@@ -37,6 +37,7 @@ export const MISSING_TOOL_RESULT_MESSAGE =
 export interface PendingReplayToolCall {
   callId: string;
   toolName: string;
+  resolvedToolName?: string;
   timestamp?: string;
   recordId: string;
   /**
@@ -302,6 +303,9 @@ function toPendingTranscriptToolCall(
   return {
     callId: pending.callId,
     toolName: pending.toolName,
+    ...(pending.resolvedToolName
+      ? { resolvedToolName: pending.resolvedToolName }
+      : {}),
     sourceRecordId: pending.recordId,
     ...(pending.timestamp ? { sourceTimestamp: pending.timestamp } : {}),
     ...(pending.rawCallId ? { rawCallId: pending.rawCallId } : {}),
@@ -315,6 +319,9 @@ function toLegacyPendingToolCall(
   return {
     callId: pending.callId,
     toolName: pending.toolName,
+    ...(pending.resolvedToolName
+      ? { resolvedToolName: pending.resolvedToolName }
+      : {}),
     recordId: pending.sourceRecordId,
     ...(pending.sourceTimestamp ? { timestamp: pending.sourceTimestamp } : {}),
     ...(pending.rawCallId ? { rawCallId: pending.rawCallId } : {}),

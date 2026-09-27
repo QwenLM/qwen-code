@@ -5,6 +5,10 @@
  */
 
 import {
+  validateStartupConfigRequest,
+  assertStartupConfigApplied,
+} from './session-startup-config.js';
+import {
   MCP_RESTART_SERVER_DEADLINE_MS,
   MCP_RESTART_CLIENT_HEADROOM_MS,
 } from '@qwen-code/acp-bridge/mcpTimeouts';
@@ -21,6 +25,8 @@ import { RestSseTransport } from './RestSseTransport.js';
 import { DaemonCapabilityMissingError } from './types.js';
 import type {
   DaemonAgentMutationResult,
+  DaemonMcpAppToolCall,
+  DaemonMcpAppToolResult,
   DaemonAuthProviderId,
   DaemonAuthProviderCatalog,
   DaemonAuthProviderInstallRequest,
@@ -42,11 +48,13 @@ import type {
   DaemonSessionContextUsageStatus,
   DaemonSessionConfigOptionResult,
   ReasoningSelection,
+  SessionStartupConfig,
   BranchSessionRequest,
   DaemonBranchSessionRequest,
   DaemonBranchSessionResult,
   DaemonBranchedSession,
   HistoricalBranchSessionRequest,
+  WorktreeBranchSessionRequest,
   DaemonPersistedBranchedSession,
   DaemonSideTaskSession,
   DaemonForkSessionResult,
@@ -55,6 +63,7 @@ import type {
   DaemonSessionArchiveState,
   DaemonSessionExportFormat,
   DaemonSessionExportResult,
+  DaemonSessionToolCalls,
   DaemonSessionTranscriptPage,
   DaemonSessionTranscriptPageOptions,
   DaemonSessionTurnIndexPage,
@@ -70,6 +79,8 @@ import type {
   DaemonSessionSavedWorkflowStatus,
   DaemonSessionListPage,
   DaemonSessionListPageOptions,
+  DaemonSessionCatalogRequest,
+  DaemonSessionCatalogResult,
   DaemonSessionSearchOptions,
   DaemonSessionSearchResult,
   DaemonWorkspaceSessionInfo,
@@ -83,6 +94,7 @@ import type {
   DaemonUsageDashboard,
   DaemonUsageRange,
   DaemonStatusReport,
+  DaemonUpdateStatus,
   DaemonStatusReportDetail,
   DaemonSessionTaskWithWorkflowStatus,
   DaemonSessionTasksStatus,
@@ -109,6 +121,9 @@ import type {
   DaemonGitCommitDetail,
   DaemonGitBranchesResult,
   DaemonGitCheckoutResult,
+  DaemonGitWorktreesResult,
+  DaemonGitWorktreeStatus,
+  DaemonGitWorktreeRemoveResult,
   DaemonGitPushResult,
   DaemonGitPullResult,
   DaemonGitCommitResult,
@@ -630,6 +645,7 @@ export function isStaleBranchPointError(
 }
 
 export interface CreateSessionRequest {
+  startupConfig?: SessionStartupConfig;
   /**
    * Workspace path the daemon must have registered. When
    * omitted, the SDK sends no `cwd` field and the daemon route falls
@@ -686,19 +702,18 @@ export interface CreateSessionRequest {
   branch?: { name: string };
 }
 
-export interface RestoreSessionRequest {
+/**
+ * Fields accepted by `POST /session/:id/resume`. Resume restores the full
+ * journal without history replay, so the load-only replay fields are not
+ * part of this request — the daemon neither uses nor validates them there.
+ */
+export interface ResumeSessionRequest {
   /**
    * Workspace path the daemon must have registered. Omit to let the daemon use
    * its advertised primary workspace, mirroring `createOrAttachSession`.
    */
   workspaceCwd?: string;
   approvalMode?: string;
-  /** Latest persisted records to include in the initial load replay. */
-  historyPageSize?: number;
-  /** Load-only live-turn replay projection. Omit for the complete journal. */
-  liveReplayMode?: 'full' | 'summary';
-  /** Load-only response projection for durable replay; defaults to full. */
-  compactedReplayMode?: 'full' | 'summary';
   /** Restore-time attribution for legacy/unattributed sessions. */
   sourceType?: string;
   /** Optional source-specific identifier. Requires `sourceType`. */
@@ -708,6 +723,19 @@ export interface RestoreSessionRequest {
    * timer and relies on the daemon's own restore deadline.
    */
   timeoutMs?: number;
+}
+
+/**
+ * Fields accepted by `POST /session/:id/load`: the shared restore fields
+ * plus the replay-shaping fields below, which only load consumes.
+ */
+export interface RestoreSessionRequest extends ResumeSessionRequest {
+  /** Latest persisted records to include in the initial load replay. */
+  historyPageSize?: number;
+  /** Load-only live-turn replay projection. Omit for the complete journal. */
+  liveReplayMode?: 'full' | 'summary';
+  /** Load-only response projection for durable replay; defaults to full. */
+  compactedReplayMode?: 'full' | 'summary';
 }
 
 export interface WorktreeResetSessionRequest {
@@ -823,6 +851,16 @@ export class DaemonClient {
   private capabilitiesRequest?: Promise<DaemonCapabilities>;
   private capabilitiesGeneration = 0;
   private restoreBudgetGeneration = 0;
+  // In-flight dedup for workspace-providers reads, keyed on the
+  // fully-resolved request URL so root and per-workspace scopes never alias
+  // (#11604). Entries exist only while a request is pending: this is not a
+  // cache, and once the shared promise settles the next caller issues a
+  // fresh request. A caller arriving while one is still pending shares that
+  // read, so a reload racing an in-flight request is not authoritative.
+  private readonly workspaceProvidersInFlight = new Map<
+    string,
+    Promise<DaemonWorkspaceProvidersStatus>
+  >();
   private readonly promptLimit: number;
   private readonly promptCounts: Record<string, number> = Object.create(null);
   /**
@@ -1362,6 +1400,33 @@ export class DaemonClient {
     );
   }
 
+  /** Check the daemon installation; refresh bypasses its cached release check. */
+  async daemonUpdateStatus(refresh = false): Promise<DaemonUpdateStatus> {
+    return await this.jsonRequest<DaemonUpdateStatus>(
+      `/daemon/update${refresh ? '?refresh=true' : ''}`,
+      'GET /daemon/update',
+      { mode: 'rest' },
+    );
+  }
+
+  /** Download and verify the checked release without activating it. */
+  async prepareDaemonUpdate(): Promise<DaemonUpdateStatus> {
+    return await this.jsonRequest<DaemonUpdateStatus>(
+      '/daemon/update/prepare',
+      'POST /daemon/update/prepare',
+      { method: 'POST', body: {}, mode: 'rest' },
+    );
+  }
+
+  /** Activate a prepared release and restart the daemon after responding. */
+  async restartDaemonForUpdate(): Promise<DaemonUpdateStatus> {
+    return await this.jsonRequest<DaemonUpdateStatus>(
+      '/daemon/update/restart',
+      'POST /daemon/update/restart',
+      { method: 'POST', body: {}, mode: 'rest' },
+    );
+  }
+
   /**
    * Aggregate local token-usage dashboard (`GET /usage/dashboard`): the
    * selected range's flattened totals plus a trailing per-day heatmap, read
@@ -1709,16 +1774,76 @@ export class DaemonClient {
   }
 
   async workspaceProviders(): Promise<DaemonWorkspaceProvidersStatus> {
-    return await this.fetchWithTimeout(
-      `${this.baseUrl}/workspace/providers`,
+    return await this.requestWorkspaceProviders(
+      '/workspace/providers',
+      'GET /workspace/providers',
+    );
+  }
+
+  /**
+   * @internal
+   * Idempotent workspace-providers GET deduped per resolved URL while a
+   * request is pending. Concurrent callers of the same resource share one
+   * request and observe the same value (or the same rejection); a caller
+   * arriving after the shared promise settles always triggers a fresh
+   * fetch, while a caller arriving while one is pending shares that read
+   * (a reload racing an in-flight request is not authoritative). Dedup is
+   * skipped entirely when the fetch timeout is disabled, because a
+   * consumer-supplied fetch that never settles would otherwise pin the
+   * URL to a dead promise for this client's lifetime.
+   */
+  requestWorkspaceProviders(
+    path: string,
+    label: string,
+  ): Promise<DaemonWorkspaceProvidersStatus> {
+    const url = `${this.baseUrl}${path}`;
+    const pending = this.workspaceProvidersInFlight.get(url);
+    if (pending) return pending;
+    const request = this.fetchWithTimeout(
+      url,
       { headers: this.headers() },
       async (res) => {
         if (!res.ok) {
-          throw await this.failOnError(res, 'GET /workspace/providers');
+          throw await this.failOnError(res, label);
         }
         return (await res.json()) as DaemonWorkspaceProvidersStatus;
       },
     );
+    // `fetchTimeoutMs: 0` (or Infinity) is the documented "no request
+    // deadline" sentinel: with no bound on the request, an entry whose
+    // promise never settles could never be reclaimed, so fall back to one
+    // request per caller.
+    if (!this.fetchTimeoutMs) return request;
+    this.workspaceProvidersInFlight.set(url, request);
+    // Drop the entry on settle (single microtask, both outcomes) so a
+    // settled request never poisons or delays the next caller. The cleanup
+    // handler swallows the rejection for this chain only — every real
+    // caller still observes it.
+    const forget = () => {
+      if (this.workspaceProvidersInFlight.get(url) === request) {
+        this.workspaceProvidersInFlight.delete(url);
+      }
+    };
+    // Safety net for a transport that ignores the abort signal: the armed
+    // timeout aborts the fetch but cannot force the promise to settle, so
+    // drop a still-pending entry once the deadline has clearly passed
+    // instead of letting a dead request shadow later callers. Identity-
+    // guarded and never aborts anything on its own.
+    const watchdog = setTimeout(forget, this.fetchTimeoutMs + 1_000);
+    if (typeof watchdog === 'object' && watchdog && 'unref' in watchdog) {
+      (watchdog as { unref: () => void }).unref();
+    }
+    request.then(
+      () => {
+        clearTimeout(watchdog);
+        forget();
+      },
+      () => {
+        clearTimeout(watchdog);
+        forget();
+      },
+    );
+    return request;
   }
 
   async workspaceHooks(): Promise<DaemonWorkspaceHooksStatus> {
@@ -2872,11 +2997,16 @@ export class DaemonClient {
   async createStandaloneSession(
     options: CreateStandaloneSessionOptions = {},
   ): Promise<DaemonStandaloneSession> {
+    validateStartupConfigRequest(options);
     await this.requireCapability(STANDALONE_SESSIONS_CAPABILITY);
+    if (options.startupConfig !== undefined) {
+      await this.requireCapability('session_startup_config');
+    }
     const { sessionId: requestedSessionId, ...request } = options;
     const sessionId = (
       requestedSessionId ?? createStandaloneSessionId()
     ).toLowerCase();
+    let session: DaemonStandaloneSession;
     try {
       const response = await this.jsonRequest<unknown>(
         '/standalone/sessions',
@@ -2887,7 +3017,7 @@ export class DaemonClient {
           mode: 'rest',
         },
       );
-      return parseStandaloneSession(
+      session = parseStandaloneSession(
         response,
         'POST /standalone/sessions',
         sessionId,
@@ -2906,6 +3036,8 @@ export class DaemonClient {
         error,
       );
     }
+    assertStartupConfigApplied(session, options.startupConfig);
+    return session;
   }
 
   async listStandaloneSessions(
@@ -3132,6 +3264,10 @@ export class DaemonClient {
     req: CreateSessionRequest,
     clientId?: string,
   ): Promise<DaemonSession> {
+    validateStartupConfigRequest(req);
+    if (req.startupConfig !== undefined) {
+      await this.requireCapability('session_startup_config');
+    }
     if (req.sessionId !== undefined && req.sessionId !== null) {
       await this.requireCapability('session_id_override');
     }
@@ -3157,6 +3293,9 @@ export class DaemonClient {
         headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
         body: JSON.stringify({
           cwd: req.workspaceCwd,
+          ...(req.startupConfig !== undefined
+            ? { startupConfig: req.startupConfig }
+            : {}),
           ...(req.sessionId !== undefined ? { sessionId: req.sessionId } : {}),
           ...(req.modelServiceId ? { modelServiceId: req.modelServiceId } : {}),
           // `!== undefined` (not truthy) so a buggy caller passing
@@ -3182,6 +3321,7 @@ export class DaemonClient {
       async (res) => {
         if (!res.ok) throw await this.failOnError(res, 'POST /session');
         const session = (await res.json()) as DaemonSession;
+        assertStartupConfigApplied(session, req.startupConfig);
         if (
           typeof req.sessionId === 'string' &&
           session.sessionId !== req.sessionId.toLowerCase()
@@ -3259,6 +3399,36 @@ export class DaemonClient {
     return await this.jsonRequest<DaemonSessionListPage>(
       `/workspace/${urlEncode(workspaceCwd)}/sessions?${query.toString()}`,
       'GET /workspace/sessions',
+    );
+  }
+
+  /**
+   * Read independent workspace pages in one native REST request. Callers
+   * pre-flight `session_catalog_batch` once and use qualified session lists
+   * on older daemons. Continue each workspace with its own returned cursor;
+   * default batch cursors differ from legacy numeric list cursors.
+   */
+  async listSessionsCatalog(
+    request: DaemonSessionCatalogRequest,
+    opts?: { signal?: AbortSignal; timeoutMs?: number },
+  ): Promise<DaemonSessionCatalogResult> {
+    const { pageSize, ...options } = request.options ?? {};
+    return await this.jsonRequest<DaemonSessionCatalogResult>(
+      '/sessions/catalog',
+      'POST /sessions/catalog',
+      {
+        method: 'POST',
+        body: {
+          ...request,
+          options:
+            request.options === undefined
+              ? undefined
+              : { ...options, size: pageSize },
+        },
+        mode: 'rest',
+        signal: opts?.signal,
+        timeoutMs: opts?.timeoutMs,
+      },
     );
   }
 
@@ -3452,7 +3622,7 @@ export class DaemonClient {
 
   async resumeSession(
     sessionId: string,
-    req: RestoreSessionRequest = {},
+    req: ResumeSessionRequest = {},
     clientId?: string,
   ): Promise<DaemonRestoredSession> {
     return this.restoreSession('resume', sessionId, req, clientId);
@@ -3526,6 +3696,11 @@ export class DaemonClient {
 
   async branchSession(
     sessionId: string,
+    req: WorktreeBranchSessionRequest,
+    clientId?: string,
+  ): Promise<DaemonBranchedSession>;
+  async branchSession(
+    sessionId: string,
     req: HistoricalBranchSessionRequest,
     clientId?: string,
   ): Promise<DaemonPersistedBranchedSession>;
@@ -3552,6 +3727,9 @@ export class DaemonClient {
         body: JSON.stringify({
           name: req.name,
           ...('atRecordId' in req ? { atRecordId: req.atRecordId } : {}),
+          ...('worktree' in req && req.worktree !== undefined
+            ? { worktree: req.worktree }
+            : {}),
         }),
       },
       async (res) => {
@@ -6336,7 +6514,33 @@ export class DaemonClient {
     this.restoreBudgetGeneration = ++this.capabilitiesGeneration;
     this.capabilitiesRequest = undefined;
     this.capabilityFeatures = undefined;
+    // Dropping in-flight entries makes the next workspace-providers call
+    // start a fresh request, which the disposed transport rejects with
+    // DaemonTransportClosedError — matching how every other post-dispose
+    // request behaves. The settle handlers' identity guard keeps a late
+    // settle from deleting a newer entry after this clear.
+    this.workspaceProvidersInFlight.clear();
     this.transport.dispose();
+  }
+
+  callMcpAppTool(
+    sessionId: string,
+    request: DaemonMcpAppToolCall,
+    clientId: string,
+    signal?: AbortSignal,
+  ): Promise<DaemonMcpAppToolResult> {
+    return this.jsonRequest(
+      `/session/${encodeURIComponent(sessionId)}/mcp-app/tools/call`,
+      'MCP App tool call failed',
+      {
+        method: 'POST',
+        body: request,
+        clientId,
+        signal,
+        timeoutMs: 310_000,
+        mode: 'rest',
+      },
+    );
   }
 
   listSessionSources(
@@ -6953,10 +7157,12 @@ export class WorkspaceDaemonClient {
   workspaceGit(opts?: {
     cwd?: string;
     wait?: boolean;
+    sessionId?: string;
   }): Promise<DaemonWorkspaceGitStatus> {
     const params = new URLSearchParams();
     if (opts?.cwd) params.set('cwd', opts.cwd);
     if (opts?.wait) params.set('wait', '1');
+    if (opts?.sessionId) params.set('sessionId', opts.sessionId);
     const query = params.toString();
     const suffix = query ? `/git?${query}` : '/git';
     return this.client.workspaceJsonRequest<DaemonWorkspaceGitStatus>(
@@ -6967,9 +7173,15 @@ export class WorkspaceDaemonClient {
     );
   }
 
-  workspaceGitDiff(cwd?: string): Promise<DaemonWorkspaceGitDiff> {
-    const suffix =
-      cwd != null ? `/git/diff?cwd=${urlEncode(cwd)}` : '/git/diff';
+  workspaceGitDiff(
+    cwd?: string,
+    sessionId?: string,
+  ): Promise<DaemonWorkspaceGitDiff> {
+    const params = new URLSearchParams();
+    if (cwd != null) params.set('cwd', cwd);
+    if (sessionId != null) params.set('sessionId', sessionId);
+    const query = params.toString();
+    const suffix = `/git/diff${query ? `?${query}` : ''}`;
     return this.client.workspaceJsonRequest<DaemonWorkspaceGitDiff>(
       this.workspaceSelector,
       suffix,
@@ -6982,11 +7194,13 @@ export class WorkspaceDaemonClient {
     path: string,
     oldPath?: string,
     cwd?: string,
+    sessionId?: string,
   ): Promise<DaemonWorkspaceGitDiffHunks> {
     const query =
       `/git/diff/file?path=${urlEncode(path)}` +
       (oldPath != null ? `&oldPath=${urlEncode(oldPath)}` : '') +
-      (cwd != null ? `&cwd=${urlEncode(cwd)}` : '');
+      (cwd != null ? `&cwd=${urlEncode(cwd)}` : '') +
+      (sessionId != null ? `&sessionId=${urlEncode(sessionId)}` : '');
     return this.client.workspaceJsonRequest<DaemonWorkspaceGitDiffHunks>(
       this.workspaceSelector,
       query,
@@ -7000,7 +7214,7 @@ export class WorkspaceDaemonClient {
     skip?: number,
     cwd?: string,
     range?: string,
-    options?: DaemonGitLogOptions,
+    options?: DaemonGitLogOptions & { sessionId?: string },
   ): Promise<DaemonGitLog> {
     const params = new URLSearchParams();
     if (limit != null) params.set('limit', String(limit));
@@ -7009,6 +7223,7 @@ export class WorkspaceDaemonClient {
     if (range) params.set('range', range);
     if (options?.all) params.set('all', '1');
     if (options?.search) params.set('search', options.search);
+    if (options?.sessionId != null) params.set('sessionId', options.sessionId);
     const qs = params.toString();
     return this.client.workspaceJsonRequest<DaemonGitLog>(
       this.workspaceSelector,
@@ -7021,10 +7236,12 @@ export class WorkspaceDaemonClient {
   workspaceGitCommitDetail(
     sha: string,
     cwd?: string,
+    sessionId?: string,
   ): Promise<DaemonGitCommitDetail> {
     const query =
       `/git/log/commit?sha=${urlEncode(sha)}` +
-      (cwd != null ? `&cwd=${urlEncode(cwd)}` : '');
+      (cwd != null ? `&cwd=${urlEncode(cwd)}` : '') +
+      (sessionId != null ? `&sessionId=${urlEncode(sessionId)}` : '');
     return this.client.workspaceJsonRequest<DaemonGitCommitDetail>(
       this.workspaceSelector,
       query,
@@ -7033,9 +7250,15 @@ export class WorkspaceDaemonClient {
     );
   }
 
-  workspaceGitBranches(cwd?: string): Promise<DaemonGitBranchesResult> {
-    const suffix =
-      cwd != null ? `/git/branches?cwd=${urlEncode(cwd)}` : '/git/branches';
+  workspaceGitBranches(
+    cwd?: string,
+    sessionId?: string,
+  ): Promise<DaemonGitBranchesResult> {
+    const params = new URLSearchParams();
+    if (cwd != null) params.set('cwd', cwd);
+    if (sessionId != null) params.set('sessionId', sessionId);
+    const query = params.toString();
+    const suffix = `/git/branches${query ? `?${query}` : ''}`;
     return this.client.workspaceJsonRequest<DaemonGitBranchesResult>(
       this.workspaceSelector,
       suffix,
@@ -7047,9 +7270,13 @@ export class WorkspaceDaemonClient {
   workspaceGitCheckout(
     ref: string,
     cwd?: string,
+    sessionId?: string,
   ): Promise<DaemonGitCheckoutResult> {
-    const suffix =
-      cwd != null ? `/git/checkout?cwd=${urlEncode(cwd)}` : '/git/checkout';
+    const params = new URLSearchParams();
+    if (cwd != null) params.set('cwd', cwd);
+    if (sessionId != null) params.set('sessionId', sessionId);
+    const query = params.toString();
+    const suffix = `/git/checkout${query ? `?${query}` : ''}`;
     return this.client.workspaceJsonRequest<DaemonGitCheckoutResult>(
       this.workspaceSelector,
       suffix,
@@ -7062,14 +7289,52 @@ export class WorkspaceDaemonClient {
     name: string,
     startPoint?: string,
     cwd?: string,
+    sessionId?: string,
   ): Promise<DaemonGitCheckoutResult> {
-    const suffix =
-      cwd != null ? `/git/branch?cwd=${urlEncode(cwd)}` : '/git/branch';
+    const params = new URLSearchParams();
+    if (cwd != null) params.set('cwd', cwd);
+    if (sessionId != null) params.set('sessionId', sessionId);
+    const query = params.toString();
+    const suffix = `/git/branch${query ? `?${query}` : ''}`;
     return this.client.workspaceJsonRequest<DaemonGitCheckoutResult>(
       this.workspaceSelector,
       suffix,
       'POST /workspaces/:workspace/git/branch',
       { method: 'POST', body: { name, startPoint }, mode: 'rest' },
+    );
+  }
+
+  workspaceGitWorktrees(): Promise<DaemonGitWorktreesResult> {
+    return this.client.workspaceJsonRequest<DaemonGitWorktreesResult>(
+      this.workspaceSelector,
+      '/git/worktrees',
+      'GET /workspaces/:workspace/git/worktrees',
+      { mode: 'rest' },
+    );
+  }
+
+  workspaceGitWorktreeStatus(path: string): Promise<DaemonGitWorktreeStatus> {
+    return this.client.workspaceJsonRequest<DaemonGitWorktreeStatus>(
+      this.workspaceSelector,
+      `/git/worktrees/status?path=${urlEncode(path)}`,
+      'GET /workspaces/:workspace/git/worktrees/status',
+      { mode: 'rest' },
+    );
+  }
+
+  workspaceGitRemoveWorktree(
+    path: string,
+    opts?: { force?: boolean },
+  ): Promise<DaemonGitWorktreeRemoveResult> {
+    return this.client.workspaceJsonRequest<DaemonGitWorktreeRemoveResult>(
+      this.workspaceSelector,
+      '/git/worktrees/remove',
+      'POST /workspaces/:workspace/git/worktrees/remove',
+      {
+        method: 'POST',
+        body: { path, force: opts?.force === true },
+        mode: 'rest',
+      },
     );
   }
 
@@ -7079,9 +7344,13 @@ export class WorkspaceDaemonClient {
       force?: boolean;
     },
     cwd?: string,
+    sessionId?: string,
   ): Promise<DaemonGitPushResult> {
-    const suffix =
-      cwd != null ? `/git/push?cwd=${urlEncode(cwd)}` : '/git/push';
+    const params = new URLSearchParams();
+    if (cwd != null) params.set('cwd', cwd);
+    if (sessionId != null) params.set('sessionId', sessionId);
+    const query = params.toString();
+    const suffix = `/git/push${query ? `?${query}` : ''}`;
     return this.client.workspaceJsonRequest<DaemonGitPushResult>(
       this.workspaceSelector,
       suffix,
@@ -7100,16 +7369,30 @@ export class WorkspaceDaemonClient {
     cwd?: string,
     // The stash/force flows chain several git commands server-side, each
     // with its own budget, so callers can outsize the client's default
-    // fetch timeout instead of aborting mid-flow while the daemon runs on.
+    // fetch timeout. A string binds a managed worktree to its owning session;
+    // a number preserves the existing per-call timeout position.
+    sessionIdOrTimeout?: string | number,
     timeoutMs?: number,
   ): Promise<DaemonGitPullResult> {
-    const suffix =
-      cwd != null ? `/git/pull?cwd=${urlEncode(cwd)}` : '/git/pull';
+    const sessionId =
+      typeof sessionIdOrTimeout === 'string' ? sessionIdOrTimeout : undefined;
+    const requestTimeoutMs =
+      typeof sessionIdOrTimeout === 'number' ? sessionIdOrTimeout : timeoutMs;
+    const params = new URLSearchParams();
+    if (cwd != null) params.set('cwd', cwd);
+    if (sessionId != null) params.set('sessionId', sessionId);
+    const query = params.toString();
+    const suffix = `/git/pull${query ? `?${query}` : ''}`;
     return this.client.workspaceJsonRequest<DaemonGitPullResult>(
       this.workspaceSelector,
       suffix,
       'POST /workspaces/:workspace/git/pull',
-      { method: 'POST', body: opts ?? {}, mode: 'rest', timeoutMs },
+      {
+        method: 'POST',
+        body: opts ?? {},
+        mode: 'rest',
+        timeoutMs: requestTimeoutMs,
+      },
     );
   }
 
@@ -7117,9 +7400,13 @@ export class WorkspaceDaemonClient {
     message: string,
     opts?: { all?: boolean },
     cwd?: string,
+    sessionId?: string,
   ): Promise<DaemonGitCommitResult> {
-    const suffix =
-      cwd != null ? `/git/commit?cwd=${urlEncode(cwd)}` : '/git/commit';
+    const params = new URLSearchParams();
+    if (cwd != null) params.set('cwd', cwd);
+    if (sessionId != null) params.set('sessionId', sessionId);
+    const query = params.toString();
+    const suffix = `/git/commit${query ? `?${query}` : ''}`;
     return this.client.workspaceJsonRequest<DaemonGitCommitResult>(
       this.workspaceSelector,
       suffix,
@@ -7189,11 +7476,13 @@ export class WorkspaceDaemonClient {
       head?: string;
     },
     cwd?: string,
+    sessionId?: string,
   ): Promise<DaemonGitHubPullRequestCreateResult> {
-    const suffix =
-      cwd != null
-        ? `/github/prs/create?cwd=${urlEncode(cwd)}`
-        : '/github/prs/create';
+    const params = new URLSearchParams();
+    if (cwd != null) params.set('cwd', cwd);
+    if (sessionId != null) params.set('sessionId', sessionId);
+    const query = params.toString();
+    const suffix = `/github/prs/create${query ? `?${query}` : ''}`;
     return this.client.workspaceJsonRequest<DaemonGitHubPullRequestCreateResult>(
       this.workspaceSelector,
       suffix,
@@ -7275,7 +7564,10 @@ export class WorkspaceDaemonClient {
   }
 
   workspaceProviders(): Promise<DaemonWorkspaceProvidersStatus> {
-    return this.get('/providers', 'GET /workspaces/:workspace/providers');
+    return this.client.requestWorkspaceProviders(
+      `/workspaces/${this.workspaceSelector}/providers`,
+      'GET /workspaces/:workspace/providers',
+    );
   }
 
   workspaceHooks(): Promise<DaemonWorkspaceHooksStatus> {
@@ -7481,6 +7773,20 @@ export class WorkspaceDaemonClient {
       `/session/${urlEncode(sessionId)}/transcript${transcriptPageSuffix(opts)}`,
       'GET /workspaces/:workspace/session/:id/transcript',
       { clientId: opts.clientId, mode: 'rest' },
+    );
+  }
+
+  /** Read all persisted calls in one turn without loading or attaching a session. */
+  getSessionToolCalls(
+    sessionId: string,
+    turnId: string,
+  ): Promise<DaemonSessionToolCalls> {
+    const query = new URLSearchParams({ turnId });
+    return this.client.workspaceJsonRequest<DaemonSessionToolCalls>(
+      this.workspaceSelector,
+      `/session/${urlEncode(sessionId)}/tool-calls?${query.toString()}`,
+      'GET /workspaces/:workspace/session/:id/tool-calls',
+      { mode: 'rest' },
     );
   }
 

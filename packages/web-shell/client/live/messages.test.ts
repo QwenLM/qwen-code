@@ -31,6 +31,14 @@ describe('Live Voice messages', () => {
     expect(
       getTranslator('en')('live.shortcutHint', { shortcut: 'Command+E' }),
     ).toBe('Global shortcut: Command+E');
+    expect(
+      getTranslator('en')('live.browser.sharingNamed', { target: 'Terminal' }),
+    ).toBe('Terminal');
+    expect(
+      getTranslator('zh-CN')('live.browser.sharingNamed', {
+        target: 'Terminal',
+      }),
+    ).toBe('Terminal');
   });
 
   it('hold only Live keys, translated one for one', () => {

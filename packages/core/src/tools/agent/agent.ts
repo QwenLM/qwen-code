@@ -4,12 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { shellResultText } from '../../utils/shell-result.js';
 import { goalTurnContext } from '../../goals/goal-turn-context.js';
 import { randomUUID } from 'node:crypto';
 import { realpath } from 'node:fs/promises';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from '../tools.js';
 import { ToolNames, ToolDisplayNames } from '../tool-names.js';
 import {
+  buildInheritedForkExecutionToolNames,
   EXCLUDED_TOOLS_FOR_SUBAGENTS,
   extractParentToolNames,
 } from '../../agents/runtime/agent-core.js';
@@ -72,11 +74,14 @@ import { resolveExternalWorktreeDir } from '../../agents/worktree-pin.js';
 import { getStartupContextLength } from '../../core/environmentContext.js';
 import {
   childLaunchDepth,
+  getCurrentAgentConfiguredToolAllowlist,
+  getCurrentAgentDisallowedTools,
   getCurrentAgentId,
   isTopLevelSession,
   runWithAgentContext,
   spawnBlockReason,
 } from '../../agents/runtime/agent-context.js';
+import { matchesAgentToolBlocklist } from '../../agents/runtime/subagent-plan-tool-policy.js';
 import { trace, context as otelContext } from '@opentelemetry/api';
 import {
   endSubagentSpan,
@@ -142,6 +147,11 @@ import {
   ExecutionCleanupError,
   type ExecutionEnvironment,
 } from '../../services/execution-environment.js';
+import {
+  buildAgentDelegationSection,
+  resolveAgentDelegationSurface,
+} from '../../skills/agent-delegation-skill.js';
+import type { BundledReferenceSurface } from '../../skills/bundled-reference.js';
 
 const EXTERNAL_USAGE_NOTICE =
   '\n\n[External executor token usage and cost are unavailable.]';
@@ -592,7 +602,10 @@ export async function rebuildToolRegistryOnOverride(
     skipDiscovery: true,
     forSubAgent: true,
   });
-  if (!override.getExecutionEnvironment?.()) {
+  if (
+    !override.getExecutionEnvironment?.() &&
+    !base.getShellExecutionSandbox?.()
+  ) {
     agentRegistry.copyDiscoveredToolsFrom(base.getToolRegistry());
   }
   ov.getToolRegistry = () => agentRegistry;
@@ -765,6 +778,13 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
   private availableSubagents: SubagentConfig[] =
     BuiltinAgentRegistry.getBuiltinAgents();
   private readonly removeChangeListener: () => void;
+  /**
+   * What the description says about the delegation reference, decided once
+   * here. Every later refresh (a subagent added, the team flag toggled)
+   * rebuilds the description from this, so a mid-session `/skills` toggle
+   * cannot make two refreshes disagree about where the reference lives.
+   */
+  private readonly delegationSurface: BundledReferenceSurface;
 
   constructor(private readonly config: Config) {
     // Initialize with a basic schema first
@@ -863,6 +883,7 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
       true, // canUpdateOutput - Enable live output updates for real-time progress
     );
 
+    this.delegationSurface = resolveAgentDelegationSurface(config);
     this.subagentManager = config.getSubagentManager();
     this.removeChangeListener = this.subagentManager.addChangeListener(() => {
       void this.refreshSubagents();
@@ -928,6 +949,14 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
     const teammateWorktreeTail = teamEnabled
       ? '; named teammates may use one, but must be shut down before it is removed.'
       : '.';
+    // Prompt-writing craft: a pointer where the model can load the
+    // `agent-delegation` skill, the reference in full where it cannot, and
+    // nothing where the user turned that reference off (#12054). The fork
+    // facts that shape the call and every background-agent rule stay above,
+    // so a session that never loads it still calls this tool correctly.
+    const delegationSection = buildAgentDelegationSection(
+      this.delegationSurface,
+    );
     const baseDescription = `Launch a new agent to handle complex, multi-step tasks autonomously.
 The Agent tool launches specialized agents (subprocesses) that autonomously handle complex tasks. Each agent type has specific capabilities and tools available to it.
 
@@ -953,10 +982,8 @@ ${todoGuidance}- Delegate only concrete, bounded tasks that can run independentl
 - A background agent reports its result through a completion notification in a later turn. A foreground regular agent returns its result inline. Agent results are not visible to the user, so relay the relevant outcome in your response.
 - While background agents run, continue meaningful non-overlapping work. Wait for an agent only when its result blocks the next required step.
 - Reuse an existing background agent for related follow-up work instead of launching a duplicate: call ${ToolNames.LIST_AGENTS} to inspect the current roster, then call ${ToolNames.SEND_MESSAGE} with its \`task_id\`. Running agents receive the message at the next tool-round boundary; paused agents resume with it as their first continuation instruction; completed agents continue on their resident runtime when available and otherwise revive from their retained transcript. If the task is no longer retained or cannot be resumed or revived, launch a new agent.
-- Provide clear, detailed prompts so the agent can work autonomously and return exactly the information you need.
 - Regular subagents and named teammates start without parent conversation history. Only fork agents accept \`fork_turns\`, \`fork_tools\`, and \`fork_profile\`; omit \`fork_turns\` for the full conversation and omit both restriction parameters to allow every inherited tool except \`${ToolNames.ASK_USER_QUESTION}\`. Regular subagents do not receive that tool either.
 - Treat the agent's output as evidence, not as automatically correct. Verify factual claims, review code changes, and run relevant checks before integrating or relaying the result.
-- Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, web fetches, etc.), since it is not aware of the user's intent
 - If the agent description mentions that it should be used proactively, then you should try your best to use it without the user having to ask for it first. Use your judgement.
 - If the user asks for agents "in parallel", group independent launches in a single message with multiple Agent tool use content blocks. Do not parallelize overlapping code changes.
 - Top-level regular subagents run in the background by default. Set \`run_in_background: false\` when the current turn must wait for the result before continuing. Nested agent launches run in the foreground and return to their direct parent; an explicit \`run_in_background: true\` request is rejected because nested agents cannot receive background completion notifications. Unnamed caller-owned \`working_dir\` launches run in the foreground: an explicit \`run_in_background: true\` request is rejected, while a configured background default (\`background: true\` in a subagent definition) is rejected at the top level and downgraded to the foreground for nested launches${teammateWorktreeTail}
@@ -978,48 +1005,7 @@ Choose a fork when the task needs substantial context from the parent conversati
 
 Forks are cheap because they share your prompt cache. Don't set \`model\` on a fork — a different model can't reuse the parent's cache. Pass a short \`name\` (one or two words, lowercase) so the user can track the fork.
 
-The background-agent rules above apply to background forks unchanged.
-
-**Writing a fork prompt.** With the default full history, the prompt is a *directive* — what to do, not what the situation is. When \`fork_turns\` limits history, include any older context the fork still needs. Be specific about scope: what's in, what's out, what another agent is handling.
-
-## Writing the prompt
-
-Brief the agent like a smart colleague: make the delegated task, boundaries, and expected output explicit. Regular subagents have not seen this conversation; forks inherit all or the selected recent window.
-- Explain what you're trying to accomplish and why.
-- Describe what you've already learned or ruled out.
-- Give enough context about the surrounding problem that the agent can make judgment calls rather than just following a narrow instruction.
-- If you need a short response, say so explicitly.
-- For lookups, provide the exact target. For investigations, provide the actual question rather than an over-prescribed sequence of steps.
-
-Terse command-style prompts produce shallow, generic work.
-
-**Never delegate understanding.** Do not write prompts like "based on your findings, fix the bug" or "based on the research, implement it." Those phrases push synthesis onto the agent instead of doing it yourself. Write prompts that prove you understood the task: include relevant file paths, constraints, what specifically needs to be learned or changed, and what is out of scope.
-
-After launching an agent, do not fabricate or predict what it found before it returns. If the user asks a follow-up before the result arrives, provide status rather than guessing.
-
-Example usage:
-
-<example_agent_descriptions>
-"test-runner": use this agent after you are done writing code to run tests
-</example_agent_descriptions>
-
-<example>
-user: "Please write a function that checks if a number is prime"
-assistant: I'm going to use the Write tool to write the following code:
-<code>
-function isPrime(n) {
-  if (n <= 1) return false
-  for (let i = 2; i * i <= n; i++) {
-    if (n % i === 0) return false
-  }
-  return true
-}
-</code>
-<commentary>
-Since a significant piece of code was written and the task was completed, now use the test-runner agent to run the tests
-</commentary>
-assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
-</example>
+The background-agent rules above apply to background forks unchanged.${delegationSection ? `\n\n${delegationSection}` : ''}
 `;
 
     // Update description using object property assignment since it's readonly
@@ -1605,8 +1591,8 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           ...(preserveProtocolPayloads && event.responseParts !== undefined
             ? { responseParts: event.responseParts }
             : {}),
-          ...(typeof event.resultDisplay === 'string'
-            ? { resultDisplay: event.resultDisplay }
+          ...(shellResultText(event.resultDisplay) !== undefined
+            ? { resultDisplay: shellResultText(event.resultDisplay)! }
             : {}),
           ...(preserveProtocolPayloads && event.boundaryArtifact
             ? { boundaryArtifact: event.boundaryArtifact }
@@ -1794,14 +1780,91 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       ? extractParentToolNames(generationConfig)
       : [];
     registerForkDisplayImageForCache(agentConfig, parentToolNames);
+    // A fork inherits the parent's tool surface, so the parent agent's own
+    // disallowedTools blocklist must survive one level down: the union with
+    // the live registry — or an explicit fork_tools request — would
+    // otherwise re-admit a tool prepareTools removed from the parent's
+    // declarations (e.g. `{ tools: ['*'], disallowedTools: ['mcp__slack']
+    // }`), and the bridge decouples execution from declaration. The
+    // blocklist is applied to the computed allowlist below and also handed
+    // to the fork's toolConfig, whose invocation-level re-check enforces it
+    // against wildcard fork_tools patterns a name filter cannot see (R24-1).
+    const parentDisallowedTools = getCurrentAgentDisallowedTools();
+    const parentConfiguredToolAllowlist =
+      getCurrentAgentConfiguredToolAllowlist();
+    const keepOffParentBlocklist = (toolName: string): boolean =>
+      !matchesAgentToolBlocklist(parentDisallowedTools, toolName);
+    const defaultExecutionToolNames = buildInheritedForkExecutionToolNames(
+      parentToolNames,
+      agentConfig.getToolRegistry().getAllToolNames(),
+      parentConfiguredToolAllowlist,
+    ).filter(keepOffParentBlocklist);
     const forkTurns = normalizeForkTurns(this.params.fork_turns);
     const requestedTools = this.forkProfile?.tools ?? this.params.fork_tools;
+    const isRequestedByFork = (toolName: string): boolean => {
+      if (requestedTools === undefined) return true;
+      if (requestedTools.includes(toolName)) return true;
+      if (!toolName.startsWith('mcp__')) return false;
+
+      const registeredTool = agentConfig.getToolRegistry().getTool(toolName) as
+        | { serverName?: unknown; serverToolName?: unknown }
+        | undefined;
+      if (
+        typeof registeredTool?.serverName !== 'string' ||
+        typeof registeredTool.serverToolName !== 'string'
+      ) {
+        return requestedTools.includes('mcp__*');
+      }
+
+      const serverName = registeredTool.serverName;
+      const serverToolName = registeredTool.serverToolName;
+      const serverPattern = `mcp__${serverName}`;
+      const rawToolName = `${serverPattern}__${serverToolName}`;
+      return requestedTools.some((pattern) => {
+        if (
+          pattern === 'mcp__*' ||
+          pattern === serverPattern ||
+          pattern === rawToolName
+        ) {
+          return true;
+        }
+        const toolPatternPrefix = `${serverPattern}__`;
+        return (
+          pattern.startsWith(toolPatternPrefix) &&
+          pattern.endsWith('*') &&
+          serverToolName.startsWith(pattern.slice(toolPatternPrefix.length, -1))
+        );
+      });
+    };
+    const buildParentBoundExecutionAllowlist = (
+      fallbackTools: readonly string[],
+    ): string[] => {
+      if (parentConfiguredToolAllowlist === undefined) {
+        return buildForkExecutionAllowlist(
+          requestedTools,
+          fallbackTools,
+          parentToolNames,
+        ).filter(keepOffParentBlocklist);
+      }
+      return fallbackTools.filter(
+        (toolName) =>
+          toolName !== ToolNames.ASK_USER_QUESTION &&
+          !EXCLUDED_TOOLS_FOR_SUBAGENTS.has(toolName) &&
+          keepOffParentBlocklist(toolName) &&
+          (isRequestedByFork(toolName) ||
+            (requestedTools !== undefined &&
+              requestedTools.length > 0 &&
+              (toolName === ToolNames.TOOL_SEARCH ||
+                toolName === ToolNames.TOOL_CALL) &&
+              parentToolNames.includes(toolName))),
+      );
+    };
     const requestedExecutionAllowedTools =
       requestedTools === undefined
         ? undefined
         : resolveForkExecutionAllowedTools(
             parentToolNames,
-            buildForkExecutionAllowlist(requestedTools, []),
+            buildParentBoundExecutionAllowlist(defaultExecutionToolNames),
           );
     const profilePromptHint = this.forkProfile?.promptHint;
     let rawHistory: Content[] = [];
@@ -1907,16 +1970,6 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // current ToolRegistry. This preserves the parent's tool surface and
       // cache prefix when schemas are unchanged without letting a persisted or
       // stale declaration bypass the live registry.
-      const declaredExecutionToolNames =
-        parentToolNames.length > 0
-          ? parentToolNames
-          : agentConfig
-              .getToolRegistry()
-              .getAllToolNames()
-              .filter(
-                (toolName) => !EXCLUDED_TOOLS_FOR_SUBAGENTS.has(toolName),
-              );
-
       promptConfig = {
         renderedSystemPrompt: generationConfig.systemInstruction as
           | string
@@ -1927,17 +1980,13 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         tools: parentToolNames.length > 0 ? parentToolNames : ['*'],
         executionAllowedTools: resolveForkExecutionAllowedTools(
           parentToolNames,
-          buildForkExecutionAllowlist(
-            requestedTools,
-            declaredExecutionToolNames,
-          ),
+          buildParentBoundExecutionAllowlist(defaultExecutionToolNames),
         ),
+        ...(parentDisallowedTools?.length
+          ? { disallowedTools: [...parentDisallowedTools] }
+          : {}),
       };
     } else {
-      const registeredToolNames = agentConfig
-        .getToolRegistry()
-        .getAllToolNames()
-        .filter((toolName) => !EXCLUDED_TOOLS_FOR_SUBAGENTS.has(toolName));
       promptConfig = {
         systemPrompt: FORK_AGENT.systemPrompt,
         initialMessages,
@@ -1946,8 +1995,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         tools: ['*'],
         executionAllowedTools: resolveForkExecutionAllowedTools(
           parentToolNames,
-          buildForkExecutionAllowlist(requestedTools, registeredToolNames),
+          buildParentBoundExecutionAllowlist(defaultExecutionToolNames),
         ),
+        ...(parentDisallowedTools?.length
+          ? { disallowedTools: [...parentDisallowedTools] }
+          : {}),
       };
     }
 
@@ -2386,6 +2438,18 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         executionBackendError,
         executionBackendError,
       );
+    }
+    if (
+      this.config.getShellExecutionSandbox?.() &&
+      (this.params.isolation || this.params.working_dir || this.params.name)
+    ) {
+      const message =
+        'Tool execution sandbox supports only same-workspace in-process agents; worktrees, working_dir and teammates are unavailable.';
+      return {
+        llmContent: message,
+        returnDisplay: message,
+        error: { message },
+      };
     }
     const sessionWorkflowAgent =
       this.config.getSessionWorkflowPlanRevision?.() !== undefined;
@@ -3575,6 +3639,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                 executionAllowedTools: [...bgToolConfig.executionAllowedTools],
               }
             : {}),
+          // Unlike the allowlist above, the blocklist persists whenever the
+          // fork carries one — it also bounds plain forks whose allowlist is
+          // rebuilt from the live parent surface on resume.
+          ...(isFork && bgToolConfig?.disallowedTools?.length
+            ? { disallowedTools: [...bgToolConfig.disallowedTools] }
+            : {}),
           executor: subagentConfig.executor?.kind,
           persistedCliFlags:
             subagentConfig.executor !== undefined
@@ -4481,6 +4551,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             ? {
                 executionAllowedTools: [...toolConfig.executionAllowedTools],
               }
+            : {}),
+          // Unlike the allowlist above, the blocklist persists whenever the
+          // fork carries one — it also bounds plain forks whose allowlist is
+          // rebuilt from the live parent surface on resume.
+          ...(isFork && toolConfig?.disallowedTools?.length
+            ? { disallowedTools: [...toolConfig.disallowedTools] }
             : {}),
           executor: subagentConfig.executor?.kind,
           persistedCliFlags:

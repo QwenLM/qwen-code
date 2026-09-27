@@ -5,11 +5,22 @@
  */
 
 import { spawn } from 'node:child_process';
-import { constants, openSync, writeFileSync, closeSync } from 'node:fs';
+import {
+  closeSync,
+  constants,
+  createReadStream,
+  fstatSync,
+  openSync,
+  readFileSync,
+  readlinkSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import type { Readable } from 'node:stream';
 import { MAX_STATUS_BYTES, parseBwrapStatus } from './bwrap-status.js';
 
-const [parentPid, statusPath, bwrap, ...args] = process.argv.slice(2);
+const [parentPid, statusPath, payloadEnvPath, bwrap, ...args] =
+  process.argv.slice(2);
 if (process.ppid !== Number(parentPid)) process.exit(1);
 const parentWatch = setInterval(() => {
   if (process.ppid !== Number(parentPid)) process.exit(1);
@@ -23,10 +34,48 @@ const fd = openSync(
     constants.O_NOFOLLOW,
   0o600,
 );
+const envFd = openSync(
+  payloadEnvPath,
+  constants.O_RDONLY | constants.O_NOFOLLOW,
+);
+let parsedEnv: unknown;
+try {
+  parsedEnv = JSON.parse(readFileSync(envFd, 'utf8'));
+} finally {
+  closeSync(envFd);
+  unlinkSync(payloadEnvPath);
+}
+if (!parsedEnv || typeof parsedEnv !== 'object' || Array.isArray(parsedEnv))
+  process.exit(1);
+const env = Object.fromEntries(
+  Object.entries(parsedEnv).map(([key, value]) => {
+    if (typeof value !== 'string') process.exit(1);
+    return [key, value];
+  }),
+);
+const input = fstatSync(0);
+let shareInput = input.isSocket() || input.isCharacterDevice();
+if (input.isFIFO()) {
+  try {
+    shareInput = readlinkSync('/proc/self/fd/0').startsWith('pipe:');
+  } catch {
+    shareInput = false;
+  }
+}
 const child = spawn(bwrap, ['--json-status-fd', '3', ...args], {
-  stdio: ['inherit', 'inherit', 'inherit', 'pipe'],
-  env: { PATH: '/usr/bin:/bin', LANG: 'C.UTF-8', TERM: 'xterm-256color' },
+  stdio: [shareInput ? 'inherit' : 'pipe', 'inherit', 'inherit', 'pipe'],
+  env,
 });
+if (!shareInput && child.stdin) {
+  // Host-backed descriptors can bypass mount policy through fd operations.
+  // Copy their bytes through a relay-owned pipe instead of sharing the fd.
+  const sink = child.stdin;
+  const source = createReadStream('', { fd: 0, autoClose: false });
+  source.on('error', () => sink.end());
+  sink.on('error', () => source.destroy());
+  child.on('close', () => source.destroy());
+  source.pipe(sink);
+}
 let wire = '';
 let bytes = 0;
 let failed = false;

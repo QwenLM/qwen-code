@@ -179,7 +179,7 @@ export type RewindAction =
   | { type: 'select-up' }
   | { type: 'select-down' }
   | { type: 'enter-pick'; fileCheckpointingEnabled: boolean }
-  | { type: 'option-up' }
+  | { type: 'option-up'; optionCount: number }
   | { type: 'option-down'; optionCount: number }
   | { type: 'back' }
   | { type: 'begin-restore' }
@@ -194,6 +194,19 @@ export function createRewindState(turnCount: number): RewindState {
     selectedTurnIndex: null,
     restoreOptionIndex: 0,
   };
+}
+
+/**
+ * One clamped step of the restore-option cursor. Shared by the reducer and by
+ * the key handler, which has to know where a burst of arrows landed before
+ * React has re-rendered the reducer's answer.
+ */
+export function stepRestoreOption(
+  current: number,
+  delta: -1 | 1,
+  optionCount: number,
+): number {
+  return Math.min(Math.max(0, optionCount - 1), Math.max(0, current + delta));
 }
 
 export function rewindReducer(
@@ -225,16 +238,21 @@ export function rewindReducer(
       if (state.phase !== 'restore-options') return state;
       return {
         ...state,
-        restoreOptionIndex: Math.max(0, state.restoreOptionIndex - 1),
+        restoreOptionIndex: stepRestoreOption(
+          state.restoreOptionIndex,
+          -1,
+          action.optionCount,
+        ),
       };
     }
     case 'option-down': {
       if (state.phase !== 'restore-options') return state;
       return {
         ...state,
-        restoreOptionIndex: Math.min(
-          Math.max(0, action.optionCount - 1),
-          state.restoreOptionIndex + 1,
+        restoreOptionIndex: stepRestoreOption(
+          state.restoreOptionIndex,
+          1,
+          action.optionCount,
         ),
       };
     }

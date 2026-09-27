@@ -72,6 +72,7 @@ import type { SubagentConfig } from '../subagents/types.js';
 import { BUBBLE_APPROVAL_MODE } from '../subagents/types.js';
 import { resolveAgentExecutionBackend } from '../subagents/execution-backend.js';
 import {
+  buildInheritedForkExecutionToolNames,
   EXCLUDED_TOOLS_FOR_SUBAGENTS,
   extractParentToolNames,
 } from './runtime/agent-core.js';
@@ -149,6 +150,7 @@ interface ResolvedResumeTarget {
 interface CurrentForkRuntime {
   systemInstruction: string | Content;
   toolNames: string[];
+  executionToolNames: string[];
 }
 
 interface ResumeOperation {
@@ -1018,6 +1020,7 @@ export class BackgroundAgentResumeService {
           resumeHistory ?? [],
           currentForkRuntime!,
           meta.executionAllowedTools,
+          meta.disallowedTools,
           meta.agentId,
           meta.description,
         );
@@ -1745,6 +1748,13 @@ export class BackgroundAgentResumeService {
           generationConfig.systemInstruction as string | Content,
         ),
         toolNames,
+        executionToolNames: buildInheritedForkExecutionToolNames(
+          toolNames,
+          toolRegistry.getAllToolNames(),
+          // Forks launch only from the main session; the wake-up caller's
+          // ambient allowlist is unrelated to the persisted fork policy.
+          undefined,
+        ),
       };
     } catch (error) {
       debugLogger.warn(
@@ -1790,6 +1800,7 @@ export class BackgroundAgentResumeService {
     initialMessages: Content[],
     runtime: CurrentForkRuntime,
     executionAllowedTools?: string[],
+    disallowedTools?: string[],
     subagentId?: string,
     taskName?: string,
   ): Promise<AgentHeadless> {
@@ -1805,8 +1816,18 @@ export class BackgroundAgentResumeService {
       // parity but must not execute it.
       executionAllowedTools: resolveForkExecutionAllowedTools(
         runtime.toolNames,
-        buildForkExecutionAllowlist(executionAllowedTools, runtime.toolNames),
+        buildForkExecutionAllowlist(
+          executionAllowedTools,
+          runtime.executionToolNames,
+          runtime.toolNames,
+        ),
       ),
+      // Restore the persisted blocklist beside the allowlist: the
+      // invocation-level re-check is the only enforcement a wildcard
+      // allowlist entry (e.g. mcp__*) cannot provide on its own.
+      ...(disallowedTools?.length
+        ? { disallowedTools: [...disallowedTools] }
+        : {}),
     };
 
     return AgentHeadless.create(

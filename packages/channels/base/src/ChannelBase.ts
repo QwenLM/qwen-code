@@ -22,6 +22,9 @@ import type {
   ChannelUserQuestion,
   DispatchMode,
   Envelope,
+  GroupConfig,
+  GroupSenderPolicy,
+  PrivatePolicy,
   ObservedChannelContactGraph,
   ObservedChannelContactObservation,
   SanitizedToolCallEvent,
@@ -37,10 +40,12 @@ import { GroupGate } from './GroupGate.js';
 import { DmGate } from './DmGate.js';
 import { GroupHistoryStore } from './group-history-store.js';
 import type { GroupHistoryEntry } from './group-history-store.js';
+import { resolvePrivatePolicy } from './private-policy.js';
 import { SenderGate } from './SenderGate.js';
 import { PairingStore } from './PairingStore.js';
 import type { CreatePairingRequestResult } from './PairingStore.js';
 import { SessionRouter, readDaemonHttpErrorCode } from './SessionRouter.js';
+import { matchMessageRoute } from './message-routes.js';
 import {
   NamedSessionManager,
   NamedSessionTaskError,
@@ -460,7 +465,10 @@ export abstract class ChannelBase {
   protected groupGate: GroupGate;
   protected dmGate: DmGate;
   protected gate: SenderGate;
+  protected readonly privatePolicy: PrivatePolicy;
   protected router: SessionRouter;
+  private readonly messageRoutes: ReadonlyMap<string, string>;
+  private readonly routedEnvelopes = new WeakSet<Envelope>();
   protected name: string;
   /** Resolved (defaulted + frozen) identity/scope — adapters should read these, not raw config. */
   protected readonly identity: ChannelRuntimeIdentity;
@@ -1385,6 +1393,31 @@ export abstract class ChannelBase {
   ) {
     this.name = name;
     this.config = config;
+    this.messageRoutes = new Map(Object.entries(config.messageRoutes ?? {}));
+    if (config.multiSession && this.messageRoutes.size > 0) {
+      throw new Error('messageRoutes cannot be combined with multiSession.');
+    }
+    if (
+      [...this.messageRoutes].some(
+        ([prefix, instructions]) =>
+          !prefix.trim() ||
+          prefix !== prefix.trim() ||
+          typeof instructions !== 'string',
+      )
+    ) {
+      throw new Error(
+        'Message routes require non-empty prefixes and string instructions.',
+      );
+    }
+    if (
+      config.defaultMessageRoute !== undefined &&
+      !this.messageRoutes.has(config.defaultMessageRoute)
+    ) {
+      throw new Error(
+        'defaultMessageRoute must name a configured message route.',
+      );
+    }
+    this.privatePolicy = resolvePrivatePolicy(config);
     this.bridge = bridge;
     this.locale = options?.locale ?? 'en';
     this.proxy = options?.proxy;
@@ -1409,7 +1442,7 @@ export abstract class ChannelBase {
     // Scoped by the channel's workspace cwd: two workspaces reusing the same
     // channel name must not share pairing/allowlist state (#7017).
     const pairingStore =
-      config.senderPolicy === 'pairing' || config.groupPolicy === 'pairing'
+      this.privatePolicy === 'pairing' || config.groupPolicy === 'pairing'
         ? new PairingStore(name, config.cwd)
         : undefined;
     this.groupGate = new GroupGate(
@@ -1417,9 +1450,11 @@ export abstract class ChannelBase {
       config.groups,
       pairingStore,
     );
-    this.dmGate = new DmGate(config.dmPolicy);
+    this.dmGate = new DmGate(
+      this.privatePolicy === 'disabled' ? 'disabled' : 'open',
+    );
     this.gate = new SenderGate(
-      config.senderPolicy,
+      this.privatePolicy,
       config.allowedUsers,
       pairingStore,
     );
@@ -1858,6 +1893,11 @@ export abstract class ChannelBase {
       if (this.config.instructions) {
         staticContext.push(this.config.instructions);
       }
+      const routeInstructions =
+        target.messageRoute === undefined
+          ? undefined
+          : this.messageRoutes.get(target.messageRoute);
+      if (routeInstructions) staticContext.push(routeInstructions);
       // Boundary block goes last: recency bias means later instructions win,
       // and the isolation boundary must not be overridable by operator text.
       if (this.shouldPrependChannelBoundaryPrompt()) {
@@ -2119,6 +2159,7 @@ export abstract class ChannelBase {
       job.target.threadId,
       job.cwd,
       job.target.isGroup,
+      { routeKey: job.target.messageRoute },
     );
     const label = sanitizeQuotedText(job.label || job.id, 80);
     const createdBy = sanitizeSenderName(job.createdBy || 'unknown');
@@ -3691,6 +3732,7 @@ export abstract class ChannelBase {
       envelope.senderId,
       envelope.chatId,
       envelope.threadId,
+      envelope.messageRoute,
     );
   }
 
@@ -4094,6 +4136,7 @@ export abstract class ChannelBase {
             envelope.senderId,
             envelope.chatId,
             envelope.threadId,
+            envelope.messageRoute,
           );
       if (retiringSessionId) this.onSessionRetiring(retiringSessionId);
       if (this.namedSessions) {
@@ -4130,6 +4173,7 @@ export abstract class ChannelBase {
           envelope.senderId,
           envelope.chatId,
           envelope.threadId,
+          envelope.messageRoute,
         );
       }
       this.clearPendingGroupHistory(envelope);
@@ -4261,7 +4305,7 @@ export abstract class ChannelBase {
     };
 
     // For a shared session, clearing it affects everyone who shares it: restrict
-    // it to authorized senders (config.allowedUsers, when set) and require an
+    // it to the session's operators (see isSharedSessionOperator) and require an
     // explicit "confirm". DMs on per-user/thread scope and per-user groups clear
     // directly — there /clear only touches the caller's own session.
     const clearHandler: CommandHandler = async (envelope, args) => {
@@ -4326,6 +4370,7 @@ export abstract class ChannelBase {
             envelope.senderId,
             envelope.chatId,
             envelope.threadId,
+            envelope.messageRoute,
           );
       // `single` collapses EVERY DM and group to one `__single__` session, so it
       // is shared channel-wide regardless of where the /who came from — report
@@ -4461,8 +4506,12 @@ export abstract class ChannelBase {
             envelope.senderId,
             envelope.chatId,
             envelope.threadId,
+            envelope.messageRoute,
           );
-      const policy = this.config.senderPolicy;
+      const policy =
+        envelope.isGroup && !this.isPersonalConversation(envelope)
+          ? this.groupSendersFor(envelope)
+          : this.privatePolicy;
       const lines = [
         `Session: ${hasSession ? 'active' : 'none'}`,
         `Access: ${policy}`,
@@ -4891,6 +4940,9 @@ export abstract class ChannelBase {
   private loopTargetFromEnvelope(envelope: Envelope): SessionTarget {
     return this.normalizeLoopTarget({
       channelName: this.name,
+      ...(envelope.messageRoute !== undefined
+        ? { messageRoute: envelope.messageRoute }
+        : {}),
       senderId: envelope.senderId,
       chatId: envelope.chatId,
       threadId: envelope.threadId,
@@ -4925,6 +4977,11 @@ export abstract class ChannelBase {
     target: SessionTarget,
     senderName: string,
   ): boolean {
+    if (
+      target.messageRoute !== undefined &&
+      !this.messageRoutes.has(target.messageRoute)
+    )
+      return false;
     const normalizedTarget = this.normalizeLoopTarget(target);
     const envelope: Envelope = {
       channelName: this.name,
@@ -4940,9 +4997,7 @@ export abstract class ChannelBase {
     return (
       this.groupGate.check(envelope, { createPairingRequest: false }).allowed &&
       this.dmGate.check(envelope).allowed &&
-      (normalizedTarget.isGroup && this.config.groupPolicy === 'pairing'
-        ? true
-        : this.gate.isAllowed(normalizedTarget.senderId)) &&
+      this.senderGateFor(envelope).isAllowed(normalizedTarget.senderId) &&
       this.isAuthorizedForSharedSession(envelope)
     );
   }
@@ -4959,6 +5014,7 @@ export abstract class ChannelBase {
       envelope.senderId,
       envelope.chatId,
       envelope.threadId,
+      envelope.messageRoute,
     );
     return sessionId && this.activePrompts.has(sessionId)
       ? sessionId
@@ -5044,6 +5100,7 @@ export abstract class ChannelBase {
       envelope.senderId,
       envelope.chatId,
       envelope.threadId,
+      envelope.messageRoute,
     );
     if (sessionId) {
       this.unattendedMemorySessions.delete(sessionId);
@@ -5821,34 +5878,34 @@ export abstract class ChannelBase {
   }
 
   /**
-   * Whether `envelope.senderId` may act on the resolved session's destructive or
-   * workspace-leaking commands (/clear, /who). A SHARED session with a non-empty
-   * allowedUsers list is restricted to those members; a per-user session, or one
-   * with no allowlist, is unrestricted. Shared verbatim by /clear and /who so the
-   * gate can't drift; each caller sends its own rejection wording.
+   * Whether `envelope.senderId` may operate the resolved session: answer its
+   * permission prompts, steer it, or run /cancel, /clear, /who, /status, /loop
+   * and /btw. Shared verbatim by every such command so the gate can't drift;
+   * each caller sends its own rejection wording.
    */
   private isAuthorizedForSharedSession(envelope: Envelope): boolean {
-    return this.isAuthorizedForSharedSessionTarget(envelope);
-  }
-
-  private isAuthorizedForSharedSessionTarget(target: {
-    isGroup?: boolean;
-    senderId: string;
-  }): boolean {
-    if (!this.isSharedSessionTarget(target)) return true;
-    const authorized = this.config.allowedUsers;
-    return authorized.length === 0 || authorized.includes(target.senderId);
+    return this.isSharedSessionOperator(envelope, envelope.senderId);
   }
 
   private isAuthorizedForSharedSessionToolCall(
     target: SessionTarget,
     sessionId: string,
   ): boolean {
+    return this.isSharedSessionOperator(
+      target,
+      this.activePrompts.get(sessionId)?.senderId,
+    );
+  }
+
+  private isSharedSessionOperator(
+    target: { isGroup?: boolean; chatId: string },
+    senderId: string | undefined,
+  ): boolean {
     if (!this.isSharedSessionTarget(target)) return true;
-    const authorized = this.config.allowedUsers;
-    if (authorized.length === 0) return true;
-    const senderId = this.activePrompts.get(sessionId)?.senderId;
-    return senderId !== undefined && authorized.includes(senderId);
+    return (
+      senderId !== undefined &&
+      this.config.operators?.includes(senderId) === true
+    );
   }
 
   private toolCallerName(sessionId: string, target: SessionTarget): string {
@@ -6019,6 +6076,7 @@ export abstract class ChannelBase {
       this.name,
       envelope.chatId,
       envelope.threadId ?? null,
+      ...(envelope.messageRoute !== undefined ? [envelope.messageRoute] : []),
     ]);
   }
 
@@ -6040,6 +6098,7 @@ export abstract class ChannelBase {
   }
 
   protected recordPendingGroupHistory(envelope: Envelope): void {
+    if (!this.applyMessageRoute(envelope)) return;
     const limit = this.groupHistoryLimit(envelope);
     if (limit <= 0 || envelope.text.trim().length === 0) {
       return;
@@ -6049,10 +6108,7 @@ export abstract class ChannelBase {
     // text.
     if (envelope.syntheticText) return;
     const senderId = truncateGroupHistoryField(envelope.senderId);
-    if (
-      this.config.groupPolicy !== 'pairing' &&
-      !this.gate.isAllowed(senderId)
-    ) {
+    if (!this.senderGateFor(envelope).isAllowed(senderId)) {
       return;
     }
 
@@ -6134,6 +6190,7 @@ export abstract class ChannelBase {
   }
 
   private prependGroupHistoryContext(
+    envelope: Envelope,
     promptText: string,
     entries: GroupHistoryEntry[],
   ): string {
@@ -6141,10 +6198,10 @@ export abstract class ChannelBase {
       return promptText;
     }
 
-    const lines =
-      this.config.groupPolicy === 'pairing'
-        ? entries
-        : entries.filter((entry) => this.gate.isAllowed(entry.senderId));
+    const senderGate = this.senderGateFor(envelope);
+    const lines = entries.filter((entry) =>
+      senderGate.isAllowed(entry.senderId),
+    );
     if (lines.length === 0) {
       return promptText;
     }
@@ -6161,10 +6218,56 @@ export abstract class ChannelBase {
     return `${GROUP_HISTORY_CONTEXT_MARKER}\n${formatted.join('\n')}\n\n${CURRENT_MESSAGE_MARKER}\n${promptText}`;
   }
 
+  protected senderGateFor(target: {
+    isGroup?: boolean;
+    chatId: string;
+  }): SenderGate {
+    if (target.isGroup !== true || this.isPersonalConversation(target)) {
+      return this.gate;
+    }
+    const senders = this.groupSendersFor(target);
+    return new SenderGate(
+      senders,
+      senders === 'allowlist' ? this.groupAllowedUsersFor(target.chatId) : [],
+    );
+  }
+
+  private groupSendersFor(target: { chatId: string }): GroupSenderPolicy {
+    return (
+      this.groupConfigFor(target.chatId)?.senders ??
+      this.groupConfigFor('*')?.senders ??
+      'open'
+    );
+  }
+
+  /**
+   * Whether a group-shaped conversation acts on behalf of one person, such as
+   * a document comment thread or a task. Its sender follows `privatePolicy`
+   * like a direct message, and `groups` does not apply; its
+   * group shape still decides routing, memory, and presentation.
+   */
+  protected isPersonalConversation(_target: { chatId: string }): boolean {
+    return false;
+  }
+
+  private groupAllowedUsersFor(chatId: string): string[] {
+    return (
+      this.groupConfigFor(chatId)?.allowedUsers ??
+      this.groupConfigFor('*')?.allowedUsers ??
+      []
+    );
+  }
+
+  private groupConfigFor(key: string): GroupConfig | undefined {
+    const groups = this.config.groups;
+    return Object.hasOwn(groups, key) ? groups[key] : undefined;
+  }
+
   protected preflightInbound(
     envelope: Envelope,
     options: PreflightInboundOptions = {},
   ): boolean | Promise<boolean> {
+    if (!this.applyMessageRoute(envelope)) return false;
     const groupResult = this.groupGate.check(envelope, {
       createPairingRequest: !options.deferPairingRequests,
     });
@@ -6208,21 +6311,19 @@ export abstract class ChannelBase {
       return false;
     }
 
-    if (envelope.isGroup && this.config.groupPolicy === 'pairing') {
-      this.markPreflighted(envelope);
-      return true;
-    }
+    const senderGate = this.senderGateFor(envelope);
 
     if (
       options.deferPairingRequests === true &&
-      this.config.senderPolicy === 'pairing' &&
-      !this.gate.isAllowed(envelope.senderId)
+      senderGate === this.gate &&
+      this.privatePolicy === 'pairing' &&
+      !senderGate.isAllowed(envelope.senderId)
     ) {
       this.markPreflighted(envelope);
       return true;
     }
 
-    const result = this.gate.check(envelope.senderId, envelope.senderName);
+    const result = senderGate.check(envelope.senderId, envelope.senderName);
     if (!result.allowed) {
       if (result.pairing !== undefined) {
         this.logPreflightRejected('sender_pairing_required');
@@ -6242,7 +6343,9 @@ export abstract class ChannelBase {
             return false;
           });
       }
-      this.logPreflightRejected('sender_denied');
+      this.logPreflightRejected(
+        senderGate === this.gate ? 'sender_denied' : 'group_sender_denied',
+      );
       return false;
     }
 
@@ -6495,6 +6598,28 @@ export abstract class ChannelBase {
     this.preflightedEnvelopes.add(envelope);
   }
 
+  private applyMessageRoute(envelope: Envelope): boolean {
+    if (this.routedEnvelopes.has(envelope)) return true;
+    if (
+      this.messageRoutes.size === 0 ||
+      envelope.bypassMessageRoutes ||
+      envelope.syntheticText
+    ) {
+      this.routedEnvelopes.add(envelope);
+      return true;
+    }
+    const matched = matchMessageRoute(
+      envelope.text,
+      this.messageRoutes,
+      this.config.defaultMessageRoute,
+    );
+    if (!matched) return false;
+    envelope.text = matched.text;
+    envelope.messageRoute = matched.prefix;
+    this.routedEnvelopes.add(envelope);
+    return true;
+  }
+
   /** Wait until the currently active bridge recovery, if any, has completed. */
   private async waitForBridgeRecovery(): Promise<void> {
     let completedRecovery: Promise<void> | undefined;
@@ -6723,6 +6848,7 @@ export abstract class ChannelBase {
         envelope.threadId,
         this.config.cwd,
         envelope.isGroup,
+        { routeKey: envelope.messageRoute },
       );
     }
 
@@ -6898,11 +7024,11 @@ export abstract class ChannelBase {
     }
 
     // Resolve dispatch mode: per-group override → channel config → default
-    const groupCfg = envelope.isGroup
-      ? this.config.groups[envelope.chatId] || this.config.groups['*']
+    const groupMode = envelope.isGroup
+      ? (this.groupConfigFor(envelope.chatId)?.dispatchMode ??
+        this.groupConfigFor('*')?.dispatchMode)
       : undefined;
-    const mode: DispatchMode =
-      groupCfg?.dispatchMode || this.config.dispatchMode || 'steer';
+    const mode: DispatchMode = groupMode ?? this.config.dispatchMode ?? 'steer';
 
     const active = this.activePrompts.get(sessionId);
 
@@ -7070,6 +7196,11 @@ export abstract class ChannelBase {
         if (this.config.instructions) {
           sessionContext.push(this.config.instructions);
         }
+        const routeInstructions =
+          envelope.messageRoute === undefined
+            ? undefined
+            : this.messageRoutes.get(envelope.messageRoute);
+        if (routeInstructions) sessionContext.push(routeInstructions);
         // Boundary block goes last: recency bias means later instructions win,
         // and the isolation boundary must not be overridable by operator text.
         if (this.shouldPrependChannelBoundaryPrompt()) {
@@ -7136,6 +7267,7 @@ export abstract class ChannelBase {
         ? []
         : this.drainPendingGroupHistory(envelope);
       let promptToSend = this.prependGroupHistoryContext(
+        envelope,
         promptText,
         groupHistoryEntries,
       );

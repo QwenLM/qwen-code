@@ -140,6 +140,7 @@ describe('relaunchAppInChildProcess', () => {
   const originalExecArgv = [...process.execArgv];
   const originalArgv = [...process.argv];
   const originalExecPath = process.execPath;
+  const originalExecve = process.execve;
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -167,6 +168,7 @@ describe('relaunchAppInChildProcess', () => {
     process.execArgv = [...originalExecArgv];
     process.argv = [...originalArgv];
     process.execPath = originalExecPath;
+    process.execve = originalExecve;
 
     processExitSpy.mockRestore();
     stdinPauseSpy.mockRestore();
@@ -181,6 +183,196 @@ describe('relaunchAppInChildProcess', () => {
 
       expect(mockedSpawn).not.toHaveBeenCalled();
       expect(processExitSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  it('replaces the current process when requested and supported', async () => {
+    process.execArgv = ['--trace-warnings'];
+    process.argv = ['/usr/bin/node', '/app/cli.js', '--model', 'test'];
+    const execveSpy = vi.fn(() => undefined as never);
+    process.execve = execveSpy;
+
+    await relaunchAppInChildProcess(
+      ['--max-old-space-size=4096'],
+      ['--debug'],
+      {
+        childEnv: { QWEN_TEST_CHILD: '1' },
+        replaceProcess: true,
+      },
+    );
+
+    expect(execveSpy).toHaveBeenCalledWith(
+      '/usr/bin/node',
+      [
+        '/usr/bin/node',
+        '--trace-warnings',
+        '--max-old-space-size=4096',
+        '/app/cli.js',
+        '--debug',
+        '--model',
+        'test',
+      ],
+      expect.objectContaining({
+        QWEN_CODE_NO_RELAUNCH: 'true',
+        QWEN_TEST_CHILD: '1',
+      }),
+    );
+    expect(mockedSpawn).not.toHaveBeenCalled();
+  });
+
+  it('continues in place when the replacement would boot an identical image', async () => {
+    process.argv = ['/usr/bin/node', '/app/cli.js', '-p', 'hi'];
+    const execveSpy = vi.fn((): never => {
+      throw new Error('UNEXPECTED_EXECVE');
+    });
+    process.execve = execveSpy;
+
+    await relaunchAppInChildProcess([], [], {
+      childEnv: { QWEN_TEST_CHILD: '1' },
+      replaceProcess: true,
+    });
+
+    expect(execveSpy).not.toHaveBeenCalled();
+    expect(mockedSpawn).not.toHaveBeenCalled();
+    expect(processExitSpy).not.toHaveBeenCalled();
+    // Matches what the replaced image would see, so nested launches and later
+    // relaunch calls in this process stay no-ops.
+    expect(process.env['QWEN_CODE_NO_RELAUNCH']).toBe('true');
+    // Child-only state stays out of the continuing process's environment,
+    // which every tool subprocess inherits.
+    expect(process.env['QWEN_TEST_CHILD']).toBeUndefined();
+  });
+
+  it('still replaces the process when the environment changed since boot', async () => {
+    // e.g. `.env` supplied NODE_EXTRA_CA_CERTS, which only Node's boot reads,
+    // or a value that some module captured when it was imported.
+    process.argv = ['/usr/bin/node', '/app/cli.js', '-p', 'hi'];
+    const execveSpy = vi.fn(() => undefined as never);
+    process.execve = execveSpy;
+
+    await relaunchAppInChildProcess([], [], {
+      environmentChangedSinceBoot: true,
+      replaceProcess: true,
+    });
+
+    expect(execveSpy).toHaveBeenCalledWith(
+      '/usr/bin/node',
+      expect.arrayContaining(['/app/cli.js', '-p', 'hi']),
+      expect.objectContaining({ QWEN_CODE_NO_RELAUNCH: 'true' }),
+    );
+  });
+
+  it('falls back to supervised spawn when process replacement fails', async () => {
+    process.argv = ['/usr/bin/node', '/app/cli.js'];
+    process.execve = vi.fn((): never => {
+      throw new Error('E2BIG');
+    });
+    const child = createMockChildProcess(0, false);
+    mockedSpawn.mockReturnValue(child);
+
+    const promise = relaunchAppInChildProcess(
+      ['--max-old-space-size=4096'],
+      [],
+      {
+        replaceProcess: true,
+      },
+    );
+    await vi.waitFor(() => expect(mockedSpawn).toHaveBeenCalledOnce());
+    child.emit('close', 0);
+    await expect(promise).rejects.toThrow('PROCESS_EXIT_CALLED');
+  });
+
+  it('keeps the supervised spawn path when process replacement is unsupported', async () => {
+    const originalPlatform = process.platform;
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+    process.argv = ['/usr/bin/node', '/app/cli.js'];
+    const execveSpy = vi.fn((): never => {
+      throw new Error('UNEXPECTED_EXECVE');
+    });
+    process.execve = execveSpy;
+    const child = createMockChildProcess(0, false);
+    mockedSpawn.mockReturnValue(child);
+
+    try {
+      const promise = relaunchAppInChildProcess([], [], {
+        replaceProcess: true,
+      });
+      await vi.waitFor(() => expect(mockedSpawn).toHaveBeenCalledOnce());
+      expect(execveSpy).not.toHaveBeenCalled();
+      child.emit('close', 0);
+      await expect(promise).rejects.toThrow('PROCESS_EXIT_CALLED');
+    } finally {
+      Object.defineProperty(process, 'platform', { value: originalPlatform });
+    }
+  });
+
+  describe('when the bin launcher exposed gc at runtime', () => {
+    const originalGc = globalThis.gc;
+    const originalPlatform = process.platform;
+
+    beforeEach(() => {
+      // cli-entry.js on POSIX: gc comes from v8.setFlagsFromString, not argv.
+      globalThis.gc = vi.fn() as unknown as typeof globalThis.gc;
+      process.execArgv = [];
+      process.argv = ['/usr/bin/node', '/app/cli.js', '--acp'];
+    });
+
+    afterEach(() => {
+      globalThis.gc = originalGc;
+      Object.defineProperty(process, 'platform', { value: originalPlatform });
+    });
+
+    it('starts the supervised child with --expose-gc', async () => {
+      const child = createMockChildProcess(0, false);
+      mockedSpawn.mockReturnValue(child);
+
+      const promise = relaunchAppInChildProcess([], []);
+      await vi.waitFor(() => expect(mockedSpawn).toHaveBeenCalledOnce());
+      expect(mockedSpawn.mock.calls[0][1]).toEqual([
+        '--expose-gc',
+        '/app/cli.js',
+        '--acp',
+      ]);
+      child.emit('close', 0);
+      await expect(promise).rejects.toThrow('PROCESS_EXIT_CALLED');
+    });
+
+    it('replaces the process with --expose-gc', async () => {
+      Object.defineProperty(process, 'platform', { value: 'linux' });
+      const execveSpy = vi.fn(() => undefined as never);
+      process.execve = execveSpy;
+
+      await relaunchAppInChildProcess(['--max-old-space-size=4096'], [], {
+        replaceProcess: true,
+      });
+
+      expect(execveSpy).toHaveBeenCalledWith(
+        '/usr/bin/node',
+        [
+          '/usr/bin/node',
+          '--expose-gc',
+          '--max-old-space-size=4096',
+          '/app/cli.js',
+          '--acp',
+        ],
+        expect.any(Object),
+      );
+    });
+
+    it('does not repeat --expose-gc already on the command line', async () => {
+      process.execArgv = ['--expose-gc'];
+      const child = createMockChildProcess(0, false);
+      mockedSpawn.mockReturnValue(child);
+
+      const promise = relaunchAppInChildProcess([], []);
+      await vi.waitFor(() => expect(mockedSpawn).toHaveBeenCalledOnce());
+      expect(mockedSpawn.mock.calls[0][1]).toEqual([
+        '--expose-gc',
+        '/app/cli.js',
+        '--acp',
+      ]);
+      child.emit('close', 0);
+      await expect(promise).rejects.toThrow('PROCESS_EXIT_CALLED');
     });
   });
 
@@ -435,6 +627,33 @@ describe('relaunchAppInChildProcess', () => {
 
       expect(onUpdateRelaunch).not.toHaveBeenCalled();
       expect(processExitSpy).toHaveBeenCalledWith(0);
+    });
+
+    it('rebuilds the child environment for each relaunch', async () => {
+      process.argv = ['/usr/bin/node', '/app/cli.js'];
+      process.env['QWEN_TEST_TRANSIENT'] = '1';
+      const firstChild = createMockChildProcess(0, false);
+      const secondChild = createMockChildProcess(0, false);
+      mockedSpawn
+        .mockReturnValueOnce(firstChild)
+        .mockReturnValueOnce(secondChild);
+
+      const promise = relaunchAppInChildProcess([], [], {
+        afterSpawn: () => delete process.env['QWEN_TEST_TRANSIENT'],
+      });
+      await vi.waitFor(() => expect(mockedSpawn).toHaveBeenCalledOnce());
+      expect(mockedSpawn.mock.calls[0]?.[2]?.env).toMatchObject({
+        QWEN_TEST_TRANSIENT: '1',
+      });
+
+      firstChild.emit('close', RELAUNCH_EXIT_CODE);
+      await vi.waitFor(() => expect(mockedSpawn).toHaveBeenCalledTimes(2));
+      expect(mockedSpawn.mock.calls[1]?.[2]?.env).not.toHaveProperty(
+        'QWEN_TEST_TRANSIENT',
+      );
+
+      secondChild.emit('close', 0);
+      await expect(promise).rejects.toThrow('PROCESS_EXIT_CALLED');
     });
 
     it.each([

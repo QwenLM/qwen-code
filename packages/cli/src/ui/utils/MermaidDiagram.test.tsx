@@ -6,6 +6,8 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'ink-testing-library';
+import type { Config } from '@qwen-code/qwen-code-core';
+import { ConfigContext } from '../contexts/ConfigContext.js';
 import { MermaidDiagram } from './MermaidDiagram.js';
 import { TerminalOutputProvider } from '../contexts/TerminalOutputContext.js';
 import { renderMermaidImageAsync } from './mermaidImageRenderer.js';
@@ -25,6 +27,24 @@ const mockedRenderMermaidImageAsync = vi.mocked(renderMermaidImageAsync);
 describe('MermaidDiagram', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  it('renders only the wireframe in a tool sandbox', () => {
+    const config = {
+      getShellExecutionSandbox: () => ({ network: 'closed' }),
+    } as unknown as Config;
+    const { lastFrame } = render(
+      <ConfigContext.Provider value={config}>
+        <MermaidDiagram
+          source={'flowchart TD\nA[Start] --> B[End]'}
+          sourceCopyCommand="/copy mermaid 1"
+          contentWidth={80}
+          isPending={false}
+        />
+      </ConfigContext.Provider>,
+    );
+    expect(lastFrame()).toContain('Mermaid flowchart (TD)');
+    expect(mockedRenderMermaidImageAsync).not.toHaveBeenCalled();
   });
 
   it('renders the wireframe immediately and writes Kitty images through raw output', async () => {

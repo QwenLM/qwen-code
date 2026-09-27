@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../i18n';
+import { TurnCallsProvider } from '../turnCallsContext';
 import {
   WebShellCustomizationProvider,
   type WebShellAssistantTurnFooterRenderInfo,
@@ -599,4 +600,65 @@ describe('MessageItem inline message editing', () => {
     expect(captured.userMessageProps?.editing).toBe(true);
     expect(captured.userMessageProps?.submittingEdit).toBe(false);
   });
+});
+
+it.each([
+  [undefined, 'ordinary prompt', true],
+  ['cron', 'scheduled prompt', true],
+  ['goal_runtime', 'continue goal', false],
+  ['goal_control', 'goal card', false],
+  ['cron', '', false],
+] as const)(
+  'exposes Tool calls only for a navigation prompt (%s)',
+  (source, content, visible) => {
+    const onOpen = vi.fn();
+    const view = render(
+      <I18nProvider language="en">
+        <TurnCallsProvider onOpen={onOpen}>
+          <MessageItem
+            message={{
+              id: 'prompt',
+              role: 'user',
+              content,
+              timestamp: 0,
+              ...(source ? { source } : {}),
+            }}
+          />
+        </TurnCallsProvider>
+      </I18nProvider>,
+    );
+    const entry = view.querySelector<HTMLButtonElement>(
+      '[aria-label="View tool calls"]',
+    );
+    expect(Boolean(entry)).toBe(visible);
+    if (entry) {
+      act(() => entry.click());
+      expect(onOpen).toHaveBeenCalledWith('prompt');
+    }
+  },
+);
+
+it('updates the Tool calls entry when the user message source is filled in', () => {
+  const onOpen = vi.fn();
+  const row = (source?: string) => (
+    <I18nProvider language="en">
+      <TurnCallsProvider onOpen={onOpen}>
+        <MessageItem
+          message={{
+            id: 'prompt',
+            role: 'user',
+            content: 'Same text',
+            timestamp: 0,
+            source,
+          }}
+        />
+      </TurnCallsProvider>
+    </I18nProvider>
+  );
+  const { root, container } = renderWithRoot(row());
+  expect(
+    container.querySelector('[aria-label="View tool calls"]'),
+  ).not.toBeNull();
+  act(() => root.render(row('goal_runtime')));
+  expect(container.querySelector('[aria-label="View tool calls"]')).toBeNull();
 });

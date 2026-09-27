@@ -73,6 +73,18 @@ function hasPermissionDiffPreview(
   });
 }
 
+function escapePreviewText(text: string): string {
+  return text.replace(/[\u007f-\u009f\u2028\u2029\p{Cf}]/gu, (character) =>
+    character
+      .split('')
+      .map(
+        (codeUnit) =>
+          `\\u${codeUnit.charCodeAt(0).toString(16).padStart(4, '0')}`,
+      )
+      .join(''),
+  );
+}
+
 function getPermissionContent(
   toolCall: Record<string, unknown> | undefined,
   fallback?: string,
@@ -81,6 +93,23 @@ function getPermissionContent(
   if (Array.isArray(rawContent)) {
     const content = rawContent.flatMap((value): ContentBlock[] => {
       const block = getRecord(value);
+      if (
+        block?.['type'] === 'diff' &&
+        typeof block['path'] === 'string' &&
+        typeof block['newText'] === 'string'
+      ) {
+        return [
+          {
+            type: 'diff',
+            path: escapePreviewText(block['path']),
+            oldText:
+              typeof block['oldText'] === 'string'
+                ? escapePreviewText(block['oldText'])
+                : '',
+            newText: escapePreviewText(block['newText']),
+          },
+        ];
+      }
       const nested = getRecord(block?.['content']);
       const text =
         block?.['type'] === 'text' && typeof block['text'] === 'string'
@@ -93,19 +122,22 @@ function getPermissionContent(
     if (content.length > 0) return { content };
   }
   const input = getExplicitPermissionInput(toolCall);
-  if (input && !hasPermissionDiffPreview(toolCall)) {
-    const text = JSON.stringify(input, null, 2).replace(
-      /[\u007f-\u009f\u2028\u2029\p{Cf}]/gu,
-      (character) =>
-        character
-          .split('')
-          .map(
-            (codeUnit) =>
-              `\\u${codeUnit.charCodeAt(0).toString(16).padStart(4, '0')}`,
-          )
-          .join(''),
-    );
-    return { content: [{ type: 'text', text }], contentIsInput: true };
+  // An empty input object carries no information; rendering its serialization
+  // would show a bare `{}` as the approval body.
+  if (
+    input &&
+    Object.keys(input).length > 0 &&
+    !hasPermissionDiffPreview(toolCall)
+  ) {
+    return {
+      content: [
+        {
+          type: 'text',
+          text: escapePreviewText(JSON.stringify(input, null, 2)),
+        },
+      ],
+      contentIsInput: true,
+    };
   }
   return { content: [{ type: 'text', text: fallback || 'Tool permission' }] };
 }

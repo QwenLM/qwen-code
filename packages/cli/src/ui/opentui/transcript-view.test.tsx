@@ -37,10 +37,23 @@ const mocks = vi.hoisted(() => {
     ) => {
       const config = key === undefined ? props : { ...props, key };
       const children = (config?.children ?? null) as React.ReactNode;
-      if (type === 'box' || type === 'text') {
+      if (type === 'box' || type === 'text' || type === 'span') {
+        // jsdom drops unknown props, so the colour-bearing opentui attributes
+        // are surfaced as data-* for assertions to pin.
+        const dom: Record<string, unknown> = key === undefined ? {} : { key };
+        const source = (config ?? {}) as Record<string, unknown>;
+        for (const name of ['fg', 'bg', 'borderColor', 'attributes']) {
+          if (source[name] !== undefined) dom[`data-${name}`] = source[name];
+        }
+        if (source['flexDirection'] !== undefined) {
+          dom['data-direction'] = source['flexDirection'];
+        }
+        if (source['width'] !== undefined) {
+          dom['data-width'] = String(source['width']);
+        }
         return React.createElement(
           type === 'box' ? 'div' : 'span',
-          key === undefined ? null : { key },
+          dom,
           children,
         );
       }
@@ -59,7 +72,12 @@ vi.mock('@opentui/react/jsx-runtime', () => mocks.buildJsxRuntime());
 vi.mock('@opentui/react/jsx-dev-runtime', () => mocks.buildJsxRuntime());
 
 import { OpenTuiTranscriptView } from './transcript-view.js';
-import type { LiveThinkingItem, LiveToolItem } from './live-session-model.js';
+import { C } from './theme.js';
+import type {
+  LiveAssistantItem,
+  LiveThinkingItem,
+  LiveToolItem,
+} from './live-session-model.js';
 
 const toolItem = (overrides: Partial<LiveToolItem> = {}): LiveToolItem => ({
   kind: 'tool',
@@ -407,6 +425,53 @@ describe('OpenTuiTranscriptView', () => {
     expect(container.textContent).toContain('echo done');
   });
 
+  it('bolds only the tool name, leaving the status glyph at ink’s weight', () => {
+    const { container } = render(
+      <OpenTuiTranscriptView items={[toolItem({ tool: 'custom-tool' })]} />,
+    );
+    const name = [...container.querySelectorAll('span')]
+      .filter((row) => (row.textContent ?? '').includes('custom-tool'))
+      .pop();
+    expect(name).toBeDefined();
+    const glyph = name
+      ?.closest('div[data-direction="row"]')
+      ?.querySelector('div > span');
+    expect(glyph?.textContent?.trim()).not.toBe('');
+    expect(glyph?.getAttribute('data-attributes')).toBe('0');
+    expect(name?.getAttribute('data-attributes')).toBe('1');
+  });
+
+  it('paints the subagent summary as ink’s three runs', () => {
+    const { container } = render(
+      <OpenTuiTranscriptView
+        items={[
+          toolItem({
+            output: '',
+            subagentSummary: {
+              glyph: '✔',
+              tone: 'success',
+              prefix: 'reviewer: ',
+              rest: 'check imports · 5 tools',
+            },
+          }),
+        ]}
+      />,
+    );
+    const spans = [...container.querySelectorAll('span')];
+    const glyph = spans.find((row) => (row.textContent ?? '').trim() === '✔');
+    expect(glyph?.getAttribute('data-fg')).toBe(C.green);
+    expect(glyph?.getAttribute('data-attributes')).toBeNull();
+    const prefix = spans.find((row) =>
+      (row.textContent ?? '').includes('reviewer:'),
+    );
+    expect(prefix?.getAttribute('data-fg')).toBe(C.text);
+    expect(prefix?.getAttribute('data-attributes')).toBe('1');
+    const rest = spans.find((row) =>
+      (row.textContent ?? '').includes('check imports'),
+    );
+    expect(rest?.getAttribute('data-fg')).toBe(C.dim);
+  });
+
   it('renders the ! shell row with the ink $ prefix', () => {
     const { container } = render(
       <OpenTuiTranscriptView
@@ -478,17 +543,221 @@ describe('OpenTuiTranscriptView', () => {
     ];
     const collapsed = render(<OpenTuiTranscriptView items={items} />);
     expect(collapsed.container.textContent).toContain('Thought for 12s');
-    expect(collapsed.container.textContent).not.toContain(
-      'INSPECTING_THE_REPOSITORY',
-    );
+    expect(collapsed.container.querySelector('markdown')).toBeNull();
     collapsed.unmount();
 
     const expanded = render(
       <OpenTuiTranscriptView items={items} thoughtsExpanded />,
     );
-    expect(expanded.container.textContent).toContain(
-      'INSPECTING_THE_REPOSITORY',
-    );
+    expect(
+      expanded.container.querySelector('markdown')?.getAttribute('content'),
+    ).toContain('INSPECTING_THE_REPOSITORY');
     expect(expanded.container.textContent).toContain('ctrl+o to collapse');
+  });
+
+  it('drops the click affordance from both hints when ui.mouseTracking is off (#172)', () => {
+    const thought: LiveThinkingItem[] = [
+      {
+        kind: 'thinking',
+        id: 'th1',
+        text: 'BODY',
+        done: true,
+        durationMs: 12_000,
+      },
+    ];
+    const tool = [toolItem({ description: 'echo HI', done: true })];
+
+    const clickable = render(<OpenTuiTranscriptView items={thought} />);
+    expect(clickable.container.textContent).toContain('click or ctrl+o');
+    clickable.unmount();
+    const toolClickable = render(
+      <OpenTuiTranscriptView items={tool} showToolCallDetails={false} />,
+    );
+    expect(toolClickable.container.textContent).toContain('click to expand');
+    toolClickable.unmount();
+
+    // The renderer takes no pointer events in this configuration, so a hint
+    // offering a click would advertise a dead affordance.
+    const noMouse = render(
+      <OpenTuiTranscriptView items={thought} mouseTracking={false} />,
+    );
+    expect(noMouse.container.textContent).toContain('(ctrl+o to expand)');
+    expect(noMouse.container.textContent).not.toContain('click');
+    noMouse.unmount();
+    const toolNoMouse = render(
+      <OpenTuiTranscriptView
+        items={tool}
+        showToolCallDetails={false}
+        mouseTracking={false}
+      />,
+    );
+    expect(toolNoMouse.container.textContent).toContain('ctrl+o to expand');
+    expect(toolNoMouse.container.textContent).not.toContain('click');
+  });
+
+  it('stamps the assistant row only when output.showTimestamps is on (#76)', () => {
+    const items: LiveAssistantItem[] = [
+      {
+        kind: 'assistant',
+        id: 'a1',
+        text: 'ANSWER_BODY',
+        streaming: false,
+        timestamp: Date.UTC(2026, 8, 18, 7, 5, 9),
+      },
+    ];
+    const stamped = render(
+      <OpenTuiTranscriptView items={items} showTimestamps />,
+    );
+    expect(stamped.container.textContent).toMatch(/\[\d{2}:\d{2}:\d{2}\]/);
+    stamped.unmount();
+
+    const plain = render(<OpenTuiTranscriptView items={items} />);
+    expect(plain.container.textContent).not.toMatch(/\[\d{2}:\d{2}:\d{2}\]/);
+  });
+
+  it('remounts the assistant row when the stamp setting flips (#170)', () => {
+    // `output.showTimestamps` is dialog-settable and needs no restart, so an
+    // already-mounted row switches shape mid-session. The two shapes differ,
+    // and this renderer never clears a prop a re-render drops, so they have to
+    // remount rather than reuse: the stamped branch's second child would
+    // otherwise keep the flexGrow the unstamped one gave it.
+    const items: LiveAssistantItem[] = [
+      {
+        kind: 'assistant',
+        id: 'a1',
+        text: 'ANSWER_BODY',
+        streaming: false,
+        timestamp: Date.UTC(2026, 8, 18, 7, 5, 9),
+      },
+    ];
+    const { container, rerender } = render(
+      <OpenTuiTranscriptView items={items} />,
+    );
+    const bare = container.querySelector('[data-direction="row"]');
+    expect(bare?.querySelector('markdown')?.getAttribute('content')).toContain(
+      'ANSWER_BODY',
+    );
+
+    rerender(<OpenTuiTranscriptView items={items} showTimestamps />);
+    expect(bare?.isConnected).toBe(false);
+    expect(container.textContent).toMatch(/\[\d{2}:\d{2}:\d{2}\]/);
+    expect(
+      container.querySelector('markdown')?.getAttribute('content'),
+    ).toContain('ANSWER_BODY');
+  });
+
+  it('gives the row glyph a structural gap, not a trailing space (#188)', () => {
+    // A space inside the glyph's own text node is squeezed out as soon as the
+    // sibling needs the full width, so a long wrapped answer printed as
+    // `◆︎Answer`. Only a fixed-width box keeps the column.
+    const rows = render(
+      <OpenTuiTranscriptView
+        items={[
+          { kind: 'user', id: 'u1', text: 'QUESTION_BODY' },
+          {
+            kind: 'assistant',
+            id: 'a1',
+            text: 'ANSWER_BODY',
+            streaming: false,
+          },
+        ]}
+      />,
+    );
+    const glyphBoxes = rows.container.querySelectorAll('[data-width="2"]');
+    expect(glyphBoxes).toHaveLength(2);
+    for (const box of glyphBoxes) {
+      const glyph = box.firstElementChild;
+      expect(glyph?.textContent).toMatch(/^\S{1,2}$/u);
+      expect(glyph?.parentElement).toBe(box);
+    }
+    expect(rows.container.textContent).toContain('QUESTION_BODY');
+    expect(
+      rows.container.querySelector('markdown')?.getAttribute('content'),
+    ).toContain('ANSWER_BODY');
+  });
+
+  it('collapses a settled tool card when ui.showToolCallDetails is false (#85)', () => {
+    const items = [
+      toolItem({
+        tool: 'mcp__fs__write_file',
+        description: '{"path":"/x","content":"SECRET_PAYLOAD"}',
+        done: true,
+      }),
+    ];
+    const collapsed = render(
+      <OpenTuiTranscriptView items={items} showToolCallDetails={false} />,
+    );
+    expect(collapsed.container.textContent).not.toContain('SECRET_PAYLOAD');
+    expect(collapsed.container.textContent).toContain('click to expand');
+    collapsed.unmount();
+
+    const detailed = render(<OpenTuiTranscriptView items={items} />);
+    expect(detailed.container.textContent).toContain('SECRET_PAYLOAD');
+    expect(detailed.container.textContent).not.toContain('click to expand');
+  });
+
+  it('keeps the header row element when ctrl+O opens a collapsed card (#167)', () => {
+    // @opentui/react never clears a prop a re-render drops, so a collapsed
+    // branch of its own shape reconciled its glyph box onto the expanded
+    // header row and left width=2 stuck on it: the terminal drew `✓ S` and
+    // lost the description. One tree shape for both states is the fix, and
+    // element identity across the toggle is what pins it.
+    const items = [toolItem({ description: 'echo ACCEPT_MARKER', done: true })];
+    const { container, rerender } = render(
+      <OpenTuiTranscriptView
+        items={items}
+        showToolCallDetails={false}
+        thoughtsExpanded={false}
+      />,
+    );
+    const headerOf = (label: string) => {
+      const span = [...container.querySelectorAll('span')].find((el) =>
+        (el.textContent ?? '').includes(label),
+      );
+      let node = span?.parentElement ?? null;
+      while (node && node.dataset['direction'] !== 'row') {
+        node = node.parentElement;
+      }
+      return node;
+    };
+    const collapsedHeader = headerOf('Shell');
+    expect(collapsedHeader?.dataset['direction']).toBe('row');
+    expect(collapsedHeader?.dataset['width']).toBeUndefined();
+    expect(collapsedHeader?.textContent).toContain('click to expand');
+
+    rerender(
+      <OpenTuiTranscriptView
+        items={items}
+        showToolCallDetails={false}
+        thoughtsExpanded
+      />,
+    );
+    const expandedHeader = headerOf('Shell');
+    expect(expandedHeader).toBe(collapsedHeader);
+    expect(expandedHeader?.dataset['width']).toBeUndefined();
+    expect(expandedHeader?.textContent).toContain('echo ACCEPT_MARKER');
+    expect(expandedHeader?.textContent).not.toContain('click to expand');
+    // The glyph box is the only child that ever carries a width.
+    expect(expandedHeader?.querySelectorAll('[data-width]')).toHaveLength(1);
+  });
+
+  it('keeps a card that still needs an answer open with details off (#85)', () => {
+    // ink's CollapsibleToolGroupMessage never collapses a call while it is
+    // waiting: the card is the only surface carrying the payload being approved.
+    const { container } = render(
+      <OpenTuiTranscriptView
+        awaitingCallId="t1"
+        showToolCallDetails={false}
+        items={[
+          toolItem({
+            tool: 'mcp__fs__write_file',
+            description: '{"path":"/x","content":"SECRET_PAYLOAD"}',
+            confirm: 'pending',
+          }),
+        ]}
+      />,
+    );
+    expect(container.textContent).toContain('SECRET_PAYLOAD');
+    expect(container.textContent).not.toContain('click to expand');
   });
 });

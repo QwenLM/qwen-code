@@ -1591,6 +1591,7 @@ export const useLlmStream = (
       submitType: SendMessageType,
       submittedPrompt: string | undefined,
       preserveTurnOwnership: boolean,
+      shellModeIntent?: boolean,
     ): Promise<{
       queryToSend: PartListUnion | null;
       shouldProceed: boolean;
@@ -1744,7 +1745,12 @@ export const useLlmStream = (
           }
         }
 
-        if (shellModeActive && handleShellCommand(trimmedQuery, abortSignal)) {
+        // A queued submission carries the shell intent recorded when the
+        // user submitted it; the live flag may have flipped while the
+        // entry waited in the queue (#11626). Other producers record no
+        // intent and route on the live flag, as before.
+        const routeToShell = shellModeIntent ?? shellModeActive;
+        if (routeToShell && handleShellCommand(trimmedQuery, abortSignal)) {
           return { queryToSend: null, shouldProceed: false };
         }
 
@@ -3220,6 +3226,16 @@ export const useLlmStream = (
         }
 
         if (executableToolCallRequests.length > 0) {
+          // The scheduler may complete a fast tool before this stream's caller
+          // regains control. Seal streamed assistant text first so the tool
+          // group cannot enter static history ahead of it.
+          if (pendingHistoryItemRef.current) {
+            commitItemInOrder(
+              pendingHistoryItemRef.current,
+              userMessageTimestamp,
+            );
+            setPendingHistoryItem(null);
+          }
           if (toolContinuationOwner) {
             for (const request of executableToolCallRequests) {
               continuationOwnersByToolCallIdRef.current.set(
@@ -3554,6 +3570,13 @@ export const useLlmStream = (
         onRequestStarted?: () => void;
         steerInput?: SteerInput;
         submittedPrompt?: string;
+        /**
+         * Shell intent recorded when the user submitted this query
+         * (queued submissions carry it from the message queue). When set,
+         * it overrides the live `shellModeActive` flag for shell routing,
+         * so a flip after enqueue cannot misroute the entry (#11626).
+         */
+        shellMode?: boolean;
         goal?: QueuedGoalTurn;
         claimGoalTurn?: () => QueuedGoalTurn | undefined;
         userAdmission?: DirectUserAdmission;
@@ -3826,6 +3849,7 @@ export const useLlmStream = (
                     submittedPrompt,
                     allowConcurrentBtwDuringResponse ||
                       isDetachedToolContinuation,
+                    metadata?.shellMode,
                   );
         } catch (error) {
           await releaseUndeliveredGoalTurn(metadata?.userAdmission?.turnKey);
@@ -4280,7 +4304,7 @@ export const useLlmStream = (
             });
           }
         } finally {
-          if (cleanupReviewLease) {
+          if (cleanupReviewLease && !config.getShellExecutionSandbox?.()) {
             cleanupReviewWorktreeLeases({
               sessionId: config.getSessionId(),
               promptId: prompt_id!,
@@ -6039,10 +6063,10 @@ export const useLlmStream = (
         // Reasoning renders above the streaming answer.
         pendingThoughtItem,
         ...pendingAssistantItems,
+        pendingToolCallGroupDisplay,
         pendingHistoryItem,
         pendingRetryErrorItem,
         pendingRetryCountdownItem,
-        pendingToolCallGroupDisplay,
       ].filter((i) => i !== undefined && i !== null),
     [
       pendingThoughtItem,
@@ -6387,11 +6411,17 @@ export const useLlmStream = (
     };
   }, [admitNotification, config]);
 
-  // Register background workflow completions onto the shared queue. The
-  // registry keeps this separate from its terminal-bell subscriber.
+  // Register background and client-started foreground workflow completions.
+  // The registry keeps this separate from its terminal-bell subscriber.
   useEffect(() => {
     const registry = config.getWorkflowRunRegistry();
     registry.setCompletionCallback((displayText, modelText, meta) => {
+      // The result must remain visible even if the model request is delayed
+      // or fails. Background notifications retain their existing drain timing.
+      const displayed = meta.isBackgrounded === false;
+      if (displayed) {
+        addItem({ type: 'notification', text: displayText }, Date.now());
+      }
       admitNotification({
         displayText,
         modelText,
@@ -6399,12 +6429,13 @@ export const useLlmStream = (
         kind: 'workflow',
         taskId: meta.runId,
         todoWorkChainId: meta.todoWorkChainId,
+        displayed,
       });
     });
     return () => {
       registry.setCompletionCallback(undefined);
     };
-  }, [admitNotification, config]);
+  }, [addItem, admitNotification, config]);
 
   // Register monitor notification callback onto the shared queue.
   useEffect(() => {

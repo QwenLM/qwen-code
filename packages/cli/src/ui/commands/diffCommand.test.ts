@@ -60,6 +60,23 @@ describe('diffCommand', () => {
     mockContext = makeContextWithCwd();
   });
 
+  it.each(['interactive', 'non_interactive'] as const)(
+    'rejects the host Git preview in sandboxed %s mode',
+    async (executionMode) => {
+      const context = makeContextWithCwd();
+      context.executionMode = executionMode;
+      context.services.config!.getShellExecutionSandbox = vi
+        .fn()
+        .mockReturnValue({ network: 'closed' });
+      expect(await diffCommand.action!(context, '')).toMatchObject({
+        type: 'message',
+        messageType: 'error',
+        content: expect.stringContaining('Run git diff through the Shell tool'),
+      });
+      expect(mockFetchGitDiff).not.toHaveBeenCalled();
+    },
+  );
+
   it('errors when config is unavailable', async () => {
     if (!diffCommand.action) throw new Error('Command has no action');
     const noConfigContext = createMockCommandContext();

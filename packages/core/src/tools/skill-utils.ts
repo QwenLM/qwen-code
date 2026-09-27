@@ -238,6 +238,16 @@ function compareSkillEntries(
 }
 
 /**
+ * Opening sentence of the block coreToolScheduler adds to a tool result when
+ * reading a file activates a path-gated skill. The scheduler folds that
+ * envelope into the tool response rather than emitting it as its own text
+ * part, so `isSkillListingReminder` deliberately does not match it and
+ * `/context` bills it with the tool result (#12235).
+ */
+export const SKILLS_ACTIVATED_OPENER =
+  'The following skill(s) became available via the Skill tool based on the file you just accessed';
+
+/**
  * Renders normalized skill entries into the `<available_skills>` body. Pure: no
  * I/O, no config — XML-escapes every untrusted field (extension/command names
  * bypass `validateSkillName`, so a crafted name could otherwise inject raw tags)

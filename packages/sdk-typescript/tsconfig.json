@@ -43,6 +43,9 @@
     // packages/core/dist copy next to the packages/core/src copy every
     // package-root import loads. Mirrors packages/acp-bridge/tsconfig.json.
     "paths": {
+      "@qwen-code/qwen-code-core/shellResult": [
+        "../core/src/utils/shell-result.ts"
+      ],
       "@qwen-code/qwen-code-core/transcriptRecords": [
         "../core/src/utils/transcript-records.ts"
       ],

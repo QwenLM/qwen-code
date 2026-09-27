@@ -1893,13 +1893,17 @@ export default {
     'El context supera el límit! Useu /compress o /clear per reduir-lo.',
   'No API response yet. Send a message to see actual usage.':
     "Encara no hi ha cap resposta de l'API. Envieu un missatge per veure l'ús real.",
+  'Estimated usage, including the conversation':
+    'Ús estimat, inclosa la conversa',
+  'No provider usage yet. These are local estimates, including the conversation.':
+    "Encara no hi ha dades d'ús del proveïdor. Són estimacions locals, inclosa la conversa.",
   'Estimated pre-conversation overhead':
     'Càrrega estimada prèvia a la conversa',
   'Context window': 'Finestra de context',
   tokens: 'tokens',
   Used: 'Usat',
   Free: 'Lliure',
-  'Autocompact buffer': 'Memòria intermèdia de compactació automàtica',
+  'Autocompact buffer': 'Reserva de compactació',
   'Usage by category': 'Ús per categoria',
   'System prompt': 'Missatge del sistema',
   'Built-in tools': 'Eines integrades',
@@ -2465,6 +2469,7 @@ export default {
   'toolDisplayName.Monitor': 'Monitor',
   'toolDisplayName.NotebookEdit': 'Edita notebook',
   'toolDisplayName.ToolSearch': "Cerca d'eines",
+  'toolDisplayName.ToolCall': "Crida d'eina",
   'toolDisplayName.EnterWorktree': "Entra a l'arbre de treball",
   'toolDisplayName.ExitWorktree': "Surt de l'arbre de treball",
   'toolDisplayName.Workflow': 'Flux de treball',

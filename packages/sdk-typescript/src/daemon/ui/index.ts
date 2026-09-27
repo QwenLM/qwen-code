@@ -103,6 +103,7 @@ export type {
   DaemonTranscriptState,
   DaemonTranscriptStore,
   DaemonTranscriptTruncationDetail,
+  DaemonTurnUsage,
   DaemonUnrecognizedDiagnostic,
   DaemonUnrecognizedDiagnosticReason,
   // Chat-stream events

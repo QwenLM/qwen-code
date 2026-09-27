@@ -249,7 +249,8 @@ export function OpenTuiThemeDialog(props: OpenTuiThemeDialogProps) {
               onSelectIndex={themeList.selectIndex}
               onWheel={(direction) =>
                 themeList.setActiveIndex(
-                  themeList.activeIndex + (direction === 'down' ? 1 : -1),
+                  themeList.activeIndexRef.current +
+                    (direction === 'down' ? 1 : -1),
                 )
               }
               renderLabel={(item, { titleColor }) => (
@@ -311,7 +312,8 @@ export function OpenTuiThemeDialog(props: OpenTuiThemeDialogProps) {
             onSelectIndex={scopeList.selectIndex}
             onWheel={(direction) =>
               scopeList.setActiveIndex(
-                scopeList.activeIndex + (direction === 'down' ? 1 : -1),
+                scopeList.activeIndexRef.current +
+                  (direction === 'down' ? 1 : -1),
               )
             }
             renderLabel={(item, { titleColor }) => (
