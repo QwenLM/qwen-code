@@ -51,6 +51,7 @@ export function getAgentPluginSchemaStatus(
       manifestPath,
     );
   } catch (error) {
+    if (isResourceExhaustion(error)) throw error;
     const code = (error as NodeJS.ErrnoException).code;
     return code === 'ENOENT' || code === 'ENOTDIR' ? 'unrelated' : 'supported';
   }

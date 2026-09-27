@@ -69,26 +69,34 @@ helper that retries resource exhaustion once and otherwise continues
 without the extension set rather than aborting initialization; post-startup
 refreshes keep the fail-closed semantics above.
 
-One scoped exception: executor refusals recorded by a scan are preserved
-even when the scan dies. A file that declares an `executor`/`executionBackend`
-but fails validation is recorded in `extension.agentExecutorRefusals` so a
-by-name dispatch refuses instead of falling through to a same-named
-builtin. The refusals are folded into the caller's map in `readdir` order
-before the exhaustion error is rethrown, and `loadExtension` records the
-attempt's refusals for `refreshCacheWithSnapshot` to merge into the cache
-when it rethrows: an absent extension gets a subresource-free tombstone,
-an already-cached one keeps its complete entry and gains the fresh
-refusals — so the refusal gates dispatch either way. The merge runs in
-`readConsistent`'s rejection callback while the store lock is still held,
-so a concurrent uninstall or refresh cannot commit between the failed
-scan and the merge and be overwritten by it. The tombstone's `isActive`
-derives from the store snapshot like the committed path's does, failing
-closed when even that read is exhausted. A fail-closed tombstone is
-inactive, though, and the dispatch-side refusal map reads only active
-extensions — so the merge additionally records each attempt's refusals in
-a manager-held pending map that `SubagentManager` unions into its
-extension-level refusal map regardless of activation, and a committed full
-refresh supersedes and clears those pending records.
+Executor refusals are kept separately from the committed runtime cache. A file
+that declares an invalid `executor`/`executionBackend` records a refusal in
+`extension.agentExecutorRefusals`; loaders fold those records in `readdir`
+order before surfacing an error. Each refresh also collects refusals in an
+attempt-local ledger. If scanning or store initialization rejects, the
+rejection callback unions the selected extensions' records into the manager's
+pending map while the store lock is held. Named refreshes settle all in-flight
+siblings before merging and exclude records from unrequested extensions.
+
+A rejected refresh publishes no new runtime entries, including for siblings
+that finished loading. The previous cache stays intact; there are no failed-scan
+tombstones for command loaders, activation mutations, or other consumers to
+mistake for loaded extensions. `SubagentManager` reads pending refusals through
+its existing callback independently of activation and refuses a by-name
+fallback even on a cold cache. No activation snapshot is needed on rejection.
+
+A successful refresh retains refusals from skipped extensions and incomplete
+agent discovery. A complete committed agent scan supersedes only that
+extension's pending records, including on named refreshes and install/update
+reloads. Uninstall removes the name; a full refresh also drops records whose
+installation directory is confirmed missing. Unreadable directories and
+`ENOTDIR` are not proof of removal. Pending state does not persist across
+process restarts.
+
+The commands walk tracks symlink targets per traversal ancestry: separate
+aliases to one directory are both listed, while repeated targets on the same
+path terminate a cycle. Plugin manifest path resolution propagates resource
+exhaustion just like the manifest read itself.
 
 ### Outside the descriptor budget
 
@@ -129,7 +137,11 @@ managed `SkillManager.loadSkillsFromDir` (skill-manager.ts) sit outside it.
   exhaustion; every fail-closed entrance has a regression test that goes
   red when its rethrow is removed.
 - Executor refusals gate dispatch across a failed refresh, cold start
-  included.
+  included, without publishing partially loaded runtime entries.
+- Failed attempts union only requested names. Complete committed rescans and
+  explicit removal withdraw stale records; skipped or unreadable scans retain
+  them. Store initialization failures preserve the same rejection guarantees.
+- Command aliases remain visible and symlink cycles terminate.
 
 ## Open questions
 

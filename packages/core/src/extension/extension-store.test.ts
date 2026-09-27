@@ -1111,24 +1111,52 @@ describe('ExtensionStore', () => {
     expect(callbackRan).toBe(true);
   });
 
-  it('readConsistent still runs the rejection callback before releasing the lock', async () => {
-    const store = makeStore();
-    await store.ensureInitialized([{ id: 'd4'.repeat(32), name: 'demo' }]);
-    let callbackSawSnapshot = false;
-    await expect(
-      store.readConsistent(
+  it.each(['scan', 'commit'])(
+    'runs the %s rejection callback before releasing the lock',
+    async (phase) => {
+      const store = makeStore();
+      const identity = { id: 'd4'.repeat(32), name: 'demo' };
+      await store.ensureInitialized([identity]);
+      let releaseCallback!: () => void;
+      const held = new Promise<void>((resolve) => {
+        releaseCallback = resolve;
+      });
+      let startCallback!: () => void;
+      const started = new Promise<void>((resolve) => {
+        startCallback = resolve;
+      });
+      const reading = store.readConsistent(
         async () => {
-          throw new Error('scan died');
+          if (phase === 'scan') throw new Error('scan died');
+          return {
+            value: null,
+            extensions: [identity, { id: 'd5'.repeat(32), name: 'demo' }],
+          };
         },
-        async (readSnapshot) => {
-          const snapshot = await readSnapshot();
-          callbackSawSnapshot =
-            snapshot.extensions['d4'.repeat(32)] !== undefined;
+        async () => {
+          startCallback();
+          await held;
         },
-      ),
-    ).rejects.toThrow('scan died');
-    expect(callbackSawSnapshot).toBe(true);
-  });
+      );
+      // Attach the rejection handler before testing the competing mutation.
+      // eslint-disable-next-line vitest/valid-expect
+      const rejection = expect(reading).rejects.toThrow(
+        phase === 'scan' ? 'scan died' : 'conflicts',
+      );
+      await started;
+      let mutationSettled = false;
+      const mutation = store
+        .setDefaultActivation(identity, 'disabled')
+        .finally(() => {
+          mutationSettled = true;
+        });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(mutationSettled).toBe(false);
+      releaseCallback();
+      await rejection;
+      await expect(mutation).resolves.toMatchObject({ generation: 1 });
+    },
+  );
 
   it.runIf(process.platform !== 'win32')(
     'uses one workspace key for symlink and real paths',

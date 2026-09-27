@@ -388,40 +388,25 @@ export class ExtensionStore {
     );
   }
 
-  /**
-   * When `readArtifacts` rejects, `onArtifactsRejected` runs before the lock
-   * is released and receives a snapshot reader that does not re-acquire it.
-   * A caller folding the failed attempt's records into shared state (e.g. the
-   * extension manager's refusal merge) stays atomic with every other store
-   * mutation that way; reading the snapshot after the release would leave a
-   * window a concurrent commit can interleave into.
-   */
+  /** Runs the rejection callback under the lock, preserving the original error. */
   async readConsistent<T>(
     readArtifacts: () => Promise<{
       value: T;
       extensions: readonly ExtensionIdentity[];
     }>,
-    onArtifactsRejected?: (
-      readSnapshot: () => Promise<ExtensionStoreSnapshot>,
-    ) => Promise<void>,
+    onArtifactsRejected?: () => Promise<void>,
   ): Promise<{ value: T; snapshot: ExtensionStoreSnapshot }> {
     return await this.withLock(async () => {
-      let artifacts: {
-        value: T;
-        extensions: readonly ExtensionIdentity[];
-      };
       try {
-        artifacts = await readArtifacts();
+        const { value, extensions } = await readArtifacts();
+        const snapshot = await this.ensureInitializedUnlocked(extensions);
+        return { value, snapshot };
       } catch (error) {
         // The callback folds the failed attempt's records into shared state;
-        // it must never replace the primary rejection. A throw from it (its
-        // own snapshot read, or anything its callees rethrow) is logged and
-        // the original error still surfaces (R9-2).
+        // it must never replace the primary rejection. Callback failures
+        // are logged and the original error still surfaces (R9-2).
         try {
-          await onArtifactsRejected?.(
-            async () =>
-              (await this.readSnapshotUnlocked()) ?? this.emptySnapshot(),
-          );
+          await onArtifactsRejected?.();
         } catch (callbackError) {
           debugLogger.warn(
             'extension store rejection callback failed; surfacing the primary error:',
@@ -430,9 +415,6 @@ export class ExtensionStore {
         }
         throw error;
       }
-      const { value, extensions } = artifacts;
-      const snapshot = await this.ensureInitializedUnlocked(extensions);
-      return { value, snapshot };
     });
   }
 

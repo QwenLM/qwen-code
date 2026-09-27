@@ -61,23 +61,28 @@ install-metadata sidecar 读取、`loadExtensionWorkflows`（含其候选路径�
 耗尽先重试一次，仍失败则不带扩展集继续启动，而不是中止初始化；启动之后
 的 refresh 仍保持上述 fail-closed 语义。
 
-一个有界例外：扫描已记录的 executor refusal 即使扫描失败也会被保留。
-声明了 `executor`/`executionBackend` 但校验失败的文件会记录在
-`extension.agentExecutorRefusals` 中，使按名分派拒绝而不是回退到同名
-内置 agent。这些 refusal 在重抛耗尽错误之前按 `readdir` 顺序并入调用方
-的 map，且 `loadExtension` 会把本次尝试记录的 refusal 交给
-`refreshCacheWithSnapshot`，在重抛 refresh 拒绝时并入缓存：缺席的扩展
-得到一个不含子资源的 tombstone，已在缓存中的扩展保留其完整条目并并入
-新的 refusal——因此 refusal
-在两种情况下都拦截分派。该合并在
-`readConsistent` 的拒绝回调中、仍持有 store 锁时执行，因此并发的卸载或
-refresh 无法在扫描失败与合并之间抢先提交而被陈旧记录覆盖。tombstone 的
-`isActive` 与已提交路径一样从 store 快照推导，当连该读取也因耗尽失败时
-按关闭处理（fail closed）。但按关闭处理的 tombstone 处于非激活状态，而
-分派侧的 refusal map 只读取激活扩展——因此合并还会把本次尝试记录的
-refusal 写入扩展管理器持有的 pending map，由 `SubagentManager` 不论激活
-状态都并入其 extension 级 refusal map；下一次完整 refresh 提交后这些
-pending 记录即被取代并清空。
+Executor refusal 与已提交的运行时缓存分开保存。声明了无效
+`executor`/`executionBackend` 的文件会在 `extension.agentExecutorRefusals`
+中记录拒绝；加载器在抛出错误之前按 `readdir` 顺序合并记录。每次 refresh
+还使用独立的尝试记录表。扫描或 store 初始化失败时，拒绝回调在持有
+store 锁期间，将选中扩展的记录合并到管理器的 pending map 中。按名刷新会
+等待所有在途兄弟任务结束后再合并，并排除未请求扩展的记录。
+
+失败的 refresh 不发布任何新的运行时条目，包括已经成功加载的兄弟扩展。
+原缓存保持不变；不再生成会被命令加载器、激活操作或其他消费者误认为
+已加载扩展的失败扫描 tombstone。`SubagentManager` 通过已有回调读取
+pending refusal，不依赖激活状态，即使冷缓存也会拒绝按名回退。拒绝路径
+不需要读取激活快照。
+
+成功的 refresh 保留被跳过扩展和不完整 agent 扫描的拒绝记录。完整且已提交
+的 agent 扫描只取代该扩展的 pending 记录，按名刷新和安装/更新后的重新
+加载也遵循此规则。卸载删除该名称的记录；完整刷新还会删除安装目录已确认
+不存在的记录。目录不可读和 `ENOTDIR` 不代表扩展已移除。Pending 状态不跨
+进程重启持久化。
+
+Commands 遍历按当前路径的祖先链记录符号链接目标：指向同一目录的不同
+别名都会被列出，同一路径上的重复目标则终止循环。Plugin manifest 的路径
+解析与文件读取一样传播资源耗尽错误。
 
 ### 描述符预算之外
 
@@ -114,7 +119,12 @@ gate 只约束清单回调的准入数。commands 的递归 `readdir`（单次 l
 - 完整加载中位数保持在 ~228 ms 基准数字或更低。
 - 资源耗尽时没有任何加载会提交被截断或为空的扩展集；每个 fail-closed
   入口都有一个回归测试，在移除其重抛时变红。
-- Executor refusal 在 refresh 失败期间仍然拦截分派，包括冷启动。
+- Executor refusal 在 refresh 失败期间仍然拦截分派，包括冷启动，且不发布
+  部分加载的运行时条目。
+- 失败尝试只合并被请求名称的记录。完整且已提交的重新扫描及明确移除会
+  撤销旧记录；被跳过或不可读的扫描保留记录。Store 初始化失败遵循相同的
+  拒绝保证。
+- 命令别名仍然可见，符号链接循环能够终止。
 
 ## 待决问题
 

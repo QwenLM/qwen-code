@@ -4275,18 +4275,14 @@ describe('extension tests', () => {
         const manager = createExtensionManager();
         await expect(manager.refreshCache()).rejects.toThrow('EMFILE');
 
-        const tombstone = manager
-          .getLoadedExtensions()
-          .find((extension) => extension.name === 'emfile-agents-ext');
-        expect(tombstone?.agents).toEqual([]);
-        expect(tombstone?.agentExecutorRefusals?.get('explore')).toBeInstanceOf(
-          SubagentError,
-        );
+        expect(manager.getLoadedExtensions()).toEqual([]);
+        const pending = manager
+          .getPendingScanRefusals()
+          .get('emfile-agents-ext');
+        expect(pending?.get('explore')).toBeInstanceOf(SubagentError);
         disarm();
 
-        // Once the fault clears, a full refresh replaces the tombstone with
-        // the real load: the healthy file loads and the refusal is
-        // re-recorded against the loaded extension.
+        // Recovery publishes the complete extension and its fresh refusals.
         await manager.refreshCache();
         const loaded = manager
           .getLoadedExtensions()
@@ -4325,12 +4321,11 @@ describe('extension tests', () => {
         const disarm = armReadFileProbe('other.md');
         const manager = createExtensionManager();
         await expect(manager.refreshCache()).rejects.toThrow(/aaa-dangling/);
-        const tombstone = manager
-          .getLoadedExtensions()
-          .find((extension) => extension.name === 'emfile-agents-ext');
-        expect(tombstone?.agentExecutorRefusals?.get('explore')).toBeInstanceOf(
-          SubagentError,
-        );
+        expect(manager.getLoadedExtensions()).toEqual([]);
+        const pending = manager
+          .getPendingScanRefusals()
+          .get('emfile-agents-ext');
+        expect(pending?.get('explore')).toBeInstanceOf(SubagentError);
         disarm();
       });
 
@@ -4500,21 +4495,14 @@ describe('extension tests', () => {
           fsProbe.failReadFileFor = undefined;
           fsProbe.delayReadFileFor = undefined;
         }
-        const tombstone = manager
-          .getLoadedExtensions()
-          .find((extension) => extension.name === 'race-ext');
-        expect(tombstone?.agentExecutorRefusals?.get('explore')).toBeInstanceOf(
-          SubagentError,
-        );
+        expect(manager.getLoadedExtensions()).toEqual([]);
+        const pending = manager.getPendingScanRefusals().get('race-ext');
+        expect(pending?.get('explore')).toBeInstanceOf(SubagentError);
       });
 
       it("keeps a dying refresh's refusals when an overlapping refresh starts mid-settle", async () => {
-        // Refresh A records its refusal tombstone quickly but cannot merge
-        // it until slow-ext's delayed read settles. Refresh B, started
-        // inside that window, used to synchronously clear() the shared
-        // per-instance map — wiping A's record before A's merge — and then
-        // die at the manifest config read before recording anything of its
-        // own. Per-attempt ledgers make the two refreshes untouchable.
+        // A records refusals while its slow sibling settles. B must not
+        // erase those attempt-local records when it starts in that window.
         const extDir = createExtension({
           extensionsDir: userExtensionsDir,
           name: 'emfile-agents-ext',
@@ -4545,10 +4533,7 @@ describe('extension tests', () => {
         const manager = createExtensionManager();
         try {
           const refreshA = manager.refreshCache();
-          // Let A's dying scan record its tombstone, then start B with the
-          // faults re-aimed at the manifest config read — which the
-          // fingerprint never performs — so every one of B's extension
-          // loads dies before recording any refusal.
+          // B fails before discovering agents, so only A can preserve them.
           await new Promise((resolve) => setTimeout(resolve, 30));
           fsProbe.failReadFileFor = undefined;
           fsProbe.delayReadFileFor = undefined;
@@ -4567,20 +4552,14 @@ describe('extension tests', () => {
           fsProbe.delayReadFileFor = undefined;
           fsProbe.failReadFileSyncFor = undefined;
         }
-        const tombstone = manager
-          .getLoadedExtensions()
-          .find((extension) => extension.name === 'emfile-agents-ext');
-        expect(tombstone?.agentExecutorRefusals?.get('explore')).toBeInstanceOf(
-          SubagentError,
-        );
+        expect(manager.getLoadedExtensions()).toEqual([]);
+        const pending = manager
+          .getPendingScanRefusals()
+          .get('emfile-agents-ext');
+        expect(pending?.get('explore')).toBeInstanceOf(SubagentError);
       });
 
-      it('unions fresh refusals into the cached entry when a warm rescan dies of resource exhaustion', async () => {
-        // Prime the cache with a complete entry; the next refresh records a
-        // refusal for a newly added agent and then dies on the skills leg.
-        // The cached entry must keep its loaded subresources AND gain the
-        // fresh refusal — skipping the merge wholesale because the extension
-        // is already cached would re-open the builtin fall-through.
+      it('keeps the warm cache intact and records fresh refusals separately', async () => {
         const extDir = createExtension({
           extensionsDir: userExtensionsDir,
           name: 'warm-ext',
@@ -4617,17 +4596,13 @@ describe('extension tests', () => {
           .find((extension) => extension.name === 'warm-ext');
         expect(cached?.agents?.map((a) => a.name)).toEqual(['good']);
         expect(cached?.skills?.map((s) => s.name)).toEqual(['s1']);
-        expect(cached?.agentExecutorRefusals?.get('reviewer')).toBeInstanceOf(
-          SubagentError,
-        );
+        expect(cached?.agentExecutorRefusals?.has('reviewer')).toBe(false);
+        expect(
+          manager.getPendingScanRefusals().get('warm-ext')?.get('reviewer'),
+        ).toBeInstanceOf(SubagentError);
       });
 
       it('keeps refusals an extension recorded when a sibling kills the refresh', async () => {
-        // aaa-refusal-ext scans cleanly and records reviewer's refusal, but
-        // the refresh rejects on dying-ext's exhaustion — the successful
-        // scan's fresh entry is discarded with the batch, so the refusal
-        // must reach the cache through the attempt ledger, not only through
-        // tombstones of extensions whose own load died.
         const refusalDir = createExtension({
           extensionsDir: userExtensionsDir,
           name: 'aaa-refusal-ext',
@@ -4653,20 +4628,12 @@ describe('extension tests', () => {
         const manager = createExtensionManager();
         await expect(manager.refreshCache()).rejects.toThrow('EMFILE');
         disarm();
-        const tombstone = manager
-          .getLoadedExtensions()
-          .find((extension) => extension.name === 'aaa-refusal-ext');
-        expect(
-          tombstone?.agentExecutorRefusals?.get('reviewer'),
-        ).toBeInstanceOf(SubagentError);
+        expect(manager.getLoadedExtensions()).toEqual([]);
+        const pending = manager.getPendingScanRefusals().get('aaa-refusal-ext');
+        expect(pending?.get('reviewer')).toBeInstanceOf(SubagentError);
       });
 
-      it('strips config-borne runtime surface from a failed scan tombstone', async () => {
-        // The tombstone exists to carry executor refusals, not the rejected
-        // load's runtime surface: MCP servers and LSP servers are read
-        // through `config` (Config.getMergedMcpServers, LspConfigLoader), so
-        // scrubbing only the top-level fields would still let a refused
-        // extension's servers spawn on the next tools refresh.
+      it('publishes no runtime surface from a failed scan', async () => {
         const extDir = createExtension({
           extensionsDir: userExtensionsDir,
           name: 'tombstone-ext',
@@ -4698,30 +4665,12 @@ describe('extension tests', () => {
         await expect(manager.refreshCache()).rejects.toThrow('EMFILE');
         disarm();
 
-        const tombstone = manager
-          .getLoadedExtensions()
-          .find((extension) => extension.name === 'tombstone-ext');
-        // The refusal surface is the whole point of the tombstone.
-        expect(tombstone?.agentExecutorRefusals?.get('explore')).toBeInstanceOf(
-          SubagentError,
-        );
-        expect(tombstone?.isActive).toBe(true);
-        // ...and nothing else may ride along, on either representation.
-        expect(tombstone?.mcpServers).toBeUndefined();
-        expect(tombstone?.hooks).toBeUndefined();
-        expect(tombstone?.config.mcpServers).toBeUndefined();
-        expect(tombstone?.config.lspServers).toBeUndefined();
-        expect(tombstone?.config.name).toBe('tombstone-ext');
-        expect(tombstone?.config.version).toBe('1.0.0');
+        expect(manager.getLoadedExtensions()).toEqual([]);
+        const pending = manager.getPendingScanRefusals().get('tombstone-ext');
+        expect(pending?.get('explore')).toBeInstanceOf(SubagentError);
       });
 
-      it("derives a failed-scan tombstone's isActive from the store, not the head load", async () => {
-        // The head load derives isActive from the enablement projection,
-        // whose catch-all turns a read failure into "everything enabled". A
-        // tombstone copying that value would report a store-disabled
-        // extension as active for the rest of the session; the committed
-        // path's authority is the store snapshot (applyStoreActivation), so
-        // the rejection path must derive from it too.
+      it('publishes no failed-scan entry when the enablement projection is unreadable', async () => {
         const extDir = createExtension({
           extensionsDir: userExtensionsDir,
           name: 'aaa-refusal',
@@ -4755,26 +4704,15 @@ describe('extension tests', () => {
           const manager = createExtensionManager();
           await expect(manager.refreshCache()).rejects.toThrow(/zzz-dangling/);
 
-          const tombstone = manager
-            .getLoadedExtensions()
-            .find((extension) => extension.name === 'aaa-refusal');
-          // The refusal surface is the whole point of the tombstone...
-          expect(
-            tombstone?.agentExecutorRefusals?.get('explore'),
-          ).toBeInstanceOf(SubagentError);
-          // ...but its activation must be the store's verdict.
-          expect(tombstone?.isActive).toBe(false);
+          expect(manager.getLoadedExtensions()).toEqual([]);
+          const pending = manager.getPendingScanRefusals().get('aaa-refusal');
+          expect(pending?.get('explore')).toBeInstanceOf(SubagentError);
         } finally {
           fsProbe.failReadFileSyncFor = undefined;
         }
       });
 
-      it('does not tombstone an extension the loader skipped when a sibling kills the refresh', async () => {
-        // aaa-broken records an executor refusal mid-load, then its own
-        // malformed hooks config makes the load throw a non-exhaustion
-        // error and skip (return null). The skip verdict must stand when
-        // the refresh later rejects on the sibling's exhaustion — a
-        // rejected extension must not materialize as a tombstone.
+      it('does not publish an extension the loader skipped when a sibling kills the refresh', async () => {
         const brokenDir = createExtension({
           extensionsDir: userExtensionsDir,
           name: 'aaa-broken',
@@ -4921,12 +4859,7 @@ describe('extension tests', () => {
         ]);
       });
 
-      it('fails a failed-scan tombstone closed when the store snapshot read also dies of exhaustion', async () => {
-        // The tombstone's isActive derives from the store snapshot; when
-        // that read itself fails — under the same exhaustion that killed the
-        // scan — no activation authority is left. The tombstone must fail
-        // closed rather than copy the head load's value, which the
-        // projection's own read failure has already defaulted to "enabled".
+      it('retains refusals without publishing an entry when the store snapshot is unreadable', async () => {
         const extDir = createExtension({
           extensionsDir: userExtensionsDir,
           name: 'aaa-refusal',
@@ -4961,13 +4894,9 @@ describe('extension tests', () => {
           const manager = createExtensionManager();
           await expect(manager.refreshCache()).rejects.toThrow(/zzz-dangling/);
 
-          const tombstone = manager
-            .getLoadedExtensions()
-            .find((extension) => extension.name === 'aaa-refusal');
-          expect(
-            tombstone?.agentExecutorRefusals?.get('explore'),
-          ).toBeInstanceOf(SubagentError);
-          expect(tombstone?.isActive).toBe(false);
+          expect(manager.getLoadedExtensions()).toEqual([]);
+          const pending = manager.getPendingScanRefusals().get('aaa-refusal');
+          expect(pending?.get('explore')).toBeInstanceOf(SubagentError);
         } finally {
           fsProbe.failReadFileSyncFor = undefined;
           fsProbe.failReadFileFor = undefined;
@@ -4976,11 +4905,6 @@ describe('extension tests', () => {
       });
 
       it('does not resurrect an extension whose uninstall overlaps a refresh that rejects after recording a refusal', async () => {
-        // The failed refresh's refusal merge must commit while the store
-        // lock is still held: an uninstall committing in the gap between the
-        // rejection and the merge otherwise has its cache delete overwritten
-        // by the merge, resurrecting the uninstalled extension as an
-        // active-but-empty tombstone for the rest of the session.
         const extDir = createExtension({
           extensionsDir: userExtensionsDir,
           name: 'race-ext',
@@ -5014,17 +4938,7 @@ describe('extension tests', () => {
         expect(manager.getLoadedExtensions().map((e) => e.name)).toEqual([]);
       });
 
-      it('keeps the refusal tombstone when the activation lookup itself throws', async () => {
-        // The tombstone branch derives isActive from the store snapshot;
-        // getActivation canonicalizes the workspace path and rethrows every
-        // non-ENOENT errno. Unguarded, that throw abandoned the whole merge
-        // — discarding every entry's refusals — and escaped the
-        // readConsistent callback, replacing the scan's own rejection
-        // (R9-2). The one entry must degrade to isActive: false instead,
-        // and the refresh must still surface the errno that killed the
-        // scan. (Faulting store.getActivation directly, not realpathSync:
-        // the head load's isEnabled realpaths the same workspace path and
-        // must stay intact for the refusal to be recorded at all.)
+      it('preserves refusals without consulting activation after a failed scan', async () => {
         const extDir = createExtension({
           extensionsDir: userExtensionsDir,
           name: 'aaa-refusal',
@@ -5036,9 +4950,6 @@ describe('extension tests', () => {
           '---\nname: explore\ndescription: Explore agent\nexecutor: {kind: invalid, command: runner}\n---\nExplore carefully.',
         );
 
-        // Record the extension's policy in the store, so the tombstone
-        // branch's activation lookup reaches getActivation (the name
-        // fallback returns early without it).
         const enabler = createExtensionManager();
         await enabler.refreshCache();
         await enabler.disableExtension('aaa-refusal', SettingScope.User);
@@ -5062,30 +4973,16 @@ describe('extension tests', () => {
           const manager = createExtensionManager({ extensionStore: store });
           await expect(manager.refreshCache()).rejects.toThrow(/zzz-dangling/);
 
-          const tombstone = manager
-            .getLoadedExtensions()
-            .find((extension) => extension.name === 'aaa-refusal');
-          expect(activationSpy).toHaveBeenCalled();
-          expect(
-            tombstone?.agentExecutorRefusals?.get('explore'),
-          ).toBeInstanceOf(SubagentError);
-          expect(tombstone?.isActive).toBe(false);
-          expect(
-            manager.getPendingScanRefusals().get('aaa-refusal')?.get('explore'),
-          ).toBeInstanceOf(SubagentError);
+          expect(manager.getLoadedExtensions()).toEqual([]);
+          const pending = manager.getPendingScanRefusals().get('aaa-refusal');
+          expect(activationSpy).not.toHaveBeenCalled();
+          expect(pending?.get('explore')).toBeInstanceOf(SubagentError);
         } finally {
           activationSpy.mockRestore();
         }
       });
 
-      it('gates dispatch with a failed-scan refusal whose tombstone failed closed inactive', async () => {
-        // The dispatch-side refusal map is built from ACTIVE extensions
-        // (config.getActiveExtensions), so the failed-scan tombstone above
-        // — isActive: false when no activation authority survives — cannot
-        // carry its refusals there. They must reach the SubagentManager
-        // through the manager-held pending channel instead (R8-1), or a
-        // by-name dispatch of the refused name silently resolves the
-        // same-named builtin (R10-2).
+      it('gates dispatch with a failed-scan refusal when no runtime entry exists', async () => {
         const extDir = createExtension({
           extensionsDir: userExtensionsDir,
           name: 'aaa-refusal',
@@ -5123,10 +5020,7 @@ describe('extension tests', () => {
           fsProbe.failReadFileSkip = 0;
         }
 
-        const tombstone = manager
-          .getLoadedExtensions()
-          .find((extension) => extension.name === 'aaa-refusal');
-        expect(tombstone?.isActive).toBe(false);
+        expect(manager.getLoadedExtensions()).toEqual([]);
         const refusal = manager
           .getPendingScanRefusals()
           .get('aaa-refusal')
@@ -5185,7 +5079,10 @@ describe('extension tests', () => {
           manager.getPendingScanRefusals().get('aaa-refusal')?.get('explore'),
         ).toBeInstanceOf(SubagentError);
 
-        await manager.uninstallExtension('aaa-refusal', false);
+        await manager.uninstallExtensionById(
+          enabler.getLoadedExtensions()[0].id,
+          false,
+        );
         expect(manager.getPendingScanRefusals().has('aaa-refusal')).toBe(false);
       });
     });

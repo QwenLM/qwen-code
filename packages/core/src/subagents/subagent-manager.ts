@@ -162,11 +162,10 @@ export class SubagentManager {
       /**
        * Extension executor refusals recorded by refresh attempts that
        * rejected before committing. The committed refusal records ride on
-       * active extensions (`agentExecutorRefusals`), but a failed-scan
-       * tombstone fails closed inactive (R8-1), so its refusals only reach
-       * dispatch through this channel. The daemon's CRUD-scoped manager and
-       * other Config-stub constructions omit it and see committed records
-       * only.
+       * active extensions (`agentExecutorRefusals`), while uncommitted
+       * or incomplete scans reach dispatch through this channel. The daemon's
+       * CRUD-scoped manager and other Config-stub constructions omit it
+       * and see committed records only.
        */
       getPendingExtensionRefusals?: () => Iterable<
         ReadonlyMap<string, SubagentError>
@@ -1824,8 +1823,8 @@ export class SubagentManager {
       }
       // Refusals a REJECTED refresh recorded never committed onto the
       // active set above; they stay pending at the extension manager until
-      // the next committed refresh and gate dispatch from here regardless
-      // of the failed-closed activation verdict (R8-1). Same scan scoping
+      // a complete committed agent rescan and gate dispatch from here
+      // independently of activation. Same scan scoping
       // as the committed records: only names a scan actually refused.
       for (const refusals of this.getPendingExtensionRefusals()) {
         for (const [name, error] of refusals) {
@@ -1959,6 +1958,7 @@ export async function loadSubagentFromDir(
   // name, so a by-name dispatch can refuse instead of falling through to a
   // builtin of the same name.
   refusals?: Map<string, SubagentError>,
+  onDiscoveryError?: () => void,
 ): Promise<SubagentConfig[]> {
   try {
     const files = await fs.readdir(baseDir);
@@ -1989,6 +1989,7 @@ export async function loadSubagentFromDir(
           // settled and the refusals below are folded: failing the refresh
           // closed must not discard the refusals the scan already produced.
           if (isResourceExhaustion(error)) return { exhaustion: error };
+          if (!isNamedExecutionRefusal(error)) onDiscoveryError?.();
           warnInvalidSubagentFile(filePath, error);
           return { refusal: error };
         }
@@ -2026,7 +2027,9 @@ export async function loadSubagentFromDir(
     if (isResourceExhaustion(error)) {
       throw error;
     }
-    // Directory doesn't exist or can't be read
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      onDiscoveryError?.();
+    }
     return [];
   }
 }
