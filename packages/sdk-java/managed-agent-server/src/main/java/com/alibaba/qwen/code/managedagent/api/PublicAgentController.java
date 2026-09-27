@@ -3,7 +3,6 @@ package com.alibaba.qwen.code.managedagent.api;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.CommandAdmission;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.DeletedSession;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.CreateSessionRequest;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicEvent;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicItemList;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicList;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicSession;
@@ -13,7 +12,6 @@ import com.alibaba.qwen.code.managedagent.service.ManagedAgentService;
 import com.alibaba.qwen.code.managedagent.service.ManagedAgentService.SessionMutationResult;
 import com.alibaba.qwen.code.managedagent.service.ManagedEventStreamService;
 import jakarta.validation.Valid;
-import java.util.List;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
@@ -171,9 +169,8 @@ public class PublicAgentController {
             return streams.publicStream(tenant.tenantId(), tenant.actorId(),
                     sessionId, cursor);
         }
-        List<PublicEvent> events = service.publicEvents(tenant.tenantId(),
-                tenant.actorId(), sessionId, cursor, limit);
-        return new PublicList<>("list", events, false, null);
+        return service.publicEvents(tenant.tenantId(), tenant.actorId(),
+                sessionId, cursor, limit);
     }
 
     @GetMapping("/{sessionId}/items")
