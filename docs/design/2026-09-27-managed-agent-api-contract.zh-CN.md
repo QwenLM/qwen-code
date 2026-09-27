@@ -164,7 +164,8 @@ spec 的 JSON Pointer 定位，因此 `$ref` 在同一个文件内解析。
 `supports-color` 后，pnpm 改写了 lockfile 中每个 `debug` 条目的可选
 `supports-color` peer（约 1100 行变化），而 hoisted 目录树并无变化。一个 pnpm
 override 把 `openapi-typescript>supports-color` 固定为仓库已在使用的 7.2.0；
-生成器只读取 `stdout.hasBasic`，7.2.0 同样提供。
+生成器只读取 `stdout` 与 `stdout.hasBasic` 来决定日志是否着色，7.2.0 导出结构相同
+的 `stdout`（没有 TTY 时为 `false`，此时关闭颜色）。
 
 ## 7. D1 记录的差异
 

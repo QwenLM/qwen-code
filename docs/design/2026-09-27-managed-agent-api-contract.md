@@ -184,7 +184,9 @@ server still rejects the contract's `input_text`.
 of every `debug` entry in the lockfile (about 1100 changed lines) without
 changing the hoisted tree. A pnpm override pins
 `openapi-typescript>supports-color` to the 7.2.0 the repository already uses;
-the generator reads only `stdout.hasBasic`, which 7.2.0 also provides.
+the generator only reads `stdout` and `stdout.hasBasic` to decide whether to
+colour its logs, and 7.2.0 exports the same `stdout` (`false` without a TTY,
+which turns colours off).
 
 ## 7. Gaps recorded by D1
 
