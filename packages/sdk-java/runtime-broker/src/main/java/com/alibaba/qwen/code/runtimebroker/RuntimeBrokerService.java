@@ -3,6 +3,11 @@ package com.alibaba.qwen.code.runtimebroker;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.HexFormat;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -204,6 +209,68 @@ public final class RuntimeBrokerService implements AutoCloseable {
         requireOpen();
         String key = BrokerValues.requireId(idempotencyKey,
                 "idempotencyKey");
+        if (reference == null || reference.containsKey("dispatchMode")) {
+            throw invalid("runtime_reference_invalid", "dispatchMode is reserved");
+        }
+        return createExecutionReceipt(harnessSessionId, runtimeSessionId, key, reference, true);
+    }
+
+    public CompletionStage<ToolExecutionRecord> prepareExecution(
+            String harnessSessionId, String runtimeSessionId,
+            String idempotencyKey, Map<String, Object> reference) {
+        requireOpen();
+        String key = BrokerValues.requireId(idempotencyKey, "idempotencyKey");
+        if (reference == null || !reference.keySet().equals(Set.of("sessionId", "promptId", "callId", "argsDigest"))
+                || !(reference.get("argsDigest") instanceof String digest)
+                || !digest.matches("sha256:[0-9a-f]{64}")) {
+            throw invalid("runtime_reference_invalid", "Deferred execution reference is invalid");
+        }
+        Map<String, Object> deferred = new LinkedHashMap<>(reference);
+        deferred.put("dispatchMode", "deferred");
+        return createExecutionReceipt(harnessSessionId, runtimeSessionId, key, deferred, false);
+    }
+
+    public CompletionStage<ToolExecutionRecord> startExecution(
+            String harnessSessionId, String runtimeSessionId,
+            String executionCallId, String payloadJson) {
+        requireOpen();
+        String executionId = BrokerValues.requireId(executionCallId, "executionCallId");
+        return requireReadySession(harnessSessionId, runtimeSessionId).thenApply(context -> {
+            ToolExecutionRecord record = requireExecution(context, executionId);
+            if (!"deferred".equals(record.getReference().get("dispatchMode"))) {
+                throw conflict("runtime_execution_conflict", "Execution was not reserved for deferred dispatch");
+            }
+            byte[] bytes = BrokerValues.requireWellFormed(payloadJson, "payloadJson")
+                    .getBytes(StandardCharsets.UTF_8);
+            if (bytes.length > 256 * 1024) {
+                throw invalid("runtime_payload_invalid", "Tool payload exceeds 256 KiB");
+            }
+            String digest;
+            try {
+                digest = "sha256:" + HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
+            } catch (NoSuchAlgorithmException exception) {
+                throw new IllegalStateException(exception);
+            }
+            if (!digest.equals(record.getRequestDigest())) {
+                throw conflict("runtime_idempotency_conflict", "Tool payload differs from its reserved digest");
+            }
+            Map<String, Object> payload = JsonCodec.parseObject(bytes, "tool payload");
+            if (!payload.keySet().equals(Set.of("toolName", "input"))
+                    || !(payload.get("toolName") instanceof String toolName) || toolName.isEmpty()
+                    || !(payload.get("input") instanceof Map)) {
+                throw invalid("runtime_payload_invalid", "Tool payload is invalid");
+            }
+            if (shouldDriveDispatch(record)) {
+                beginDispatch(context, record, payload);
+            }
+            ToolExecutionRecord latest = executionRepository.findByExecutionCallId(executionId);
+            return latest == null ? record : latest;
+        });
+    }
+
+    private CompletionStage<ToolExecutionRecord> createExecutionReceipt(
+            String harnessSessionId, String runtimeSessionId, String key,
+            Map<String, Object> reference, boolean dispatch) {
         return safeStage(() -> {
             ToolExecutionRecord receipt = executionRepository.findByIdempotencyKey(key);
             if (receipt != null && receipt.isTerminal()) {
@@ -217,7 +284,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 return CompletableFuture.completedFuture(receipt);
             }
             return requireReadySession(harnessSessionId, runtimeSessionId)
-                    .thenApply(context -> createExecution(context, key, reference));
+                    .thenApply(context -> createExecution(context, key, reference, dispatch));
         });
     }
 
@@ -539,7 +606,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
     }
 
     private ToolExecutionRecord createExecution(SessionContext context,
-            String idempotencyKey, Map<String, Object> reference) {
+            String idempotencyKey, Map<String, Object> reference, boolean dispatch) {
         ToolExecutionRecord record;
         synchronized (context) {
             requireReadySessionRecord(context);
@@ -575,7 +642,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
                         "idempotency key belongs to another request");
             }
         }
-        if (shouldDriveDispatch(record)) {
+        if (dispatch && shouldDriveDispatch(record)) {
             beginDispatch(context, record);
         }
         ToolExecutionRecord current = executionRepository
@@ -1589,6 +1656,15 @@ public final class RuntimeBrokerService implements AutoCloseable {
 
     private void beginDispatch(SessionContext context,
             ToolExecutionRecord prepared) {
+        beginDispatch(context, prepared, null);
+    }
+
+    private void beginDispatch(SessionContext context,
+            ToolExecutionRecord prepared, Map<String, Object> payload) {
+        if (payload == null && "deferred".equals(prepared.getReference().get("dispatchMode"))
+                && !prepared.isCancelRequested()) {
+            throw conflict("runtime_execution_conflict", "Deferred execution requires its original payload");
+        }
         CompletableFuture<Void> created = new CompletableFuture<>();
         CompletableFuture<Void> existing = dispatches.putIfAbsent(
                 prepared.getExecutionCallId(), created);
@@ -1597,7 +1673,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
         }
         CompletionStage<Void> operation;
         try {
-            operation = dispatch(context, prepared);
+            operation = dispatch(context, prepared, payload);
         } catch (RuntimeException | Error exception) {
             dispatches.remove(prepared.getExecutionCallId(), created);
             created.completeExceptionally(exception);
@@ -1615,7 +1691,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
     }
 
     private CompletionStage<Void> dispatch(SessionContext context,
-            ToolExecutionRecord prepared) {
+            ToolExecutionRecord prepared, Map<String, Object> payload) {
         ToolExecutionRecord claimed = executionRepository.claimDispatch(
                 prepared.getExecutionCallId(), brokerOwnerId,
                 dispatchLeaseDuration);
@@ -1648,8 +1724,9 @@ public final class RuntimeBrokerService implements AutoCloseable {
             throw exception;
         }
         invocations.add(executing.getExecutionCallId());
-        return safeStage(() -> transport.execute(context.lease(),
-                context.session(), executing.getReference()))
+        return safeStage(() -> payload == null
+                ? transport.execute(context.lease(), context.session(), executing.getReference())
+                : transport.execute(context.lease(), context.session(), executing.getReference(), payload))
                 .<Void>handle((result, error) -> {
                     // Stop counting as running before the outcome is
                     // written, so a cancel that reads that outcome does not

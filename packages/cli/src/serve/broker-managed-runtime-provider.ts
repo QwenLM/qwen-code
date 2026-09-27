@@ -18,7 +18,9 @@ import {
   managedToolDigest,
   type ManagedToolInvocationReference,
 } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
-import { isLoopbackBind } from './loopback-binds.js';
+import { resolveManagedRuntimeBrokerBaseUrl } from './managed-runtime-broker-url.js';
+
+export { resolveManagedRuntimeBrokerBaseUrl } from './managed-runtime-broker-url.js';
 import {
   ManagedRuntimeProviderError,
   type ManagedRuntimeExecutionIdentity,
@@ -102,32 +104,6 @@ export interface ManagedRuntimeBrokerClientOptions {
   readonly baseUrl: string;
   readonly token: string;
   readonly fetch?: typeof fetch;
-}
-
-export function resolveManagedRuntimeBrokerBaseUrl(raw: string): URL {
-  let url: URL;
-  try {
-    url = new URL(raw);
-  } catch {
-    throw new Error('Managed Runtime Broker URL is invalid.');
-  }
-  if (
-    (url.protocol !== 'http:' && url.protocol !== 'https:') ||
-    url.username ||
-    url.password ||
-    url.search ||
-    url.hash ||
-    (url.pathname !== '/' && url.pathname !== '')
-  ) {
-    throw new Error('Managed Runtime Broker URL must be an HTTP(S) origin.');
-  }
-  if (url.protocol === 'http:' && !isLoopbackBind(url.hostname)) {
-    throw new Error(
-      'Managed Runtime Broker URL must use HTTPS outside the loopback interface.',
-    );
-  }
-  url.pathname = '/';
-  return url;
 }
 
 async function readBoundedResponseText(

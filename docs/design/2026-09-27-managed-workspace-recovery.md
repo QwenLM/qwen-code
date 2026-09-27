@@ -344,7 +344,7 @@ not depend on a live Session or current actor/mapping resolution. HTTP retains
 `details.reason: runtime_lost`; the TypeScript adapter preserves that information
 for inspect, reconcile and cancel. No physical evidence is projected publicly.
 
-Flyway V14 and the standalone initializer add nullable evidence/abandonment
+Flyway V16 and the standalone initializer add nullable evidence/abandonment
 columns and the placement guard. Upgrade tests write pre-change SQL rows before
 migration and verify PREPARED, UNKNOWN and SETTLED receipts afterwards. A
 coordinated rollout remains required before writing ABANDONED rows.

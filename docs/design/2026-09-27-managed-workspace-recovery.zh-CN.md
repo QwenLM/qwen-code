@@ -112,7 +112,7 @@ Local provisioner 仅能为自身仍持有并已观察到退出的进程证明 j
 
 私有终态读取、取消和同键创建重试校验原保存的 Binding 与 Session 身份，要求服务鉴权，不依赖本地存活 Session，也不重新解析当前 actor 或映射。HTTP 保留 `runtime_broker_execution_unknown`，附带 `details.terminal: true` 和 `details.reason: runtime_lost`；TypeScript adapter 在 inspect、reconcile 和 cancel 路径保留这些信息，不对外投影物理证据。
 
-Flyway V14 和独立 initializer 增加可空证据／放弃字段及 placement guard。升级测试在迁移前直接写入旧版 SQL 行，迁移后校验 PREPARED、UNKNOWN 和 SETTLED 回执。写入 ABANDONED 前仍需协调升级，不能混用旧二进制。
+Flyway V16 和独立 initializer 增加可空证据／放弃字段及 placement guard。升级测试在迁移前直接写入旧版 SQL 行，迁移后校验 PREPARED、UNKNOWN 和 SETTLED 回执。写入 ABANDONED 前仍需协调升级，不能混用旧二进制。
 
 ## 7. 交付顺序与边界
 

@@ -59,13 +59,24 @@ class RuntimeRecoveryTest {
         }
     }
 
-    @Test
-    void terminalHttpReadsUseSavedOwnershipAfterRestartAndRelease() throws Exception {
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void terminalHttpReadsUseSavedOwnershipAfterRestartAndRelease(boolean deferred) throws Exception {
         var bindings = new InMemoryRuntimeBindingRepository();
         var sessions = new InMemoryRuntimeSessionRepository();
         var executions = new InMemoryToolExecutionRepository();
         var fixture = new RuntimeRecoveryContract.Fixture(bindings, sessions, executions, "http-recovery");
-        ToolExecutionRecord prepared = fixture.prepare("call");
+        Map<String, Object> reference = Map.of("sessionId", fixture.session.getRuntimeSessionId(),
+                "promptId", "turn", "callId", "call", "argsDigest", "sha256:" + "0".repeat(64));
+        var storedReference = new java.util.LinkedHashMap<>(reference);
+        if (deferred) {
+            storedReference.put("dispatchMode", "deferred");
+        }
+        ToolExecutionRecord prepared = bindings.admitExecution(sessions, executions,
+                ToolExecutionRecord.prepared("http-call", "http-key", fixture.binding.getBindingId(),
+                        fixture.binding.getGeneration(), fixture.session.getSession().getHarnessSessionId(),
+                        fixture.session.getRuntimeSessionId(), "turn", "call", (String) reference.get("argsDigest"),
+                        storedReference));
         RuntimeBindingRecord lost = fixture.lose(false);
         bindings.recoverLost(sessions, executions, lost);
         RuntimeTransport noTransport = (RuntimeTransport) Proxy.newProxyInstance(
@@ -102,9 +113,12 @@ class RuntimeRecoveryTest {
                 assertEquals(ToolExecutionRecord.State.ABANDONED, restarted.cancelExecution(
                         prepared.getHarnessSessionId(), prepared.getRuntimeSessionId(), prepared.getExecutionCallId())
                         .toCompletableFuture().join().getState());
-                assertEquals(prepared.getExecutionCallId(), restarted.createExecution(prepared.getHarnessSessionId(),
-                        prepared.getRuntimeSessionId(), prepared.getIdempotencyKey(), prepared.getReference())
-                        .toCompletableFuture().join().getExecutionCallId());
+                var retried = deferred
+                        ? restarted.prepareExecution(prepared.getHarnessSessionId(), prepared.getRuntimeSessionId(),
+                                prepared.getIdempotencyKey(), reference)
+                        : restarted.createExecution(prepared.getHarnessSessionId(), prepared.getRuntimeSessionId(),
+                                prepared.getIdempotencyKey(), reference);
+                assertEquals(prepared.getExecutionCallId(), retried.toCompletableFuture().join().getExecutionCallId());
                 assertEquals(ExecutionReconciliation.Outcome.ABANDONED, restarted.reconcileExecution(
                         prepared.getHarnessSessionId(), prepared.getRuntimeSessionId(), prepared.getExecutionCallId())
                         .toCompletableFuture().join().getOutcome());
