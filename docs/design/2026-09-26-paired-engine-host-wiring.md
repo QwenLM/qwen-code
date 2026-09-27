@@ -302,9 +302,16 @@ classification is B2a's.
 
 ## Risks and open questions
 
-- Until a Managed engine lands, the opt-in only makes Legacy sessions durable
-  from creation, with the owner-only transcripts for unused sessions described
-  in B2a. It runs nothing on Managed.
+- Until a Managed engine lands, the opt-in runs nothing on Managed, but it still
+  changes Legacy behavior in two ways. Legacy sessions are durable from
+  creation, with the owner-only transcripts for unused sessions described in
+  B2a. A quarantined Legacy channel follows the B2c policy: it refuses new
+  prompts, closes settled sessions and retires by the drain deadline, where an
+  unpaired channel lets its sessions keep prompting until they drain. The
+  follow-ups the B2c approval requires before B2d enables pairing (#12811: a
+  background job finishing during a quarantine must not stall the drain, and
+  exit verification must start when termination starts) therefore apply to
+  paired Legacy-only hosts too.
 - The serve app's Managed-engine dependency has no production caller until the
   engine slice lands; tests use it for the double.
 - The purpose rules rely on creator-attributed sources, which can only make a
