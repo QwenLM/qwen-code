@@ -13,6 +13,7 @@ import com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection.TaskProjection;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitTransactionRequest;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.EventRecord;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -110,7 +111,8 @@ class ManagedExtensionRecordStoreTest {
                     ? ExtensionRecordJournal.OPERATION : "reopenMonitorRun";
             String commandId = reuse == null ? "rejected"
                     : "accepted-" + reuse.intValue();
-            assertRefused(reject.required("id").textValue(), sessionId, null,
+            assertRefused(reject.required("id").textValue(), sessionId,
+                    ManagedExtensionRecordStore.ERROR_REJECTED, null,
                     () -> journal.commit(journal.request(operation,
                             commandId, ExtensionRecordJournal.bytes(
                                     reject.required("next")), occurredAt,
@@ -186,16 +188,68 @@ class ManagedExtensionRecordStoreTest {
             refuse(edit.getKey(), edit.getValue().message(), start,
                     edit.getValue().editEvent(), records -> records);
         }
-        refuse("a body with trailing content", "Stage H record is not valid"
-                + " JSON", trailing, event -> {
-                }, records -> records);
-        refuse("an event line with trailing content", "journal record is not"
-                + " valid JSON", start, event -> {
-                }, records -> records.replaceFirst("\n", " xyz\n"));
-        refuse("no commit marker", "ends with its commit marker", start,
+        refuse("a body with trailing content", "The Stage H record is not a"
+                + " JSON object the Session authority can read", trailing,
                 event -> {
+                }, records -> records);
+        refuse("no commit marker", "holds only its events, then its commit"
+                + " marker", start, event -> {
                 }, records -> records.substring(0, records.indexOf('\n')
                         + 1) + "{\"subtype\":\"managed_session_note\"}\n");
+        String sessionId = UUID.randomUUID().toString();
+        ExtensionRecordJournal journal = journal(sessionId);
+        assertRefused("a line among the events that is not one", sessionId,
+                ManagedExtensionRecordStore.ERROR_REJECTED,
+                "holds only its events, then its commit marker",
+                () -> journal.commit(journal.request(
+                        ExtensionRecordJournal.OPERATION, "refused", start,
+                        1_000, event -> {
+                        }, records -> records.replaceFirst("\n",
+                                "\n{\"subtype\":\"managed_session_note\"}\n"),
+                        1)));
+    }
+
+    @Test
+    void refusesRecordLinesTheAuthorityCouldNotParse() throws Exception {
+        byte[] start = ExtensionRecordJournal.bytes(
+                chain().get(0).required("monitorRun"));
+        Map<String, UnaryOperator<String>> lines = Map.of(
+                "trailing content", records -> records.replaceFirst("\n",
+                        " xyz\n"),
+                "a duplicate key", records -> records.replaceFirst("\\{",
+                        "{\"type\":\"system\","),
+                "nesting deeper than the authority reads", records -> records
+                        .replaceFirst("\\{", "{\"deep\":" + nested(64) + ","),
+                "a number past the double range", records -> records
+                        .replaceFirst("\\{", "{\"huge\":1e400,"));
+        for (Map.Entry<String, UnaryOperator<String>> edit
+                : lines.entrySet()) {
+            String sessionId = UUID.randomUUID().toString();
+            ExtensionRecordJournal journal = journal(sessionId);
+            assertRefused(edit.getKey(), sessionId,
+                    ManagedSessionStoreModels.ERROR_INVALID_REQUEST,
+                    "Record line 1 is not a JSON object the Session authority"
+                            + " can read",
+                    () -> journal.commit(journal.request(
+                            ExtensionRecordJournal.OPERATION, "refused",
+                            start, 1_000, event -> {
+                            }, edit.getValue())));
+        }
+        // The deepest line the authority reads is still accepted, on a line
+        // the Stage H rules do not otherwise look at.
+        String sessionId = UUID.randomUUID().toString();
+        ExtensionRecordJournal journal = journal(sessionId);
+        journal.commit(journal.request(ExtensionRecordJournal.OPERATION,
+                "deepest", start, 1_000, event -> {
+                }, records -> records.replaceFirst(
+                        "\\{\"uuid\"(?=[^\n]*managed_session_commit_v1)",
+                        "{\"deep\":" + nested(63) + ",\"uuid\"")));
+        assertThat(revisions(sessionId)).isEqualTo(1);
+    }
+
+    /** A value holding {@code depth} nested arrays. */
+    private static String nested(int depth) {
+        return "[".repeat(depth) + "]".repeat(depth);
     }
 
     @Test
@@ -209,6 +263,7 @@ class ManagedExtensionRecordStoreTest {
                 revision.recordBytesBase64()), StandardCharsets.UTF_8)
                 .split("\n")[0];
         assertRefused("a genesis with a Stage H record", sessionId,
+                ManagedExtensionRecordStore.ERROR_REJECTED,
                 "is not one of the transaction's events",
                 () -> journal.commit(journal.genesis(event
                         + "\n{\"subtype\":\"managed_session_header_v1\"}\n",
@@ -223,9 +278,11 @@ class ManagedExtensionRecordStoreTest {
             UnaryOperator<String> editRecords) {
         String sessionId = UUID.randomUUID().toString();
         ExtensionRecordJournal journal = journal(sessionId);
-        assertRefused(label, sessionId, message, () -> journal.commit(
-                journal.request(ExtensionRecordJournal.OPERATION, "refused",
-                        body, 1_000, editEvent, editRecords)));
+        assertRefused(label, sessionId,
+                ManagedExtensionRecordStore.ERROR_REJECTED, message,
+                () -> journal.commit(journal.request(
+                        ExtensionRecordJournal.OPERATION, "refused", body,
+                        1_000, editEvent, editRecords)));
     }
 
     /**
@@ -233,7 +290,7 @@ class ManagedExtensionRecordStoreTest {
      * revision behind, which it would if the store did not roll back. A
      * {@code message} names the rule that refused it.
      */
-    private void assertRefused(String label, String sessionId,
+    private void assertRefused(String label, String sessionId, String code,
             String message, ThrowingCallable commit) {
         long transactions = rows("qwen_managed_session_journal_tx", sessionId);
         long references = rows("qwen_managed_session_resource_ref",
@@ -241,8 +298,7 @@ class ManagedExtensionRecordStoreTest {
         long revisions = revisions(sessionId);
         assertThatThrownBy(commit).as(label)
                 .isInstanceOfSatisfying(ApiException.class, error -> {
-                    assertThat(error.getCode()).as(label).isEqualTo(
-                            ManagedExtensionRecordStore.ERROR_REJECTED);
+                    assertThat(error.getCode()).as(label).isEqualTo(code);
                     if (message != null) {
                         assertThat(error.getMessage()).as(label)
                                 .contains(message);

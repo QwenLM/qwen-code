@@ -6892,6 +6892,721 @@
           "delivery": null
         }
       }
+    },
+    {
+      "id": "reattaches-under-the-same-generation",
+      "accepted": [
+        {
+          "monitorId": "monitor-1",
+          "ownerScopeId": "scope-main",
+          "commandRef": {
+            "resourceId": "args-monitor-1",
+            "kind": "managed-tool-args",
+            "schemaVersion": 1,
+            "byteLength": 64,
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "maxEvents": 100,
+          "idleTimeoutMs": 60000,
+          "debounceMs": 1000,
+          "startReceiptRef": null,
+          "observationSequence": 0,
+          "lastObservationRef": null,
+          "notifiedThrough": 0,
+          "stopReason": null,
+          "outputRef": null,
+          "run": {
+            "state": "admitted",
+            "reason": null,
+            "definition": null,
+            "executionCallId": "call-monitor-1",
+            "effectId": null,
+            "dispatchId": null,
+            "deliveryId": null,
+            "execution": "intent",
+            "runtime": null,
+            "delivery": null
+          }
+        },
+        {
+          "monitorId": "monitor-1",
+          "ownerScopeId": "scope-main",
+          "commandRef": {
+            "resourceId": "args-monitor-1",
+            "kind": "managed-tool-args",
+            "schemaVersion": 1,
+            "byteLength": 64,
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "maxEvents": 100,
+          "idleTimeoutMs": 60000,
+          "debounceMs": 1000,
+          "startReceiptRef": null,
+          "observationSequence": 0,
+          "lastObservationRef": null,
+          "notifiedThrough": 0,
+          "stopReason": null,
+          "outputRef": null,
+          "run": {
+            "state": "admitted",
+            "reason": null,
+            "definition": null,
+            "executionCallId": "call-monitor-1",
+            "effectId": null,
+            "dispatchId": null,
+            "deliveryId": null,
+            "execution": "dispatch_started",
+            "runtime": {
+              "runtimeBindingId": "binding-1",
+              "generation": "1"
+            },
+            "delivery": null
+          }
+        },
+        {
+          "monitorId": "monitor-1",
+          "ownerScopeId": "scope-main",
+          "commandRef": {
+            "resourceId": "args-monitor-1",
+            "kind": "managed-tool-args",
+            "schemaVersion": 1,
+            "byteLength": 64,
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "maxEvents": 100,
+          "idleTimeoutMs": 60000,
+          "debounceMs": 1000,
+          "startReceiptRef": {
+            "resourceId": "receipt-1",
+            "kind": "managed-runtime-receipt",
+            "schemaVersion": 1,
+            "byteLength": 64,
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "observationSequence": 0,
+          "lastObservationRef": null,
+          "notifiedThrough": 0,
+          "stopReason": null,
+          "outputRef": null,
+          "run": {
+            "state": "running",
+            "reason": null,
+            "definition": null,
+            "executionCallId": "call-monitor-1",
+            "effectId": null,
+            "dispatchId": null,
+            "deliveryId": null,
+            "execution": "running_attached",
+            "runtime": {
+              "runtimeBindingId": "binding-1",
+              "generation": "1"
+            },
+            "delivery": null
+          }
+        },
+        {
+          "monitorId": "monitor-1",
+          "ownerScopeId": "scope-main",
+          "commandRef": {
+            "resourceId": "args-monitor-1",
+            "kind": "managed-tool-args",
+            "schemaVersion": 1,
+            "byteLength": 64,
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "maxEvents": 100,
+          "idleTimeoutMs": 60000,
+          "debounceMs": 1000,
+          "startReceiptRef": {
+            "resourceId": "receipt-1",
+            "kind": "managed-runtime-receipt",
+            "schemaVersion": 1,
+            "byteLength": 64,
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "observationSequence": 1,
+          "lastObservationRef": {
+            "resourceId": "observation-1",
+            "kind": "managed-monitor-observation",
+            "schemaVersion": 1,
+            "byteLength": 64,
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "notifiedThrough": 0,
+          "stopReason": null,
+          "outputRef": null,
+          "run": {
+            "state": "running",
+            "reason": null,
+            "definition": null,
+            "executionCallId": "call-monitor-1",
+            "effectId": null,
+            "dispatchId": null,
+            "deliveryId": null,
+            "execution": "running_attached",
+            "runtime": {
+              "runtimeBindingId": "binding-1",
+              "generation": "1"
+            },
+            "delivery": null
+          }
+        },
+        {
+          "monitorId": "monitor-1",
+          "ownerScopeId": "scope-main",
+          "commandRef": {
+            "resourceId": "args-monitor-1",
+            "kind": "managed-tool-args",
+            "schemaVersion": 1,
+            "byteLength": 64,
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "maxEvents": 100,
+          "idleTimeoutMs": 60000,
+          "debounceMs": 1000,
+          "startReceiptRef": {
+            "resourceId": "receipt-1",
+            "kind": "managed-runtime-receipt",
+            "schemaVersion": 1,
+            "byteLength": 64,
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "observationSequence": 1,
+          "lastObservationRef": {
+            "resourceId": "observation-1",
+            "kind": "managed-monitor-observation",
+            "schemaVersion": 1,
+            "byteLength": 64,
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "notifiedThrough": 0,
+          "stopReason": null,
+          "outputRef": null,
+          "run": {
+            "state": "recovery_blocked",
+            "reason": "runtime_lost",
+            "definition": null,
+            "executionCallId": "call-monitor-1",
+            "effectId": null,
+            "dispatchId": null,
+            "deliveryId": null,
+            "execution": "outcome_unknown",
+            "runtime": {
+              "runtimeBindingId": "binding-1",
+              "generation": "1"
+            },
+            "delivery": null
+          }
+        }
+      ],
+      "next": {
+        "monitorId": "monitor-1",
+        "ownerScopeId": "scope-main",
+        "commandRef": {
+          "resourceId": "args-monitor-1",
+          "kind": "managed-tool-args",
+          "schemaVersion": 1,
+          "byteLength": 64,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "maxEvents": 100,
+        "idleTimeoutMs": 60000,
+        "debounceMs": 1000,
+        "startReceiptRef": {
+          "resourceId": "receipt-2",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 64,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "observationSequence": 1,
+        "lastObservationRef": {
+          "resourceId": "observation-1",
+          "kind": "managed-monitor-observation",
+          "schemaVersion": 1,
+          "byteLength": 64,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "notifiedThrough": 0,
+        "stopReason": null,
+        "outputRef": null,
+        "run": {
+          "state": "running",
+          "reason": "runtime_lost",
+          "definition": null,
+          "executionCallId": "call-monitor-1",
+          "effectId": null,
+          "dispatchId": null,
+          "deliveryId": null,
+          "execution": "running_attached",
+          "runtime": {
+            "runtimeBindingId": "binding-2",
+            "generation": "1"
+          },
+          "delivery": null
+        }
+      }
+    },
+    {
+      "id": "reattaches-under-an-older-generation",
+      "accepted": [
+        {
+          "monitorId": "monitor-1",
+          "ownerScopeId": "scope-main",
+          "commandRef": {
+            "resourceId": "args-monitor-1",
+            "kind": "managed-tool-args",
+            "schemaVersion": 1,
+            "byteLength": 64,
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "maxEvents": 100,
+          "idleTimeoutMs": 60000,
+          "debounceMs": 1000,
+          "startReceiptRef": null,
+          "observationSequence": 0,
+          "lastObservationRef": null,
+          "notifiedThrough": 0,
+          "stopReason": null,
+          "outputRef": null,
+          "run": {
+            "state": "admitted",
+            "reason": null,
+            "definition": null,
+            "executionCallId": "call-monitor-1",
+            "effectId": null,
+            "dispatchId": null,
+            "deliveryId": null,
+            "execution": "intent",
+            "runtime": null,
+            "delivery": null
+          }
+        },
+        {
+          "monitorId": "monitor-1",
+          "ownerScopeId": "scope-main",
+          "commandRef": {
+            "resourceId": "args-monitor-1",
+            "kind": "managed-tool-args",
+            "schemaVersion": 1,
+            "byteLength": 64,
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "maxEvents": 100,
+          "idleTimeoutMs": 60000,
+          "debounceMs": 1000,
+          "startReceiptRef": null,
+          "observationSequence": 0,
+          "lastObservationRef": null,
+          "notifiedThrough": 0,
+          "stopReason": null,
+          "outputRef": null,
+          "run": {
+            "state": "admitted",
+            "reason": null,
+            "definition": null,
+            "executionCallId": "call-monitor-1",
+            "effectId": null,
+            "dispatchId": null,
+            "deliveryId": null,
+            "execution": "dispatch_started",
+            "runtime": {
+              "runtimeBindingId": "binding-1",
+              "generation": "3"
+            },
+            "delivery": null
+          }
+        },
+        {
+          "monitorId": "monitor-1",
+          "ownerScopeId": "scope-main",
+          "commandRef": {
+            "resourceId": "args-monitor-1",
+            "kind": "managed-tool-args",
+            "schemaVersion": 1,
+            "byteLength": 64,
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "maxEvents": 100,
+          "idleTimeoutMs": 60000,
+          "debounceMs": 1000,
+          "startReceiptRef": {
+            "resourceId": "receipt-1",
+            "kind": "managed-runtime-receipt",
+            "schemaVersion": 1,
+            "byteLength": 64,
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "observationSequence": 0,
+          "lastObservationRef": null,
+          "notifiedThrough": 0,
+          "stopReason": null,
+          "outputRef": null,
+          "run": {
+            "state": "running",
+            "reason": null,
+            "definition": null,
+            "executionCallId": "call-monitor-1",
+            "effectId": null,
+            "dispatchId": null,
+            "deliveryId": null,
+            "execution": "running_attached",
+            "runtime": {
+              "runtimeBindingId": "binding-1",
+              "generation": "3"
+            },
+            "delivery": null
+          }
+        },
+        {
+          "monitorId": "monitor-1",
+          "ownerScopeId": "scope-main",
+          "commandRef": {
+            "resourceId": "args-monitor-1",
+            "kind": "managed-tool-args",
+            "schemaVersion": 1,
+            "byteLength": 64,
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "maxEvents": 100,
+          "idleTimeoutMs": 60000,
+          "debounceMs": 1000,
+          "startReceiptRef": {
+            "resourceId": "receipt-1",
+            "kind": "managed-runtime-receipt",
+            "schemaVersion": 1,
+            "byteLength": 64,
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "observationSequence": 1,
+          "lastObservationRef": {
+            "resourceId": "observation-1",
+            "kind": "managed-monitor-observation",
+            "schemaVersion": 1,
+            "byteLength": 64,
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "notifiedThrough": 0,
+          "stopReason": null,
+          "outputRef": null,
+          "run": {
+            "state": "running",
+            "reason": null,
+            "definition": null,
+            "executionCallId": "call-monitor-1",
+            "effectId": null,
+            "dispatchId": null,
+            "deliveryId": null,
+            "execution": "running_attached",
+            "runtime": {
+              "runtimeBindingId": "binding-1",
+              "generation": "3"
+            },
+            "delivery": null
+          }
+        },
+        {
+          "monitorId": "monitor-1",
+          "ownerScopeId": "scope-main",
+          "commandRef": {
+            "resourceId": "args-monitor-1",
+            "kind": "managed-tool-args",
+            "schemaVersion": 1,
+            "byteLength": 64,
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "maxEvents": 100,
+          "idleTimeoutMs": 60000,
+          "debounceMs": 1000,
+          "startReceiptRef": {
+            "resourceId": "receipt-1",
+            "kind": "managed-runtime-receipt",
+            "schemaVersion": 1,
+            "byteLength": 64,
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "observationSequence": 1,
+          "lastObservationRef": {
+            "resourceId": "observation-1",
+            "kind": "managed-monitor-observation",
+            "schemaVersion": 1,
+            "byteLength": 64,
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "notifiedThrough": 0,
+          "stopReason": null,
+          "outputRef": null,
+          "run": {
+            "state": "recovery_blocked",
+            "reason": "runtime_lost",
+            "definition": null,
+            "executionCallId": "call-monitor-1",
+            "effectId": null,
+            "dispatchId": null,
+            "deliveryId": null,
+            "execution": "outcome_unknown",
+            "runtime": {
+              "runtimeBindingId": "binding-1",
+              "generation": "3"
+            },
+            "delivery": null
+          }
+        }
+      ],
+      "next": {
+        "monitorId": "monitor-1",
+        "ownerScopeId": "scope-main",
+        "commandRef": {
+          "resourceId": "args-monitor-1",
+          "kind": "managed-tool-args",
+          "schemaVersion": 1,
+          "byteLength": 64,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "maxEvents": 100,
+        "idleTimeoutMs": 60000,
+        "debounceMs": 1000,
+        "startReceiptRef": {
+          "resourceId": "receipt-2",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 64,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "observationSequence": 1,
+        "lastObservationRef": {
+          "resourceId": "observation-1",
+          "kind": "managed-monitor-observation",
+          "schemaVersion": 1,
+          "byteLength": 64,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "notifiedThrough": 0,
+        "stopReason": null,
+        "outputRef": null,
+        "run": {
+          "state": "running",
+          "reason": "runtime_lost",
+          "definition": null,
+          "executionCallId": "call-monitor-1",
+          "effectId": null,
+          "dispatchId": null,
+          "deliveryId": null,
+          "execution": "running_attached",
+          "runtime": {
+            "runtimeBindingId": "binding-2",
+            "generation": "2"
+          },
+          "delivery": null
+        }
+      }
+    },
+    {
+      "id": "rebinds-without-an-unknown-outcome",
+      "accepted": [
+        {
+          "monitorId": "monitor-1",
+          "ownerScopeId": "scope-main",
+          "commandRef": {
+            "resourceId": "args-monitor-1",
+            "kind": "managed-tool-args",
+            "schemaVersion": 1,
+            "byteLength": 64,
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "maxEvents": 100,
+          "idleTimeoutMs": 60000,
+          "debounceMs": 1000,
+          "startReceiptRef": null,
+          "observationSequence": 0,
+          "lastObservationRef": null,
+          "notifiedThrough": 0,
+          "stopReason": null,
+          "outputRef": null,
+          "run": {
+            "state": "admitted",
+            "reason": null,
+            "definition": null,
+            "executionCallId": "call-monitor-1",
+            "effectId": null,
+            "dispatchId": null,
+            "deliveryId": null,
+            "execution": "intent",
+            "runtime": null,
+            "delivery": null
+          }
+        },
+        {
+          "monitorId": "monitor-1",
+          "ownerScopeId": "scope-main",
+          "commandRef": {
+            "resourceId": "args-monitor-1",
+            "kind": "managed-tool-args",
+            "schemaVersion": 1,
+            "byteLength": 64,
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "maxEvents": 100,
+          "idleTimeoutMs": 60000,
+          "debounceMs": 1000,
+          "startReceiptRef": null,
+          "observationSequence": 0,
+          "lastObservationRef": null,
+          "notifiedThrough": 0,
+          "stopReason": null,
+          "outputRef": null,
+          "run": {
+            "state": "admitted",
+            "reason": null,
+            "definition": null,
+            "executionCallId": "call-monitor-1",
+            "effectId": null,
+            "dispatchId": null,
+            "deliveryId": null,
+            "execution": "dispatch_started",
+            "runtime": {
+              "runtimeBindingId": "binding-1",
+              "generation": "1"
+            },
+            "delivery": null
+          }
+        },
+        {
+          "monitorId": "monitor-1",
+          "ownerScopeId": "scope-main",
+          "commandRef": {
+            "resourceId": "args-monitor-1",
+            "kind": "managed-tool-args",
+            "schemaVersion": 1,
+            "byteLength": 64,
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "maxEvents": 100,
+          "idleTimeoutMs": 60000,
+          "debounceMs": 1000,
+          "startReceiptRef": {
+            "resourceId": "receipt-1",
+            "kind": "managed-runtime-receipt",
+            "schemaVersion": 1,
+            "byteLength": 64,
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "observationSequence": 0,
+          "lastObservationRef": null,
+          "notifiedThrough": 0,
+          "stopReason": null,
+          "outputRef": null,
+          "run": {
+            "state": "running",
+            "reason": null,
+            "definition": null,
+            "executionCallId": "call-monitor-1",
+            "effectId": null,
+            "dispatchId": null,
+            "deliveryId": null,
+            "execution": "running_attached",
+            "runtime": {
+              "runtimeBindingId": "binding-1",
+              "generation": "1"
+            },
+            "delivery": null
+          }
+        },
+        {
+          "monitorId": "monitor-1",
+          "ownerScopeId": "scope-main",
+          "commandRef": {
+            "resourceId": "args-monitor-1",
+            "kind": "managed-tool-args",
+            "schemaVersion": 1,
+            "byteLength": 64,
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "maxEvents": 100,
+          "idleTimeoutMs": 60000,
+          "debounceMs": 1000,
+          "startReceiptRef": {
+            "resourceId": "receipt-1",
+            "kind": "managed-runtime-receipt",
+            "schemaVersion": 1,
+            "byteLength": 64,
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "observationSequence": 1,
+          "lastObservationRef": {
+            "resourceId": "observation-1",
+            "kind": "managed-monitor-observation",
+            "schemaVersion": 1,
+            "byteLength": 64,
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "notifiedThrough": 0,
+          "stopReason": null,
+          "outputRef": null,
+          "run": {
+            "state": "running",
+            "reason": null,
+            "definition": null,
+            "executionCallId": "call-monitor-1",
+            "effectId": null,
+            "dispatchId": null,
+            "deliveryId": null,
+            "execution": "running_attached",
+            "runtime": {
+              "runtimeBindingId": "binding-1",
+              "generation": "1"
+            },
+            "delivery": null
+          }
+        }
+      ],
+      "next": {
+        "monitorId": "monitor-1",
+        "ownerScopeId": "scope-main",
+        "commandRef": {
+          "resourceId": "args-monitor-1",
+          "kind": "managed-tool-args",
+          "schemaVersion": 1,
+          "byteLength": 64,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "maxEvents": 100,
+        "idleTimeoutMs": 60000,
+        "debounceMs": 1000,
+        "startReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 64,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "observationSequence": 1,
+        "lastObservationRef": {
+          "resourceId": "observation-1",
+          "kind": "managed-monitor-observation",
+          "schemaVersion": 1,
+          "byteLength": 64,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "notifiedThrough": 0,
+        "stopReason": null,
+        "outputRef": null,
+        "run": {
+          "state": "running",
+          "reason": null,
+          "definition": null,
+          "executionCallId": "call-monitor-1",
+          "effectId": null,
+          "dispatchId": null,
+          "deliveryId": null,
+          "execution": "running_attached",
+          "runtime": {
+            "runtimeBindingId": "binding-2",
+            "generation": "2"
+          },
+          "delivery": null
+        }
+      }
     }
   ],
   "brokerExecutionCases": [
@@ -6899,55 +7614,127 @@
       "id": "prepared",
       "state": "PREPARED",
       "executionStatus": null,
-      "execution": "intent"
+      "execution": "intent",
+      "inspection": {
+        "outcome": "known",
+        "status": {
+          "state": "prepared"
+        }
+      },
+      "harnessExecution": "intent"
     },
     {
       "id": "dispatching",
       "state": "DISPATCHING",
       "executionStatus": null,
-      "execution": "intent"
+      "execution": "intent",
+      "inspection": {
+        "outcome": "known",
+        "status": {
+          "state": "executing"
+        }
+      },
+      "harnessExecution": "dispatch_started"
     },
     {
       "id": "executing",
       "state": "EXECUTING",
       "executionStatus": null,
-      "execution": "dispatch_started"
+      "execution": "dispatch_started",
+      "inspection": {
+        "outcome": "known",
+        "status": {
+          "state": "executing"
+        }
+      },
+      "harnessExecution": "dispatch_started"
     },
     {
       "id": "cancel-requested",
       "state": "CANCEL_REQUESTED",
       "executionStatus": null,
-      "execution": "dispatch_started"
+      "execution": "dispatch_started",
+      "inspection": {
+        "outcome": "known",
+        "status": {
+          "state": "cancel_requested"
+        }
+      },
+      "harnessExecution": "dispatch_started"
     },
     {
       "id": "settled-not-started",
       "state": "SETTLED",
       "executionStatus": "not_started",
-      "execution": "not_started_proven"
+      "execution": "not_started_proven",
+      "inspection": {
+        "outcome": "known",
+        "status": {
+          "state": "settled",
+          "result": {
+            "executionStatus": "not_started"
+          }
+        }
+      },
+      "harnessExecution": "not_started_proven"
     },
     {
       "id": "settled-success",
       "state": "SETTLED",
       "executionStatus": "success",
-      "execution": "settled"
+      "execution": "settled",
+      "inspection": {
+        "outcome": "known",
+        "status": {
+          "state": "settled",
+          "result": {
+            "executionStatus": "success"
+          }
+        }
+      },
+      "harnessExecution": "settled"
     },
     {
       "id": "settled-error",
       "state": "SETTLED",
       "executionStatus": "error",
-      "execution": "settled"
+      "execution": "settled",
+      "inspection": {
+        "outcome": "known",
+        "status": {
+          "state": "settled",
+          "result": {
+            "executionStatus": "error"
+          }
+        }
+      },
+      "harnessExecution": "settled"
     },
     {
       "id": "settled-cancelled",
       "state": "SETTLED",
       "executionStatus": "cancelled",
-      "execution": "settled"
+      "execution": "settled",
+      "inspection": {
+        "outcome": "known",
+        "status": {
+          "state": "settled",
+          "result": {
+            "executionStatus": "cancelled"
+          }
+        }
+      },
+      "harnessExecution": "settled"
     },
     {
       "id": "unknown",
       "state": "UNKNOWN",
       "executionStatus": null,
-      "execution": "outcome_unknown"
+      "execution": "outcome_unknown",
+      "inspection": {
+        "outcome": "unknown"
+      },
+      "harnessExecution": "outcome_unknown"
     }
   ],
   "inspectionExecutionCases": [

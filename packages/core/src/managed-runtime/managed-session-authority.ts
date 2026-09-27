@@ -1352,18 +1352,32 @@ export class LocalManagedSessionAuthority {
         );
         actors.push(...INPUT_ACTORS);
       }
-      const receipt = await this.commit(command, values, actors, eventId);
-      return {
-        receipt,
-        ...this.applyExtensionRevision(
-          sequence,
-          occurredAt,
-          command.commandId,
-          request.domain,
-          parsed,
-          recordRef,
-        ),
-      };
+      let applied = undefined as
+        | Omit<ManagedSessionExtensionReceipt, 'receipt'>
+        | undefined;
+      const receipt = await this.commit(command, values, actors, {
+        eventId,
+        // Applied with the rest of the transaction's state, so no reader
+        // sees the event committed and the record not.
+        apply: () => {
+          applied = this.applyExtensionRevision(
+            sequence,
+            occurredAt,
+            command.commandId,
+            request.domain,
+            parsed,
+            recordRef,
+          );
+        },
+      });
+      if (applied === undefined) {
+        // The command key named another transaction, which the replay
+        // check above refuses before anything is published.
+        throw new ManagedSessionConflictError(
+          `command ${command.commandId} was committed without a Stage H record.`,
+        );
+      }
+      return { receipt, ...applied };
     });
   }
 
@@ -1636,16 +1650,17 @@ export class LocalManagedSessionAuthority {
   }
 
   /**
-   * `extensionEventId` names the one Stage H record event the caller
-   * prepared; any other event of a domain with a record body is refused, so
-   * no path commits one around its revision chain, and so is any other event
-   * that takes an ID of the form those events use, so none can block them.
+   * `extension` names the one Stage H record event the caller prepared and
+   * applies its revision once the transaction commits; any other event of a
+   * domain with a record body is refused, so no path commits one around its
+   * revision chain, and so is any other event that takes an ID of the form
+   * those events use, so none can block them.
    */
   private async commit(
     command: ManagedSessionCommand,
     values: readonly unknown[],
     actors: readonly ManagedSessionActor[],
-    extensionEventId?: string,
+    extension?: { readonly eventId: string; readonly apply: () => void },
   ): Promise<ManagedSessionCommitReceipt> {
     this.assertCommandWritable(command);
     const key = managedSessionCommandKey(command.operation, command.commandId);
@@ -1682,14 +1697,14 @@ export class LocalManagedSessionAuthority {
         MANAGED_EXTENSION_RECORD_BODIES[
           event.payload['domain'] as ManagedSessionDomain
         ] !== undefined &&
-        event.eventId !== extensionEventId
+        event.eventId !== extension?.eventId
       ) {
         throw new ManagedSessionConflictError(
           `${event.payload['domain']} records commit only through commitExtensionRecord.`,
         );
       }
       if (
-        event.eventId !== extensionEventId &&
+        event.eventId !== extension?.eventId &&
         EXTENSION_EVENT_ID.test(event.eventId)
       ) {
         throw new ManagedSessionConflictError(
@@ -1815,6 +1830,7 @@ export class LocalManagedSessionAuthority {
       receipt,
       contentDigest: command.contentDigest,
     });
+    extension?.apply();
     return receipt;
   }
 

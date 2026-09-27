@@ -933,6 +933,114 @@ describe('managed session authority Stage H records', () => {
     });
   });
 
+  it('refuses a Stage H retry of a command committed without a record', async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      const shared = command('shared-1');
+      await authority.submitInput(shared, {
+        inputId: 'shared-1',
+        turnId: 'shared-1',
+        source: 'user',
+        contentRef: await harness.store.publish(
+          'managed-input',
+          Buffer.from('{"text":"hello"}', 'utf8'),
+        ),
+        deadline: null,
+        admissionRef: await harness.store.publish(
+          'managed-admission',
+          Buffer.from('{}', 'utf8'),
+        ),
+        wakeReason: 'input',
+      });
+      const sequence = authority.committedSequence;
+      await expect(
+        authority.commitExtensionRecord(
+          shared,
+          { domain: 'monitor_run', record: LIFE[0] },
+          TRUSTED,
+        ),
+      ).rejects.toThrow(/committed without a Stage H record/);
+      expect(await publishedBodies(harness)).toBe(0);
+      expect(authority.committedSequence).toBe(sequence);
+      expect(authority.taskViews()).toEqual([]);
+      expect(authority.extensionRecord('monitor_run', 'monitor-1')).toBe(
+        undefined,
+      );
+    });
+  });
+
+  it('shows the record as soon as its transaction commits', async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      const journal = (
+        authority as unknown as {
+          journal: { appendTransaction(records: unknown[]): Promise<void> };
+        }
+      ).journal;
+      const append = journal.appendTransaction.bind(journal);
+      const seen: Array<[number, number]> = [];
+      // Readers woken by the append keep reading for a few turns of the
+      // microtask queue, across the point where the commit lands.
+      vi.spyOn(journal, 'appendTransaction').mockImplementation(
+        async (records) => {
+          await append(records);
+          const observe = (turns: number): void => {
+            seen.push([
+              authority.committedSequence,
+              authority.taskViews().length,
+            ]);
+            if (turns > 0) queueMicrotask(() => observe(turns - 1));
+          };
+          queueMicrotask(() => observe(10));
+        },
+      );
+      await authority.commitExtensionRecord(
+        command('monitor-1:1'),
+        { domain: 'monitor_run', record: LIFE[0] },
+        TRUSTED,
+      );
+      expect(seen.map(([committed]) => committed)).toContain(1);
+      for (const [committed, tasks] of seen) {
+        expect(tasks).toBe(committed);
+      }
+    });
+  });
+
+  it('fails to reopen when two records share their opening command', async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      await authority.commitExtensionRecord(
+        { ...command('open-1'), operation: 'startMonitor' },
+        { domain: 'monitor_run', record: LIFE[0] },
+        TRUSTED,
+      );
+      // A writer without the one-record rule, as a log written under looser
+      // rules would hold it.
+      const rules = vi
+        .spyOn(
+          LocalManagedSessionAuthority.prototype as unknown as {
+            assertExtensionRevision(): void;
+          },
+          'assertExtensionRevision',
+        )
+        .mockImplementation(() => undefined);
+      await authority.commitExtensionRecord(
+        command('open-1'),
+        {
+          domain: 'monitor_run',
+          record: { ...LIFE[0], monitorId: 'monitor-2' },
+        },
+        TRUSTED,
+      );
+      rules.mockRestore();
+    });
+    await expect(
+      withAuthority(harness, async () => undefined, { create: false }),
+    ).rejects.toThrow(
+      /session log is corrupt: command open-1 already opened monitor_run record monitor-1/,
+    );
+  });
+
   it('replays a committed command after its domain was disabled', async () => {
     const harness = await createHarness();
     await withAuthority(harness, async (authority) => {

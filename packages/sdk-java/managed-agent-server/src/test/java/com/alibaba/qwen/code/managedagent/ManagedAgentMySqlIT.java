@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection.TaskProjection;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecordStore;
@@ -20,11 +21,14 @@ import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.SealWr
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.WriterGrant;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.Admission;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.ReplayWindow;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutationKind;
 import com.alibaba.qwen.code.runtimebroker.JdbcRepositoryContract;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.io.IOException;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Proxy;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
@@ -37,6 +41,7 @@ import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 import org.flywaydb.core.Flyway;
@@ -659,6 +664,76 @@ class ManagedAgentMySqlIT {
                 session)).isZero();
         assertThat(records.listTasks(tenant, session, null, null, 10).tasks()
                 .get(0).projection()).isEqualTo(before);
+    }
+
+    @Test
+    @Order(9)
+    void announcesNothingAfterADeletionCommittedMidCommit() throws Exception {
+        DriverManagerDataSource dataSource = dataSource();
+        Flyway.configure().dataSource(dataSource)
+                .locations("classpath:db/migration").load().migrate();
+        JdbcTemplate jdbc = new JdbcTemplate(dataSource);
+        TransactionTemplate transactions = new TransactionTemplate(
+                new DataSourceTransactionManager(dataSource));
+        ManagedAgentStore agents = new ManagedAgentStore(jdbc,
+                new ObjectMapper(), Clock.systemUTC(), ignored -> {
+                }, new ManagedWorkspaceRegistry(jdbc),
+                new ManagedAgentProperties());
+        String tenant = "mysql-extension-delete-" + UUID.randomUUID();
+        String session = inTransaction(transactions,
+                () -> agents.insertSessionCommand(tenant, "CREATE_SESSION",
+                        "create", "sha256:" + "a".repeat(64), "qwen-code",
+                        null, "tasks", List.of(), "sha256:" + "b".repeat(64)))
+                .sessionId();
+        // The deletion commits on another connection after the commit read
+        // its snapshot and before it announces, which on REPEATABLE READ is
+        // invisible to a plain read.
+        AgentStateStore racing = (AgentStateStore) Proxy.newProxyInstance(
+                AgentStateStore.class.getClassLoader(),
+                new Class<?>[] {AgentStateStore.class},
+                (proxy, method, arguments) -> {
+                    if ("appendLiveSessionEventIfAbsent".equals(
+                            method.getName())) {
+                        CompletableFuture.runAsync(() -> {
+                            transactions.executeWithoutResult(status -> agents
+                                    .beginSessionMutation(tenant,
+                                            "DELETE_SESSION", "delete",
+                                            "sha256:" + "c".repeat(64),
+                                            session,
+                                            SessionMutationKind.DELETE));
+                            transactions.executeWithoutResult(status -> agents
+                                    .completeSessionMutation(tenant,
+                                            "DELETE_SESSION", "delete",
+                                            session,
+                                            SessionMutationKind.DELETE, null,
+                                            null));
+                        }).join();
+                    }
+                    try {
+                        return method.invoke(agents, arguments);
+                    } catch (InvocationTargetException error) {
+                        throw error.getCause();
+                    }
+                });
+        ManagedSessionStore store = new ManagedSessionStore(jdbc,
+                new ManagedExtensionRecordStore(jdbc, racing));
+        ExtensionRecordJournal journal = inTransaction(transactions,
+                () -> new ExtensionRecordJournal(store, tenant,
+                        "mysql-extension-workspace", session).open());
+        JsonNode start = ManagedExtensionProjectionContractTest.fixtures()
+                .required("monitorChainCases").get(0).required("revisions")
+                .get(0).required("monitorRun");
+        inTransaction(transactions,
+                () -> journal.commitMonitor("start", start, 1_000));
+
+        List<String> events = jdbc.queryForList("SELECT event_type FROM"
+                        + " managed_agent_event WHERE tenant_id = ? AND"
+                        + " session_id = ? ORDER BY sequence_id",
+                String.class, tenant, session);
+        assertThat(events).endsWith("session.deleted")
+                .doesNotContain("task.updated");
+        assertThat(count(jdbc, "qwen_managed_session_extension_record",
+                tenant, session)).isEqualTo(1);
     }
 
     private static int count(JdbcTemplate jdbc, String table, String tenant,

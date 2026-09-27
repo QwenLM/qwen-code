@@ -10,7 +10,13 @@ import {
   type OperationGrant,
 } from './managed-extension-record.js';
 import { ManagedSessionConflictError } from './managed-session-authority.js';
-import type { ManagedSessionKey } from './managed-session-records.js';
+import {
+  assertManagedSessionKey,
+  assertManagedSessionStableId,
+  ManagedSessionRecordError,
+  type ManagedSessionJsonValue,
+  type ManagedSessionKey,
+} from './managed-session-records.js';
 
 interface GateEntry {
   /**
@@ -22,8 +28,16 @@ interface GateEntry {
   revokedThrough: number;
 }
 
+/**
+ * A malformed key is refused rather than looked up, so a revocation can never
+ * miss the grant it names.
+ */
 function gateKey(sessionKey: ManagedSessionKey, operationId: string): string {
-  return `${sessionKey.tenantId}\0${sessionKey.workspaceId}\0${sessionKey.sessionId}\0${operationId}`;
+  const key = assertManagedSessionKey(
+    sessionKey as unknown as ManagedSessionJsonValue,
+  );
+  const id = assertManagedSessionStableId(operationId, 'operationId');
+  return `${key.tenantId}\0${key.workspaceId}\0${key.sessionId}\0${id}`;
 }
 
 /**
@@ -32,6 +46,8 @@ function gateKey(sessionKey: ManagedSessionKey, operationId: string): string {
  * renewal or a later revision replaces it, and anything older is refused. A
  * revoked revision never reopens, and the grant it revoked still bounds the
  * next one, so a revocation cannot let an older Workspace generation back in.
+ * The gate lives in the Runtime's memory: a restarted Runtime starts with none,
+ * and an entry stays until the process ends.
  */
 export class ManagedOperationGrantGate {
   private readonly entries = new Map<string, GateEntry>();
@@ -72,6 +88,11 @@ export class ManagedOperationGrantGate {
     operationRevision: number,
   ): void {
     const key = gateKey(sessionKey, operationId);
+    if (!Number.isSafeInteger(operationRevision) || operationRevision < 1) {
+      throw new ManagedSessionRecordError(
+        'operationRevision must be a positive safe integer.',
+      );
+    }
     const entry = this.entries.get(key) ?? {
       grant: undefined,
       revokedThrough: 0,

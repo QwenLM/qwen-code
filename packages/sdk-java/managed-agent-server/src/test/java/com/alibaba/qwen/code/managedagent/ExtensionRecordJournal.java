@@ -106,6 +106,17 @@ final class ExtensionRecordJournal {
     CommitTransactionRequest request(String operation, String commandId,
             byte[] body, long occurredAt, Consumer<ObjectNode> editEvent,
             UnaryOperator<String> editRecords) {
+        return request(operation, commandId, body, occurredAt, editEvent,
+                editRecords, 0);
+    }
+
+    /**
+     * A commit request that declares {@code extraEvents} more events after
+     * the Stage H one, whose lines {@code editRecords} supplies.
+     */
+    CommitTransactionRequest request(String operation, String commandId,
+            byte[] body, long occurredAt, Consumer<ObjectNode> editEvent,
+            UnaryOperator<String> editRecords, int extraEvents) {
         String resourceId = resourceId(body);
         ObjectNode recordRef = JSON.createObjectNode()
                 .put("resourceId", resourceId)
@@ -130,9 +141,11 @@ final class ExtensionRecordJournal {
         String transactionId = "transaction-" + operation + "-" + commandId;
         return new CommitTransactionRequest(workspaceId, WRITER,
                 writerGeneration, journalRevision, sequence, transactionId,
-                operation, commandId, sha256(commandId), next, next,
-                1, sha256("events-" + commandId), lastCommitDigest,
-                sha256(transactionId), 0, null, 2, base64(records),
+                operation, commandId, sha256(commandId), next,
+                next + extraEvents, 1 + extraEvents,
+                sha256("events-" + commandId), lastCommitDigest,
+                sha256(transactionId), 0, null, 2 + extraEvents,
+                base64(records),
                 sha256(records), List.of(new CommitResource(resourceId,
                         "managed-monitor_run", 1, body.length,
                         sha256(body), Base64.getEncoder()

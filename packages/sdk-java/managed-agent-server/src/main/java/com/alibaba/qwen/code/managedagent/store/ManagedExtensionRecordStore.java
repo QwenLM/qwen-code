@@ -5,8 +5,9 @@ import com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection.Body;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection.TaskProjection;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecords.InvalidRecordException;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.StoredResource;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
+import com.fasterxml.jackson.core.JsonFactory;
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.StreamReadConstraints;
 import com.fasterxml.jackson.core.StreamReadFeature;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -55,9 +56,14 @@ public class ManagedExtensionRecordStore {
             "workspaceId", "sessionId");
     private static final Set<String> PAYLOAD_FIELDS = Set.of("domain",
             "version", "operationId", "recordRef");
-    // Parses as strictly as the Session authority does, so the store never
-    // accepts a line or a body the authority could not read back.
-    private static final ObjectMapper JSON = JsonMapper.builder()
+    // Parses as strictly as the Session authority's reader: no duplicate
+    // keys, no trailing content, no deeper nesting, and, checked after
+    // parsing, only finite numbers. The store never accepts a line or a body
+    // that the authority could not read back.
+    private static final ObjectMapper JSON = JsonMapper.builder(JsonFactory
+                    .builder().streamReadConstraints(StreamReadConstraints
+                            .builder().maxNestingDepth(ManagedSessionStoreModels
+                                    .MAX_JSON_DEPTH).build()).build())
             .enable(StreamReadFeature.STRICT_DUPLICATE_DETECTION)
             .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS).build();
     private final JdbcTemplate jdbc;
@@ -86,9 +92,11 @@ public class ManagedExtensionRecordStore {
      * Applies the Stage H revisions that one journal transaction carries.
      * It runs inside the Session store's commit, after the transaction's
      * resources are stored, so {@code resources} reads each body verified.
-     * A Stage H event must hold its declared place among the transaction's
-     * {@code eventCount} events, and the transaction must end with its
-     * commit marker, as the authority's reader requires.
+     * Every record line must be one the authority's reader can parse,
+     * whether or not the transaction carries a Stage H record. A Stage H
+     * event must hold its declared place among the transaction's
+     * {@code eventCount} events, and its transaction must hold only those
+     * events and then its commit marker, as the authority writes it.
      */
     void apply(String tenantId, String workspaceId, String sessionId,
             long firstSequence, int eventCount, byte[] recordBytes,
@@ -96,11 +104,19 @@ public class ManagedExtensionRecordStore {
         String[] lines = new String(recordBytes, StandardCharsets.UTF_8)
                 .split("\n");
         boolean applied = false;
+        boolean shaped = true;
         String lastSubtype = null;
         for (int index = 0; index < lines.length; index++) {
-            JsonNode record = read(lines[index], "journal record");
+            JsonNode record = parse(lines[index]);
+            if (record == null) {
+                throw new ApiException(HttpStatus.BAD_REQUEST,
+                        ManagedSessionStoreModels.ERROR_INVALID_REQUEST,
+                        "Record line " + (index + 1) + " is not a JSON object"
+                                + " the Session authority can read.");
+            }
             lastSubtype = record.path("subtype").textValue();
             if (!EVENT_SUBTYPE.equals(lastSubtype)) {
+                shaped &= index >= eventCount;
                 continue;
             }
             JsonNode event = record.path("managedSession");
@@ -123,9 +139,9 @@ public class ManagedExtensionRecordStore {
                 applied = true;
             }
         }
-        require(!applied || COMMIT_SUBTYPE.equals(lastSubtype),
-                "A transaction with a Stage H record ends with its commit"
-                        + " marker.");
+        require(!applied || shaped && COMMIT_SUBTYPE.equals(lastSubtype),
+                "A transaction with a Stage H record holds only its events,"
+                        + " then its commit marker.");
     }
 
     public TaskPage listTasks(String tenantId, String sessionId,
@@ -224,8 +240,7 @@ public class ManagedExtensionRecordStore {
                 && resource.digest().equals(recordRef.get("digest")
                         .textValue()),
                 "The Stage H record does not match its resource.");
-        JsonNode record = read(new String(resource.bytes(),
-                StandardCharsets.UTF_8), "Stage H record");
+        JsonNode record = readBody(resource);
         try {
             body.require().accept(record);
         } catch (InvalidRecordException error) {
@@ -256,10 +271,8 @@ public class ManagedExtensionRecordStore {
         } else {
             require(previous.domain().equals(domain)
                     && previous.recordId().equals(recordId)
-                    && body.isSuccessor().test(read(new String(resources
-                            .apply(previous.resourceId()).bytes(),
-                            StandardCharsets.UTF_8), "Stage H record"),
-                            record),
+                    && body.isSuccessor().test(readBody(resources.apply(
+                            previous.resourceId())), record),
                     domain + " record " + recordId
                             + " cannot follow its revision "
                             + previous.revision() + ".");
@@ -315,23 +328,18 @@ public class ManagedExtensionRecordStore {
 
     /**
      * Announces a changed task view on the Session event stream, in the same
-     * transaction, when the Session has a public resource.
+     * transaction, when the Session has a public resource that is not
+     * deleted or being deleted, so a deleted Session's terminal event stays
+     * its last one.
      */
     private void announce(String tenantId, String sessionId, String taskId,
             String state, long revision) {
         if (sessions == null) {
             return;
         }
-        Optional<SessionRecord> session = sessions.findSessionById(sessionId);
-        // A deleted Session's terminal event stays its last one.
-        if (session.isEmpty() || !tenantId.equals(session.get().tenantId())
-                || "DELETING".equals(session.get().status())
-                || "DELETED".equals(session.get().status())) {
-            return;
-        }
-        sessions.appendPublicEventIfAbsent(tenantId, sessionId, null,
+        sessions.appendLiveSessionEventIfAbsent(tenantId, sessionId,
                 "task.updated", Map.of("taskId", taskId, "state", state),
-                false, "task:" + taskId + ":" + revision);
+                "task:" + taskId + ":" + revision);
     }
 
     private static TaskRow taskRow(ResultSet result, String tenantId,
@@ -368,15 +376,36 @@ public class ManagedExtensionRecordStore {
         return matcher != null && matcher.matches() ? matcher.group(1) : null;
     }
 
-    private static JsonNode read(String text, String label) {
+    private static JsonNode readBody(StoredResource resource) {
+        JsonNode record = parse(new String(resource.bytes(),
+                StandardCharsets.UTF_8));
+        require(record != null, "The Stage H record is not a JSON object the"
+                + " Session authority can read.");
+        return record;
+    }
+
+    /** A JSON object as the authority's reader parses it, or null. */
+    private static JsonNode parse(String text) {
         try {
             JsonNode node = JSON.readTree(text);
-            require(node != null && node.isObject(),
-                    label + " must be a JSON object.");
-            return node;
+            return node != null && node.isObject() && finite(node) ? node
+                    : null;
         } catch (JsonProcessingException error) {
-            throw rejected(label + " is not valid JSON.");
+            return null;
         }
+    }
+
+    /** JavaScript reads a number past the double range as an infinity. */
+    private static boolean finite(JsonNode node) {
+        if (node.isNumber()) {
+            return Double.isFinite(node.doubleValue());
+        }
+        for (JsonNode child : node) {
+            if (!finite(child)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private static long time(JsonNode node) {

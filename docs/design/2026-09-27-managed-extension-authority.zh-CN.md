@@ -1,8 +1,8 @@
-# Managed 扩展记录 Authority（H0c）
+# Managed 扩展 Authority（H0c）
 
 [English](2026-09-27-managed-extension-authority.md) | [简体中文](2026-09-27-managed-extension-authority.zh-CN.md)
 
-状态：已在本次变更中实现；目前尚无 Stage H domain 开放提交。更新：2026-09-27。本文是 [#12827](https://github.com/QwenLM/qwen-code/issues/12827) 的 H0c 切片，属于 Managed Agent 提案 [#12380](https://github.com/QwenLM/qwen-code/issues/12380) 的 H 阶段。它建立在 H0a 的任务契约（[设计](2026-09-27-managed-agent-task-contract.zh-CN.md)）和 H0b 的记录契约（[设计](2026-09-27-managed-extension-record-contract.zh-CN.md)）之上。下文的“参考设计”指该提案[扩展运行时设计](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-extension-runtime.md)的第 1、3、11、13 节，以及其 [Session 存储设计](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-session-storage.md)第 3 节和[私有控制协议](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-control-protocol.md)中的 `OperationGrant`，均以 #12827 固定的提交为准。
+状态：已在本次变更中实现；目前尚无 Stage H domain 开放提交。更新：2026-09-28。本文是 [#12827](https://github.com/QwenLM/qwen-code/issues/12827) 的 H0c 切片，属于 Managed Agent 提案 [#12380](https://github.com/QwenLM/qwen-code/issues/12380) 的 H 阶段。它建立在 H0a 的任务契约（[设计](2026-09-27-managed-agent-task-contract.zh-CN.md)）和 H0b 的记录契约（[设计](2026-09-27-managed-extension-record-contract.zh-CN.md)）之上。下文的“参考设计”指该提案[扩展运行时设计](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-extension-runtime.md)的第 1、3、11、13 节，以及其 [Session 存储设计](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-session-storage.md)第 3 节和[私有控制协议](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-control-protocol.md)中的 `OperationGrant`，均以 #12827 固定的提交为准。
 
 ## 问题
 
@@ -34,7 +34,8 @@ H0b 定下了 Stage H 各项能力共用的记录，但还没有组件提交它�
 - **任务事件与取消。** 这两类路由保持 `planned`：H0c 的任务不产生输出，也还没有能响应取消的 owner。
 - **派发器。** 目前还没有组件读取 outbox；派发器由 H4 与 H5 加入。
 - **提交时的 grant 校验。** 哪些提交必须出示 grant，由各切片随其阶段决定。
-- **Runtime、Harness 与 Broker 路径。** 不改动工具循环、Broker 或 worker。
+- **Runtime、Harness 与 Broker 路径。** 不改动工具循环、Broker 或 worker。Broker 的线上状态映射只是对它新增的契约测试可见。
+- **先后顺序。** #12827 要求 H0c 等待支持工具的 Hosted 回合、#12765 与 #12766 落地。H0c 不改变任何 Harness、Broker 或 worker 路径，且 `monitor_run` 仍未开放，因此它可以先行合入，也可以等待；这由维护者决定。
 
 ## 决策
 
@@ -43,8 +44,8 @@ H0b 定下了 Stage H 各项能力共用的记录，但还没有组件提交它�
 3. **每条记录一条修订链，按正文自身的身份区分**（H0b 未决问题 3）。Stage H 修订的资源恰好保存封闭的正文，不合并任何其他内容。修订链按 domain 与正文自身的身份（Monitor 为 `monitorId`）区分，其修订号、上一修订和开启它的操作都来自日志顺序，因而不可能与正文不一致。
 4. **第一条修订必须开启运行。** 其运行为 `reserved` 或 `admitted`，执行为空或 `intent`，交付为空或 `planned`；Monitor 还必须尚未写出输出，而没有启动回执它也不可能有观测。H0b 的后继规则只说明一条修订如何接在另一条之后；没有这条规则，一条记录可能一出现就已结算。
 5. **`degraded` 就是带恢复原因的运行中或等待中的运行**（H0b 未决问题 2）。这正是 H0b 允许在保障降低的情况下继续进行的状态，例如 Runtime 丢失后重建了观察的 Monitor。
-6. **outbox 由交付状态线导出。** 只要记录的交付处于 `planned`、`sending`、`partial`、`accepting` 或 `unknown`，它就在 outbox 中：仍需发送，或需要在不重发的前提下对账。由于 outbox 是已提交运行的投影，它总是与运行一同提交。`accepted` 等待的是模型，而不是派发器。
-7. **grant 由已提交的事实导出。** authority 为一条已提交的记录签发 grant：其 operation 是开启该记录的命令，因此一个命令至多开启一条记录；其修订号是该记录当前的修订号；其计划是该修订的资源。owner、Workspace 代数与阶段由调用方提供，生命周期、信任与阶段的检查由登记阶段的切片加入。grant 不需要自己的日志条目，重启后的 authority 会再签发相同的修订。Runtime 的 gate 按 H0b 的替换规则安装它，因此再次签发即为续期，而更换 owner 或范围需要该记录的新修订。gate 绝不重新开启已撤销的修订，被撤销的 grant 仍约束下一个 grant。
+6. **outbox 由交付状态线导出。** 只要记录的交付处于 `planned`、`sending`、`partial`、`accepting` 或 `unknown`，它就在 outbox 中：仍需发送，或需要在不重发的前提下对账。由于 outbox 是已提交运行的投影，它总是与运行一同提交。`accepted` 等待的是模型，而不是派发器。Monitor 的运行没有交付状态线，因此 H0c 的记录都不在 outbox 中：交付相关的列与 `isExtensionDeliveryPending` 是为 H4 和 H5 新增的正文准备的，fixture 在普通运行上固定了这条规则。
+7. **grant 由已提交的事实导出。** authority 为一条已提交的记录签发 grant：其 operation 是开启该记录的命令，因此一个命令至多开启一条记录；其修订号是该记录当前的修订号；其计划是该修订的资源。owner、Workspace 代数与阶段由调用方提供，生命周期、信任与阶段的检查由登记阶段的切片加入。grant 不需要自己的日志条目，重启后的 authority 会再签发相同的修订。Runtime 的 gate 按 H0b 的替换规则安装它，因此再次签发即为续期，而更换 owner 或范围需要该记录的新修订。gate 绝不重新开启已撤销的修订，被撤销的 grant 仍约束下一个 grant。格式错误的撤销会被拒绝，而不是悄悄错过它指向的 grant。gate 保存在 Runtime 的内存中：重启后的 Runtime 从空的 gate 开始，因此撤销只在收到它的进程存活期间有效；接入 gate 的 H1 负责决定撤销是否必须成为已提交的事实。
 8. **任务身份是两侧都能计算的哈希。** 记录键是对 Session ID、domain 与记录身份以 NUL 连接后求 SHA-256，任务 ID 为 `task_` 加上该键。该 ID 满足公开接口 128 字符的上限，且不暴露任何内部标识。
 9. **提供列表与详情，不提供事件与取消。** 四条读取路由改为 `partial`，每个 Session 都报告 `capabilities.tasks`，因为每个 Session 都提供这些路由。任务事件保持 `planned`，直到有任务产生输出；取消保持 `planned`，直到有 owner 能停止任务；`PublicCommandOperation.task_id` 与 `WebShellCommandOperation.taskId` 随取消保持 `planned`。因此 H0c 的任务不宣告任何操作，也不带 Artifact。
 10. **Runtime 的报告映射到执行状态线。** Broker 记录处于 `PREPARED` 或 `DISPATCHING` 时为 `intent`，`EXECUTING` 或 `CANCEL_REQUESTED` 为 `dispatch_started`，`UNKNOWN` 为 `outcome_unknown`；`SETTLED` 在状态为 `not_started` 时为 `not_started_proven`，否则为 `settled`。Harness 按同样的方式读取线上状态，唯一的区别是把 `executing` 视为已派发：线上无法区分尚未发送的认领和已发送的调用，而把可能已发送的调用当作未发送，可能导致它被执行两次。
@@ -54,11 +55,11 @@ H0b 定下了 Stage H 各项能力共用的记录，但还没有组件提交它�
 `LocalManagedSessionAuthority.commitExtensionRecord(command, { domain, record, input? }, actor)` 提交一条修订。
 
 1. domain 必须在 `MANAGED_EXTENSION_RECORD_BODIES` 中有记录正文；目前只有 `monitor_run` 有。
-2. 重试的命令在重新发布任何内容之前，返回它已提交的修订，即使该 domain 此后已被关闭提交。同一命令携带不同内容则为冲突。
+2. 重试的命令在重新发布任何内容之前，返回它已提交的修订，即使该 domain 此后已被关闭提交。同一命令携带不同内容则为冲突；一个命令若提交过的不是 Stage H 记录，同样为冲突。
 3. domain 必须已开放提交；`monitor_run` 未开放。
 4. 解析并封闭正文。记录的第一条修订必须开启运行，且其命令不能已经开启过另一条记录；之后的每一条修订都必须是最新修订的后继。
 5. 命令必须可写：日志没有因先前的写入失败而停止，命令指向本 Session，且给定的预期序号等于已提交的序号。提交时还会再做这些检查，但先行检查可以保证被拒绝的重试不会发布任何正文。
-6. 解析后的正文作为资源发布；`domain.committed` 事件与给定的输入及其唤醒在一个事务中提交。
+6. 解析后的正文作为资源发布；`domain.committed` 事件与给定的输入及其唤醒在一个事务中提交。authority 与该事务的其余状态一同应用这条修订，因此任何读取方都不会看到事件已提交而记录尚未生效的状态。
 
 其他任何路径若试图为有正文的 domain 提交 `domain.committed` 事件，例如 `appendExecution` 或 `commitDomainRecord`，都会被拒绝，因此没有修订能绕过它的修订链。其他任何 ID 形如 Stage H 记录事件所用 `<domain>:<n>` 的事件也会被拒绝，因此没有事件能占用后续修订所需的 ID。
 
@@ -100,12 +101,12 @@ authority 打开时，会按同样的规则重放日志中的每条 Stage H 修�
 
 Flyway `V16` 新增 `qwen_managed_session_extension_record`：每条记录一行，以 Session 范围键和记录键为主键，保存记录身份、最新修订及其资源、任务投影与交付状态线。`ManagedExtensionRecordStore` 在 `ManagedSessionStore.commit` 中写入它，时机在事务的资源存入之后，并处于同一个 SQL 事务内：
 
-1. 以与 authority 读取器同样严格的方式解析事务的每一行记录，拒绝重复键与尾随内容，并挑出有正文的 domain 的 `domain.committed` 事件。
-2. 按 authority 读取器的方式检查每个这样的事件：事件封闭且没有 subject（authority 从不为它设置 subject）；版本为 1；序号与它在事务事件中的位置相符，因此它既不会占据提交标记所在的行，也不会属于 genesis；键封闭且属于本 Session；payload 封闭且其引用指向该 domain 的版本 1 记录。携带这类事件的事务必须以提交标记结尾。然后从校验过的资源读取正文，检查它与引用一致，并用 `ManagedExtensionRecords` 检查正文。
+1. 以与 authority 读取器同样严格的方式解析事务的每一行记录：不允许重复键或尾随内容，嵌套不超过 64 层（由共享的存储契约固定），数字必须有限。然后挑出有正文的 domain 的 `domain.committed` 事件。
+2. 按 authority 读取器的方式检查每个这样的事件：事件封闭且没有 subject（authority 从不为它设置 subject）；版本为 1；序号与它在事务事件中的位置相符，因此它既不会占据提交标记所在的行，也不会属于 genesis；键封闭且属于本 Session；payload 封闭且其引用指向该 domain 的版本 1 记录。携带这类事件的事务只能依次包含它的事件和提交标记。然后从校验过的资源读取正文，检查它与引用一致，并用 `ManagedExtensionRecords` 检查正文。
 3. 对照存储中的最新修订检查首修订规则或后继规则，并借助每行保存的开启命令哈希，检查开启记录的命令没有开启过另一条记录。然后用 `ManagedExtensionProjection` 投影任务视图，插入或更新该行。
-4. 当视图发生变化，且该 Session 有公开资源、未被删除也不在删除中时，追加一个带 `data.taskId` 与 `data.state` 的 `task.updated` 事件；事件带有去重键，重放的事务不会重复宣告。该事件与其他 Session 事件一样追加：它会推进 Session 的 `updated_at` 与版本；若它落在两段流式文本增量之间，会像任何穿插进来的事件一样把文本分段拆开。
+4. 当视图发生变化，且该 Session 有公开资源、未被删除也不在删除中时，追加一个带 `data.taskId` 与 `data.state` 的 `task.updated` 事件；事件带有去重键，重放的事务不会重复宣告。它先锁住 Session 所在的行再读取状态，因此能看到在 Session 存储事务进行期间已提交的删除。该事件与其他 Session 事件一样追加：它会推进 Session 的 `updated_at` 与版本；若它落在两段流式文本增量之间，会像任何穿插进来的事件一样把文本分段拆开。
 
-被这些规则拒绝的修订返回 `409 managed_session_extension_record_rejected`。正文资源缺失、属于其他 Session 或校验失败时，沿用存储原有的回应（`409 managed_session_resource_missing`、`404 session_not_found`、`500 managed_session_resource_corrupt`）。无论哪种情况，整个提交都会回滚。重放的事务在上述步骤之前就已返回。现在每一行记录都必须是 JSON 对象；authority 一直是这样写的。这些行是持久的读模型：重启后的服务读到相同的列表，而导出它们的日志仍是真相来源。
+被这些规则拒绝的修订返回 `409 managed_session_extension_record_rejected`。正文资源缺失、属于其他 Session 或校验失败时，沿用存储原有的回应（`409 managed_session_resource_missing`、`404 session_not_found`、`500 managed_session_resource_corrupt`）。无论哪种情况，整个提交都会回滚。重放的事务在上述步骤之前就已返回。现在，无论事务是否携带 Stage H 记录，每一行记录都必须是 authority 读取器能够接受的 JSON 对象，否则返回 `400 managed_session_invalid_request`。authority 写出的行一直满足这一点。这些行是持久的读模型：重启后的服务读到相同的列表，而导出它们的日志仍是真相来源。
 
 ## 公开契约
 
@@ -127,26 +128,30 @@ OpenAPI 版本升为 `1.18.0`，排在事件重放（#12840）的 `1.17.0` 之�
 - 7 个任务 ID 用例；
 - 50 个运行起始用例与 31 个 Monitor 起始用例；
 - 45 个单修订视图与 11 段运行历史，附带各自的 outbox 归属；
-- 2 条 Monitor 修订链，两侧分别通过各自的 authority 或存储提交；另有 9 条两侧都必须拒绝的修订链，其中一条复用了已开启另一条记录的命令；
-- 9 个 Broker 执行用例与 8 个线上状态执行用例。
+- 2 条 Monitor 修订链，两侧分别通过各自的 authority 或存储提交；另有 12 条两侧都必须拒绝的修订链：其中一条复用了已开启另一条记录的命令，另有三条在相同或更旧的代数下、或未经未知结果就重新挂接 Runtime；
+- 9 个 Broker 用例，每个都附带 Broker 为它上报的线上状态以及 Harness 据此读出的执行状态；另有 8 个线上状态执行用例。
 
-标注由一个依据本文编写、独立于两种语言的 Python 实现给出，它与 H0b 一样保存在仓库之外。`managed-extension-projection.test.ts` 与 `ManagedExtensionProjectionContractTest` 都回放任务 ID、起始、视图与历史用例。执行用例则各自回放本侧读取的报告：TypeScript 回放由 Harness 映射的线上状态用例，Java 回放 Broker 用例。authority 测试套件、`ManagedExtensionRecordStoreTest` 与 `ManagedAgentMySqlIT` 提交修订链。
+标注由一个依据本文编写、独立于两种语言的 Python 实现给出，它与 H0b 一样保存在仓库之外。`managed-extension-projection.test.ts` 与 `ManagedExtensionProjectionContractTest` 都回放任务 ID、起始、视图与历史用例。Java 映射每个 Broker 用例的状态；TypeScript 映射它的线上状态以及线上状态用例，并检查两种读法只在 `DISPATCHING` 上不同，与决策 10 一致；Broker 的 `ManagedExtensionExecutionContractTest` 则检查 Broker 确实上报这些线上状态。authority 测试套件、`ManagedExtensionRecordStoreTest` 与 `ManagedAgentMySqlIT` 提交修订链。
+
+`managed-extension-journal-v1.fixtures.json` 保存了 TypeScript authority 通过其 HTTP 存储发出的请求，对应一个含两条 Monitor 修订的 Session，其中第二条带有通知输入及其唤醒。写入端的输出一旦变化，HTTP 存储测试就会失败；以 `QWEN_WRITE_GOLDEN=1` 运行时会重写该文件。`ManagedSessionStoreIntegrationTest` 把同样的请求发给 Java 存储，后者必须全部接受并投影出相同的任务。
 
 ## 涉及文件
 
 - `packages/core/src/managed-runtime/managed-extension-projection.ts` 及其测试，`managed-operation-grant-gate.ts` 及其测试（新增）。
 - `packages/core/src/managed-runtime/managed-extension-record.ts`：起始规则。
 - `packages/core/src/managed-runtime/managed-session-authority.ts` 与新增的 `managed-session-authority.extension.test.ts`。
-- `packages/core/src/managed-runtime/http-managed-session-store.ts` 及其测试。
-- 上述 fixture 文件（新增）。
-- `packages/sdk-java/managed-agent-server` 中：`ManagedExtensionProjection`、`ManagedExtensionRecordStore`、`ManagedTaskService` 与 `V16__managed_extension_record.sql`（新增）；`ManagedExtensionRecords`、`ManagedSessionStore`、`ManagedAgentService`、`ApiModels` 与两个控制器；OpenAPI 规范；`ManagedAgentApiContractTest`、`ManagedAgentMySqlIT` 与三个新测试。
+- `packages/core/src/managed-runtime/http-managed-session-store.ts` 及其测试，以及 `managed-session-store-contract.test.ts`。
+- 上述两个 fixture 文件（新增），以及 `managed-session-store-v1.fixtures.json` 中的 `maxJsonDepth`。
+- `packages/sdk-java/managed-agent-server` 中：`ManagedExtensionProjection`、`ManagedExtensionRecordStore`、`ManagedTaskService` 与 `V16__managed_extension_record.sql`（新增）；`ManagedExtensionRecords`、`ManagedSessionStore`、`ManagedSessionStoreModels`、`AgentStateStore`、`ManagedAgentStore`、`ManagedAgentService`、`ApiModels` 与两个控制器；OpenAPI 规范；`ManagedAgentApiContractTest`、`ManagedAgentMySqlIT`、`ManagedSessionStoreIntegrationTest`、`ManagedSessionStoreContractFixtureTest` 与 `PlannedTaskContractTest`；以及 `ManagedExtensionProjectionContractTest`、`ManagedExtensionRecordStoreTest` 和测试辅助类 `ExtensionRecordJournal`（新增）。
+- `packages/sdk-java/runtime-broker` 中：`RuntimeBrokerHttpServer.wireState` 改为包内可见，并由新增的 `ManagedExtensionExecutionContractTest` 固定。
 - `packages/web-shell/client/components/managed/generated/managed-agent-api.ts`（重新生成）。
 - 本设计的两种语言版本，以及 H0a 与 H0b 设计的状态行。
 
 ## 验证计划
 
-- **TypeScript：** 回放 fixture；authority 测试套件覆盖修订链、发布前的拒绝、重放、通知与唤醒、绕过防护、保留的事件 ID、未开放的 domain、冷重建、正文缺失或接不上修订链，以及 grant；gate 对照 H0b 的替换用例与撤销语义；HTTP 存储覆盖嵌套资源与经 HTTP 的冷重建。
-- **Java：** 回放 fixture；通过 `ManagedSessionStore` 覆盖修订链、拒绝（并断言拒绝它的规则）、重放、宣告与已删除的 Session；API 契约测试覆盖每条已映射的路由与每个记录；MySQL 集成测试在 MariaDB 10.11 与 MySQL 8.4 上运行，并证明被拒绝的修订不会留下任何资源、资源引用或日志行。
+- **TypeScript：** 回放 fixture；authority 测试套件覆盖修订链、发布前的拒绝、重放以及提交时未带记录的命令、通知与唤醒、事务一提交记录即可见、绕过防护、保留的事件 ID、未开放的 domain、冷重建、正文缺失、接不上修订链或共用开启命令，以及 grant；gate 对照 H0b 的替换用例、撤销语义与格式错误的输入；HTTP 存储覆盖嵌套资源、经 HTTP 的冷重建以及写入端发出的请求。
+- **Java：** 回放 fixture；通过 `ManagedSessionStore` 覆盖修订链、拒绝（并断言拒绝它的规则）、authority 无法解析的记录行、重放、宣告与已删除的 Session；经 HTTP 路由回放 TypeScript 写入端的请求；API 契约测试覆盖每条已映射的路由与每个记录；MySQL 集成测试在 MariaDB 10.11 与 MySQL 8.4 上运行，并证明被拒绝的修订不会留下任何资源、资源引用或日志行，且在 Stage H 提交期间已提交的删除不会在其终止事件之后收到 `task.updated`。
+- **Broker：** 每个执行状态对应上报的线上状态。
 - **生成类型：** WebShell 生成器测试。
 - **变异检查：** 依次禁用投影规则、起始与修订链规则、authority 的拒绝以及存储的检查，每一处都有测试失败。
 
@@ -155,7 +160,8 @@ OpenAPI 版本升为 `1.18.0`，排在事件重放（#12840）的 `1.17.0` 之�
 - 对每个 fixture 用例，TypeScript 与 Java 得出相同的任务 ID、任务视图与 outbox 归属，并拒绝相同的修订链；两侧各自把本侧读取的 Runtime 报告映射为 fixture 给出的执行状态。
 - 被拒绝的修订在两侧都不提交任何内容。
 - 重新打开的 authority 与重启后的服务报告与之前相同的任务列表。
-- 没有映射任何 planned 路由；对于没有 Stage H 记录的 Session，除了空的任务列表和 `capabilities.tasks` 之外没有任何变化。
+- 没有映射任何 planned 路由；对于没有 Stage H 记录的 Session，除了空的任务列表、`capabilities.tasks` 以及更严格的记录行解析之外没有任何变化。
+- H0 门槛在契约层面成立。fixture 固定了任务 ID、修订链规则（Runtime 只能在未知结果之后、以更新的代数重新挂接）、Broker 的执行状态以及 Broker 为其上报的线上状态。TypeScript、Java 存储与 Broker 各自回放自己的部分。目前只有提交路径是端到端运行的：在 H3 开放 `monitor_run`、H1 接入 gate 之前，生产代码不会调用 `commitExtensionRecord`、grant gate 或执行状态映射。
 - `monitor_run` 仍被拒绝提交。
 
 ## 未决问题
@@ -166,6 +172,7 @@ OpenAPI 版本升为 `1.18.0`，排在事件重放（#12840）的 `1.17.0` 之�
 4. **逻辑启动与物理启动。** H0b 允许运行在执行已处于 `running_attached` 时仍停在 `admitted`，此时任务显示为 `pending`，Runtime 状态为 `ready`，且没有启动时间。收紧这条规则属于对 H0b 契约的修改。
 5. **重放的 domain 记录。** `commitDomainRecord` 会在发现命令是重放之前就发布新的正文，并返回这个正文的引用，而不是已提交的那个。`commitExtensionRecord` 先检查重放；旧方法留待单独修复。
 6. **通知唤醒。** 提交通知输入的修订也会提交对应的 `wake.requested`，但目前还没有任何消费方。托管 Session 路径在已接受的输入缺少 `turn.settled` 时拒绝重新打开 Session（`hosted_turn_recovery_required`），因此 H3 在开放会发出通知的 domain 之前，必须先运行或结算这类输入。
+7. **后续新增的正文。** Java 存储只物化它认识的正文，其他 domain 的 `domain.committed` 事件则与 H0c 之前一样直接放行。新增正文的切片必须先让服务端上线，再让任何写入者提交该 domain；否则就要在服务端获得该正文时从日志回填这些行。不然，这样的服务端看到某条记录的第一条修订并不是起始修订，会拒绝它，写入者随之停止。H0c 唯一的正文 `monitor_run` 两侧同时具备，且仍未开放。
 
 ## 后续工作
 

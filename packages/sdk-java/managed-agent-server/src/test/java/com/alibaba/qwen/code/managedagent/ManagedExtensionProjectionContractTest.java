@@ -185,8 +185,12 @@ class ManagedExtensionProjectionContractTest {
     }
 
     static JsonNode fixtures() throws IOException {
-        Path path = contractDirectory().resolve(
-                "managed-extension-projection-v1.fixtures.json");
+        return contract("managed-extension-projection-v1.fixtures.json");
+    }
+
+    /** A file of the shared managed-runtime contracts. */
+    static JsonNode contract(String name) throws IOException {
+        Path path = contractDirectory().resolve(name);
         assertTrue(Files.isRegularFile(path),
                 () -> "missing shared contract: " + path);
         return JSON.readTree(path.toFile());

@@ -32,7 +32,12 @@ const fixtures = JSON.parse(
     'utf8',
   ),
 ) as {
-  readonly grant: Grant & { readonly resourceScope: { phases: string[] } };
+  readonly grant: Grant & {
+    readonly resourceScope: {
+      readonly phases: string[];
+      readonly recordRef: Readonly<Record<string, unknown>>;
+    };
+  };
   readonly grantSuccessorCases: ReadonlyArray<{
     readonly id: string;
     readonly valid: boolean;
@@ -130,13 +135,82 @@ describe('managed operation grant gate', () => {
     expect(() => gate.install({ ...next, workspaceGeneration: '3' })).toThrow(
       /cannot replace/,
     );
-    expect(() => gate.install({ ...next, domain: 'child_run' })).toThrow();
+    expect(() =>
+      gate.install({
+        ...next,
+        domain: 'child_run',
+        resourceScope: {
+          ...next.resourceScope,
+          recordRef: {
+            ...next.resourceScope.recordRef,
+            kind: 'managed-child_run',
+          },
+        },
+      }),
+    ).toThrow(/cannot replace/);
     expect(gate.admits(grant.sessionKey, grant.operationId, phase, 0)).toBe(
       false,
     );
     expect(gate.install(next)).toBe('installed');
     expect(gate.admits(grant.sessionKey, grant.operationId, phase, 0)).toBe(
       true,
+    );
+  });
+
+  it('keeps the highest revocation', () => {
+    const gate = new ManagedOperationGrantGate();
+    const grant = { ...fixtures.grant, operationRevision: 5 };
+    const [phase] = grant.resourceScope.phases;
+    gate.install(grant);
+    gate.revoke(grant.sessionKey, grant.operationId, 5);
+    // A late revocation of an older revision lowers nothing.
+    gate.revoke(grant.sessionKey, grant.operationId, 3);
+    expect(() => gate.install(grant)).toThrow(/was revoked/);
+    expect(gate.admits(grant.sessionKey, grant.operationId, phase, 0)).toBe(
+      false,
+    );
+  });
+
+  it('refuses a malformed revocation instead of missing its grant', () => {
+    const gate = new ManagedOperationGrantGate();
+    const grant = fixtures.grant;
+    const [phase] = grant.resourceScope.phases;
+    gate.install(grant);
+    const { workspaceId: _omitted, ...partialKey } = grant.sessionKey;
+    for (const revoke of [
+      () =>
+        gate.revoke(
+          partialKey as unknown as ManagedSessionKey,
+          grant.operationId,
+          grant.operationRevision,
+        ),
+      () => gate.revoke(grant.sessionKey, '', grant.operationRevision),
+      ...[undefined, Number.NaN, 0, 1.5, Number.MAX_SAFE_INTEGER + 1].map(
+        (revision) => () =>
+          gate.revoke(
+            grant.sessionKey,
+            grant.operationId,
+            revision as unknown as number,
+          ),
+      ),
+    ]) {
+      expect(revoke).toThrow(ManagedSessionRecordError);
+    }
+    expect(() =>
+      gate.admits(
+        partialKey as unknown as ManagedSessionKey,
+        grant.operationId,
+        phase,
+        0,
+      ),
+    ).toThrow(ManagedSessionRecordError);
+    // The refusals changed nothing: the grant admits until a real revocation.
+    expect(gate.admits(grant.sessionKey, grant.operationId, phase, 0)).toBe(
+      true,
+    );
+    gate.revoke(grant.sessionKey, grant.operationId, grant.operationRevision);
+    expect(gate.admits(grant.sessionKey, grant.operationId, phase, 0)).toBe(
+      false,
     );
   });
 
