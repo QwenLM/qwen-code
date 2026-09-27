@@ -93,8 +93,9 @@ Harness 输入，因此请求摘要与幂等重放都不变。WebShell 客户端
 ### 4.6 SSE 路由上的 JSON 错误
 
 新增的错误探测发现，只发送 `Accept: text/event-stream` 的客户端（WebShell 客户端
-正是如此）收到的是 500，而不是 `404` 或 `400` 错误信封，因为 JSON 信封不是可接受
-的表示。错误响应现在预设 `Content-Type: application/json`，内容协商不再丢弃它们。
+正是如此）遇到的是未处理的异常，而不是 `404` 或 `400` 错误信封，因为 JSON 信封不是
+可接受的表示；servlet 容器会把这种异常变成 500。错误响应现在预设
+`Content-Type: application/json`，内容协商不再丢弃它们。
 
 ## 5. 契约测试
 

@@ -112,10 +112,11 @@ a new client needs a server that includes this change.
 ### 4.6 JSON errors on SSE routes
 
 The new error probes showed that a client sending only
-`Accept: text/event-stream`, which is what the WebShell client does, received a
-500 instead of the `404` or `400` envelope, because the JSON envelope was not an
-acceptable representation. Error responses now preset
-`Content-Type: application/json`, so content negotiation no longer drops them.
+`Accept: text/event-stream`, which is what the WebShell client does, hit an
+unhandled exception instead of the `404` or `400` envelope, because the JSON
+envelope was not an acceptable representation; a servlet container turns that
+into a 500. Error responses now preset `Content-Type: application/json`, so
+content negotiation no longer drops them.
 
 ## 5. Contract test
 
