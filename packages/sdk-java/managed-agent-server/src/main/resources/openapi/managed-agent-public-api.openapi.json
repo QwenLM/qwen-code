@@ -5650,7 +5650,7 @@
         "type": "string",
         "enum": ["cancel", "send_input", "read_output"],
         "x-qwen-implementation-status": "planned",
-        "description": "Actions the task supports now, the same for every caller; whether a caller may use one is an authorization check (403). cancel: the cancel route accepts a new command for this task. send_input: reserved for a later capability route. read_output: the task events route returns output events for this task; without it the route returns only state and Artifact events."
+        "description": "Actions the task supports now, the same for every caller. cancel: the cancel route accepts a new command for this task; whether a caller may use it is an authorization check (403 on the cancel route). send_input: reserved for a later capability route. read_output: the task events route returns output events for this task to any caller that can read it. read_output does not change during the task's life, and a task without it produces no output events: its output goes only to Artifacts, so the events route never filters out events that exist."
       },
       "PublicTask": {
         "type": "object",
@@ -6376,7 +6376,7 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 512,
-            "description": "The position after the last event this page covers: every earlier event was either returned or filtered out for this page, and an event held back by limit is never passed, so an empty page can still advance past filtered events; when the page covers no event, the requested position, or the start of the retained events when after was omitted. Pass it back to continue. It is never null because a running task can produce more events."
+            "description": "The cursor of the last returned event, so an event held back by limit is never passed; on an empty page, the requested position, or the start of the retained events when after was omitted. Pass it back to continue. It is never null because a running task can produce more events."
           }
         },
         "x-qwen-implementation-status": "planned"
@@ -6499,7 +6499,7 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 512,
-            "description": "The position after the last event this page covers: every earlier event was either returned or filtered out for this page, and an event held back by limit is never passed, so an empty page can still advance past filtered events; when the page covers no event, the requested position, or the start of the retained events when after was omitted. Pass it back to continue. It is never null because a running task can produce more events."
+            "description": "The cursor of the last returned event, so an event held back by limit is never passed; on an empty page, the requested position, or the start of the retained events when after was omitted. Pass it back to continue. It is never null because a running task can produce more events."
           }
         },
         "x-qwen-implementation-status": "planned"

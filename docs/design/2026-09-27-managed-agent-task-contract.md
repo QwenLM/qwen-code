@@ -167,11 +167,9 @@ reports.
 Every event carries `cursor`, the position after it, which also serves as its
 identity. A consumer that stores the cursor with each event it applies resumes
 after a crash without applying an output chunk twice. A page's `next_cursor`
-is the position after the last event the page covers: every earlier event was
-either returned or filtered out for this page, and an event held back by
-`limit` is never passed, so a page that filtered everything out still
-advances; when the page covers no event, it is the requested position, or the
-start of the retained events when `after` was omitted. Unlike list pages,
+is the cursor of its last event, so an event held back by `limit` is never
+passed; on an empty page it is the requested position, or the start of the
+retained events when `after` was omitted. Unlike list pages,
 `next_cursor` is required and never `null`: a running task can produce more
 events, so a caller that reached the end still needs a position to poll from.
 `after` accepts an event's or a page's cursor, or a task's `output_cursor`;
@@ -190,10 +188,13 @@ it, and allows `limit` up to 1000 with a default of 100:
 invalid_event_cursor`, the code the Session event history already uses.
 
 `action_capabilities` describes the task, not the caller: it lists the
-actions the task supports now, the same for every caller, and whether a
-caller may use one is a separate authorization check. `read_output` says that
-the route returns `output` events for the task. Without it the route returns
-only state and Artifact events.
+actions the task supports now, the same for every caller. Whether a caller may
+cancel is a separate authorization check (`403` on the cancel route); reading
+output needs only read access. `read_output` says that the route returns
+`output` events for the task. It does not change during the task's life, and
+a task without it produces no output events: its output goes only to
+Artifacts. The route therefore never filters out an event that exists, and the
+guarantees in this section and in section 4.7 hold for every task.
 
 ### 4.4 Cancel
 
@@ -349,8 +350,9 @@ cancel and event query requests are checked as well.
   `1.15.0`. D2 (#12822) also moves the spec; whichever of the two lands later
   takes the next minor version.
 - **H0b.** The shared record schema, including `monitor_run`, the three state
-  lines and `OperationGrant`. It depends on issue question 1 (whether
-  `monitor_run` joins the closed v1 domain index).
+  lines and `OperationGrant`, is #12837. It adds `monitor_run` to the closed v1
+  domain index, which answers issue question 1, and keeps the domain disabled
+  for submission.
 - **H0c.** Builds the task projection, maps these routes as `partial`, and
   defines the Session events that announce task changes. Marking the routes
   alone is not enough: `PublicCommandOperation.task_id`,
