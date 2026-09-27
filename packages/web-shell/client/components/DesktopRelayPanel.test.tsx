@@ -65,6 +65,7 @@ describe('DesktopRelayPanel', () => {
   it('shows the one-time setup command when the relay is not installed', () => {
     const handlers = mount({ phase: 'missing' });
     expect(text()).toContain('desktop-relay install');
+    expect(text()).toContain('desktop-relay disconnect');
     act(() => button('Copy command')?.click());
     act(() => button('Check again')?.click());
     expect(handlers.onCopyCommand).toHaveBeenCalled();
@@ -286,9 +287,29 @@ describe('retainLiveDesktopRelayProbe', () => {
     expect(retainLiveDesktopRelayProbe(live, idle)).toBe(idle);
   });
 
-  it('stops retaining once the relay has been unobservable too long', () => {
+  it('keeps revocation available without claiming a connection after sustained probe failures', () => {
     const gone = { kind: 'missing' as const };
     expect(retainLiveDesktopRelayProbe(live, gone, 2)).toBe(live);
-    expect(retainLiveDesktopRelayProbe(live, gone, 3)).toBe(gone);
+    const unknown = retainLiveDesktopRelayProbe(live, gone, 3);
+    expect(unknown).toEqual({ kind: 'unknown' });
+    expect(retainLiveDesktopRelayProbe(unknown, gone, 20)).toEqual(unknown);
+    const handlers = mount(
+      deriveDesktopRelayStatus({
+        probe: unknown,
+        sessionId: 's1',
+        daemonUrl: live.active.daemonUrl,
+        blocker: undefined,
+        awaitingApproval: false,
+        error: undefined,
+      }),
+    );
+    expect(text()).toContain('Connection status unknown');
+    expect(text()).toContain('desktop-relay disconnect');
+    expect(text()).not.toContain('desktop-relay install');
+    expect(button('Connect this computer')).toBeUndefined();
+    act(() => button('Disconnect')?.click());
+    expect(handlers.onDisconnect).toHaveBeenCalledOnce();
+    const idle = { kind: 'ready' as const, version: '0.1.7' };
+    expect(retainLiveDesktopRelayProbe(unknown, idle, 21)).toBe(idle);
   });
 });

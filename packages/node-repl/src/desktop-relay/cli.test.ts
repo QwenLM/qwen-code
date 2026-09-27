@@ -5,6 +5,8 @@
  */
 
 import fs from 'node:fs';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -14,6 +16,7 @@ import {
   purgeRelayHome,
   runDesktopRelayCommand,
 } from './cli.js';
+import { createRecordStore } from './runtime.js';
 
 const temporary: string[] = [];
 
@@ -29,6 +32,56 @@ function tempHome(name: string): string {
   fs.writeFileSync(path.join(home, 'package.json'), JSON.stringify({ name }));
   return home;
 }
+
+describe.skipIf(process.platform === 'win32')(
+  'desktop-relay disconnect',
+  () => {
+    it('revokes without a loopback listener and refuses a mismatched process identity', async () => {
+      const home = tempHome('qwen-desktop-relay-runtime');
+      const identity = `relay-disconnect-test-${process.pid}`;
+      const child = spawn(
+        process.execPath,
+        [
+          '-e',
+          `process.title=${JSON.stringify(identity)};process.stdout.write('ready');setTimeout(()=>{},30000)`,
+        ],
+        { stdio: ['ignore', 'pipe', 'ignore'] },
+      );
+      await once(child.stdout, 'data');
+      const exited = once(child, 'exit');
+      const output = vi.spyOn(process.stdout, 'write').mockReturnValue(true);
+      const store = createRecordStore(home);
+      const record = {
+        pid: child.pid!,
+        processIdentity: 'unrelated',
+        origin: 'https://example.com',
+        daemonUrl: 'https://example.com',
+        sessionId: 'test',
+        phase: 'connected' as const,
+        updatedAt: '',
+      };
+      try {
+        store.write(record);
+        expect(
+          await runDesktopRelayCommand(['disconnect', '--home', home]),
+        ).toBe(0);
+        process.kill(child.pid!, 0);
+        expect(output).toHaveBeenLastCalledWith(
+          'No matching live desktop relay was found.\n',
+        );
+        store.write({ ...record, processIdentity: identity });
+        expect(
+          await runDesktopRelayCommand(['disconnect', '--home', home]),
+        ).toBe(0);
+        await expect(exited).resolves.toEqual([null, 'SIGTERM']);
+      } finally {
+        child.kill('SIGTERM');
+        output.mockRestore();
+        await exited;
+      }
+    });
+  },
+);
 
 describe('desktop-relay uninstall --purge', () => {
   it('recognizes only marked runtime directories outside broad roots', () => {

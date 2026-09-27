@@ -21,7 +21,12 @@ import {
   runLaunchctl,
   uninstallLaunchAgent,
 } from './launchd.js';
-import { createRecordStore, packageVersion, runAgent } from './runtime.js';
+import {
+  createRecordStore,
+  ownsRelayProcess,
+  packageVersion,
+  runAgent,
+} from './runtime.js';
 
 const USAGE = `Usage: node-repl-mcp desktop-relay <command>
 
@@ -35,6 +40,8 @@ Commands:
       Unregister the socket; --purge also deletes the runtime.
   status [--home <dir>]
       Show whether the relay is registered and what it last connected to.
+  disconnect [--home <dir>]
+      Request a local disconnect even when the loopback socket is unreachable.
 `;
 
 function flag(args: string[], name: string): string | undefined {
@@ -229,6 +236,30 @@ function status(args: string[]): number {
   return 0;
 }
 
+function disconnect(args: string[]): number {
+  const record = createRecordStore(homeFrom(args)).read();
+  if (
+    record?.pid &&
+    record.processIdentity &&
+    ownsRelayProcess(record.pid, record.processIdentity)
+  ) {
+    try {
+      process.kill(record.pid, 'SIGTERM');
+    } catch (error) {
+      process.stderr.write(
+        `Could not disconnect the relay: ${String(error)}\n`,
+      );
+      return 1;
+    }
+    process.stdout.write(
+      'Local disconnect requested. Run desktop-relay status to check the result.\n',
+    );
+  } else {
+    process.stdout.write('No matching live desktop relay was found.\n');
+  }
+  return 0;
+}
+
 export async function runDesktopRelayCommand(args: string[]): Promise<number> {
   const [command, ...rest] = args;
   if (rest.includes('--home') && flag(rest, '--home') === undefined) {
@@ -242,6 +273,8 @@ export async function runDesktopRelayCommand(args: string[]): Promise<number> {
       return uninstall(rest);
     case 'status':
       return status(rest);
+    case 'disconnect':
+      return disconnect(rest);
     case 'agent':
       // Started by launchd for each accepted connection, not by hand.
       await runAgent(homeFrom(rest));

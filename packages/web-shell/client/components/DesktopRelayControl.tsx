@@ -31,6 +31,7 @@ export type DesktopRelayPhase =
   | 'checking'
   | 'permission-required'
   | 'missing'
+  | 'unknown'
   | 'idle'
   | 'awaiting-approval'
   | 'connecting'
@@ -66,6 +67,9 @@ const COPY = {
     'desktopRelay.status.checking': 'Checking…',
     'desktopRelay.status.permissionRequired': 'Browser permission required',
     'desktopRelay.status.missing': 'Relay not detected',
+    'desktopRelay.status.unknown': 'Connection status unknown',
+    'desktopRelay.unknownHint':
+      'If previously connected, that session may still control this computer. To request a local disconnect without the browser or network, run the installed relay in a terminal on this computer (for a custom installation, adjust the executable path and add --home <dir>):',
     'desktopRelay.status.idle': 'Not connected',
     'desktopRelay.status.awaitingApproval': 'Waiting for approval',
     'desktopRelay.status.connecting': 'Connecting…',
@@ -107,6 +111,9 @@ const COPY = {
     'desktopRelay.status.checking': '检测中…',
     'desktopRelay.status.permissionRequired': '需要浏览器权限',
     'desktopRelay.status.missing': '未检测到中继',
+    'desktopRelay.status.unknown': '连接状态未知',
+    'desktopRelay.unknownHint':
+      '如果此前连接过，该会话可能仍能操作这台电脑。可在这台电脑的终端运行已安装的中继，请求本地断开，无需浏览器或网络（自定义安装路径请替换命令路径并添加 --home <目录>）：',
     'desktopRelay.status.idle': '未连接',
     'desktopRelay.status.awaitingApproval': '等待确认',
     'desktopRelay.status.connecting': '连接中…',
@@ -149,6 +156,7 @@ const STATUS_KEY: Record<DesktopRelayPhase, CopyKey> = {
   checking: 'desktopRelay.status.checking',
   'permission-required': 'desktopRelay.status.permissionRequired',
   missing: 'desktopRelay.status.missing',
+  unknown: 'desktopRelay.status.unknown',
   idle: 'desktopRelay.status.idle',
   'awaiting-approval': 'desktopRelay.status.awaitingApproval',
   connecting: 'desktopRelay.status.connecting',
@@ -175,6 +183,7 @@ const CAN_CONNECT: readonly DesktopRelayPhase[] = [
   'other-session',
 ];
 const CAN_DISCONNECT: readonly DesktopRelayPhase[] = [
+  'unknown',
   'connecting',
   'connected',
   'other-session',
@@ -188,7 +197,9 @@ function sameUrl(a: string, b: string): boolean {
   }
 }
 
-function isLiveProbe(probe: DesktopRelayProbe | undefined): boolean {
+type DesktopRelayObservation = DesktopRelayProbe | { kind: 'unknown' };
+
+function isLiveProbe(probe: DesktopRelayObservation | undefined): boolean {
   const phase = probe?.kind === 'ready' ? probe.active?.phase : undefined;
   return (
     phase === 'connecting' || phase === 'registering' || phase === 'connected'
@@ -198,24 +209,23 @@ function isLiveProbe(probe: DesktopRelayProbe | undefined): boolean {
 /**
  * Consecutive inconclusive probes a retained live observation may survive.
  * Retention keeps the revoke control across a transient probe failure, but the
- * control only works while the relay is reachable — so retention that never
- * expires would keep asserting a connection that has been unobservable for as
- * long as the panel stays mounted.
+ * observation then becomes unknown, not proof that the relay has stopped.
  */
 const MAX_INCONCLUSIVE_PROBES = 3;
 
 export function retainLiveDesktopRelayProbe(
-  previous: DesktopRelayProbe | undefined,
+  previous: DesktopRelayObservation | undefined,
   next: DesktopRelayProbe,
   inconclusiveProbes = 0,
-): DesktopRelayProbe {
+): DesktopRelayObservation {
   if (
     next.kind !== 'ready' &&
-    inconclusiveProbes < MAX_INCONCLUSIVE_PROBES &&
     previous &&
-    isLiveProbe(previous)
+    (isLiveProbe(previous) || previous.kind === 'unknown')
   ) {
-    return previous;
+    return inconclusiveProbes < MAX_INCONCLUSIVE_PROBES
+      ? previous
+      : { kind: 'unknown' };
   }
   return next;
 }
@@ -225,7 +235,7 @@ export function deriveDesktopRelayStatus(input: {
   blocker: DesktopRelayBlocker | undefined;
   sessionId: string | undefined;
   daemonUrl: string | undefined;
-  probe: DesktopRelayProbe | undefined;
+  probe: DesktopRelayObservation | undefined;
   awaitingApproval: boolean;
   error: string | undefined;
 }): DesktopRelayStatus {
@@ -235,6 +245,8 @@ export function deriveDesktopRelayStatus(input: {
     (active.phase === 'connecting' ||
       active.phase === 'registering' ||
       active.phase === 'connected');
+  if (input.probe?.kind === 'unknown')
+    return { phase: 'unknown', canDisconnect: true };
   if (input.blocker !== undefined) {
     return {
       phase: 'unavailable',
@@ -318,6 +330,28 @@ export function DesktopRelayPanel({
         <p className="text-xs text-muted-foreground">
           {t('desktopRelay.needsSessionHint')}
         </p>
+      ) : null}
+
+      {phase === 'unknown' || phase === 'missing' ? (
+        <div className="flex flex-col gap-2" role="alert">
+          <p className="text-xs text-muted-foreground">
+            {t('desktopRelay.unknownHint')}
+          </p>
+          <code className="block break-all rounded bg-muted px-2 py-1 font-mono text-xs">
+            ~/.qwen/desktop-relay/node_modules/.bin/node-repl-mcp desktop-relay
+            disconnect
+          </code>
+          {phase === 'unknown' ? (
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={onCheckAgain}
+            >
+              {t('desktopRelay.checkAgain')}
+            </Button>
+          ) : null}
+        </div>
       ) : null}
 
       {phase === 'missing' ? (
@@ -431,7 +465,9 @@ export function DesktopRelayControl({
   const { baseUrl, token, capabilities } = useWorkspace();
   const { sessionId, workspaceCwd } = useConnection();
   const [open, setOpen] = useState(false);
-  const [probe, setProbe] = useState<DesktopRelayProbe | undefined>(undefined);
+  const [probe, setProbe] = useState<DesktopRelayObservation | undefined>(
+    undefined,
+  );
   const [awaitingApproval, setAwaitingApproval] = useState(false);
   const [error, setError] = useState<string | undefined>(undefined);
   const [copied, setCopied] = useState(false);
@@ -493,8 +529,9 @@ export function DesktopRelayControl({
 
   const refresh = useCallback(async () => {
     const next = await probeDesktopRelay();
+    const failures = inconclusiveProbes.current;
     setProbe((previous) =>
-      retainLiveDesktopRelayProbe(previous, next, inconclusiveProbes.current),
+      retainLiveDesktopRelayProbe(previous, next, failures),
     );
     inconclusiveProbes.current =
       next.kind === 'ready' ? 0 : inconclusiveProbes.current + 1;

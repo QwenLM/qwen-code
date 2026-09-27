@@ -142,6 +142,18 @@ approved separately; nothing is remembered. `desktop-relay status` shows the las
 connection, `desktop-relay uninstall [--purge]` removes the socket (and the
 runtime).
 
+If the browser cannot reach the relay, the remote connection may still be
+running. Request a local disconnect without using the loopback socket:
+
+```bash
+~/.qwen/desktop-relay/node_modules/.bin/node-repl-mcp desktop-relay disconnect
+```
+
+This checks the recorded process identity before sending SIGTERM; it does not
+download a package. For a custom installation, use that installation's executable
+and add `--home <dir>`. The command reports a disconnect request, not a confirmed
+shutdown; `desktop-relay status` shows the last recorded state.
+
 ## Build & test
 
 ```bash
