@@ -76,7 +76,6 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
   },
 }));
 
-import { isCrossSessionMessagingEnabled } from '../../peerMessaging/enabled.js';
 import {
   formatHeldList,
   peersCommand,
@@ -136,22 +135,19 @@ function makeContext(
   peerMessaging: Fake | null,
   crossSessionMessaging?: unknown,
   scopes: Record<string, unknown> = {},
-  runtimePolicyAllows = true,
+  suppression: { isSafeMode?: boolean; getBareMode?: boolean } = {},
 ): CommandContext {
   return {
     services: {
       peerMessaging,
       settings: { merged: { agents: { crossSessionMessaging } }, ...scopes },
+      // The gate reads the two session-level suppressions off the Config,
+      // so the double models them rather than stubbing the answer: a case
+      // where the flags and the setting disagree stays expressible, and the
+      // message can be checked against the cause it actually derived.
       config: {
-        // The real config folds the setting into this answer and narrows it
-        // with the session-level suppressions (`--bare`, `--safe-mode`), so
-        // the double composes the same two inputs and a case where the
-        // runtime policy and the setting disagree stays expressible.
-        isCrossSessionMessagingEnabled: () =>
-          runtimePolicyAllows &&
-          isCrossSessionMessagingEnabled({
-            agents: { crossSessionMessaging },
-          }),
+        isSafeMode: () => suppression.isSafeMode === true,
+        getBareMode: () => suppression.getBareMode === true,
       },
     },
   } as unknown as CommandContext;
@@ -470,12 +466,16 @@ describe('/peers', () => {
     expect(result.content).not.toContain('Remove that entry');
   });
 
-  it('reports effective safe-mode policy as off', async () => {
-    // Settings on, runtime policy off: the session runs with the feature
-    // suppressed (`--bare`, `--safe-mode`), so `/peers` must not report a
-    // bind failure for an inbox that was never asked to bind.
+  // Arm-specific assertions on purpose. Every branch of
+  // `describeMessagingOff` also begins with "Cross-session messaging is
+  // off", so asserting only that shared prefix stays green with the
+  // suppression arm deleted — and `/peers` then tells a safe-mode user
+  // whose setting is already `true` to go remove that entry, a remedy that
+  // changes nothing. Each case also pins the environment channel, since
+  // both suppressions can be reached without the flag.
+  it('names safe mode as the reason instead of a settings remedy', async () => {
     const result = await peersCommand.action!(
-      makeContext(null, true, {}, false),
+      makeContext(null, true, {}, { isSafeMode: true }),
       '',
     );
     if (!result || result.type !== 'message') {
@@ -483,7 +483,25 @@ describe('/peers', () => {
     }
 
     expect(result.messageType).toBe('info');
-    expect(result.content).toContain('Cross-session messaging is off');
+    expect(result.content).toContain('in safe mode');
+    expect(result.content).toContain('QWEN_CODE_SAFE_MODE');
+    expect(result.content).not.toContain('Remove that entry');
+    expect(result.content).not.toContain('failed to bind');
+  });
+
+  it('names bare mode as the reason instead of a settings remedy', async () => {
+    const result = await peersCommand.action!(
+      makeContext(null, true, {}, { getBareMode: true }),
+      '',
+    );
+    if (!result || result.type !== 'message') {
+      throw new Error('expected a message result');
+    }
+
+    expect(result.messageType).toBe('info');
+    expect(result.content).toContain('in bare mode');
+    expect(result.content).toContain('QWEN_CODE_SIMPLE');
+    expect(result.content).not.toContain('Remove that entry');
     expect(result.content).not.toContain('failed to bind');
   });
 

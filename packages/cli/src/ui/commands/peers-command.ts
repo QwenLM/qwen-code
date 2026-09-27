@@ -29,7 +29,9 @@ import type { SlashCommand, SlashCommandActionReturn } from './types.js';
 import {
   crossSessionMessagingOffScope,
   type CrossSessionMessagingOffScope,
-  isCrossSessionMessagingEnabled,
+  crossSessionMessagingSuppression,
+  type CrossSessionMessagingSuppression,
+  isCrossSessionMessagingActive,
 } from '../../peerMessaging/enabled.js';
 import { t } from '../../i18n/index.js';
 import { CommandKind } from './types.js';
@@ -313,21 +315,22 @@ export const peersCommand: SlashCommand = {
       // absent when the session failed to register or the socket failed to
       // bind (path too long, unwritable runtime dir).
       const settings = context.services.settings;
-      const settingsEnabled = isCrossSessionMessagingEnabled(settings?.merged);
+      const runtime = context.services.config;
       // The setting is not the whole gate: `--bare` and `--safe-mode` turn
       // messaging off for the session whatever it says, and the same
-      // effective answer is what interactive startup binds the inbox on.
-      // Reading settings alone would call a deliberately off session "on,
-      // no inbox" and hand it a bind failure to explain.
-      const effective =
-        settingsEnabled &&
-        (context.services.config?.isCrossSessionMessagingEnabled() ?? true);
-      if (!effective) {
+      // predicate is what interactive startup binds the inbox on. Reading
+      // the setting alone would call a deliberately off session "on, no
+      // inbox" and hand it a bind failure to explain.
+      if (!isCrossSessionMessagingActive(settings?.merged, runtime)) {
+        // Name the cause that actually fired instead of guessing: a
+        // suppression is a startup flag no settings edit can undo, while the
+        // setting being off has a scope-shaped remedy.
+        const suppression = crossSessionMessagingSuppression(runtime);
         return {
           type: 'message',
           messageType: 'info',
-          content: settingsEnabled
-            ? 'Cross-session messaging is off: this session runs with --bare or --safe-mode, which turns it off whatever the setting says.'
+          content: suppression
+            ? describeMessagingSuppressed(suppression)
             : describeMessagingOff(
                 settings ? crossSessionMessagingOffScope(settings) : undefined,
               ),
@@ -521,4 +524,22 @@ function describeMessagingOff(
     default:
       return 'Cross-session messaging is off because of the "agents.crossSessionMessaging" setting (only true, or leaving it unset, turns it on). Remove that entry, then restart.';
   }
+}
+
+/**
+ * Why a session whose setting is on still has no inbox: a startup flag
+ * closed the surface, and no settings edit can undo it.
+ *
+ * Kept apart from {@link describeMessagingOff} rather than folded into its
+ * scope union: that one answers "which settings file turned it off", and a
+ * startup flag is not a file. Both channels are named because the flag and
+ * the environment variable that sets it reach the same suppression, and a
+ * user who only set the latter would otherwise not recognize the cause.
+ */
+function describeMessagingSuppressed(
+  suppression: CrossSessionMessagingSuppression,
+): string {
+  return suppression === 'safe-mode'
+    ? 'Cross-session messaging is off: this session runs in safe mode (--safe-mode, or QWEN_CODE_SAFE_MODE), which closes the surfaces other processes can reach. The "agents.crossSessionMessaging" setting cannot turn it back on; restart without safe mode.'
+    : 'Cross-session messaging is off: this session runs in bare mode (--bare, or QWEN_CODE_SIMPLE), which skips implicit startup work. The "agents.crossSessionMessaging" setting cannot turn it back on; restart without bare mode.';
 }
