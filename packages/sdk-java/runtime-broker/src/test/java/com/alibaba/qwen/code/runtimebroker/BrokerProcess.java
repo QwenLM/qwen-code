@@ -187,6 +187,29 @@ final class BrokerProcess implements AutoCloseable {
         }
     }
 
+    /** A call pending when a gate kills the Broker fails at once. */
+    private String awaitReply(String op) throws InterruptedException {
+        long deadline = System.nanoTime() + CALL_TIMEOUT.toNanos();
+        while (System.nanoTime() < deadline) {
+            String line = output.poll(100, TimeUnit.MILLISECONDS);
+            if (line != null) {
+                return line;
+            }
+            if (!process.isAlive()) {
+                // Standard output may still hold a reply written just
+                // before the exit.
+                line = output.poll(1, TimeUnit.SECONDS);
+                if (line != null) {
+                    return line;
+                }
+                throw new AssertionError("Broker " + name + " exited during "
+                        + op + ": " + logTail());
+            }
+        }
+        throw new AssertionError("Broker " + name + " did not answer " + op
+                + ": " + logTail());
+    }
+
     private Reply executionCall(String op, String harness,
             String runtimeSession, String execution) {
         return call(op, Map.of("harness", harness,
@@ -202,12 +225,7 @@ final class BrokerProcess implements AutoCloseable {
             input.write(JSON.toJSONString(command));
             input.newLine();
             input.flush();
-            String line = output.poll(CALL_TIMEOUT.toMillis(),
-                    TimeUnit.MILLISECONDS);
-            if (line == null) {
-                throw new AssertionError("Broker " + name + " did not answer "
-                        + op + ": " + logTail());
-            }
+            String line = awaitReply(op);
             JSONObject reply = JSON.parseObject(line);
             if (reply.getLongValue("id") != id) {
                 throw new AssertionError("Broker " + name

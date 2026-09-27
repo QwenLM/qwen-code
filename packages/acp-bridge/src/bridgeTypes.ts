@@ -6,6 +6,7 @@
 
 import type {
   ApprovalMode,
+  McpAppToolResult,
   BackgroundNotificationTurn,
   ManagedToolV2Client,
   GoalControlRequest,
@@ -40,6 +41,7 @@ import type {
   SubscribeOptions,
 } from './eventBus.js';
 import type { PermissionPolicy } from './permission.js';
+import type { BridgeExecutionEngine } from './bridgeOptions.js';
 import type {
   SessionArtifactInput,
   SessionArtifactMutationResult,
@@ -1024,9 +1026,19 @@ export interface BridgeRuntimeStopSession {
   hasRunningBackgroundTasks?: boolean;
 }
 
-export interface BridgeRuntimeStopResult {
+/** One live channel addressed by a workspace runtime stop. */
+export interface BridgeRuntimeStopChannel {
   channelId: string;
   runtimeEpoch: number;
+  executionEngine?: BridgeExecutionEngine;
+}
+
+export interface BridgeRuntimeStopResult {
+  /** The first stopped channel: workspace control when it was live. */
+  channelId: string;
+  /** The newest epoch among the stopped channels. */
+  runtimeEpoch: number;
+  channels: BridgeRuntimeStopChannel[];
   stopToken: string;
   state: 'stopping' | 'stopped' | 'incomplete' | 'failed';
   stopped: boolean;
@@ -1038,9 +1050,18 @@ export interface BridgeRuntimeStopResult {
   error?: string;
 }
 
+/**
+ * A stop confirmation must echo `stopToken`, `channelId`, `runtimeEpoch` and
+ * the exact session IDs. Any channel started later raises `runtimeEpoch`, so a
+ * confirmation never reaches a channel or session it did not preview.
+ */
 export interface BridgeRuntimeStopSnapshot {
+  /** The first listed channel: workspace control when it is live. */
   channelId?: string;
+  /** The newest epoch among the listed channels. */
   runtimeEpoch: number;
+  /** Every live channel, workspace control first. */
+  channels: BridgeRuntimeStopChannel[];
   stopToken: string;
   blockedReasons: string[];
   sessions: BridgeRuntimeStopSession[];
@@ -1048,10 +1069,23 @@ export interface BridgeRuntimeStopSnapshot {
 }
 
 export interface BridgeWorkspaceRuntimeLifecycleSnapshot {
+  /** Aggregate over every engine channel. */
   state: 'cold' | 'starting' | 'active' | 'idle' | 'stopping';
+  /** Aggregate: some engine channel is live. */
   runtimeLive: boolean;
+  /**
+   * The workspace-control channel's own epoch while it is live; otherwise the
+   * epoch source's current value.
+   */
   runtimeEpoch: number;
+  /** Aggregate over every engine channel. */
   activeWork: boolean;
+  /**
+   * Lifecycle of the Legacy channel, which serves workspace control
+   * (workspace status and commands, MCP, Skills, preheat) on a paired Bridge.
+   * Omitted when the Bridge has one channel: the aggregate fields describe it.
+   */
+  workspaceControl?: 'cold' | 'starting' | 'live' | 'stopping';
 }
 
 export type BridgePendingInteraction =
@@ -2360,6 +2394,14 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
   /** Read sanitized LSP server status for a live session. */
   getSessionLspStatus(sessionId: string): Promise<ServeSessionLspStatus>;
 
+  /** Execute an App-visible tool through the bound session permission pipeline. */
+  callMcpAppTool(
+    sessionId: string,
+    request: BridgeMcpAppToolCall,
+    signal: AbortSignal,
+    context: { clientId: string },
+  ): Promise<McpAppToolResult>;
+
   /** Read sanitized Skill and MCP snapshots for a live session. */
   getSessionResourcesStatus(
     sessionId: string,
@@ -2876,15 +2918,20 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
   readonly sessionCount: number;
 
   /**
-   * Whether an ACP channel is currently live (spawned and not dying).
-   * Distinct from `sessionCount > 0`: a channel can be live with zero
+   * Whether an ACP channel of any engine is currently live (spawned and not
+   * dying). Distinct from `sessionCount > 0`: a channel can be live with zero
    * attached sessions during the cold-spawn window, and conversely a
-   * killed channel may briefly retain sessions before reaping. Consumers
-   * that need true channel liveness (e.g. the workspace service's
-   * `acpChannelLive` envelope field) must use this rather than the
-   * session count.
+   * killed channel may briefly retain sessions before reaping.
    */
   isChannelLive(): boolean;
+
+  /**
+   * Whether the channel that serves workspace control is live: Legacy on a
+   * paired Bridge. Consumers that talk to workspace control (the workspace
+   * service's `acpChannelLive` fields, preheat results) use this. Bridges that
+   * omit it have one channel, so `isChannelLive()` answers the same question.
+   */
+  isWorkspaceControlLive?(): boolean;
 
   /**
    * Atomic physical lifecycle snapshot. Optional only for compatibility with
@@ -2951,10 +2998,17 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
    *  Status hooks, so the sampler treats them as absent (→ 0 / skipped). */
   readonly pendingPromptTotal?: number;
 
+  /** Number of live ACP channels (spawned and not dying): one per engine
+   *  that has a child, so up to two on a paired Bridge. Optional — see
+   *  {@link pendingPromptTotal}; absent means at most one. */
+  readonly liveChannelCount?: number;
+
   /** Latest self-reported ACP-child rss/cpu (Daemon Status child-resource
    *  chart), or undefined before the first successful poll / when no child is
-   *  live. Synchronous cache read for the metrics sampler. Optional — see
-   *  {@link pendingPromptTotal}. */
+   *  live. On a paired Bridge it combines the fresh reading of each live
+   *  child: rss and cpu are summed, the age is the oldest, heap marks keep
+   *  their maxima. Synchronous cache read for the metrics sampler. Optional —
+   *  see {@link pendingPromptTotal}. */
   getChildResourceSnapshot?():
     | {
         rssBytes: number;
@@ -2969,9 +3023,15 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
          *  measured zero and an unmeasured child are different claims, and
          *  only the first may be read as "this child needed no heap". */
         heap?: ChildHeapReport;
+        /** How many children the reading covers. Absent on bridges predating
+         *  the field, which cover exactly one. */
+        children?: number;
+        /** How many of those children contributed to `heap`. Absent on
+         *  bridges predating the field: one when `heap` is present. */
+        heapReported?: number;
       }
     | undefined;
-  /** Poll the live child's resource extMethod and refresh the cache that
+  /** Poll each live child's resource extMethod and refresh the cache that
    *  {@link getChildResourceSnapshot} reads. Fired fire-and-forget by the
    *  sampler each tick. Optional — see {@link pendingPromptTotal}. */
   refreshChildResource?(): Promise<void>;
@@ -3034,3 +3094,12 @@ export interface ShellCommandResult {
 
 /** @deprecated Use `AcpSessionBridge` instead. */
 export type HttpAcpBridge = AcpSessionBridge;
+
+export interface BridgeMcpAppToolCall {
+  serverName: string;
+  resourceUri: string;
+  name: string;
+  arguments: Record<string, unknown>;
+}
+
+export type BridgeMcpAppToolResult = McpAppToolResult;

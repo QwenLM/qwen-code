@@ -220,9 +220,20 @@ export interface DaemonRuntimeStopSession {
   hasRunningBackgroundTasks?: boolean;
 }
 
-export interface DaemonRuntimeStopResult {
+/** One live ACP channel addressed by a workspace runtime stop. */
+export interface DaemonRuntimeStopChannel {
   channelId: string;
   runtimeEpoch: number;
+  executionEngine?: 'legacy' | 'managed';
+}
+
+export interface DaemonRuntimeStopResult {
+  /** The first stopped channel. */
+  channelId: string;
+  /** The newest epoch among the stopped channels. */
+  runtimeEpoch: number;
+  /** Every stopped channel; absent from daemons that predate it. */
+  channels?: DaemonRuntimeStopChannel[];
   stopToken: string;
   state: 'stopping' | 'stopped' | 'incomplete' | 'failed';
   stopped: boolean;
@@ -235,9 +246,17 @@ export interface DaemonRuntimeStopResult {
   error?: string;
 }
 
+/**
+ * Echo `stopToken`, `channelId`, `runtimeEpoch` and the exact session IDs to
+ * confirm a stop. A channel started after the preview stales it.
+ */
 export interface DaemonRuntimeStopSnapshot {
+  /** The first listed channel. */
   channelId?: string;
+  /** The newest epoch among the listed channels. */
   runtimeEpoch: number;
+  /** Every live channel; absent from daemons that predate it. */
+  channels?: DaemonRuntimeStopChannel[];
   stopToken: string;
   blockedReasons: string[];
   sessions: DaemonRuntimeStopSession[];
@@ -4928,6 +4947,8 @@ export interface MCPServerConfigShape {
   readonly timeout?: number;
   readonly discoveryTimeoutMs?: number;
   readonly versionNegotiation?: 'auto' | 'legacy';
+  readonly appResourceMaxBytes?: number;
+  readonly appResourceTimeoutMs?: number;
   readonly trust?: boolean;
   readonly description?: string;
   readonly oauth?: Record<string, unknown>;
@@ -5705,4 +5726,24 @@ export interface ExtensionUpdateCheckResponse {
 export interface ExtensionRefreshResponse {
   refreshed: number;
   failed: number;
+}
+
+export interface DaemonMcpAppToolCall {
+  serverName: string;
+  resourceUri: string;
+  name: string;
+  arguments: Record<string, unknown>;
+}
+
+export interface DaemonMcpAppToolResult {
+  content?: Array<{
+    type: string;
+    text?: string;
+    data?: string;
+    mimeType?: string;
+    [key: string]: unknown;
+  }>;
+  isError?: boolean;
+  structuredContent?: unknown;
+  [key: string]: unknown;
 }
