@@ -326,13 +326,13 @@ function statusFilterBlanks(tree: string): NodeJS.ProcessEnv | string {
   // config is just as executable, and the tree's own attacker-writable
   // `.gitattributes` is what selects the driver. Those names cannot be
   // enumerated to this screen's read-to-the-bottom standard — and must not
-  // feed the checkout gate's refuse-on-any-hit list — so instead of blanking
-  // them by name the measurement reads no user config AT ALL: what git never
-  // reads, no attribute can select, and no normalizing global driver can
-  // quietly map a rewrite back onto the indexed blob. The honest half of the
-  // trade is `settleCheckoutIndex`'s: its trigger covers the full stack, so a
-  // filter that lives only in `~/.gitconfig` (git-lfs installed the default
-  // way) still gets its stat-fresh index first.
+  // feed the checkout gate's refuse-on-any-hit list — so the measurement
+  // disables the native user-config slots. A repo-local include can still
+  // reintroduce an exact trusted origin; `reachedExempt` names only those
+  // trusted filters and blanks them alongside repository-defined filters.
+  // The honest half of the trade is `settleCheckoutIndex`'s: its trigger
+  // covers the full stack, so a filter that lives only in `~/.gitconfig`
+  // (git-lfs installed the default way) still gets its stat-fresh index first.
   return {
     ...NO_USER_CONFIG_ENV,
     ...filterBlankEnv([...screen.filters, ...screen.reachedExempt]),
@@ -1698,14 +1698,13 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
         // `core.fsmonitor` and `core.hooksPath`. The third is
         // `filter.<driver>.clean|process`, whose key is not fixed — the
         // repo-local names are enumerated by the screen and blanked on this
-        // spawn by name, while the global and system scopes are not read by
-        // the spawn AT ALL (`NO_USER_CONFIG_ENV`): a driver defined there is
-        // just as executable, the tree's own `.gitattributes` selects it,
-        // and its names cannot be screened to the read-to-the-bottom
-        // standard. The refusal is still only for repo-local config the
-        // screen could not read to the bottom. The repo-local half is what
-        // the sibling `worktreeResidue` does on the identical `status`
-        // refresh. (For one round this arm REFUSED on any filter instead,
+        // spawn by name. `NO_USER_CONFIG_ENV` disables native global and
+        // system slots; when repo-local config explicitly re-includes a
+        // trusted source, `reachedExempt` supplies the names to blank. The
+        // refusal is still only for repo-local config the screen could not
+        // read to the bottom. The repo-local half is what the sibling
+        // `worktreeResidue` does on the identical `status` refresh. (For one
+        // round this arm REFUSED on any filter instead,
         // and a repository with git-lfs installed `--local` then got a base
         // tree only on the ask that built it.)
         //
