@@ -26,7 +26,8 @@ import { MANAGED_TOOL_RESULT_KINDS } from './managed-tool-result.js';
 // the Stage H capabilities share. The shared fixtures in
 // contracts/managed-extension-record-v1.fixtures.json pin it, and
 // ManagedExtensionRecords in packages/sdk-java/managed-agent-server replays
-// the same cases. Nothing commits these records until H0c.
+// the same cases. The Session authority commits them (H0c, see
+// managed-extension-projection.ts).
 
 export const MANAGED_EXTENSION_RECORD_LIMITS = Object.freeze({
   /** The Managed Session stable ID rule, which every id field follows. */
@@ -870,6 +871,21 @@ export function isExtensionRunSuccessor(
   );
 }
 
+/**
+ * Whether `value` may open a run: it starts reserved or admitted, with no
+ * execution beyond an intent and no delivery beyond a plan, so the first
+ * revision of a record never skips a step the later ones take one at a time.
+ */
+export function isExtensionRunStart(value: unknown): boolean {
+  const run = attempt(() => parseExtensionRun(value));
+  return (
+    run !== undefined &&
+    (run.state === 'reserved' || run.state === 'admitted') &&
+    (run.execution === null || run.execution === 'intent') &&
+    (run.delivery === null || run.delivery.state === 'planned')
+  );
+}
+
 /** Parses the body of a `managed-monitor_run` domain record. */
 export function parseMonitorRun(value: unknown): MonitorRun {
   const monitor = closed(value, MONITOR_KEYS, 'monitorRun');
@@ -1008,6 +1024,20 @@ export function parseMonitorRun(value: unknown): MonitorRun {
     fail('monitorRun.stopReason is quota_exceeded exactly for a quota reason.');
   }
   return Object.freeze(parsed);
+}
+
+/**
+ * Whether `value` may be the first revision of a monitor: its run opens, and
+ * it has written no output, which needs a watch. It cannot have observed
+ * anything either, since an observation needs a start receipt.
+ */
+export function isMonitorRunStart(value: unknown): boolean {
+  const monitor = attempt(() => parseMonitorRun(value));
+  return (
+    monitor !== undefined &&
+    isExtensionRunStart(monitor.run) &&
+    monitor.outputRef === null
+  );
 }
 
 /**

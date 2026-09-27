@@ -21,6 +21,22 @@ import {
   encodeHarnessCheckpointV1,
 } from './managed-harness-checkpoint.js';
 
+// monitor_run is enabled by H3; the Stage H case below runs ahead of it.
+vi.mock('./managed-session-records.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('./managed-session-records.js')>();
+  return {
+    ...actual,
+    assertManagedSessionDomainEnabled: (
+      domain: Parameters<typeof actual.assertManagedSessionDomainEnabled>[0],
+    ) => {
+      if (domain !== 'monitor_run') {
+        actual.assertManagedSessionDomainEnabled(domain);
+      }
+    },
+  };
+});
+
 const SESSION_KEY: ManagedSessionKey = {
   tenantId: 'tenant-a',
   workspaceId: 'workspace-a',
@@ -521,6 +537,118 @@ describe('HTTP Managed Session store', () => {
       vi.clearAllTimers();
       vi.useRealTimers();
     }
+  });
+
+  it('commits the resources a Stage H record names and rebuilds it cold', async () => {
+    const server = new FakeManagedSessionStore();
+    const runtimeBaseDir = await mkdtemp(
+      path.join(tmpdir(), 'managed-http-store-'),
+    );
+    temporaryDirectories.push(runtimeBaseDir);
+    const transcriptPath = path.join(runtimeBaseDir, 'session.jsonl');
+    const open = async (writerId: string, writerToken: string) => {
+      const stores = createHttpManagedSessionStores({
+        baseUrl: 'http://session-store.test',
+        sessionKey: SESSION_KEY,
+        writerId,
+        writerToken,
+        fetchFn: server.fetch,
+      });
+      const create =
+        writerId === 'harness-a'
+          ? {
+              definitionRef: await stores.resourceStore.publish(
+                'managed-session-definition',
+                Buffer.from('{}', 'utf8'),
+              ),
+              rootSnapshotRef: await stores.resourceStore.publish(
+                'managed-session-root-snapshot',
+                Buffer.from('{}', 'utf8'),
+              ),
+              createdBy: 'test',
+            }
+          : undefined;
+      return openManagedSession({
+        runtimeBaseDir,
+        sessionId: SESSION_KEY.sessionId,
+        transcriptPath,
+        sessionKey: SESSION_KEY,
+        cwd: '/workspace',
+        version: 'test',
+        workerId: writerId,
+        activationLeaseDurationMs: 60_000,
+        journalStore: stores.journalStore,
+        resourceStore: stores.resourceStore,
+        ...(create === undefined ? {} : { create }),
+      });
+    };
+    const first = await open('harness-a', TOKEN_A);
+    const commandRef = await first.resources.publish(
+      'managed-tool-args',
+      Buffer.from('{"command":"tail -f build.log"}', 'utf8'),
+    );
+    const start = {
+      monitorId: 'monitor-1',
+      ownerScopeId: 'scope-main',
+      commandRef,
+      maxEvents: 100,
+      idleTimeoutMs: 60_000,
+      debounceMs: 0,
+      startReceiptRef: null,
+      observationSequence: 0,
+      lastObservationRef: null,
+      notifiedThrough: 0,
+      stopReason: null,
+      outputRef: null,
+      run: {
+        state: 'admitted',
+        reason: null,
+        definition: null,
+        executionCallId: 'call-monitor-1',
+        effectId: null,
+        dispatchId: null,
+        deliveryId: null,
+        execution: 'intent',
+        runtime: null,
+        delivery: null,
+      },
+    };
+    const committed = await first.authority.commitExtensionRecord(
+      {
+        operation: 'commitMonitorRun',
+        commandId: 'monitor-1:1',
+        sessionKey: SESSION_KEY,
+        contentDigest: 'e'.repeat(64),
+      },
+      { domain: 'monitor_run', record: start },
+      { class: 'trusted_entry' },
+    );
+    // The args are named only inside the body, and still travel with it.
+    expect(server.commits.at(-1)?.['resources']).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          resourceId: committed.recordRef.resourceId,
+          kind: 'managed-monitor_run',
+          bytesBase64: expect.any(String),
+        }),
+        expect.objectContaining({
+          resourceId: commandRef.resourceId,
+          bytesBase64: Buffer.from('{"command":"tail -f build.log"}').toString(
+            'base64',
+          ),
+        }),
+      ]),
+    );
+    const views = first.authority.taskViews();
+    expect(views).toHaveLength(1);
+    await first.close();
+
+    const restored = await open('harness-b', TOKEN_B);
+    expect(restored.authority.taskViews()).toEqual(views);
+    expect(
+      restored.authority.extensionRecord('monitor_run', 'monitor-1'),
+    ).toMatchObject({ revision: 1, recordRef: committed.recordRef });
+    await restored.close();
   });
 
   it('rejects resources that require the unimplemented OSS path', async () => {

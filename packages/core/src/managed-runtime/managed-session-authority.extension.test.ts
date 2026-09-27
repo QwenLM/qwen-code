@@ -1,0 +1,780 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { readFileSync } from 'node:fs';
+import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { SessionWriterLease } from '../services/session-writer-lease.js';
+import {
+  LocalManagedSessionAuthority,
+  ManagedSessionConflictError,
+  type ManagedSessionInputRequest,
+} from './managed-session-authority.js';
+import {
+  managedExtensionRecordKey,
+  type ManagedTaskProjection,
+} from './managed-extension-projection.js';
+import { ManagedOperationGrantGate } from './managed-operation-grant-gate.js';
+import { LocalManagedSessionResourceStore } from './managed-session-resources.js';
+import {
+  ManagedSessionRecordError,
+  type ManagedSessionDurableRef,
+} from './managed-session-records.js';
+
+const enablement = vi.hoisted(() => ({ monitorRun: true }));
+
+// monitor_run is enabled by H3; this suite runs the H0c path ahead of it.
+vi.mock('./managed-session-records.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('./managed-session-records.js')>();
+  return {
+    ...actual,
+    assertManagedSessionDomainEnabled: (
+      domain: Parameters<typeof actual.assertManagedSessionDomainEnabled>[0],
+    ) => {
+      if (domain !== 'monitor_run' || !enablement.monitorRun) {
+        actual.assertManagedSessionDomainEnabled(domain);
+      }
+    },
+  };
+});
+
+const temporaryDirectories = new Set<string>();
+
+afterEach(async () => {
+  enablement.monitorRun = true;
+  for (const directory of temporaryDirectories) {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+  temporaryDirectories.clear();
+});
+
+const sessionId = '550e8400-e29b-41d4-a716-446655440000';
+const sessionKey = {
+  tenantId: 'tenant-1',
+  workspaceId: 'workspace-1',
+  sessionId,
+};
+
+interface Harness {
+  readonly runtimeBaseDir: string;
+  readonly transcriptPath: string;
+  readonly store: LocalManagedSessionResourceStore;
+  now: number;
+}
+
+async function createHarness(): Promise<Harness> {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-managed-ext-'));
+  temporaryDirectories.add(root);
+  const runtimeBaseDir = path.join(root, 'runtime');
+  const transcriptPath = path.join(root, 'chats', `${sessionId}.jsonl`);
+  await fs.mkdir(runtimeBaseDir, { recursive: true });
+  await fs.mkdir(path.dirname(transcriptPath), { recursive: true });
+  return {
+    runtimeBaseDir,
+    transcriptPath,
+    store: LocalManagedSessionResourceStore.create({
+      runtimeBaseDir,
+      sessionKey,
+    }),
+    now: 1_000,
+  };
+}
+
+async function withAuthority<T>(
+  harness: Harness,
+  run: (authority: LocalManagedSessionAuthority) => Promise<T>,
+  options: { create?: boolean } = {},
+): Promise<T> {
+  const lease = await SessionWriterLease.acquire({
+    runtimeBaseDir: harness.runtimeBaseDir,
+    sessionId,
+    transcriptPath: harness.transcriptPath,
+  });
+  try {
+    const create =
+      options.create === false
+        ? undefined
+        : {
+            definitionRef: await harness.store.publish(
+              'managed-definition',
+              Buffer.from('{}', 'utf8'),
+            ),
+            rootSnapshotRef: await harness.store.publish(
+              'managed-root',
+              Buffer.from('{}', 'utf8'),
+            ),
+            createdBy: 'daemon',
+          };
+    const authority = await LocalManagedSessionAuthority.open({
+      lease,
+      sessionKey,
+      cwd: '/workspace',
+      version: 'test',
+      resources: harness.store,
+      now: () => harness.now,
+      ...(create === undefined ? {} : { create }),
+    });
+    return await run(authority);
+  } finally {
+    await lease.release().catch(() => undefined);
+  }
+}
+
+function ref(resourceId: string, kind: string): ManagedSessionDurableRef {
+  return {
+    resourceId,
+    kind,
+    schemaVersion: 1,
+    byteLength: 64,
+    digest: 'a'.repeat(64),
+  };
+}
+
+const BINDING_1 = { runtimeBindingId: 'binding-1', generation: '1' };
+const BINDING_2 = { runtimeBindingId: 'binding-2', generation: '2' };
+
+function run(overrides: Record<string, unknown>) {
+  return {
+    state: 'admitted',
+    reason: null,
+    definition: null,
+    executionCallId: 'call-monitor-1',
+    effectId: null,
+    dispatchId: null,
+    deliveryId: null,
+    execution: 'intent',
+    runtime: null,
+    delivery: null,
+    ...overrides,
+  };
+}
+
+function monitor(
+  runOverrides: Record<string, unknown>,
+  overrides: Record<string, unknown> = {},
+) {
+  return {
+    monitorId: 'monitor-1',
+    ownerScopeId: 'scope-main',
+    commandRef: ref('args-monitor-1', 'managed-tool-args'),
+    maxEvents: 100,
+    idleTimeoutMs: 60_000,
+    debounceMs: 1000,
+    startReceiptRef: null,
+    observationSequence: 0,
+    lastObservationRef: null,
+    notifiedThrough: 0,
+    stopReason: null,
+    outputRef: null,
+    run: run(runOverrides),
+    ...overrides,
+  };
+}
+
+const RECEIPT_1 = ref('receipt-1', 'managed-runtime-receipt');
+const RECEIPT_2 = ref('receipt-2', 'managed-runtime-receipt');
+const OBSERVATION_1 = ref('observation-1', 'managed-monitor-observation');
+
+/** A watch that starts, observes once, loses its Runtime and is rebuilt. */
+const LIFE = [
+  monitor({}),
+  monitor({ execution: 'dispatch_started', runtime: BINDING_1 }),
+  monitor(
+    { state: 'running', execution: 'running_attached', runtime: BINDING_1 },
+    { startReceiptRef: RECEIPT_1 },
+  ),
+  monitor(
+    { state: 'running', execution: 'running_attached', runtime: BINDING_1 },
+    {
+      startReceiptRef: RECEIPT_1,
+      observationSequence: 1,
+      lastObservationRef: OBSERVATION_1,
+    },
+  ),
+  monitor(
+    {
+      state: 'recovery_blocked',
+      reason: 'runtime_lost',
+      execution: 'outcome_unknown',
+      runtime: BINDING_1,
+    },
+    {
+      startReceiptRef: RECEIPT_1,
+      observationSequence: 1,
+      lastObservationRef: OBSERVATION_1,
+    },
+  ),
+  monitor(
+    {
+      state: 'running',
+      reason: 'runtime_lost',
+      execution: 'running_attached',
+      runtime: BINDING_2,
+    },
+    {
+      startReceiptRef: RECEIPT_2,
+      observationSequence: 1,
+      lastObservationRef: OBSERVATION_1,
+    },
+  ),
+  monitor(
+    { state: 'cancelled', execution: 'settled', runtime: BINDING_2 },
+    {
+      startReceiptRef: RECEIPT_2,
+      observationSequence: 1,
+      lastObservationRef: OBSERVATION_1,
+      notifiedThrough: 1,
+      stopReason: 'stop_requested',
+    },
+  ),
+];
+
+function command(commandId: string, digest = 'd') {
+  return {
+    operation: 'commitMonitorRun',
+    commandId,
+    sessionKey,
+    contentDigest: digest.repeat(64),
+  };
+}
+
+const TRUSTED = { class: 'trusted_entry' } as const;
+
+async function commitLife(
+  harness: Harness,
+  authority: LocalManagedSessionAuthority,
+  count = LIFE.length,
+) {
+  for (let index = 0; index < count; index++) {
+    harness.now = 1_000 * (index + 1);
+    await authority.commitExtensionRecord(
+      command(`monitor-1:${index + 1}`),
+      { domain: 'monitor_run', record: LIFE[index] },
+      TRUSTED,
+    );
+  }
+}
+
+const TASK_ID = `task_${managedExtensionRecordKey(sessionId, 'monitor_run', 'monitor-1')}`;
+
+// The same chains ManagedExtensionRecordStoreTest commits through the Java
+// Session store, so both sides must project and refuse them alike.
+const chains = JSON.parse(
+  readFileSync(
+    path.join(
+      path.dirname(fileURLToPath(import.meta.url)),
+      'contracts',
+      'managed-extension-projection-v1.fixtures.json',
+    ),
+    'utf8',
+  ),
+) as {
+  readonly monitorChainCases: ReadonlyArray<{
+    readonly id: string;
+    readonly sessionId: string;
+    readonly revisions: ReadonlyArray<{
+      readonly occurredAt: number;
+      readonly monitorRun: { readonly monitorId: string };
+      readonly view: ManagedTaskProjection;
+    }>;
+  }>;
+  readonly monitorChainRejectCases: ReadonlyArray<{
+    readonly id: string;
+    readonly accepted: readonly unknown[];
+    readonly next: unknown;
+  }>;
+};
+
+describe('managed-extension-projection/1 monitor chains', () => {
+  it.each(chains.monitorChainCases)(
+    'commits and projects: $id',
+    async (each) => {
+      expect(each.sessionId).toBe(sessionId);
+      const harness = await createHarness();
+      await withAuthority(harness, async (authority) => {
+        for (const [index, revision] of each.revisions.entries()) {
+          harness.now = revision.occurredAt;
+          await authority.commitExtensionRecord(
+            command(`chain:${index}`),
+            { domain: 'monitor_run', record: revision.monitorRun },
+            TRUSTED,
+          );
+          const [view] = authority.taskViews();
+          expect(view).toEqual({
+            taskId: `task_${managedExtensionRecordKey(sessionId, 'monitor_run', revision.monitorRun.monitorId)}`,
+            sessionId,
+            kind: 'monitor',
+            ...revision.view,
+          });
+        }
+      });
+    },
+  );
+
+  it.each(chains.monitorChainRejectCases)('refuses: $id', async (each) => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      for (const [index, record] of each.accepted.entries()) {
+        await authority.commitExtensionRecord(
+          command(`chain:${index}`),
+          { domain: 'monitor_run', record },
+          TRUSTED,
+        );
+      }
+      const before = authority.committedSequence;
+      await expect(
+        authority.commitExtensionRecord(
+          command('chain:next'),
+          { domain: 'monitor_run', record: each.next },
+          TRUSTED,
+        ),
+      ).rejects.toThrow(ManagedSessionRecordError);
+      expect(authority.committedSequence).toBe(before);
+    });
+  });
+});
+
+describe('managed session authority Stage H records', () => {
+  it('chains monitor revisions and projects the task', async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      const first = await authority.commitExtensionRecord(
+        command('monitor-1:1'),
+        { domain: 'monitor_run', record: LIFE[0] },
+        TRUSTED,
+      );
+      expect(first).toMatchObject({
+        domain: 'monitor_run',
+        recordId: 'monitor-1',
+        taskId: TASK_ID,
+        revision: 1,
+        receipt: { replayed: false },
+      });
+      expect(first.recordRef.kind).toBe('managed-monitor_run');
+      // The resource holds exactly the closed body, with no envelope.
+      expect(
+        JSON.parse((await harness.store.read(first.recordRef)).toString()),
+      ).toEqual(LIFE[0]);
+      expect(authority.taskViews()).toEqual([
+        {
+          taskId: TASK_ID,
+          sessionId,
+          kind: 'monitor',
+          state: 'pending',
+          runtimeState: 'unbound',
+          definitionRevision: null,
+          createdAt: 1_000,
+          startedAt: null,
+          settledAt: null,
+        },
+      ]);
+
+      for (let index = 1; index < LIFE.length; index++) {
+        harness.now = 1_000 * (index + 1);
+        await authority.commitExtensionRecord(
+          command(`monitor-1:${index + 1}`),
+          { domain: 'monitor_run', record: LIFE[index] },
+          TRUSTED,
+        );
+        if (index === 4) {
+          expect(authority.taskViews()[0]).toMatchObject({
+            state: 'recovery_blocked',
+            runtimeState: 'lost',
+          });
+        }
+        if (index === 5) {
+          expect(authority.taskViews()[0]).toMatchObject({
+            state: 'degraded',
+            runtimeState: 'ready',
+          });
+        }
+      }
+      expect(
+        authority.extensionRecord('monitor_run', 'monitor-1'),
+      ).toMatchObject({
+        revision: LIFE.length,
+        operationId: 'monitor-1:1',
+        record: LIFE.at(-1),
+      });
+      expect(authority.taskViews()).toEqual([
+        {
+          taskId: TASK_ID,
+          sessionId,
+          kind: 'monitor',
+          state: 'cancelled',
+          runtimeState: null,
+          definitionRevision: null,
+          createdAt: 1_000,
+          startedAt: 3_000,
+          settledAt: 7_000,
+        },
+      ]);
+      expect(authority.extensionOutbox()).toEqual([]);
+    });
+  });
+
+  it('keeps one chain per monitor and lists the newest first', async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      await authority.commitExtensionRecord(
+        command('monitor-1:1'),
+        { domain: 'monitor_run', record: LIFE[0] },
+        TRUSTED,
+      );
+      harness.now = 2_000;
+      const second = await authority.commitExtensionRecord(
+        command('monitor-2:1'),
+        {
+          domain: 'monitor_run',
+          record: { ...LIFE[0], monitorId: 'monitor-2' },
+        },
+        TRUSTED,
+      );
+      expect(second.revision).toBe(1);
+      expect(authority.taskViews().map((view) => view.taskId)).toEqual([
+        second.taskId,
+        TASK_ID,
+      ]);
+    });
+  });
+
+  it('refuses a first revision that does not open its run', async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      const before = authority.committedSequence;
+      await expect(
+        authority.commitExtensionRecord(
+          command('monitor-1:1'),
+          { domain: 'monitor_run', record: LIFE[2] },
+          TRUSTED,
+        ),
+      ).rejects.toThrow(ManagedSessionConflictError);
+      expect(authority.committedSequence).toBe(before);
+      expect(authority.taskViews()).toEqual([]);
+    });
+  });
+
+  it('refuses a revision that is not a successor', async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      await commitLife(harness, authority, 4);
+      // A lost watch observes nothing, so the count cannot grow while blocked.
+      const skipped = monitor(
+        {
+          state: 'recovery_blocked',
+          reason: 'runtime_lost',
+          execution: 'outcome_unknown',
+          runtime: BINDING_1,
+        },
+        {
+          startReceiptRef: RECEIPT_1,
+          observationSequence: 0,
+          lastObservationRef: null,
+        },
+      );
+      await expect(
+        authority.commitExtensionRecord(
+          command('monitor-1:5'),
+          { domain: 'monitor_run', record: skipped },
+          TRUSTED,
+        ),
+      ).rejects.toThrow(/cannot follow its revision 4/);
+      expect(
+        authority.extensionRecord('monitor_run', 'monitor-1')?.revision,
+      ).toBe(4);
+    });
+  });
+
+  it('refuses a malformed body before publishing it', async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      await expect(
+        authority.commitExtensionRecord(
+          command('monitor-1:1'),
+          {
+            domain: 'monitor_run',
+            record: { ...LIFE[0], operationId: 'envelope-field' },
+          },
+          TRUSTED,
+        ),
+      ).rejects.toThrow(ManagedSessionRecordError);
+    });
+  });
+
+  it('commits a notification input and its wake with the record', async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      await commitLife(harness, authority, 4);
+      const input: ManagedSessionInputRequest = {
+        inputId: 'monitor-1:notify:1',
+        turnId: 'monitor-1:notify:1',
+        source: 'monitor',
+        contentRef: await harness.store.publish(
+          'managed-input',
+          Buffer.from('{"text":"changed"}', 'utf8'),
+        ),
+        deadline: null,
+        admissionRef: await harness.store.publish(
+          'managed-admission',
+          Buffer.from('{}', 'utf8'),
+        ),
+        wakeReason: 'input',
+      };
+      const notified = { ...LIFE[3], notifiedThrough: 1 };
+      const committed = await authority.commitExtensionRecord(
+        command('monitor-1:notify:1'),
+        { domain: 'monitor_run', record: notified, input },
+        TRUSTED,
+      );
+      const { firstSequence, lastSequence } = committed.receipt;
+      expect(lastSequence - firstSequence).toBe(2);
+      const events = authority.eventsInSequenceRange(
+        firstSequence,
+        lastSequence,
+      );
+      expect(events.map((event) => event.kind)).toEqual([
+        'domain.committed',
+        'input.accepted',
+        'wake.requested',
+      ]);
+      expect(events[2].payload).toMatchObject({
+        sourceEventId: 'monitor-1:notify:1:accepted',
+        requiredSequence: events[1].sequence,
+      });
+    });
+  });
+
+  it('replays a retried command without publishing again', async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      await commitLife(harness, authority, 2);
+      const sequence = authority.committedSequence;
+      const bodies = path.join(
+        harness.runtimeBaseDir,
+        'resources',
+        sessionId,
+        'managed-monitor_run',
+      );
+      const published = (await fs.readdir(bodies)).length;
+      const replay = await authority.commitExtensionRecord(
+        command('monitor-1:1'),
+        { domain: 'monitor_run', record: LIFE[0] },
+        TRUSTED,
+      );
+      expect(replay).toMatchObject({
+        revision: 1,
+        receipt: { replayed: true },
+      });
+      expect(replay.recordRef).toEqual(
+        authority
+          .eventsInSequenceRange(1, sequence)
+          .find((event) => event.kind === 'domain.committed')?.payload[
+          'recordRef'
+        ],
+      );
+      expect(authority.committedSequence).toBe(sequence);
+      expect((await fs.readdir(bodies)).length).toBe(published);
+      await expect(
+        authority.commitExtensionRecord(
+          command('monitor-1:1', 'e'),
+          { domain: 'monitor_run', record: LIFE[0] },
+          TRUSTED,
+        ),
+      ).rejects.toThrow(/different content/);
+    });
+  });
+
+  it('refuses a monitor record committed around its chain', async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      const recordRef = await harness.store.publish(
+        'managed-monitor_run',
+        Buffer.from(JSON.stringify(LIFE[0]), 'utf8'),
+      );
+      await expect(
+        authority.appendExecution(
+          command('raw-monitor'),
+          [
+            {
+              v: 1,
+              sequence: authority.committedSequence + 1,
+              eventId: 'monitor_run:1',
+              sessionKey,
+              kind: 'domain.committed',
+              occurredAt: harness.now,
+              payload: {
+                domain: 'monitor_run',
+                version: 1,
+                operationId: 'raw-monitor',
+                recordRef,
+              },
+            },
+          ],
+          TRUSTED,
+        ),
+      ).rejects.toThrow(/only through commitExtensionRecord/);
+    });
+  });
+
+  it('refuses domains without a body and disabled domains', async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      await expect(
+        authority.commitExtensionRecord(
+          command('schedule-1'),
+          { domain: 'schedule', record: {} },
+          TRUSTED,
+        ),
+      ).rejects.toThrow(/has no Stage H record body/);
+      enablement.monitorRun = false;
+      await expect(
+        authority.commitExtensionRecord(
+          command('monitor-1:1'),
+          { domain: 'monitor_run', record: LIFE[0] },
+          TRUSTED,
+        ),
+      ).rejects.toThrow(/not enabled for submission/);
+    });
+  });
+
+  it('rebuilds the chains and the task list after a restart', async () => {
+    const harness = await createHarness();
+    const before = await withAuthority(harness, async (authority) => {
+      await commitLife(harness, authority, 5);
+      return authority.taskViews();
+    });
+    await withAuthority(
+      harness,
+      async (authority) => {
+        expect(authority.taskViews()).toEqual(before);
+        expect(
+          authority.extensionRecord('monitor_run', 'monitor-1'),
+        ).toMatchObject({ revision: 5, operationId: 'monitor-1:1' });
+        await expect(
+          authority.commitExtensionRecord(
+            command('monitor-1:bad'),
+            { domain: 'monitor_run', record: LIFE[0] },
+            TRUSTED,
+          ),
+        ).rejects.toThrow(ManagedSessionConflictError);
+        harness.now = 6_000;
+        const next = await authority.commitExtensionRecord(
+          command('monitor-1:6'),
+          { domain: 'monitor_run', record: LIFE[5] },
+          TRUSTED,
+        );
+        expect(next.revision).toBe(6);
+        expect(authority.taskViews()[0]).toMatchObject({
+          state: 'degraded',
+          startedAt: 3_000,
+        });
+      },
+      { create: false },
+    );
+  });
+
+  it('fails to reopen when a committed body is missing', async () => {
+    const harness = await createHarness();
+    const recordRef = await withAuthority(harness, async (authority) => {
+      await commitLife(harness, authority, 1);
+      return authority.extensionRecord('monitor_run', 'monitor-1')!.recordRef;
+    });
+    await fs.rm(
+      path.join(
+        harness.runtimeBaseDir,
+        'resources',
+        sessionId,
+        recordRef.kind,
+        recordRef.resourceId,
+      ),
+    );
+    await expect(
+      withAuthority(harness, async () => undefined, { create: false }),
+    ).rejects.toThrow(ManagedSessionRecordError);
+  });
+
+  it('issues grants the Runtime gate installs, renews and replaces', async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      await commitLife(harness, authority, 5);
+      const request = {
+        domain: 'monitor_run' as const,
+        recordId: 'monitor-1',
+        ownerId: 'runtime-monitor-owner',
+        workspaceGeneration: '3',
+        phases: ['rebuild_watch'],
+        leaseDurationMs: 30_000,
+      };
+      const grant = authority.issueOperationGrant(request);
+      expect(grant).toMatchObject({
+        sessionKey,
+        operationId: 'monitor-1:1',
+        domain: 'monitor_run',
+        operationRevision: 5,
+        resourceScope: {
+          recordRef: authority.extensionRecord('monitor_run', 'monitor-1')
+            ?.recordRef,
+          phases: ['rebuild_watch'],
+        },
+        expiresAt: harness.now + 30_000,
+      });
+      const gate = new ManagedOperationGrantGate();
+      expect(gate.install(grant)).toBe('installed');
+      expect(gate.install(grant)).toBe('unchanged');
+      expect(
+        gate.admits(sessionKey, 'monitor-1:1', 'rebuild_watch', harness.now),
+      ).toBe(true);
+
+      harness.now += 1_000;
+      expect(gate.install(authority.issueOperationGrant(request))).toBe(
+        'installed',
+      );
+      // Another owner needs a new revision of the record first.
+      expect(() =>
+        gate.install(
+          authority.issueOperationGrant({ ...request, ownerId: 'other-owner' }),
+        ),
+      ).toThrow(ManagedSessionConflictError);
+
+      harness.now = 6_000;
+      await authority.commitExtensionRecord(
+        command('monitor-1:6'),
+        { domain: 'monitor_run', record: LIFE[5] },
+        TRUSTED,
+      );
+      expect(
+        gate.install(
+          authority.issueOperationGrant({ ...request, ownerId: 'other-owner' }),
+        ),
+      ).toBe('installed');
+    });
+  });
+
+  it('refuses grants for unknown or finished records', async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      const request = {
+        domain: 'monitor_run' as const,
+        recordId: 'monitor-1',
+        ownerId: 'owner',
+        workspaceGeneration: '1',
+        phases: ['rebuild_watch'],
+        leaseDurationMs: 30_000,
+      };
+      expect(() => authority.issueOperationGrant(request)).toThrow(
+        /is committed/,
+      );
+      await commitLife(harness, authority);
+      expect(() => authority.issueOperationGrant(request)).toThrow(
+        /nothing left to finish/,
+      );
+    });
+  });
+});

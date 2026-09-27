@@ -18,8 +18,8 @@ import java.util.stream.Stream;
  * The managed-extension-record/1 contract (H0b of #12827): the records that
  * the Stage H capabilities share, as the control plane reads them. The
  * shared schema and fixtures in packages/core pin the contract, and the
- * TypeScript module there replays the same cases. Nothing commits these
- * records until H0c.
+ * TypeScript module there replays the same cases. The Session store reads
+ * them as they commit (H0c, see ManagedExtensionProjection).
  */
 public final class ManagedExtensionRecords {
     public static final List<String> DOMAINS = List.of("config_install",
@@ -425,6 +425,25 @@ public final class ManagedExtensionRecords {
                         generationOf(runtimeBefore, "generation")) > 0;
     }
 
+    /**
+     * Whether {@code run} may open a run: it starts reserved or admitted,
+     * with no execution beyond an intent and no delivery beyond a plan, so
+     * the first revision of a record never skips a step the later ones take
+     * one at a time.
+     */
+    public static boolean isRunStart(JsonNode run) {
+        if (!accepts(() -> requireRun(run))) {
+            return false;
+        }
+        String state = text(run, "state");
+        String execution = text(run, "execution");
+        JsonNode delivery = run.get("delivery");
+        return ("reserved".equals(state) || "admitted".equals(state))
+                && (execution == null || "intent".equals(execution))
+                && (delivery.isNull()
+                        || "planned".equals(text(delivery, "state")));
+    }
+
     /** Checks the body of a managed-monitor_run domain record. */
     public static void requireMonitorRun(JsonNode monitor) {
         closed(monitor, MONITOR_KEYS, "monitorRun");
@@ -567,6 +586,18 @@ public final class ManagedExtensionRecords {
                 next.get("startReceiptRef"));
         return previous.get("startReceiptRef").isNull()
                 || (rebuilt ? !sameReceipt : sameReceipt);
+    }
+
+    /**
+     * Whether {@code monitor} may be the first revision of a monitor: its
+     * run opens, and it has written no output, which needs a watch. It
+     * cannot have observed anything either, since an observation needs a
+     * start receipt.
+     */
+    public static boolean isMonitorRunStart(JsonNode monitor) {
+        return accepts(() -> requireMonitorRun(monitor))
+                && isRunStart(monitor.get("run"))
+                && monitor.get("outputRef").isNull();
     }
 
     /**

@@ -10,10 +10,14 @@ import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSession;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSessionRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellStreamRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSubmitRequest;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTask;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTaskGetRequest;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTaskQueryRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTranscript;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTranscriptRequest;
 import com.alibaba.qwen.code.managedagent.service.ManagedAgentService;
 import com.alibaba.qwen.code.managedagent.service.ManagedEventStreamService;
+import com.alibaba.qwen.code.managedagent.service.ManagedTaskService;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import jakarta.validation.Valid;
@@ -32,11 +36,28 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 public class WebShellAgentController {
     private final ManagedAgentService service;
     private final ManagedEventStreamService streams;
+    private final ManagedTaskService tasks;
 
     public WebShellAgentController(ManagedAgentService service,
-            ManagedEventStreamService streams) {
+            ManagedEventStreamService streams, ManagedTaskService tasks) {
         this.service = service;
         this.streams = streams;
+        this.tasks = tasks;
+    }
+
+    @PostMapping("/tasks/query")
+    public WebShellPage<WebShellTask> tasks(TenantContext tenant,
+            @Valid @RequestBody WebShellTaskQueryRequest request) {
+        return tasks.queryWebShellTasks(tenant.tenantId(), tenant.actorId(),
+                request.sessionId(), request.cursor(),
+                request.limit() == null ? 20 : request.limit());
+    }
+
+    @PostMapping("/tasks/get")
+    public WebShellTask task(TenantContext tenant,
+            @Valid @RequestBody WebShellTaskGetRequest request) {
+        return tasks.getWebShellTask(tenant.tenantId(), tenant.actorId(),
+                request.sessionId(), request.taskId());
     }
 
     @PostMapping("/sessions/query")

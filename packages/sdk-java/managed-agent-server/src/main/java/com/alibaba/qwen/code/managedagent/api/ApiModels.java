@@ -68,7 +68,10 @@ public final class ApiModels {
     }
 
     public record SessionCapabilities(boolean items, boolean snapshots,
-            boolean artifacts, boolean resync) {
+            boolean artifacts, boolean resync, boolean tasks) {
+    }
+
+    public record WebShellSessionCapabilities(boolean tasks) {
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
@@ -195,7 +198,39 @@ public final class ApiModels {
     public record WebShellSession(String sessionId, String title,
             String agentId, String status, long createdAt, long updatedAt,
             WebShellTurn activeTurn, Object environment, long lastSequence,
-            WebShellWorkspace workspace) {
+            WebShellWorkspace workspace,
+            WebShellSessionCapabilities capabilities) {
+    }
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record PublicTask(String id, String object,
+            @JsonProperty("session_id") String sessionId, String kind,
+            String state,
+            @JsonProperty("definition_revision") Long definitionRevision,
+            @JsonProperty("runtime_state") String runtimeState,
+            @JsonProperty("created_at") long createdAt,
+            @JsonProperty("started_at") Long startedAt,
+            @JsonProperty("settled_at") Long settledAt,
+            @JsonProperty("output_cursor") String outputCursor,
+            @JsonProperty("artifact_refs") List<String> artifactRefs,
+            @JsonProperty("action_capabilities")
+                    List<String> actionCapabilities) {
+    }
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record WebShellTask(String taskId, String sessionId, String kind,
+            String state, Long definitionRevision, String runtimeState,
+            long createdAt, Long startedAt, Long settledAt,
+            String outputCursor, List<String> artifactRefs,
+            List<String> actionCapabilities) {
+    }
+
+    public record WebShellTaskQueryRequest(@NotBlank String sessionId,
+            String cursor, Integer limit) {
+    }
+
+    public record WebShellTaskGetRequest(@NotBlank String sessionId,
+            @NotBlank String taskId) {
     }
 
     public record WebShellPage<T>(List<T> data, String nextCursor,

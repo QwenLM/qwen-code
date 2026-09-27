@@ -33,6 +33,7 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Set;
 import java.util.regex.Pattern;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -56,6 +57,7 @@ public class ManagedSessionStore {
             "READY", "BLOCKED_RESOURCE", "BLOCKED_WORKSPACE",
             "BLOCKED_EXECUTION");
     private final JdbcTemplate jdbc;
+    private final ManagedExtensionRecordStore extensionRecords;
     private final RowMapper<HeadRow> headMapper = (result, row) ->
             new HeadRow(result.getString("tenant_id"),
                     result.getString("workspace_id"),
@@ -93,7 +95,14 @@ public class ManagedSessionStore {
                     result.getString("state"));
 
     public ManagedSessionStore(JdbcTemplate jdbc) {
+        this(jdbc, new ManagedExtensionRecordStore(jdbc));
+    }
+
+    @Autowired
+    public ManagedSessionStore(JdbcTemplate jdbc,
+            ManagedExtensionRecordStore extensionRecords) {
         this.jdbc = jdbc;
+        this.extensionRecords = extensionRecords;
     }
 
     @Transactional
@@ -295,6 +304,10 @@ public class ManagedSessionStore {
         String scopeKey = sessionScopeKey(tenantId, sessionId);
         commitResources(scopeKey, tenantId, sessionId, request, revision,
                 now, validated.resources());
+        extensionRecords.apply(tenantId, request.workspaceId(), sessionId,
+                validated.recordBytes(), resourceId -> storedResource(
+                        scopeKey, tenantId, request.workspaceId(), sessionId,
+                        resourceId));
         jdbc.update("INSERT INTO qwen_managed_session_journal_tx"
                         + " (tenant_id, workspace_id, session_id,"
                         + " journal_revision, command_key_hash,"
@@ -459,6 +472,22 @@ public class ManagedSessionStore {
                         + " last_verified_at = ? WHERE session_scope_key = ?"
                         + " AND resource_id = ?",
                 databaseNow(), scopeKey, resourceId);
+        return new StoredResource(resource.resourceId(), resource.kind(),
+                resource.schemaVersion(), resource.byteLength(),
+                resource.digest(), resource.bytes());
+    }
+
+    /** A committed resource of this transaction's Session, verified. */
+    private StoredResource storedResource(String scopeKey, String tenantId,
+            String workspaceId, String sessionId, String resourceId) {
+        ResourceRow resource = findResource(scopeKey, resourceId);
+        if (resource == null) {
+            throw conflict(ManagedSessionStoreModels.ERROR_RESOURCE_MISSING,
+                    "A referenced Managed Session resource is missing.");
+        }
+        requireResourceScope(resource, tenantId, workspaceId, sessionId,
+                resourceId);
+        verifyStoredResource(resource);
         return new StoredResource(resource.resourceId(), resource.kind(),
                 resource.schemaVersion(), resource.byteLength(),
                 resource.digest(), resource.bytes());
@@ -1067,8 +1096,7 @@ public class ManagedSessionStore {
         return sha256(writerToken.getBytes(StandardCharsets.UTF_8));
     }
 
-    private static String sessionScopeKey(String tenantId,
-            String sessionId) {
+    static String sessionScopeKey(String tenantId, String sessionId) {
         return sha256((tenantId + "\u0000" + sessionId)
                 .getBytes(StandardCharsets.UTF_8));
     }

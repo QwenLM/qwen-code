@@ -2,7 +2,7 @@
 
 [English](2026-09-27-managed-agent-task-contract.md) | [简体中文](2026-09-27-managed-agent-task-contract.zh-CN.md)
 
-Status: H0a implemented in this change, as a contract only (every added route and schema, and every property added to an existing schema, is `planned`); H0b, H0c and H1 to H6 pending
+Status: H0a implemented in this change, as a contract only (every added route and schema, and every property added to an existing schema, is `planned`); H0b has landed, H0c serves the task list and detail and announces task changes ([design](2026-09-27-managed-extension-authority.md)), and task events, cancel and H1 to H6 are pending
 Date: 2026-09-27
 Issue: [#12827](https://github.com/QwenLM/qwen-code/issues/12827), part of [#12380](https://github.com/QwenLM/qwen-code/issues/12380)
 

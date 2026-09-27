@@ -6,11 +6,13 @@ import com.alibaba.qwen.code.managedagent.api.ApiModels.CreateSessionRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicItemList;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicList;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicSession;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicTask;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.SessionEventRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.UpdateSessionRequest;
 import com.alibaba.qwen.code.managedagent.service.ManagedAgentService;
 import com.alibaba.qwen.code.managedagent.service.ManagedAgentService.SessionMutationResult;
 import com.alibaba.qwen.code.managedagent.service.ManagedEventStreamService;
+import com.alibaba.qwen.code.managedagent.service.ManagedTaskService;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
@@ -32,11 +34,13 @@ import org.springframework.web.bind.annotation.RestController;
 public class PublicAgentController {
     private final ManagedAgentService service;
     private final ManagedEventStreamService streams;
+    private final ManagedTaskService tasks;
 
     public PublicAgentController(ManagedAgentService service,
-            ManagedEventStreamService streams) {
+            ManagedEventStreamService streams, ManagedTaskService tasks) {
         this.service = service;
         this.streams = streams;
+        this.tasks = tasks;
     }
 
     @PostMapping
@@ -180,6 +184,22 @@ public class PublicAgentController {
             @RequestParam(defaultValue = "20") int limit) {
         return service.listPublicItems(tenant.tenantId(), tenant.actorId(),
                 sessionId, after, limit);
+    }
+
+    @GetMapping("/{sessionId}/tasks")
+    public PublicList<PublicTask> tasks(TenantContext tenant,
+            @PathVariable String sessionId,
+            @RequestParam(required = false) String cursor,
+            @RequestParam(defaultValue = "20") int limit) {
+        return tasks.listPublicTasks(tenant.tenantId(), tenant.actorId(),
+                sessionId, cursor, limit);
+    }
+
+    @GetMapping("/{sessionId}/tasks/{taskId}")
+    public PublicTask task(TenantContext tenant,
+            @PathVariable String sessionId, @PathVariable String taskId) {
+        return tasks.getPublicTask(tenant.tenantId(), tenant.actorId(),
+                sessionId, taskId);
     }
 
     private static long parseSequence(String header, long fallback) {

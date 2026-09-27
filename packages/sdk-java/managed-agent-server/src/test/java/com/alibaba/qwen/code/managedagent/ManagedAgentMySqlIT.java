@@ -6,6 +6,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection.TaskProjection;
+import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
@@ -19,6 +21,7 @@ import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.Writer
 import com.alibaba.qwen.code.managedagent.store.StoreModels.Admission;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.ReplayWindow;
 import com.alibaba.qwen.code.runtimebroker.JdbcRepositoryContract;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
 import java.net.URLEncoder;
@@ -596,6 +599,56 @@ class ManagedAgentMySqlIT {
                 .locations("classpath:db/migration").load().migrate();
         JdbcRepositoryContract.verify(dataSource,
                 "flyway-" + UUID.randomUUID());
+    }
+
+    @Test
+    @Order(8)
+    void projectsStageHRecordsAndRollsBackARefusedOne() throws Exception {
+        DriverManagerDataSource dataSource = dataSource();
+        Flyway.configure().dataSource(dataSource)
+                .locations("classpath:db/migration").load().migrate();
+        JdbcTemplate jdbc = new JdbcTemplate(dataSource);
+        TransactionTemplate transactions = new TransactionTemplate(
+                new DataSourceTransactionManager(dataSource));
+        String tenant = "mysql-extension";
+        String session = "mysql-extension-" + UUID.randomUUID();
+        ExtensionRecordJournal journal = inTransaction(transactions,
+                () -> new ExtensionRecordJournal(new ManagedSessionStore(jdbc),
+                        tenant, "mysql-extension-workspace", session).open());
+        JsonNode fixtures = ManagedExtensionProjectionContractTest.fixtures();
+        JsonNode chain = fixtures.required("monitorChainCases").get(0)
+                .required("revisions");
+        for (int index = 0; index < chain.size() - 1; index++) {
+            JsonNode revision = chain.get(index);
+            String commandId = "monitor-" + index;
+            inTransaction(transactions, () -> journal.commitMonitor(
+                    commandId, revision.required("monitorRun"),
+                    revision.required("occurredAt").longValue()));
+        }
+        ManagedExtensionRecordStore records =
+                new ManagedExtensionRecordStore(jdbc, null);
+        TaskProjection before = records.listTasks(tenant, session, null,
+                null, 10).tasks().get(0).projection();
+        assertThat(before).isEqualTo(ManagedExtensionProjectionContractTest
+                .view(chain.get(chain.size() - 2).required("view")));
+
+        JsonNode refused = fixtures.required("monitorChainRejectCases")
+                .get(4).required("next");
+        assertThatThrownBy(() -> inTransaction(transactions,
+                () -> journal.commitMonitor("refused", refused, 99_000)))
+                .isInstanceOfSatisfying(ApiException.class, error ->
+                        assertThat(error.getCode()).isEqualTo(
+                                ManagedExtensionRecordStore.ERROR_REJECTED));
+        assertThat(jdbc.queryForObject("SELECT committed_sequence FROM"
+                        + " qwen_managed_session_journal_head WHERE"
+                        + " tenant_id = ? AND session_id = ?", Long.class,
+                tenant, session)).isEqualTo(journal.committedSequence());
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
+                        + " qwen_managed_session_resource WHERE tenant_id = ?"
+                        + " AND session_id = ?", Integer.class, tenant,
+                session)).isEqualTo(chain.size() - 1);
+        assertThat(records.listTasks(tenant, session, null, null, 10).tasks()
+                .get(0).projection()).isEqualTo(before);
     }
 
     private static Process startWorkspaceProcess(String action,
