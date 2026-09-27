@@ -476,6 +476,17 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
     );
   });
 
+  it('attributes tool-call reads to a stable workspace route and decoded session', () => {
+    expect(
+      resolveDaemonTelemetryRoute(
+        mockReq('GET', '/workspaces/ws/session/session%2F1/tool-calls'),
+      ),
+    ).toEqual({
+      route: 'GET /workspaces/:workspace/session/:id/tool-calls',
+      sessionId: 'session/1',
+    });
+  });
+
   it('attributes workspace session-info reads to the shared session-info route', () => {
     const mw = daemonTelemetryMiddleware(() => '/ws');
     const res = mockRes(200);
@@ -996,6 +1007,38 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
     );
   });
 
+  it.each(['/sessions/catalog', '/sessions/catalog/', '/SESSIONS/CATALOG'])(
+    'records batch catalog metrics without attributing %s to primary',
+    (path) => {
+      const resolveWorkspaceCwd = vi.fn(() => '/workspace/primary');
+      const recordRequest = vi.fn();
+      const res = mockRes(200);
+      const req = mockReq('POST', path);
+      expect(resolveDaemonTelemetryRoute(req)).toEqual({
+        route: 'POST /sessions/catalog',
+        attribution: 'handler_resolved',
+      });
+
+      daemonTelemetryMiddleware(resolveWorkspaceCwd, recordRequest)(
+        req,
+        res,
+        vi.fn() as unknown as NextFunction,
+      );
+      res.emit('finish');
+
+      expect(recordRequest).toHaveBeenCalledWith(expect.any(Number), 200);
+      expect(coreMocks.recordDaemonHttpRequest).toHaveBeenCalledWith(
+        expect.any(Number),
+        'POST /sessions/catalog',
+        200,
+        undefined,
+      );
+      expect(resolveWorkspaceCwd).not.toHaveBeenCalled();
+      expect(coreMocks.hashDaemonWorkspace).not.toHaveBeenCalled();
+      expect(coreMocks.spanSetAttribute).not.toHaveBeenCalled();
+    },
+  );
+
   it('omits workspace hash when a dynamic target is never resolved', () => {
     const resolveWorkspaceCwd = vi.fn(() => '/workspace/primary');
     const mw = daemonTelemetryMiddleware(resolveWorkspaceCwd);
@@ -1095,17 +1138,17 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
 });
 
 describe('legacy session telemetry route catalog', () => {
-  it('contains 73 unique routes with the audited 71/2 attribution split', () => {
+  it('contains 74 unique routes with the audited 72/2 attribution split', () => {
     const keys = legacySessionTelemetryRoutes.map(
       ({ method, path }) => `${method} ${path}`,
     );
-    expect(keys).toHaveLength(73);
-    expect(new Set(keys).size).toBe(73);
+    expect(keys).toHaveLength(74);
+    expect(new Set(keys).size).toBe(74);
     expect(
       legacySessionTelemetryRoutes.filter(
         ({ attribution }) => attribution === 'handler_resolved',
       ),
-    ).toHaveLength(71);
+    ).toHaveLength(72);
     expect(
       legacySessionTelemetryRoutes.filter(
         ({ attribution }) => attribution === 'pre_resolved',

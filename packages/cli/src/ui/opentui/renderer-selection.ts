@@ -132,11 +132,18 @@ export function isOpenTuiRuntimeSupported(
  * surfaces as a loud startup failure. The flag also survives into
  * {@link RendererSelection.strict} so the dispatcher can block the
  * boot-failure fallback the same way.
+ *
+ * Screen-reader mode is a second ink-only capability: it needs plain-text
+ * append-only output on the main screen with no mouse, and the OpenTUI side
+ * has no renderer path for it yet. Serving OpenTUI there would hand a
+ * screen-reader user in-place differential redraws, which are worse than
+ * useless, so the gate keeps ink.
  */
 export function selectTuiRenderer(
   envValue: string | undefined = process.env[TUI_RENDERER_ENV_VAR],
   probe?: RuntimeVersionProbe,
   env: NodeJS.ProcessEnv = process.env,
+  screenReader = false,
 ): RendererSelection {
   const requested = envValue?.trim().toLowerCase();
   const strictValue = env[TUI_RENDERER_STRICT_ENV_VAR]?.trim().toLowerCase();
@@ -147,6 +154,20 @@ export function selectTuiRenderer(
       reason: requested
         ? `${TUI_RENDERER_ENV_VAR}=${envValue} is not "${OPEN_TUI_RENDERER_VALUE}"`
         : `${TUI_RENDERER_ENV_VAR} is not set`,
+      strict,
+    };
+  }
+  if (screenReader) {
+    if (strict) {
+      throw new Error(
+        `${TUI_RENDERER_ENV_VAR}=${OPEN_TUI_RENDERER_VALUE} was requested, but screen-reader mode is only implemented by the ink renderer and ` +
+          `${TUI_RENDERER_STRICT_ENV_VAR} forbids the silent ink fallback`,
+      );
+    }
+    return {
+      renderer: 'ink',
+      reason:
+        'OpenTUI requested but screen-reader mode is only implemented by the ink renderer',
       strict,
     };
   }

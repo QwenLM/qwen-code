@@ -112,6 +112,22 @@ describe('WebTerminalRegistry', () => {
     vi.useRealTimers();
   });
 
+  it('runs an explicit SSH command with the existing terminal lifecycle', async () => {
+    const registry = new WebTerminalRegistry();
+    const command = {
+      file: 'ssh',
+      args: ['-tt', 'host', 'cd /srv/project && exec sh -l'],
+    };
+    await registry.create({ workspaceCwd: '/local/anchor', command });
+    expect(spawn).toHaveBeenCalledWith(
+      command.file,
+      command.args,
+      expect.objectContaining({ cwd: '/local/anchor' }),
+    );
+    registry.releaseWorkspace('/local/anchor');
+    expect(kill).toHaveBeenCalled();
+  });
+
   it('uses the resolved workspace and normalizes its environment', async () => {
     const registry = new WebTerminalRegistry();
 

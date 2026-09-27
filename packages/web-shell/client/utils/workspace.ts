@@ -20,16 +20,27 @@ export function workspaceBasename(cwd: string): string {
   return parts.at(-1) ?? cwd;
 }
 
-export function workspaceLabel(
-  workspace: Pick<DaemonWorkspaceCapability, 'cwd' | 'displayName'>,
+export function sshWorkspaceLabel(
+  ssh: NonNullable<DaemonWorkspaceCapability['ssh']>,
 ): string {
-  return workspace.displayName?.trim() || workspaceBasename(workspace.cwd);
+  return `${ssh.host}${ssh.port === undefined ? '' : `:${ssh.port}`}:${ssh.directory}`;
+}
+
+export function workspaceLabel(
+  workspace: Pick<DaemonWorkspaceCapability, 'cwd' | 'displayName' | 'ssh'>,
+): string {
+  return (
+    workspace.displayName?.trim() ||
+    (workspace.ssh
+      ? sshWorkspaceLabel(workspace.ssh)
+      : workspaceBasename(workspace.cwd))
+  );
 }
 
 export function workspaceLabelForCwd(
   cwd: string,
   workspaces:
-    | readonly Pick<DaemonWorkspaceCapability, 'cwd' | 'displayName'>[]
+    | readonly Pick<DaemonWorkspaceCapability, 'cwd' | 'displayName' | 'ssh'>[]
     | undefined,
 ): string {
   const workspace = workspaces?.find((entry) => entry.cwd === cwd);

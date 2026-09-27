@@ -79,6 +79,15 @@ function entry(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function setInputValue(input: HTMLInputElement, value: string): void {
+  const setter = Object.getOwnPropertyDescriptor(
+    HTMLInputElement.prototype,
+    'value',
+  )!.set!;
+  setter.call(input, value);
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
 function logPayload(entries: unknown[], hasMore = false, available = true) {
   return { v: 1 as const, workspaceCwd: '/repo', available, entries, hasMore };
 }
@@ -91,7 +100,10 @@ describe('GitLogDialog', () => {
     mount();
     await flush();
 
-    expect(workspaceGitLog).toHaveBeenCalledWith(50, 0, undefined);
+    expect(workspaceGitLog).toHaveBeenCalledWith(50, 0, undefined, undefined, {
+      all: false,
+      search: undefined,
+    });
     expect(document.body.textContent).toContain('first change');
     expect(document.body.textContent).toContain('Ada');
     expect(document.body.textContent).toContain('2 minutes ago');
@@ -153,7 +165,14 @@ describe('GitLogDialog', () => {
     await flush();
 
     // Second call uses the accumulated offset (1 entry already loaded).
-    expect(workspaceGitLog).toHaveBeenNthCalledWith(2, 50, 1, undefined);
+    expect(workspaceGitLog).toHaveBeenNthCalledWith(
+      2,
+      50,
+      1,
+      undefined,
+      undefined,
+      { all: false, search: undefined },
+    );
     expect(document.body.textContent).toContain('newest');
     expect(document.body.textContent).toContain('older');
   });
@@ -182,8 +201,22 @@ describe('GitLogDialog', () => {
     });
     await flush();
 
-    expect(workspaceGitLog).toHaveBeenNthCalledWith(2, 50, 1, undefined);
-    expect(workspaceGitLog).toHaveBeenNthCalledWith(3, 50, 3, undefined);
+    expect(workspaceGitLog).toHaveBeenNthCalledWith(
+      2,
+      50,
+      1,
+      undefined,
+      undefined,
+      { all: false, search: undefined },
+    );
+    expect(workspaceGitLog).toHaveBeenNthCalledWith(
+      3,
+      50,
+      3,
+      undefined,
+      undefined,
+      { all: false, search: undefined },
+    );
     expect(document.body.textContent?.match(/duplicate/g)).toHaveLength(1);
     expect(document.body.textContent).toContain('older');
   });
@@ -336,7 +369,13 @@ describe('GitLogDialog', () => {
     });
     await flush();
 
-    expect(workspaceGitLog).toHaveBeenCalledWith(50, 0, '/worktrees/wt');
+    expect(workspaceGitLog).toHaveBeenCalledWith(
+      50,
+      0,
+      '/worktrees/wt',
+      undefined,
+      { all: false, search: undefined },
+    );
 
     const loadMore = Array.from(document.body.querySelectorAll('button')).find(
       (b) => b.textContent === 'Load more',
@@ -347,7 +386,14 @@ describe('GitLogDialog', () => {
     });
     await flush();
 
-    expect(workspaceGitLog).toHaveBeenNthCalledWith(2, 50, 1, '/worktrees/wt');
+    expect(workspaceGitLog).toHaveBeenNthCalledWith(
+      2,
+      50,
+      1,
+      '/worktrees/wt',
+      undefined,
+      { all: false, search: undefined },
+    );
 
     const row = document.body.querySelector(
       'button[aria-expanded="false"]',
@@ -362,5 +408,130 @@ describe('GitLogDialog', () => {
       e.sha,
       '/worktrees/wt',
     );
+  });
+
+  it('refetches every branch when the All branches toggle is pressed', async () => {
+    workspaceGitLog
+      .mockResolvedValueOnce(logPayload([entry({ subject: 'head only' })]))
+      .mockResolvedValueOnce(logPayload([entry({ subject: 'other branch' })]));
+    mount();
+    await flush();
+
+    const toggle = document.body.querySelector(
+      '[data-testid="git-log-all-branches"]',
+    ) as HTMLButtonElement;
+    expect(toggle.textContent).toBe('All branches');
+    expect(toggle.getAttribute('aria-pressed')).toBe('false');
+    await act(async () => {
+      toggle.click();
+    });
+    await flush();
+
+    expect(workspaceGitLog).toHaveBeenNthCalledWith(
+      2,
+      50,
+      0,
+      undefined,
+      undefined,
+      { all: true, search: undefined },
+    );
+    expect(toggle.getAttribute('aria-pressed')).toBe('true');
+    expect(document.body.textContent).toContain('other branch');
+    expect(document.body.textContent).not.toContain('head only');
+  });
+
+  it('searches after the query settles and hides the lane graph for matches', async () => {
+    workspaceGitLog
+      .mockResolvedValueOnce(logPayload([entry({ subject: 'unrelated' })]))
+      .mockResolvedValueOnce(logPayload([entry({ subject: 'fix: typo' })]));
+    mount();
+    await flush();
+    expect(
+      document.body.querySelector('[data-testid="commit-graph"]'),
+    ).not.toBeNull();
+
+    const input = document.body.querySelector(
+      'input[type="search"]',
+    ) as HTMLInputElement;
+    await act(async () => {
+      setInputValue(input, ' typo ');
+    });
+    // Still debouncing: no second fetch yet.
+    expect(workspaceGitLog).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 350));
+    });
+    await flush();
+
+    expect(workspaceGitLog).toHaveBeenNthCalledWith(
+      2,
+      50,
+      0,
+      undefined,
+      undefined,
+      { all: false, search: 'typo' },
+    );
+    expect(document.body.textContent).toContain('fix: typo');
+    expect(
+      document.body.querySelector('[data-testid="commit-graph"]'),
+    ).toBeNull();
+  });
+
+  it('shows the no-match placeholder for an empty search result', async () => {
+    workspaceGitLog
+      .mockResolvedValueOnce(logPayload([entry()]))
+      .mockResolvedValueOnce(logPayload([]));
+    mount();
+    await flush();
+    const input = document.body.querySelector(
+      'input[type="search"]',
+    ) as HTMLInputElement;
+    await act(async () => {
+      setInputValue(input, 'nothing');
+      await new Promise((resolve) => setTimeout(resolve, 350));
+    });
+    await flush();
+    expect(document.body.textContent).toContain('No commits match');
+  });
+
+  it('lays merge history out in lanes: the side branch takes a second column', async () => {
+    const base = entry({ subject: 'base', parents: [] });
+    const side = entry({ subject: 'side', parents: [base.sha] });
+    const mainline = entry({ subject: 'mainline', parents: [base.sha] });
+    const merge = entry({
+      subject: 'merge',
+      parents: [mainline.sha, side.sha],
+    });
+    workspaceGitLog.mockResolvedValue(
+      logPayload([merge, side, mainline, base]),
+    );
+    mount();
+    await flush();
+
+    const columns = Array.from(
+      document.body.querySelectorAll('[data-testid="commit-graph"]'),
+    ).map((el) => el.getAttribute('data-column'));
+    expect(columns).toEqual(['0', '1', '0', '0']);
+
+    // Lanes continue straight through an expanded row's detail block.
+    workspaceGitCommitDetail.mockResolvedValue({
+      ...side,
+      available: true,
+      body: '',
+      files: [],
+      filesCount: 0,
+      linesAdded: 0,
+      linesRemoved: 0,
+      hiddenCount: 0,
+    });
+    const rows = document.body.querySelectorAll('button[aria-expanded]');
+    await act(async () => {
+      (rows[1] as HTMLButtonElement).click();
+    });
+    await flush();
+    // The side row keeps both lanes (its own and the mainline) open below it.
+    expect(
+      document.body.querySelectorAll('[data-testid="commit-graph-tail"] path'),
+    ).toHaveLength(2);
   });
 });

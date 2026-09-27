@@ -17,6 +17,7 @@ import { ToolRegistry } from '../tools/tool-registry.js';
 import { LlmClient } from '../core/client.js';
 import { LlmChat } from '../core/llm-chat.js';
 import { ToolSearchTool } from '../tools/tool-search.js';
+import { ToolCallTool } from '../tools/tool-call.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { SessionSourceService } from '../services/session-sources.js';
 import { PermissionManager } from '../permissions/permission-manager.js';
@@ -56,6 +57,7 @@ describe('late session source activation', () => {
       });
       const registry = new ToolRegistry(config);
       vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+      registry.registerTool(new ToolCallTool(registry));
       registry.registerTool(new ToolSearchTool(config));
       const client = new LlmClient(config);
       const [startupHistory] = await getInitialChatHistory(config);

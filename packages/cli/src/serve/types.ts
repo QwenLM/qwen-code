@@ -44,6 +44,7 @@ import type {
  *   implemented.
  */
 export type ServeMode = 'http-bridge' | 'native';
+export type ServeProfile = 'default' | 'hosted-harness';
 
 export type ServeChannelSelection =
   | { mode: 'all' }
@@ -58,6 +59,8 @@ export interface ChannelWebhookConfigSource {
 export interface ServeOptions {
   hostname: string;
   port: number;
+  /** Deployment boundary for provider selection and exposed surfaces. */
+  profile?: ServeProfile;
   /**
    * Bearer token required on every request. Optional when bound to loopback
    * (developer convenience). On a non-loopback bind with neither this option
@@ -70,6 +73,19 @@ export interface ServeOptions {
    * still fails the remote-bind check.
    */
   token?: string;
+  /**
+   * Print the token-bearing QR even when it would be withheld —
+   * an operator-supplied (stable) token on captured (non-TTY) stdout. The
+   * default suppression keeps stable credentials out of collected logs; this
+   * opt-in declares the log pipeline as trusted as the daemon host. An
+   * explicit value (either polarity) wins over the `serve.tokenQr` setting;
+   * `undefined` means the flag was omitted and the setting applies. `true`
+   * has no effect for generated tokens or interactive terminals, where the QR
+   * already prints; `false` suppresses it on every path, including those two
+   * — a generated bearer still reaches the operator as its own plain-text
+   * line, so the veto costs access to nothing.
+   */
+  tokenQr?: boolean;
   mode: ServeMode;
   /** Registration capacity, including primary and user scratch workspaces.
    * Defaults to QWEN_SERVE_MAX_WORKSPACES or 256; accepts integers 1..256.
@@ -263,9 +279,9 @@ export interface ServeOptions {
    * the cgroup-constrained or host memory.
    *
    * `childHeapMode: 'admit'` limits child starts using the modeled slot count;
-   * `observe` only reports the partition. Neither applies its heap ceiling. Sizing
-   * children arrives with the peak old-space measurement that can tell an
-   * operator beforehand whether their workload fits the partition.
+   * `observe` only reports the partition. Experimental `enforce` also applies
+   * the fixed modeled old-space ceiling to each managed child. It does not
+   * bound total process RSS.
    */
   memoryBudgetMb?: number;
   /**
@@ -287,18 +303,15 @@ export interface ServeOptions {
    *
    * `observe` (default) computes the partition and counts the spawns it would
    * have refused; nothing is applied. `admit` enforces only the child count,
-   * retaining the legacy heap arguments. There is no `enforce` yet — applying it
-   * needs a way to tell an operator in advance whether their workload fits
-   * the ceiling, and `refusals` cannot answer that: it counts admission
-   * pressure, while children still run on the far larger host-derived
-   * ceiling. `off` models nothing.
+   * retaining the legacy heap arguments. Experimental `enforce` also applies
+   * the fixed modeled old-space ceiling to each managed child. A zero refusal
+   * count does not prove the workload fits that ceiling. `off` models nothing.
    */
   childHeapMode?: ChildHeapMode;
   /**
-   * Resolved at boot by `runQwenServe`. Not an operator input, and not
-   * consumed by any spawn path — it is reported under `limits.memory` on
-   * `GET /daemon/status` so the daemon's memory denominator is observable
-   * before a child-capacity policy is designed against it.
+   * Resolved once at boot by `runQwenServe` for journal growth and the child
+   * policy, and reported under `limits.memory` on `GET /daemon/status`.
+   * Not an operator input.
    */
   daemonMemoryBudget?: DaemonMemoryBudget;
   /**
@@ -329,6 +342,21 @@ export interface ServeOptions {
    * `POST /session/:id/prompt` from receipt to completion.
    */
   promptDeadlineMs?: number;
+  /** Mount the experimental resident Managed Gateway and Tool Runtime path. */
+  experimentalManagedAgents?: boolean;
+  /** Expose the private authenticated Tool-only Runtime worker protocol. */
+  experimentalManagedRuntimeWorker?: boolean;
+  experimentalManagedRuntimeAutoLocal?: boolean;
+  /** Use a remote Runtime worker origin instead of the local provider. */
+  experimentalManagedRuntimeUrl?: string;
+  /** Bearer credential used only for the remote Runtime worker. */
+  experimentalManagedRuntimeToken?: string;
+  /** Java Runtime Broker origin used only by the Hosted Harness profile. */
+  managedRuntimeBrokerUrl?: string;
+  /** Service credential used only for Harness-to-Broker calls. */
+  managedRuntimeBrokerToken?: string;
+  /** Deployment-generated digest for the Hosted Harness private contract. */
+  hostedHarnessCapabilityDigest?: string;
   /**
    * Per-SSE-connection idle deadline.
    */
@@ -414,8 +442,19 @@ export interface ServeOptions {
  *
  * `v` is the wire schema version; bumped only on breaking frame changes.
  */
+export interface HostedHarnessCapabilities {
+  readonly protocolVersions: {
+    readonly current: 1;
+    readonly supported: readonly [1];
+  };
+  readonly bootId: string;
+  readonly capabilityDigest: string;
+}
+
 export interface CapabilitiesEnvelope {
   v: 1;
+  /** Private process generation and protocol for the Hosted Harness client. */
+  hostedHarness?: HostedHarnessCapabilities;
   /**
    * Serve protocol versions supported by this daemon. Optional because this is
    * additive to v=1; older v=1 daemons omit it.
@@ -461,6 +500,7 @@ export interface CapabilitiesEnvelope {
     id: string;
     cwd: string;
     displayName?: string;
+    ssh?: { host: string; port?: number; directory: string };
     primary: boolean;
     trusted: boolean;
     workflowsEnabled?: boolean;

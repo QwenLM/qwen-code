@@ -22,6 +22,11 @@
  *  - theme selection (useThemeCommand parity).
  */
 
+import { buildModelIdContext } from '@qwen-code/qwen-code-core/utils/modelId.js';
+import {
+  checkAdvisorModelAvailability,
+  isAdvisorModelEligible,
+} from '../../config/advisor-model.js';
 import process from 'node:process';
 import { EventEmitter } from 'node:events';
 import {
@@ -75,11 +80,14 @@ import { extensionComponentsSummary } from '../../services/extension-components-
 import { getErrorMessage } from '../../utils/errors.js';
 import { getToolInvalidReasons, isToolValid } from '../components/mcp/utils.js';
 import { themeManager, AUTO_THEME_NAME } from '../themes/theme-manager.js';
+import { applyOpenTuiTheme } from './theme.js';
+import { getActiveOpenTuiTheme } from './theme-parity.js';
 import {
   isSelectableVoiceModel,
   formatUnsupportedVoiceModelMessage,
 } from '../voice/voice-model.js';
 import {
+  ADVISOR_OFF_OPTION,
   buildModelSelectionKey,
   encodeAuxModelSelector,
   encodeVisionModelSelector,
@@ -97,6 +105,15 @@ import type {
 } from './dialogs-mcp.js';
 import type { ExtensionRow } from './dialogs-extensions.js';
 
+function advisorSelector(
+  model: NonNullable<OpenTuiModelEntry['model']>,
+): string {
+  const selector = `${model.authType}:${model.id}`;
+  return model.isRuntimeModel
+    ? selector
+    : `${selector}\0${model.registryBaseUrl ?? ''}`;
+}
+
 /**
  * Model list parity of ModelDialog's `availableModelEntries`: runtime entries
  * are listed (tagged) outside image mode, QWEN_OAUTH models only under that
@@ -113,8 +130,28 @@ export function buildModelEntries(
 ): OpenTuiModelEntry[] {
   const allModels = config?.getAllConfiguredModels?.() ?? [];
   const authType = config?.getAuthType?.();
-  const entries: OpenTuiModelEntry[] = [];
+  const entries: OpenTuiModelEntry[] =
+    mode === 'advisor'
+      ? [
+          {
+            key: ADVISOR_OFF_OPTION,
+            value: ADVISOR_OFF_OPTION,
+            authType: '',
+            modelId: '',
+            label: t('Off'),
+            description: t('Disable Advisor'),
+          },
+        ]
+      : [];
   for (const model of allModels) {
+    if (
+      mode === 'advisor' &&
+      (!isAdvisorModelEligible(model, true) ||
+        !config ||
+        !checkAdvisorModelAvailability(config, advisorSelector(model))
+          .available)
+    )
+      continue;
     if (mode === 'image') {
       // ink gates on isImageGenerationCapable (not just imageOnly): dual-role
       // models with supportsImageGeneration and visionOnly image-capable
@@ -135,7 +172,7 @@ export function buildModelEntries(
       ) {
         continue;
       }
-      if (mode !== 'fast' && model.fastOnly) continue;
+      if (mode !== 'fast' && mode !== 'advisor' && model.fastOnly) continue;
       if (mode !== 'voice' && model.voiceOnly) continue;
       // ink keeps visionOnly models in vision AND image mode
       // (ModelDialog.tsx: isVisionModelMode || isImageModelMode || !m.visionOnly).
@@ -144,11 +181,13 @@ export function buildModelEntries(
     const key =
       model.isRuntimeModel && model.runtimeSnapshotId
         ? model.runtimeSnapshotId
-        : buildModelSelectionKey(
-            String(model.authType ?? ''),
-            model.id,
-            model.baseUrl,
-          );
+        : mode === 'advisor'
+          ? advisorSelector(model)
+          : buildModelSelectionKey(
+              String(model.authType ?? ''),
+              model.id,
+              model.baseUrl,
+            );
     const isRuntime = model.isRuntimeModel ?? false;
     const isQwenOAuth = model.authType === AuthType.QWEN_OAUTH;
     // ink folds the runtime / discontinued markers into the row description as
@@ -213,6 +252,33 @@ export function computeModelDialogInitialKey(params: {
   const { config, settings, entries, mode } = params;
   if (entries.length === 0) return undefined;
   const byKey = new Map(entries.map((entry) => [entry.key, entry]));
+
+  if (mode === 'advisor') {
+    const setting = config?.getAdvisorModel();
+    if (!setting) return ADVISOR_OFF_OPTION;
+    try {
+      const endpointIndex = setting.indexOf('\0');
+      const selector = resolveModelId(
+        setting.split('\0')[0],
+        config ? buildModelIdContext(config) : {},
+      );
+      const match =
+        selector &&
+        entries.find(
+          ({ model }) =>
+            model &&
+            model.id === selector.modelId &&
+            (!selector.authType || model.authType === selector.authType) &&
+            (endpointIndex < 0 ||
+              (!model.isRuntimeModel &&
+                (model.registryBaseUrl ?? '') ===
+                  setting.slice(endpointIndex + 1))),
+        );
+      return match?.key ?? entries[1]?.key ?? ADVISOR_OFF_OPTION;
+    } catch {
+      return entries[1]?.key ?? ADVISOR_OFF_OPTION;
+    }
+  }
 
   if (mode === 'primary') {
     const snapshotId = config?.getActiveRuntimeModelSnapshot?.()?.id?.trim();
@@ -331,6 +397,30 @@ export async function applyModelSelection(
     params;
   const selectedEntry = entries.find((entry) => entry.key === selectionKey);
   const scopeSuffix = persistScopeSuffix(persistScope);
+
+  if (mode === 'advisor') {
+    if (!config) return { ok: false, error: t('Configuration not available.') };
+    const off = selectionKey === ADVISOR_OFF_OPTION;
+    if (!off && !selectedEntry?.model)
+      return { ok: false, error: t('Selected Advisor model is unavailable.') };
+    hydrateApiKeyEnvFromSettings(settings, selectedEntry?.model?.envKey);
+    const selector = off ? undefined : advisorSelector(selectedEntry!.model!);
+    if (selector && !checkAdvisorModelAvailability(config, selector).available)
+      return { ok: false, error: t('Selected Advisor model is unavailable.') };
+    try {
+      if ((await config.setAdvisorModel(selector)) === false)
+        return { ok: false, error: t('Advisor configuration is unavailable.') };
+      settings.setValue(SettingScope.User, 'advisorModel', selector ?? '');
+      return {
+        ok: true,
+        message: selector
+          ? t('Advisor set to {{model}}', { model: selector.split('\0')[0] })
+          : t('Advisor disabled'),
+      };
+    } catch (error) {
+      return { ok: false, error: getErrorMessage(error) };
+    }
+  }
 
   if (mode === 'voice') {
     if (!selectedEntry?.model) {
@@ -599,6 +689,7 @@ export function applyThemeSelection(
   }
   const effective = settings.merged.ui?.theme;
   themeManager.setActiveTheme(effective ?? AUTO_THEME_NAME);
+  applyOpenTuiTheme(getActiveOpenTuiTheme());
   return { applied: themeName };
 }
 

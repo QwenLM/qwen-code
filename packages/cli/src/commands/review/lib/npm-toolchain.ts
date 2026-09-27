@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { existsSync, rmSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import type { BuildTestReport, CommandResult } from '../build-test.js';
 import {
@@ -64,15 +64,40 @@ function testCommand(dir: string): string {
   return dir === '.' ? 'npm test' : `npm test --workspace=${shellArg(dir)}`;
 }
 /**
- * npm's completeness marker — `npm ci` writes
- * `node_modules/.package-lock.json` only once the tree is fully
- * materialised. This is the gate the install phase below reads, exported so
- * `prebuild.ts` answers the fetch report's `installed` off the SAME
- * predicate: the report and Agent 7 can never disagree about whether the
- * tree needs an install.
+ * The installer a repo's lockfile calls for, or null when it commits neither.
+ * `pnpm-lock.yaml` alone means pnpm. Beside a `package-lock.json` (a repo
+ * mid-migration commits both) the root manifest's `packageManager` decides,
+ * and anything but `pnpm@…` keeps npm, so an npm repo installs exactly as
+ * before. Only the install differs: scripts still run through `npm run`.
+ */
+export function lockfileInstaller(root: string): 'npm' | 'pnpm' | null {
+  const npmLock = existsSync(join(root, 'package-lock.json'));
+  if (!existsSync(join(root, 'pnpm-lock.yaml'))) return npmLock ? 'npm' : null;
+  if (!npmLock) return 'pnpm';
+  try {
+    const manager: unknown = JSON.parse(
+      readFileSync(join(root, 'package.json'), 'utf8'),
+    )?.packageManager;
+    return typeof manager === 'string' && manager.startsWith('pnpm@')
+      ? 'pnpm'
+      : 'npm';
+  } catch {
+    return 'npm';
+  }
+}
+
+/**
+ * The installer's completeness marker — `npm ci` writes
+ * `node_modules/.package-lock.json`, and pnpm `node_modules/.modules.yaml`,
+ * only once the tree is fully materialised. This is the gate the install
+ * phase below reads, exported so `prebuild.ts` answers the fetch report's
+ * `installed` off the SAME predicate: the report and Agent 7 can never
+ * disagree about whether the tree needs an install.
  */
 export function npmInstallComplete(root: string): boolean {
-  return existsSync(join(root, 'node_modules', '.package-lock.json'));
+  const marker =
+    lockfileInstaller(root) === 'pnpm' ? '.modules.yaml' : '.package-lock.json';
+  return existsSync(join(root, 'node_modules', marker));
 }
 /**
  * The one grammar `testCommand` above emits. Exported for the `--resume`
@@ -735,33 +760,34 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
   // in the diff and are not — so a timed-out install aborts, exactly like an install
   // that left no tree at all.
   //
-  // Whether to install is gated on npm's **completeness marker**, not the bare
-  // directory. `npm ci` writes `node_modules/.package-lock.json` only once the tree
-  // is fully materialised, so a partial tree — left by a timeout here, or by the
+  // Whether to install is gated on the installer's **completeness marker**, not the
+  // bare directory. `npm ci` writes `node_modules/.package-lock.json`, and pnpm
+  // `node_modules/.modules.yaml`, only once the tree is fully materialised, so a
+  // partial tree — left by a timeout here, or by the
   // agent's own shell-tool kill one level up — has the directory but not the marker.
   // Gating on the directory would let every later run *skip* the install and build
   // against that partial tree; gating on the marker reinstalls it.
   //
-  // But `npm ci` is only right for an npm repo. `workspaces` is also yarn/bun/pnpm
-  // syntax, and those write no `package-lock.json`, so `npm ci` would fail-fast on
-  // the missing lockfile and mislabel a perfectly usable `node_modules` as a failed
-  // install. So install only when there IS a `package-lock.json` (an npm repo) whose
-  // tree is incomplete; a non-npm repo that already has a tree is trusted — the build
+  // But the installer has to match the lockfile. `workspaces` is also yarn/bun
+  // syntax, and those commit neither `package-lock.json` nor `pnpm-lock.yaml`, so
+  // `npm ci` would fail-fast on the missing lockfile and mislabel a perfectly usable
+  // `node_modules` as a failed install. So install only when there IS one of the two
+  // (`lockfileInstaller` picks `npm ci` or `corepack pnpm install`) and the tree
+  // is incomplete; a yarn/bun repo that already has a tree is trusted — the build
   // is the authoritative signal, by this command's own argument.
-  const npmLock = existsSync(join(root, 'package-lock.json'));
+  const installer = lockfileInstaller(root);
   const installComplete = (): boolean => npmInstallComplete(root);
 
-  // A non-npm repo (yarn/bun/pnpm — `workspaces` is their syntax too) with no
-  // installed tree cannot be installed here: `npm ci` needs the npm lockfile, and
+  // A yarn or bun repo (`workspaces` is their syntax too) with no installed tree
+  // cannot be installed here: neither installer reads its lockfile, and
   // building against absent dependencies fails with `Cannot find module` **inside the
   // PR's own changed files** — the false-Critical steer this command exists to
   // prevent. A review worktree is cold by construction, so this is the common case,
   // not an edge. Hand it to the brief, naming the tool to install with. (The warm
   // case — a tree already present — is trusted below and never reaches here.)
-  if (args.install && !npmLock && !existsSync(join(root, 'node_modules'))) {
+  if (args.install && !installer && !existsSync(join(root, 'node_modules'))) {
     const altLock = [
       ['yarn.lock', 'yarn install --frozen-lockfile'],
-      ['pnpm-lock.yaml', 'pnpm install --frozen-lockfile'],
       ['bun.lockb', 'bun install --frozen-lockfile'],
       ['bun.lock', 'bun install --frozen-lockfile'],
     ].find(([f]) => existsSync(join(root, f)));
@@ -775,14 +801,17 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
             'build/test precedence in your brief.',
     );
   }
-  if (args.install && npmLock && !installComplete()) {
+  if (args.install && installer && !installComplete()) {
     // Disk preflight. The deadline already treats "cannot finish in time" as an
     // infrastructure result and skips ahead with a disclosure; "cannot fit on
     // the disk" is the same class of result, discovered before the command runs
     // instead of 33 seconds into it. An `npm ci` that dies on ENOSPC is
     // strictly worse than one that never starts: it leaves a partial tree AND a
     // full disk that fails every agent scheduled after this one.
-    const installCmd = 'npm ci --no-audit --no-fund';
+    const installCmd =
+      installer === 'pnpm'
+        ? 'corepack pnpm install --frozen-lockfile --reporter=append-only'
+        : 'npm ci --no-audit --no-fund';
     const free = freeDiskBytes(root);
     if (free !== null && free < INSTALL_MIN_FREE_BYTES) {
       results.ok = false;

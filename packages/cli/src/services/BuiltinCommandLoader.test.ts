@@ -82,6 +82,7 @@ import type { Config } from '@qwen-code/qwen-code-core';
 import { CommandKind } from '../ui/commands/types.js';
 
 import { restoreCommand } from '../ui/commands/restoreCommand.js';
+import { ideCommand } from '../ui/commands/ideCommand.js';
 
 vi.mock('../ui/commands/authCommand.js', () => ({ authCommand: {} }));
 vi.mock('../ui/commands/bugCommand.js', () => ({ bugCommand: {} }));
@@ -143,6 +144,40 @@ describe('BuiltinCommandLoader', () => {
     });
   });
 
+  it('skips automatic IDE process detection in tool sandbox', async () => {
+    const { ideCommand } = await import('../ui/commands/ideCommand.js');
+    mockConfig.getShellExecutionSandbox = vi
+      .fn()
+      .mockReturnValue({ backend: 'bwrap' });
+    const commands = await new BuiltinCommandLoader(mockConfig).loadCommands(
+      new AbortController().signal,
+    );
+    expect(ideCommand).not.toHaveBeenCalled();
+    expect(commands.some((command) => command.name === 'ide')).toBe(false);
+  });
+
+  it('does not probe local IDE processes for a non-interactive run', async () => {
+    mockConfig.isInteractive = vi.fn().mockReturnValue(false);
+
+    const commands = await new BuiltinCommandLoader(mockConfig).loadCommands(
+      new AbortController().signal,
+    );
+
+    expect(ideCommand).not.toHaveBeenCalled();
+    expect(commands.some((command) => command.name === 'ide')).toBe(false);
+  });
+
+  it('still builds the IDE command for an interactive run', async () => {
+    mockConfig.isInteractive = vi.fn().mockReturnValue(true);
+
+    const commands = await new BuiltinCommandLoader(mockConfig).loadCommands(
+      new AbortController().signal,
+    );
+
+    expect(ideCommand).toHaveBeenCalledOnce();
+    expect(commands.some((command) => command.name === 'ide')).toBe(true);
+  });
+
   it('should correctly pass the config object to restore command factory', async () => {
     const loader = new BuiltinCommandLoader(mockConfig);
     await loader.loadCommands(new AbortController().signal);
@@ -150,6 +185,16 @@ describe('BuiltinCommandLoader', () => {
     // ideCommand is now a constant, no longer needs config
     expect(restoreCommandMock).toHaveBeenCalledTimes(1);
     expect(restoreCommandMock).toHaveBeenCalledWith(mockConfig);
+  });
+
+  it('does not probe local IDE processes for an execution environment', async () => {
+    mockConfig.getExecutionEnvironment = vi.fn().mockReturnValue({});
+    const loader = new BuiltinCommandLoader(mockConfig);
+
+    const commands = await loader.loadCommands(new AbortController().signal);
+
+    expect(ideCommand).not.toHaveBeenCalled();
+    expect(commands.some((command) => command.name === 'ide')).toBe(false);
   });
 
   it('should filter out null command definitions returned by factories', async () => {

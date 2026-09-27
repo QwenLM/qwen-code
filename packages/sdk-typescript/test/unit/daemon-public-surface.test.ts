@@ -106,6 +106,11 @@ import type {
   DaemonSessionDiedEvent,
   DaemonSessionEvent,
   DaemonSessionCatalogVersion,
+  DaemonSessionCatalogWorkspace,
+  DaemonSessionCatalogRequest,
+  DaemonSessionCatalogPage,
+  DaemonSessionCatalogError,
+  DaemonSessionCatalogResult,
   DaemonSessionLiveState,
   DaemonSessionTurnIndexEntry,
   DaemonSessionTurnIndexPage,
@@ -179,6 +184,9 @@ import {
   UNRECOGNIZED_DIAGNOSTICS_LIMIT,
 } from '../../src/daemon/index.js';
 import type {
+  DaemonResourceLink,
+  DaemonUiUserResourceLinkEvent,
+  PromptContentBlock,
   DaemonChannelStartupAttemptFailure as DaemonEntryChannelStartupAttemptFailure,
   DaemonChannelStartupFailure as DaemonEntryChannelStartupFailure,
   DaemonChannelWorkerStartErrorResponse as DaemonEntryChannelWorkerStartErrorResponse,
@@ -187,6 +195,35 @@ import type {
   DaemonUnrecognizedDiagnostic as DaemonEntryUnrecognizedDiagnostic,
   DaemonUnrecognizedDiagnosticReason as DaemonEntryUnrecognizedDiagnosticReason,
 } from '../../src/daemon/index.js';
+
+describe('resource-link public surface', () => {
+  it('keeps the ACP discriminator and nullable metadata in the daemon API', () => {
+    const resourceLink: DaemonResourceLink = {
+      type: 'resource_link',
+      uri: 'transit://attachment',
+      name: 'report.pdf',
+      mimeType: null,
+      size: null,
+      description: null,
+      title: null,
+      annotations: {
+        audience: null,
+        lastModified: null,
+        priority: null,
+        _meta: null,
+      },
+      _meta: null,
+    };
+    const event: DaemonUiUserResourceLinkEvent = {
+      type: 'user.resource_link.delta',
+      resourceLink,
+    };
+    const promptContent: PromptContentBlock[] = [resourceLink];
+    expect(event.resourceLink).toBe(resourceLink);
+    expect(promptContent[0]).toBe(resourceLink);
+    expectTypeOf(event.resourceLink.type).toEqualTypeOf<'resource_link'>();
+  });
+});
 
 describe('continuation compatibility', () => {
   it('accepts an older daemon response without an event epoch', () => {
@@ -574,6 +611,76 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     expectTypeOf<DaemonStatusReportLevel>().not.toBeNever();
     expectTypeOf<DaemonStatusReportSection>().not.toBeNever();
     expectTypeOf<DaemonStatusReportSession>().not.toBeNever();
+  });
+
+  it('exposes batched session catalogs at the public entry', () => {
+    expect(typeof Public.DaemonClient.prototype.listSessionsCatalog).toBe(
+      'function',
+    );
+    expectTypeOf<DaemonSessionCatalogWorkspace>().toEqualTypeOf<{
+      workspace: string;
+      cursor?: string;
+    }>();
+    expectTypeOf<DaemonSessionCatalogRequest>().toEqualTypeOf<{
+      workspaces: 'all' | DaemonSessionCatalogWorkspace[];
+      options?: Omit<Public.DaemonSessionListPageOptions, 'cursor'>;
+      includeGroups?: boolean;
+    }>();
+    expectTypeOf<DaemonSessionCatalogPage>().toEqualTypeOf<{
+      sessions: Public.DaemonSessionSummary[];
+      nextCursor?: string;
+      liveMergeFailed?: boolean;
+      truncated?: boolean;
+      workspace: string;
+      workspaceId: string;
+      cwd: string;
+      groups?: Public.DaemonSessionGroupCatalog;
+    }>();
+    expectTypeOf<DaemonSessionCatalogError>().toEqualTypeOf<{
+      workspace: string;
+      workspaceId?: string;
+      cwd?: string;
+      error: { code: string; message: string; status: number };
+    }>();
+    expectTypeOf<DaemonSessionCatalogResult>().toEqualTypeOf<{
+      workspaces: Array<DaemonSessionCatalogPage | DaemonSessionCatalogError>;
+    }>();
+    expectTypeOf<DaemonClient['listSessionsCatalog']>().toEqualTypeOf<
+      (
+        request: DaemonSessionCatalogRequest,
+        opts?: { signal?: AbortSignal; timeoutMs?: number },
+      ) => Promise<DaemonSessionCatalogResult>
+    >();
+  });
+
+  it('parses every kind of background turn a daemon emits', () => {
+    // A consumer built against an older SDK would reject a kind it has
+    // never seen and lose the turn, so every kind the daemon can emit has
+    // to be listed here as well as in the type.
+    for (const kind of [
+      'agent',
+      'monitor',
+      'shell',
+      'workflow',
+      'peer',
+    ] as const) {
+      expect(
+        Public.parseDaemonBackgroundTurn({
+          turnId: 't1',
+          taskId: 'k1',
+          kind,
+          startedAt: 1,
+        }),
+      ).toMatchObject({ kind });
+    }
+    expect(
+      Public.parseDaemonBackgroundTurn({
+        turnId: 't1',
+        taskId: 'k1',
+        kind: 'something-else',
+        startedAt: 1,
+      }),
+    ).toBeUndefined();
   });
 
   it('exposes the workspace session live-state surface at the public entry', () => {

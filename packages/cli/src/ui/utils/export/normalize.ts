@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { isShellResultDisplay } from '@qwen-code/qwen-code-core/shellResult';
 import type { Part } from '@google/genai';
 import {
   formatVisionBridgeNoticeDisplay,
@@ -42,7 +43,11 @@ export function normalizeSessionData(
   // Build index of assistant messages by uuid for usageMetadata merging
   const assistantMessageIndexByUuid = new Map<string, number>();
   normalized.forEach((message, index) => {
-    if (message.type === 'assistant') {
+    if (
+      message.type === 'assistant' &&
+      (message.message?.role !== 'thinking' ||
+        !assistantMessageIndexByUuid.has(message.uuid))
+    ) {
       assistantMessageIndexByUuid.set(message.uuid, index);
     }
   });
@@ -109,6 +114,9 @@ function mergeToolCallData(
   }
   if (existing.status === 'pending' || existing.status === 'in_progress') {
     existing.status = incoming.status;
+  }
+  if (incoming.rawOutput !== undefined) {
+    existing.rawOutput = incoming.rawOutput;
   }
   if (!existing.rawInput && incoming.rawInput) {
     existing.rawInput = incoming.rawInput;
@@ -187,6 +195,9 @@ function buildToolCallMessageFromResult(
       title,
       status: toolCallResult?.error ? 'failed' : 'completed',
       rawInput,
+      ...(isShellResultDisplay(toolCallResult?.resultDisplay)
+        ? { rawOutput: toolCallResult.resultDisplay }
+        : {}),
       content,
       locations,
       timestamp: Date.parse(record.timestamp),

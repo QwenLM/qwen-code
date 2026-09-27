@@ -34,6 +34,18 @@ function envelope(overrides: Partial<Envelope> = {}): Envelope {
 }
 
 describe('GroupGate', () => {
+  it('inherits requireMention by field even when the group has another override', () => {
+    const gate = new GroupGate('allowlist', {
+      '*': { requireMention: false },
+      chat1: { senders: 'allowlist' },
+      chat2: { requireMention: true },
+    });
+    expect(gate.check(envelope({ isGroup: true })).allowed).toBe(true);
+    expect(
+      gate.check(envelope({ isGroup: true, chatId: 'chat2' })).reason,
+    ).toBe('mention_required');
+  });
+
   describe('non-group messages', () => {
     it('always allows DM messages regardless of policy', () => {
       for (const policy of [

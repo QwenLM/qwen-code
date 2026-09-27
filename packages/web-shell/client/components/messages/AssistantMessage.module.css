@@ -46,8 +46,35 @@
 }
 
 .copyButton svg {
-  width: 14px;
-  height: 14px;
+  width: 16px;
+  height: 16px;
+}
+
+/* A thumb glyph fills its view box far more than the built-in copy and branch
+   icons do, so it takes a smaller box and a proportionally thicker stroke: at
+   13px the 2.4 stroke paints the same ~1.3px as their 16px default, so the
+   three read as one row instead of the thumb looking heavier. */
+.feedbackButton svg {
+  width: 13px;
+  height: 13px;
+  stroke-width: 2.4;
+}
+
+/* The mark reads as state: blue means satisfied, red means not.
+   The hover and focus variants are listed so the colour survives `.copyButton`'s
+   own hover rule, which has a higher specificity: the row only appears on
+   hover, so a mark that greyed out while the pointer was on it would never be
+   readable. */
+.feedbackButtonActiveUp,
+.feedbackButtonActiveUp:hover,
+.feedbackButtonActiveUp:focus-visible {
+  color: var(--agent-blue-400, #335cff);
+}
+
+.feedbackButtonActiveDown,
+.feedbackButtonActiveDown:hover,
+.feedbackButtonActiveDown:focus-visible {
+  color: var(--destructive, #ef4444);
 }
 
 .footerTime {
@@ -166,6 +193,7 @@
 .translationPopover {
   width: min(480px, calc(100vw - 32px));
   max-height: min(520px, calc(100vh - 48px));
+  max-height: min(520px, calc(100dvh - 48px));
 }
 
 .translationTitle {

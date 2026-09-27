@@ -1436,6 +1436,78 @@ describe('HookEventHandler', () => {
     });
   });
 
+  it.each([
+    ['use', 'completed'],
+    ['batch', 'completed'],
+    ['batch', 'failed'],
+  ] as const)(
+    'preserves shell text for %s hooks with %s results without mutating the UI result',
+    async (event, outcome) => {
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(
+        createMockExecutionPlan([
+          {
+            type: HookType.Command,
+            command: 'echo test',
+            source: HooksConfigSource.Project,
+          },
+        ]),
+      );
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+      const display = Object.freeze({
+        type: 'shell_result',
+        version: 1,
+        text: outcome === 'failed' ? 'Exit Code: 7' : 'line one\nline two',
+        output: 'line one\nline two',
+        directory: '/tmp',
+        exitCode: outcome === 'failed' ? 7 : 0,
+        signal: null,
+        pid: 42,
+        error: null,
+        outcome,
+        notices: [],
+        truncated: false,
+        outputFiles: [],
+      });
+      const response = Object.freeze({
+        returnDisplay: display,
+        result_display: display,
+      });
+      if (event === 'use') {
+        await hookEventHandler.firePostToolUseEvent(
+          'run_shell_command',
+          {},
+          response,
+          'shell-1',
+          PermissionMode.Default,
+        );
+      } else {
+        await hookEventHandler.firePostToolBatchEvent([
+          {
+            tool_name: 'run_shell_command',
+            tool_input: {},
+            tool_use_id: 'shell-1',
+            status: outcome === 'failed' ? 'error' : 'success',
+            tool_response: response,
+          },
+        ]);
+      }
+      const input = vi.mocked(mockHookRunner.executeHooksParallel).mock
+        .calls[0][2];
+      expect(input).toMatchObject(
+        event === 'use'
+          ? { tool_response: { returnDisplay: display.text } }
+          : {
+              tool_calls: [{ tool_response: { result_display: display.text } }],
+            },
+      );
+      expect(response.returnDisplay).toBe(display);
+      expect(response.result_display).toBe(display);
+    },
+  );
+
   describe('firePostToolBatchEvent', () => {
     it('preserves question text for batch hooks without changing other results', async () => {
       vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(
@@ -4815,6 +4887,298 @@ describe('HookEventHandler', () => {
         `${HookEventName.Notification}:end`,
       ]);
     });
+
+    /**
+     * What each runner returns for each way a hook can end (the runner tests
+     * pin these shapes), and the outcome the bus must report for it. HTTP keeps
+     * `success: true` on its non-blocking failures, so the projection has to
+     * follow `outcome`, not `success`.
+     */
+    it.each([
+      [
+        'command',
+        'cancelled before start',
+        { success: false, outcome: 'cancelled' },
+        'cancelled',
+      ],
+      [
+        'http',
+        'cancelled before start',
+        { success: false, outcome: 'cancelled' },
+        'cancelled',
+      ],
+      [
+        'function',
+        'cancelled before start',
+        { success: false, outcome: 'cancelled' },
+        'cancelled',
+      ],
+      [
+        'prompt',
+        'cancelled before start',
+        { success: false, outcome: 'cancelled' },
+        'cancelled',
+      ],
+      [
+        'command',
+        'cancelled while running',
+        { success: false, outcome: 'cancelled' },
+        'cancelled',
+      ],
+      [
+        'http',
+        'cancelled while running',
+        { success: true, outcome: 'cancelled', output: { continue: true } },
+        'cancelled',
+      ],
+      [
+        'function',
+        'cancelled while running',
+        { success: false, outcome: 'cancelled' },
+        'cancelled',
+      ],
+      [
+        'prompt',
+        'cancelled while running',
+        { success: false, outcome: 'cancelled' },
+        'cancelled',
+      ],
+      [
+        'command',
+        'timed out',
+        { success: false, outcome: 'timeout' },
+        'timeout',
+      ],
+      [
+        'http',
+        'timed out',
+        { success: true, outcome: 'timeout', output: { continue: true } },
+        'timeout',
+      ],
+      [
+        'function',
+        'timed out',
+        { success: false, outcome: 'timeout' },
+        'timeout',
+      ],
+      [
+        'prompt',
+        'timed out',
+        { success: false, outcome: 'timeout' },
+        'timeout',
+      ],
+      ['command', 'allowed', { success: true, outcome: 'success' }, 'success'],
+      [
+        'http',
+        'allowed',
+        { success: true, outcome: 'success', output: { continue: true } },
+        'success',
+      ],
+      [
+        'function',
+        'allowed',
+        { success: true, outcome: 'success', output: { continue: true } },
+        'success',
+      ],
+      [
+        'prompt',
+        'allowed',
+        {
+          success: true,
+          outcome: 'success',
+          output: { continue: true, decision: 'allow' },
+        },
+        'success',
+      ],
+      [
+        'command',
+        'blocked',
+        { success: false, outcome: 'blocking' },
+        'blocked',
+      ],
+      [
+        'http',
+        'blocked',
+        {
+          success: true,
+          outcome: 'blocking',
+          output: { decision: 'block', reason: 'no' },
+        },
+        'blocked',
+      ],
+      [
+        'function',
+        'blocked',
+        {
+          success: false,
+          outcome: 'blocking',
+          output: { continue: false, decision: 'block' },
+        },
+        'blocked',
+      ],
+      [
+        'prompt',
+        'blocked',
+        {
+          success: false,
+          outcome: 'blocking',
+          output: { continue: false, decision: 'block' },
+        },
+        'blocked',
+      ],
+      [
+        'command',
+        'failed to spawn',
+        { success: false, outcome: 'non_blocking_error' },
+        'error',
+      ],
+      [
+        'http',
+        'non-2xx response',
+        {
+          success: true,
+          outcome: 'non_blocking_error',
+          error: new Error('HTTP hook returned 500'),
+          output: { continue: true },
+        },
+        'error',
+      ],
+      [
+        'http',
+        'connection failure',
+        {
+          success: true,
+          outcome: 'non_blocking_error',
+          error: new TypeError('fetch failed'),
+          output: { continue: true },
+        },
+        'error',
+      ],
+      [
+        'http',
+        'URL not allowed',
+        { success: false, outcome: 'non_blocking_error' },
+        'error',
+      ],
+      [
+        'function',
+        'callback threw',
+        { success: false, outcome: 'non_blocking_error' },
+        'error',
+      ],
+      [
+        'prompt',
+        'provider error',
+        {
+          success: false,
+          outcome: 'non_blocking_error',
+          output: { continue: true },
+        },
+        'error',
+      ],
+      [
+        'command',
+        'malformed output',
+        { success: false, outcome: 'non_blocking_error' },
+        'error',
+      ],
+      [
+        'command',
+        'non-zero exit',
+        { success: false, outcome: 'non_blocking_error' },
+        'error',
+      ],
+      [
+        'command',
+        'internal error',
+        { success: false, outcome: 'non_blocking_error' },
+        'error',
+      ],
+      [
+        'command',
+        'async hand-off',
+        {
+          success: true,
+          outcome: 'success',
+          isAsync: true,
+          output: { continue: true },
+        },
+        'success',
+      ],
+      [
+        'command',
+        'async refused',
+        {
+          success: false,
+          outcome: 'non_blocking_error',
+          isAsync: true,
+          output: { continue: true },
+        },
+        'error',
+      ],
+    ] as Array<[string, string, Partial<HookExecutionResult>, string]>)(
+      'reports a %s hook that %s as %s on the bus',
+      async (_runner, _ending, result, expected) => {
+        runWith([commandHook('matrix')], () => result);
+
+        await hookEventHandler.fireUserPromptSubmitEvent('hi');
+
+        expect(progress().find((m) => m['phase'] === 'end')?.['outcome']).toBe(
+          expected,
+        );
+      },
+    );
+
+    /**
+     * The command runner now states the outcome of its internal catch and of
+     * the async hand-off and refusal. Each must project to what the bus
+     * reported before the outcome was filled in.
+     */
+    it.each([
+      [
+        'internal error',
+        { success: false, error: new Error('boom') },
+        'non_blocking_error',
+      ],
+      [
+        'async refused',
+        {
+          success: false,
+          isAsync: true,
+          error: new Error('too many'),
+          output: { continue: true },
+        },
+        'non_blocking_error',
+      ],
+      [
+        'async hand-off',
+        { success: true, isAsync: true, output: { continue: true } },
+        'success',
+      ],
+    ] as Array<
+      [string, Partial<HookExecutionResult>, HookExecutionResult['outcome']]
+    >)(
+      'reports the same %s progress with and without an explicit outcome',
+      async (_ending, result, outcome) => {
+        runWith([commandHook('implicit')], () => result);
+        await hookEventHandler.fireUserPromptSubmitEvent('hi');
+        const implicit = progress().find((m) => m['phase'] === 'end');
+
+        publish.mockClear();
+        runWith([commandHook('implicit')], () => ({ ...result, outcome }));
+        await hookEventHandler.fireUserPromptSubmitEvent('hi');
+        const explicit = progress().find((m) => m['phase'] === 'end');
+
+        // Two firings are two invocations, so the identity is the one field
+        // that has to differ; everything the outcome decides must not.
+        expect(implicit?.['invocationId']).toMatch(/^hook-\d+$/);
+        expect(explicit?.['invocationId']).not.toBe(implicit?.['invocationId']);
+        expect(explicit).toEqual({
+          ...implicit,
+          invocationId: expect.stringMatching(/^hook-\d+$/),
+        });
+      },
+    );
   });
   describe('hook invocation identity in progress events', () => {
     let bus: MessageBus;

@@ -9,31 +9,65 @@ import { RequestError } from '@agentclientprotocol/sdk';
 import { SessionIdCaseConflictError } from '@qwen-code/qwen-code-core';
 import { DaemonDrainingError } from '../server/session-archive.js';
 import { StandaloneSessionServiceError } from '../conversations/standalone-session-service.js';
+import { WorkspaceRuntimeInitializationError } from '../workspace-runtime-coordinator.js';
 import {
   AcpChildCapacityExceededError,
   BridgeChannelQuarantinedError,
   BridgeTimeoutError,
   InvalidSessionMetadataError,
+  ManagedSessionBranchUnsupportedError,
+  RequestedSessionIdRejectedError,
   RestoreInProgressError,
   SessionRestoreTimeoutError,
 } from '../acp-session-bridge.js';
+import { SessionExecutionEngineError } from '@qwen-code/qwen-code-core/services/session-execution-engine.js';
+import { SessionTranscriptSnapshotUnavailableError } from '@qwen-code/qwen-code-core/services/session-transcript-reader.js';
 import { toRpcError } from './dispatch.js';
 import { RPC } from './json-rpc.js';
 
+describe('startup errors across bundle boundaries', () => {
+  it.each([
+    ['invalid_startup_config', 400, RPC.INVALID_PARAMS],
+    // A rejected selection is caller input too — the JSON-RPC code agrees
+    // with the REST 4xx classification, and data.httpStatus keeps the 422.
+    ['startup_config_rejected', 422, RPC.INVALID_PARAMS],
+  ] as const)(
+    'maps %s by its stable contract',
+    (errorKind, httpStatus, code) => {
+      const error = Object.assign(new Error('startup rejected'), {
+        name: 'SessionStartupConfigError',
+        code: errorKind,
+      });
+      expect(toRpcError(error)).toEqual({
+        code,
+        message: 'startup rejected',
+        data: { errorKind, httpStatus },
+      });
+    },
+  );
+});
+
 describe('capacity RPC errors', () => {
-  it('carries an explicit HTTP status and machine reason', () => {
-    const error = new AcpChildCapacityExceededError(6, 6);
-    expect(toRpcError(error)).toEqual({
-      code: RPC.INTERNAL_ERROR,
-      message: error.message,
-      data: {
-        httpStatus: 503,
-        errorKind: error.code,
-        maxConcurrentChildren: 6,
-        committedAcpChildren: 6,
-      },
-    });
-  });
+  it.each([false, true])(
+    'carries capacity through runtime wrapper=%s',
+    (wrapped) => {
+      const error = new AcpChildCapacityExceededError(6, 6);
+      expect(
+        toRpcError(
+          wrapped ? new WorkspaceRuntimeInitializationError(error) : error,
+        ),
+      ).toEqual({
+        code: RPC.INTERNAL_ERROR,
+        message: error.message,
+        data: {
+          httpStatus: 503,
+          errorKind: error.code,
+          maxConcurrentChildren: 6,
+          committedAcpChildren: 6,
+        },
+      });
+    },
+  );
   it('preserves standalone rollback classification with nested capacity', () => {
     const capacity = {
       code: 'acp_child_capacity_exhausted' as const,
@@ -61,6 +95,99 @@ describe('capacity RPC errors', () => {
   });
 });
 
+describe('paired Bridge rejections', () => {
+  it('maps an invalid requested ID to 400 without echoing it', () => {
+    expect(
+      toRpcError(new RequestedSessionIdRejectedError('invalid_session_id')),
+    ).toEqual({
+      code: RPC.INVALID_PARAMS,
+      message: 'Invalid params: Requested session ID is invalid',
+      data: { httpStatus: 400, errorKind: 'invalid_session_id' },
+    });
+  });
+
+  it('maps a live requested ID to the shared 409 conflict shape', () => {
+    expect(
+      toRpcError(
+        new RequestedSessionIdRejectedError('session_id_conflict', 'id'),
+      ),
+    ).toEqual({
+      code: RPC.INVALID_PARAMS,
+      message: 'Invalid params: Session id is already live',
+      data: {
+        httpStatus: 409,
+        errorKind: 'session_id_conflict',
+        sessionId: 'id',
+        conflict: 'live',
+      },
+    });
+  });
+
+  it('maps an unsupported Managed branch to 409', () => {
+    const error = new ManagedSessionBranchUnsupportedError('id');
+    expect(toRpcError(error)).toEqual({
+      code: RPC.INVALID_PARAMS,
+      message: error.message,
+      data: {
+        httpStatus: 409,
+        errorKind: 'managed_session_branch_unsupported',
+        sessionId: 'id',
+      },
+    });
+  });
+
+  it.each([
+    ['host selection', new SessionExecutionEngineError('id', 'empty')],
+    [
+      'the ACP child',
+      {
+        code: -32024,
+        message: 'belongs to managed',
+        data: {
+          errorKind: 'session_execution_engine_unavailable',
+          sessionId: 'id',
+        },
+      },
+    ],
+  ])('maps an owner rejection from %s to 409', (_source, error) => {
+    expect(toRpcError(error)).toEqual({
+      code: RPC.INVALID_PARAMS,
+      message:
+        'This session cannot be resumed with the current execution engine.',
+      data: {
+        httpStatus: 409,
+        errorKind: 'session_execution_engine_unavailable',
+      },
+    });
+  });
+});
+
+describe('transcript snapshot rejections', () => {
+  it.each([
+    [
+      'the daemon',
+      new SessionTranscriptSnapshotUnavailableError('id'),
+      'Transcript snapshot is unavailable for session id',
+    ],
+    [
+      'the ACP child',
+      // What the ACP SDK rejects with: the JSON-RPC error object, not an Error.
+      {
+        code: -32010,
+        message: 'Transcript snapshot is unavailable for session id',
+        data: { errorKind: 'transcript_snapshot_unavailable', sessionId: 'id' },
+      },
+      'Transcript snapshot is unavailable for session id',
+    ],
+  ])('maps one raised by %s to 409 like REST', (_source, error, message) => {
+    expect(toRpcError(error)).toEqual({
+      code: RPC.INTERNAL_ERROR,
+      message,
+      data: { httpStatus: 409, errorKind: 'transcript_snapshot_unavailable' },
+    });
+  });
+});
+
 describe('toRpcError', () => {
   it.each(['request', 'wire'] as const)(
     'preserves workflow parameter details from a %s error',
@@ -81,6 +208,41 @@ describe('toRpcError', () => {
       });
     },
   );
+
+  // A run whose stored state rules out the action — no journal to resume,
+  // args its snapshot could not keep — is not a daemon fault: the client
+  // gets the reason and a status it can branch on.
+  it.each([
+    'workflow_journal_unavailable',
+    'workflow_args_unavailable',
+    'workflow_run_live_elsewhere',
+  ])('answers %s as a conflict that keeps its message', (errorKind) => {
+    const source = RequestError.invalidParams(
+      { errorKind },
+      'Workflow run wf_1234abcd has no journal on disk',
+    );
+
+    expect(toRpcError(source)).toEqual({
+      code: RPC.INVALID_PARAMS,
+      message: source.message,
+      data: { errorKind, httpStatus: 409 },
+    });
+  });
+
+  // Nothing started, and the daemon is not at fault for it: the write that
+  // keeps a second runner off this journal did not land. Retryable.
+  it('answers workflow_not_recorded as unavailable, with its message', () => {
+    const source = RequestError.invalidParams(
+      { errorKind: 'workflow_not_recorded' },
+      'Could not record that workflow run wf_1234abcd is running again',
+    );
+
+    expect(toRpcError(source)).toEqual({
+      code: RPC.INVALID_PARAMS,
+      message: source.message,
+      data: { errorKind: 'workflow_not_recorded', httpStatus: 503 },
+    });
+  });
 
   it.each([
     new Error('Unexpected workflow failure'),
