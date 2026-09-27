@@ -1,6 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ChangeEvent } from 'react';
-import { ArrowLeftIcon, PlusIcon, SlashIcon, XIcon } from 'lucide-react';
+import {
+  ArrowLeftIcon,
+  MessageCircleQuestionIcon,
+  PlusIcon,
+  SlashIcon,
+  XIcon,
+} from 'lucide-react';
 import { useI18n } from '../../i18n';
 import type { CommandInfo } from '../../adapters/types';
 import {
@@ -71,6 +77,7 @@ export interface AddMenuProps {
    * Omitted when the host has not enabled Plan.
    */
   plan?: AddMenuPlanControl;
+  btw?: { onSelect: () => void; disabledReason?: string };
   mobileActions?: {
     commands: readonly CommandInfo[];
     categoryOrder?: CommandDisplayCategoryOrder;
@@ -307,6 +314,7 @@ export function AddMenu({
   skillsLoadError,
   skillsLoaded = false,
   plan,
+  btw,
   mobileActions,
   commandsOnly = false,
 }: AddMenuProps) {
@@ -682,6 +690,27 @@ export function AddMenu({
                       onClick={() => closeAndRun(mobileActions.onLiveVoice!)}
                     />
                   )}
+                  {btw && (
+                    <Button
+                      variant="ghost"
+                      className={`${mobileRowClass} py-2`}
+                      disabled={Boolean(btw.disabledReason)}
+                      data-testid="composer-add-menu-btw"
+                      onClick={() => closeAndRun(btw.onSelect)}
+                    >
+                      <MessageCircleQuestionIcon />
+                      <span className="flex min-w-0 flex-1 flex-col">
+                        <span>{t('composerAdd.btw.label')}</span>
+                        <span className="truncate text-xs text-muted-foreground">
+                          {btw.disabledReason ??
+                            t('composerAdd.btw.description')}
+                        </span>
+                      </span>
+                      <span className="text-xs text-muted-foreground">
+                        /btw
+                      </span>
+                    </Button>
+                  )}
                   {plan && (
                     <Button
                       variant="ghost"
@@ -846,9 +875,11 @@ export function AddMenu({
             }}
           >
             {!anyAvailable ? (
-              <DropdownMenuLabel data-testid="composer-add-menu-empty">
-                {t('composerAdd.emptyState')}
-              </DropdownMenuLabel>
+              !btw && (
+                <DropdownMenuLabel data-testid="composer-add-menu-empty">
+                  {t('composerAdd.emptyState')}
+                </DropdownMenuLabel>
+              )
             ) : (
               <>
                 {addFileAvailable || uploadAvailable ? (
@@ -1023,6 +1054,25 @@ export function AddMenu({
                 </DropdownMenuSub>
               </>
             )}
+            {btw ? (
+              <>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem
+                  disabled={Boolean(btw.disabledReason)}
+                  data-testid="composer-add-menu-btw"
+                  onSelect={() => closeAndRun(btw.onSelect)}
+                >
+                  <MessageCircleQuestionIcon />
+                  <span className="flex min-w-0 flex-1 flex-col">
+                    <span>{t('composerAdd.btw.label')}</span>
+                    <span className="truncate text-xs text-muted-foreground">
+                      {btw.disabledReason ?? t('composerAdd.btw.description')}
+                    </span>
+                  </span>
+                  <span className="text-xs text-muted-foreground">/btw</span>
+                </DropdownMenuItem>
+              </>
+            ) : null}
             {plan ? (
               <>
                 <DropdownMenuSeparator />
