@@ -19,7 +19,7 @@ import { isNodeError } from '../utils/errors.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { fileExists, isWithinRoot } from '../utils/fileUtils.js';
 import { NO_EXEC_CONFIG } from '../utils/gitUtils.js';
-import { runGit } from '../utils/git-branches.js';
+import { runGitCapture } from '../utils/git-branches.js';
 import { loadSimpleGit } from '../utils/load-simple-git.js';
 import { initRepositoryWithMainBranch } from './gitInit.js';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
@@ -84,11 +84,15 @@ export const DISPOSABLE_IGNORED_ROOTS: ReadonlySet<string> = new Set([
  * that edit, so such a preserve is permanent rather than transient. The argv
  * tokens added for this probe are literals placed after the `status`
  * subcommand and are never caller-derived (see `load-simple-git.ts`), and
- * `runGit` scrubs the environment (`gitEnv`) so an inherited `GIT_DIR` or
- * `status.showUntrackedFiles=no` cannot make a dirty checkout read clean.
+ * `runGitCapture` scrubs the environment (`gitEnv`) so an inherited
+ * `GIT_DIR` or `status.showUntrackedFiles=no` cannot make a dirty checkout
+ * read clean.
  *
- * Fail-closed: any read error counts as work, preserving the checkout.
- * The `.git` access check exists because `runGit` does not pin the
+ * Fail-closed: any read error counts as work, preserving the checkout —
+ * including the one kind that arrives as a zero exit status: git reports
+ * a directory it cannot open as a stderr warning, leaving that content
+ * absent from stdout, so any stderr output preserves the checkout too.
+ * The `.git` access check exists because `runGitCapture` does not pin the
  * repository: without it, git's upward discovery from a path whose own
  * `.git` is gone (a sweep's `fs.rm` that threw partway, a restore that
  * dropped the link file) would answer about the *enclosing* repository —
@@ -98,7 +102,7 @@ export const DISPOSABLE_IGNORED_ROOTS: ReadonlySet<string> = new Set([
 export async function worktreeHasWork(worktreePath: string): Promise<boolean> {
   try {
     await fs.access(path.join(worktreePath, '.git'));
-    const stdout = await runGit(worktreePath, [
+    const { stdout, stderr } = await runGitCapture(worktreePath, [
       ...NO_EXEC_CONFIG,
       '--no-optional-locks',
       'status',
@@ -106,6 +110,16 @@ export async function worktreeHasWork(worktreePath: string): Promise<boolean> {
       '--untracked-files=normal',
       '--ignored=matching',
     ]);
+    // `git status` reports a directory it cannot open as a stderr warning
+    // with exit 0, so that content is absent from stdout with no line to
+    // preserve it — the one read error that arrives without rejecting.
+    // Fail closed on it; the sweep's keeping line then carries the reason.
+    if (stderr.trim().length > 0) {
+      debugLogger.debug(
+        `worktreeHasWork: status probe at ${worktreePath} reported on stderr, treating as work: ${stderr.trim()}`,
+      );
+      return true;
+    }
     for (const line of stdout.split('\n')) {
       if (line.trim().length === 0) continue;
       const entry = line.slice(3);

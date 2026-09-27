@@ -560,6 +560,60 @@ describe('cleanupStaleAgentWorktrees', () => {
     ).resolves.toBeUndefined();
   });
 
+  // chmod-based denial needs POSIX semantics; Windows ACLs do not map, and
+  // root (CI containers) opens mode-000 directories without a warning.
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'preserves a stale worktree when the probe cannot enumerate a directory',
+    async () => {
+      // `git status` answers a directory it cannot open with a stderr
+      // warning and exit 0, so the content is absent from stdout with no
+      // line to keep it. Beside a waivable entry (the node_modules
+      // symlink) that silent gap would let the sweep reach
+      // removeUserWorktree over content the probe never saw.
+      const target = path.join(repoRoot, 'node_modules', 'x');
+      await fs.mkdir(target, { recursive: true });
+      await fs.writeFile(path.join(target, 'i.js'), '//\n');
+      const wtPath = await createAgentWorktree('agent-aabbccd');
+      await fs.symlink(
+        path.join(repoRoot, 'node_modules'),
+        path.join(wtPath, 'node_modules'),
+        'dir',
+      );
+      await fs.mkdir(path.join(wtPath, 'locked'));
+      await fs.writeFile(
+        path.join(wtPath, 'locked', 'precious.txt'),
+        'irreplaceable\n',
+      );
+      await fs.chmod(path.join(wtPath, 'locked'), 0o000);
+      await agePastCutoff(wtPath);
+      worktreeServiceLogger.debug.mockClear();
+
+      try {
+        const removed = await cleanupStaleAgentWorktrees(repoRoot);
+
+        expect(removed).toBe(0);
+        await expect(
+          fs.access(path.join(wtPath, '.git')),
+        ).resolves.toBeUndefined();
+        await expect(
+          fs.access(path.join(wtPath, '.gitignore')),
+        ).resolves.toBeUndefined();
+        const registered = execFileSync(
+          'git',
+          ['worktree', 'list', '--porcelain'],
+          { cwd: repoRoot, encoding: 'utf8' },
+        );
+        expect(registered).toContain(`worktree ${wtPath}`);
+        expect(worktreeServiceLogger.debug).toHaveBeenCalledWith(
+          expect.stringContaining('reported on stderr'),
+        );
+      } finally {
+        // Restore readability so afterEach can remove the fixture.
+        await fs.chmod(path.join(wtPath, 'locked'), 0o755);
+      }
+    },
+  );
+
   it('preserves a stale worktree whose only content is an empty ignored directory', async () => {
     // git lists empty *ignored* directories (never empty untracked ones), so
     // the collapsed arm can be reached with zero children — where "every
