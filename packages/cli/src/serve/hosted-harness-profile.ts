@@ -59,6 +59,11 @@ export function validateHostedHarnessProfile(
       '--profile hosted-harness does not accept browser origins.',
     );
   }
+  if (opts.experimentalPairedEngines) {
+    throw new Error(
+      '--profile hosted-harness does not pair execution engines.',
+    );
+  }
   if (
     opts.managedRuntimeBrokerUrl !== undefined ||
     opts.managedRuntimeBrokerToken !== undefined
