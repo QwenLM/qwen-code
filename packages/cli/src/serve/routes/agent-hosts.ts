@@ -109,17 +109,19 @@ export function registerAgentHostTransportRoutes(
   const json = express.json({ limit: '16kb' });
 
   app.use('/agent-hosts', (req, res, next) => {
-    if (
-      rateLimiter &&
-      !rateLimiter.checkRate(
-        `agent-host:preauth:${req.ip || req.socket.remoteAddress || 'unknown'}`,
-        'mutation',
-      )
-    ) {
+    const hostId = /^\/agent-hosts\/[^/]+\/([^/]+)\//.exec(
+      req.originalUrl,
+    )?.[1];
+    const enrollment = req.originalUrl.startsWith('/agent-hosts/enroll');
+    const tier = enrollment ? 'mutation' : 'read';
+    const subject = enrollment
+      ? req.ip || req.socket.remoteAddress || 'unknown'
+      : hostId || req.ip || req.socket.remoteAddress || 'unknown';
+    if (rateLimiter && !rateLimiter.checkRate(`agent-host:${subject}`, tier)) {
       res.status(429).json({
         error: 'Rate limit exceeded',
         code: 'rate_limit_exceeded',
-        tier: 'mutation',
+        tier,
       });
       return;
     }

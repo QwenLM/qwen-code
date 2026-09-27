@@ -358,7 +358,7 @@ async function executeAssignment(
       ...(steps ? { steps } : {}),
     };
   };
-  const progressHeartbeat = setInterval(() => void flush(), 500);
+  const progressHeartbeat = setInterval(() => void flush(), 1000);
   progressHeartbeat.unref?.();
   renew.unref?.();
   let summary: string | undefined;
@@ -610,14 +610,14 @@ export async function startAgentHostConnection(
   ]);
   const existing = activeConnections.get(key);
   if (existing) {
-    if (existing.provider !== options.provider)
-      throw new Error(
-        'This workspace already has a Host connection using another provider.',
-      );
     if (
       existing.bridge === options.bridge &&
       existing.generationGuard === options.generationGuard
     ) {
+      if (existing.provider !== options.provider)
+        throw new Error(
+          'This workspace already has a Host connection using another provider.',
+        );
       return existing.start;
     }
     activeConnections.delete(key);
@@ -775,12 +775,21 @@ async function connectAgentHost(
           await delay(RETRY_MS);
         }
       }
+    } catch (error) {
+      if (!options.generationGuard?.closed) {
+        writeStderrLine(
+          `qwen serve: Agent Host connection stopped: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
     } finally {
       clearInterval(timer);
       const active = activeConnections.get(
         JSON.stringify([serverUrl, options.workspaceId, options.workspaceCwd]),
       );
-      if (active?.generationGuard === options.generationGuard) {
+      if (
+        active?.bridge === options.bridge &&
+        active.generationGuard === options.generationGuard
+      ) {
         activeConnections.delete(
           JSON.stringify([
             serverUrl,
