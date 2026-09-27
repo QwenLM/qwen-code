@@ -37,7 +37,10 @@ import {
 import { laterActivityTimestamp } from './activity-timestamp.js';
 import { classifyTopLevelConversationSource } from '../../runtime/live-session-source.js';
 import { parseCallerSuppliedSessionId } from '../../config/session-id.js';
-import { AGENT_HOST_SESSION_SOURCE_TYPE } from '../../runtime/agent-session-source.js';
+import {
+  AGENT_HOST_SESSION_SOURCE_TYPE,
+  AGENT_SESSION_SOURCE_TYPE,
+} from '../../runtime/agent-session-source.js';
 
 const DEFAULT_SESSION_PAGE_SIZE = 20;
 const MAX_SESSION_PAGE_SIZE = 100;
@@ -730,7 +733,10 @@ async function loadAllPersistedSummaries(
       size: 10_000,
       archiveState,
       signal,
-      excludeSourceType: AGENT_HOST_SESSION_SOURCE_TYPE,
+      excludeSourceTypes: [
+        AGENT_HOST_SESSION_SOURCE_TYPE,
+        AGENT_SESSION_SOURCE_TYPE,
+      ],
     });
     signal.throwIfAborted();
     const remaining = MAX_ORGANIZED_SESSIONS - sessions.length;
@@ -1465,7 +1471,10 @@ async function listWorkspaceSessionsForResponseInRuntime(
     cursor: numericCursor,
     size: pageSize,
     archiveState,
-    excludeSourceType: AGENT_HOST_SESSION_SOURCE_TYPE,
+    excludeSourceTypes: [
+      AGENT_HOST_SESSION_SOURCE_TYPE,
+      AGENT_SESSION_SOURCE_TYPE,
+    ],
     ...(readOptions.signal ? { signal: readOptions.signal } : {}),
   });
   readOptions.signal?.throwIfAborted();
@@ -1692,7 +1701,10 @@ export async function getWorkspaceSessionInfoForResponse(
   options: { includeLive?: boolean } = {},
 ): Promise<WorkspaceSessionInfoResult> {
   const counts = await new SessionService(workspaceCwd).getSessionInfoCounts({
-    excludeSourceType: AGENT_HOST_SESSION_SOURCE_TYPE,
+    excludeSourceTypes: [
+      AGENT_HOST_SESSION_SOURCE_TYPE,
+      AGENT_SESSION_SOURCE_TYPE,
+    ],
   });
   return {
     active: counts.active,

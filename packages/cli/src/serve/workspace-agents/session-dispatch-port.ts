@@ -409,10 +409,16 @@ export function createSessionDispatchPort(
           sessionId,
         );
         if (summary?.titleSource !== 'manual') {
-          bridge.updateSessionMetadata?.(sessionId, {
-            displayName: `${agent.name} · ${threadTitle}`.slice(0, 256),
-            titleSource: 'auto',
-          });
+          try {
+            bridge.updateSessionMetadata?.(sessionId, {
+              displayName: `${agent.name} · ${threadTitle}`.slice(0, 256),
+              titleSource: 'auto',
+            });
+          } catch {
+            // Cosmetic only: the bridge validates display names and throws
+            // synchronously, and a rejected title must not turn a successful
+            // spawn into a launch failure.
+          }
         }
         return {
           status: 'started',

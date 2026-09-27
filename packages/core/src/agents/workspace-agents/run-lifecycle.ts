@@ -430,33 +430,46 @@ export async function applyAggregateStatus(
     }
   }
 
-  if (
-    resolution.status === 'blocked' &&
-    next.parentThreadId &&
-    !resolution.outstanding.some(
+  if (resolution.status === 'blocked' && next.parentThreadId) {
+    const unackedTerminal = resolution.outstanding.filter(
       (obligation) =>
         (obligation.kind === 'failure' || obligation.kind === 'cancelled') &&
         obligation.acknowledgedAtSequence === undefined,
-    ) &&
-    !alreadyReported('child_blocked')
-  ) {
-    const cause = resolution.outstanding.find(
-      (obligation) => obligation.acknowledgedAtSequence === undefined,
     );
-    next = enqueue(
-      next,
-      {
-        kind: 'parent_report',
-        ...(cause ? { causedByRunId: cause.runId } : {}),
-        payload: {
-          event: 'child_blocked',
-          threadId: next.id,
-          parentThreadId: next.parentThreadId,
-          reason: resolution.reason,
+    // child_failed / child_cancelled already tells the parent about a
+    // reported terminal run; child_blocked on top would double-report. But a
+    // terminal whose report finishRunInTransaction skipped because a sibling
+    // was still live was never told about — blocking must not stay silent.
+    const everyTerminalReported = unackedTerminal.every((obligation) =>
+      next.outbox.some(
+        (event) =>
+          event.causedByRunId === obligation.runId &&
+          (event.payload['event'] === 'child_failed' ||
+            event.payload['event'] === 'child_cancelled'),
+      ),
+    );
+    if (
+      !(unackedTerminal.length > 0 && everyTerminalReported) &&
+      !alreadyReported('child_blocked')
+    ) {
+      const cause = resolution.outstanding.find(
+        (obligation) => obligation.acknowledgedAtSequence === undefined,
+      );
+      next = enqueue(
+        next,
+        {
+          kind: 'parent_report',
+          ...(cause ? { causedByRunId: cause.runId } : {}),
+          payload: {
+            event: 'child_blocked',
+            threadId: next.id,
+            parentThreadId: next.parentThreadId,
+            reason: resolution.reason,
+          },
         },
-      },
-      now,
-    );
+        now,
+      );
+    }
   }
 
   return next;
@@ -650,6 +663,11 @@ export async function finishRunInTransaction(
         : undefined;
   if (
     next.parentThreadId &&
+    // A thread a person marked done already queued its child_done report;
+    // the runs its cancellation settles must not stack a second, contradicting
+    // report on top. A 'cancelled' thread still needs this — it may be the
+    // parent's only notification.
+    next.status !== 'done' &&
     !hasLiveRun &&
     parentEvent &&
     !next.outbox.some(

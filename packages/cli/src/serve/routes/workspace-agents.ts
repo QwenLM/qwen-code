@@ -65,7 +65,10 @@ import {
   decideDispatch,
   resolveTargets,
 } from '@qwen-code/qwen-code-core/agents/workspace-agents/dispatch-policy.js';
-import { queuedAhead } from '@qwen-code/qwen-code-core/agents/workspace-agents/dispatcher.js';
+import {
+  deliverParentReports,
+  queuedAhead,
+} from '@qwen-code/qwen-code-core/agents/workspace-agents/dispatcher.js';
 import {
   finishRunInTransaction,
   hasLiveDescendant,
@@ -317,7 +320,7 @@ export function registerWorkspaceAgentRoutes(
       current.bridge !== runtime.bridge ||
       current.generationGuard !== runtime.generationGuard
     ) {
-      current?.owner.stop();
+      await current?.owner.stop();
       const owner = startAgentHostSessionOwner({
         bridge: runtime.bridge,
         workspaceCwd: runtime.workspaceCwd,
@@ -383,20 +386,42 @@ export function registerWorkspaceAgentRoutes(
             readWorkspaceAgents(runtime.workspaceCwd),
             listThreads(runtime.workspaceCwd),
           ]);
-          const hasRoster = agents.some(
-            (agent) => agent.retiredAt === undefined,
+          // "Can anyone take work" is the addressability question the DELETE
+          // teardown asks, not just "is anyone unretired" — a workspace whose
+          // agents are all disabled must not keep a host session heartbeat
+          // alive.
+          const hasRoster = agents.some(isAgentAddressable);
+          const hasLiveRuns = threads.some((thread) =>
+            thread.runs.some((run) => LIVE_RUN_STATUSES.has(run.status)),
           );
-          const hasWork = threads.some(
-            (thread) =>
-              thread.runs.some((run) => LIVE_RUN_STATUSES.has(run.status)) ||
-              // Only parent reports are still delivered; a leftover event of a
-              // retired kind must not keep waking recovery every five seconds.
-              thread.outbox.some(
-                (event) =>
-                  event.status === 'pending' && event.kind === 'parent_report',
-              ),
+          const hasPendingReports = threads.some((thread) =>
+            // Only parent reports are still delivered; a leftover event of a
+            // retired kind must not keep waking recovery every five seconds.
+            thread.outbox.some(
+              (event) =>
+                event.status === 'pending' && event.kind === 'parent_report',
+            ),
           );
+          const hasWork = hasLiveRuns || hasPendingReports;
           if (!hasRoster && !hasWork) continue;
+          if (!hasRoster && !hasLiveRuns) {
+            // Nobody here can take work anymore. Deliver what needs no agent,
+            // then tear the owner down exactly as the DELETE route does.
+            await deliverParentReports(runtime.workspaceCwd);
+            await owners.get(runtime.workspaceCwd)?.owner.stop();
+            owners.delete(runtime.workspaceCwd);
+            const workspace = await readAgentWorkspace(runtime.workspaceCwd);
+            if (workspace.hostSessionId) {
+              await releaseAgentHostSession(
+                runtime.workspaceCwd,
+                workspace.hostSessionId,
+              );
+              await runtime.bridge
+                .closeSession(workspace.hostSessionId)
+                .catch(() => {});
+            }
+            continue;
+          }
           const owner = owners.get(runtime.workspaceCwd);
           if (
             !hasWork &&
@@ -428,7 +453,7 @@ export function registerWorkspaceAgentRoutes(
   app.locals['stopWorkspaceAgentRecovery'] = () => {
     recoveryStopped = true;
     clearInterval(recoveryTimer);
-    for (const { owner } of owners.values()) owner.stop();
+    for (const { owner } of owners.values()) void owner.stop();
   };
 
   /**
@@ -1222,7 +1247,10 @@ export function registerWorkspaceAgentRoutes(
             ? await startBookedRuns(runtime)
             : undefined;
         if (remainingAgents.length === 0) {
-          owners.get(runtime.workspaceCwd)?.owner.stop();
+          // Drain the owner's in-flight tick before releasing the host
+          // session, or a concurrent ensure() can spawn a replacement that
+          // nothing heartbeats or closes.
+          await owners.get(runtime.workspaceCwd)?.owner.stop();
           owners.delete(runtime.workspaceCwd);
           const workspace = await readAgentWorkspace(runtime.workspaceCwd);
           if (workspace.hostSessionId) {

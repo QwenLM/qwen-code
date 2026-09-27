@@ -1144,19 +1144,16 @@ export async function setWorkspaceAgentEnabled(
     // success and change nothing a caller can observe — `isAgentAddressable`
     // still refuses it — which is worse than saying no.
     if (agent.retiredAt !== undefined) return 'retired';
-    if ((agent.enabled !== false) === enabled) return 'updated';
-    await transaction.writeAgents(
-      agents.map((candidate) =>
-        candidate.id === agentId ? { ...candidate, enabled } : candidate,
-      ),
-    );
     if (!enabled) {
       // A disabled agent's queued runs can never start — candidate selection
       // skips non-addressable agents — but `queued` counts as live for
       // thread status and for `agentHasLiveWork`, so leaving one behind
       // pins its thread in `in_progress` and blocks retirement with no
-      // in-band explanation. Settle those runs here, in the roster change's
-      // own transaction; running work is left to finish.
+      // in-band explanation. Settle those runs first: this transaction has
+      // no rollback, so the roster write must come after the fallible scan,
+      // and the settle runs even when the flag is already false so a retry
+      // after a partial failure finishes the job. Running work is left to
+      // finish.
       const { threads, unreadable } = await transaction.listThreads();
       if (unreadable.length > 0) {
         throw new Error(
@@ -1179,6 +1176,12 @@ export async function setWorkspaceAgentEnabled(
         }
       }
     }
+    if ((agent.enabled !== false) === enabled) return 'updated';
+    await transaction.writeAgents(
+      agents.map((candidate) =>
+        candidate.id === agentId ? { ...candidate, enabled } : candidate,
+      ),
+    );
     return 'updated';
   });
 }

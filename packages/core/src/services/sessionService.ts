@@ -309,8 +309,8 @@ export interface ListSessionsOptions {
   archiveState?: SessionArchiveState;
   /** Aborts an in-progress catalog scan. */
   signal?: AbortSignal;
-  /** Omits records carrying this immutable creator attribution. */
-  excludeSourceType?: string;
+  /** Omits records carrying any of these immutable creator attributions. */
+  excludeSourceTypes?: readonly string[];
 }
 
 /**
@@ -2613,7 +2613,7 @@ export class SessionService {
       size = 20,
       archiveState = 'active',
       signal,
-      excludeSourceType,
+      excludeSourceTypes,
     } = options;
     const chatsDir = this.getChatsDirForState(archiveState);
     const isArchived = archiveState === 'archived';
@@ -2727,8 +2727,9 @@ export class SessionService {
         knownManaged,
       );
       if (
-        excludeSourceType !== undefined &&
-        source.sourceType === excludeSourceType
+        excludeSourceTypes !== undefined &&
+        source.sourceType !== undefined &&
+        excludeSourceTypes.includes(source.sourceType)
       ) {
         continue;
       }
@@ -2866,11 +2867,11 @@ export class SessionService {
    * `GET .../session-info`) must not poll this in a tight loop.
    */
   async getSessionInfoCounts(
-    options: { excludeSourceType?: string } = {},
+    options: { excludeSourceTypes?: readonly string[] } = {},
   ): Promise<SessionInfoCounts> {
     const [active, archived] = await Promise.all([
-      this.countSessionsInState('active', options.excludeSourceType),
-      this.countSessionsInState('archived', options.excludeSourceType),
+      this.countSessionsInState('active', options.excludeSourceTypes),
+      this.countSessionsInState('archived', options.excludeSourceTypes),
     ]);
     return {
       active: active.count,
@@ -2882,7 +2883,7 @@ export class SessionService {
 
   private async countSessionsInState(
     archiveState: SessionArchiveState,
-    excludeSourceType?: string,
+    excludeSourceTypes?: readonly string[],
   ): Promise<{ count: number; truncated: boolean }> {
     const chatsDir = this.getChatsDirForState(archiveState);
     let fileNames: string[];
@@ -2899,7 +2900,7 @@ export class SessionService {
     let filesProcessed = 0;
     let truncated = false;
     const tailBuffer =
-      excludeSourceType === undefined
+      excludeSourceTypes === undefined
         ? undefined
         : Buffer.alloc(LITE_READ_BUF_SIZE);
 
@@ -2931,9 +2932,11 @@ export class SessionService {
           continue;
         }
         if (
-          excludeSourceType !== undefined &&
-          this.extractCreationMetadataFromFile(filePath, records, tailBuffer)
-            .sourceType === excludeSourceType
+          excludeSourceTypes !== undefined &&
+          excludeSourceTypes.includes(
+            this.extractCreationMetadataFromFile(filePath, records, tailBuffer)
+              .sourceType ?? '',
+          )
         ) {
           continue;
         }
@@ -4616,7 +4619,7 @@ export class SessionService {
    * @returns Session data for resumption, or undefined if no sessions exist
    */
   async loadLastSession(
-    options: Pick<ListSessionsOptions, 'excludeSourceType'> = {},
+    options: Pick<ListSessionsOptions, 'excludeSourceTypes'> = {},
   ): Promise<ResumedSessionData | undefined> {
     const result = await this.listSessions({ size: 1, ...options });
     if (result.items.length === 0) {

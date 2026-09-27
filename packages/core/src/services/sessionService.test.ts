@@ -7936,6 +7936,7 @@ describe('SessionService', () => {
     it('excludes a source before applying the page size', async () => {
       const visibleId = '00000000-0000-4000-8000-000000000001';
       const hiddenId = '00000000-0000-4000-8000-000000000002';
+      const hiddenAgentId = '00000000-0000-4000-8000-000000000003';
       const visibleFile = writeSession(visibleId, [
         userLine(visibleId, 'visible'),
       ]);
@@ -7946,11 +7947,24 @@ describe('SessionService', () => {
           systemPayload: { sourceType: 'agent-host' },
         },
       ]);
+      // A second excluded source (a mesh agent's body session) must be dropped
+      // by the same list option, not just the one name it was built for.
+      const hiddenAgentFile = writeSession(hiddenAgentId, [
+        userLine(hiddenAgentId, 'hidden agent'),
+        {
+          ...sessionSourceLine(hiddenAgentId),
+          systemPayload: { sourceType: 'agent' },
+        },
+      ]);
       fs.utimesSync(visibleFile, new Date(1), new Date(1));
       fs.utimesSync(hiddenFile, new Date(2), new Date(2));
+      fs.utimesSync(hiddenAgentFile, new Date(3), new Date(3));
 
       await expect(
-        service.listSessions({ size: 1, excludeSourceType: 'agent-host' }),
+        service.listSessions({
+          size: 1,
+          excludeSourceTypes: ['agent-host', 'agent'],
+        }),
       ).resolves.toMatchObject({
         items: [{ sessionId: visibleId }],
         hasMore: false,
@@ -7978,7 +7992,7 @@ describe('SessionService', () => {
       );
 
       await expect(
-        service.getSessionInfoCounts({ excludeSourceType: 'agent-host' }),
+        service.getSessionInfoCounts({ excludeSourceTypes: ['agent-host'] }),
       ).resolves.toEqual({
         active: 1,
         archived: 0,
