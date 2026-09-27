@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// Two agreements nothing else in the suite reads, both of which fail green.
+// Three agreements nothing else in the suite reads, all of which fail green.
 //
 // 1. `scripts/check-desktop-isolation.js` keeps a `nativePrefixes` list, and
 //    the root workspace manifests keep a `!packages/*` negation per native
@@ -22,6 +22,12 @@
 //    `working-directory:` values. They have to name the same directory as each
 //    other and a directory that exists, or the job skips and reports success
 //    having compiled nothing.
+//
+// 3. That job's changed-files filter lists both updater-feed scripts.
+//    `packages/desktop/scripts/test-release.js` is the only test either of them
+//    has and it runs in this job, so a filter naming one script and not the
+//    other lets a PR that edits only the unlisted one skip its own test and
+//    still report green.
 //
 // The npm/pnpm mirror of the negation list is already pinned by
 // `package-scripts.test.js` ("mirrors the npm workspace boundaries in
@@ -209,5 +215,17 @@ describe('desktop_shell CI job — the crate path agrees with itself', () => {
       filterAlternative.endsWith('/'),
       `the filter alternative ${filterAlternative} has no trailing slash, so the changed-files filter also matches sibling paths that merely start with it`,
     ).toBe(true);
+  });
+
+  it('lists both updater-feed scripts, so either one triggers the lane that tests them', () => {
+    for (const script of [
+      'create-desktop-update-manifest',
+      'create-electron-bridge-manifest',
+    ]) {
+      expect(
+        filterRun,
+        `the changed-files filter does not list ${script}.mjs, so a PR touching only that script skips 'Run desktop release tests' and reports green having tested nothing`,
+      ).toContain(`\\.github/scripts/${script}\\.mjs`);
+    }
   });
 });

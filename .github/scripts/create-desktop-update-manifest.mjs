@@ -69,7 +69,17 @@ fs.writeFileSync(options.output, `${JSON.stringify(manifest, null, 2)}\n`);
 
 function selectArtifact(assets, pattern, platform) {
   const matches = assets.filter((asset) => pattern.test(asset));
-  if (matches.length === 0 && allowMissingPlatforms.has(platform)) return null;
+  if (matches.length === 0 && allowMissingPlatforms.has(platform)) {
+    // stdout, not stderr: GitHub parses workflow commands from stdout only,
+    // and stderr has to stay reserved for the thrown error the tests match on.
+    // Without this a tolerant run is byte-identical in the log to a complete
+    // one, and the dropped key is only discoverable by diffing the published
+    // feed against the previous mirror.
+    console.log(
+      `::warning::no updater artifact for ${platform}; publishing the feed without it (--allow-missing-platform)`,
+    );
+    return null;
+  }
   if (matches.length !== 1) {
     throw new Error(
       `Expected one updater artifact for ${platform}, found ${matches.length}: ${matches.join(', ')}`,
@@ -90,7 +100,11 @@ function parseArguments(args) {
     const name = args[index]?.replace(/^--/, '');
     const value = args[index + 1];
     if (!name || value === undefined) throw new Error('Invalid arguments.');
-    values[name] = value;
+    // Accumulate repeats: a bash-array caller spells a multi-valued option as
+    // repeated flags, and plain assignment would keep only the last one — the
+    // dropped value then surfaces as a missing build leg during a release run.
+    values[name] =
+      values[name] === undefined ? value : `${values[name]},${value}`;
   }
   for (const required of ['assets', 'repository', 'tag', 'version', 'output']) {
     if (!values[required]) throw new Error(`Missing --${required}`);

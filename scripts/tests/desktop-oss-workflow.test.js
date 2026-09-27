@@ -343,6 +343,13 @@ describe('Desktop OSS mirror workflow', () => {
     expect(prepare).toContain(
       'manifest_args=(--allow-missing-platform linux-aarch64)',
     );
+    // Pin the effect, not only the pieces: the declaration and the `if` guard
+    // both survive a refactor that drops the expansion, and an unexpanded array
+    // is not an error under `set -u` — the mirror would then die with
+    // `found 0` on exactly the path this flag exists for.
+    expect(prepare).toMatch(
+      /create-desktop-update-manifest\.mjs[\s\S]*?"\$\{manifest_args\[@\]}"/,
+    );
     expect(prepare).toContain('sha256sum -- * > SHA256SUMS.txt');
 
     const upload = getWorkflowStep(
@@ -376,6 +383,16 @@ describe('Desktop OSS mirror workflow', () => {
 
   it('advances the OSS feed only for the current GitHub stable version', () => {
     const publish = getWorkflowJob(releaseWorkflow, 'publish');
+    // The other side of the strictness split. A fresh build must never be able
+    // to tolerate a missing leg: an operator unblocking a release by adding the
+    // flag here would drop the key from the primary feed while the arm64 asset
+    // still ships — #12806 again, with every test green and no step failing.
+    const generateManifest = getWorkflowStep(
+      publish,
+      'Generate checksums and updater manifest',
+    );
+    expect(generateManifest).toContain('create-desktop-update-manifest.mjs');
+    expect(generateManifest).not.toContain('--allow-missing-platform');
     const updateFeed = getWorkflowStep(publish, 'Update stable updater feed');
     expect(updateFeed).toContain('sort -V');
     expect(updateFeed).toContain(

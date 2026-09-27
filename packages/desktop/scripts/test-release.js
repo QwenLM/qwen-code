@@ -1459,43 +1459,61 @@ function testUpdateManifest(directory) {
     missingLeg.stderr,
     /Expected one updater artifact for linux-aarch64, found 0/,
   );
+  assert.doesNotMatch(
+    missingLeg.stdout,
+    /::warning::/,
+    'a run that refused to publish must not also report a tolerated platform',
+  );
   assert.match(
     runManifest('--allow-missing-platform', 'darwin-x86_64').stderr,
     /linux-aarch64, found 0/,
     'the escape hatch is keyed per platform, not a blanket opt-out',
   );
-  assert.equal(
-    runManifest('--allow-missing-platform', 'linux-aarch64').status,
-    0,
-  );
+  const tolerant = runManifest('--allow-missing-platform', 'linux-aarch64');
+  assert.equal(tolerant.status, 0, tolerant.stderr);
   assert.deepEqual(
     Object.keys(JSON.parse(fs.readFileSync(output, 'utf8')).platforms).sort(),
     ['darwin-aarch64', 'darwin-x86_64', 'linux-x86_64', 'windows-x86_64'],
   );
-  fs.writeFileSync(path.join(assets, artifacts[4]), artifacts[4]);
-  fs.writeFileSync(
-    path.join(assets, `${artifacts[4]}.sig`),
-    `signature:${artifacts[4]}\n`,
+  // A dropped key is otherwise invisible: the run exits 0 and its log is
+  // byte-identical to a complete one, so the omission is only discoverable by
+  // diffing the published feed against the previous mirror.
+  assert.match(
+    tolerant.stdout,
+    /::warning::no updater artifact for linux-aarch64/,
   );
 
-  fs.rmSync(path.join(assets, `${artifacts[3]}.sig`));
-  const failure = spawnSync(
-    process.execPath,
+  // Both spellings of a multi-valued option must mean the same thing: a
+  // bash-array caller writes repeated flags, and plain assignment in
+  // parseArguments would silently keep only the last one.
+  fs.rmSync(path.join(assets, artifacts[0]));
+  fs.rmSync(path.join(assets, `${artifacts[0]}.sig`));
+  for (const spelling of [
     [
-      manifestScript,
-      '--assets',
-      assets,
-      '--repository',
-      'QwenLM/qwen-code',
-      '--tag',
-      'desktop-v0.1.0',
-      '--version',
-      '0.1.0',
-      '--output',
-      output,
+      '--allow-missing-platform',
+      'linux-aarch64',
+      '--allow-missing-platform',
+      'darwin-aarch64',
     ],
-    { encoding: 'utf8' },
-  );
+    ['--allow-missing-platform', 'linux-aarch64,darwin-aarch64'],
+  ]) {
+    const both = runManifest(...spelling);
+    assert.equal(both.status, 0, both.stderr);
+    assert.deepEqual(
+      Object.keys(JSON.parse(fs.readFileSync(output, 'utf8')).platforms).sort(),
+      ['darwin-x86_64', 'linux-x86_64', 'windows-x86_64'],
+    );
+  }
+  for (const artifact of [artifacts[0], artifacts[4]]) {
+    fs.writeFileSync(path.join(assets, artifact), artifact);
+    fs.writeFileSync(
+      path.join(assets, `${artifact}.sig`),
+      `signature:${artifact}\n`,
+    );
+  }
+
+  fs.rmSync(path.join(assets, `${artifacts[3]}.sig`));
+  const failure = runManifest();
   assert.notEqual(failure.status, 0);
   assert.match(failure.stderr, /Missing updater signature/);
 }
