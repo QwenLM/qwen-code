@@ -211,7 +211,6 @@ public final class ApiModels {
             @JsonProperty("created_at") long createdAt,
             @JsonProperty("started_at") Long startedAt,
             @JsonProperty("settled_at") Long settledAt,
-            @JsonProperty("output_cursor") String outputCursor,
             @JsonProperty("artifact_refs") List<String> artifactRefs,
             @JsonProperty("action_capabilities")
                     List<String> actionCapabilities) {
@@ -221,8 +220,7 @@ public final class ApiModels {
     public record WebShellTask(String taskId, String sessionId, String kind,
             String state, Long definitionRevision, String runtimeState,
             long createdAt, Long startedAt, Long settledAt,
-            String outputCursor, List<String> artifactRefs,
-            List<String> actionCapabilities) {
+            List<String> artifactRefs, List<String> actionCapabilities) {
     }
 
     public record WebShellTaskQueryRequest(@NotBlank String sessionId,

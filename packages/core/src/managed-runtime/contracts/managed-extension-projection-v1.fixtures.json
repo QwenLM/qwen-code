@@ -957,6 +957,25 @@
       }
     },
     {
+      "id": "admitted-with-a-channel-delivery-already-sending",
+      "valid": false,
+      "run": {
+        "state": "admitted",
+        "reason": null,
+        "definition": null,
+        "executionCallId": null,
+        "effectId": null,
+        "dispatchId": null,
+        "deliveryId": "delivery-1",
+        "execution": null,
+        "runtime": null,
+        "delivery": {
+          "target": "channel",
+          "state": "sending"
+        }
+      }
+    },
+    {
       "id": "h0b-reserved-with-intent",
       "valid": false,
       "run": {
@@ -2754,7 +2773,7 @@
         "runtimeState": null,
         "definitionRevision": null,
         "createdAt": 1000,
-        "startedAt": 1000,
+        "startedAt": null,
         "settledAt": null
       },
       "deliveryPending": false
@@ -2782,7 +2801,7 @@
         "runtimeState": "lost",
         "definitionRevision": null,
         "createdAt": 1000,
-        "startedAt": 1000,
+        "startedAt": null,
         "settledAt": null
       },
       "deliveryPending": false
@@ -2810,7 +2829,7 @@
         "runtimeState": null,
         "definitionRevision": null,
         "createdAt": 1000,
-        "startedAt": 1000,
+        "startedAt": null,
         "settledAt": null
       },
       "deliveryPending": false
@@ -2835,7 +2854,7 @@
         "runtimeState": null,
         "definitionRevision": null,
         "createdAt": 1000,
-        "startedAt": 1000,
+        "startedAt": null,
         "settledAt": null
       },
       "deliveryPending": false
@@ -2860,7 +2879,7 @@
         "runtimeState": "unbound",
         "definitionRevision": null,
         "createdAt": 1000,
-        "startedAt": 1000,
+        "startedAt": null,
         "settledAt": null
       },
       "deliveryPending": false
@@ -4259,7 +4278,7 @@
             "runtimeState": null,
             "definitionRevision": null,
             "createdAt": 1000,
-            "startedAt": 3000,
+            "startedAt": null,
             "settledAt": null
           },
           "deliveryPending": false
@@ -4286,7 +4305,7 @@
             "runtimeState": null,
             "definitionRevision": null,
             "createdAt": 1000,
-            "startedAt": 3000,
+            "startedAt": 4000,
             "settledAt": 4000
           },
           "deliveryPending": false
@@ -4370,7 +4389,7 @@
             "runtimeState": null,
             "definitionRevision": null,
             "createdAt": 1000,
-            "startedAt": 3000,
+            "startedAt": null,
             "settledAt": null
           },
           "deliveryPending": false
@@ -4397,7 +4416,7 @@
             "runtimeState": null,
             "definitionRevision": null,
             "createdAt": 1000,
-            "startedAt": 3000,
+            "startedAt": null,
             "settledAt": null
           },
           "deliveryPending": false
@@ -4812,6 +4831,246 @@
             "definitionRevision": null,
             "createdAt": 1000,
             "startedAt": 2000,
+            "settledAt": 5000
+          },
+          "deliveryPending": false
+        }
+      ]
+    },
+    {
+      "id": "runtime-lost-while-dispatching",
+      "kind": "monitor",
+      "revisions": [
+        {
+          "occurredAt": 1000,
+          "run": {
+            "state": "admitted",
+            "reason": null,
+            "definition": null,
+            "executionCallId": "call-1",
+            "effectId": null,
+            "dispatchId": null,
+            "deliveryId": null,
+            "execution": "intent",
+            "runtime": null,
+            "delivery": null
+          },
+          "view": {
+            "state": "pending",
+            "runtimeState": "unbound",
+            "definitionRevision": null,
+            "createdAt": 1000,
+            "startedAt": null,
+            "settledAt": null
+          },
+          "deliveryPending": false
+        },
+        {
+          "occurredAt": 2000,
+          "run": {
+            "state": "admitted",
+            "reason": null,
+            "definition": null,
+            "executionCallId": "call-1",
+            "effectId": null,
+            "dispatchId": null,
+            "deliveryId": null,
+            "execution": "dispatch_started",
+            "runtime": {
+              "runtimeBindingId": "binding-1",
+              "generation": "1"
+            },
+            "delivery": null
+          },
+          "view": {
+            "state": "pending",
+            "runtimeState": "provisioning",
+            "definitionRevision": null,
+            "createdAt": 1000,
+            "startedAt": null,
+            "settledAt": null
+          },
+          "deliveryPending": false
+        },
+        {
+          "occurredAt": 3000,
+          "run": {
+            "state": "recovery_blocked",
+            "reason": "runtime_lost",
+            "definition": null,
+            "executionCallId": "call-1",
+            "effectId": null,
+            "dispatchId": null,
+            "deliveryId": null,
+            "execution": "dispatch_started",
+            "runtime": {
+              "runtimeBindingId": "binding-1",
+              "generation": "1"
+            },
+            "delivery": null
+          },
+          "view": {
+            "state": "recovery_blocked",
+            "runtimeState": "lost",
+            "definitionRevision": null,
+            "createdAt": 1000,
+            "startedAt": null,
+            "settledAt": null
+          },
+          "deliveryPending": false
+        }
+      ]
+    },
+    {
+      "id": "proven-never-started",
+      "kind": "monitor",
+      "revisions": [
+        {
+          "occurredAt": 1000,
+          "run": {
+            "state": "admitted",
+            "reason": null,
+            "definition": null,
+            "executionCallId": "call-1",
+            "effectId": null,
+            "dispatchId": null,
+            "deliveryId": null,
+            "execution": "intent",
+            "runtime": null,
+            "delivery": null
+          },
+          "view": {
+            "state": "pending",
+            "runtimeState": "unbound",
+            "definitionRevision": null,
+            "createdAt": 1000,
+            "startedAt": null,
+            "settledAt": null
+          },
+          "deliveryPending": false
+        },
+        {
+          "occurredAt": 2000,
+          "run": {
+            "state": "recovery_blocked",
+            "reason": "outcome_unknown",
+            "definition": null,
+            "executionCallId": "call-1",
+            "effectId": null,
+            "dispatchId": null,
+            "deliveryId": null,
+            "execution": "outcome_unknown",
+            "runtime": null,
+            "delivery": null
+          },
+          "view": {
+            "state": "recovery_blocked",
+            "runtimeState": "unbound",
+            "definitionRevision": null,
+            "createdAt": 1000,
+            "startedAt": null,
+            "settledAt": null
+          },
+          "deliveryPending": false
+        },
+        {
+          "occurredAt": 3000,
+          "run": {
+            "state": "failed",
+            "reason": null,
+            "definition": null,
+            "executionCallId": "call-1",
+            "effectId": null,
+            "dispatchId": null,
+            "deliveryId": null,
+            "execution": "not_started_proven",
+            "runtime": null,
+            "delivery": null
+          },
+          "view": {
+            "state": "failed",
+            "runtimeState": null,
+            "definitionRevision": null,
+            "createdAt": 1000,
+            "startedAt": null,
+            "settledAt": 3000
+          },
+          "deliveryPending": false
+        }
+      ]
+    },
+    {
+      "id": "writer-clock-runs-behind",
+      "kind": "automation_run",
+      "revisions": [
+        {
+          "occurredAt": 5000,
+          "run": {
+            "state": "admitted",
+            "reason": null,
+            "definition": null,
+            "executionCallId": null,
+            "effectId": "effect-1",
+            "dispatchId": null,
+            "deliveryId": null,
+            "execution": "intent",
+            "runtime": null,
+            "delivery": null
+          },
+          "view": {
+            "state": "pending",
+            "runtimeState": "unbound",
+            "definitionRevision": null,
+            "createdAt": 5000,
+            "startedAt": null,
+            "settledAt": null
+          },
+          "deliveryPending": false
+        },
+        {
+          "occurredAt": 3000,
+          "run": {
+            "state": "running",
+            "reason": null,
+            "definition": null,
+            "executionCallId": null,
+            "effectId": "effect-1",
+            "dispatchId": null,
+            "deliveryId": null,
+            "execution": "dispatch_started",
+            "runtime": null,
+            "delivery": null
+          },
+          "view": {
+            "state": "running",
+            "runtimeState": "unbound",
+            "definitionRevision": null,
+            "createdAt": 5000,
+            "startedAt": 5000,
+            "settledAt": null
+          },
+          "deliveryPending": false
+        },
+        {
+          "occurredAt": 2000,
+          "run": {
+            "state": "settled",
+            "reason": null,
+            "definition": null,
+            "executionCallId": null,
+            "effectId": "effect-1",
+            "dispatchId": null,
+            "deliveryId": null,
+            "execution": "settled",
+            "runtime": null,
+            "delivery": null
+          },
+          "view": {
+            "state": "completed",
+            "runtimeState": null,
+            "definitionRevision": null,
+            "createdAt": 5000,
+            "startedAt": 5000,
             "settledAt": 5000
           },
           "deliveryPending": false

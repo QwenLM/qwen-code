@@ -476,8 +476,6 @@ export interface components {
             startedAt?: number;
             /** Format: int64 */
             settledAt?: number;
-            /** @description Task event cursor positioned after the newest event at read time; pass it as after on the task events route to follow only new events. */
-            outputCursor?: string;
             /** @description The newest Artifacts that hold durable task output, at most 100, oldest first; older Artifacts stay readable through the Session artifact routes. */
             artifactRefs: string[];
             actionCapabilities: components["schemas"]["TaskActionCapability"][];

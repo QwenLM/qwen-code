@@ -127,13 +127,11 @@ const TERMINAL: readonly ExtensionRunState[] = [
   'failed',
   'cancelled',
 ];
-/** Run states that mean the work may have begun. */
-const STARTED: readonly ExtensionRunState[] = [
-  'running',
-  'waiting',
-  'recovery_blocked',
-  'settled',
-];
+/**
+ * Run states that mean the work began. A blocked run may still prove that it
+ * never started, so it sets no start of its own.
+ */
+const STARTED: readonly ExtensionRunState[] = ['running', 'waiting', 'settled'];
 /** Delivery states that still need the dispatcher: to send, or to find out. */
 const PENDING_DELIVERY = new Set([
   'planned',
@@ -173,22 +171,31 @@ function runtimeState(run: ExtensionRun): ManagedTaskRuntimeState | null {
 /**
  * The task view after one more committed revision of its record, from the
  * view before it (null for the first revision), the revision's run and the
- * time its `domain.committed` event occurred.
+ * time its `domain.committed` event occurred. The times come from the
+ * journal, so a rebuild yields the same view; a writer's clock may run
+ * behind the one before it, so a time never precedes an earlier one.
  */
 export function projectManagedTask(
   previous: ManagedTaskProjection | null,
   run: ExtensionRun,
   occurredAt: number,
 ): ManagedTaskProjection {
+  const createdAt = previous?.createdAt ?? occurredAt;
+  const startedAt =
+    previous?.startedAt ??
+    (STARTED.includes(run.state) ? Math.max(occurredAt, createdAt) : null);
+  const settledAt =
+    previous?.settledAt ??
+    (TERMINAL.includes(run.state)
+      ? Math.max(occurredAt, startedAt ?? createdAt)
+      : null);
   return Object.freeze({
     state: taskState(run),
     runtimeState: runtimeState(run),
     definitionRevision: run.definition?.definitionRevision ?? null,
-    createdAt: previous?.createdAt ?? occurredAt,
-    startedAt:
-      previous?.startedAt ?? (STARTED.includes(run.state) ? occurredAt : null),
-    settledAt:
-      previous?.settledAt ?? (TERMINAL.includes(run.state) ? occurredAt : null),
+    createdAt,
+    startedAt,
+    settledAt,
   });
 }
 

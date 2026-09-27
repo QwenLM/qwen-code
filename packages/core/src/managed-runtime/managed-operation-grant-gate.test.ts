@@ -120,6 +120,26 @@ describe('managed operation grant gate', () => {
     );
   });
 
+  it('bounds the next grant by the one it revoked', () => {
+    const gate = new ManagedOperationGrantGate();
+    const grant = { ...fixtures.grant, workspaceGeneration: '5' };
+    const [phase] = grant.resourceScope.phases;
+    gate.install(grant);
+    gate.revoke(grant.sessionKey, grant.operationId, grant.operationRevision);
+    const next = { ...grant, operationRevision: grant.operationRevision + 1 };
+    expect(() => gate.install({ ...next, workspaceGeneration: '3' })).toThrow(
+      /cannot replace/,
+    );
+    expect(() => gate.install({ ...next, domain: 'child_run' })).toThrow();
+    expect(gate.admits(grant.sessionKey, grant.operationId, phase, 0)).toBe(
+      false,
+    );
+    expect(gate.install(next)).toBe('installed');
+    expect(gate.admits(grant.sessionKey, grant.operationId, phase, 0)).toBe(
+      true,
+    );
+  });
+
   it('keeps a revocation that arrives before its grant', () => {
     const gate = new ManagedOperationGrantGate();
     const grant = fixtures.grant;

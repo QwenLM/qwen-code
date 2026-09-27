@@ -34,9 +34,12 @@ public final class ManagedExtensionProjection {
 
     private static final Set<String> TERMINAL = Set.of("settled", "failed",
             "cancelled");
-    /** Run states that mean the work may have begun. */
+    /**
+     * Run states that mean the work began. A blocked run may still prove
+     * that it never started, so it sets no start of its own.
+     */
     private static final Set<String> STARTED = Set.of("running", "waiting",
-            "recovery_blocked", "settled");
+            "settled");
     /** Delivery states that still need the dispatcher. */
     private static final Set<String> PENDING_DELIVERY = Set.of("planned",
             "sending", "partial", "accepting", "unknown");
@@ -83,25 +86,31 @@ public final class ManagedExtensionProjection {
     /**
      * The task view after one more committed revision, from the view before
      * it (null for the first revision), the revision's checked run and the
-     * time its domain.committed event occurred.
+     * time its domain.committed event occurred. The times come from the
+     * journal, so a rebuild yields the same view; a writer's clock may run
+     * behind the one before it, so a time never precedes an earlier one.
      */
     public static TaskProjection project(TaskProjection previous,
             JsonNode run, long occurredAt) {
         String state = run.get("state").textValue();
         JsonNode definition = run.get("definition");
+        long createdAt = previous == null ? occurredAt : previous.createdAt();
         Long startedAt = previous != null && previous.startedAt() != null
                 ? previous.startedAt()
-                : STARTED.contains(state) ? Long.valueOf(occurredAt) : null;
+                : STARTED.contains(state)
+                        ? Long.valueOf(Math.max(occurredAt, createdAt)) : null;
         Long settledAt = previous != null && previous.settledAt() != null
                 ? previous.settledAt()
-                : TERMINAL.contains(state) ? Long.valueOf(occurredAt) : null;
+                : TERMINAL.contains(state)
+                        ? Long.valueOf(Math.max(occurredAt, startedAt != null
+                                ? startedAt : createdAt))
+                        : null;
         return new TaskProjection(taskState(state, run.get("reason")),
                 runtimeState(run),
                 definition.isNull() ? null : definition
                         .get("definitionRevision").decimalValue()
                         .longValueExact(),
-                previous == null ? occurredAt : previous.createdAt(),
-                startedAt, settledAt);
+                createdAt, startedAt, settledAt);
     }
 
     /** Whether the run's delivery is in the outbox. */

@@ -120,7 +120,7 @@ public class ManagedTaskService {
         return new PublicTask(task.taskId(), "agent.task", sessionId,
                 task.kind(), view.state(), view.definitionRevision(),
                 view.runtimeState(), view.createdAt(), view.startedAt(),
-                view.settledAt(), null, NO_ARTIFACTS, NO_ACTIONS);
+                view.settledAt(), NO_ARTIFACTS, NO_ACTIONS);
     }
 
     private static WebShellTask webShellTask(String sessionId,
@@ -128,7 +128,7 @@ public class ManagedTaskService {
         TaskProjection view = task.projection();
         return new WebShellTask(task.taskId(), sessionId, task.kind(),
                 view.state(), view.definitionRevision(), view.runtimeState(),
-                view.createdAt(), view.startedAt(), view.settledAt(), null,
+                view.createdAt(), view.startedAt(), view.settledAt(),
                 NO_ARTIFACTS, NO_ACTIONS);
     }
 }

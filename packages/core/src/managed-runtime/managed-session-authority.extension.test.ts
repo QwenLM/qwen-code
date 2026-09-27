@@ -736,12 +736,16 @@ describe('managed session authority Stage H records', () => {
       expect(gate.install(authority.issueOperationGrant(request))).toBe(
         'installed',
       );
-      // Another owner needs a new revision of the record first.
-      expect(() =>
-        gate.install(
-          authority.issueOperationGrant({ ...request, ownerId: 'other-owner' }),
-        ),
-      ).toThrow(ManagedSessionConflictError);
+      // The authority issues another owner's grant under the same revision,
+      // and the gate refuses it until the record has a new revision.
+      const otherOwner = authority.issueOperationGrant({
+        ...request,
+        ownerId: 'other-owner',
+      });
+      expect(otherOwner.operationRevision).toBe(5);
+      expect(() => gate.install(otherOwner)).toThrow(
+        /cannot replace revision 5/,
+      );
 
       harness.now = 6_000;
       await authority.commitExtensionRecord(
@@ -757,24 +761,70 @@ describe('managed session authority Stage H records', () => {
     });
   });
 
-  it('refuses grants for unknown or finished records', async () => {
+  it('refuses a grant for a record that was never committed', async () => {
     const harness = await createHarness();
     await withAuthority(harness, async (authority) => {
-      const request = {
-        domain: 'monitor_run' as const,
-        recordId: 'monitor-1',
-        ownerId: 'owner',
-        workspaceGeneration: '1',
-        phases: ['rebuild_watch'],
-        leaseDurationMs: 30_000,
-      };
-      expect(() => authority.issueOperationGrant(request)).toThrow(
-        /is committed/,
+      expect(() =>
+        authority.issueOperationGrant({
+          domain: 'monitor_run',
+          recordId: 'monitor-1',
+          ownerId: 'owner',
+          workspaceGeneration: '1',
+          phases: ['rebuild_watch'],
+          leaseDurationMs: 30_000,
+        }),
+      ).toThrow(/is committed/);
+    });
+  });
+
+  it('lets a command open one record, whatever its operation name', async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      await authority.commitExtensionRecord(
+        { ...command('open-1'), operation: 'startMonitor' },
+        { domain: 'monitor_run', record: LIFE[0] },
+        TRUSTED,
       );
-      await commitLife(harness, authority);
-      expect(() => authority.issueOperationGrant(request)).toThrow(
-        /nothing left to finish/,
+      await expect(
+        authority.commitExtensionRecord(
+          command('open-1'),
+          {
+            domain: 'monitor_run',
+            record: { ...LIFE[0], monitorId: 'monitor-2' },
+          },
+          TRUSTED,
+        ),
+      ).rejects.toThrow(/already opened monitor_run record monitor-1/);
+      expect(authority.taskViews()).toHaveLength(1);
+    });
+  });
+
+  it('replays a committed command after its domain was disabled', async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      const first = await authority.commitExtensionRecord(
+        command('monitor-1:1'),
+        { domain: 'monitor_run', record: LIFE[0] },
+        TRUSTED,
       );
+      enablement.monitorRun = false;
+      await expect(
+        authority.commitExtensionRecord(
+          command('monitor-1:1'),
+          { domain: 'monitor_run', record: LIFE[0] },
+          TRUSTED,
+        ),
+      ).resolves.toMatchObject({
+        recordRef: first.recordRef,
+        receipt: { replayed: true },
+      });
+      await expect(
+        authority.commitExtensionRecord(
+          command('monitor-1:2'),
+          { domain: 'monitor_run', record: LIFE[1] },
+          TRUSTED,
+        ),
+      ).rejects.toThrow(/not enabled for submission/);
     });
   });
 });

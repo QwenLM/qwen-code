@@ -13,8 +13,12 @@ import { ManagedSessionConflictError } from './managed-session-authority.js';
 import type { ManagedSessionKey } from './managed-session-records.js';
 
 interface GateEntry {
+  /**
+   * The latest grant installed. A revocation keeps it, so the next grant
+   * still has to be its successor.
+   */
   grant: OperationGrant | undefined;
-  /** No revision at or below this one may be installed again. */
+  /** No revision at or below this one admits or installs again. */
   revokedThrough: number;
 }
 
@@ -26,8 +30,8 @@ function gateKey(sessionKey: ManagedSessionKey, operationId: string): string {
  * The Runtime's per-operation gate. It holds the one OperationGrant an
  * operation may act under: installing the same grant again is idempotent, a
  * renewal or a later revision replaces it, and anything older is refused. A
- * revoked revision never reopens, so the next revision closes the old
- * admission before its phases can run again.
+ * revoked revision never reopens, and the grant it revoked still bounds the
+ * next one, so a revocation cannot let an older Workspace generation back in.
  */
 export class ManagedOperationGrantGate {
   private readonly entries = new Map<string, GateEntry>();
@@ -73,12 +77,6 @@ export class ManagedOperationGrantGate {
       revokedThrough: 0,
     };
     entry.revokedThrough = Math.max(entry.revokedThrough, operationRevision);
-    if (
-      entry.grant !== undefined &&
-      entry.grant.operationRevision <= entry.revokedThrough
-    ) {
-      entry.grant = undefined;
-    }
     this.entries.set(key, entry);
   }
 
@@ -89,9 +87,11 @@ export class ManagedOperationGrantGate {
     phase: string,
     now: number,
   ): boolean {
-    const grant = this.entries.get(gateKey(sessionKey, operationId))?.grant;
+    const entry = this.entries.get(gateKey(sessionKey, operationId));
+    if (entry?.grant === undefined) return false;
+    const { grant } = entry;
     return (
-      grant !== undefined &&
+      grant.operationRevision > entry.revokedThrough &&
       now < grant.expiresAt &&
       grant.resourceScope.phases.includes(phase)
     );

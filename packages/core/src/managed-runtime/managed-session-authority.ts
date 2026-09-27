@@ -1296,7 +1296,6 @@ export class LocalManagedSessionAuthority {
         `domain ${request.domain} has no Stage H record body.`,
       );
     }
-    assertManagedSessionDomainEnabled(request.domain);
     const store = this.resources;
     if (store === undefined) {
       throw new ManagedSessionRecordError(
@@ -1304,12 +1303,21 @@ export class LocalManagedSessionAuthority {
       );
     }
     return this.runSerial(async () => {
+      // A retry returns what it committed even if the domain was disabled
+      // since.
       const replayed = this.replayedExtension(command);
       if (replayed !== undefined) return replayed;
+      assertManagedSessionDomainEnabled(request.domain);
       const parsed = body.parse(request.record);
-      this.assertExtensionRevision(request.domain, body, parsed, (message) => {
-        throw new ManagedSessionConflictError(message);
-      });
+      this.assertExtensionRevision(
+        request.domain,
+        body,
+        parsed,
+        command.commandId,
+        (message) => {
+          throw new ManagedSessionConflictError(message);
+        },
+      );
       const recordRef = await store.publish(
         `managed-${request.domain}`,
         Buffer.from(JSON.stringify(parsed.record), 'utf8'),
@@ -1395,11 +1403,13 @@ export class LocalManagedSessionAuthority {
 
   /**
    * Issues an OperationGrant for the owner of a committed record, so it can
-   * finish the listed phases without a model activation. The grant is
-   * derived from committed facts: its operation is the command that opened
-   * the record and its revision is the record's current revision, so a new
-   * revision is the only way to change owner or scope, and the grant never
-   * needs a journal entry of its own.
+   * finish the listed phases without a model activation. The operation, the
+   * revision and the plan come from committed facts: the command that opened
+   * the record, its current revision and that revision's resource. The
+   * owner, the Workspace generation and the phases are the caller's, and the
+   * slices that register phases add their checks. Nothing is journaled, so
+   * issuing again later renews the grant, and the Runtime's gate accepts
+   * another owner or scope only under a new revision of the record.
    */
   issueOperationGrant(request: {
     readonly domain: ManagedSessionDomain;
@@ -1413,14 +1423,6 @@ export class LocalManagedSessionAuthority {
     if (record === undefined) {
       throw new ManagedSessionConflictError(
         `no ${request.domain} record ${request.recordId} is committed.`,
-      );
-    }
-    if (
-      TERMINAL_RUN_STATES.has(record.run.state) &&
-      !isExtensionDeliveryPending(record.run)
-    ) {
-      throw new ManagedSessionConflictError(
-        `${request.domain} record ${request.recordId} has nothing left to finish.`,
       );
     }
     return parseOperationGrant({
@@ -1482,10 +1484,15 @@ export class LocalManagedSessionAuthority {
     );
   }
 
+  /**
+   * `operationId` is the command that commits the revision. The command that
+   * opens a record becomes its operation, so it may open no other record.
+   */
   private assertExtensionRevision(
     domain: ManagedSessionDomain,
     body: ManagedExtensionRecordBody,
     parsed: ReturnType<ManagedExtensionRecordBody['parse']>,
+    operationId: string,
     reject: (message: string) => never,
   ): void {
     const previous = this.extensionRecord(domain, parsed.recordId);
@@ -1494,6 +1501,13 @@ export class LocalManagedSessionAuthority {
         reject(
           `the first revision of ${domain} record ${parsed.recordId} must open its run.`,
         );
+      }
+      for (const record of this.extensionRecords.values()) {
+        if (record.operationId === operationId) {
+          reject(
+            `command ${operationId} already opened ${record.domain} record ${record.recordId}.`,
+          );
+        }
       }
       return;
     }
@@ -1569,11 +1583,17 @@ export class LocalManagedSessionAuthority {
           MANAGED_SESSION_LIMITS.maxEventBytes,
         ),
       );
-      this.assertExtensionRevision(domain, body, parsed, (message) => {
-        throw new ManagedSessionRecordError(
-          `session log is corrupt: ${message}`,
-        );
-      });
+      this.assertExtensionRevision(
+        domain,
+        body,
+        parsed,
+        event.payload['operationId'] as string,
+        (message) => {
+          throw new ManagedSessionRecordError(
+            `session log is corrupt: ${message}`,
+          );
+        },
+      );
       this.applyExtensionRevision(
         event.sequence,
         event.occurredAt,
@@ -2171,8 +2191,6 @@ export class LocalManagedSessionAuthority {
     };
   }
 }
-
-const TERMINAL_RUN_STATES = new Set(['settled', 'failed', 'cancelled']);
 
 const INPUT_ACTORS: readonly ManagedSessionActor[] = [
   { class: 'trusted_entry' },

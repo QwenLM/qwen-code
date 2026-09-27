@@ -44,7 +44,7 @@ The facts below are from `main` at `848cf5e6c4`.
 4. **A first revision opens its run.** Its run is `reserved` or `admitted`, its execution is absent or an `intent`, and its delivery is absent or `planned`; a Monitor has also written no output, and cannot have observed anything without a start receipt. H0b's successor rules only say how a revision follows another; without this rule, a record could appear already settled.
 5. **`degraded` is a running or waiting run with a recovery reason** (H0b open question 2). That is exactly the state H0b allows to go on with reduced guarantees, such as a Monitor watch rebuilt after its Runtime was lost.
 6. **The outbox is derived from the delivery line.** A record is in the outbox while its delivery is `planned`, `sending`, `partial`, `accepting` or `unknown`: still to send, or to reconcile without resending. Because the outbox is a projection of the committed run, it always commits with it. `accepted` waits for the model, not for a dispatcher.
-7. **Grants are derived from committed facts.** The authority issues a grant for a committed record: its operation is the command that opened the record and its revision is the record's current revision. Issuing it again later renews it; a new owner or scope needs a new revision of the record first. The grant needs no journal entry, and a restarted authority issues the same revision again. The Runtime's gate installs it under H0b's replacement rule and never reopens a revoked revision.
+7. **Grants are derived from committed facts.** The authority issues a grant for a committed record: its operation is the command that opened the record, so a command opens at most one record; its revision is the record's current revision; and its plan is that revision's resource. The owner, the Workspace generation and the phases are the caller's, and the slices that register phases add their lifecycle, trust and phase checks. The grant needs no journal entry, and a restarted authority issues the same revision again. The Runtime's gate installs it under H0b's replacement rule, so issuing it again renews it and another owner or scope takes a new revision of the record. The gate never reopens a revoked revision, and the grant it revoked still bounds the next one.
 8. **Task identity is a hash both sides compute.** The record key is SHA-256 over the Session ID, the domain and the record's identity, joined by NUL, and the task ID is `task_` followed by the key. The ID fits the 128-character public limit and exposes no internal identifier.
 9. **List and detail are served; events and cancel are not.** The four read routes become `partial` and every Session reports `capabilities.tasks`, since every Session serves them. Task events stay `planned` until a task produces output, and cancel until an owner can stop a task; `PublicCommandOperation.task_id` and `WebShellCommandOperation.taskId` stay `planned` with cancel. H0c tasks therefore advertise no action and no Artifact.
 10. **The Runtime's reports map onto the execution line.** A Broker record in `PREPARED` or `DISPATCHING` is an `intent`, `EXECUTING` or `CANCEL_REQUESTED` is `dispatch_started`, `UNKNOWN` is `outcome_unknown`, and `SETTLED` is `not_started_proven` with the status `not_started` and `settled` otherwise. The Harness reads the wire status the same way, except that it takes `executing` as dispatched: the wire cannot tell an unsent claim from a sent call, and taking a call that may have been sent for an unsent one could run it twice.
@@ -53,10 +53,11 @@ The facts below are from `main` at `848cf5e6c4`.
 
 `LocalManagedSessionAuthority.commitExtensionRecord(command, { domain, record, input? }, actor)` commits one revision.
 
-1. The domain must have a record body in `MANAGED_EXTENSION_RECORD_BODIES` and be enabled for submission; only `monitor_run` has a body, and it is not enabled.
-2. A retried command returns the revision it committed before anything is published again. The same command with other content is a conflict.
-3. The body is parsed and closed. The first revision of its record must open its run, and every later one must be a successor of the latest.
-4. The parsed body is published as the resource, and the `domain.committed` event, with the input and its wake when given, commits in one transaction.
+1. The domain must have a record body in `MANAGED_EXTENSION_RECORD_BODIES`; only `monitor_run` has one.
+2. A retried command returns the revision it committed before anything is published again, even if the domain was disabled since. The same command with other content is a conflict.
+3. The domain must be enabled for submission; `monitor_run` is not.
+4. The body is parsed and closed. The first revision of its record must open its run, and its command must not have opened another record; every later revision must be a successor of the latest.
+5. The parsed body is published as the resource, and the `domain.committed` event, with the input and its wake when given, commits in one transaction.
 
 Any other path that tries to commit a `domain.committed` event for a domain with a body, such as `appendExecution` or `commitDomainRecord`, is refused, so no revision bypasses its chain.
 
@@ -86,23 +87,24 @@ The task view follows the committed revisions of one record. Each revision gives
 The rows apply in order. `draining` needs a stop request, which the run block does not carry; H3 adds it.
 
 - `createdAt` is the time of the first revision.
-- `startedAt` is the time of the first revision whose run is `running`, `waiting`, `recovery_blocked` or `settled`, so every completed task has one and a pending task never does.
+- `startedAt` is the time of the first revision whose run is `running`, `waiting` or `settled`, so every completed task has one and a pending task never does. A blocked run sets none, since it may still prove that it never started.
 - `settledAt` is the time of the revision that ended the run.
+- A time never precedes an earlier one: `startedAt` is at least `createdAt`, and `settledAt` at least the start, or the creation when there was none.
 - `definitionRevision` is the run's pinned definition revision.
 - The list is newest first by creation, then by task ID, both descending.
 
-Task timestamps are epoch milliseconds, as the H0a contract states. The served Session and event resources report seconds; see open question 2.
+The times are the `occurredAt` the authority records on each revision, not the server's clock, so a rebuild from the journal yields the same view; the clamping covers a writer whose clock runs behind the one before it. They are epoch milliseconds, as the H0a contract states; the served Session and event resources report seconds, see open question 2.
 
 ## Java Session store
 
 Flyway `V16` adds `qwen_managed_session_extension_record`: one row per record, keyed by the Session scope key and the record key, holding the record's identity, its latest revision and resource, the task projection and the delivery line. `ManagedExtensionRecordStore` writes it from `ManagedSessionStore.commit`, after the transaction's resources are stored and in the same SQL transaction:
 
-1. It parses each record line of the transaction strictly, refusing duplicate keys, and picks the `domain.committed` events of domains with a body.
-2. It checks that each event names this Session and that its resource matches the reference, then reads the body from the verified resource and checks it with `ManagedExtensionRecords`.
+1. It parses each record line of the transaction as strictly as the authority's reader, refusing duplicate keys and trailing content, and picks the `domain.committed` events of domains with a body.
+2. It checks each such event as the authority's reader does: version 1, a closed key of this Session, and a closed payload whose reference names a version 1 record of the domain. It then reads the body from the verified resource, checks that it matches the reference, and checks the body with `ManagedExtensionRecords`.
 3. It checks the first-revision or successor rule against the stored latest revision, projects the task view with `ManagedExtensionProjection`, and inserts or updates the row.
 4. When the view changed and the Session has a public resource, it appends a `task.updated` event with `data.taskId` and `data.state`, keyed so a replayed transaction announces nothing twice.
 
-A refused revision answers `409 managed_session_extension_record_rejected` and rolls back the whole commit. A replayed transaction returns before any of this runs. Every record line must now be a JSON object; the authority has always written one. The rows are the durable read model: a restarted server reads the same list, and the journal they are derived from stays the source of truth.
+A revision that these rules refuse answers `409 managed_session_extension_record_rejected`. A body resource that is missing, belongs to another Session or fails verification keeps the store's existing answers (`409 managed_session_resource_missing`, `404 session_not_found`, `500 managed_session_resource_corrupt`). Either way the whole commit rolls back. A replayed transaction returns before any of this runs. Every record line must now be a JSON object; the authority has always written one. The rows are the durable read model: a restarted server reads the same list, and the journal they are derived from stays the source of truth.
 
 ## Public contract
 
@@ -112,6 +114,7 @@ The OpenAPI version becomes `1.18.0`, after the `1.17.0` of event replay (#12840
 - `SessionCapabilities.tasks` is served. `WebShellSession.capabilities` becomes the named schema `WebShellSessionCapabilities`, whose `tasks` is served while the other flags stay `planned`.
 - The list route documents the `task.updated` event; the event type is an open string, so no schema changes.
 - A bad list cursor is `400 invalid_cursor`, a limit outside 1 to 100 is `400 invalid_limit`, and an unknown task is `404 task_not_found`.
+- `output_cursor` and `outputCursor` stay `planned` with the task events route they point to. The values of `TaskActionCapability` reach the generated types although no H0c task advertises one, since an enum value cannot carry the marker, as H0a noted for `task_cancel`.
 
 The generated WebShell types gain the two task routes, the task schemas and the capabilities object.
 
@@ -121,8 +124,8 @@ The generated WebShell types gain the two task routes, the task schemas and the 
 
 - the record bodies, task states and outbox states, as constants;
 - 7 task ID cases;
-- 49 run start and 31 Monitor start cases;
-- 45 single-revision views and 8 run histories, with their outbox membership;
+- 50 run start and 31 Monitor start cases;
+- 45 single-revision views and 11 run histories, with their outbox membership;
 - 2 Monitor chains that both sides commit through their authority or store, and 8 chains they must refuse;
 - 9 Broker and 8 wire-status execution cases.
 
@@ -142,7 +145,7 @@ A Python labeler written from this document, independent of both languages and k
 ## Validation plan
 
 - **TypeScript:** the fixture replay; the authority suite for chains, refusals, replay, the notification and wake, the bypass guard, disabled domains, cold rebuild, a missing body and grants; the gate against H0b's replacement cases and revocation; the HTTP store for the nested resources and a cold rebuild over HTTP.
-- **Java:** the fixture replay; the chains, refusals, replay and announcements through `ManagedSessionStore`; the API contract test for every mapped route and record; the MySQL integration test on MariaDB 10.11 and MySQL 8.4, which also shows that a refused revision rolls back its resources and journal row.
+- **Java:** the fixture replay; the chains, refusals, replay and announcements through `ManagedSessionStore`; the API contract test for every mapped route and record; the MySQL integration test on MariaDB 10.11 and MySQL 8.4, which also shows that a refused revision leaves no resource, resource reference or journal row behind.
 - **Generated types:** the WebShell generator test.
 - **Mutation checks:** each rule of the projection, the start rules and the store checks is mutated in turn and a test fails.
 
@@ -157,9 +160,10 @@ A Python labeler written from this document, independent of both languages and k
 ## Open questions
 
 1. **Rebuild cost.** A reopened authority reads every Stage H revision body. A Monitor may commit up to 10,000 observations, so H3 should bound this before enabling it, for example by chaining the authority's view to a checkpoint.
-2. **Timestamp units.** The H0a contract gives tasks epoch milliseconds, and this change follows it, but the served Session and event resources report seconds. A later D slice should make the public surface consistent.
-3. **Nested resources.** The HTTP store commits every resource a Stage H body names, so the Java store refuses a body that names a resource the Session does not hold, such as a start receipt or an output manifest kept only in the Runtime or the tool result store. H3 must either publish those as Session resources or exempt their kinds from the closure.
-4. **Replayed domain records.** `commitDomainRecord` publishes a new body before it detects a replayed command, and returns that body's reference instead of the committed one. `commitExtensionRecord` checks for the replay first; the older method is left for a separate fix.
+2. **Timestamp units and source.** The H0a contract gives tasks epoch milliseconds, and this change follows it, but the served Session and event resources report seconds. A later D slice should make the public surface consistent. H0a also says that the server fills task times from its clock; H0c takes them from the journal instead, for the reason given under Task projection.
+3. **Nested resources.** The HTTP store lists every resource a Stage H body names with the commit, so the Java store's resource check refuses a body that names a resource the Session does not hold, such as a start receipt or an output manifest kept only in the Runtime or the tool result store; the Java store does not walk the body itself. H3 must either publish those as Session resources or exempt their kinds from the closure. A named resource whose metadata disagrees with a staged one fails the commit before it is sent and, as for a mismatched reference in an event payload, stops the writer; H3 should check the references before it publishes the body.
+4. **Logical and physical start.** H0b lets a run stay `admitted` while its execution is already `running_attached`, so such a task shows `pending` with the Runtime state `ready` and no start time. Tightening that rule is a change to the H0b contract.
+5. **Replayed domain records.** `commitDomainRecord` publishes a new body before it detects a replayed command, and returns that body's reference instead of the committed one. `commitExtensionRecord` checks for the replay first; the older method is left for a separate fix.
 
 ## Follow-up work
 

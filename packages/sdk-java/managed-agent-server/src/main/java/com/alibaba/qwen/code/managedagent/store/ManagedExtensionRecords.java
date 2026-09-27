@@ -627,7 +627,7 @@ public final class ManagedExtensionRecords {
         }
     }
 
-    private static void closed(JsonNode node, Set<String> keys,
+    static void closed(JsonNode node, Set<String> keys,
             String label) {
         require(node != null && node.isObject() && node.size() == keys.size(),
                 label + " must be an object with exactly " + keys);
@@ -635,7 +635,7 @@ public final class ManagedExtensionRecords {
                 label + " must be an object with exactly " + keys));
     }
 
-    private static String id(JsonNode node, String label) {
+    static String id(JsonNode node, String label) {
         require(node != null && node.isTextual() && !node.textValue()
                 .isEmpty(), label + " must be a non-empty string");
         String value = node.textValue();
@@ -665,7 +665,7 @@ public final class ManagedExtensionRecords {
      * JavaScript, 1.0 counts as 1; a number past the double range, which
      * Jackson reads as an infinity, counts as none.
      */
-    private static long count(JsonNode node, long min, long max,
+    static long count(JsonNode node, long min, long max,
             String label) {
         BigDecimal value = node != null && node.isNumber()
                 && Double.isFinite(node.doubleValue())
@@ -692,7 +692,7 @@ public final class ManagedExtensionRecords {
                 label + " must be canonical decimal text from 1 to 2^63-1");
     }
 
-    private static void durableRef(JsonNode node, String label) {
+    static void durableRef(JsonNode node, String label) {
         closed(node, Set.of("resourceId", "kind", "schemaVersion",
                 "byteLength", "digest"), label);
         id(node.get("resourceId"), label + ".resourceId");

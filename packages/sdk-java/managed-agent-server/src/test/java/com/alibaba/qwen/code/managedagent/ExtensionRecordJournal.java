@@ -16,6 +16,8 @@ import java.util.Base64;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.UUID;
+import java.util.function.Consumer;
+import java.util.function.UnaryOperator;
 
 /**
  * Commits journal transactions to the Session store in the record format the
@@ -78,8 +80,18 @@ final class ExtensionRecordJournal {
      */
     CommitTransactionRequest request(String commandId, JsonNode monitor,
             long occurredAt) {
-        byte[] body = bytes(monitor);
-        String resourceId = UUID.nameUUIDFromBytes(body).toString();
+        return request(commandId, bytes(monitor), occurredAt, event -> {
+        }, records -> records);
+    }
+
+    /**
+     * A commit request whose body bytes, event or record lines a test may
+     * change, as a writer that does not follow the contract would.
+     */
+    CommitTransactionRequest request(String commandId, byte[] body,
+            long occurredAt, Consumer<ObjectNode> editEvent,
+            UnaryOperator<String> editRecords) {
+        String resourceId = resourceId(body);
         ObjectNode recordRef = JSON.createObjectNode()
                 .put("resourceId", resourceId)
                 .put("kind", "managed-monitor_run")
@@ -96,9 +108,10 @@ final class ExtensionRecordJournal {
         event.putObject("payload").put("domain", "monitor_run")
                 .put("version", 1).put("operationId", commandId)
                 .set("recordRef", recordRef);
-        String records = line("managed_session_event_v1", event)
-                + line("managed_session_commit_v1",
-                        JSON.createObjectNode().put("commandId", commandId));
+        editEvent.accept(event);
+        String records = editRecords.apply(line("managed_session_event_v1",
+                event) + line("managed_session_commit_v1",
+                        JSON.createObjectNode().put("commandId", commandId)));
         String transactionId = "transaction-" + commandId;
         return new CommitTransactionRequest(workspaceId, WRITER,
                 writerGeneration, journalRevision, sequence, transactionId,
@@ -123,6 +136,19 @@ final class ExtensionRecordJournal {
         return sequence;
     }
 
+    /** The resource that holds a body; equal bodies share one. */
+    static String resourceId(byte[] body) {
+        return UUID.nameUUIDFromBytes(body).toString();
+    }
+
+    static byte[] bytes(JsonNode node) {
+        try {
+            return JSON.writeValueAsBytes(node);
+        } catch (JsonProcessingException error) {
+            throw new IllegalStateException(error);
+        }
+    }
+
     private String line(String subtype, JsonNode body) {
         ObjectNode record = JSON.createObjectNode()
                 .put("uuid", UUID.randomUUID().toString())
@@ -135,14 +161,6 @@ final class ExtensionRecordJournal {
                 .put("version", "test");
         record.set("managedSession", body);
         return new String(bytes(record), StandardCharsets.UTF_8) + "\n";
-    }
-
-    private static byte[] bytes(JsonNode node) {
-        try {
-            return JSON.writeValueAsBytes(node);
-        } catch (JsonProcessingException error) {
-            throw new IllegalStateException(error);
-        }
     }
 
     private static String base64(String value) {

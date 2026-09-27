@@ -5876,7 +5876,8 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 512,
-            "description": "Task event cursor positioned after the newest event at read time; pass it as after on the task events route to follow only new events."
+            "description": "Task event cursor positioned after the newest event at read time; pass it as after on the task events route to follow only new events.",
+            "x-qwen-implementation-status": "planned"
           },
           "artifact_refs": {
             "type": "array",
@@ -6228,7 +6229,8 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 512,
-            "description": "Task event cursor positioned after the newest event at read time; pass it as after on the task events route to follow only new events."
+            "description": "Task event cursor positioned after the newest event at read time; pass it as after on the task events route to follow only new events.",
+            "x-qwen-implementation-status": "planned"
           },
           "artifactRefs": {
             "type": "array",

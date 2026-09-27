@@ -19,11 +19,13 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
-import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
+import java.util.function.Consumer;
+import java.util.function.UnaryOperator;
+import org.assertj.core.api.ThrowableAssert.ThrowingCallable;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -99,18 +101,10 @@ class ManagedExtensionRecordStoreTest {
                 journal.commitMonitor("accepted-" + index, monitor,
                         1_000L * ++index);
             }
-            long revisions = revisions(sessionId);
             long occurredAt = 1_000L * (index + 1);
-            assertThatThrownBy(() -> journal.commitMonitor("rejected",
-                    reject.required("next"), occurredAt))
-                    .as(reject.required("id").textValue())
-                    .isInstanceOfSatisfying(ApiException.class, error ->
-                            assertThat(error.getCode()).isEqualTo(
-                                    ManagedExtensionRecordStore
-                                            .ERROR_REJECTED));
-            assertThat(committedSequence(sessionId))
-                    .isEqualTo(journal.committedSequence());
-            assertThat(revisions(sessionId)).isEqualTo(revisions);
+            assertRefused(reject.required("id").textValue(), sessionId,
+                    () -> journal.commitMonitor("rejected",
+                            reject.required("next"), occurredAt));
         }
     }
 
@@ -128,34 +122,61 @@ class ManagedExtensionRecordStoreTest {
     }
 
     @Test
-    void refusesARecordThatNamesAnotherSession() throws Exception {
+    void refusesWhatTheAuthorityCouldNotReadBack() throws Exception {
+        byte[] start = ExtensionRecordJournal.bytes(
+                chain().get(0).required("monitorRun"));
+        byte[] trailing = (new String(start, StandardCharsets.UTF_8)
+                + " {}").getBytes(StandardCharsets.UTF_8);
+        Map<String, Consumer<ObjectNode>> events = Map.of(
+                "another workspace", event -> ((ObjectNode) event
+                        .get("sessionKey")).put("workspaceId", "other"),
+                "an extra Session key field", event -> ((ObjectNode) event
+                        .get("sessionKey")).put("extra", true),
+                "a schema version as text", event -> ((ObjectNode) event
+                        .at("/payload/recordRef")).put("schemaVersion", "1"),
+                "a record version 2", event -> ((ObjectNode) event
+                        .get("payload")).put("version", 2),
+                "an event version 2", event -> event.put("v", 2),
+                "an extra payload field", event -> ((ObjectNode) event
+                        .get("payload")).put("extra", true));
+        for (Map.Entry<String, Consumer<ObjectNode>> edit
+                : events.entrySet()) {
+            refuse(edit.getKey(), start, edit.getValue(), records -> records);
+        }
+        refuse("a body with trailing content", trailing, event -> {
+        }, records -> records);
+        refuse("an event line with trailing content", start, event -> {
+        }, records -> records.replaceFirst("\n", " xyz\n"));
+    }
+
+    private void refuse(String label, byte[] body,
+            Consumer<ObjectNode> editEvent,
+            UnaryOperator<String> editRecords) {
         String sessionId = UUID.randomUUID().toString();
         ExtensionRecordJournal journal = journal(sessionId);
-        CommitTransactionRequest request = journal.request("foreign",
-                chain().get(0).required("monitorRun"), 1_000);
-        String records = new String(Base64.getDecoder().decode(
-                request.recordBytesBase64()), StandardCharsets.UTF_8);
-        String foreign = records.replace("\"workspaceId\":\"" + WORKSPACE
-                + "\"", "\"workspaceId\":\"other-workspace\"");
-        assertThat(foreign).isNotEqualTo(records);
-        assertThatThrownBy(() -> journal.commit(new CommitTransactionRequest(
-                request.workspaceId(), request.writerId(),
-                request.writerGeneration(), request.expectedJournalRevision(),
-                request.expectedCommittedSequence(), request.transactionId(),
-                request.operation(), request.commandId(),
-                request.contentDigest(), request.firstSequence(),
-                request.lastSequence(), request.eventCount(),
-                request.eventsDigest(), request.previousCommitDigest(),
-                request.commitDigest(), request.activationEpoch(),
-                request.latestCheckpointResourceId(), request.recordCount(),
-                Base64.getEncoder().encodeToString(foreign.getBytes(
-                        StandardCharsets.UTF_8)),
-                ExtensionRecordJournal.sha256(foreign),
-                request.resources())))
+        assertRefused(label, sessionId, () -> journal.commit(journal.request(
+                "refused", body, 1_000, editEvent, editRecords)));
+    }
+
+    /**
+     * A refused commit leaves no journal row, no resource reference and no
+     * revision behind, which it would if the store did not roll back.
+     */
+    private void assertRefused(String label, String sessionId,
+            ThrowingCallable commit) {
+        long transactions = rows("qwen_managed_session_journal_tx", sessionId);
+        long references = rows("qwen_managed_session_resource_ref",
+                sessionId);
+        long revisions = revisions(sessionId);
+        assertThatThrownBy(commit).as(label)
                 .isInstanceOfSatisfying(ApiException.class, error ->
-                        assertThat(error.getCode()).isEqualTo(
+                        assertThat(error.getCode()).as(label).isEqualTo(
                                 ManagedExtensionRecordStore.ERROR_REJECTED));
-        assertThat(revisions(sessionId)).isZero();
+        assertThat(rows("qwen_managed_session_journal_tx", sessionId))
+                .as(label).isEqualTo(transactions);
+        assertThat(rows("qwen_managed_session_resource_ref", sessionId))
+                .as(label).isEqualTo(references);
+        assertThat(revisions(sessionId)).as(label).isEqualTo(revisions);
     }
 
     @Test
@@ -240,12 +261,11 @@ class ManagedExtensionRecordStoreTest {
         return total == null ? 0 : total;
     }
 
-    private long committedSequence(String sessionId) {
-        Long sequence = jdbc.queryForObject("SELECT committed_sequence FROM"
-                        + " qwen_managed_session_journal_head WHERE"
-                        + " tenant_id = ? AND session_id = ?",
+    private long rows(String table, String sessionId) {
+        Long count = jdbc.queryForObject("SELECT COUNT(*) FROM " + table
+                        + " WHERE tenant_id = ? AND session_id = ?",
                 Long.class, TENANT, sessionId);
-        return sequence == null ? -1 : sequence;
+        return count == null ? 0 : count;
     }
 
     private static List<JsonNode> chain() throws Exception {

@@ -8,6 +8,7 @@ import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.Stored
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.StreamReadFeature;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
@@ -20,6 +21,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.function.Function;
 import java.util.regex.Pattern;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -43,8 +45,15 @@ public class ManagedExtensionRecordStore {
     private static final Pattern TASK_ID = Pattern.compile(
             "^task_([0-9a-f]{64})$");
     private static final long MAX_TIME = 8_640_000_000_000_000L;
+    private static final Set<String> SESSION_KEY_FIELDS = Set.of("tenantId",
+            "workspaceId", "sessionId");
+    private static final Set<String> PAYLOAD_FIELDS = Set.of("domain",
+            "version", "operationId", "recordRef");
+    // Parses as strictly as the Session authority does, so the store never
+    // accepts a line or a body the authority could not read back.
     private static final ObjectMapper JSON = JsonMapper.builder()
-            .enable(StreamReadFeature.STRICT_DUPLICATE_DETECTION).build();
+            .enable(StreamReadFeature.STRICT_DUPLICATE_DETECTION)
+            .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS).build();
     private final JdbcTemplate jdbc;
     private final AgentStateStore sessions;
 
@@ -89,14 +98,10 @@ public class ManagedExtensionRecordStore {
             Body body = domain == null ? null
                     : ManagedExtensionProjection.RECORD_BODIES.get(domain);
             if (body != null) {
-                JsonNode key = event.path("sessionKey");
-                require(tenantId.equals(key.path("tenantId").textValue())
-                        && workspaceId.equals(key.path("workspaceId")
-                                .textValue())
-                        && sessionId.equals(key.path("sessionId").textValue()),
-                        "The Stage H record names another Session.");
+                requireEnvelope(event, domain, tenantId, workspaceId,
+                        sessionId);
                 applyRevision(tenantId, workspaceId, sessionId, domain, body,
-                        payload.path("recordRef"),
+                        payload.get("recordRef"),
                         time(event.path("occurredAt")), resources);
             }
         }
@@ -142,19 +147,55 @@ public class ManagedExtensionRecordStore {
                 recordKey).stream().findFirst();
     }
 
+    /**
+     * Checks the domain.committed event of a Stage H record as the Session
+     * authority's reader does: its version, its Session, and a closed payload
+     * whose reference names a version 1 record of the domain.
+     */
+    private static void requireEnvelope(JsonNode event, String domain,
+            String tenantId, String workspaceId, String sessionId) {
+        try {
+            ManagedExtensionRecords.count(event.get("v"), 1, 1, "event.v");
+            ManagedExtensionRecords.count(event.get("sequence"), 1,
+                    Long.MAX_VALUE, "event.sequence");
+            ManagedExtensionRecords.id(event.get("eventId"), "event.eventId");
+            ManagedExtensionRecords.closed(event.get("sessionKey"),
+                    SESSION_KEY_FIELDS, "event.sessionKey");
+            JsonNode payload = event.get("payload");
+            ManagedExtensionRecords.closed(payload, PAYLOAD_FIELDS,
+                    "event.payload");
+            ManagedExtensionRecords.count(payload.get("version"), 1, 1,
+                    "event.payload.version");
+            ManagedExtensionRecords.id(payload.get("operationId"),
+                    "event.payload.operationId");
+            ManagedExtensionRecords.durableRef(payload.get("recordRef"),
+                    "event.payload.recordRef");
+        } catch (InvalidRecordException error) {
+            throw rejected(error.getMessage());
+        }
+        JsonNode key = event.get("sessionKey");
+        JsonNode recordRef = event.get("payload").get("recordRef");
+        require(tenantId.equals(key.get("tenantId").textValue())
+                && workspaceId.equals(key.get("workspaceId").textValue())
+                && sessionId.equals(key.get("sessionId").textValue()),
+                "The Stage H record names another Session.");
+        require(("managed-" + domain).equals(recordRef.get("kind")
+                .textValue()) && recordRef.get("schemaVersion")
+                        .longValue() == 1,
+                "The Stage H record must reference managed-" + domain
+                        + " version 1.");
+    }
+
     private void applyRevision(String tenantId, String workspaceId,
             String sessionId, String domain, Body body, JsonNode recordRef,
             long occurredAt, Function<String, StoredResource> resources) {
-        String resourceId = recordRef.path("resourceId").textValue();
-        require(resourceId != null, "The Stage H record has no resource.");
+        String resourceId = recordRef.get("resourceId").textValue();
         StoredResource resource = resources.apply(resourceId);
-        require(resource.kind().equals(recordRef.path("kind").textValue())
-                && resource.kind().equals("managed-" + domain)
+        require(resource.kind().equals(recordRef.get("kind").textValue())
                 && resource.schemaVersion() == 1
-                && recordRef.path("schemaVersion").asLong() == 1
-                && resource.byteLength() == recordRef.path("byteLength")
-                        .asLong(-1)
-                && resource.digest().equals(recordRef.path("digest")
+                && resource.byteLength() == recordRef.get("byteLength")
+                        .longValue()
+                && resource.digest().equals(recordRef.get("digest")
                         .textValue()),
                 "The Stage H record does not match its resource.");
         JsonNode record = read(new String(resource.bytes(),

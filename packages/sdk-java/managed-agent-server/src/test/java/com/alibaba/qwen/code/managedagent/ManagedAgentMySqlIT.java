@@ -23,6 +23,7 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.ReplayWindow;
 import com.alibaba.qwen.code.runtimebroker.JdbcRepositoryContract;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.io.IOException;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
@@ -632,23 +633,40 @@ class ManagedAgentMySqlIT {
         assertThat(before).isEqualTo(ManagedExtensionProjectionContractTest
                 .view(chain.get(chain.size() - 2).required("view")));
 
-        JsonNode refused = fixtures.required("monitorChainRejectCases")
-                .get(4).required("next");
+        // A body no revision committed, so its resource and its reference
+        // are new rows that only a rollback removes.
+        JsonNode refused = ((ObjectNode) chain.get(chain.size() - 2)
+                .required("monitorRun").deepCopy()).put("maxEvents", 50);
+        String refusedResource = ExtensionRecordJournal.resourceId(
+                ExtensionRecordJournal.bytes(refused));
+        int references = count(jdbc, "qwen_managed_session_resource_ref",
+                tenant, session);
         assertThatThrownBy(() -> inTransaction(transactions,
                 () -> journal.commitMonitor("refused", refused, 99_000)))
                 .isInstanceOfSatisfying(ApiException.class, error ->
                         assertThat(error.getCode()).isEqualTo(
                                 ManagedExtensionRecordStore.ERROR_REJECTED));
-        assertThat(jdbc.queryForObject("SELECT committed_sequence FROM"
-                        + " qwen_managed_session_journal_head WHERE"
-                        + " tenant_id = ? AND session_id = ?", Long.class,
-                tenant, session)).isEqualTo(journal.committedSequence());
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
                         + " qwen_managed_session_resource WHERE tenant_id = ?"
-                        + " AND session_id = ?", Integer.class, tenant,
-                session)).isEqualTo(chain.size() - 1);
+                        + " AND session_id = ? AND resource_id = ?",
+                Integer.class, tenant, session, refusedResource)).isZero();
+        assertThat(count(jdbc, "qwen_managed_session_resource_ref", tenant,
+                session)).isEqualTo(references);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
+                        + " qwen_managed_session_journal_tx WHERE"
+                        + " tenant_id = ? AND session_id = ? AND"
+                        + " command_id = 'refused'", Integer.class, tenant,
+                session)).isZero();
         assertThat(records.listTasks(tenant, session, null, null, 10).tasks()
                 .get(0).projection()).isEqualTo(before);
+    }
+
+    private static int count(JdbcTemplate jdbc, String table, String tenant,
+            String session) {
+        Integer rows = jdbc.queryForObject("SELECT COUNT(*) FROM " + table
+                        + " WHERE tenant_id = ? AND session_id = ?",
+                Integer.class, tenant, session);
+        return rows == null ? 0 : rows;
     }
 
     private static Process startWorkspaceProcess(String action,
