@@ -17,6 +17,7 @@ import {
 import type { Content, GenerateContentConfig } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { AuthType } from '../core/contentGenerator.js';
+import { ModelsConfig } from '../models/modelsConfig.js';
 import { LlmChat, StreamEventType } from '../core/llm-chat.js';
 import { createRuntimeContentGeneratorView } from '../models/content-generator-config.js';
 import type { RuntimeContentGeneratorView } from './runtime/agent-context.js';
@@ -261,6 +262,14 @@ describe('runForkedAgent (cache path)', () => {
     'resolves an endpoint-qualified selector without passing its suffix as the model ID: %s',
     async (endpoint) => {
       const config = {
+        getModelsConfig: () =>
+          new ModelsConfig({
+            modelProvidersConfig: {
+              openai: [
+                { id: 'shared', ...(endpoint ? { baseUrl: endpoint } : {}) },
+              ],
+            },
+          }),
         getModel: () => 'shared',
         getContentGeneratorConfig: () => ({
           model: 'shared',

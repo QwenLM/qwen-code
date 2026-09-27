@@ -185,6 +185,7 @@ class AdvisorToolInvocation extends BaseToolInvocation<
             version: 0,
           },
           model: advisorModel,
+          modelEndpointType: 'registry',
           abortSignal: signal,
           disableModelFallbacks: true,
         }),
