@@ -22,6 +22,17 @@ script requires TypeScript integrations absent from this PR. See the
 for the remaining merge gates; earlier preview timing and recovery results
 below are not evidence for this split.
 
+## API contract
+
+`src/main/resources/openapi/managed-agent-public-api.openapi.json` is the
+single source for the public and WebShell routes. `ManagedAgentApiContractTest`
+compares the mapped routes, the `ApiModels` records and real responses with it;
+`src/test/resources/openapi/contract-known-gaps.txt` lists the differences that
+Stage D still has to close. The WebShell client types are generated from the
+same file by `npm run generate:managed-agent-api` in `packages/web-shell`.
+Design: [English](../../../docs/design/2026-09-27-managed-agent-api-contract.md) |
+[简体中文](../../../docs/design/2026-09-27-managed-agent-api-contract.zh-CN.md)
+
 ## Prerequisites
 
 - Java 21
