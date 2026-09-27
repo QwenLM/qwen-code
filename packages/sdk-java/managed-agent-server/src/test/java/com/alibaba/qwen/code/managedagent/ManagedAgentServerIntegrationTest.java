@@ -29,7 +29,9 @@ import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.Admission;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.DispatchTarget;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.EventRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.HarnessEvent;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.ItemRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.ProjectedEvent;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutationKind;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -923,6 +925,92 @@ class ManagedAgentServerIntegrationTest {
                                         .extracting(part -> part.text())
                                         .containsExactly("before", "after",
                                                 "thought", "final")));
+    }
+
+    @Test
+    void eventsNameTheSnapshotItemsAndPartsTheyChange() {
+        String tenant = "tenant-identity-" + UUID.randomUUID();
+        Admission session = store.insertSessionCommand(tenant,
+                "CREATE_SESSION", "identity-create",
+                "sha256:" + "d".repeat(64), "qwen-code", null, null,
+                List.of(), null);
+        String sessionId = session.sessionId();
+        String owner = "identity-owner";
+        Admission turn = new TransactionTemplate(transactionManager).execute(status -> {
+            Admission admitted = store.insertTurnCommand(tenant, "SUBMIT_TURN",
+                    "identity-turn", "sha256:" + "e".repeat(64), sessionId,
+                    List.of(Map.of("type", "text", "text", "hi")),
+                    "sha256:" + "f".repeat(64));
+            assertThat(store.claimTurn(tenant, sessionId, admitted.turnId(),
+                    owner, Duration.ofMinutes(1))).isPresent();
+            return admitted;
+        });
+        store.recordAdmission(tenant, sessionId, turn.turnId(), owner,
+                "identity-epoch", 0);
+        // The reasoning stream continues across the two batches.
+        store.recordHarnessEvents(tenant, sessionId, turn.turnId(), owner,
+                "identity-epoch", List.of(
+                        harnessText(1, "item.output_text.delta", "a"),
+                        harnessText(2, "item.output_text.delta", "b"),
+                        harnessText(3, "item.reasoning.delta", "c")));
+        store.recordHarnessEvents(tenant, sessionId, turn.turnId(), owner,
+                "identity-epoch", List.of(
+                        harnessText(4, "item.reasoning.delta", "d"),
+                        new HarnessEvent(5, "boot:identity-epoch:5",
+                                new ProjectedEvent("item.tool_call.updated",
+                                        Map.of("toolCallId", "tool-1"), false,
+                                        null, null, null)),
+                        harnessText(6, "item.output_text.delta", "e"),
+                        new HarnessEvent(7, "boot:identity-epoch:7",
+                                new ProjectedEvent("turn.completed", Map.of(),
+                                        true, "COMPLETED", null, null))));
+        store.materializeNextBatch(tenant, sessionId, 200);
+
+        List<ItemRecord> items = store.findSnapshot(tenant, sessionId)
+                .orElseThrow().items();
+        List<EventRecord> events = store.findEvents(tenant, sessionId, 0,
+                100);
+        for (EventRecord event : events) {
+            assertThat(event.schemaVersion()).isEqualTo(1);
+            assertThat(event.projectionVersion()).isEqualTo(1);
+            if (event.itemId() == null) {
+                continue;
+            }
+            ItemRecord item = items.stream().filter(candidate ->
+                    candidate.itemId().equals(event.itemId()))
+                    .findFirst().orElseThrow();
+            if (event.contentPartId() != null) {
+                assertThat(item.content()).filteredOn(part ->
+                                part.partId().equals(event.contentPartId()))
+                        .singleElement().satisfies(part -> assertThat(
+                                event.sequence()).isBetween(
+                                        part.firstSequence(),
+                                        part.lastSequence()));
+            }
+        }
+        List<EventRecord> deltas = events.stream()
+                .filter(event -> event.type().endsWith(".delta")).toList();
+        String output = "part_" + turn.turnId() + "_output_text_";
+        String reasoning = "part_" + turn.turnId() + "_reasoning_";
+        assertThat(deltas).extracting(EventRecord::contentPartId)
+                .containsExactly(output + deltas.get(0).sequence(),
+                        output + deltas.get(0).sequence(),
+                        reasoning + deltas.get(2).sequence(),
+                        reasoning + deltas.get(2).sequence(),
+                        output + deltas.get(4).sequence());
+        assertThat(events).filteredOn(event -> event.itemId() != null)
+                .extracting(EventRecord::type).containsExactly(
+                        "turn.accepted", "item.output_text.delta",
+                        "item.output_text.delta", "item.reasoning.delta",
+                        "item.reasoning.delta", "item.tool_call.updated",
+                        "item.output_text.delta");
+    }
+
+    private static HarnessEvent harnessText(long sourceId, String type,
+            String text) {
+        return new HarnessEvent(sourceId, "boot:identity-epoch:" + sourceId,
+                new ProjectedEvent(type, Map.of("text", text), false, null,
+                        null, null));
     }
 
     @Test

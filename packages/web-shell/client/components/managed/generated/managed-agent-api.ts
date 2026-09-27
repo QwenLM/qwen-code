@@ -58,7 +58,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description POST SSE consumed through fetch response.body. */
+        /** @description POST SSE consumed through fetch response.body. An afterSequence below the replay floor ends the stream with one agent.session.resync_required frame instead of a 409; reload the transcript and resume after its lastSequence. */
         post: operations["webShellStreamEvents"];
         delete?: never;
         options?: never;
@@ -321,6 +321,19 @@ export interface components {
             };
             terminal: boolean;
         };
+        /** @description Data of the agent.session.resync_required SSE frame. Reload the transcript, then resume after its lastSequence. */
+        WebShellResyncRequired: {
+            /** @constant */
+            type: "agent.session.resync_required";
+            /** Format: uuid */
+            sessionId: string;
+            /** Format: int64 */
+            replayFloorSequence: number;
+            /** Format: int64 */
+            snapshotThroughSequence: number;
+            /** @constant */
+            action: "reload_snapshot";
+        };
         ErrorEnvelope: {
             error: {
                 code: string;
@@ -428,15 +441,6 @@ export interface components {
         };
         /** @description Resource absent or outside the caller tenant scope. */
         NotFound: {
-            headers: {
-                [name: string]: unknown;
-            };
-            content: {
-                "application/json": components["schemas"]["ErrorEnvelope"];
-            };
-        };
-        /** @description Replay cursor is older than the retained replay floor. */
-        CursorExpired: {
             headers: {
                 [name: string]: unknown;
             };
@@ -567,7 +571,6 @@ export interface operations {
             };
             400: components["responses"]["BadRequest"];
             404: components["responses"]["NotFound"];
-            409: components["responses"]["CursorExpired"];
         };
     };
     webShellCreateSession: {
