@@ -6,7 +6,10 @@
 
 import { createServer, type Server } from 'node:http';
 import { afterEach, expect, it, vi } from 'vitest';
-import { HostedWorkspaceBroker } from './hosted-workspace-broker.js';
+import {
+  HostedWorkspaceBroker,
+  HostedWorkspaceBrokerRejection,
+} from './hosted-workspace-broker.js';
 import { WORKSPACE_CAPABILITY_DIGEST } from './managed-workspace-activation.js';
 
 let server: Server;
@@ -143,4 +146,14 @@ it('queries the original identity after a lost start and refuses unknown status'
     '/internal/runtime-broker/v1/executions/execution:start',
     '/internal/runtime-broker/v1/executions/execution',
   ]);
+});
+
+it('preserves a definite acquisition refusal from the HTTP response', async () => {
+  const broker = await fixture(() => ({
+    code: 409,
+    body: { code: 'workspace_busy' },
+  }));
+  await expect(broker.acquire()).rejects.toEqual(
+    new HostedWorkspaceBrokerRejection(409, 'workspace_busy'),
+  );
 });

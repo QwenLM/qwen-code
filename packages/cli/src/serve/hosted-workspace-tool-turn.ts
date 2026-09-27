@@ -13,10 +13,12 @@ import {
 } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import type { ManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
+import { HTTP_MANAGED_SESSION_STORE_CONTRACT } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import { normalizeWorkspaceRelativePath } from './managed-workspace-binding.js';
 import { WORKSPACE_CAPABILITY_DIGEST } from './managed-workspace-activation.js';
 import {
   HostedWorkspaceBroker,
+  HostedWorkspaceBrokerRejection,
   type HostedWorkspaceBrokerOptions,
 } from './hosted-workspace-broker.js';
 
@@ -97,6 +99,7 @@ export class HostedWorkspaceToolTurn {
       parts: Part[],
       model: string,
     ) => Promise<string>,
+    private readonly validateAssistant: (parts: Part[], model: string) => void,
   ) {
     this.broker = new HostedWorkspaceBroker(
       options,
@@ -131,14 +134,29 @@ export class HostedWorkspaceToolTurn {
         toolName: call.name,
         input: { ...call.args, file_path: relativeFile },
       });
-      if (Buffer.byteLength(payloadJson) > 256 * 1024)
-        throw new Error('Hosted tool input exceeds 256 KiB.');
+      const inputBytes = Buffer.from(
+        JSON.stringify({
+          harnessSessionId:
+            this.session.authority.sessionHeader.sessionKey.sessionId,
+          runtimeSessionId: this.promptId,
+          payloadJson,
+        }),
+      );
+      if (
+        inputBytes.length >
+        HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes
+      )
+        throw new Error(
+          'Hosted tool input exceeds the inline Session Store limit.',
+        );
       return {
         call,
         payloadJson,
+        inputBytes,
         digest: `sha256:${createHash('sha256').update(payloadJson).digest('hex')}`,
       };
     });
+    this.validateAssistant(parts, model);
     signal.throwIfAborted();
     let onAbort: () => void = () => undefined;
     try {
@@ -153,27 +171,34 @@ export class HostedWorkspaceToolTurn {
       signal.removeEventListener('abort', onAbort);
     }
     signal.throwIfAborted();
-    const reserved: string[] = [];
-    try {
+    if (!this.acquired) {
       // Acquisition may have taken effect even when its reply is lost.
       this.uncertain = true;
-      if (!this.acquired) {
+      try {
         await this.broker.acquire();
         this.acquired = true;
+      } catch (cause) {
+        if (
+          cause instanceof HostedWorkspaceBrokerRejection &&
+          cause.status === 409 &&
+          (cause.code === 'workspace_busy' ||
+            cause.code === 'workspace_unavailable')
+        ) {
+          this.uncertain = false;
+          throw cause;
+        }
+        throw new HostedToolRecoveryRequiredError(cause);
       }
+    }
+    const reserved: string[] = [];
+    try {
+      this.uncertain = true;
       const messageId = await this.commit('assistant', parts, model);
       const bindings = [];
       for (const [ordinal, request] of requests.entries()) {
         const routeRef = await this.session.resources.publish(
           'managed-tool-input',
-          Buffer.from(
-            JSON.stringify({
-              harnessSessionId:
-                this.session.authority.sessionHeader.sessionKey.sessionId,
-              runtimeSessionId: this.promptId,
-              payloadJson: request.payloadJson,
-            }),
-          ),
+          request.inputBytes,
         );
         const executionCallId = await this.broker.prepare(
           randomUUID(),

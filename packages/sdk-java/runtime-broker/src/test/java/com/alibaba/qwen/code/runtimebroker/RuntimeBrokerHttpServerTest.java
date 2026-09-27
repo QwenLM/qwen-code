@@ -119,6 +119,23 @@ class RuntimeBrokerHttpServerTest {
     }
 
     @Test
+    void immediateExecutionRejectsDeferredReferencesBeforeDispatch() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            fixture.transport.fail = false;
+            fixture.service.acquire("harness", "runtime", "bootstrap").toCompletableFuture().join();
+            Map<String, Object> deferred = new java.util.HashMap<>(reference());
+            deferred.put("dispatchMode", "deferred");
+            HttpResponse<String> response = fixture.post("/executions", Map.of(
+                    "protocolVersion", 1, "requestId", "bypass", "idempotencyKey", "fresh-key",
+                    "harnessSessionId", "harness", "runtimeSessionId", "runtime",
+                    "turnId", "turn", "toolCallId", "call", "requestDigest", "digest", "reference", deferred));
+            assertEquals(400, response.statusCode(), response.body());
+            assertTrue(response.body().contains("runtime_reference_invalid"), response.body());
+            assertEquals(0, fixture.transport.executions.get());
+        }
+    }
+
+    @Test
     void cancelPreparedWorkNeverInvokesTransport() throws Exception {
         try (Fixture fixture = new Fixture()) {
             fixture.service.acquire("harness", "runtime", "bootstrap").toCompletableFuture().join();

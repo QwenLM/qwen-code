@@ -17,6 +17,7 @@ import {
 import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
 import type { ManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
+import { HostedWorkspaceBrokerRejection } from './hosted-workspace-broker.js';
 import {
   HostedWorkspaceToolTurn,
   HostedToolRecoveryRequiredError,
@@ -30,7 +31,8 @@ const broker = vi.hoisted(() => ({
   cancel: vi.fn(),
   release: vi.fn(),
 }));
-vi.mock('./hosted-workspace-broker.js', () => ({
+vi.mock('./hosted-workspace-broker.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./hosted-workspace-broker.js')>()),
   HostedWorkspaceBroker: class {
     warm = broker.warm;
     acquire = broker.acquire;
@@ -126,6 +128,7 @@ beforeEach(async () => {
       });
       return uuid;
     },
+    () => undefined,
   );
 });
 afterEach(async () => {
@@ -313,3 +316,68 @@ it('keeps an empty Runtime error visible to the model instead of reporting succe
   });
   expect(result[0].functionResponse?.response).not.toHaveProperty('output');
 });
+
+it.each(['workspace_busy', 'workspace_unavailable'])(
+  'allows another attempt after a definite %s acquire refusal',
+  async (code) => {
+    const refusal = new HostedWorkspaceBrokerRejection(409, code);
+    broker.acquire.mockRejectedValueOnce(refusal);
+    await expect(
+      turn.execute(calls, parts, 'model', new AbortController().signal),
+    ).rejects.toBe(refusal);
+    await expect(turn.finish()).resolves.toBeUndefined();
+    expect(broker.prepare).not.toHaveBeenCalled();
+    expect(broker.release).not.toHaveBeenCalled();
+    expect(await session.sink.project()).toEqual([]);
+    await turn.execute(calls, parts, 'model', new AbortController().signal);
+    await turn.consumeResults();
+    await turn.finish();
+    expect(broker.acquire).toHaveBeenCalledTimes(2);
+    expect(broker.release).toHaveBeenCalledOnce();
+  },
+);
+
+it.each([
+  new Error('lost acquire response'),
+  new HostedWorkspaceBrokerRejection(503, 'workspace_unavailable'),
+  new HostedWorkspaceBrokerRejection(409, 'runtime_session_acquire_failed'),
+])(
+  'retains recovery blocking after ambiguous acquisition: %s',
+  async (cause) => {
+    broker.acquire.mockRejectedValueOnce(cause);
+    await expect(
+      turn.execute(calls, parts, 'model', new AbortController().signal),
+    ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+    await expect(turn.finish()).rejects.toBeInstanceOf(
+      HostedToolRecoveryRequiredError,
+    );
+    expect(broker.prepare).not.toHaveBeenCalled();
+    expect(broker.release).not.toHaveBeenCalled();
+  },
+);
+
+it.each(['x'.repeat(70 * 1024), '中'.repeat(23 * 1024), '"'.repeat(17 * 1024)])(
+  'checks the exact serialized argument resource before acquisition (%#)',
+  async (content) => {
+    const call = {
+      ...calls[0],
+      name: 'write_file',
+      args: { file_path: 'file.txt', content },
+    };
+    await expect(
+      turn.execute(
+        [call],
+        [
+          {
+            functionCall: { id: call.callId, name: call.name, args: call.args },
+          },
+        ],
+        'model',
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow('inline Session Store limit');
+    await expect(turn.finish()).resolves.toBeUndefined();
+    expect(broker.acquire).not.toHaveBeenCalled();
+    expect(broker.prepare).not.toHaveBeenCalled();
+  },
+);

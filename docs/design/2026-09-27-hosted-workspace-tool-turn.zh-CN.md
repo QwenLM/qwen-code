@@ -39,7 +39,7 @@ Harness 在持久化参数资源中保留精确 payload 字节。Broker 只在�
 ## 回合时序
 
 1. 使用现有 Session 权威持久接纳 prompt，独立启动 Runtime 预热和模型推理。无工具回答可在环境仍准备中时完成。
-2. 验证完整模型响应，在副作用之前拒绝 profile 外的工具。
+2. 验证完整模型响应，在副作用之前拒绝 profile 外的工具。在获取所有权前，按精确序列化字节检查每个参数资源及完整 assistant 记录是否满足 Store 内联限制，包括 UTF-8 编码、JSON 转义和记录元数据。
 3. 第一批工具到来时，获取一个 Runtime Session 及其 Workspace 存储所有权。提交完整模型响应，逐个发布精确参数资源、预留调用，并通过 `tool.intent` 事件关联每个输入和 schema，然后在任何 start 之前提交一个 `await_runtime` 检查点。
 4. 在该所有权下顺序执行调用。通过原始 execution identity 查询状态和取消，不为恢复丢失响应而创建替代调用。
 5. 持久化每个执行结果和模型函数响应，再把现有 Harness 检查点推进到 `results_ready`。只向下一次模型请求发送这些已提交响应，在该请求完成后记录消费，并在多批工具间保留顺序。
@@ -49,9 +49,11 @@ Harness 在持久化参数资源中保留精确 payload 字节。Broker 只在�
 
 ## 失败与取消
 
+占用存储前明确返回 HTTP 409 `workspace_busy` 或 `workspace_unavailable` 的 acquire 拒绝以普通错误结束回合，Session 可重试或 reload。占用存储后的 acquire 失败统一使用 `runtime_session_acquire_failed`，包括后续权限复检失败，仍要求恢复。acquire 响应丢失也保持阻塞。
+
 派发前的准入或参数资源失败不会产生工具副作用。start 响应丢失后只查询原始执行。无法观察的结果、lease 丢失、结果提交失败或未验证取消会把 Session 阻塞在持久等待点。调用方可观察 recovery-required 状态。Harness 不发出正常 completed/cancelled 安全边界，也不允许新 prompt 忘记这些工作。
 
-取消会中止推理，并按原始身份请求取消每个已预留或已启动调用。取消请求不等于停止证据；只有 Runtime 终态结果允许结算和释放。无法观察出结果时保留所有权并阻塞。释放失败也阻塞后续工具，不在本地清除所有权。
+取消会中止推理，并按原始身份请求取消每个已预留或已启动调用。取消请求不等于停止证据；只有 Runtime 终态结果允许结算和释放。无法观察出结果时保留所有权并阻塞。释放失败也阻塞后续工具，不在本地清除所有权。结果未知时仍持有 Workspace 存储，因此同一 Workspace 的其它 Session 会收到可恢复的 busy 错误，直到 W0e 恢复清除原持有者。
 
 私有循环最多运行 16 轮模型请求。Broker payload 上限为 256 KiB，但每个参数、结果和历史资源也必须满足现有 Session Store 的 64 KiB 内联限制；过大资源直接失败，不能截断后继续。每个 Broker HTTP 请求超时为 30 秒，执行观察最多两分钟加上当前请求。这些是私有 profile 内部限制，不是新用户设置。
 
@@ -69,6 +71,7 @@ Java 产品 coordinator 和公开 Workspace 准入继续受门禁约束。私有
 - 故意延迟 Runtime 就绪，证明第一次模型请求更早开始；无工具回答不等待环境就绪即可完成。
 - 在两个 Workspace 目录中通过真实 worker 执行 Read/Write/Edit。在 Harness 启动目录放置诱饵文件，证明没有读写它。
 - 执行至少两轮模型/工具循环和后续 prompt；断言模型请求与持久回放中的调用/结果一一对应。
+- 验证 busy/unavailable 拒绝后可继续 prompt 和 reload，而 acquire 响应丢失及占用存储后的失败仍阻塞。在获取所有权前拒绝过大的输入和完整 assistant 记录，包括 UTF-8 和嵌套 JSON 转义。
 - 在 start 前注入参数/意图持久化失败，观察零文件副作用。丢弃 start 响应，证明只查询原执行且不产生第二次副作用。
 - 验证 start 前取消、执行中取消和状态不可读时取消。仅物理已结算工作可产生回合终态；未知结果阻止后续 prompt 和 reload。
 - 验证结算前后的 prepare/start payload 冲突、存储引用不含 payload、prepare/cancel 竞态和原接口兼容性。
@@ -77,4 +80,4 @@ Java 产品 coordinator 和公开 Workspace 准入继续受门禁约束。私有
 
 ## 尚未完成的边界
 
-独立进程 O1c 发布器/回执桥接、完整 Shell 输出、文件备份/撤销结算、公开 actor 准入、产品 UI 启用、W0e 恢复及更广泛 G/H 工作，都不能由私有工具回合测试认证。扩围时必须先同步两种语言的设计与验收测试，再启用相应能力。
+独立进程 O1c 发布器/回执桥接、完整 Shell 输出、文件备份/撤销结算、公开 actor 准入、产品 UI 启用、W0e 恢复及更广泛 G/H 工作，都不能由私有工具回合测试认证。worker 结果目前仍携带原生绝对路径；将其转换为面向模型的 Workspace 相对路径，以及为无效路径返回模型可纠正的函数错误，留待后续处理。扩围时必须先同步两种语言的设计与验收测试，再启用相应能力。

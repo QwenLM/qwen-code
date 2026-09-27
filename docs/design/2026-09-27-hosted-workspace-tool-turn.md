@@ -39,7 +39,7 @@ Prepared cancellation settles without invoking the Runtime. A dispatcher commits
 ## Turn sequence
 
 1. Admit the prompt durably using the existing Session authority. Start Runtime warming and model inference independently. A no-tool answer can finish while provisioning is still pending.
-2. Validate the complete model response and refuse tools outside the profile before side effects.
+2. Validate the complete model response and refuse tools outside the profile before side effects. Before acquisition, check each exact serialized argument resource and the complete assistant record against the inline Store limit, including UTF-8 encoding, JSON escaping and record metadata.
 3. On the first tool batch, acquire one Runtime Session and its Workspace storage owner. Commit the full model response, publish each exact argument resource, reserve its invocation and anchor every input/schema with a `tool.intent` event, then commit one `await_runtime` checkpoint before any start request.
 4. Execute calls sequentially under that owner. Read status and cancel using the original execution identity. Never create a replacement call to recover a lost response.
 5. Persist each execution outcome and model-facing function response, then advance the existing Harness checkpoint to `results_ready`. Send only those committed responses to the next model request. Record consumption after that request finishes and preserve ordering across multiple batches.
@@ -49,9 +49,11 @@ Tool-enabled history preserves complete function-call/function-response groups. 
 
 ## Failure and cancellation
 
+A definite HTTP 409 `workspace_busy` or `workspace_unavailable` acquisition refusal before claiming storage ends the turn with an ordinary error; the Session may retry or reload. After storage is claimed, acquisition failures use `runtime_session_acquire_failed`, including a failed authority recheck, and remain recovery-blocked. A lost acquisition reply also remains blocked.
+
 Admission or argument-resource failure before dispatch causes no tool effect. After a lost start reply, query only the original execution. An unobservable outcome, lease loss, failed result commit or unverified cancellation blocks the Session at its durable wait. The caller can observe recovery-required status. The Harness neither emits a normal completed/cancelled safety boundary nor permits a fresh prompt to forget that work.
 
-Cancellation aborts inference and requests cancellation of every reserved or started original invocation. A cancellation request is not stop evidence. Only a terminal Runtime result permits result settlement and release. If observation cannot determine the outcome, retain ownership and block. A failed release also blocks further tools rather than clearing ownership locally.
+Cancellation aborts inference and requests cancellation of every reserved or started original invocation. A cancellation request is not stop evidence. Only a terminal Runtime result permits result settlement and release. If observation cannot determine the outcome, retain ownership and block. A failed release also blocks further tools rather than clearing ownership locally. An unknown outcome retains the Workspace storage holder, so other Sessions in the same Workspace receive a recoverable busy error until W0e recovery clears that holder.
 
 The private loop is bounded to 16 model rounds. Broker payloads are limited to 256 KiB, but each argument, result and history resource must also fit the existing 64 KiB inline Session Store limit; larger resources fail closed rather than truncate. Each Broker HTTP request has a 30-second timeout and execution observation is bounded to two minutes plus the current request. These limits are internal to this private profile, not new user settings.
 
@@ -69,6 +71,7 @@ The Java product coordinator and public Workspace admission stay gated. Private 
 - Prove first model traffic precedes deliberately delayed Runtime readiness, and a no-tool answer completes without waiting for readiness.
 - Drive Read/Write/Edit through a real worker in two Workspace directories. Place a decoy file under the Harness launch directory and prove it is not read or modified.
 - Drive at least two model/tool rounds and a later prompt. Assert exact function-call/result pairing in both model requests and durable replay.
+- Verify busy/unavailable refusals permit another prompt and reload, while lost acquire replies and failures after storage claim remain blocked. Reject oversized inputs and complete assistant records before acquisition, including UTF-8 and nested JSON escaping.
 - Fail argument/intent persistence before start and observe zero filesystem effects. Drop start responses and prove the original execution is queried without a second effect.
 - Cancel before start, during an operation and with status unavailable. Only physically settled work may produce a terminal turn; unknown outcomes block subsequent prompts and reload.
 - Verify prepare/start payload conflicts before and after settlement, payload-free stored references, prepare/cancel races and original API compatibility.
@@ -77,4 +80,4 @@ The Java product coordinator and public Workspace admission stay gated. Private 
 
 ## Open boundaries
 
-The separate-process O1c publisher/receipt bridge, complete Shell output, file backup/undo settlement, public actor admission, product UI enablement, W0e recovery and broader G/H work are not certified by a private tool-turn test. Any expansion must update both language versions and its acceptance tests before enabling the associated capability.
+The separate-process O1c publisher/receipt bridge, complete Shell output, file backup/undo settlement, public actor admission, product UI enablement, W0e recovery and broader G/H work are not certified by a private tool-turn test. Worker results currently retain native absolute paths; converting them to Workspace-relative model-facing output and returning correctable function errors for invalid paths is a follow-up. Any expansion must update both language versions and its acceptance tests before enabling the associated capability.

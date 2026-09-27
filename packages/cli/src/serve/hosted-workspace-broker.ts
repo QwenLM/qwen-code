@@ -8,7 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { ManagedSessionKey } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import type { ManagedToolResultPayload } from './managed-runtime-tool-executor.js';
-import { resolveManagedRuntimeBrokerBaseUrl } from './broker-managed-runtime-provider.js';
+import { resolveManagedRuntimeBrokerBaseUrl } from './managed-runtime-broker-url.js';
 import { WORKSPACE_CAPABILITY_DIGEST } from './managed-workspace-activation.js';
 
 export interface HostedWorkspaceBrokerOptions {
@@ -20,6 +20,15 @@ function object(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value))
     throw new Error('Invalid Hosted Workspace Broker response.');
   return value as Record<string, unknown>;
+}
+
+export class HostedWorkspaceBrokerRejection extends Error {
+  constructor(
+    readonly status: number,
+    readonly code: unknown,
+  ) {
+    super(`Runtime Broker returned HTTP ${status} (${String(code)}).`);
+  }
 }
 
 export class HostedWorkspaceBroker {
@@ -196,7 +205,7 @@ export class HostedWorkspaceBroker {
     }
     const parsed = object(JSON.parse(Buffer.concat(chunks).toString('utf8')));
     if (!response.ok)
-      throw new Error(`Runtime Broker returned HTTP ${response.status}.`);
+      throw new HostedWorkspaceBrokerRejection(response.status, parsed['code']);
     if (
       parsed['protocolVersion'] !== 1 ||
       parsed['harnessSessionId'] !== this.key.sessionId ||

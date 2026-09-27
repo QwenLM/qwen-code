@@ -509,25 +509,22 @@ export function registerHostedHarnessSessionRoutes(
           });
           await session.managed.sink.write(user);
           parentUuid = user.uuid;
+          const messageRecord = (
+            type: 'assistant' | 'tool_result',
+            parts: Part[],
+            model: string,
+          ) =>
+            record(session, req.params['id'], type, parentUuid, {
+              daemonPromptId: promptId,
+              model,
+              message: { role: type === 'assistant' ? 'model' : 'user', parts },
+            });
           const commit = async (
             type: 'assistant' | 'tool_result',
             parts: Part[],
             model: string,
           ) => {
-            const message = record(
-              session,
-              req.params['id'],
-              type,
-              parentUuid,
-              {
-                daemonPromptId: promptId,
-                model,
-                message: {
-                  role: type === 'assistant' ? 'model' : 'user',
-                  parts,
-                },
-              },
-            );
+            const message = messageRecord(type, parts, model);
             await session.managed.sink.write(message);
             parentUuid = message.uuid;
             return message.uuid;
@@ -540,6 +537,19 @@ export function registerHostedHarnessSessionRoutes(
                   harness,
                   promptId,
                   commit,
+                  (parts, model) => {
+                    if (
+                      Buffer.byteLength(
+                        JSON.stringify(
+                          messageRecord('assistant', parts, model),
+                        ),
+                      ) >
+                      HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes
+                    )
+                      throw new Error(
+                        'Hosted assistant record exceeds the inline Session Store limit.',
+                      );
+                  },
                 )
               : undefined;
           let state: 'completed' | 'cancelled' | 'error' = 'completed';
