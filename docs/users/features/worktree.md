@@ -200,9 +200,9 @@ Named user worktrees (`enter_worktree` slugs) are never auto-cleaned, with one e
 
 The uncommitted-content guard reads `git status --porcelain --untracked-files=normal --ignored=matching`, so even content your ignore rules hide — a `.env`, `.qwen/pr-drafts/` — preserves an aged `agent-<7hex>` worktree. The only exemptions are:
 
-- **Disposable build output** — an entry named `node_modules`, `dist` or `coverage`, either at the root of the checkout or as an ignored _directory_ nested inside it (a monorepo's `packages/app/node_modules/`). A nested ignored _file_ with one of those names is not build output and still preserves the worktree, so `go test -coverprofile=coverage` writing `packages/app/coverage` keeps the checkout.
+- **Disposable build output** — an entry whose _first_ path segment is `node_modules`, `dist` or `coverage`, so that output and anything git lists under it, a single ignored file included (`!! dist/archive.zip` under a `*.zip` rule). Also an ignored _directory_ nested inside the checkout whose own name is one of those three (a monorepo's `packages/app/node_modules/`). A nested ignored _file_ with one of those names is not build output and still preserves the worktree, so `go test -coverprofile=coverage` writing `packages/app/coverage` keeps the checkout — but nothing stored under a root `dist/`, `coverage/` or `node_modules/` is kept.
 - **Symlinks** — removing the checkout unlinks them and never touches what they point at, which is what keeps `worktree.symlinkDirectories` checkouts reapable. A nested value (`tools/cache`) makes git collapse the subtree to a single `?? tools/` entry, so a collapsed directory qualifies only when everything inside it is itself a symlink; one real file beside the links preserves the worktree.
-- **The daemon's `.qwen-session` marker.**
+- **The daemon's `.qwen-session` marker**, as long as git lists it as untracked or ignored — the two shapes `writeWorktreeSessionMarker` produces. A marker the repository actually tracks is a committed file rather than the daemon's, so an edit to one preserves the worktree.
 
 A path git quotes because it contains special characters is not resolved and counts as work.
 

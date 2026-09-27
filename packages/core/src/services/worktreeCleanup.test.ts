@@ -245,6 +245,32 @@ describe('cleanupStaleAgentWorktrees', () => {
     expect(removed).toBe(1);
   });
 
+  it('preserves a stale worktree whose only content is an edit to a tracked .qwen-session', async () => {
+    // The marker exemption is for the daemon's own file, which git lists as
+    // ignored (its `info/exclude` rule) or untracked (a fixture without one).
+    // A repository that *tracks* `.qwen-session` — a committed fixture, or a
+    // marker staged after that best-effort exclude write failed — renders as
+    // ` M .qwen-session`: a real uncommitted edit, and the name match alone
+    // would waive it and authorize a force-remove plus branch delete over it.
+    await fs.writeFile(path.join(repoRoot, '.qwen-session'), 'committed\n');
+    // -f so a global excludesFile matching the marker cannot fail the add;
+    // ignore rules never apply to a tracked path, so the ` M` shape holds.
+    execFileSync('git', ['add', '-f', '.qwen-session'], { cwd: repoRoot });
+    execFileSync('git', ['commit', '-q', '-m', 'marker', '--no-verify'], {
+      cwd: repoRoot,
+    });
+    const wtPath = await createAgentWorktree('agent-aabbccd');
+    await fs.writeFile(path.join(wtPath, '.qwen-session'), 'edited\n');
+    await agePastCutoff(wtPath);
+
+    const removed = await cleanupStaleAgentWorktrees(repoRoot);
+
+    expect(removed).toBe(0);
+    await expect(
+      fs.readFile(path.join(wtPath, '.qwen-session'), 'utf8'),
+    ).resolves.toBe('edited\n');
+  });
+
   it('still reaps a stale worktree whose node_modules is a symlink (worktree.symlinkDirectories)', async () => {
     const target = path.join(repoRoot, 'node_modules', 'x');
     await fs.mkdir(target, { recursive: true });
@@ -292,6 +318,34 @@ describe('cleanupStaleAgentWorktrees', () => {
     await expect(fs.access(wtPath)).rejects.toThrow();
   });
 
+  it('still reaps a stale worktree whose only content is one ignored file under a disposable root', async () => {
+    // A file-level rule makes git list the entry with no trailing slash
+    // (`!! dist/archive.zip`), so only the first-segment branch of
+    // isDisposableIgnoredEntry can waive it — the nested branch requires
+    // `endsWith('/')`. Every other disposable fixture yields a collapsed
+    // `!! <name>/`, which the nested branch matches on its own, so without
+    // this case deleting the first-segment branch leaves the suite green
+    // while aged root `dist`/`coverage` checkouts stop being reapable. The
+    // rule must be committed *before* the worktree exists: the worktree
+    // branch has to carry it, or git reports `?? dist/` instead.
+    await addIgnoreRule('*.zip');
+    const wtPath = await createAgentWorktree('agent-aabbccd');
+    await fs.mkdir(path.join(wtPath, 'dist'), { recursive: true });
+    await fs.writeFile(path.join(wtPath, 'dist', 'archive.zip'), 'zip\n');
+    await agePastCutoff(wtPath);
+    worktreeServiceLogger.debug.mockClear();
+
+    const removed = await cleanupStaleAgentWorktrees(repoRoot);
+
+    expect(removed).toBe(1);
+    await expect(fs.access(wtPath)).rejects.toThrow();
+    expect(worktreeServiceLogger.debug).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'waiving !! dist/archive.zip (disposable-output)',
+      ),
+    );
+  });
+
   it('preserves a stale worktree holding a nested ignored directory outside the disposable set', async () => {
     const wtPath = await createAgentWorktree('agent-aabbccd');
     // `secret.env` matches at any depth; whether git collapses this to
@@ -311,6 +365,31 @@ describe('cleanupStaleAgentWorktrees', () => {
     await expect(
       fs.access(path.join(wtPath, 'packages', 'app', 'secret.env')),
     ).resolves.toBeUndefined();
+  });
+
+  it('preserves a stale worktree holding ignored work beside disposable output', async () => {
+    // git emits ignored and untracked entries in traversal order, so the
+    // realistic mixed checkout waives *first*: `!! node_modules/` and only
+    // then `!! packages/app/secret.env`. A predicate that returned "no work"
+    // on the first waiver instead of continuing the scan reads this checkout
+    // as empty and destroys the secret, and every single-entry fixture above
+    // stays green under that refactor.
+    const wtPath = await createAgentWorktree('agent-aabbccd');
+    await fs.mkdir(path.join(wtPath, 'node_modules', 'x'), { recursive: true });
+    await fs.writeFile(path.join(wtPath, 'node_modules', 'x', 'i.js'), '//\n');
+    await fs.mkdir(path.join(wtPath, 'packages', 'app'), { recursive: true });
+    await fs.writeFile(
+      path.join(wtPath, 'packages', 'app', 'secret.env'),
+      'AWS_KEY=x\n',
+    );
+    await agePastCutoff(wtPath);
+
+    const removed = await cleanupStaleAgentWorktrees(repoRoot);
+
+    expect(removed).toBe(0);
+    await expect(
+      fs.readFile(path.join(wtPath, 'packages', 'app', 'secret.env'), 'utf8'),
+    ).resolves.toBe('AWS_KEY=x\n');
   });
 
   it('still reaps a stale worktree whose only content is an ignored .turbo symlink', async () => {

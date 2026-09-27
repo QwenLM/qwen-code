@@ -76,10 +76,12 @@ export const DISPOSABLE_IGNORED_ROOTS: ReadonlySet<string> = new Set([
  * elsewhere — this is what keeps `worktree.symlinkDirectories` checkouts
  * reapable, nested values included, which git reports as a collapsed parent
  * holding nothing but links), and the session marker
- * ({@link WORKTREE_SESSION_FILE}) — git-excluded in production but
- * possibly untracked in hand-built fixtures. The argv tokens added for
- * this probe are literals placed after the `status` subcommand and are
- * never caller-derived (see `load-simple-git.ts`), and `runGit` scrubs the
+ * ({@link WORKTREE_SESSION_FILE}) when git lists it as ignored (its exclude
+ * rule) or untracked (a fixture without one). A marker the repository tracks
+ * is a committed file rather than the daemon's, so an edit to one counts as
+ * work like any other tracked change. The argv tokens added for this probe
+ * are literals placed after the `status` subcommand and are never
+ * caller-derived (see `load-simple-git.ts`), and `runGit` scrubs the
  * environment (`gitEnv`) so an inherited `GIT_DIR` or
  * `status.showUntrackedFiles=no` cannot make a dirty checkout read clean.
  *
@@ -107,7 +109,10 @@ export async function worktreeHasWork(worktreePath: string): Promise<boolean> {
       const entry = line.slice(3);
       const status = line.slice(0, 2);
       let waived: string | null = null;
-      if (entry === WORKTREE_SESSION_FILE) {
+      if (
+        (status === '!!' || status === '??') &&
+        entry === WORKTREE_SESSION_FILE
+      ) {
         waived = 'session-marker';
       } else if (status === '!!' && isDisposableIgnoredEntry(entry)) {
         waived = 'disposable-output';
