@@ -8,6 +8,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import bundled from './generated/model-registry.json' with { type: 'json' };
 import {
   getModelCatalogCachePath,
   invalidateModelCatalog,
@@ -297,7 +298,8 @@ describe('refreshModelCatalog', () => {
       source: 'https://old-mirror/api.json',
       fetchedAt: new Date().toISOString(),
       etag: '"old"',
-      models: {},
+      // Non-empty, so only the source mismatch can force the re-fetch.
+      models: { kept: { context: 7 } },
     });
     fetchMock.mockResolvedValue(jsonResponse(api));
 
@@ -368,7 +370,11 @@ describe('refreshModelCatalog', () => {
     const cache = readJson(getModelCatalogCachePath());
     expect(cache.fetchedAt).toBe(LONG_AGO);
     expect(cache.models).toEqual({ kept: { context: 7 } });
-    expect(lookupModelCatalog('claude-fable-5')).toBeDefined();
+    // The stale cache stays on disk but is older than the bundle, so the
+    // bundled snapshot is what answers.
+    expect(lookupModelCatalog('claude-fable-5')).toEqual(
+      bundled.models['claude-fable-5'],
+    );
   });
 
   it('does not reuse an empty cache: fetches without the ETag and heals', async () => {

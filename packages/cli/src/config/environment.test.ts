@@ -592,6 +592,14 @@ describe('update download source environment', () => {
 });
 
 describe('model catalog download source environment', () => {
+  beforeEach(() => {
+    resetEnvironmentTrackingForTesting();
+  });
+
+  afterEach(() => {
+    resetEnvironmentTrackingForTesting();
+  });
+
   it.each(['.env', '.qwen/.env', 'settings.env'])(
     'rejects a project-scoped catalog URL from %s',
     (source) => {
@@ -600,18 +608,32 @@ describe('model catalog download source environment', () => {
       if (source === 'settings.env') {
         settings.env = {
           QWEN_CODE_MODELS_DEV_URL: 'https://project.example.com/api.json',
+          RUNTIME_SETTINGS_ONLY: 'allowed',
         };
       } else {
         const envPath = path.join(workspace, source);
         fs.mkdirSync(path.dirname(envPath), { recursive: true });
         fs.writeFileSync(
           envPath,
-          'QWEN_CODE_MODELS_DEV_URL=https://project.example.com/api.json\n',
+          'QWEN_CODE_MODELS_DEV_URL=https://project.example.com/api.json\nRUNTIME_DOTENV=allowed\n',
         );
       }
+      // The allowed control proves the project file itself was applied; the
+      // exclusion, not a discovery failure, is what drops the catalog URL.
+      const allowedKey =
+        source === 'settings.env' ? 'RUNTIME_SETTINGS_ONLY' : 'RUNTIME_DOTENV';
 
       loadEnvironment(settings, workspace);
       expect(process.env['QWEN_CODE_MODELS_DEV_URL']).toBeUndefined();
+      expect(process.env[allowedKey]).toBe('allowed');
+
+      reloadEnvironment(settings, workspace);
+      expect(process.env['QWEN_CODE_MODELS_DEV_URL']).toBeUndefined();
+      expect(process.env[allowedKey]).toBe('allowed');
+
+      const snapshot = buildRuntimeEnvironment(settings, workspace, {});
+      expect(snapshot.effectiveEnv['QWEN_CODE_MODELS_DEV_URL']).toBeUndefined();
+      expect(snapshot.effectiveEnv[allowedKey]).toBe('allowed');
     },
   );
 

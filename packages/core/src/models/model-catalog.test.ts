@@ -17,6 +17,7 @@ import {
   normalize,
   tokenLimit,
 } from '../core/tokenLimits.js';
+import { computeThresholds } from '../services/chatCompressionService.js';
 import { resolveModelConfig } from './modelConfigResolver.js';
 import bundled from './generated/model-registry.json' with { type: 'json' };
 import {
@@ -114,6 +115,15 @@ describe('model catalog', () => {
     writeJson(getModelCatalogCachePath(), { fetchedAt: FAR_FUTURE });
     invalidateModelCatalog();
     expect(loadModelCatalog().fetchedAt).toBe(bundled.fetchedAt);
+    // Well-formed, but empty once every entry fails validation: the refresh
+    // side already refuses to write this shape, so a stale one must not win.
+    writeJson(getModelCatalogCachePath(), {
+      fetchedAt: FAR_FUTURE,
+      models: { bad: { context: 'x' } },
+    });
+    invalidateModelCatalog();
+    expect(loadModelCatalog().fetchedAt).toBe(bundled.fetchedAt);
+    expect(lookupModelCatalog('qwen-flash')).toBeDefined();
   });
 
   it('uses real bundled defaults without overriding explicit model settings', () => {
@@ -172,6 +182,20 @@ describe('model catalog', () => {
     expect(lookupModelCatalog('deepseek-v3-0324')).toBeUndefined();
   });
 
+  it('drops cache keys no normalized spelling can reach', () => {
+    // A cache written before the projection's fixed-point filter can carry
+    // `deepseek-v3`; its own normalized spelling (deepseek) never reaches it,
+    // while it poisons every dated alias that resolves through the lookup.
+    writeJson(getModelCatalogCachePath(), {
+      source: 'https://models.dev/api.json',
+      fetchedAt: FAR_FUTURE,
+      models: { 'deepseek-v3': { context: 163_840, output: 163_840 } },
+    });
+    invalidateModelCatalog();
+    expect(lookupModelCatalog('deepseek-v3')).toBeUndefined();
+    expect(tokenLimit('deepseek-v3-0324', 'output')).toBe(32_000);
+  });
+
   it('keeps output pins after refresh while filling unknown model limits', () => {
     writeJson(getModelCatalogCachePath(), {
       source: 'https://models.dev/api.json',
@@ -213,6 +237,9 @@ describe('model catalog', () => {
         process.env['QWEN_CODE_MAX_OUTPUT_TOKENS'] = '32768';
         expect(provider.buildRequest(request, 'test').max_tokens).toBe(32_768);
       }
+      // The only case where the explicit env budget exceeds a curated pin,
+      // so the isKnownModel clamp must win over the env value.
+      process.env['QWEN_CODE_MAX_OUTPUT_TOKENS'] = '32768';
       const provider = new DefaultOpenAICompatibleProvider(
         { model: 'glm-4.7' },
         {} as Config,
@@ -269,6 +296,24 @@ describe('model catalog', () => {
       output: 64_000,
     });
     expect(lookupModelCatalog('claude-sonnet-4-6')?.context).toBe(1_000_000);
+  });
+
+  it('keeps qwen3-coder-plus at its vendor-declared 1M window even after a refresh', () => {
+    expect(tokenLimit('qwen3-coder-plus')).toBe(1_000_000);
+    expect(
+      computeThresholds(tokenLimit('qwen3-coder-plus')).hard,
+    ).toBeLessThanOrEqual(1_000_000);
+    writeJson(getModelCatalogCachePath(), {
+      source: 'https://models.dev/api.json',
+      fetchedAt: FAR_FUTURE,
+      models: { 'qwen3-coder-plus': { context: 1_048_576, output: 65_536 } },
+    });
+    invalidateModelCatalog();
+    expect(lookupModelCatalog('qwen3-coder-plus')).toEqual({
+      context: 1_000_000,
+      output: 65_536,
+    });
+    expect(tokenLimit('qwen3-coder-plus')).toBe(1_000_000);
   });
 
   it('drops malformed entries while parsing', () => {

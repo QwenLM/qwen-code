@@ -8,6 +8,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { Storage } from '../config/storage.js';
 import type { InputModalities } from '../core/contentGenerator.js';
+import { normalize } from '../core/tokenLimits.js';
 import bundledCatalog from './generated/model-registry.json' with { type: 'json' };
 
 export interface ModelCatalogEntry {
@@ -95,8 +96,18 @@ export function loadModelCatalog(): ModelCatalog {
   if (!loaded) {
     const bundled = bundledCatalog as ModelCatalog;
     const cached = readCache(getModelCatalogCachePath());
+    // A cache written before the projection's guards can hold keys no
+    // normalized spelling reaches (deepseek-v3 did) or no usable entries at
+    // all; neither may displace the bundled snapshot.
+    const usableEntries = Object.entries(cached?.models ?? {}).filter(
+      ([key]) => normalize(key) === key,
+    );
+    const usable =
+      cached && usableEntries.length > 0
+        ? { ...cached, models: Object.fromEntries(usableEntries) }
+        : undefined;
     let base =
-      cached && cached.fetchedAt > bundled.fetchedAt ? cached : bundled;
+      usable && usable.fetchedAt > bundled.fetchedAt ? usable : bundled;
     // Sonnet 4.5's retired 1M beta must not override the default API limit.
     // https://platform.claude.com/docs/en/build-with-claude/context-windows
     if (base.models['claude-sonnet-4-5']) {
@@ -107,6 +118,20 @@ export function loadModelCatalog(): ModelCatalog {
           'claude-sonnet-4-5': {
             ...base.models['claude-sonnet-4-5'],
             context: 200_000,
+          },
+        },
+      };
+    }
+    // models.dev's alibaba buckets approximate the vendor-declared 1M window
+    // of qwen3-coder-plus as 1,048,576; keep the declared 1,000,000.
+    if (base.models['qwen3-coder-plus']) {
+      base = {
+        ...base,
+        models: {
+          ...base.models,
+          'qwen3-coder-plus': {
+            ...base.models['qwen3-coder-plus'],
+            context: 1_000_000,
           },
         },
       };

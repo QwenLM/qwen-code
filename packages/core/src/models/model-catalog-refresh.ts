@@ -22,7 +22,7 @@ import {
 const debugLogger = createDebugLogger('MODEL_CATALOG');
 
 export const MODELS_DEV_URL = 'https://models.dev/api.json';
-/** `QWEN_CODE_MODELS_DEV_REFRESH=off` stops the once-a-day download; a previously downloaded cache is still preferred until deleted. */
+/** `QWEN_CODE_MODELS_DEV_REFRESH=off` stops the once-a-day download; a downloaded cache still serves while it is newer than the bundled snapshot. */
 export const MODEL_CATALOG_REFRESH_ENV = 'QWEN_CODE_MODELS_DEV_REFRESH';
 /** Replaces the models.dev URL, e.g. with a corporate mirror. */
 export const MODEL_CATALOG_URL_ENV = 'QWEN_CODE_MODELS_DEV_URL';

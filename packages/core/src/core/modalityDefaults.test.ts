@@ -16,6 +16,7 @@ vi.mock('../models/model-catalog.js', () => {
     'qwen-catalog-vision': { modalities: { image: true } },
     'qwen3-vl-catalog': { modalities: { pdf: true } },
     'catalog-only-model': { modalities: { audio: true } },
+    'catalog-vision-model': { modalities: { image: true } },
   };
   return { lookupModelCatalog: (model: string) => entries[model] };
 });
@@ -429,5 +430,11 @@ describe('models.dev catalog', () => {
   it('uses the catalog alone for a model no family pattern matches', () => {
     expect(defaultModalities('catalog-only-model')).toEqual({ audio: true });
     expect(defaultModalities('unknown-model')).toEqual({});
+  });
+
+  it('looks the catalog up by normalized id', () => {
+    expect(defaultModalities('provider/Catalog-Vision-Model:free')).toEqual({
+      image: true,
+    });
   });
 });
