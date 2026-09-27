@@ -52,8 +52,10 @@ public final class InMemoryRuntimeBindingRepository
         }
         long generation = generations.getOrDefault(request, 0L) + 1;
         Instant now = clock.instant();
+        RuntimeProvisionSeed seed = request.requiresDurableIdentity()
+                ? RuntimeProvisionSeed.create(bindingId, generation) : null;
         RuntimeBindingRecord created = new RuntimeBindingRecord(
-                bindingId, request, generation,
+                bindingId, request, seed, generation,
                 RuntimeBindingRecord.State.PROVISIONING, null, false, null,
                 null, 0, 0, null, now);
         generations.put(request, generation);
@@ -174,6 +176,24 @@ public final class InMemoryRuntimeBindingRepository
                 .withVersion(current.getVersion() + 1);
         records.put(bindingId, renewed);
         return renewed;
+    }
+
+    @Override
+    public synchronized RuntimeBindingRecord releaseOperation(
+            String bindingId, String owner, long operationGeneration) {
+        RuntimeBindingRecord current = requireRecord(bindingId);
+        if (current == null) {
+            return null;
+        }
+        String ownerId = BrokerValues.requireId(owner, "owner");
+        if (!ownerId.equals(current.getOperationOwner())
+                || operationGeneration != current.getOperationGeneration()) {
+            return null;
+        }
+        RuntimeBindingRecord released = current.withOperation(null, null,
+                operationGeneration).withVersion(current.getVersion() + 1);
+        records.put(bindingId, released);
+        return released;
     }
 
     private RuntimeBindingRecord requireRecord(String bindingId) {

@@ -31,6 +31,16 @@ import { StructuredToolError, ToolErrorType } from './tool-error.js';
 import type { Config } from '../config/config.js';
 import { truncateToolOutput } from './truncation.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import {
+  clampInlineMediaPart,
+  getMaxInlineMediaBytes,
+  TOOL_RESULT_MEDIA_REMEDY,
+} from '../core/inlineMediaLimit.js';
+import {
+  boundImageBuffer,
+  ImageViewError,
+  sniffBoundableImageMime,
+} from '../utils/image-view.js';
 import { getErrorMessage, isAbortError } from '../utils/errors.js';
 import {
   getAllMCPServerStatuses,
@@ -691,9 +701,9 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
 
       // Wrap the raw CallToolResult into the Part[] format that the
       // existing transform/display functions expect.
-      const rawResponseParts = wrapMcpCallToolResultAsParts(
-        this.serverToolName,
-        callToolResult,
+      const rawResponseParts = await this.boundImages(
+        wrapMcpCallToolResultAsParts(this.serverToolName, callToolResult),
+        signal,
       );
 
       if (this.isMCPToolError(rawResponseParts)) {
@@ -703,7 +713,9 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
         });
       }
 
-      const transformedParts = transformMcpContentToParts(rawResponseParts);
+      const transformedParts = await this.clampInlineMedia(
+        transformMcpContentToParts(rawResponseParts),
+      );
       const truncated = await this.truncateTextParts(transformedParts);
       const fallbackText = getDisplayFromPartsWithPersistedOutput(
         transformedParts,
@@ -860,13 +872,15 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       if (isParentAbortOutcome(outcome)) {
         throw outcome.reason;
       }
-      const rawResponseParts = outcome;
+      const rawResponseParts = await this.boundImages(outcome, signal);
 
       if (this.isMCPToolError(rawResponseParts)) {
         return await this.buildMcpToolError(rawResponseParts, functionCalls[0]);
       }
 
-      const transformedParts = transformMcpContentToParts(rawResponseParts);
+      const transformedParts = await this.clampInlineMedia(
+        transformMcpContentToParts(rawResponseParts),
+      );
       const truncated = await this.truncateTextParts(transformedParts);
 
       return {
@@ -899,7 +913,9 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     let errorMessage: string;
     let persistedOutputFiles: string[] | undefined;
     if (imageContent) {
-      const truncatedContent = await this.truncateTextParts(imageContent);
+      const truncatedContent = await this.truncateTextParts(
+        await this.clampInlineMedia(imageContent),
+      );
       llmContent = truncatedContent.parts;
       persistedOutputFiles = truncatedContent.persistedOutputFiles;
       errorMessage = `MCP tool '${
@@ -925,6 +941,34 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       },
       ...(persistedOutputFiles !== undefined ? { persistedOutputFiles } : {}),
     };
+  }
+
+  private boundImages(
+    rawResponseParts: Part[],
+    signal: AbortSignal,
+  ): Promise<Part[]> {
+    return boundMcpImageBlocks(
+      rawResponseParts,
+      signal,
+      `${this.serverName}/${this.serverToolName}`,
+    );
+  }
+
+  private async clampInlineMedia(parts: Part[]): Promise<Part[]> {
+    return clampMcpInlineMedia(parts, await this.isOmniMediaDeliveryActive());
+  }
+
+  /**
+   * Whether the omni funnel (`processToolResultOmniMedia`) takes over this
+   * result's image, audio and video parts. It uploads by reference under its
+   * own ceilings and bounds any part it keeps inline, so the inline clamp must
+   * not pre-empt it. `isOmniEnabled()` runs first so non-omni sessions skip
+   * the dynamic import, as in `fileUtils`.
+   */
+  private async isOmniMediaDeliveryActive(): Promise<boolean> {
+    if (!this.cliConfig?.isOmniEnabled?.()) return false;
+    const omni = await this.cliConfig.loadOmniMediaReader();
+    return omni.isOmniDeliveryActive(this.cliConfig);
   }
 
   /**
@@ -1282,6 +1326,136 @@ function transformImageAudioBlock(
       },
     },
   ];
+}
+
+/**
+ * Shrink oversized images in an MCP result to the same visual budget
+ * `read_file` applies, before the result is rendered into parts, so each
+ * envelope names the mime the model actually receives.
+ *
+ * Admission and the resulting mime come from the bytes, not the server's
+ * label, which MCP makes optional and servers get wrong: an image block or
+ * resource blob whose magic bytes say JPEG, PNG or WebP is bounded, and one
+ * that already fits keeps its bytes but takes the sniffed mime. Anything
+ * else, including formats the renderer cannot output, never reaches it.
+ * `subject` names the server and tool in renderer errors, since these bytes
+ * have no file path.
+ */
+async function boundMcpImageBlocks(
+  rawResponseParts: Part[],
+  signal: AbortSignal,
+  subject: string,
+): Promise<Part[]> {
+  const funcResponse = rawResponseParts?.[0]?.functionResponse;
+  const content = funcResponse?.response?.['content'];
+  if (!funcResponse || !Array.isArray(content)) return rawResponseParts;
+
+  const inlineByteCeiling = getMaxInlineMediaBytes();
+  let changed = false;
+  const boundedContent: McpContentBlock[] = [];
+  // Sequential on purpose: one image in the renderer at a time.
+  for (const block of content as McpContentBlock[]) {
+    const media =
+      block.type === 'image'
+        ? { data: block.data, mimeType: block.mimeType }
+        : block.type === 'resource' && block.resource?.blob
+          ? { data: block.resource.blob, mimeType: block.resource.mimeType }
+          : undefined;
+    // 16 base64 characters decode to the 12 bytes the sniffer needs.
+    const sniffedMime =
+      typeof media?.data === 'string'
+        ? sniffBoundableImageMime(
+            Buffer.from(media.data.slice(0, 16), 'base64'),
+          )
+        : null;
+    if (!media || !sniffedMime) {
+      boundedContent.push(block);
+      continue;
+    }
+    let bounded: { data: string; mimeType: string } | undefined;
+    try {
+      const view = await boundImageBuffer(
+        Buffer.from(media.data, 'base64'),
+        `${subject} ${sniffedMime}`,
+        signal,
+        inlineByteCeiling,
+      );
+      bounded = view
+        ? { data: view.bytes.toString('base64'), mimeType: view.mimeType }
+        : { data: media.data, mimeType: sniffedMime };
+    } catch (error) {
+      if (!(error instanceof ImageViewError)) {
+        throw error;
+      }
+      const message = `Unable to bound MCP image from ${subject} (${media.mimeType}): ${getErrorMessage(error)}`;
+      // A missing renderer fails every image of every call, so surface it.
+      if (error.code === 'renderer_unavailable') {
+        debugLogger.warn(message);
+      } else {
+        debugLogger.debug(message);
+      }
+    }
+    // Unconfirmed bytes keep the server's label.
+    if (
+      !bounded ||
+      (bounded.data === media.data && bounded.mimeType === media.mimeType)
+    ) {
+      boundedContent.push(block);
+      continue;
+    }
+    changed = true;
+    boundedContent.push(
+      block.type === 'resource'
+        ? {
+            ...block,
+            resource: {
+              ...block.resource,
+              blob: bounded.data,
+              mimeType: bounded.mimeType,
+            },
+          }
+        : { ...block, ...bounded },
+    );
+  }
+  if (!changed) return rawResponseParts;
+  return [
+    {
+      ...rawResponseParts[0],
+      functionResponse: {
+        ...funcResponse,
+        response: { ...funcResponse.response, content: boundedContent },
+      },
+    },
+    ...rawResponseParts.slice(1),
+  ];
+}
+
+/**
+ * Replace inline media over the inline limit with a text placeholder: images
+ * the renderer could not bring under it, and audio or other blobs, which
+ * `read_file` likewise refuses above the limit. Under omni delivery image,
+ * audio and video parts are left to the funnel, which uploads them by
+ * reference or clamps what it keeps inline.
+ */
+function clampMcpInlineMedia(
+  parts: Part[],
+  omniDeliveryActive: boolean,
+): Part[] {
+  const inlineByteCeiling = getMaxInlineMediaBytes();
+  return parts.map((part) => {
+    const mimeType = part.inlineData?.mimeType;
+    if (
+      !part.inlineData ||
+      (omniDeliveryActive && /^(image|audio|video)\//.test(mimeType ?? ''))
+    ) {
+      return part;
+    }
+    return clampInlineMediaPart(
+      part,
+      inlineByteCeiling,
+      TOOL_RESULT_MEDIA_REMEDY,
+    );
+  });
 }
 
 function transformResourceBlock(

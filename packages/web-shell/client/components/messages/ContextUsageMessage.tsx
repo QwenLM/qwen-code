@@ -214,13 +214,12 @@ function SkillsSection({
 }: {
   skills: readonly DaemonContextSkillDetail[];
   labels: {
-    active: string;
     bodyLoaded: string;
     tokens: string;
   };
 }) {
   const sorted = [...skills].sort((a, b) => {
-    if (a.loaded !== b.loaded) return a.loaded ? -1 : 1;
+    if (!a.loaded !== !b.loaded) return a.loaded ? -1 : 1;
     return b.tokens + (b.bodyTokens ?? 0) - (a.tokens + (a.bodyTokens ?? 0));
   });
   if (sorted.length === 0) return null;
@@ -233,9 +232,6 @@ function SkillsSection({
             <span className={styles.secondary}>{'\u2514'} </span>
             <span className={styles.detailName} title={skill.name}>
               {skill.name}
-              {skill.loaded && (
-                <span className={styles.success}> {labels.active}</span>
-              )}
             </span>
             <span className={styles.value}>
               {formatTokens(skill.tokens)} {labels.tokens}
@@ -320,11 +316,17 @@ export function ContextUsageMessage({
       </div>
       {!hasTokenCount ? (
         <>
+          {/* After /model, /restore or a resume the estimate includes the
+              conversation, so the base-overhead captions would be false. */}
           <div className={styles.estimateHint}>
-            {t('contextUsage.usageUnavailable')}
+            {breakdown.messages > 0
+              ? t('contextUsage.usageEstimatedWithConversation')
+              : t('contextUsage.usageUnavailable')}
           </div>
           <div className={styles.sectionTitle}>
-            {t('contextUsage.estimatedOverhead')}
+            {breakdown.messages > 0
+              ? t('contextUsage.estimatedUsage')
+              : t('contextUsage.estimatedOverhead')}
           </div>
           <div className={styles.metaLine}>
             {t('contextUsage.contextWindow')}: {formatTokens(contextWindowSize)}{' '}
@@ -458,7 +460,6 @@ export function ContextUsageMessage({
               <SkillsSection
                 skills={usage.skills}
                 labels={{
-                  active: t('contextUsage.active'),
                   bodyLoaded: t('contextUsage.bodyLoaded'),
                   tokens: t('contextUsage.tokens'),
                 }}
@@ -472,7 +473,7 @@ export function ContextUsageMessage({
               tokens={breakdown.startupContext!}
             />
           )}
-          {hasTokenCount && (
+          {(hasTokenCount || breakdown.messages > 0) && (
             <CategoryRow
               {...categoryProps}
               label={t('contextUsage.messages')}

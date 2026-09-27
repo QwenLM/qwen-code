@@ -49,6 +49,12 @@ export interface StartupChannelSelection {
    * restore, which is what a single-workspace daemon does today.
    */
   readonly tolerantNames: ReadonlySet<string>;
+  /**
+   * Every workspace that listed each name, in registration order. A name the
+   * restore has to drop is reported against each of them, since each asked
+   * for it.
+   */
+  readonly claimants: ReadonlyMap<string, readonly string[]>;
   readonly diagnostics: readonly StartupChannelDiagnostic[];
 }
 
@@ -187,6 +193,7 @@ export function resolveStartupChannelSelection(
       selection: { mode: 'all' },
       ownerHints: new Map(),
       tolerantNames: new Set(),
+      claimants: new Map(),
       diagnostics,
     };
   }
@@ -218,6 +225,12 @@ export function resolveStartupChannelSelection(
     selection: names.length > 0 ? { mode: 'names', names } : undefined,
     ownerHints,
     tolerantNames,
+    claimants: new Map(
+      [...claimsByName].map(([name, claims]) => [
+        name,
+        claims.map((claim) => claim.workspaceCwd),
+      ]),
+    ),
     diagnostics,
   };
 }

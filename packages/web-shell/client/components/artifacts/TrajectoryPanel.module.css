@@ -88,15 +88,6 @@
   font-size: 11px;
 }
 
-.notice {
-  margin-top: 6px;
-  padding: 6px 8px;
-  border-radius: 6px;
-  background: var(--muted);
-  color: var(--muted-foreground);
-  font-size: 11px;
-}
-
 .tableWrap {
   flex: 1;
   min-height: 0;
@@ -124,14 +115,28 @@
 }
 
 .olderBar {
+  /* A fixed height, not a minimum: whatever the bar says, the grid under it
+     must start at the same place. */
+  flex: none;
   display: flex;
+  align-items: center;
   justify-content: center;
-  padding: 4px 0 6px;
+  gap: 6px;
+  height: 26px;
+  overflow: hidden;
 }
 
 .olderNotice {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 11px;
   color: var(--muted-foreground);
+}
+
+.olderNotice.toneError {
+  color: var(--destructive);
 }
 
 .virtualBody {

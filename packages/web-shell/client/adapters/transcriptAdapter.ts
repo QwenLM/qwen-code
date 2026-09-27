@@ -122,7 +122,13 @@ function getPermissionContent(
     if (content.length > 0) return { content };
   }
   const input = getExplicitPermissionInput(toolCall);
-  if (input && !hasPermissionDiffPreview(toolCall)) {
+  // An empty input object carries no information; rendering its serialization
+  // would show a bare `{}` as the approval body.
+  if (
+    input &&
+    Object.keys(input).length > 0 &&
+    !hasPermissionDiffPreview(toolCall)
+  ) {
     return {
       content: [
         {
