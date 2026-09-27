@@ -333,6 +333,7 @@ import {
   registerWorkspaceSkillsRoutes,
 } from './routes/workspace-skills.js';
 import { registerChannelWebhookRoutes } from './routes/channel-webhooks.js';
+import { registerA2ATransportRoutes } from './routes/a2a.js';
 import type {
   ChannelDeliveryAccepted,
   ChannelDeliveryRequest,
@@ -2273,6 +2274,10 @@ export function createServeApp(
       rateLimiter,
       daemonLog,
     });
+  }
+
+  if (agentCollaborationEnabled) {
+    registerA2ATransportRoutes(app, workspaceRegistry);
   }
 
   // Credentials are a listener-scoped set, not one token: while Local Control

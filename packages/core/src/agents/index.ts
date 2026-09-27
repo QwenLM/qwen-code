@@ -37,6 +37,18 @@ export {
 export { consumeAgentInput } from './workspace-agents/run-lifecycle.js';
 export { resolveAgentPersona } from './workspace-agents/persona.js';
 export { findAgentSessionBinding } from './workspace-agents/session-binding.js';
+export {
+  issueA2AGrant,
+  revokeA2AGrant,
+  listA2AGrants,
+} from './workspace-agents/a2a-grants.js';
+export type {
+  A2ATaskView,
+  A2AAgentCard,
+  A2ACaller,
+  A2AFailure,
+} from './workspace-agents/a2a-server.js';
+export type { A2AGrant, A2AGrantScope } from './workspace-agents/types.js';
 export { strandLocalRuns } from './workspace-agents/stranded-runs.js';
 export type { AgentRunContext } from './workspace-agents/run-context.js';
 export {

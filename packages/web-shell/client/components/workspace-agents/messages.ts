@@ -37,6 +37,31 @@ export const COLLAB_MESSAGES_EN: Record<string, CollabMessage> = {
   'collab.run.stalled': (v) =>
     `${v?.agent} has shown no progress for ${v?.elapsed}. It may be stuck.`,
   'collab.run.stop': 'Stop',
+  'collab.share.title': (v) => `Share ${v?.name}`,
+  'collab.share.description':
+    'Anyone with the token can send this agent work over A2A. It keeps running on this computer, in this workspace.',
+  'collab.share.copy': 'Copy',
+  'collab.share.copied': 'Copied',
+  'collab.share.done': 'Done',
+  'collab.share.scope': 'What they may ask for',
+  'collab.share.scope.analysis': 'Read-only: look at the code and answer',
+  'collab.share.scope.analysisHint':
+    'The agent cannot change project files for them.',
+  'collab.share.scope.full': 'Everything this agent can do',
+  'collab.share.scope.fullHint':
+    'Currently the same read-only access. Neither option allows project-file edits.',
+  'collab.share.create': 'Create link',
+  'collab.share.endpoint': 'A2A endpoint',
+  'collab.share.token': 'Token',
+  'collab.share.try': 'Try it',
+  'collab.share.once':
+    'The token is shown only now. It expires in 7 days; revoke it here any time.',
+  'collab.share.loopback':
+    'This address only works on this computer. Open Web Shell through an address the caller can reach, then create the share.',
+  'collab.share.active': (v) => `Active shares (${v?.count ?? 0})`,
+  'collab.share.until': (v) => `until ${v?.date}`,
+  'collab.share.revoke': 'Revoke',
+  'collab.agent.share': 'Share',
   'collab.tabs.agents': 'Agents',
   'collab.tabs.tasks': 'Conversations',
   'collab.tabs.agentsHint':
@@ -314,6 +339,29 @@ export const COLLAB_MESSAGES_ZH: Record<string, CollabMessage> = {
   'collab.run.stalled': (v) =>
     `${v?.agent} 已经 ${v?.elapsed} 没有进展，可能卡住了`,
   'collab.run.stop': '停止',
+  'collab.share.title': (v) => `分享 ${v?.name}`,
+  'collab.share.description':
+    '拿到令牌的人可以通过 A2A 给这个 Agent 派活。它仍然运行在这台电脑上、这个工作区里。',
+  'collab.share.copy': '复制',
+  'collab.share.copied': '已复制',
+  'collab.share.done': '完成',
+  'collab.share.scope': '对方能让它做什么',
+  'collab.share.scope.analysis': '只读：看代码、回答问题',
+  'collab.share.scope.analysisHint': 'Agent 不会替对方修改项目文件。',
+  'collab.share.scope.full': '这个 Agent 能做的一切',
+  'collab.share.scope.fullHint':
+    '当前两种选项都是只读权限，都不能修改项目文件。',
+  'collab.share.create': '生成分享',
+  'collab.share.endpoint': 'A2A 地址',
+  'collab.share.token': '令牌',
+  'collab.share.try': '试一下',
+  'collab.share.once': '令牌只显示这一次，7 天后失效，随时可以在这里撤销。',
+  'collab.share.loopback':
+    '这个地址只在本机可用。请用别人能访问到的地址打开 Web Shell，再生成分享。',
+  'collab.share.active': (v) => `已分享（${v?.count ?? 0}）`,
+  'collab.share.until': (v) => `有效至 ${v?.date}`,
+  'collab.share.revoke': '撤销',
+  'collab.agent.share': '分享',
   'collab.tabs.agents': 'Agent',
   'collab.tabs.tasks': '协作对话',
   'collab.tabs.agentsHint':

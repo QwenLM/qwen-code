@@ -24,6 +24,8 @@ import {
   type WorkspaceAgent,
   type WorkspaceAgentsFile,
   type AgentWorkspaceState,
+  type A2AGrant,
+  type ExternalIntake,
   type MessageOutcome,
   type RunCloseKind,
   type RunUsageRound,
@@ -352,6 +354,18 @@ function isValidEvent(value: unknown): value is ThreadEvent {
   );
 }
 
+function isValidExternalIntake(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    isNonEmptyString(value['key']) &&
+    isNonEmptyString(value['callerId']) &&
+    isValidId(value['targetAgentId']) &&
+    isNonEmptyString(value['messageId']) &&
+    isNonEmptyString(value['contentHash']) &&
+    isFiniteTimestamp(value['receivedAt'])
+  );
+}
+
 function isValidThread(value: unknown): value is Thread {
   if (!isRecord(value)) return false;
   if (
@@ -390,7 +404,13 @@ function isValidThread(value: unknown): value is Thread {
     (value['acceptanceCriteria'] !== undefined &&
       typeof value['acceptanceCriteria'] !== 'string') ||
     (value['priority'] !== undefined &&
-      !THREAD_PRIORITIES.has(value['priority'] as ThreadPriority))
+      !THREAD_PRIORITIES.has(value['priority'] as ThreadPriority)) ||
+    // Present-but-malformed is rejected rather than ignored: this record is
+    // what makes a retry idempotent and what scopes reads to their caller, so
+    // a thread carrying an unreadable one must not be served at all — dropping
+    // the field would silently hand it to whoever asked next.
+    (value['externalIntake'] !== undefined &&
+      !isValidExternalIntake(value['externalIntake']))
   ) {
     return false;
   }
@@ -423,6 +443,18 @@ function isValidThread(value: unknown): value is Thread {
   return value['nextMessageSequence'] > previousSequence;
 }
 
+function isValidA2AGrant(value: unknown): value is A2AGrant {
+  return (
+    isRecord(value) &&
+    isNonEmptyString(value['callerId']) &&
+    isValidId(value['agentId']) &&
+    (value['scope'] === 'analysis' || value['scope'] === 'full') &&
+    isNonEmptyString(value['secretHash']) &&
+    isFiniteTimestamp(value['createdAt']) &&
+    (value['expiresAt'] === undefined || isFiniteTimestamp(value['expiresAt']))
+  );
+}
+
 function isValidWorkspace(value: unknown): value is AgentWorkspaceState {
   return (
     isRecord(value) &&
@@ -430,7 +462,13 @@ function isValidWorkspace(value: unknown): value is AgentWorkspaceState {
     isValidId(value['workspaceId']) &&
     (value['hostSessionId'] === undefined ||
       isNonEmptyString(value['hostSessionId'])) &&
-    isPositiveInteger(value['nextRunSequence'])
+    isPositiveInteger(value['nextRunSequence']) &&
+    // A malformed grant list fails the whole record rather than being dropped.
+    // Dropping it would silently revoke every external caller — or, if the
+    // malformed entry were the one being read past, silently admit one.
+    (value['callerGrants'] === undefined ||
+      (Array.isArray(value['callerGrants']) &&
+        value['callerGrants'].every(isValidA2AGrant)))
   );
 }
 
@@ -1044,6 +1082,34 @@ export async function readAgentWorkspace(
   });
 }
 
+/**
+ * Read-modify-write the caller grants under the workspace lock.
+ *
+ * A read followed by a separate write would let two concurrent issues drop one
+ * another — and a dropped grant is a caller who thinks it has access and does
+ * not, or worse, one whose revocation silently did not take.
+ */
+export async function updateAgentWorkspaceCallerGrants(
+  projectRoot: string,
+  update: (grants: readonly A2AGrant[]) => A2AGrant[],
+): Promise<AgentWorkspaceState> {
+  return withWorkspaceLock(projectRoot, async () => {
+    const workspace = await ensureMigratedUnlocked(projectRoot);
+    const grants = update(workspace.callerGrants ?? []);
+    const next: AgentWorkspaceState =
+      grants.length > 0
+        ? { ...workspace, callerGrants: grants }
+        : (() => {
+            const { callerGrants: _dropped, ...rest } = workspace;
+            return rest;
+          })();
+    await atomicWriteJSON(getWorkspaceFilePath(projectRoot), next, {
+      noFollow: true,
+    });
+    return next;
+  });
+}
+
 export async function claimAgentHostSession(
   projectRoot: string,
   candidateSessionId: string,
@@ -1070,13 +1136,11 @@ export async function releaseAgentHostSession(
   return withWorkspaceLock(projectRoot, async () => {
     const workspace = await ensureMigratedUnlocked(projectRoot);
     if (workspace.hostSessionId !== expectedSessionId) return false;
+    // Only the claim goes; A2A grants and anything else the record holds stay.
+    const { hostSessionId: _released, ...rest } = workspace;
     await atomicWriteJSON(
       getWorkspaceFilePath(projectRoot),
-      {
-        schemaVersion: workspace.schemaVersion,
-        workspaceId: workspace.workspaceId,
-        nextRunSequence: workspace.nextRunSequence,
-      },
+      rest,
       STORE_FILE_OPTIONS,
     );
     return true;
@@ -1295,6 +1359,8 @@ export interface CreateThreadInput {
   createdBy?: string;
   assigneeAgentId?: string;
   parentThreadId?: string;
+  /** Provenance when an external A2A caller raised this thread. */
+  externalIntake?: ExternalIntake;
 }
 
 /**
@@ -1303,7 +1369,7 @@ export interface CreateThreadInput {
  * Use `prepareThreadInTransaction` when the first message and run must be part
  * of the initial file replacement too.
  */
-async function createThreadInTransaction(
+export async function createThreadInTransaction(
   transaction: AgentStoreTransaction,
   input: CreateThreadInput,
 ): Promise<Thread> {
@@ -1360,6 +1426,7 @@ export async function prepareThreadInTransaction(
     ...(input.priority && input.priority !== DEFAULT_THREAD_PRIORITY
       ? { priority: input.priority }
       : {}),
+    ...(input.externalIntake ? { externalIntake: input.externalIntake } : {}),
   };
 }
 

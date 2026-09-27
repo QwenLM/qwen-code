@@ -73,6 +73,12 @@ export interface PostMessageOptions {
   now?: number;
   /** Thread state to admit against and persist in the final replacement. */
   threadOverride?: Thread;
+  /**
+   * Books exactly these agents, whatever the text mentions. For a post from
+   * outside the workspace: its caller was granted one agent, and an @name in
+   * the text must not reach another.
+   */
+  targets?: readonly string[];
 }
 
 export function countQueuedElsewhere(
@@ -237,7 +243,9 @@ export async function postMessageInTransaction(
   };
 
   const hasExplicitMention = parsed.ids.length > 0 || parsed.unknown.length > 0;
-  const targetIds = resolveTargets(next, message, hasExplicitMention);
+  const targetIds = options.targets
+    ? [...options.targets]
+    : resolveTargets(next, message, hasExplicitMention);
   if (targetIds.length === 0 && !hasExplicitMention) {
     outcomes.push({ decision: { kind: 'skip', reason: 'no_target' } });
   }
