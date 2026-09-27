@@ -195,6 +195,8 @@ export async function maybeOpenWebShellBrowser(
 interface ServeArgs {
   port: number;
   hostname: string;
+  profile: 'default' | 'hosted-harness';
+  'hosted-harness-capability-digest'?: string;
   token?: string;
   'max-sessions': number;
   'max-total-sessions'?: number;
@@ -228,6 +230,13 @@ interface ServeArgs {
   'allow-origin'?: string[];
   'allow-private-auth-base-url': boolean;
   'prompt-deadline-ms'?: number;
+  'experimental-managed-agents': boolean;
+  'experimental-managed-runtime-worker': boolean;
+  'experimental-managed-runtime-auto-local': boolean;
+  'experimental-managed-runtime-url'?: string;
+  'experimental-managed-runtime-token'?: string;
+  'managed-runtime-broker-url'?: string;
+  'managed-runtime-broker-token'?: string;
   'writer-idle-timeout-ms'?: number;
   'channel-idle-timeout-ms'?: number;
   'initialize-timeout-ms'?: number;
@@ -272,6 +281,17 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         default: DEFAULT_SERVE_HOSTNAME,
         description:
           'Interface to bind. Loopback (127.0.0.0/8, localhost, ::1, [::1]) is auth-free; anything else requires a token (one is generated and printed when neither --token nor QWEN_SERVER_TOKEN supplies one). A localhost bind that resolves off-loopback never generates, and still refuses when no token source resolved; an empty value is rejected as operator error.',
+      })
+      .option('profile', {
+        choices: ['default', 'hosted-harness'] as const,
+        default: 'default' as const,
+        description:
+          'Deployment profile. hosted-harness enables the private no-tool Managed Session API on loopback.',
+      })
+      .option('hosted-harness-capability-digest', {
+        type: 'string',
+        description:
+          'SHA-256 capability digest for the private Hosted Harness profile. Falls back to QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST.',
       })
       .option('token', {
         type: 'string',
@@ -587,6 +607,48 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'Server-side wallclock cap on POST /session/:id/prompt (ms). ' +
           'Falls back to QWEN_SERVE_PROMPT_DEADLINE_MS. Positive integer.',
       })
+      .option('experimental-managed-agents', {
+        type: 'boolean',
+        default: false,
+        description:
+          'Reserved experimental mode; not implemented and rejects startup.',
+      })
+      .option('experimental-managed-runtime-worker', {
+        type: 'boolean',
+        default: false,
+        description:
+          'Reserved experimental mode; not implemented and rejects startup.',
+      })
+      .option('experimental-managed-runtime-auto-local', {
+        type: 'boolean',
+        default: false,
+        description:
+          'Reserved experimental mode; not implemented and rejects startup.',
+      })
+      .option('experimental-managed-runtime-url', {
+        type: 'string',
+        requiresArg: true,
+        description:
+          'Reserved experimental Runtime URL; not implemented and rejects startup.',
+      })
+      .option('experimental-managed-runtime-token', {
+        type: 'string',
+        requiresArg: true,
+        description:
+          'Reserved experimental Runtime credential; not implemented and rejects startup.',
+      })
+      .option('managed-runtime-broker-url', {
+        type: 'string',
+        requiresArg: true,
+        description:
+          'Reserved Broker URL for --profile hosted-harness; not implemented and rejects startup.',
+      })
+      .option('managed-runtime-broker-token', {
+        type: 'string',
+        requiresArg: true,
+        description:
+          'Reserved Broker credential for --profile hosted-harness; not implemented and rejects startup.',
+      })
       .option('writer-idle-timeout-ms', {
         type: 'number',
         description:
@@ -869,6 +931,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       const serveOptions = {
         port: argv.port,
         hostname: argv.hostname,
+        profile: argv.profile,
         token: argv.token,
         mode: 'http-bridge',
         maxSessions: argv['max-sessions'],
@@ -912,6 +975,43 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           : {}),
         ...(argv['prompt-deadline-ms'] !== undefined
           ? { promptDeadlineMs: argv['prompt-deadline-ms'] }
+          : {}),
+        ...(argv['experimental-managed-agents']
+          ? { experimentalManagedAgents: true }
+          : {}),
+        ...(argv['experimental-managed-runtime-auto-local']
+          ? { experimentalManagedRuntimeAutoLocal: true }
+          : {}),
+        ...(argv['experimental-managed-runtime-worker']
+          ? { experimentalManagedRuntimeWorker: true }
+          : {}),
+        ...(argv['experimental-managed-runtime-url'] !== undefined
+          ? {
+              experimentalManagedRuntimeUrl:
+                argv['experimental-managed-runtime-url'],
+            }
+          : {}),
+        ...(argv['experimental-managed-runtime-token'] !== undefined
+          ? {
+              experimentalManagedRuntimeToken:
+                argv['experimental-managed-runtime-token'],
+            }
+          : {}),
+        ...(argv['managed-runtime-broker-url'] !== undefined
+          ? {
+              managedRuntimeBrokerUrl: argv['managed-runtime-broker-url'],
+            }
+          : {}),
+        ...(argv['managed-runtime-broker-token'] !== undefined
+          ? {
+              managedRuntimeBrokerToken: argv['managed-runtime-broker-token'],
+            }
+          : {}),
+        ...(argv['hosted-harness-capability-digest'] !== undefined
+          ? {
+              hostedHarnessCapabilityDigest:
+                argv['hosted-harness-capability-digest'],
+            }
           : {}),
         ...(argv['writer-idle-timeout-ms'] !== undefined
           ? { writerIdleTimeoutMs: argv['writer-idle-timeout-ms'] }
@@ -976,7 +1076,9 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         );
         applyOpenWithAuth(serveOptions);
       }
-      const handle = await runQwenServe(serveOptions);
+      const handle = await runQwenServe(serveOptions, {
+        updateRestartArgv: process.argv.slice(2),
+      });
       // Open the Web Shell in a browser once the listener is up (best-effort;
       // never throws — see maybeOpenWebShellBrowser).
       if (argv['local-control']) {

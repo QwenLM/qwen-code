@@ -34,6 +34,7 @@ import type {
 } from '../../trajectory/types';
 import {
   buildTimeline,
+  type TimelineMode,
   type TimelineSpan,
 } from '../../trajectory/buildTimeline';
 import {
@@ -302,32 +303,38 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
     scrollTopRef.current = element.scrollTop;
   }, []);
 
+  const [mode, setMode] = useState<TimelineMode>('active');
   const timeline = useMemo(
-    () => (trajectory ? buildTimeline(trajectory) : undefined),
-    [trajectory],
+    () => (trajectory ? buildTimeline(trajectory, { mode }) : undefined),
+    [trajectory, mode],
   );
 
-  // The selection belongs to the window it was drawn on. A refresh or another
-  // session re-lays the compressed time axis, so the same numbers would name a
-  // different stretch of the run; holding the window alongside the range lets
-  // the range lapse in the same render the window changes, with no frame in
-  // which the new table is filtered by the old one.
+  // The selection belongs to the axis it was drawn on. A refresh, another
+  // session, or a switch between active and real time lays the axis out
+  // afresh, so the same numbers would name a different stretch of the run;
+  // holding what the axis was built from alongside the range lets the range
+  // lapse in the same render the axis changes, with no frame in which the new
+  // table is filtered by the old one. Keyed on the window and the mode — the
+  // axis's inputs — rather than on the memoized axis itself, whose identity
+  // React keeps as an optimisation, not a promise.
   const [rangeState, setRangeState] = useState<
-    { range: TimelineRange; of: Trajectory } | undefined
+    { range: TimelineRange; of: Trajectory; mode: TimelineMode } | undefined
   >(undefined);
   const range =
-    rangeState !== undefined && rangeState.of === trajectory
+    rangeState !== undefined &&
+    rangeState.of === trajectory &&
+    rangeState.mode === mode
       ? rangeState.range
       : undefined;
   const setRange = useCallback(
     (next: TimelineRange | undefined) => {
       setRangeState(
         next !== undefined && trajectory !== undefined
-          ? { range: next, of: trajectory }
+          ? { range: next, of: trajectory, mode }
           : undefined,
       );
     },
-    [trajectory],
+    [trajectory, mode],
   );
 
   /** Rows running in the selected time, or undefined when nothing is selected. */
@@ -616,6 +623,7 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
         describe={describeSpan}
         {...(range !== undefined ? { range } : {})}
         onRangeChange={setRange}
+        onModeChange={setMode}
       />
 
       {error !== undefined && (
@@ -640,7 +648,26 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
         {visualRows.length === 0 ? (
           // An error with nothing folded is already stated by the alert above;
           // repeating it here as a placeholder would say it twice.
-          status === 'error' ? null : (
+          status === 'error' ? null : range !== undefined ? (
+            // Real time keeps the gaps between turns on the axis, and a
+            // stretch dragged inside one has nothing in it. Said here, with
+            // the way back beside it, rather than left as a blank table. Not
+            // a live region: the header's row count, which changes in the
+            // same render, already says it, and two would say it twice.
+            <div
+              className={styles.placeholder}
+              data-testid="trajectory-range-empty"
+            >
+              <span>{t('trajectory.range.empty')}</span>{' '}
+              <button
+                type="button"
+                className={styles.headerButton}
+                onClick={() => setRange(undefined)}
+              >
+                {t('trajectory.range.clear')}
+              </button>
+            </div>
+          ) : (
             <div className={styles.placeholder} role="status">
               {empty
                 ? t('trajectory.empty')

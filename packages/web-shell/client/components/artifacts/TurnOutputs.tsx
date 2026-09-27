@@ -1,3 +1,4 @@
+import { useWebShellCustomization } from '../../customization';
 import type {
   DaemonBackgroundTurn,
   DaemonSessionArtifact,
@@ -146,7 +147,13 @@ export type TurnOutputOpenRequest = (
   sourceSessionId?: string;
 };
 
+export type ArtifactFilter = (
+  artifact: DaemonSessionArtifact,
+  context: { turnId: string; sourceSessionId?: string },
+) => boolean;
+
 interface TurnOutputsProps {
+  sourceSessionId?: string;
   turnId: string;
   changes: readonly TurnOutputFileChange[];
   artifacts: readonly DaemonSessionArtifact[];
@@ -165,7 +172,8 @@ interface TurnOutputsProps {
 function TurnOutputsComponent({
   turnId,
   changes,
-  artifacts,
+  artifacts: allArtifacts,
+  sourceSessionId,
   scheduledTasks,
   workspaceCwd,
   onOpenRequest,
@@ -175,6 +183,12 @@ function TurnOutputsComponent({
   onError,
 }: TurnOutputsProps) {
   const { t } = useI18n();
+  const { filterArtifact } = useWebShellCustomization();
+  const artifacts = filterArtifact
+    ? allArtifacts.filter((artifact) =>
+        filterArtifact(artifact, { turnId, sourceSessionId }),
+      )
+    : allArtifacts;
   const workspaceTarget = useArtifactWorkspaceTarget(workspaceCwd);
   const workspaceActions = workspaceTarget?.actions;
   const [showAllChanges, setShowAllChanges] = useState(false);

@@ -38,6 +38,7 @@
 // remember.
 
 import type { CommandModule } from 'yargs';
+import { displayAnchor } from './lib/report.js';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -776,7 +777,7 @@ export function buildChunkAgentPrompt(
     const lines = [
       '',
       `**This is an INCREMENTAL round** — the diff holds only what changed since the ` +
-        `previous clean review round (anchor \`${inertPath(incremental.anchor.slice(0, 12))}\`), ` +
+        `previous clean review round (anchor \`${inertPath(displayAnchor(incremental.anchor))}\`), ` +
         `plus still-clean files one import hop from a change. Your files' scopes:`,
     ];
     if (isFixAuditRound(report)) {
@@ -1153,7 +1154,7 @@ function diffReadingBlock(
     ...(incremental
       ? [
           `**Incremental round.** This diff is scoped to what changed since the previous ` +
-            `clean review round (anchor \`${inertPath(incremental.anchor.slice(0, 12))}\`), plus ` +
+            `clean review round (anchor \`${inertPath(displayAnchor(incremental.anchor))}\`), plus ` +
             `still-clean files one import hop from a change — each of those is in scope ` +
             `only for its interaction with what it imports. The rest of the change was ` +
             `reviewed clean last round and is deliberately absent; do not go find it. ` +
@@ -2733,13 +2734,19 @@ export function renderFixAuditInput(artifact: unknown, hunks: string): string {
       f.summary,
       `Failure scenario: ${f.failureScenario}`,
       ...(f.fixWitness ? [`Fix witness: ${f.fixWitness}`] : []),
+      // The premise the fix owed, when the finding recorded one — the
+      // assumption this audit most needs to check is pinned.
+      ...(f.fixConstraint ? [`Fix constraint: ${f.fixConstraint}`] : []),
       ...(f.outcomeNote ? [`Fixer's note: ${f.outcomeNote}`] : []),
     ].join('\n'),
   );
   return [
     '# Fix audit input',
     '',
-    `## Findings the fix claims to close — ${fixed.length} with outcome \`fixed\``,
+    // Every `fixed` outcome the artifact holds, not only this round's: an
+    // artifact rebuilt on the interactive path carries earlier fixes too,
+    // whose edits predate these hunks.
+    `## Findings recorded as \`fixed\` — ${fixed.length} (every \`fixed\` outcome in the artifact; one fixed earlier has no hunk here)`,
     '',
     entries.join('\n\n'),
     '',

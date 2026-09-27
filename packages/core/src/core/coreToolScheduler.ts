@@ -83,6 +83,7 @@ import * as fsSync from 'node:fs';
 import {
   collectAvailableSkillEntries,
   renderAvailableSkillsBlock,
+  SKILLS_ACTIVATED_OPENER,
   type AvailableSkillEntry,
 } from '../tools/skill-utils.js';
 import { escapeSystemReminderTags } from '../utils/xml.js';
@@ -583,6 +584,7 @@ type CoreToolCallResponseInfo = ToolCallResponseInfo & {
 
 export type ErroredToolCall = {
   status: 'error';
+  invocation?: AnyToolInvocation;
   request: ToolCallRequestInfo;
   response: ToolCallResponseInfo;
   tool?: AnyDeclarativeTool;
@@ -1373,6 +1375,7 @@ function withPostToolBatchStop(
     request: lastCall.request,
     tool: lastCall.tool,
     response,
+    startTime: lastCall.startTime,
     durationMs: lastCall.durationMs,
     outcome: undefined,
   } as ErroredToolCall;
@@ -1997,6 +2000,7 @@ export class CoreToolScheduler {
             request: currentCall.request,
             status: 'error',
             tool: toolInstance,
+            invocation,
             response: auxiliaryData as CoreToolCallResponseInfo,
             durationMs,
             ...(durationMs !== undefined
@@ -2161,6 +2165,7 @@ export class CoreToolScheduler {
           args as Record<string, unknown>,
           targetCallId,
           call.request.prompt_id,
+          call.request.executionOrigin?.kind === 'client',
         ),
       );
       if (invocationOrError instanceof Error) {
@@ -2461,24 +2466,31 @@ export class CoreToolScheduler {
 
   /**
    * Builds a tool invocation and threads optional context (callId,
-   * promptId) into it via duck-typed setters when the invocation
-   * exposes them. Both setters are intentionally optional:
+   * promptId, completion delivery) through the setters it exposes.
+   * Client tools need completion delivery because they do not continue
+   * the model's tool-result turn; code-mode calls return to their parent.
+   * The setters are intentionally optional:
    * - Existing tools whose invocations do not implement these setters
    *   stay compatible without any change.
    * - Future contexts (subagent / direct buildAndExecute / non-scheduler
    *   callers) may invoke this with fewer arguments and still get a
    *   valid invocation back.
-   * Production call sites in this scheduler always pass both — see
-   * the setArgs path at L1036 and the schedule path at L1497.
+   * Scheduling and argument rebuilds pass the request's client provenance;
+   * a missing origin (including nested code-mode calls) does not opt in.
    */
   private buildInvocation(
     tool: AnyDeclarativeTool,
     args: object,
     callId?: string,
     promptId?: string,
+    notifyOnCompletion = false,
   ): AnyToolInvocation | Error {
     try {
       const invocation = tool.build(structuredClone(args));
+      const notificationAware = invocation as {
+        setCompletionNotificationEnabled?: (enabled: boolean) => void;
+      };
+      notificationAware.setCompletionNotificationEnabled?.(notifyOnCompletion);
       if (callId) {
         const maybeAware = invocation as { setCallId?: (id: string) => void };
         if (typeof maybeAware.setCallId === 'function') {
@@ -2623,7 +2635,14 @@ export class CoreToolScheduler {
       distance: levenshtein.get(unknownToolName, toolName),
     }));
 
-    matches.sort((a, b) => a.distance - b.distance);
+    matches.sort((a, b) => {
+      const aIsPrefix = unknownToolName.startsWith(a.name);
+      const bIsPrefix = unknownToolName.startsWith(b.name);
+      if (aIsPrefix !== bIsPrefix) {
+        return aIsPrefix ? -1 : 1;
+      }
+      return a.distance - b.distance;
+    });
 
     const topNResults = matches.slice(0, topN);
 
@@ -3181,6 +3200,7 @@ export class CoreToolScheduler {
               policyGate.args,
               reqInfo.callId,
               reqInfo.prompt_id,
+              reqInfo.executionOrigin?.kind === 'client',
             ),
           );
           if (recordPrevalidationCancellation()) continue;
@@ -6141,7 +6161,7 @@ export class CoreToolScheduler {
               }
               if (activatedEntries.length > 0) {
                 reminderBlocks.push(
-                  `The following skill(s) became available via the Skill tool based on the file you just accessed; invoke a skill by passing its name to the Skill tool:\n<available_skills>\n${renderAvailableSkillsBlock(
+                  `${SKILLS_ACTIVATED_OPENER}; invoke a skill by passing its name to the Skill tool:\n<available_skills>\n${renderAvailableSkillsBlock(
                     activatedEntries,
                   )}\n</available_skills>`,
                 );

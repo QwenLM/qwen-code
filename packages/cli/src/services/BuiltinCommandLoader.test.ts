@@ -156,6 +156,28 @@ describe('BuiltinCommandLoader', () => {
     expect(commands.some((command) => command.name === 'ide')).toBe(false);
   });
 
+  it('does not probe local IDE processes for a non-interactive run', async () => {
+    mockConfig.isInteractive = vi.fn().mockReturnValue(false);
+
+    const commands = await new BuiltinCommandLoader(mockConfig).loadCommands(
+      new AbortController().signal,
+    );
+
+    expect(ideCommand).not.toHaveBeenCalled();
+    expect(commands.some((command) => command.name === 'ide')).toBe(false);
+  });
+
+  it('still builds the IDE command for an interactive run', async () => {
+    mockConfig.isInteractive = vi.fn().mockReturnValue(true);
+
+    const commands = await new BuiltinCommandLoader(mockConfig).loadCommands(
+      new AbortController().signal,
+    );
+
+    expect(ideCommand).toHaveBeenCalledOnce();
+    expect(commands.some((command) => command.name === 'ide')).toBe(true);
+  });
+
   it('should correctly pass the config object to restore command factory', async () => {
     const loader = new BuiltinCommandLoader(mockConfig);
     await loader.loadCommands(new AbortController().signal);

@@ -7,7 +7,11 @@
 import { describe, it, expect } from 'vitest';
 import { createHash } from 'node:crypto';
 import { buildDiffPlan } from './diff-plan.js';
-import { buildPlanReport, stringifyPlanReport } from './report.js';
+import {
+  buildPlanReport,
+  displayAnchor,
+  stringifyPlanReport,
+} from './report.js';
 import { selectionDrift } from './selection.js';
 import { makeDiff } from './test-utils.js';
 
@@ -271,5 +275,20 @@ describe('stringifyPlanReport', () => {
     const report = planReportOf(diff, () => 1);
     const parsed = JSON.parse(stringifyPlanReport(report)) as typeof report;
     expect(parsed.files[0].path).toBe(weird);
+  });
+});
+
+describe('displayAnchor', () => {
+  it('truncates sha-shaped labels and renders every other label whole', () => {
+    const sha40 = 'a'.repeat(40);
+    expect(displayAnchor(sha40)).toBe('a'.repeat(12));
+    expect(displayAnchor('A'.repeat(64))).toHaveLength(12);
+    // The regression it exists for: a 12-char slice printed `content-verd`
+    // in the summary line and in every brief.
+    expect(displayAnchor('content-verdicts')).toBe('content-verdicts');
+    // A local round's state id is a 64-hex sha256 — truncating it is right.
+    expect(displayAnchor('f'.repeat(64))).toHaveLength(12);
+    // Too short to be an object id: rendered whole rather than mangled.
+    expect(displayAnchor('abc123')).toBe('abc123');
   });
 });

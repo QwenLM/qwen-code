@@ -53,6 +53,8 @@ function blockedMessage(result: SessionRelinkLookupResult): string {
       return 'The saved session appears to be active in another Qwen Code process, so it cannot be reattached.';
     case 'invalid_transcript':
       return 'The saved session transcript is incomplete or invalid, so it cannot be safely reattached.';
+    case 'managed_session':
+      return "This session belongs to Qwen Code's managed session engine and cannot be reattached by the legacy project-move flow.";
     case 'source_directory_exists':
       return (
         `The session still belongs to an existing project directory (${result.recordedCwd ?? 'unknown'}). ` +

@@ -18,6 +18,37 @@ export { WebShellTranscript } from './components/WebShellTranscript';
 export type { WebShellTranscriptProps } from './components/WebShellTranscript';
 export * from './daemon-react-sdk';
 export type { WebShellBrowserNotificationsOptions } from './browser-turn-notifications';
+export {
+  JavaManagedAgentClient,
+  JavaManagedAgentHttpError,
+  type JavaAgentCommandAdmission,
+  type JavaAgentEnvironment,
+  type JavaAgentEvent,
+  type JavaAgentSession,
+  type JavaAgentTranscript,
+  type JavaAgentTurn,
+  type JavaManagedAgentClientOptions,
+} from './components/managed/java-managed-agent-client';
+export {
+  createJavaManagedAgentProvider,
+  type JavaManagedAgentProviderOptions,
+} from './components/managed/java-managed-agent-provider';
+export {
+  ManagedAgentWebShell,
+  type ManagedAgentWebShellProps,
+} from './ManagedAgentWebShell';
+export {
+  type ManagedAgentCommandOptions,
+  type ManagedAgentProvider,
+  type ManagedAgentRequestOptions,
+  type ManagedAgentRuntimeState,
+  type ManagedAgentSessionEvent,
+  type ManagedAgentSessionEventType,
+  type ManagedAgentSessionPhase,
+  type ManagedAgentSessionSummary,
+  type ManagedAgentSessionTranscript,
+  type ManagedAgentTurnAdmission,
+} from './components/managed/managed-agent-provider';
 
 export interface WebShellWithProvidersProps extends WebShellProps {
   /**
@@ -293,6 +324,7 @@ export type {
   PaneHeaderActionsRenderer,
 } from './components/ChatPane';
 export type {
+  ArtifactFilter,
   TurnOutputKind,
   TurnOutputOpenRequest,
 } from './components/artifacts/TurnOutputs';
@@ -326,3 +358,5 @@ export type {
   WebShellMessageNavigationRequest,
   WebShellMessageNavigationResult,
 } from './hooks/useMessageNavigation';
+export { highlightCode } from './components/messages/codeHighlighter';
+export type { CodeHighlightRequest } from './components/messages/codeHighlighter';

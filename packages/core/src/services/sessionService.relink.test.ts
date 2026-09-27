@@ -287,6 +287,38 @@ describe('SessionService project relinking', () => {
     ).resolves.toMatchObject({ status: 'blocked', reason: 'active_writer' });
   });
 
+  it('leaves managed sessions with their session authority', async () => {
+    const fixture = makeFixture();
+    fs.writeFileSync(
+      fixture.transcriptPath,
+      `${JSON.stringify({
+        sessionId: SESSION_ID,
+        uuid: 'managed-header',
+        parentUuid: null,
+        type: 'system',
+        subtype: 'managed_session_header_v1',
+        cwd: fixture.oldCwd,
+        timestamp: '2026-09-24T00:00:00.000Z',
+        managedSession: {
+          sessionKey: {
+            tenantId: 'local',
+            workspaceId: 'old-workspace',
+            sessionId: SESSION_ID,
+          },
+        },
+      })}\n`,
+    );
+    fs.rmSync(fixture.oldCwd, { recursive: true });
+
+    await expect(
+      fixture.service.findRelinkCandidate(SESSION_ID),
+    ).resolves.toMatchObject({ status: 'blocked', reason: 'managed_session' });
+    expect(fs.existsSync(fixture.transcriptPath)).toBe(true);
+    expect(
+      fs.existsSync(fixture.service.getSessionTranscriptPath(SESSION_ID)),
+    ).toBe(false);
+  });
+
   it('refuses an invalid transcript', async () => {
     const fixture = makeFixture();
     fs.appendFileSync(fixture.transcriptPath, '{truncated');

@@ -15,7 +15,10 @@ import {
   getPlugin,
   UNSAFE_OBJECT_KEYS,
 } from '../commands/channel/channel-registry.js';
-import { multiSessionCompatibilityError } from '../commands/channel/config-utils.js';
+import {
+  multiSessionCompatibilityError,
+  parseMessageRoutingConfig,
+} from '../commands/channel/config-utils.js';
 import {
   loadSettings,
   saveSettings,
@@ -134,6 +137,9 @@ function assertSharedField(
   value: unknown,
   previous?: unknown,
 ): boolean {
+  if (key === 'messageRoutes' || key === 'defaultMessageRoute') {
+    return true;
+  }
   if (key === 'multiSession') {
     if (typeof value !== 'boolean') {
       throw invalidConfig(`Channel field "${key}" must be a boolean.`);
@@ -662,6 +668,17 @@ export class WorkspaceChannelSettingsStore {
       webhooks: nextConfig['webhooks'],
     });
     if (multiSessionError) throw invalidConfig(multiSessionError);
+    try {
+      const routing = parseMessageRoutingConfig(name, nextConfig);
+      if (routing.messageRoutes !== undefined)
+        nextConfig['messageRoutes'] = routing.messageRoutes;
+      if (routing.defaultMessageRoute !== undefined)
+        nextConfig['defaultMessageRoute'] = routing.defaultMessageRoute;
+    } catch (error) {
+      throw invalidConfig(
+        error instanceof Error ? error.message : String(error),
+      );
+    }
     let crossFieldError: unknown;
     try {
       crossFieldError = plugin.management.validateConfig?.(nextConfig);

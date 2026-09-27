@@ -2442,6 +2442,7 @@ export class QQChannel extends ChannelBase {
     safeName: string;
     cleanText: string;
     commandText: string;
+    routeText: string;
     text: string;
     senderName: string;
   } | null {
@@ -2568,6 +2569,7 @@ export class QQChannel extends ChannelBase {
       safeName,
       cleanText,
       commandText,
+      routeText: sanitizePromptText(safeDisplayText),
       text,
       senderName,
     };
@@ -2611,7 +2613,10 @@ export class QQChannel extends ChannelBase {
       .replace(/\[bot]/g, '');
     const isSlash = safeContent.startsWith('/');
     const body = sanitizePromptText(safeContent);
-    const text = isSlash ? body : `[atMention=true] [${safeName}]: ${body}`;
+    const text =
+      isSlash || this.config.messageRoutes
+        ? body
+        : `[atMention=true] [${safeName}]: ${body}`;
     this.handleInbound({
       channelName: this.name,
       senderId: chatId,
@@ -2622,7 +2627,9 @@ export class QQChannel extends ChannelBase {
       isGroup: false,
       isMentioned: true,
       isReplyToBot: false,
-      ...(isSlash ? {} : { alreadyPrefixed: true as const }),
+      ...(isSlash || this.config.messageRoutes
+        ? {}
+        : { alreadyPrefixed: true as const }),
     }).catch((e) =>
       process.stderr.write(
         `[QQ:${this.name}] C2C handler error: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,
@@ -2670,7 +2677,8 @@ export class QQChannel extends ChannelBase {
       forceAtMention: true,
     });
     if (!result) return;
-    const { isSlash, text, commandText, senderName, safeName } = result;
+    const { isSlash, text, commandText, routeText, senderName, safeName } =
+      result;
 
     // Deduplicate before handleInbound — prepareGroupMessage already ran
     // so side effects (extractBotOpenId) are applied regardless of dedup.
@@ -2703,12 +2711,14 @@ export class QQChannel extends ChannelBase {
       senderId,
       senderName,
       chatId,
-      text,
+      text: this.config.messageRoutes ? routeText : text,
       messageId: event.id,
       isGroup: true,
       isMentioned: true,
       isReplyToBot: true,
-      ...(isSlash ? {} : { alreadyPrefixed: true as const }),
+      ...(isSlash || this.config.messageRoutes
+        ? {}
+        : { alreadyPrefixed: true as const }),
     }).catch((e) =>
       process.stderr.write(
         `[QQ:${this.name}] Group handler error: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,
@@ -2749,8 +2759,15 @@ export class QQChannel extends ChannelBase {
 
     const result = this.prepareGroupMessage(event, chatId);
     if (!result) return;
-    const { isSlash, text, commandText, senderName, isAtBot, safeName } =
-      result;
+    const {
+      isSlash,
+      text,
+      commandText,
+      routeText,
+      senderName,
+      isAtBot,
+      safeName,
+    } = result;
 
     // @-bot messages always pass through (passive reply).
     // Non-@-bot messages are subject to active-message and keyword policies.
@@ -2847,14 +2864,16 @@ export class QQChannel extends ChannelBase {
     this.handleInbound({
       channelName: this.name,
       chatId,
-      text,
+      text: this.config.messageRoutes ? routeText : text,
       senderId,
       senderName,
       messageId: event.id,
       isGroup: true,
       isMentioned: isAtBot,
       isReplyToBot: isAtBot,
-      ...(isSlash ? {} : { alreadyPrefixed: true as const }),
+      ...(isSlash || this.config.messageRoutes
+        ? {}
+        : { alreadyPrefixed: true as const }),
     }).catch((e) => {
       process.stderr.write(
         `[QQ:${this.name}] handleGroupAll error: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,

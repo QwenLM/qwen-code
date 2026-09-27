@@ -108,6 +108,29 @@ describe('resume session relinking', () => {
     expect(confirm).not.toHaveBeenCalled();
   });
 
+  it('leaves managed sessions with their session authority', async () => {
+    const service = serviceWithLookup({
+      status: 'blocked',
+      reason: 'managed_session',
+    });
+    const confirm = vi.fn();
+    const result = await maybeRelinkResumeSession({
+      sessionId: SESSION_ID,
+      cwd: '/workspace/after',
+      interactive: true,
+      service,
+      confirm,
+    });
+
+    expect(result).toEqual({
+      status: 'blocked',
+      message:
+        "This session belongs to Qwen Code's managed session engine and cannot be reattached by the legacy project-move flow.",
+    });
+    expect(confirm).not.toHaveBeenCalled();
+    expect(service.relinkSession).not.toHaveBeenCalled();
+  });
+
   it('treats only an interactive prompt or an empty TTY invocation as interactive', () => {
     expect(isInteractiveResumeInvocation({ promptInteractive: 'plan' })).toBe(
       true,
