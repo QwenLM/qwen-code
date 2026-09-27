@@ -12,11 +12,14 @@ import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
+import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.service.ManagedAgentService;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutationKind;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import java.time.Clock;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -58,6 +61,9 @@ class ManagedWorkspaceAdmissionTest {
 
     @Autowired
     private ManagedAgentService service;
+
+    @Autowired
+    private ManagedWorkspaceRegistry registry;
 
     @Test
     void publicCreationPinsSevenFieldBindingAndReplaysAfterRegistryChange()
@@ -235,7 +241,7 @@ class ManagedWorkspaceAdmissionTest {
                 + " (tenant_id, workspace_id) VALUES (?, ?)", tenant,
                 "ws-a");
         var first = store.insertWorkspaceSessionCommand(tenant, "actor-a",
-                "key", "sha256:" + "a".repeat(64), "qwen-code", null,
+                "key", "sha256:" + "a".repeat(64), "qwen-code", null, null,
                 List.of(), null, null);
         jdbc.update("UPDATE managed_workspace_default SET workspace_id = ?"
                 + " WHERE tenant_id = ?", "ws-b", tenant);
@@ -245,7 +251,7 @@ class ManagedWorkspaceAdmissionTest {
         assertThat(store.requireSession(tenant, first.sessionId())
                 .workspace().getWorkspaceId()).isEqualTo("ws-a");
         var second = store.insertWorkspaceSessionCommand(tenant, "actor-a",
-                "new-key", "sha256:" + "a".repeat(64), "qwen-code",
+                "new-key", "sha256:" + "a".repeat(64), "qwen-code", null,
                 null, List.of(), null, null);
         assertThat(store.requireSession(tenant, second.sessionId())
                 .workspace().getWorkspaceId()).isEqualTo("ws-b");
@@ -257,6 +263,33 @@ class ManagedWorkspaceAdmissionTest {
     }
 
     @Test
+    void boundRetriesReplayBeforeCheckingTheRevision() {
+        String tenant = "tenant-" + UUID.randomUUID();
+        register(tenant, "ws-a", "storage-a");
+        grant(tenant, "ws-a", "actor-a", true);
+        WorkspaceSelection selection = new WorkspaceSelection("ws-a", ".");
+        String digest = "sha256:" + "a".repeat(64);
+        var first = store.insertWorkspaceSessionCommand(tenant, "actor-a",
+                "key", digest, "qwen-code", "1", null, List.of(), null,
+                selection);
+        ManagedAgentProperties changed = new ManagedAgentProperties();
+        changed.setAgentRevision("2");
+        ManagedAgentStore upgraded = new ManagedAgentStore(jdbc, mapper,
+                Clock.systemUTC(), ignored -> {
+                }, registry, changed);
+
+        assertThat(upgraded.insertWorkspaceSessionCommand(tenant, "actor-a",
+                "key", digest, "qwen-code", "1", null, List.of(), null,
+                selection).sessionId()).isEqualTo(first.sessionId());
+        assertThatThrownBy(() -> upgraded.insertWorkspaceSessionCommand(
+                tenant, "actor-a", "new-key", digest, "qwen-code", "1", null,
+                List.of(), null, selection))
+                .isInstanceOfSatisfying(ApiException.class, error ->
+                        assertThat(error.getCode())
+                                .isEqualTo("unsupported_feature"));
+    }
+
+    @Test
     void storeCannotCreateOrDispatchBoundTurnsWhenServiceIsBypassed() {
         String tenant = "tenant-" + UUID.randomUUID();
         register(tenant, "ws-a", "storage-a");
@@ -265,13 +298,13 @@ class ManagedWorkspaceAdmissionTest {
         List<Map<String, Object>> input = List.of(
                 Map.of("type", "text", "text", "go"));
         assertThatThrownBy(() -> store.insertWorkspaceSessionCommand(
-                tenant, "actor-a", "nonempty", "digest", "qwen-code",
+                tenant, "actor-a", "nonempty", "digest", "qwen-code", null,
                 null, input, "payload", selection))
                 .isInstanceOfSatisfying(ApiException.class, error ->
                         assertThat(error.getCode())
                                 .isEqualTo("workspace_unavailable"));
         var created = store.insertWorkspaceSessionCommand(tenant, "actor-a",
-                "empty", "digest", "qwen-code", null, List.of(), null,
+                "empty", "digest", "qwen-code", null, null, List.of(), null,
                 selection);
         String sessionId = created.sessionId();
         assertThatThrownBy(() -> store.insertTurnCommand(tenant, "SUBMIT",
@@ -392,11 +425,11 @@ class ManagedWorkspaceAdmissionTest {
                 try {
                     if (bound) {
                         store.insertWorkspaceSessionCommand(tenant, "actor-a", "key",
-                                "bound-digest", "qwen-code", null, List.of(), null,
+                                "bound-digest", "qwen-code", null, null, List.of(), null,
                                 new WorkspaceSelection("ws-a", "."));
                     } else {
                         store.insertSessionCommand(tenant, "CREATE_SESSION", "key",
-                                "legacy-digest", "qwen-code", null, List.of(), null);
+                                "legacy-digest", "qwen-code", null, null, List.of(), null);
                     }
                     return "created";
                 } catch (ApiException error) {
@@ -492,7 +525,7 @@ class ManagedWorkspaceAdmissionTest {
     private void assertCreateError(String tenant, WorkspaceSelection selection,
             String expected) {
         assertThatThrownBy(() -> store.insertWorkspaceSessionCommand(tenant,
-                "actor-a", "key", "digest", "qwen-code", null, List.of(), null,
+                "actor-a", "key", "digest", "qwen-code", null, null, List.of(), null,
                 selection)).isInstanceOfSatisfying(ApiException.class, error ->
                         assertThat(error.getCode()).isEqualTo(expected));
     }
@@ -503,7 +536,7 @@ class ManagedWorkspaceAdmissionTest {
         register(tenant, "ws-a", "storage-a");
         grant(tenant, "ws-a", "actor-a", true);
         String session = store.insertWorkspaceSessionCommand(tenant, "actor-a",
-                "key", "digest", "qwen-code", null, List.of(), null,
+                "key", "digest", "qwen-code", null, null, List.of(), null,
                 new WorkspaceSelection("ws-a", ".")).sessionId();
         for (String column : List.of("workspace_generation", "context_revision")) {
             assertThatThrownBy(() -> jdbc.update("UPDATE managed_agent_session SET "

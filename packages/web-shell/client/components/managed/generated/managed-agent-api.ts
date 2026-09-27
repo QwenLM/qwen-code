@@ -307,6 +307,15 @@ export interface components {
                 "application/json": components["schemas"]["ErrorEnvelope"];
             };
         };
+        /** @description A trusted actor is required for this request but none was supplied. */
+        Unauthorized: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ErrorEnvelope"];
+            };
+        };
         /** @description Invalid request. */
         BadRequest: {
             headers: {
@@ -336,6 +345,15 @@ export interface components {
         };
         /** @description Replay cursor is older than the retained replay floor. */
         CursorExpired: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ErrorEnvelope"];
+            };
+        };
+        /** @description A dependency such as the Hosted Harness is unavailable; retry later. */
+        Unavailable: {
             headers: {
                 [name: string]: unknown;
             };
@@ -377,6 +395,7 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
+            403: components["responses"]["Forbidden"];
         };
     };
     webShellGetSession: {
@@ -402,6 +421,7 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
+            403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
         };
     };
@@ -482,9 +502,11 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
+            503: components["responses"]["Unavailable"];
         };
     };
     webShellSubmitTurn: {

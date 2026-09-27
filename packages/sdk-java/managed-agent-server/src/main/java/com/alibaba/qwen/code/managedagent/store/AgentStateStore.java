@@ -23,13 +23,14 @@ import java.util.Optional;
 public interface AgentStateStore {
     Admission insertSessionCommand(String tenantId, String operation,
             String idempotencyKey, String requestDigest, String agentId,
-            String title, List<Map<String, Object>> input,
-            String payloadDigest);
+            String requestedRevision, String title,
+            List<Map<String, Object>> input, String payloadDigest);
 
     Admission insertWorkspaceSessionCommand(String tenantId, String actorId,
             String idempotencyKey, String requestDigest, String agentId,
-            String title, List<Map<String, Object>> input,
-            String payloadDigest, WorkspaceSelection selection);
+            String requestedRevision, String title,
+            List<Map<String, Object>> input, String payloadDigest,
+            WorkspaceSelection selection);
 
     Admission replayWorkspaceSessionCommand(String tenantId, String actorId,
             String idempotencyKey, String requestDigest);

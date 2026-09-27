@@ -39,7 +39,7 @@ public final class WorkspaceCreationProcessFixtureMain {
             case "create-and-exit" -> {
                 Admission first = transactions.execute(status ->
                         store.insertWorkspaceSessionCommand(tenant, "actor-a",
-                                "workspace-create", digest, "qwen-code",
+                                "workspace-create", digest, "qwen-code", null,
                                 null, List.of(), null, null));
                 require(first != null && !first.replayed(),
                         "creation did not commit a new command");

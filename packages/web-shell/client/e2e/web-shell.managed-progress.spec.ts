@@ -106,7 +106,12 @@ async function installManagedScenario(page: Page, testInfo: TestInfo) {
           submittedAt: Date.now(),
         },
       };
-      append('turn.accepted', { input: body.input });
+      append('turn.accepted', {
+        input: body.input.map((block: { text: string }) => ({
+          type: 'text',
+          text: block.text,
+        })),
+      });
       append('turn.started');
       return respond(
         {

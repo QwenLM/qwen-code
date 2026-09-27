@@ -99,11 +99,11 @@ public class WebShellAgentController {
         validateTraceMetadata(request.metadata());
         WebShellAdmission admission = webShell(selection == null
                 ? service.createSession(tenant.tenantId(),
-                        request.idempotencyKey(), request.agentId(),
+                        request.idempotencyKey(), request.agentId(), null,
                         request.title(), null, request.input())
                 : service.createWorkspaceSession(tenant.tenantId(),
                         tenant.requireActorId(), request.idempotencyKey(),
-                        request.agentId(), request.title(), null,
+                        request.agentId(), null, request.title(), null,
                         request.input(), selection));
         return ResponseEntity.accepted().body(admission);
     }

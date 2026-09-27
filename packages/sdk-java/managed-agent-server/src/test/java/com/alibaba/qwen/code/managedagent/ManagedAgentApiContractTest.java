@@ -42,6 +42,7 @@ import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTranscript;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTranscriptRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTurn;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellWorkspace;
+import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.api.RequestIdFilter;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -267,9 +268,44 @@ class ManagedAgentApiContractTest {
                 .param("limit", "100").header(TENANT, tenant), null);
         exchange(drift, "listSessions", 400, get("/v1/agents/sessions")
                 .param("limit", "0").header(TENANT, tenant), null);
+        exchange(drift, "listSessions", 400, get("/v1/agents/sessions"),
+                null);
+        exchange(drift, "listSessions", 403, get("/v1/agents/sessions")
+                .header(TENANT, tenant).principal(actor(otherTenant)), null);
         exchange(drift, "getSession", 404,
                 get("/v1/agents/sessions/{id}", sessionId)
                         .header(TENANT, otherTenant), null);
+        exchange(drift, "getSession", 400,
+                get("/v1/agents/sessions/{id}", sessionId), null);
+        exchange(drift, "getSession", 403,
+                get("/v1/agents/sessions/{id}", sessionId)
+                        .header(TENANT, tenant).principal(actor(otherTenant)),
+                null);
+        exchange(drift, "createSession", 401,
+                post("/v1/agents/sessions").header(TENANT, tenant)
+                        .header(IDEMPOTENCY_KEY, "contract-no-actor"),
+                """
+                {"agent_id":"qwen-code","workspace":{"workspace_id":"ws-a"}}
+                """);
+        harness.setAvailable(false);
+        try {
+            exchange(drift, "createSession", 503,
+                    post("/v1/agents/sessions").header(TENANT, tenant)
+                            .header(IDEMPOTENCY_KEY, "contract-no-harness"),
+                    """
+                    {"agent_id":"qwen-code",
+                     "input":[{"type":"input_text","text":"hi"}]}
+                    """);
+            exchange(drift, "webShellCreateSession", 503,
+                    post(WEB_SHELL + "/sessions/create").header(TENANT, tenant),
+                    """
+                    {"idempotencyKey":"contract-web-no-harness",
+                     "agentId":"qwen-code",
+                     "input":[{"type":"input_text","text":"hi"}]}
+                    """);
+        } finally {
+            harness.setAvailable(true);
+        }
         awaitMaterialized(tenant, sessionId);
         exchange(drift, "getSession", 200,
                 get("/v1/agents/sessions/{id}", sessionId)
@@ -301,6 +337,21 @@ class ManagedAgentApiContractTest {
                         .header(TENANT, tenant)
                         .header(IDEMPOTENCY_KEY, "contract-rename"),
                 "{\"title\":\"renamed\"}");
+        harness.setAvailable(false);
+        try {
+            assertThat(mvc.perform(
+                            post("/v1/agents/sessions/{id}/archive", sessionId)
+                                    .header(TENANT, tenant)
+                                    .header(IDEMPOTENCY_KEY,
+                                            "contract-archive"))
+                    .andReturn().getResponse().getStatus()).isEqualTo(503);
+        } finally {
+            harness.setAvailable(true);
+        }
+        assertThat(json(exchange(drift, "getSession", 200,
+                get("/v1/agents/sessions/{id}", sessionId)
+                        .header(TENANT, tenant), null))
+                .get("status").asText()).isEqualTo("archiving");
         exchange(drift, "archiveSession", 202,
                 post("/v1/agents/sessions/{id}/archive", sessionId)
                         .header(TENANT, tenant)
@@ -337,6 +388,12 @@ class ManagedAgentApiContractTest {
                 """
                 {"type":"agent.session.cancel","turn_id":"%s"}
                 """.formatted(turnId));
+        JsonNode cancelling = json(exchange(drift, "getSession", 200,
+                get("/v1/agents/sessions/{id}", cancelledId)
+                        .header(TENANT, tenant), null)).get("active_turn");
+        assertThat(cancelling.get("status").asText()).isEqualTo("cancelling");
+        assertThat(cancelling.get("input_item_id").asText())
+                .isEqualTo("item_" + turnId + "_input");
         settleCancelledTurn(tenant, cancelledId, cancels);
 
         String webSessionId = json(exchange(drift, "webShellCreateSession",
@@ -364,6 +421,19 @@ class ManagedAgentApiContractTest {
         exchange(drift, "webShellGetSession", 400,
                 post(WEB_SHELL + "/sessions/get").header(TENANT, tenant),
                 "{}");
+        exchange(drift, "webShellGetSession", 403,
+                post(WEB_SHELL + "/sessions/get").header(TENANT, tenant)
+                        .principal(actor(otherTenant)),
+                "{\"sessionId\":\"%s\"}".formatted(webSessionId));
+        exchange(drift, "webShellListSessions", 403,
+                post(WEB_SHELL + "/sessions/query").header(TENANT, tenant)
+                        .principal(actor(otherTenant)), "{}");
+        exchange(drift, "webShellCreateSession", 401,
+                post(WEB_SHELL + "/sessions/create").header(TENANT, tenant),
+                """
+                {"idempotencyKey":"contract-web-no-actor","agentId":"qwen-code",
+                 "workspace":{"workspaceId":"ws-a"}}
+                """);
         exchange(drift, "webShellTranscript", 404,
                 post(WEB_SHELL + "/transcript/query")
                         .header(TENANT, otherTenant),
@@ -382,7 +452,8 @@ class ManagedAgentApiContractTest {
         exchange(drift, "webShellSubmitTurn", 404,
                 post(WEB_SHELL + "/turns/submit").header(TENANT, otherTenant),
                 """
-                {"idempotencyKey":"contract-foreign","sessionId":"%s",
+                {"requestId":"contract-foreign-trace",
+                 "idempotencyKey":"contract-foreign","sessionId":"%s",
                  "input":[{"type":"input_text","text":"hi"}]}
                 """.formatted(webSessionId));
         exchange(drift, "webShellSubmitTurn", 400,
@@ -473,6 +544,12 @@ class ManagedAgentApiContractTest {
                 .get("sessionId").asText();
         awaitMaterialized(tenant, sessionId);
         awaitIdle(tenant, sessionId);
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> {
+            JsonNode transcript = json(webShell(tenant, "/transcript/query",
+                    "{\"sessionId\":\"%s\"}".formatted(sessionId)));
+            assertThat(transcript.get("coveredSequence").asLong())
+                    .isEqualTo(transcript.get("lastSequence").asLong());
+        });
 
         JsonNode publicSession = json(mvc.perform(
                         get("/v1/agents/sessions/{id}", sessionId)
@@ -488,8 +565,22 @@ class ManagedAgentApiContractTest {
                 "{\"sessionId\":\"%s\"}".formatted(sessionId)));
         JsonNode webShellListed = json(webShell(tenant, "/sessions/query",
                 "{}")).get("data").get(0);
+        long snapshotThrough = json(mvc.perform(
+                        get("/v1/agents/sessions/{id}/items", sessionId)
+                                .header(TENANT, tenant))
+                .andReturn().getResponse()
+                .getContentAsString(StandardCharsets.UTF_8))
+                .get("snapshot_through_sequence").asLong();
         for (JsonNode session : List.of(publicSession, publicListed)) {
             assertThat(session.get("id").asText()).isEqualTo(sessionId);
+            assertThat(session.get("agent_revision").asText()).isEqualTo("1");
+            assertThat(session.get("capabilities")).isEqualTo(json("""
+                    {"items":true,"snapshots":false,"artifacts":false,
+                     "resync":false}
+                    """));
+            assertThat(session.get("replay_floor_sequence").asLong()).isZero();
+            assertThat(session.get("snapshot_through_sequence").asLong())
+                    .isPositive().isEqualTo(snapshotThrough);
             for (JsonNode other : List.of(webShellSession, webShellListed)) {
                 assertThat(other.get("sessionId").asText())
                         .isEqualTo(sessionId);
@@ -504,15 +595,86 @@ class ManagedAgentApiContractTest {
         }
 
         String otherTenant = tenant + "-other";
-        assertThat(errorCode(mvc.perform(
-                        get("/v1/agents/sessions/{id}", sessionId)
-                                .header(TENANT, otherTenant))
-                .andReturn().getResponse()
-                .getContentAsString(StandardCharsets.UTF_8)))
-                .isEqualTo(" session_not_found");
-        assertThat(errorCode(webShell(otherTenant, "/sessions/get",
-                "{\"sessionId\":\"%s\"}".formatted(sessionId))))
-                .isEqualTo(" session_not_found");
+        for (MockHttpServletRequestBuilder foreign : List.of(
+                get("/v1/agents/sessions/{id}", sessionId)
+                        .header(TENANT, otherTenant),
+                post(WEB_SHELL + "/sessions/get").header(TENANT, otherTenant)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"sessionId\":\"%s\"}"
+                                .formatted(sessionId)))) {
+            MockHttpServletResponse response = mvc.perform(foreign)
+                    .andReturn().getResponse();
+            assertThat(response.getStatus()).isEqualTo(404);
+            assertThat(json(response.getContentAsString(
+                            StandardCharsets.UTF_8))
+                    .at("/error/code").asText())
+                    .isEqualTo("session_not_found");
+        }
+    }
+
+    @Test
+    void requestIdsAreEchoedOnlyWhenSafe() throws Exception {
+        String tenant = "tenant-request-id-" + UUID.randomUUID();
+        MockHttpServletResponse traced = mvc.perform(get("/v1/agents/sessions")
+                        .header(TENANT, tenant)
+                        .header(RequestIdFilter.HEADER, "gateway-trace-1"))
+                .andReturn().getResponse();
+        assertThat(traced.getHeader(RequestIdFilter.HEADER))
+                .isEqualTo("gateway-trace-1");
+
+        for (String unsafe : List.of("two words", "x".repeat(129))) {
+            MockHttpServletResponse replaced = mvc.perform(
+                            get("/v1/agents/sessions")
+                                    .header(TENANT, tenant)
+                                    .header(RequestIdFilter.HEADER, unsafe))
+                    .andReturn().getResponse();
+            assertThat(UUID.fromString(
+                    replaced.getHeader(RequestIdFilter.HEADER))).isNotNull();
+        }
+
+        MockHttpServletResponse ignored = mvc.perform(
+                        post(WEB_SHELL + "/sessions/create")
+                                .header(TENANT, tenant)
+                                .header(RequestIdFilter.HEADER,
+                                        "gateway-trace-2")
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content("""
+                                        {"requestId":"line\\nbreak",
+                                         "idempotencyKey":"request-id",
+                                         "agentId":"qwen-code","input":[]}
+                                        """))
+                .andReturn().getResponse();
+        assertThat(ignored.getStatus()).isEqualTo(202);
+        assertThat(ignored.getHeader(RequestIdFilter.HEADER))
+                .isEqualTo("gateway-trace-2");
+
+        assertThat(mvc.perform(post(WEB_SHELL + "/sessions/create")
+                        .header(TENANT, tenant)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"requestId":"%s","idempotencyKey":"too-long",
+                                 "agentId":"qwen-code","input":[]}
+                                """.formatted("x".repeat(129))))
+                .andReturn().getResponse().getStatus()).isEqualTo(400);
+    }
+
+    private static AuthenticatedTenantActor actor(String tenant) {
+        return new AuthenticatedTenantActor() {
+            @Override
+            public String tenantId() {
+                return tenant;
+            }
+
+            @Override
+            public String actorId() {
+                return "actor-a";
+            }
+
+            @Override
+            public String getName() {
+                return "actor-a";
+            }
+        };
     }
 
     private String webShell(String tenant, String path, String body)
@@ -579,7 +741,8 @@ class ManagedAgentApiContractTest {
         }
         JsonNode sent = body == null ? null
                 : objectMapper.readTree(body).get("requestId");
-        if (sent != null && !sent.asText().equals(requestId)) {
+        if (sent != null && sent.isTextual()
+                && !sent.asText().equals(requestId)) {
             drift.put(label + ": " + RequestIdFilter.HEADER
                     + " does not echo requestId", requestId);
         }

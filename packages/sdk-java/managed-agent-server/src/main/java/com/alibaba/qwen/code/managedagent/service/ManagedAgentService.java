@@ -87,8 +87,9 @@ public class ManagedAgentService {
     }
 
     public CommandAdmission createSession(String tenantId,
-            String idempotencyKey, String agentId, String title,
-            Map<String, Object> metadata, List<InputBlock> blocks) {
+            String idempotencyKey, String agentId, String agentRevision,
+            String title, Map<String, Object> metadata,
+            List<InputBlock> blocks) {
         validateIdempotencyKey(idempotencyKey);
         List<Map<String, Object>> input = input(blocks, false);
         if (!input.isEmpty()) {
@@ -97,6 +98,9 @@ public class ManagedAgentService {
         String effectiveTitle = metadataTitle(title, metadata);
         Map<String, Object> semantic = new LinkedHashMap<>();
         semantic.put("agentId", agentId);
+        if (agentRevision != null) {
+            semantic.put("agentRevision", agentRevision);
+        }
         semantic.put("title", effectiveTitle);
         semantic.put("input", input);
         String requestDigest = digests.digest(semantic);
@@ -111,8 +115,8 @@ public class ManagedAgentService {
         Admission admission;
         try {
             admission = store.insertSessionCommand(tenantId, CREATE,
-                    idempotencyKey, requestDigest, agentId, effectiveTitle,
-                    input, payloadDigest);
+                    idempotencyKey, requestDigest, agentId, agentRevision,
+                    effectiveTitle, input, payloadDigest);
         } catch (DuplicateKeyException error) {
             admission = store.replayCommand(tenantId, CREATE,
                     idempotencyKey, requestDigest);
@@ -123,7 +127,7 @@ public class ManagedAgentService {
 
     public CommandAdmission createWorkspaceSession(String tenantId,
             String actorId, String idempotencyKey, String agentId,
-            String title, Map<String, Object> metadata,
+            String agentRevision, String title, Map<String, Object> metadata,
             List<InputBlock> blocks, WorkspaceSelection selection) {
         validateIdempotencyKey(idempotencyKey);
         if (actorId == null || actorId.isEmpty()) {
@@ -139,6 +143,9 @@ public class ManagedAgentService {
         String effectiveTitle = metadataTitle(title, metadata);
         Map<String, Object> semantic = new LinkedHashMap<>();
         semantic.put("agentId", agentId);
+        if (agentRevision != null) {
+            semantic.put("agentRevision", agentRevision);
+        }
         semantic.put("title", effectiveTitle);
         semantic.put("input", input);
         semantic.put("workspace", selection == null
@@ -152,7 +159,8 @@ public class ManagedAgentService {
         try {
             admission = store.insertWorkspaceSessionCommand(tenantId,
                     actorId, idempotencyKey, requestDigest, agentId,
-                    effectiveTitle, input, payloadDigest, selection);
+                    agentRevision, effectiveTitle, input, payloadDigest,
+                    selection);
         } catch (DuplicateKeyException error) {
             admission = store.replayWorkspaceSessionCommand(tenantId,
                     actorId, idempotencyKey, requestDigest);

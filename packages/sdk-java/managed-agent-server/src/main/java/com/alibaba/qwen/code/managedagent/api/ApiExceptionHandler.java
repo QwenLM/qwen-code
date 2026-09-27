@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.api;
 
 import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import org.slf4j.Logger;
@@ -9,6 +10,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
+import org.springframework.web.HttpMediaTypeNotAcceptableException;
 import org.springframework.web.bind.ServletRequestBindingException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
@@ -24,8 +26,8 @@ public class ApiExceptionHandler {
 
     @ExceptionHandler(ApiException.class)
     public ResponseEntity<Map<String, Object>> api(ApiException error,
-            HttpServletRequest request) {
-        return response(request, error.getStatus(), error.getCode(),
+            HttpServletRequest request, HttpServletResponse response) {
+        return response(request, response, error.getStatus(), error.getCode(),
                 error.getMessage());
     }
 
@@ -33,10 +35,17 @@ public class ApiExceptionHandler {
     public void disconnectedClient() {
     }
 
+    // The client accepts no representation of the envelope.
+    @ExceptionHandler(HttpMediaTypeNotAcceptableException.class)
+    public ResponseEntity<Void> notAcceptable() {
+        return ResponseEntity.status(HttpStatus.NOT_ACCEPTABLE).build();
+    }
+
     @ExceptionHandler(NoResourceFoundException.class)
     public ResponseEntity<Map<String, Object>> missingResource(
-            NoResourceFoundException error, HttpServletRequest request) {
-        return response(request, HttpStatus.NOT_FOUND, "not_found",
+            NoResourceFoundException error, HttpServletRequest request,
+            HttpServletResponse response) {
+        return response(request, response, HttpStatus.NOT_FOUND, "not_found",
                 "The requested endpoint does not exist.");
     }
 
@@ -46,16 +55,16 @@ public class ApiExceptionHandler {
             MethodArgumentTypeMismatchException.class,
             IllegalArgumentException.class})
     public ResponseEntity<Map<String, Object>> invalid(Exception error,
-            HttpServletRequest request) {
-        return response(request, HttpStatus.BAD_REQUEST, "invalid_request",
-                "The request body is invalid.");
+            HttpServletRequest request, HttpServletResponse response) {
+        return response(request, response, HttpStatus.BAD_REQUEST,
+                "invalid_request", "The request body is invalid.");
     }
 
     @ExceptionHandler(Exception.class)
     public ResponseEntity<Map<String, Object>> unexpected(Exception error,
-            HttpServletRequest request) {
+            HttpServletRequest request, HttpServletResponse response) {
         LOG.error("Managed Agent request failed", error);
-        return response(request, HttpStatus.INTERNAL_SERVER_ERROR,
+        return response(request, response, HttpStatus.INTERNAL_SERVER_ERROR,
                 "internal_error",
                 "The Managed Agent request failed.");
     }
@@ -70,8 +79,12 @@ public class ApiExceptionHandler {
     }
 
     private static ResponseEntity<Map<String, Object>> response(
-            HttpServletRequest request, HttpStatus status, String code,
-            String message) {
+            HttpServletRequest request, HttpServletResponse response,
+            HttpStatus status, String code, String message) {
+        // An SSE stream that already started cannot switch to an envelope.
+        if (response.isCommitted()) {
+            return null;
+        }
         // Preset so that an SSE-only Accept header still gets the envelope.
         return ResponseEntity.status(status)
                 .contentType(MediaType.APPLICATION_JSON)

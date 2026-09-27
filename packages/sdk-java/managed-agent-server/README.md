@@ -34,7 +34,9 @@ Sessions record the agent revision from `QWEN_MANAGED_AGENT_REVISION` (default
 `1`) when they are created. Every response carries `X-Request-Id`, which error
 envelopes repeat as `request_id` and the logs print.
 Design: [English](../../../docs/design/2026-09-27-managed-agent-api-contract.md) |
-[简体中文](../../../docs/design/2026-09-27-managed-agent-api-contract.zh-CN.md)
+[简体中文](../../../docs/design/2026-09-27-managed-agent-api-contract.zh-CN.md);
+Session query: [English](../../../docs/design/2026-09-27-managed-agent-session-query.md) |
+[简体中文](../../../docs/design/2026-09-27-managed-agent-session-query.zh-CN.md)
 
 ## Prerequisites
 
@@ -74,7 +76,7 @@ curl -sS http://127.0.0.1:8080/v1/agents/sessions \
   -H 'Content-Type: application/json' \
   -H 'X-Qwen-Tenant-Id: demo' \
   -H 'Idempotency-Key: create-1' \
-  -d '{"agent_id":"qwen-code","input":[{"type":"text","text":"hello"}]}'
+  -d '{"agent_id":"qwen-code","input":[{"type":"input_text","text":"hello"}]}'
 ```
 
 The returned `id` is an RFC UUID and is the canonical identity used by

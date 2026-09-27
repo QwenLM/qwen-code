@@ -160,8 +160,9 @@ public class ManagedAgentStore implements AgentStateStore {
     @Transactional
     public Admission insertSessionCommand(String tenantId, String operation,
             String idempotencyKey, String requestDigest, String agentId,
-            String title, List<Map<String, Object>> input,
-            String payloadDigest) {
+            String requestedRevision, String title,
+            List<Map<String, Object>> input, String payloadDigest) {
+        requireAgentRevision(requestedRevision);
         requireCreationScope(tenantId, idempotencyKey, false);
         return insertSession(tenantId, operation, idempotencyKey,
                 requestDigest, agentId, title, input, payloadDigest,
@@ -172,8 +173,9 @@ public class ManagedAgentStore implements AgentStateStore {
     @Transactional
     public Admission insertWorkspaceSessionCommand(String tenantId,
             String actorId, String idempotencyKey, String requestDigest,
-            String agentId, String title, List<Map<String, Object>> input,
-            String payloadDigest, WorkspaceSelection selection) {
+            String agentId, String requestedRevision, String title,
+            List<Map<String, Object>> input, String payloadDigest,
+            WorkspaceSelection selection) {
         if (!input.isEmpty()) {
             throw workspaceExecutionUnavailable();
         }
@@ -183,6 +185,7 @@ public class ManagedAgentStore implements AgentStateStore {
             return replayWorkspaceCommand(tenantId, actorId,
                     requestDigest, existing.getFirst());
         }
+        requireAgentRevision(requestedRevision);
         requireCreationScope(tenantId, idempotencyKey, true);
         ResolvedBinding workspace = workspaces.resolveForCreation(
                 tenantId, actorId, selection);
@@ -272,6 +275,15 @@ public class ManagedAgentStore implements AgentStateStore {
             throw new ApiException(HttpStatus.CONFLICT,
                     "idempotency_conflict",
                     "The idempotency key was reused with different content.");
+        }
+    }
+
+    // Called only for a new admission; a retry has already replayed.
+    private void requireAgentRevision(String requested) {
+        if (requested != null && !requested.equals(agentRevision)) {
+            throw new ApiException(HttpStatus.BAD_REQUEST,
+                    "unsupported_feature",
+                    "Only the current agent revision can be selected.");
         }
     }
 

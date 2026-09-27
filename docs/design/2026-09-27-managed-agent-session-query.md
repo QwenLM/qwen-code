@@ -52,16 +52,32 @@ surfaces, and that cross-tenant reads return `404 session_not_found`.
 
 ### 4.1 Contract v1.14
 
-- `PublicSession.status` gains `archived`, the value the server has always
-  returned for an archived Session. The planned `archived_at` field is
-  unchanged. If the lifecycle work later represents archiving as `closed` plus
-  `archived_at`, that is a contract change of its own.
+- The Session and Turn status enums gain the values the server already
+  returns. A Session reads `archived` after an archive, and `archiving` or
+  `deleting` while that mutation waits for a retry after the Harness was
+  unavailable. A Turn reads `cancelling` between a cancellation's admission and
+  its settlement. The planned `archived_at` field is unchanged. If the lifecycle
+  work later represents archiving as `closed` plus `archived_at`, that is a
+  contract change of its own.
 - `ErrorEnvelope.error.request_id` becomes required, as section 3 of the
-  contract already states.
-- The error responses the server returns are declared: `400` on the event
-  query, the Items list, and the WebShell session query and get; `400` and
-  `404` on the WebShell transcript, event stream, submit and cancel.
-- The six Session routes above move to `implemented`.
+  [public API contract][contract] that the D1 note links already states.
+- Two shared responses are added: `Unauthorized` (401) and `Unavailable` (503).
+  The implemented operations declare every status the server's own handlers
+  return for them. Session create on both surfaces adds `401 actor_required`
+  for a Workspace selection without a trusted actor, and `503` when the Hosted
+  Harness is unavailable. Session get adds `400 invalid_tenant`, and the
+  WebShell session query and get add `400`. Session get and list on both
+  surfaces add `403 actor_scope_mismatch` from the tenant filter. Framework
+  responses such as `405` and `415` stay undeclared, and a client that accepts
+  no JSON gets a `406` without a body. The partial operations gain the `400`
+  and `404` responses the new probes exercise: `400` on the event query and the
+  Items list, and `400` and `404` on the WebShell transcript, event stream,
+  submit and cancel.
+- The six Session routes above move to `implemented`. `implemented` covers an
+  operation's surface that is not `planned`. The planned `workspace` field,
+  which W0b already returns for bound Sessions, does not match
+  `WorkspaceContext` yet; the `record … WorkspaceContext` gap lines keep
+  tracking it for the workspace-context work.
 
 ### 4.2 `agent_revision`
 
@@ -71,11 +87,16 @@ written to the Session row at admission, so a later change of the setting does
 not rewrite existing Sessions. Flyway V13 adds the column and gives existing
 rows `1`.
 
-A create request may name `agent_revision`. A value other than the current
-revision is rejected with `400 unsupported_feature`. Because the only
-acceptable explicit value equals the one an omitted field resolves to, the
-field is not part of the idempotency digest; that changes when AgentDefinition
-allows several revisions.
+A create request may name `agent_revision`. A new admission that names a value
+other than the current revision is rejected with `400 unsupported_feature`.
+The store checks this after the idempotency replay lookup and before it
+reserves the creation or resolves a Workspace, so a retry of an admitted
+creation still returns the original Session after the setting changes. An
+explicit revision is part of the idempotency digest and an omitted one is not,
+so digests of requests that omit it do not change. A retry that adds, drops or
+changes the field is a different request and gets `409 idempotency_conflict`.
+The same holds for a request that named the field before this change, whose
+digest ignored it; no client in this repository sends the field.
 
 ### 4.3 Capabilities and watermarks
 
@@ -87,7 +108,12 @@ allows several revisions.
   floor.
 - `snapshot_through_sequence` is the covered sequence of the Session's
   Snapshot, the same value the Items list returns, or `0` before the first
-  materialization. It is read without loading the Snapshot's Items.
+  materialization. It is read by primary key without loading the Snapshot's
+  Items, one lookup per Session, as the active Turn already needs. The Session
+  row and the Snapshot are read separately, so while events are being
+  materialized the watermark can briefly be ahead of `last_event_id`. A stream
+  reconciliation discards the Snapshot, so the watermark can also drop back
+  to `0` until the Items are rebuilt.
 - `input_item_id` is `item_<turnId>_input`, the id the input Item is
   materialized with.
 
@@ -96,11 +122,17 @@ allows several revisions.
 A filter that runs before tenant resolution assigns every request an id. It
 uses the incoming `X-Request-Id` when that is visible ASCII of at most 128
 characters, and a random UUID otherwise. On WebShell create, submit and cancel,
-a `requestId` in the body replaces it. The contract allows any string of up to
-128 characters there, so a value that is unsafe to echo in a header is ignored
-rather than rejected. The id is returned in `X-Request-Id` on every response,
-written to `error.request_id`, and placed in the log MDC, which the
-`logging.pattern.correlation` setting prints.
+a `requestId` in the body replaces it once the handler runs. The contract
+allows any string of up to 128 characters there, so a value that is unsafe to
+echo in a header is ignored rather than rejected; a longer value fails
+validation with `400`. A request that fails before the handler runs, such as
+one without a tenant or with an invalid body, keeps the id the filter
+assigned. The id is
+returned in `X-Request-Id` on every response, written to `error.request_id`,
+and placed in the log MDC, which the `logging.pattern.correlation` setting
+prints. The WebShell client now sends a fresh `requestId` with each create,
+submit and cancel instead of reusing the idempotency key, which the contract's `RequestId` header
+forbids.
 
 ### 4.5 Input type
 
@@ -116,21 +148,33 @@ The new error probes showed that a client sending only
 unhandled exception instead of the `404` or `400` envelope, because the JSON
 envelope was not an acceptable representation; a servlet container turns that
 into a 500. Error responses now preset `Content-Type: application/json`, so
-content negotiation no longer drops them.
+content negotiation no longer drops them. Once a stream has started, the
+response is committed and an error can no longer become an envelope, so the
+handler leaves such a response alone rather than appending JSON to the stream.
+A request whose `Accept` header excludes JSON gets `406` without a body, as it
+did before the preset.
 
 ## 5. Contract test
 
-- The scenario sends `input_text`, names the current and a foreign agent
-  revision, and probes every newly declared error status. Request bodies are
-  validated against the schema only for calls that expect success, because
+- The scenario sends `input_text` and names the current and a foreign agent
+  revision. It probes every status that this change declares, including a
+  request without a tenant, an authenticated actor from another tenant, a
+  Workspace selection without an actor and a disabled Harness. Request bodies
+  are validated against the schema only for calls that expect success, because
   error probes send invalid bodies on purpose.
+- The scenario reads a Session while its Turn is cancelling and while an
+  archive waits for a retry, and checks `cancelling`, `input_item_id` and
+  `archiving`.
 - Every response must carry `X-Request-Id`, an error's `request_id` must equal
-  it, and a WebShell `requestId` must be echoed.
-- A gap line may not name an `implemented` operation.
+  it, and a WebShell `requestId` must be echoed. A separate test sends a safe
+  and an unsafe `X-Request-Id` and an unsafe body `requestId`.
+- A request or response gap line may not name an `implemented` operation.
 - A parity test creates one Session through the WebShell adapter and compares
   the public get and list with the WebShell get and query: identity, agent,
-  status and last sequence must match. Cross-tenant reads on both surfaces
-  return `404 session_not_found`.
+  status and last sequence must match. It also pins the revision, the
+  capabilities, the replay floor and the snapshot watermark against the Items
+  list, and checks that cross-tenant reads on both surfaces return
+  `404 session_not_found`.
 - The gap file shrinks from 51 to 21 lines; what remains is D3, lifecycle and
   workspace-context work.
 
@@ -138,9 +182,12 @@ content negotiation no longer drops them.
 
 - Public Session and Turn responses and error envelopes gain fields; nothing
   is removed.
-- Archived Sessions keep `status: "archived"`, now part of the contract.
+- Status values the server already returned (`archived`, `archiving`,
+  `deleting`, `cancelling`) are now part of the contract.
 - The server accepts both input spellings. The WebShell client sends
   `input_text` and requires a server with this change.
+- A WebShell `requestId` longer than 128 characters is now rejected with `400`,
+  as the contract's schema requires.
 - The generated `@qwen-code/web-shell` types now require `request_id` in the
   error envelope, and the client's create and submit requests take
   `input_text` blocks.
@@ -154,8 +201,18 @@ content negotiation no longer drops them.
   echo, dropping `request_id` from the envelope, returning a different status
   on one surface, listing a gap for an `implemented` operation, and rejecting
   `input_text`.
+- A retry that names the admitted revision replays the original Session after
+  the setting changes; skipping the replay lookup makes that test fail.
 - Before the JSON content-type fix, the SSE error probe failed with the
   exception the WebShell client would have seen as a 500.
+- A unit test checks that an error on an already committed stream writes
+  nothing.
+- The MySQL upgrade test, which CI runs against MariaDB, reads revision `1`
+  from a Session created before V13; the same upgrade was reproduced locally on
+  H2 in MySQL mode.
+- The revision tests cover both creation paths and read the stored revision
+  back through a service configured with another one. A `406` test covers
+  unacceptable media types.
 - The WebShell typecheck, the managed component tests and the managed-progress
   e2e spec pass against the regenerated types.
 
@@ -166,3 +223,5 @@ content negotiation no longer drops them.
   `closed` plus `archived_at`.
 - Workspace-context work: `context_revision` and `state` on the Session
   workspace, and a read of a bound Session in the scenario.
+
+[contract]: https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-api-contract.md

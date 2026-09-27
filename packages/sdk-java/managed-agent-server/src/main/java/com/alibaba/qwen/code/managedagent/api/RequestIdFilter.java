@@ -19,7 +19,7 @@ public class RequestIdFilter extends OncePerRequestFilter {
     public static final String HEADER = "X-Request-Id";
     private static final String MDC_KEY = "requestId";
     private static final String ATTRIBUTE = RequestIdFilter.class.getName();
-    // Header-safe and log-safe: visible ASCII only, as the contract caps at 128.
+    // Header-safe and log-safe: visible ASCII only, up to the contract's 128.
     private static final Pattern SAFE = Pattern.compile("[\\x21-\\x7E]{1,128}");
 
     @Override
