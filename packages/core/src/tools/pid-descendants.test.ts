@@ -6,7 +6,7 @@
 
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { listDescendantPids, sigtermPids } from './pid-descendants.js';
 
 describe('pid-descendants', () => {
@@ -50,14 +50,17 @@ describe('pid-descendants', () => {
     });
 
     it('tolerates already-exited pids (ESRCH swallowed)', () => {
-      // Pick a pid almost certainly not in use. process.kill with
-      // SIGTERM to a non-existent pid throws ESRCH which sigtermPids
-      // catches.
-      const result = sigtermPids([999999, 999998]);
-      // The function returns the count of "successfully signaled" pids
-      // (where process.kill didn't throw). For non-existent pids,
-      // it throws ESRCH which is caught, so the count is 0.
-      expect(result).toBe(0);
+      const kill = vi.spyOn(process, 'kill').mockImplementation(() => {
+        throw Object.assign(new Error('No such process'), { code: 'ESRCH' });
+      });
+      try {
+        expect(sigtermPids([999999, 999998])).toBe(0);
+        expect(kill).toHaveBeenCalledTimes(2);
+        expect(kill).toHaveBeenNthCalledWith(1, 999999, 'SIGTERM');
+        expect(kill).toHaveBeenNthCalledWith(2, 999998, 'SIGTERM');
+      } finally {
+        kill.mockRestore();
+      }
     });
   });
 

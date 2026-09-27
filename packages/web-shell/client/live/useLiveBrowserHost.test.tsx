@@ -461,6 +461,51 @@ describe('useLiveBrowserHost', () => {
     });
   });
 
+  it.each(['stop', 'replace', 'epoch'])(
+    'does not upload an old capture after %s',
+    async (change) => {
+      await render();
+      const ws = await connected();
+      await act(async () => {
+        await host!.startSharingScreen();
+      });
+      let resolve!: (frame: {
+        image: string;
+        width: number;
+        height: number;
+      }) => void;
+      shareHandle.grab.mockImplementationOnce(
+        () =>
+          new Promise((done) => {
+            resolve = done;
+          }),
+      );
+      await act(async () => {
+        ws.receive({
+          type: 'host.capture_visual',
+          requestId: 'stale',
+          source: 'screen',
+          epoch: 0,
+        });
+        if (change === 'stop') host!.stopSharingScreen();
+        else if (change === 'replace') await host!.startSharingScreen();
+        else
+          ws.receive({
+            type: 'host.state',
+            epoch: 1,
+            status: status('listening'),
+          });
+        resolve({ image: 'old-image', width: 1, height: 1 });
+      });
+      expect(
+        ws.text().find((message) => message['requestId'] === 'stale'),
+      ).toMatchObject({ success: false });
+      expect(
+        ws.text().some((message) => message['image'] === 'old-image'),
+      ).toBe(false);
+    },
+  );
+
   it('follows the browser\u2019s own stop-sharing control', async () => {
     await render();
     await connected();
@@ -986,4 +1031,207 @@ describe('useLiveBrowserHost', () => {
       expect(host!.captureMode).toBeUndefined();
     });
   });
+});
+
+describe('continuous screen feed', () => {
+  async function feeding() {
+    await render();
+    const ws = await connected();
+    await act(async () => {
+      ws.receive({
+        type: 'host.welcome',
+        screenFeedV1: true,
+        epoch: 1,
+        status: status('listening'),
+      });
+      await host!.startSharingScreen();
+    });
+    const feedId = host!.screenFeed.feedId!;
+    await act(async () =>
+      ws.receive({
+        type: 'host.screen_feed_state',
+        epoch: 1,
+        feedId,
+        phase: 'starting',
+      }),
+    );
+    return { ws, feedId };
+  }
+
+  it('keeps old daemons on demand without unsupported commands', async () => {
+    await render();
+    const ws = await connected();
+    await act(async () => {
+      ws.receive({ type: 'host.state', epoch: 1, status: status('listening') });
+      await host!.startSharingScreen();
+    });
+    expect(
+      ws
+        .text()
+        .some((message) =>
+          String(message['type']).startsWith('host.screen_feed'),
+        ),
+    ).toBe(false);
+  });
+
+  it('automatically starts when a call becomes ready after sharing', async () => {
+    await render();
+    const ws = await connected();
+    await act(async () => {
+      ws.receive({
+        type: 'host.welcome',
+        screenFeedV1: true,
+        epoch: 0,
+        status: status('idle'),
+      });
+      await host!.startSharingScreen();
+    });
+    expect(host!.screenFeed.phase).toBe('idle');
+    await act(async () =>
+      ws.receive({ type: 'host.state', epoch: 1, status: status('listening') }),
+    );
+    expect(ws.text().at(-1)).toMatchObject({
+      type: 'host.screen_feed_start',
+      epoch: 1,
+    });
+  });
+
+  it('starts automatically during an active call and sends frames after the starting acknowledgement', async () => {
+    const { ws, feedId } = await feeding();
+    expect(ws.text()).toContainEqual({
+      type: 'host.screen_feed_frame',
+      epoch: 1,
+      feedId,
+      image: 'ZmFrZS1qcGVn',
+    });
+    expect(host!.screenShare.sharing).toBe(true);
+  });
+
+  it.each(['stop', 'revoke', 'disconnect', 'callEnd'])(
+    'cancels the feed on %s and ignores late replies',
+    async (operation) => {
+      const { ws, feedId } = await feeding();
+      await act(async () => {
+        if (operation === 'stop') host!.stopSharingScreen();
+        else if (operation === 'revoke') shareEnded!();
+        else if (operation === 'disconnect') host!.disconnect();
+        else
+          ws.receive({ type: 'host.state', epoch: 1, status: status('idle') });
+      });
+      expect(ws.text().at(-1)).toEqual({
+        type: 'host.screen_feed_stop',
+        epoch: 1,
+        feedId,
+      });
+      await act(async () =>
+        ws.receive({
+          type: 'host.screen_feed_state',
+          epoch: 1,
+          feedId,
+          phase: 'streaming',
+        }),
+      );
+      expect(host!.screenFeed.phase).not.toBe('streaming');
+    },
+  );
+
+  it('revokes an active share on a new epoch before any new feed can reuse its pending encode', async () => {
+    let resolve!: (frame: {
+      image: string;
+      width: number;
+      height: number;
+    }) => void;
+    shareHandle.grab.mockImplementationOnce(
+      () =>
+        new Promise((done) => {
+          resolve = done;
+        }),
+    );
+    const { ws, feedId } = await feeding();
+    await act(async () => {
+      ws.receive({ type: 'host.state', epoch: 2, status: status('listening') });
+      const latestStart = ws
+        .text()
+        .filter((message) => message['type'] === 'host.screen_feed_start')
+        .at(-1)!;
+      ws.receive({
+        type: 'host.screen_feed_state',
+        epoch: 2,
+        feedId: latestStart['feedId'],
+        phase: 'starting',
+      });
+      resolve({ image: 'old-feed', width: 1, height: 1 });
+    });
+    expect(ws.text()).toContainEqual({
+      type: 'host.screen_feed_stop',
+      epoch: 1,
+      feedId,
+    });
+    expect(ws.text().some((message) => message['image'] === 'old-feed')).toBe(
+      false,
+    );
+    expect(host!.screenFeed.phase).toBe('stopped');
+    expect(host!.screenShare.sharing).toBe(false);
+    expect(shareHandle.stop).toHaveBeenCalled();
+    expect(shareHandle.grab).toHaveBeenCalledTimes(1);
+    expect(
+      ws
+        .text()
+        .filter((message) => message['type'] === 'host.screen_feed_start'),
+    ).toHaveLength(1);
+  });
+
+  it('does not retry an errored feed on periodic state updates but permits a new share', async () => {
+    const { ws, feedId } = await feeding();
+    await act(async () => {
+      ws.receive({
+        type: 'host.screen_feed_state',
+        epoch: 1,
+        feedId,
+        phase: 'error',
+        message: 'failed',
+      });
+      ws.receive({ type: 'host.state', epoch: 1, status: status('listening') });
+      ws.receive({ type: 'host.state', epoch: 1, status: status('thinking') });
+    });
+    expect(host!.screenFeed.phase).toBe('error');
+    expect(
+      ws
+        .text()
+        .filter((message) => message['type'] === 'host.screen_feed_start'),
+    ).toHaveLength(1);
+    await act(async () => host!.startSharingScreen());
+    expect(
+      ws
+        .text()
+        .filter((message) => message['type'] === 'host.screen_feed_start'),
+    ).toHaveLength(2);
+  });
+
+  it.each(['listening', 'starting'])(
+    'discards a pending screen picker when a %s call ends',
+    async (state) => {
+      await render();
+      const ws = await connected();
+      let resolve!: (value: typeof shareHandle) => void;
+      startShare.mockImplementationOnce(
+        () =>
+          new Promise((done) => {
+            resolve = done;
+          }),
+      );
+      let pending!: Promise<void>;
+      await act(async () => {
+        ws.receive({ type: 'host.state', epoch: 1, status: status(state) });
+        pending = host!.startSharingScreen();
+        ws.receive({ type: 'host.state', epoch: 1, status: status('idle') });
+      });
+      await act(async () => {
+        resolve(shareHandle);
+        await pending;
+      });
+      expect(host!.screenShare.sharing).toBe(false);
+      expect(shareHandle.stop).toHaveBeenCalled();
+    },
+  );
 });

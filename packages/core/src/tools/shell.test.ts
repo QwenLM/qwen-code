@@ -10,6 +10,8 @@ import {
   describe,
   it,
   expect,
+  beforeAll,
+  afterAll,
   beforeEach,
   afterEach,
   type Mock,
@@ -91,6 +93,7 @@ import {
   type ShellOutputEvent,
 } from '../services/shellExecutionService.js';
 import * as fs from 'node:fs';
+import { mkdtemp, rm } from 'node:fs/promises';
 import * as os from 'node:os';
 import * as crypto from 'node:crypto';
 import path from 'node:path';
@@ -120,6 +123,7 @@ function getCommandParameterDescription(shellTool: ShellTool): string {
 }
 
 describe('ShellTool', () => {
+  let outputDirectory: string;
   let shellTool: ShellTool;
   let mockConfig: Config;
   let mockShellOutputCallback: (event: ShellOutputEvent) => void;
@@ -135,6 +139,17 @@ describe('ShellTool', () => {
     check: ReturnType<typeof vi.fn>;
     recordWrite: ReturnType<typeof vi.fn>;
   };
+
+  beforeAll(async () => {
+    const realOs = await vi.importActual<typeof import('node:os')>('node:os');
+    outputDirectory = await mkdtemp(
+      path.join(realOs.tmpdir(), 'qwen-shell-test-'),
+    );
+  });
+
+  afterAll(async () => {
+    await rm(outputDirectory, { recursive: true, force: true });
+  });
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -187,7 +202,7 @@ describe('ShellTool', () => {
         .mockReturnValue(createMockWorkspaceContext('/test/dir')),
       storage: {
         getUserSkillsDirs: vi.fn().mockReturnValue(['/test/dir/.qwen/skills']),
-        getProjectTempDir: vi.fn().mockReturnValue('/tmp/qwen-temp'),
+        getProjectTempDir: vi.fn().mockReturnValue(outputDirectory),
         getProjectDir: vi.fn().mockReturnValue('/test/proj'),
       },
       getTruncateToolOutputThreshold: vi.fn().mockReturnValue(0),

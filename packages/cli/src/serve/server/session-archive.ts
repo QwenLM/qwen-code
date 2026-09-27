@@ -262,10 +262,9 @@ async function runWithDaemonWriterLease<T>(params: {
       ) {
         throw error;
       }
-      lease = await service.acquireSessionMaintenanceLease(
-        sessionId,
-        leaseOptions,
-      );
+      lease =
+        (await service.acquireSealedManagedMaintenanceLease(sessionId)) ??
+        (await service.acquireSessionMaintenanceLease(sessionId, leaseOptions));
     }
   } catch (error) {
     return { mutationApplied: false, error };

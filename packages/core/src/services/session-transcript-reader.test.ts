@@ -4395,6 +4395,23 @@ describe('SessionTranscriptReader', () => {
       } as ChatRecord;
     }
 
+    it('exposes the admitted prompt identity before a turn result is recorded', async () => {
+      await writeRecords([
+        {
+          ...record('u1', null, 'same prompt'),
+          daemonPromptId: 'active-prompt',
+        },
+      ]);
+      const page = await new SessionTranscriptReader(
+        workspaceDir,
+      ).readTurnIndexPage(sessionId, { limit: 10 });
+      expect(page.turns).toHaveLength(1);
+      expect(page.turns[0]).toMatchObject({
+        turnId: 'u1',
+        promptId: 'active-prompt',
+      });
+    });
+
     it('builds stable sparse pages and projects only public previews', async () => {
       const attachmentToken = '@attachment:///file-1';
       const user = {

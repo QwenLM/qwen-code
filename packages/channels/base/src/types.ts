@@ -3,17 +3,15 @@ import type { ChannelAgentBridge } from './ChannelAgentBridge.js';
 import type { ChannelBase, ChannelBaseOptions } from './ChannelBase.js';
 import type { ChannelWebhookConfig } from './ChannelWebhookTask.js';
 
+/** @deprecated Use PrivatePolicy. */
 export type SenderPolicy = 'allowlist' | 'pairing' | 'open';
 export type SessionScope = 'user' | 'thread' | 'chat_thread' | 'single';
 export type ChannelType = string;
 export type GroupPolicy = 'disabled' | 'allowlist' | 'pairing' | 'open';
-/**
- * Who may speak inside a group the channel already admitted (`GroupConfig.senders`).
- * `inherit` follows `senderPolicy`, like a direct message. `pairing` is
- * deliberately absent: pairing approvals are stored per user and would also
- * unlock direct messages. Admitting a whole group is `groupPolicy: "pairing"`.
- */
-export type GroupSenderPolicy = 'inherit' | 'open' | 'allowlist';
+export type PrivatePolicy = 'disabled' | 'allowlist' | 'pairing' | 'open';
+/** Members who may speak inside an admitted group. */
+export type GroupSenderPolicy = 'open' | 'allowlist';
+/** @deprecated Use PrivatePolicy. */
 export type DmPolicy = 'disabled' | 'open';
 export type DispatchMode = 'collect' | 'steer' | 'followup';
 export type ChannelOutputMode = 'per_task' | 'per_response' | 'per_turn';
@@ -46,10 +44,7 @@ export interface GroupConfig {
   requireMention?: boolean; // default: true
   dispatchMode?: DispatchMode;
   groupHistoryLimit?: number;
-  /**
-   * Who may speak in the group. Default: `open` in an approved group under
-   * `groupPolicy: "pairing"`, `inherit` otherwise.
-   */
+  /** Who may speak in the group. Default: `open`. */
   senders?: GroupSenderPolicy;
   /** Members allowed to speak when `senders` is `allowlist`. */
   allowedUsers?: string[];
@@ -60,7 +55,9 @@ export interface ChannelConfig {
   token: string;
   clientId?: string;
   clientSecret?: string;
-  senderPolicy: SenderPolicy;
+  privatePolicy?: PrivatePolicy;
+  /** @deprecated Use privatePolicy. Read only as a private-access fallback. */
+  senderPolicy?: SenderPolicy;
   allowedUsers: string[];
   /** Channel routing scope. `thread` is retained for existing configurations only. */
   sessionScope: SessionScope;
@@ -69,6 +66,10 @@ export interface ChannelConfig {
   cwd: string;
   approvalMode?: string;
   instructions?: string;
+  /** Exact message prefixes mapped to first-turn session instructions. */
+  messageRoutes?: Record<string, string>;
+  /** Configured route used for messages without a matching prefix. */
+  defaultMessageRoute?: string;
   identity?: ChannelIdentityConfig;
   memoryScope?: ChannelMemoryScopeConfig;
   webhooks?: ChannelWebhookConfig;
@@ -76,11 +77,11 @@ export interface ChannelConfig {
   /** Output grouping for opted-in adapters. Defaults to `per_turn`. */
   outputMode?: ChannelOutputMode;
   groupPolicy: GroupPolicy; // default: "disabled"
-  dmPolicy: DmPolicy; // default: "open"
+  /** @deprecated Use privatePolicy. Read only as a private-access fallback. */
+  dmPolicy?: DmPolicy;
   /**
    * Who may operate a shared session (/approve, /cancel, /clear, /loop, ...).
-   * Authoritative when set, even when empty. Unset derives the operators from
-   * `allowedUsers` and the sender axes.
+   * Unset or empty grants no shared-session operator permissions.
    */
   operators?: string[];
   groupHistoryLimit?: number;
@@ -113,6 +114,10 @@ export interface Envelope {
   chatId: string;
   chatName?: string;
   text: string;
+  /** Selected by the channel's route matcher, never by the remote sender. */
+  messageRoute?: string;
+  /** Internal provider events that are not user-authored messages. */
+  bypassMessageRoutes?: true;
   /**
    * `text` is an adapter-synthesized placeholder (`(image)`, `(voice
    * message)`, `(file: …)`) rather than something the user typed.
@@ -168,6 +173,7 @@ export interface Envelope {
 
 export interface SessionTarget {
   channelName: string;
+  messageRoute?: string;
   senderId: string;
   chatId: string;
   threadId?: string;

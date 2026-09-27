@@ -465,6 +465,10 @@ describe('CLI entry import boundary', () => {
     );
     expect(runServeSource).toContain("import('./server.js')");
     expect(runServeSource).toContain("import('@qwen-code/acp-bridge/bridge')");
+    expect(runServeSource).not.toMatch(/import \{ SessionService \} from/);
+    expect(runServeSource).toMatch(
+      /await import\(\s*'@qwen-code\/qwen-code-core\/services\/sessionService\.js'/,
+    );
     // web-shell-static (express-static/CSP machinery) must stay out of the
     // fast-path static closure at every depth, including transitive edges
     // through server/self-origin.js and web-shell-preauth.js; the static
@@ -731,6 +735,36 @@ describe('serve fast path argument parsing', () => {
       ['rate-limit-read', ['--rate-limit-read', '120']],
       ['rate-limit-window-ms', ['--rate-limit-window-ms', '60000']],
       ['experimental-lsp', ['--experimental-lsp']],
+      ['profile', ['--profile', 'hosted-harness']],
+      [
+        'hosted-harness-capability-digest',
+        ['--hosted-harness-capability-digest', `sha256:${'a'.repeat(64)}`],
+      ],
+      ['experimental-managed-agents', ['--experimental-managed-agents']],
+      [
+        'experimental-managed-runtime-worker',
+        ['--experimental-managed-runtime-worker'],
+      ],
+      [
+        'experimental-managed-runtime-auto-local',
+        ['--experimental-managed-runtime-auto-local'],
+      ],
+      [
+        'experimental-managed-runtime-url',
+        ['--experimental-managed-runtime-url', 'http://127.0.0.1:3001'],
+      ],
+      [
+        'experimental-managed-runtime-token',
+        ['--experimental-managed-runtime-token', 'test-token'],
+      ],
+      [
+        'managed-runtime-broker-url',
+        ['--managed-runtime-broker-url', 'http://127.0.0.1:3002'],
+      ],
+      [
+        'managed-runtime-broker-token',
+        ['--managed-runtime-broker-token', 'test-token'],
+      ],
       ['restore-ask-user-question', ['--restore-ask-user-question']],
       ['external-tool-guard-mode', ['--external-tool-guard-mode', 'off']],
       [
@@ -747,6 +781,15 @@ describe('serve fast path argument parsing', () => {
     ]);
     const expectedFallbackOptions = new Set([
       'channel',
+      'profile',
+      'hosted-harness-capability-digest',
+      'experimental-managed-agents',
+      'experimental-managed-runtime-worker',
+      'experimental-managed-runtime-auto-local',
+      'experimental-managed-runtime-url',
+      'experimental-managed-runtime-token',
+      'managed-runtime-broker-url',
+      'managed-runtime-broker-token',
       'external-tool-guard-endpoint',
       'external-tool-guard-mode',
       'external-tool-guard-timeout-ms',
