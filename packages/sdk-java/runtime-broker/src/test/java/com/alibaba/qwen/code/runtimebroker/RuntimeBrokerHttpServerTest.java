@@ -16,6 +16,7 @@ import java.util.HexFormat;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -161,12 +162,27 @@ class RuntimeBrokerHttpServerTest {
             ToolExecutionRecord unknown = fixture.service.getExecution("harness", "runtime", id).toCompletableFuture().join();
             assertEquals(ToolExecutionRecord.State.UNKNOWN, unknown.getState());
             assertTrue(!unknown.getReference().containsKey("executionCallId"));
-            fixture.transport.runtimeStatus = Map.of("state", "executing");
             String route = "/executions/" + id + "?requestId=read&harnessSessionId=harness&runtimeSessionId=runtime";
             HttpRequest request = HttpRequest.newBuilder(fixture.uri(route)).header("Authorization", "Bearer secret").GET().build();
+            assertEquals(409, fixture.client.send(request, HttpResponse.BodyHandlers.ofString()).statusCode());
+            fixture.transport.runtimeStatus = Map.of("state", "prepared");
+            HttpResponse<String> prepared = fixture.client.send(request, HttpResponse.BodyHandlers.ofString());
+            assertEquals(200, prepared.statusCode(), prepared.body());
+            assertEquals("prepared", JSON.parseObject(prepared.body()).getJSONObject("status").getString("state"));
+            assertEquals(Set.of("state", "cancelRequested", "lastSeq", "firstAvailableSeq", "progressGap", "progress"),
+                    JSON.parseObject(prepared.body()).getJSONObject("status").keySet());
+            HttpResponse<String> repeatedStart = fixture.post("/executions/" + id + ":start", Map.of(
+                    "protocolVersion", 1, "requestId", "repeat", "harnessSessionId", "harness",
+                    "runtimeSessionId", "runtime", "payloadJson", payload));
+            assertEquals(200, repeatedStart.statusCode(), repeatedStart.body());
+            assertEquals("prepared", JSON.parseObject(repeatedStart.body()).getJSONObject("status").getString("state"));
+            assertEquals(1, fixture.transport.executions.get());
+            fixture.transport.runtimeStatus = Map.of("state", "executing");
             HttpResponse<String> running = fixture.client.send(request, HttpResponse.BodyHandlers.ofString());
             assertEquals(200, running.statusCode(), running.body());
             assertEquals("executing", JSON.parseObject(running.body()).getJSONObject("status").getString("state"));
+            assertEquals(Set.of("state", "cancelRequested", "lastSeq", "firstAvailableSeq", "progressGap", "progress"),
+                    JSON.parseObject(running.body()).getJSONObject("status").keySet());
             assertEquals(ToolExecutionRecord.State.UNKNOWN,
                     fixture.service.getExecution("harness", "runtime", id).toCompletableFuture().join().getState());
             fixture.transport.runtimeStatus = Map.of("state", "cancel_requested");
@@ -174,6 +190,9 @@ class RuntimeBrokerHttpServerTest {
                     "protocolVersion", 1, "requestId", "cancel", "harnessSessionId", "harness", "runtimeSessionId", "runtime"));
             assertEquals(200, cancelling.statusCode(), cancelling.body());
             assertEquals("cancel_requested", JSON.parseObject(cancelling.body()).getJSONObject("status").getString("state"));
+            assertEquals(Set.of("state", "cancelRequested", "lastSeq", "firstAvailableSeq", "progressGap", "progress"),
+                    JSON.parseObject(cancelling.body()).getJSONObject("status").keySet());
+            assertTrue(JSON.parseObject(cancelling.body()).getJSONObject("status").getBooleanValue("cancelRequested"));
             assertEquals(1, fixture.transport.cancellations.get());
             assertEquals(ToolExecutionRecord.State.UNKNOWN,
                     fixture.service.getExecution("harness", "runtime", id).toCompletableFuture().join().getState());

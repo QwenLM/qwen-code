@@ -257,8 +257,9 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
             if (!(body.get("payloadJson") instanceof String payload)) {
                 throw new RuntimeBrokerException(400, "runtime_payload_invalid", "payloadJson is required", false);
             }
-            complete(exchange, service.startExecution(harnessSessionId, runtimeSessionId, executionCallId, payload),
-                    record -> executionEnvelope(harnessSessionId, runtimeSessionId, record));
+            complete(exchange, service.startExecution(harnessSessionId, runtimeSessionId, executionCallId, payload)
+                    .thenCompose(record -> observe(harnessSessionId, runtimeSessionId, record)),
+                    observation -> observedExecutionEnvelope(harnessSessionId, runtimeSessionId, observation));
             return;
         }
         if ("POST".equals(exchange.getRequestMethod())
@@ -314,10 +315,14 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
         ToolExecutionRecord record = observation.getRecord();
         String state = observation.getRuntimeState();
         if (record.getState() == ToolExecutionRecord.State.UNKNOWN
-                && ("executing".equals(state) || "cancel_requested".equals(state))) {
+                && ("prepared".equals(state) || "executing".equals(state)
+                    || "cancel_requested".equals(state))) {
             Map<String, Object> response = envelope(harnessSessionId, runtimeSessionId,
                     "executionCallId", record.getExecutionCallId());
-            response.put("status", Map.of("state", state));
+            Map<String, Object> observedStatus = status(record);
+            observedStatus.put("state", state);
+            observedStatus.put("cancelRequested", record.isCancelRequested() || "cancel_requested".equals(state));
+            response.put("status", observedStatus);
             return response;
         }
         return executionEnvelope(harnessSessionId, runtimeSessionId, record);
