@@ -125,7 +125,7 @@
                         <version>${maven-failsafe-plugin.version}</version>
                         <configuration>
                             <excludes>
-                                <exclude>**/HostedHarnessMySqlIT.java</exclude>
+                                <exclude>**/Hosted*IT.java</exclude>
                             </excludes>
                         </configuration>
                         <executions>
@@ -150,7 +150,7 @@
                         <version>${maven-failsafe-plugin.version}</version>
                         <configuration>
                             <includes>
-                                <include>**/HostedHarnessMySqlIT.java</include>
+                                <include>**/Hosted*IT.java</include>
                             </includes>
                             <failIfNoTests>true</failIfNoTests>
                             <forkedProcessTimeoutInSeconds>180</forkedProcessTimeoutInSeconds>
