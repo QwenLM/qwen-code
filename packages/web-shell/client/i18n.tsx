@@ -7,10 +7,6 @@ import {
 
 import { LIVE_MESSAGES_EN, LIVE_MESSAGES_ZH } from './live/messages.js';
 import {
-  COLLAB_MESSAGES_EN,
-  COLLAB_MESSAGES_ZH,
-} from './components/workspace-agents/messages.js';
-import {
   SETTINGS_MESSAGES_EN,
   SETTINGS_MESSAGES_ZH,
 } from './settings/messages.js';
@@ -626,8 +622,6 @@ const EN: Messages = {
   'agent.view': 'View',
   'agents.closed': 'Agents panel closed.',
   'agents.title': 'Agents',
-  'agents.description':
-    'Manage reusable agent definitions for tasks, Agent Teams, and shared-thread collaboration.',
   'subagent.result': 'Result',
   'subagent.tools': (v) => `Tools (${v?.count ?? 0})`,
   'subagent.toolsCount': (v) => `${v?.count ?? 0} tools`,
@@ -4115,7 +4109,6 @@ const EN: Messages = {
   'welcome.titlePrefix': 'Welcome to',
   'welcome.tipLabel': 'Tips:',
   ...LIVE_MESSAGES_EN,
-  ...COLLAB_MESSAGES_EN,
   ...SETTINGS_MESSAGES_EN,
 };
 
@@ -4569,12 +4562,6 @@ const ZH: Messages = {
   'toolName.savememory': '保存记忆',
   'toolName.askuserquestion': '询问用户',
   'toolName.toolsearch': '工具搜索',
-  'toolName.thread_post': '发帖到线程',
-  'toolName.thread_wait': '等待协作方',
-  'toolName.thread_block': '提出阻塞问题',
-  'toolName.thread_review': '提交待评审',
-  'toolName.thread_create': '创建子线程',
-  'toolName.thread_read': '读取线程',
   'about.auth': '认证',
   'about.baseUrl': 'Base URL',
   'about.fastModel': '快速模型',
@@ -4766,8 +4753,6 @@ const ZH: Messages = {
   'agent.view': '查看',
   'agents.closed': '智能体面板已关闭。',
   'agents.title': '智能体',
-  'agents.description':
-    '管理可复用的智能体定义，用于任务执行、Agent Team 或共享任务协作。',
   'subagent.result': '结果',
   'subagent.tools': (v) => `工具 (${v?.count ?? 0})`,
   'subagent.toolsCount': (v) => `${v?.count ?? 0} 个工具`,
@@ -7979,7 +7964,6 @@ const ZH: Messages = {
   'welcome.titlePrefix': '欢迎使用',
   'welcome.tipLabel': '提示：',
   ...LIVE_MESSAGES_ZH,
-  ...COLLAB_MESSAGES_ZH,
   ...SETTINGS_MESSAGES_ZH,
 };
 
