@@ -1,0 +1,335 @@
+# Managed Workspace Recovery and Reclamation (W0e)
+
+[English](2026-09-27-managed-workspace-recovery.md) | [简体中文](2026-09-27-managed-workspace-recovery.zh-CN.md)
+
+Status: proposed decision and implementation plan, 2026-09-27. No recovery
+enablement is implemented by this document. Baseline: `e0b8bea9e0ba369a0661bc51cbbb9a27555aff48`.
+
+Related: [roadmap #12380](https://github.com/QwenLM/qwen-code/issues/12380),
+[lost executions #12670](https://github.com/QwenLM/qwen-code/issues/12670),
+[local workers #12766](https://github.com/QwenLM/qwen-code/issues/12766),
+[W0c-3](2026-09-26-managed-workspace-execution.md), and
+[W0d](managed-workspace-w0d-web-shell-binding.md).
+
+## 1. Problem and verified baseline
+
+W0d lets a user create and inspect a fixed Workspace binding. Recovery must
+preserve that binding while releasing physical resources safely. Changing a
+default Workspace or selecting a new directory is never a recovery operation.
+
+The production local-process provisioner reports the durable kind
+`local-process`, but its worker ownership lives in memory. After Broker restart
+it observes the previous worker as `UNKNOWN`, even if that worker has exited.
+The default reconciliation deadline is four 30-second operation leases. A
+timeout releases the reconciliation claim and leaves the binding `READY`.
+Normal shutdown sends termination to owned workers without retiring their
+durable bindings. A Broker crash can leave a worker alive.
+
+The test-only recoverable provisioner records worker PID and start time. It
+can drive the merged Broker reconciliation path, but it is not a production
+identity store or proof that every writer has stopped. If it reports
+`NOT_FOUND`, the Broker persists `LOST`. An unsettled execution then pins that
+generation indefinitely. `reconcileExecution` answers `IN_FLIGHT` for an
+orphaned `EXECUTING` record; it only queries evidence for `UNKNOWN` records.
+
+On this baseline, the existing
+`ProcessCrashFaultGateTest#aHostCrashPinsTheLostGenerationBehindTheUnsettledCall`
+was run with real Broker JVMs, the global qwen 0.24.6 worker and durable H2. It
+passed its assertions of the defect: `warm`/`acquire` returned
+`runtime_broker_runtime_lost`, `release` returned
+`runtime_reconciliation_required`, the execution remained `EXECUTING`, and
+there was no replay or replacement worker. This is baseline evidence, not a
+passing recovery implementation. The test kills selected processes; it does
+not certify an actual host reboot or an isolation domain with escaped children.
+
+## 2. Recommended decision for #12670
+
+Introduce a distinct execution state `ABANDONED`: the original Runtime journal
+is permanently unavailable, the outcome remains unknown, and polling for a
+result can stop. It carries no `executionStatus`, result or `settledAt`.
+Persist `abandonedAt`, reason `runtime_lost`, and a reference to the exact
+generation's loss evidence. Keep the execution identity, idempotency key,
+request digest, reference, cancellation intent, sequence and last dispatch
+claim. `SETTLED` continues to mean a result supported by existing evidence.
+
+After durable, authoritative loss of the original Runtime is established,
+`PREPARED`, `DISPATCHING`, `EXECUTING`, `CANCEL_REQUESTED` and `UNKNOWN` may
+transition to `ABANDONED`. One conservative rule covers all five states; no
+success, failure, cancellation or `not_started` result is synthesized. A
+previously `SETTLED` result wins if it committed first and remains unchanged.
+Late completion, cancellation, renewal, dispatch takeover and manual UNKNOWN
+resolution cannot mutate an abandoned record. The same idempotency key never
+starts another physical execution, including after a fresh generation exists.
+
+**Ending result lookup does not authorize resource reuse.** A `LOST` binding
+and its Runtime Sessions remain pinned until there is independent, durable
+evidence that the old execution domain cannot write again. This gate applies
+to legacy boot v1 as well as managed boot v2. Legacy placements have no
+Workspace holder to provide a second safety boundary.
+
+Keep `isSettled()` for result-bearing records. Add an explicit terminal-state
+predicate for control flow, and distinguish active-result accounting from the
+generation's physical reuse gate. Do not globally replace every
+`!isSettled()` check and thereby make `ABANDONED` an implicit unlock.
+
+The recommendation is to resolve this rule before enabling durable production
+adoption in #12766. It does not require Stage G to resume a Hosted Turn: W0e
+records uncertainty and recovers resources; Stage G decides the logical Turn's
+continuation, history and user resolution.
+
+## 3. Evidence and authorization
+
+Store loss and writer-stop evidence against the exact binding ID/generation,
+Runtime identity/incarnation, resource identity and host identity. Evidence is
+versioned, records its source and observation time, and is retained after
+reclamation. The source is a trusted provisioner or host supervisor, never a
+browser request, client path, guessed PID or caller-supplied `force` flag.
+Monotonic evidence updates must not overwrite a conflicting identity or
+downgrade an already recorded stop proof.
+
+| Observation                                                                                    | Result lookup                                | Physical reuse                                                                 |
+| ---------------------------------------------------------------------------------------------- | -------------------------------------------- | ------------------------------------------------------------------------------ |
+| Network failure, timeout, expired claim, missing/corrupt process record                        | Keep unresolved                              | Block                                                                          |
+| Exact worker identity proved permanently absent                                                | May record `ABANDONED` after persisting loss | Block until writer-stop proof                                                  |
+| Same-host boot identity changed, from a trusted OS source and a durable pre-crash record       | Record permanent loss                        | Eligible after proving the old domain belonged to that host boot               |
+| Trusted isolation supervisor proves the exact old execution domain is empty and cannot restart | Record permanent loss if its journal is gone | Eligible                                                                       |
+| Worker PID gone, PID reused, SIGTERM sent, or one descendant snapshot is empty                 | At most worker-loss evidence                 | Block                                                                          |
+| Original worker closes the Session activation gate and reports no invocation active            | Keep actual journal outcomes                 | Existing normal-release semantics only; not proof about escaped Shell children |
+
+The first successful crash-reclamation path should target the existing
+single-host local-storage deployment and a verified host reboot. Platforms
+without a trusted boot identity stay blocked. Broker-only restart can adopt a
+live worker for original status/cancel/release after full identity checks.
+Trusted recovery/cleanup uses saved ownership and service authentication; a new
+execution separately requires the current actor grant. It does not restart or
+replay a Hosted Turn.
+
+The current tool profile includes Shell and permits detached descendants. A
+root PID/start-time check, process-group kill or SQL epoch alone does not prove
+those descendants stopped. General worker-crash reclamation needs a killable
+isolation domain or a separately versioned restricted tool profile. W0e does
+not silently reinterpret the existing frozen profile as file-tools-only.
+Remote filesystems and external side effects need their own fencing contract;
+the host-reboot proof here is limited to administrator-managed local storage.
+It also requires a trusted workload that cannot arrange writers outside the
+recorded domain, including cron, launchd or systemd jobs that restart after a
+reboot. A changed boot identity proves old processes exited, not that an
+external scheduler cannot recreate them. If that prerequisite is not
+established, keep the storage blocked even after reboot.
+
+## 4. Durable recovery sequence and races
+
+Recovery is bounded, idempotent and restartable at each durable step:
+
+1. Claim reconciliation for the exact binding generation. Observe outside SQL
+   transactions; recheck ownership, generation and identity before committing
+   the observation. `UNKNOWN` retries within the existing deadline;
+   conflicting identity remains blocked.
+2. Commit loss evidence and `LOST`, fencing new Runtime Session and execution
+   admissions to that generation. A stale Broker cannot insert `ACQUIRING` or
+   `PREPARED` after this fence.
+3. Mark remaining nonterminal executions `ABANDONED` in bounded batches using
+   state/version checks. Concurrent valid settlement may win; a later
+   settlement cannot revive an abandoned record. Keep all physical pins while
+   writer-stop evidence is absent.
+4. Once writer-stop proof is persisted, release the exact generation's Runtime
+   Sessions locally. No transport call to a replacement Runtime may answer for
+   the old generation. A logical Managed Agent Session and its Workspace
+   binding remain intact.
+5. For managed storage, conditionally clear only the matching holder after
+   checking the evidence and original holder identity. A crash before or after
+   this write resumes safely; an old retry cannot clear a new holder. Revoked
+   product access can prevent new work without preventing trusted physical
+   cleanup of the saved identity.
+6. Under the binding claim, recheck absence of active references and the
+   writer-stop proof, retire the old binding, then allow normal provisioning.
+   A new tool turn receives a new Runtime Session ID. Reclamation never chooses
+   a different Workspace, storage mapping or configuration for the existing
+   logical Session.
+
+The SQL concurrency boundary must be implemented, not inferred from Java
+`synchronized`. Today Session validation and execution insertion use separate
+transactions. A late insertion can land after an abandonment scan. New
+admissions and the loss fence must lock the same binding-generation row and
+validate its state in the insertion transaction. Use one lock order:
+binding, Runtime Session, execution; order batch execution rows by stable key.
+Reject new admissions after the fence while permitting identity-checked reads
+of existing idempotent receipts. Binding reuse performs its final reference
+check under that same fence. The in-memory test store must provide an
+equivalent shared coordination boundary.
+
+The server's storage cleanup is a separate conditional transaction after
+durable stop evidence. No SQL transaction spans HTTP, process termination or
+host observation. Any database failure preserves or rechecks the pin; it does
+not imply successful cleanup. Neither a `FAILED` binding nor a generic
+`releaseUnusableSession` path may bypass the physical reuse gate for this
+recovery flow.
+
+The placement mapping must remain stable while an old domain is pinned.
+Current placement keys include directory, capability, isolation and provisioner;
+changing those can create a different slot that does not see the old binding.
+Before admitting a replacement, compare the saved original placement with the
+trusted deployment mapping and reject changes that would bypass an unreclaimed
+domain, including legacy placements without a storage holder. An empty slot
+under a new request key is not clearance. This slice requires a quiescent,
+verified cleanup before changing physical mapping/profile; online migration
+across placement keys needs a separate physical-resource fence.
+
+## 5. Production local-worker identity for #12766
+
+Persist a versioned per-generation resource record in an administrator-owned
+directory outside Workspace roots. Bind it to the existing provision seed,
+binding generation, host/boot identity, worker PID/start identity and validated
+loopback endpoint. Keep tokens in the existing encrypted SQL seed; never put
+them in filenames, resource handles or diagnostic output. Reject symlink,
+permission, corruption and identity conflicts rather than treating them as
+resource absence. A missing record proves nothing. This directory is not a
+security boundary against a malicious same-UID worker: the current deployment
+assumes trusted tools. Protect recovery authority with OS isolation before
+admitting untrusted workloads; a path outside the Workspace alone is not enough.
+
+The identity protocol must cover the interval between process creation and
+the Broker persisting `READY`. Merely copying the test helper's post-start
+`Files.writeString` leaves an unrecorded-worker window. Reuse the existing
+stdin boot barrier: the worker parses a complete boot document at EOF before
+opening any listener. Persist a launch intent before spawn, then atomically
+publish and sync the actual `Process` PID/start identity before writing the
+first boot byte. A Broker killed before that write leaves an empty/incomplete
+boot, so the worker cannot admit tools. After validated ready, publish the
+endpoint before reporting successful provisioning. A missing endpoint after
+crash remains unresolved; it does not justify another launch.
+
+Hold one cross-process per-seed file lock across spawn, identity persistence,
+boot and ready. An observer that cannot take the lock returns `UNKNOWN`; it
+cannot certify absence while a delayed launcher can still start. Retirement
+takes the same lock and leaves a durable tombstone that forbids relaunch of
+that seed. Failures terminate the testable owned process and retain the
+identity/intent until its disposition is proved. Do not delete an unresolved
+record. Old generic resource handles without the new versioned identity remain
+unrecoverable. The configured command must directly run a trusted worker that
+obeys this boot protocol; wrappers that execute tools before boot or retain its
+stdin are unsupported. This approach needs no new boot wire version or worker
+self-registration route.
+
+An alive process is adopted only after PID/start/host identity checks and full
+placement attestation of Runtime identity, lease, incarnation, scope and
+storage identity. Verify each Session's frozen context separately through the
+existing context-install and activation receipts; it is not part of the
+placement attestation envelope. Reading a record does not grant execution
+authority. Current grants for new execution, storage holder, directory identity
+and activation receipts still apply.
+Concurrent Brokers must converge on the existing binding claim. Adoption does
+not mint a fresh token/epoch or give a stale Broker authority to admit a new
+execution after the loss fence.
+
+Do not combine unconditional parent-death exit with transparent adoption of a
+surviving worker. For this design, a registered worker may survive Broker
+failure for later reconciliation, with each attempt bounded; an incompletely
+registered startup must fail closed. Shutdown detaches from recoverable workers.
+Explicit retirement must first persistently fence the exact generation and
+claim retirement authority, then request termination and verify stop evidence.
+An adoption map entry and the short reconciliation claim are not lifetime
+ownership: multiple Brokers may observe the same worker, so closing one cannot
+unconditionally kill it. Include both spawned and adopted workers in resource
+accounting. Sending SIGTERM, returning from `close`, or dropping an in-memory
+entry is not successful retirement. Automatic reclamation is enabled only for
+the proof sources validated by the next slice.
+
+## 6. Interface, storage and consumer changes
+
+| Layer / existing consumer                                                                | Planned change                                                                                                                       |
+| ---------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `ToolExecutionRecord`, in-memory/JDBC repositories                                       | `ABANDONED` invariants, abandonment time/reason, immutable terminal mutations, scoped accounting and admission fence                 |
+| `RuntimeBindingRecord`, repositories, `RuntimeBrokerService`                             | Durable evidence, bounded abandonment/release, final physical reuse gate, fenced late callbacks                                      |
+| `RuntimeSessionRepository` implementations                                               | Atomic generation-scoped admission and release; no late insertion behind loss                                                        |
+| `ExecutionReconciliation`                                                                | Return an explicit `ABANDONED` outcome from the ledger, without consulting a new worker                                              |
+| `RuntimeBrokerHttpServer`                                                                | Read original terminal records after process loss/release; validate saved ownership and scope without requiring a live local Session |
+| `broker-managed-runtime-provider.ts` and `managed-runtime-provider.ts`                   | Preserve terminal uncertainty; stop polling/replay without presenting a synthetic Tool result                                        |
+| `WorkspaceExecutionStore`, `WorkspaceRuntimeTransport`, `WorkspaceRuntimeProvisioner`    | Conditional holder cleanup from exact stop evidence; current authorization for new execution; cleanup from saved identity            |
+| `LocalProcessRuntimeProvisioner`, worker boot/ready entry, embedded Broker configuration | Versioned durable launch identity, adoption and verified retirement                                                                  |
+| Standalone Broker schema and server Flyway schema                                        | Add evidence and abandonment fields with compatible defaults; share JDBC contract tests                                              |
+
+Keep the current private HTTP error `runtime_broker_execution_unknown` for an
+abandoned result, with explicit terminal/reason metadata, so existing callers
+already stop their success-result polling. Java reconciliation gets the new
+outcome. Audit the TypeScript adapter's inspect/reconcile/cancel paths together;
+an unknown result must not become `settled`, successful, or eligible for
+automatic retry. `:resolve` must not turn abandonment into a fabricated result.
+New runtime-status enum values are not added to the worker tool protocol merely
+to describe Broker resource recovery.
+
+The session busy check currently uses only `runtimeSessionId`. Recovery queries
+must include binding ID and runtime generation as well, with exact identifier
+comparison; two tenants using the same ID must not block or clear one another.
+Existing execution rows already carry this tuple. Prefer it to introducing an
+unrelated tenant-schema redesign; keep a broader busy-check cleanup separately
+scoped if needed.
+
+Migrations preserve existing `UNKNOWN`, settled results and immutable keys.
+Old rows without trustworthy loss/stop evidence remain blocked. Unknown enum
+values are not readable by old Java binaries, so new abandonment writes require
+a coordinated server rollout; mixed old/new Brokers against these rows are not
+supported. Do not edit an applied Flyway migration. Keep physical paths and
+process metadata out of public Session/Workspace responses.
+
+## 7. Delivery order and boundaries
+
+| Slice          | Deliverable                                                                                                                     | Exit condition                                                                                                                  |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| W0e-1 / #12670 | Execution terminal uncertainty, durable evidence contract, admission fence, conditional generation cleanup, private projections | Repository/HTTP/race tests pass; missing stop proof still blocks reuse                                                          |
+| W0e-2 / #12766 | Production durable launch identity and live-worker reconciliation                                                               | Real process restart/adoption tests pass; incomplete identity never duplicates a worker; unsupported stop proof remains blocked |
+| W0e-3          | Same-host reboot recovery and Workspace holder cleanup, stale-writer fault gates                                                | Real SQL + worker + host/isolation evidence establishes safe progress or explicit blocking in every acceptance case             |
+
+These are implementation slices, not three already completed features. Land
+W0e-1 before enabling W0e-2 reclamation. W0e is complete only after W0e-3; a
+passing helper-based test does not qualify a production provisioner.
+
+[Hosted file-tool PR #12831](https://github.com/QwenLM/qwen-code/pull/12831)
+already covers private gated Read/Write/Edit orchestration and excludes process
+loss recovery. Coordinate its saved execution-identity and unknown-result
+consumers before integration. Public bound-message execution, Stage G Turn
+takeover/history settlement, arbitrary Shell containment, Kubernetes and
+product identity propagation remain separate. `workspace_context` stays false;
+W0d's narrow `workspace_binding` capability remains unchanged.
+
+## 8. Acceptance and evidence
+
+| Gate                                 | Required observation                                                                                                                                     |
+| ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Lost execution states                | Each of the five nonterminal states terminates as outcome-unknown; committed `SETTLED` evidence is unchanged                                             |
+| Delayed callback / claim             | Completion, cancel, renewal and resolution after abandonment cannot mutate or re-execute the record                                                      |
+| Admission race                       | Park before Session/execution insertion, commit loss on a second Broker, resume: insertion is refused; existing receipts remain readable                 |
+| Response loss / retry                | Crash after each recovery commit; repeat with original identities; one terminal record and no duplicate worker or execution                              |
+| Worker alive after Broker restart    | Exact same identity is re-attested; original status/cancel/release works; no automatic Hosted replay                                                     |
+| Shared observer shutdown             | Closing one Broker detaches; another can continue using the original worker; explicit retirement requires its own durable authority                      |
+| Worker absent, descendants uncertain | Record uncertainty if justified; binding, Runtime Session and storage remain unavailable for reuse                                                       |
+| Verified host reboot                 | Persist correct boot/domain evidence, abandon unknown outcomes, release exact old holders, then run new work in the original Workspace                   |
+| Untrusted evidence                   | Timeout, missing record, PID reuse, wrong host, mismatched incarnation and changed directory never unlock or kill another process                        |
+| Tenant / storage isolation           | Reused Runtime Session IDs and stale cleanup cannot affect another binding/tenant; same-storage serialization survives recovery                          |
+| Old writer                           | Escaped/delayed writer is still capable of writes: replacement stays blocked; after verified domain death, no old marker appears after new holder starts |
+| Configuration / authorization drift  | Original binding stays fixed; revoked actors cannot execute; trusted cleanup does not require restoring their grant                                      |
+| Placement-key drift                  | Changing path/profile/isolation/provisioner cannot bypass an unreclaimed domain by provisioning under a new slot                                         |
+| Legacy / schema / HTTP               | Boot v1 obeys the same reuse gate; migration preserves receipts; terminal read works after release and does not expose physical identities               |
+
+Run the existing Stage F process gates, new repository contracts on H2 and real
+MySQL/MariaDB, Spring-to-worker holder recovery, and supported host reboot or
+isolation-domain tests. Use real escaped descendants for the negative gate;
+mock observations alone cannot prove physical safety. Run repository build,
+typecheck, bundle, focused TypeScript tests, Java verification/Checkstyle and
+two consecutive clean full-diff audits for implementation. The detailed local
+test plan lives in `.qwen/e2e-tests/managed-workspace-w0e.md`.
+
+## 9. Review decisions and remaining prerequisites
+
+Recommend accepting `ABANDONED` as terminal uncertainty, preserving independent
+physical pins, and implementing W0e-1 before production local recovery. The
+issues still need this decision recorded and reviewed; this document is not a
+claim of maintainer acceptance.
+
+The W0e-2/3 implementation must select a supported OS source of stable host/boot
+identity and prove durable startup registration on that platform. If the
+deployment requires automatic recovery after worker-only death with arbitrary
+Shell descendants, select a killable isolation domain before enabling that
+path. Until then, its correct acceptance result is explicit blocking. These
+requirements do not prevent designing and implementing W0e-1 with deterministic
+trusted evidence fixtures, but those fixtures do not satisfy W0e completion.
