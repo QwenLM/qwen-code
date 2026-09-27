@@ -19616,7 +19616,7 @@ SOFTWARE.
 
 
 ============================================================
-@tanstack/react-virtual@3.14.2
+@tanstack/react-virtual@3.14.13
 (git+https://github.com/TanStack/virtual.git)
 
 MIT License
@@ -19643,7 +19643,7 @@ SOFTWARE.
 
 
 ============================================================
-@tanstack/virtual-core@3.17.0
+@tanstack/virtual-core@3.17.11
 (git+https://github.com/TanStack/virtual.git)
 
 MIT License
