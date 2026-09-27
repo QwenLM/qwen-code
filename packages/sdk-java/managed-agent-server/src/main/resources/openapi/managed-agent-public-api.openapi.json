@@ -1799,7 +1799,7 @@
         "x-qwen-implementation-status": "planned",
         "responses": {
           "200": {
-            "description": "Task events after the cursor, oldest first. 400 invalid_event_cursor rejects a malformed cursor or one from another task. 409 cursor_expired means that the cursor is older than the retained events; its replay_floor_sequence and snapshot_through_sequence stay absent. An output event expires only after its text is in an Artifact, so a caller that reads the task Artifacts and then the retained events from the start (without after) misses no output; joining the two without overlap is defined with output segmentation in Stage H3. 400 unsupported_feature when the Session does not serve tasks (capabilities.tasks is false).",
+            "description": "Task events after the cursor, oldest first. 400 invalid_event_cursor rejects a malformed cursor or one from another task. 409 cursor_expired means that the cursor is older than the retained events; its replay_floor_sequence and snapshot_through_sequence stay absent. An output event expires only after its text is in an Artifact, so a caller that first reads the retained events from the start (without after) and only then the task Artifacts misses no output, as long as artifact_refs still lists every Artifact of the task; reading the Artifacts first can miss an event archived and expired between the two reads. Joining the two without overlap is defined with output segmentation in Stage H3. 400 unsupported_feature when the Session does not serve tasks (capabilities.tasks is false).",
             "content": {
               "application/json": {
                 "schema": {

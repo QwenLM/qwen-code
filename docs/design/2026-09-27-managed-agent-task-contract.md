@@ -93,8 +93,8 @@ resources:
 The enums are shared components (`TaskKind`, `TaskState`, `TaskRuntimeState`
 and `TaskActionCapability`), as `CwdOperationStatus` already is, and so is the
 open event type `TaskEventType`. The conditionals and bounds are copied into
-each surface, so `PlannedTaskContractTest` checks every instance against both
-(section 5).
+each surface, so `PlannedTaskContractTest` checks its instances against both,
+all but the public-only `object` check (section 5).
 
 The design's shape changes in five places:
 
@@ -151,8 +151,9 @@ These invariants are schema conditionals:
 
 Conditionals forbid the fields of one type on another. The set of types is
 open: a later minor version may add a type together with the optional fields
-it needs, and clients ignore types they do not know, as section 5 of the API
-contract requires. Every event carries `schema_version` and
+it needs, as section 5 of the API contract allows. Clients ignore task event
+types they do not know; task events carry no terminal flag, so that section's
+refresh rule for unknown terminal events does not apply. Every event carries `schema_version` and
 `projection_version`, as section 5 of the API contract requires of public
 events. High-volume logs and Monitor raw lines go into Artifacts, never one
 event per line, as design section 11 requires, and events are retained for a
@@ -282,9 +283,13 @@ A caller that cannot read a task gets `404`, not `403`, as API contract
 section 10 requires, so the read routes declare no `403`; only cancel does. `cursor_expired` leaves the envelope's
 `replay_floor_sequence` and `snapshot_through_sequence` absent, because task
 cursors are opaque. An output event expires only after its text is in an
-Artifact, so a caller that reads the task's Artifacts and then the retained
-events from the start misses no output. Joining the two without overlap
-depends on how output is segmented, which H3 defines.
+Artifact, so a caller that first reads the retained events from the start and
+only then the task's Artifacts misses no output: every event that expired
+before the event read began was archived before it. The opposite order can
+miss an event that is archived and expired between the two reads. The
+guarantee also needs `artifact_refs` to list every Artifact of the task (see
+Artifact attribution in section 7). Joining the two without overlap depends on
+how output is segmented, which H3 defines.
 
 ## 5. Contract test changes
 
@@ -303,7 +308,8 @@ against them with the same validator: the task invariants, forbidden fields,
 one shape per event type, the event versions, list and page cursors, and the
 `task_cancel` operation, including through the `PublicOperation` and
 `WebShellOperation` unions. Each instance is written once in the public shape
-and checked again, renamed to camelCase, against the WebShell mirror, so a
+and, except the public-only `object` check, checked again, renamed to
+camelCase, against the WebShell mirror, so a
 conditional copied wrongly into one surface fails the test. The WebShell
 cancel and event query requests are checked as well.
 

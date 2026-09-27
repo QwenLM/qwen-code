@@ -75,7 +75,7 @@ operation 模型；本变更选择接受它可见。
 
 枚举都是共用组件（`TaskKind`、`TaskState`、`TaskRuntimeState` 和 `TaskActionCapability`），
 与已有的 `CwdOperationStatus` 做法相同，开放的事件类型 `TaskEventType` 也是共用组件。条件约束和上下限在两个接口面各有一份，
-所以 `PlannedTaskContractTest` 用每个实例同时校验两者（见第 5 节）。
+所以 `PlannedTaskContractTest` 用其实例同时校验两者，只有仅限公共形状的 `object` 检查除外（见第 5 节）。
 
 与设计中的结构相比有五处变化：
 
@@ -119,7 +119,8 @@ operation 模型；本变更选择接受它可见。
 - `artifact`，收到任务输出的 Artifact 的 `artifact_id`。
 
 条件约束禁止一种类型带另一种类型的字段。类型集合是开放的：后续 minor 版本可以增加类型，
-连同它需要的可选字段一起加入，客户端忽略不认识的类型，与 API 契约第 5 节的要求一致。按 API 契约第 5 节对公共事件的要求，每个事件都带 `schema_version` 和
+连同它需要的可选字段一起加入，这是 API 契约第 5 节所允许的。客户端忽略不认识的任务事件类型；任务事件没有终态标志，
+所以该节针对未知终态事件的刷新规则不适用。按 API 契约第 5 节对公共事件的要求，每个事件都带 `schema_version` 和
 `projection_version`。按设计第 11 节的要求，高频日志和 Monitor 原始行进入 Artifact，绝不每行一个事件；
 事件只保留有限时间，不会永久保存。
 
@@ -219,8 +220,10 @@ operation 模型；本变更选择接受它可见。
 
 按 API 契约第 10 节，无权读取任务的调用方收到 `404`，而不是 `403`，所以只读路由不声明 `403`，只有取消声明。`cursor_expired`
 的错误封装中 `replay_floor_sequence` 和 `snapshot_through_sequence` 保持缺省，因为任务游标是不透明的。
-输出事件只有在其文本已进入 Artifact 后才会过期，因此调用方先读取任务的 Artifact、再从头读取保留的事件，
-不会漏掉任何输出。两者之间如何无重叠地衔接取决于输出如何分段，由 H3 定义。
+输出事件只有在其文本已进入 Artifact 后才会过期，因此调用方先从头读完保留的事件、再读取任务的 Artifact，
+不会漏掉任何输出：在读取事件开始之前过期的每个事件，都已在那之前进入 Artifact。反过来的顺序可能漏掉在两次读取之间
+被归档并过期的事件。这一保证还要求 `artifact_refs` 列出该任务的全部 Artifact（见第 7 节的 Artifact 归属）。
+两者之间如何无重叠地衔接取决于输出如何分段，由 H3 定义。
 
 ## 5. 契约测试变更
 
@@ -234,7 +237,7 @@ operation 模型；本变更选择接受它可见。
 新增的 `PlannedTaskContractTest` 使用同一个校验器，用合法与非法实例校验这些 schema：
 任务不变式、禁止字段、每种事件类型只有一种结构、事件版本、列表与分页游标，以及 `task_cancel` operation
 （包括经由 `PublicOperation` 和 `WebShellOperation` union 的校验）。每个实例按公共形状只写一次，
-再改名为 camelCase 后针对 WebShell 镜像校验一遍，因此条件约束在某一个接口面抄错时测试会失败。
+除仅限公共形状的 `object` 检查外，再改名为 camelCase 后针对 WebShell 镜像校验一遍，因此条件约束在某一个接口面抄错时测试会失败。
 WebShell 的取消请求和事件查询请求也在校验之列。
 
 ## 6. 验证
