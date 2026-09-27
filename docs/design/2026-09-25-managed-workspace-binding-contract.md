@@ -2,7 +2,7 @@
 
 [English](2026-09-25-managed-workspace-binding-contract.md) | [简体中文](2026-09-25-managed-workspace-binding-contract.zh-CN.md)
 
-Status: implemented as a standalone package; nothing is wired yet. Updated: 2026-09-25. This is the first W0 slice of the Managed Agent proposal [#12380](https://github.com/QwenLM/qwen-code/issues/12380). [This reply](https://github.com/QwenLM/qwen-code/issues/12380#issuecomment-5825755703) to [the W0a questions](https://github.com/QwenLM/qwen-code/issues/12380#issuecomment-5819009126) settled the placement and the timing of the boot envelope. Below, "the reference contract" is the proposal's [Workspace and Session cwd design](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-workspace-context.en.md) together with the [`WorkspaceRelativePath` schema](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-public-api.openapi.yaml#L1453) of its public OpenAPI, and "the reference schema" is its [Workspace DDL](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-workspace-schema.mysql.sql), all at the commit that #12380 links.
+Status: implemented as a standalone package. Since W0c-1 the worker uses its TypeScript twin through the `managed-context/1` envelope ([Managed Context Worker](2026-09-26-managed-context-worker.md)); the Broker does not use it yet. Updated: 2026-09-26. This is the first W0 slice of the Managed Agent proposal [#12380](https://github.com/QwenLM/qwen-code/issues/12380). [This reply](https://github.com/QwenLM/qwen-code/issues/12380#issuecomment-5825755703) to [the W0a questions](https://github.com/QwenLM/qwen-code/issues/12380#issuecomment-5819009126) settled the placement and the timing of the boot envelope. Below, "the reference contract" is the proposal's [Workspace and Session cwd design](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-workspace-context.en.md) together with the [`WorkspaceRelativePath` schema](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-public-api.openapi.yaml#L1453) of its public OpenAPI, and "the reference schema" is its [Workspace DDL](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-workspace-schema.mysql.sql), all at the commit that #12380 links.
 
 ## Problem
 
@@ -222,14 +222,11 @@ The cases cover both sides of each rule's boundaries, including non-ASCII names,
 
 ## Boot envelope
 
-The boot envelope is a separate slice (W0a-2). #12380 asked for its shape to be decided now, on top of the execute contract (#12630, since merged); it follows this slice as a change of its own. This slice fixes what the envelope will carry: the ContextBinding fields, their normalization and the digest. W0a-2 must then do the following:
+The boot envelope is its own slice, W0a-2, and the [managed context envelope](2026-09-25-managed-context-envelope.md) now defines it: the negotiation of `managed-context/1`, boot v2 and ready v2, attestation v3, and the context installation request with its receipt. It differs from the plan first written here in three ways:
 
-- Negotiate `managed-context/1`.
-- Add a new boot-document version that carries the ContextBinding and the inputs for the mount root and effective cwd. The daemon-style path hash survives only as a compatibility alias.
-- Add a new attestation identity version, so that W0c reuses the existing gate instead of inventing a separate Workspace attestation.
-- Change these together: the TypeScript key lists, the schema, the fixtures, the Java field-set assertions and the fake worker `fake-attestation-worker.mjs`. The fake worker does not enforce the closed key set today, so Java tests would not catch a mismatch.
-
-That slice, or W0c, must also decide which fields enter the Runtime placement scope. A Workspace-isolated Runtime is shared by Sessions whose `cwdRelative` differ. So `cwdRelative` and `contextRevision` must stay out of the placement identity in `RuntimeScope`; adding them would change the Broker's request and scope keys and stop Runtime reuse. They bind per Session and per invocation instead.
+- Boot v2 carries the Workspace binding and the mount root but no Session context, because a Workspace-isolated Runtime is shared by Sessions whose `cwdRelative` differ. Each Session installs its `ContextBinding` through the installation request instead, so `cwdRelative` and `contextRevision` stay out of `RuntimeScope`.
+- The daemon-style path hash is not carried at all. A worker that needs one derives it from the verified mount root.
+- W0a-2 defines the contract only. The worker, the provisioner and the fake worker `fake-attestation-worker.mjs` change in W0c, which wires the protocol.
 
 ## Errors
 
@@ -262,7 +259,7 @@ None of these succeeds on an unchanged retry. W0a raises them as one exception t
   - Tests in the matching test package, including the fixture consumer.
 - `packages/sdk-java/runtime-broker/README.md` and `QWEN.md`: a section on the package.
 - `packages/cli/src/serve/contracts/managed-workspace-binding-v1.fixtures.json` and `.schema.json` (new).
-- `packages/cli/src/serve/managed-workspace-binding.ts` and its test (new). This is the TypeScript twin of the working-directory rule and the digest. It is not wired into the worker yet.
+- `packages/cli/src/serve/managed-workspace-binding.ts` and its test (new). This is the TypeScript twin of the working-directory rule and the digest. The worker uses it since W0c-1.
 - This design document, in both languages.
 
 No existing Broker class, the Broker schema, the daemon `WorkspaceRegistry`, the worker boot document, the attestation contract or any CI workflow changes. The SDK Java workflow already runs the `runtime-broker` tests and Checkstyle, and its path filters cover both `packages/sdk-java/**` and `packages/cli/src/serve/**`.
@@ -289,7 +286,7 @@ No existing Broker class, the Broker schema, the daemon `WorkspaceRegistry`, the
 - No caller-supplied absolute path, storage ID or generation can reach a resolved Workspace.
 - A replacement snapshot cannot drop a Workspace, lower its generation, or change its storage ID without a new generation.
 - The Java package uses only the JDK: no other Broker class, Spring, CLI internals or scheduler.
-- The documentation does not claim persistence, wiring or capability advertisement.
+- The documentation does not claim persistence or capability advertisement. The worker was wired later, in W0c-1.
 
 ## Open questions
 
@@ -300,7 +297,7 @@ No existing Broker class, the Broker schema, the daemon `WorkspaceRegistry`, the
 
 | Slice | Scope                                                                                                                                                               |
 | ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| W0a-2 | The versioned boot envelope and attestation identity.                                                                                                               |
+| W0a-2 | The versioned boot envelope, attestation v3 and context installation, defined in the [managed context envelope](2026-09-25-managed-context-envelope.md).            |
 | W0b   | Atomic Session binding with the creation receipt, original-key recovery, and explicitly unbound old Sessions.                                                       |
 | W0c   | Session-based Broker resolution through `HarnessSessionResolver`, the storage-to-mount resolver, worker installation and attestation, and the Workspace turn lease. |
 | W0d   | WebShell selection, the relative-directory field, and the default and empty states.                                                                                 |

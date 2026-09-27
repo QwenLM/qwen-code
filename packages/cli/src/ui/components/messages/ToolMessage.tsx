@@ -22,7 +22,7 @@ import type {
   AgentResultDisplay,
   PlanResultDisplay,
   AnsiOutputDisplay,
-  AdvisorReviewDisplay,
+  AdvisorDisplay,
   McpToolProgressData,
   FileDiff,
   TerminalImageDisplay,
@@ -34,8 +34,8 @@ import {
 } from '@qwen-code/qwen-code-core/services/visionBridge/vision-bridge-service.js';
 import { AGENT_TOOL_NAMES } from '../../utils/agent-tool-names.js';
 import {
-  formatAdvisorReview,
-  isAdvisorReviewDisplay,
+  formatAdvisorDisplay,
+  isAdvisorDisplay,
   isTerminalImageDisplay,
 } from '@qwen-code/qwen-code-core/tools/tools.js';
 import { ToolConfirmationMessage } from './ToolConfirmationMessage.js';
@@ -171,7 +171,7 @@ type DisplayRendererResult =
   | { type: 'todo'; data: TodoResultDisplay }
   | { type: 'findings'; data: FindingsResultDisplay }
   | { type: 'plan'; data: PlanResultDisplay }
-  | { type: 'advisor'; data: AdvisorReviewDisplay }
+  | { type: 'advisor'; data: AdvisorDisplay }
   | { type: 'string'; data: string }
   | { type: 'diff'; data: { fileDiff: string; fileName: string } }
   | { type: 'task'; data: AgentResultDisplay }
@@ -193,7 +193,7 @@ const useResultDisplayRenderer = (
       return { type: 'image', data: resultDisplay };
     }
 
-    if (isAdvisorReviewDisplay(resultDisplay)) {
+    if (isAdvisorDisplay(resultDisplay)) {
       return {
         type: 'advisor',
         data: resultDisplay,
@@ -1046,7 +1046,7 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
             )}
             {effectiveDisplayRenderer.type === 'advisor' && (
               <AdvisorMessage
-                text={formatAdvisorReview(effectiveDisplayRenderer.data)}
+                text={formatAdvisorDisplay(effectiveDisplayRenderer.data)}
                 model={effectiveDisplayRenderer.data.model ?? description}
                 containerWidth={innerWidth}
                 availableTerminalHeight={availableHeight}

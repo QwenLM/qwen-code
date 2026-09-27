@@ -6,6 +6,7 @@
 
 import { readSshWorkspace } from '../serve/ssh-workspace-store.js';
 import { SshExecutionEnvironment } from '@qwen-code/qwen-code-core/services/ssh-execution-environment.js';
+import type { SessionExecutionEngine } from '@qwen-code/qwen-code-core/services/session-execution-engine.js';
 import {
   type ModelProposedGoalsMode,
   ApprovalMode,
@@ -104,6 +105,7 @@ import { channelCommand } from '../commands/channel.js';
 import { authCommand } from '../commands/auth.js';
 import { serveCommand } from '../commands/serve.js';
 import { sessionsCommand } from '../commands/sessions.js';
+import { batchCommand } from '../commands/batch.js';
 import { boardCommand } from '../commands/board.js';
 import { updateCommand } from '../commands/update.js';
 import { sandboxCommand } from '../commands/sandbox.js';
@@ -901,6 +903,7 @@ export async function parseArguments(): Promise<CliArgs> {
     .command(serveCommand)
     // Register sessions subcommands
     .command(sessionsCommand)
+    .command(batchCommand)
     // Register update command
     .command(updateCommand)
     // Register `qwen sandbox` (inspect / prove the resolved sandbox backend)
@@ -944,16 +947,20 @@ export async function parseArguments(): Promise<CliArgs> {
       result._[0] === 'review' ||
       result._[0] === 'sessions' ||
       result._[0] === 'board' ||
+      result._[0] === 'batch' ||
       result._[0] === 'update' ||
       result._[0] === 'sandbox')
   ) {
     // Note: `serve` is intentionally NOT in this list. Its handler blocks
     // forever (after the listener is up); SIGINT/SIGTERM in runQwenServe
     // drives shutdown. Hitting `process.exit(0)` here would kill the daemon.
-    // MCP/Extensions/Auth/Hooks/Channel/Review commands handle their own
-    // execution and exit. Returning here would let the main interactive
-    // flow run, which would prompt for stdin input despite the user
-    // having already invoked a subcommand.
+    // MCP/Extensions/Auth/Hooks/Channel/Review/Batch commands handle their own
+    // execution and exit. Returning here would let the main interactive flow
+    // run, which would prompt for stdin input despite the user having already
+    // invoked a subcommand. `batch` must be here for a second reason: the main
+    // flow below relaunches the process for a larger heap, and a second parse
+    // would run the subcommand handler again — submitting (and billing) a
+    // duplicate batch job whose id the user never sees.
     process.exit(process.exitCode ?? 0);
   }
 
@@ -1711,6 +1718,8 @@ export async function loadCliConfig(
         sessionId: string,
       ) => Promise<SessionRestoreProjection | undefined>;
     };
+    /** Engine a paired host selected; the Config persists or verifies it. */
+    executionEngine?: SessionExecutionEngine;
   },
   enabledSkillNamesProvider?: () => ReadonlySet<string>,
 ): Promise<Config> {
@@ -2300,6 +2309,10 @@ export async function loadCliConfig(
       }
     }
 
+    if (sessionId) {
+      sessionService.assertLegacySessionExecution(sessionId);
+    }
+
     if (argv.forkSession && sessionId) {
       const sourceSessionId = sessionId;
       const forkedSessionId = randomUUID();
@@ -2431,6 +2444,7 @@ export async function loadCliConfig(
     sessionData,
     sessionRestoreProjection,
     sessionRestoreProjectionSource: boundSessionRestoreProjectionSource,
+    sessionExecutionEngine: hostPolicy?.executionEngine,
     embeddingModel: DEFAULT_QWEN_EMBEDDING_MODEL,
     sandbox: sandboxConfig,
     targetDir: cwd,
@@ -2743,6 +2757,7 @@ export async function loadCliConfig(
     memoryAgentMaxTurns: settings.memory?.agentMaxTurns,
     fastModel: settings.fastModel || undefined,
     advisorModel,
+    advisorMaxUses: settings.advisorMaxUses,
     // Bare and safe mode must switch the tool off explicitly: `undefined`
     // means "derive it" now that WebSearch is opt-out.
     webSearch:

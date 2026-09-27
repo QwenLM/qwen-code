@@ -185,6 +185,12 @@ The SDK requires the daemon's `session_id_override` capability before sending th
 
 This option always creates a new thread session and is not an idempotent attach. If the create outcome is ambiguous, use the known ID with load or resume. Omitting the option preserves the existing create-or-attach behavior.
 
+## Daemon startup model and reasoning selection
+
+`DaemonClient.createOrAttachSession` and `createStandaloneSession` accept `startupConfig: { modelServiceId, reasoningEffort? }` and preflight `session_startup_config` before creation. The model is required; omit reasoning for model-only selection, including models with no reasoning control. An explicit effort is validated against the model. The SDK checks `modelApplied: true` and the canonical `startupConfigApplied` response; model-only confirmation omits reasoning fields.
+
+Startup selection does not save shared defaults or impose a lifetime pin. Definite selection rejection fails creation; uncertain standalone creation retains its existing recovery result. A successful response whose startup confirmation is missing or mismatched is rejected directly and does not trigger standalone recovery/adoption. See the [protocol](./qwen-serve-protocol.md#capabilities).
+
 ## Talking to running sessions
 
 `@qwen-code/sdk/peer` lets a program that is not a Qwen Code session join the

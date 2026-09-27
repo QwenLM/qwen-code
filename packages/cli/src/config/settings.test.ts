@@ -659,6 +659,30 @@ describe('Settings Loading and Merging', () => {
       );
     });
 
+    it.each([-1, 1.5, '5'])(
+      'warns that an invalid advisorMaxUses %s is ignored',
+      (advisorMaxUses) => {
+        (mockFsExistsSync as Mock).mockImplementation(
+          (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+        );
+        (fs.readFileSync as Mock).mockImplementation(
+          (p: fs.PathOrFileDescriptor) =>
+            p === USER_SETTINGS_PATH
+              ? JSON.stringify({
+                  [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
+                  advisorMaxUses,
+                })
+              : '{}',
+        );
+
+        const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+        expect(getSettingsWarnings(settings)).toEqual([
+          expect.stringContaining('advisorMaxUses must be a non-negative'),
+        ]);
+      },
+    );
+
     it('should silently ignore unknown top-level keys in a v2 settings file', () => {
       (mockFsExistsSync as Mock).mockImplementation(
         (p: fs.PathLike) => p === USER_SETTINGS_PATH,
@@ -3664,9 +3688,15 @@ describe('Settings Loading and Merging', () => {
       (fs.readFileSync as Mock).mockImplementation(
         (p: fs.PathOrFileDescriptor) => {
           if (p === USER_SETTINGS_PATH)
-            return JSON.stringify({ advisorModel: 'user-advisor' });
+            return JSON.stringify({
+              advisorModel: 'user-advisor',
+              advisorMaxUses: 2,
+            });
           if (p === MOCK_WORKSPACE_SETTINGS_PATH)
-            return JSON.stringify({ advisorModel: 'workspace-advisor' });
+            return JSON.stringify({
+              advisorModel: 'workspace-advisor',
+              advisorMaxUses: 0,
+            });
           return '{}';
         },
       );
@@ -3674,6 +3704,7 @@ describe('Settings Loading and Merging', () => {
       const settings = loadSettings(MOCK_WORKSPACE_DIR);
 
       expect(settings.merged.advisorModel).toBe('user-advisor');
+      expect(settings.merged.advisorMaxUses).toBe(2);
       expect(
         getSettingsWarnings(settings).some((warning) =>
           warning.includes('advisorModel'),

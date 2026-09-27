@@ -781,10 +781,29 @@ globalThis.fetch = async (url) => {
     env,
   });
   assert.equal(degraded.status, 0, degraded.stderr);
-  assert.match(degraded.stderr, /@lydell\/node-pty-darwin-x64 is not pinned/);
+  assert.match(degraded.stderr, /@lydell\/node-pty is not pinned/);
   assert.equal(
     fs.existsSync(path.join(runtimeDir, 'qwen-code', 'lib', 'node_modules')),
     false,
+  );
+
+  // A missing target-specific prebuild pin should identify that package
+  // instead of blaming the wrapper package, which remains pinned here.
+  fs.writeFileSync(
+    path.join(sourceRoot, 'package.json'),
+    JSON.stringify({
+      version: '0.0.0-test',
+      optionalDependencies: { '@lydell/node-pty': '1.2.0-beta.10' },
+    }),
+  );
+  const missingPrebuild = spawnSync(process.execPath, [testScript], {
+    encoding: 'utf8',
+    env,
+  });
+  assert.equal(missingPrebuild.status, 0, missingPrebuild.stderr);
+  assert.match(
+    missingPrebuild.stderr,
+    /@lydell\/node-pty-darwin-x64 is not pinned/,
   );
 
   const marker = path.join(runtimeDir, 'qwen-code', 'complete-marker');
