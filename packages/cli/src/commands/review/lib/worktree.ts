@@ -1038,7 +1038,7 @@ const FILTER_COMMAND_KEYS = '^filter\\..*\\.(smudge|clean|process)$';
 const SCREEN_KEYS = `${FILTER_COMMAND_KEYS}|^include\\.path$|^includeif\\..*\\.path$`;
 
 export interface TrustedConfigRecord {
-  scope: 'global' | 'system';
+  scope: 'global' | 'system' | 'command';
   file: string;
   key: string;
 }
@@ -1046,6 +1046,7 @@ export interface TrustedConfigRecord {
 /** Parse `git config -z --show-origin --show-scope` records. */
 export function parseTrustedConfigRecords(
   stdout: string,
+  includeCommandScope = false,
 ): TrustedConfigRecord[] | null {
   const fields = stdout.split('\0');
   if (fields.at(-1) === '') fields.pop();
@@ -1054,7 +1055,13 @@ export function parseTrustedConfigRecords(
   const records: TrustedConfigRecord[] = [];
   for (let i = 0; i < fields.length; i += 3) {
     const scope = fields[i];
-    if (scope !== 'global' && scope !== 'system') continue;
+    if (
+      scope !== 'global' &&
+      scope !== 'system' &&
+      !(includeCommandScope && scope === 'command')
+    ) {
+      continue;
+    }
     const origin = fields[i + 1];
     const keyAndValue = fields[i + 2];
     const nl = keyAndValue.indexOf('\n');
@@ -1523,7 +1530,10 @@ export function filterCommandsIn(
   // the screened tree so `includeIf.gitdir:` has the same answer as the Git
   // operation being authorised. The list read identifies trusted include-only
   // files too, allowing the local walk to stop at that source boundary.
-  const trustedRead = (args: string[]): TrustedConfigRecord[] | null => {
+  const trustedRead = (
+    args: string[],
+    includeCommandScope = false,
+  ): TrustedConfigRecord[] | null => {
     const result = spawnSync('git', args, {
       cwd: screenedTree,
       encoding: 'utf8',
@@ -1546,7 +1556,10 @@ export function filterCommandsIn(
       attribution.add(reason);
       return null;
     }
-    const records = parseTrustedConfigRecords(result.stdout);
+    const records = parseTrustedConfigRecords(
+      result.stdout,
+      includeCommandScope,
+    );
     if (records === null) {
       const reason =
         'the global/system config graph returned malformed origin records — an included filter cannot be attributed to a user-owned origin';
@@ -1620,34 +1633,45 @@ export function filterCommandsIn(
     }
   }
 
-  const activeOrigins = new Set(
-    (trustedOriginRecords ?? []).map(({ file }) => originKey(file)),
-  );
   const reachedOrigins = new Set<string>();
-  const collectTrustedReach = (file: string, depth: number): void => {
+  const collectTrustedReach = (file: string): void => {
     const origin = originKey(file);
-    // Only traverse sources Git actually read. Missing user includes remain
-    // ignored, and unrelated global sources are not reached by this walk.
-    if (!activeOrigins.has(origin) || reachedOrigins.has(origin)) return;
-    if (depth > MAX_INCLUDE_DEPTH || reachedOrigins.size >= MAX_INCLUDE_FILES) {
+    if (reachedOrigins.has(origin)) return;
+    if (reachedOrigins.size >= MAX_INCLUDE_FILES) {
       unread.add(`${file} (trusted include reach exceeds screening limits)`);
       return;
     }
     reachedOrigins.add(origin);
-    for (const key of trustedFiltersByOrigin.get(origin) ?? []) {
-      reachedExempt.add(key);
-    }
-    const r = read(file);
-    if ('unreadable' in r) {
+    // Ask Git to expand just this boundary in command scope while retaining
+    // repository context for includeIf (including hasconfig:remote.*.url).
+    // Other native slots keep their own scopes and are not locally reached.
+    const records = trustedRead(
+      [
+        '-c',
+        `include.path=${file}`,
+        'config',
+        '--null',
+        '--show-origin',
+        '--show-scope',
+        '--includes',
+        '--get-regexp',
+        FILTER_COMMAND_KEYS,
+      ],
+      true,
+    );
+    if (records === null) {
       unread.add(
-        `${file} (could not read trusted include reach: ${r.unreadable})`,
+        `${file} (trusted include reach could not be read completely)`,
       );
       return;
     }
-    for (const [key, value] of r.records) {
-      if (key.startsWith('filter.')) continue;
-      const target = includeTarget(file, value);
-      if (target !== null) collectTrustedReach(target, depth + 1);
+    for (const { scope, file: source, key } of records) {
+      if (scope !== 'command') continue;
+      if (trustedFiltersByOrigin.get(originKey(source))?.has(key)) {
+        reachedExempt.add(key);
+      } else {
+        filters.add(key);
+      }
     }
   };
 
@@ -1696,7 +1720,7 @@ export function filterCommandsIn(
     }
     const origin = originKey(file);
     if (via !== null && trustedOrigins.has(origin)) {
-      collectTrustedReach(file, depth);
+      collectTrustedReach(file);
       return;
     }
     if (visited.has(real)) return;

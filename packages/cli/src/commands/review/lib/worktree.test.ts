@@ -344,6 +344,66 @@ describe('worktreeResidue', () => {
     },
   );
 
+  it.skipIf(process.platform === 'win32')(
+    'R8-2 control: leaves an inactive global includeIf target active only through XDG unblanked',
+    () => {
+      // Both native global slots must participate, including in fixture Git.
+      delete process.env['GIT_CONFIG_GLOBAL'];
+      delete process.env['XDG_CONFIG_HOME'];
+      const globalConfig = join(gitIsolation.home, '.gitconfig');
+      const xdgConfig = join(gitIsolation.home, '.config', 'git', 'config');
+      const payload = join(gitIsolation.home, 'filters.inc');
+      mkdirSync(dirname(xdgConfig), { recursive: true });
+      writeFileSync(
+        payload,
+        '[filter "xform"]\n' +
+          '\tclean = tr a-z A-Z\n' +
+          '\tsmudge = tr A-Z a-z\n' +
+          '\trequired = true\n',
+      );
+      writeFileSync(
+        globalConfig,
+        '[includeIf "gitdir:/does-not-match/"]\n' +
+          `\tpath = ${JSON.stringify(payload)}\n`,
+      );
+      writeFileSync(
+        xdgConfig,
+        `[include]\n\tpath = ${JSON.stringify(payload)}\n`,
+      );
+      gitRepo('config', 'include.path', globalConfig);
+      writeFileSync(join(repo, '.gitattributes'), 'a.ts filter=xform\n');
+      gitRepo('add', '.gitattributes', 'a.ts');
+      gitRepo('add', '--renormalize', 'a.ts');
+      gitRepo('commit', '-qm', 'filtered head');
+      const head = gitRepo('rev-parse', 'HEAD');
+      git('reset', '--hard', '-q', head);
+      expect(git('show', `${head}:a.ts`)).toBe('EXPORT CONST X = 1;');
+      expect(readFileSync(join(tree, 'a.ts'), 'utf8')).toBe(
+        'export const x = 1;\n',
+      );
+      expect(git('status', '--porcelain')).toBe('');
+      const stale = new Date(Date.now() + 60_000);
+      utimesSync(join(tree, 'a.ts'), stale, stale);
+      const screen = filterCommandsIn(
+        git('rev-parse', '--path-format=absolute', '--git-common-dir'),
+        git('rev-parse', '--path-format=absolute', '--git-dir'),
+        tree,
+      );
+
+      expect.soft(screen).toEqual({
+        filters: [],
+        exempt: ['filter.xform.clean', 'filter.xform.smudge'],
+        reachedExempt: [],
+        attribution: [],
+        unread: [],
+        dangling: [],
+      });
+      expect
+        .soft(worktreeResidue(tree, 12, head))
+        .toEqual({ paths: [], total: 0 });
+    },
+  );
+
   it('refuses a dangling include rather than reading it as "no filters"', () => {
     // git ignores an include whose target is missing; a screen that did the
     // same would certify a config whose payload file lands one step later.
@@ -2203,6 +2263,32 @@ describe('filterCommandsIn — the include walk', () => {
     expect(filterCommandsIn(dir, dir).filters).toEqual(['filter.lfs.clean']);
   });
 
+  it('R8-2 retains repository context for a reached hasconfig conditional include', () => {
+    execFileSync('git', ['init', '-q', dir]);
+    const common = join(dir, '.git');
+    const globalConfig = join(gitIsolation.home, '.gitconfig');
+    const payload = join(gitIsolation.home, 'filters.cfg');
+    writeFileSync(payload, '[filter "lfs"]\n\tclean = git-lfs clean\n');
+    writeFileSync(
+      globalConfig,
+      '[includeIf "hasconfig:remote.*.url:https://example.com/project.git"]\n' +
+        `\tpath = ${JSON.stringify(payload)}\n`,
+    );
+    execFileSync(
+      'git',
+      ['config', 'remote.origin.url', 'https://example.com/project.git'],
+      { cwd: dir },
+    );
+    execFileSync('git', ['config', 'include.path', globalConfig], { cwd: dir });
+
+    const screen = filterCommandsIn(common, common, dir);
+    expect(screen.filters).toEqual([]);
+    expect(screen.exempt).toEqual(['filter.lfs.clean']);
+    expect(screen.reachedExempt).toEqual(['filter.lfs.clean']);
+    expect(screen.unread).toEqual([]);
+    expect(screen.dangling).toEqual([]);
+  });
+
   it.skipIf(process.platform === 'win32')(
     'keeps a POSIX backslash distinct from the global-config separator spelling',
     () => {
@@ -2734,6 +2820,21 @@ describe('filterCommandsIn — the include walk', () => {
         key: 'filter.lfs.clean',
       },
     ]);
+  });
+
+  it('accepts command-scope file origins only for an explicit reachability read', () => {
+    const file = join(dir, 'included.cfg');
+    const records = `command\0file:${file}\0filter.x.clean\ncat\0`;
+    expect(parseTrustedConfigRecords(records)).toEqual([]);
+    expect(parseTrustedConfigRecords(records, true)).toEqual([
+      { scope: 'command', file, key: 'filter.x.clean' },
+    ]);
+    expect(
+      parseTrustedConfigRecords(
+        'command\0command line:\0filter.x.clean\ncat\0',
+        true,
+      ),
+    ).toBeNull();
   });
 
   it('keeps a global filter attributable when the config also has a valueless key', () => {
