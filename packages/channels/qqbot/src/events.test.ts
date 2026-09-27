@@ -1713,6 +1713,10 @@ describe('群管理事件', () => {
         string,
         { msgId: string; timestamp: number }
       >;
+      const replyContextByMessageId = chp['replyContextByMessageId'] as Map<
+        string,
+        { chatId: string; msgId: string; timestamp: number }
+      >;
       const streamState = chp['streamState'] as Map<
         string,
         {
@@ -1737,6 +1741,16 @@ describe('群管理事件', () => {
       });
       msgSeqMap.set('msg-xyz', 3);
       replyMsgId.set(groupId, { msgId: 'msg-xyz', timestamp: Date.now() });
+      // Seed the paired context entry so handleGroupDelRobot's context loop
+      // actually reaches msg-xyz and runs its guard. The session anchor still
+      // exists at this point, so the old and widened predicates agree: this
+      // pins that the guard exists, not the predicate widening (see the
+      // moved-anchor case below).
+      replyContextByMessageId.set('msg-xyz', {
+        chatId: groupId,
+        msgId: 'msg-xyz',
+        timestamp: Date.now(),
+      });
       streamState.set('sid-1', {
         chatId: groupId,
         buffer: '',
@@ -1777,6 +1791,10 @@ describe('群管理事件', () => {
         { msgId: string; timestamp: number }
       >;
       const msgSeqMap = chp['msgSeqMap'] as Map<string, number>;
+      const replyContextByMessageId = chp['replyContextByMessageId'] as Map<
+        string,
+        { chatId: string; msgId: string; timestamp: number }
+      >;
       const streamState = chp['streamState'] as Map<
         string,
         {
@@ -1803,6 +1821,15 @@ describe('群管理事件', () => {
         timestamp: Date.now(),
       });
       msgSeqMap.set('msg-X', 3);
+      // Seed the paired context entry so the context loop reaches msg-X and
+      // its guard runs. The session anchor still exists here, so the old and
+      // widened predicates agree: this pins that the guard exists, not the
+      // predicate widening.
+      replyContextByMessageId.set('msg-X', {
+        chatId: groupId,
+        msgId: 'msg-X',
+        timestamp: Date.now(),
+      });
       streamState.set('sid-1', {
         chatId: groupId,
         buffer: 'pending tail',
@@ -1850,6 +1877,71 @@ describe('群管理事件', () => {
       });
 
       releaseSpy.mockRestore();
+    });
+
+    // B6: the widened predicate, where it genuinely differs from
+    // isMsgIdAnchoredBySession — the session anchor has moved to a different
+    // msgId while a streamState entry for that session still carries the
+    // context msgId with a non-empty buffer. The anchor-only predicate would
+    // drop the counter; the shared predicate must keep it.
+    it('keeps the counter when the session anchor moved but a buffered entry still holds the context msgId (R10-7)', () => {
+      const ch = makeChannel();
+      const pvt = ch as unknown as QQChannelRaw;
+      const chp = ch as unknown as Record<string, unknown>;
+
+      const groupId = 'group-del-moved-1';
+      const sessionReplyMsgId = chp['sessionReplyMsgId'] as Map<
+        string,
+        { msgId: string; timestamp: number }
+      >;
+      const msgSeqMap = chp['msgSeqMap'] as Map<string, number>;
+      const replyContextByMessageId = chp['replyContextByMessageId'] as Map<
+        string,
+        { chatId: string; msgId: string; timestamp: number }
+      >;
+      const streamState = chp['streamState'] as Map<
+        string,
+        {
+          chatId: string;
+          buffer: string;
+          timer: ReturnType<typeof setTimeout> | null;
+          retryCount: number;
+          msgId?: string;
+          turn: number;
+        }
+      >;
+
+      // The session has already moved to a newer anchor (msg-Y), but its
+      // streamState entry still carries the older context msgId (msg-X) with
+      // a buffered residual.
+      sessionReplyMsgId.set('sid-1', {
+        msgId: 'msg-Y',
+        timestamp: Date.now(),
+      });
+      msgSeqMap.set('msg-X', 3);
+      replyContextByMessageId.set('msg-X', {
+        chatId: groupId,
+        msgId: 'msg-X',
+        timestamp: Date.now(),
+      });
+      streamState.set('sid-1', {
+        chatId: groupId,
+        buffer: 'pending tail',
+        timer: null,
+        retryCount: 0,
+        msgId: 'msg-X',
+        turn: 1,
+      });
+
+      const evt: GroupDelRobotEvent = {
+        group_openid: groupId,
+        op_member_openid: 'admin-1',
+        timestamp: Date.now(),
+      };
+      pvt['handleGroupDelRobot'](evt);
+
+      // The context loop's guard saw the buffered entry and kept the counter.
+      expect(msgSeqMap.get('msg-X')).toBe(3);
     });
 
     // R9-5: the release must carry the matched entry's msgId identity (the

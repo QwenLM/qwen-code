@@ -3135,8 +3135,9 @@ describe('cancel/flush coordination', () => {
     await drain();
 
     // Turn 2 streams — its chunk lands in streamOrphanBuffer (the deferred
-    // chain still owns the entry) — then is cancelled. The orphan stays
-    // "T2-SECRET" in the side buffer.
+    // chain still owns the entry) — then is cancelled. onPromptEnd must
+    // deliver that stashed HEAD on turn 2's own anchor (msg-B) rather than
+    // leaving it for turn 3 to drop as superseded.
     setReplyMsgId(ch, 'test-chat', 'msg-B');
     onPromptStart(ch, 'test-chat', 's1', 'msg-B');
     onResponseChunk(ch, 'test-chat', 'T2-SECRET', 's1');
@@ -3145,26 +3146,230 @@ describe('cancel/flush coordination', () => {
     ).onPromptEnd('test-chat', 's1');
 
     // Turn 1's chain settles: the deferred re-flush delivers T1-tail, then
-    // frees the entry — leaving T2-SECRET orphaned in the side buffer.
+    // frees the entry.
     resolveSend!(mockResponse(true));
     await vi.advanceTimersByTimeAsync(20_000);
     await drain();
     expect(streamState(ch).has('s1')).toBe(false);
 
     // Turn 3 — in thread scope, another member's question on the same
-    // session. onPromptStart (fixed) purges the orphaned side-buffer entry,
-    // so turn 3's reply head is its own text, not "T2-SECRETT3-answer".
+    // session. Turn 2's HEAD went out as its own message, so turn 3's reply
+    // head is its own text, not "T2-SECRETT3-answer".
     setReplyMsgId(ch, 'test-chat', 'msg-C');
     onPromptStart(ch, 'test-chat', 's1', 'msg-C');
     onResponseChunk(ch, 'test-chat', 'T3-answer', 's1');
     vi.advanceTimersByTime(2000);
     await drain();
 
-    expect(mockSendQQMessage).toHaveBeenCalledTimes(3);
-    const body = mockSendQQMessage.mock.calls[2][3] as Record<string, unknown>;
+    // Four sends: T1-head, the cancelled turn's own T2-SECRET, T1-tail and
+    // T3-answer. The cancelled text is delivered once as its own message and
+    // never concatenated into turn 3's reply. Each expected message must
+    // appear exactly once (order-free), so a duplication cannot pass.
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(4);
+    const contents = sentContents();
+    for (const expected of ['T1-head ', 'T2-SECRET', 'T1-tail', 'T3-answer']) {
+      expect(contents.filter((c) => c === expected)).toHaveLength(1);
+    }
+    expect(contents.some((c) => c.includes('T2-SECRETT3-answer'))).toBe(false);
+    const body = mockSendQQMessage.mock.calls[3][3] as Record<string, unknown>;
     expect((body['markdown'] as Record<string, string>)['content']).toBe(
       'T3-answer',
     );
+  });
+
+  it('final segment suspended in resolveRoute keeps msg-A seq when the session dies (R10-4)', async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const seqMap = chp['msgSeqMap'] as Map<string, number>;
+    const streamState = chp['streamState'] as Map<string, unknown>;
+    const flushingSessions = chp['flushingSessions'] as Map<string, unknown>;
+
+    // Turn 1's first segment delivers (msg-A, seq 1) and settles.
+    setReplyMsgId(ch, 'test-chat', 'msg-A');
+    onPromptStart(ch, 'test-chat', 's1', 'msg-A');
+    onResponseChunk(ch, 'test-chat', 'head ', 's1');
+    vi.advanceTimersByTime(2000);
+    await drain();
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+    expect(seqMap.get('msg-A')).toBe(1);
+
+    // A newer message moves the chat-level entry (ordinary group traffic), so
+    // only the in-flight marker can protect the counter.
+    setReplyMsgId(ch, 'test-chat', 'msg-C');
+
+    // Expire the token: the terminal send suspends in resolveRoute →
+    // fetchToken, BEFORE it reads msgSeqMap.
+    let releaseToken!: () => void;
+    const tokenGate = new Promise<void>((r) => {
+      releaseToken = r;
+    });
+    chp['tokenExpiresAt'] = Date.now() - 1;
+    mockFetchAccessToken.mockImplementation(async () => {
+      await tokenGate;
+      return { accessToken: 'test-token', expiresIn: 7200 };
+    });
+
+    onResponseChunk(ch, 'test-chat', 'tail', 's1');
+    const completion = onResponseComplete(ch, 'test-chat', 'head tail', 's1');
+    await drain();
+
+    // The terminal send is suspended with no streamState entry and no
+    // flushingSessions marker — only the in-flight refcount can see it.
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+    expect(streamState.has('s1')).toBe(false);
+    expect(flushingSessions.has('s1')).toBe(false);
+
+    // Session death lands in that window: the guard must keep the counter so
+    // the suspended send still resolves msg_seq 2, not a duplicate of (msg-A,1).
+    ch.onSessionDied('s1');
+
+    releaseToken();
+    await completion;
+    await drain();
+
+    const tailBody = mockSendQQMessage.mock.calls[1][3] as Record<
+      string,
+      unknown
+    >;
+    expect(tailBody['msg_id']).toBe('msg-A');
+    expect(tailBody['msg_seq']).toBe(2);
+  });
+
+  it("deleteReplyContext keeps a parked residual's msg_seq counter (R10-6)", async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const seqMap = chp['msgSeqMap'] as Map<string, number>;
+    const streamState = chp['streamState'] as Map<
+      string,
+      { msgId?: string; buffer: string }
+    >;
+    const flushingSessions = chp['flushingSessions'] as Map<string, unknown>;
+    const pendingStreamDelete = chp['pendingStreamDelete'] as Set<string>;
+
+    // Turn 1's head delivers (msg-A, seq 1) and settles.
+    setReplyMsgId(ch, 'test-chat', 'msg-A');
+    onPromptStart(ch, 'test-chat', 's1', 'msg-A');
+    onResponseChunk(ch, 'test-chat', 'T1-head ', 's1');
+    vi.advanceTimersByTime(2000);
+    await drain();
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+    expect(seqMap.get('msg-A')).toBe(1);
+
+    // The next flush suspends; a residual buffers behind it and the turn parks.
+    let resolveSend!: (v: MockResponse) => void;
+    const sendPromise = new Promise<MockResponse>((r) => {
+      resolveSend = r;
+    });
+    mockSendQQMessage.mockReturnValueOnce(sendPromise);
+    onResponseChunk(ch, 'test-chat', 'T1-tail ', 's1');
+    vi.advanceTimersByTime(2000);
+    await drain();
+    expect(flushingSessions.has('s1')).toBe(true);
+    onResponseChunk(ch, 'test-chat', 'T1-resid ', 's1');
+    onPromptEnd(ch, 'test-chat', 's1');
+    expect(pendingStreamDelete.has('s1')).toBe(true);
+    expect(streamState.get('s1')!.msgId).toBe('msg-A');
+    expect(streamState.get('s1')!.buffer).toBe('T1-resid ');
+
+    // A successor turn moves the anchor; the release veto keeps the counter
+    // because the parked entry still holds msg-A with a buffered residual.
+    setReplyMsgId(ch, 'test-chat', 'msg-B');
+    onPromptStart(ch, 'test-chat', 's1', 'msg-B');
+    expect(seqMap.get('msg-A')).toBe(2);
+
+    // The sweep's exact call for the expired msg-A context: the shared
+    // predicate must keep the counter while the parked residual owns it.
+    const contexts = chp['replyContextByMessageId'] as Map<
+      string,
+      { chatId: string; msgId: string; timestamp: number }
+    >;
+    (
+      chp['deleteReplyContext'] as (c: {
+        chatId: string;
+        msgId: string;
+        timestamp: number;
+      }) => void
+    )(contexts.get('msg-A')!);
+
+    // The parked residual flushes and continues at seq 3, not 1.
+    resolveSend(mockResponse(true));
+    await drain();
+    vi.advanceTimersByTime(6000);
+    await drain();
+
+    const residualBody = mockSendQQMessage.mock.calls[2][3] as Record<
+      string,
+      unknown
+    >;
+    expect(residualBody['msg_id']).toBe('msg-A');
+    expect(residualBody['msg_seq']).toBe(3);
+
+    // Once the parked residual has settled and the anchor has moved on, the
+    // counter is no longer held by anything and must be reclaimed — the other
+    // direction of the guard, so "kept while parked" cannot be confused with
+    // "never reclaimed".
+    expect(seqMap.has('msg-A')).toBe(false);
+  });
+
+  it('a failed concurrent send does not roll back a seq another send accepted (R11-1)', async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const seqMap = chp['msgSeqMap'] as Map<string, number>;
+
+    setReplyMsgId(ch, 'test-chat', 'msg-A');
+
+    // Session s2's anchored send starts first (msg-A, seq 1) and suspends.
+    onPromptStart(ch, 'test-chat', 's2', 'msg-A');
+    let rejectB!: (e: unknown) => void;
+    const promiseB = new Promise<MockResponse>((_res, rej) => {
+      rejectB = rej;
+    });
+    mockSendQQMessage.mockReturnValueOnce(promiseB);
+    onResponseChunk(ch, 'test-chat', 'B-text', 's2');
+    vi.advanceTimersByTime(2000);
+    await drain();
+    expect(seqMap.get('msg-A')).toBe(1);
+
+    // Session s1's anchored send runs under the SAME msgId and succeeds seq 2.
+    onPromptStart(ch, 'test-chat', 's1', 'msg-A');
+    mockSendQQMessage.mockResolvedValueOnce(mockResponse(true));
+    onResponseChunk(ch, 'test-chat', 'A-text', 's1');
+    vi.advanceTimersByTime(2000);
+    await drain();
+    expect(seqMap.get('msg-A')).toBe(2);
+    const aBody = sentBodies().at(-1)!;
+    expect(aBody['msg_id']).toBe('msg-A');
+    expect(aBody['msg_seq']).toBe(2);
+
+    // s2's suspended send now fails: the rollback must not forget s1's
+    // accepted seq 2 while s1's anchor is still live.
+    rejectB(new Error('network down'));
+    await drain();
+
+    // Clear s2's retry timer so the next advanceTimersByTime does not replay it.
+    const s2state = (chp['streamState'] as Map<string, { timer: unknown }>).get(
+      's2',
+    );
+    if (s2state?.timer) {
+      clearTimeout(s2state.timer as ReturnType<typeof setTimeout>);
+      (s2state as { timer: unknown }).timer = null;
+    }
+
+    // The counter must still reflect the accepted seq 2.
+    expect(seqMap.get('msg-A')).toBe(2);
+
+    // The next two sends continue at 3 and 4; a replay of 1 and 2 would
+    // duplicate an accepted (msg_id, msg_seq) pair that QQ dedupes and drops.
+    onResponseChunk(ch, 'test-chat', 'C-text', 's1');
+    vi.advanceTimersByTime(2000);
+    await drain();
+    onResponseChunk(ch, 'test-chat', 'D-text', 's1');
+    vi.advanceTimersByTime(2000);
+    await drain();
+    const replayed = sentBodies()
+      .filter((b) => b['msg_id'] === 'msg-A')
+      .map((b) => b['msg_seq']);
+    expect(replayed).toEqual([1, 2, 3, 4]);
   });
 });
 
@@ -3385,6 +3590,13 @@ function sentContents(): string[] {
     const markdown = body?.['markdown'] as { content?: string } | undefined;
     return markdown?.content ?? '';
   });
+}
+
+/** Raw request body of every send, in call order. */
+function sentBodies(): Array<Record<string, unknown>> {
+  return mockSendQQMessage.mock.calls.map(
+    (c) => c[3] as Record<string, unknown>,
+  );
 }
 
 /**
@@ -3638,6 +3850,231 @@ describe('stash ownership regressions', () => {
 
     await onResponseComplete(ch, 'test-chat', 'T2-REST', 's1');
     expect(sentContents()).toContain('T2-HEAD T2-REST');
+  });
+
+  it('re-stashes the sealed head when the drained stash send fails permanently (R10-2)', async () => {
+    const ch = makeChannel();
+    const { orphanBuffer } = await reachStashedOrphan(ch);
+
+    // Seal the head at a response boundary: the bridge cleared its collection,
+    // so this sealed portion has no other copy.
+    onResponseBoundary(ch, 'test-chat', 's1');
+    expect(orphanBuffer.get('s1')!.pre).toBe('T2-HEAD ');
+
+    // The next chunk drains the stash into a fresh entry; that drained send
+    // fails permanently, so the buffer (and the sealed head in it) is dropped.
+    mockSendQQMessage.mockRejectedValueOnce(
+      new DeliveryError('FALLBACK_FAILED', 'permanent failure'),
+    );
+    onResponseChunk(ch, 'test-chat', 'T2-REST', 's1');
+    vi.advanceTimersByTime(2000);
+    await drain();
+    expect(streamState(ch).has('s1')).toBe(false);
+    // The failed attempt itself already carries the drained text, so only a
+    // send issued AFTER it can prove the sealed head was recovered.
+    const failedAttempts = mockSendQQMessage.mock.calls.length;
+
+    // Completion must still recover the sealed head from the re-stash.
+    await onResponseComplete(ch, 'test-chat', 'T2-REST', 's1');
+    expect(sentContents().slice(failedAttempts)).toContain('T2-HEAD T2-REST');
+  });
+
+  it('merges the sealed head into a successor stash when the drained send fails permanently (A2-1)', async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const orphanBuffer = chp['streamOrphanBuffer'] as Map<
+      string,
+      { turn: number; text: string; pre?: string }
+    >;
+    const pendingStreamDelete = chp['pendingStreamDelete'] as Set<string>;
+    const { resolveSend } = await reachStaleStash(ch);
+
+    // Turn 1's chain settles and frees the entry; turn 2's stash remains.
+    resolveSend(mockResponse(true));
+    await vi.advanceTimersByTimeAsync(20_000);
+    await drain();
+    expect(streamState(ch).has('s1')).toBe(false);
+    expect(orphanBuffer.get('s1')).toEqual({ turn: 2, text: 'T2-HEAD ' });
+
+    // Seal turn 2's head at a boundary, then drain it into a fresh entry.
+    onResponseBoundary(ch, 'test-chat', 's1');
+    expect(orphanBuffer.get('s1')!.pre).toBe('T2-HEAD ');
+    let rejectDrain!: (e: unknown) => void;
+    const drainPromise = new Promise<MockResponse>((_r, rej) => {
+      rejectDrain = rej;
+    });
+    mockSendQQMessage.mockReturnValueOnce(drainPromise);
+    onResponseChunk(ch, 'test-chat', 'T2-REST', 's1');
+    vi.advanceTimersByTime(2000);
+    await drain();
+    const drainedState = (
+      chp['streamState'] as Map<string, { sealedPre?: string }>
+    ).get('s1')!;
+    expect(drainedState.sealedPre).toBe('T2-HEAD ');
+
+    // A residual buffers behind the in-flight drained send; turn 2 parks.
+    onResponseChunk(ch, 'test-chat', 'T2-RESID', 's1');
+    onPromptEnd(ch, 'test-chat', 's1');
+    expect(pendingStreamDelete.has('s1')).toBe(true);
+
+    // Turn 3 starts and stashes its own head, occupying the stash slot.
+    setReplyMsgId(ch, 'test-chat', 'msg-C');
+    onPromptStart(ch, 'test-chat', 's1', 'msg-C');
+    onResponseChunk(ch, 'test-chat', 'T3-HEAD', 's1');
+    expect(orphanBuffer.get('s1')).toEqual({ turn: 3, text: 'T3-HEAD' });
+
+    // The drained send carrying turn 2's sealed head fails permanently. The
+    // re-stash must merge into turn 3's stash rather than skip it: skipping
+    // drops the sealed head with no other copy (the boundary cleared the
+    // bridge's collection, so it is absent from fullText).
+    const beforeFailure = sentContents().length;
+    rejectDrain(new DeliveryError('FALLBACK_FAILED', 'permanent failure'));
+    await drain();
+    expect(streamState(ch).has('s1')).toBe(false);
+    // The re-stash must have merged into turn 3's stash rather than skipped.
+    const mergedStash = orphanBuffer.get('s1');
+
+    // Drive turn 3 to completion: the sealed head must be recovered by a send
+    // issued after the failed attempt.
+    onResponseChunk(ch, 'test-chat', 'T3-REST', 's1');
+    await onResponseComplete(ch, 'test-chat', 'T3-HEADT3-REST', 's1');
+    onPromptEnd(ch, 'test-chat', 's1');
+    await drain();
+    await vi.advanceTimersByTimeAsync(20_000);
+    await drain();
+
+    // Count-sensitive: exactly one post-failure send carries the sealed head,
+    // and with the failed attempt's single copy that is two overall — so a
+    // double delivery cannot pass.
+    const afterFailure = sentContents().slice(beforeFailure);
+    expect(afterFailure.some((c) => c.includes('T2-HEAD '))).toBe(true);
+    expect(afterFailure.filter((c) => c.includes('T2-HEAD '))).toHaveLength(1);
+    expect(sentContents().filter((c) => c.includes('T2-HEAD '))).toHaveLength(
+      2,
+    );
+    expect(mergedStash).toEqual({
+      turn: 3,
+      text: 'T2-HEAD T3-HEAD',
+      pre: 'T2-HEAD ',
+    });
+  });
+
+  it('does not re-deliver a sealed head a successful flush already carried (R11-3)', async () => {
+    const ch = makeChannel();
+    const { orphanBuffer } = await reachStashedOrphan(ch);
+
+    // Seal the head at a boundary, then drain it into a fresh entry.
+    onResponseBoundary(ch, 'test-chat', 's1');
+    expect(orphanBuffer.get('s1')!.pre).toBe('T2-HEAD ');
+    let resolveS1!: (v: MockResponse) => void;
+    const s1 = new Promise<MockResponse>((r) => {
+      resolveS1 = r;
+    });
+    mockSendQQMessage.mockReturnValueOnce(s1);
+    onResponseChunk(ch, 'test-chat', 'T2-REST', 's1');
+    vi.advanceTimersByTime(2000);
+    await drain();
+
+    // A residual arrives while S1 is in flight; S1 then SUCCEEDS, delivering
+    // 'T2-HEAD T2-REST' — the sealed head is now on the user's screen.
+    onResponseChunk(ch, 'test-chat', 'T2-TAIL', 's1');
+    resolveS1(mockResponse(true));
+    await drain();
+    expect(sentContents()).toContain('T2-HEAD T2-REST');
+    expect(sentContents().filter((c) => c.includes('T2-HEAD'))).toHaveLength(1);
+
+    // The residual flush now fails permanently. The sealed head was already
+    // delivered by S1, so the re-stash must not re-seal it.
+    mockSendQQMessage.mockRejectedValueOnce(
+      new DeliveryError('FALLBACK_FAILED', 'permanent failure'),
+    );
+    vi.advanceTimersByTime(2000);
+    await drain();
+
+    // Completion: with the head already delivered, it must not be prepended
+    // again and sent as a second, standalone copy.
+    await onResponseComplete(ch, 'test-chat', 'T2-RESTT2-TAIL', 's1');
+
+    expect(sentContents().filter((c) => c.includes('T2-HEAD'))).toEqual([
+      'T2-HEAD T2-REST',
+    ]);
+  });
+
+  it("delivers a cancelled turn's stashed head before the park early-return (R10-1)", async () => {
+    const ch = makeChannel();
+    const { resolveSend, orphanBuffer, chp } = await reachStaleStash(ch);
+    const pendingStreamDelete = chp['pendingStreamDelete'] as Set<string>;
+
+    expect(orphanBuffer.get('s1')).toEqual({
+      turn: 2,
+      text: 'T2-HEAD ',
+    });
+    expect(pendingStreamDelete.has('s1')).toBe(true);
+
+    // ChannelBase skips onResponseComplete on cancel, so onPromptEnd is the
+    // only teardown — it must service turn 2's stash before the park
+    // early-return hands the session to turn 1's deferred chain.
+    onPromptEnd(ch, 'test-chat', 's1');
+    expect(orphanBuffer.has('s1')).toBe(false);
+
+    resolveSend(mockResponse(true));
+    await vi.advanceTimersByTimeAsync(20_000);
+    await drain();
+
+    // Count-sensitive: the cancelled turn's head goes out exactly once as its
+    // own message, so a double delivery cannot pass.
+    expect(sentContents().filter((c) => c === 'T2-HEAD ')).toHaveLength(1);
+  });
+
+  it("deliverCancelledStash's anchored send is protected by the in-flight guard (R11-2)", async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const seqMap = chp['msgSeqMap'] as Map<string, number>;
+    const { resolveSend } = await reachStaleStash(ch);
+
+    // Make the counter observably non-default so a reset is visible.
+    seqMap.set('msg-B', 4);
+
+    // Expire the token: the cancelled-stash send suspends in resolveRoute.
+    let releaseToken!: () => void;
+    const gate = new Promise<void>((r) => {
+      releaseToken = r;
+    });
+    chp['tokenExpiresAt'] = Date.now() - 1;
+    mockFetchAccessToken.mockImplementation(async () => {
+      await gate;
+      return { accessToken: 'test-token', expiresIn: 7200 };
+    });
+
+    // Cancel turn 2: the pre-park block fires deliverCancelledStash.
+    onPromptEnd(ch, 'test-chat', 's1');
+    await drain();
+    expect(seqMap.has('msg-B')).toBe(true);
+
+    // Successor turn starts on the same session; chat-level entry moved on.
+    setReplyMsgId(ch, 'test-chat', 'msg-C');
+    onPromptStart(ch, 'test-chat', 's1', 'msg-C');
+
+    // The in-flight send's counter must still be protected.
+    expect(seqMap.has('msg-B')).toBe(true);
+
+    releaseToken();
+    await drain();
+    const stashBody = sentBodies().find(
+      (b) =>
+        (b['markdown'] as { content?: string } | undefined)?.content ===
+        'T2-HEAD ',
+    )!;
+    // The suspended send keeps the sequence it would have had (4 + 1), rather
+    // than resetting to 1.
+    expect(stashBody['msg_seq']).toBe(5);
+    // Anchor correctness: the cancelled turn's own anchor (msg-B), not the
+    // predecessor's (msg-A).
+    expect(stashBody['msg_id']).toBe('msg-B');
+
+    resolveSend(mockResponse(true));
+    await vi.advanceTimersByTimeAsync(20_000);
+    await drain();
   });
 
   it("services a successor's park armed against a superseded chain's marker (R9-2)", async () => {

@@ -116,6 +116,14 @@ interface QQStreamState {
    * its turn against the current counter and drops stale entries.
    */
   turn: number;
+  /**
+   * Sealed pre-boundary head carried across the onResponseChunk stash drain.
+   * The drain folds the stash into `buffer`; if that drained send fails
+   * permanently the buffer is dropped, and the bridge's cleared collection
+   * means this sealed portion has no other copy. The permanent-failure branch
+   * re-stashes it so onResponseComplete can still prepend it.
+   */
+  sealedPre?: string;
 }
 
 /** Validate chatId to prevent SSRF when constructing URLs. */
@@ -170,6 +178,14 @@ export class QQChannel extends ChannelBase {
   private inboundReplyContext = new AsyncLocalStorage<QQReplyContext>();
   /** msg_seq counter per user messageId, for multi-block streaming. */
   private msgSeqMap: Map<string, number> = new Map();
+  /**
+   * Anchored sends currently in flight, keyed by the msgId whose msg_seq
+   * counter they hold (refcounted: two sessions may send under one msgId).
+   * Covers sends that own no streamState entry — the terminal send in
+   * onResponseComplete and the stale-entry branch — which flushingSessions
+   * (session-keyed) cannot see.
+   */
+  private inFlightMsgSeqSends: Map<string, number> = new Map();
   /** Periodic cleanup timer for expired replyMsgId entries. */
   private replyMsgIdCleanupTimer: ReturnType<typeof setInterval> | null = null;
   /** 5-minute TTL for replyMsgId entries and seenMessages dedup. */
@@ -900,7 +916,13 @@ export class QQChannel extends ChannelBase {
             `[QQ:${this.name}] MESSAGE DROPPED: rate-limited (429) on markdown attempt for ${sanitizeLogText(chatId, 64)}\n`,
           );
           if (msgId) {
-            this.msgSeqMap.set(msgId, nextSeq - 1);
+            // Only roll back our own seq: a concurrent send under the same
+            // msgId (two sessions can share one) may have advanced the counter
+            // past ours, and restoring nextSeq - 1 would forget the seq that
+            // send accepted, making later sends replay a pair QQ dedupes.
+            if (this.msgSeqMap.get(msgId) === nextSeq) {
+              this.msgSeqMap.set(msgId, nextSeq - 1);
+            }
             this.saveQQState();
           }
           throw new DeliveryError(
@@ -912,7 +934,11 @@ export class QQChannel extends ChannelBase {
         // Passive markdown failed (non-429). If we have msgId, roll back
         // and try active retries (no msg_id/msg_seq).
         if (msgId) {
-          this.msgSeqMap.set(msgId, nextSeq - 1);
+          // Conditional rollback: see the 429 branch above — a concurrent
+          // anchored send may already have advanced the counter past ours.
+          if (this.msgSeqMap.get(msgId) === nextSeq) {
+            this.msgSeqMap.set(msgId, nextSeq - 1);
+          }
           rollbackApplied = true;
 
           // Check if active messages are allowed for this chat
@@ -1055,7 +1081,11 @@ export class QQChannel extends ChannelBase {
     } catch (e) {
       // Rollback on failure if we haven't already
       if (msgId && !rollbackApplied) {
-        this.msgSeqMap.set(msgId, nextSeq - 1);
+        // Conditional rollback: see the 429 branch above — a concurrent
+        // anchored send may already have advanced the counter past ours.
+        if (this.msgSeqMap.get(msgId) === nextSeq) {
+          this.msgSeqMap.set(msgId, nextSeq - 1);
+        }
       }
       if (msgId) this.saveQQState();
       // Note: sendQQMessage only throws on network/timeout errors, never HTTP status.
@@ -1277,6 +1307,23 @@ export class QQChannel extends ChannelBase {
     // below has early returns (deferred flush chains) that must not leave
     // this session marked as an active prompt for the cron discriminator.
     this.activePromptSessions.delete(sessionId);
+    // A cancelled turn whose chunks were diverted into the side buffer while a
+    // predecessor's deferred chain parked the session must still deliver its
+    // HEAD: the early return below hands the whole teardown to that chain, but
+    // the chain only services its own residual — it never reads the successor's
+    // stash, and the next turn would drop it as superseded. Service this turn's
+    // stash first, on this turn's own anchor; the park flag and the
+    // predecessor's entry/buffer stay untouched so its chain can still settle
+    // and release its own anchor.
+    const parkedStash = this.streamOrphanBuffer.get(sessionId);
+    if (
+      this.pendingStreamDelete.has(sessionId) &&
+      parkedStash &&
+      parkedStash.turn === (this.turnCounter.get(sessionId) ?? 0)
+    ) {
+      this.streamOrphanBuffer.delete(sessionId);
+      void this.deliverCancelledStash(chatId, sessionId, parkedStash.text);
+    }
     if (this.pendingStreamDelete.has(sessionId)) {
       // Deferred completion (or a cancelled turn's flush below) owns the
       // teardown: the flush chain's terminal settle releases the anchor and
@@ -1348,6 +1395,59 @@ export class QQChannel extends ChannelBase {
     this.flushedSessions.delete(sessionId);
     this.turnCounter.delete(sessionId);
     this.streamOrphanBuffer.delete(sessionId);
+  }
+
+  /**
+   * Deliver a cancelled turn's stashed HEAD on its OWN anchor. The session is
+   * parked in pendingStreamDelete while a predecessor turn's deferred chain
+   * settles, so ChannelBase skips onResponseComplete and onPromptEnd's park
+   * early-return would otherwise leave this turn's stash for the next turn to
+   * discard as superseded. Fire-and-forget — onPromptEnd is sync — and swallow
+   * a rejection so a failed delivery cannot become an unhandled rejection. The
+   * park flag and the predecessor's streamState entry/buffer are deliberately
+   * untouched: that chain still owns them and must settle and release its own
+   * anchor, and this text must not go out under the predecessor's msgId.
+   */
+  private async deliverCancelledStash(
+    chatId: string,
+    sessionId: string,
+    text: string,
+  ): Promise<void> {
+    try {
+      const anchorEntry = this.sessionReplyMsgId.get(sessionId);
+      const captured =
+        anchorEntry &&
+        Date.now() - anchorEntry.timestamp < QQChannel.REPLY_MSG_ID_TTL_MS
+          ? anchorEntry.msgId
+          : undefined;
+      const sourceLabel = this.getResponseSourceLabel(sessionId);
+      if (captured) {
+        // Mark the send in flight for the release guard: this session owns no
+        // streamState entry for the cancelled turn, so a successor's
+        // onPromptStart release (or the 60s sweep) would otherwise drop the
+        // msg_seq counter while the send is suspended in resolveRoute and it
+        // would resolve msg_seq 1 again.
+        this.beginMsgSeqSend(captured);
+        try {
+          await this.sendMessageWithReplyContext(
+            chatId,
+            text,
+            undefined,
+            sourceLabel,
+            captured,
+          );
+        } finally {
+          this.endMsgSeqSend(captured);
+        }
+        this.releaseSessionReplyAnchor(sessionId, captured);
+      } else {
+        await this.sendResponseMessage(chatId, text, sessionId, sourceLabel);
+      }
+    } catch (e: unknown) {
+      process.stderr.write(
+        `[QQ:${this.name}] cancelled-stash delivery failed: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,
+      );
+    }
   }
 
   // ── Streaming (idle-flush with per-session buffers) ────────────
@@ -1449,12 +1549,17 @@ export class QQChannel extends ChannelBase {
       // so a long stream's later windows fall back to the active send path
       // instead of sending chunks with an expired msg_id.
       const held = this.streamOrphanBuffer.get(sessionId);
+      let sealedPre: string | undefined;
       if (held !== undefined) {
         if (held.turn === currentTurn) {
           // The previous turn's deferred chain has settled and freed the
           // streamState entry — prepend the stashed chunks so this turn's
           // reply HEAD is delivered in order.
           this.streamOrphanBuffer.delete(sessionId);
+          // The sealed pre-boundary head has no other copy (the bridge cleared
+          // its collection at the boundary), so carry it on the state until the
+          // drained send settles: a permanent failure re-stashes it below.
+          sealedPre = held.pre;
           chunk = held.text + chunk;
         } else {
           this.dropOrphanStash(sessionId, held);
@@ -1467,6 +1572,7 @@ export class QQChannel extends ChannelBase {
         currentTurn,
         segment,
       );
+      if (sealedPre !== undefined) state.sealedPre = sealedPre;
       this.streamState.set(sessionId, state);
     } else {
       state.sourceLabel ??= segment?.sourceLabel;
@@ -1583,6 +1689,12 @@ export class QQChannel extends ChannelBase {
       state.msgId,
     )
       .then(() => {
+        // This send carried the sealed pre-boundary head (the drain folded it
+        // into this buffer), so it must not be re-stashed by a later permanent
+        // failure — onResponseComplete would prepend it and deliver a second
+        // standalone copy. Clear it on both success paths (state current and
+        // session died) because the head is out either way.
+        state.sealedPre = undefined;
         // #3: Guard — if session died during in-flight send, touch nothing
         // of the entry's, but do release the anchor: no later settle can run
         // for this state, so otherwise its msg_seq counter is stranded.
@@ -1662,6 +1774,35 @@ export class QQChannel extends ChannelBase {
           const current = this.streamState.get(sessionId);
           if (current === state) {
             this.streamState.delete(sessionId);
+            // The sealed pre-boundary head was drained into this buffer and is
+            // absent from fullText (the boundary cleared the bridge's
+            // collection), so re-stash it: onResponseComplete can then prepend
+            // it instead of losing it with the permanently-failed buffer. Merge
+            // into a stash a successor turn already holds rather than skipping
+            // it — skipping drops this sealed head with no other copy. The
+            // sealed head is older than anything the successor stashed, so it
+            // is prepended. `pre` carries only text the bridge's cleared
+            // collection no longer holds, so when the existing stash has no
+            // seal its `text` is already in fullText and only our sealed head
+            // is prepended; otherwise the successor's text would be delivered
+            // twice.
+            if (state.sealedPre !== undefined) {
+              const existing = this.streamOrphanBuffer.get(sessionId);
+              this.streamOrphanBuffer.set(
+                sessionId,
+                existing === undefined
+                  ? {
+                      turn: state.turn,
+                      text: state.sealedPre,
+                      pre: state.sealedPre,
+                    }
+                  : {
+                      turn: existing.turn,
+                      text: state.sealedPre + existing.text,
+                      pre: state.sealedPre + (existing.pre ?? ''),
+                    },
+              );
+            }
           }
           // Release only when the settle is terminal (the session was parked
           // for teardown) or this entry was superseded by a later turn. While
@@ -1991,13 +2132,21 @@ export class QQChannel extends ChannelBase {
         // undefined sourceLabel, so the anchored send goes through the
         // reply-context helper. The stale entry's own sourceLabel belongs to
         // the old turn, so only this turn's label is used.
-        await this.sendMessageWithReplyContext(
-          chatId,
-          replyText,
-          undefined,
-          segment?.sourceLabel ?? this.getResponseSourceLabel(sessionId),
-          captured,
-        );
+        // Mark the send in flight for the release guard: the surviving
+        // streamState entry carries the OLD turn's msgId, so the
+        // streamState/flushingSessions check cannot see this send.
+        this.beginMsgSeqSend(captured);
+        try {
+          await this.sendMessageWithReplyContext(
+            chatId,
+            replyText,
+            undefined,
+            segment?.sourceLabel ?? this.getResponseSourceLabel(sessionId),
+            captured,
+          );
+        } finally {
+          this.endMsgSeqSend(captured);
+        }
         this.releaseSessionReplyAnchor(sessionId, captured);
       } else {
         await super.onResponseComplete(chatId, replyText, sessionId);
@@ -2070,13 +2219,21 @@ export class QQChannel extends ChannelBase {
         // undefined sourceLabel, so the anchored send goes through the
         // reply-context helper instead (msgIdOverride still wins over the
         // reply context, so the anchor is unchanged).
-        await this.sendMessageWithReplyContext(
-          chatId,
-          remaining,
-          undefined,
-          sourceLabel,
-          capturedMsgId,
-        );
+        // Mark the send in flight for the release guard: the streamState
+        // entry was deleted above, so nothing else can tell the guard that
+        // this msgId's counter is still being used.
+        this.beginMsgSeqSend(capturedMsgId);
+        try {
+          await this.sendMessageWithReplyContext(
+            chatId,
+            remaining,
+            undefined,
+            sourceLabel,
+            capturedMsgId,
+          );
+        } finally {
+          this.endMsgSeqSend(capturedMsgId);
+        }
       } else {
         if (anchorEntry) {
           // The anchor existed but outlived its TTL — a long turn whose final
@@ -2688,25 +2845,13 @@ export class QQChannel extends ChannelBase {
     // expectedMsgId so this turn's msg_seq counter cannot orphan.
     const target = expectedMsgId ?? current?.msgId;
     if (target === undefined) return;
-    // Another session is still streaming under this msgId — keep its seq.
-    if (this.isMsgIdAnchoredBySession(target)) return;
-    // A streamState entry still holds this msgId with a pending flush (a
-    // re-buffered tail + armed retry timer) — keep the seq until it settles.
-    // Releasing now would drop the counter, and the tail's sendMessage would
-    // resolve nextSeq = 1 after the first flush's (msg-A,1); QQ dedupes on
-    // msg_id + msg_seq and silently drops the tail.
-    // A flush already in flight keeps the seq for the same reason: idleFlush()
-    // clears buffer/timer before sendMessage awaits resolveRoute, so without
-    // the flushingSessions check a release would drop the counter and the
-    // in-flight send would resolve nextSeq = 1 after the first segment's
-    // (msg-A,1) — the tail is silently lost to QQ's msg_id + msg_seq dedup.
-    for (const [sid, s] of this.streamState) {
-      if (
-        s.msgId === target &&
-        (s.buffer || s.timer || this.flushingSessions.has(sid))
-      )
-        return;
-    }
+    // Another session is still anchored to this msgId, a streamState entry
+    // still holds it with a pending flush (a re-buffered tail + armed retry
+    // timer), or an anchored send under it is in flight — keep the seq until
+    // it settles. Releasing now would drop the counter, and the tail's
+    // sendMessage would resolve nextSeq = 1 after the first flush's (msg-A,1);
+    // QQ dedupes on msg_id + msg_seq and silently drops the tail.
+    if (this.isMsgSeqStillInUse(target)) return;
     // The chat-level entry still points at this msgId — seq is still in use.
     for (const [, entry] of this.replyMsgId) {
       if (entry.msgId === target) return;
@@ -2716,6 +2861,41 @@ export class QQChannel extends ChannelBase {
       // orphaned seq for a msgId that can never be used again.
       this.saveQQState();
     }
+  }
+
+  /**
+   * Whether a msgId's msg_seq counter is still needed: another session is
+   * anchored to it, a streamState entry holds it with a pending residual or an
+   * in-flight flush, or an anchored send under it is in flight (including the
+   * entry-less sends flushingSessions cannot see). The single predicate for
+   * every msgSeqMap reclamation site, so the release veto and the TTL/teardown
+   * reclaimers cannot disagree and drop a counter under a live send.
+   */
+  private isMsgSeqStillInUse(msgId: string): boolean {
+    if (this.isMsgIdAnchoredBySession(msgId)) return true;
+    for (const [sid, s] of this.streamState) {
+      if (
+        s.msgId === msgId &&
+        (s.buffer || s.timer || this.flushingSessions.has(sid))
+      )
+        return true;
+    }
+    return (this.inFlightMsgSeqSends.get(msgId) ?? 0) > 0;
+  }
+
+  /** Mark an anchored send under msgId in flight for the release guard. */
+  private beginMsgSeqSend(msgId: string): void {
+    this.inFlightMsgSeqSends.set(
+      msgId,
+      (this.inFlightMsgSeqSends.get(msgId) ?? 0) + 1,
+    );
+  }
+
+  /** Clear the matching beginMsgSeqSend once the send has settled. */
+  private endMsgSeqSend(msgId: string): void {
+    const remaining = (this.inFlightMsgSeqSends.get(msgId) ?? 1) - 1;
+    if (remaining > 0) this.inFlightMsgSeqSends.set(msgId, remaining);
+    else this.inFlightMsgSeqSends.delete(msgId);
   }
 
   /** Whether any live session is still anchored to this msgId. */
@@ -2751,7 +2931,7 @@ export class QQChannel extends ChannelBase {
     // (per-session msgId, PR #8241): keep its msg_seq counter alive so its
     // tail send doesn't reset the sequence — only delete it when no live
     // session is still anchored to it.
-    if (!this.isMsgIdAnchoredBySession(context.msgId)) {
+    if (!this.isMsgSeqStillInUse(context.msgId)) {
       this.msgSeqMap.delete(context.msgId);
     }
     if (this.replyMsgId.get(context.chatId)?.msgId === context.msgId) {
@@ -2781,7 +2961,7 @@ export class QQChannel extends ChannelBase {
           // (per-session msgId): keep its msg_seq counter alive so the tail
           // send doesn't reset the sequence — only delete it when no live
           // session is still anchored to it.
-          if (!this.isMsgIdAnchoredBySession(entry.msgId)) {
+          if (!this.isMsgSeqStillInUse(entry.msgId)) {
             this.msgSeqMap.delete(entry.msgId);
           }
           this.replyMsgId.delete(chatId);
@@ -3925,14 +4105,16 @@ export class QQChannel extends ChannelBase {
     // msgSeqMap is keyed by message ID, not group_openid — get the
     // message ID from replyMsgId before deleting the reply entry.
     const replyEntry = this.replyMsgId.get(groupId);
-    if (replyEntry && !this.isMsgIdAnchoredBySession(replyEntry.msgId)) {
+    if (replyEntry && !this.isMsgSeqStillInUse(replyEntry.msgId)) {
       this.msgSeqMap.delete(replyEntry.msgId);
     }
     this.replyMsgId.delete(groupId);
     for (const context of this.replyContextByMessageId.values()) {
       if (context.chatId === groupId) {
         this.replyContextByMessageId.delete(context.msgId);
-        this.msgSeqMap.delete(context.msgId);
+        if (!this.isMsgSeqStillInUse(context.msgId)) {
+          this.msgSeqMap.delete(context.msgId);
+        }
       }
     }
     this.botOpenIdByGroup.delete(groupId);
