@@ -318,8 +318,8 @@ function testReleaseMatrixCoversUpdaterPlatforms() {
     built.add(platform);
   }
   assert.ok(built.size > 0, 'the build matrix must declare rust targets');
-  // Keyed on the `[platform, selectArtifact(` entry shape so a commented-out
-  // entry stops counting as published.
+  // Keyed on the `[platform, selectArtifact(` entry shape, so commenting out
+  // one of the multi-line entries stops it counting as published.
   const published = new Set();
   for (const [, platform] of manifestSource.matchAll(
     /\[\s*'((?:darwin|linux|windows)-(?:x86_64|aarch64))'\s*,/g,
