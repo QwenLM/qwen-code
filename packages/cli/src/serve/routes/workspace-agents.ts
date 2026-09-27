@@ -449,6 +449,14 @@ export function registerWorkspaceAgentRoutes(
     });
     res.flushHeaders();
     let closed = false;
+    let unsubscribe = () => {};
+    const stop = (endResponse = false) => {
+      if (closed) return;
+      closed = true;
+      clearInterval(heartbeat);
+      unsubscribe();
+      if (endResponse && !res.writableEnded) res.end();
+    };
     // A slow client skips intermediate progress frames rather than queueing
     // them; the next frame carries the whole text so far anyway.
     let congested = false;
@@ -456,25 +464,26 @@ export function registerWorkspaceAgentRoutes(
       congested = false;
     });
     const send = (event: AgentLiveEvent) => {
+      if (runtime.generationGuard?.closed) {
+        stop(true);
+        return;
+      }
       if (closed || (congested && event.type === 'progress')) return;
       congested = !res.write(
         `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`,
       );
     };
     const heartbeat = setInterval(() => {
-      if (!closed) res.write(': ping\n\n');
+      if (runtime.generationGuard?.closed) stop(true);
+      else if (!closed) res.write(': ping\n\n');
     }, 20_000);
     heartbeat.unref?.();
-    req.on('close', () => {
-      closed = true;
-      clearInterval(heartbeat);
-    });
-    const unsubscribe = await subscribeAgentEvents(runtime.workspaceCwd, send);
+    req.on('close', () => stop());
+    unsubscribe = await subscribeAgentEvents(runtime.workspaceCwd, send);
     if (closed) {
       unsubscribe();
       return;
     }
-    req.on('close', unsubscribe);
     send({ type: 'changed' });
   });
 
