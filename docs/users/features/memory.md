@@ -144,6 +144,24 @@ You can also set them in `~/.qwen/settings.json` (applies to all projects) or `.
 }
 ```
 
+### Structured recall (opt-in)
+
+By default Qwen reads memory as a flat `MEMORY.md` index. The structured protocol replaces that with a hierarchical memory tree, injects only the subtree relevant to your current request, and gives Qwen a `search_memory` tool to pull full entries on demand — which costs fewer tokens once a memory collection grows past a handful of files.
+
+It is off by default. Turn it on in `settings.json` (restart required):
+
+```json
+{
+  "memory": {
+    "enableStructuredRecall": true
+  }
+}
+```
+
+or for a single run with `QWEN_CODE_MEMORY_STRUCTURED_RECALL=1`.
+
+Turning it on starts a background metadata migration: each memory file gains the frontmatter (category, keywords, usage scenarios) that recall needs. It runs in small batches of at most 10 files per turn and only rewrites frontmatter, never the body of a note. While the setting is off the migration is never scheduled, so nothing is rewritten and no background model calls are made.
+
 ### Team memory (shared with collaborators)
 
 By default, auto-memory is **private to you** — it lives under your home directory and is never shared. Team memory is an opt-in tier that the whole team shares **through git**.
@@ -212,7 +230,7 @@ Opens the Memory panel. From here you can:
 
 ### `/memory migrate-team`
 
-Migrates the **team memory** tier (`.qwen/team-memory/`) to the structured metadata format: each file gains the frontmatter (name, description, category, keywords, usage scenarios) that memory recall needs. Personal and project memory are migrated automatically in the background; team memory is shared through git, so the rewrite runs only on explicit request and shows up as a reviewable commit. Run it once per repository in a trusted workspace with team memory enabled.
+Migrates the **team memory** tier (`.qwen/team-memory/`) to the structured metadata format: each file gains the frontmatter (name, description, category, keywords, usage scenarios) that memory recall needs. Personal and project memory are migrated automatically in the background once [structured recall](#structured-recall-opt-in) is enabled; team memory is shared through git, so the rewrite runs only on explicit request and shows up as a reviewable commit. Run it once per repository in a trusted workspace with team memory enabled.
 
 ### `/init`
 

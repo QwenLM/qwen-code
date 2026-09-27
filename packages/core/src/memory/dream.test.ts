@@ -41,6 +41,7 @@ describe('managed auto-memory dream', () => {
       getModel: vi.fn().mockReturnValue('qwen-test'),
       getApprovalMode: vi.fn(),
       getMemoryRecallMode: vi.fn().mockReturnValue('legacy'),
+      getStructuredMemoryRecallEnabled: vi.fn().mockReturnValue(true),
     } as unknown as Config;
   });
 

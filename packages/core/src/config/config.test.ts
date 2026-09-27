@@ -2395,6 +2395,55 @@ describe('Server Config (config.ts)', () => {
     });
   });
 
+  describe('getStructuredMemoryRecallEnabled', () => {
+    const prevEnv = process.env['QWEN_CODE_MEMORY_STRUCTURED_RECALL'];
+    afterEach(() => {
+      if (prevEnv === undefined) {
+        delete process.env['QWEN_CODE_MEMORY_STRUCTURED_RECALL'];
+      } else {
+        process.env['QWEN_CODE_MEMORY_STRUCTURED_RECALL'] = prevEnv;
+      }
+    });
+
+    it('is off by default and follows the enableStructuredMemoryRecall setting', () => {
+      delete process.env['QWEN_CODE_MEMORY_STRUCTURED_RECALL'];
+      expect(new Config(baseParams).getStructuredMemoryRecallEnabled()).toBe(
+        false,
+      );
+      expect(
+        new Config({
+          ...baseParams,
+          enableStructuredMemoryRecall: true,
+        }).getStructuredMemoryRecallEnabled(),
+      ).toBe(true);
+    });
+
+    it('QWEN_CODE_MEMORY_STRUCTURED_RECALL overrides the setting', () => {
+      process.env['QWEN_CODE_MEMORY_STRUCTURED_RECALL'] = '1';
+      expect(new Config(baseParams).getStructuredMemoryRecallEnabled()).toBe(
+        true,
+      );
+      process.env['QWEN_CODE_MEMORY_STRUCTURED_RECALL'] = '0';
+      expect(
+        new Config({
+          ...baseParams,
+          enableStructuredMemoryRecall: true,
+        }).getStructuredMemoryRecallEnabled(),
+      ).toBe(false);
+    });
+
+    it('bareMode forces off even with the setting and env both on', () => {
+      process.env['QWEN_CODE_MEMORY_STRUCTURED_RECALL'] = '1';
+      expect(
+        new Config({
+          ...baseParams,
+          bareMode: true,
+          enableStructuredMemoryRecall: true,
+        }).getStructuredMemoryRecallEnabled(),
+      ).toBe(false);
+    });
+  });
+
   describe('getCronRecurringMaxAgeDays', () => {
     const prevEnv = process.env['QWEN_CODE_CRON_MAX_AGE_DAYS'];
     afterEach(() => {
@@ -10032,6 +10081,7 @@ describe('Server Config (config.ts)', () => {
     });
     vi.spyOn(config, 'isManagedMemoryAvailable').mockReturnValue(true);
     vi.spyOn(config, 'getManagedAutoMemoryEnabled').mockReturnValue(true);
+    vi.spyOn(config, 'getStructuredMemoryRecallEnabled').mockReturnValue(true);
     vi.spyOn(config, 'getProjectRoot').mockReturnValue('/tmp/project');
     vi.spyOn(config, 'getTeamMemoryEnabled').mockReturnValue(false);
     vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
@@ -10085,6 +10135,7 @@ describe('Server Config (config.ts)', () => {
       debugLogger: createDebugLogger('TEST'),
     });
     vi.spyOn(config, 'getManagedAutoMemoryEnabled').mockReturnValue(true);
+    vi.spyOn(config, 'getStructuredMemoryRecallEnabled').mockReturnValue(true);
     vi.spyOn(config, 'getProjectRoot').mockReturnValue('/tmp/project');
     vi.spyOn(config, 'getTeamMemoryEnabled').mockReturnValue(false);
     vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
@@ -10122,6 +10173,36 @@ describe('Server Config (config.ts)', () => {
     // The production predicate adds `&& !isSafeMode()`; keep the mock pointed
     // at it so the gate being exercised is the one client.ts relies on.
     vi.spyOn(config, 'getManagedAutoMemoryEnabled').mockReturnValue(false);
+    vi.spyOn(config, 'getProjectRoot').mockReturnValue('/tmp/project');
+    const scan = vi
+      .fn()
+      .mockResolvedValue({ ready: true, revision: 'structured-revision' });
+    Object.assign(config, {
+      scanMemoryRecallCorpusStatus: scan,
+      buildAutoMemoryPromptForMode: vi
+        .fn()
+        .mockResolvedValue('structured prompt'),
+    });
+
+    await expect(config.prepareMemoryRecallTransition()).resolves.toBe(
+      undefined,
+    );
+    expect(scan).not.toHaveBeenCalled();
+    expect(config.getMemoryRecallMode()).toBe('legacy');
+  });
+
+  it('prepareMemoryRecallTransition stays inert while the structured protocol is opted out', async () => {
+    // A ready corpus must not flip the protocol on by itself: activation is
+    // opt-in, so the readiness scan is never even consulted.
+    const config = Object.create(Config.prototype) as Config;
+    Object.assign(config, {
+      memoryRecallMode: 'legacy',
+      memoryRecallModeInitialized: true,
+      memoryCorpusRevision: 'legacy-revision',
+      autoMemoryPrompt: 'legacy prompt',
+    });
+    vi.spyOn(config, 'getManagedAutoMemoryEnabled').mockReturnValue(true);
+    vi.spyOn(config, 'getStructuredMemoryRecallEnabled').mockReturnValue(false);
     vi.spyOn(config, 'getProjectRoot').mockReturnValue('/tmp/project');
     const scan = vi
       .fn()

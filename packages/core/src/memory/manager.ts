@@ -261,6 +261,7 @@ export interface MetadataMigrationScheduleResult {
   status: 'scheduled' | 'skipped';
   taskId?: string;
   skippedReason?:
+    | 'disabled'
     | 'complete'
     | 'running'
     | 'memory_pressure'
@@ -781,6 +782,13 @@ export class MemoryManager {
   async scheduleMetadataMigration(
     params: ScheduleMetadataMigrationParams,
   ): Promise<MetadataMigrationScheduleResult> {
+    // The migration's only consumer is the structured recall protocol, so an
+    // opted-out corpus must not pay for forked agents that enrich metadata
+    // nothing will ever read. Checked before the pressure probe so a disabled
+    // feature reports why it is off rather than an incidental skip reason.
+    if (!params.config.getStructuredMemoryRecallEnabled()) {
+      return { status: 'skipped', skippedReason: 'disabled' };
+    }
     if (this.isUnderMemoryPressure(params.config)) {
       return { status: 'skipped', skippedReason: 'memory_pressure' };
     }
@@ -1429,12 +1437,17 @@ export class MemoryManager {
       return { status: 'skipped', skippedReason: 'memory_pressure' };
     }
     // A stalled migration (see MIGRATION_STALL_LIMIT) never drains its
-    // candidates; do not let it suppress consolidation forever.
+    // candidates; do not let it suppress consolidation forever. The same holds
+    // when the structured protocol is opted out — the migration is never
+    // scheduled, so its candidates never drain and the stall counter never
+    // advances. The enabled check comes first so a disabled feature does not
+    // even pay for the candidate scan.
     const projectMigrationStalled =
       (this.migrationStallCountByDomain.get(
         `project:${getAutoMemoryRoot(params.projectRoot)}`,
       ) ?? 0) >= MIGRATION_STALL_LIMIT;
     if (
+      params.config.getStructuredMemoryRecallEnabled() &&
       !projectMigrationStalled &&
       params.config.getMemoryRecallMode() !== 'structured' &&
       (
@@ -1569,6 +1582,9 @@ export class MemoryManager {
         `user:${getUserAutoMemoryRoot()}`,
       ) ?? 0) >= MIGRATION_STALL_LIMIT;
     if (
+      // See the project gate above: an opted-out protocol never drains its
+      // migration candidates, so it must not suppress consolidation either.
+      params.config.getStructuredMemoryRecallEnabled() &&
       !userMigrationStalled &&
       params.config.getMemoryRecallMode() !== 'structured' &&
       (

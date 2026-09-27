@@ -910,12 +910,7 @@ export class ToolRegistry {
     return Array.from(this.tools.values())
       .filter((tool) => this.isToolAvailable(tool.name))
       .filter((tool) => this.isToolDeclared(tool.name))
-      .filter(
-        (tool) =>
-          (tool.name !== ToolNames.SEARCH_MEMORY &&
-            tool.name !== ToolNames.MANAGE_MEMORY) ||
-          (this.config.getMemoryRecallMode?.() ?? 'legacy') === 'structured',
-      )
+      .filter((tool) => this.isMemoryRecallToolDeclared(tool.name))
       .filter(
         (tool) =>
           includeDeferred ||
@@ -925,6 +920,21 @@ export class ToolRegistry {
       )
       .sort(ToolRegistry.compareToolsByDeclarationName)
       .map((tool) => tool.schema);
+  }
+
+  /**
+   * `search_memory` / `manage_memory` only work under the structured recall
+   * protocol; under the legacy protocol both deny every call. Advertising them
+   * anyway hands the model tools that can only fail, so they are withheld.
+   * Shared by both declaration paths — the direct one and the code-mode exec
+   * bindings — because a code-mode session reaches them through the binding
+   * plan rather than through `getFunctionDeclarations`.
+   */
+  private isMemoryRecallToolDeclared(name: string): boolean {
+    if (name !== ToolNames.SEARCH_MEMORY && name !== ToolNames.MANAGE_MEMORY) {
+      return true;
+    }
+    return (this.config.getMemoryRecallMode?.() ?? 'legacy') === 'structured';
   }
 
   private getCodeModeFunctionDeclarations(
@@ -954,7 +964,9 @@ export class ToolRegistry {
     const plan = planCodeModeBindings(
       Array.from(this.tools.values()).filter(
         (tool) =>
-          this.isToolAvailable(tool.name) && this.isToolDeclared(tool.name),
+          this.isToolAvailable(tool.name) &&
+          this.isToolDeclared(tool.name) &&
+          this.isMemoryRecallToolDeclared(tool.name),
       ),
       (name) => this.isDeferredAndHidden(name),
       allowedNames,

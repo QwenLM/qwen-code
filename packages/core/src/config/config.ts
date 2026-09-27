@@ -1455,6 +1455,15 @@ export interface ConfigParameters {
    */
   enableTeamMemory?: boolean;
   enableTeamMemorySync?: boolean;
+  /**
+   * Enable the structured on-demand memory recall protocol. Defaults to false
+   * (opt-in): while it is off the corpus stays on the legacy flat-MEMORY.md
+   * protocol and the metadata migration that would make it structured-ready is
+   * never scheduled. Overridable at runtime by
+   * `QWEN_CODE_MEMORY_STRUCTURED_RECALL` ('0'/'1') via
+   * {@link Config.getStructuredMemoryRecallEnabled}.
+   */
+  enableStructuredMemoryRecall?: boolean;
   /** Enable automatic project skill review after tool-heavy sessions. Defaults to false. */
   enableAutoSkill?: boolean;
   /** Require user confirmation before persisting an auto-activated skill. Defaults to true. */
@@ -3066,6 +3075,7 @@ export class Config {
   private readonly enableManagedAutoDream: boolean;
   private readonly enableTeamMemory: boolean;
   private readonly enableTeamMemorySync: boolean;
+  private readonly enableStructuredMemoryRecall: boolean;
   // Latch (keyed by projectRoot) so the "team memory enabled but not shareable"
   // warning is emitted at most once per repo, even though refreshHierarchicalMemory
   // may re-run. Keyed rather than a single boolean so entering a new repo (/cd)
@@ -3659,6 +3669,8 @@ export class Config {
     this.enableManagedAutoDream = params.enableManagedAutoDream ?? true;
     this.enableTeamMemory = params.enableTeamMemory ?? false;
     this.enableTeamMemorySync = params.enableTeamMemorySync ?? false;
+    this.enableStructuredMemoryRecall =
+      params.enableStructuredMemoryRecall ?? false;
     this.enableAutoSkill = params.enableAutoSkill ?? false;
     this.autoSkillConfirm = params.autoSkillConfirm ?? true;
     // Clamp: schema validation only runs on interactive edit paths, so a
@@ -5011,15 +5023,19 @@ export class Config {
           }
         }
       }
-      const corpusStatus = await this.scanMemoryRecallCorpusStatus().catch(
-        (error: unknown) => {
-          this.debugLogger.warn(
-            'memory metadata readiness scan failed; preserving the active recall protocol',
-            error,
-          );
-          return undefined;
-        },
-      );
+      // The readiness scan walks the frontmatter of every memory file, so skip
+      // it while the structured protocol is opted out: a disabled feature must
+      // not cost startup I/O either. Leaving corpusStatus undefined keeps the
+      // initialization below on 'legacy'.
+      const corpusStatus = this.getStructuredMemoryRecallEnabled()
+        ? await this.scanMemoryRecallCorpusStatus().catch((error: unknown) => {
+            this.debugLogger.warn(
+              'memory metadata readiness scan failed; preserving the active recall protocol',
+              error,
+            );
+            return undefined;
+          })
+        : undefined;
       if (!this.memoryRecallModeInitialized) {
         this.memoryRecallMode = corpusStatus?.ready ? 'structured' : 'legacy';
         this.memoryCorpusRevision = corpusStatus?.revision ?? '';
@@ -8236,6 +8252,7 @@ export class Config {
     PreparedMemoryRecallTransition | undefined
   > {
     if (!this.getManagedAutoMemoryEnabled()) return undefined;
+    if (!this.getStructuredMemoryRecallEnabled()) return undefined;
     if (this.memoryRecallMode === 'structured') return undefined;
     const status = await this.scanMemoryRecallCorpusStatus();
     const to: MemoryRecallMode = status.ready ? 'structured' : 'legacy';
@@ -10148,6 +10165,32 @@ export class Config {
       return true;
     }
     return this.enableTeamMemorySync;
+  }
+
+  /**
+   * Whether the structured on-demand memory recall protocol may activate.
+   * Opt-in: off unless the `memory.enableStructuredRecall` setting is on.
+   * `QWEN_CODE_MEMORY_STRUCTURED_RECALL` overrides for tests / power users
+   * ('0' forces off, '1' forces on).
+   *
+   * While this is off the corpus stays on the legacy protocol *and* the
+   * metadata migration that would make it structured-ready is never
+   * scheduled, so a disabled feature costs no forked-agent calls. Callers
+   * that gate on it must not treat "off" as "migration still owed" — see the
+   * `migration_pending` dream gates, which would otherwise suppress
+   * consolidation for the life of the process.
+   */
+  getStructuredMemoryRecallEnabled(): boolean {
+    if (this.shellExecutionSandbox) return false;
+    if (this.getBareMode() || this.isSafeMode()) return false;
+    const override = process.env['QWEN_CODE_MEMORY_STRUCTURED_RECALL'];
+    if (override === '0') {
+      return false;
+    }
+    if (override === '1') {
+      return true;
+    }
+    return this.enableStructuredMemoryRecall;
   }
 
   isManagedMemoryAvailable(): boolean {

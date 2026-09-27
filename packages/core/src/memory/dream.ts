@@ -313,7 +313,10 @@ export async function runManagedAutoMemoryDream(
     // scheduled (scheduleMetadataMigration short-circuits 'complete') and
     // the mode cannot regress to legacy inside the process, so the gate's
     // remedy would be a dead end. The sibling schedulers deliberately skip
-    // this gate in structured mode too.
+    // this gate in structured mode too. Opting out of the structured protocol
+    // is the same dead end one step earlier: the migration is never scheduled
+    // at all, so pointing the user at it points at nothing.
+    config.getStructuredMemoryRecallEnabled() &&
     config.getMemoryRecallMode() !== 'structured' &&
     (
       await scanMemoryMetadataMigrationCandidates(

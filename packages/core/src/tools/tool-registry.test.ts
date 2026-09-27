@@ -720,6 +720,33 @@ describe('ToolRegistry', () => {
       ).toEqual(['manage_memory', 'read_file', 'search_memory']);
     });
 
+    it('keeps structured memory tools out of the code-mode bindings in legacy mode', () => {
+      // A code-mode session reaches these tools through the exec binding plan,
+      // not through getFunctionDeclarations, so the recall-mode filter has to
+      // be applied there too — otherwise legacy mode advertises tools whose
+      // every call is denied.
+      toolRegistry.registerTool(new MockTool({ name: 'search_memory' }));
+      toolRegistry.registerTool(new MockTool({ name: 'manage_memory' }));
+      toolRegistry.registerTool(new MockTool({ name: 'read_file' }));
+      const mode = vi.spyOn(config, 'getMemoryRecallMode');
+
+      mode.mockReturnValue('legacy');
+      expect(
+        toolRegistry
+          .getCodeModeBindingPlan()
+          .bindings.map((binding) => binding.name)
+          .sort(),
+      ).toEqual(['read_file']);
+
+      mode.mockReturnValue('structured');
+      expect(
+        toolRegistry
+          .getCodeModeBindingPlan()
+          .bindings.map((binding) => binding.name)
+          .sort(),
+      ).toEqual(['manage_memory', 'read_file', 'search_memory']);
+    });
+
     it('sorts visible function declarations by canonical name', () => {
       toolRegistry.registerTool(new MockTool({ name: 'zeta' }));
       toolRegistry.registerTool(new MockTool({ name: 'alpha' }));

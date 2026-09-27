@@ -71,6 +71,9 @@ function makeMockConfig(overrides: Partial<Config> = {}): Config {
     getManagedAutoMemoryEnabled: vi.fn().mockReturnValue(true),
     getManagedAutoDreamEnabled: vi.fn().mockReturnValue(true),
     getMemoryRecallMode: vi.fn().mockReturnValue('legacy'),
+    // On by default here: these suites exercise the migration/dream machinery
+    // itself. The opted-out behaviour has its own cases below.
+    getStructuredMemoryRecallEnabled: vi.fn().mockReturnValue(true),
     isTrustedFolder: vi.fn().mockReturnValue(true),
     getSessionId: vi.fn().mockReturnValue('session-1'),
     getModel: vi.fn().mockReturnValue('test-model'),
@@ -247,6 +250,29 @@ describe('MemoryManager', () => {
         }),
       ).resolves.toEqual({ status: 'skipped', skippedReason: 'complete' });
       expect(scan).not.toHaveBeenCalled();
+    });
+
+    it('skips migration entirely while the structured protocol is opted out', async () => {
+      // The migration exists only to make the corpus structured-ready, so an
+      // opted-out corpus must not pay for a candidate scan or a forked agent.
+      const scan = vi.spyOn(
+        metadataMigration,
+        'scanMemoryMetadataMigrationCandidates',
+      );
+      const run = vi.spyOn(metadataMigration, 'runMemoryMetadataMigration');
+      await writeLegacy(getAutoMemoryRoot(projectRoot), 'project.md');
+      const manager = new MemoryManager();
+      const config = makeMockConfig({
+        getStructuredMemoryRecallEnabled: vi.fn().mockReturnValue(false),
+      });
+
+      for (const scope of ['project', 'user'] as const) {
+        await expect(
+          manager.scheduleMetadataMigration({ projectRoot, scope, config }),
+        ).resolves.toEqual({ status: 'skipped', skippedReason: 'disabled' });
+      }
+      expect(scan).not.toHaveBeenCalled();
+      expect(run).not.toHaveBeenCalled();
     });
 
     it('scans team migration candidates in structured mode', async () => {
@@ -636,6 +662,49 @@ describe('MemoryManager', () => {
         skippedReason: 'migration_pending',
       });
       expect(runManagedAutoMemoryDream).not.toHaveBeenCalled();
+    });
+
+    it('does not pause dream while the structured protocol is opted out', async () => {
+      // With the protocol off the migration is never scheduled, so its
+      // candidates never drain and the stall counter never advances. The
+      // migration_pending gate must not fire at all in that state, or
+      // consolidation would be suppressed for the life of the process.
+      await writeLegacy(getAutoMemoryRoot(projectRoot), 'project.md');
+      await writeLegacy(getUserAutoMemoryRoot(), 'user.md');
+      const scan = vi.spyOn(
+        metadataMigration,
+        'scanMemoryMetadataMigrationCandidates',
+      );
+      const dreamResult = {
+        touchedTopics: [],
+        createdEntries: 0,
+        updatedEntries: 0,
+        deletedEntries: 0,
+        dedupedEntries: 0,
+        splitEntries: 0,
+        keywordBackfilled: 0,
+        systemMessage: undefined,
+      };
+      vi.mocked(runManagedAutoMemoryDream).mockResolvedValue(dreamResult);
+      vi.mocked(runManagedUserAutoMemoryDream).mockResolvedValue(dreamResult);
+      const manager = new MemoryManager();
+      const config = makeMockConfig({
+        getStructuredMemoryRecallEnabled: vi.fn().mockReturnValue(false),
+      });
+
+      const project = await manager.scheduleDream({
+        projectRoot,
+        sessionId: 'session',
+        config,
+      });
+      const user = await manager.scheduleUserDream({ projectRoot, config });
+
+      expect(project.skippedReason).not.toBe('migration_pending');
+      expect(user.skippedReason).not.toBe('migration_pending');
+      // Short-circuit witness: the gate must not even pay for the scan.
+      expect(scan).not.toHaveBeenCalled();
+      await project.promise;
+      await user.promise;
     });
 
     it('stops rescheduling a migration that never makes progress', async () => {
