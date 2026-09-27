@@ -22,6 +22,8 @@ import { createMemoryScopedAgentConfig } from './memory-scoped-agent-config.js';
 import {
   MEMORY_CATEGORY_SECTION,
   MEMORY_FRONTMATTER_EXAMPLE,
+  TYPES_SECTION_INDIVIDUAL,
+  WHAT_NOT_TO_SAVE_SECTION,
 } from './prompt.js';
 
 const MAX_TURNS = 8;
@@ -43,7 +45,11 @@ Rules:
 - Keep one independently retrievable fact or rule per file, with the body near or below 1,200 characters.
 - When updating a file, refresh its description, category, keywords, and usage_scenarios from the complete content.
 
+${TYPES_SECTION_INDIVIDUAL.join('\n')}
+
 ${MEMORY_CATEGORY_SECTION.join('\n')}
+
+${WHAT_NOT_TO_SAVE_SECTION.join('\n')}
 
 Memory file format reference:
 ${MEMORY_FRONTMATTER_EXAMPLE.join('\n')}`;
