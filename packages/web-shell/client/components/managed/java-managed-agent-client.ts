@@ -14,10 +14,19 @@ export interface JavaAgentEnvironment {
 
 export type JavaAgentSession = Omit<
   Schemas['WebShellSession'],
-  'environment'
+  'environment' | 'workspace'
 > & {
   environment?: JavaAgentEnvironment | null;
+  // W0d saves the binding; context revision/state remain a recorded W2 gap.
+  workspace?: Pick<
+    Schemas['WebShellWorkspaceContext'],
+    'workspaceId' | 'cwdRelative'
+  >;
 };
+
+export type JavaAgentWorkspace = Schemas['WebShellWorkspace'];
+
+export type JavaAgentWorkspacePage = Schemas['WebShellWorkspacePage'];
 
 export type JavaAgentSessionPage = Omit<
   Schemas['WebShellSessionPage'],
@@ -90,6 +99,21 @@ export class JavaManagedAgentClient {
 
   getSession(sessionId: string, signal?: AbortSignal) {
     return this.post<JavaAgentSession>('/sessions/get', { sessionId }, signal);
+  }
+
+  listWorkspaces(
+    request: Schemas['WebShellWorkspaceQueryRequest'],
+    signal?: AbortSignal,
+  ): Promise<JavaAgentWorkspacePage> {
+    return this.post('/workspaces/query', request, signal);
+  }
+
+  getWorkspace(workspaceId: string, signal?: AbortSignal) {
+    return this.post<JavaAgentWorkspace>(
+      '/workspaces/get',
+      { workspaceId },
+      signal,
+    );
   }
 
   getTranscript(

@@ -544,17 +544,20 @@ function checkDeferredSwap(standaloneDir: string): void {
       throw deferredMarkerError(standaloneDir);
     }
     const batPid = parseInt(marker, 10);
-    if (Number.isNaN(batPid)) {
-      // A torn marker is no liveness proof either.
+    if (!Number.isSafeInteger(batPid) || batPid <= 0 || batPid > 2147483647) {
+      // A torn marker is no liveness proof either, and a value that cannot be a
+      // PID makes process.kill throw ERR_INVALID_ARG_TYPE instead of answering
+      // the liveness question. Send it to the error that carries the removal
+      // steps rather than one that tells the user to wait.
       throw deferredMarkerError(standaloneDir);
     }
-    if (isProcessAlive(batPid)) {
-      // A live PID normally means the bat is still swapping — but a hung
-      // bat or a reused PID would block every future update forever, so an
-      // aged marker escapes to a deferred-marker remedy instead. The parent
-      // writes the marker right after spawning the bat and the bat deletes
-      // it on exit, so the marker's mtime ages the same way as the
-      // marker-less .new check below. The escape must not authorize
+    if (!isProcessProvablyGone(batPid)) {
+      // A PID that cannot be proven gone normally means the bat is still
+      // swapping — but a hung bat or a reused PID would block every future
+      // update forever, so an aged marker escapes to a deferred-marker remedy
+      // instead. The parent writes the marker right after spawning the bat and
+      // the bat deletes it on exit, so the marker's mtime ages the same way as
+      // the marker-less .new check below. The escape must not authorize
       // deleting .new: a stale marker does not prove the swap directory is
       // safe to remove, so swapProvenDead stays false.
       let markerStale = false;
@@ -566,10 +569,11 @@ function checkDeferredSwap(standaloneDir: string): void {
         // unreadable — cannot prove age, keep waiting
       }
       if (markerStale) {
-        // This branch fires because the PID reads alive, so the guard must
-        // stay actionable when a qwen-update.bat really is running (hung
-        // bat: end it first); with a reused PID no bat exists and the
-        // cleanup applies directly.
+        // This branch fires precisely when the PID is not provably gone (alive,
+        // or held by a process we may not signal), so the guard must stay
+        // actionable when a qwen-update.bat really is running (hung bat: end it
+        // first); with a reused PID no bat exists and the cleanup applies
+        // directly.
         throw new Error(
           `A previous update left a deferred-swap marker at ${standaloneDir}.deferred. ` +
             `If a qwen-update.bat process is still running, end it first; then remove the marker, the pending swap at ${standaloneDir}.new, and .qwen-update.lock, and try again.`,
@@ -731,6 +735,21 @@ function isProcessAlive(pid: number): boolean {
   }
 }
 
+// Unlike isProcessAlive, this treats "cannot tell" as "not gone": EPERM means
+// the process exists but is not ours to signal (an elevated bat probed from an
+// unelevated shell), which is no proof of death. Only ESRCH is. Callers that
+// decide whether a lock is stealable keep using isProcessAlive — being
+// conservative there would re-block updates forever. This is for the one gate
+// that authorizes deleting a staged install.
+function isProcessProvablyGone(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'ESRCH';
+  }
+}
+
 function atomicReplace(
   standaloneDir: string,
   newDir: string,
@@ -834,7 +853,7 @@ function atomicReplace(
       );
     }
     // Write .deferred marker with the bat script PID so future `qwen update`
-    // calls can detect the in-flight swap via isProcessAlive(batPid).
+    // calls can detect the in-flight swap via isProcessProvablyGone(batPid).
     // acquireLock checks this marker before allowing lock theft.
     fs.writeFileSync(deferredMarker, String(child.pid));
     return 'deferred';

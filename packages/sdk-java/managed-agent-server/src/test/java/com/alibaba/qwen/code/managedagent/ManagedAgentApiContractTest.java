@@ -41,6 +41,7 @@ import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTranscript;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTranscriptRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTurn;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellWorkspace;
+import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -66,6 +67,7 @@ import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMock
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.annotation.Import;
 import org.springframework.http.MediaType;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.mock.web.MockHttpServletResponse;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
@@ -154,6 +156,9 @@ class ManagedAgentApiContractTest {
 
     @Autowired
     private FixtureHarness harness;
+
+    @Autowired
+    private JdbcTemplate jdbc;
 
     @Autowired
     @Qualifier("requestMappingHandlerMapping")
@@ -383,6 +388,83 @@ class ManagedAgentApiContractTest {
         checkStream(drift, "getSessionEvents", "PublicEvent", publicStream);
         checkStream(drift, "webShellStreamEvents", "WebShellEvent",
                 webShellStream);
+        String workspaceTenant = tenant + "-workspace";
+        AuthenticatedTenantActor actor = new AuthenticatedTenantActor() {
+            @Override
+            public String getName() {
+                return actorId();
+            }
+
+            @Override
+            public String tenantId() {
+                return workspaceTenant;
+            }
+
+            @Override
+            public String actorId() {
+                return "contract-actor";
+            }
+        };
+        for (String workspaceId : List.of("ws-a", "ws-default")) {
+            jdbc.update("INSERT INTO managed_workspace_registry (tenant_id,"
+                            + " workspace_id, workspace_generation, storage_id,"
+                            + " display_name, config_ref, policy_ref, state)"
+                            + " VALUES (?, ?, 1, 'storage', ?, 'config', 'policy',"
+                            + " 'ACTIVE')", workspaceTenant, workspaceId,
+                    workspaceId);
+            jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
+                            + " workspace_id, actor_id, can_read, can_create)"
+                            + " VALUES (?, ?, ?, TRUE, TRUE)", workspaceTenant,
+                    workspaceId, actor.actorId().getBytes(StandardCharsets.UTF_8));
+        }
+        jdbc.update("INSERT INTO managed_workspace_default"
+                        + " (tenant_id, workspace_id) VALUES (?, 'ws-default')",
+                workspaceTenant);
+        exchange(drift, "listWorkspaces", 200,
+                get("/v1/agents/workspaces").header(TENANT, workspaceTenant)
+                        .principal(actor).param("limit", "1"), null);
+        exchange(drift, "getWorkspace", 200,
+                get("/v1/agents/workspaces/ws-default")
+                        .header(TENANT, workspaceTenant).principal(actor), null);
+        exchange(drift, "webShellQueryWorkspaces", 200,
+                post(WEB_SHELL + "/workspaces/query")
+                        .header(TENANT, workspaceTenant).principal(actor),
+                "{\"limit\":1}");
+        exchange(drift, "webShellGetWorkspace", 200,
+                post(WEB_SHELL + "/workspaces/get")
+                        .header(TENANT, workspaceTenant).principal(actor),
+                "{\"workspaceId\":\"ws-default\"}");
+        String publicBoundId = json(exchange(drift, "createSession", 202,
+                post("/v1/agents/sessions").header(TENANT, workspaceTenant)
+                        .principal(actor).header(IDEMPOTENCY_KEY, "bound-public"),
+                """
+                {"agent_id":"qwen-code","input":[],
+                 "workspace":{"workspace_id":"ws-default",
+                              "cwd_relative":"services/./api"}}
+                """)).get("id").asText();
+        JsonNode publicBound = json(exchange(drift, "getSession", 200,
+                get("/v1/agents/sessions/{id}", publicBoundId)
+                        .header(TENANT, workspaceTenant).principal(actor), null));
+        assertThat(publicBound.at("/workspace/workspace_id").asText())
+                .isEqualTo("ws-default");
+        assertThat(publicBound.at("/workspace/cwd_relative").asText())
+                .isEqualTo("services/api");
+        String webBoundId = json(exchange(drift, "webShellCreateSession", 202,
+                post(WEB_SHELL + "/sessions/create")
+                        .header(TENANT, workspaceTenant).principal(actor),
+                """
+                {"agentId":"qwen-code","idempotencyKey":"bound-web","input":[],
+                 "workspace":{"workspaceId":"ws-default",
+                              "cwdRelative":"services/./api"}}
+                """)).get("sessionId").asText();
+        JsonNode webBound = json(exchange(drift, "webShellGetSession", 200,
+                post(WEB_SHELL + "/sessions/get")
+                        .header(TENANT, workspaceTenant).principal(actor),
+                "{\"sessionId\":\"%s\"}".formatted(webBoundId)));
+        assertThat(webBound.at("/workspace/workspaceId").asText())
+                .isEqualTo("ws-default");
+        assertThat(webBound.at("/workspace/cwdRelative").asText())
+                .isEqualTo("services/api");
         assertThat(exercised).containsExactlyInAnyOrderElementsOf(
                 CONTRACT.operations().stream()
                         .filter(operation -> !"planned".equals(
