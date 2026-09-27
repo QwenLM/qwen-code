@@ -324,6 +324,22 @@ worker across Broker restarts; budget process, memory and state-directory growth
 before enabling it. Physical cleanup needs an evidence-preserving lifecycle;
 do not delete records to reclaim capacity.
 See the [adoption design](../../../docs/design/2026-09-27-local-runtime-adoption.md).
+
+For trusted same-host Linux reboot recovery, additionally set
+`QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY=true`. This requires
+durable local mode. A changed kernel boot ID on the original machine can prove
+that original local writers stopped; worker-only death still cannot. The
+service scans eight saved bindings every five seconds, independently of current
+Session grants, and clears only the original SQL holder after all execution
+receipts become terminal. Recovery never starts a replacement worker or replays
+an unknown execution. A later authorized request may create a new generation.
+Keep the same Broker user, local disks, machine identity and SQL keys; remote
+writers, restored/cloned snapshots and external jobs that recreate writers are
+outside this contract. The option remains disabled by default. The
+[reboot recovery design](../../../docs/design/2026-09-28-local-reboot-recovery.md)
+distinguishes portable test evidence from the dedicated Linux reboot acceptance
+gate, which is still pending.
+
 The Kubernetes adapter's real-cluster fault matrix remains a production gate. This
 standalone reference keeps the one configured directory for legacy unbound
 Sessions. Persisted bound Sessions use the private Workspace execution path
@@ -367,7 +383,8 @@ responses retain the SQL holder; there is no timeout-based takeover. The
 provider and file tools do not confine access to the mount root: Read/Write/Edit
 and Shell can reach other paths allowed by the worker's host permissions.
 Foreground Shell may create detached descendants. Use this only with trusted
-local workloads until physical isolation and W0e cleanup are implemented.
+local workloads. The opt-in W0e recovery above handles trusted host reboot; it
+does not provide physical isolation or recovery after worker-only death.
 Public bound Turn/lifecycle gates and the full Hosted tool loop remain closed.
 See the bilingual [execution design](../../../docs/design/2026-09-26-managed-workspace-execution.md)
 for the exact boundary.

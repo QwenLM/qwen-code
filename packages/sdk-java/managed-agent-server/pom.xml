@@ -126,6 +126,7 @@
                         <configuration>
                             <excludes>
                                 <exclude>**/Hosted*IT.java</exclude>
+                                <exclude>**/WorkspaceRecoveryWorkerIT.java</exclude>
                             </excludes>
                         </configuration>
                         <executions>
@@ -151,6 +152,7 @@
                         <configuration>
                             <includes>
                                 <include>**/Hosted*IT.java</include>
+                                <include>**/WorkspaceRecoveryWorkerIT.java</include>
                             </includes>
                             <failIfNoTests>true</failIfNoTests>
                             <forkedProcessTimeoutInSeconds>600</forkedProcessTimeoutInSeconds>

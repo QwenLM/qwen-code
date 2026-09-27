@@ -621,6 +621,17 @@ class LocalProcessRuntimeProvisionerTest {
         }
 
         @Override
+        public java.util.List<RuntimeBindingRecord> findRecoveryCandidates(String kind, String after, int limit) {
+            return delegate.findRecoveryCandidates(kind, after, limit);
+        }
+
+        @Override
+        public RuntimeBindingRecord finishLostRecovery(RuntimeSessionRepository sessions,
+                ToolExecutionRepository executions, RuntimeBindingRecord expected) {
+            return delegate.finishLostRecovery(sessions, executions, expected);
+        }
+
+        @Override
         public RuntimeBindingRecord recoverLost(RuntimeSessionRepository sessions,
                 ToolExecutionRepository executions, RuntimeBindingRecord expected) {
             return delegate.recoverLost(sessions, executions, expected);

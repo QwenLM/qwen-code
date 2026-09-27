@@ -45,6 +45,7 @@ public final class LocalProcessRuntimeProvisioner
     private final HttpRuntimeTransport transport;
     private final Function<RuntimeScope, String> storageResolver;
     private final LocalRuntimeStore store;
+    private final boolean trustedRebootRecovery;
     private final ExecutorService executor = Executors.newCachedThreadPool(
             task -> {
                 Thread thread = new Thread(task, "runtime-provisioner");
@@ -69,12 +70,23 @@ public final class LocalProcessRuntimeProvisioner
 
     public static LocalProcessRuntimeProvisioner durable(List<String> command,
             Path stateDirectory, HttpRuntimeTransport transport) {
+        return durable(command, stateDirectory, transport, false);
+    }
+
+    public static LocalProcessRuntimeProvisioner durable(List<String> command,
+            Path stateDirectory, HttpRuntimeTransport transport, boolean trustedRebootRecovery) {
         return new LocalProcessRuntimeProvisioner(command, stateDirectory, transport, null,
-                new LocalRuntimeStore(stateDirectory, LocalRuntimeStore.HostIdentity.linux()));
+                new LocalRuntimeStore(stateDirectory, LocalRuntimeStore.HostIdentity.linux()), trustedRebootRecovery);
     }
 
     LocalProcessRuntimeProvisioner(List<String> command, Path workingDirectory,
             HttpRuntimeTransport transport, Function<RuntimeScope, String> storageResolver, LocalRuntimeStore store) {
+        this(command, workingDirectory, transport, storageResolver, store, false);
+    }
+
+    LocalProcessRuntimeProvisioner(List<String> command, Path workingDirectory,
+            HttpRuntimeTransport transport, Function<RuntimeScope, String> storageResolver, LocalRuntimeStore store,
+            boolean trustedRebootRecovery) {
         if (command == null || command.isEmpty() || workingDirectory == null
                 || transport == null) {
             throw new IllegalArgumentException(
@@ -85,6 +97,7 @@ public final class LocalProcessRuntimeProvisioner
         this.transport = transport;
         this.storageResolver = storageResolver;
         this.store = store;
+        this.trustedRebootRecovery = trustedRebootRecovery;
     }
 
     @Override
@@ -421,6 +434,13 @@ public final class LocalProcessRuntimeProvisioner
         }
         try {
             return store.locked(request, seed, handle, false, (resource, registration) -> {
+                if (trustedRebootRecovery && store.rebooted(registration)) {
+                    resource.save(registration.withState(LocalRuntimeStore.State.RETIRED));
+                    return RuntimeObservation.notFound(localEvidence(seed, handle,
+                            RuntimeRecoveryEvidence.Fact.JOURNAL_LOST, "trusted-host-reboot"),
+                            localEvidence(seed, handle, RuntimeRecoveryEvidence.Fact.WRITERS_STOPPED,
+                                    "trusted-host-reboot"));
+                }
                 if (!store.sameBoot(registration)) {
                     return RuntimeObservation.unknown(handle);
                 }
@@ -431,13 +451,8 @@ public final class LocalProcessRuntimeProvisioner
                     if (lastLease == null) {
                         return RuntimeObservation.conflict(handle);
                     }
-                    String domain = handle.getValue().get("hostId") + ":" + handle.getValue().get("bootId")
-                            + ":" + handle.getValue().get("resourceId");
-                    return RuntimeObservation.notFound(new RuntimeRecoveryEvidence(
-                            seed.getProvisionRequestId() + ":journal-lost", RuntimeRecoveryEvidence.Fact.JOURNAL_LOST,
-                            "registered-process-exit", Instant.now(), domain, seed.getProvisionRequestId(),
-                            seed.getProvisionalRuntimeId(), seed.getGatewayIncarnation(), seed.getLeaseId(),
-                            seed.getEpoch(), handle), null);
+                    return RuntimeObservation.notFound(localEvidence(seed, handle,
+                            RuntimeRecoveryEvidence.Fact.JOURNAL_LOST, "registered-process-exit"), null);
                 }
                 if (registration.state() == LocalRuntimeStore.State.INTENT
                         || registration.state() == LocalRuntimeStore.State.LAUNCHING) {
@@ -460,6 +475,16 @@ public final class LocalProcessRuntimeProvisioner
         } catch (RuntimeBrokerException error) {
             return error.isRetryable() ? RuntimeObservation.unknown(handle) : RuntimeObservation.conflict(handle);
         }
+    }
+
+    private static RuntimeRecoveryEvidence localEvidence(RuntimeProvisionSeed seed, RuntimeResourceHandle handle,
+            RuntimeRecoveryEvidence.Fact fact, String source) {
+        String domain = handle.getValue().get("hostId") + ":" + handle.getValue().get("bootId")
+                + ":" + handle.getValue().get("resourceId");
+        return new RuntimeRecoveryEvidence(seed.getProvisionRequestId() + (fact == RuntimeRecoveryEvidence.Fact.JOURNAL_LOST
+                ? ":journal-lost" : ":writers-stopped"), fact, source,
+                Instant.now(), domain, seed.getProvisionRequestId(), seed.getProvisionalRuntimeId(),
+                seed.getGatewayIncarnation(), seed.getLeaseId(), seed.getEpoch(), handle);
     }
 
     private RuntimeObservation observe(RuntimeProvisionRequest request,
