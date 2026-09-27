@@ -7,7 +7,6 @@
 import { describe, expect, it } from 'vitest';
 import { SettingScope, type LoadedSettings } from './settings.js';
 import {
-  dropCredentialFromAuxSelector,
   getOwnKeyScope,
   getPersistScopeForModelSelection,
   getWritableScopes,
@@ -172,27 +171,5 @@ describe('getOwnKeyScope', () => {
     expect(getOwnKeyScope(loaded, 'modelFallbacks')).toBe(
       SettingScope.Workspace,
     );
-  });
-});
-
-describe('auxiliary endpoint persistence', () => {
-  it.each([
-    'https://user:secret@api.example/v1',
-    'https://api.example/v1?key=secret',
-    'https://api.example/v1#secret',
-  ])('drops credential metadata at workspace scope: %s', (url) => {
-    const selector = `openai:shared\0${url}`;
-    expect(
-      dropCredentialFromAuxSelector(selector, SettingScope.Workspace),
-    ).toBe('openai:shared');
-    expect(dropCredentialFromAuxSelector(selector, SettingScope.User)).toBe(
-      selector,
-    );
-  });
-  it('keeps a public auxiliary endpoint byte-identical', () => {
-    const selector = 'openai:shared\0https://api.example';
-    expect(
-      dropCredentialFromAuxSelector(selector, SettingScope.Workspace),
-    ).toBe(selector);
   });
 });

@@ -667,23 +667,12 @@ export class ChatCompressionService {
     // model — warning about the main model being "too small" is confusing
     // when no compaction model was explicitly configured.
     if (effectiveCompactionModel !== config.getModel()) {
-      // `resolveModelId` strips the `\0<baseUrl>` endpoint pin (#12760), so
-      // read it off the raw selector: without it this guard can size itself
-      // against another same-id endpoint's window and discard the pin that
-      // the side-query actually resolves to.
-      const pinnedBaseUrl =
-        (effectiveCompactionModel ?? '').split('\0')[1] ?? '';
       const resolved = resolveModelId(effectiveCompactionModel);
       if (resolved) {
         const models = resolved.authType
           ? config.getAllConfiguredModels([resolved.authType])
           : config.getAllConfiguredModels();
-        const entry =
-          (pinnedBaseUrl
-            ? models.find(
-                (m) => m.id === resolved.modelId && m.baseUrl === pinnedBaseUrl,
-              )
-            : undefined) ?? models.find((m) => m.id === resolved.modelId);
+        const entry = models.find((m) => m.id === resolved.modelId);
         const window = entry?.contextWindowSize;
         // Include the system prompt and the output reserve: providers check
         // prompt + max_tokens <= window, so all three terms count.

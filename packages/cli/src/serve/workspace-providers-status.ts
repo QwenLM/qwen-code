@@ -139,12 +139,9 @@ function buildWorkspaceProvidersStatus(
           currentRegistryBaseUrl,
         )
       : undefined;
-    // The persisted selector may carry a `\0<baseUrl>` endpoint disambiguator.
-    // This payload leaves the process (daemon HTTP + web-shell DOM) beside a
-    // `baseUrl` field that is already scrubbed, so emit only the selector.
     const fastModelId =
       typeof settings.fastModel === 'string' && settings.fastModel.length > 0
-        ? settings.fastModel.split('\0', 1)[0]
+        ? settings.fastModel
         : undefined;
     const visionModelId =
       typeof settings.visionModel === 'string' &&

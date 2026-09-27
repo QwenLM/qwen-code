@@ -182,7 +182,6 @@ describe('AdvisorTool', () => {
         config,
         model: 'advisor-model',
         abortSignal: signal,
-        modelEndpointType: 'registry',
         disableModelFallbacks: true,
         cacheSafeParams: {
           generationConfig: {

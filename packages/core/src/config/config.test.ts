@@ -8999,7 +8999,7 @@ describe('Server Config (config.ts)', () => {
     });
 
     it.each(['fastModel', 'compactionModel'] as const)(
-      'rejects a stale auxiliary endpoint for %s',
+      'drops a stale auxiliary endpoint instead of unconfiguring %s',
       (key) => {
         const config = new Config({
           ...baseParams,
@@ -9010,16 +9010,37 @@ describe('Server Config (config.ts)', () => {
             openai: [{ id: 'shared', baseUrl: 'https://moved.example/v1' }],
           },
         });
+        // The pin no longer names a configured endpoint, so the selector falls
+        // back to the bare form and the registry's first same-id match — the
+        // pre-#12760 behaviour — instead of reporting the model as unset.
         const read = () =>
           key === 'fastModel'
             ? config.getFastModel()
             : config.getCompactionModel();
-        expect(read()).toBeUndefined();
-        if (key === 'fastModel')
-          config.setFastModel('openai:shared\0https://moved.example/v1');
-        else
-          config.setCompactionModel('openai:shared\0https://moved.example/v1');
-        expect(read()).toBe('openai:shared\0https://moved.example/v1');
+        expect(read()).toBe('openai:shared');
+      },
+    );
+
+    it.each(['fastModel', 'compactionModel'] as const)(
+      'keeps %s bare when the pinned entry declares no endpoint of its own',
+      (key) => {
+        const config = new Config({
+          ...baseParams,
+          authType: AuthType.USE_OPENAI,
+          model: 'main',
+          // What the picker persists for a row whose provider entry has no
+          // `baseUrl`: the registry's effective (default) URL.
+          [key]: 'openai:shared\0https://api.openai.com/v1',
+          modelProvidersConfig: { openai: [{ id: 'shared' }] },
+        });
+        // Such an entry is registered under the plain id, which a bare
+        // selector already resolves to; re-attaching the effective URL would
+        // hand consumers a registry key that does not exist.
+        const read = () =>
+          key === 'fastModel'
+            ? config.getFastModel()
+            : config.getCompactionModel();
+        expect(read()).toBe('openai:shared');
       },
     );
 

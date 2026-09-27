@@ -871,25 +871,6 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     expect(withEmptyFastModel.current).not.toHaveProperty('fastModelId');
   });
 
-  it('omits the endpoint disambiguator from the reported fast model id', async () => {
-    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
-    await writeUserSettings({
-      security: { auth: { selectedType: 'openai' } },
-      model: { name: 'main-model' },
-      fastModel: 'openai:main-model\0https://user:sk-serve-leak@a.example/v1',
-      modelProviders: {
-        openai: [{ id: 'main-model', name: 'Main Model' }],
-      },
-    });
-
-    // This payload leaves the process (daemon HTTP + web-shell DOM) beside a
-    // `baseUrl` field that is already scrubbed, so the selector must not carry
-    // the persisted credential-bearing endpoint either.
-    const result = await provider(workspace, false);
-    expect(result.current?.fastModelId).toBe('openai:main-model');
-    expect(JSON.stringify(result)).not.toContain('sk-serve-leak');
-  });
-
   it('includes only non-empty vision model settings in current selection', async () => {
     const provider = createWorkspaceProvidersStatusProvider({ env: {} });
     await writeUserSettings({

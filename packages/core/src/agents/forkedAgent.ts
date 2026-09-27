@@ -254,10 +254,9 @@ async function buildForkedModelRuntime(
   base: Config,
   contentGeneratorOwner: Config,
   modelSelector: string,
-  endpointType: 'resolved' | 'registry' = 'resolved',
 ): Promise<ForkedModelRuntime> {
   const endpointIndex = modelSelector.indexOf('\0');
-  let registryBaseUrl =
+  const registryBaseUrl =
     endpointIndex < 0
       ? undefined
       : modelSelector.slice(endpointIndex + 1) || null;
@@ -265,26 +264,6 @@ async function buildForkedModelRuntime(
     endpointIndex < 0 ? modelSelector : modelSelector.slice(0, endpointIndex),
     buildModelIdContext(base),
   );
-  if (
-    endpointType === 'resolved' &&
-    registryBaseUrl &&
-    resolvedModel?.authType
-  ) {
-    const selected = base
-      .getModelsConfig()
-      .getResolvedModel(
-        resolvedModel.authType,
-        resolvedModel.modelId,
-        registryBaseUrl,
-      );
-    if (!selected) {
-      throw new Error(
-        `Model '${resolvedModel.modelId}' is no longer configured at the selected endpoint`,
-      );
-    }
-    // Fast selectors store resolved URLs; the runtime guard expects registry identity.
-    registryBaseUrl = selected.registryBaseUrl ?? null;
-  }
   // When the selector cannot resolve (e.g. `fast` with no fast model
   // configured, or `inherit` on a config without a current model), fall back
   // to the parent session model instead of passing the raw selector string
@@ -422,8 +401,6 @@ export interface CachePathParams {
   jsonSchema?: Record<string, unknown>;
   /** Model override (defaults to cacheSafeParams.model). */
   model?: string;
-  /** Advisor selectors pin registry identity, including an implicit endpoint. */
-  modelEndpointType?: 'resolved' | 'registry';
   /** External cancellation signal. */
   abortSignal?: AbortSignal;
   /** Do not route the query through configured model fallbacks. */
@@ -575,7 +552,6 @@ export async function runForkedAgent(
       config,
       config,
       modelSelector,
-      params.modelEndpointType,
     );
 
     return runWithForkedModelRuntime(modelRuntime, async (model) => {

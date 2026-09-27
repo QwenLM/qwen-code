@@ -62,10 +62,7 @@ import type {
 import { SettingScope } from '../../config/settings.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { loadMcpApprovals } from '../../config/mcpApprovals.js';
-import {
-  dropCredentialFromAuxSelector,
-  getPersistScopeForModelSelection,
-} from '../../config/modelProvidersScope.js';
+import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import { t } from '../../i18n/index.js';
 import { extensionComponentsSummary } from '../../services/extension-components-summary.js';
 import { getErrorMessage } from '../../utils/errors.js';
@@ -450,13 +447,10 @@ export async function applyModelSelection(
   // disambiguator when the row carries one) so duplicate model ids across
   // providers bind the selected provider's credentials.
   if (mode === 'fast') {
-    const scope = resolveModelPersistScope(settings, persistScope);
-    const fastModel = dropCredentialFromAuxSelector(
-      encodeAuxModelSelector(selectionKey),
-      scope,
-    );
+    const fastModel = encodeAuxModelSelector(selectionKey);
     // Sync the runtime Config so forked agents pick up the change immediately.
     config?.setFastModel?.(fastModel);
+    const scope = resolveModelPersistScope(settings, persistScope);
     settings.setValue(scope, 'fastModel', fastModel);
     return {
       ok: true,
@@ -505,13 +499,10 @@ export async function applyModelSelection(
         error: t('Selected compaction model is unavailable.'),
       };
     }
-    const scope = resolveModelPersistScope(settings, persistScope);
-    const compactionModelId = dropCredentialFromAuxSelector(
-      encodeAuxModelSelector(selectionKey),
-      scope,
-    );
+    const compactionModelId = encodeAuxModelSelector(selectionKey);
     // Sync runtime Config so the compression service picks it up immediately.
     config.setCompactionModel(compactionModelId);
+    const scope = resolveModelPersistScope(settings, persistScope);
     settings.setValue(scope, 'compactionModel', compactionModelId);
     return {
       ok: true,

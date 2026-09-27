@@ -194,11 +194,7 @@ function buildSettingsResponse(
     );
 
     const publicValue = (value: unknown) =>
-      key === 'mcpServers'
-        ? redactMcpServersSetting(value)
-        : key === 'fastModel' && typeof value === 'string'
-          ? value.split('\0', 1)[0]
-          : value;
+      key === 'mcpServers' ? redactMcpServersSetting(value) : value;
     const effective = LIVE_MANAGED_SETTINGS.has(key)
       ? (userVal ?? def.default)
       : (mergedEffective ?? def.default);

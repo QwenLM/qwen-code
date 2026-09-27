@@ -6114,20 +6114,34 @@ export class Config {
 
     const rawSelector = resolveModelId(this.fastModel);
     if (!rawSelector?.authType) return selector.modelId;
-    // Re-attach the persisted `\0<baseUrl>` endpoint disambiguator (dropped
-    // by selector parsing): `resolveForModel` consumes it to hit the exact
-    // registry entry instead of the first same-id provider (#12760).
-    const persisted = this.fastModel ?? '';
-    const endpointIdx = persisted.indexOf('\0');
-    const baseUrl = endpointIdx >= 0 ? persisted.slice(endpointIdx + 1) : '';
-    if (
-      baseUrl &&
-      !available.some((m) => m.id === selector.modelId && m.baseUrl === baseUrl)
-    ) {
-      return undefined;
-    }
     const qualified = `${rawSelector.authType}:${selector.modelId}`;
-    return baseUrl ? `${qualified}\0${baseUrl}` : qualified;
+    const endpoint = this.pinnedAuxEndpoint(
+      this.fastModel,
+      selector.modelId,
+      available,
+    );
+    return endpoint ? `${qualified}\0${endpoint}` : qualified;
+  }
+
+  /**
+   * The endpoint a persisted aux selector (`authType:id\0<baseUrl>`) is pinned
+   * to, in the registry-identity form consumers of the selector compare
+   * against: the picker persists the row's effective baseUrl, while registry
+   * keys and the forked-runtime guard use the declared one. An entry that
+   * declares no endpoint needs no suffix — a bare selector resolves to it —
+   * and an endpoint matching no configured entry is dropped, which keeps the
+   * pre-existing first-match behaviour instead of unconfiguring the model.
+   */
+  private pinnedAuxEndpoint(
+    persisted: string | undefined,
+    modelId: string,
+    available: AvailableModel[],
+  ): string | undefined {
+    const endpoint = persisted?.trim().split('\0')[1];
+    if (!endpoint) return undefined;
+    return available.find(
+      (model) => model.id === modelId && model.baseUrl === endpoint,
+    )?.registryBaseUrl;
   }
 
   /**
@@ -6250,21 +6264,13 @@ export class Config {
       }
       const rawSelector = resolveModelId(this.compactionModel);
       if (!rawSelector?.authType) return selector.modelId;
-      // Same `\0<baseUrl>` endpoint disambiguator handling as getFastModel
-      // (#12760); runSideQuery's resolveForModel consumes it.
-      const persisted = this.compactionModel ?? '';
-      const endpointIdx = persisted.indexOf('\0');
-      const baseUrl = endpointIdx >= 0 ? persisted.slice(endpointIdx + 1) : '';
-      if (
-        baseUrl &&
-        !available.some(
-          (m) => m.id === selector.modelId && m.baseUrl === baseUrl,
-        )
-      ) {
-        return undefined;
-      }
       const qualified = `${rawSelector.authType}:${selector.modelId}`;
-      return baseUrl ? `${qualified}\0${baseUrl}` : qualified;
+      const endpoint = this.pinnedAuxEndpoint(
+        this.compactionModel,
+        selector.modelId,
+        available,
+      );
+      return endpoint ? `${qualified}\0${endpoint}` : qualified;
     }
     return this.getModel();
   }

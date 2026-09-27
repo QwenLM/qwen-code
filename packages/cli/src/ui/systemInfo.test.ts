@@ -275,15 +275,6 @@ describe('systemInfo', () => {
     });
   });
 
-  it('redacts auxiliary endpoint metadata from public system info', async () => {
-    Object.assign(mockContext.services.settings!.merged, {
-      fastModel: 'openai:shared\0https://user:sk-report@api.example/v1',
-    });
-    const info = await getExtendedSystemInfo(mockContext);
-    expect(info.fastModel).toBe('openai:shared');
-    expect(JSON.stringify(info)).not.toContain('sk-report');
-  });
-
   describe('getExtendedSystemInfo', () => {
     it('should include memory usage and base URL', async () => {
       vi.mocked(IdeClient.getInstance).mockResolvedValue({

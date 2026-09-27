@@ -281,16 +281,6 @@ function formatUnavailableImageModelMessage(
   );
 }
 
-/**
- * Registry entries are keyed per auth type, so one endpoint can contribute
- * several entries for the same id (a gateway publishing it over both wire
- * APIs, for instance). Ambiguity is about endpoints, not entries: counting
- * entries would reject a typed selector that binds exactly one credential.
- */
-function countDistinctEndpoints(models: AvailableModel[]): number {
-  return new Set(models.map((model) => model.baseUrl ?? '')).size;
-}
-
 function formatAmbiguousVisionModelMessage(
   modelName: string,
   matchingModels: AvailableModel[],
@@ -629,12 +619,14 @@ export const modelCommand: SlashCommand = {
       if (!modelName) {
         // Open model dialog in fast-model mode (interactive) or return current fast model (non-interactive)
         if (context.executionMode !== 'interactive') {
-          const fastModelSetting =
-            context.services.settings?.merged?.fastModel?.trim();
+          // The picker persists `authType:id\0<baseUrl>`; report the selector.
+          const fastModel =
+            context.services.settings?.merged?.fastModel?.split('\0', 1)[0] ||
+            'not set';
           return {
             type: 'message',
             messageType: 'info',
-            content: `Current fast model: ${fastModelSetting?.split('\0', 1)[0] || 'not set'}\nUse "/model --fast <model-id>" to set fast model.`,
+            content: `Current fast model: ${fastModel}\nUse "/model --fast <model-id>" to set fast model.`,
           };
         }
         return {
@@ -694,29 +686,6 @@ export const modelCommand: SlashCommand = {
                 availableModels,
               )
             : formatUnavailableFastModelMessage(modelName, availableModels),
-        };
-      }
-
-      // A typed selector cannot express an endpoint, so a same-id match
-      // across multiple configured endpoints would silently bind whichever
-      // provider registered first (registry first-match fallback) — e.g. an
-      // exhausted token plan (#12760). The picker is the way to pin one.
-      const matchingModels = availableModels.filter(
-        (model) => model.id === selector.modelId,
-      );
-      const currentAuthMatches = selector.authType
-        ? matchingModels
-        : matchingModels.filter((model) => model.authType === authType);
-      const endpointCandidates =
-        currentAuthMatches.length > 0 ? currentAuthMatches : matchingModels;
-      if (countDistinctEndpoints(endpointCandidates) > 1) {
-        return {
-          type: 'message',
-          messageType: 'error',
-          content: t(
-            "Fast model '{{modelName}}' matches multiple configured endpoints. Run /model --fast without an argument and choose the exact endpoint.",
-            { modelName },
-          ),
         };
       }
 
@@ -936,24 +905,6 @@ export const modelCommand: SlashCommand = {
                 modelName,
                 availableModels,
               ),
-        };
-      }
-
-      // The picker persists `authType:id\0<baseUrl>` for compaction too, so a
-      // typed overwrite across same-id endpoints would silently unpin the
-      // selected one. Refuse it the way --fast/--vision/--image already do.
-      if (
-        countDistinctEndpoints(
-          availableModels.filter((model) => model.id === selector.modelId),
-        ) > 1
-      ) {
-        return {
-          type: 'message',
-          messageType: 'error',
-          content: t(
-            "Compaction model '{{modelName}}' matches multiple configured endpoints. Run /model --compaction without an argument and choose the exact endpoint.",
-            { modelName },
-          ),
         };
       }
 

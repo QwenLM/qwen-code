@@ -234,9 +234,7 @@ export async function getExtendedSystemInfo(
       : undefined;
 
   // Get fast model from settings
-  const fastModel =
-    context.services.settings?.merged?.fastModel?.split('\0', 1)[0] ||
-    undefined;
+  const fastModel = context.services.settings?.merged?.fastModel || undefined;
   const lspStatus = getLspStatus(context);
 
   return {
