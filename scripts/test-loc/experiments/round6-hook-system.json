@@ -1,0 +1,428 @@
+{
+  "baselineCommit": "37412a57d4",
+  "hypothesis": "A finite event contract matrix can replace repeated thin-wrapper examples while preserving each method's argument forwarding, defaults, output absence, exact event dispatch and output class. Independent literal output semantics retain accessor checks and avoid using the production factory as the expected-value oracle.",
+  "scope": {
+    "testFile": "packages/core/src/hooks/hookSystem.test.ts",
+    "productionModules": [
+      "packages/core/src/hooks/hookSystem.ts",
+      "packages/core/src/hooks/types.ts"
+    ],
+    "unchangedCompanionTests": [
+      "packages/core/src/hooks/types.test.ts",
+      "packages/core/src/hooks/hookAggregator.test.ts"
+    ]
+  },
+  "mappings": [
+    {
+      "before": "HookSystem fireStopEvent should fire stop event and return AggregatedHookResult",
+      "after": "HookSystem 'fireStopEvent' forwards every argument and preserves the complete blocking result by identity",
+      "reason": "The complete-argument call checks every handler argument, including the AbortSignal/context/phase where present, and returns the exact aggregate object with finalOutput, duration, success=false and errors. Identity subsumes the original deep-equality and individual block/reason assertions."
+    },
+    {
+      "before": "HookSystem fireStopEvent should use default parameters when not provided",
+      "after": "HookSystem 'fireStopEvent' forwards defaults and preserves the result without final output by identity",
+      "reason": "The required-argument call explicitly checks every handler argument including defaults, and preserves the exact aggregate object with undefined finalOutput."
+    },
+    {
+      "before": "HookSystem fireStopEvent should forward context usage to hookEventHandler",
+      "after": "HookSystem 'fireStopEvent' forwards every argument and preserves the complete blocking result by identity",
+      "reason": "The complete-argument call checks every handler argument, including the AbortSignal/context/phase where present, and returns the exact aggregate object with finalOutput, duration, success=false and errors. Identity subsumes the original deep-equality and individual block/reason assertions."
+    },
+    {
+      "before": "HookSystem fireStopEvent should return AggregatedHookResult even when no final output",
+      "after": "HookSystem 'fireStopEvent' forwards defaults and preserves the result without final output by identity",
+      "reason": "The required-argument call explicitly checks every handler argument including defaults, and preserves the exact aggregate object with undefined finalOutput."
+    },
+    {
+      "before": "HookSystem fireMessageDisplayEvent should fire message display event and return AggregatedHookResult",
+      "after": "HookSystem 'fireMessageDisplayEvent' forwards every argument and preserves the complete blocking result by identity",
+      "reason": "The complete-argument call checks every handler argument, including the AbortSignal/context/phase where present, and returns the exact aggregate object with finalOutput, duration, success=false and errors. Identity subsumes the original deep-equality and individual block/reason assertions."
+    },
+    {
+      "before": "HookSystem fireMessageDisplayEvent should return AggregatedHookResult even when no final output",
+      "after": "HookSystem 'fireMessageDisplayEvent' forwards defaults and preserves the result without final output by identity",
+      "reason": "The required-argument call explicitly checks every handler argument including defaults, and preserves the exact aggregate object with undefined finalOutput."
+    },
+    {
+      "before": "HookSystem fireUserPromptSubmitEvent should fire UserPromptSubmit event and return output",
+      "after": "HookSystem 'fireUserPromptSubmitEvent' forwards every argument and wraps the final output for this event",
+      "reason": "The complete-argument row checks the exact handler method, every argument, event factory label, exact output constructor, literal fields, field identity, blocking decision, effective reason and sanitized additional context. Repeated positive input labels share this wrapper contract; this does not transfer handler behavior coverage to the mocked handler."
+    },
+    {
+      "before": "HookSystem fireUserPromptSubmitEvent should pass prompt to event handler",
+      "after": "HookSystem 'fireUserPromptSubmitEvent' forwards every argument and wraps the final output for this event",
+      "reason": "The complete-argument row checks the exact handler method, every argument, event factory label, exact output constructor, literal fields, field identity, blocking decision, effective reason and sanitized additional context. Repeated positive input labels share this wrapper contract; this does not transfer handler behavior coverage to the mocked handler."
+    },
+    {
+      "before": "HookSystem fireUserPromptSubmitEvent should pass submitted prompt after the existing signal argument",
+      "after": "HookSystem 'fireUserPromptSubmitEvent' forwards every argument and wraps the final output for this event",
+      "reason": "The complete-argument row checks the exact handler method, every argument, event factory label, exact output constructor, literal fields, field identity, blocking decision, effective reason and sanitized additional context. Repeated positive input labels share this wrapper contract; this does not transfer handler behavior coverage to the mocked handler."
+    },
+    {
+      "before": "HookSystem fireUserPromptSubmitEvent should return undefined when no final output",
+      "after": "HookSystem 'fireUserPromptSubmitEvent' forwards omitted-argument defaults and returns undefined without final output",
+      "reason": "The required-argument row explicitly checks all forwarded defaults and the undefined result. Full optional-argument forwarding and the concrete output class are independently checked by this method's companion row."
+    },
+    {
+      "before": "HookSystem fireUserPromptSubmitEvent should return DefaultHookOutput with blocking decision",
+      "after": "HookSystem 'fireUserPromptSubmitEvent' forwards every argument and wraps the final output for this event",
+      "reason": "The complete-argument row checks the exact handler method, every argument, event factory label, exact output constructor, literal fields, field identity, blocking decision, effective reason and sanitized additional context. Repeated positive input labels share this wrapper contract; this does not transfer handler behavior coverage to the mocked handler."
+    },
+    {
+      "before": "HookSystem fireUserPromptSubmitEvent should return DefaultHookOutput with additional context",
+      "after": "HookSystem 'fireUserPromptSubmitEvent' forwards every argument and wraps the final output for this event",
+      "reason": "The complete-argument row checks the exact handler method, every argument, event factory label, exact output constructor, literal fields, field identity, blocking decision, effective reason and sanitized additional context. Repeated positive input labels share this wrapper contract; this does not transfer handler behavior coverage to the mocked handler."
+    },
+    {
+      "before": "HookSystem fireInstructionsLoadedEvent should delegate to hookEventHandler.fireInstructionsLoadedEvent",
+      "after": "HookSystem 'fireInstructionsLoadedEvent' forwards omitted-argument defaults and returns undefined without final output",
+      "reason": "The required-argument row explicitly checks all forwarded defaults and the undefined result. Full optional-argument forwarding and the concrete output class are independently checked by this method's companion row."
+    },
+    {
+      "before": "HookSystem fireInstructionsLoadedEvent should return DefaultHookOutput when finalOutput exists",
+      "after": "HookSystem 'fireInstructionsLoadedEvent' forwards every argument and wraps the final output for this event",
+      "reason": "The complete-argument row checks the exact handler method, every argument, event factory label, exact output constructor, literal fields, field identity, blocking decision, effective reason and sanitized additional context. Repeated positive input labels share this wrapper contract; this does not transfer handler behavior coverage to the mocked handler."
+    },
+    {
+      "before": "HookSystem fireUserPromptExpansionEvent should fire UserPromptExpansion event and return output",
+      "after": "HookSystem 'fireUserPromptExpansionEvent' forwards every argument and wraps the final output for this event",
+      "reason": "The complete-argument row checks the exact handler method, every argument, event factory label, exact output constructor, literal fields, field identity, blocking decision, effective reason and sanitized additional context. Repeated positive input labels share this wrapper contract; this does not transfer handler behavior coverage to the mocked handler."
+    },
+    {
+      "before": "HookSystem fireUserPromptExpansionEvent should return DefaultHookOutput with blocking decision",
+      "after": "HookSystem 'fireUserPromptExpansionEvent' forwards every argument and wraps the final output for this event",
+      "reason": "The complete-argument row checks the exact handler method, every argument, event factory label, exact output constructor, literal fields, field identity, blocking decision, effective reason and sanitized additional context. Repeated positive input labels share this wrapper contract; this does not transfer handler behavior coverage to the mocked handler."
+    },
+    {
+      "before": "HookSystem fireUserPromptExpansionEvent should return undefined when no final output",
+      "after": "HookSystem 'fireUserPromptExpansionEvent' forwards omitted-argument defaults and returns undefined without final output",
+      "reason": "The required-argument row explicitly checks all forwarded defaults and the undefined result. Full optional-argument forwarding and the concrete output class are independently checked by this method's companion row."
+    },
+    {
+      "before": "HookSystem fireSessionStartEvent should fire session start event and return output",
+      "after": "HookSystem 'fireSessionStartEvent' forwards every argument and wraps the final output for this event",
+      "reason": "The complete-argument row checks the exact handler method, every argument, event factory label, exact output constructor, literal fields, field identity, blocking decision, effective reason and sanitized additional context. Repeated positive input labels share this wrapper contract; this does not transfer handler behavior coverage to the mocked handler."
+    },
+    {
+      "before": "HookSystem fireSessionStartEvent should pass all parameters to event handler",
+      "after": "HookSystem 'fireSessionStartEvent' forwards every argument and wraps the final output for this event",
+      "reason": "The complete-argument row checks the exact handler method, every argument, event factory label, exact output constructor, literal fields, field identity, blocking decision, effective reason and sanitized additional context. Repeated positive input labels share this wrapper contract; this does not transfer handler behavior coverage to the mocked handler."
+    },
+    {
+      "before": "HookSystem fireSessionStartEvent should return undefined when no final output",
+      "after": "HookSystem 'fireSessionStartEvent' forwards omitted-argument defaults and returns undefined without final output",
+      "reason": "The required-argument row explicitly checks all forwarded defaults and the undefined result. Full optional-argument forwarding and the concrete output class are independently checked by this method's companion row."
+    },
+    {
+      "before": "HookSystem fireSessionEndEvent should fire session end event and return output",
+      "after": "HookSystem 'fireSessionEndEvent' forwards every argument and wraps the final output for this event",
+      "reason": "The complete-argument row checks the exact handler method, every argument, event factory label, exact output constructor, literal fields, field identity, blocking decision, effective reason and sanitized additional context. Repeated positive input labels share this wrapper contract; this does not transfer handler behavior coverage to the mocked handler."
+    },
+    {
+      "before": "HookSystem fireSessionEndEvent should pass reason to event handler",
+      "after": "HookSystem 'fireSessionEndEvent' forwards every argument and wraps the final output for this event",
+      "reason": "The complete-argument row checks the exact handler method, every argument, event factory label, exact output constructor, literal fields, field identity, blocking decision, effective reason and sanitized additional context. Repeated positive input labels share this wrapper contract; this does not transfer handler behavior coverage to the mocked handler."
+    },
+    {
+      "before": "HookSystem fireSessionEndEvent should return undefined when no final output",
+      "after": "HookSystem 'fireSessionEndEvent' forwards omitted-argument defaults and returns undefined without final output",
+      "reason": "The required-argument row explicitly checks all forwarded defaults and the undefined result. Full optional-argument forwarding and the concrete output class are independently checked by this method's companion row."
+    },
+    {
+      "before": "HookSystem fireSessionDeleteEvent should fire the event with the deleted session id",
+      "after": "HookSystem 'fireSessionDeleteEvent' forwards every argument and wraps the final output for this event",
+      "reason": "The complete-argument row checks the exact handler method, every argument, event factory label, exact output constructor, literal fields, field identity, blocking decision, effective reason and sanitized additional context. Repeated positive input labels share this wrapper contract; this does not transfer handler behavior coverage to the mocked handler."
+    },
+    {
+      "before": "HookSystem firePreToolUseEvent should fire PreToolUse event and return output",
+      "after": "HookSystem 'firePreToolUseEvent' forwards every argument and wraps the final output for this event",
+      "reason": "The complete-argument row checks the exact handler method, every argument, event factory label, exact output constructor, literal fields, field identity, blocking decision, effective reason and sanitized additional context. Repeated positive input labels share this wrapper contract; this does not transfer handler behavior coverage to the mocked handler."
+    },
+    {
+      "before": "HookSystem firePreToolUseEvent should pass all parameters to event handler",
+      "after": "HookSystem 'firePreToolUseEvent' forwards every argument and wraps the final output for this event",
+      "reason": "The complete-argument row checks the exact handler method, every argument, event factory label, exact output constructor, literal fields, field identity, blocking decision, effective reason and sanitized additional context. Repeated positive input labels share this wrapper contract; this does not transfer handler behavior coverage to the mocked handler."
+    },
+    {
+      "before": "HookSystem firePreToolUseEvent should forward tool_call_id to event handler",
+      "after": "HookSystem 'firePreToolUseEvent' forwards every argument and wraps the final output for this event",
+      "reason": "The complete-argument row checks the exact handler method, every argument, event factory label, exact output constructor, literal fields, field identity, blocking decision, effective reason and sanitized additional context. Repeated positive input labels share this wrapper contract; this does not transfer handler behavior coverage to the mocked handler."
+    },
+    {
+      "before": "HookSystem firePreToolUseEvent should return undefined when no final output",
+      "after": "HookSystem 'firePreToolUseEvent' forwards omitted-argument defaults and returns undefined without final output",
+      "reason": "The required-argument row explicitly checks all forwarded defaults and the undefined result. Full optional-argument forwarding and the concrete output class are independently checked by this method's companion row."
+    },
+    {
+      "before": "HookSystem firePreToolUseEvent should return DefaultHookOutput with deny decision",
+      "after": "HookSystem output semantics preserves deny decisions and additional context for PreToolUse",
+      "reason": "Retains top-level deny, isBlockingDecision true, the literal effective reason and unchanged plain additional context; also checks the specialized permission accessor independently."
+    },
+    {
+      "before": "HookSystem firePreToolUseEvent should return DefaultHookOutput with additional context",
+      "after": "HookSystem output semantics preserves deny decisions and additional context for PreToolUse",
+      "reason": "Retains top-level deny, isBlockingDecision true, the literal effective reason and unchanged plain additional context; also checks the specialized permission accessor independently."
+    },
+    {
+      "before": "HookSystem firePostToolUseEvent should fire PostToolUse event and return output",
+      "after": "HookSystem 'firePostToolUseEvent' forwards every argument and wraps the final output for this event",
+      "reason": "The complete-argument row checks the exact handler method, every argument, event factory label, exact output constructor, literal fields, field identity, blocking decision, effective reason and sanitized additional context. Repeated positive input labels share this wrapper contract; this does not transfer handler behavior coverage to the mocked handler."
+    },
+    {
+      "before": "HookSystem firePostToolUseEvent should pass all parameters to event handler",
+      "after": "HookSystem 'firePostToolUseEvent' forwards every argument and wraps the final output for this event",
+      "reason": "The complete-argument row checks the exact handler method, every argument, event factory label, exact output constructor, literal fields, field identity, blocking decision, effective reason and sanitized additional context. Repeated positive input labels share this wrapper contract; this does not transfer handler behavior coverage to the mocked handler."
+    },
+    {
+      "before": "HookSystem firePostToolUseEvent should forward tool_call_id to event handler",
+      "after": "HookSystem 'firePostToolUseEvent' forwards every argument and wraps the final output for this event",
+      "reason": "The complete-argument row checks the exact handler method, every argument, event factory label, exact output constructor, literal fields, field identity, blocking decision, effective reason and sanitized additional context. Repeated positive input labels share this wrapper contract; this does not transfer handler behavior coverage to the mocked handler."
+    },
+    {
+      "before": "HookSystem firePostToolUseEvent should return undefined when no final output",
+      "after": "HookSystem 'firePostToolUseEvent' forwards omitted-argument defaults and returns undefined without final output",
+      "reason": "The required-argument row explicitly checks all forwarded defaults and the undefined result. Full optional-argument forwarding and the concrete output class are independently checked by this method's companion row."
+    },
+    {
+      "before": "HookSystem firePostToolUseEvent should return DefaultHookOutput with system message",
+      "after": "HookSystem output semantics preserves the system message and supplies PostToolUse defaults",
+      "reason": "Retains the literal systemMessage assertion and explicitly checks allow/No reason provided defaults. The event matrix separately checks explicit block/reason fields and exact PostToolUseHookOutput class."
+    },
+    {
+      "before": "HookSystem firePostToolBatchEvent should fire PostToolBatch event and return output",
+      "after": "HookSystem 'firePostToolBatchEvent' forwards every argument and wraps the final output for this event",
+      "reason": "The complete-argument row checks the exact handler method, every argument, event factory label, exact output constructor, literal fields, field identity, blocking decision, effective reason and sanitized additional context. Repeated positive input labels share this wrapper contract; this does not transfer handler behavior coverage to the mocked handler."
+    },
+    {
+      "before": "HookSystem firePostToolBatchEvent should return undefined when no final output",
+      "after": "HookSystem 'firePostToolBatchEvent' forwards omitted-argument defaults and returns undefined without final output",
+      "reason": "The required-argument row explicitly checks all forwarded defaults and the undefined result. Full optional-argument forwarding and the concrete output class are independently checked by this method's companion row."
+    },
+    {
+      "before": "HookSystem firePostToolUseFailureEvent should fire PostToolUseFailure event and return output",
+      "after": "HookSystem 'firePostToolUseFailureEvent' forwards every argument and wraps the final output for this event",
+      "reason": "The complete-argument row checks the exact handler method, every argument, event factory label, exact output constructor, literal fields, field identity, blocking decision, effective reason and sanitized additional context. Repeated positive input labels share this wrapper contract; this does not transfer handler behavior coverage to the mocked handler. Its former explicit isInterrupt=false is consolidated into the full row's true and the required row's undefined; HookSystem only forwards this boolean. This lost concrete input partition remains subject to capability comparisons."
+    },
+    {
+      "before": "HookSystem firePostToolUseFailureEvent should pass all parameters to event handler",
+      "after": "HookSystem 'firePostToolUseFailureEvent' forwards every argument and wraps the final output for this event",
+      "reason": "The complete-argument row checks the exact handler method, every argument, event factory label, exact output constructor, literal fields, field identity, blocking decision, effective reason and sanitized additional context. Repeated positive input labels share this wrapper contract; this does not transfer handler behavior coverage to the mocked handler."
+    },
+    {
+      "before": "HookSystem firePostToolUseFailureEvent should forward tool_call_id to event handler",
+      "after": "HookSystem 'firePostToolUseFailureEvent' forwards every argument and wraps the final output for this event",
+      "reason": "The complete-argument row checks the exact handler method, every argument, event factory label, exact output constructor, literal fields, field identity, blocking decision, effective reason and sanitized additional context. Repeated positive input labels share this wrapper contract; this does not transfer handler behavior coverage to the mocked handler."
+    },
+    {
+      "before": "HookSystem firePostToolUseFailureEvent should use default values for optional parameters",
+      "after": "HookSystem 'firePostToolUseFailureEvent' forwards omitted-argument defaults and returns undefined without final output",
+      "reason": "The required-argument row explicitly checks all forwarded defaults and the undefined result. Full optional-argument forwarding and the concrete output class are independently checked by this method's companion row."
+    },
+    {
+      "before": "HookSystem firePostToolUseFailureEvent should return undefined when no final output",
+      "after": "HookSystem 'firePostToolUseFailureEvent' forwards omitted-argument defaults and returns undefined without final output",
+      "reason": "The required-argument row explicitly checks all forwarded defaults and the undefined result. Full optional-argument forwarding and the concrete output class are independently checked by this method's companion row."
+    },
+    {
+      "before": "HookSystem firePostToolUseFailureEvent should return DefaultHookOutput with error context",
+      "after": "HookSystem 'firePostToolUseFailureEvent' forwards every argument and wraps the final output for this event",
+      "reason": "The complete-argument row checks the exact handler method, every argument, event factory label, exact output constructor, literal fields, field identity, blocking decision, effective reason and sanitized additional context. Repeated positive input labels share this wrapper contract; this does not transfer handler behavior coverage to the mocked handler."
+    },
+    {
+      "before": "HookSystem firePreCompactEvent should fire PreCompact event with auto trigger and return output",
+      "after": "HookSystem 'firePreCompactEvent' forwards every argument and wraps the final output for this event",
+      "reason": "The complete-argument row checks the exact handler method, every argument, event factory label, exact output constructor, literal fields, field identity, blocking decision, effective reason and sanitized additional context. Repeated positive input labels share this wrapper contract; this does not transfer handler behavior coverage to the mocked handler. Auto/default empty instructions remain in the required-argument row; Manual/nonempty instructions remain in the complete-argument row."
+    },
+    {
+      "before": "HookSystem firePreCompactEvent should fire PreCompact event with manual trigger",
+      "after": "HookSystem 'firePreCompactEvent' forwards every argument and wraps the final output for this event",
+      "reason": "The complete-argument row checks the exact handler method, every argument, event factory label, exact output constructor, literal fields, field identity, blocking decision, effective reason and sanitized additional context. Repeated positive input labels share this wrapper contract; this does not transfer handler behavior coverage to the mocked handler."
+    },
+    {
+      "before": "HookSystem firePreCompactEvent should pass custom instructions to event handler",
+      "after": "HookSystem 'firePreCompactEvent' forwards every argument and wraps the final output for this event",
+      "reason": "The complete-argument row checks the exact handler method, every argument, event factory label, exact output constructor, literal fields, field identity, blocking decision, effective reason and sanitized additional context. Repeated positive input labels share this wrapper contract; this does not transfer handler behavior coverage to the mocked handler."
+    },
+    {
+      "before": "HookSystem firePreCompactEvent should return undefined when no final output",
+      "after": "HookSystem 'firePreCompactEvent' forwards omitted-argument defaults and returns undefined without final output",
+      "reason": "The required-argument row explicitly checks all forwarded defaults and the undefined result. Full optional-argument forwarding and the concrete output class are independently checked by this method's companion row."
+    },
+    {
+      "before": "HookSystem firePreCompactEvent should return DefaultHookOutput with additional context",
+      "after": "HookSystem 'firePreCompactEvent' forwards every argument and wraps the final output for this event",
+      "reason": "The complete-argument row checks the exact handler method, every argument, event factory label, exact output constructor, literal fields, field identity, blocking decision, effective reason and sanitized additional context. Repeated positive input labels share this wrapper contract; this does not transfer handler behavior coverage to the mocked handler."
+    },
+    {
+      "before": "HookSystem fireNotificationEvent should fire Notification event and return output",
+      "after": "HookSystem 'fireNotificationEvent' forwards every argument and wraps the final output for this event",
+      "reason": "The complete-argument row checks the exact handler method, every argument, event factory label, exact output constructor, literal fields, field identity, blocking decision, effective reason and sanitized additional context. Repeated positive input labels share this wrapper contract; this does not transfer handler behavior coverage to the mocked handler."
+    },
+    {
+      "before": "HookSystem fireNotificationEvent should pass all parameters to event handler",
+      "after": "HookSystem 'fireNotificationEvent' forwards every argument and wraps the final output for this event",
+      "reason": "The complete-argument row checks the exact handler method, every argument, event factory label, exact output constructor, literal fields, field identity, blocking decision, effective reason and sanitized additional context. Repeated positive input labels share this wrapper contract; this does not transfer handler behavior coverage to the mocked handler."
+    },
+    {
+      "before": "HookSystem fireNotificationEvent should handle notification without title",
+      "after": "HookSystem 'fireNotificationEvent' forwards omitted-argument defaults and returns undefined without final output",
+      "reason": "The required-argument row explicitly checks all forwarded defaults and the undefined result. Full optional-argument forwarding and the concrete output class are independently checked by this method's companion row."
+    },
+    {
+      "before": "HookSystem fireNotificationEvent should return undefined when no final output",
+      "after": "HookSystem 'fireNotificationEvent' forwards omitted-argument defaults and returns undefined without final output",
+      "reason": "The required-argument row explicitly checks all forwarded defaults and the undefined result. Full optional-argument forwarding and the concrete output class are independently checked by this method's companion row."
+    },
+    {
+      "before": "HookSystem fireNotificationEvent should return DefaultHookOutput with additional context",
+      "after": "HookSystem 'fireNotificationEvent' forwards every argument and wraps the final output for this event",
+      "reason": "The complete-argument row checks the exact handler method, every argument, event factory label, exact output constructor, literal fields, field identity, blocking decision, effective reason and sanitized additional context. Repeated positive input labels share this wrapper contract; this does not transfer handler behavior coverage to the mocked handler."
+    },
+    {
+      "before": "HookSystem fireNotificationEvent should handle elicitation_dialog notification type",
+      "after": "HookSystem 'fireNotificationEvent' forwards every argument and wraps the final output for this event",
+      "reason": "The complete-argument row checks the exact handler method, every argument, event factory label, exact output constructor, literal fields, field identity, blocking decision, effective reason and sanitized additional context. Repeated positive input labels share this wrapper contract; this does not transfer handler behavior coverage to the mocked handler."
+    },
+    {
+      "before": "HookSystem firePermissionRequestEvent should delegate to hookEventHandler.firePermissionRequestEvent",
+      "after": "HookSystem output semantics preserves permission decisions, absent outputs and hook errors",
+      "reason": "Retains an allow decision object accessible from PermissionRequestHookOutput, no-final-output success=false, and a nonempty errors array returning undefined. Exact forwarding of required and optional parameters belongs to this method's two matrix cases."
+    },
+    {
+      "before": "HookSystem firePermissionRequestEvent should include permission_suggestions when provided",
+      "after": "HookSystem 'firePermissionRequestEvent' forwards every argument and wraps the final output for this event",
+      "reason": "The complete-argument row checks the exact handler method, every argument, event factory label, exact output constructor, literal fields, field identity, blocking decision, effective reason and sanitized additional context. Repeated positive input labels share this wrapper contract; this does not transfer handler behavior coverage to the mocked handler."
+    },
+    {
+      "before": "HookSystem firePermissionRequestEvent should return undefined when hook has no finalOutput",
+      "after": "HookSystem output semantics preserves permission decisions, absent outputs and hook errors",
+      "reason": "Retains an allow decision object accessible from PermissionRequestHookOutput, no-final-output success=false, and a nonempty errors array returning undefined. Exact forwarding of required and optional parameters belongs to this method's two matrix cases."
+    },
+    {
+      "before": "HookSystem firePermissionRequestEvent should handle all permission modes correctly",
+      "after": "HookSystem 'firePermissionRequestEvent' forwards every argument and wraps the final output for this event",
+      "reason": "The original loop exercised Default, Plan and Yolo but only asserted three calls. The complete-argument matrix case explicitly checks Yolo forwarding and the required-argument case explicitly checks Plan forwarding. The separate PermissionRequest output-semantic case exercises Default while checking the output accessor and absent/error results; it does not assert Default forwarding. HookSystem has no permission-mode branch."
+    },
+    {
+      "before": "HookSystem firePermissionRequestEvent should pass through hook errors",
+      "after": "HookSystem output semantics preserves permission decisions, absent outputs and hook errors",
+      "reason": "Retains an allow decision object accessible from PermissionRequestHookOutput, no-final-output success=false, and a nonempty errors array returning undefined. Exact forwarding of required and optional parameters belongs to this method's two matrix cases."
+    },
+    {
+      "before": "HookSystem firePermissionDeniedEvent should delegate to hookEventHandler.firePermissionDeniedEvent",
+      "after": "HookSystem 'firePermissionDeniedEvent' forwards omitted-argument defaults and returns undefined without final output",
+      "reason": "The required-argument row explicitly checks all forwarded defaults and the undefined result. Full optional-argument forwarding and the concrete output class are independently checked by this method's companion row."
+    },
+    {
+      "before": "HookSystem firePermissionDeniedEvent should forward tool_call_id to event handler",
+      "after": "HookSystem 'firePermissionDeniedEvent' forwards every argument and wraps the final output for this event",
+      "reason": "The complete-argument row checks the exact handler method, every argument, event factory label, exact output constructor, literal fields, field identity, blocking decision, effective reason and sanitized additional context. Repeated positive input labels share this wrapper contract; this does not transfer handler behavior coverage to the mocked handler."
+    },
+    {
+      "before": "HookSystem firePermissionDeniedEvent should return DefaultHookOutput when finalOutput exists",
+      "after": "HookSystem 'firePermissionDeniedEvent' forwards every argument and wraps the final output for this event",
+      "reason": "The complete-argument row checks the exact handler method, every argument, event factory label, exact output constructor, literal fields, field identity, blocking decision, effective reason and sanitized additional context. Repeated positive input labels share this wrapper contract; this does not transfer handler behavior coverage to the mocked handler."
+    },
+    {
+      "before": "HookSystem firePermissionDeniedEvent should return PermissionDenied hook output when present",
+      "after": "HookSystem output semantics preserves PermissionDenied fields without interpreting them as PreToolUse",
+      "reason": "Replaces the old createHookOutput-generated expected value with literal permissionDecision/permissionDecisionReason/hookEventName fields, exact DefaultHookOutput constructor and undefined top-level decision."
+    },
+    {
+      "before": "HookSystem fireSubagentStartEvent should fire SubagentStart event and return output",
+      "after": "HookSystem 'fireSubagentStartEvent' forwards every argument and wraps the final output for this event",
+      "reason": "The complete-argument row checks the exact handler method, every argument, event factory label, exact output constructor, literal fields, field identity, blocking decision, effective reason and sanitized additional context. Repeated positive input labels share this wrapper contract; this does not transfer handler behavior coverage to the mocked handler."
+    },
+    {
+      "before": "HookSystem fireSubagentStartEvent should pass AgentType enum as agent type",
+      "after": "HookSystem 'fireSubagentStartEvent' forwards every argument and wraps the final output for this event",
+      "reason": "The complete-argument row checks the exact handler method, every argument, event factory label, exact output constructor, literal fields, field identity, blocking decision, effective reason and sanitized additional context. Repeated positive input labels share this wrapper contract; this does not transfer handler behavior coverage to the mocked handler. The complete row uses AgentType.Bash; the required row retains a custom string agent type."
+    },
+    {
+      "before": "HookSystem fireSubagentStartEvent should return undefined when no final output",
+      "after": "HookSystem 'fireSubagentStartEvent' forwards omitted-argument defaults and returns undefined without final output",
+      "reason": "The required-argument row explicitly checks all forwarded defaults and the undefined result. Full optional-argument forwarding and the concrete output class are independently checked by this method's companion row."
+    },
+    {
+      "before": "HookSystem fireSubagentStartEvent should return DefaultHookOutput with additional context",
+      "after": "HookSystem 'fireSubagentStartEvent' forwards every argument and wraps the final output for this event",
+      "reason": "The complete-argument row checks the exact handler method, every argument, event factory label, exact output constructor, literal fields, field identity, blocking decision, effective reason and sanitized additional context. Repeated positive input labels share this wrapper contract; this does not transfer handler behavior coverage to the mocked handler."
+    },
+    {
+      "before": "HookSystem fireSubagentStopEvent should fire SubagentStop event and return output",
+      "after": "HookSystem 'fireSubagentStopEvent' forwards every argument and wraps the final output for this event",
+      "reason": "The complete-argument row checks the exact handler method, every argument, event factory label, exact output constructor, literal fields, field identity, blocking decision, effective reason and sanitized additional context. Repeated positive input labels share this wrapper contract; this does not transfer handler behavior coverage to the mocked handler."
+    },
+    {
+      "before": "HookSystem fireSubagentStopEvent should pass all parameters to event handler",
+      "after": "HookSystem 'fireSubagentStopEvent' forwards every argument and wraps the final output for this event",
+      "reason": "The complete-argument row checks the exact handler method, every argument, event factory label, exact output constructor, literal fields, field identity, blocking decision, effective reason and sanitized additional context. Repeated positive input labels share this wrapper contract; this does not transfer handler behavior coverage to the mocked handler."
+    },
+    {
+      "before": "HookSystem fireSubagentStopEvent should return undefined when no final output",
+      "after": "HookSystem 'fireSubagentStopEvent' forwards omitted-argument defaults and returns undefined without final output",
+      "reason": "The required-argument row explicitly checks all forwarded defaults and the undefined result. Full optional-argument forwarding and the concrete output class are independently checked by this method's companion row."
+    },
+    {
+      "before": "HookSystem fireSubagentStopEvent should return StopHookOutput with blocking decision",
+      "after": "HookSystem 'fireSubagentStopEvent' forwards every argument and wraps the final output for this event",
+      "reason": "The complete-argument row checks the exact handler method, every argument, event factory label, exact output constructor, literal fields, field identity, blocking decision, effective reason and sanitized additional context. Repeated positive input labels share this wrapper contract; this does not transfer handler behavior coverage to the mocked handler. Nonblocking allow and stop-specific formatting are independently owned by the output semantics case."
+    },
+    {
+      "before": "HookSystem fireSubagentStopEvent should return StopHookOutput with allow decision",
+      "after": "HookSystem output semantics allows SubagentStop and exposes its stop-specific reason",
+      "reason": "Retains nonblocking allow output. The event matrix separately retains block and effective reason; this case additionally checks StopHookOutput.getStopReason against its literal formatted result."
+    },
+    {
+      "before": "HookSystem fireTodoCreatedEvent should fire TodoCreated event and return AggregatedHookResult",
+      "after": "HookSystem 'fireTodoCreatedEvent' forwards every argument and preserves the complete blocking result by identity",
+      "reason": "The complete-argument call checks every handler argument, including the AbortSignal/context/phase where present, and returns the exact aggregate object with finalOutput, duration, success=false and errors. Identity subsumes the original deep-equality and individual block/reason assertions."
+    },
+    {
+      "before": "HookSystem fireTodoCreatedEvent should pass abort signal to event handler",
+      "after": "HookSystem 'fireTodoCreatedEvent' forwards every argument and preserves the complete blocking result by identity",
+      "reason": "The complete-argument call checks every handler argument, including the AbortSignal/context/phase where present, and returns the exact aggregate object with finalOutput, duration, success=false and errors. Identity subsumes the original deep-equality and individual block/reason assertions."
+    },
+    {
+      "before": "HookSystem fireTodoCreatedEvent should return blocking result when hook blocks",
+      "after": "HookSystem 'fireTodoCreatedEvent' forwards every argument and preserves the complete blocking result by identity",
+      "reason": "The complete-argument call checks every handler argument, including the AbortSignal/context/phase where present, and returns the exact aggregate object with finalOutput, duration, success=false and errors. Identity subsumes the original deep-equality and individual block/reason assertions."
+    },
+    {
+      "before": "HookSystem fireTodoCompletedEvent should fire TodoCompleted event and return AggregatedHookResult",
+      "after": "HookSystem 'fireTodoCompletedEvent' forwards every argument and preserves the complete blocking result by identity",
+      "reason": "The complete-argument call checks every handler argument, including the AbortSignal/context/phase where present, and returns the exact aggregate object with finalOutput, duration, success=false and errors. Identity subsumes the original deep-equality and individual block/reason assertions."
+    },
+    {
+      "before": "HookSystem fireTodoCompletedEvent should pass abort signal to event handler",
+      "after": "HookSystem 'fireTodoCompletedEvent' forwards every argument and preserves the complete blocking result by identity",
+      "reason": "The complete-argument call checks every handler argument, including the AbortSignal/context/phase where present, and returns the exact aggregate object with finalOutput, duration, success=false and errors. Identity subsumes the original deep-equality and individual block/reason assertions."
+    },
+    {
+      "before": "HookSystem fireTodoCompletedEvent should return blocking result when hook blocks completion",
+      "after": "HookSystem 'fireTodoCompletedEvent' forwards every argument and preserves the complete blocking result by identity",
+      "reason": "The complete-argument call checks every handler argument, including the AbortSignal/context/phase where present, and returns the exact aggregate object with finalOutput, duration, success=false and errors. Identity subsumes the original deep-equality and individual block/reason assertions."
+    }
+  ],
+  "removed": [],
+  "assertionOwnership": {
+    "wrapperRows": "16 wrapped-event methods each retain two independent runtime cases: complete nondefault arguments plus output checks, and required arguments plus explicit defaults and no final output.",
+    "resultIdentity": "4 aggregate-returning methods each retain two independent runtime cases. The complete failure/block payload and absent-output aggregate must be returned by identity.",
+    "specializedSemantics": "7 output semantic cases retain deny/context, systemMessage/defaults, permission decision/error handling, PermissionDenied literal fields and SubagentStop allow behavior, and independently add expansion ampersand escaping, batch stop behavior and stop-reason formatting.",
+    "unchanged": "Construction, initialization/reload, event handler/registry accessors, enable/disable, registered hooks, event queries including session hooks, and messages provider cases are unchanged.",
+    "positiveLabels": "Distinct arbitrary prompts, tool names, notification values and context strings that reached the same branch are represented by the explicit required/full argument rows. This is a behavioral partition change rather than a claim that all old concrete inputs remain. PostToolUseFailure also consolidates the former explicit isInterrupt=false row into true and omitted/undefined rows; the wrapper has no branch on this value."
+  },
+  "validation": {
+    "status": "pending",
+    "required": [
+      "package-local unit tests and build/typecheck",
+      "coverage comparison on hookSystem.ts and types.ts",
+      "full static mutation comparison with hookSystem/types/hookAggregator tests"
+    ],
+    "limits": [
+      "A failed earlier assertion can mask later assertions within its event-specific contract; each method and missing-output partition remains separately named.",
+      "Some positive-value labels and aggregate allow payloads are consolidated into representative full/default forwarding and failure-result identity checks; mutation and semantic review are required before retention.",
+      "StopFailure and PostCompact wrappers lacked cases in this baseline file and remain outside this bounded redesign."
+    ]
+  }
+}
