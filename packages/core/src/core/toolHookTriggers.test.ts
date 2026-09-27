@@ -206,6 +206,43 @@ describe('toolHookTriggers', () => {
       });
     });
 
+    it('qwen-code#12457: denies a failMode: "closed" hook transport failure that HookRunner turned into an explicit deny', async () => {
+      // This is what HookAggregator hands back, unchanged, once HookRunner's
+      // buildFailClosedDenial (hookRunner.ts) converts a fail-closed
+      // command hook's exit-1 into `decision: 'deny'` instead of the
+      // default allow. Proves the denial survives this layer: it is
+      // indistinguishable from any other hook-authored deny, so it is
+      // caught by the existing `isDenied()` branch above, NOT by the
+      // hookError/"no output" branch below.
+      const mockOutput = {
+        decision: 'deny',
+        reason:
+          'Hook "my-security-hook" failed closed (failMode: "closed"): exited with a non-blocking error: boom',
+      };
+      const mockMessageBus = createMockMessageBus();
+      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
+        success: true,
+        output: mockOutput,
+      });
+
+      const result = await firePreToolUseHook(
+        mockMessageBus,
+        'test-tool',
+        {},
+        'test-id',
+        'auto',
+      );
+
+      expect(result).toEqual({
+        shouldProceed: false,
+        blockReason:
+          'Hook "my-security-hook" failed closed (failMode: "closed"): exited with a non-blocking error: boom',
+        blockType: 'denied',
+      });
+      // Not the generic transport-failure shape: no hookError sentinel.
+      expect(result.hookError).toBeUndefined();
+    });
+
     it('should return shouldProceed: false with ask type when confirmation is required', async () => {
       const result = await pre(
         busWithOutput({

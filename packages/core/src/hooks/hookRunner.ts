@@ -265,6 +265,39 @@ const PLAIN_TEXT_CONTEXT_EVENTS: ReadonlySet<HookEventName> = new Set([
   HookEventName.UserPromptExpansion,
 ]);
 
+/**
+ * Top-level {@link HookOutput} field names. Used only to decide, for a
+ * `failMode: "closed"` command hook, whether stdout/stderr that DID parse
+ * as JSON is a genuine (if minimal) HookOutput or just noise indistinguishable
+ * from a transport failure — typically `{}`, or an object with unrelated
+ * keys (qwen-code#12457 follow-up). Not used for `"open"`/absent, which
+ * accepts any parsed object exactly as before.
+ */
+const HOOK_OUTPUT_FIELDS: ReadonlySet<string> = new Set([
+  'continue',
+  'stopReason',
+  'suppressOutput',
+  'systemMessage',
+  'terminalSequence',
+  'decision',
+  'reason',
+  'hookSpecificOutput',
+]);
+
+function hasRecognizedHookOutputField(output: HookOutput): boolean {
+  return Object.keys(output).some((key) => HOOK_OUTPUT_FIELDS.has(key));
+}
+
+/**
+ * A `{` immediately (whitespace aside) followed by a quoted key, e.g. the
+ * `{"decision":` in `debug\n{"decision":` — a truncated/broken JSON object
+ * preceded by ordinary log output. Ordinary human-readable diagnostic text
+ * essentially never contains this exact shape, so it is a tight, low-risk
+ * signal that a `failMode: "closed"` hook attempted (and failed) to emit
+ * structured JSON not starting at position 0 (qwen-code#12457 follow-up).
+ */
+const HOOK_JSON_OBJECT_FRAGMENT = /\{\s*"/;
+
 function isNoSuchProcessError(error: unknown): boolean {
   return (error as NodeJS.ErrnoException)?.code === 'ESRCH';
 }
@@ -790,6 +823,24 @@ export class HookRunner {
       default:
         return 'unknown';
     }
+  }
+
+  /**
+   * Build the `deny` output a `failMode: "closed"` command hook reports
+   * instead of the default `allow` when its own transport fails (a
+   * non-blocking exit code, a timeout, unparsable JSON stdout, or a spawn
+   * error). The reason names the hook and states plainly that it failed
+   * closed, so the resulting denial reads as a fail-safe, not a generic
+   * block (design requirement from qwen-code#12457).
+   */
+  private buildFailClosedDenial(
+    hookConfig: CommandHookConfig,
+    detail: string,
+  ): HookOutput {
+    return {
+      decision: 'deny',
+      reason: `Hook "${this.getHookId(hookConfig)}" failed closed (failMode: "closed"): ${detail}`,
+    };
   }
 
   /**
@@ -1367,6 +1418,9 @@ export class HookRunner {
         }
 
         const duration = Date.now() - startTime;
+        // A user/system abort is not a hook transport failure (nothing to
+        // fail closed on); only an actual timeout is.
+        const isRealTimeout = !aborted;
         finish({
           hookConfig,
           eventName,
@@ -1380,6 +1434,13 @@ export class HookRunner {
           stdout,
           stderr,
           duration,
+          ...(isRealTimeout &&
+            hookConfig.failMode === 'closed' && {
+              output: this.buildFailClosedDenial(
+                hookConfig,
+                `timed out after ${timeout / 1000}s`,
+              ),
+            }),
         });
       };
 
@@ -1533,6 +1594,7 @@ export class HookRunner {
           } catch {
             parseFailed = true;
           }
+          const isClosed = hookConfig.failMode === 'closed';
           if (
             !parseFailed &&
             parsed !== null &&
@@ -1540,17 +1602,47 @@ export class HookRunner {
             !Array.isArray(parsed)
           ) {
             output = parsed as HookOutput;
+            // failMode "closed" only: valid JSON that parses to an object
+            // but carries none of HookOutput's own fields — typically `{}`,
+            // or a stray object with unrelated keys — is indistinguishable
+            // from a hook that failed to produce a real answer. `"open"`
+            // keeps accepting it exactly as before (allow-by-omission).
+            if (
+              isClosed &&
+              !isBlockingError &&
+              !hasRecognizedHookOutputField(output)
+            ) {
+              output = this.buildFailClosedDenial(
+                hookConfig,
+                'printed a JSON object with no recognisable HookOutput field (e.g. "decision")',
+              );
+            }
           } else if (
             parseFailed &&
             !isBlockingError &&
-            textToParse.startsWith('{')
+            // A closed hook also treats unparsable output as a broken
+            // structured payload when it does not start with '{' but still
+            // clearly LOOKS like an attempted JSON object somewhere in the
+            // text (a '{' immediately followed by a quoted key, e.g. a log
+            // line before a truncated `{"decision": ...`). This is a
+            // content signal, not an exit-code one: ordinary human-readable
+            // error text (a hook that just writes "boom" and exits 1, the
+            // existing non-blocking-error convention already denied above
+            // by convertPlainTextToHookOutput) essentially never matches
+            // it, so plain diagnostic stdout/stderr is unaffected on any
+            // exit code, in EITHER mode.
+            (textToParse.startsWith('{') ||
+              (isClosed && HOOK_JSON_OBJECT_FRAGMENT.test(textToParse)))
           ) {
+            const looksLikeJson = textToParse.startsWith('{');
             // Output that starts like a JSON object but does not parse is a
             // broken structured payload, not context or a message: as in
             // Claude Code, it is a non-blocking error and nothing of it reaches
             // the model. Exit code 2 still blocks on its stderr text below.
             debugLogger.warn(
-              `Hook "${hookConfig.name || hookConfig.command}" printed output that starts like a JSON object but is not valid JSON; it is ignored`,
+              looksLikeJson
+                ? `Hook "${hookConfig.name || hookConfig.command}" printed output that starts like a JSON object but is not valid JSON; it is ignored`
+                : `Hook "${hookConfig.name || hookConfig.command}" printed output that looks like it contains broken JSON under failMode: "closed"; treated as a transport failure`,
             );
             finish({
               hookConfig,
@@ -1562,8 +1654,33 @@ export class HookRunner {
               stderr,
               exitCode: exitCode ?? -1,
               duration,
+              ...(isClosed && {
+                output: this.buildFailClosedDenial(
+                  hookConfig,
+                  looksLikeJson
+                    ? 'printed output that starts like a JSON object but is not valid JSON'
+                    : 'printed output that looks like broken JSON but does not parse',
+                ),
+              }),
             });
             return;
+          } else if (!parseFailed && !isBlockingError && isClosed) {
+            // failMode "closed" only: JSON that parses successfully but is
+            // not a usable HookOutput object (a bare array/number/boolean/
+            // null, e.g. `[]`) is the same ambiguity as an object with no
+            // recognised fields above — deny, regardless of exit code
+            // (parse SUCCEEDING is unambiguous proof this was a structured
+            // payload attempt, not incidental prose).
+            output = this.buildFailClosedDenial(
+              hookConfig,
+              `printed JSON that is not a HookOutput object (${
+                Array.isArray(parsed)
+                  ? 'an array'
+                  : parsed === null
+                    ? 'null'
+                    : typeof parsed
+              })`,
+            );
           } else {
             output = this.convertPlainTextToHookOutput(
               textToParse,
@@ -1573,11 +1690,39 @@ export class HookRunner {
                   ? EXIT_CODE_SUCCESS
                   : EXIT_CODE_NON_BLOCKING_ERROR,
               parsedFromStdout ? eventName : undefined,
+              hookConfig,
             );
           }
         }
 
         const killedBySignal = exitCode === null;
+        // Reached only when this close event is neither our own timeout nor
+        // an abort (both return above, at line 1515, before this point) nor
+        // the surviving-hook-supervisor timeout (which also returns above).
+        // So `killedBySignal` here means something OUTSIDE this runner ended
+        // the process — the OOM killer, a supervisor, a crash (SIGSEGV) —
+        // not a cancellation this runner itself initiated. That is exactly
+        // the "hook silently disappears" failure the fail-closed mode
+        // exists for, so it counts as a non-blocking failure too (a null
+        // exit code already satisfies "not 0 and not 2" below).
+        const isNonBlockingFailure =
+          exitCode !== EXIT_CODE_SUCCESS && exitCode !== 2;
+        // A non-blocking failure (any exit code other than 0 or 2, or a
+        // signal kill) that printed nothing parseable still leaves `output`
+        // unset above; a fail-closed hook must deny even when it crashed
+        // silently.
+        if (
+          !output &&
+          isNonBlockingFailure &&
+          hookConfig.failMode === 'closed'
+        ) {
+          output = this.buildFailClosedDenial(
+            hookConfig,
+            killedBySignal
+              ? 'was killed by a signal (crashed or was terminated externally)'
+              : `exited with code ${exitCode}`,
+          );
+        }
         finish({
           hookConfig,
           eventName,
@@ -1617,6 +1762,12 @@ export class HookRunner {
           stdout,
           stderr,
           duration,
+          ...(hookConfig.failMode === 'closed' && {
+            output: this.buildFailClosedDenial(
+              hookConfig,
+              `failed to start: ${error.message}`,
+            ),
+          }),
         });
       });
     });
@@ -1657,11 +1808,16 @@ export class HookRunner {
    * @param stdoutEvent The firing event, passed only when `text` is the
    *   hook's stdout. On a successful exit, stdout of a
    *   {@link PLAIN_TEXT_CONTEXT_EVENTS} event becomes additional context.
+   * @param hookConfig The command hook this output came from. When its
+   *   `failMode` is `"closed"`, a non-blocking exit code (today always
+   *   normalized to {@link EXIT_CODE_NON_BLOCKING_ERROR} before reaching
+   *   here) denies instead of the default allow-with-warning (qwen-code#12457).
    */
   private convertPlainTextToHookOutput(
     text: string,
     exitCode: number,
-    stdoutEvent?: HookEventName,
+    stdoutEvent: HookEventName | undefined,
+    hookConfig: CommandHookConfig,
   ): HookOutput {
     if (exitCode === EXIT_CODE_SUCCESS) {
       if (stdoutEvent && PLAIN_TEXT_CONTEXT_EVENTS.has(stdoutEvent)) {
@@ -1686,6 +1842,12 @@ export class HookRunner {
       };
     } else if (exitCode === EXIT_CODE_NON_BLOCKING_ERROR) {
       // Non-blocking error (EXIT_CODE_NON_BLOCKING_ERROR = 1)
+      if (hookConfig.failMode === 'closed') {
+        return this.buildFailClosedDenial(
+          hookConfig,
+          `exited with a non-blocking error: ${text}`,
+        );
+      }
       return {
         decision: 'allow',
         reason: `Non-blocking error: ${text}`,

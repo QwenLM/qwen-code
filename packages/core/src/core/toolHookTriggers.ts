@@ -166,6 +166,15 @@ export async function firePreToolUseHook(
       // messages carry no operator value; the sentinel is more
       // actionable. (#4321 review-9 wenshao Suggestion refines
       // review-8.)
+      //
+      // This "no output at all" shape only occurs when nothing ran a
+      // command for this event (dispatch/plan failure, or zero matching
+      // hooks) — never for a configured `failMode: "closed"` command hook's
+      // own transport failure (bad exit code, timeout, invalid JSON stdout,
+      // spawn error): HookRunner always turns THAT into an explicit
+      // `output.decision: 'deny'` (see hookRunner.ts's
+      // `buildFailClosedDenial`), which is caught by `isDenied()` below
+      // instead of reaching this branch (qwen-code#12457).
       const message =
         response.error?.message ||
         `hook runner returned ${response.success ? 'no output' : 'success: false'} without error detail`;
@@ -218,7 +227,12 @@ export async function firePreToolUseHook(
       additionalContext,
     };
   } catch (error) {
-    // Hook errors should not block tool execution
+    // Hook errors should not block tool execution. Reached only for a
+    // failure in the request/dispatch machinery itself (message-bus
+    // request timeout, thrown before any hook config is resolved) — not
+    // for a specific command hook's transport failure, which is handled
+    // (and can fail closed) inside HookRunner before a response is ever
+    // published; see the comment above (qwen-code#12457).
     const message = error instanceof Error ? error.message : String(error);
     debugLogger.warn(`PreToolUse hook error for ${toolName}: ${message}`);
     return { shouldProceed: true, hookError: message };
