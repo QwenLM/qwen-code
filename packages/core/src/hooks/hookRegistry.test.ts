@@ -10,6 +10,19 @@ import { HookRegistry } from './hookRegistry.js';
 import { HookEventName, HooksConfigSource, HookType } from './types.js';
 import type { HookConfig } from './types.js';
 
+const { debugWarn } = vi.hoisted(() => ({
+  debugWarn: vi.fn(),
+}));
+
+vi.mock('../utils/debugLogger.js', () => ({
+  createDebugLogger: () => ({
+    warn: debugWarn,
+    info: vi.fn(),
+    error: vi.fn(),
+    debug: vi.fn(),
+  }),
+}));
+
 describe('HookRegistry', () => {
   let mockConfig: HookRegistryConfig;
   let mockFeedbackEmitter: FeedbackEmitter;
@@ -1212,6 +1225,244 @@ describe('HookRegistry', () => {
       // No-op unregister should not throw
       unregister();
       expect(registry.getAllHooks()).toHaveLength(0);
+    });
+  });
+
+  describe('reloadConfiguredHooks — stable enabled-state keying', () => {
+    beforeEach(() => {
+      debugWarn.mockClear();
+    });
+    it('preserves disabled state of a named command hook when its command is edited on disk', async () => {
+      const userHooks = {
+        [HookEventName.PreToolUse]: [
+          {
+            matcher: 'Bash',
+            hooks: [
+              {
+                type: HookType.Command,
+                command: 'echo old-command',
+                name: 'my-named-hook',
+              },
+            ],
+          },
+        ],
+      };
+      mockConfig.getUserHooks = vi.fn().mockReturnValue(userHooks);
+
+      const registry = new HookRegistry(mockConfig);
+      await registry.initialize();
+      registry.setHookEnabled('my-named-hook', false);
+      expect(registry.getHooksForEvent(HookEventName.PreToolUse)).toHaveLength(
+        0,
+      );
+      const editedHooks = {
+        [HookEventName.PreToolUse]: [
+          {
+            matcher: 'Bash',
+            hooks: [
+              {
+                type: HookType.Command,
+                command: 'echo new-command',
+                name: 'my-named-hook',
+              },
+            ],
+          },
+        ],
+      };
+      mockConfig.getUserHooks = vi.fn().mockReturnValue(editedHooks);
+
+      await registry.reloadConfiguredHooks();
+
+      const after = registry.getAllHooks();
+      expect(after).toHaveLength(1);
+      expect((after[0].config as { command: string }).command).toBe(
+        'echo new-command',
+      );
+      expect(after[0].enabled).toBe(false);
+      expect(registry.getHooksForEvent(HookEventName.PreToolUse)).toHaveLength(
+        0,
+      );
+      expect(debugWarn).not.toHaveBeenCalled();
+    });
+
+    it('preserves disabled state of a named HTTP hook when its URL is edited on disk', async () => {
+      const userHooks = {
+        [HookEventName.PreToolUse]: [
+          {
+            hooks: [
+              {
+                type: HookType.Http,
+                url: 'http://old.example.com/hook',
+                name: 'my-http-hook',
+              },
+            ],
+          },
+        ],
+      };
+      mockConfig.getUserHooks = vi.fn().mockReturnValue(userHooks);
+
+      const registry = new HookRegistry(mockConfig);
+      await registry.initialize();
+      registry.setHookEnabled('my-http-hook', false);
+      expect(registry.getHooksForEvent(HookEventName.PreToolUse)).toHaveLength(
+        0,
+      );
+
+      const editedHooks = {
+        [HookEventName.PreToolUse]: [
+          {
+            hooks: [
+              {
+                type: HookType.Http,
+                url: 'http://new.example.com/hook',
+                name: 'my-http-hook',
+              },
+            ],
+          },
+        ],
+      };
+      mockConfig.getUserHooks = vi.fn().mockReturnValue(editedHooks);
+
+      await registry.reloadConfiguredHooks();
+
+      const after = registry.getAllHooks();
+      expect(after).toHaveLength(1);
+      expect((after[0].config as { url: string }).url).toBe(
+        'http://new.example.com/hook',
+      );
+      expect(after[0].enabled).toBe(false);
+      expect(debugWarn).not.toHaveBeenCalled();
+    });
+
+    it('preserves disabled state of a named prompt hook when its prompt text is edited on disk', async () => {
+      const userHooks = {
+        [HookEventName.PreToolUse]: [
+          {
+            hooks: [
+              {
+                type: HookType.Prompt,
+                prompt: 'Evaluate this tool call for safety (old)',
+                name: 'my-prompt-hook',
+              },
+            ],
+          },
+        ],
+      };
+      mockConfig.getUserHooks = vi.fn().mockReturnValue(userHooks);
+
+      const registry = new HookRegistry(mockConfig);
+      await registry.initialize();
+      registry.setHookEnabled('my-prompt-hook', false);
+      expect(registry.getHooksForEvent(HookEventName.PreToolUse)).toHaveLength(
+        0,
+      );
+
+      const editedHooks = {
+        [HookEventName.PreToolUse]: [
+          {
+            hooks: [
+              {
+                type: HookType.Prompt,
+                prompt: 'Evaluate this tool call for safety (new)',
+                name: 'my-prompt-hook',
+              },
+            ],
+          },
+        ],
+      };
+      mockConfig.getUserHooks = vi.fn().mockReturnValue(editedHooks);
+
+      await registry.reloadConfiguredHooks();
+
+      const after = registry.getAllHooks();
+      expect(after).toHaveLength(1);
+      expect((after[0].config as { prompt: string }).prompt).toBe(
+        'Evaluate this tool call for safety (new)',
+      );
+      expect(after[0].enabled).toBe(false);
+      expect(debugWarn).not.toHaveBeenCalled();
+    });
+
+    it('refuses to disable an unnamed command hook individually', async () => {
+      const userHooks = {
+        [HookEventName.PreToolUse]: [
+          {
+            hooks: [
+              {
+                type: HookType.Command,
+                command: 'echo unnamed',
+              },
+            ],
+          },
+        ],
+      };
+      mockConfig.getUserHooks = vi.fn().mockReturnValue(userHooks);
+
+      const registry = new HookRegistry(mockConfig);
+      await registry.initialize();
+
+      registry.setHookEnabled('echo unnamed', false);
+
+      const hooks = registry.getAllHooks();
+      expect(hooks).toHaveLength(1);
+      expect(hooks[0].enabled).toBe(true);
+      expect(registry.getHooksForEvent(HookEventName.PreToolUse)).toHaveLength(
+        1,
+      );
+    });
+
+    it('resets disabled state when a hook is renamed on disk', async () => {
+      const userHooks = {
+        [HookEventName.PreToolUse]: [
+          {
+            hooks: [
+              {
+                type: HookType.Command,
+                command: 'echo test',
+                name: 'old-name',
+              },
+            ],
+          },
+        ],
+      };
+      mockConfig.getUserHooks = vi.fn().mockReturnValue(userHooks);
+
+      const registry = new HookRegistry(mockConfig);
+      await registry.initialize();
+      registry.setHookEnabled('old-name', false);
+      expect(registry.getHooksForEvent(HookEventName.PreToolUse)).toHaveLength(
+        0,
+      );
+
+      const renamedHooks = {
+        [HookEventName.PreToolUse]: [
+          {
+            hooks: [
+              {
+                type: HookType.Command,
+                command: 'echo test',
+                name: 'new-name',
+              },
+            ],
+          },
+        ],
+      };
+      mockConfig.getUserHooks = vi.fn().mockReturnValue(renamedHooks);
+
+      await registry.reloadConfiguredHooks();
+
+      const after = registry.getAllHooks();
+      expect(after).toHaveLength(1);
+      expect(after[0].config.name).toBe('new-name');
+      expect(after[0].enabled).toBe(true);
+      expect(registry.getHooksForEvent(HookEventName.PreToolUse)).toHaveLength(
+        1,
+      );
+      // The reload warning should fire exactly once for the orphaned key
+      expect(debugWarn).toHaveBeenCalledTimes(1);
+      expect(debugWarn.mock.calls[0][0]).toContain(
+        'did not match any entry after reload',
+      );
     });
   });
 
