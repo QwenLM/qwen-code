@@ -240,6 +240,50 @@ describe('WorkspaceChannelSettingsStore', () => {
     },
   );
 
+  it('persists normalized message routes and their default', async () => {
+    const store = new WorkspaceChannelSettingsStore(workspace);
+    await store.upsert('routed', {
+      expectedRevision: store.snapshot().revision,
+      config: {
+        type: 'user-default-management-test',
+        messageRoutes: { ' /review ': ' Review code. ', '/QA': '' },
+        defaultMessageRoute: ' /QA ',
+      },
+    });
+    expect(readStoredChannel('routed')).toMatchObject({
+      messageRoutes: { '/review': 'Review code.', '/QA': '' },
+      defaultMessageRoute: '/QA',
+    });
+  });
+
+  it.each([
+    { messageRoutes: null },
+    { messageRoutes: [] },
+    { messageRoutes: '/review' },
+    { messageRoutes: {} },
+    { messageRoutes: { ' ': 'instructions' } },
+    { messageRoutes: { ' constructor ': 'instructions' } },
+    { messageRoutes: { '/review': 1 } },
+    { messageRoutes: { '/review': '', ' /review ': '' } },
+    { messageRoutes: { '/review': '' }, multiSession: true },
+    { defaultMessageRoute: '/review' },
+    { messageRoutes: { '/review': '' }, defaultMessageRoute: '/missing' },
+    { defaultMessageRoute: '' },
+    { defaultMessageRoute: null },
+    { defaultMessageRoute: 1 },
+  ])('rejects invalid managed message routing %j', async (routing) => {
+    const store = new WorkspaceChannelSettingsStore(workspace);
+    await expect(
+      store.upsert('routed', {
+        expectedRevision: store.snapshot().revision,
+        config: { type: 'user-default-management-test', ...routing },
+      }),
+    ).rejects.toMatchObject({
+      code: 'channel_settings_invalid_config',
+      message: expect.stringMatching(/messageRoutes|defaultMessageRoute/),
+    });
+  });
+
   it('preserves an existing secret unless replace or clear is explicit', async () => {
     // The stored secret is an environment reference, so the assertion below only
     // means something with the variable defined: while it is unset, resolution

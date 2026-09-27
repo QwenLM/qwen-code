@@ -19,8 +19,9 @@ export interface TimelineRange {
  * Rows whose span was running at any point in the range, ends included.
  *
  * With idle time cut out of the domain, spans cover it end to end, so any
- * range finds at least one row. That stops holding once a mode draws real
- * clock time with its gaps left in.
+ * range finds at least one row. In `clock` mode the gaps stay on the axis, and
+ * a range that falls inside one finds nothing — an ordinary answer the panel
+ * says in words rather than an edge case.
  *
  * Closed on both sides so a zero-length span sitting on an edge — a tool that
  * reported 0 ms, or a range made by a drag that stopped exactly on a bar's

@@ -93,7 +93,8 @@ export const FIX_DELTA_SCOPE =
   'tracked or not. A hunk shows a file as git stores it: a binary file (a ' +
   '`binary` or `-diff` attribute included) as `Binary files … differ`, ' +
   'without its content, and a clean-filtered file (Git LFS) as its filtered ' +
-  'form.';
+  'form. An edit that changes the ignore rules brings what they hid in as ' +
+  'additions (a hidden nested repository as its gitlink).';
 
 /**
  * The name-family exclusions both captures share. A family needs both forms:
@@ -331,7 +332,10 @@ export function runFixDelta(args: FixDeltaArgs): void {
     writeStderrLine(
       'fix-delta: HEAD moved between the two moments ' +
         `(${snapshot.head?.slice(0, 12) ?? 'unborn'} -> ${headNow?.slice(0, 12) ?? 'unborn'}) — ` +
-        'a change that landed by commit alone is not in the hunks.',
+        'the hunks still compare the working tree with the snapshot, so a ' +
+        'committed edit is in them, and so is anything a pull, rebase or ' +
+        'checkout in between brought in; a gitignored file a commit started ' +
+        'tracking is not.',
     );
   }
   writeStderrLine(FIX_DELTA_SCOPE);

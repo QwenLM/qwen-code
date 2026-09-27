@@ -15,6 +15,10 @@ import {
   createChannelManagementService,
   type ChannelManagementWorkerManager,
 } from './channel-management-service.js';
+import {
+  createChannelRestoreFailures,
+  type ChannelRestoreFailures,
+} from './channel-restore-failures.js';
 
 const WORKSPACE = '/ws/primary';
 
@@ -40,6 +44,7 @@ function setup(options: {
   snapshot?: ChannelSettingsSnapshot;
   committedNames?: string[];
   workspaceCwd?: string;
+  restoreFailures?: ChannelRestoreFailures;
 }) {
   let persisted = options.snapshot ?? settingsSnapshot();
   const store = {
@@ -135,6 +140,9 @@ function setup(options: {
     workspaceCwd: WORKSPACE,
     store,
     manager,
+    ...(options.restoreFailures
+      ? { restoreFailures: options.restoreFailures }
+      : {}),
   });
   return { service, store, manager, persisted: () => persisted };
 }
@@ -565,6 +573,105 @@ describe('createChannelManagementService', () => {
     expect(result.instance.runtime).toEqual({ state: 'connected' });
   });
 
+  it('lists a channel that failed to restore as an error, not stopped', async () => {
+    const restoreFailures = createChannelRestoreFailures();
+    restoreFailures.record([
+      {
+        workspaceCwd: WORKSPACE,
+        channel: 'bot',
+        message: 'gateway did not answer',
+      },
+      // Another workspace's same-name channel is not this one.
+      {
+        workspaceCwd: '/ws/other',
+        channel: 'bot',
+        message: 'unrelated',
+      },
+    ]);
+    const { service } = setup({ restoreFailures });
+
+    expect((await service.list()).instances['bot']?.runtime).toEqual({
+      state: 'error',
+      lastError: 'gateway did not answer',
+    });
+  });
+
+  it('reports a committed channel from its worker, not a restore failure', async () => {
+    const restoreFailures = createChannelRestoreFailures();
+    restoreFailures.record([
+      {
+        workspaceCwd: WORKSPACE,
+        channel: 'bot',
+        message: 'stale',
+      },
+    ]);
+    const { service } = setup({ committedNames: ['bot'], restoreFailures });
+
+    expect((await service.list()).instances['bot']?.runtime).toEqual({
+      state: 'connected',
+    });
+  });
+
+  it.each([
+    {
+      operation: 'start',
+      act: (service: ReturnType<typeof setup>['service']) =>
+        service.start('bot'),
+    },
+    {
+      operation: 'stop',
+      act: (service: ReturnType<typeof setup>['service']) =>
+        service.stop('bot'),
+    },
+    {
+      operation: 'upsert',
+      act: (service: ReturnType<typeof setup>['service']) =>
+        service.upsert('bot', {
+          expectedRevision: 'rev-1',
+          config: { type: 'dingtalk', clientId: 'client-id' },
+        }),
+    },
+    {
+      operation: 'remove',
+      act: (service: ReturnType<typeof setup>['service']) =>
+        service.remove('bot', { expectedRevision: 'rev-1' }),
+    },
+  ])(
+    'forgets a restore failure once an operator uses $operation',
+    async ({ act }) => {
+      const restoreFailures = createChannelRestoreFailures();
+      restoreFailures.record([
+        {
+          workspaceCwd: WORKSPACE,
+          channel: 'bot',
+          message: 'x',
+        },
+      ]);
+      const { service } = setup({ restoreFailures });
+
+      await act(service);
+
+      expect(restoreFailures.get(WORKSPACE, 'bot')).toBeUndefined();
+    },
+  );
+
+  it('keeps a restore failure when only the startup flag changes', async () => {
+    const restoreFailures = createChannelRestoreFailures();
+    restoreFailures.record([
+      { workspaceCwd: WORKSPACE, channel: 'bot', message: 'x' },
+    ]);
+    const { service } = setup({ restoreFailures });
+
+    await service.setStartup('bot', {
+      expectedRevision: 'rev-1',
+      enabled: false,
+    });
+
+    expect(restoreFailures.get(WORKSPACE, 'bot')).toMatchObject({
+      message: 'x',
+    });
+  });
+
   it('does not delete config when worker stop is unconfirmed', async () => {
     const { service, store, manager, persisted } = setup({
       committedNames: ['bot'],
@@ -719,6 +826,72 @@ describe('createChannelManagementService', () => {
       code: 'channel_worker_not_enabled',
     });
     expect(manager.reloadWorkspace).not.toHaveBeenCalled();
+  });
+
+  it('retries a channel whose restore failed by starting it', async () => {
+    const restoreFailures = createChannelRestoreFailures();
+    restoreFailures.record([
+      {
+        workspaceCwd: WORKSPACE,
+        channel: 'bot',
+        message: 'gateway did not answer',
+      },
+    ]);
+    const { service, manager } = setup({ committedNames: [], restoreFailures });
+
+    const result = await service.restart('bot');
+
+    // Nothing is running to restart; the listed error is what retry acts on.
+    expect(manager.reloadWorkspace).not.toHaveBeenCalled();
+    expect(manager.setChannelEnabled).toHaveBeenCalledWith(
+      { name: 'bot', workspaceCwd: WORKSPACE },
+      true,
+    );
+    expect(result.instance.runtime).toEqual({ state: 'connected' });
+    expect(restoreFailures.get(WORKSPACE, 'bot')).toBeUndefined();
+  });
+
+  it('keeps the restore failure when retrying it fails to start', async () => {
+    const restoreFailures = createChannelRestoreFailures();
+    restoreFailures.record([
+      {
+        workspaceCwd: WORKSPACE,
+        channel: 'bot',
+        message: 'gateway did not answer',
+      },
+    ]);
+    const { service, manager } = setup({ committedNames: [], restoreFailures });
+    manager.setChannelEnabled.mockRejectedValueOnce(new Error('still down'));
+
+    await expect(service.restart('bot')).rejects.toThrow('still down');
+
+    expect((await service.list()).instances['bot']?.runtime).toEqual({
+      state: 'error',
+      lastError: 'gateway did not answer',
+    });
+  });
+
+  it('retries a replacement that was rolled back by starting it', async () => {
+    const { service, manager } = setup({ committedNames: ['bot'] });
+    manager.reloadWorkspace.mockRejectedValueOnce(new Error('bad config'));
+    const failed = await service.upsert('bot', {
+      expectedRevision: 'rev-1',
+      config: { type: 'dingtalk', clientId: 'client-id' },
+    });
+    // The failed reload stopped the channel and kept its error.
+    expect(failed.instance.runtime).toEqual({
+      state: 'error',
+      lastError: 'bad config',
+    });
+    manager.setChannelEnabled.mockClear();
+
+    const result = await service.restart('bot');
+
+    expect(manager.setChannelEnabled).toHaveBeenCalledWith(
+      { name: 'bot', workspaceCwd: WORKSPACE },
+      true,
+    );
+    expect(result.instance.runtime).toEqual({ state: 'connected' });
   });
 
   it('rejects restart of a configured channel that is not enabled', async () => {

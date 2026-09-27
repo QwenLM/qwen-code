@@ -74,6 +74,41 @@ Channels are configured under the `channels` key in `settings.json`. Each channe
 | `groups`            | No               | Per-group settings. Keys are group chat IDs or `"*"` for defaults. See [Group Chats](#group-chats)                                                                                                          |
 | `dispatchMode`      | No               | What happens when you send a message while the bot is busy: `steer` (default), `collect`, or `followup`. See [Dispatch Modes](#dispatch-modes)                                                              |
 
+### Message Routes
+
+Use `messageRoutes` to run multiple workflows through one Channel connection.
+Each key is a case-sensitive message prefix and each value contains instructions
+for that route:
+
+```json
+{
+  "messageRoutes": {
+    "/review": "Review the requested pull request.",
+    "/QA": "Answer questions about this repository."
+  },
+  "defaultMessageRoute": "/QA"
+}
+```
+
+A prefix must be followed by whitespace and a non-empty message. The longest
+matching prefix wins; leading mentions are skipped when matching. The matched prefix is removed before the
+message reaches the agent. Route instructions are combined with the Channel's
+common `instructions` on the first turn of each session. Routes use separate
+sessions within the configured `sessionScope`. Existing Channel memory remains
+shared at its configured chat/thread scope; routes are not a permissions sandbox.
+
+Without `defaultMessageRoute`, unmatched chat messages are ignored. To accept
+ordinary messages, set it to a key in `messageRoutes`; those messages keep their
+original text and use that route's instructions and session. Empty prefixes and
+empty route maps are invalid. Route instructions may be empty. Prefixes and
+instructions are trimmed when loading configuration. `messageRoutes` cannot be
+combined with `multiSession`.
+
+Routing does not grant access: private and group policies still apply. Shared
+and agent commands also need a route prefix, for example `/QA /help`. Messages
+without user-authored text and provider-generated system events remain outside
+prefix routing.
+
 ### Private Policy
 
 `privatePolicy` controls private conversations independently of groups:

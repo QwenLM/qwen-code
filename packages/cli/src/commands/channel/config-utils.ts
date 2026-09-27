@@ -193,6 +193,72 @@ function parseObjectStringFields<Field extends string>(
   return Object.keys(result).length > 0 ? result : undefined;
 }
 
+export function parseMessageRoutingConfig(
+  name: string,
+  rawConfig: Record<string, unknown>,
+): { messageRoutes?: Record<string, string>; defaultMessageRoute?: string } {
+  const value = rawConfig['messageRoutes'];
+  let messageRoutes: Record<string, string> | undefined;
+  if (value !== undefined) {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+      throw new Error(
+        `Channel "${name}" field "messageRoutes" must be an object.`,
+      );
+    }
+    messageRoutes = {};
+    for (const [rawPrefix, instructions] of Object.entries(value)) {
+      const prefix = rawPrefix.trim();
+      if (!prefix) {
+        throw new Error(
+          `Channel "${name}" field "messageRoutes" contains an empty prefix.`,
+        );
+      }
+      if (['__proto__', 'constructor', 'prototype'].includes(prefix)) {
+        throw new Error(
+          `Channel "${name}" field "messageRoutes" contains a reserved prefix.`,
+        );
+      }
+      if (typeof instructions !== 'string') {
+        throw new Error(
+          `Channel "${name}" field "messageRoutes.${prefix}" must be a string.`,
+        );
+      }
+      if (Object.hasOwn(messageRoutes, prefix)) {
+        throw new Error(
+          `Channel "${name}" field "messageRoutes" contains duplicate prefix "${prefix}".`,
+        );
+      }
+      messageRoutes[prefix] = instructions.trim();
+    }
+    if (Object.keys(messageRoutes).length === 0) {
+      throw new Error(
+        `Channel "${name}" field "messageRoutes" must not be empty.`,
+      );
+    }
+    if (rawConfig['multiSession'] === true) {
+      throw new Error(
+        `Channel "${name}" cannot use "messageRoutes" with "multiSession".`,
+      );
+    }
+  }
+  const rawDefault = rawConfig['defaultMessageRoute'];
+  let defaultMessageRoute: string | undefined;
+  if (rawDefault !== undefined) {
+    if (typeof rawDefault !== 'string' || !rawDefault.trim()) {
+      throw new Error(
+        `Channel "${name}" field "defaultMessageRoute" must be a non-empty string.`,
+      );
+    }
+    defaultMessageRoute = rawDefault.trim();
+    if (!Object.hasOwn(messageRoutes ?? {}, defaultMessageRoute)) {
+      throw new Error(
+        `Channel "${name}" field "defaultMessageRoute" must name a configured message route.`,
+      );
+    }
+  }
+  return { messageRoutes, defaultMessageRoute };
+}
+
 function parseMemoryScopeConfig(
   channelName: string,
   rawConfig: Record<string, unknown>,
@@ -612,6 +678,7 @@ export async function parseChannelConfig(
     cwd: resolveChannelCwd(rawConfig['cwd'] as string | undefined, defaultCwd),
     approvalMode: parseApprovalModeConfig(name, rawConfig),
     instructions: rawConfig['instructions'] as string | undefined,
+    ...parseMessageRoutingConfig(name, rawConfig),
     identity: parseObjectStringFields(name, rawConfig, 'identity', [
       'id',
       'displayName',

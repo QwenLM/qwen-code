@@ -12,6 +12,7 @@ import { I18nProvider } from '../../i18n';
 import {
   TrajectoryOverview,
   exactPercent,
+  formatClockTime,
   formatWindowTime,
   type TrajectoryOverviewProps,
 } from './TrajectoryOverview';
@@ -56,6 +57,7 @@ function draw(root: Root, props: Partial<TrajectoryOverviewProps>) {
           model={undefined}
           onSelect={() => {}}
           onRangeChange={() => {}}
+          onModeChange={() => {}}
           describe={(span) => `about ${span.rowKey}`}
           {...props}
         />
@@ -85,9 +87,50 @@ const MODEL: TimelineModel = {
     span({ rowKey: 'sub', lane: 2, start: 1500, end: 2000, error: true }),
   ],
   turnMarks: [{ turnIndex: 2, at: 1500 }],
+  mode: 'active',
   total: 2000,
+  activeMs: 2000,
+  originMs: 0,
   droppedRows: 0,
 };
+
+/** Where the clock-mode fixture starts, as a local wall-clock moment. */
+const ORIGIN = new Date(2026, 8, 24, 14, 5, 6).getTime();
+
+/**
+ * Two turns a minute apart, on a real-time axis: a request and its tool, then
+ * nearly a minute of nothing, then a failed subagent request.
+ */
+const CLOCK_MODEL: TimelineModel = {
+  spans: [
+    span({ rowKey: 'req', lane: 0, start: 0, end: 1000, ttftEnd: 400 }),
+    span({ rowKey: 'tool', lane: 1, start: 1000, end: 1250 }),
+    span({
+      rowKey: 'sub',
+      lane: 2,
+      start: 60_000,
+      end: 60_500,
+      error: true,
+    }),
+  ],
+  turnMarks: [{ turnIndex: 2, at: 60_000 }],
+  mode: 'clock',
+  total: 60_500,
+  activeMs: 1750,
+  originMs: ORIGIN,
+  droppedRows: 0,
+};
+
+/** The clock reading a test expects, spelt out apart from the code. */
+function clockReading(epochMs: number, digits: 0 | 1 | 2 | 3): string {
+  return new Intl.DateTimeFormat('en', {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23',
+    ...(digits > 0 ? { fractionalSecondDigits: digits } : {}),
+  }).format(epochMs);
+}
 
 /** Track geometry the pointer maths reads; jsdom lays nothing out. */
 const PLOT_LEFT = 50;
@@ -929,6 +972,132 @@ describe('TrajectoryOverview', () => {
       expect(exactPercent(-0)).toBe('0%');
       expect(exactPercent(1e-7)).toBe('0.0000001%');
       expect(exactPercent(100 / 3)).toBe('33.33333333%');
+    });
+  });
+
+  describe('real time', () => {
+    const modeSwitch = (container: HTMLElement) =>
+      container.querySelector<HTMLButtonElement>(
+        '[data-testid="trajectory-mode-clock"]',
+      )!;
+    const text = (container: HTMLElement, id: string) =>
+      container.querySelector(`[data-testid="${id}"]`)!.textContent;
+
+    it('offers the switch as a pressed state, where assistive technology can reach it', () => {
+      const active = render({ model: MODEL });
+      expect(modeSwitch(active).getAttribute('aria-pressed')).toBe('false');
+      expect(modeSwitch(active).getAttribute('aria-label')).toBe(
+        'Real time, idle included',
+      );
+      expect(modeSwitch(active).closest('[aria-hidden="true"]')).toBeNull();
+
+      const clock = render({ model: CLOCK_MODEL });
+      expect(modeSwitch(clock).getAttribute('aria-pressed')).toBe('true');
+    });
+
+    it('asks for the other mode, whichever is in force', () => {
+      const onModeChange = vi.fn();
+      const container = render({ model: MODEL, onModeChange });
+      act(() => modeSwitch(container).click());
+      expect(onModeChange).toHaveBeenLastCalledWith('clock');
+
+      rerender({ model: CLOCK_MODEL, onModeChange });
+      act(() => modeSwitch(container).click());
+      expect(onModeChange).toHaveBeenLastCalledWith('active');
+    });
+
+    it('reads the axis as clock times, and says elapsed and active apart', () => {
+      const container = render({ model: CLOCK_MODEL });
+      // A minute in view: whole seconds.
+      expect(text(container, 'trajectory-overview-from')).toBe(
+        clockReading(ORIGIN, 0),
+      );
+      expect(text(container, 'trajectory-overview-busy')).toBe(
+        '1m elapsed, 1.8s active',
+      );
+      expect(overviewOf(container)!.getAttribute('aria-label')).toBe(
+        'Timeline of 3 timed records over 1m, 1.8s of activity',
+      );
+    });
+
+    it('keeps the active axis as it was', () => {
+      const container = render({ model: MODEL });
+      expect(text(container, 'trajectory-overview-from')).toBe('0');
+      expect(text(container, 'trajectory-overview-busy')).toBe('2.0s active');
+    });
+
+    it('names both ends of a zoomed window as clock times', () => {
+      const container = render({ model: CLOCK_MODEL });
+      // The 20ms floor about the middle of the minute: 30 240–30 260 ms.
+      wheel(plotOf(container), at(0.5), { deltaY: -100_000 });
+      expect(text(container, 'trajectory-overview-from')).toBe(
+        clockReading(ORIGIN + 30_240, 3),
+      );
+      expect(text(container, 'trajectory-overview-busy')).toBe(
+        clockReading(ORIGIN + 30_260, 3),
+      );
+    });
+
+    it('names a selected stretch as clock times', () => {
+      const container = render({
+        model: CLOCK_MODEL,
+        range: { start: 0, end: 1250 },
+      });
+      expect(overviewOf(container)!.getAttribute('aria-label')).toBe(
+        'Timeline of 3 timed records over 1m, 1.8s of activity' +
+          `, ${clockReading(ORIGIN, 1)} to ${clockReading(ORIGIN + 1250, 1)} selected`,
+      );
+    });
+
+    it('drops the zoom when the mode changes', () => {
+      const container = render({ model: MODEL });
+      wheel(plotOf(container), at(0.5), { deltaY: -400 });
+      expect(layer(container).zoomed).toBe(true);
+      rerender({ model: CLOCK_MODEL });
+      expect(layer(container).zoomed).toBe(false);
+    });
+
+    it('says the switch out loud, and a later zoom after it', () => {
+      const container = render({ model: MODEL });
+      const status = () => text(container, 'trajectory-zoom-status');
+      wheel(plotOf(container), at(0.5), { deltaY: -400 });
+      expect(status()).toMatch(/^Showing /);
+
+      act(() => modeSwitch(container).click());
+      rerender({ model: CLOCK_MODEL });
+      expect(status()).toBe('Showing real time, idle included');
+
+      act(() => button(container, 'in').click());
+      expect(status()).toMatch(/^Showing \d{2}:\d{2}:\d{2}/);
+
+      act(() => modeSwitch(container).click());
+      rerender({ model: MODEL });
+      expect(status()).toBe('Showing active time only');
+    });
+
+    it('places a short call in a long stretch of real time exactly', () => {
+      const [, tool] = spansOf(render({ model: CLOCK_MODEL }));
+      // 250 ms of 60 500.
+      expect(tool!.style.getPropertyValue('--width')).toBe('0.41322314%');
+      expect(tool!.style.getPropertyValue('--left')).toBe('1.65289256%');
+    });
+  });
+
+  describe('formatClockTime', () => {
+    it('shows as many fractional digits as the window needs', () => {
+      const at = ORIGIN + 1234;
+      expect(formatClockTime(at, 60_000, 'en')).toBe(clockReading(at, 0));
+      expect(formatClockTime(at, 5_000, 'en')).toBe(clockReading(at, 1));
+      expect(formatClockTime(at, 500, 'en')).toBe(clockReading(at, 2));
+      expect(formatClockTime(at, 50, 'en')).toBe(clockReading(at, 3));
+      expect(formatClockTime(at, 50, 'en')).toMatch(
+        /^\d{2}:\d{2}:\d{2}\.\d{3}$/,
+      );
+    });
+
+    it('reads the first hour after midnight as 00, not 24', () => {
+      const midnight = new Date(2026, 8, 24, 0, 5, 6).getTime();
+      expect(formatClockTime(midnight, 60_000, 'en')).toBe('00:05:06');
     });
   });
 });

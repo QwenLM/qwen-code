@@ -135,6 +135,8 @@ describe('built-in channel registry', () => {
     });
     expect(entry?.fields.map((field) => field.key)).toEqual([
       'settings',
+      'messageRoutes',
+      'defaultMessageRoute',
       'privatePolicy',
       'allowedUsers',
       'groupPolicy',
