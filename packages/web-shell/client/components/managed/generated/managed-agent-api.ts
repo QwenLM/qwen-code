@@ -42,6 +42,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
+        /** @description Without a cursor, a Session that has a Snapshot returns all of its Items, the events up to the Snapshot other than input, text-delta and tool-call updates, and every event after it. Otherwise, and for an olderCursor, limit bounds the page of events. */
         post: operations["webShellTranscript"];
         delete?: never;
         options?: never;
@@ -58,7 +59,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description POST SSE consumed through fetch response.body. */
+        /** @description POST SSE consumed through fetch response.body. An afterSequence below the replay floor ends the stream with one agent.session.resync_required frame instead of a 409; reload the transcript and resume after its lastSequence. */
         post: operations["webShellStreamEvents"];
         delete?: never;
         options?: never;
@@ -300,6 +301,7 @@ export interface components {
             /** Format: int64 */
             updatedAt: number;
         };
+        /** @description A committed event, replayed with the versions and identity it was accepted with. A stream.reconciled event is the exception: it means that Harness recovery retracted earlier deltas of its Turn, which now have empty text and no itemId or contentPartId, and that later deltas may name other Parts. Reload the transcript and resume after its lastSequence. */
         WebShellEvent: {
             /** @default 1 */
             schemaVersion?: number;
@@ -321,11 +323,24 @@ export interface components {
             };
             terminal: boolean;
         };
+        /** @description Data of the agent.session.resync_required SSE frame. Reload the transcript, then resume after its lastSequence. */
+        WebShellResyncRequired: {
+            /** @constant */
+            type: "agent.session.resync_required";
+            /** Format: uuid */
+            sessionId: string;
+            /** Format: int64 */
+            replayFloorSequence: number;
+            /** Format: int64 */
+            snapshotThroughSequence: number;
+            /** @constant */
+            action: "reload_snapshot";
+        };
         ErrorEnvelope: {
             error: {
                 code: string;
                 message: string;
-                request_id?: string | null;
+                request_id: string;
                 /** Format: int64 */
                 replay_floor_sequence?: number | null;
                 /** Format: int64 */
@@ -399,6 +414,15 @@ export interface components {
                 "application/json": components["schemas"]["ErrorEnvelope"];
             };
         };
+        /** @description A trusted actor is required for this request but none was supplied. */
+        Unauthorized: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ErrorEnvelope"];
+            };
+        };
         /** @description Invalid request. */
         BadRequest: {
             headers: {
@@ -426,8 +450,8 @@ export interface components {
                 "application/json": components["schemas"]["ErrorEnvelope"];
             };
         };
-        /** @description Replay cursor is older than the retained replay floor. */
-        CursorExpired: {
+        /** @description A dependency such as the Hosted Harness is unavailable; retry later. */
+        Unavailable: {
             headers: {
                 [name: string]: unknown;
             };
@@ -468,6 +492,8 @@ export interface operations {
                     "application/json": components["schemas"]["WebShellSessionPage"];
                 };
             };
+            400: components["responses"]["BadRequest"];
+            403: components["responses"]["Forbidden"];
         };
     };
     webShellGetSession: {
@@ -492,6 +518,8 @@ export interface operations {
                     "application/json": components["schemas"]["WebShellSession"];
                 };
             };
+            400: components["responses"]["BadRequest"];
+            403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
         };
     };
@@ -517,6 +545,8 @@ export interface operations {
                     "application/json": components["schemas"]["WebShellTranscript"];
                 };
             };
+            400: components["responses"]["BadRequest"];
+            404: components["responses"]["NotFound"];
         };
     };
     webShellStreamEvents: {
@@ -541,7 +571,8 @@ export interface operations {
                     "text/event-stream": string;
                 };
             };
-            409: components["responses"]["CursorExpired"];
+            400: components["responses"]["BadRequest"];
+            404: components["responses"]["NotFound"];
         };
     };
     webShellCreateSession: {
@@ -568,9 +599,11 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
+            503: components["responses"]["Unavailable"];
         };
     };
     webShellSubmitTurn: {
@@ -596,6 +629,8 @@ export interface operations {
                     "application/json": components["schemas"]["WebShellAdmission"];
                 };
             };
+            400: components["responses"]["BadRequest"];
+            404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
         };
     };
@@ -622,6 +657,8 @@ export interface operations {
                     "application/json": components["schemas"]["WebShellAdmission"];
                 };
             };
+            400: components["responses"]["BadRequest"];
+            404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
         };
     };
