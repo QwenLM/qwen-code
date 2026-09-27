@@ -19,6 +19,7 @@ import { SessionService } from '@qwen-code/qwen-code-core/services/sessionServic
 import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import type { AcpSessionBridge } from './acp-session-bridge.js';
+import type { WorkspaceGenerationGuard } from './workspace-registry.js';
 import { runCodexAppServer } from '../external-agents/codex-subagent-executor.js';
 import { selectRejectOption } from '../external-agents/acp-subagent-executor.js';
 import { streamAgentTurn } from './workspace-agents/stream-agent-turn.js';
@@ -80,6 +81,7 @@ export interface AgentHostConnectionOptions {
   enrollmentToken?: string;
   allowHttp?: boolean;
   name?: string;
+  generationGuard?: WorkspaceGenerationGuard;
 }
 
 function normalizeServerUrl(value: string, allowHttp = false): string {
@@ -243,6 +245,7 @@ async function executeAssignment(
   let renewedAt = Date.now();
   const renewLease = async () => {
     try {
+      options.generationGuard?.assertOpen();
       const response = await requestJson<{ lease?: { leaseId: string } }>(
         `${credential.serverUrl}/agent-hosts/${encodeURIComponent(credential.workspaceId)}/${encodeURIComponent(credential.hostId)}/heartbeat`,
         {
@@ -280,7 +283,8 @@ async function executeAssignment(
       const status = (error as { status?: number }).status;
       if (
         !finished &&
-        (status === 401 ||
+        (options.generationGuard?.closed ||
+          status === 401 ||
           status === 404 ||
           status === 409 ||
           Date.now() - renewedAt >= leaseMs)
@@ -588,7 +592,12 @@ async function returnResult(
 
 const activeConnections = new Map<
   string,
-  { provider: string; start: Promise<void> }
+  {
+    provider: string;
+    bridge: AcpSessionBridge;
+    generationGuard?: WorkspaceGenerationGuard;
+    start: Promise<void>;
+  }
 >();
 
 export async function startAgentHostConnection(
@@ -605,10 +614,21 @@ export async function startAgentHostConnection(
       throw new Error(
         'This workspace already has a Host connection using another provider.',
       );
-    return existing.start;
+    if (
+      existing.bridge === options.bridge &&
+      existing.generationGuard === options.generationGuard
+    ) {
+      return existing.start;
+    }
+    activeConnections.delete(key);
   }
   const start = connectAgentHost(options);
-  activeConnections.set(key, { provider: options.provider, start });
+  activeConnections.set(key, {
+    provider: options.provider,
+    bridge: options.bridge,
+    generationGuard: options.generationGuard,
+    start,
+  });
   try {
     await start;
   } catch (error) {
@@ -620,6 +640,7 @@ export async function startAgentHostConnection(
 async function connectAgentHost(
   options: AgentHostConnectionOptions,
 ): Promise<void> {
+  options.generationGuard?.assertOpen();
   const providers = hostProviders(options.provider);
   const serverUrl = normalizeServerUrl(options.serverUrl, options.allowHttp);
   if (
@@ -670,6 +691,7 @@ async function connectAgentHost(
   let offline = false;
   const heartbeat = async (): Promise<void> => {
     try {
+      options.generationGuard?.assertOpen();
       await requestJson(
         `${serverUrl}/agent-hosts/${encodeURIComponent(activeCredential.workspaceId)}/${encodeURIComponent(activeCredential.hostId)}/heartbeat`,
         {
@@ -713,40 +735,59 @@ async function connectAgentHost(
   );
 
   void (async () => {
-    for (;;) {
-      try {
-        const assignment = await pickup(serverUrl, activeCredential);
-        if (!assignment) continue;
-        writeStderrLine(
-          `qwen serve: Agent Host ${activeCredential.hostId} running ${assignment.agent.name} on ${assignment.threadId}.`,
-        );
-        let result: HostRunResult;
+    try {
+      for (;;) {
+        options.generationGuard?.assertOpen();
         try {
-          result = await executeAssignment(
-            options,
-            activeCredential,
-            assignment,
+          const assignment = await pickup(serverUrl, activeCredential);
+          options.generationGuard?.assertOpen();
+          if (!assignment) continue;
+          writeStderrLine(
+            `qwen serve: Agent Host ${activeCredential.hostId} running ${assignment.agent.name} on ${assignment.threadId}.`,
           );
+          let result: HostRunResult;
+          try {
+            result = await executeAssignment(
+              options,
+              activeCredential,
+              assignment,
+            );
+          } catch (error) {
+            result = {
+              threadId: assignment.threadId,
+              runId: assignment.runId,
+              hostId: activeCredential.hostId,
+              leaseId: assignment.lease.leaseId,
+              attempt: assignment.attempt,
+              status:
+                error instanceof Error && error.message === 'not_leasable'
+                  ? 'cancelled'
+                  : 'failed',
+              error: error instanceof Error ? error.message : String(error),
+            };
+          }
+          await returnResult(serverUrl, activeCredential, result);
         } catch (error) {
-          result = {
-            threadId: assignment.threadId,
-            runId: assignment.runId,
-            hostId: activeCredential.hostId,
-            leaseId: assignment.lease.leaseId,
-            attempt: assignment.attempt,
-            status:
-              error instanceof Error && error.message === 'not_leasable'
-                ? 'cancelled'
-                : 'failed',
-            error: error instanceof Error ? error.message : String(error),
-          };
+          if (options.generationGuard?.closed) return;
+          writeStderrLine(
+            `qwen serve: Agent Host pickup failed: ${error instanceof Error ? error.message : String(error)}`,
+          );
+          await delay(RETRY_MS);
         }
-        await returnResult(serverUrl, activeCredential, result);
-      } catch (error) {
-        writeStderrLine(
-          `qwen serve: Agent Host pickup failed: ${error instanceof Error ? error.message : String(error)}`,
+      }
+    } finally {
+      clearInterval(timer);
+      const active = activeConnections.get(
+        JSON.stringify([serverUrl, options.workspaceId, options.workspaceCwd]),
+      );
+      if (active?.generationGuard === options.generationGuard) {
+        activeConnections.delete(
+          JSON.stringify([
+            serverUrl,
+            options.workspaceId,
+            options.workspaceCwd,
+          ]),
         );
-        await delay(RETRY_MS);
       }
     }
   })();

@@ -357,13 +357,23 @@ export async function pickupRunForHost(
         (host) => hostIds.includes(host.id) && hostOffersProgram(host, program),
       );
     };
-    let failedAny = false;
+    let changedAny = false;
     for (const thread of listed.threads) {
       if (isThreadTerminal(thread.status)) continue;
       for (const run of thread.runs) {
         const agent = placed.get(run.agentId);
+        if (run.status === 'finishing' && agent) {
+          changedAny = true;
+          await finishRunInTransaction(transaction, {
+            threadId: thread.id,
+            runId: run.id,
+            outcome: { status: 'completed', attempt: run.attempts },
+            now,
+          });
+          continue;
+        }
         if (run.status === 'queued' && agent && runsNowhere(agent)) {
-          failedAny = true;
+          changedAny = true;
           await finishRunInTransaction(transaction, {
             threadId: thread.id,
             runId: run.id,
@@ -379,7 +389,7 @@ export async function pickupRunForHost(
     }
 
     // Re-read after failing runs so a later write never restores them.
-    const threads = failedAny
+    const threads = changedAny
       ? (await transaction.listThreads()).threads
       : listed.threads;
 
@@ -577,10 +587,25 @@ export async function applyHostRunResult(
         value: { thread: current, alreadyApplied: true },
       };
     }
-    const checked = await checkRunLeaseInTransaction(transaction, input, now);
-    if (!checked.ok) return checked;
-    if (checked.value.hostId !== input.hostId) {
-      return { ok: false, reason: 'stale_lease' as const };
+    if (
+      run.status === 'finishing' &&
+      (input.status !== 'completed' ||
+        (input.close !== undefined && run.closeKind !== input.close.kind))
+    ) {
+      return { ok: false, reason: 'not_leasable' as const };
+    }
+    const ownsFinishingRun =
+      run.status === 'finishing' &&
+      run.attempts === input.attempt &&
+      run.lease?.attempt === input.attempt &&
+      run.lease.hostId === input.hostId &&
+      run.lease.leaseId === input.leaseId;
+    if (!ownsFinishingRun) {
+      const checked = await checkRunLeaseInTransaction(transaction, input, now);
+      if (!checked.ok) return checked;
+      if (checked.value.hostId !== input.hostId) {
+        return { ok: false, reason: 'stale_lease' as const };
+      }
     }
 
     await transaction.writeThread(
@@ -591,13 +616,6 @@ export async function applyHostRunResult(
         ),
       })),
     );
-    if (
-      run.status === 'finishing' &&
-      (input.status !== 'completed' ||
-        (input.close !== undefined && run.closeKind !== input.close.kind))
-    ) {
-      return { ok: false, reason: 'not_leasable' as const };
-    }
     if (
       run.status === 'running' &&
       input.status === 'completed' &&

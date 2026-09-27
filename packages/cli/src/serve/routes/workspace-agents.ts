@@ -1325,6 +1325,14 @@ export function registerWorkspaceAgentRoutes(
           return;
         }
         if (execution?.mode === 'managed-host') {
+          if (
+            (typeof payload.agentType === 'string' &&
+              payload.agentType.trim()) ||
+            (typeof payload.model === 'string' && payload.model.trim())
+          ) {
+            res.status(400).json({ error: 'managed_host_persona_unsupported' });
+            return;
+          }
           const placed = (await readAgentHosts(root)).filter((host) =>
             execution.hostIds.includes(host.id),
           );
@@ -1593,6 +1601,18 @@ export function registerWorkspaceAgentRoutes(
       }
       try {
         const agentId = String(req.params['id']);
+        const current = (await readWorkspaceAgents(runtime.workspaceCwd)).find(
+          (agent) => agent.id === agentId,
+        );
+        const nextConfig = current ? config.apply(current) : undefined;
+        const nextExecution = execution ?? current?.execution;
+        if (
+          nextExecution?.mode === 'managed-host' &&
+          (nextConfig?.agentType || nextConfig?.model)
+        ) {
+          res.status(400).json({ error: 'managed_host_persona_unsupported' });
+          return;
+        }
         let missing = false;
         let retired = false;
         if (execution !== undefined) {

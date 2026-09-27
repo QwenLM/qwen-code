@@ -21,6 +21,8 @@ import {
   heartbeatAgentHost,
 } from '@qwen-code/qwen-code-core/agents/workspace-agents/store.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
+import { requireTrustedWorkspaceRuntime } from '../workspace-route-runtime.js';
+import type { RateLimiterInstance } from '../rate-limit.js';
 
 function body(req: Request): Record<string, unknown> {
   return typeof req.body === 'object' && req.body !== null ? req.body : {};
@@ -102,8 +104,27 @@ function readHostResult(
 export function registerAgentHostTransportRoutes(
   app: Application,
   workspaceRegistry: WorkspaceRegistry,
+  rateLimiter?: Pick<RateLimiterInstance, 'checkRate'>,
 ): void {
   const json = express.json({ limit: '16kb' });
+
+  app.use('/agent-hosts', (req, res, next) => {
+    if (
+      rateLimiter &&
+      !rateLimiter.checkRate(
+        `agent-host:preauth:${req.ip || req.socket.remoteAddress || 'unknown'}`,
+        'mutation',
+      )
+    ) {
+      res.status(429).json({
+        error: 'Rate limit exceeded',
+        code: 'rate_limit_exceeded',
+        tier: 'mutation',
+      });
+      return;
+    }
+    next();
+  });
 
   app.post(
     '/agent-hosts/:workspaceId/:hostId/progress',
@@ -112,10 +133,11 @@ export function registerAgentHostTransportRoutes(
       const { workspaceId, hostId } = req.params;
       const secret = hostSecret(req);
       const runtime = runtimeFor(workspaceRegistry, workspaceId);
-      if (!runtime || (!runtime.primary && !runtime.trusted)) {
+      if (!runtime) {
         res.status(404).json({ error: 'Workspace not found.' });
         return;
       }
+      if (!requireTrustedWorkspaceRuntime(runtime, res)) return;
       if (
         !secret ||
         !(await authenticateAgentHost(runtime.workspaceCwd, hostId, secret))
@@ -206,10 +228,7 @@ export function registerAgentHostTransportRoutes(
       res.status(404).json({ error: 'Workspace not found.' });
       return;
     }
-    if (!runtime.primary && !runtime.trusted) {
-      res.status(403).json({ error: 'Workspace is not trusted.' });
-      return;
-    }
+    if (!requireTrustedWorkspaceRuntime(runtime, res)) return;
     try {
       const enrolled = await enrollAgentHost(runtime.workspaceCwd, {
         token,
@@ -247,10 +266,11 @@ export function registerAgentHostTransportRoutes(
         return;
       }
       const runtime = runtimeFor(workspaceRegistry, workspaceId);
-      if (!runtime || (!runtime.primary && !runtime.trusted)) {
+      if (!runtime) {
         res.status(404).json({ error: 'Workspace not found.' });
         return;
       }
+      if (!requireTrustedWorkspaceRuntime(runtime, res)) return;
       try {
         const host = await heartbeatAgentHost(
           runtime.workspaceCwd,
@@ -323,10 +343,11 @@ export function registerAgentHostTransportRoutes(
         return;
       }
       const runtime = runtimeFor(workspaceRegistry, workspaceId);
-      if (!runtime || (!runtime.primary && !runtime.trusted)) {
+      if (!runtime) {
         res.status(404).json({ error: 'Workspace not found.' });
         return;
       }
+      if (!requireTrustedWorkspaceRuntime(runtime, res)) return;
       if (
         !(await authenticateAgentHost(runtime.workspaceCwd, hostId, secret))
       ) {
@@ -380,10 +401,11 @@ export function registerAgentHostTransportRoutes(
         return;
       }
       const runtime = runtimeFor(workspaceRegistry, workspaceId);
-      if (!runtime || (!runtime.primary && !runtime.trusted)) {
+      if (!runtime) {
         res.status(404).json({ error: 'Workspace not found.' });
         return;
       }
+      if (!requireTrustedWorkspaceRuntime(runtime, res)) return;
       if (
         !(await authenticateAgentHost(runtime.workspaceCwd, hostId, secret))
       ) {

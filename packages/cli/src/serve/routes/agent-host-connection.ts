@@ -77,6 +77,9 @@ export function registerAgentHostConnectionRoutes(
         enrollmentToken: input.enrollmentToken,
         provider: input.provider,
         allowHttp: input.allowHttp === true,
+        ...(runtime.generationGuard
+          ? { generationGuard: runtime.generationGuard }
+          : {}),
       });
       res.json({
         connected: true,
