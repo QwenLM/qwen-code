@@ -49,6 +49,10 @@ import {
   type SettingsType,
   type SettingsValue,
 } from '../../config/settingsSchema.js';
+import {
+  formatAuxModelSelectorForDisplay,
+  isAuxModelSelectorSettingKey,
+} from '../../utils/aux-model-selector.js';
 import { isAutoLanguage } from '../../i18n/languageUtils.js';
 import {
   getExtendedSystemInfo,
@@ -100,6 +104,18 @@ export const SUB_DIALOG_SETTING_KEYS = [
 
 export function isSubDialogSetting(key: string): boolean {
   return (SUB_DIALOG_SETTING_KEYS as readonly string[]).includes(key);
+}
+
+/**
+ * Row value for an inline number/string setting. Aux-model selectors persist
+ * as `authType:id\0baseUrl`, and that suffix can embed userinfo credentials,
+ * so those rows render the scrubbed display form instead of the raw string —
+ * parity with the ink SettingsDialog row.
+ */
+export function formatSettingRowValue(key: string, value: unknown): string {
+  return typeof value === 'string' && isAuxModelSelectorSettingKey(key)
+    ? formatAuxModelSelectorForDisplay(value)
+    : String(value);
 }
 
 export interface SettingsListItem {
@@ -785,7 +801,10 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
                 effectiveCurrentValue !== undefined &&
                 effectiveCurrentValue !== null
               ) {
-                displayValue = String(effectiveCurrentValue);
+                displayValue = formatSettingRowValue(
+                  item.key,
+                  effectiveCurrentValue,
+                );
               } else {
                 displayValue = '';
               }
