@@ -63,6 +63,7 @@ import {
   type DiscoveredPlugin,
 } from './sourceRegistry.js';
 import {
+  InsecureArchiveUrlError,
   loadMarketplaceConfigFromSource,
   parseInstallSource,
 } from './marketplace.js';
@@ -181,6 +182,8 @@ export interface Extension {
   resolvedSettings?: ResolvedExtensionSetting[];
   commands?: string[];
   skills?: SkillConfig[];
+  /** Runtime-only: missing skills may be discovery failures rather than removals. */
+  skillsDiscoveryHasErrors?: boolean;
   agents?: SubagentConfig[];
   /** Workflow scripts this extension ships, addressed as `<name>:<meta.name>`. */
   workflows?: ExtensionWorkflowDefinition[];
@@ -1248,13 +1251,17 @@ export class ExtensionManager {
       // marketplace.json). A single extension repo (Gemini/Claude/git/npm) is
       // not a marketplace — guide the user to install it directly instead.
       let isInstallableExtension = false;
+      let probeError: unknown;
       try {
         await parseInstallSource(trimmed, {
           networkPolicy: this.networkPolicy,
         });
         isInstallableExtension = true;
-      } catch {
-        // Not a recognizable install source either.
+      } catch (error) {
+        // Not a recognizable install source either; remember why so a
+        // policy rejection below can surface its real reason instead of the
+        // misleading "no marketplace" message.
+        probeError = error;
       }
       const redacted = redactUrlCredentials(trimmed);
       if (isInstallableExtension) {
@@ -1262,6 +1269,15 @@ export class ExtensionManager {
           `"${redacted}" looks like a single extension, not a marketplace. ` +
             `Install it directly with: /extensions install ${redacted}`,
         );
+      }
+      // A policy rejection (e.g. an insecure archive URL) is the actionable
+      // diagnosis for this source — rethrow it so the user sees the reason
+      // instead of the generic "No marketplace found" guidance. Note the
+      // marketplace probe above has already attempted the fetch by this
+      // point; rethrowing here only changes the reported reason, not the
+      // request behaviour.
+      if (probeError instanceof InsecureArchiveUrlError) {
+        throw probeError;
       }
       throw new Error(
         `No marketplace found at "${redacted}". ` +
@@ -1843,9 +1859,15 @@ export class ExtensionManager {
       const config = extension.config;
       const effectiveExtensionPath = extension.path;
 
+      const onSkillsDiscoveryError = () => {
+        head.extension.skillsDiscoveryHasErrors = true;
+      };
       if (loadedManifest.format === 'agent-plugins-v1') {
         extension.commands = [];
-        extension.skills = await loadAgentPluginSkills(effectiveExtensionPath);
+        extension.skills = await loadAgentPluginSkills(
+          effectiveExtensionPath,
+          onSkillsDiscoveryError,
+        );
         extension.agents = [];
         // The Agent Plugins v1 schema defines no workflows.
         extension.workflows = [];
@@ -1860,6 +1882,7 @@ export class ExtensionManager {
           .filter((contextFilePath) => fs.existsSync(contextFilePath));
         extension.skills = await loadSkillsFromDir(
           `${effectiveExtensionPath}/skills`,
+          onSkillsDiscoveryError,
         );
         const agentExecutorRefusals = new Map<string, SubagentError>();
         extension.agents = await loadSubagentFromDir(

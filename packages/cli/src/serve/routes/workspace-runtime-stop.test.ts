@@ -60,6 +60,7 @@ function setup() {
     completion = Promise.resolve({
       channelId: 'child',
       runtimeEpoch: 2,
+      channels: [{ channelId: 'child', runtimeEpoch: 2 }],
       stopToken: 'token',
       state: 'stopped',
       stopped: true,

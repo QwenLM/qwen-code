@@ -13,6 +13,7 @@ import { preview } from 'vite';
 import type { ConfigEnv, ProxyOptions, UserConfig } from 'vite';
 import viteConfig, {
   BRAND_ROUTE_PROXY,
+  MANAGED_AGENT_JAVA_ROUTE_PROXY,
   QUALIFIED_ACP_WS_PROXY,
   QUALIFIED_VOICE_STREAM_PROXY,
 } from '../vite.config';
@@ -131,6 +132,18 @@ describe('Web Shell standalone session development proxy', () => {
   it('proxies standalone session routes to the daemon', () => {
     const proxy = loadConfig().server?.proxy;
     expect(proxy?.['/standalone/sessions']).toBe(proxy?.['/session']);
+  });
+});
+
+describe('Web Shell Java Managed Agent development proxy', () => {
+  it('proxies only the public Java WebShell API prefix', () => {
+    const proxy = loadConfig().server?.proxy;
+    const managed = proxy?.[MANAGED_AGENT_JAVA_ROUTE_PROXY];
+
+    expect(managed).not.toBeTypeOf('string');
+    expect(managed).toBeDefined();
+    expect((managed as ProxyOptions).target).toBe('http://127.0.0.1:8080');
+    expect(MANAGED_AGENT_JAVA_ROUTE_PROXY).toBe('/api/agent/web-shell/v1');
   });
 });
 

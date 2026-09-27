@@ -25,7 +25,6 @@ must be able to query the original execution while its outcome is unknown.
 
 ## Non-goals
 
-- JDBC or MySQL persistence.
 - Dispatching a Tool call or communicating with a Runtime.
 - Defining public Agent Event, Item, or API schemas.
 - Recovering or reprovisioning Runtime processes.
@@ -113,9 +112,9 @@ settled records.
 
 `InMemoryToolExecutionRepository` synchronizes every compound operation. It is
 a reference implementation for one process, not a multi-JVM coordination
-mechanism. A later JDBC adapter must preserve the same identity, idempotency,
-version, lease, transition-legality, and fencing semantics through database
-constraints and row locking.
+mechanism. `JdbcToolExecutionRepository` preserves the same identity,
+idempotency, version, lease, transition-legality, and fencing semantics through
+database constraints and row locking.
 
 ## Security and tenancy
 
@@ -164,12 +163,14 @@ redaction contract.
 - Immutable execution identity cannot be replaced through compare-and-set.
 - A settled execution cannot be changed or reactivated.
 - Result status, sequence, and settlement invariants fail closed.
-- No JDBC, Runtime transport, Hosted Harness, Spring, or public API dependency
-  is introduced.
+- The in-memory repository boundary introduces no JDBC, Runtime transport,
+  Hosted Harness, Spring, or public API dependency.
 
 ## Follow-up work
 
-Add a separate JDBC implementation that persists the same contract and proves
-cross-instance convergence against MySQL. Runtime dispatch integration must
-query the original `executionCallId` after an ambiguous response instead of
-replaying the Tool call.
+The JDBC implementation of this contract lives in
+`JdbcToolExecutionRepository`; see `managed-runtime-broker-jdbc.md`. After an
+ambiguous response the Broker can query the original invocation on demand by
+its `reference`, and it calls `resolveUnknown` only on the Runtime's terminal
+evidence; it never replays the Tool call. See the UNKNOWN reconciliation section of
+`managed-runtime-broker-service-core.md`.

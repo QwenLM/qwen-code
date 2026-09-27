@@ -306,7 +306,7 @@ public final class ToolExecutionRecord {
                 && turnId.equals(other.turnId)
                 && toolCallId.equals(other.toolCallId)
                 && requestDigest.equals(other.requestDigest)
-                && reference.equals(other.reference);
+                && BrokerValues.sameJsonMap(reference, other.reference);
     }
 
     boolean sameDispatch(ToolExecutionRecord other) {
@@ -331,7 +331,7 @@ public final class ToolExecutionRecord {
                 && turnId.equals(other.turnId)
                 && toolCallId.equals(other.toolCallId)
                 && requestDigest.equals(other.requestDigest)
-                && reference.equals(other.reference);
+                && BrokerValues.sameJsonMap(reference, other.reference);
     }
 
     private ToolExecutionRecord copy(State nextState, String nextStatus,

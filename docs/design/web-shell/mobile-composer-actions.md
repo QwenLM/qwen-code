@@ -23,7 +23,11 @@ model, approval, dictation, and send controls. Hide the width toggle on touch;
 retain the context-usage control when enabled by the host. Put workspace
 selection and Git controls
 in a separate context row so starting a task in a particular workspace or
-branch remains possible. Preserve host-provided toolbar slots.
+branch remains possible. The row's measured height, two lines when it wraps,
+is added to the composer's height cap, so it does not come out of the
+attachments' room when a soft keyboard shrinks the viewport. The rows stack
+without overlapping touch targets.
+Preserve host-provided toolbar slots.
 
 Use 44px touch targets and wrap controls on very narrow viewports rather than
 clip them. Keep Plan as an active-state chip. While a turn runs, stop remains
@@ -76,6 +80,19 @@ Hosts without Add retain Shell and history-search buttons in the editing row;
 this fallback does not enable file ingestion or references.
 
 The history search must have a visible close action and remain touch usable.
+It opens upward from the composer, so its height is also capped by the room
+between the composer and the top of the visible chat area. When even its
+minimum height does not fit, it overlaps the top of the composer instead of
+going under the header, so its search field and close action stay on screen
+with a soft keyboard open. The same positioning applies to desktop history
+search: when a short window leaves insufficient room above the composer,
+the panel overlaps its top so the search field stays visible. Desktop editing
+and keyboard shortcuts retain their existing behavior.
+The bound is the top of the lowest ancestor that
+clips overflow. A host whose own header overlays the shell without clipping
+it must declare `--web-shell-popover-safe-top`; that variable is also how a
+host opts out of the default clearance, and a declared `0px` is honoured
+rather than swallowed.
 File selection must stay in a user gesture, and deferred insertions must run
 after the drawer releases focus. Expanded editing must preserve attachment
 and reference state in the shared composer, including IME input. Image/file
@@ -100,7 +117,17 @@ Record any runtime limitations separately from mocked browser results.
 
 - At phone widths, the old action grid and simulated keyboard keys are absent;
   labelled history arrows remain in the editing row. Toolbar
-  actions are reachable with no horizontal overflow. Desktop behavior remains.
+  actions are reachable with no horizontal overflow. Desktop toolbar behavior
+  remains.
+- Desktop Ctrl+R keeps the search field visible and focused in a short window
+  (1280x300), overlapping the composer when necessary. Escape preserves the
+  draft and returns focus to the editor. With enough room, the panel remains
+  above the composer.
+- With a soft keyboard open at a Pixel 7 keyboard height (about 412x450),
+  attachments stay reachable beside the context row, and the history search
+  field and close action stay reachable below the header. Below roughly 430px
+  of viewport height the composer is already at its cap, so the attachments
+  strip shrinks toward a sliver.
 - Stop works with a pending draft and keeps the draft; send still queues it.
 - Hide keyboard blurs the editor; expand/edit/Done preserves text, selection,
   attachments, and references. Switching sessions cannot leak expanded drafts.

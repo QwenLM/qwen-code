@@ -184,6 +184,9 @@ describe('resolveStartupChannelSelection', () => {
     expect(result.selection).toEqual({ mode: 'names', names: ['telegram'] });
     expect([...result.ownerHints]).toEqual([]);
     expect([...result.tolerantNames]).toEqual(['telegram']);
+    // Each workspace that asked is named, so a dropped name is reported
+    // against both.
+    expect([...result.claimants]).toEqual([['telegram', [SECOND, THIRD]]]);
     expect(result.diagnostics).toEqual([
       {
         code: 'claimed_by_multiple_workspaces',

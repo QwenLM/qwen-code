@@ -31,10 +31,17 @@ final class JdbcRepositorySupport {
 
     static String requestKey(RuntimeProvisionRequest request) {
         RuntimeScope scope = request.getScope();
+        if (request.isManagedContext()) {
+            return digest("managed-context/1", scope.getTenantId(),
+                    scope.getWorkspaceId(), scope.getWorkspaceGeneration(),
+                    scope.getCanonicalCwd(), scope.getCapabilityDigest(),
+                    scope.getIsolationClass(), request.getIsolationKey(),
+                    request.getProvisionerKind(), request.getStorageId());
+        }
         return digest(scope.getTenantId(), scope.getWorkspaceId(),
                 scope.getWorkspaceGeneration(), scope.getCanonicalCwd(),
                 scope.getCapabilityDigest(), scope.getIsolationClass(),
-                request.getIsolationKey());
+                request.getIsolationKey(), request.getProvisionerKind());
     }
 
     static String scopeKey(RuntimeScope scope) {
@@ -62,13 +69,23 @@ final class JdbcRepositorySupport {
 
     static Instant databaseNow(Connection connection) throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement(
-                "SELECT CURRENT_TIMESTAMP")) {
+                "SELECT UNIX_TIMESTAMP(),"
+                        + " EXTRACT(MICROSECOND FROM CURRENT_TIMESTAMP(6))")) {
             try (ResultSet result = statement.executeQuery()) {
                 if (!result.next()) {
                     throw new SQLException("database returned no clock row");
                 }
-                return result.getTimestamp(1, utcCalendar()).toInstant()
-                        .truncatedTo(ChronoUnit.MICROS);
+                long epochSeconds = result.getLong(1);
+                if (result.wasNull()) {
+                    throw new SQLException("database returned a null clock");
+                }
+                long micros = result.getLong(2);
+                if (result.wasNull() || micros < 0 || micros >= 1_000_000) {
+                    throw new SQLException(
+                            "database returned invalid clock precision");
+                }
+                return Instant.ofEpochSecond(epochSeconds, micros * 1_000L)
+                        .truncatedTo(ChronoUnit.SECONDS);
             }
         }
     }

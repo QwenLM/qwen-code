@@ -107,6 +107,7 @@ vi.mock('./ChatPane', () => ({
       <div
         data-testid="chat-pane"
         data-plan-visible={String(props.planControlVisible)}
+        data-model-management={JSON.stringify(props.modelManagement)}
         data-pane-workspace={props.workspaceCwd}
         data-session-details={props.sessionSummary?.sessionId}
         data-maximized={props.isMaximized ? 'true' : 'false'}
@@ -246,6 +247,18 @@ function openPicker(): void {
 }
 
 describe('SplitView', () => {
+  it('forwards model management policy to every pane', () => {
+    const modelManagement = { allowAdd: false, allowDelete: true };
+    render({ sessionIds: ['s1', 's2'], modelManagement });
+    const panes = container!.querySelectorAll('[data-testid="chat-pane"]');
+    expect(panes).toHaveLength(2);
+    for (const pane of panes) {
+      expect(pane.getAttribute('data-model-management')).toBe(
+        JSON.stringify(modelManagement),
+      );
+    }
+  });
+
   it('keeps a newly added controlled pane active without relying on composer autofocus', () => {
     function ControlledSplit() {
       const [ids, setIds] = React.useState(['s1', 's2']);
