@@ -853,7 +853,7 @@ function atomicReplace(
       );
     }
     // Write .deferred marker with the bat script PID so future `qwen update`
-    // calls can detect the in-flight swap via isProcessAlive(batPid).
+    // calls can detect the in-flight swap via isProcessProvablyGone(batPid).
     // acquireLock checks this marker before allowing lock theft.
     fs.writeFileSync(deferredMarker, String(child.pid));
     return 'deferred';

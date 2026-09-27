@@ -1245,6 +1245,39 @@ describe('standalone-update', () => {
       expect(fs.existsSync(`${standaloneDir}.deferred`)).toBe(true);
       expect(fs.existsSync(lockPath)).toBe(false);
     });
+
+    it('routes a non-positive deferred PID to the remediation message even when the probe succeeds', () => {
+      // process.kill(0, 0) signals the caller's own process group and
+      // process.kill(-1, 0) signals every process the user may signal, so both
+      // SUCCEED: a marker of 0 or -1 would probe as a live bat and the user
+      // would be told to wait for a swap that cannot exist. The `<= 0` clause
+      // is what routes it to the error carrying the removal steps instead.
+      for (const marker of ['0', '-1']) {
+        const standaloneDir = path.join(tempDir, `qwen-${marker}`);
+        const lockPath = path.join(tempDir, `lock-${marker}.lock`);
+        fs.mkdirSync(`${standaloneDir}.new`, { recursive: true });
+        fs.writeFileSync(`${standaloneDir}.deferred`, marker);
+
+        // The probe is mocked to look alive, so the clause under test is the
+        // only thing standing between a torn marker and the "please wait"
+        // dead end. This fragment is unique to deferredMarkerError: the
+        // aged-marker escape says "If a qwen-update.bat process is still
+        // running" and the wait branch carries no removal steps at all.
+        const kill = vi.spyOn(process, 'kill').mockImplementation(() => true);
+        try {
+          expect(() => acquireLock(lockPath, standaloneDir)).toThrow(
+            'If no qwen-update.bat process is running, remove the marker',
+          );
+          // Neither the staged swap nor the torn marker may be disturbed.
+          expect(fs.existsSync(`${standaloneDir}.new`)).toBe(true);
+          expect(fs.existsSync(`${standaloneDir}.deferred`)).toBe(true);
+          // Fast path only: the lock acquireLock wrote must be released.
+          expect(fs.existsSync(lockPath)).toBe(false);
+        } finally {
+          kill.mockRestore();
+        }
+      }
+    });
   });
 
   describe.skipIf(process.platform === 'win32')('ensurePathInShellRc', () => {
