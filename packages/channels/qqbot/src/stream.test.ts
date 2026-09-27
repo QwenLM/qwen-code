@@ -3984,7 +3984,7 @@ describe('stash ownership regressions', () => {
     });
   });
 
-  it('tags a re-stashed sealed head with the live turn so a successor can consume it (R11-4)', async () => {
+  it('tags a re-stashed sealed head with the live turn so a successor can consume it (self-review D1)', async () => {
     const ch = makeChannel();
     const chp = ch as unknown as Record<string, unknown>;
     const orphanBuffer = chp['streamOrphanBuffer'] as Map<
@@ -4047,7 +4047,7 @@ describe('stash ownership regressions', () => {
     ).toBe(true);
   });
 
-  it('hands off the sealed head when a superseded turn drops its entry (R11-5)', async () => {
+  it('hands off the sealed head when a superseded turn drops its entry (self-review D2)', async () => {
     const ch = makeChannel();
     const chp = ch as unknown as Record<string, unknown>;
     const orphanBuffer = chp['streamOrphanBuffer'] as Map<
