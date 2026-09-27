@@ -19,7 +19,7 @@ On Windows, commands are executed with `cmd.exe /c`. On other platforms, they ar
 
 ## How to use `run_shell_command` with Qwen Code
 
-When using `run_shell_command`, the command is executed as a subprocess. Whether it runs in the background or in the foreground is controlled by the `is_background` parameter; on the managed background path a bare trailing `&` is stripped as redundant, because that path is itself the backgrounding mechanism. The tool returns detailed information about the execution, including:
+When using `run_shell_command`, the command is executed as a subprocess. Whether it runs in the background or in the foreground is controlled by the `is_background` parameter. Do not add a trailing `&` when `is_background: true`: the managed background path is itself the backgrounding mechanism, and the tool rejects the call rather than running it. The tool returns detailed information about the execution, including:
 
 ### The `is_background` Parameter
 
@@ -82,11 +82,7 @@ Start a background development server (recommended approach):
 run_shell_command(command="npm run dev", description="Start development server in background", is_background=true)
 ```
 
-Start a background server (alternative with explicit &):
-
-```bash
-run_shell_command(command="npm run dev &", description="Start development server in background", is_background=false)
-```
+Note: an explicit `&` is not a background mechanism for this tool. A bare trailing `&` is stripped at spawn time (and rejected outright when `is_background: true`), so `command="npm run dev &"` with `is_background=false` runs `npm run dev` in the foreground and blocks the turn. Always use `is_background=true` for a command that should run in the background.
 
 Run a build command in foreground:
 
@@ -166,8 +162,8 @@ When an interactive command is running, you can send input to it from the Qwen C
 
 - **Security:** Be cautious when executing commands, especially those constructed from user input, to prevent security vulnerabilities.
 - **Error handling:** Check the `Stderr`, `Error`, and `Exit Code` fields to determine if a command executed successfully.
-- **Background processes:** When `is_background=true` or when a command contains `&`, the tool will return immediately and the process will continue to run in the background. The `Background PIDs` field will contain the process ID of the background process.
-- **Background execution choices:** The `is_background` parameter is optional (the schema requires only `command`); set `is_background: true` for a command that will not stop on its own, because leaving it in the foreground blocks the turn until it times out. You can also add `&` to the command for manual background execution, but `is_background` provides clearer intent and automatically handles the background execution setup.
+- **Background processes:** Only `is_background=true` runs a command in the background: the tool then returns immediately with the process ID in the `Background PIDs` field, and the process continues to run. A `&` inside the command never makes the tool return early (and a bare trailing one is stripped at spawn time, or rejected when `is_background: true`).
+- **Background execution choices:** The `is_background` parameter is optional (the schema requires only `command`); set `is_background: true` for a command that will not stop on its own, because leaving it in the foreground blocks the turn until it times out. Use `is_background` rather than shell-level `&`; it provides clearer intent and the tool manages the background execution setup.
 - **Command descriptions:** When using `is_background=true`, the command description will include a `[background]` indicator to clearly show the execution mode.
 
 ## Environment Variables
