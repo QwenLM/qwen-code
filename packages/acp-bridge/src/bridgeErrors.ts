@@ -699,13 +699,28 @@ export class WorkspaceDrainingError extends Error {
  * child's state is unknown; settlement-overdue states mean the child still
  * holds work the bridge can neither cancel nor account for. Existing sessions
  * remain usable. Cleanup-failed states last until channel recycle;
- * settlement-overdue states may clear when the abandoned request settles.
+ * settlement-overdue states may clear when the abandoned request settles. On a
+ * paired Bridge any of them quarantines the channel: its sessions get no new
+ * work either, and the refusal lasts until the channel is gone, unless a late
+ * acknowledgement ends a workspace-change quarantine first.
  */
 export type BridgeChannelUnavailableReason =
   | 'restore_cleanup_failed'
   | 'restore_settlement_overdue'
   | 'new_session_cleanup_failed'
-  | 'new_session_settlement_overdue';
+  | 'new_session_settlement_overdue'
+  /**
+   * A paired Bridge terminated a quarantined channel but cannot confirm that
+   * its process tree is gone; the engine stays closed until it can, which may
+   * need an operator.
+   */
+  | 'channel_exit_unverified'
+  /**
+   * The channel of another engine did not acknowledge a session-affecting
+   * workspace change. A late acknowledgement of every missing change may end
+   * the quarantine before its drain deadline.
+   */
+  | 'workspace_change_unacknowledged';
 
 export class BridgeChannelQuarantinedError extends Error {
   readonly reason: BridgeChannelUnavailableReason;
@@ -719,19 +734,58 @@ export class BridgeChannelQuarantinedError extends Error {
   constructor(
     reason: BridgeChannelUnavailableReason = 'restore_cleanup_failed',
     retryAfterSeconds: number = RESTORE_IN_PROGRESS_RETRY_AFTER_SECONDS,
+    work: 'sessions' | 'prompts' = 'sessions',
   ) {
     super(
-      reason === 'restore_settlement_overdue'
-        ? 'The ACP channel is unavailable for new sessions while an abandoned session restore has not settled'
-        : reason === 'new_session_settlement_overdue'
-          ? 'The ACP channel is unavailable for new sessions while an abandoned session initialization has not settled'
-          : reason === 'new_session_cleanup_failed'
-            ? 'The ACP channel is unavailable for new sessions while timed-out session initialization cleanup is pending'
-            : 'The ACP channel is unavailable for new sessions while timed-out restore cleanup is pending',
+      `The ACP channel is unavailable for new ${work} ` +
+        (reason === 'restore_settlement_overdue'
+          ? 'because an abandoned session restore did not settle in time'
+          : reason === 'new_session_settlement_overdue'
+            ? 'because an abandoned session initialization did not settle in time'
+            : reason === 'new_session_cleanup_failed'
+              ? 'while timed-out session initialization cleanup is pending'
+              : reason === 'channel_exit_unverified'
+                ? 'until its terminated process tree is confirmed gone; operator action may be required'
+                : reason === 'workspace_change_unacknowledged'
+                  ? 'because it did not acknowledge a workspace change'
+                  : 'while timed-out restore cleanup is pending'),
     );
     this.name = 'BridgeChannelQuarantinedError';
     this.reason = reason;
     this.retryAfterSeconds = retryAfterSeconds;
+  }
+}
+
+/**
+ * Another live engine did not acknowledge a session-affecting workspace
+ * change, so its channel is quarantined. A change the workspace-control engine
+ * saved must still not be reported as applied.
+ */
+export class WorkspaceChangePartiallyAppliedError extends Error {
+  readonly revision: number;
+  readonly kind: string;
+  /** Channels that did not acknowledge the change. */
+  readonly unacknowledgedChannelIds: readonly string[];
+  /** The workspace-control engine's answer, when it applied the change. */
+  readonly result: unknown;
+
+  constructor(
+    revision: number,
+    kind: string,
+    unacknowledgedChannelIds: readonly string[],
+    result?: unknown,
+    /** The workspace-control engine's own failure, if it had one. */
+    cause?: unknown,
+  ) {
+    super(
+      `Workspace change ${revision} (${kind}) was not acknowledged by every live ACP channel`,
+    );
+    this.name = 'WorkspaceChangePartiallyAppliedError';
+    this.revision = revision;
+    this.kind = kind;
+    this.unacknowledgedChannelIds = unacknowledgedChannelIds;
+    this.result = result;
+    if (cause !== undefined) this.cause = cause;
   }
 }
 

@@ -166,6 +166,16 @@ const LIVE_MESSAGES_TRANSCRIPT_STUB = normalizePath(
   resolve(__dirname, './client/live/messages.transcript-stub.ts'),
 );
 
+const TRANSCRIPT_STUBS = new Map([
+  [LIVE_MESSAGES_MODULE, LIVE_MESSAGES_TRANSCRIPT_STUB],
+  [
+    normalizePath(resolve(__dirname, './client/settings/messages.ts')),
+    normalizePath(
+      resolve(__dirname, './client/settings/messages.transcript-stub.ts'),
+    ),
+  ],
+]);
+
 function stubTranscriptDeadMessages(): Plugin {
   return {
     name: 'web-shell-stub-transcript-dead-messages',
@@ -175,8 +185,8 @@ function stubTranscriptDeadMessages(): Plugin {
         ...options,
         skipSelf: true,
       });
-      return resolved && normalizePath(resolved.id) === LIVE_MESSAGES_MODULE
-        ? LIVE_MESSAGES_TRANSCRIPT_STUB
+      return resolved
+        ? (TRANSCRIPT_STUBS.get(normalizePath(resolved.id)) ?? null)
         : null;
     },
   };
