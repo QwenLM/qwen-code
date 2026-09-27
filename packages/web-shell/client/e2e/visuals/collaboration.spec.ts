@@ -427,21 +427,6 @@ async function setupRuntimes(page: Page, baseURL: string): Promise<void> {
           runtimes: [local, buildBox, macMini],
         },
       });
-    if (/\/agents\/[^/]+\/shares$/.test(path))
-      return method === 'POST'
-        ? route.fulfill({
-            status: 201,
-            json: {
-              endpoint: 'http://192.168.1.20:4170/a2a/v1',
-              workspaceId: 'ws_demo',
-              callerId: 'share_3f9a1c',
-              agentId: 'ag_lead',
-              secret: `a2a_${'s'.repeat(40)}`,
-              scope: 'analysis',
-              expiresAt: NOW + 7 * 24 * 60 * MIN,
-            },
-          })
-        : route.fulfill({ json: { shares: [] } });
     if (path.endsWith('/threads'))
       return route.fulfill({ json: { threads: [] } });
     return route.fulfill({ status: 404, json: { error: 'not in fixture' } });
@@ -469,7 +454,7 @@ for (const theme of THEMES) {
     await captureScreenshot(page, `collab-add-runtime-${theme}`);
   });
 
-  test(`collaboration share and new agent (${theme})`, async ({
+  test(`collaboration new agent on runtime (${theme})`, async ({
     page,
   }, testInfo) => {
     await setupRuntimes(page, resolveBaseURL(testInfo));
@@ -478,14 +463,6 @@ for (const theme of THEMES) {
       .getByRole('button', { name: 'Agents', exact: true })
       .first()
       .click();
-    await page.getByRole('button', { name: 'More actions for lead' }).click();
-    await page.getByRole('menuitem', { name: 'Share' }).click();
-    const dialog = page.getByRole('dialog');
-    await dialog.getByRole('button', { name: 'Create link' }).click();
-    await expect(dialog.getByText(/a2a_s+/).first()).toBeVisible();
-    await captureScreenshot(page, `collab-share-${theme}`);
-    await page.keyboard.press('Escape');
-
     await page.getByRole('button', { name: 'New agent', exact: true }).click();
     // A machine with only Qwen Code: Codex and Claude Code are offered but
     // unavailable, which is the state the picker has to explain.

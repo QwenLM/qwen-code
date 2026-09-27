@@ -16,7 +16,7 @@ A2A 的语义、存储与授权已落地。Host 放置采用操作者确认的�
 
 ### 已有（不要重写）
 
-- `packages/core/src/agents/workspace-agents/a2a-contract.ts` — 冻结的版本与常量：`A2A_PROTOCOL_VERSION = '1.0'`、`A2A_TRANSPORT_BINDING = 'JSONRPC'`、`A2A_AGENT_CARD_PATH = '.well-known/agent-card.json'`、`A2A_CONTENT_TYPE = 'application/a2a+json'`、`QWEN_A2A_EXTENSION_URI`、`toA2ATaskState`、`externalRequestKey`。选型理由见[冻结契约](../design/2026-09-09-a2a-frozen-contract.md)，**不要改版本或绑定**。
+- `packages/core/src/agents/workspace-agents/a2a-contract.ts` — 冻结的版本与常量：`A2A_PROTOCOL_VERSION = '1.0'`、`A2A_TRANSPORT_BINDING = 'JSONRPC'`、`A2A_AGENT_CARD_PATH = '.well-known/agent-card.json'`、`A2A_CONTENT_TYPE = 'application/a2a+json'`、`QWEN_A2A_EXTENSION_URI`、`toA2ATaskState`、`externalRequestKey`。选型理由见[冻结契约](https://github.com/QwenLM/qwen-code/blob/8ff056f1c7e5842393bc8d0f5b8a6ab1502462b6/docs/design/2026-09-09-a2a-frozen-contract.md)，**不要改版本或绑定**。
 - `packages/core/src/agents/workspace-agents/a2a-server.ts` — 五个必需操作，全部已实现并测过：
 
   ```ts
