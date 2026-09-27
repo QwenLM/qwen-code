@@ -505,6 +505,54 @@ describe('/peers', () => {
     expect(result.content).not.toContain('failed to bind');
   });
 
+  // The both-causes state, which the two cases above cannot express: they
+  // build their context with the setting on. Naming only the flag here tells
+  // a user whose own settings entry is also off that the setting cannot
+  // matter, and sends them to a restart that leaves messaging off.
+  async function runBothCauses(suppression: {
+    isSafeMode?: boolean;
+    getBareMode?: boolean;
+  }): Promise<{ messageType: string; content: string }> {
+    const result = await peersCommand.action!(
+      makeContext(
+        null,
+        false,
+        { user: { settings: { agents: { crossSessionMessaging: false } } } },
+        suppression,
+      ),
+      '',
+    );
+    if (!result || result.type !== 'message') {
+      throw new Error('expected a message result');
+    }
+    return { messageType: result.messageType, content: result.content };
+  }
+
+  it('names the settings remedy and safe mode when both turn messaging off', async () => {
+    const result = await runBothCauses({ isSafeMode: true });
+
+    expect(result.messageType).toBe('info');
+    expect(result.content).toContain('in safe mode');
+    expect(result.content).toContain('QWEN_CODE_SAFE_MODE');
+    expect(result.content).toContain('Remove that entry');
+    // The single-cause claim is false in this state: the setting is one of
+    // the two reasons messaging is off, so it is not something the flag
+    // alone overrides.
+    expect(result.content).not.toContain('cannot turn it back on');
+    expect(result.content).not.toContain('failed to bind');
+  });
+
+  it('names the settings remedy and bare mode when both turn messaging off', async () => {
+    const result = await runBothCauses({ getBareMode: true });
+
+    expect(result.messageType).toBe('info');
+    expect(result.content).toContain('in bare mode');
+    expect(result.content).toContain('QWEN_CODE_SIMPLE');
+    expect(result.content).toContain('Remove that entry');
+    expect(result.content).not.toContain('cannot turn it back on');
+    expect(result.content).not.toContain('failed to bind');
+  });
+
   it('repeats the bind failure and what to change when the inbox could not bind', async () => {
     inboxFailure.current = {
       cause: 'foreign_owner',

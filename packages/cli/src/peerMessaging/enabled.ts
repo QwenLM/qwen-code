@@ -52,6 +52,16 @@ export type CrossSessionMessagingSuppression = 'bare' | 'safe-mode';
  * and writing a record is neither minimal nor free. Neither flag is visible
  * to the setting, so the setting alone cannot answer the question.
  *
+ * The two channels are not symmetric across a process boundary, though the
+ * paragraph above reads as if they were: `spawnChannel.ts` scrubs
+ * `QWEN_CODE_SIMPLE` out of the environment of a `qwen --acp` child it
+ * spawns (so a daemon's own bare mode does not leak into the sessions it
+ * hosts), leaves `QWEN_CODE_SAFE_MODE` alone, and nothing in `packages/`
+ * writes that variable. An *inherited* `QWEN_CODE_SAFE_MODE` therefore
+ * suppresses messaging in every session a daemon or editor hosts, and those
+ * sessions register no record at all — silently, because the explanation
+ * `/peers` gives is not reachable from a driven session.
+ *
  * Safe mode is reported first when both are on: it is the stronger claim
  * about what this session may touch, and naming it is the more useful
  * answer.

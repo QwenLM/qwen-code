@@ -206,10 +206,11 @@ entry there.
 `@qwen-code/sdk/peer` lets a program that is not a Qwen Code session join the
 sessions running as the same user on the same machine — a voice front-end, a
 relay, a build watcher. The program shows up in `qwen sessions ps`, and in the
-`list_agents` of every session that has `agents.crossSessionMessaging` turned
-on — which is also what lets those sessions message it by name with
-`send_message`. It can message them back. It runs on Node only and needs
-nothing beyond Node itself.
+`list_agents` of every session that takes part in cross-session messaging — its
+`agents.crossSessionMessaging` setting is on, and it was not started with
+`--bare` or `--safe-mode` — which is also what lets those sessions message it
+by name with `send_message`. It can message them back. It runs on Node only and
+needs nothing beyond Node itself.
 
 ```typescript
 import { PeerEndpoint } from '@qwen-code/sdk/peer';
