@@ -47,6 +47,10 @@ let sessionId: string;
 let clientId: string;
 let releaseModel: (() => void) | undefined;
 
+// The required no-AK gate runs this file under the default integration config,
+// which leaves vitest's 10 s hook default; pin one teardown budget everywhere.
+const HOOK_TIMEOUT_MS = 15_000;
+
 afterEach(async ({ task }) => {
   releaseModel?.();
   releaseModel = undefined;
@@ -79,7 +83,7 @@ afterEach(async ({ task }) => {
     );
   if (cli?.root) expect(existsSync(cli.root)).toBe(false);
   for (const url of urls) await assertPortReleased(url);
-});
+}, HOOK_TIMEOUT_MS);
 
 async function start(
   handler: FakeOpenAIHandler = () => ({ content: 'HOSTED_REPLY' }),
@@ -327,22 +331,24 @@ describe(
       ).toBe(true);
     });
 
-    it.each(['failed', 'cancelled'] as const)(
+    it.each(['failed', 'cancelled', 'empty'] as const)(
       'omits %s A through successful B and C while retaining completed history',
       async (outcome) => {
         const held = new Promise<void>((resolve) => {
           releaseModel = resolve;
         });
+        const first = {
+          failed: { errorContent: 'DETERMINISTIC_FAILURE' },
+          cancelled: {
+            contentChunks: ['PARTIAL'],
+            holdAfterChunks: 1,
+            holdUntil: held,
+          },
+          // A thought-only reply completes the turn without answer text.
+          empty: { reasoning: 'THOUGHT_ONLY' },
+        }[outcome];
         await start(({ requestIndex }) =>
-          requestIndex === 0
-            ? outcome === 'failed'
-              ? { errorContent: 'DETERMINISTIC_FAILURE' }
-              : {
-                  contentChunks: ['PARTIAL'],
-                  holdAfterChunks: 1,
-                  holdUntil: held,
-                }
-            : { content: `REPLY_${requestIndex}` },
+          requestIndex === 0 ? first : { content: `REPLY_${requestIndex}` },
         );
         await open();
         const a = payload('UNANSWERED_A');
@@ -356,9 +362,17 @@ describe(
             event.promptId === a.promptId && event.type.startsWith('turn_'),
         );
         expect(terminal).toMatchObject(
-          outcome === 'failed'
-            ? { type: 'turn_error', data: { code: 'hosted_turn_failed' } }
-            : { type: 'turn_complete', data: { stopReason: 'cancelled' } },
+          {
+            failed: {
+              type: 'turn_error',
+              data: { code: 'hosted_turn_failed' },
+            },
+            cancelled: {
+              type: 'turn_complete',
+              data: { stopReason: 'cancelled' },
+            },
+            empty: { type: 'turn_complete', data: { stopReason: 'end_turn' } },
+          }[outcome],
         );
         releaseModel!();
         for (const text of ['SUCCESS_B', 'NEXT_C']) {
@@ -462,15 +476,36 @@ describe(
       expect(await stale.json()).toMatchObject({
         code: 'hosted_harness_generation_mismatch',
       });
-      for (const route of [
-        '/',
-        '/workspaces',
-        '/sessions',
-        '/acp',
-        '/mcp',
-        '/session/unknown/shell',
+      expect(
+        (await cli.request('/health', { headers: new Headers() })).status,
+      ).toBe(401);
+      // The Hosted gates answer with a bare 404. An ordinary route's own JSON
+      // not-found (the shell route's session_not_found) must not pass.
+      const hidden = async (
+        method: string,
+        route: string,
+        headers?: Headers,
+      ) => {
+        const response = await cli.request(route, { method, headers });
+        expect(
+          [response.status, await response.text()],
+          `${method} ${route}`,
+        ).toEqual([404, 'Not Found']);
+      };
+      // Hidden before authentication, not merely refused after it.
+      await hidden('GET', '/daemon/status', new Headers());
+      // A default-profile daemon answers the first four GETs with 200 and /acp
+      // with 406 for the same token; the ordinary shell route sits under the
+      // /session/ prefix the Hosted routes share.
+      for (const [method, route] of [
+        ['GET', '/daemon/status'],
+        ['GET', '/workspace/settings'],
+        ['GET', '/standalone/sessions'],
+        ['GET', '/workspace-registrations'],
+        ['GET', '/acp'],
+        ['POST', `/session/${sessionId}/shell`],
       ]) {
-        expect((await cli.request(route)).status).toBe(404);
+        await hidden(method, route);
       }
       const ws = new WebSocket(cli.baseUrl.replace('http:', 'ws:') + '/acp', {
         headers: cli.headers(),
@@ -491,6 +526,17 @@ describe(
         ws.on('error', () => undefined);
         ws.terminate();
       }
+      expect(
+        await json(
+          '/session',
+          {
+            sessionId,
+            sessionScope: 'thread',
+            managedSessionStore: { ...connection(), writerId: randomUUID() },
+          },
+          409,
+        ),
+      ).toMatchObject({ code: 'hosted_harness_generation_mismatch' });
       await store!.close();
       await json(
         '/session',
