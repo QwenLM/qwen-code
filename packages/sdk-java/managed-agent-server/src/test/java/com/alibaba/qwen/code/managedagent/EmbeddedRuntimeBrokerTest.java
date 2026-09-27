@@ -65,8 +65,8 @@ class EmbeddedRuntimeBrokerTest {
                 "storage-a", ".", "config-a", 1);
         when(store.findSessionById(SESSION_ID)).thenReturn(Optional.of(
                 new SessionRecord("tenant-a", SESSION_ID, "qwen-code",
-                        null, "ACTIVE", null, null, 0, 0, 1, 1, null, 0,
-                        binding)));
+                        null, null, "ACTIVE", null, null, 0, 0, 1, 1, null,
+                        0, binding)));
         try (EmbeddedRuntimeBroker broker = broker(store, properties())) {
             assertThatThrownBy(() -> broker.warm(SESSION_ID)
                     .toCompletableFuture().join())

@@ -8,7 +8,6 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import java.io.IOException;
 import java.security.Principal;
-import java.util.Map;
 import java.util.regex.Pattern;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
@@ -52,12 +51,10 @@ public class TenantContextFilter extends OncePerRequestFilter {
         if (tenantId == null || !TENANT_PATTERN.matcher(tenantId).matches()) {
             response.setStatus(HttpServletResponse.SC_BAD_REQUEST);
             response.setContentType(MediaType.APPLICATION_JSON_VALUE);
-            objectMapper.writeValue(response.getOutputStream(), Map.of(
-                    "error", Map.of(
-                            "code", "invalid_tenant",
-                            "message", HEADER
-                                    + " is required and must contain 1-128"
-                                    + " safe characters.")));
+            objectMapper.writeValue(response.getOutputStream(),
+                    ApiExceptionHandler.envelope(request, "invalid_tenant",
+                            HEADER + " is required and must contain 1-128"
+                                    + " safe characters."));
             return;
         }
         Principal principal = request.getUserPrincipal();
@@ -68,9 +65,10 @@ public class TenantContextFilter extends OncePerRequestFilter {
                     || !validActorId(tenantId, claimedActorId)) {
                 response.setStatus(HttpServletResponse.SC_FORBIDDEN);
                 response.setContentType(MediaType.APPLICATION_JSON_VALUE);
-                objectMapper.writeValue(response.getOutputStream(), Map.of(
-                        "error", Map.of("code", "actor_scope_mismatch",
-                                "message", "Authenticated actor scope is invalid.")));
+                objectMapper.writeValue(response.getOutputStream(),
+                        ApiExceptionHandler.envelope(request,
+                                "actor_scope_mismatch",
+                                "Authenticated actor scope is invalid."));
                 return;
             }
             actorId = claimedActorId;

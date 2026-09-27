@@ -318,7 +318,7 @@ class WorkspaceRuntimeTest {
         jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, can_read, can_create)"
                 + " VALUES (?, 'workspace', ?, TRUE, TRUE)", tenant, "actor".getBytes(StandardCharsets.UTF_8));
         var created = sessions.insertWorkspaceSessionCommand(tenant, "actor", "create", "sha256:" + "a".repeat(64),
-                "qwen-code", null, List.of(), null, new WorkspaceSelection("workspace", cwd));
+                "qwen-code", null, null, List.of(), null, new WorkspaceSelection("workspace", cwd));
         return sessions.findSessionById(created.sessionId()).orElseThrow();
     }
 

@@ -77,7 +77,7 @@ class HostedWorkspaceToolTurnIT {
                 jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, can_read, can_create)"
                         + " VALUES (?, ?, ?, TRUE, TRUE)", tenant, workspaceId, "actor".getBytes(StandardCharsets.UTF_8));
                 var created = store.insertWorkspaceSessionCommand(tenant, "actor", "create-" + index,
-                        "sha256:" + "a".repeat(64), "qwen-code", null, List.of(), null,
+                        "sha256:" + "a".repeat(64), "qwen-code", null, null, List.of(), null,
                         new WorkspaceSelection(workspaceId, "child"));
                 sessions.add(Map.of("sessionId", created.sessionId(), "workspaceId", workspaceId,
                         "directory", workspaces.get(index).resolve("child").toString()));

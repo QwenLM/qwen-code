@@ -14,14 +14,9 @@ export interface JavaAgentEnvironment {
 
 export type JavaAgentSession = Omit<
   Schemas['WebShellSession'],
-  'environment' | 'workspace'
+  'environment'
 > & {
   environment?: JavaAgentEnvironment | null;
-  // W0d saves the binding; context revision/state remain a recorded W2 gap.
-  workspace?: Pick<
-    Schemas['WebShellWorkspaceContext'],
-    'workspaceId' | 'cwdRelative'
-  >;
 };
 
 export type JavaAgentWorkspace = Schemas['WebShellWorkspace'];
@@ -44,12 +39,6 @@ export type JavaAgentItem = Schemas['WebShellItem'];
 export type JavaAgentCommandAdmission = Schemas['WebShellAdmission'];
 
 export type JavaAgentTranscript = Schemas['WebShellTranscript'];
-
-// The server still accepts only "text" blocks, not the contract's "input_text"
-// (contract-known-gaps.txt in packages/sdk-java/managed-agent-server).
-type JavaAgentInput<T> = Omit<T, 'input'> & {
-  input: Array<{ type: 'text'; text: string }>;
-};
 
 export interface JavaManagedAgentClientOptions {
   baseUrl: string;
@@ -124,14 +113,14 @@ export class JavaManagedAgentClient {
   }
 
   createSession(
-    request: JavaAgentInput<Schemas['WebShellCreateRequest']>,
+    request: Schemas['WebShellCreateRequest'],
     signal?: AbortSignal,
   ): Promise<JavaAgentCommandAdmission> {
     return this.post('/sessions/create', request, signal);
   }
 
   submitTurn(
-    request: JavaAgentInput<Schemas['WebShellSubmitRequest']>,
+    request: Schemas['WebShellSubmitRequest'],
     signal?: AbortSignal,
   ): Promise<JavaAgentCommandAdmission> {
     return this.post('/turns/submit', request, signal);

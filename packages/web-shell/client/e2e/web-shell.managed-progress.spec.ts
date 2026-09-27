@@ -106,7 +106,12 @@ async function installManagedScenario(page: Page, testInfo: TestInfo) {
           submittedAt: Date.now(),
         },
       };
-      append('turn.accepted', { input: body.input });
+      append('turn.accepted', {
+        input: body.input.map((block: { text: string }) => ({
+          type: 'text',
+          text: block.text,
+        })),
+      });
       append('turn.started');
       return respond(
         {
@@ -279,8 +284,8 @@ test('Managed cancellation waits for settlement before continuing the same sessi
   await expect(composer).toBeEnabled();
   await expect(page).toHaveURL(new RegExp(`managedSession=${SESSION_ID}`));
   expect(fixture.prompts.map((request) => request.prompt)).toEqual([
-    [{ type: 'text', text: 'Turn to cancel' }],
-    [{ type: 'text', text: 'Continue after cancellation' }],
+    [{ type: 'input_text', text: 'Turn to cancel' }],
+    [{ type: 'input_text', text: 'Continue after cancellation' }],
   ]);
   expect(new Set(fixture.prompts.map((request) => request.key)).size).toBe(2);
   expect(fixture.daemon.promptRequests()).toHaveLength(0);

@@ -77,7 +77,11 @@ test('creates a fixed empty Session against Spring and SQL at desktop and mobile
       page.locator('[data-managed-workspace-binding]'),
     ).toContainText('ws-default');
     if (size.width === 390) {
-      expect(createRequests[2]).toEqual(createRequests[1]);
+      // requestId is trace-only, so a retry carries a fresh one.
+      expect(createRequests[2]).toEqual({
+        ...(createRequests[1] as Record<string, unknown>),
+        requestId: expect.stringMatching(/^managed_/),
+      });
       expect(createdIds[2]).toBe(createdIds[1]);
     }
     await expect(page.locator('[data-managed-progress]')).toHaveCount(0);
