@@ -185,10 +185,7 @@ function failure(res: express.Response, cause: unknown): void {
     res.status(409).json({ code: cause.code, error: cause.message });
     return;
   }
-  res.status(503).json({
-    code: 'managed_tool_result_storage_failed',
-    error: cause instanceof Error ? cause.message : String(cause),
-  });
+  throw cause;
 }
 
 /** Registers Tool v3 only for a locally injected Session-owned publisher. */

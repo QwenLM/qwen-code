@@ -151,9 +151,7 @@ export class LocalShellResultCapture implements ShellRawCaptureSink {
   private fail(cause: unknown): void {
     this.failed = true;
     this.failureReason =
-      cause instanceof Error &&
-      (cause.message === 'managed_tool_result_invalid' ||
-        cause.message === 'size_limit')
+      cause instanceof Error && cause.message === 'size_limit'
         ? 'size_limit'
         : 'storage_failed';
   }
@@ -301,7 +299,7 @@ export class LocalShellResultCapture implements ShellRawCaptureSink {
       });
       const bytes = Buffer.from(JSON.stringify(manifest));
       if (bytes.byteLength > MANAGED_TOOL_RESULT_LIMITS.maxManifestBytes) {
-        throw new Error('manifest exceeds 64 KiB');
+        throw new Error('size_limit');
       }
       await this.assertWritable();
       manifestRef = await this.resources.publish(

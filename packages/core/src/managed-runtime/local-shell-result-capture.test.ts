@@ -352,46 +352,52 @@ describe('foreground Shell local result capture', () => {
     }
   });
 
-  it('keeps a successful physical outcome when segment storage refuses bytes', async () => {
-    const { store, lease, resources } = await createStore();
-    try {
-      const capture = new LocalShellResultCapture(
-        {
-          publish: async () => ({
-            status: 'refused',
-            code: 'managed_tool_result_digest_mismatch',
-          }),
-          seal: (request) => store.seal(request),
-          prefix: (request) => store.prefix(request),
-          readRange: (request) => store.readRange(request),
-          close: () => store.close(),
-        },
-        resources,
-        identity,
-      );
-      capture.setStarted(42);
-      await capture.write('stdout', Buffer.alloc(1024 * 1024, 0x41));
-      await capture.finish('stdout', true);
-      await capture.finish('stderr', true);
-      capture.setProcessResult({
-        rawOutput: Buffer.alloc(0),
-        output: '',
-        exitCode: 0,
-        signal: null,
-        error: null,
-        aborted: false,
-        pid: 42,
-        executionMethod: 'child_process',
-      });
-      const envelope = await capture.finalize('success', []);
-      expect(envelope.executionStatus).toBe('success');
-      expect(envelope.capture).toMatchObject({
-        captureStatus: 'unavailable',
-        captureReason: 'storage_failed',
-      });
-    } finally {
-      await store.close();
-      await lease.release();
-    }
-  });
+  it.each([
+    'managed_tool_result_digest_mismatch',
+    'managed_tool_result_invalid',
+  ] as const)(
+    'keeps a successful physical outcome when segment storage refuses %s',
+    async (code) => {
+      const { store, lease, resources } = await createStore();
+      try {
+        const capture = new LocalShellResultCapture(
+          {
+            publish: async () => ({
+              status: 'refused',
+              code,
+            }),
+            seal: (request) => store.seal(request),
+            prefix: (request) => store.prefix(request),
+            readRange: (request) => store.readRange(request),
+            close: () => store.close(),
+          },
+          resources,
+          identity,
+        );
+        capture.setStarted(42);
+        await capture.write('stdout', Buffer.alloc(1024 * 1024, 0x41));
+        await capture.finish('stdout', true);
+        await capture.finish('stderr', true);
+        capture.setProcessResult({
+          rawOutput: Buffer.alloc(0),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 42,
+          executionMethod: 'child_process',
+        });
+        const envelope = await capture.finalize('success', []);
+        expect(envelope.executionStatus).toBe('success');
+        expect(envelope.capture).toMatchObject({
+          captureStatus: 'unavailable',
+          captureReason: 'storage_failed',
+        });
+      } finally {
+        await store.close();
+        await lease.release();
+      }
+    },
+  );
 });
