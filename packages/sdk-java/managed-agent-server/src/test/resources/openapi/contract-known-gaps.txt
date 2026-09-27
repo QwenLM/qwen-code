@@ -73,9 +73,15 @@ response deleteSession: expected 202, got 200
 response getSession 200: /status enum
 response listSessions 200: /data/*/status enum
 
-# Workspace context (W0d/W2, outside Stage D): the Session workspace lacks its
+# Workspace context (W2, outside Stage D): the Session workspace lacks its
 # context revision and state.
 record PublicWorkspace -> WorkspaceContext: missing context_revision
 record PublicWorkspace -> WorkspaceContext: missing state
 record WebShellWorkspace -> WebShellWorkspaceContext: missing contextRevision
 record WebShellWorkspace -> WebShellWorkspaceContext: missing state
+response createSession 202: /workspace required context_revision
+response createSession 202: /workspace required state
+response getSession 200: /workspace required context_revision
+response getSession 200: /workspace required state
+response webShellGetSession 200: /workspace required contextRevision
+response webShellGetSession 200: /workspace required state
