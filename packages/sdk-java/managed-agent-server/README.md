@@ -22,6 +22,28 @@ script requires TypeScript integrations absent from this PR. See the
 for the remaining merge gates; earlier preview timing and recovery results
 below are not evidence for this split.
 
+## API contract
+
+`src/main/resources/openapi/managed-agent-public-api.openapi.json` is the
+single source for the public and WebShell routes. `ManagedAgentApiContractTest`
+compares the mapped routes, the `ApiModels` records and real responses with it;
+`src/test/resources/openapi/contract-known-gaps.txt` lists the differences that
+the lifecycle work still has to close. The WebShell client types are generated from the
+same file by `npm run generate:managed-agent-api` in `packages/web-shell`.
+Sessions record the agent revision from `QWEN_MANAGED_AGENT_REVISION` (default
+`1`) when they are created. Every response carries `X-Request-Id`, which error
+envelopes repeat as `request_id` and the logs print. Events keep the schema and
+projection versions and the Item and Part identity they were accepted with,
+except that a `stream.reconciled` event announces retracted deltas. A
+cursor below a Session's replay floor gets `409 cursor_expired` from the JSON
+event query and one `agent.session.resync_required` frame from either stream.
+Design: [English](../../../docs/design/2026-09-27-managed-agent-api-contract.md) |
+[简体中文](../../../docs/design/2026-09-27-managed-agent-api-contract.zh-CN.md);
+Session query: [English](../../../docs/design/2026-09-27-managed-agent-session-query.md) |
+[简体中文](../../../docs/design/2026-09-27-managed-agent-session-query.zh-CN.md);
+Event replay: [English](../../../docs/design/2026-09-27-managed-agent-event-replay.md) |
+[简体中文](../../../docs/design/2026-09-27-managed-agent-event-replay.zh-CN.md)
+
 ## Prerequisites
 
 - Java 21
@@ -60,7 +82,7 @@ curl -sS http://127.0.0.1:8080/v1/agents/sessions \
   -H 'Content-Type: application/json' \
   -H 'X-Qwen-Tenant-Id: demo' \
   -H 'Idempotency-Key: create-1' \
-  -d '{"agent_id":"qwen-code","input":[{"type":"text","text":"hello"}]}'
+  -d '{"agent_id":"qwen-code","input":[{"type":"input_text","text":"hello"}]}'
 ```
 
 The returned `id` is an RFC UUID and is the canonical identity used by
@@ -257,6 +279,14 @@ Kubernetes adapter's real-cluster fault matrix remain production gates. This
 standalone reference keeps the one configured directory for legacy unbound
 Sessions. Persisted bound Sessions use the private Workspace execution path
 below.
+
+Flyway V12 aligns the Runtime tables with the Broker's own `schema.sql`, which
+its JDBC repositories are written against. `RuntimeBrokerFlywaySchemaTest`
+fails when the two definitions differ, so a change to either one needs a
+matching change to the other. V12 replaces two primary keys. MySQL rejects this
+when `sql_require_primary_key` is set: V12 fails before it changes anything, and
+Flyway records the failure. Unset the variable, run Flyway `repair`, and start
+the server again.
 
 ### Private Workspace tool execution (W0c-3)
 

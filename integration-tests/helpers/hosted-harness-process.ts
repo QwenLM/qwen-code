@@ -9,6 +9,7 @@ import { access, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import { HOSTED_HOME_PREFIX } from '../scratch-dir.js';
 
 export const HOSTED_TOKEN = 'hosted-process-fixture-token';
 export const HOSTED_DIGEST = `sha256:${'a'.repeat(64)}`;
@@ -43,6 +44,7 @@ export class HostedHarnessProcess {
       hostname?: string;
       startupTimeout?: number;
       args?: string[];
+      extraArgs?: string[];
     } = {},
   ) {
     await access(HOSTED_CLI).catch(() => {
@@ -50,7 +52,7 @@ export class HostedHarnessProcess {
         'Missing packaged CLI: run npm run build && npm run bundle',
       );
     });
-    this.root = await mkdtemp(path.join(tmpdir(), 'hosted-no-tool-'));
+    this.root = await mkdtemp(path.join(tmpdir(), HOSTED_HOME_PREFIX));
     try {
       const config = path.join(this.root, '.qwen');
       await mkdir(config);
@@ -99,6 +101,7 @@ export class HostedHarnessProcess {
           HOSTED_DIGEST,
           '--workspace',
           this.root,
+          ...(options.extraArgs ?? []),
         ],
         {
           cwd: this.root,
