@@ -221,6 +221,35 @@ describe('agent run lifecycle', () => {
     expect(hasLiveDescendant([{ ...parent }, { ...sibling }], parent.id)).toBe(
       false,
     );
+
+    // A cancelled child with no report owed can never wake the parent: it
+    // must not count as live, or a parent waiting on it strands forever.
+    const cancelledChild: Thread = {
+      ...child,
+      status: 'cancelled',
+      runs: [],
+      outbox: [],
+    };
+    expect(hasLiveDescendant([{ ...parent }, cancelledChild], parent.id)).toBe(
+      false,
+    );
+    // But a terminal child that still owes a report can still wake it.
+    const cancelledWithReport: Thread = {
+      ...cancelledChild,
+      outbox: [
+        {
+          id: 'ev1',
+          kind: 'parent_report',
+          payload: {},
+          status: 'pending',
+          attempts: 0,
+          createdAt: Date.now(),
+        },
+      ],
+    };
+    expect(
+      hasLiveDescendant([{ ...parent }, cancelledWithReport], parent.id),
+    ).toBe(true);
   });
 
   it('refuses a close for a run the caller does not own', async () => {
