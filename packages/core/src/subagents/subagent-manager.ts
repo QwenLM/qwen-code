@@ -1630,7 +1630,15 @@ export class SubagentManager {
       // closed) rather than inheriting shell/write it was not configured
       // for. Deliberate: this supersedes the earlier compatibility fallback
       // for converted Claude agents.
-      const toolNames = config.tools
+      //
+      // An *empty* allow-list is a different case: `tools: []` is the
+      // documented "inherit everything" marker for definition files
+      // (validation.ts warns exactly that), but `[]` is truthy, so testing
+      // only for presence turned a deny-only shape (`tools: []` plus
+      // `disallowedTools`) into a zero-tool agent once AgentCore started
+      // reading an explicit empty list as deny-all. Require a non-empty list
+      // so `tools: []` keeps falling through to the wildcard.
+      const toolNames = config.tools?.length
         ? await this.resolveToolNames(config.tools)
         : ['*'];
       toolConfig = {

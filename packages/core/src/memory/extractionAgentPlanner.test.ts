@@ -11,7 +11,7 @@ import {
   captureAutoMemoryExtractionHistory,
   runAutoMemoryExtractionByAgent,
 } from './extractionAgentPlanner.js';
-import { scanAutoMemoryTopicDocuments } from './scan.js';
+import { scanAutoMemoryTopicDocuments } from './structured-scan.js';
 import {
   AUTO_MEMORY_PINNED_DIRNAME,
   getAutoMemoryRoot,
@@ -19,9 +19,10 @@ import {
 } from './paths.js';
 import { runForkedAgent, getCacheSafeParams } from '../agents/forkedAgent.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { AUTO_MEMORY_TREE_CATEGORIES } from './types.js';
 
-vi.mock('./scan.js', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('./scan.js')>();
+vi.mock('./structured-scan.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./structured-scan.js')>();
   return {
     ...actual,
     scanAutoMemoryTopicDocuments: vi.fn(),
@@ -58,6 +59,7 @@ describe('runAutoMemoryExtractionByAgent', () => {
     getApprovalMode: vi.fn(),
     getMemoryAgentTimeoutMinutes: vi.fn().mockReturnValue(undefined),
     getMemoryAgentMaxTurns: vi.fn().mockReturnValue(undefined),
+    getAutoMemoryPrompt: vi.fn().mockReturnValue('session routing contract'),
   } as unknown as Config;
 
   beforeEach(() => {
@@ -67,12 +69,16 @@ describe('runAutoMemoryExtractionByAgent', () => {
     });
     vi.mocked(scanAutoMemoryTopicDocuments).mockResolvedValue([
       {
+        scope: 'project',
         type: 'user',
         filePath: '/tmp/auto-memory/user/prefs.md',
         relativePath: 'user/prefs.md',
         filename: 'prefs.md',
         title: 'User Memory',
         description: 'User preferences',
+        category: 'uncategorized',
+        keywords: [],
+        usageScenarios: [],
         body: '- Existing terse preference.',
         mtimeMs: 1,
       },
@@ -103,6 +109,9 @@ describe('runAutoMemoryExtractionByAgent', () => {
     expect(getCacheSafeParams).not.toHaveBeenCalled();
     expect(runForkedAgent).toHaveBeenCalledWith(
       expect.objectContaining({
+        systemPrompt: expect.stringMatching(
+          /category[\s\S]*usage_scenarios[\s\S]*discriminative retrieval terms or short phrases/,
+        ),
         tools: [
           'read_file',
           'grep_search',
@@ -116,6 +125,32 @@ describe('runAutoMemoryExtractionByAgent', () => {
         maxTimeMinutes: 2,
       }),
     );
+    const systemPrompt =
+      vi.mocked(runForkedAgent).mock.calls[0]?.[0].systemPrompt;
+    for (const category of AUTO_MEMORY_TREE_CATEGORIES) {
+      expect(systemPrompt).toContain(category);
+    }
+    expect(systemPrompt).toContain('at most 64 characters');
+  });
+
+  it('does not inherit the session auto-memory routing contract', async () => {
+    // The session contract routes body access through search_memory /
+    // manage_memory — tools this agent does not have — and forbids the
+    // direct file tools it does have. The extraction prompt already embeds
+    // the frontmatter reference, so blanking the inherited section loses
+    // nothing.
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      finalText: '',
+      filesTouched: [],
+      filesWritten: [],
+    });
+
+    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp', []);
+
+    const call = vi.mocked(runForkedAgent).mock.calls[0]?.[0];
+    expect(call?.config.getAutoMemoryPrompt()).toBe('');
+    expect(call?.systemPrompt).toContain('Memory file format reference:');
   });
 
   it('threads the configured memory agent timeout into the forked agent', async () => {
@@ -547,6 +582,39 @@ describe('runAutoMemoryExtractionByAgent', () => {
     );
     expect(result.touchedProjectScope).toBe(true);
     expect(result.touchedUserScope).toBe(true);
+  });
+
+  it('includes the existing keyword vocabulary in the agent task prompt', async () => {
+    // The reuse-canonical-terms instruction is meaningless unless the
+    // vocabulary snapshot actually reaches the task prompt.
+    vi.mocked(scanAutoMemoryTopicDocuments).mockResolvedValue([
+      {
+        scope: 'project',
+        type: 'project',
+        filePath: '/tmp/auto-memory/project/conventions.md',
+        relativePath: 'project/conventions.md',
+        filename: 'conventions.md',
+        title: 'Project conventions',
+        description: 'Project conventions memory',
+        category: 'project_introduction',
+        keywords: ['terse responses', 'memory migration'],
+        usageScenarios: [],
+        body: 'Prefer terse responses.',
+        mtimeMs: 1,
+      },
+    ]);
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      finalText: '',
+      filesTouched: [],
+      filesWritten: [],
+    });
+
+    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp', []);
+
+    const taskPrompt = vi.mocked(runForkedAgent).mock.calls[0]?.[0].taskPrompt;
+    expect(taskPrompt).toContain('## Existing keyword vocabulary');
+    expect(taskPrompt).toContain('terse responses');
   });
 });
 

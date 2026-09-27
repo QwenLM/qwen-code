@@ -2,7 +2,7 @@
 
 [English](2026-09-27-managed-agent-api-contract.md) | [简体中文](2026-09-27-managed-agent-api-contract.zh-CN.md)
 
-Status: D1 implemented in this change; D2 and D3 pending
+Status: D1 implemented; D2 implemented in [Session query](2026-09-27-managed-agent-session-query.md); D3 pending
 Date: 2026-09-27
 Issue: [#12793](https://github.com/QwenLM/qwen-code/issues/12793), part of [#12380](https://github.com/QwenLM/qwen-code/issues/12380)
 
@@ -37,12 +37,11 @@ the checks that D2 and D3 build on.
 
 ## 3. Non-goals
 
-- No route becomes `implemented`. The only status changes record archive and
-  delete, which the server already serves, as `partial` instead of `planned`
-  (4.3).
+- No route becomes `implemented`. Shipped lifecycle routes (4.3) and W0d
+  discovery and binding (4.5) are recorded as `partial`.
 - No server behavior changes. D1 only records what D2 and D3 must fix.
 - No schema field is removed to make the current server pass.
-- Durable admission, Turns, AgentDefinition, Artifacts, Workspaces, Actions and
+- Durable admission, Turns, AgentDefinition, Artifacts, workspace execution and context switching, Actions and
   event retention stay out of scope, as in the issue.
 
 ## 4. Decisions
@@ -58,9 +57,11 @@ single-quoted scalars and block style, and the upstream YAML fails them in 2264
 places. JSON follows the precedent of
 `docs/developers/daemon-rest-api.openapi.json`, needs no YAML parser on either
 side, and is formatted by Prettier like the rest of the repository. The
-conversion keeps key order and is lossless apart from the changes in 4.3.
+conversion keeps key order and is lossless apart from the changes in 4.3
+and 4.5.
 
-The version becomes `1.13.0`, because this change adds routes (4.3).
+D1 introduced `1.13.0` for the lifecycle routes (4.3). Integrating W0d adds
+the workspace lookup route and advances the version to `1.14.0` (4.5).
 
 ### 4.2 Generate TypeScript, validate Java
 
@@ -93,6 +94,24 @@ so v1.13 records all four as `partial`:
 `planned`. Until AgentDefinition lands, D2 returns a fixed revision taken from
 the server's agent configuration. D1 only records the missing field.
 
+### 4.5 W0d discovery and empty-session binding
+
+The W0d integration marks public workspace list/get, WebShell workspace query/get,
+and Session workspace selection and readback as `partial`. It adds the previously
+missing WebShell `workspaces/get` operation and regenerates the client types.
+Workspace queries have their own request schema: limit defaults to 50 and is
+bounded at 100; cursors are bounded at 2048 characters.
+
+Discovery's required `workspace_binding` / `workspaceBinding` capability advertises
+only discovery, empty-session creation and binding readback. It does not enable
+workspace execution or context switching. The existing `workspace_context` /
+`workspaceContext` capability remains false.
+
+Discovery now returns the target public workspace `id` and `object` and lowercase
+WebShell states. Bound Sessions still return only workspace identity and cwd, so
+traffic coverage records the missing context revision and state for W2. The
+local client override remains only for that Session binding.
+
 ## 5. Java contract test
 
 `ManagedAgentApiContractTest` runs in the ordinary `mvn test` lane with the
@@ -110,7 +129,7 @@ The test reads every route under `/v1/agents` and `/api/agent/web-shell/v1`
 from Spring's `RequestMappingHandlerMapping` and compares them with the spec.
 A mapped route that is absent from the spec or marked `planned` fails; so does
 a `partial` or `implemented` route that is not mapped. There are no route gaps
-after 4.3.
+after 4.3 and 4.5.
 
 ### 5.2 Records
 
@@ -131,7 +150,9 @@ fake Harness: a completed Turn, an input and a cancellation, rename, archive,
 a get and a list of the archived Session, unarchive and delete on the public
 API; create with and without a first message, query, get, transcript, submit,
 cancel and the SSE stream on the WebShell adapter; and cross-tenant `404` and
-idempotency `409` errors. For each exchange it checks that:
+idempotency `409` errors. Workspace traffic covers all four discovery routes,
+a default outside the current page, and bound empty-session creation and readback
+on both surfaces, including normalized cwd. For each exchange it checks that:
 
 - the request body the test sends is valid against the request schema;
 - the status is the one the spec expects for that call;
@@ -190,12 +211,12 @@ which turns colours off).
 
 ## 7. Gaps recorded by D1
 
-| Slice                      | Gaps                                                                                                                                                                                                                                                                                                                                                                                                      |
-| -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| D2                         | `agent_revision` and `capabilities` missing from every Session response; `replay_floor_sequence`, `snapshot_through_sequence` and `PublicTurn.input_item_id` missing from the records; `agent_revision` missing from `CreateSessionRequest`; no `X-Request-Id` on WebShell commands; `WebShellStreamRequest.limit` still in the record; input blocks accept only `text`, not the contract's `input_text`. |
-| D3                         | `schema_version`, `projection_version`, `item_id` and `content_part_id` missing from public and WebShell events, in JSON and SSE; event and transcript pages reject `limit` above 100 with `400 invalid_limit`.                                                                                                                                                                                           |
-| Lifecycle work             | `archive` and `DELETE` return `200` instead of `202` with a command operation; `DeletedSession` has no schema; an archived Session reads back with `status: "archived"`, which the contract's status enum lacks (v1.10 models archiving with the planned `archived_at`).                                                                                                                                  |
-| Workspace context (W0d/W2) | The Session `workspace` lacks `context_revision` and `state` on both surfaces.                                                                                                                                                                                                                                                                                                                            |
+| Slice                  | Gaps                                                                                                                                                                                                                                                                                                                                                                                                      |
+| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| D2                     | `agent_revision` and `capabilities` missing from every Session response; `replay_floor_sequence`, `snapshot_through_sequence` and `PublicTurn.input_item_id` missing from the records; `agent_revision` missing from `CreateSessionRequest`; no `X-Request-Id` on WebShell commands; `WebShellStreamRequest.limit` still in the record; input blocks accept only `text`, not the contract's `input_text`. |
+| D3                     | `schema_version`, `projection_version`, `item_id` and `content_part_id` missing from public and WebShell events, in JSON and SSE; event and transcript pages reject `limit` above 100 with `400 invalid_limit`.                                                                                                                                                                                           |
+| Lifecycle work         | `archive` and `DELETE` return `200` instead of `202` with a command operation; `DeletedSession` has no schema; an archived Session reads back with `status: "archived"`, which the contract's status enum lacks (v1.10 models archiving with the planned `archived_at`).                                                                                                                                  |
+| Workspace context (W2) | The Session `workspace` lacks `context_revision` and `state` on both surfaces, checked through records and bound-session responses.                                                                                                                                                                                                                                                                       |
 
 The input type mismatch was not in the issue's list; the request validation in
 5.3 found it. The server's `input()` rejects anything but `text`, and the
@@ -237,15 +258,9 @@ hold everything those slices must fix:
 - **Schema-valid semantics (D3).** A full event page returns
   `has_more: false` and `next_cursor: null`. The response matches the schema,
   so no gap line can record it, and D3's own tests must cover it.
-- **Workspace-bound Sessions.** A Session bound to a W0b workspace reads back
-  without `context_revision` and `state`. The four `record … WorkspaceContext`
-  lines cover this indirectly; the workspace-context slice should add a read of
-  a bound Session to the scenario.
-- **Merge order with W0d.** W0d maps the workspace routes that v1.13 marks
-  `planned`, adds the WebShell `workspaces/get` route that the spec lacks, and
-  adds the Session `workspace` field that the generator strips as `planned`.
-  Whichever change lands second marks those routes and fields `partial`, adds
-  the missing route, and regenerates the TypeScript types.
+- **Workspace-bound Sessions (W2).** Creation and readback on both surfaces now
+  exercise the missing `context_revision` and `state` directly. W2 supplies those
+  fields and removes the corresponding record and response gaps.
 
 [contract]: https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-api-contract.md
 [openapi]: https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-public-api.openapi.yaml

@@ -17,6 +17,7 @@ import {
   type ManagedAgentProvider,
   type ManagedAgentSessionSummary,
 } from './managed-agent-provider';
+import { WorkspaceBindingCreator } from './WorkspaceBindingCreator';
 
 interface PendingPrompt {
   idempotencyKey: string;
@@ -85,6 +86,7 @@ export function ManagedSessionsPage({
   if (managedAgentProvider) {
     return (
       <ManagedSessionsContent
+        key={managedAgentProvider.storageKey}
         sessionId={sessionId}
         onSelectSession={onSelectSession}
         workspaceCwd={workspaceCwd}
@@ -358,7 +360,8 @@ function ManagedSessionsContent({
   if (!enabled) return <p role="status">{t('managed.unavailable')}</p>;
   const summary = detail.summary;
   const active =
-    summary && !['completed', 'failed', 'cancelled'].includes(summary.phase);
+    summary &&
+    !['created', 'completed', 'failed', 'cancelled'].includes(summary.phase);
   return (
     <div className="flex h-full min-h-0 flex-col gap-3">
       <div className="flex items-center justify-between gap-2">
@@ -447,10 +450,29 @@ function ManagedSessionsContent({
               <Badge variant="secondary">
                 {t(`managed.phase.${summary.phase}`)}
               </Badge>
-              <span className="text-muted-foreground">
-                {t('managed.runtime')}:{' '}
-                {t(`managed.runtime.${summary.runtimeState}`)}
-              </span>
+              {summary.phase !== 'created' && (
+                <span className="text-muted-foreground">
+                  {t('managed.runtime')}:{' '}
+                  {t(`managed.runtime.${summary.runtimeState}`)}
+                </span>
+              )}
+            </div>
+          )}
+          {summary?.workspace && (
+            <div
+              className="rounded-md border px-3 py-2 text-sm"
+              data-managed-workspace-binding
+            >
+              <p>
+                {t('managed.workspaceBound')}: {summary.workspace.workspaceId}
+              </p>
+              <p>
+                {t('managed.workspaceDirectory')}:{' '}
+                {summary.workspace.cwdRelative}
+              </p>
+              <p className="text-muted-foreground">
+                {t('managed.workspaceExecutionUnavailable')}
+              </p>
             </div>
           )}
           {summary?.failure && (
@@ -458,25 +480,38 @@ function ManagedSessionsContent({
               {summary.failure.message}
             </p>
           )}
-          <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-            <MessageList
-              messages={messages}
-              pendingApproval={null}
-              sessionKey={`managed:${provider.storageKey}:${sessionId ?? 'new'}`}
-              loadingTranscript={detail.loading}
-              isResponding={Boolean(active)}
-              hasOlderHistory={Boolean(detail.olderCursor)}
-              loadingOlderHistory={detail.loadingOlder}
-              onLoadOlderHistory={detail.loadOlder}
-              workspaceCwd={summary?.workspaceCwd}
-              hideSessionTimeline
-              welcomeHeader={
-                <p className="p-4 text-muted-foreground">
-                  {t('managed.prompt')}
-                </p>
-              }
+          {!sessionId && provider.workspaceBinding ? (
+            <WorkspaceBindingCreator
+              provider={provider}
+              clientId={clientId}
+              onCreated={(createdId) => {
+                setListRevision((current) => current + 1);
+                onSelectSession(createdId);
+              }}
             />
-          </div>
+          ) : (
+            <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+              <MessageList
+                messages={messages}
+                pendingApproval={null}
+                sessionKey={`managed:${provider.storageKey}:${sessionId ?? 'new'}`}
+                loadingTranscript={detail.loading}
+                isResponding={Boolean(active)}
+                hasOlderHistory={Boolean(detail.olderCursor)}
+                loadingOlderHistory={detail.loadingOlder}
+                onLoadOlderHistory={detail.loadOlder}
+                workspaceCwd={summary?.workspaceCwd}
+                hideSessionTimeline
+                welcomeHeader={
+                  summary?.workspace ? null : (
+                    <p className="p-4 text-muted-foreground">
+                      {t('managed.prompt')}
+                    </p>
+                  )
+                }
+              />
+            </div>
+          )}
           {pending && !busy && (
             <p role="status" className="text-sm text-muted-foreground">
               {t('managed.uncertain')}
@@ -489,62 +524,65 @@ function ManagedSessionsContent({
             }
             loading={detail.loading}
           />
-          <form
-            className="flex shrink-0 flex-col gap-2"
-            onSubmit={(event) => {
-              event.preventDefault();
-              void submit();
-            }}
-          >
-            <Textarea
-              aria-label={t('managed.prompt')}
-              value={pending?.text ?? text}
-              onChange={(event) => setText(event.target.value)}
-              disabled={
-                busy ||
-                Boolean(pending) ||
-                Boolean(sessionId && !summary?.capabilities.canSend)
-              }
-              placeholder={t('managed.prompt')}
-            />
-            <div className="flex items-center justify-end gap-2">
-              {sessionId &&
-                !active &&
-                summary &&
-                !summary.capabilities.canSend && (
-                  <span className="mr-auto text-sm text-muted-foreground">
-                    {t('managed.newRequired')}
-                  </span>
-                )}
-              {cancellationEnabled &&
-                summary?.capabilities.canCancel &&
-                summary.activeTurnId && (
-                  <Button
-                    type="button"
-                    variant="outline"
-                    disabled={busy}
-                    onClick={() => void cancel()}
-                  >
-                    {t('managed.cancel')}
-                  </Button>
-                )}
-              <Button
-                type="submit"
+          {!summary?.workspace &&
+          (!provider.workspaceBinding || (sessionId && summary)) ? (
+            <form
+              className="flex shrink-0 flex-col gap-2"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void submit();
+              }}
+            >
+              <Textarea
+                aria-label={t('managed.prompt')}
+                value={pending?.text ?? text}
+                onChange={(event) => setText(event.target.value)}
                 disabled={
                   busy ||
-                  (!pending &&
-                    (!text.trim() ||
-                      Boolean(sessionId && !summary?.capabilities.canSend)))
+                  Boolean(pending) ||
+                  Boolean(sessionId && !summary?.capabilities.canSend)
                 }
-              >
-                {busy
-                  ? t('managed.sending')
-                  : pending
-                    ? t('managed.retry')
-                    : t('managed.send')}
-              </Button>
-            </div>
-          </form>
+                placeholder={t('managed.prompt')}
+              />
+              <div className="flex items-center justify-end gap-2">
+                {sessionId &&
+                  !active &&
+                  summary &&
+                  !summary.capabilities.canSend && (
+                    <span className="mr-auto text-sm text-muted-foreground">
+                      {t('managed.newRequired')}
+                    </span>
+                  )}
+                {cancellationEnabled &&
+                  summary?.capabilities.canCancel &&
+                  summary.activeTurnId && (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      disabled={busy}
+                      onClick={() => void cancel()}
+                    >
+                      {t('managed.cancel')}
+                    </Button>
+                  )}
+                <Button
+                  type="submit"
+                  disabled={
+                    busy ||
+                    (!pending &&
+                      (!text.trim() ||
+                        Boolean(sessionId && !summary?.capabilities.canSend)))
+                  }
+                >
+                  {busy
+                    ? t('managed.sending')
+                    : pending
+                      ? t('managed.retry')
+                      : t('managed.send')}
+                </Button>
+              </div>
+            </form>
+          ) : null}
         </section>
       </div>
     </div>

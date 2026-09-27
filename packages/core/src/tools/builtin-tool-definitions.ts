@@ -88,7 +88,7 @@ export function getGlobToolDefinition(): ManagedToolDescriptor {
   return defineTool(
     ToolNames.GLOB,
     ToolDisplayNames.GLOB,
-    'Fast file pattern matching tool that works with any codebase size\n- Supports glob patterns like "**/*.js" or "src/**/*.ts"\n- Returns matching file paths sorted by modification time\n- Use this tool when you need to find files by name patterns\n- When you are doing an open ended search that may require multiple rounds of globbing and grepping, use the Agent tool instead\n- You have the capability to call multiple tools in a single response. It is always better to speculatively perform multiple searches as a batch that are potentially useful.',
+    'Fast file pattern matching tool that works with any codebase size\n- Supports glob patterns like "**/*.js" or "src/**/*.ts"\n- Returns matching file paths sorted by modification time\n- Use this tool when you need to find files by name patterns',
     Kind.Search,
     {
       properties: {
@@ -113,7 +113,46 @@ export function getGrepToolDefinition(): ManagedToolDescriptor {
     ...defineTool(
       ToolNames.GREP,
       ToolDisplayNames.GREP,
-      'Search file contents using the available search backend.\n- Use Grep for content searches instead of invoking grep or rg through Bash.\n- Accepts regular expression patterns; syntax and case handling depend on the available backend.\n- Filter files with glob patterns such as "*.js" or "**/*.tsx".\n- Use the Agent tool for open-ended searches requiring multiple rounds.',
+      'A powerful search tool for finding patterns in files\n\n  Usage:\n  - ALWAYS use Grep for search tasks. NEVER invoke `grep` or `rg` as a Bash command. The Grep tool has been optimized for correct permissions and access.\n  - Supports full regex syntax (e.g., "log.*Error", "function\\s+\\w+")\n  - Filter files with glob parameter (e.g., "*.js", "**/*.tsx")\n  - Case-insensitive by default\n',
+      Kind.Search,
+      {
+        properties: {
+          pattern: {
+            type: 'string',
+            description:
+              'The regular expression pattern to search for in file contents',
+          },
+          glob: {
+            type: 'string',
+            description:
+              'Glob pattern to filter files (e.g. "*.js", "*.{ts,tsx}")',
+          },
+          path: {
+            type: 'string',
+            description:
+              'Directory to search in; file paths are also supported. Defaults to the workspace directories.',
+          },
+          limit: {
+            type: 'integer',
+            minimum: 1,
+            description:
+              'Maximum matching lines to return. Must be a positive integer. Configured output limits still apply when omitted.',
+          },
+        },
+        required: ['pattern'],
+        type: 'object',
+      },
+    ),
+    maxOutputChars: 20_000,
+  };
+}
+
+export function getRipGrepToolDefinition(): ManagedToolDescriptor {
+  return {
+    ...defineTool(
+      ToolNames.GREP,
+      ToolDisplayNames.GREP,
+      'A powerful search tool built on ripgrep\n\n  Usage:\n  - ALWAYS use Grep for search tasks. NEVER invoke `grep` or `rg` as a Bash command. The Grep tool has been optimized for correct permissions and access.\n  - Supports full regex syntax (e.g., "log.*Error", "function\\s+\\w+")\n  - Filter files with glob parameter (e.g., "*.js", "**/*.tsx")\n  - Pattern syntax: Uses ripgrep (not grep) - special regex characters need escaping (use `interface\\{\\}` to find `interface{}` in Go code)\n',
       Kind.Search,
       {
         properties: {
@@ -267,15 +306,14 @@ export function getEditToolDefinition(): ManagedToolDescriptor {
     ToolDisplayNames.EDIT,
     `Replaces text within a file. By default, replaces a single occurrence. Set \`replace_all\` to true when you intend to modify every instance of \`old_string\`. This tool requires providing significant context around the change to ensure precise targeting. Always use the ${ToolNames.READ_FILE} tool to examine the file's current content before attempting a text replacement.
 
-      The user has the ability to modify the \`new_string\` content. If modified, this will be stated in the response.
+The user has the ability to modify the \`new_string\` content. If modified, this will be stated in the response.
 
 Expectation for required parameters:
 1. \`file_path\` MUST be an absolute path; otherwise an error will be thrown.
 2. \`old_string\` MUST be the exact literal text to replace (including all whitespace, indentation, newlines, and surrounding code etc.).
 3. \`new_string\` MUST be the exact literal text to replace \`old_string\` with (also including all whitespace, indentation, newlines, and surrounding code etc.). Ensure the resulting code is correct and idiomatic.
 4. NEVER escape \`old_string\` or \`new_string\`, that would break the exact literal text requirement.
-**Important:** If ANY of the above are not satisfied, the tool will fail. CRITICAL for \`old_string\`: Must uniquely identify the single instance to change. Include at least 3 lines of context BEFORE and AFTER the target text, matching whitespace and indentation precisely. If this string matches multiple locations, or does not match exactly, the tool will fail.
-**Multiple replacements:** Set \`replace_all\` to true when you want to replace every occurrence that matches \`old_string\`.`,
+**Important:** If ANY of the above are not satisfied, the tool will fail. CRITICAL for \`old_string\`: Must uniquely identify the single instance to change. Include at least 3 lines of context BEFORE and AFTER the target text, matching whitespace and indentation precisely. If this string matches multiple locations, or does not match exactly, the tool will fail.`,
     Kind.Edit,
     {
       properties: {
@@ -432,13 +470,13 @@ function getShellCommandSequencingGuidance({
   shell,
 }: ShellConfiguration): string {
   const independentGuidance =
-    '- If the commands are independent and can run in parallel, make multiple run_shell_command tool calls in a single message. For example, if you need to run "git status" and "git diff", send a single message with two run_shell_command tool calls in parallel.';
+    '- If the commands are independent and can run in parallel, make multiple run_shell_command tool calls in a single message.';
 
   switch (shell) {
     case 'bash':
       return `- When issuing multiple commands:
   ${independentGuidance}
-  - If the commands depend on each other and must run sequentially, use a single run_shell_command call with '&&' to chain them together (e.g., \`git add . && git commit -m "message" && git push\`). For instance, if one operation must complete before another starts (like mkdir before cp, Write before run_shell_command for git operations, or git add before git commit), run these operations sequentially instead.
+  - If the commands depend on each other and must run sequentially, use a single run_shell_command call with '&&' to chain them together (e.g., \`git add . && git commit -m "message" && git push\`).
   - Use ';' only when you need to run commands sequentially but don't care if earlier commands fail.
   - DO NOT use newlines to separate commands (newlines are ok in quoted strings).`;
     case 'cmd':
@@ -488,9 +526,7 @@ function getShellToolDescription(
 IMPORTANT: This tool is for terminal operations like git, npm, docker, etc. DO NOT use it for file operations (reading, writing, editing, searching, finding files) - use the specialized tools for this instead.
 
 **Usage notes**:
-- The command argument is required.
 - You can specify an optional timeout in milliseconds (up to 600000ms / 10 minutes). If not specified, commands will timeout after 120000ms (2 minutes). For longer commands, use \`is_background: true\` and observe the managed task instead of passing a larger timeout.
-- It is very helpful if you write a clear, concise description of what this command does in 5-10 words.
 
 - Avoid using run_shell_command with the \`find\`, \`grep\`, \`cat\`, \`head\`, \`tail\`, \`sed\`, \`awk\`, or \`echo\` commands, unless explicitly instructed or when these commands are truly necessary for the task. Instead, always prefer using the dedicated tools for these commands:
   - File search: Use ${ToolNames.GLOB} (NOT find or ls)
@@ -518,12 +554,7 @@ ${getShellCommandSequencingGuidance(shellConfiguration)}
   - Web servers: \`python -m http.server\`, \`php -S localhost:8000\`
   - Any command expected to run indefinitely until manually stopped
 ${processGroupNote}${processStopNote}
-- Use foreground execution (is_background: false) for:
-  - One-time commands: \`ls\`, \`cat\`, \`grep\`
-  - Build commands: \`npm run build\`, \`make\`
-  - Installation commands: \`npm install\`, \`pip install\`
-  - Git operations: \`git commit\`, \`git push\`
-  - Test runs: \`npm test\`, \`pytest\`
+- Use foreground execution (the default) for commands that finish on their own, such as builds, installs, git operations, and test runs.
 `;
 }
 

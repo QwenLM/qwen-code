@@ -115,6 +115,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/agent/web-shell/v1/workspaces/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Same authorization, paging, explicit default and pre-Session capability discovery as listWorkspaces, with camelCase fields. Listing errors must not cause silent fallback to a default directory. */
+        post: operations["webShellQueryWorkspaces"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/workspaces/get": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Read one authorized Workspace by its logical ID; absent or unreadable Workspaces return 404. No Runtime is started. */
+        post: operations["webShellGetWorkspace"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -159,6 +193,7 @@ export interface components {
             title?: string | null;
             input?: components["schemas"]["InputBlock"][];
             metadata?: components["schemas"]["WebShellMetadata"];
+            workspace?: components["schemas"]["WebShellWorkspaceSelection"];
         };
         WebShellSubmitRequest: {
             /** @description Trace correlation only. */
@@ -218,6 +253,7 @@ export interface components {
             } | null;
             /** Format: int64 */
             lastSequence: number;
+            workspace?: components["schemas"]["WebShellWorkspaceContext"];
         };
         WebShellSessionPage: {
             data: components["schemas"]["WebShellSession"][];
@@ -289,17 +325,82 @@ export interface components {
             error: {
                 code: string;
                 message: string;
-                request_id?: string | null;
+                request_id: string;
                 /** Format: int64 */
                 replay_floor_sequence?: number | null;
                 /** Format: int64 */
                 snapshot_through_sequence?: number | null;
             };
         };
+        /**
+         * @description Logical directory relative to the authorized workspace root; dot denotes root. Use slash separators. Reject absolute paths, drive prefixes, backslashes, NUL and parent segments. Runtime must verify directory existence, realpath containment and symlink safety before activation; schema validation alone is insufficient. Preserve spaces and case, normalize repeated separators and dot segments, and never percent-decode JSON values.
+         * @example .
+         * @example services/api
+         */
+        WorkspaceRelativePath: string;
+        WebShellWorkspaceSelection: {
+            workspaceId: string;
+            /** @default . */
+            cwdRelative?: components["schemas"]["WorkspaceRelativePath"];
+        };
+        WebShellWorkspaceContext: {
+            workspaceId: string;
+            cwdRelative: components["schemas"]["WorkspaceRelativePath"];
+            /** Format: int64 */
+            contextRevision: number;
+            /** @enum {string} */
+            state: "ready" | "changing" | "recovery_blocked";
+        };
+        WebShellWorkspace: {
+            workspaceId: string;
+            displayName: string;
+            /** @description Current actor permission hint only; creation rechecks ACL, state and Agent/config compatibility. */
+            canCreateSession: boolean;
+            /** @enum {string} */
+            state: "active" | "draining" | "removed";
+        };
+        WebShellWorkspacePage: {
+            data: components["schemas"]["WebShellWorkspace"][];
+            hasMore: boolean;
+            nextCursor?: string | null;
+            capabilities: {
+                /**
+                 * @description Same end-to-end W0 readiness as public workspace_context; missing means unsupported.
+                 * @default false
+                 */
+                workspaceContext: boolean;
+                /** @description Supports authorized Workspace discovery, empty Session creation, and saved binding read-back; does not enable execution. */
+                workspaceBinding: boolean;
+            };
+            /** @description Same authorized explicit default as default_workspace, including when outside this page; null if absent or not creatable. A non-null default is active and has canCreateSession=true. */
+            defaultWorkspace: (components["schemas"]["WebShellWorkspace"] & {
+                /** @constant */
+                state?: "active";
+                /** @constant */
+                canCreateSession?: true;
+            }) | null;
+        };
+        WebShellWorkspaceQueryRequest: {
+            cursor?: string | null;
+            /** @default 50 */
+            limit?: number | null;
+        };
+        WebShellWorkspaceGetRequest: {
+            workspaceId: string;
+        };
     };
     responses: {
         /** @description Resource is readable but actor lacks this operation or original Action responder permission. */
         Forbidden: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ErrorEnvelope"];
+            };
+        };
+        /** @description A trusted actor is required for this request but none was supplied. */
+        Unauthorized: {
             headers: {
                 [name: string]: unknown;
             };
@@ -343,6 +444,15 @@ export interface components {
                 "application/json": components["schemas"]["ErrorEnvelope"];
             };
         };
+        /** @description A dependency such as the Hosted Harness is unavailable; retry later. */
+        Unavailable: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ErrorEnvelope"];
+            };
+        };
     };
     parameters: never;
     requestBodies: never;
@@ -376,6 +486,8 @@ export interface operations {
                     "application/json": components["schemas"]["WebShellSessionPage"];
                 };
             };
+            400: components["responses"]["BadRequest"];
+            403: components["responses"]["Forbidden"];
         };
     };
     webShellGetSession: {
@@ -400,6 +512,8 @@ export interface operations {
                     "application/json": components["schemas"]["WebShellSession"];
                 };
             };
+            400: components["responses"]["BadRequest"];
+            403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
         };
     };
@@ -425,6 +539,8 @@ export interface operations {
                     "application/json": components["schemas"]["WebShellTranscript"];
                 };
             };
+            400: components["responses"]["BadRequest"];
+            404: components["responses"]["NotFound"];
         };
     };
     webShellStreamEvents: {
@@ -449,6 +565,8 @@ export interface operations {
                     "text/event-stream": string;
                 };
             };
+            400: components["responses"]["BadRequest"];
+            404: components["responses"]["NotFound"];
             409: components["responses"]["CursorExpired"];
         };
     };
@@ -476,9 +594,11 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
+            503: components["responses"]["Unavailable"];
         };
     };
     webShellSubmitTurn: {
@@ -504,6 +624,8 @@ export interface operations {
                     "application/json": components["schemas"]["WebShellAdmission"];
                 };
             };
+            400: components["responses"]["BadRequest"];
+            404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
         };
     };
@@ -530,7 +652,61 @@ export interface operations {
                     "application/json": components["schemas"]["WebShellAdmission"];
                 };
             };
+            400: components["responses"]["BadRequest"];
+            404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
+        };
+    };
+    webShellQueryWorkspaces: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellWorkspaceQueryRequest"];
+            };
+        };
+        responses: {
+            /** @description Authorized durable resource view; no Runtime startup required. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellWorkspacePage"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    webShellGetWorkspace: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellWorkspaceGetRequest"];
+            };
+        };
+        responses: {
+            /** @description Authorized durable resource view; no Runtime startup required. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellWorkspace"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            404: components["responses"]["NotFound"];
         };
     };
 }

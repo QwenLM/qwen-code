@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.store;
 
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
+import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.Admission;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.CommandRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.DispatchTarget;
@@ -64,10 +65,13 @@ public class ManagedAgentStore implements AgentStateStore {
     private final Clock clock;
     private final CommittedEventPublisher eventPublisher;
     private final ManagedWorkspaceRegistry workspaces;
+    private final String agentRevision;
     private final RowMapper<SessionRecord> sessionMapper = (result, row) ->
             new SessionRecord(result.getString("tenant_id"),
                     result.getString("session_id"),
-                    result.getString("agent_id"), result.getString("title"),
+                    result.getString("agent_id"),
+                    result.getString("agent_revision"),
+                    result.getString("title"),
                     result.getString("status"),
                     result.getString("harness_boot_id"),
                     result.getString("harness_event_epoch"),
@@ -136,20 +140,29 @@ public class ManagedAgentStore implements AgentStateStore {
 
     public ManagedAgentStore(JdbcTemplate jdbc, ObjectMapper objectMapper,
             Clock clock, CommittedEventPublisher eventPublisher,
-            ManagedWorkspaceRegistry workspaces) {
+            ManagedWorkspaceRegistry workspaces,
+            ManagedAgentProperties properties) {
         this.jdbc = jdbc;
         this.objectMapper = objectMapper;
         this.clock = clock;
         this.eventPublisher = eventPublisher;
         this.workspaces = workspaces;
+        this.agentRevision = properties.getAgentRevision();
+        if (agentRevision == null || agentRevision.isBlank()
+                || agentRevision.length() > 128) {
+            throw new IllegalArgumentException(
+                    "qwen.managed-agent.agent-revision must contain 1-128"
+                            + " characters");
+        }
     }
 
     @Override
     @Transactional
     public Admission insertSessionCommand(String tenantId, String operation,
             String idempotencyKey, String requestDigest, String agentId,
-            String title, List<Map<String, Object>> input,
-            String payloadDigest) {
+            String requestedRevision, String title,
+            List<Map<String, Object>> input, String payloadDigest) {
+        requireAgentRevision(requestedRevision);
         requireCreationScope(tenantId, idempotencyKey, false);
         return insertSession(tenantId, operation, idempotencyKey,
                 requestDigest, agentId, title, input, payloadDigest,
@@ -160,8 +173,9 @@ public class ManagedAgentStore implements AgentStateStore {
     @Transactional
     public Admission insertWorkspaceSessionCommand(String tenantId,
             String actorId, String idempotencyKey, String requestDigest,
-            String agentId, String title, List<Map<String, Object>> input,
-            String payloadDigest, WorkspaceSelection selection) {
+            String agentId, String requestedRevision, String title,
+            List<Map<String, Object>> input, String payloadDigest,
+            WorkspaceSelection selection) {
         if (!input.isEmpty()) {
             throw workspaceExecutionUnavailable();
         }
@@ -171,6 +185,7 @@ public class ManagedAgentStore implements AgentStateStore {
             return replayWorkspaceCommand(tenantId, actorId,
                     requestDigest, existing.getFirst());
         }
+        requireAgentRevision(requestedRevision);
         requireCreationScope(tenantId, idempotencyKey, true);
         ResolvedBinding workspace = workspaces.resolveForCreation(
                 tenantId, actorId, selection);
@@ -263,6 +278,15 @@ public class ManagedAgentStore implements AgentStateStore {
         }
     }
 
+    // Called only for a new admission; a retry has already replayed.
+    private void requireAgentRevision(String requested) {
+        if (requested != null && !requested.equals(agentRevision)) {
+            throw new ApiException(HttpStatus.BAD_REQUEST,
+                    "unsupported_feature",
+                    "Only the current agent revision can be selected.");
+        }
+    }
+
     private Admission insertSession(String tenantId, String operation,
             String idempotencyKey, String requestDigest, String agentId,
             String title, List<Map<String, Object>> input,
@@ -276,13 +300,14 @@ public class ManagedAgentStore implements AgentStateStore {
         String promptId = input.isEmpty() ? null
                 : UUID.randomUUID().toString();
         jdbc.update("INSERT INTO managed_agent_session (tenant_id,"
-                        + " session_id, agent_id, title, status, created_at,"
-                        + " updated_at, workspace_id, workspace_generation,"
-                        + " workspace_storage_id, cwd_relative,"
-                        + " context_config_ref, context_revision,"
-                        + " workspace_config_ref, workspace_policy_ref)"
-                        + " VALUES (?, ?, ?, ?, 'ACTIVE', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                tenantId, sessionId, agentId, title, now, now,
+                        + " session_id, agent_id, agent_revision, title,"
+                        + " status, created_at, updated_at, workspace_id,"
+                        + " workspace_generation, workspace_storage_id,"
+                        + " cwd_relative, context_config_ref,"
+                        + " context_revision, workspace_config_ref,"
+                        + " workspace_policy_ref) VALUES (?, ?, ?, ?, ?,"
+                        + " 'ACTIVE', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                tenantId, sessionId, agentId, agentRevision, title, now, now,
                 workspace == null ? null : workspace.getWorkspaceId(),
                 workspace == null ? null : workspace.getWorkspaceGeneration(),
                 workspace == null ? null : workspace.getStorageId(),
@@ -729,6 +754,16 @@ public class ManagedAgentStore implements AgentStateStore {
                         result.getLong("updated_at")),
                 tenantId, sessionId);
         return rows.stream().findFirst();
+    }
+
+    @Override
+    public long findSnapshotCoveredSequence(String tenantId,
+            String sessionId) {
+        List<Long> rows = jdbc.queryForList("SELECT covered_sequence FROM"
+                        + " managed_agent_snapshot WHERE tenant_id = ? AND"
+                        + " session_id = ?",
+                Long.class, tenantId, sessionId);
+        return rows.isEmpty() ? 0 : rows.getFirst();
     }
 
     public List<MaterializationTarget> findMaterializationTargets(int limit) {
@@ -1320,7 +1355,7 @@ public class ManagedAgentStore implements AgentStateStore {
         }
         String itemId = string(event.data().get("itemId"));
         if (itemId == null) {
-            itemId = inputItemId(event.turnId());
+            itemId = StoreModels.inputItemId(event.turnId());
         }
         upsertItem(event, itemId, "message", "user", "completed",
                 Map.of());
@@ -1515,12 +1550,8 @@ public class ManagedAgentStore implements AgentStateStore {
 
     private static Map<String, Object> acceptedData(String turnId,
             List<Map<String, Object>> input) {
-        return Map.of("turnId", turnId, "itemId", inputItemId(turnId),
-                "input", input);
-    }
-
-    private static String inputItemId(String turnId) {
-        return "item_" + turnId + "_input";
+        return Map.of("turnId", turnId,
+                "itemId", StoreModels.inputItemId(turnId), "input", input);
     }
 
     private static String string(Object value) {

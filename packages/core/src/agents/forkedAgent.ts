@@ -474,6 +474,12 @@ export interface ForkedAgentResult {
   filesTouched: string[];
   /** File paths from successful mutating tool results. */
   filesWritten?: string[];
+  /** Aggregate model usage for this isolated agent run. */
+  usage?: {
+    inputTokens: number;
+    outputTokens: number;
+    totalTokens: number;
+  };
 }
 
 /**
@@ -699,6 +705,7 @@ export async function runForkedAgent(
     const filesTouched = new Set<string>();
     const pendingMutatingPaths = new Map<string, string[]>();
     const filesWritten = new Set<string>();
+    let usage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
 
     const initialMessages =
       params.extraHistory &&
@@ -770,6 +777,14 @@ export async function runForkedAgent(
         // the writes that actually landed on disk.
         setImmediate(() => executionController.abort(selfAbortReason));
       }
+    });
+
+    emitter.on(AgentEventType.FINISH, (event) => {
+      usage = {
+        inputTokens: event.inputTokens ?? 0,
+        outputTokens: event.outputTokens ?? 0,
+        totalTokens: event.totalTokens ?? 0,
+      };
     });
 
     const headless = await scope.run(() =>
@@ -844,6 +859,7 @@ export async function runForkedAgent(
         finalText,
         filesTouched: touched,
         filesWritten: written,
+        usage,
       };
     }
     if (terminateReason === AgentTerminateMode.CANCELLED) {
@@ -853,6 +869,7 @@ export async function runForkedAgent(
         finalText,
         filesTouched: touched,
         filesWritten: written,
+        usage,
       };
     }
     if (terminateReason !== AgentTerminateMode.GOAL) {
@@ -862,6 +879,7 @@ export async function runForkedAgent(
         finalText,
         filesTouched: touched,
         filesWritten: written,
+        usage,
       };
     }
     return {
@@ -870,6 +888,7 @@ export async function runForkedAgent(
       finalText,
       filesTouched: touched,
       filesWritten: written,
+      usage,
     };
   } finally {
     executionController.abort();

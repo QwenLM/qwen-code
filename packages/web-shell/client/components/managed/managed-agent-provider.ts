@@ -5,6 +5,7 @@ import type {
 } from '@qwen-code/sdk/daemon';
 
 export type ManagedAgentSessionPhase =
+  | 'created'
   | 'admitted'
   | 'runtime_starting'
   | 'agent_running'
@@ -26,6 +27,7 @@ export interface ManagedAgentSessionSummary {
   activeTurnId?: string;
   title: string;
   workspaceCwd?: string;
+  workspace?: { workspaceId: string; cwdRelative: string };
   createdAt: number;
   admittedAt: number;
   updatedAt: number;
@@ -88,6 +90,25 @@ export interface ManagedAgentProvider {
   readonly storageKey: string;
   readonly canCancel: boolean;
   readonly acceptsWorkspaceCwd: boolean;
+  readonly workspaceBinding?: {
+    readonly agentId: string;
+    list(
+      options: ManagedAgentRequestOptions & { cursor?: string; limit?: number },
+    ): Promise<{
+      data: ManagedAgentWorkspace[];
+      defaultWorkspace?: ManagedAgentWorkspace | null;
+      nextCursor?: string;
+      supported: boolean;
+    }>;
+    get(
+      workspaceId: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedAgentWorkspace>;
+    createEmpty(
+      request: { agentId: string; workspaceId: string; cwdRelative: string },
+      options: ManagedAgentCommandOptions,
+    ): Promise<{ sessionId: string }>;
+  };
   listSessions(
     options: ManagedAgentRequestOptions & {
       workspaceCwd?: string;
@@ -212,4 +233,11 @@ function toSessionEvent(
 ): ManagedAgentSessionEvent {
   const { promptId, ...mapped } = event;
   return { ...mapped, turnId: promptId };
+}
+
+export interface ManagedAgentWorkspace {
+  workspaceId: string;
+  displayName: string;
+  state: string;
+  canCreateSession: boolean;
 }
