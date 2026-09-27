@@ -283,12 +283,20 @@ describe('git-sourced lint lanes', () => {
   // builds on hosts with pinned linter builds (linux/x64, darwin/*); on any
   // other host — win32, linux/arm64, … — skip instead of failing at the
   // throw. Probe the capability, not the platform, so the gate cannot drift
-  // when the pin table grows a new entry.
+  // when the pin table grows a new entry. Only the unsupported-platform
+  // throw is a skippable absent capability: anything else getLinters()
+  // throws (e.g. a Missing SHA-256 pin after a table edit) is a real defect
+  // in the table and must fail the lane cases, not read as green skips.
   const getLintersOrSkip = async (ctx) => {
     const { getLinters } = await import('../lint.js');
     try {
       return getLinters();
-    } catch {
+    } catch (error) {
+      if (
+        !String(error?.message).startsWith('Unsupported platform/architecture')
+      ) {
+        throw error;
+      }
       return ctx.skip();
     }
   };
@@ -505,6 +513,19 @@ describe('git-sourced lint lanes', () => {
     );
     expect(win32).not.toContain('.local/bin');
     expect(win32.endsWith(':/usr/bin:/bin')).toBe(true);
+  });
+
+  // The suite's only no-argument call, which is how production's runCommand
+  // invokes it: the sole witness for the four parameter defaults and the
+  // `= {}` fallback, including tempDir = TEMP_DIR (the directory the
+  // installers actually extract into). getLinterTempDir never reaches
+  // getPlatformArch(), so this case also runs on the Windows gate.
+  it('defaults to the module temp dir the installers extract into', async () => {
+    const { getLinterPath, getLinterTempDir } = await import('../lint.js');
+    const temp = toPosix(getLinterTempDir());
+    expect(toPosix(getLinterPath())).toContain(
+      `${temp}/actionlint:${temp}/shellcheck:`,
+    );
   });
 });
 
