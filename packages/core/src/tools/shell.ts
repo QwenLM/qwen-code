@@ -62,6 +62,7 @@ import type {
   ShellOutputEvent,
   ShellPostPromoteHandlers,
   ShellPostPromoteSettleInfo,
+  ShellRawCaptureSink,
 } from '../services/shellExecutionService.js';
 import {
   getShellAbortReasonKind,
@@ -2373,6 +2374,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     setPidCallback?: (pid: number) => void,
     setPromoteAbortControllerCallback?: (ac: AbortController) => void,
     canPromoteForegroundShell?: () => boolean,
+    rawCapture?: ShellRawCaptureSink,
   ): Promise<ToolResult> {
     const strippedCommand = stripShellWrapper(this.params.command);
 
@@ -2776,9 +2778,12 @@ export class ShellToolInvocation extends BaseToolInvocation<
         cwd,
         onShellOutputEvent,
         combinedSignal,
-        this.config.getShouldUseNodePtyShell(),
-        shellExecutionConfig ?? {},
-        { postPromote },
+        rawCapture ? false : this.config.getShouldUseNodePtyShell(),
+        {
+          ...shellExecutionConfig,
+          ...(rawCapture ? { maxBufferedOutputBytes: 64 * 1024 } : {}),
+        },
+        { postPromote, ...(rawCapture ? { rawCapture } : {}) },
       );
     } catch (err) {
       // ShellExecutionService.execute() can throw before resolving (e.g.
@@ -2792,6 +2797,8 @@ export class ShellToolInvocation extends BaseToolInvocation<
       throw err;
     }
     const { result: resultPromise, pid } = executionHandle;
+
+    if (pid) rawCapture?.setStarted(pid);
 
     if (pid && setPidCallback) {
       setPidCallback(pid);
@@ -2857,6 +2864,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     let result;
     try {
       result = await resultPromise;
+      rawCapture?.setProcessResult(result);
     } finally {
       // Cancel any pending trailing flush — the command has settled (or
       // threw) and either the final ToolResult carries the complete output
