@@ -9185,6 +9185,7 @@ export function App({
     }
   });
   const collaborationThreadId =
+    workspace.capabilities?.features?.includes('agent_collaboration_v1') &&
     collaborationThread !== undefined &&
     collaborationThread.server === workspace.baseUrl
       ? collaborationThread.id
