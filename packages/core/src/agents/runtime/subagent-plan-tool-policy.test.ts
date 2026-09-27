@@ -223,7 +223,6 @@ describe('subagent plan tool policy', () => {
     it.each([
       ['no tool config', undefined],
       ['a wildcard', { tools: ['*'] }],
-      ['an empty list', { tools: [] }],
       ['an explicit list naming skill', { tools: [ToolNames.SKILL] }],
       [
         'a blocklist that leaves skill alone',
@@ -246,6 +245,9 @@ describe('subagent plan tool policy', () => {
       // prepareTools declares exactly the inline entries here; nothing is
       // inherited from the registry.
       ['an inline-only declaration set', { tools: [{ name: 'custom' }] }],
+      // An explicit empty list is the documented deny-all contract, so it
+      // inherits nothing — no tools at all, and no skill tool.
+      ['an empty list', { tools: [] }],
     ])('withholds skills for %s', (_label, toolConfig) => {
       expect(toolConfigAllowsSkill(toolConfig)).toBe(false);
     });

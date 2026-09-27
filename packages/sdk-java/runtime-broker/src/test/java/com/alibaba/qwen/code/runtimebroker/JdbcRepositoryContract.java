@@ -31,7 +31,11 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 import javax.sql.DataSource;
 
-final class JdbcRepositoryContract {
+/**
+ * Contract for the JDBC repositories. It is public so that
+ * managed-agent-server can also run it against its Flyway schema.
+ */
+public final class JdbcRepositoryContract {
     private static final Instant START = Instant.parse(
             "2026-09-20T00:00:00Z");
     private static final Instant HEALTH = START.plusSeconds(30);
@@ -39,7 +43,12 @@ final class JdbcRepositoryContract {
     private JdbcRepositoryContract() {
     }
 
-    static void verify(DataSource dataSource, String prefix) throws Exception {
+    /**
+     * Runs the contract. {@code prefix} namespaces every row it writes, so a
+     * shared database needs a prefix that no earlier run used.
+     */
+    public static void verify(DataSource dataSource, String prefix)
+            throws Exception {
         verifySchema(dataSource);
         verifyBinding(dataSource, prefix);
         verifyProvisionerKindRoundTrip(dataSource, prefix);
@@ -48,6 +57,61 @@ final class JdbcRepositoryContract {
         verifyExecution(dataSource, prefix);
         verifyExecutionFences(dataSource, prefix);
         verifyExecutionForgeries(dataSource, prefix);
+        verifyLeaseDeadlines(dataSource, prefix);
+    }
+
+    // Every claim and renewal must persist a whole-second deadline that is
+    // at least the configured duration after the precise database clock.
+    private static void verifyLeaseDeadlines(DataSource dataSource,
+            String prefix) throws Exception {
+        Duration lease = Duration.ofMinutes(30);
+        JdbcRuntimeBindingRepository bindings =
+                new JdbcRuntimeBindingRepository(dataSource,
+                        protector(prefix), () -> prefix + "-deadline-binding");
+        String bindingId = bindings.findOrCreate(new RuntimeProvisionRequest(
+                scope(prefix + "-deadline-tenant"), prefix + "-isolation",
+                "local-process")).getBindingId();
+        Instant before = preciseNow(dataSource);
+        RuntimeBindingRecord claimed = bindings.claimOperation(bindingId,
+                prefix + "-deadline-owner", lease);
+        assertLeaseDeadline(before, lease, claimed.getOperationLeaseUntil());
+        before = preciseNow(dataSource);
+        RuntimeBindingRecord renewed = bindings.renewOperation(bindingId,
+                prefix + "-deadline-owner",
+                claimed.getOperationGeneration(), lease);
+        assertLeaseDeadline(before, lease, renewed.getOperationLeaseUntil());
+
+        JdbcToolExecutionRepository executions =
+                new JdbcToolExecutionRepository(dataSource);
+        String executionId = executions.findOrCreate(execution(
+                prefix + "-deadline-execution",
+                prefix + "-deadline-idempotency",
+                prefix + "-deadline-digest")).getExecutionCallId();
+        before = preciseNow(dataSource);
+        ToolExecutionRecord dispatched = executions.claimDispatch(
+                executionId, prefix + "-deadline-dispatcher", lease);
+        assertLeaseDeadline(before, lease, dispatched.getDispatchLeaseUntil());
+        before = preciseNow(dataSource);
+        ToolExecutionRecord renewedDispatch = executions.renewDispatch(
+                executionId, prefix + "-deadline-dispatcher",
+                dispatched.getDispatchGeneration(), lease);
+        assertLeaseDeadline(before, lease,
+                renewedDispatch.getDispatchLeaseUntil());
+    }
+
+    private static Instant preciseNow(DataSource dataSource)
+            throws SQLException {
+        try (Connection connection = dataSource.getConnection()) {
+            return JdbcRepositorySupport.databaseNowPrecise(connection);
+        }
+    }
+
+    private static void assertLeaseDeadline(Instant before, Duration lease,
+            Instant deadline) {
+        assertEquals(0, deadline.getNano(), () -> deadline
+                + " is not a whole second");
+        assertFalse(deadline.isBefore(before.plus(lease)), () -> deadline
+                + " is shorter than " + lease + " after " + before);
     }
 
     private static void verifySchema(DataSource dataSource)
@@ -576,6 +640,8 @@ final class JdbcRepositoryContract {
         typedReference.put("untyped", untypedReference);
         typedReference.put("scale",
                 new BigDecimal("1.2345678901234567890123E+30"));
+        typedReference.put("fraction",
+                new BigDecimal("0." + "1".repeat(2048)));
         typedReference.put("ratio", 162544.13f);
         typedReference.put("weight", -1363683.0538119469d);
         // Numbers nested in a map or a list come back as other subtypes too,
@@ -598,6 +664,19 @@ final class JdbcRepositoryContract {
                             prefix + "-types-turn", prefix + "-types-tool",
                             prefix + "-types-digest", invalidReference));
         }
+        Map<String, Object> unreadableReference = new LinkedHashMap<>(
+                typedReference);
+        unreadableReference.put("fraction",
+                new BigDecimal("0." + "1".repeat(2049)));
+        assertThrows(IllegalArgumentException.class,
+                () -> ToolExecutionRecord.prepared(
+                        prefix + "-unreadable-types-execution",
+                        prefix + "-unreadable-types-idempotency",
+                        prefix + "-types-binding", 1,
+                        prefix + "-types-harness",
+                        prefix + "-types-runtime-session",
+                        prefix + "-types-turn", prefix + "-types-tool",
+                        prefix + "-types-digest", unreadableReference));
         ToolExecutionRecord typedCandidate = ToolExecutionRecord.prepared(
                 prefix + "-types-execution", typesKey,
                 prefix + "-types-binding", 1, prefix + "-types-harness",
@@ -661,6 +740,14 @@ final class JdbcRepositoryContract {
         typedResult.put("jsonLd", jsonLdReference);
         typedResult.put("untyped", untypedReference);
         typedResult.put("limit", new BigDecimal("1E+400"));
+        typedResult.put("fraction",
+                new BigDecimal("0." + "1".repeat(2048)));
+        Map<String, Object> unreadableResult = new LinkedHashMap<>(
+                typedResult);
+        unreadableResult.put("fraction",
+                new BigDecimal("0." + "1".repeat(2049)));
+        assertThrows(IllegalArgumentException.class,
+                () -> typedClaim.withResult(unreadableResult, 1, START));
         ToolExecutionRecord typedSettled = rereader.compareAndSet(typedClaim,
                 typedClaim.withResult(typedResult, 1, START),
                 prefix + "-dispatcher-a",

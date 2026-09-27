@@ -825,11 +825,19 @@ class HostedHarnessClientTest {
         exchange.close();
     }
 
+    /**
+     * Sends a body-less response and ends the connection with it. On Java 11
+     * the JDK's own HTTP server drops the connection after a response without
+     * a body, while the Java 11 HttpClient keeps it pooled; the next request
+     * over it fails with "HTTP/1.1 header parser received no bytes". This is
+     * the same fixture fix as DaemonSessionClientTest#sendNoContent.
+     */
     private static void sendSessionNoContent(HttpExchange exchange)
             throws IOException {
         assertPrivateHeaders(exchange);
         exchange.getResponseHeaders().set(
                 HostedHarnessClient.BOOT_ID_HEADER, BOOT_ID);
+        exchange.getResponseHeaders().set("Connection", "close");
         exchange.sendResponseHeaders(204, -1);
         exchange.close();
     }

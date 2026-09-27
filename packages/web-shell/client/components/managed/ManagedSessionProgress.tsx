@@ -14,7 +14,8 @@ export function ManagedSessionProgress({
 }) {
   const { t } = useI18n();
   const active =
-    summary && !['completed', 'failed', 'cancelled'].includes(summary.phase);
+    summary &&
+    !['created', 'completed', 'failed', 'cancelled'].includes(summary.phase);
   const now = useSharedNow(Boolean(active));
   if (!submitting && !loading && !active) return null;
 

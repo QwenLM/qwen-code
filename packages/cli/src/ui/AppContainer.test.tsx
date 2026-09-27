@@ -10,10 +10,12 @@ const {
   useWakeRepaintMock,
   buildWakeRepaintSpy,
   readCronTasksMock,
+  restoreWorktreeContextMock,
 } = vi.hoisted(() => ({
   writeTerminalTitleSpy: vi.fn(),
   useWakeRepaintMock: vi.fn(),
   readCronTasksMock: vi.fn(),
+  restoreWorktreeContextMock: vi.fn(),
   buildWakeRepaintSpy: vi.fn((deps: Record<string, unknown>) =>
     vi.fn(() => deps),
   ),
@@ -36,6 +38,9 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     // tests can pin the startup notice's only real source (and its catch
     // fallback) instead of hitting a nonexistent hashed path.
     readCronTasks: readCronTasksMock,
+    // Control the resume-time worktree restore so tests can pin how the
+    // container surfaces its outcomes without a real sidecar on disk.
+    restoreWorktreeContext: restoreWorktreeContextMock,
   };
 });
 
@@ -100,6 +105,7 @@ import {
   describeDeliveryStatus,
   describeDropReason,
   PEER_ADMISSION_LIMITS,
+  WorktreeRestoreRefusedError,
   type DropNotice,
   type HeldMessage,
   type SubagentManager,
@@ -616,6 +622,11 @@ describe('AppContainer State Management', () => {
     vi.spyOn(mockConfig, 'isCronEnabled').mockReturnValue(false);
     readCronTasksMock.mockReset();
     readCronTasksMock.mockResolvedValue([]);
+    restoreWorktreeContextMock.mockReset();
+    restoreWorktreeContextMock.mockResolvedValue({
+      contextMessage: null,
+      session: null,
+    });
 
     // Mock config's getTargetDir to return consistent workspace directory
     vi.spyOn(mockConfig, 'getTargetDir').mockReturnValue('/test/workspace');
@@ -6398,6 +6409,72 @@ describe('AppContainer State Management', () => {
           .slice(0, -1)
           .every((item) => item.display?.suppressOnRestore === true),
       ).toBe(true);
+    });
+
+    it('surfaces a worktree restore refusal as a WARNING history item', async () => {
+      // An ownership refusal loads the session WITHOUT its worktree
+      // binding — the model is never told the worktree exists, so the lost
+      // binding must be visible, not a console.debug.
+      const historyManager = {
+        history: [] as HistoryItem[],
+        addItem: vi.fn(),
+        updateItem: vi.fn(),
+        clearItems: vi.fn(),
+        loadHistory: vi.fn(),
+        truncateToItem: vi.fn(),
+      };
+      mockedUseHistory.mockReturnValue(historyManager);
+      vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
+      vi.spyOn(mockConfig, 'getResumedSessionData').mockReturnValue({
+        conversation: {
+          sessionId: 'session-1',
+          projectHash: 'test-project-hash',
+          startTime: '2024-01-01T00:00:00Z',
+          lastUpdated: '2024-01-01T00:00:01Z',
+          messages: [],
+        },
+        filePath: '/tmp/session.jsonl',
+        lastCompletedUuid: null,
+      } as ReturnType<typeof mockConfig.getResumedSessionData>);
+      vi.spyOn(mockConfig, 'loadPausedBackgroundAgents').mockResolvedValue([]);
+      restoreWorktreeContextMock.mockImplementation(
+        async (_sidecarPath: string, onWarn?: (error: unknown) => void) => {
+          onWarn?.(
+            new WorktreeRestoreRefusedError(
+              'Worktree marker owner other-session does not match session ' +
+                'session-1; refusing restore and preserving sidecar.',
+            ),
+          );
+          return { contextMessage: null, session: null };
+        },
+      );
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      await vi.waitFor(() => {
+        expect(historyManager.addItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: MessageType.WARNING,
+            text: expect.stringContaining('refusing restore'),
+          }),
+          expect.any(Number),
+        );
+      });
+      // No worktree context message means no INFO restore notice either.
+      expect(historyManager.addItem).not.toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.INFO,
+          text: expect.stringContaining('Active worktree'),
+        }),
+        expect.any(Number),
+      );
     });
 
     it('announces active scheduled tasks after restoring resumed history', async () => {

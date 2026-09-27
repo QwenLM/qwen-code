@@ -1474,6 +1474,9 @@ It fires when the session starts, when context files are reloaded during the ses
 
 Hooks are configured in Qwen Code settings, typically in `.qwen/settings.json` or user configuration files. Hooks in the system settings files (System and SystemDefaults) load with the source System and, like user hooks, regardless of folder trust. Within one event, sequential hooks from settings and extensions run in this order: Project, User, System, Extension.
 
+> [!NOTE]
+> A hook must include a name field to be enabled or disabled individually at runtime. Hooks without a name will always execute when their event and matcher conditions are met.
+
 ```json
 {
   "hooks": {

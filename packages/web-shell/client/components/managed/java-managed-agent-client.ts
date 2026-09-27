@@ -1,14 +1,10 @@
+import type { components } from './generated/managed-agent-api';
+
+type Schemas = components['schemas'];
+
 export type JavaAgentDate = number | string;
 
-export interface JavaAgentTurn {
-  turnId: string;
-  sessionId: string;
-  status: string;
-  submittedAt: JavaAgentDate;
-  completedAt?: JavaAgentDate;
-  errorCode?: string;
-  usage?: Record<string, unknown>;
-}
+export type JavaAgentTurn = Schemas['WebShellTurn'];
 
 export interface JavaAgentEnvironment {
   environmentId?: string;
@@ -16,74 +12,33 @@ export interface JavaAgentEnvironment {
   errorCode?: string;
 }
 
-export interface JavaAgentSession {
-  sessionId: string;
-  title?: string;
-  agentId?: string;
-  status: string;
-  createdAt: JavaAgentDate;
-  updatedAt: JavaAgentDate;
-  activeTurn?: JavaAgentTurn;
-  environment?: JavaAgentEnvironment;
-  lastSequence: number;
-}
+export type JavaAgentSession = Omit<
+  Schemas['WebShellSession'],
+  'environment'
+> & {
+  environment?: JavaAgentEnvironment | null;
+};
 
-export interface JavaAgentEvent {
-  sequence: number;
-  eventId: string;
-  sessionId: string;
-  turnId: string;
-  itemId?: string;
-  type: string;
-  createdAt: JavaAgentDate;
-  data?: Record<string, unknown>;
-  terminal: boolean;
-}
+export type JavaAgentWorkspace = Schemas['WebShellWorkspace'];
 
-export interface JavaAgentContentPart {
-  partId: string;
-  type: 'input_text' | 'output_text' | 'reasoning' | string;
-  text: string;
-  firstSequence: number;
-  lastSequence: number;
-}
+export type JavaAgentWorkspacePage = Schemas['WebShellWorkspacePage'];
 
-export interface JavaAgentItem {
-  itemId: string;
-  sessionId: string;
-  turnId: string;
-  type: 'message' | 'tool_call' | string;
-  role?: string;
-  status: string;
-  content: JavaAgentContentPart[];
-  attributes: Record<string, unknown>;
-  firstSequence: number;
-  lastSequence: number;
-  createdAt: JavaAgentDate;
-  updatedAt: JavaAgentDate;
-}
+export type JavaAgentSessionPage = Omit<
+  Schemas['WebShellSessionPage'],
+  'data'
+> & {
+  data: JavaAgentSession[];
+};
 
-export interface JavaAgentCommandAdmission {
-  sessionId: string;
-  turnId?: string;
-  status: string;
-  replayed: boolean;
-}
+export type JavaAgentEvent = Schemas['WebShellEvent'];
 
-export interface JavaAgentCursorPage<T> {
-  data: T[];
-  nextCursor?: string;
-  hasMore: boolean;
-}
+export type JavaAgentContentPart = Schemas['WebShellContentPart'];
 
-export interface JavaAgentTranscript {
-  items?: JavaAgentItem[];
-  events: JavaAgentEvent[];
-  coveredSequence?: number;
-  olderCursor?: string;
-  hasMore: boolean;
-  lastSequence: number;
-}
+export type JavaAgentItem = Schemas['WebShellItem'];
+
+export type JavaAgentCommandAdmission = Schemas['WebShellAdmission'];
+
+export type JavaAgentTranscript = Schemas['WebShellTranscript'];
 
 export interface JavaManagedAgentClientOptions {
   baseUrl: string;
@@ -125,9 +80,9 @@ export class JavaManagedAgentClient {
   }
 
   listSessions(
-    request: { cursor?: string; limit?: number },
+    request: Schemas['WebShellListRequest'],
     signal?: AbortSignal,
-  ): Promise<JavaAgentCursorPage<JavaAgentSession>> {
+  ): Promise<JavaAgentSessionPage> {
     return this.post('/sessions/query', request, signal);
   }
 
@@ -135,55 +90,51 @@ export class JavaManagedAgentClient {
     return this.post<JavaAgentSession>('/sessions/get', { sessionId }, signal);
   }
 
+  listWorkspaces(
+    request: Schemas['WebShellWorkspaceQueryRequest'],
+    signal?: AbortSignal,
+  ): Promise<JavaAgentWorkspacePage> {
+    return this.post('/workspaces/query', request, signal);
+  }
+
+  getWorkspace(workspaceId: string, signal?: AbortSignal) {
+    return this.post<JavaAgentWorkspace>(
+      '/workspaces/get',
+      { workspaceId },
+      signal,
+    );
+  }
+
   getTranscript(
-    request: { sessionId: string; cursor?: string; limit?: number },
+    request: Schemas['WebShellTranscriptRequest'],
     signal?: AbortSignal,
   ): Promise<JavaAgentTranscript> {
     return this.post('/transcript/query', request, signal);
   }
 
   createSession(
-    request: {
-      requestId: string;
-      idempotencyKey: string;
-      agentId: string;
-      environmentId?: string;
-      title?: string;
-      input: Array<{ type: 'text'; text: string }>;
-      metadata?: Record<string, unknown>;
-    },
+    request: Schemas['WebShellCreateRequest'],
     signal?: AbortSignal,
   ): Promise<JavaAgentCommandAdmission> {
     return this.post('/sessions/create', request, signal);
   }
 
   submitTurn(
-    request: {
-      requestId: string;
-      idempotencyKey: string;
-      sessionId: string;
-      input: Array<{ type: 'text'; text: string }>;
-      metadata?: Record<string, unknown>;
-    },
+    request: Schemas['WebShellSubmitRequest'],
     signal?: AbortSignal,
   ): Promise<JavaAgentCommandAdmission> {
     return this.post('/turns/submit', request, signal);
   }
 
   cancelTurn(
-    request: {
-      requestId: string;
-      idempotencyKey: string;
-      sessionId: string;
-      turnId: string;
-    },
+    request: Schemas['WebShellCancelRequest'],
     signal?: AbortSignal,
   ): Promise<JavaAgentCommandAdmission> {
     return this.post('/turns/cancel', request, signal);
   }
 
   async *streamEvents(
-    request: { sessionId: string; afterSequence?: number; limit?: number },
+    request: Schemas['WebShellStreamRequest'],
     signal?: AbortSignal,
   ): AsyncGenerator<JavaAgentEvent> {
     const response = await this.request(

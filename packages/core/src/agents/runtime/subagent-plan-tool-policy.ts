@@ -140,10 +140,11 @@ export function toolConfigAllowsSkill(
   const names = toolConfig.tools.filter(
     (tool): tool is string => typeof tool === 'string',
   );
-  // A list holding only inline declarations does NOT inherit the registry:
-  // that is the explicit branch of `prepareTools()`, which declares no
-  // registry tool.
-  const inheritsRegistry = names.includes('*') || toolConfig.tools.length === 0;
+  // Only a wildcard inherits the registry, exactly as `prepareTools()` does.
+  // Neither an explicit empty list (the documented deny-all contract) nor a
+  // list holding only inline declarations inherits: both take the explicit
+  // branch there, which declares no registry tool.
+  const inheritsRegistry = names.includes('*');
   return inheritsRegistry || names.includes(ToolNames.SKILL);
 }
 
