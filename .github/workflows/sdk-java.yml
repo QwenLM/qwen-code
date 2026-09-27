@@ -302,6 +302,7 @@ jobs:
         run: >-
           mvn --batch-mode --no-transfer-progress -f packages/sdk-java/managed-agent-server/pom.xml
           -Phosted-harness-mysql
+          -Dnode.executable="$(command -v node)"
           -Dqwen.cli.entry="${GITHUB_WORKSPACE}/dist/cli.js"
           -Dmysql.url="jdbc:mysql://127.0.0.1:${MYSQL_PORT}/hosted_harness_test?allowPublicKeyRetrieval=true&useSSL=false"
           -Dmysql.user=root -Dmysql.password=hosted-fixture verify checkstyle:check
