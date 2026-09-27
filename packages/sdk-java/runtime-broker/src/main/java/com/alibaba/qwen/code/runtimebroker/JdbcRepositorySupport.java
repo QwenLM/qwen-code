@@ -31,6 +31,13 @@ final class JdbcRepositorySupport {
 
     static String requestKey(RuntimeProvisionRequest request) {
         RuntimeScope scope = request.getScope();
+        if (request.isManagedContext()) {
+            return digest("managed-context/1", scope.getTenantId(),
+                    scope.getWorkspaceId(), scope.getWorkspaceGeneration(),
+                    scope.getCanonicalCwd(), scope.getCapabilityDigest(),
+                    scope.getIsolationClass(), request.getIsolationKey(),
+                    request.getProvisionerKind(), request.getStorageId());
+        }
         return digest(scope.getTenantId(), scope.getWorkspaceId(),
                 scope.getWorkspaceGeneration(), scope.getCanonicalCwd(),
                 scope.getCapabilityDigest(), scope.getIsolationClass(),

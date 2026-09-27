@@ -87,12 +87,28 @@ export async function startModelServer() {
 
 let runCounter = 0;
 
+// Where a run's model credentials come from: exported in the shell, in the
+// settings file's `env` block (where `/auth` stores them), or in
+// `~/.qwen/.env` (where the docs recommend them). The two file sources
+// exercise the env-file relaunch rule.
+export const CREDENTIAL_SOURCES = ['shell', 'settings', 'dotenv'];
+
 /**
  * A fresh HOME, XDG and runtime directories, an empty git workspace, and a
  * settings file that selects OpenAI auth. The environment is reduced to what
  * a user's terminal would pass.
  */
-export function makeRunEnvironment({ root, modelServer, tmpDir }) {
+export function makeRunEnvironment({
+  root,
+  modelServer,
+  tmpDir,
+  credentials = 'shell',
+}) {
+  if (!CREDENTIAL_SOURCES.includes(credentials)) {
+    throw new Error(
+      `credentials must be one of ${CREDENTIAL_SOURCES.join(', ')}: ${credentials}`,
+    );
+  }
   const runId = `run-${process.pid}-${++runCounter}`;
   const dir = path.join(root, runId);
   const home = path.join(dir, 'home');
@@ -105,13 +121,26 @@ export function makeRunEnvironment({ root, modelServer, tmpDir }) {
   ]) {
     fs.mkdirSync(d, { recursive: true });
   }
+  const modelEnv = {
+    OPENAI_API_KEY: 'bench-key',
+    OPENAI_BASE_URL: modelServer.baseUrl(runId),
+  };
   fs.writeFileSync(
     path.join(home, '.qwen', 'settings.json'),
     JSON.stringify({
       security: { auth: { selectedType: 'openai' } },
       model: { name: 'bench-model' },
+      ...(credentials === 'settings' ? { env: modelEnv } : {}),
     }),
   );
+  if (credentials === 'dotenv') {
+    fs.writeFileSync(
+      path.join(home, '.qwen', '.env'),
+      Object.entries(modelEnv)
+        .map(([key, value]) => `${key}=${value}\n`)
+        .join(''),
+    );
+  }
   execFileSync('git', ['init', '-q', cwd], {
     env: { PATH: process.env.PATH, HOME: home },
   });
@@ -133,8 +162,7 @@ export function makeRunEnvironment({ root, modelServer, tmpDir }) {
       XDG_DATA_HOME: path.join(dir, 'xdg', 'data'),
       XDG_STATE_HOME: path.join(dir, 'xdg', 'state'),
       TMPDIR: tmp,
-      OPENAI_API_KEY: 'bench-key',
-      OPENAI_BASE_URL: modelServer.baseUrl(runId),
+      ...(credentials === 'shell' ? modelEnv : {}),
       NO_PROXY: '127.0.0.1,localhost',
     },
   };

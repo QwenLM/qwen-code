@@ -34,7 +34,7 @@
 
 ### 3.2 干净环境
 
-每次启动都会得到新的 `HOME`、`QWEN_HOME`、`QWEN_RUNTIME_DIR`、`XDG_*` 目录和工作区，工作区是一个空的 git 仓库。设置文件选择 OpenAI 认证并指向本地回环 stub，环境变量只保留终端会传递的那些：`PATH`、`LANG`、`TERM`，以及 stub 的密钥与地址。CLI 通过真实的 bin 入口 `cli-entry.js` 启动，运行在 120×40 的 node-pty 终端中，屏幕由 `@xterm/headless` 重建。
+每次启动都会得到新的 `HOME`、`QWEN_HOME`、`QWEN_RUNTIME_DIR`、`XDG_*` 目录和工作区，工作区是一个空的 git 仓库。设置文件选择 OpenAI 认证并指向本地回环 stub，环境变量只保留终端会传递的那些：`PATH`、`LANG`、`TERM`，以及 stub 的密钥与地址。`--credentials settings` 或 `--credentials dotenv` 会把密钥与地址从 shell 移到设置文件的 `env` 块（`/auth` 存放它们的位置）或 `~/.qwen/.env`（文档推荐的位置），以便度量 env 文件触发的重启规则。CLI 通过真实的 bin 入口 `cli-entry.js` 启动，运行在 120×40 的 node-pty 终端中，屏幕由 `@xterm/headless` 重建。
 
 ### 3.3 指标
 

@@ -214,6 +214,7 @@ import { sendNotification } from '../services/notificationService.js';
 import { type UpdateObject } from './utils/updateCheck.js';
 import { setUpdateHandler } from './handleAutoUpdate.js';
 import { registerCleanup, runExitCleanup } from '../utils/cleanup.js';
+import { exitCleanly } from '../utils/processUtils.js';
 import {
   useMessageQueue,
   type QueuedUserSubmission,
@@ -2099,7 +2100,7 @@ export const AppContainer = (props: AppContainerProps) => {
         config.getLlmClient()?.requestShutdown();
         setTimeout(async () => {
           await runExitCleanup();
-          process.exit(0);
+          await exitCleanly(0);
         }, 100);
       },
       setDebugMessage,
@@ -4101,6 +4102,12 @@ export const AppContainer = (props: AppContainerProps) => {
     streamingState,
     updateInfo,
     agentViewState.activeView,
+    // The agent tab footer grows with its own status row / queued messages /
+    // input text, none of which the deps above track; AgentComposer syncs
+    // this key to AgentViewContext whenever they change so the footer is
+    // re-measured and the transcript viewport does not stay stale-high
+    // (#9507). Mirrors the LiveAgentPanel layout key (#5798).
+    agentViewState.agentComposerLayoutKey,
     embeddedShellFocused,
     messageQueue.length,
     isInputActive,

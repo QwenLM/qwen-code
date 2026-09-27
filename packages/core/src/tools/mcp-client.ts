@@ -6,6 +6,7 @@
 
 import {
   Client,
+  SdkHttpError,
   SSEClientTransport,
   StreamableHTTPClientTransport,
   type GetPromptResult,
@@ -129,7 +130,7 @@ function bindInvocationContextPolicy(
   }
 }
 
-const STREAMABLE_HTTP_GET_SSE_FALLBACK_STATUSES = new Set([400, 404]);
+const STREAMABLE_HTTP_GET_SSE_FALLBACK_STATUSES = new Set([400, 404, 422, 501]);
 const STREAMABLE_HTTP_GET_SSE_ERROR_BODY_LIMIT = 512;
 // The MCP undici dispatcher runs with headersTimeout: 0, bodyTimeout: 0
 // (see getOrCreateMcpDispatcher in runtimeFetchOptions.ts), and every caller
@@ -276,12 +277,13 @@ function isStreamableHttpGetSseRequest(init?: RequestInit): boolean {
  * Wraps fetch to preserve OAuth challenges before the SDK discards response
  * metadata and to normalize conventional "GET not supported" rejections of
  * the optional Streamable HTTP GET SSE request to the SDK's unsupported
- * sentinel: Spring AI rejects it with 400 (#4521), and servers with no GET
- * route at all — e.g. the official SDK's stateless
+ * sentinel: Spring AI rejects it with 400 (#4521), servers with no GET route
+ * at all — e.g. the official SDK's stateless
  * `StreamableHTTPServerTransport` behind Express, whose default fallthrough
- * answers 404 — reject it with 404 (#8784). A raw 405 needs no rewriting
- * (the SDK tolerates it natively) and 401 must stay untouched (the OAuth
- * challenge detection above depends on observing it).
+ * answers 404 — reject it with 404 (#8784). Some gateways map unsupported
+ * optional GET requests to 422 or 501; these are normalized too. A raw 405
+ * needs no rewriting (the SDK tolerates it natively) and 401 must stay
+ * untouched (the OAuth challenge detection above depends on observing it).
  *
  * SDK coupling: `StreamableHTTPClientTransport._startOrAuthSse()` treats a
  * 405 response as "GET SSE unsupported" and continues in POST-only mode.
@@ -566,30 +568,22 @@ export class McpClient {
       this.transport = await this.createTransport();
 
       this.client.onerror = (error) => {
-        if (this.isDisconnecting) {
-          return;
-        }
-        // A JSON-RPC -32601 (Method not found) is the server explicitly
-        // saying "I do not implement this method family". For legacy-era
-        // tools-only servers this surfaces as an HTTP 400 carrying a
-        // JSON-RPC error body; the transport's outer `catch` wraps it in
-        // an SdkHttpError before onerror fires. The discovery layer
-        // already swallows -32601 via `isMethodNotFound` (`listMcpPrompts`
-        // / `listMcpResources` return []), but by that time the status
-        // registry is already poisoned and `/mcp` shows the server red.
-        // Mirror the discovery-layer tolerance here so a missing
-        // prompts/resources capability does not flip status to
-        // DISCONNECTED. Use the stricter `isJsonRpcMethodNotFound` (parse
-        // the JSON-RPC error body for the numeric -32601 code) rather
-        // than the loose `isMethodNotFound` substring match — onerror
-        // has no request context, so the substring fallback could
-        // mis-trigger on unrelated "Method not found" text. Transport-
-        // level errors (ECONNREFUSED, proxy 502, etc.) still fall
-        // through to DISCONNECTED.
-        if (isJsonRpcMethodNotFound(error)) {
+        // Legacy Streamable HTTP can wrap a JSON-RPC -32601 response in a
+        // transport error. Discovery treats that response as an absent
+        // optional method, so it must not poison the healthy connection.
+        // The gate is deliberately `isBenignMcpMethodNotFound`, not a bare
+        // numeric -32601 check: onerror has no request context, so only a
+        // transport-owned HTTP status plus a valid JSON-RPC body may keep a
+        // session alive. Anything peer-controlled — a 401 or 403 body, a
+        // numeric `code` on a plain Error, a statusless SSE wrapper — must
+        // still retire the connection.
+        if (isBenignMcpMethodNotFound(error)) {
           debugLogger.debug(
             `MCP method-not-found (${this.serverName}): ${getErrorMessage(error)}`,
           );
+          return;
+        }
+        if (this.isDisconnecting) {
           return;
         }
         // capture the upstream error
@@ -1497,11 +1491,10 @@ export async function connectAndDiscover(
     );
 
     mcpClient.onerror = (error) => {
-      // Same -32601 tolerance as the connect() handler (R2-1): a legacy-
-      // era tools-only server answering method-not-found must not poison
-      // the registry here either — the discovery calls below swallow it
-      // and a successful discovery rewrites CONNECTED anyway.
-      if (isJsonRpcMethodNotFound(error)) {
+      // Match the pooled client path above: a legacy transport may surface an
+      // optional method's JSON-RPC -32601 as an error callback, even though
+      // discovery correctly treats it as "method not found".
+      if (isBenignMcpMethodNotFound(error)) {
         debugLogger.debug(
           `MCP method-not-found (${mcpServerName}): ${getErrorMessage(error)}`,
         );
@@ -1765,27 +1758,90 @@ async function discoverToolsWithMetadata(
  * message fallback (for transports that drop the code) keeps the original
  * case-sensitive exact substring `'Method not found'` — deliberately NOT a
  * broad `/method not found/i`, which would also swallow unrelated errors
- * like "Error in method not found handler: ...".
+ * like "Error in method not found handler: ...". Transport wrappers use the
+ * stricter JSON-RPC body/status predicate below; a wrapper that fails that
+ * gate is not treated as a method-not-found message.
  */
 function isMethodNotFound(error: unknown): boolean {
+  // Use the same JSON-RPC body predicate as the status callback. This keeps
+  // transport-wrapped -32601 responses quiet even when their message wording
+  // is not the literal "Method not found".
+  if (isBenignMcpMethodNotFound(error)) return true;
+  // A recognized transport error that fails the body/status gate must not
+  // fall through to the message substring, which could hide a 401 or 503.
+  // This ordering is load-bearing: it must precede both fallbacks below.
+  if (isLegacyMcpTransportError(error)) return false;
+  // Direct protocol errors reach discovery as request rejections rather than
+  // transport callbacks, so retain the numeric JSON-RPC fallback for them.
   if (getJsonRpcErrorCode(error) === -32601) return true;
   return error instanceof Error && error.message.includes('Method not found');
 }
 
+const LEGACY_MCP_SSE_ERROR_PATTERN =
+  /^Error POSTing to endpoint(?: \(HTTP (\d{3})\))?:\s*([\s\S]*)$/u;
+
+function isLegacyMcpTransportError(error: unknown): boolean {
+  return (
+    error instanceof SdkHttpError ||
+    (error instanceof Error && LEGACY_MCP_SSE_ERROR_PATTERN.test(error.message))
+  );
+}
+
+const LEGACY_MCP_METHOD_NOT_FOUND_STATUSES = new Set([400, 404, 405, 422, 501]);
+
 /**
- * -32601 detector for `client.onerror`, which has no request context and
- * therefore cannot accept the loose `'Method not found'` substring
- * fallback that `isMethodNotFound` uses — the phrase alone must never
- * gate a session-liveness decision. Accepts only the numeric
- * `-32601` code, wherever the transport surfaces it: structured
- * `error.code`, or the JSON-RPC body embedded in `data.text` /
- * `message` (legacy-era HTTP wraps the body before `onerror` fires),
- * read via `JSON.parse` rather than a text scan.
- * Worded however the server phrases the message — a spec-legal
- * `-32601` with "Unknown method" still counts.
+ * Legacy HTTP transports may surface JSON-RPC method-not-found as a structured
+ * HTTP error or as a plain error message containing `(HTTP nnn): {body}`.
+ * Only allow HTTP 400, 404, 405, 422, or 501 with a valid JSON-RPC body;
+ * 401, 403, missing/other statuses, and unrelated transport errors must still
+ * retire the connection.
  */
-function isJsonRpcMethodNotFound(error: unknown): boolean {
-  return getJsonRpcErrorCode(error) === -32601;
+function isBenignMcpMethodNotFound(error: unknown): boolean {
+  if (!isLegacyMcpTransportError(error)) return false;
+
+  const sdkHttpError = error instanceof SdkHttpError ? error : undefined;
+  const legacySseResponse =
+    error instanceof Error
+      ? error.message.match(LEGACY_MCP_SSE_ERROR_PATTERN)
+      : undefined;
+  const embeddedStatus = legacySseResponse?.[1];
+  const sdkHttpStatus = sdkHttpError?.data?.['status'];
+  const sdkHttpResponseText = sdkHttpError?.data?.['text'];
+  const responseText =
+    typeof sdkHttpResponseText === 'string'
+      ? sdkHttpResponseText
+      : legacySseResponse?.[2];
+  // Prefer transport-owned structured status. Older SSE transports expose
+  // only a plain SDK-generated `Error POSTing ... (HTTP nnn): <body>` message;
+  // parse status only from that prefix, never from the peer-controlled body.
+  const status =
+    typeof sdkHttpStatus === 'number'
+      ? sdkHttpStatus
+      : embeddedStatus === undefined
+        ? undefined
+        : Number(embeddedStatus);
+  // Legacy servers and gateways use more than HTTP 400 for this JSON-RPC
+  // response. Keep the accepted mappings explicit so authentication errors
+  // and unrelated server failures still retire the connection.
+  if (
+    status === undefined ||
+    !LEGACY_MCP_METHOD_NOT_FOUND_STATUSES.has(status)
+  ) {
+    return false;
+  }
+  if (responseText === undefined) return false;
+
+  const jsonStart = responseText.indexOf('{');
+  if (jsonStart === -1) return false;
+  try {
+    const payload = JSON.parse(responseText.slice(jsonStart)) as {
+      jsonrpc?: unknown;
+      error?: { code?: unknown };
+    };
+    return payload.jsonrpc === '2.0' && payload.error?.code === -32601;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -1821,8 +1877,9 @@ function canUseModernTypedHelper(
  * helper returns `[]` without a request in that case. Modern sessions
  * therefore use the helper only when the capability is declared;
  * otherwise we issue the same raw `prompts/list` request as the legacy
- * path. A server that truly lacks prompts answers `-32601 Method not
- * found`, which the catch below swallows silently.
+ * path. A server that truly lacks prompts answers with JSON-RPC error code
+ * `-32601`, which the catch below swallows silently; legacy HTTP wrappers are
+ * accepted only when their status and response body pass the transport gate.
  */
 export async function listMcpPrompts(
   mcpServerName: string,

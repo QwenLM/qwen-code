@@ -48,6 +48,10 @@ Every launch gets a new `HOME`, `QWEN_HOME`, `QWEN_RUNTIME_DIR`, `XDG_*`
 directories and workspace, which is an empty git repository. The settings file
 selects OpenAI auth against the loopback stub, and the environment is reduced
 to what a terminal passes: `PATH`, `LANG`, `TERM` and the stub's key and URL.
+`--credentials settings` or `--credentials dotenv` moves that key and URL out
+of the shell into the settings file's `env` block, where `/auth` stores them,
+or into `~/.qwen/.env`, where the docs recommend them, so the env-file
+relaunch rule can be measured.
 The CLI starts through the real bin entry, `cli-entry.js`, in a node-pty
 terminal of 120×40 whose screen `@xterm/headless` reconstructs.
 
