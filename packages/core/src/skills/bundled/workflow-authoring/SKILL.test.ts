@@ -269,6 +269,9 @@ describe('bundled workflow-authoring skill', () => {
     ['Math.floor(budget.total / 100_000)'],
     // Saving is a different skill.
     ['`workflow-creator` skill'],
+    ["interactive TUI's ink renderer"],
+    ['OpenTUI renderer does not yet run client-scheduled tools'],
+    ["Workflow({ name: '<name>' })"],
   ])('states the script contract: %s', (anchor) => {
     expect(skillProse()).toContain(anchor);
   });
