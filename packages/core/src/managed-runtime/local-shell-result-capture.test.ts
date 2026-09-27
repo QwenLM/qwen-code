@@ -101,8 +101,12 @@ describe('foreground Shell local result capture', () => {
       for (let index = 0; index < count; index++) expected.update(unit);
       const initialBuffers = process.memoryUsage().arrayBuffers;
       let peakBuffers = initialBuffers;
+      const initialRss = process.memoryUsage().rss;
+      let peakRss = initialRss;
       const sample = setInterval(() => {
-        peakBuffers = Math.max(peakBuffers, process.memoryUsage().arrayBuffers);
+        const usage = process.memoryUsage();
+        peakBuffers = Math.max(peakBuffers, usage.arrayBuffers);
+        peakRss = Math.max(peakRss, usage.rss);
       }, 25);
       const source = `
         const { once } = require('node:events');
@@ -159,6 +163,7 @@ describe('foreground Shell local result capture', () => {
       expect(stderr.byteLength).toBe(5);
       expect(peakInFlight).toBeLessThanOrEqual(2);
       expect(peakBuffers - initialBuffers).toBeLessThan(80 * 1024 * 1024);
+      expect(peakRss - initialRss).toBeLessThan(256 * 1024 * 1024);
       expect(
         await store.readRange({
           manifestRef: manifestRef!,
