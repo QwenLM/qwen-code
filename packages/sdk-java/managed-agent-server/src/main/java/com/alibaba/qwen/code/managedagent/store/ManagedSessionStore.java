@@ -96,6 +96,22 @@ public class ManagedSessionStore {
         this.jdbc = jdbc;
     }
 
+    record PublicationWriter(long now, long leaseUntil, long journalRevision,
+            long committedSequence, long activationEpoch, String checkpointId, String recoveryStatus) {
+    }
+
+    PublicationWriter lockPublicationWriter(String tenant, String workspace,
+            String session, String writer, long generation, String token) {
+        validateScope(tenant, workspace, session);
+        HeadRow head = requireHeadForUpdate(tenant, session);
+        requireHeadScope(head, tenant, workspace, session);
+        Timestamp now = databaseNow();
+        requireWriter(head, writer, generation, token, now, true);
+        return new PublicationWriter(now.getTime(), head.writerLeaseUntil().getTime(),
+                head.journalRevision(), head.committedSequence(), head.activationEpoch(),
+                head.latestCheckpointResourceId(), head.recoveryStatus());
+    }
+
     @Transactional
     public WriterGrant acquireWriter(String tenantId, String sessionId,
             String writerToken, AcquireWriterRequest request) {

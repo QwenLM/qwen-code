@@ -75,7 +75,7 @@ A manifest is a Session resource of kind `managed-tool-result-manifest` and sche
 | `sessionId`         | id: the Managed Session, not the Runtime Session                                                         |
 | `turnId`            | id                                                                                                       |
 | `executionCallId`   | id: the `tool.intent` identity that the Session receipt will name                                        |
-| `callId`            | id: the model's call ID                                                                                  |
+| `callId`            | id: original Runtime `reference.callId`; model pairing is separate                                       |
 | `invocationDigest`  | id: the `argsDigest` of the original reference, exactly as the Runtime received it                       |
 | `bindingGeneration` | generation: the Runtime binding generation that ran the call                                             |
 | `captureId`         | token: one per execution capture; segments are keyed under it                                            |

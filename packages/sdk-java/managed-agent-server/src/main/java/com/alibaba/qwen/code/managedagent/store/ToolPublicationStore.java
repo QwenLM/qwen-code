@@ -1,0 +1,318 @@
+package com.alibaba.qwen.code.managedagent.store;
+
+import static com.alibaba.qwen.code.managedagent.store.ToolPublicationContract.require;
+import static com.alibaba.qwen.code.managedagent.store.ToolPublicationContract.text;
+
+import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
+import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.util.Base64;
+import java.util.List;
+import java.util.Objects;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
+
+/** Internal O2a reservations. No upload or production route is enabled here. */
+public final class ToolPublicationStore {
+    public record Capacity(long executionBytes, long sessionBytes, long tenantBytes,
+            long activeCaptures) {
+        public Capacity {
+            require(executionBytes > 0 && executionBytes <= ToolPublicationContract.MAX_CAPTURE_BYTES,
+                    "Invalid execution capacity");
+            for (long value : new long[] {sessionBytes, tenantBytes, activeCaptures}) {
+                require(value > 0 && value <= ToolPublicationContract.MAX_COUNT,
+                        "Invalid publication capacity");
+            }
+        }
+    }
+
+    private static final ObjectMapper JSON = new ObjectMapper();
+    private final JdbcTemplate jdbc;
+    private final TransactionTemplate transactions;
+    private final ManagedSessionStore sessions;
+    private final ToolExecutionRepository executions;
+    private final RuntimeBindingRepository bindings;
+    private final Capacity capacity;
+
+    public ToolPublicationStore(JdbcTemplate jdbc, PlatformTransactionManager manager,
+            ManagedSessionStore sessions, ToolExecutionRepository executions,
+            RuntimeBindingRepository bindings, Capacity capacity) {
+        this.jdbc = Objects.requireNonNull(jdbc);
+        this.transactions = new TransactionTemplate(manager);
+        this.sessions = Objects.requireNonNull(sessions);
+        this.executions = Objects.requireNonNull(executions);
+        this.bindings = Objects.requireNonNull(bindings);
+        this.capacity = Objects.requireNonNull(capacity);
+    }
+
+    public JsonNode apply(JsonNode input, String writerToken, String publicationToken) {
+        JsonNode request = ToolPublicationContract.parse("request", input);
+        String operation = text(request, "operation");
+        String hash = ("reserve".equals(operation) || "renew".equals(operation))
+                ? ToolPublicationContract.tokenHash(publicationToken) : null;
+        return transactions.execute(status -> applyLocked(request, writerToken, hash));
+    }
+
+    private JsonNode applyLocked(JsonNode request, String writerToken, String tokenHash) {
+        JsonNode key = request.get("sessionKey");
+        String tenant = text(key, "tenantId");
+        String workspace = text(key, "workspaceId");
+        String session = text(key, "sessionId");
+        String tenantKey = hash(tenant);
+        String scope = hash(JSON.createArrayNode().add(tenant).add(workspace).add(session).toString());
+        // Every mutation uses this order, including no-start capacity release.
+        jdbc.update("INSERT INTO qwen_tool_publication_tenant (tenant_key, tenant_id) VALUES (?, ?)"
+                + " ON DUPLICATE KEY UPDATE tenant_key = tenant_key", tenantKey, tenant);
+        String savedTenant = jdbc.queryForObject("SELECT tenant_id FROM qwen_tool_publication_tenant"
+                + " WHERE tenant_key = ? FOR UPDATE", String.class, tenantKey);
+        require(tenant.equals(savedTenant), "Tenant key conflicts");
+        JsonNode owner = request.get("owner");
+        var writer = sessions.lockPublicationWriter(tenant, workspace, session,
+                text(owner, "writerId"), owner.get("writerGeneration").longValue(), writerToken);
+        String operation = text(request, "operation");
+        JsonNode candidate = request.get("binding");
+        String id = candidate == null ? text(request, "publicationId") : text(candidate, "publicationId");
+        List<Row> rows = jdbc.query("SELECT * FROM qwen_tool_publication"
+                        + " WHERE scope_key = ? AND publication_id = ? FOR UPDATE",
+                (r, index) -> new Row(r.getString("tenant_id"), r.getString("workspace_id"),
+                        r.getString("session_id"), r.getString("binding_json"),
+                        r.getString("binding_digest"), r.getString("token_hash"),
+                        r.getString("state"), r.getObject("expires_at", Long.class),
+                        r.getLong("capture_bytes")), scope, id);
+        Row row = rows.isEmpty() ? null : rows.get(0);
+        if (row != null) {
+            require(tenant.equals(row.tenant()) && workspace.equals(row.workspace())
+                    && session.equals(row.session()), "Publication scope conflicts");
+        }
+        if ("reserve".equals(operation)) {
+            long bytes = request.get("captureBytes").longValue();
+            String digest = ToolPublicationContract.bindingDigest(candidate);
+            if (row != null) {
+                require(digest.equals(row.digest()) && bytes == row.captureBytes()
+                        && equalHash(tokenHash, row.tokenHash()), "Reservation replay conflicts");
+                require("OPEN".equals(row.state()), "Reservation is fenced");
+                requireEvidence(candidate, writerToken, writer, false);
+                require(row.expiresAt() > writer.now(), "Reservation expired; renew explicitly");
+                return grant(id, row);
+            }
+            long expires = requireEvidence(candidate, writerToken, writer, true);
+            require(bytes <= capacity.executionBytes(), "Execution capture capacity exceeded");
+            long allocation = bytes + ToolPublicationContract.PRODUCER_BYTES
+                    + ToolPublicationContract.ADMISSION_BYTES;
+            var totals = jdbc.queryForMap("SELECT COALESCE(SUM(capture_bytes + producer_bytes"
+                    + " + admission_bytes), 0) AS reserved, COUNT(*) AS captures"
+                    + " FROM qwen_tool_publication WHERE tenant_key = ? AND state <> 'NOT_STARTED'", tenantKey);
+            long reserved = ((Number) totals.get("reserved")).longValue();
+            long count = ((Number) totals.get("captures")).longValue();
+            Long sessionReserved = jdbc.queryForObject("SELECT COALESCE(SUM(capture_bytes + producer_bytes"
+                    + " + admission_bytes), 0) FROM qwen_tool_publication"
+                    + " WHERE scope_key = ? AND state <> 'NOT_STARTED'", Long.class, scope);
+            require(reserved <= capacity.tenantBytes() - allocation
+                    && sessionReserved <= capacity.sessionBytes() - allocation
+                    && count < capacity.activeCaptures(), "Publication capacity exhausted");
+            jdbc.update("INSERT INTO qwen_tool_publication (scope_key, tenant_key, tenant_id, workspace_id,"
+                            + " session_id, publication_id, execution_key, capture_id, binding_json, binding_digest,"
+                            + " token_hash, state, expires_at, capture_bytes, producer_bytes, admission_bytes)"
+                            + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?, ?)",
+                    scope, tenantKey, tenant, workspace, session, id, hash(text(candidate, "executionCallId")),
+                    text(candidate, "captureId"), candidate.toString(), digest, tokenHash, expires, bytes,
+                    ToolPublicationContract.PRODUCER_BYTES, ToolPublicationContract.ADMISSION_BYTES);
+            return grant(id, new Row(tenant, workspace, session, candidate.toString(), digest, tokenHash,
+                    "OPEN", expires, bytes));
+        }
+        require(row != null, "Publication does not exist");
+        JsonNode binding = ToolPublicationContract.parseBytes("binding", row.binding().getBytes(StandardCharsets.UTF_8));
+        require(ToolPublicationContract.bindingDigest(binding).equals(row.digest()), "Stored binding is corrupt");
+        if ("renew".equals(operation)) {
+            require("OPEN".equals(row.state()) && equalHash(tokenHash, row.tokenHash()), "Publication is fenced");
+            require(text(owner, "writerId").equals(text(binding, "writerId"))
+                    && owner.get("writerGeneration").longValue() == binding.get("writerGeneration").longValue(),
+                    "Original writer is fenced");
+            long expires = requireEvidence(binding, writerToken, writer, false);
+            jdbc.update("UPDATE qwen_tool_publication SET expires_at = ? WHERE scope_key = ? AND publication_id = ?",
+                    expires, scope, id);
+            return grant(id, row.withState("OPEN", expires));
+        }
+        String state = "FENCED";
+        if ("close_not_started".equals(operation)) {
+            ToolExecutionRecord execution = requireExecution(binding, false);
+            require(execution.isSettled() && ("not_started".equals(execution.getExecutionStatus())
+                    || "cancelled".equals(execution.getExecutionStatus()) && execution.getDispatchGeneration() == 0),
+                    "Execution has no authoritative not-started proof");
+            state = "NOT_STARTED";
+        } else if ("NOT_STARTED".equals(row.state())) {
+            state = row.state();
+        }
+        jdbc.update("UPDATE qwen_tool_publication SET state = ?, expires_at = NULL"
+                + " WHERE scope_key = ? AND publication_id = ?", state, scope, id);
+        return grant(id, row.withState(state, null));
+    }
+
+    private long requireEvidence(JsonNode b, String writerToken, ManagedSessionStore.PublicationWriter writer,
+            boolean preparing) {
+        JsonNode key = b.get("sessionKey");
+        require("READY".equals(writer.recoveryStatus()), "Session recovery is blocked");
+        require(writer.activationEpoch() == b.get("activationEpoch").longValue()
+                && writer.checkpointId() != null, "Checkpoint or activation changed");
+        JsonNode activation = null;
+        JsonNode intent = null;
+        long intentSequence = b.get("intentSequence").longValue();
+        for (long revision = writer.journalRevision(); revision > 0 && (activation == null || intent == null); revision--) {
+            var page = sessions.transactions(text(key, "tenantId"), text(key, "workspaceId"), text(key, "sessionId"),
+                    writerToken, revision - 1, 1);
+            require(page.transactions().size() == 1 && page.transactions().get(0).journalRevision() == revision,
+                    "Committed journal evidence is missing");
+            byte[] bytes = Base64.getDecoder().decode(page.transactions().get(0).recordBytesBase64());
+            String records = new String(bytes, StandardCharsets.UTF_8);
+            String[] lines = records.split("\n");
+            for (int i = lines.length - 1; i >= 0; i--) {
+                JsonNode record = ToolPublicationContract.readJson(lines[i].getBytes(StandardCharsets.UTF_8));
+                if (!"managed_session_event_v1".equals(text(record, "subtype"))) {
+                    continue;
+                }
+                JsonNode event = record.path("managedSession");
+                require(event.path("sessionKey").equals(key) && event.path("v").asInt() == 1,
+                        "Journal event scope conflicts");
+                if (activation == null && "activation.changed".equals(text(event, "kind"))) {
+                    activation = event.path("payload");
+                }
+                if (event.path("sequence").asLong() == intentSequence) {
+                    require("tool.intent".equals(text(event, "kind")), "Intent sequence conflicts");
+                    require(page.transactions().get(0).writerGeneration() == b.get("writerGeneration").longValue(),
+                            "Original intent writer conflicts");
+                    intent = event;
+                }
+            }
+        }
+        require(activation != null && intent != null, "Committed publication evidence is missing");
+        require("active".equals(text(activation, "phase"))
+                && text(b, "activationId").equals(text(activation, "activationId"))
+                && b.get("activationEpoch").longValue() == activation.path("epoch").asLong()
+                && activation.path("expiresAt").asLong() > writer.now(), "Activation is not active");
+        JsonNode payload = intent.path("payload");
+        require(text(b, "executionCallId").equals(text(payload, "executionCallId"))
+                && b.get("argsRef").equals(payload.path("argsRef"))
+                && "runtime".equals(text(payload, "outcomeSource"))
+                && "activation".equals(text(intent.path("subject"), "type"))
+                && text(b, "activationId").equals(text(intent.path("subject"), "activationId"))
+                && b.get("activationEpoch").longValue() == intent.path("subject").path("epoch").asLong(),
+                "Original intent conflicts");
+        requireCheckpoint(b, readResource(b, b.get("checkpointRef"), writerToken), writer);
+        if (!writer.checkpointId().equals(text(b.get("checkpointRef"), "resourceId"))) {
+            var current = sessions.readResource(text(key, "tenantId"), text(key, "workspaceId"),
+                    text(key, "sessionId"), writer.checkpointId(), writerToken);
+            require("managed-checkpoint".equals(current.kind()) && current.schemaVersion() == 1
+                    && current.byteLength() <= ToolPublicationContract.MAX_BODY_BYTES, "Current checkpoint is invalid");
+            requireCheckpoint(b, ToolPublicationContract.readJson(current.bytes()), writer);
+        }
+        JsonNode args = readResource(b, b.get("argsRef"), writerToken);
+        require(text(key, "sessionId").equals(text(args, "harnessSessionId"))
+                && text(b.get("reference"), "sessionId").equals(text(args, "runtimeSessionId")),
+                "Argument resource scope conflicts");
+        ToolPublicationContract.requirePayload(b, text(args, "payloadJson"));
+        ToolExecutionRecord execution = requireExecution(b, true);
+        if (preparing) {
+            require(execution.getState() == ToolExecutionRecord.State.PREPARED && execution.getDispatchGeneration() == 0,
+                    "Publication must be reserved before dispatch");
+        }
+        return Math.min(writer.leaseUntil(), activation.path("expiresAt").asLong());
+    }
+
+    private static void requireCheckpoint(JsonNode b, JsonNode checkpoint, ManagedSessionStore.PublicationWriter writer) {
+        JsonNode key = b.get("sessionKey");
+        long intentSequence = b.get("intentSequence").longValue();
+        JsonNode identity = checkpoint.path("identity");
+        require(identity.path("sessionKey").equals(key)
+                && text(b, "turnId").equals(text(identity, "turnId"))
+                && text(b.get("reference"), "promptId").equals(text(identity, "promptId"))
+                && "managed".equals(text(identity, "engine")) && identity.path("schemaVersion").asInt() == 1
+                && text(b, "activationId").equals(text(identity, "activationId"))
+                && identity.path("coveredSequence").asLong() >= intentSequence
+                && identity.path("coveredSequence").asLong() <= writer.committedSequence()
+                && "await_runtime".equals(text(checkpoint.path("continuation"), "phase")),
+                "Checkpoint does not authorize dispatch");
+        JsonNode item = null;
+        for (JsonNode value : checkpoint.path("tools").path("items")) {
+            if (text(b, "executionCallId").equals(text(value, "executionCallId"))) {
+                require(item == null, "Duplicate checkpoint execution");
+                item = value;
+            }
+        }
+        require(item != null && "run_shell_command".equals(text(item, "toolName"))
+                && "in_progress".equals(text(item, "state"))
+                && "runtime".equals(text(item, "outcomeSource"))
+                && text(b, "modelCallId").equals(text(item, "functionCallId"))
+                && text(b, "requestDigest").equals("sha256:" + text(item, "inputDigest")),
+                "Checkpoint execution identity conflicts");
+    }
+
+    private JsonNode readResource(JsonNode b, JsonNode ref, String writerToken) {
+        JsonNode key = b.get("sessionKey");
+        var resource = sessions.readResource(text(key, "tenantId"), text(key, "workspaceId"),
+                text(key, "sessionId"), text(ref, "resourceId"), writerToken);
+        require(resource.kind().equals(text(ref, "kind")) && resource.schemaVersion() == ref.get("schemaVersion").intValue()
+                && resource.byteLength() == ref.get("byteLength").longValue()
+                && resource.digest().equals(text(ref, "digest")), "Publication resource reference conflicts");
+        return ToolPublicationContract.readJson(resource.bytes());
+    }
+
+    private ToolExecutionRecord requireExecution(JsonNode b, boolean live) {
+        ToolExecutionRecord execution = executions.findByExecutionCallId(text(b, "executionCallId"));
+        RuntimeBindingRecord runtime = bindings.findById(text(b, "runtimeBindingId"));
+        JsonNode key = b.get("sessionKey");
+        JsonNode ref = b.get("reference");
+        require(execution != null && runtime != null, "Original Broker records are missing");
+        var scope = runtime.getRequest().getScope();
+        require(scope.getTenantId().equals(text(key, "tenantId"))
+                && scope.getWorkspaceId().equals(text(key, "workspaceId"))
+                && runtime.getGeneration() == Long.parseLong(text(b, "bindingGeneration"))
+                && execution.getBindingId().equals(runtime.getBindingId())
+                && execution.getRuntimeGeneration() == runtime.getGeneration()
+                && execution.getHarnessSessionId().equals(text(key, "sessionId"))
+                && execution.getRuntimeSessionId().equals(text(ref, "sessionId"))
+                && execution.getTurnId().equals(text(ref, "promptId"))
+                && execution.getToolCallId().equals(text(ref, "callId"))
+                && execution.getRequestDigest().equals(text(b, "requestDigest")), "Broker execution identity conflicts");
+        if (live) {
+            require(runtime.getState() == RuntimeBindingRecord.State.READY && !runtime.isDrainRequested()
+                    && execution.getState() != ToolExecutionRecord.State.UNKNOWN && !execution.isSettled(),
+                    "Runtime cannot authorize publication");
+        }
+        return execution;
+    }
+
+    private static JsonNode grant(String id, Row row) {
+        ObjectNode grant = JSON.createObjectNode().put("publication", ToolPublicationContract.PROTOCOL)
+                .put("publicationId", id).put("bindingDigest", row.digest()).put("state", row.state())
+                .put("captureBytes", row.captureBytes()).put("producerBytes", ToolPublicationContract.PRODUCER_BYTES)
+                .put("admissionBytes", ToolPublicationContract.ADMISSION_BYTES);
+        if (row.expiresAt() == null) {
+            grant.putNull("expiresAt");
+        } else {
+            grant.put("expiresAt", row.expiresAt());
+        }
+        return ToolPublicationContract.parse("grant", grant);
+    }
+
+    private static String hash(String text) {
+        return ToolPublicationContract.sha256(text.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static boolean equalHash(String left, String right) {
+        return MessageDigest.isEqual(left.getBytes(StandardCharsets.US_ASCII), right.getBytes(StandardCharsets.US_ASCII));
+    }
+
+    private record Row(String tenant, String workspace, String session, String binding,
+            String digest, String tokenHash, String state, Long expiresAt, long captureBytes) {
+        Row withState(String next, Long expiry) {
+            return new Row(tenant, workspace, session, binding, digest, tokenHash, next, expiry, captureBytes);
+        }
+    }
+}

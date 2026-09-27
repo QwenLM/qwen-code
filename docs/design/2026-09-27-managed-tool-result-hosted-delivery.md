@@ -1,0 +1,253 @@
+# Managed Tool Result Hosted Delivery (O2)
+
+[English](2026-09-27-managed-tool-result-hosted-delivery.md) | [简体中文](2026-09-27-managed-tool-result-hosted-delivery.zh-CN.md)
+
+## 1. Status and recommendation
+
+O2 remains a staged design; its [O2a contract/ownership foundation](2026-09-27-managed-tool-publication-ownership.md) is implemented locally. O2b–O2d are not implemented. Research date: 2026-09-27. The code baseline is main `e0b8bea9e0ba369a0661bc51cbbb9a27555aff48`, including O1c #12821. The adjacent Hosted tool-turn work is reviewed separately at #12831, commit `25749df40093bcb4b971db8b3fbd2d8b21fffb7e`; it is not assumed to be merged or unchanged. Recheck that dependency before implementing its integration.
+
+Implement a private OSS-backed publication service inside the existing Java Managed Session Store, with its catalog in the same SQL database as the Session journal. Reuse O1a immutable segments, manifests and Tool v3, with the explicit call-ID semantic clarification in section 5. Reuse O1c capture and backpressure. Add durable publication ownership, verified reference closure, bounded capacity admission, and reconciliation with the original Session receipt.
+
+OSS is the proposed first backend, pending deployment confirmation. A shared persistent volume is a different durability profile: it may support process replacement but does not by itself prove that results survive losing the Runtime host. This document does not implement both backends. It also does not enable the public product gate or supply general orphan-worker adoption.
+
+## 2. Findings and dependencies
+
+| Source at the pinned baseline                                                                                                                                                                                                       | Observed behavior                                                                                                                                    | Consequence                                                                                              |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| [O1a](2026-09-26-managed-tool-result-contract.md), [O1b](2026-09-26-managed-tool-result-local-store.md), [O1c](2026-09-27-managed-tool-result-shell-capture.md)                                                                     | Separate execution, capture and delivery; immutable segment receipts; exact-version reads; local capture/receipt loop                                | Reuse their contract and regression suites; local survival does not establish hosted durability          |
+| [HTTP Session Store](https://github.com/QwenLM/qwen-code/blob/e0b8bea9e0ba369a0661bc51cbbb9a27555aff48/packages/core/src/managed-runtime/http-managed-session-store.ts#L162)                                                        | `publish()` stages bytes in memory; the limit is 64 KiB. `commitResources()` traverses staged checkpoints, not outcome → manifest → pages → segments | Returning a resource reference is not a remote publication receipt                                       |
+| [Java Session Store](https://github.com/QwenLM/qwen-code/blob/e0b8bea9e0ba369a0661bc51cbbb9a27555aff48/packages/sdk-java/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/store/ManagedSessionStore.java#L273) | Journal, listed resource references and writer fencing share a SQL transaction; resources currently use `MYSQL_INLINE` and `REFERENCED`              | Reuse that transaction for catalog attachment, without doing OSS I/O while holding the journal head lock |
+| [SQL catalog](https://github.com/QwenLM/qwen-code/blob/e0b8bea9e0ba369a0661bc51cbbb9a27555aff48/packages/sdk-java/managed-agent-server/src/main/resources/db/migration/V4__managed_session_store.sql#L55)                           | Object key/version/encryption columns exist, but no implemented OSS publication protocol or segment closure                                          | Add forward migrations; do not treat unused columns as a working backend                                 |
+| [Local Session admission](https://github.com/QwenLM/qwen-code/blob/e0b8bea9e0ba369a0661bc51cbbb9a27555aff48/packages/core/src/managed-runtime/local-shell-result-session.ts#L75)                                                    | Requires a local resource store and `SessionWriterLease`; prepared identities live in memory                                                         | A Hosted owner needs an explicit adapter and durable binding, not a cast to the local class              |
+| [Worker executor](https://github.com/QwenLM/qwen-code/blob/e0b8bea9e0ba369a0661bc51cbbb9a27555aff48/packages/cli/src/serve/managed-runtime-tool-executor.ts#L557)                                                                   | Calls the injected local `accept()` before reporting settled                                                                                         | Separate physical settlement from remote Session acceptance in the Hosted path                           |
+| [Hosted tool turns](https://github.com/QwenLM/qwen-code/blob/25749df40093bcb4b971db8b3fbd2d8b21fffb7e/docs/design/2026-09-27-hosted-workspace-tool-turn.md)                                                                         | Private Read/Write/Edit loop, deferred prepare/start, durable wait before effects; Shell remains closed                                              | Integrate with this loop; do not duplicate its dispatch, history or Workspace ownership                  |
+
+The existing Java transaction limits remain 64 KiB per inline resource, 1024 resource references, 8 MiB per transaction and 256 events. Valid O1a pages may be 256 KiB. O1c currently emits pages after 512 segments; the contract permits 1024. Saved outcomes can also exceed 64 KiB. Moving only raw stdout/stderr to OSS therefore leaves a metadata persistence gap.
+
+The broader [artifact design](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-tool-result-artifacts.md) supplies the hold/receipt boundary. This proposal specializes it to the current HTTP Session Store: the publication catalog and physical journal are colocated, although the TypeScript authority still decides whether a result is acceptable. A future split-database deployment would need another reconciliation design.
+
+## 3. Scope and invariants
+
+The first producer remains foreground Shell, `process_pipes`, `complete_required`, separate stdout/stderr and one final `revision=1`. This slice covers private upload, durable final outcome, Session admission, internal fixed-version reads, quotas/backpressure, and real replacement-host verification. O3 owns public preview grouping, download authorization and UI. PTY, background jobs, arbitrary attachments, automatic GC, cross-Session sharing, deduplication and general W0e recovery remain separate.
+
+The following invariants apply at every boundary:
+
+- Commit original intent and `await_runtime`, reserve capacity and bind publication before permitting Shell effects. Admission failure means zero effects.
+- A published ordinal never changes bytes. Retries return the original receipt and references. A supplied digest, HTTP success, object listing or Broker `SETTLED` does not prove Session acceptance.
+- A complete-required result can advance `results_ready` only after its exact original `tool.receipt` says `committed` and the full retained closure is verified.
+- Physical outcome, capture completeness and delivery decision remain independent. Persistence failure after effects cannot execute the command again or rewrite its exit result.
+- Retain published bytes and ownership metadata independently of worker/Harness memory. ACK never deletes Session-owned result data.
+- Unknown outcomes remain unknown. A finished byte stream alone cannot certify that a command succeeded, stopped or released its Workspace owner.
+
+## 4. Components, transport and ownership
+
+```mermaid
+sequenceDiagram
+    participant H as Hosted Session owner
+    participant J as Java Store and SQL catalog
+    participant B as Broker
+    participant R as Runtime worker
+    participant O as Private OSS
+    H->>B: Prepare original execution
+    H->>J: Commit intent and await_runtime
+    H->>J: Reserve publication and capacity
+    H->>B: Start with immutable publication binding
+    B->>R: Bind restricted grant, then Tool v3 execute
+    R->>J: Publish bounded segments and metadata
+    J->>O: Create immutable object; read back and verify
+    J-->>R: Original durable receipt
+    R->>J: Seal and finish original outcome
+    R-->>B: Settled, delivery pending
+    H->>J: Verify finished publication; commit tool.receipt
+    J->>J: Atomically attach retained closure and journal
+    H->>B: Send exact original ACK
+    B->>R: Tool v3 acknowledge
+    H->>J: Advance committed result checkpoint
+```
+
+The sequence starts with original execution preparation, then wait commit, grant binding, publication, durable outcome and receipt, followed by ACK and checkpoint advancement. Checkpoint advancement and ACK may be retried independently after receipt commit. Neither is allowed to precede that commit; model continuation reads the committed decision even if ACK delivery is unavailable.
+
+Use a worker-initiated private HTTPS upload channel to Java. This adds an explicit deployment requirement: workers can reach the configured publication ingress. The existing Broker still initiates execution/status/cancel/ACK toward workers. Upload URLs are deployment configuration, never tool arguments. If that egress or required capability is absent, refuse capture admission before execution; do not fall back to v2 or a local path with weaker durability.
+
+Do not send Session writer tokens, local leases or OSS credentials to workers. The Session owner reserves a publication using its existing authenticated Store connection. The owner generates a 256-bit random capture-scoped bearer token before reserving; Java stores only its hash and binds it to the full identity below. A lost reserve response retries the same token. See the [O2a implementation refinement](2026-09-27-managed-tool-publication-ownership.md). The Broker passes it over an authenticated, selected-Runtime control operation before v3 execute. The grant is not added to the closed Tool v3 body, boot JSON, durable invocation reference, logs or public events. The control operation uses existing worker bearer/lease authentication, accepts at most 64 KiB, and cannot itself execute a tool. Missing binding rejects execute before effects. O2a supplies the closed immutable binding/request/grant schema; the selected-Runtime grant-install operation and HTTP wiring are O2d work.
+
+The grant permits only this publication's segment/resource writes, seal, finish and status; no journal mutation, arbitrary resource read, object listing or caller-supplied object key. It expires no later than the current owner authorization. Renew it only while the same Session writer generation, activation and Runtime binding remain valid. Ingress and final catalog commits both recheck these fences. An upload that finishes after fencing may leave a retained candidate, but cannot return a successful publication receipt. Refreshing authorization never changes execution identity or reruns the call.
+
+| Proposed operation family                                                               | Ownership and authentication                                                           | Consumers                                           |
+| --------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- | --------------------------------------------------- |
+| Reserve/renew/fence publication; close a proven not-started call; read finished outcome | Live Session owner, full Session key, current Store writer authorization               | Hosted authority adapter and explicit recovery host |
+| Publish/seal/finish/status                                                              | One original capture and Runtime generation, restricted grant                          | Remote capture adapter                              |
+| Bind grant at worker                                                                    | Selected Runtime, existing bearer and lease identity; compare saved execution mapping  | Broker dispatch and worker executor                 |
+| Read exact manifest range                                                               | Persisted Session resource, authorized owner; compare expected full execution identity | Session validator and replacement-host tests        |
+| Attach publication to journal transaction                                               | Live Session owner plus frozen catalog root; SQL writer fencing                        | Existing HTTP Session transaction consumer          |
+
+The initial internal reader may require the existing owner authorization; this does not create a public download API. Tenant/Workspace/Session scope comes from authenticated server state and is compared with every supplied identifier. No unknown/revoked/draining binding can select the primary Runtime or Harness directory.
+
+## 5. Durable identity binding
+
+Keep these identities distinct in one immutable publication binding:
+
+| Identity                                                              | Required meaning                                                                                       |
+| --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `tenantId`, `workspaceId`, Managed `sessionId`                        | Full Session ownership; manifest has no workspace field, so catalog and authorization must retain it   |
+| `turnId`, `modelCallId`, `executionCallId`                            | Original Session intent and function response pairing                                                  |
+| Runtime Session ID, `promptId`, Runtime `callId`, `bindingGeneration` | Original Broker/worker reference and target; may differ from Managed/model identifiers                 |
+| Exact `payloadJson` and its `requestDigest`                           | #12831 dispatch replay hashes the original UTF-8 `{toolName,input}` bytes, not reserialized JSON       |
+| Canonical input digest                                                | O1c `managedToolDigest(input)`, used as Runtime `reference.argsDigest` and manifest `invocationDigest` |
+| `captureId`, `revision=1`, protocol/capture policy                    | Stable capture identity and admission; a protocol or capture change conflicts                          |
+| Creating writer generation, activation ID/epoch, publication ID       | Authorization fence and retained ownership, not a replacement for Runtime generation                   |
+
+The binding references the already committed argument resource rather than duplicating large payloads in SQL identity rows. Validate both digests before dispatch. Java checks exact payload bytes; the TypeScript worker checks its canonical input digest. Save both as different fields.
+
+O1a originally called `manifest.callId` the model ID while requiring it to repeat `reference.callId`. Those IDs coincide locally, but #12831 assigns a separate UUID to the Runtime reference. O2a clarifies the documented meaning and preserves the wire equality: `manifest.callId` is the original Runtime `reference.callId`; `modelCallId` remains in the durable binding and Session checkpoint for function-response pairing. Preserve the worker's existing call-ID collision protection and the distinct Broker UUID. Do not rewrite model history or add a field to the closed v3 body.
+
+This explicitly changes O1a's documented call-ID meaning for Hosted calls. O2a updates the English/Chinese contract and adds TS/Java binding fixtures before implementation depends on it. Unchanged existing segment fixtures are still required, but are not proof of this semantic change. The Hosted validator follows the immutable mapping and rejects substitution in either direction; the local path retains its equal-ID behavior. Maintainer agreement on this clarification is an O2a exit gate, not an implicit compatibility assumption.
+
+The current local admission directly compares `checkpoint.functionCallId` with `reference.callId` and reads raw arguments from `argsRef`. #12831 instead stores a wrapped argument resource containing `harnessSessionId`, `runtimeSessionId` and `payloadJson`. Reuse validation rules through a narrow explicit Hosted adapter; do not weaken the local validator to accept either shape implicitly.
+
+## 6. Publication catalog and immutable storage
+
+### 6.1 SQL records and state
+
+Add a publication record unique by full Session scope and original execution/capture identity. It stores the identity binding, current grant fence, capacity reservation, immutable terminal envelope reference/digest, exact manifest reference, closure verification result and receipt source mapping. Allocate stable IDs durably before acknowledging them.
+
+Segment entries are unique by `(publicationId, streamId, ordinal)` and retain receiver-computed length/SHA-256 and physical object location. Metadata entries have stable logical slots: page `(streamId, firstOrdinal)`, manifest `revision`, terminal envelope, and admitted outcome. Slot reuse with different bytes conflicts. Use existing `ManagedSessionDurableRef` without adding provider URLs or credentials.
+
+Publication state advances from `OPEN` through a durable finish barrier to `FINISHED`, then `REFERENCED`. `FINISHED` means the original terminal envelope and its declared resource closure are durable and frozen; it can describe complete, partial or unavailable capture. `REFERENCED` means a Session receipt retains that closure, including a blocked receipt's diagnostic outcome. It does not itself mean the result was accepted. Incomplete abandoned publications can be fenced and retained for diagnosis; absence of a receipt never implies permission to delete them. A separate `NOT_STARTED` terminal disposition closes a proven no-effect reservation without manufacturing a capture or manifest.
+
+Store closure membership incrementally in segment/resource catalog rows. Freeze it at finish. One verified publication root attaches to a Session transaction; do not expand every raw segment into `resources[]` or raise existing transaction limits. For blocked results, retain all already verified publication data, including data not reachable from a partial manifest. No closure can reference another Session/publication or silently select its newest revision.
+
+### 6.2 OSS profile and publication receipt
+
+Use a dedicated private bucket that has never enabled versioning, immutable server-generated keys, and `x-oss-forbid-overwrite: true` on every create. Reject deployment profiles where versioning is enabled or suspended: OSS documents that this header is ineffective in either state. A future versioned backend must pin `versionId` on every read and account for retry-created versions separately. Do not silently switch profiles. See [OSS PutObject](https://www.alibabacloud.com/help/en/oss/developer-reference/putobject).
+
+Each segment uses one bounded PUT, not multipart or append. First reserve its catalog slot and object key in SQL. Receive at most 16 MiB, compute length/SHA-256, and reject conflicting slot contents before uploading. A service-wide admission semaphore is acquired before consuming the body. The first implementation may hold one bounded segment per admitted request; it must never hold a whole stream.
+
+After PUT, read that exact key back and verify length/SHA-256 before marking it verified and returning a receipt. Retrying a lost PUT response uses the same key; an existing object is read and verified, never overwritten. A lost catalog response returns the original verified entry. Provider checksums supplement this proof; an ETag or caller metadata is insufficient. See [OSS data verification](https://www.alibabacloud.com/help/en/oss/user-guide/data-verification/).
+
+All OSS calls run outside journal/catalog row locks. Short SQL transactions recheck identity, state and fence before installing a verified entry. OSS visibility after a successful PUT does not make OSS and SQL one transaction; preallocated candidate records make that gap discoverable without listing the bucket. See [OSS consistency](https://www.alibabacloud.com/help/en/oss/user-guide/what-is-oss).
+
+An unverified or corrupt candidate remains charged and quarantined. A conflicting caller cannot replace or poison a verified segment. Corruption of already published bytes makes reads fail and records a durable quarantine mark; later publishes cannot repair that identity automatically. Reject or retain bounded conflict metadata without storing unlimited attacker-supplied bodies.
+
+Bucket policy limits reads/writes to the service identity, prevents other writers and automatic lifecycle deletion for retained objects, and uses deployment-selected server-side encryption. Record any required key identity in the catalog. Startup checks validate the bucket profile and private endpoint. Do not reuse `tools/artifact/oss-publisher.ts`: it uploads public HTML and overwrites keys, with different ownership and integrity semantics.
+
+### 6.3 Metadata, seals and finish
+
+Publish pages, manifests and outcomes through the same durable publication service. Bytes of at most 64 KiB may use SQL inline storage; larger permitted resources use immutable OSS objects. Apply kind-specific limits to actual serialized bytes: O1a manifest 64 KiB, page 256 KiB; retain the Tool v3 1 MiB response bound and propose a 2 MiB bound for the private wrapped terminal/admission record. The wrapper bound does not allow a larger Tool v3 response. Finalize preview limiting before freezing the terminal envelope.
+
+The remote adapter supplies `ToolResultSegmentStore` and a publication-scoped metadata `publish/read` adapter. Do not change `ManagedSessionResourceStore` for every consumer or turn the existing staged HTTP `publish()` into a false durable acknowledgement. The normal HTTP reader gains catalog-aware, bounded reads of these retained metadata resources.
+
+Seal scans immutable verified segments in order, checks exact count/length and SHA-256, and saves its original result. Prefix stops at the first gap. Do not derive concatenated SHA-256 from per-segment hashes. Finish validates page positions, seals, manifest identity/status and the original physical outcome, then freezes the complete declared relationship. Malformed or contradictory claims are rejected; a valid partial/unavailable capture may finish but cannot be accepted under `complete_required`.
+
+Seal/finish can exceed an ordinary HTTP request timeout. Use idempotent verification-operation records and a bounded service executor; short requests observe the same in-flight operation, not a second scan per poll. Successful operations replay their original results. A rejected seal records no seal: after missing segments arrive, the same request can create a new attempt and succeed, as O1a requires. A service restart can rescan immutable bytes from ordinal zero. There is no serialized SHA state or digest-checkpoint protocol in this slice.
+
+Publish/seal/prefix for a publication retain O1a ordering. Accepting finish durably closes ingress to new producer writes, waits for already registered operations, then verifies and freezes the result. No new ordinal can enter during that drain. Reject invalid finish requests before installing the barrier; failures after the barrier retain the same finalization attempt for repair of service availability, never an upgrade of the producer's final capture. Operation concurrency, I/O deadlines and retry budgets are finite deployment limits. A lost HTTP response is not an instruction to execute Shell again.
+
+## 7. Capacity and backpressure
+
+Retain O1c's 1 MiB segment default, at most one publish in flight per stream, and combined 64 KiB raw preview. Preserve its per-stream write queue, including Node's exit-time pipe resumption case. A network retry retains only the current immutable segment and runs inside that operation. Do not enqueue new chunk promises while storage is slow.
+
+Before effects, reserve an explicit maximum capture allocation and two separate bounded metadata allowances: producer finalization and the later Session admission attachment. Enforce limits for each execution, retained Session bytes, tenant reserved/retained bytes, active captures and concurrent gateway requests. These are required deployment policy values; there is no unbounded or guessed production fallback. A rollout supplies measured values and must accommodate the declared 100 MiB acceptance case. The 1 GiB test receives its own explicit allocation.
+
+Reservation covers pending uploads, verified objects, inline metadata and quarantined candidates. Reserve before starting a PUT; duplicate receipts do not charge twice. After terminal freeze and complete in-flight accounting, release only definitely unused capture/producer allocation. Keep the admission allowance until `REFERENCED`, or a proven terminal cancellation with no pending admission/candidate work. Otherwise a full tenant could capture output but be unable to persist its receipt. A fenced unfinished publication retains its used/uncertain charge; any release of unused capacity requires proof that no further publication or original commit can arrive. Neither lease expiry nor a failed status lookup is that proof. No automatic object deletion or GC is introduced here.
+
+A quota refusal before dispatch returns without effects. Exhaustion during execution stops new capture persistence, records `quota_exhausted`, drains output with bounded memory and preserves the true execution result. Admission becomes blocked. Transport/storage failures use their own failure classification; do not collapse quota to `storage_failed`. O1c currently needs this explicit failure-reason extension. If even terminal persistence is unavailable, remain unknown/recovery-blocked rather than inventing a receipt.
+
+Retries are finite and reuse the same operation identity and bytes. Authentication/fencing, schema, conflict and digest failures are not transient retries. Transient network/service failures may retry within the admitted deadline; after failure latches, a final partial/unavailable capture cannot upgrade. Paused persistence time remains excluded from the Shell post-exit drain timeout, while the separate persistence deadline prevents indefinite waiting.
+
+## 8. Session receipt, checkpoint and ACK
+
+The Hosted worker finalizes and durably finishes the original envelope, then reports Tool v3 `settled` with `deliveryStatus: pending`. It cannot commit a Session receipt. The local same-process path may keep its existing injected acceptance; use explicit adapters, with no mode inferred from a missing method. Broker status records physical settlement separately from Session admission. Add explicit v3 selection/status/cancel/ACK to the production transport interface only for admitted capture calls.
+
+The Session owner first queries an existing original `tool.receipt`. If absent, it loads the durable finished publication and checks the original intent/checkpoint/argument binding, full identity, physical envelope, all metadata digests and verified closure. It must not use the partial-state comparison in `isToolResultEnvelopeOf()` as complete admission validation. Storage independently validates bytes; TypeScript authority retains the completeness-policy decision.
+
+Publish the versioned `toolOutcomeRef` containing original envelope, exact manifest reference and `committed/blocked` decision through an idempotent admission slot. Its canonical content digest and admission command identity remain stable across retries. Reuse the existing `tool.receipt` event. In one SQL transaction: validate current writer and finished root, verify the receipt agrees with that root/decision, attach closure retention, append journal, and store the original receipt event sequence. Small ordinary refs still obey existing limits. The decision wrapper is an admission attachment; it does not mutate the frozen producer envelope/manifest.
+
+For `committed`, `historyRevision` is that positive event sequence and `resultRef` names the exact manifest. For `blocked`, `resultRef` and ACK `historyRevision` are null, and the saved outcome retains any partial manifest. The blocked event itself still has a positive Session sequence. Never infer acceptance from receipt existence alone.
+
+A not-started call has empty capture and follows the existing no-capture result path, plus an idempotent owner operation to close its publication reservation as `NOT_STARTED`. Require authoritative evidence for the original execution, fence its grant, account for accepted operations and release unused allocation and the active-capture slot. Contradictory start/publication evidence rejects closure. Prepared cancellation and definite pre-dispatch refusal can supply evidence; timeout, lease expiry and missing status cannot. No Tool v3 capture ACK is valid for this path.
+
+After an append exception, the current TypeScript authority is write-failed. Close/reopen through the supported ownership path and read the original journal; do not blindly append on the same object. A replacement writer cannot replay an old transaction with its new token: current Java duplicate-commit rules require the original writer and record identity. Read and use an existing receipt first. If a new receipt is still needed, the new authorized owner performs a new fenced admission of the same durable finished publication, with uniqueness preventing duplicate receipts.
+
+Advance `results_ready` only from the saved committed decision. Replay the original manifest, outcome reference and receipt sequence; do not publish new UUID resources on recovery. Send an identical ACK only to the original live Runtime generation. A replacement generation reads the Session result without receiving or re-executing the old invocation. Keep cancellation, process drain and Workspace release conditions independent from receipt delivery. General adoption of a still-running orphan remains W0e work.
+
+## 9. Fixed-version reads
+
+The internal reader accepts an immutable `manifestRef`, complete expected identity, `streamId`, `offset` and `length`. It resolves the original catalog binding under full Session authorization. The result is exact bytes, at most 16 MiB; illegal bounds reject without truncation. Zero length succeeds only at a valid boundary.
+
+Validate manifest/page serialized digests, identity, page positions and segment catalog associations. For each touched segment, stream/hash the entire immutable object and retain only the requested intersection; return the Buffer only after all checks pass. Metadata traversal is bounded by O1a page/manifest limits. For an admitted `body.ref`, stream/hash the entire referenced object and retain the requested range; the first Shell producer continues to use pages. The ordinary whole-buffer metadata reader must never be used for a large body.
+
+Use raw binary reads with no text decoding or transparent content transformation. Do not assume a Range response is correct: OSS can return a full object for invalid ranges. The first adapter uses full-object streaming for each touched segment/body and enforces expected length locally; later range optimizations need equivalent integrity proof. See [OSS GetObject](https://www.alibabacloud.com/help/en/oss/developer-reference/getobject).
+
+An object missing or altered after acceptance fails closed. It does not fall back to local Runtime files, the latest manifest or another version. Previously committed history remains a fact, but unreadable resources block their use; detection is not permission to rewrite the original result.
+
+## 10. Recovery and lifecycle
+
+| Failure window                                           | Required behavior                                                                                                                                |
+| -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Intent or publication reservation fails before start     | No tool effect; retain/cancel only the original prepared reservation; close allocated publication capacity only with proven not-started evidence |
+| Object PUT succeeds before catalog verification/response | Locate by the preallocated candidate; verify exact bytes and return the original receipt; charge uncertain storage                               |
+| Worker dies before EOF/seal                              | Keep verified prefix; execution remains unknown unless separately proved; never promote bytes into a settled success                             |
+| Manifest exists without durable finished envelope        | Remain unknown/blocked; neither object scan nor manifest status supplies missing physical outcome                                                |
+| Finish commits, reply or worker is lost                  | Read original finished envelope/ref and revalidate against original intent; no new execution                                                     |
+| Receipt commit response is lost                          | Reopen authority and read original journal; reuse original outcome/ref/sequence if committed                                                     |
+| Receipt commits before checkpoint                        | Use committed receipt to advance; blocked never advances                                                                                         |
+| Checkpoint commits before ACK                            | Resend the same ACK to the original generation, or retain Session result if that generation is gone                                              |
+| Writer/activation fence changes during PUT               | Stop new publication; late candidates remain held, catalog install fails; owner change does not prove Shell stopped                              |
+| Object is corrupted/missing, or Java/OSS is unavailable  | Fail reads/admission; retain known physical outcome, ownership and capacity uncertainty; no fallback execution                                   |
+
+A replacement host has a fresh filesystem and uses only durable SQL/OSS plus supported Session writer acquisition. Recovery tests must distinguish orderly writer seal from lease-expiry/fenced takeover; killing a process alone is not a legal takeover proof. A finished publication can be admitted by a valid new owner, while unfinished old-generation upload is not automatically adopted or renewed. Existing public cold-load refusal stays until a dedicated recovery entry is implemented and tested.
+
+Graceful close stops new executions, drains execution/finalization, closes remote adapters, stops renewal, releases Workspace activation/ownership under its existing stop evidence, then seals the Session writer. Loss of ownership does not justify continued catalog writes. No background watcher or immortal retry job is required: operation work is bounded, persisted for observation, and resumes only under valid authorization.
+
+## 11. Implementation slices and consumers
+
+| Slice                                     | Concrete deliverable                                                                                                                                           | Exit gate                                                                                                                                    |
+| ----------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| O2a: contract and ownership               | Publication/grant schemas, reviewed O1a call-ID clarification and mapping, forward SQL migration, capacity reservation and closed internal operation contracts | Cross-tenant/Workspace/generation and changed-digest cases fail before effects; v2/local behavior unchanged; revised Hosted meaning reviewed |
+| O2b: remote persistence                   | Private OSS adapter, idempotent segment/metadata receipts, seal/finish, frozen closure and internal range reads                                                | O1a sequences plus real OSS durability, limits, response-loss, corruption and replacement-process tests                                      |
+| O2c: Session admission and reconciliation | Hosted authority adapter, atomic closure attachment, original receipt lookup/checkpoint/ACK recovery                                                           | Complete-required decision matrix and all commit windows pass on real SQL; no duplicate effects or refs                                      |
+| O2d: separate-process integration         | Broker v3/grant binding, remote worker publisher, integration with the then-current Hosted tool turn                                                           | Real worker and different-host read proof; 100 MiB/1 GiB, failure/ownership regressions; private gate only                                   |
+
+Each slice can be reviewed separately. O2a begins with failing contract tests; it does not open Shell. If the adjacent same-host Shell bridge lands first, reuse its narrow publisher/receipt seams and retain its durability profile. Rebase O2d on its reviewed API rather than creating a second Hosted tool loop. Public capability enablement requires a separate decision after these gates.
+
+| Area likely to change                          | Direct consumers and regression boundary                                                                                                                           |
+| ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `packages/core/src/managed-runtime/`           | Remote segment/resource adapters, shared admission validation, HTTP Session commit/reader; local O1b/O1c and generic resource callers remain supported             |
+| `packages/cli/src/serve/`                      | Worker publisher injection, grant binding, v3 pending result and Hosted owner integration; default no-tool and file-only profiles remain unchanged                 |
+| `packages/sdk-java/managed-agent-server/`      | Store/controller/catalog/OSS adapter, migrations and Workspace transport; existing inline Session transactions/recovery remain compatible                          |
+| `packages/sdk-java/runtime-broker/`            | Transport interface and deferred dispatch carry original v3 binding and ACK; ordinary v2 dispatch remains unchanged                                                |
+| `packages/core/src/managed-runtime/contracts/` | New private publication/binding fixtures plus existing O1a conformance fixtures; TS/Java must agree on call-ID mapping, closed shapes, limits and error precedence |
+
+No WebShell change belongs in these slices. This is cross-package core feature work; apply the repository's maintainer awareness/review gate. The design does not authorize merging or bypassing that gate.
+
+## 12. Validation and evidence
+
+### 12.1 Required implementation acceptance
+
+Use real Shell child processes, distinct worker/owner/service processes, real SQL and a dedicated private OSS test bucket. A faultable local object-store double can run fast tests but cannot certify OSS semantics. Every injected failure records exact original identities, bytes, side-effect count and retained state. Use isolated Session/Workspace keys and prefixes; tests never delete production objects.
+
+| Group                  | Required proof                                                                                                                                                                                                                                                                                                                                                               |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Contract               | Replay O1a's 28 groups/136 segment steps unchanged through the async adapter; wrong tenant/Workspace, every identity field, two different digest meanings and model/Runtime call IDs; v2/v3 conflicts before effects                                                                                                                                                         |
+| Metadata               | Maximum valid page, outcome over 64 KiB, serialized-size overflow, short stable resource IDs, missing/wrong page and closure association; no reliance on staged memory                                                                                                                                                                                                       |
+| Bytes and memory       | Incremental 100 MiB and 1 GiB, binary/NUL/invalid/split UTF-8, both streams and tail ranges; independent streamed hash oracle; bounded client/server queues and RSS at fixed concurrency under slow storage                                                                                                                                                                  |
+| Process semantics      | EOF vs exit, inherited pipes, cancellation, Node exit-time resumed writes, no EOF finish, buffer release after finish; preserve physical outcome on quota/I/O failure                                                                                                                                                                                                        |
+| Quota and upload       | Zero effects on failed reservation; pre-start refusal/cancellation restores unused capacity and rejects old grants; admission retains its reserved allowance after finish; mid-command exhaustion after one side-effect marker; same-ordinal conflict, lost PUT/readback/catalog replies, corruption, changed bucket mode, concurrent capacity claims and fenced late writes |
+| Admission and recovery | Valid complete commits; partial/unavailable/missing manifest/unsealed/wrong identity/digest blocks; blocked never advances; readback digest validation, receipt-response/checkpoint/ACK loss, changed ACK rejected; exact refs/sequence reused                                                                                                                               |
+| Host replacement       | Remove access to original Runtime disk, reopen on another host after legitimate writer handoff, read exact 100 MiB tail; abnormal loss preserves unknown without assuming orphan adoption                                                                                                                                                                                    |
+| Compatibility          | TS/Java real v3 interop, existing v2/disabled gate/W0c activation, HTTP inline transactions, local O1b/O1c, Hosted no-tool/file-only profiles                                                                                                                                                                                                                                |
+
+### 12.2 Research verification performed
+
+Two focused existing core tests passed at the pinned baseline: refusal of resources requiring the unimplemented OSS path, and staged-resource commit/restore. They use the existing fake HTTP Store and establish only the current 64 KiB/staging behavior. Global `qwen --version` reported `0.24.6`; no model request was sent. A normal CLI dialogue cannot exercise the proposed O2 publication service.
+
+The full O2 implementation acceptance above has not run. O2a verification is recorded in its linked slice document; it does not establish OSS or host-replacement behavior. Future verification must include focused core/CLI/Java tests, repository build/typecheck, real SQL/OSS process evidence, and two consecutive clean full-diff self-audit passes. Report mocks, real processes and different-host evidence separately. This design's validation is code/source research, those two baseline tests, and document consistency checks.
+
+## 13. Deployment decisions before enablement
+
+- Confirm private OSS region, endpoint, never-versioned bucket and encryption identity. If the environment requires bucket versioning or forbids worker-to-Java egress, revise the storage/transport profile before implementation; do not silently weaken it.
+- Supply measured byte/concurrency limits, publication/verification deadlines and retention operations. Used and quarantined bytes remain charged without GC; operations must observe that capacity. Automatic reclamation is later work.
+- Pin the final Hosted file/Shell bridge dependency and its payload/reference schema before O2d. General W0e adoption and automatic cold-load continuation remain independent gates.
+
+These deployment choices do not prevent O2a contract and ownership work. They do prevent claiming a deployed cross-host guarantee or opening the public Shell capability.
