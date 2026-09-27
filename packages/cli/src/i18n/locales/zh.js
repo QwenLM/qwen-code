@@ -2204,6 +2204,9 @@ export default {
   Unattributed: '未归因',
   'Cached prefix': '缓存前缀',
   tokens: 'tokens',
+  'Estimated usage, including the conversation': '估算用量（含对话）',
+  'No provider usage yet. These are local estimates, including the conversation.':
+    '尚未收到 provider 用量，以下为本地估算，包含对话。',
   'Estimated pre-conversation overhead': '预估对话前开销',
   'No API response yet. Send a message to see actual usage.':
     '暂无 API 响应。发送消息以查看实际使用情况。',
@@ -2705,4 +2708,6 @@ export default {
   'Kept model as {{model}}': '模型保持为 {{model}}',
   'Review messages held from other Qwen Code sessions (accept | deny), and manage trusted controllers (controllers | revoke)':
     '查看其他 Qwen Code 会话发来的待处理消息（accept | deny），并管理受信任控制器（controllers | revoke）',
+  'Create a git commit with an AI-drafted message':
+    '使用 AI 起草的提交信息创建 git 提交',
 };

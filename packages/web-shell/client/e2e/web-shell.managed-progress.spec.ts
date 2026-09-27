@@ -27,6 +27,7 @@ async function installManagedScenario(page: Page, testInfo: TestInfo) {
   let summary: JavaAgentSession = {
     sessionId: SESSION_ID,
     title: 'Managed progress regression',
+    agentId: 'qwen-code',
     status: 'active',
     createdAt: Date.now() - 10_000,
     updatedAt: Date.now(),
@@ -39,7 +40,7 @@ async function installManagedScenario(page: Page, testInfo: TestInfo) {
     environment: { state: 'ready' },
     lastSequence: 0,
   };
-  function append(type: string, data?: Record<string, unknown>) {
+  function append(type: string, data: Record<string, unknown> = {}) {
     const sequence = events.length + 1;
     events.push({
       sequence,

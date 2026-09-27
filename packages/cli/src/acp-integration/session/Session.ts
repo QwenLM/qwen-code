@@ -25,6 +25,7 @@ import {
   type ToolCallConfirmationDetails,
   type ToolConfirmationPayload,
   type ToolResult,
+  type McpAppToolResult,
   type ToolResultDisplay,
   type ShellProgressData,
   type ChatRecord,
@@ -2105,6 +2106,7 @@ function isCallerCausedModelRefusal(error: Error): boolean {
  * - SubAgentTracker for tracking sub-agent tool calls
  */
 export class Session implements SessionContext {
+  private readonly mcpAppCalls = new Map<string, AbortController>();
   private pendingPrompt: AbortController | null = null;
   private activeGoalProposalTurn?: AgentResponseCapture['goalProposalTurn'];
   /**
@@ -4325,6 +4327,7 @@ export class Session implements SessionContext {
       }
     }
     if (
+      this.mcpAppCalls.size > 0 ||
       this.historyMutationActive ||
       this.goalProcessing ||
       this.cronProcessing ||
@@ -4359,7 +4362,8 @@ export class Session implements SessionContext {
     // Task captures wait for queued turns; a temporary close gate must drain
     // only executing turns so it can reopen and let those queues progress.
     return Boolean(
-      this.pendingPrompt ||
+      this.mcpAppCalls.size > 0 ||
+        this.pendingPrompt ||
         this.historyMutationActive ||
         this.pendingPromptCompletion ||
         this.goalProcessing ||
@@ -4403,6 +4407,7 @@ export class Session implements SessionContext {
       );
     }
     this.closing = true;
+
     let resolveGate!: () => void;
     const completion = new Promise<void>((resolve) => {
       resolveGate = resolve;
@@ -4491,6 +4496,7 @@ export class Session implements SessionContext {
   dispose(): void {
     this.disposed = true;
     this.closing = true;
+    this.cancelMcpAppCalls();
     for (const capture of this.channelTaskCaptures) {
       capture.controller.abort(SESSION_DISPOSE_ABORT_REASON);
     }
@@ -12961,6 +12967,90 @@ export class Session implements SessionContext {
     return reminders;
   }
 
+  cancelMcpAppCalls(): void {
+    for (const controller of this.mcpAppCalls.values()) controller.abort();
+  }
+
+  cancelMcpAppCall(callId: string): void {
+    this.mcpAppCalls.get(callId)?.abort();
+  }
+
+  async callMcpAppTool(
+    callId: string,
+    request: {
+      serverName: string;
+      resourceUri: string;
+      name: string;
+      arguments: Record<string, unknown>;
+    },
+  ): Promise<McpAppToolResult> {
+    if (this.mcpAppCalls.has(callId)) throw new Error('Duplicate MCP App call');
+    const controller = new AbortController();
+    this.mcpAppCalls.set(callId, controller);
+    this.#activeWorkChanged();
+    try {
+      await this.assertCanStartTurn();
+      controller.signal.throwIfAborted();
+      const registry = this.config.getToolRegistry();
+      if (
+        !registry.hasMcpAppResource(request.serverName, request.resourceUri)
+      ) {
+        throw new Error('MCP App resource is not available in this session');
+      }
+      const tool = registry.getMcpAppTool(request.serverName, request.name);
+      if (!tool)
+        throw new Error('MCP App tool is not available on this server');
+      let rawResult: McpAppToolResult | undefined;
+      let delivered = false;
+      const recordResult: QueueToolResultRecord = (_fc, record) => {
+        delivered =
+          record.metadata.status === 'success' ||
+          (rawResult?.isError === true &&
+            record.metadata.errorType === ToolErrorType.MCP_TOOL_ERROR);
+      };
+      const result = await promptIdContext.run(callId, () =>
+        this.runTool(
+          controller.signal,
+          callId,
+          { id: callId, name: tool.name, args: request.arguments },
+          undefined,
+          undefined,
+          undefined,
+          recordResult,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          {
+            tool,
+            onResult: (value) => {
+              rawResult = value;
+            },
+          },
+        ),
+      );
+      controller.signal.throwIfAborted();
+      if (rawResult && delivered) return rawResult;
+      const response = result.parts.find((part) => part.functionResponse)
+        ?.functionResponse?.response;
+      return {
+        isError: true,
+        content: [
+          {
+            type: 'text',
+            text:
+              typeof response?.['error'] === 'string'
+                ? response['error']
+                : 'MCP App tool call was not executed.',
+          },
+        ],
+      };
+    } finally {
+      this.mcpAppCalls.delete(callId);
+      this.#activeWorkChanged();
+    }
+  }
+
   private async runTool(
     abortSignal: AbortSignal,
     promptId: string,
@@ -12981,6 +13071,10 @@ export class Session implements SessionContext {
       source: 'code_mode';
     },
     finalizeCodeModeToolResult?: (result: RunToolResult) => Promise<Part[]>,
+    appExecution?: {
+      tool: DiscoveredMCPTool;
+      onResult: (result: McpAppToolResult) => void;
+    },
   ): Promise<RunToolResult> {
     const callId = fc.id ?? generatedCallId ?? `${fc.name}-${Date.now()}`;
     const modelFacingToolName = fc.name ?? 'unknown_tool';
@@ -13264,6 +13358,7 @@ export class Session implements SessionContext {
 
     let toolName = fc.name;
     if (
+      !appExecution &&
       this.config.getToolMode?.() === ToolMode.CodeModeOnly &&
       !isCodeModeToolCallAllowed(toolName, codeModeContext?.source ?? 'model')
     ) {
@@ -13281,7 +13376,7 @@ export class Session implements SessionContext {
     }
     const toolRegistry = this.config.getToolRegistry();
     const pm = this.config.getPermissionManager?.();
-    let tool = toolRegistry.getTool(toolName);
+    let tool = appExecution?.tool ?? toolRegistry.getTool(toolName);
 
     if (canonicalToolName(toolName) === ToolNames.TOOL_CALL) {
       let bridgeEnabled = true;
@@ -13525,7 +13620,13 @@ export class Session implements SessionContext {
 
         let toolBuildSucceeded = false;
         try {
-          const invocation = tool.build(args);
+          const invocation = appExecution
+            ? appExecution.tool.buildForApp(
+                args,
+                appExecution.onResult,
+                this.config,
+              )
+            : tool.build(args);
           const callIdAware = invocation as {
             setCallId?: (id: string) => void;
           };
@@ -14240,6 +14341,7 @@ export class Session implements SessionContext {
               }
               const params: RequestPermissionRequest = {
                 sessionId: this.sessionId,
+                ...(appExecution ? { _meta: { mcpAppCallId: callId } } : {}),
                 options: permissionOptions,
                 toolCall: {
                   toolCallId: callId,

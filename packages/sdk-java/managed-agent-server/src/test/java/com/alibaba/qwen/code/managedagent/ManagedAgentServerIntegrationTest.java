@@ -758,12 +758,15 @@ class ManagedAgentServerIntegrationTest {
                 List.of(), null);
         List<Map<String, Object>> input = List.of(Map.of(
                 "type", "text", "text", "batch"));
-        Admission turn = store.insertTurnCommand(tenant, "SUBMIT_TURN",
-                "batch-turn", "sha256:" + "b".repeat(64),
-                session.sessionId(), input, "sha256:" + "c".repeat(64));
         String owner = "batch-owner";
-        assertThat(store.claimTurn(tenant, session.sessionId(),
-                turn.turnId(), owner, Duration.ofMinutes(1))).isPresent();
+        Admission turn = new TransactionTemplate(transactionManager).execute(status -> {
+            Admission admitted = store.insertTurnCommand(tenant, "SUBMIT_TURN",
+                    "batch-turn", "sha256:" + "b".repeat(64),
+                    session.sessionId(), input, "sha256:" + "c".repeat(64));
+            assertThat(store.claimTurn(tenant, session.sessionId(),
+                    admitted.turnId(), owner, Duration.ofMinutes(1))).isPresent();
+            return admitted;
+        });
         store.recordAdmission(tenant, session.sessionId(), turn.turnId(),
                 owner, "batch-epoch", 0);
         long before = store.requireSession(tenant, session.sessionId())

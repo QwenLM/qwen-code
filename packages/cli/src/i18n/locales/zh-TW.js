@@ -1980,6 +1980,9 @@ export default {
     '上下文超出限制！請使用 /compress 或 /clear 來減少上下文。',
   'No API response yet. Send a message to see actual usage.':
     '暫無 API 響應。發送消息以查看實際使用情況。',
+  'Estimated usage, including the conversation': '估算用量（含對話）',
+  'No provider usage yet. These are local estimates, including the conversation.':
+    '尚未收到 provider 用量，以下為本地估算，包含對話。',
   'Estimated pre-conversation overhead': '預估對話前開銷',
   'Context window': '上下文窗口',
   tokens: 'tokens',
@@ -2503,4 +2506,6 @@ export default {
   'Kept model as {{model}}': '模型保持為 {{model}}',
   'Review messages held from other Qwen Code sessions (accept | deny), and manage trusted controllers (controllers | revoke)':
     '檢視其他 Qwen Code 工作階段傳來的待處理訊息（accept | deny），並管理受信任控制器（controllers | revoke）',
+  'Create a git commit with an AI-drafted message':
+    '使用 AI 起草的提交訊息建立 git 提交',
 };

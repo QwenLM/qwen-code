@@ -17,7 +17,7 @@ import {
   FINDING_SOURCES,
   REPORT_FINDINGS_LEVELS,
 } from '@qwen-code/qwen-code-core/tools/report-findings.js';
-import { isAdvisorReviewDisplay } from '@qwen-code/qwen-code-core/tools/tools.js';
+import { isAdvisorDisplay } from '@qwen-code/qwen-code-core/tools/tools.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import {
   ToolCallStatus,
@@ -331,7 +331,7 @@ function formatToolResultDisplay(
       value,
     ) as IndividualToolCallDisplay['resultDisplay'];
   }
-  if (isAdvisorReviewDisplay(value)) {
+  if (isAdvisorDisplay(value)) {
     return sanitizeDaemonValue(
       value,
     ) as IndividualToolCallDisplay['resultDisplay'];

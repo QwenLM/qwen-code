@@ -238,7 +238,7 @@ export const advisorCommand: SlashCommand = {
   },
   argumentHint: '[<model-id>|off|review [focus]]',
   kind: CommandKind.BUILT_IN,
-  supportedModes: ['interactive', 'acp'] as const,
+  supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   completion: async (context, partialArg) => {
     const prefix = partialArg.trim();
     const fixed = [
@@ -274,7 +274,12 @@ export const advisorCommand: SlashCommand = {
           return {
             type: 'message',
             messageType: 'info',
-            content: 'Use /advisor <model-id> or /advisor off.',
+            content: [
+              `Advisor: ${context.services.config?.getAdvisorModel()?.split('\0')[0] ?? 'off'}`,
+              `Session calls: ${context.services.config?.getAdvisorUseCount() ?? 0} / ${context.services.config?.getAdvisorMaxUses() || 'unlimited'}`,
+              'Each consultation sends the conversation to the selected provider and consumes additional tokens.',
+              'Use /advisor <model-id> or /advisor off.',
+            ].join('\n'),
           };
         }
         return { type: 'dialog', dialog: 'advisor-model' };

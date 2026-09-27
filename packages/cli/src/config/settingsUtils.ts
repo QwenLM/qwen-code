@@ -294,7 +294,10 @@ export const WORKSPACE_RESTRICTED_SETTINGS = [
  * Workspace strip, the "ignored" warning, and the daemon route that refuses
  * the write — read it beside `WORKSPACE_RESTRICTED_SETTINGS`.
  */
-export const WORKSPACE_RESTRICTED_ROOT_SETTINGS = ['advisorModel'] as const;
+export const WORKSPACE_RESTRICTED_ROOT_SETTINGS = [
+  'advisorModel',
+  'advisorMaxUses',
+] as const;
 
 /**
  * Settings a Workspace may only make stricter.
