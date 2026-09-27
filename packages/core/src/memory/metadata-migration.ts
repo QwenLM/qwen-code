@@ -333,7 +333,11 @@ function mergeMetadata(
     const document = parseDocument(parts.frontmatter, { schema: 'core' });
     if (document.errors.length === 0) {
       try {
+        const { missingOrInvalidFields } = validateStructuredAutoMemoryDocument(
+          candidate.content,
+        );
         for (const key of OWNED_FRONTMATTER_KEYS) {
+          if (!missingOrInvalidFields.includes(key)) continue;
           const previous = document.get(key, true);
           // Replacing an anchor would change aliases in unowned fields.
           if (isNode(previous) && 'anchor' in previous && previous.anchor) {
@@ -448,6 +452,7 @@ async function generateMemoryMetadataWithAgent(
     systemPrompt: [
       'Generate complete retrieval metadata for exactly one managed memory file.',
       'Return one JSON object only. Do not call tools or rewrite the body.',
+      'Keep existing valid metadata unchanged; fill only missing or invalid fields.',
       `type must be one of: ${AUTO_MEMORY_TYPES.join(', ')}`,
       `category must be one of: ${AUTO_MEMORY_TREE_CATEGORIES.join(', ')}`,
       'Use 2-6 discriminative keywords or short phrases and 1-3 usage_scenarios.',

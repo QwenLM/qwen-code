@@ -744,6 +744,8 @@ describe('memory metadata migration', () => {
       '# hand-maintained note',
       'custom_field: &flag custom value',
       'alias_field: *flag',
+      'description: &description Curated description',
+      'custom_note: *description',
       'notes: "quoted: value # kept"',
       'type: project',
       'title: Legacy title',
@@ -764,14 +766,16 @@ describe('memory metadata migration', () => {
     expect(updated).toContain('# hand-maintained note');
     expect(updated).toContain('custom_field: &flag custom value');
     expect(updated).toContain('alias_field: *flag');
+    expect(updated).toContain('description: &description Curated description');
+    expect(updated).toContain('custom_note: *description');
     expect(updated).toContain('notes: "quoted: value # kept"');
     expect(updated).toContain('name: Migrated memory');
     expect(updated.endsWith('Body.')).toBe(true);
   });
 
-  it('does not carry old scalar comments into generated metadata', async () => {
+  it('preserves valid curated metadata instead of accepting model replacements', async () => {
     const original =
-      '---\nname: Old title #123\ndescription: Fix #123 and #456\ntype: project\n---\nBody.\n';
+      '---\nname: Old title #123\ndescription: Fix #123 and #456\ntype: reference\n---\nBody.\n';
     const filePath = await write('project/legacy.md', original);
     const [candidate] = await scanMemoryMetadataMigrationCandidates(
       memoryRoot,
@@ -790,16 +794,17 @@ describe('memory metadata migration', () => {
       'project',
     );
     expect(parsed).toMatchObject({
-      title: generated.name,
-      description: generated.description,
+      title: 'Old title #123',
+      description: 'Fix #123 and #456',
+      type: 'reference',
     });
-    expect(updated).not.toContain('#123');
+    expect(updated).toContain('keywords:');
     expect(updated.endsWith('---\nBody.\n')).toBe(true);
   });
 
-  it('refuses to replace anchored metadata rather than changing unknown aliases', async () => {
+  it('refuses to replace invalid anchored metadata rather than changing unknown aliases', async () => {
     const original =
-      '---\nname: &title Old title\ncustom_note: *title\ntype: project\n---\nBody.\n';
+      '---\ncategory: &category invalid_category\ncustom_note: *category\ntype: project\n---\nBody.\n';
     const filePath = await write('project/legacy.md', original);
     const result = await runMemoryMetadataMigration({
       config: {} as Config,
