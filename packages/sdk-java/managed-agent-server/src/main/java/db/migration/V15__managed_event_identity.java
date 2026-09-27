@@ -12,6 +12,7 @@ import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import org.flywaydb.core.api.migration.BaseJavaMigration;
 import org.flywaydb.core.api.migration.Context;
 
@@ -51,18 +52,26 @@ public class V15__managed_event_identity extends BaseJavaMigration {
                 PreparedStatement update = connection.prepareStatement(
                         "UPDATE managed_agent_event SET item_id = ?,"
                                 + " content_part_id = ? WHERE tenant_id = ?"
-                                + " AND session_id = ? AND sequence_id = ?")) {
+                                + " AND session_id = ? AND sequence_id"
+                                + " BETWEEN ? AND ?")) {
             for (String[] session : sessions) {
                 backfill(select, update, session[0], session[1]);
             }
         }
     }
 
+    // A text stream shares one identity across consecutive rows, so each run
+    // of equal identities is one ranged update rather than one per row.
     private void backfill(PreparedStatement select, PreparedStatement update,
             String tenantId, String sessionId) throws Exception {
         select.setString(1, tenantId);
         select.setString(2, sessionId);
+        update.setString(3, tenantId);
+        update.setString(4, sessionId);
         int pending = 0;
+        Identity run = null;
+        long first = 0;
+        long last = 0;
         try (ResultSet rows = select.executeQuery()) {
             Identity previous = null;
             long previousSequence = -1;
@@ -80,21 +89,41 @@ public class V15__managed_event_identity extends BaseJavaMigration {
                 if (identity.itemId() == null) {
                     continue;
                 }
-                update.setString(1, identity.itemId());
-                update.setString(2, identity.contentPartId());
-                update.setString(3, tenantId);
-                update.setString(4, sessionId);
-                update.setLong(5, sequence);
-                update.addBatch();
-                if (++pending == BATCH_SIZE) {
-                    execute(update);
-                    pending = 0;
+                if (run != null && sequence == last + 1
+                        && identity.itemId().equals(run.itemId())
+                        && Objects.equals(identity.contentPartId(),
+                                run.contentPartId())) {
+                    last = sequence;
+                    continue;
                 }
+                if (run != null) {
+                    pending = add(update, run, first, last, pending);
+                }
+                run = identity;
+                first = sequence;
+                last = sequence;
             }
+        }
+        if (run != null) {
+            pending = add(update, run, first, last, pending);
         }
         if (pending > 0) {
             execute(update);
         }
+    }
+
+    private static int add(PreparedStatement update, Identity identity,
+            long first, long last, int pending) throws SQLException {
+        update.setString(1, identity.itemId());
+        update.setString(2, identity.contentPartId());
+        update.setLong(5, first);
+        update.setLong(6, last);
+        update.addBatch();
+        if (pending + 1 < BATCH_SIZE) {
+            return pending + 1;
+        }
+        execute(update);
+        return 0;
     }
 
     private static void execute(PreparedStatement update) throws SQLException {

@@ -51,7 +51,9 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
         "spring.datasource.username=sa",
         "spring.datasource.password=",
         "qwen.managed-agent.harness.enabled=false",
-        "qwen.managed-agent.events.poll-interval=10ms",
+        // A stream reads the store only to catch up or after an overflow, so
+        // live events must come through the hub.
+        "qwen.managed-agent.events.poll-interval=30s",
         "qwen.managed-agent.events.materialize-interval=10ms"
 })
 @AutoConfigureMockMvc
@@ -80,20 +82,26 @@ class ManagedEventReplayTest {
     void jsonPagesFollowNextCursorWithoutGaps() throws Exception {
         String tenant = tenant();
         String sessionId = session(tenant);
-        long last = append(tenant, sessionId, 250);
+        // 245 events fill exactly 35 pages of 7, so the last page is full.
+        long last = append(tenant, sessionId, 244);
+        assertThat(last).isEqualTo(245);
 
         List<Long> sequences = new ArrayList<>();
         String cursor = "0";
         JsonNode page;
+        int pages = 0;
         do {
             page = json(mvc.perform(events(tenant, sessionId)
                             .param("after", cursor).param("limit", "7"))
                     .andReturn().getResponse());
+            pages++;
+            assertThat(page.get("data")).isNotEmpty();
             page.get("data").forEach(event ->
                     sequences.add(event.get("sequence").asLong()));
             cursor = page.get("next_cursor").asText();
         } while (page.get("has_more").asBoolean());
 
+        assertThat(pages).isEqualTo(35);
         assertThat(sequences).containsExactlyElementsOf(range(1, last));
         assertThat(page.get("next_cursor").isNull()).isTrue();
         assertThat(mvc.perform(events(tenant, sessionId)
@@ -110,12 +118,15 @@ class ManagedEventReplayTest {
     void lastEventIdResumesAcrossPagesAndThenGoesLive() throws Exception {
         String tenant = tenant();
         String sessionId = session(tenant);
-        append(tenant, sessionId, 250);
+        long caughtUp = append(tenant, sessionId, 250);
         MockHttpServletResponse stream = mvc.perform(events(tenant, sessionId)
                         .param("stream", "true").param("after", "5")
                         .header("Last-Event-ID", "120")
                         .accept(MediaType.TEXT_EVENT_STREAM))
                 .andReturn().getResponse();
+        // Append only after catch-up, so these events arrive live.
+        await().atMost(Duration.ofSeconds(10))
+                .until(() -> ids(stream).contains(caughtUp));
         append(tenant, sessionId, 3);
         long last = close(tenant, sessionId);
 

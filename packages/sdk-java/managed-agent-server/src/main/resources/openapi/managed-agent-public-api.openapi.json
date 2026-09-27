@@ -758,7 +758,8 @@
           "404": {
             "$ref": "#/components/responses/NotFound"
           }
-        }
+        },
+        "description": "Without a cursor, a Session that has a Snapshot returns all of its Items, the events up to the Snapshot other than input, text-delta and tool-call updates, and every event after it. Otherwise, and for an olderCursor, limit bounds the page of events."
       }
     },
     "/api/agent/web-shell/v1/events/stream": {
@@ -2421,7 +2422,7 @@
           "snapshot_through_sequence",
           "action"
         ],
-        "description": "Data of the agent.session.resync_required SSE frame. Read the Session and its Items, then resume after snapshot_through_sequence.",
+        "description": "Data of the agent.session.resync_required SSE frame. Read the Session and its Items, then resume after the snapshot_through_sequence that the Items list returns; the value in this frame can be older.",
         "properties": {
           "type": {
             "const": "agent.session.resync_required"

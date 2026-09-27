@@ -8,6 +8,9 @@ import java.util.UUID;
  * The Item and content Part that an event changes, named as the Items
  * projection names them. Projection version 1 derives both from the event and
  * the event right before it, so they are fixed when the event is accepted.
+ *
+ * <p>Stored events and the V15 backfill use this rule as version 1. A
+ * different rule needs a new projection version, not a change to this one.
  */
 public final class EventIdentity {
     public static final int SCHEMA_VERSION = 1;

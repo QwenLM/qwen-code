@@ -78,6 +78,13 @@ correct `cursor_expired` or resync.
   characters once the sequence has ten digits.
 - `replay_floor_sequence` gains a description: events at or below it may be
   pruned, and a cursor below it has expired.
+- `SessionResyncRequired` tells a client to resume after the
+  `snapshot_through_sequence` that the Items list returns, since the value in
+  the frame can be older than the Snapshot the client then reads.
+- The WebShell transcript states what it already returned: without a cursor, a
+  Session with a Snapshot gets all of its Items, the events up to the Snapshot
+  other than input, text-delta and tool-call updates, and every later event;
+  `limit` bounds the event pages otherwise.
 
 ### 4.2 Versions and identity
 
@@ -90,13 +97,13 @@ version does not rewrite older events.
 `EventIdentity` states projection version 1's rule for naming the Item and
 Part that an event changes:
 
-| Event                                                         | `item_id`                                         | `content_part_id`                                                                                                                      |
-| ------------------------------------------------------------- | ------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| `turn.accepted`                                               | `data.itemId`, else `item_<turn>_input`           | none; the event fills several Parts                                                                                                    |
-| `item.output_text.delta` and `item.reasoning.delta` with text | `data.itemId`, else `item_<turn>_assistant`       | the Part of the event right before it, when that event is a delta of the same type and Item; otherwise `part_<turn>_<type>_<sequence>` |
-| a text delta with empty text                                  | none                                              | none; the projection skips it                                                                                                          |
-| `item.tool_call.updated`                                      | `data.itemId`, else derived from the tool call id | none                                                                                                                                   |
-| any other event                                               | none                                              | none                                                                                                                                   |
+| Event                                                         | `item_id`                                                                                    | `content_part_id`                                                                                                                      |
+| ------------------------------------------------------------- | -------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `turn.accepted`                                               | `data.itemId`, else `item_<turn>_input`                                                      | none; the event fills several Parts                                                                                                    |
+| `item.output_text.delta` and `item.reasoning.delta` with text | `data.itemId`, else `item_<turn>_assistant`                                                  | the Part of the event right before it, when that event is a delta of the same type and Item; otherwise `part_<turn>_<type>_<sequence>` |
+| a text delta with empty text                                  | none                                                                                         | none; the projection skips it                                                                                                          |
+| `item.tool_call.updated`                                      | `data.itemId`, else derived from the tool call id, or from the turn and sequence without one | none                                                                                                                                   |
+| any other event                                               | none                                                                                         | none                                                                                                                                   |
 
 This is the rule the materializer already applies when it builds Items, and
 the materializer now takes its names from the same helpers. Because a delta's
@@ -107,11 +114,20 @@ clients should use the top-level field.
 
 Flyway V15 is a Java migration that gives the events written before V14 their
 identity with the same rule, one Session at a time in sequence order. It reads
-`data_json` only for the four event types that have an identity. A delta whose
-text a retraction emptied gets no identity, which matches the Items that the
-store rebuilds after a retraction. A retraction that happens after an event
-was accepted leaves the stored identity as it was accepted; the
-`stream.reconciled` event that follows tells clients to reload the Snapshot.
+`data_json` only for the four event types that have an identity, and it writes
+each run of consecutive events with the same identity, such as one text Part,
+with a single ranged update. A delta whose text a retraction emptied gets no
+identity, which matches the Items that the store rebuilds after a retraction.
+`EventIdentity` is projection version 1 for both the store and V15; a
+different rule needs a new projection version rather than a change to it.
+
+A retraction (`retractContinuationOutput`, during Harness recovery) empties the
+text of the retracted deltas and rebuilds the Items. The store then derives the
+identity of every event from the first retracted one on again, so that an
+emptied delta names nothing and a kept delta that continued it names the Part
+that the rebuilt Items give it. This rewrites identity together with the data
+that the retraction already rewrites, and the `stream.reconciled` event that
+follows tells clients to reload the Snapshot.
 
 ### 4.3 Event pages
 
@@ -141,11 +157,23 @@ was accepted leaves the stored identity as it was accepted; the
   reloads the Snapshot can resume after `snapshot_through_sequence`. Tests call
   it; the retention work will call it before it deletes events.
 - `PublicSession.replay_floor_sequence` returns the stored floor.
+- A stream reconciliation discards the Snapshot, so its covered sequence is `0`
+  until the Items are rebuilt. With a raised floor, a public client told to
+  resync during that time would get `409` again until the rebuild finishes.
+  Nothing raises the floor in production yet; the retention work must close
+  this window before it does.
+- The WebShell transcript does not check the floor. Once events are pruned,
+  its older pages must end at the floor; that also belongs to the retention
+  work.
 
 ### 4.5 Capabilities
 
 `snapshots` and `resync` become `true`. The Items list returns a Snapshot with
-its covered sequence, and both streams send the resync frame.
+its covered sequence, and both streams send the resync frame. The Items list
+reads the current Snapshot for every page, so a client that needs more than one
+page can see two Snapshot versions; pinning one version across pages is the
+remaining `listItems` work. The WebShell transcript returns one Snapshot in
+one response.
 
 ### 4.6 WebShell client
 
@@ -164,23 +192,30 @@ reloads the transcript and resumes after its `lastSequence`, as it does after
   capabilities and that every event's `item_id` and `content_part_id` name an
   Item and a Part of the Snapshot.
 - `ManagedEventReplayTest` covers:
-  - JSON pages that follow `next_cursor` without gaps, and the 1000 limit;
+  - JSON pages that follow `next_cursor` without gaps, including a full last
+    page that must report `has_more: false`, and the 1000 limit;
   - `Last-Event-ID` taking precedence over `after` and resuming across the
     100-event catch-up pages before live events;
   - a catch-up that races a writer and hands over to live events without gaps
     or duplicates;
-  - a stuck stream whose hub dropped 600 events and that reads them back from
-    the store;
+  - a stuck stream that falls behind by 600 events, more than the 512 the hub
+    keeps, and reads the dropped ones back from the store;
   - a floor raised past a lagging stream, which then sends one resync frame
     after the last event it delivered;
   - expired cursors on the JSON query and on both streams, and the floor's cap
     and monotonicity.
-- `EventIdentityTest` pins the rule. An integration test appends deltas in two
-  batches, with a reasoning Part that spans both, and compares every event's
-  identity with the materialized Snapshot.
+
+  The suite polls the store only every 30 seconds, so live events can reach a
+  stream only through the hub.
+
+- `EventIdentityTest` pins the rule. Integration tests compare every event's
+  identity with the materialized Snapshot after deltas appended in two batches
+  with a reasoning Part that spans both, after single appends, and after
+  retractions, including a kept delta that continued a retracted one.
 - An upgrade test writes events at V1 on H2 in MySQL mode, migrates, and checks
   the backfilled identity against the rule and against the Snapshot.
-  `ManagedAgentMySqlIT` runs the same upgrade on MariaDB.
+  `ManagedAgentMySqlIT` runs the same upgrade on MySQL and checks the replay
+  floor there.
 - The web-shell tests decode a resync frame and check that the provider yields
   one `stream_gap` and stops.
 
@@ -190,29 +225,41 @@ reloads the transcript and resumes after its `lastSequence`, as it does after
 - The WebShell stream's `409` response leaves the contract; the server never
   returned it.
 - V14 adds columns with defaults. V15 reads the event table once during the
-  upgrade and updates the rows that have an identity.
+  upgrade, in the migration's transaction, and updates each run of events with
+  one statement. On a local MariaDB it migrated 200,000 events in 100 Sessions
+  in under three seconds; a table with many short runs takes longer.
+- Upgrade all replicas together. A replica that still runs the previous
+  version after V14 writes events without an identity, and a text delta that
+  a new replica appends after one of them starts a Part that the Items do not
+  have.
 - A client that ignores the resync frame sees the stream end, reconnects with
   the same cursor and gets the frame again. The web-shell client handles it.
   Until the retention work raises the floor, no production stream sends it.
-- The generated `@qwen-code/web-shell` types add the optional event fields and
-  `WebShellResyncRequired`, and the stream operation no longer lists `409`.
+- The generated `@qwen-code/web-shell` types add `WebShellResyncRequired`, and
+  the stream operation no longer lists `409`. The optional event fields were
+  already in the WebShell event schema.
 
 ## 7. Validation
 
 - The Managed Agent server's full test suite and Checkstyle pass.
-- `ManagedAgentMySqlIT` passes against `mariadb:10.11.18`, the image CI uses.
+- `ManagedAgentMySqlIT` passes against `mariadb:10.11.18`, the image CI uses,
+  and against `mysql:8.4`.
 - The packaged Spring Boot jar migrates a MariaDB database to V15, which shows
   that Flyway finds the Java migration inside the jar.
 - Mutations each fail the matching test: ignoring `Last-Event-ID`, skipping the
-  floor check, delivering past a gap in the hub, returning no `next_cursor`,
-  starting a new Part for every delta, and skipping the V15 backfill.
+  floor check, ignoring an overflowed hub, a hub that never delivers,
+  returning no `next_cursor`, reporting `has_more` on a full last page,
+  starting a new Part for every delta, ignoring the previous event on a single
+  append, skipping the identity rederivation after a retraction, and skipping
+  the V15 backfill.
 - The web-shell typecheck, the managed component tests and the managed-progress
   and managed-workspace-w0d e2e specs pass against the regenerated types.
 
 ## 8. Follow-up
 
-- Retention: prune events, raise the floor before pruning, and keep the floor
-  at or below the Snapshot while a stream reconciliation rebuilds the Items.
+- Retention: prune events, raise the floor before pruning, keep the floor at
+  or below the Snapshot while a stream reconciliation rebuilds the Items, and
+  end the WebShell transcript's older pages at the floor.
 - The WebShell Session's floor and Snapshot watermarks.
 - `listItems` with paged Snapshot versions.
 - Lifecycle work: the three remaining gap lines.

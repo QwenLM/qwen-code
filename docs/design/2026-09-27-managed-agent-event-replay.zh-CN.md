@@ -67,6 +67,11 @@ resync。
   时就会超过 64 个字符。
 - `replay_floor_sequence` 增加说明：不超过它的事件可能被清理，低于它的游标已
   过期。
+- `SessionResyncRequired` 要求客户端从 Items 列表返回的 `snapshot_through_sequence`
+  之后继续，因为帧中的值可能比客户端随后读到的 Snapshot 更旧。
+- WebShell transcript 写明它原本的返回内容：没有游标时，有 Snapshot 的 Session
+  返回全部 Items、Snapshot 之前除输入、文本增量与工具调用更新以外的事件，以及之后的
+  所有事件；其他情况下由 `limit` 限定事件分页。
 
 ### 4.2 版本与身份
 
@@ -77,13 +82,13 @@ Flyway V14 为 `managed_agent_event` 新增默认值为 `1` 的 `schema_version`
 
 `EventIdentity` 描述投影版本 1 为事件所修改的 Item 与 Part 命名的规则：
 
-| 事件                                                        | `item_id`                                     | `content_part_id`                                                                                         |
-| ----------------------------------------------------------- | --------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| `turn.accepted`                                             | `data.itemId`，否则为 `item_<turn>_input`     | 无；该事件填充多个 Part                                                                                   |
-| 带文本的 `item.output_text.delta` 与 `item.reasoning.delta` | `data.itemId`，否则为 `item_<turn>_assistant` | 如果紧邻的上一条事件是同一类型、同一 Item 的增量，则沿用它的 Part；否则为 `part_<turn>_<type>_<sequence>` |
-| 文本为空的文本增量                                          | 无                                            | 无；投影会跳过它                                                                                          |
-| `item.tool_call.updated`                                    | `data.itemId`，否则由工具调用 id 推导         | 无                                                                                                        |
-| 其他事件                                                    | 无                                            | 无                                                                                                        |
+| 事件                                                        | `item_id`                                                                         | `content_part_id`                                                                                         |
+| ----------------------------------------------------------- | --------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `turn.accepted`                                             | `data.itemId`，否则为 `item_<turn>_input`                                         | 无；该事件填充多个 Part                                                                                   |
+| 带文本的 `item.output_text.delta` 与 `item.reasoning.delta` | `data.itemId`，否则为 `item_<turn>_assistant`                                     | 如果紧邻的上一条事件是同一类型、同一 Item 的增量，则沿用它的 Part；否则为 `part_<turn>_<type>_<sequence>` |
+| 文本为空的文本增量                                          | 无                                                                                | 无；投影会跳过它                                                                                          |
+| `item.tool_call.updated`                                    | `data.itemId`，否则由工具调用 id 推导；没有工具调用 id 时由 turn 与 sequence 推导 | 无                                                                                                        |
+| 其他事件                                                    | 无                                                                                | 无                                                                                                        |
 
 这正是物化器构建 Items 时已经采用的规则，物化器现在也通过同一组辅助方法命名。
 由于增量的 Part 只取决于它之前的那条事件，存储层在追加事件时就确定身份：文本增量
@@ -91,10 +96,16 @@ Flyway V14 为 `managed_agent_event` 新增默认值为 `1` 的 `schema_version`
 应使用顶层字段。
 
 Flyway V15 是一个 Java 迁移，按同一规则为 V14 之前写入的事件补上身份，逐个
-Session 按 sequence 顺序处理。它只为四种有身份的事件类型读取 `data_json`。文本
-已被撤回清空的增量不获得身份，这与存储层撤回后重建的 Items 一致。事件被接受之后
-才发生的撤回不会改变已存储的身份；随后的 `stream.reconciled` 事件会让客户端重新
-读取 Snapshot。
+Session 按 sequence 顺序处理。它只为四种有身份的事件类型读取 `data_json`，并把
+身份相同的连续事件（例如同一个文本 Part）用一条范围更新写入。文本已被撤回清空的
+增量不获得身份，这与存储层撤回后重建的 Items 一致。`EventIdentity` 对存储层与 V15
+而言都是投影版本 1；不同的规则需要新的投影版本，而不是修改它。
+
+撤回（Harness 恢复期间的 `retractContinuationOutput`）会清空被撤回增量的文本并
+重建 Items。随后存储层从第一条被撤回的事件起重新推导每条事件的身份，使被清空的
+增量不指向任何内容，而接续了它的保留增量指向重建后的 Items 给出的 Part。这与撤回
+本来就会改写的数据一起改写身份，随后的 `stream.reconciled` 事件会让客户端重新读取
+Snapshot。
 
 ### 4.3 事件分页
 
@@ -119,11 +130,19 @@ Session 按 sequence 顺序处理。它只为四种有身份的事件类型读�
   `snapshot_through_sequence` 之后继续。测试调用它；保留策略的工作将在删除事件之前
   调用它。
 - `PublicSession.replay_floor_sequence` 返回已存储的下限。
+- 事件流重整会丢弃 Snapshot，因此在 Items 重建之前，其已覆盖的 sequence 为 `0`。
+  如果下限已被提升，这段时间内收到 resync 的公共客户端会一直得到 `409`，直到重建
+  完成。生产环境中目前没有任何路径提升下限；保留策略的工作必须在提升下限之前消除
+  这段窗口。
+- WebShell transcript 不检查下限。事件被清理之后，它的更早分页必须止于下限；这同样
+  属于保留策略的工作。
 
 ### 4.5 能力
 
 `snapshots` 与 `resync` 改为 `true`。Items 列表返回带有已覆盖 sequence 的
-Snapshot，两个事件流都会发送 resync 帧。
+Snapshot，两个事件流都会发送 resync 帧。Items 列表的每一页都读取当前 Snapshot，
+因此需要多页的客户端可能看到两个 Snapshot 版本；跨页固定同一版本是 `listItems`
+剩余的工作。WebShell transcript 在一次响应中返回同一个 Snapshot。
 
 ### 4.6 WebShell 客户端
 
@@ -139,44 +158,55 @@ Snapshot，两个事件流都会发送 resync 帧。
   一帧 resync。一致性测试检查新的能力值，并检查每条事件的 `item_id` 与
   `content_part_id` 都指向 Snapshot 中的 Item 与 Part。
 - `ManagedEventReplayTest` 覆盖：
-  - 按 `next_cursor` 翻页的 JSON 查询不跳序，以及 1000 的 limit；
+  - 按 `next_cursor` 翻页的 JSON 查询不跳序，包括必须报告 `has_more: false` 的
+    满页最后一页，以及 1000 的 limit；
   - `Last-Event-ID` 优先于 `after`，并跨越每页 100 条的历史补齐后进入实时事件；
   - 与写入方竞争的历史补齐无缝、不重复地切换到实时事件；
-  - hub 丢弃了 600 条事件的卡住的事件流，从存储重新读回这些事件；
+  - 卡住的事件流落后 600 条事件，超过 hub 保留的 512 条，并从存储重新读回被丢弃的
+    事件；
   - 下限越过落后的事件流后，事件流在已送达的最后一条事件之后发送一帧 resync；
   - JSON 查询与两个事件流上的过期游标，以及下限的上限与单调性。
-- `EventIdentityTest` 固定该规则。一个集成测试分两批追加增量，其中一个 reasoning
-  Part 跨越两批，并把每条事件的身份与物化后的 Snapshot 对照。
+
+  该测试集每 30 秒才轮询一次存储，因此实时事件只能经由 hub 到达事件流。
+
+- `EventIdentityTest` 固定该规则。集成测试在以下情形后把每条事件的身份与物化后的
+  Snapshot 对照：分两批追加、且有一个 reasoning Part 跨越两批的增量；逐条追加的
+  增量；以及撤回，包括接续了被撤回增量的保留增量。
 - 一个升级测试在 H2 的 MySQL 模式下于 V1 写入事件、执行迁移，并按规则与 Snapshot
-  检查补上的身份。`ManagedAgentMySqlIT` 在 MariaDB 上执行同样的升级。
+  检查补上的身份。`ManagedAgentMySqlIT` 在 MySQL 上执行同样的升级，并在其上检查回放下限。
 - web-shell 测试解码 resync 帧，并检查 provider 只产出一个 `stream_gap` 后停止。
 
 ## 6. 兼容性
 
 - 事件只新增字段，Session 报告已存储的下限；没有删除任何内容。
 - WebShell 事件流的 `409` 响应从契约中移除；服务端从未返回过它。
-- V14 新增带默认值的列。V15 在升级时读取一遍事件表，并更新有身份的行。
+- V14 新增带默认值的列。V15 在升级时于迁移事务内读取一遍事件表，并对每一段事件
+  执行一条更新。在本地 MariaDB 上，它在三秒内迁移了 100 个 Session 中的 20 万条
+  事件；短片段很多的表会更慢。
+- 所有副本需要一起升级。V14 之后仍运行旧版本的副本写入的事件没有身份，新副本在
+  其后追加的文本增量会开始一个 Items 中没有的 Part。
 - 忽略 resync 帧的客户端会看到事件流结束，用同一个游标重连后再次收到该帧。
   web-shell 客户端会处理它。在保留策略的工作提升下限之前，生产环境中的事件流不会
   发送它。
-- 生成的 `@qwen-code/web-shell` 类型新增可选的事件字段与 `WebShellResyncRequired`，
-  事件流 operation 不再列出 `409`。
+- 生成的 `@qwen-code/web-shell` 类型新增 `WebShellResyncRequired`，事件流
+  operation 不再列出 `409`。可选的事件字段原本就在 WebShell 事件 schema 中。
 
 ## 7. 验证
 
 - Managed Agent 服务的完整测试与 Checkstyle 通过。
-- `ManagedAgentMySqlIT` 在 CI 所用的 `mariadb:10.11.18` 上通过。
+- `ManagedAgentMySqlIT` 在 CI 所用的 `mariadb:10.11.18` 以及 `mysql:8.4` 上通过。
 - 打包后的 Spring Boot jar 把 MariaDB 数据库迁移到 V15，说明 Flyway 能在 jar 中
   找到这个 Java 迁移。
-- 以下变更分别使对应测试失败：忽略 `Last-Event-ID`、跳过下限检查、在 hub 中越过
-  缺口继续投递、不返回 `next_cursor`、每个增量都新建 Part、跳过 V15 回填。
+- 以下变更分别使对应测试失败：忽略 `Last-Event-ID`、跳过下限检查、忽略 hub 溢出、
+  hub 从不投递、不返回 `next_cursor`、满页的最后一页报告 `has_more`、每个增量都
+  新建 Part、逐条追加时忽略上一条事件、撤回后跳过身份的重新推导、跳过 V15 回填。
 - WebShell 的 typecheck、managed 组件测试以及 managed-progress 与
   managed-workspace-w0d e2e 用例在重新生成的类型下通过。
 
 ## 8. 后续工作
 
-- 保留策略：清理事件，在清理之前提升下限，并在事件流重整重建 Items 期间把下限保持
-  在 Snapshot 之下或与之相等。
+- 保留策略：清理事件，在清理之前提升下限，在事件流重整重建 Items 期间把下限保持
+  在 Snapshot 之下或与之相等，并让 WebShell transcript 的更早分页止于下限。
 - WebShell Session 的下限与 Snapshot 水位。
 - 带 Snapshot 版本分页的 `listItems`。
 - 生命周期工作：剩余的三行差异。

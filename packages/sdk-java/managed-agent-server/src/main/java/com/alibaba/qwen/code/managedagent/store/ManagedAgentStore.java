@@ -1149,6 +1149,7 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " IN ('item.output_text.delta',"
                         + " 'item.reasoning.delta') ORDER BY sequence_id ASC",
                 eventMapper, tenantId, sessionId, turnId);
+        long firstRetracted = Long.MAX_VALUE;
         for (EventRecord event : deltas) {
             if (event.sourceKey() == null
                     || !event.sourceKey().startsWith(sourcePrefix)) {
@@ -1160,6 +1161,10 @@ public class ManagedAgentStore implements AgentStateStore {
                             + " WHERE tenant_id = ? AND session_id = ?"
                             + " AND sequence_id = ?",
                     writeJson(data), tenantId, sessionId, event.sequence());
+            firstRetracted = Math.min(firstRetracted, event.sequence());
+        }
+        if (firstRetracted != Long.MAX_VALUE) {
+            reassignIdentity(tenantId, sessionId, firstRetracted);
         }
         // Rebuild shared text parts from retained events, including any
         // output belonging to other Harness generations.
@@ -1806,6 +1811,38 @@ public class ManagedAgentStore implements AgentStateStore {
                 event.contentPartId());
         publishAfterCommit(List.of(event));
         return event;
+    }
+
+    // Emptied deltas name nothing, and a delta that continued one now starts
+    // a Part of its own, so identities from the first emptied event on are
+    // derived again as the rebuilt Items will name them.
+    private void reassignIdentity(String tenantId, String sessionId,
+            long fromSequence) {
+        List<EventRecord> events = jdbc.query("SELECT * FROM"
+                        + " managed_agent_event WHERE tenant_id = ? AND"
+                        + " session_id = ? AND sequence_id >= ? ORDER BY"
+                        + " sequence_id ASC",
+                eventMapper, tenantId, sessionId, fromSequence - 1);
+        Identity previous = null;
+        for (EventRecord event : events) {
+            if (event.sequence() < fromSequence) {
+                previous = new Identity(event.type(), event.itemId(),
+                        event.contentPartId());
+                continue;
+            }
+            Identity identity = EventIdentity.of(event.type(),
+                    event.turnId(), event.sequence(), event.data(), previous);
+            if (!Objects.equals(identity.itemId(), event.itemId())
+                    || !Objects.equals(identity.contentPartId(),
+                            event.contentPartId())) {
+                jdbc.update("UPDATE managed_agent_event SET item_id = ?,"
+                                + " content_part_id = ? WHERE tenant_id = ?"
+                                + " AND session_id = ? AND sequence_id = ?",
+                        identity.itemId(), identity.contentPartId(), tenantId,
+                        sessionId, event.sequence());
+            }
+            previous = identity;
+        }
     }
 
     // Only a text delta continues the event before it, so other events skip
