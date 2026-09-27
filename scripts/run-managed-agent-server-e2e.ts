@@ -60,6 +60,12 @@ if (
   );
 }
 
+if (inflightFailover || continuationFailover) {
+  throw new Error(
+    `${inflightFailover ? '--inflight-failover' : '--continuation-failover'} is not yet enabled: the mode drives its assertion through a physical tool execution, but the Hosted Harness no-tool slice (#12713) refuses every tool call by design, so the run fails with "Hosted Harness no-tool turn refused a tool call" before the Broker sees any request. The mode stays gated until the tool-capable Hosted turn tracked in #12380 lands. Use --session-failover for the durable-owner failover check that runs on the current slice.`,
+  );
+}
+
 const durableFailover =
   sessionFailover || inflightFailover || continuationFailover;
 const modelBeforeRuntimeAssertionDelayMs = 20_000;

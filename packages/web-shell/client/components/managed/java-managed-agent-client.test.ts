@@ -111,7 +111,7 @@ describe('JavaManagedAgentClient', () => {
         requestId: 'r1',
         idempotencyKey: 'key-1',
         agentId: 'dataworks_data_agent',
-        input: [{ type: 'text', text: 'hello' }],
+        input: [{ type: 'input_text', text: 'hello' }],
       }),
     ).rejects.toEqual(
       expect.objectContaining<Partial<JavaManagedAgentHttpError>>({

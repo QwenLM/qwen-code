@@ -785,6 +785,35 @@ describe('useLlmStream', () => {
     });
   });
 
+  it('displays a foreground workflow result before the model request and never duplicates it', async () => {
+    const { mockSendMessageStream } = renderTestHook();
+    const displayText =
+      'Workflow completed. Run ID: wf_client\nResult: {"failed":["fr"]}\nReported failed: ["fr"]';
+    const modelText =
+      '<task-notification><kind>workflow</kind><result>fr failed</result></task-notification>';
+    const callback =
+      mockWorkflowRunRegistry.setCompletionCallback.mock.calls[0][0];
+    act(() => {
+      callback(displayText, modelText, {
+        runId: 'wf_client',
+        status: 'completed',
+        isBackgrounded: false,
+      });
+      expect(mockAddItem).toHaveBeenCalledWith(
+        { type: 'notification', text: displayText },
+        expect.any(Number),
+      );
+      expect(mockSendMessageStream).not.toHaveBeenCalled();
+    });
+    await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalledOnce());
+    expect(mockSendMessageStream.mock.calls[0][0]).toBe(modelText);
+    expect(
+      mockAddItem.mock.calls.filter(
+        ([item]) => item.type === 'notification' && item.text === displayText,
+      ),
+    ).toHaveLength(1);
+  });
+
   it('forwards submitted prompt provenance only for UserQuery', async () => {
     const { result, mockSendMessageStream } = renderTestHook();
 
