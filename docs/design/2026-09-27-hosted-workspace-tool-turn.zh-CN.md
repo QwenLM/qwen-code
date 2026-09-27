@@ -55,7 +55,7 @@ Harness 在持久化参数资源中保留精确 payload 字节。Broker 只在�
 
 取消会中止推理，并按原始身份请求取消每个已预留或已启动调用。取消请求不等于停止证据；只有 Runtime 终态结果允许结算和释放。无法观察出结果时保留所有权并阻塞。释放失败也阻塞后续工具，不在本地清除所有权。结果未知时仍持有 Workspace 存储，因此同一 Workspace 的其它 Session 会收到可恢复的 busy 错误，直到 W0e 恢复清除原持有者。
 
-私有循环最多运行 16 轮模型请求。Broker payload 上限为 256 KiB，但每个参数、结果和历史资源也必须满足现有 Session Store 的 64 KiB 内联限制；过大资源直接失败，不能截断后继续。每个 Broker HTTP 请求超时为 30 秒，执行观察最多两分钟加上当前请求。这些是私有 profile 内部限制，不是新用户设置。
+私有循环最多运行 16 轮模型请求。Broker payload 上限为 256 KiB，但每个参数、结果和历史资源也必须满足现有 Session Store 的 64 KiB 内联限制。过大的参数和 assistant 记录在获取所有权前拒绝。对已知终态执行，同时检查序列化 outcome 和完整 tool_result 记录，包括 UTF-8、JSON 转义和元数据；任一超限时，持久化保留原 executionStatus、标记 outputOmitted=true 的小型函数错误，替代原输出，read_file 响应提示模型缩小 offset/limit 范围。这份回执不表示工具未执行。仍须提交并消费回执后才能正常结算和释放；未知结果和持久化失败仍要求恢复并保持阻塞。每个 Broker HTTP 请求超时为 30 秒，执行观察最多两分钟加上当前请求。这些是私有 profile 内部限制，不是新用户设置。
 
 冷 load 保留现有对未结算输入的拒绝。进程丢失后的自动接续、孤儿 worker 接管与旧代执行对账属于 W0e/#12766/#12670。本片记录后续所需的原始身份，但不宣称完成这些能力。
 
@@ -72,6 +72,7 @@ Java 产品 coordinator 和公开 Workspace 准入继续受门禁约束。私有
 - 在两个 Workspace 目录中通过真实 worker 执行 Read/Write/Edit。在 Harness 启动目录放置诱饵文件，证明没有读写它。
 - 执行至少两轮模型/工具循环和后续 prompt；断言模型请求与持久回放中的调用/结果一一对应。
 - 验证 busy/unavailable 拒绝后可继续 prompt 和 reload，而 acquire 响应丢失及占用存储后的失败仍阻塞。在获取所有权前拒绝过大的输入和完整 assistant 记录，包括 UTF-8 和嵌套 JSON 转义。
+- 读取密集 CJK 文本，另行覆盖 outcome 合规但完整记录超限的边界。验证有界省略回执保留执行终态、进入模型与持久历史、允许后续缩小范围读取并释放 Workspace 所有权。覆盖 JSON 转义膨胀和错误输出，保持未知结果与持久化失败时的阻塞。
 - 在 start 前注入参数/意图持久化失败，观察零文件副作用。丢弃 start 响应，证明只查询原执行且不产生第二次副作用。
 - 验证 start 前取消、执行中取消和状态不可读时取消。仅物理已结算工作可产生回合终态；未知结果阻止后续 prompt 和 reload。
 - 验证结算前后的 prepare/start payload 冲突、存储引用不含 payload、prepare/cancel 竞态和原接口兼容性。

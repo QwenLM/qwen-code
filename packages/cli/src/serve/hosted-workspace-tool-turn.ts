@@ -99,7 +99,11 @@ export class HostedWorkspaceToolTurn {
       parts: Part[],
       model: string,
     ) => Promise<string>,
-    private readonly validateAssistant: (parts: Part[], model: string) => void,
+    private readonly messageFitsInline: (
+      type: 'assistant' | 'tool_result',
+      parts: Part[],
+      model: string,
+    ) => boolean,
   ) {
     this.broker = new HostedWorkspaceBroker(
       options,
@@ -156,7 +160,10 @@ export class HostedWorkspaceToolTurn {
         digest: `sha256:${createHash('sha256').update(payloadJson).digest('hex')}`,
       };
     });
-    this.validateAssistant(parts, model);
+    if (!this.messageFitsInline('assistant', parts, model))
+      throw new Error(
+        'Hosted assistant record exceeds the inline Session Store limit.',
+      );
     signal.throwIfAborted();
     let onAbort: () => void = () => undefined;
     try {
@@ -287,7 +294,7 @@ export class HostedWorkspaceToolTurn {
           )
         )
           throw new Error('Runtime returned an unsupported tool result.');
-        const converted =
+        let converted =
           result.executionStatus === 'success'
             ? convertToFunctionResponse(
                 request.call.name,
@@ -309,14 +316,38 @@ export class HostedWorkspaceToolTurn {
           executionStatus: result.executionStatus,
           ...(result.error ? { runtimeError: result.error } : {}),
         };
+        let outcome = Buffer.from(
+          JSON.stringify({ executionCallId, ...converted[0] }),
+        );
+        if (
+          outcome.byteLength >
+            HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes ||
+          !this.messageFitsInline('tool_result', converted, model)
+        ) {
+          converted = [
+            {
+              functionResponse: {
+                id: request.call.callId,
+                name: request.call.name,
+                response: {
+                  error:
+                    `Tool execution settled as ${result.executionStatus}, but its output exceeds the ${HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes}-byte durable Session limit and was omitted.` +
+                    (request.call.name === 'read_file'
+                      ? ' Request a smaller offset/limit range.'
+                      : ''),
+                  executionStatus: result.executionStatus,
+                  outputOmitted: true,
+                },
+              },
+            },
+          ];
+          outcome = Buffer.from(
+            JSON.stringify({ executionCallId, ...converted[0] }),
+          );
+        }
         const outcomeRef = await this.session.resources.publish(
           'managed-tool-outcome',
-          Buffer.from(
-            JSON.stringify({
-              executionCallId,
-              ...converted[0],
-            }),
-          ),
+          outcome,
         );
         await this.commit('tool_result', converted, model);
         await this.harness.resolveAwaitRuntime(executionCallId, outcomeRef);

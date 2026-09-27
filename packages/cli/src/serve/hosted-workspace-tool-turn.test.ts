@@ -128,7 +128,7 @@ beforeEach(async () => {
       });
       return uuid;
     },
-    () => undefined,
+    () => true,
   );
 });
 afterEach(async () => {
@@ -316,6 +316,62 @@ it('keeps an empty Runtime error visible to the model instead of reporting succe
   });
   expect(result[0].functionResponse?.response).not.toHaveProperty('output');
 });
+
+it.each([
+  {
+    label: 'UTF-8 output',
+    result: {
+      executionStatus: 'success',
+      responseParts: [{ text: '中'.repeat(25_000) }],
+    },
+  },
+  {
+    label: 'JSON-escaped output',
+    result: {
+      executionStatus: 'success',
+      responseParts: [{ text: '\\'.repeat(35_000) }],
+    },
+  },
+  {
+    label: 'Runtime error',
+    result: {
+      executionStatus: 'error',
+      responseParts: [],
+      error: { message: '中'.repeat(25_000) },
+    },
+  },
+])(
+  'persists a small receipt for oversized settled $label',
+  async ({ result }) => {
+    broker.execute.mockResolvedValue(result);
+    const publish = vi.spyOn(session.resources, 'publish');
+    const responses = await turn.execute(
+      [calls[0]],
+      [parts[0]],
+      'model',
+      new AbortController().signal,
+    );
+    const response = responses[0].functionResponse?.response;
+    expect(response?.['outputOmitted']).toBe(true);
+    expect(response?.['executionStatus']).toBe(result.executionStatus);
+    expect(response?.['error']).toContain('durable Session limit');
+    expect(response).not.toHaveProperty('output');
+    expect(response).not.toHaveProperty('runtimeError');
+    const outcome = publish.mock.calls.find(
+      ([kind]) => kind === 'managed-tool-outcome',
+    )?.[1];
+    expect(outcome?.byteLength).toBeLessThanOrEqual(64 * 1024);
+    const receipt = (await session.sink.project()).at(-1);
+    expect(receipt?.message?.parts).toEqual(responses);
+    expect(Buffer.byteLength(JSON.stringify(receipt))).toBeLessThanOrEqual(
+      64 * 1024,
+    );
+    await turn.consumeResults();
+    await turn.finish();
+    expect(broker.execute).toHaveBeenCalledOnce();
+    expect(broker.release).toHaveBeenCalledOnce();
+  },
+);
 
 it.each(['workspace_busy', 'workspace_unavailable'])(
   'allows another attempt after a definite %s acquire refusal',

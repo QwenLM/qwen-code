@@ -537,19 +537,11 @@ export function registerHostedHarnessSessionRoutes(
                   harness,
                   promptId,
                   commit,
-                  (parts, model) => {
-                    if (
-                      Buffer.byteLength(
-                        JSON.stringify(
-                          messageRecord('assistant', parts, model),
-                        ),
-                      ) >
-                      HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes
-                    )
-                      throw new Error(
-                        'Hosted assistant record exceeds the inline Session Store limit.',
-                      );
-                  },
+                  (type, parts, model) =>
+                    Buffer.byteLength(
+                      JSON.stringify(messageRecord(type, parts, model)),
+                    ) <=
+                    HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes,
                 )
               : undefined;
           let state: 'completed' | 'cancelled' | 'error' = 'completed';
