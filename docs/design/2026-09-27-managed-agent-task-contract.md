@@ -158,7 +158,11 @@ refresh rule for unknown terminal events does not apply. Every event carries `sc
 events. High-volume logs and Monitor raw lines go into Artifacts or this
 paged stream and stay out of the Session event stream, as design section 11
 and API contract section 6 require, and events are retained for a bounded time
-rather than kept forever.
+rather than kept forever. Events expire only from the oldest end, so the
+retained events have no gaps: an output event that is not yet in an Artifact
+also holds back the expiry of every later event, and a cursor older than the
+oldest retained event is the only way to miss one, which `cursor_expired`
+reports.
 
 Every event carries `cursor`, the position after it, which also serves as its
 identity. A consumer that stores the cursor with each event it applies resumes
