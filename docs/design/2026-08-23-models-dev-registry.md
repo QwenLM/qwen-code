@@ -26,7 +26,7 @@ Sonnet 4.5 is corrected to 200,000 context tokens even when cached data advertis
 
 Only the supported first-party provider allowlist feeds the default catalog. Entries must support tool calls and text output. Only positive safe-integer token limits and boolean input modalities are accepted.
 
-Model identifiers use the existing normalization rules. All entries that normalize to one key must agree, including dated and provider-qualified variants. If any disagree, omit the entire key and preserve the existing regex/default behavior. A bare identifier must not erase conflicting endpoint evidence. This is deliberately conservative: it does not certify every possible private gateway or correct endpoint-specific limitations already present in the regex tables.
+Model identifiers use the existing normalization rules. A projected key must be a fixed point of the normalizer: a candidate whose key still shortens under normalization (a dated alias folding onto a spelling that is itself an alias) is omitted, so every committed entry is reachable by the id it is keyed under. All entries that normalize to one key must agree, including dated and provider-qualified variants. If any disagree, omit the entire key and preserve the existing regex/default behavior. A bare identifier must not erase conflicting endpoint evidence. This is deliberately conservative: it does not certify every possible private gateway or correct endpoint-specific limitations already present in the regex tables.
 
 Provider-aware lookup would require changing the model-resolution contract and its callers. It is deferred rather than approximated by first-provider precedence. Regeneration and runtime refresh use the same projection.
 

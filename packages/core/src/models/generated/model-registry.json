@@ -149,10 +149,6 @@
       "context": 32768,
       "output": 16384
     },
-    "deepseek-v3": {
-      "context": 163840,
-      "output": 163840
-    },
     "deepseek-v3-1": {
       "context": 131072,
       "output": 65536

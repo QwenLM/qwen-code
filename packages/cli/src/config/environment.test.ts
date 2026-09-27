@@ -123,6 +123,7 @@ const TRACKED_ENV = [
   'DASHSCOPE_PROXY_BASE_URL',
   'QWEN_TEST_PROVIDER_KEY',
   'DEMO_VAR',
+  'QWEN_CODE_MODELS_DEV_URL',
 ] as const;
 
 let tmpDirs: string[] = [];
@@ -588,6 +589,45 @@ describe('update download source environment', () => {
       expect(snapshot.effectiveEnv['QWEN_UPDATE_BASE_URL']).toBe(trustedUrl);
     },
   );
+});
+
+describe('model catalog download source environment', () => {
+  it.each(['.env', '.qwen/.env', 'settings.env'])(
+    'rejects a project-scoped catalog URL from %s',
+    (source) => {
+      const workspace = makeWorkspace();
+      const settings = testSettings({ advanced: { excludedEnvVars: [] } });
+      if (source === 'settings.env') {
+        settings.env = {
+          QWEN_CODE_MODELS_DEV_URL: 'https://project.example.com/api.json',
+        };
+      } else {
+        const envPath = path.join(workspace, source);
+        fs.mkdirSync(path.dirname(envPath), { recursive: true });
+        fs.writeFileSync(
+          envPath,
+          'QWEN_CODE_MODELS_DEV_URL=https://project.example.com/api.json\n',
+        );
+      }
+
+      loadEnvironment(settings, workspace);
+      expect(process.env['QWEN_CODE_MODELS_DEV_URL']).toBeUndefined();
+    },
+  );
+
+  it('preserves the operator-supplied catalog URL against project configuration', () => {
+    const workspace = makeWorkspace();
+    process.env['QWEN_CODE_MODELS_DEV_URL'] = 'https://mirror.corp/api.json';
+    fs.writeFileSync(
+      path.join(workspace, '.env'),
+      'QWEN_CODE_MODELS_DEV_URL=https://project.example.com/api.json\n',
+    );
+
+    loadEnvironment(testSettings({}), workspace);
+    expect(process.env['QWEN_CODE_MODELS_DEV_URL']).toBe(
+      'https://mirror.corp/api.json',
+    );
+  });
 });
 
 describe('daemon registration capacity environment', () => {

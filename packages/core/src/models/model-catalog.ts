@@ -51,8 +51,7 @@ function isEntry(value: unknown): value is ModelCatalogEntry {
         !Array.isArray(modalities) &&
         Object.entries(modalities).every(
           ([key, value]) =>
-            ['image', 'pdf', 'audio', 'video'].includes(key) &&
-            typeof value === 'boolean',
+            ['image', 'pdf', 'audio', 'video'].includes(key) && value === true,
         )))
   );
 }

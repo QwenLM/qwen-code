@@ -12,6 +12,7 @@ import { AuthType } from '../core/contentGenerator.js';
 import {
   defaultOutputCeiling,
   hasExplicitOutputLimit,
+  normalize,
   tokenLimit,
 } from '../core/tokenLimits.js';
 import { resolveModelConfig } from './modelConfigResolver.js';
@@ -160,6 +161,15 @@ describe('model catalog', () => {
     expect(tokenLimit('claude-sonnet-5')).toBe(1_000_000);
   });
 
+  it('keys every bundled entry by a normalize() fixed point so its own id reaches it', () => {
+    for (const id of Object.keys(bundled.models)) {
+      expect(normalize(id)).toBe(id);
+    }
+    // Both spellings of a model must resolve alike; a dated alias must not
+    // land on a key the canonical id cannot reach (deepseek-v3 did).
+    expect(lookupModelCatalog('deepseek-v3-0324')).toBeUndefined();
+  });
+
   it('keeps output pins after refresh while filling unknown model limits', () => {
     writeJson(getModelCatalogCachePath(), {
       source: 'https://models.dev/api.json',
@@ -235,6 +245,7 @@ describe('model catalog', () => {
         infinite: { context: Infinity },
         fractional: { output: 1.5 },
         invalidModality: { modalities: { image: 'false' } },
+        falseModality: { modalities: { image: false } },
       },
     });
     expect(parsed).toEqual({

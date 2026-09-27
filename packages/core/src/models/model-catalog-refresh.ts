@@ -22,7 +22,7 @@ import {
 const debugLogger = createDebugLogger('MODEL_CATALOG');
 
 export const MODELS_DEV_URL = 'https://models.dev/api.json';
-/** `QWEN_CODE_MODELS_DEV_REFRESH=off` keeps the bundled snapshot and never fetches models.dev. */
+/** `QWEN_CODE_MODELS_DEV_REFRESH=off` stops the once-a-day download; a previously downloaded cache is still preferred until deleted. */
 export const MODEL_CATALOG_REFRESH_ENV = 'QWEN_CODE_MODELS_DEV_REFRESH';
 /** Replaces the models.dev URL, e.g. with a corporate mirror. */
 export const MODEL_CATALOG_URL_ENV = 'QWEN_CODE_MODELS_DEV_URL';
@@ -154,6 +154,13 @@ export function trimModelsDevCatalog(
         continue;
       }
       const key = normalize(model.id);
+      // Lookups key on normalize(user input), so a key that is not its own
+      // normalized form is unreachable by its own spelling while a dated
+      // alias still hits it (`deepseek-v3-0324` -> `deepseek-v3` ->
+      // `deepseek`). Omit it so both spellings share the regex answer.
+      if (normalize(key) !== key) {
+        continue;
+      }
       const existing = candidates.get(key);
       if (existing) {
         existing.push(entry);
@@ -186,7 +193,13 @@ async function readCacheFile(
 
 async function refreshRemote(url: string, cachePath: string): Promise<void> {
   const cached = await readCacheFile(cachePath);
-  const reusable = cached?.source === url ? cached : undefined;
+  // A cache with no models is a poisoned write from before the empty-
+  // projection guard below; treat it as absent so it heals on this fetch
+  // instead of being re-stamped by a 304.
+  const reusable =
+    cached?.source === url && Object.keys(cached.models).length > 0
+      ? cached
+      : undefined;
   if (
     reusable &&
     Date.now() - Date.parse(reusable.fetchedAt) < REFRESH_INTERVAL_MS
@@ -211,6 +224,12 @@ async function refreshRemote(url: string, cachePath: string): Promise<void> {
       fetchedAt,
       url,
     );
+    // A 200 that projects to nothing is not a catalog (a renamed upstream
+    // field or a gateway error body); keep the previous data instead of
+    // shadowing the bundled snapshot with an empty one for a day.
+    if (Object.keys(next.models).length === 0) {
+      throw new Error(`no catalog entries projected from ${url}`);
+    }
     const etag = response.headers.get('etag');
     if (etag) {
       next.etag = etag;

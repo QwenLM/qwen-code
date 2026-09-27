@@ -307,6 +307,12 @@ describe('isHardcodedProjectEnvExclusion', () => {
   });
 
   it('matches the newly added hardcoded exclusions case-insensitively', () => {
+    expect(isHardcodedProjectEnvExclusion('QWEN_CODE_MODELS_DEV_URL')).toBe(
+      true,
+    );
+    expect(isHardcodedProjectEnvExclusion('qwen_code_models_dev_url')).toBe(
+      true,
+    );
     expect(isHardcodedProjectEnvExclusion('SSL_CERT_FILE')).toBe(true);
     expect(isHardcodedProjectEnvExclusion('ssl_cert_file')).toBe(true);
     expect(isHardcodedProjectEnvExclusion('GIT_SSH_COMMAND')).toBe(true);

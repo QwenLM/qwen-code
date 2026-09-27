@@ -42,6 +42,9 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   'QWEN_CODE_SYSTEM_DEFAULTS_PATH',
   // Downloaded updates execute as the user; a project must not select them.
   'QWEN_UPDATE_BASE_URL',
+  // The refreshed model catalog is written to the global cache that every
+  // project reads; a project must not choose where it is downloaded from.
+  'QWEN_CODE_MODELS_DEV_URL',
   // This points to a host temp file that carries build warnings. A project
   // `.env` must not redirect it to an arbitrary file to read or delete.
   'QWEN_CODE_WARNINGS_FILE',

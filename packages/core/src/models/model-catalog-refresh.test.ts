@@ -190,6 +190,26 @@ describe('trimModelsDevCatalog', () => {
       models: {},
     });
   });
+
+  it('omits a key that is unreachable by its own normalized spelling', () => {
+    // normalize('acme-v3-0324') -> 'acme-v3', which itself normalizes to
+    // 'acme': the entry could never be looked up by the id it describes.
+    const models = trimModelsDevCatalog(
+      {
+        alibaba: {
+          models: {
+            'acme-v3-0324': chat('acme-v3-0324', {
+              context: 163840,
+              output: 163840,
+            }),
+          },
+        },
+      },
+      NOW,
+    ).models;
+    expect(models).not.toHaveProperty('acme-v3');
+    expect(models).toEqual({});
+  });
 });
 
 describe('refreshModelCatalog', () => {
@@ -264,7 +284,7 @@ describe('refreshModelCatalog', () => {
     writeJson(getModelCatalogCachePath(), {
       source: MODELS_DEV_URL,
       fetchedAt: new Date().toISOString(),
-      models: {},
+      models: { kept: { context: 7 } },
     });
 
     await refreshModelCatalog();
@@ -332,6 +352,40 @@ describe('refreshModelCatalog', () => {
     await refreshModelCatalog();
 
     expect(readJson(getModelCatalogCachePath()).fetchedAt).toBe(LONG_AGO);
+  });
+
+  it('leaves the cache in force when a 200 response projects to nothing', async () => {
+    writeJson(getModelCatalogCachePath(), {
+      source: MODELS_DEV_URL,
+      fetchedAt: LONG_AGO,
+      models: { kept: { context: 7 } },
+    });
+    // Valid JSON with no allowlisted provider, e.g. a gateway error envelope.
+    fetchMock.mockResolvedValue(jsonResponse({ message: 'rate limited' }));
+
+    await expect(refreshModelCatalog()).resolves.toBeUndefined();
+
+    const cache = readJson(getModelCatalogCachePath());
+    expect(cache.fetchedAt).toBe(LONG_AGO);
+    expect(cache.models).toEqual({ kept: { context: 7 } });
+    expect(lookupModelCatalog('claude-fable-5')).toBeDefined();
+  });
+
+  it('does not reuse an empty cache: fetches without the ETag and heals', async () => {
+    writeJson(getModelCatalogCachePath(), {
+      source: MODELS_DEV_URL,
+      fetchedAt: LONG_AGO,
+      etag: '"poisoned"',
+      models: {},
+    });
+    fetchMock.mockResolvedValue(jsonResponse(api, { etag: '"new"' }));
+
+    await refreshModelCatalog();
+
+    expect(fetchMock.mock.calls[0]?.[1]?.headers).toEqual({});
+    const cache = readJson(getModelCatalogCachePath());
+    expect(cache.models).toEqual(trimmed);
+    expect(cache.etag).toBe('"new"');
   });
 
   it('does nothing when the refresh or the whole catalog is switched off', async () => {
