@@ -149,6 +149,19 @@ function getPlatformArch() {
  * }}
  */
 
+// Both git-sourced lanes stage the git file list and refuse to hand an empty
+// one to the linter; build the two guard fragments once per stage (the same
+// parameterized-shell pattern as getCachedArchiveInstaller) so the five
+// copies cannot drift apart again.
+const stageGitFileList = (label) => `
+      files="$(git ls-files)" || { echo "${label}: git ls-files failed; refusing to lint an empty file list" >&2; exit 1; }`;
+
+const refuseEmptyList = (label, variable, reason) => `
+      if [ -z "$${variable}" ]; then
+        echo "${label}: ${reason}; refusing to pass on an empty file list" >&2
+        exit 1
+      fi`;
+
 let lintersCache;
 
 // Built lazily: getPlatformArch() throws on platforms where the POSIX-only
@@ -212,18 +225,17 @@ export function getLinters() {
         // swallows every upstream status, so an empty git ls-files (the
         // 2026-09-24 dubious-ownership failure, #12647) otherwise passed
         // the lane having linted nothing.
-        run: `
-      files="$(git ls-files)" || { echo "shellcheck: git ls-files failed; refusing to lint an empty file list" >&2; exit 1; }
-      candidates="$(printf '%s\\n' "$files" | grep -v '^integration-tests/terminal-bench/' | grep -E '^([^.]+|.*\\.(sh|zsh|bash))')"
-      if [ -z "$candidates" ]; then
-        echo "shellcheck: git ls-files matched no shell-script candidates; refusing to pass on an empty file list" >&2
-        exit 1
-      fi
-      scripts="$(printf '%s\\n' "$candidates" | xargs file --mime-type | grep 'text/x-shellscript' | awk '{ print substr($1, 1, length($1)-1) }')"
-      if [ -z "$scripts" ]; then
-        echo "shellcheck: file --mime-type detected no shell scripts; refusing to pass on an empty file list" >&2
-        exit 1
-      fi
+        run: `${stageGitFileList('shellcheck')}
+      candidates="$(printf '%s\\n' "$files" | grep -v '^integration-tests/terminal-bench/' | grep -E '^([^.]+|.*\\.(sh|zsh|bash))')"${refuseEmptyList(
+        'shellcheck',
+        'candidates',
+        'git ls-files matched no shell-script candidates',
+      )}
+      scripts="$(printf '%s\\n' "$candidates" | xargs file --mime-type | grep 'text/x-shellscript' | awk '{ print substr($1, 1, length($1)-1) }')"${refuseEmptyList(
+        'shellcheck',
+        'scripts',
+        'file --mime-type detected no shell scripts',
+      )}
       printf '%s\\n' "$scripts" | xargs shellcheck \\
         --check-sourced \\
         --enable=all \\
@@ -241,13 +253,12 @@ export function getLinters() {
         // the lane must fail on git's error, not on yamllint's usage screen
         // from a zero-file invocation — and `xargs -r` would turn that
         // failure into a false green.
-        run: `
-      files="$(git ls-files)" || { echo "yamllint: git ls-files failed; refusing to lint an empty file list" >&2; exit 1; }
-      files="$(printf '%s\\n' "$files" | grep -E '\\.(yaml|yml)')"
-      if [ -z "$files" ]; then
-        echo "yamllint: git ls-files matched no yaml files; refusing to lint an empty file list" >&2
-        exit 1
-      fi
+        run: `${stageGitFileList('yamllint')}
+      files="$(printf '%s\\n' "$files" | grep -E '\\.(yaml|yml)')"${refuseEmptyList(
+        'yamllint',
+        'files',
+        'git ls-files matched no yaml files',
+      )}
       printf '%s\\n' "$files" | xargs yamllint --format github
     `,
       },
@@ -256,13 +267,18 @@ export function getLinters() {
   return lintersCache;
 }
 
+// tempDir defaults to the module TEMP_DIR on purpose: getLinters() builds
+// every installer and extract path from that same constant, so a tempDir
+// that differs from it would put a directory nothing was installed into on
+// PATH.
 export function getLinterPath({
   env = process.env,
   platform = process.platform,
   cwd = process.cwd(),
+  tempDir = TEMP_DIR,
 } = {}) {
   const nodeBin = join(cwd, 'node_modules', '.bin');
-  let path = `${nodeBin}:${TEMP_DIR}/actionlint:${TEMP_DIR}/shellcheck:${env.PATH}`;
+  let path = `${nodeBin}:${tempDir}/actionlint:${tempDir}/shellcheck:${env.PATH}`;
   if (platform === 'darwin') {
     path = `${path}:${env.HOME}/Library/Python/3.12/bin`;
   } else if (platform === 'linux') {

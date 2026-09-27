@@ -279,183 +279,214 @@ describe('git-sourced lint lanes', () => {
       encoding: 'utf8',
     });
 
-  it.skipIf(process.platform === 'win32')(
-    'yamllint fails on the git error and never runs yamllint when git ls-files fails',
-    async () => {
-      const { getLinters } = await import('../lint.js');
-      const { root, repo, bin } = setup(null);
-      try {
-        const yamllintLog = path.join(root, 'yamllint.log');
-        // The #12647 failure mode, verbatim.
-        stub(
-          bin,
-          'git',
-          "echo 'fatal: detected dubious ownership in repository' >&2\nexit 128",
-        );
-        stub(bin, 'yamllint', `echo "$@" >> '${yamllintLog}'`);
+  // The lane cases need the linter table, which getPlatformArch() only
+  // builds on hosts with pinned linter builds (linux/x64, darwin/*); on any
+  // other host — win32, linux/arm64, … — skip instead of failing at the
+  // throw. Probe the capability, not the platform, so the gate cannot drift
+  // when the pin table grows a new entry.
+  const getLintersOrSkip = async (ctx) => {
+    const { getLinters } = await import('../lint.js');
+    try {
+      return getLinters();
+    } catch {
+      return ctx.skip();
+    }
+  };
 
-        const result = runLane(getLinters().yamllint.run, { repo, bin });
-        expect(result.status).not.toBe(0);
-        expect(result.stderr).toContain('dubious ownership');
-        expect(result.stderr).toContain('git ls-files failed');
-        expect(existsSync(yamllintLog)).toBe(false);
-      } finally {
-        rmSync(root, { recursive: true, force: true });
-      }
-    },
-  );
+  it('yamllint fails on the git error and never runs yamllint when git ls-files fails', async (ctx) => {
+    const linters = await getLintersOrSkip(ctx);
+    const { root, repo, bin } = setup(null);
+    try {
+      const yamllintLog = path.join(root, 'yamllint.log');
+      // The #12647 failure mode, verbatim.
+      stub(
+        bin,
+        'git',
+        "echo 'fatal: detected dubious ownership in repository' >&2\nexit 128",
+      );
+      stub(bin, 'yamllint', `echo "$@" >> '${yamllintLog}'`);
 
-  it.skipIf(process.platform === 'win32')(
-    'yamllint refuses to lint an empty file list',
-    async () => {
-      const { getLinters } = await import('../lint.js');
-      const { root, repo, bin } = setup({ 'index.js': 'console.log(1)\n' });
-      try {
-        const yamllintLog = path.join(root, 'yamllint.log');
-        stub(bin, 'yamllint', `echo "$@" >> '${yamllintLog}'`);
+      const result = runLane(linters.yamllint.run, { repo, bin });
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain('dubious ownership');
+      expect(result.stderr).toContain('git ls-files failed');
+      expect(existsSync(yamllintLog)).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 
-        const result = runLane(getLinters().yamllint.run, { repo, bin });
-        expect(result.status).not.toBe(0);
-        expect(result.stderr).toContain('no yaml files');
-        expect(existsSync(yamllintLog)).toBe(false);
-      } finally {
-        rmSync(root, { recursive: true, force: true });
-      }
-    },
-  );
+  it('yamllint refuses to lint an empty file list', async (ctx) => {
+    const linters = await getLintersOrSkip(ctx);
+    const { root, repo, bin } = setup({ 'index.js': 'console.log(1)\n' });
+    try {
+      const yamllintLog = path.join(root, 'yamllint.log');
+      stub(bin, 'yamllint', `echo "$@" >> '${yamllintLog}'`);
 
-  it.skipIf(process.platform === 'win32')(
-    'yamllint lints exactly the yaml files git lists',
-    async () => {
-      const { getLinters } = await import('../lint.js');
-      const { root, repo, bin } = setup({
-        'ci.yml': 'on: push\n',
-        'deploy.yaml': '---\n',
-        'index.js': 'console.log(1)\n',
-      });
-      try {
-        const yamllintLog = path.join(root, 'yamllint.log');
-        stub(bin, 'yamllint', `echo "$@" >> '${yamllintLog}'`);
+      const result = runLane(linters.yamllint.run, { repo, bin });
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain('no yaml files');
+      expect(existsSync(yamllintLog)).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 
-        const result = runLane(getLinters().yamllint.run, { repo, bin });
-        expect(result.status).toBe(0);
-        const args = readFileSync(yamllintLog, 'utf8');
-        expect(args).toContain('ci.yml');
-        expect(args).toContain('deploy.yaml');
-        expect(args).not.toContain('index.js');
-      } finally {
-        rmSync(root, { recursive: true, force: true });
-      }
-    },
-  );
+  it('yamllint lints exactly the yaml files git lists', async (ctx) => {
+    const linters = await getLintersOrSkip(ctx);
+    const { root, repo, bin } = setup({
+      'ci.yml': 'on: push\n',
+      'deploy.yaml': '---\n',
+      'index.js': 'console.log(1)\n',
+    });
+    try {
+      const yamllintLog = path.join(root, 'yamllint.log');
+      stub(bin, 'yamllint', `echo "$@" >> '${yamllintLog}'`);
 
-  it.skipIf(process.platform === 'win32')(
-    'shellcheck fails on the git error and never runs shellcheck when git ls-files fails',
-    async () => {
-      const { getLinters } = await import('../lint.js');
-      const { root, repo, bin } = setup(null);
-      try {
-        const shellcheckLog = path.join(root, 'shellcheck.log');
-        stub(
-          bin,
-          'git',
-          "echo 'fatal: detected dubious ownership in repository' >&2\nexit 128",
-        );
-        stub(bin, 'file', 'exit 0');
-        stub(bin, 'shellcheck', `echo "$@" >> '${shellcheckLog}'`);
+      const result = runLane(linters.yamllint.run, { repo, bin });
+      expect(result.status).toBe(0);
+      const args = readFileSync(yamllintLog, 'utf8');
+      // Exact argv, not substrings: xargs appends the file list after the
+      // flags, so this also pins `--format github` and the exclusion of
+      // index.js — deleting the flag must turn this red.
+      expect(args.trim()).toBe('--format github ci.yml deploy.yaml');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 
-        const result = runLane(getLinters().shellcheck.run, { repo, bin });
-        expect(result.status).not.toBe(0);
-        expect(result.stderr).toContain('dubious ownership');
-        expect(result.stderr).toContain('git ls-files failed');
-        expect(existsSync(shellcheckLog)).toBe(false);
-      } finally {
-        rmSync(root, { recursive: true, force: true });
-      }
-    },
-  );
+  it('fails the lane when yamllint itself exits non-zero', async (ctx) => {
+    const linters = await getLintersOrSkip(ctx);
+    const { root, repo, bin } = setup({ 'ci.yml': 'on: push\n' });
+    try {
+      const yamllintLog = path.join(root, 'yamllint.log');
+      stub(bin, 'yamllint', `echo "$@" >> '${yamllintLog}'\nexit 1`);
 
-  it.skipIf(process.platform === 'win32')(
-    'shellcheck refuses to pass when git lists no shell-script candidates',
-    async () => {
-      const { getLinters } = await import('../lint.js');
-      // Only dotfiles: nothing matches the candidate grep.
-      const { root, repo, bin } = setup({ '.yamllint.yml': '---\n' });
-      try {
-        const shellcheckLog = path.join(root, 'shellcheck.log');
-        stub(bin, 'file', 'exit 0');
-        stub(bin, 'shellcheck', `echo "$@" >> '${shellcheckLog}'`);
+      const result = runLane(linters.yamllint.run, { repo, bin });
+      expect(result.status).not.toBe(0);
+      // The log distinguishes "yamllint ran and failed" from a guard firing
+      // before the linter was ever invoked.
+      expect(existsSync(yamllintLog)).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 
-        const result = runLane(getLinters().shellcheck.run, { repo, bin });
-        expect(result.status).not.toBe(0);
-        expect(result.stderr).toContain('no shell-script candidates');
-        expect(existsSync(shellcheckLog)).toBe(false);
-      } finally {
-        rmSync(root, { recursive: true, force: true });
-      }
-    },
-  );
+  it('shellcheck fails on the git error and never runs shellcheck when git ls-files fails', async (ctx) => {
+    const linters = await getLintersOrSkip(ctx);
+    const { root, repo, bin } = setup(null);
+    try {
+      const shellcheckLog = path.join(root, 'shellcheck.log');
+      stub(
+        bin,
+        'git',
+        "echo 'fatal: detected dubious ownership in repository' >&2\nexit 128",
+      );
+      stub(bin, 'file', 'exit 0');
+      stub(bin, 'shellcheck', `echo "$@" >> '${shellcheckLog}'`);
 
-  it.skipIf(process.platform === 'win32')(
-    'shellcheck refuses to pass when no shell scripts are detected',
-    async () => {
-      const { getLinters } = await import('../lint.js');
-      const { root, repo, bin } = setup({ 'README.md': '# hi\n' });
-      try {
-        const shellcheckLog = path.join(root, 'shellcheck.log');
-        stub(
-          bin,
-          'file',
-          '[ "$1" = "--mime-type" ] && shift\nfor f in "$@"; do echo "$f: text/plain"; done',
-        );
-        stub(bin, 'shellcheck', `echo "$@" >> '${shellcheckLog}'`);
+      const result = runLane(linters.shellcheck.run, { repo, bin });
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain('dubious ownership');
+      expect(result.stderr).toContain('git ls-files failed');
+      expect(existsSync(shellcheckLog)).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 
-        const result = runLane(getLinters().shellcheck.run, { repo, bin });
-        expect(result.status).not.toBe(0);
-        expect(result.stderr).toContain('no shell scripts');
-        expect(existsSync(shellcheckLog)).toBe(false);
-      } finally {
-        rmSync(root, { recursive: true, force: true });
-      }
-    },
-  );
+  it('shellcheck refuses to pass when git lists no shell-script candidates', async (ctx) => {
+    const linters = await getLintersOrSkip(ctx);
+    // Only dotfiles: nothing matches the candidate grep.
+    const { root, repo, bin } = setup({ '.yamllint.yml': '---\n' });
+    try {
+      const shellcheckLog = path.join(root, 'shellcheck.log');
+      stub(bin, 'file', 'exit 0');
+      stub(bin, 'shellcheck', `echo "$@" >> '${shellcheckLog}'`);
 
-  it.skipIf(process.platform === 'win32')(
-    'shellcheck lints exactly the files file(1) detects as shell scripts',
-    async () => {
-      const { getLinters } = await import('../lint.js');
-      const { root, repo, bin } = setup({
-        'tool.sh': '#!/bin/sh\necho hi\n',
-        'main.js': 'console.log(1)\n',
-      });
-      try {
-        const shellcheckLog = path.join(root, 'shellcheck.log');
-        stub(
-          bin,
-          'file',
-          '[ "$1" = "--mime-type" ] && shift\nfor f in "$@"; do\n  case "$f" in\n    *.sh) echo "$f: text/x-shellscript";;\n    *) echo "$f: text/plain";;\n  esac\ndone',
-        );
-        stub(bin, 'shellcheck', `echo "$@" >> '${shellcheckLog}'`);
+      const result = runLane(linters.shellcheck.run, { repo, bin });
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain('no shell-script candidates');
+      expect(existsSync(shellcheckLog)).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 
-        const result = runLane(getLinters().shellcheck.run, { repo, bin });
-        expect(result.status).toBe(0);
-        const args = readFileSync(shellcheckLog, 'utf8');
-        expect(args).toContain('tool.sh');
-        expect(args).not.toContain('main.js');
-      } finally {
-        rmSync(root, { recursive: true, force: true });
-      }
-    },
-  );
+  it('shellcheck refuses to pass when no shell scripts are detected', async (ctx) => {
+    const linters = await getLintersOrSkip(ctx);
+    const { root, repo, bin } = setup({ 'README.md': '# hi\n' });
+    try {
+      const shellcheckLog = path.join(root, 'shellcheck.log');
+      stub(
+        bin,
+        'file',
+        '[ "$1" = "--mime-type" ] && shift\nfor f in "$@"; do echo "$f: text/plain"; done',
+      );
+      stub(bin, 'shellcheck', `echo "$@" >> '${shellcheckLog}'`);
+
+      const result = runLane(linters.shellcheck.run, { repo, bin });
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain('no shell scripts');
+      expect(existsSync(shellcheckLog)).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('shellcheck lints exactly the files file(1) detects as shell scripts', async (ctx) => {
+    const linters = await getLintersOrSkip(ctx);
+    const { root, repo, bin } = setup({
+      'tool.sh': '#!/bin/sh\necho hi\n',
+      'main.js': 'console.log(1)\n',
+    });
+    try {
+      const shellcheckLog = path.join(root, 'shellcheck.log');
+      stub(
+        bin,
+        'file',
+        '[ "$1" = "--mime-type" ] && shift\nfor f in "$@"; do\n  case "$f" in\n    *.sh) echo "$f: text/x-shellscript";;\n    *) echo "$f: text/plain";;\n  esac\ndone',
+      );
+      // Emit one note:-level finding on stdout so the lane's trailing sed
+      // severity rewrite is observed end to end, not just present in source.
+      stub(
+        bin,
+        'shellcheck',
+        `echo "$@" >> '${shellcheckLog}'\necho 'tool.sh:1:1: note: double quote to prevent globbing [SC2086]'`,
+      );
+
+      const result = runLane(linters.shellcheck.run, { repo, bin });
+      expect(result.status).toBe(0);
+      expect(result.stdout).toContain(
+        'tool.sh:1:1: warning: double quote to prevent globbing [SC2086]',
+      );
+      expect(result.stdout).not.toContain('note:');
+      // Exact argv: pins --format=gcc, --enable=all, the exclude list and
+      // the awk colon-strip (a surviving colon would log 'tool.sh:').
+      const args = readFileSync(shellcheckLog, 'utf8');
+      expect(args.trim()).toBe(
+        '--check-sourced --enable=all --exclude=SC2002,SC2129,SC2310' +
+          ' --severity=style --format=gcc --color=never tool.sh',
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 
   it('appends the pip --user bin dir after the inherited PATH', async () => {
     const { getLinterPath } = await import('../lint.js');
     const env = { HOME: '/home/runner', PATH: '/usr/bin:/bin' };
 
     const linux = toPosix(
-      getLinterPath({ env, platform: 'linux', cwd: '/repo' }),
+      getLinterPath({
+        env,
+        platform: 'linux',
+        cwd: '/repo',
+        tempDir: '/tmp/linters',
+      }),
     );
     expect(linux.startsWith('/repo/node_modules/.bin:')).toBe(true);
+    expect(linux).toContain('/tmp/linters/actionlint:/tmp/linters/shellcheck:');
     expect(linux.indexOf('/home/runner/.local/bin')).toBeGreaterThan(
       linux.indexOf('/usr/bin'),
     );
