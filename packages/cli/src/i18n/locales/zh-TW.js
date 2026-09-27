@@ -2243,6 +2243,8 @@ export default {
   '{{count}} tool calls': '{{count}} 個工具呼叫',
   '{{count}} event': '{{count}} 個事件',
   '{{count}} events': '{{count}} 個事件',
+  'Output capture failed. Displayed output may be incomplete.':
+    '輸出擷取失敗，顯示的輸出可能不完整。',
   '{{count}} dropped': '丟棄 {{count}} 行',
   'pid {{pid}}': 'pid {{pid}}',
   'exit {{exitCode}}': '退出碼 {{exitCode}}',
