@@ -6,6 +6,11 @@
 
 import { useI18n } from '../../i18n';
 import { AddRuntimeDialog, type JoinToken } from './add-runtime-dialog';
+import {
+  ShareAgentDialog,
+  type AgentShare,
+  type AgentShareSummary,
+} from './share-agent-dialog';
 import { useMemo, useState, type FormEvent } from 'react';
 import { MoreHorizontalIcon, PlusIcon } from 'lucide-react';
 
@@ -89,6 +94,12 @@ export interface ThreadsPageProps {
   /** Issues a single-use join token for the Add runtime dialog. */
   onCreateJoinToken?: () => Promise<JoinToken>;
   hostServerUrl?: string;
+  /** A2A shares of one agent; absent hides Share. */
+  shares?: {
+    create: (agentId: string) => Promise<AgentShare>;
+    list: (agentId: string) => Promise<AgentShareSummary[]>;
+    revoke: (agentId: string, callerId: string) => Promise<unknown>;
+  };
   capabilities?: AgentCapabilitiesView;
   onCreateThread: (input: NewThread) => Promise<boolean> | void;
   workspaceCwd?: string;
@@ -266,6 +277,7 @@ export function ThreadsPage({
   onCreateJoinToken,
   onConnectRemoteHost,
   hostServerUrl,
+  shares,
   capabilities,
   onCreateThread,
   workspaceCwd,
@@ -283,6 +295,7 @@ export function ThreadsPage({
   const [openAgentId, setOpenAgentId] = useState<string>();
   const { t } = useI18n();
   const [addingRuntime, setAddingRuntime] = useState(false);
+  const [sharing, setSharing] = useState<{ id: string; name: string }>();
   const [taskAssignee, setTaskAssignee] = useState('');
   const statusLabel = (status: string) =>
     AGENT_STATUSES.has(status) ? t(`collab.agentStatus.${status}`) : status;
@@ -704,6 +717,15 @@ export function ThreadsPage({
                             {t('collab.agent.configure')}
                           </DropdownMenuItem>
                         ) : null}
+                        {shares ? (
+                          <DropdownMenuItem
+                            onSelect={() =>
+                              setSharing({ id: agent.id, name: agent.name })
+                            }
+                          >
+                            {t('collab.agent.share')}
+                          </DropdownMenuItem>
+                        ) : null}
                         <DropdownMenuItem
                           disabled={pending}
                           onSelect={() =>
@@ -1003,6 +1025,18 @@ export function ThreadsPage({
                 },
               }
             : {})}
+        />
+      )}
+      {shares && sharing && (
+        <ShareAgentDialog
+          agentName={sharing.name}
+          open
+          onOpenChange={(open) => {
+            if (!open) setSharing(undefined);
+          }}
+          onCreate={() => shares.create(sharing.id)}
+          onList={() => shares.list(sharing.id)}
+          onRevoke={(callerId) => shares.revoke(sharing.id, callerId)}
         />
       )}
     </div>

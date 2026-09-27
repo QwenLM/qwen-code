@@ -477,3 +477,65 @@ for (const theme of THEMES) {
     await captureScreenshot(page, `collab-new-agent-runtime-${theme}`);
   });
 }
+
+async function setupSharing(page: Page, baseURL: string): Promise<void> {
+  const scenario = createWebShellDaemonScenario({
+    capabilities: { features: ['session_events', 'agent_collaboration_v1'] },
+  });
+  await installScenario(page, scenario, baseURL);
+  await page.route('**/workspaces/*/agent/**', async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    const method = route.request().method();
+    if (path.endsWith('/events')) return route.abort();
+    if (path.endsWith('/agents') && method === 'GET')
+      return route.fulfill({
+        json: {
+          agents: [
+            {
+              id: 'ag_lead',
+              name: 'lead',
+              enabled: true,
+              status: 'idle',
+              waiting: 0,
+            },
+          ],
+        },
+      });
+    if (/\/agents\/[^/]+\/shares$/.test(path))
+      return method === 'POST'
+        ? route.fulfill({
+            status: 201,
+            json: {
+              endpoint: 'http://192.168.1.20:4170/a2a/v1',
+              workspaceId: 'ws_demo',
+              callerId: 'share_3f9a1c',
+              agentId: 'ag_lead',
+              secret: `a2a_${'s'.repeat(40)}`,
+              scope: 'analysis',
+              expiresAt: NOW + 7 * 24 * 60 * MIN,
+            },
+          })
+        : route.fulfill({ json: { shares: [] } });
+    if (path.endsWith('/threads'))
+      return route.fulfill({ json: { threads: [] } });
+    return route.fulfill({ status: 404, json: { error: 'not in fixture' } });
+  });
+}
+
+for (const theme of THEMES) {
+  test(`collaboration share (${theme})`, async ({ page }, testInfo) => {
+    await setupSharing(page, resolveBaseURL(testInfo));
+    await gotoNewSession(page, theme);
+    await page
+      .getByRole('button', { name: 'Agents', exact: true })
+      .first()
+      .click();
+    await page.getByRole('button', { name: 'More actions for lead' }).click();
+    await page.getByRole('menuitem', { name: 'Share' }).click();
+    const dialog = page.getByRole('dialog');
+    await dialog.getByRole('button', { name: 'Create link' }).click();
+    await expect(dialog.getByText(/a2a_s+/).first()).toBeVisible();
+    await captureScreenshot(page, `collab-share-${theme}`);
+    await page.keyboard.press('Escape');
+  });
+}

@@ -11,8 +11,9 @@ separating aggregate liveness from workspace-control readiness, and
 channel-owned epochs with a stop generation policy, including a stop receipt for
 multiple live channels. The third gate, delivering session-affecting workspace
 changes to every live engine with the acknowledgement and permission-fence
-semantics decided for Q2 in #12737, is the second part of B2b and a separate
-change. After this change no ordinary daemon, Channels or embedded constructor
+semantics decided for Q2 in #12737, is the second part of B2b:
+[Paired engine workspace change propagation](./2026-09-27-paired-engine-workspace-change-propagation.md).
+After this change no ordinary daemon, Channels or embedded constructor
 passes `executionEngines`.
 
 ## Problem and current behavior
@@ -201,6 +202,8 @@ to the primary runtime.
 - A confirmation can survive the exit, after the preview, of a channel without
   sessions. This never widens a stop, but the receipt then lists fewer channels
   than the preview.
-- Session-affecting change propagation, resource aggregation, language
-  propagation, Managed preheat/keepalive and quarantine recovery remain open, as
-  listed in Scope.
+- Session-affecting change propagation remains open (B2b part two). Resource
+  aggregation, language propagation, Managed preheat/keepalive and quarantine
+  recovery are specified in
+  [paired engine per-engine operations](./2026-09-26-paired-engine-per-engine-operations.md)
+  (B2c).

@@ -41,6 +41,18 @@ export type {
   HostRunAssignment,
   HostRunResult,
 } from './workspace-agents/host-lease.js';
+export {
+  issueA2AGrant,
+  revokeA2AGrant,
+  listA2AGrants,
+} from './workspace-agents/a2a-grants.js';
+export type {
+  A2ATaskView,
+  A2AAgentCard,
+  A2ACaller,
+  A2AFailure,
+} from './workspace-agents/a2a-server.js';
+export type { A2AGrant, A2AGrantScope } from './workspace-agents/types.js';
 export { strandLocalRuns } from './workspace-agents/stranded-runs.js';
 export type { AgentRunContext } from './workspace-agents/run-context.js';
 export {

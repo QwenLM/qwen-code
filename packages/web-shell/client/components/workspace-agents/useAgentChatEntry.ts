@@ -85,10 +85,13 @@ export function useAgentChatEntry({
       enabled && cwd ? createThreadsHttpApi(baseUrl, token, cwd) : undefined,
     [enabled, cwd, baseUrl, token],
   );
+  const activeApi = useRef(api);
+  activeApi.current = api;
   // Names known so far, so a typed @query can be claimed without waiting.
   const agentNames = useRef<string[]>([]);
   const [pending, setPending] = useState(false);
   const busy = useRef(false);
+  const submission = useRef(0);
   // The composer receives these straight as props, so both identities have to
   // survive re-renders: `atProviders` feeds a memoized ChatEditor comparison
   // and `submit` a memoized onSubmit prop.
@@ -101,6 +104,7 @@ export function useAgentChatEntry({
     roster.current = { api, at: Date.now(), agents };
     void agents.then(
       (list) => {
+        if (roster.current?.agents !== agents) return;
         agentNames.current = list
           .filter((agent) => agent.enabled && !agent.retiredAt)
           .map((agent) => agent.name.toLowerCase());
@@ -114,6 +118,10 @@ export function useAgentChatEntry({
   }, [api]);
   // Load the roster up front so the first typed @name already resolves.
   useEffect(() => {
+    submission.current += 1;
+    busy.current = false;
+    setPending(false);
+    agentNames.current = [];
     listAgents().catch(() => {});
   }, [listAgents]);
   const providers = useMemo<WebShellAtProvider[]>(
@@ -186,9 +194,13 @@ export function useAgentChatEntry({
       if (busy.current) return false;
       busy.current = true;
       setPending(true);
+      const submissionId = ++submission.current;
+      const context = getContext?.() ?? '';
       void (async () => {
         try {
           const agents = await listAgents();
+          if (activeApi.current !== api || submission.current !== submissionId)
+            return;
           // The first agent addressed leads the thread: a follow-up without an
           // @ goes to it, and sub-thread reports wake it.
           // A name may run into the next word in scripts without spaces
@@ -229,20 +241,24 @@ export function useAgentChatEntry({
             throw new Error(t('collab.mention.noAttachments'));
           // One request: the message is the assignment, so the lead starts
           // from it instead of receiving it mid-turn.
-          const context = getContext?.() ?? '';
           const { id } = await api.createThread({
             title: text.trim().slice(0, 80),
             body: context ? `${CONVERSATION_CONTEXT_PREFIX}${context}` : '',
             assignee: lead.name,
             message: text,
           });
+          if (activeApi.current !== api || submission.current !== submissionId)
+            return;
           commit?.();
           onOpen(id, cwd);
         } catch (error) {
+          if (submission.current !== submissionId) return;
           onError(error instanceof Error ? error.message : String(error));
         } finally {
-          busy.current = false;
-          setPending(false);
+          if (submission.current === submissionId) {
+            busy.current = false;
+            setPending(false);
+          }
         }
       })();
       return false;

@@ -47,6 +47,8 @@ vi.mock('../../utils/atomicFileWrite.js', async (importOriginal) => {
 import { Storage } from '../../config/storage.js';
 import {
   allocateRunSequence,
+  claimAgentHostSession,
+  releaseAgentHostSession,
   getAgentsFilePath,
   getThreadPath,
   getWorkspaceFilePath,
@@ -64,6 +66,7 @@ import {
   writeThread,
 } from './store.js';
 import { postMessage, postMessageInTransaction } from './thread-actions.js';
+import { issueA2AGrant } from './a2a-grants.js';
 import {
   HUMAN_AUTHOR_ID,
   AGENTS_SCHEMA_VERSION,
@@ -618,11 +621,37 @@ describe('retiring an agent', () => {
     const stored = await readThread(PROJECT_ROOT, 'th_root');
     expect(stored?.runs[0]?.status).toBe('cancelled');
     expect(stored?.runs[0]?.endedAt).toEqual(expect.any(Number));
+    expect(stored?.status).toBe('blocked');
     // With the dead run settled the agent holds no live work, so retiring
     // it — previously refused — now succeeds.
     await expect(retireWorkspaceAgent(PROJECT_ROOT, ALICE.id)).resolves.toBe(
       'updated',
     );
+  });
+
+  it('reports cancellation when disabling the last queued run of a child', async () => {
+    await seed([ALICE]);
+    await writeThread(
+      PROJECT_ROOT,
+      thread({
+        id: 'th_child',
+        rootThreadId: 'th_root',
+        parentThreadId: 'th_root',
+        status: 'in_progress',
+        runs: [run(1, 0, { status: 'queued', endedAt: undefined })],
+      }),
+    );
+
+    await setWorkspaceAgentEnabled(PROJECT_ROOT, ALICE.id, false);
+
+    const stored = await readThread(PROJECT_ROOT, 'th_child');
+    expect(stored?.outbox).toEqual([
+      expect.objectContaining({
+        kind: 'parent_report',
+        causedByRunId: 'rn_1',
+        payload: expect.objectContaining({ event: 'child_cancelled' }),
+      }),
+    ]);
   });
 
   it('leaves running work alone on disable', async () => {
@@ -652,5 +681,39 @@ describe('retiring an agent', () => {
       'not_found',
     );
     expect(await readWorkspaceAgents(PROJECT_ROOT)).toHaveLength(1);
+  });
+});
+
+describe('releasing the agent host session', () => {
+  let runtimeDir: string;
+
+  beforeEach(async () => {
+    runtimeDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'agent-release-test-'),
+    );
+    Storage.setRuntimeBaseDir(runtimeDir);
+  });
+
+  afterEach(async () => {
+    Storage.setRuntimeBaseDir(null);
+    await fs.rm(runtimeDir, { recursive: true, force: true });
+  });
+
+  it('drops only the claim and keeps the A2A grants', async () => {
+    await issueA2AGrant(PROJECT_ROOT, {
+      callerId: 'share_1',
+      agentId: ALICE.id,
+    });
+    await claimAgentHostSession(PROJECT_ROOT, 'session-1');
+
+    await expect(
+      releaseAgentHostSession(PROJECT_ROOT, 'session-1'),
+    ).resolves.toBe(true);
+
+    const workspace = await readAgentWorkspace(PROJECT_ROOT);
+    expect(workspace.hostSessionId).toBeUndefined();
+    expect(workspace.callerGrants?.map((grant) => grant.callerId)).toEqual([
+      'share_1',
+    ]);
   });
 });

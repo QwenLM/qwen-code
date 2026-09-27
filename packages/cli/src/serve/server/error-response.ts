@@ -499,6 +499,10 @@ export function sendBridgeError(
     return;
   }
   if (err instanceof SessionExecutionEngineError) {
+    // The response names no cause, so the log keeps it: an operator must be
+    // able to tell a transcript that cannot prove its owner from an owner
+    // that cannot run here.
+    recordExpectedBridgeError(err, ctx, daemonLog);
     res.status(409).json({
       error:
         'This session cannot be resumed with the current execution engine.',
@@ -1057,6 +1061,11 @@ export function sendBridgeError(
         return;
       }
       if (kind === 'session_execution_engine_unavailable') {
+        recordExpectedBridgeError(
+          err instanceof Error ? err : new Error(errorMessage(err)),
+          ctx,
+          daemonLog,
+        );
         res.status(409).json({
           error:
             'This session cannot be resumed with the current execution engine.',
@@ -1090,6 +1099,15 @@ export function sendBridgeError(
           error: errorMessage(err),
           code: 'branch_point_invalid',
           errorKind: kind,
+        });
+        return;
+      }
+      if (kind === 'session_not_found') {
+        res.status(404).json({
+          error: errorMessage(err),
+          code: kind,
+          errorKind: kind,
+          ...(ctx?.sessionId ? { sessionId: ctx.sessionId } : {}),
         });
         return;
       }

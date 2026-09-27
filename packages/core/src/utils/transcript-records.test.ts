@@ -5,10 +5,12 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import type { ChatRecord } from '../services/chatRecordingService.js';
 import {
   isTranscriptConversationRecord,
   prepareTranscriptRecords,
   projectUserTranscriptForDisplay,
+  validateTranscriptRecord,
   wrapUserPromptSubmitContext,
   type TranscriptRecordPreparationError,
 } from './transcript-records.js';
@@ -490,5 +492,108 @@ describe('projectUserTranscriptForDisplay', () => {
       displayText: undefined,
       parts: [{ text: 'user text' }, taggedPart],
     });
+  });
+});
+
+describe('validateTranscriptRecord', () => {
+  // Typed as a total record, so a subtype added to ChatRecord fails to compile
+  // here until it is listed, and then fails below until the validator knows it.
+  // An unknown subtype makes the whole transcript incomplete, which a paired
+  // host reads as unprovable ownership and refuses to restore.
+  const RECORDED_SUBTYPES: Record<NonNullable<ChatRecord['subtype']>, true> = {
+    chat_compression: true,
+    slash_command: true,
+    ui_telemetry: true,
+    at_command: true,
+    attribution_snapshot: true,
+    notification: true,
+    background_task_completed: true,
+    cron: true,
+    mid_turn_user_message: true,
+    custom_title: true,
+    parent_session: true,
+    session_source: true,
+    session_execution_engine: true,
+    omni_recall: true,
+    session_model: true,
+    rewind: true,
+    agent_bootstrap: true,
+    agent_launch_prompt: true,
+    agent_retry: true,
+    agent_session_ready: true,
+    file_history_snapshot: true,
+    user_text_elements: true,
+    session_artifact_event: true,
+    session_artifact_snapshot: true,
+    session_sources_snapshot: true,
+    branch_checkpoint: true,
+    goal_state: true,
+    goal_runtime: true,
+    goal_turn_end: true,
+    realtime_message: true,
+    turn_result: true,
+    managed_session_header_v1: true,
+    managed_session_event_v1: true,
+    managed_session_commit_v1: true,
+  };
+
+  it.each(Object.keys(RECORDED_SUBTYPES))(
+    'knows the recorded subtype %s',
+    (subtype) => {
+      const { diagnostics } = validateTranscriptRecord(
+        record('system-record', null, { type: 'system', subtype }),
+      );
+      expect(
+        diagnostics.filter((diagnostic) => diagnostic.path === 'subtype'),
+      ).toEqual([]);
+    },
+  );
+
+  // Likewise for record types.
+  const RECORDED_TYPES: Record<ChatRecord['type'], true> = {
+    user: true,
+    assistant: true,
+    tool_result: true,
+    system: true,
+  };
+
+  it.each(Object.keys(RECORDED_TYPES))('knows the recorded type %s', (type) => {
+    const { diagnostics } = validateTranscriptRecord(
+      record(`${type}-record`, null, { type }),
+    );
+    expect(
+      diagnostics.filter((diagnostic) =>
+        diagnostic.message.includes('unknown record type'),
+      ),
+    ).toEqual([]);
+  });
+
+  it('still flags a record type nothing records', () => {
+    const { diagnostics } = validateTranscriptRecord(
+      record('unknown-record', null, { type: 'not_recorded' }),
+    );
+    expect(diagnostics).toContainEqual(
+      expect.objectContaining({
+        code: 'unknown_record_or_part',
+        message: expect.stringContaining('unknown record type'),
+        affectsCompleteness: true,
+      }),
+    );
+  });
+
+  it('still flags a subtype nothing records', () => {
+    const { diagnostics } = validateTranscriptRecord(
+      record('system-record', null, {
+        type: 'system',
+        subtype: 'not_recorded',
+      }),
+    );
+    expect(diagnostics).toContainEqual(
+      expect.objectContaining({
+        code: 'unknown_record_or_part',
+        path: 'subtype',
+        affectsCompleteness: true,
+      }),
+    );
   });
 });

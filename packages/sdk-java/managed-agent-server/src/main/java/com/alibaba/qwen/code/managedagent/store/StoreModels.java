@@ -8,9 +8,13 @@ public final class StoreModels {
     private StoreModels() {
     }
 
+    public static String inputItemId(String turnId) {
+        return "item_" + turnId + "_input";
+    }
+
     public record SessionRecord(String tenantId, String sessionId,
-            String agentId, String title, String status,
-            String harnessBootId, String harnessEventEpoch,
+            String agentId, String agentRevision, String title,
+            String status, String harnessBootId, String harnessEventEpoch,
             long harnessLastEventId, long lastSequence, long createdAt,
             long updatedAt, Long deletedAt, long version,
             ContextBinding workspace) {
@@ -19,9 +23,10 @@ public final class StoreModels {
                 String harnessBootId, String harnessEventEpoch,
                 long harnessLastEventId, long lastSequence, long createdAt,
                 long updatedAt, Long deletedAt, long version) {
-            this(tenantId, sessionId, agentId, title, status, harnessBootId,
-                    harnessEventEpoch, harnessLastEventId, lastSequence,
-                    createdAt, updatedAt, deletedAt, version, null);
+            this(tenantId, sessionId, agentId, null, title, status,
+                    harnessBootId, harnessEventEpoch, harnessLastEventId,
+                    lastSequence, createdAt, updatedAt, deletedAt, version,
+                    null);
         }
     }
 
