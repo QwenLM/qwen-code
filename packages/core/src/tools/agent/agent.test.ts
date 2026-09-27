@@ -5605,12 +5605,17 @@ describe('AgentTool', () => {
           );
           expect(result.error).toBeUndefined();
           const tools = vi.mocked(AgentHeadless.create).mock.calls[0]?.[5];
-          expect(tools?.executionAllowedTools).toEqual([
+          expect(tools?.executionAllowedTools).toEqual([]);
+          expect(tools?.nestedExecutionAllowedTools).toEqual([
             'read_file',
             'mcp__github__read_file',
           ]);
           expect(writeMetaSpy.mock.calls[0]?.[1]).toMatchObject({
-            executionAllowedTools: ['read_file', 'mcp__github__read_file'],
+            executionAllowedTools: [],
+            nestedExecutionAllowedTools: [
+              'read_file',
+              'mcp__github__read_file',
+            ],
           });
           writeMetaSpy.mockRestore();
         },

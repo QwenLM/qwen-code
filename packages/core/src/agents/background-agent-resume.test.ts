@@ -2460,6 +2460,7 @@ describe('BackgroundAgentResumeService', () => {
       format: 'persisted deny-all execution policy',
       legacyCapabilities: {},
       executionAllowedTools: [] as string[] | undefined,
+      nestedExecutionAllowedTools: ['read_file'],
       includeDisplayImage: false,
       deniedTool: 'Read',
       expectedExecutionAllowedTools: [],
@@ -2517,6 +2518,7 @@ describe('BackgroundAgentResumeService', () => {
     async ({
       legacyCapabilities,
       executionAllowedTools,
+      nestedExecutionAllowedTools,
       includeDisplayImage,
       deniedTool,
       expectedExecutionAllowedTools,
@@ -2537,6 +2539,9 @@ describe('BackgroundAgentResumeService', () => {
         status: 'running',
         subagentName: FORK_SUBAGENT_TYPE,
         resolvedApprovalMode: 'default',
+        ...(nestedExecutionAllowedTools !== undefined
+          ? { nestedExecutionAllowedTools }
+          : {}),
         ...(executionAllowedTools !== undefined
           ? { executionAllowedTools }
           : {}),
@@ -2738,6 +2743,9 @@ describe('BackgroundAgentResumeService', () => {
           ToolNames.ASK_USER_QUESTION,
         ],
         executionAllowedTools: expectedExecutionAllowedTools,
+        ...(nestedExecutionAllowedTools !== undefined
+          ? { nestedExecutionAllowedTools }
+          : {}),
       });
       expect(createArgs?.[9]).toBe(launchPrompt);
       expect(createArgs?.[10]).toBe(agentId);

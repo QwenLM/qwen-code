@@ -103,6 +103,8 @@ export interface ToolConfig {
    * Supports exact tool names and MCP server-level patterns.
    */
   executionAllowedTools?: string[];
+  /** Exact names allowed only inside exec; never grants direct tool calls. */
+  nestedExecutionAllowedTools?: string[];
 
   /**
    * Optional list of tool names to exclude from the agent's tool pool.

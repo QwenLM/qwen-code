@@ -1147,6 +1147,13 @@ export class SubagentManager {
               ],
             }
           : {}),
+        ...(configuredToolConfig?.nestedExecutionAllowedTools !== undefined
+          ? {
+              nestedExecutionAllowedTools: [
+                ...configuredToolConfig.nestedExecutionAllowedTools,
+              ],
+            }
+          : {}),
         disallowedTools: Array.from(
           new Set([
             ...(configuredToolConfig?.disallowedTools ?? []),

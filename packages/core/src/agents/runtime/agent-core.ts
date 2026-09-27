@@ -394,6 +394,7 @@ export class AgentCore {
   readonly runConfig: RunConfig;
   readonly toolConfig?: ToolConfig;
   private readonly executionAllowedTools?: readonly string[];
+  private readonly nestedExecutionAllowedTools?: ReadonlySet<string>;
   private readonly executionAllowedExactTools?: ReadonlySet<string>;
   private readonly executionAllowedMcpPatterns?: readonly string[];
   private readonly executionAllowlistErrorSummary?: string;
@@ -480,6 +481,11 @@ export class AgentCore {
     this.modelConfig = modelConfig;
     this.runConfig = runConfig;
     this.toolConfig = toolConfig;
+    if (toolConfig?.nestedExecutionAllowedTools !== undefined) {
+      this.nestedExecutionAllowedTools = new Set(
+        toolConfig.nestedExecutionAllowedTools,
+      );
+    }
     if (toolConfig?.executionAllowedTools !== undefined) {
       this.executionAllowedTools = Object.freeze([
         ...toolConfig.executionAllowedTools,
@@ -1773,6 +1779,14 @@ export class AgentCore {
   ): boolean {
     if (this.isToolDisallowedByAgentConfig(toolName)) {
       return false;
+    }
+    if (
+      forNestedBinding &&
+      isCodeModeEnabled(this.runtimeContext.getToolMode?.()) &&
+      getToolExposure(toolName) === 'code-mode-callable' &&
+      this.nestedExecutionAllowedTools !== undefined
+    ) {
+      return this.nestedExecutionAllowedTools.has(toolName);
     }
     if (this.executionAllowedTools === undefined) {
       // Code mode declares exec unconditionally (getCodeModeFunctionDeclarations

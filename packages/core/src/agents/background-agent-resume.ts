@@ -1023,6 +1023,7 @@ export class BackgroundAgentResumeService {
           meta.disallowedTools,
           meta.agentId,
           meta.description,
+          meta.nestedExecutionAllowedTools,
         );
       } else {
         const resumeSubagentConfig =
@@ -1803,6 +1804,7 @@ export class BackgroundAgentResumeService {
     disallowedTools?: string[],
     subagentId?: string,
     taskName?: string,
+    nestedExecutionAllowedTools?: string[],
   ): Promise<AgentHeadless> {
     const promptConfig: PromptConfig = {
       renderedSystemPrompt: structuredClone(runtime.systemInstruction),
@@ -1822,6 +1824,9 @@ export class BackgroundAgentResumeService {
           runtime.toolNames,
         ),
       ),
+      ...(nestedExecutionAllowedTools !== undefined
+        ? { nestedExecutionAllowedTools: [...nestedExecutionAllowedTools] }
+        : {}),
       // Restore the persisted blocklist beside the allowlist: the
       // invocation-level re-check is the only enforcement a wildcard
       // allowlist entry (e.g. mcp__*) cannot provide on its own.

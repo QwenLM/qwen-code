@@ -479,6 +479,44 @@ describe('AgentCore skill-gate inputs', () => {
       ).toEqual([ToolNames.READ_FILE, ToolNames.WRITE_FILE]);
     });
 
+    it('keeps bounded fork bindings nested-only with an immutable policy', async () => {
+      const config = makeFakeConfig({ toolMode: ToolMode.CodeMode });
+      const registry = new ToolRegistry(config);
+      vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+      registry.registerTool(new ExecTool(config));
+      for (const name of [
+        ToolNames.READ_FILE,
+        ToolNames.WRITE_FILE,
+        'mcp__payments__charge',
+      ]) {
+        registry.registerTool(new MockTool({ name }));
+      }
+      const nested: string[] = [ToolNames.READ_FILE];
+      const core = new AgentCore(
+        'bounded-exec-fork',
+        config,
+        { systemPrompt: '' },
+        { model: 'test-model' },
+        { max_turns: 1 },
+        {
+          tools: [ToolNames.EXEC, ToolNames.READ_FILE, ToolNames.WRITE_FILE],
+          executionAllowedTools: [],
+          nestedExecutionAllowedTools: nested,
+        },
+      );
+      nested.push(ToolNames.WRITE_FILE);
+      const declarations = await core.prepareTools();
+      expect(declarations.map((tool) => tool.name)).toEqual([ToolNames.EXEC]);
+      expect(executable(core, ToolNames.READ_FILE)).toBe(false);
+      expect(declarations[0]?.description).toContain('tools.read_file(args:');
+      expect(declarations[0]?.description).not.toContain(
+        'tools.write_file(args:',
+      );
+      expect(declarations[0]?.description).not.toContain(
+        'mcp__payments__charge',
+      );
+    });
+
     it('honors MCP execution patterns in the hybrid nested binding set', async () => {
       const config = makeFakeConfig({ toolMode: ToolMode.CodeMode });
       const registry = new ToolRegistry(config);

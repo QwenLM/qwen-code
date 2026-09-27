@@ -1839,6 +1839,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     };
     const buildParentBoundExecutionAllowlist = (
       fallbackTools: readonly string[],
+      forNestedBinding = false,
     ): string[] => {
       if (parentConfiguredToolAllowlist === undefined) {
         return buildForkExecutionAllowlist(
@@ -1853,9 +1854,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           !EXCLUDED_TOOLS_FOR_SUBAGENTS.has(toolName) &&
           keepOffParentBlocklist(toolName) &&
           (isRequestedByFork(toolName) ||
-            (isCodeModeEnabled(agentConfig.getToolMode?.()) &&
+            (forNestedBinding &&
+              isCodeModeEnabled(agentConfig.getToolMode?.()) &&
               requestedTools?.includes(ToolNames.EXEC) &&
-              getToolExposure(toolName) === 'code-mode-callable') ||
+              getToolExposure(toolName) === 'code-mode-callable' &&
+              (!toolName.startsWith('mcp__') ||
+                !requestedTools.some((name) => name.startsWith('mcp__')))) ||
             (requestedTools !== undefined &&
               requestedTools.length > 0 &&
               (toolName === ToolNames.TOOL_SEARCH ||
@@ -1863,8 +1867,13 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               parentToolNames.includes(toolName))),
       );
     };
+    const nestedExecutionAllowedTools =
+      parentConfiguredToolAllowlist !== undefined &&
+      isCodeModeEnabled(agentConfig.getToolMode?.())
+        ? buildParentBoundExecutionAllowlist(defaultExecutionToolNames, true)
+        : undefined;
     const requestedExecutionAllowedTools =
-      requestedTools === undefined
+      requestedTools === undefined && nestedExecutionAllowedTools === undefined
         ? undefined
         : resolveForkExecutionAllowedTools(
             parentToolNames,
@@ -1924,6 +1933,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           lastMessage,
           requestedExecutionAllowedTools,
           profilePromptHint,
+          nestedExecutionAllowedTools,
         );
         if (forkedMessages.length > 0) {
           // Model had function calls: append tool responses + directive,
@@ -1957,6 +1967,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         this.params.prompt,
         requestedExecutionAllowedTools,
         profilePromptHint,
+        nestedExecutionAllowedTools,
       );
     }
 
@@ -1986,6 +1997,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           parentToolNames,
           buildParentBoundExecutionAllowlist(defaultExecutionToolNames),
         ),
+        ...(nestedExecutionAllowedTools !== undefined
+          ? { nestedExecutionAllowedTools }
+          : {}),
         ...(parentDisallowedTools?.length
           ? { disallowedTools: [...parentDisallowedTools] }
           : {}),
@@ -2001,6 +2015,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           parentToolNames,
           buildParentBoundExecutionAllowlist(defaultExecutionToolNames),
         ),
+        ...(nestedExecutionAllowedTools !== undefined
+          ? { nestedExecutionAllowedTools }
+          : {}),
         ...(parentDisallowedTools?.length
           ? { disallowedTools: [...parentDisallowedTools] }
           : {}),
@@ -3647,6 +3664,13 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           // Unlike the allowlist above, the blocklist persists whenever the
           // fork carries one — it also bounds plain forks whose allowlist is
           // rebuilt from the live parent surface on resume.
+          ...(isFork && bgToolConfig?.nestedExecutionAllowedTools !== undefined
+            ? {
+                nestedExecutionAllowedTools: [
+                  ...bgToolConfig.nestedExecutionAllowedTools,
+                ],
+              }
+            : {}),
           ...(isFork && bgToolConfig?.disallowedTools?.length
             ? { disallowedTools: [...bgToolConfig.disallowedTools] }
             : {}),
@@ -4561,6 +4585,13 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           // Unlike the allowlist above, the blocklist persists whenever the
           // fork carries one — it also bounds plain forks whose allowlist is
           // rebuilt from the live parent surface on resume.
+          ...(isFork && toolConfig?.nestedExecutionAllowedTools !== undefined
+            ? {
+                nestedExecutionAllowedTools: [
+                  ...toolConfig.nestedExecutionAllowedTools,
+                ],
+              }
+            : {}),
           ...(isFork && toolConfig?.disallowedTools?.length
             ? { disallowedTools: [...toolConfig.disallowedTools] }
             : {}),

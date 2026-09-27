@@ -309,6 +309,7 @@ export function buildForkedMessages(
   assistantMessage: Content,
   executionAllowedTools?: readonly string[],
   promptHint?: string,
+  nestedExecutionAllowedTools?: readonly string[],
 ): Content[] {
   const toolUseParts =
     assistantMessage.parts?.filter((part) => part.functionCall) || [];
@@ -356,7 +357,12 @@ export function buildForkedMessages(
     parts: [
       ...toolResultParts,
       {
-        text: buildChildMessage(directive, executionAllowedTools, promptHint),
+        text: buildChildMessage(
+          directive,
+          executionAllowedTools,
+          promptHint,
+          nestedExecutionAllowedTools,
+        ),
       },
     ],
   };
@@ -409,14 +415,20 @@ export function buildChildMessage(
   directive: string,
   executionAllowedTools?: readonly string[],
   promptHint?: string,
+  nestedExecutionAllowedTools?: readonly string[],
 ): string {
   const executionRestriction =
-    executionAllowedTools === undefined
-      ? ''
-      : executionAllowedTools.length === 0
-        ? `\n\nTOOL EXECUTION RESTRICTION:
+    nestedExecutionAllowedTools !== undefined
+      ? `\n\nTOOL EXECUTION RESTRICTION:
+You may call exec and tools matched by this direct-call allowlist: ${JSON.stringify(executionAllowedTools ?? [])}.
+Inside exec, only these exact nested tool names are permitted: ${JSON.stringify(nestedExecutionAllowedTools)}.
+Nested permission does not permit direct calls to those tools.`
+      : executionAllowedTools === undefined
+        ? ''
+        : executionAllowedTools.length === 0
+          ? `\n\nTOOL EXECUTION RESTRICTION:
 You may not execute any tools, even though tool declarations remain visible. Do not attempt tool calls.`
-        : `\n\nTOOL EXECUTION RESTRICTION:
+          : `\n\nTOOL EXECUTION RESTRICTION:
 You may execute only tools matched by this allowlist: ${JSON.stringify(executionAllowedTools)}.
 Other visible tool declarations are unavailable to you. Do not call them.`;
   const profileGuidance = promptHint

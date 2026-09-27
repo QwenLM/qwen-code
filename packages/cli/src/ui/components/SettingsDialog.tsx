@@ -1015,9 +1015,8 @@ export function SettingsDialog({
 
             const scopeSettings = settings.forScope(selectedScope).settings;
             const resetChangesValue =
-              !isDefaultValue(currentSetting.value, scopeSettings) &&
               getEffectiveValue(currentSetting.value, scopeSettings, {}) !==
-                defaultValue;
+              defaultValue;
             setModifiedSettings((prev) => {
               const updated = new Set(prev);
               if (resetChangesValue) updated.add(currentSetting.value);
