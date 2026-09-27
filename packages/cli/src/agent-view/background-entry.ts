@@ -37,6 +37,7 @@ import {
   writeStdoutLineSafe,
 } from '../utils/stdioHelpers.js';
 import { BACKGROUND_FLAG } from './entry-flags.js';
+import { AgentViewSupervisorClientError } from './supervisor-client.js';
 
 /**
  * Serve as the Agent View supervisor for the rest of this process's life.
@@ -103,8 +104,16 @@ export function readBackgroundPrompt(
   if (!flags.includes(BACKGROUND_FLAG)) return undefined;
 
   const words: string[] = [];
+  let flagClaimed = false;
   for (const token of flags) {
-    if (token === BACKGROUND_FLAG) continue;
+    // Only the first `--bg` claims the launch; a repeat is prompt data,
+    // matching the entry's own position-based read (`qwen --bg explain
+    // what --bg does` asks about the flag, not for two launches).
+    if (token === BACKGROUND_FLAG) {
+      if (flagClaimed) words.push(token);
+      flagClaimed = true;
+      continue;
+    }
     if (token.startsWith('-')) {
       const eq = token.indexOf('=');
       return { unsupportedFlag: eq === -1 ? token : token.slice(0, eq) };
@@ -152,6 +161,20 @@ export async function runBackgroundDispatch(
     sessionId = readDispatchedSessionId(await supervisor.dispatch(prompt, cwd));
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
+    if (
+      error instanceof AgentViewSupervisorClientError &&
+      (error.code === 'timeout' || error.code === 'closed')
+    ) {
+      // Transport-ambiguous: the supervisor keeps running a dispatch whose
+      // client went away (the store write precedes the ready wait), so the
+      // session may exist despite this CLI giving up. Asserting a failed
+      // launch would send the user re-running into a duplicate.
+      writeStderrLine(
+        `Could not confirm the background session started: ${reason}. ` +
+          'It may still have started — check `qwen sessions ps` before re-running.',
+      );
+      return 1;
+    }
     writeStderrLine(`Could not start a background session: ${reason}`);
     return 1;
   }

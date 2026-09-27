@@ -211,9 +211,13 @@ export function mergeSessionRows(
       ...row,
       // The registry half has just proven a process is alive, so a
       // managed row whose worker pid is not recorded yet must not lose it
-      // — nor the record's own start stamp, which is that process's.
+      // — and the record's start stamp wins over the session's creation
+      // stamp, because it dates the process the pid belongs to: a
+      // re-spawned worker carries `createdAt` forward from the first
+      // launch, so the stale stamp would report a minutes-old process as
+      // hours old.
       pid: row.pid ?? record.pid,
-      startedAt: row.startedAt ?? record.startedAt,
+      startedAt: record.startedAt ?? row.startedAt,
       record,
     };
   });

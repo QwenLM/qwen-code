@@ -36,6 +36,9 @@ const { readBackgroundPrompt, runBackgroundDispatch } = await import(
   './background-entry.js'
 );
 const { BACKGROUND_FLAG } = await import('./entry-flags.js');
+const { AgentViewSupervisorClientError } = await import(
+  './supervisor-client.js'
+);
 
 beforeEach(() => {
   stdout.length = 0;
@@ -145,6 +148,25 @@ describe('readBackgroundPrompt', () => {
   it('reports an empty prompt rather than guessing one', () => {
     expect(readBackgroundPrompt([BACKGROUND_FLAG])).toEqual({ prompt: '' });
   });
+
+  it('keeps a repeated --bg as prompt data instead of eating it', () => {
+    // The entry claims only the leading token — `qwen --bg explain what
+    // --bg does` asks about the flag. Skipping every occurrence would
+    // dispatch `explain what does` and report it as started: a different
+    // task than the one asked for.
+    expect(
+      readBackgroundPrompt([
+        BACKGROUND_FLAG,
+        'explain',
+        'what',
+        BACKGROUND_FLAG,
+        'does',
+      ]),
+    ).toEqual({ prompt: 'explain what --bg does' });
+    expect(
+      readBackgroundPrompt([BACKGROUND_FLAG, BACKGROUND_FLAG, 'audit']),
+    ).toEqual({ prompt: '--bg audit' });
+  });
 });
 
 describe('runBackgroundDispatch', () => {
@@ -230,6 +252,37 @@ describe('runBackgroundDispatch', () => {
     const code = await runBackgroundDispatch('audit', '/w/app');
     expect(code).toBe(1);
     expect(stderr.join('')).toContain('prompt too large');
+  });
+
+  it('does not certify a dispatch the client gave up on as failed', async () => {
+    // The supervisor keeps running a dispatch whose client timed out —
+    // the store write precedes its ready wait — so the session may exist.
+    // A flat "could not start" would send the user re-running into a
+    // duplicate.
+    dispatch.mockRejectedValue(
+      new AgentViewSupervisorClientError(
+        'Timed out waiting for Agent View supervisor response.',
+        'timeout',
+      ),
+    );
+    const code = await runBackgroundDispatch('audit', '/w/app');
+    expect(code).toBe(1);
+    const out = stderr.join('');
+    expect(out).toContain('may still have started');
+    expect(out).toContain('qwen sessions ps');
+    expect(out).not.toContain('Could not start a background session:');
+  });
+
+  it('treats a connection that dropped mid-dispatch the same way', async () => {
+    dispatch.mockRejectedValue(
+      new AgentViewSupervisorClientError(
+        'Agent View supervisor closed before sending a response.',
+        'closed',
+      ),
+    );
+    const code = await runBackgroundDispatch('audit', '/w/app');
+    expect(code).toBe(1);
+    expect(stderr.join('')).toContain('may still have started');
   });
 
   it('reports a dispatch that names no session instead of inventing one', async () => {

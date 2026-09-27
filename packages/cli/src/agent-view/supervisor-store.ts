@@ -253,6 +253,15 @@ export async function readAgentViewSessionState(
   return normalizeSessionState(raw, path.basename(paths.sessionDir));
 }
 
+async function readAgentViewSessionStateStrict(
+  sessionId: string,
+  options: StoreOptions = {},
+): Promise<AgentViewSessionStateFile | undefined> {
+  const paths = getAgentViewSessionPaths(sessionId, options);
+  const raw = await readJsonRecordStrict(paths.statePath);
+  return normalizeSessionState(raw, path.basename(paths.sessionDir));
+}
+
 export async function writeAgentViewSessionState(
   state: AgentViewSessionStateFile,
   options: StoreOptions = {},
@@ -306,7 +315,7 @@ export async function patchAgentViewSessionStateIf(
   let applied = false;
   await mutateAgentViewState(sessionId, options, async () => {
     const paths = getAgentViewSessionPaths(sessionId, options);
-    const existing = await readJsonRecordForConditionalWrite(paths.statePath);
+    const existing = await readJsonRecordStrict(paths.statePath);
     if (existing === undefined) {
       return;
     }
@@ -333,6 +342,7 @@ export async function patchAgentViewSessionStateIf(
 
 export async function listAgentViewSessionStates(
   options: StoreOptions = {},
+  strict = false,
 ): Promise<AgentViewSessionStateFile[]> {
   const { jobsDir } = getAgentViewStorePaths(options);
   let entries: string[];
@@ -346,18 +356,35 @@ export async function listAgentViewSessionStates(
   }
 
   const states = await Promise.all(
-    entries.map((sessionId) => readAgentViewSessionState(sessionId, options)),
+    entries.map((sessionId) =>
+      strict
+        ? readAgentViewSessionStateStrict(sessionId, options)
+        : readAgentViewSessionState(sessionId, options),
+    ),
   );
   return states
     .filter((state): state is AgentViewSessionStateFile => Boolean(state))
     .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
 }
 
+/**
+ * With `strict`, the per-session state files and the roster are read
+ * strictly — an unreadable or corrupt one throws instead of quietly
+ * dropping the session from the listing. A caller that reports the
+ * listing as complete (the `GET /background-agents` route, which answers
+ * 503 rather than a partial roster) needs that; the supervisor keeps the
+ * soft reads, where one bad entry must not poison a heal pass. The
+ * launch/activity/worker files stay soft either way: they only enrich a
+ * row whose state file already listed it.
+ */
 export async function listAgentViewSessionSnapshots(
   options: StoreOptions = {},
+  strict = false,
 ): Promise<AgentViewSessionSnapshot[]> {
-  const states = await listAgentViewSessionStates(options);
-  const roster = await readAgentViewRoster(options);
+  const states = await listAgentViewSessionStates(options, strict);
+  const roster = strict
+    ? await readAgentViewRosterStrict(options)
+    : await readAgentViewRoster(options);
   const rosterEntries = new Map(
     roster.sessions.map((entry) => [sanitizeSessionId(entry.sessionId), entry]),
   );
@@ -607,7 +634,14 @@ async function readJsonRecordForWrite(
   }
 }
 
-async function readJsonRecordForConditionalWrite(
+/**
+ * A strict read: a missing file (ENOENT — the entry vanished between the
+ * directory listing and this read) is absence, but a file that exists and
+ * cannot be read or parsed is an error. The soft reader above swallows
+ * those so one bad entry cannot poison a supervisor listing; a caller
+ * that must not confuse "empty" with "could not look" uses this instead.
+ */
+async function readJsonRecordStrict(
   filePath: string,
 ): Promise<JsonRecord | undefined> {
   let text: string;

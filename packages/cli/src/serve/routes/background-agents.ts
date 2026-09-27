@@ -100,7 +100,12 @@ export function registerBackgroundAgentRoutes(
   app: Application,
   deps: RegisterBackgroundAgentRoutesDeps = {},
 ): void {
-  const listSnapshots = deps.listSnapshots ?? listAgentViewSessionSnapshots;
+  // Strict reads: the response below reports the listing as complete, so
+  // a store that only partially read must surface as the 503 this
+  // handler's catch produces, not as a shorter 200.
+  const listSnapshots =
+    deps.listSnapshots ??
+    (() => listAgentViewSessionSnapshots({}, /* strict */ true));
   const listRecords = deps.listRecords ?? listLiveSessions;
 
   app.get('/background-agents', async (_req, res) => {

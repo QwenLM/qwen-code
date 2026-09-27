@@ -5,13 +5,21 @@
  */
 
 import express from 'express';
-import { describe, expect, it } from 'vitest';
+import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import request from 'supertest';
 import type { SessionRegistryRecord } from '@qwen-code/qwen-code-core/services/session-registry.js';
 import type {
   AgentViewRosterEntry,
   AgentViewSessionSnapshot,
 } from '../../agent-view/protocol.js';
+import {
+  getAgentViewSessionPaths,
+  getAgentViewStorePaths,
+  writeAgentViewSessionState,
+} from '../../agent-view/supervisor-store.js';
 import { registerBackgroundAgentRoutes } from './background-agents.js';
 
 const SESSION = '0f8e1c42-9d3a-4d21-8f77-2b6a7c9e0c31';
@@ -356,5 +364,96 @@ describe('GET /background-agents', () => {
     expect(response.status).toBe(403);
     expect(response.body.code).toBe('untrusted_workspace');
     expect(response.body).not.toHaveProperty('agents');
+  });
+});
+
+describe('GET /background-agents over a real store', () => {
+  // No injected listSnapshots: these cases drive the route's own default
+  // reader against a real store on disk, so the wiring — not a stub —
+  // decides whether a partially readable store is a 503 or a shorter 200.
+  const CORRUPT = 'deadbeef-0000-4000-8000-000000000099';
+  let home: string;
+  let previousHome: string | undefined;
+
+  beforeEach(async () => {
+    home = await fs.mkdtemp(path.join(os.tmpdir(), 'bg-route-store-'));
+    previousHome = process.env['QWEN_HOME'];
+    process.env['QWEN_HOME'] = home;
+  });
+
+  afterEach(async () => {
+    if (previousHome === undefined) {
+      delete process.env['QWEN_HOME'];
+    } else {
+      process.env['QWEN_HOME'] = previousHome;
+    }
+    await fs.rm(home, { recursive: true, force: true });
+  });
+
+  async function writeSession(sessionId: string): Promise<void> {
+    await writeAgentViewSessionState(
+      {
+        schemaVersion: 1,
+        sessionId,
+        ownership: 'managed',
+        sessionState: 'working',
+        processState: 'alive',
+        attachState: 'detached',
+        projectCwd: '/w/app',
+        originalCwd: '/w/app',
+        activeCwd: '/w/app',
+        createdAt: '2026-09-04T11:58:00Z',
+        updatedAt: '2026-09-04T11:59:00Z',
+        worktree: { mode: 'none' },
+      },
+      { globalDir: home },
+    );
+  }
+
+  function appWithRealStore() {
+    const app = express();
+    registerBackgroundAgentRoutes(app, {
+      // The registry half stays injected so the suite cannot pick up
+      // sessions live on the machine running it.
+      listRecords: (async () => []) as never,
+    });
+    return app;
+  }
+
+  it('lists the sessions a healthy store holds', async () => {
+    await writeSession(SESSION);
+    const response =
+      await request(appWithRealStore()).get('/background-agents');
+    expect(response.status).toBe(200);
+    expect(
+      response.body.agents.map((a: { sessionId: string }) => a.sessionId),
+    ).toEqual([SESSION]);
+  });
+
+  it('answers 503, not a shorter 200, when one session state cannot be read', async () => {
+    // The store outlives the supervisor, so a corrupt state file is an
+    // ordinary shape; dropping that session from the list would show a
+    // user a complete-looking roster it is not.
+    await writeSession(SESSION);
+    await writeSession(CORRUPT);
+    await fs.writeFile(
+      getAgentViewSessionPaths(CORRUPT, { globalDir: home }).statePath,
+      '{ not json',
+    );
+    const response =
+      await request(appWithRealStore()).get('/background-agents');
+    expect(response.status).toBe(503);
+    expect(response.body.code).toBe('background_agents_unavailable');
+  });
+
+  it('answers 503 when the roster cannot be parsed', async () => {
+    await writeSession(SESSION);
+    const { rosterPath } = getAgentViewStorePaths({ globalDir: home });
+    await fs.mkdir(path.dirname(rosterPath), { recursive: true });
+    await fs.writeFile(rosterPath, '{ not json');
+    const response =
+      await request(appWithRealStore()).get('/background-agents');
+    expect(response.status).toBe(503);
+    expect(response.body.code).toBe('background_agents_unavailable');
   });
 });

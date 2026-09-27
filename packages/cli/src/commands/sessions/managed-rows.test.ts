@@ -371,6 +371,22 @@ describe('mergeSessionRows', () => {
     expect(row.startedAt).toBe(NOW - 90_000);
   });
 
+  it('dates a merged row by the record’s process start, not the session’s creation', () => {
+    // `createdAt` is the session's creation stamp; a re-spawned worker
+    // carries it forward while the registry record dates the process that
+    // is running now. Preferring the stale stamp reports a minutes-old
+    // process as hours old in AGE and in the route's `startedAt`.
+    const [row] = mergeSessionRows(
+      [record({ sessionId: 'managed-1', startedAt: NOW - 5_000 })],
+      managedSessionRows(
+        [snapshot({ worker: workerFile({ workerPid: 4242 }) })],
+        NOW,
+      ),
+    );
+    expect(row.pid).toBe(4242);
+    expect(row.startedAt).toBe(NOW - 5_000);
+  });
+
   it('claims one record at a time, so a duplicate id still surfaces', () => {
     const rows = mergeSessionRows(
       [

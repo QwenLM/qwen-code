@@ -265,8 +265,20 @@ function createSupervisorHandle(
       }),
     attach: (sessionId: string) =>
       attachAgentViewSupervisorTerminal(socketPath, sessionId, authOptions),
+    // The server serializes these behind the per-session host-setup lock
+    // a launch holds for its whole ready budget (15 s), so the 5 s default
+    // would time a `sessions stop` out on the client while the stop still
+    // completes server-side.
     peek: (sessionId: string) =>
-      callAgentViewSupervisor(socketPath, 'peek', { sessionId }, authOptions),
+      callAgentViewSupervisor(
+        socketPath,
+        'peek',
+        { sessionId },
+        {
+          ...authOptions,
+          timeoutMs: LONG_AGENT_VIEW_OPERATION_TIMEOUT_MS,
+        },
+      ),
     send: (sessionId: string, text: string) =>
       callAgentViewSupervisor(
         socketPath,
@@ -290,7 +302,15 @@ function createSupervisorHandle(
     logs: (sessionId: string) =>
       callAgentViewSupervisor(socketPath, 'logs', { sessionId }, authOptions),
     stop: (sessionId: string) =>
-      callAgentViewSupervisor(socketPath, 'stop', { sessionId }, authOptions),
+      callAgentViewSupervisor(
+        socketPath,
+        'stop',
+        { sessionId },
+        {
+          ...authOptions,
+          timeoutMs: LONG_AGENT_VIEW_OPERATION_TIMEOUT_MS,
+        },
+      ),
     kill: (sessionId: string) =>
       callAgentViewSupervisor(socketPath, 'kill', { sessionId }, authOptions),
     respawn: (sessionId?: string) =>

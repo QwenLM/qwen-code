@@ -797,7 +797,7 @@ state while it runs — the supervisor's store does, so this command reads
 it too. Managed sessions are listed first, because one of them may be
 waiting for an answer.
 
-Headless sessions (`qwen -p`) register nowhere and are not shown.
+A one-shot `qwen -p` run registers nowhere and is not shown.
 
 **Flags:**
 
@@ -857,8 +857,12 @@ session with no record behind it — its worker exited, or has not spawned
 yet — is emitted as the row itself, where `name` is that title:
 
 ```
-name, pid, startedAt, cwd, taskState, sessionId, managed
+name, cwd, taskState, sessionId, managed
 ```
+
+`pid` and `startedAt` join that shape only while a live process is
+behind the session; a managed session whose worker exited, or has not
+spawned yet, omits both.
 
 `taskState` is the machine-readable form of the STATE column, and is the
 field to script against: `running`, `waiting`, `ready`, `stopped` or
@@ -1099,9 +1103,10 @@ A controller presents the token the way any other sender does — as the
 first line of the connection — and takes the socket path from the
 session registry: `qwen sessions ps --json` prints one line per session,
 managed ones first, and a line carries `ipcPath` only when that session
-has a registry record with peer messaging available. Select on the field
-rather than reading the first line —
-`qwen sessions ps --json | jq -r 'select(.ipcPath) | .ipcPath' | head -1`
+has a registry record with peer messaging available. Select the
+interactive session on the `managed` field rather than reading the first
+line — a managed session prints ahead of it and carries `ipcPath` too:
+`SESSION_IPC_PATH="$(qwen sessions ps --json | jq -r 'select(.managed == false and .ipcPath) | .ipcPath' | head -1)"`
 — and connect to it:
 
 ```bash
