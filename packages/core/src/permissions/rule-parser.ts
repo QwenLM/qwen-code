@@ -1748,15 +1748,20 @@ function resolveRawMcpIdentity(
 /**
  * The legacy `generateLegacyMcpToolName` reduction of a tool's raw identity,
  * for a rule persisted in that spelling — or `undefined` when the reduction
- * cut the name.
+ * cut into the server segment.
  *
  * Character substitution is length-preserving, so the server segment stays
  * recognizable. Past 63 characters the reduction instead cuts at
- * `slice(0, 28) + '___' + slice(-32)`, which shortens a long server key *and*
- * injects the very `__` separator a prefix match needs: two different long
- * keys can land in one window, and a rule written for
- * `weather-forecast-server` would reach `weather-forecast-server-premium`.
- * A reduction that changed the length therefore vouches for no server.
+ * `slice(0, 28) + '___' + slice(-32)`. Under a short legacy-safe server key
+ * that cut lands entirely in the tool segment — the server segment survives
+ * byte-identically, the reduction still vouches for its server, and refusing
+ * it would silently retire a persisted `deny`/`ask`/`disallowedTools` entry
+ * the day its tool's name grew past the budget. A cut that reached the
+ * server segment instead keeps only its first 23 characters *and* injects
+ * the very `__` separator a prefix match needs: two different long keys can
+ * land in one window, and a rule written for `weather-forecast-server` would
+ * reach `weather-forecast-server-premium`. That reduction vouches for no
+ * server.
  */
 function resolveLegacyMcpSpelling(
   rawToolName: string | undefined,
@@ -1768,17 +1773,23 @@ function resolveLegacyMcpSpelling(
   if (legacy === rawToolName) {
     return undefined;
   }
-  return legacy.length === rawToolName.length ? legacy : undefined;
+  if (legacy.length === rawToolName.length) {
+    return legacy;
+  }
+  const serverSegment = (name: string) => name.split('__', 2)[1];
+  return serverSegment(legacy) === serverSegment(rawToolName)
+    ? legacy
+    : undefined;
 }
 
 /**
  * Whether a 3-part entry names the tool in the legacy spelling, so an exact
  * rule persisted before provider-safe names still covers the tool. The entry
- * is matched only against the provenance-gated legacy reduction of the
- * tool's vouched raw identity: an advertised alias proves nothing on its own,
+ * is compared against the provenance-gated legacy reduction of the tool's
+ * vouched raw identity: an advertised alias proves nothing on its own,
  * because two different long server keys publish one byte-identical
- * middle-truncated reduction, and a truncated reduction vouches for no
- * server.
+ * middle-truncated reduction, and a reduction whose cut reached the server
+ * segment vouches for no server.
  */
 function matchesAdvertisedExactName(
   pattern: string,
@@ -1791,6 +1802,7 @@ function matchesAdvertisedExactName(
   const legacySpelling = resolveLegacyMcpSpelling(rawToolName);
   return (
     legacySpelling !== undefined &&
+    pattern === legacySpelling &&
     (toolAliases ?? []).some(
       (alias) => resolveToolName(alias) === legacySpelling,
     )
