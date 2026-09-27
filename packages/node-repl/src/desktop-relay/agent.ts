@@ -54,6 +54,7 @@ export interface AgentContext {
   /** This process; a record carrying it belongs to the relay about to start here. */
   pid: number;
   processIdentity: string;
+  acquireConsentLock(): Promise<(() => void) | undefined>;
   askConsent(message: string): Promise<boolean>;
   readRecord(): RelayRecord | undefined;
   writeRecord(record: RelayRecord): void;
@@ -270,49 +271,64 @@ export async function handleHttpRequest(
         message: parsed,
       });
     }
-    if (!(await ctx.askConsent(consentMessage(origin, parsed)))) {
-      return json(403, cors, { ok: false, code: 'denied' });
+    const release = await ctx.acquireConsentLock();
+    if (!release) {
+      return json(409, cors, {
+        ok: false,
+        code: 'consent_busy',
+        message:
+          'Another approval is pending, or the local approval lock is unavailable. Finish that request before retrying.',
+      });
     }
-    if (signal?.aborted) {
-      return json(409, cors, { ok: false, code: 'cancelled' });
+    try {
+      if (signal?.aborted)
+        return json(409, cors, { ok: false, code: 'cancelled' });
+      if (!(await ctx.askConsent(consentMessage(origin, parsed)))) {
+        return json(403, cors, { ok: false, code: 'denied' });
+      }
+      if (signal?.aborted) {
+        return json(409, cors, { ok: false, code: 'cancelled' });
+      }
+      // One relay per computer: an approved connection replaces the previous one.
+      const previous = ctx.readRecord();
+      if (
+        typeof previous?.pid === 'number' &&
+        previous.pid !== ctx.pid &&
+        previous.processIdentity !== undefined &&
+        ctx.ownsProcess(previous.pid, previous.processIdentity)
+      ) {
+        ctx.terminate(previous.pid);
+      }
+      ctx.writeRecord({
+        pid: ctx.pid,
+        processIdentity: ctx.processIdentity,
+        origin,
+        daemonUrl: parsed.daemonUrl,
+        sessionId: parsed.sessionId,
+        phase: 'connecting',
+        updatedAt: now,
+      });
+      return {
+        ...json(202, cors, { ok: true }),
+        after: async () => {
+          try {
+            await ctx.startRelay(parsed, origin);
+          } catch (error) {
+            const current = ctx.readRecord();
+            if (current?.pid !== ctx.pid) return;
+            ctx.writeRecord({
+              ...current,
+              pid: null,
+              phase: 'failed',
+              message: error instanceof Error ? error.message : String(error),
+              updatedAt: (ctx.now?.() ?? new Date()).toISOString(),
+            });
+          }
+        },
+      };
+    } finally {
+      release();
     }
-    // One relay per computer: an approved connection replaces the previous one.
-    const previous = ctx.readRecord();
-    if (
-      typeof previous?.pid === 'number' &&
-      previous.pid !== ctx.pid &&
-      previous.processIdentity !== undefined &&
-      ctx.ownsProcess(previous.pid, previous.processIdentity)
-    ) {
-      ctx.terminate(previous.pid);
-    }
-    ctx.writeRecord({
-      pid: ctx.pid,
-      processIdentity: ctx.processIdentity,
-      origin,
-      daemonUrl: parsed.daemonUrl,
-      sessionId: parsed.sessionId,
-      phase: 'connecting',
-      updatedAt: now,
-    });
-    return {
-      ...json(202, cors, { ok: true }),
-      after: async () => {
-        try {
-          await ctx.startRelay(parsed, origin);
-        } catch (error) {
-          const current = ctx.readRecord();
-          if (current?.pid !== ctx.pid) return;
-          ctx.writeRecord({
-            ...current,
-            pid: null,
-            phase: 'failed',
-            message: error instanceof Error ? error.message : String(error),
-            updatedAt: (ctx.now?.() ?? new Date()).toISOString(),
-          });
-        }
-      },
-    };
   }
 
   if (request.method === 'POST' && path === '/disconnect') {

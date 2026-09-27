@@ -137,6 +137,40 @@ describe('probeDesktopRelay', () => {
 });
 
 describe('connectDesktopRelay', () => {
+  it('allows a 60-second cold runtime startup before minting a credential or asking for local approval', async () => {
+    vi.useFakeTimers();
+    const fetchImpl = vi.fn<FetchLike>(async (url, init) => {
+      if (url.endsWith('/runtime/ensure')) {
+        await new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(resolve, 60_000);
+          init?.signal?.addEventListener(
+            'abort',
+            () => {
+              clearTimeout(timer);
+              reject(new Error('startup aborted'));
+            },
+            { once: true },
+          );
+        });
+      }
+      return new Response(
+        JSON.stringify(
+          url.endsWith('/credential') ? { credential: 'scoped' } : { ok: true },
+        ),
+      );
+    });
+    try {
+      const pending = connectDesktopRelay(request, fetchImpl);
+      await vi.advanceTimersByTimeAsync(59_999);
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(pending).resolves.toEqual({ ok: true });
+      expect(fetchImpl).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   const request = {
     daemonUrl: 'https://devbox:4170/',
     sessionId: 's1',

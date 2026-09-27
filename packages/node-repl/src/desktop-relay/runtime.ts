@@ -172,6 +172,25 @@ export function ownsRelayProcess(
   return result.status === 0 && result.stdout.trim() === processIdentity;
 }
 
+/** A kernel-owned mutex across inetd processes; no stale file after a crash. */
+export function acquireConsentLock(
+  port = DESKTOP_RELAY_PORT + 1,
+): Promise<(() => void) | undefined> {
+  return new Promise((resolve, reject) => {
+    // This port accepts no protocol or data. It only excludes another prompt.
+    const lock = net.createServer((socket) => socket.destroy());
+    lock.once('error', (error: NodeJS.ErrnoException) => {
+      if (error.code === 'EADDRINUSE') resolve(undefined);
+      else reject(error);
+    });
+    lock.listen({ host: '127.0.0.1', port, exclusive: true }, () =>
+      resolve(() => {
+        lock.close();
+      }),
+    );
+  });
+}
+
 function endMessage(
   end: AcpRelayEnd,
   childExit: string | undefined,
@@ -266,6 +285,7 @@ export async function runAgent(home: string): Promise<void> {
       version: packageVersion(),
       pid: process.pid,
       processIdentity,
+      acquireConsentLock,
       askConsent: (message) => askConsent(message),
       readRecord: store.read,
       writeRecord: store.write,

@@ -155,7 +155,8 @@ export async function connectDesktopRelay(
   cancellation?: AbortSignal,
 ): Promise<DesktopRelayConnectResult> {
   try {
-    const prewarmResponse = await withTimeout(10_000, (signal) =>
+    // Runtime ensure allows 60 seconds; leave time for its response to arrive.
+    const prewarmResponse = await withTimeout(65_000, (signal) =>
       fetchImpl(
         daemonEndpoint(
           request.daemonUrl,

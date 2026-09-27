@@ -75,6 +75,8 @@ launchd 的 inetd 模式把接受的连接作为新进程的 stdin/stdout。进�
 - `POST /connect`：必须有合法的 web `Origin`；校验 body（daemon 地址只允许 http/https、不带凭据；`sessionId`；可选 token 和 workspace）；**弹原生确认框**；拒绝或超时返回 403；允许后结束上一个中继（一台机器只有一个），写 `active.json`（不含 token），回 202，然后在同一个进程里跑中继，直到结束。
 - `POST /disconnect`：只接受发起连接的 `Origin`，给中继进程发 SIGTERM。
 
+并发授权通过仅在请求处理中持有的 `127.0.0.1:47822` 独占监听互斥：它不接受协议或数据，连接立即关闭。先取得互斥再弹框，并持有到批准后的状态写入完成；冲突返回 `409 consent_busy`，不排队、不弹第二个框。拒绝或异常释放互斥，进程退出由内核释放，不留下磁盘锁。端口被其他程序占用时拒绝授权，不终止占用者。这限制并发弹框，不承诺阻止连续的新请求。
+
 ### 3.3 一个 node_repl 服务多个客户端（`mcp-child-relay.ts`）
 
 daemon 为每个活跃会话加一个用于发现的 MCP 客户端，经同一个注册接入，每个客户端的请求 id 都从 0 开始；而 `node_repl` 是只服务一个客户端的 stdio server。所以：
@@ -87,7 +89,7 @@ daemon 为每个活跃会话加一个用于发现的 MCP 客户端，经同一�
 
 ### 3.4 反向通道客户端（`acp-relay.ts`）
 
-行为照搬 Web Shell 本地文件桥（`bridge-client.ts`）实测过的规则：30 秒内完成 ACP `initialize`；`register_failed` 时先预热再重试（主工作区用 `POST /workspace/acp/preheat`，其他工作区用 `POST /workspaces/:w/runtime/ensure`），最多 6 次；`already_registered` 时等待而不消耗重试次数；`rate_limited` 在注册阶段计入重试，连接后忽略。
+浏览器先以原 daemon 凭证预热（主工作区用 `POST /workspace/acp/preheat`，其他工作区用 `POST /workspaces/:w/runtime/ensure`），等待上限 65 秒以覆盖远端运行时的 60 秒启动预算，再签发一次性凭证和请求本地授权。中继不再持有完整凭证或自行预热：30 秒内完成 ACP `initialize`；注册最多 6 次，`already_registered` 的重试也消耗预算；`rate_limited` 在注册阶段计入重试，连接后忽略。
 
 有一处刻意不同：**连接断开即结束，不自动重连**。桌面控制权不会在没有新的确认的情况下恢复。
 

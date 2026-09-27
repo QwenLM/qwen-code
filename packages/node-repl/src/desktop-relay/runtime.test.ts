@@ -10,7 +10,11 @@ import { createServer, type Server } from 'node:http';
 import type { Socket } from 'node:net';
 import { WebSocketServer } from 'ws';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { openWsSocket, ownsRelayProcess } from './runtime.js';
+import {
+  acquireConsentLock,
+  openWsSocket,
+  ownsRelayProcess,
+} from './runtime.js';
 
 const servers: Server[] = [];
 const sockets = new Set<Socket>();
@@ -62,6 +66,27 @@ describe.skipIf(process.platform === 'win32')('ownsRelayProcess', () => {
 });
 
 describe('openWsSocket', () => {
+  it('excludes another approval until the kernel lock is released and fails closed on port collisions', async () => {
+    const occupied = createServer();
+    const url = await listen(occupied);
+    const port = Number(new URL(url).port);
+    expect(await acquireConsentLock(port)).toBeUndefined();
+    await new Promise<void>((resolve) => occupied.close(() => resolve()));
+    const release = await acquireConsentLock(port);
+    expect(release).toBeTypeOf('function');
+    try {
+      expect(await acquireConsentLock(port)).toBeUndefined();
+    } finally {
+      release?.();
+    }
+    const next = await acquireConsentLock(port);
+    try {
+      expect(next).toBeTypeOf('function');
+    } finally {
+      next?.();
+    }
+  });
+
   it.each([
     { reject: true, message: 'Unexpected server response: 403' },
     { reject: false, message: 'Opening handshake has timed out' },

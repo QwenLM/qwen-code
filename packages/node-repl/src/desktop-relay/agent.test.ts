@@ -26,6 +26,7 @@ function context(overrides: Partial<AgentContext> = {}) {
     version: '0.1.5',
     pid: 100,
     processIdentity: 'self',
+    acquireConsentLock: async () => () => undefined,
     askConsent: vi.fn(async () => true),
     readRecord: () => record,
     writeRecord: (next) => {
@@ -62,6 +63,47 @@ const connectBody = JSON.stringify({
 });
 
 describe('handleHttpRequest', () => {
+  it('rejects concurrent approvals before prompting and releases admission after denial', async () => {
+    let held = false;
+    let answer!: (allowed: boolean) => void;
+    const { ctx } = context({
+      acquireConsentLock: async () => {
+        if (held) return undefined;
+        held = true;
+        return () => {
+          held = false;
+        };
+      },
+      askConsent: vi.fn(
+        () =>
+          new Promise<boolean>((resolve) => {
+            answer = resolve;
+          }),
+      ),
+    });
+    const request = req('POST', '/connect', { origin: ORIGIN }, connectBody);
+    const first = handleHttpRequest(request, ctx);
+    await vi.waitFor(() => expect(ctx.askConsent).toHaveBeenCalledOnce());
+    const second = await handleHttpRequest(
+      { ...request, headers: { host: HOST, origin: 'https://other.example' } },
+      ctx,
+    );
+    expect(second.status).toBe(409);
+    expect(JSON.parse(second.body).code).toBe('consent_busy');
+    expect(ctx.askConsent).toHaveBeenCalledOnce();
+    answer(false);
+    expect((await first).status).toBe(403);
+    expect(held).toBe(false);
+    ctx.askConsent = vi.fn(async () => {
+      throw new Error('dialog failed');
+    });
+    await expect(handleHttpRequest(request, ctx)).rejects.toThrow(
+      'dialog failed',
+    );
+    expect(held).toBe(false);
+    expect(ctx.startRelay).not.toHaveBeenCalled();
+  });
+
   it('refuses a foreign Host so a rebound DNS name cannot reach the relay', async () => {
     const { ctx } = context();
     const outcome = await handleHttpRequest(
