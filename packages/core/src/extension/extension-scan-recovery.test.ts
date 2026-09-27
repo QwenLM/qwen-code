@@ -289,6 +289,36 @@ describe('extension scan recovery', () => {
     expect(manager.getPendingScanRefusals().has('bbb-refusal')).toBe(true);
   });
 
+  it('allows the builtin after disabling an extension with an incomplete agent scan', async () => {
+    extension('aaa-refusal');
+    refusal('aaa-refusal');
+    write(
+      'aaa-refusal/agents/broken.md',
+      '---\nname: broken\n---\nMissing description.',
+    );
+    await manager.refreshCache();
+    await expect(subagents().loadSubagent('explore')).rejects.toBeInstanceOf(
+      SubagentError,
+    );
+
+    await manager.disableExtension('aaa-refusal', SettingScope.Workspace, root);
+    expect(manager.getLoadedExtensions()[0].isActive).toBe(false);
+    expect((await subagents().loadSubagent('explore'))?.isBuiltin).toBe(true);
+
+    manager = new ExtensionManager({
+      extensionStore: store,
+      workspaceDir: root,
+      isWorkspaceTrusted: true,
+    });
+    await manager.refreshCache();
+    expect((await subagents().loadSubagent('explore'))?.isBuiltin).toBe(true);
+
+    await manager.enableExtension('aaa-refusal', SettingScope.Workspace, root);
+    await expect(subagents().loadSubagent('explore')).rejects.toBeInstanceOf(
+      SubagentError,
+    );
+  });
+
   it('preserves refusals for a skipped extension without publishing it', async () => {
     extension('aaa-broken', { hooks: { PreToolUse: [null] } });
     refusal('aaa-broken');
@@ -297,6 +327,21 @@ describe('extension scan recovery', () => {
     expect(
       manager.getLoadedExtensions().map((entry) => entry.name),
     ).not.toContain('aaa-broken');
+    await expect(subagents().loadSubagent('explore')).rejects.toBeInstanceOf(
+      SubagentError,
+    );
+  });
+
+  it('retains a skipped extension refusal after a successful refresh', async () => {
+    extension('aaa-broken', { hooks: { PreToolUse: [null] } });
+    refusal('aaa-broken');
+    extension('healthy');
+
+    await manager.refreshCache();
+
+    expect(manager.getLoadedExtensions().map((entry) => entry.name)).toEqual([
+      'healthy',
+    ]);
     await expect(subagents().loadSubagent('explore')).rejects.toBeInstanceOf(
       SubagentError,
     );

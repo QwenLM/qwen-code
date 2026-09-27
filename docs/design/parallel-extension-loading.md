@@ -82,8 +82,11 @@ A rejected refresh publishes no new runtime entries, including for siblings
 that finished loading. The previous cache stays intact; there are no failed-scan
 tombstones for command loaders, activation mutations, or other consumers to
 mistake for loaded extensions. `SubagentManager` reads pending refusals through
-its existing callback independently of activation and refuses a by-name
-fallback even on a cold cache. No activation snapshot is needed on rejection.
+its existing callback and refuses a by-name fallback even on a cold cache.
+The callback suppresses records for committed inactive entries, so disabled
+extensions cannot block a builtin; records without a cache entry still refuse
+dispatch. Re-enabling an entry exposes its retained records again. No activation
+snapshot is needed on rejection.
 
 A successful refresh retains refusals from skipped extensions and incomplete
 agent discovery. A complete committed agent scan supersedes only that

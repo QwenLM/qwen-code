@@ -1608,11 +1608,12 @@ export class ExtensionManager {
     string,
     ReadonlyMap<string, SubagentError>
   > {
+    // Only a committed inactive entry can suppress a pending refusal; failed
+    // or skipped scans without a cache entry must still refuse dispatch.
     return new Map(
-      [...this.pendingScanRefusals].map(([name, { refusals }]) => [
-        name,
-        refusals,
-      ]),
+      [...this.pendingScanRefusals]
+        .filter(([name]) => this.extensionCache?.get(name)?.isActive !== false)
+        .map(([name, { refusals }]) => [name, refusals]),
     );
   }
 

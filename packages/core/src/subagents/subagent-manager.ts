@@ -1823,8 +1823,8 @@ export class SubagentManager {
       }
       // Refusals a REJECTED refresh recorded never committed onto the
       // active set above; they stay pending at the extension manager until
-      // a complete committed agent rescan and gate dispatch from here
-      // independently of activation. Same scan scoping
+      // a complete committed agent rescan and gate dispatch from here. The
+      // manager excludes committed inactive extensions. Same scan scoping
       // as the committed records: only names a scan actually refused.
       for (const refusals of this.getPendingExtensionRefusals()) {
         for (const [name, error] of refusals) {
