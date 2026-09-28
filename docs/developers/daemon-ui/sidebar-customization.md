@@ -116,6 +116,7 @@ type WebShellSidebarFooterItem =
   | 'settings' // ⚙ Settings panel
   | 'update' // Update action when supported
   | 'localFiles' // Local-files bridge when available
+  | 'desktopRelay' // Use this computer through the existing desktop relay
   | 'workspacesOverview' // Workspace management when unlocked
   | 'version' // version label (e.g. "v0.19.10")
   | 'theme' // ☀/🌙 light/dark toggle

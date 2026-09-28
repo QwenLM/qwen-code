@@ -365,7 +365,9 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
                       'sessionsOverview',
                       'splitView',
                       'daemonStatus',
-                      ...(isDesktopShell() ? [] : ['localFiles' as const]),
+                      ...(isDesktopShell()
+                        ? []
+                        : ['localFiles' as const, 'desktopRelay' as const]),
                       'collapse',
                     ],
                   },

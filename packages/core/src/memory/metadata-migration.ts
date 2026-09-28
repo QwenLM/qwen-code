@@ -8,7 +8,14 @@ import { createHash } from 'node:crypto';
 import * as fsSync from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import { isMap, isNode, parseDocument } from 'yaml';
+import {
+  isMap,
+  isNode,
+  parseDocument,
+  visit,
+  type Document,
+  type Node,
+} from 'yaml';
 import { deriveConfig, type Config } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
@@ -314,6 +321,20 @@ interface MergedMetadata {
   validation: StructuredAutoMemoryValidation;
 }
 
+function isAnchorReferenced(document: Document, node: Node): boolean {
+  let referenced = false;
+  visit(document, {
+    Alias: (_key, alias) => {
+      if (alias.resolve(document) === node) {
+        referenced = true;
+        return visit.BREAK;
+      }
+      return undefined;
+    },
+  });
+  return referenced;
+}
+
 function mergeMetadata(
   candidate: MemoryMetadataMigrationCandidate,
   metadata: GeneratedMemoryMetadata,
@@ -339,8 +360,12 @@ function mergeMetadata(
         for (const key of OWNED_FRONTMATTER_KEYS) {
           if (!missingOrInvalidFields.includes(key)) continue;
           const previous = document.get(key, true);
-          // Replacing an anchor would change aliases in unowned fields.
-          if (isNode(previous) && 'anchor' in previous && previous.anchor) {
+          if (
+            isNode(previous) &&
+            'anchor' in previous &&
+            previous.anchor &&
+            isAnchorReferenced(document, previous)
+          ) {
             return null;
           }
           document.set(key, document.createNode(metadata[key]));
@@ -524,6 +549,21 @@ export async function runMemoryMetadataMigration(params: {
   };
   let bodyChars = 0;
   const roots = params.roots ?? (params.root ? [params.root] : []);
+  await Promise.all(
+    roots.map(async (root) => {
+      const indexPath = path.join(root, AUTO_MEMORY_INDEX_FILENAME);
+      const stats = await fs.lstat(indexPath).catch((error: unknown) => {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT')
+          return undefined;
+        throw error;
+      });
+      if (stats?.isSymbolicLink()) {
+        throw new Error(
+          `Refusing metadata migration while ${indexPath} is a symlink`,
+        );
+      }
+    }),
+  );
   result.filesScanned = (
     await Promise.all(roots.map((root) => listMemoryFiles(root)))
   ).reduce((count, files) => count + files.length, 0);
@@ -591,6 +631,31 @@ export async function runMemoryMetadataMigration(params: {
     if (params.abortSignal?.aborted) {
       await rebuildIndexes([...committedRoots]);
       throw new DOMException('Metadata migration aborted.', 'AbortError');
+    }
+    const parts = splitFrontmatter(candidate.filePath, candidate.content);
+    if (parts.frontmatter.trim()) {
+      const document = parseDocument(parts.frontmatter, { schema: 'core' });
+      const { missingOrInvalidFields } = validateStructuredAutoMemoryDocument(
+        candidate.content,
+      );
+      // These refusals cannot be repaired by generated metadata; do not spend
+      // model calls or starve later candidates on them.
+      if (
+        document.errors.length ||
+        OWNED_FRONTMATTER_KEYS.some((key) => {
+          if (!missingOrInvalidFields.includes(key)) return false;
+          const node = document.get(key, true);
+          return (
+            isNode(node) &&
+            'anchor' in node &&
+            !!node.anchor &&
+            isAnchorReferenced(document, node)
+          );
+        })
+      ) {
+        result.failed += 1;
+        continue;
+      }
     }
     if (
       result.attempted > 0 &&

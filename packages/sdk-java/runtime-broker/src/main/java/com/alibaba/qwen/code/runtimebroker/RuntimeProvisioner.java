@@ -70,6 +70,14 @@ public interface RuntimeProvisioner extends AutoCloseable {
     }
 
     /**
+     * Whether a failed confirmation can be retried against the same owned,
+     * still-live resource. Unknown implementations keep the binding fenced.
+     */
+    default boolean canRetryFailedConfirm(RuntimeLease lease) {
+        return false;
+    }
+
+    /**
      * Tears down the resource behind a lease the caller has decided to
      * discard, keyed by the complete lease identity so a fenced loser can
      * never kill the winning resource for the same request. The default

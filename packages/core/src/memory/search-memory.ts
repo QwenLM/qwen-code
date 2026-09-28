@@ -33,6 +33,8 @@ const SEARCH_DIVERSITY_BONUS_CAP = 4;
 const FETCH_BODY_WINDOW_CHARS = 8_000;
 const FETCH_TOTAL_BODY_CHARS = 20_000;
 const SEARCH_TOTAL_BODY_CHARS = 6_000;
+const READ_LIMIT_EXHAUSTED_MESSAGE =
+  'The per-ref fetch budget is exhausted before the end of this memory. Use the returned content or report the bounded-read limit; do not fetch or search this same ref again to continue reading.';
 const MAX_FETCH_REFS = 5;
 const MAX_SEARCH_RESULTS = 5;
 const MAX_EXPLORE_BRANCHES = 3;
@@ -795,6 +797,12 @@ async function readContentResult(
       previousCursor: window.previousCursor,
       nextCursor: window.nextCursor,
       continuation: window.continuation,
+      ...(exhaustedBodyRefs.has(ref)
+        ? {
+            readLimitExhausted: true,
+            readLimitMessage: READ_LIMIT_EXHAUSTED_MESSAGE,
+          }
+        : {}),
     };
   }
   let readLimitExhausted = false;
@@ -842,8 +850,7 @@ async function readContentResult(
     ...(readLimitExhausted
       ? {
           readLimitExhausted: true,
-          readLimitMessage:
-            'The per-ref fetch budget is exhausted before the end of this memory. Use the returned content or report the bounded-read limit; do not fetch or search this same ref again to continue reading.',
+          readLimitMessage: READ_LIMIT_EXHAUSTED_MESSAGE,
         }
       : {}),
   };

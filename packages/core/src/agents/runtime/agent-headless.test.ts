@@ -564,6 +564,21 @@ describe('subagent.ts', () => {
     });
 
     describe('execute - Initialization and Prompting', () => {
+      it('sends an explicit empty tools list for a no-tool agent', async () => {
+        const { config } = await createMockConfig();
+        mockSendMessageStream.mockImplementation(createMockStream(['stop']));
+        const scope = await AgentHeadless.create(
+          'metadata-only-agent',
+          config,
+          { systemPrompt: 'Return metadata.' },
+          defaultModelConfig,
+          defaultRunConfig,
+          { tools: [] },
+        );
+        await scope.execute(new ContextState());
+        expect(mockSendMessageStream.mock.calls[0][1].config.tools).toEqual([]);
+      });
+
       it('should correctly template the system prompt and initialize LlmChat', async () => {
         const { config } = await createMockConfig();
 

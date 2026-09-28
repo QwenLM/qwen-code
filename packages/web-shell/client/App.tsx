@@ -3401,7 +3401,7 @@ export function App({
       if (
         target instanceof Element &&
         target.closest(
-          '[data-web-shell-sidebar-more], [data-web-shell-local-files-panel]',
+          '[data-web-shell-sidebar-more], [data-web-shell-local-files-panel], [data-web-shell-desktop-relay-panel]',
         )
       ) {
         return;
@@ -3430,7 +3430,7 @@ export function App({
       if (
         el instanceof Element &&
         el.closest(
-          '[data-web-shell-sidebar-more], [data-web-shell-local-files-panel]',
+          '[data-web-shell-sidebar-more], [data-web-shell-local-files-panel], [data-web-shell-desktop-relay-panel]',
         )
       ) {
         return;
@@ -9298,7 +9298,7 @@ export function App({
               return projectFeaturesAvailable;
             }
             if (item === 'workspacesOverview') return !lockedWorkspaceCwd;
-            if (item === 'localFiles')
+            if (item === 'localFiles' || item === 'desktopRelay')
               return isPageOriginDaemon(workspace.baseUrl);
             if (item === 'splitView')
               return projectFeaturesAvailable && isLargeScreen;
