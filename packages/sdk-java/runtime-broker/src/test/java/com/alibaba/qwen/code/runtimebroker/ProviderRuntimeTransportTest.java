@@ -37,6 +37,7 @@ class ProviderRuntimeTransportTest {
     private volatile String cacheControl = "no-store";
     private volatile String contentEncoding;
     private volatile Object result = Map.of();
+    private volatile Object acquireAnswer = true;
     private volatile UnaryOperator<Map<String, Object>> response = body -> body;
 
     @BeforeEach
@@ -50,7 +51,7 @@ class ProviderRuntimeTransportTest {
                     exchange.getRequestBody().readAllBytes(), "request");
             requests.add(request);
             Map<String, Object> operation = ProviderRuntimeProtocol.object(request.get("operation"));
-            Object value = "acquire".equals(operation.get("kind")) ? true : result;
+            Object value = "acquire".equals(operation.get("kind")) ? acquireAnswer : result;
             Map<String, Object> answer = new LinkedHashMap<>();
             answer.put("protocolVersion", 1);
             answer.put("providerProtocol", ProviderRuntimeProtocol.NAME);
@@ -225,6 +226,24 @@ class ProviderRuntimeTransportTest {
                         "toolName", "edit", "input", Map.of(), "modification",
                         Map.of("source", foreign, "newContent", "next")), HARNESS, SESSION));
         assertEquals("runtime_control_operation_invalid", error.getCode());
+        // A confirm outcome outside the accepted set and a non-boolean modality
+        // are refused before anything is sent.
+        assertThrows(RuntimeBrokerException.class,
+                () -> ProviderRuntimeProtocol.control(Map.of("kind", "confirm", "reference",
+                        reference, "outcome", "restore_previous"), HARNESS, SESSION));
+        assertThrows(RuntimeBrokerException.class,
+                () -> ProviderRuntimeProtocol.control(Map.of("kind", "prepare", "identity",
+                        identity, "toolName", "read_file", "input", Map.of(), "mediaContext",
+                        Map.of("inputModalities", Map.of("image", "yes"))), HARNESS, SESSION));
+    }
+
+    @Test
+    void refusesAControlWhenTheAcquirePreludeIsNotConfirmed() {
+        acquireAnswer = false;
+        assertThrows(CompletionException.class, () -> transport.control(lease, session,
+                Map.of("kind", "manifest")).toCompletableFuture().join());
+        assertEquals(1, requests.size());
+        assertEquals(Map.of("kind", "acquire"), requests.getFirst().get("operation"));
     }
 
     @Test

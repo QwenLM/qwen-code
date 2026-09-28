@@ -914,6 +914,39 @@ describe('ManagedToolRuntime', () => {
     await runtime.releasePrepared();
   });
 
+  it('refuses to release while a turn snapshot is pending', async () => {
+    const gate = deferred<void>();
+    useSharedHistory({
+      prepareTurn: () => gate.promise,
+      execute: (operation) => operation(),
+    });
+    const begin = runtime.beginTurn(identity);
+    begin.catch(() => {});
+    await vi.waitFor(() => expect(runtime.hasActiveWork()).toBe(true));
+    await expect(runtime.releasePrepared()).rejects.toThrow(
+      'unfinished execution',
+    );
+    gate.resolve();
+    await begin;
+    await runtime.releasePrepared();
+  });
+
+  it('refuses to release while a preparation is in flight', async () => {
+    const gate = deferred<'ask'>();
+    tool.setup = (invocation) =>
+      invocation.getDefaultPermission.mockReturnValue(gate.promise);
+    await runtime.beginTurn(identity);
+    const preparing = runtime.prepare(identity, tool.name, input);
+    preparing.catch(() => {});
+    await vi.waitFor(() => expect(tool.invocations).toHaveLength(1));
+    await expect(runtime.releasePrepared()).rejects.toThrow(
+      'unfinished execution',
+    );
+    gate.resolve('ask');
+    await preparing;
+    await runtime.releasePrepared();
+  });
+
   it('keeps a prepared cancellation un-settled until its confirmation callback returns', async () => {
     const gate = deferred<void>();
     tool.setup = (invocation) =>

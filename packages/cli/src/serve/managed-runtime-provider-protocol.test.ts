@@ -253,6 +253,34 @@ describe('managed-runtime-provider/1', () => {
     ).toThrow();
   });
 
+  it('rejects malformed status shapes and premature results', () => {
+    const status: ManagedRuntimeProviderOperation = {
+      kind: 'status',
+      reference,
+    };
+    const base = {
+      state: 'executing',
+      cancelRequested: false,
+      lastSeq: 1,
+      firstAvailableSeq: 1,
+      progressGap: false,
+      progress: [],
+    };
+    expect(parseManagedRuntimeProviderResult(status, base, session)).toEqual(
+      base,
+    );
+    for (const bad of [
+      { ...base, lastSeq: -1 },
+      { ...base, lastSeq: 1.5 },
+      { ...base, firstAvailableSeq: -1 },
+      { ...base, result: { executionStatus: 'success' } },
+    ]) {
+      expect(() =>
+        parseManagedRuntimeProviderResult(status, bad, session),
+      ).toThrow();
+    }
+  });
+
   it('pins every accepted confirm outcome in the shared corpus', () => {
     const pinned = new Set(
       fixtures.cases

@@ -942,7 +942,7 @@ export class BrokerManagedRuntimeProvider implements ManagedRuntimeProvider {
         );
       }
     };
-    const control = (operation: ManagedRuntimeProviderControl) => {
+    const control = async (operation: ManagedRuntimeProviderControl) => {
       assertEntry(operation.kind === 'history');
       const session = {
         harnessSessionId: entry.harnessSessionId,
@@ -950,8 +950,9 @@ export class BrokerManagedRuntimeProvider implements ManagedRuntimeProvider {
         turnKind: entry.request.turnKind,
       };
       const parsed = parseManagedRuntimeProviderOperation(operation, session);
-      return this.client
-        .control(
+      return parseManagedRuntimeProviderResult(
+        parsed,
+        await this.client.control(
           entry.request.sessionId,
           entry.harnessSessionId,
           parsed,
@@ -959,10 +960,9 @@ export class BrokerManagedRuntimeProvider implements ManagedRuntimeProvider {
             this.lifetime.signal,
             AbortSignal.timeout(BROKER_REQUEST_TIMEOUT_MS),
           ]),
-        )
-        .then((result) =>
-          parseManagedRuntimeProviderResult(parsed, result, session),
-        );
+        ),
+        session,
+      );
     };
     const ensureExecution = (
       reference: ManagedToolInvocationReference,

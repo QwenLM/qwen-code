@@ -357,9 +357,13 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     return CompletableFuture.completedFuture(stored);
                 }
                 RuntimeBindingRecord binding = bindingRepository.findById(stored.getBindingId());
-                RuntimeSessionRecord owner = sessionRepository.findById(
+                RuntimeSessionRecord owner = binding == null ? null : sessionRepository.findById(
                         binding.getRequest().getScope(), runtimeSessionId);
-                if (owner.getState() == RuntimeSessionRecord.State.RELEASED) {
+                // A READY Session can refresh the worker's cancellation
+                // evidence; anywhere else the terminal receipt stands alone,
+                // the same rule that lets Broker HTTP read terminal receipts
+                // without a READY Session.
+                if (owner == null || owner.getState() != RuntimeSessionRecord.State.READY) {
                     return CompletableFuture.completedFuture(stored);
                 }
             }

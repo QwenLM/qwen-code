@@ -76,6 +76,7 @@ describe('BrokerManagedRuntimeProvider', () => {
   it.each([
     ['File path must be absolute', ' File path must be absolute'],
     ['', ''],
+    ['x'.repeat(4096), ` ${'x'.repeat(4096)}`],
     ['x'.repeat(4097), ''],
     ['invalid\0reason', ''],
     [null, ''],
@@ -215,7 +216,7 @@ describe('BrokerManagedRuntimeProvider', () => {
     expect(acquisitions).toBe(2);
     await provider.release(runtimeSessionId, request(), { terminal: true });
     const requests = fetchImpl.mock.calls.length;
-    expect(() => client.manifest()).toThrow('closed');
+    await expect(client.manifest()).rejects.toThrow('closed');
     await expect(client.execute(reference())).rejects.toThrow('closed');
     expect(fetchImpl).toHaveBeenCalledTimes(requests);
     provider.dispose();
@@ -425,9 +426,9 @@ describe('BrokerManagedRuntimeProvider', () => {
     await expect(
       client.beginTurn({ ...identity, sessionId: harnessSessionId }),
     ).rejects.toThrow('Session identity conflicts');
-    expect(() =>
+    await expect(
       client.confirmation({ ...reference(), sessionId: harnessSessionId }),
-    ).toThrow('Session identity conflicts');
+    ).rejects.toThrow('Session identity conflicts');
     expect(fetchImpl).toHaveBeenCalledOnce();
     provider.dispose();
   });

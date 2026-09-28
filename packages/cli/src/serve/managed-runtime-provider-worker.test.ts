@@ -853,6 +853,32 @@ describe('Managed Runtime provider worker', () => {
     },
   );
 
+  it('refuses a checkpoint while work is in flight', async () => {
+    await begin();
+    const ref = reference(
+      await prepare('run_shell_command', {
+        command: `"${process.execPath}" -e "setTimeout(String, 30000)"`,
+      }),
+    );
+    await control({ kind: 'preflight', reference: ref });
+    const execution = control({ kind: 'execute', reference: ref });
+    await vi.waitFor(async () => {
+      expect(await control({ kind: 'status', reference: ref })).toMatchObject({
+        state: 'executing',
+      });
+    });
+    const busy = await post({ kind: 'checkpoint', promptId: 'prompt-2' });
+    expect(busy.status).toBe(409);
+    await control({ kind: 'cancel', reference: ref });
+    expect(await execution).toMatchObject({ executionStatus: 'cancelled' });
+    expect(
+      await control<{ revision: number }>({
+        kind: 'checkpoint',
+        promptId: 'prompt-2',
+      }),
+    ).toMatchObject({ revision: expect.any(Number) });
+  });
+
   it('keeps an oversized shell result observable instead of failing the wire contract', async () => {
     await begin();
     const ref = reference(

@@ -544,6 +544,95 @@
       }
     },
     {
+      "name": "prepare-modification-23",
+      "valid": true,
+      "request": {
+        "protocolVersion": 1,
+        "providerProtocol": "managed-runtime-provider/1",
+        "session": {
+          "harnessSessionId": "550e8400-e29b-41d4-a716-446655440301",
+          "runtimeSessionId": "550e8400-e29b-41d4-a716-446655440302",
+          "turnKind": "bootstrap"
+        },
+        "operation": {
+          "kind": "prepare",
+          "identity": {
+            "sessionId": "550e8400-e29b-41d4-a716-446655440302",
+            "promptId": "turn-1",
+            "callId": "call-2",
+            "capabilityDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "policyRevision": "policy-1"
+          },
+          "toolName": "edit",
+          "input": {
+            "file_path": "/workspace/note.txt",
+            "old_string": "old",
+            "new_string": "new"
+          },
+          "modification": {
+            "source": {
+              "sessionId": "550e8400-e29b-41d4-a716-446655440302",
+              "promptId": "turn-1",
+              "callId": "call-1",
+              "capabilityDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "policyRevision": "policy-1",
+              "invocationId": "invocation-1",
+              "argsDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            },
+            "newContent": "new content\n"
+          }
+        }
+      }
+    },
+    {
+      "name": "prepare-media-24",
+      "valid": true,
+      "request": {
+        "protocolVersion": 1,
+        "providerProtocol": "managed-runtime-provider/1",
+        "session": {
+          "harnessSessionId": "550e8400-e29b-41d4-a716-446655440301",
+          "runtimeSessionId": "550e8400-e29b-41d4-a716-446655440302",
+          "turnKind": "bootstrap"
+        },
+        "operation": {
+          "kind": "prepare",
+          "identity": {
+            "sessionId": "550e8400-e29b-41d4-a716-446655440302",
+            "promptId": "turn-1",
+            "callId": "call-3",
+            "capabilityDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "policyRevision": "policy-1"
+          },
+          "toolName": "read_file",
+          "input": {
+            "file_path": "/workspace/image.png"
+          },
+          "mediaContext": {
+            "inputModalities": {
+              "image": true
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "acquire-continuation-25",
+      "valid": true,
+      "request": {
+        "protocolVersion": 1,
+        "providerProtocol": "managed-runtime-provider/1",
+        "session": {
+          "harnessSessionId": "550e8400-e29b-41d4-a716-446655440301",
+          "runtimeSessionId": "550e8400-e29b-41d4-a716-446655440302",
+          "turnKind": "continuation"
+        },
+        "operation": {
+          "kind": "acquire"
+        }
+      }
+    },
+    {
       "name": "extra-envelope",
       "valid": false,
       "request": {

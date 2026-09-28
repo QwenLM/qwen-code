@@ -247,6 +247,30 @@ class RuntimeBrokerHttpServerTest {
     }
 
     @Test
+    void rejectsANonStringStartPayloadBeforeTouchingTheReservation() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            fixture.transport.fail = false;
+            fixture.service.acquire("harness", "runtime", "bootstrap").toCompletableFuture().join();
+            String payload = "{\"toolName\":\"write_file\",\"input\":{}}";
+            String digest = "sha256:" + HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
+                    .digest(payload.getBytes(StandardCharsets.UTF_8)));
+            ToolExecutionRecord reserved = fixture.service.prepareExecution("harness", "runtime", "key",
+                    Map.of("sessionId", "runtime", "promptId", "turn", "callId", "call", "argsDigest", digest))
+                    .toCompletableFuture().join();
+            Map<String, Object> body = new HashMap<>(Map.of("protocolVersion", 1, "requestId", "start",
+                    "harnessSessionId", "harness", "runtimeSessionId", "runtime"));
+            body.put("payloadJson", 123);
+            HttpResponse<String> response = fixture.post(
+                    "/executions/" + reserved.getExecutionCallId() + ":start", body);
+            assertEquals(400, response.statusCode(), response.body());
+            assertTrue(response.body().contains("runtime_payload_invalid"), response.body());
+            assertSame(reserved, fixture.executions.findByExecutionCallId(reserved.getExecutionCallId()));
+            assertEquals(ToolExecutionRecord.State.PREPARED, reserved.getState());
+            assertEquals(0, fixture.transport.executions.get());
+        }
+    }
+
+    @Test
     void rejectsExtraStartFieldsBeforeChangingTheReservationOrDispatching() throws Exception {
         try (Fixture fixture = new Fixture()) {
             fixture.transport.fail = false;
