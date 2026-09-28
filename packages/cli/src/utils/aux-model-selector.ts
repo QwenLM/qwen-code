@@ -15,6 +15,8 @@
  * their own `split('\0')`.
  */
 
+import { sanitizeProviderBaseUrl } from './acpModelUtils.js';
+
 /** Settings keys that persist an `authType:id\0baseUrl` aux-model selector. */
 export const AUX_MODEL_SELECTOR_SETTING_KEYS: ReadonlySet<string> = new Set([
   'visionModel',
@@ -82,7 +84,14 @@ export function formatAuxModelSelectorForDisplay(setting: string): string {
   const nul = setting.indexOf('\0');
   if (nul < 0) return setting;
   const selector = setting.slice(0, nul);
-  if (!selector) return setting.replace(/\0/g, '\\0');
+  if (!selector) {
+    // Fail closed: a malformed value with no selector must not echo the
+    // credential-bearing suffix either. Route it through the same scrubbing
+    // rule the wire path uses, then keep the NUL escaped so no raw NUL byte
+    // reaches the terminal. An unpublishable suffix is dropped, exactly as
+    // `publicAuxModelSelectorValue` drops it on the wire.
+    return publicAuxModelSelectorValue(setting).replace(/\0/g, '\\0');
+  }
   const baseUrl = setting.slice(nul + 1);
   if (!baseUrl) return selector;
   const publishable = publishableSelectorBaseUrl(baseUrl);
@@ -93,8 +102,11 @@ export function formatAuxModelSelectorForDisplay(setting: string): string {
  * Write-path credential strip for picker-persisted selectors: userinfo is
  * removed from an http(s) baseUrl so the selector written to settings.json
  * (potentially the committable workspace-scope file) carries no credential.
- * Everything else — clean URLs, scheme-less endpoints, unparseable strings —
- * is persisted byte-identical.
+ * Clean URLs and scheme-less endpoints are persisted byte-identical. An
+ * http(s) endpoint that `new URL()` rejects fails closed through
+ * `sanitizeProviderBaseUrl`, which strips the authority userinfo textually —
+ * never verbatim, because the persisted file is the one surface the publish
+ * path cannot scrub after the fact.
  */
 export function stripAuxSelectorBaseUrlCredential(baseUrl: string): string {
   if (!/^https?:\/\//i.test(baseUrl.trim())) return baseUrl;
@@ -105,6 +117,6 @@ export function stripAuxSelectorBaseUrlCredential(baseUrl: string): string {
     url.password = '';
     return url.href;
   } catch {
-    return baseUrl;
+    return sanitizeProviderBaseUrl(baseUrl);
   }
 }

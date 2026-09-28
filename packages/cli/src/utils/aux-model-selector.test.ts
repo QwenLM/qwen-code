@@ -116,6 +116,24 @@ describe('formatAuxModelSelectorForDisplay', () => {
       '\\0https://a.example/v1',
     );
   });
+
+  it('scrubs the credential on the empty-selector branch too', () => {
+    // Fail closed: `publicAuxModelSelectorValue` scrubs this same input on the
+    // wire, so the display path must not be the one surface that echoes it.
+    const malformed = '\0https://user:sk-secret@host/v1';
+    expect(formatAuxModelSelectorForDisplay(malformed)).toBe(
+      '\\0https://host/v1',
+    );
+    expect(formatAuxModelSelectorForDisplay(malformed)).not.toContain(
+      'sk-secret',
+    );
+    expect(formatAuxModelSelectorForDisplay(malformed)).not.toContain('\0');
+  });
+
+  it('drops an unpublishable suffix on the empty-selector branch', () => {
+    expect(formatAuxModelSelectorForDisplay('\0not-a-url')).toBe('');
+    expect(formatAuxModelSelectorForDisplay('\0ftp://user:sk@host/')).toBe('');
+  });
 });
 
 describe('stripAuxSelectorBaseUrlCredential', () => {
@@ -140,5 +158,33 @@ describe('stripAuxSelectorBaseUrlCredential', () => {
     );
     expect(stripAuxSelectorBaseUrlCredential('not a url')).toBe('not a url');
     expect(stripAuxSelectorBaseUrlCredential('')).toBe('');
+  });
+
+  it('fails closed on an http(s) endpoint new URL() rejects', () => {
+    // These are the shapes the persist path used to write verbatim, credential
+    // included — the one surface the publish path cannot scrub after the fact.
+    expect(stripAuxSelectorBaseUrlCredential('https://user@host:99999')).toBe(
+      'https://host:99999',
+    );
+    for (const unparseable of [
+      'https://user:sk-secret@host.example:99999/v1',
+      'https://user:sk-secret@/v1',
+      'https://user:sk-secret@host name/v1',
+      'https://user:sk-secret@[::1/v1',
+      'https://user:sk@host:99999',
+    ]) {
+      const persisted = stripAuxSelectorBaseUrlCredential(unparseable);
+      expect(persisted).not.toContain('sk-secret');
+      expect(persisted).not.toContain('user:sk');
+      expect(persisted).not.toContain('user@');
+    }
+  });
+
+  it('keeps the query when failing closed', () => {
+    // The suffix is the endpoint disambiguator compared by exact equality, so
+    // the closed path must not start dropping the query.
+    expect(
+      stripAuxSelectorBaseUrlCredential('https://user:sk@host:99999/v1?x=1'),
+    ).toBe('https://host:99999/v1?x=1');
   });
 });
