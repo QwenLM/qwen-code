@@ -2,11 +2,9 @@
 
 [English](2026-09-09-a2a-frozen-contract.md) | [简体中文](2026-09-09-a2a-frozen-contract.zh-CN.md)
 
-Status: the contract is frozen and has an executable implementation; no transport or interoperability run has been implemented yet. 2026-09-09.
+Status: the frozen contract and polling JSON-RPC transport are implemented; cross-implementation interoperability has not been demonstrated. Updated 2026-09-28.
 
-This is P1 of the [continuation architecture](https://github.com/QwenLM/qwen-code/blob/8ff056f1c7e5842393bc8d0f5b8a6ab1502462b6/docs/design/2026-09-09-agent-service-collaboration.md) and [implementation plan](https://github.com/QwenLM/qwen-code/blob/8ff056f1c7e5842393bc8d0f5b8a6ab1502462b6/docs/plans/2026-09-09-agent-service-collaboration-plan.md). It records what was agreed, not what has been demonstrated to work.
-
-The executable portion is in `packages/core/src/agents/workspace-agents/a2a-contract.ts` (originally asserted by section 29 of `scripts/audit/run-workspace-agents.mjs`, with 227 passed / 0 failed; that script and constants used only by its assertions were subsequently removed). Code takes precedence when it differs from this document.
+This began as P1 of the [continuation architecture](https://github.com/QwenLM/qwen-code/blob/8ff056f1c7e5842393bc8d0f5b8a6ab1502462b6/docs/design/2026-09-09-agent-service-collaboration.md) and [implementation plan](https://github.com/QwenLM/qwen-code/blob/8ff056f1c7e5842393bc8d0f5b8a6ab1502462b6/docs/plans/2026-09-09-agent-service-collaboration-plan.md). It now records the contract implemented by the core workspace-agent A2A modules and the daemon transport. Code takes precedence when it differs from this document.
 
 ## 1. Frozen Version and Binding
 
@@ -34,24 +32,23 @@ Optional, with **none included in the first version**: `sendMessageStream` / `re
 
 A Task can enter `INPUT_REQUIRED`, but the first transport accepts new tasks only. Messages carrying `taskId` or `contextId` are refused until thread continuation is implemented explicitly. A run is a single turn and has no corresponding protocol entity. For returned tasks, **A2A `contextId` = `rootThreadId`**: the specification describes a contextual collection of interactions, matching a parent thread together with its child threads. `Message` ↔ `ThreadMessage`.
 
-| Local `ThreadStatus` | A2A `TaskState`             | Explanation                                      |
-| -------------------- | --------------------------- | ------------------------------------------------ |
-| `open`               | `TASK_STATE_SUBMITTED`      |                                                  |
-| `in_progress`        | `TASK_STATE_WORKING`        |                                                  |
-| `blocked`            | `TASK_STATE_INPUT_REQUIRED` |                                                  |
-| `in_review`          | `TASK_STATE_INPUT_REQUIRED` | See below                                        |
-| `done`               | `TASK_STATE_COMPLETED`      | The only local status mapped to a terminal state |
+| Local `ThreadStatus` | A2A `TaskState`             | Explanation |
+| -------------------- | --------------------------- | ----------- |
+| `open`               | `TASK_STATE_SUBMITTED`      |             |
+| `in_progress`        | `TASK_STATE_WORKING`        |             |
+| `blocked`            | `TASK_STATE_INPUT_REQUIRED` |             |
+| `in_review`          | `TASK_STATE_INPUT_REQUIRED` | See below   |
+| `done`               | `TASK_STATE_COMPLETED`      |             |
+| `cancelled`          | `TASK_STATE_CANCELED`       |             |
 
-Map `in_review` to `INPUT_REQUIRED`, not `WORKING`: work is no longer progressing and a person must unblock it. That is the relevant meaning for a caller deciding whether to keep waiting. The cost is that **the distinction between asking a question and submitting work for review is lost at the boundary**, surviving only in extension metadata.
-
-Adding a `ThreadStatus` without deciding its external representation makes `toA2ATaskState` throw rather than use a default. An assertion covers this behavior.
+`toA2ATaskState` is the exhaustive raw status mapping. The external view also considers runs: while any run is live the task is `WORKING`; once no run is live it becomes `COMPLETED`, `FAILED`, or `CANCELED` so a polling caller does not wait forever on a local review state it cannot continue. Adding a `ThreadStatus` without deciding its external representation makes the mapper throw rather than use a default. Tests cover both behaviors.
 
 ## 4. Unsupported Items
 
 - **Remote usage is not reported with Task/Message.** The A2A 1.0 data model has no usage or token field. Third-party agents therefore **cannot be required** to report usage. Our own numbers use an extension under `Task.metadata`. **Admission must treat missing usage as unknown, not zero**; otherwise a remote agent that declines to report usage would effectively be free to call.
 - **Idempotency is only a `MAY`.** The specification says an agent _may_ deduplicate on `Message.messageId`, but the client generates this unscoped ID. Two callers can supply the same ID. The server therefore adds a scoped key: `externalRequestKey(callerId, targetAgentId, messageId)`, restricted to the authenticated caller and target agent. Its three components are length-prefixed rather than delimiter-separated: IDs are opaque external strings, and a caller able to put delimiters in an ID could otherwise forge another caller's key (covered by an assertion and mutation verification).
   **The key must be persisted in the same write that accepts the request.** Adding it afterward cannot establish whether a retry is the request currently being accepted, nor reliably reject the same key with different content.
-- **Three gaps in local state:** `TASK_STATE_REJECTED` (the agent declines work) and `TASK_STATE_AUTH_REQUIRED` have no local equivalents. **Thread-level cancellation is also absent**: `ThreadStatus` has no such member; only runs do. Thus **inbound `cancelTask` cannot currently be represented locally**. P2 must add this before claiming cancellation support.
+- **Two gaps in local state:** `TASK_STATE_REJECTED` (the agent declines work) and `TASK_STATE_AUTH_REQUIRED` have no local equivalents. Thread cancellation is implemented. Task continuation is deliberately refused, so a caller can submit, poll, list, and cancel work but cannot add another message to an existing task.
 
 ## 5. A Non-`_meta` Channel for Run Frames
 
@@ -65,14 +62,15 @@ Choose **`a2a-sdk` (Python, PyPI 1.1.2, requires-python ≥ 3.10)**, repository 
 
 It uses a different language and codebase from our server's `@a2a-js/sdk`, avoiding the architecture's §6 exclusion of self-testing with our own client at both ends. The client bundled with `@a2a-js/sdk` can provide a smoke test at most, not compatibility evidence.
 
-## 7. Decisions Still Requiring a Person (Block P2, Not P1)
+## 7. Decisions Still Requiring a Person
 
-1. The actual A/B environment and connectivity (who can reach whom; whether P4's outbound channel must move earlier).
-2. The first externally exposed Agent and its execution permission scope.
-3. The approval recipient.
+1. The production connectivity model: who can reach the daemon and whether the outbound channel must move earlier.
+2. The approval recipient for externally submitted work.
+
+A grant names exactly one caller and one agent. It does not carry a speculative permission scope; the agent's existing tool policy remains the capability boundary.
 
 One additional decision from architecture §5 is needed before P3: what signal at the end of a Codex turn counts as an explicit task result.
 
-## 8. What This Round Did Not Do
+## 8. Implementation Status
 
-No A2A routes, Agent Card publication, authentication, or intake storage were implemented, and `@a2a-js/sdk` was not installed (the dependency has not yet been added to `package.json`). P1's gate is to record the mappings and unsupported items individually and choose an acceptance client. This document and `a2a-contract.ts` are that record; demonstrating interoperability belongs to P2.
+The daemon publishes the Agent Card and authenticated polling JSON-RPC routes for submit, get, list, and cancel. Grants store only secret digests, intake is idempotent and caller-scoped, and transport tests cover admission plus the successful task lifecycle. Streaming, push notifications, task continuation, and cross-implementation acceptance with the Python client remain out of scope.

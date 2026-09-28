@@ -511,7 +511,6 @@ async function setupSharing(page: Page, baseURL: string): Promise<void> {
               callerId: 'share_3f9a1c',
               agentId: 'ag_lead',
               secret: `a2a_${'s'.repeat(40)}`,
-              scope: 'analysis',
               expiresAt: NOW + 7 * 24 * 60 * MIN,
             },
           })

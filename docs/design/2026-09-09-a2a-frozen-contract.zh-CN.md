@@ -2,11 +2,9 @@
 
 [English](2026-09-09-a2a-frozen-contract.md) | [简体中文](2026-09-09-a2a-frozen-contract.zh-CN.md)
 
-状态：契约已冻结并有可执行落点；尚未实现任何传输层，也没有跑通任何互通。2026-09-09。
+状态：冻结契约与轮询式 JSON-RPC 传输已经实现；尚未完成跨实现互通验证。更新于 2026-09-28。
 
-上游为[接续架构](https://github.com/QwenLM/qwen-code/blob/8ff056f1c7e5842393bc8d0f5b8a6ab1502462b6/docs/design/2026-09-09-agent-service-collaboration.zh-CN.md)与[实施计划](https://github.com/QwenLM/qwen-code/blob/8ff056f1c7e5842393bc8d0f5b8a6ab1502462b6/docs/plans/2026-09-09-agent-service-collaboration-plan.md)的 P1。本文只记录“说定了什么”，不宣称“跑通了什么”。
-
-可执行部分在 `packages/core/src/agents/workspace-agents/a2a-contract.ts`（当时由 `scripts/audit/run-workspace-agents.mjs` 第 29 节断言，227 passed / 0 failed；该脚本及只供它断言的常量后已移除）。文档与代码不一致时以代码为准。
+本文最初是[接续架构](https://github.com/QwenLM/qwen-code/blob/8ff056f1c7e5842393bc8d0f5b8a6ab1502462b6/docs/design/2026-09-09-agent-service-collaboration.zh-CN.md)与[实施计划](https://github.com/QwenLM/qwen-code/blob/8ff056f1c7e5842393bc8d0f5b8a6ab1502462b6/docs/plans/2026-09-09-agent-service-collaboration-plan.md)的 P1。现在记录 core workspace-agent A2A 模块与 daemon 传输层已经实现的契约；文档与代码不一致时以代码为准。
 
 ## 1. 冻结的版本与绑定
 
@@ -34,24 +32,23 @@
 
 Task 可以进入 `INPUT_REQUIRED`，但首版传输只接收新任务。携带 `taskId` 或 `contextId` 的消息会被拒绝，直到 thread 续聊被明确实现。run 是单次 turn，在协议里没有对应物。对返回的任务，**A2A `contextId` = `rootThreadId`**——规范把它称作“the contextual collection of interactions”，那正是一个父 thread 连同它分裂出的子 thread。`Message` ↔ `ThreadMessage`。
 
-| 本地 `ThreadStatus` | A2A `TaskState`             | 说明                     |
-| ------------------- | --------------------------- | ------------------------ |
-| `open`              | `TASK_STATE_SUBMITTED`      |                          |
-| `in_progress`       | `TASK_STATE_WORKING`        |                          |
-| `blocked`           | `TASK_STATE_INPUT_REQUIRED` |                          |
-| `in_review`         | `TASK_STATE_INPUT_REQUIRED` | 见下                     |
-| `done`              | `TASK_STATE_COMPLETED`      | 唯一映射到终态的本地状态 |
+| 本地 `ThreadStatus` | A2A `TaskState`             | 说明 |
+| ------------------- | --------------------------- | ---- |
+| `open`              | `TASK_STATE_SUBMITTED`      |      |
+| `in_progress`       | `TASK_STATE_WORKING`        |      |
+| `blocked`           | `TASK_STATE_INPUT_REQUIRED` |      |
+| `in_review`         | `TASK_STATE_INPUT_REQUIRED` | 见下 |
+| `done`              | `TASK_STATE_COMPLETED`      |      |
+| `cancelled`         | `TASK_STATE_CANCELED`       |      |
 
-`in_review` 映到 `INPUT_REQUIRED` 而不是 `WORKING`：工作没有在推进，且要由人解除，这正是该状态对“我该不该继续等”的调用方的含义。代价是**“提了问题”与“提交待评审”的区别在边界上丢失**，只在扩展 metadata 里保留。
-
-新增 `ThreadStatus` 而不决定它对外长什么样，会让 `toA2ATaskState` 抛错而不是默认——这是断言覆盖的一项。
+`toA2ATaskState` 是穷尽的原始状态映射。对外返回时还会考虑 run：只要有 run 存活就是 `WORKING`；没有存活 run 后进入 `COMPLETED`、`FAILED` 或 `CANCELED`，避免轮询方永远等待一个它无法续聊的本地评审状态。新增 `ThreadStatus` 而不决定它对外长什么样，会让映射器抛错而不是默认；这两类行为都有测试覆盖。
 
 ## 4. 不支持项（逐项）
 
 - **远端用量不随 Task/Message 回报。** A2A 1.0 的数据模型里根本没有用量或 token 字段。因此**不能要求**第三方 agent 报告用量。我们自己的数字走 `Task.metadata` 下的扩展；**准入必须把“缺失”当作未知而非 0**，否则一个拒绝报告的远端 agent 就等于免费调用。
 - **幂等只有 `MAY`。** 规范说 agent _may_ 用 `Message.messageId` 去重，而这个 id 由客户端自己生成、且没有作用域。两个不同调用方可以给出同一个 id。所以服务端自己加作用域键：`externalRequestKey(callerId, targetAgentId, messageId)`，按认证调用方与目标 agent 限定。三段用长度前缀拼接而非分隔符连接——id 是外部来的不透明字符串，能把分隔符塞进 id 的调用方本可以伪造出别人的键（这一点有断言，且变异验证过）。
   **该键必须与“接单”写在同一次写入里。** 事后补写的键无法回答它存在的那个问题（重试是否与正在接受的请求是同一个），而“同键不同内容明确拒绝”也就无从判断。
-- **三处本地状态缺口：** `TASK_STATE_REJECTED`（agent 拒绝接活）与 `TASK_STATE_AUTH_REQUIRED` 在本地模型里没有对应物；**thread 级的取消也没有**——`ThreadStatus` 没有该成员，只有 run 有。所以**入站 `cancelTask` 今天无法在本地表达**，P2 必须先补上，才能声称取消可用。
+- **两处本地状态缺口：** `TASK_STATE_REJECTED`（agent 拒绝接活）与 `TASK_STATE_AUTH_REQUIRED` 在本地模型里没有对应物。thread 取消已经实现。任务续聊会被明确拒绝，因此调用方可以提交、轮询、列出和取消任务，但不能给已有任务追加消息。
 
 ## 5. run 帧的非 `_meta` 通道
 
@@ -65,14 +62,15 @@ Task 可以进入 `INPUT_REQUIRED`，但首版传输只接收新任务。携带 
 
 它与我们服务端所用的 `@a2a-js/sdk` 是不同语言、不同代码库，因此“两端都用自家客户端自测”这条被架构 §6 排除的情形不成立。用 `@a2a-js/sdk` 自带的 client 顶多算冒烟，不作为兼容证据。
 
-## 7. 仍需人来定的事（阻塞 P2，不阻塞 P1）
+## 7. 仍需人来定的事
 
-1. 实际 A/B 环境与可达方式（谁能到达谁；是否需要 P4 的出站通道提前）。
-2. 首个对外开放的 Agent 及其执行权限范围。
-3. 审批接收人。
+1. 生产环境的连接模型：谁能访问 daemon，是否需要提前实现出站通道。
+2. 外部任务的审批接收人。
+
+一份授权只绑定一个调用方和一个 Agent，不携带为未来预留的权限 scope；能力边界继续由 Agent 现有的工具策略决定。
 
 另有一项来自架构 §5、须在 P3 前定：Codex turn 结束时“什么信号算明确任务结果”的映射。
 
-## 8. 本轮没有做的事
+## 8. 实现状态
 
-没有实现任何 A2A 路由、没有 Agent Card 发布、没有认证、没有接单存储、没有装 `@a2a-js/sdk`（依赖尚未加入 `package.json`）。P1 的门槛是“逐项记录映射与不支持项并选定验收者”，本文与 `a2a-contract.ts` 是那个记录；跑通互通是 P2 的事。
+daemon 已发布 Agent Card，并提供带认证的轮询式 JSON-RPC 路由，支持提交、查询、列出和取消任务。授权只保存密钥摘要，接单具备幂等性并按调用方隔离；传输测试覆盖准入和成功任务生命周期。流式传输、push notification、任务续聊，以及使用 Python 客户端做跨实现验收仍不在本轮范围内。

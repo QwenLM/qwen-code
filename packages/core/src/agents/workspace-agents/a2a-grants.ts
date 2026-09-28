@@ -69,7 +69,6 @@ export async function issueA2AGrant(
   const grant: A2AGrant = {
     callerId,
     agentId,
-    scope: 'analysis',
     secretHash: hashSecret(secret),
     createdAt: now,
     ...(input.expiresAt !== undefined ? { expiresAt: input.expiresAt } : {}),

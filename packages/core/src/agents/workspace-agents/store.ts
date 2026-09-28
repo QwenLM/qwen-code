@@ -565,7 +565,6 @@ function isValidA2AGrant(value: unknown): value is A2AGrant {
     isRecord(value) &&
     isNonEmptyString(value['callerId']) &&
     isValidId(value['agentId']) &&
-    value['scope'] === 'analysis' &&
     isNonEmptyString(value['secretHash']) &&
     isFiniteTimestamp(value['createdAt']) &&
     (value['expiresAt'] === undefined || isFiniteTimestamp(value['expiresAt']))

@@ -60,7 +60,7 @@ describe('A2A grants', () => {
     expect(JSON.stringify(listed)).not.toContain('secretHash');
   });
 
-  it('checks the secret, the agent, the expiry and the scope', async () => {
+  it('checks the secret, the agent and the expiry', async () => {
     const { secret } = await issue(T0 + 1000);
     const check = (
       overrides: Partial<{ secret: string; agentId: string }>,

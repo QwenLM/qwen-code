@@ -16,4 +16,4 @@ Validate independent builds/typechecks, focused store/route/UI tests and real HT
 
 ## Remaining work
 
-Runtime removal/key revocation and real cross-machine/Claude/Codex acceptance remain in the runtime PR. A2A keeps its existing read-only scope ceiling and polling transport. The split does not settle the foundation's budget or retention policy and does not claim completed remote CI.
+Runtime removal/key revocation and real cross-machine/Claude/Codex acceptance remain in the runtime PR. A2A uses the agent's existing tool policy and polling transport. The split does not settle the foundation's budget or retention policy and does not claim completed remote CI.
