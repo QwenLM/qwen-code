@@ -15,7 +15,6 @@ import {
 } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import { managedToolDigest } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
-import { TOOL_OUTPUT_TRUNCATED_PREFIX } from '@qwen-code/qwen-code-core/tools/truncation.js';
 import {
   createToolPublicationToken,
   parseToolPublicationBinding,
@@ -65,15 +64,6 @@ function shellHistoryId(executionCallId: string): string {
   bytes[8] = (bytes[8]! & 0x3f) | 0x80;
   const hex = bytes.subarray(0, 16).toString('hex');
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
-}
-
-function hostedShellPreview(text: string): string {
-  if (!text.startsWith(TOOL_OUTPUT_TRUNCATED_PREFIX)) return text;
-  const marker = 'Truncated part of the output:\n';
-  const start = text.indexOf(marker);
-  return start < 0
-    ? 'The Shell output was retained in its immutable capture.'
-    : `Shell output preview:\n${text.slice(start + marker.length)}\nThe complete raw output is retained in the manifest.`;
 }
 
 const pathProperty = {
@@ -960,11 +950,7 @@ export class HostedWorkspaceToolTurn {
       messageId = history['messageId'];
       timestamp = history['timestamp'];
     } else {
-      const responseParts = (envelope.responseParts as Part[]).map((part) =>
-        typeof part.text === 'string'
-          ? { ...part, text: hostedShellPreview(part.text) }
-          : part,
-      );
+      const responseParts = envelope.responseParts as Part[];
       converted =
         envelope.executionStatus === 'success'
           ? convertToFunctionResponse(call.name, call.callId, responseParts)
@@ -972,9 +958,8 @@ export class HostedWorkspaceToolTurn {
               call.name,
               call.callId,
               responseParts,
-              (envelope.error?.message
-                ? hostedShellPreview(envelope.error.message)
-                : undefined) ?? `Runtime tool ${envelope.executionStatus}.`,
+              envelope.error?.message ??
+                `Runtime tool ${envelope.executionStatus}.`,
             );
       if (converted.length === 1 && converted[0]?.functionResponse) {
         const response = converted[0].functionResponse;

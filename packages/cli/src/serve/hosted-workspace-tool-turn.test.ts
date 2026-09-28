@@ -210,7 +210,13 @@ it('commits the whole batch before the first dispatch and each receipt before re
 });
 
 async function shellReceiptScenario(
-  mode: 'normal' | 'abandoned' | 'mismatched' | 'truncated' | 'lost-admission',
+  mode:
+    | 'normal'
+    | 'abandoned'
+    | 'mismatched'
+    | 'truncated'
+    | 'sentinel'
+    | 'lost-admission',
 ) {
   const shellCall = {
     ...calls[0],
@@ -231,16 +237,14 @@ async function shellReceiptScenario(
     'managed-tool-result-manifest',
     Buffer.from('{}'),
   );
+  const sentinelOutput =
+    'Tool output was too large and has been truncated.\nreal payload\n';
   const envelope = {
     executionStatus: 'success' as const,
-    responseParts: [
-      {
-        text:
-          mode === 'truncated'
-            ? 'Tool output was too large and has been truncated.\nThe full output has been saved to: /private/tmp/worker-output\nTo read the complete output, use the read_file tool with the absolute file path above.\nTruncated part of the output:\nHEAD\n... [CONTENT TRUNCATED] ...\nTAIL'
-            : 'hi',
-      },
-    ],
+    responseParts:
+      mode === 'truncated'
+        ? boundedShellPreview([{ text: `HEAD\n${'x'.repeat(10_000)}\nTAIL` }])
+        : [{ text: mode === 'sentinel' ? sentinelOutput : 'hi' }],
     capture: {
       manifest,
       captureStatus: 'complete' as const,
@@ -259,7 +263,12 @@ async function shellReceiptScenario(
   broker.executeV3.mockImplementation(async () => {
     order.push('execute');
     expect(session.authority.latestCheckpoint?.boundary).toBe('durable_wait');
-    if (mode !== 'normal' && mode !== 'truncated' && mode !== 'lost-admission')
+    if (
+      mode !== 'normal' &&
+      mode !== 'truncated' &&
+      mode !== 'sentinel' &&
+      mode !== 'lost-admission'
+    )
       throw new HostedWorkspaceBrokerRejection(
         409,
         'runtime_broker_execution_unknown',
@@ -382,13 +391,18 @@ async function shellReceiptScenario(
   const result = await execution;
   expect(broker.executeV3).toHaveBeenCalledOnce();
   expect(result[0]?.functionResponse?.response).toMatchObject({
-    output: mode === 'truncated' ? expect.stringContaining('TAIL') : 'hi',
+    output:
+      mode === 'truncated'
+        ? expect.stringContaining('TAIL')
+        : mode === 'sentinel'
+          ? sentinelOutput
+          : 'hi',
     manifestRef: manifest,
     captureStatus: 'complete',
     previewTruncated: mode === 'truncated',
   });
   if (mode === 'truncated')
-    expect(JSON.stringify(result)).not.toContain('/private/tmp/worker-output');
+    expect(JSON.stringify(result)).toContain('preview truncated');
   expect(order).toEqual([
     'assistant',
     'reserve',
@@ -410,7 +424,7 @@ async function shellReceiptScenario(
   expect(broker.acknowledgeV3.mock.calls[0]?.[0]).toBe('shell-execution');
   const publicationId = broker.prepareV3.mock.calls[0]?.[3] as string;
   broker.acknowledgeV3.mockRejectedValueOnce(new Error('ACK transport down'));
-  await (
+  const replayed = await (
     shellTurn as unknown as {
       acceptShell: (
         call: typeof shellCall,
@@ -429,6 +443,7 @@ async function shellReceiptScenario(
     envelope,
     'model',
   );
+  expect(replayed).toEqual(result);
   expect(
     request.mock.calls.filter(([route]) =>
       String(route).endsWith('/admissions/prepare'),
@@ -446,6 +461,7 @@ it.each([
   'abandoned',
   'mismatched',
   'truncated',
+  'sentinel',
   'lost-admission',
 ] as const)(
   'uses only the original Shell publication after Broker %s',
