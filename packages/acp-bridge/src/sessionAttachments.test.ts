@@ -45,6 +45,30 @@ describe('SessionAttachmentStore', () => {
     },
   );
 
+  it('rejects an oversized chunked upload before staging it', async () => {
+    const store = new SessionAttachmentStore();
+    try {
+      expect(() =>
+        store.createUpload({
+          name: 'large.bin',
+          mimeType: 'application/octet-stream',
+          size: SESSION_ATTACHMENT_MAX_ITEM_BYTES + 1,
+        }),
+      ).toThrow(RangeError);
+      for (let i = 0; i < 8; i++) {
+        expect(() =>
+          store.createUpload({
+            name: 'small.bin',
+            mimeType: 'application/octet-stream',
+            size: 1,
+          }),
+        ).not.toThrow();
+      }
+    } finally {
+      await store.close();
+    }
+  });
+
   it('keeps existing same-name references available while a new write queues', async () => {
     const store = new SessionAttachmentStore();
     try {
