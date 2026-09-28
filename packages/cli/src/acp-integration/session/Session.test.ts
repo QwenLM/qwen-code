@@ -39073,6 +39073,488 @@ describe('Session', () => {
       );
     });
 
+    describe('Code Mode nested concurrency', () => {
+      type Runtime = NonNullable<ReturnType<typeof core.getToolCallRuntime>>;
+      const deferred = () => {
+        let resolve!: () => void;
+        const promise = new Promise<void>((done) => {
+          resolve = done;
+        });
+        return { promise, resolve };
+      };
+      const output = (value: string): core.ToolResult => ({
+        llmContent: value,
+        returnDisplay: value,
+      });
+      const nestedTool = (
+        name: string,
+        kind: core.Kind | undefined,
+        execute: (
+          signal: AbortSignal,
+          args: Record<string, unknown>,
+        ) => Promise<core.ToolResult>,
+        permission: 'allow' | 'ask' | 'deny' = 'allow',
+      ) => ({
+        name,
+        kind,
+        build: (args: Record<string, unknown>) => {
+          const invocation = {
+            params: args,
+            getDefaultPermission: async () => permission,
+            getDescription: () => name,
+            toolLocations: () => [],
+            getConfirmationDetails: async () => ({
+              type: 'info' as const,
+              title: name,
+              prompt: 'Allow?',
+              onConfirm: vi.fn(),
+            }),
+            execute: (signal: AbortSignal) =>
+              execute(signal, invocation.params),
+          };
+          return invocation;
+        },
+      });
+      const runCode = (
+        tools: Array<ReturnType<typeof nestedTool>>,
+        program: (runtime: Runtime, signal: AbortSignal) => Promise<unknown>,
+        signal = new AbortController().signal,
+      ) => {
+        const exec = nestedTool(
+          core.ToolNames.EXEC,
+          core.Kind.Other,
+          async (signal) => {
+            const runtime = core.getToolCallRuntime();
+            if (!runtime) throw new Error('missing Code Mode runtime');
+            return output(JSON.stringify(await program(runtime, signal)));
+          },
+        );
+        mockToolRegistry.getTool.mockImplementation((name: string) =>
+          [exec, ...tools].find((tool) => tool.name === name),
+        );
+        return (session as unknown as ToolCallInternals).runToolCalls(
+          signal,
+          'code-concurrency',
+          [{ id: 'exec-parent', name: core.ToolNames.EXEC, args: {} }],
+        );
+      };
+      beforeEach(() => {
+        mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+        mockConfig.getApprovalMode = vi
+          .fn()
+          .mockReturnValue(ApprovalMode.DEFAULT);
+        mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
+        mockConfig.getToolMode = vi
+          .fn()
+          .mockReturnValue(core.ToolMode.CodeModeOnly);
+      });
+
+      it('overlaps safe calls and keeps reversed results and persistence with their call IDs', async () => {
+        const started = [deferred(), deferred()];
+        const release = [deferred(), deferred()];
+        const onResult = vi.fn();
+        const tools = ['read_a', 'read_b'].map((name, index) =>
+          nestedTool(name, core.Kind.Read, async () => {
+            expect(core.getToolCallRuntime()).toBeUndefined();
+            started[index].resolve();
+            await release[index].promise;
+            return output(name);
+          }),
+        );
+        const running = runCode(tools, (runtime, signal) =>
+          Promise.allSettled(
+            tools.map((tool) =>
+              runtime.dispatch(tool.name, {}, signal, onResult),
+            ),
+          ),
+        );
+        await Promise.all(started.map(({ promise }) => promise));
+        release[1].resolve();
+        release[0].resolve();
+        const result = await running;
+        expect(
+          JSON.parse(
+            String(result.parts[0].functionResponse?.response?.['output']),
+          ),
+        ).toEqual([
+          {
+            status: 'fulfilled',
+            value: expect.objectContaining({
+              callId: 'exec-parent:code:1',
+              output: 'read_a',
+            }),
+          },
+          {
+            status: 'fulfilled',
+            value: expect.objectContaining({
+              callId: 'exec-parent:code:2',
+              output: 'read_b',
+            }),
+          },
+        ]);
+        const recorded = mockChatRecordingService.recordToolResult.mock.calls;
+        expect(recorded).toHaveLength(3);
+        expect(recorded.map(([, metadata]) => metadata.callId)).toEqual([
+          'exec-parent:code:2',
+          'exec-parent:code:1',
+          'exec-parent',
+        ]);
+        for (const [parts, metadata] of recorded) {
+          expect(parts).toHaveLength(1);
+          expect(parts[0].functionResponse?.id).toBe(metadata.callId);
+        }
+        expect(
+          onResult.mock.calls.map(
+            ([value]) =>
+              value.responseParts[0].functionResponse.response.output,
+          ),
+        ).toEqual(['read_b', 'read_a']);
+      });
+
+      it('caps active calls and starts the next queued read when a slot becomes free', async () => {
+        vi.stubEnv('QWEN_CODE_MAX_TOOL_CONCURRENCY', '2');
+        const started: number[] = [];
+        const release = [deferred(), deferred(), deferred()];
+        const tools = release.map((gate, index) =>
+          nestedTool(`read_${index}`, core.Kind.Read, async () => {
+            started.push(index);
+            await gate.promise;
+            return output(String(index));
+          }),
+        );
+        const running = runCode(tools, (runtime, signal) =>
+          Promise.allSettled(
+            tools.map((tool) => runtime.dispatch(tool.name, {}, signal)),
+          ),
+        );
+        await vi.waitFor(() => expect(started).toEqual([0, 1]));
+        release[1].resolve();
+        await vi.waitFor(() => expect(started).toEqual([0, 1, 2]));
+        release[0].resolve();
+        release[2].resolve();
+        await running;
+      });
+
+      it.each([core.Kind.Edit, undefined])(
+        'keeps %s calls as ordered barriers between safe reads',
+        async (kind) => {
+          const events: string[] = [];
+          const release = [deferred(), deferred()];
+          const tools = [
+            nestedTool('read_before', core.Kind.Read, async () => {
+              events.push('read_before');
+              await release[0].promise;
+              return output('before');
+            }),
+            nestedTool('barrier', kind, async () => {
+              events.push('barrier');
+              await release[1].promise;
+              return output('barrier');
+            }),
+            nestedTool('read_after', core.Kind.Read, async () => {
+              events.push('read_after');
+              return output('after');
+            }),
+          ];
+          const running = runCode(tools, (runtime, signal) =>
+            Promise.allSettled(
+              tools.map((tool) => runtime.dispatch(tool.name, {}, signal)),
+            ),
+          );
+          await vi.waitFor(() => expect(events).toEqual(['read_before']));
+          release[0].resolve();
+          await vi.waitFor(() =>
+            expect(events).toEqual(['read_before', 'barrier']),
+          );
+          release[1].resolve();
+          await running;
+          expect(events).toEqual(['read_before', 'barrier', 'read_after']);
+        },
+      );
+
+      it('preserves explicit sequential awaits', async () => {
+        const release = deferred();
+        const events: string[] = [];
+        const tool = nestedTool(
+          'read_file',
+          core.Kind.Read,
+          async (_signal, args) => {
+            events.push(String(args['id']));
+            if (args['id'] === 1) await release.promise;
+            return output(String(args['id']));
+          },
+        );
+        const running = runCode([tool], async (runtime, signal) => {
+          await runtime.dispatch(tool.name, { id: 1 }, signal);
+          return runtime.dispatch(tool.name, { id: 2 }, signal);
+        });
+        await vi.waitFor(() => expect(events).toEqual(['1']));
+        release.resolve();
+        await running;
+        expect(events).toEqual(['1', '2']);
+      });
+
+      it.each(['execution error', 'permission denial'])(
+        'retains independent output after an ordinary %s',
+        async (failure) => {
+          const failed = nestedTool(
+            'read_fail',
+            core.Kind.Read,
+            async () => {
+              throw new Error('read failed');
+            },
+            failure === 'permission denial' ? 'deny' : 'allow',
+          );
+          const succeed = nestedTool(
+            'read_ok',
+            core.Kind.Read,
+            async (signal) => {
+              expect(signal.aborted).toBe(false);
+              return output('kept');
+            },
+          );
+          const result = await runCode(
+            [failed, succeed],
+            async (runtime, signal) => {
+              const settled = await Promise.allSettled([
+                runtime.dispatch(failed.name, {}, signal),
+                runtime.dispatch(succeed.name, {}, signal),
+              ]);
+              return settled.map((result) =>
+                result.status === 'rejected'
+                  ? { status: result.status, reason: String(result.reason) }
+                  : result,
+              );
+            },
+          );
+          expect(result.stopAfterPermissionCancel).toBe(false);
+          expect(
+            JSON.parse(
+              String(result.parts[0].functionResponse?.response?.['output']),
+            ),
+          ).toEqual([
+            {
+              status: 'rejected',
+              reason: expect.stringContaining(
+                failure === 'permission denial' ? 'denied' : 'read failed',
+              ),
+            },
+            {
+              status: 'fulfilled',
+              value: expect.objectContaining({ output: 'kept' }),
+            },
+          ]);
+        },
+      );
+
+      it('propagates nested permission cancellation through allSettled and cancels active and queued work', async () => {
+        vi.stubEnv('QWEN_CODE_MAX_TOOL_CONCURRENCY', '2');
+        const started = deferred();
+        const aborted = vi.fn();
+        const queued = vi.fn().mockResolvedValue(output('should not run'));
+        const active = nestedTool(
+          'read_active',
+          core.Kind.Read,
+          async (signal) => {
+            started.resolve();
+            await new Promise<void>((resolve) =>
+              signal.addEventListener(
+                'abort',
+                () => {
+                  aborted();
+                  resolve();
+                },
+                { once: true },
+              ),
+            );
+            return output('aborted');
+          },
+        );
+        const confirming = nestedTool(
+          'read_confirm',
+          core.Kind.Read,
+          vi.fn(),
+          'ask',
+        );
+        vi.mocked(mockClient.requestPermission).mockImplementation(async () => {
+          await started.promise;
+          return { outcome: { outcome: 'cancelled' } };
+        });
+        const tools = [
+          active,
+          confirming,
+          nestedTool('read_queued', core.Kind.Read, queued),
+        ];
+        const result = await runCode(tools, (runtime, signal) =>
+          Promise.allSettled(
+            tools.map((tool) => runtime.dispatch(tool.name, {}, signal)),
+          ),
+        );
+        expect(result.stopAfterPermissionCancel).toBe(true);
+        expect(aborted).toHaveBeenCalledOnce();
+        expect(queued).not.toHaveBeenCalled();
+        const recorded = mockChatRecordingService.recordToolResult.mock.calls;
+        expect(recorded).toHaveLength(4);
+        expect(
+          recorded.slice(0, 3).every(([, meta]) => meta.status === 'cancelled'),
+        ).toBe(true);
+      });
+
+      it.each(['parent', 'host'])(
+        'cancels active and queued work on %s abort and drains records before returning',
+        async (source) => {
+          vi.stubEnv('QWEN_CODE_MAX_TOOL_CONCURRENCY', '2');
+          const controller = new AbortController();
+          const started = [deferred(), deferred()];
+          const aborted = vi.fn();
+          const queued = vi.fn().mockResolvedValue(output('should not run'));
+          const tools = started.map((gate, index) =>
+            nestedTool(`read_${index}`, core.Kind.Read, async (signal) => {
+              gate.resolve();
+              await new Promise<void>((resolve) =>
+                signal.addEventListener(
+                  'abort',
+                  () => {
+                    aborted();
+                    resolve();
+                  },
+                  { once: true },
+                ),
+              );
+              return output('cancelled');
+            }),
+          );
+          tools.push(nestedTool('read_queued', core.Kind.Read, queued));
+          const running = runCode(
+            tools,
+            (runtime, signal) =>
+              Promise.allSettled(
+                tools.map((tool) =>
+                  runtime.dispatch(
+                    tool.name,
+                    {},
+                    source === 'host' ? controller.signal : signal,
+                  ),
+                ),
+              ),
+            source === 'parent' ? controller.signal : undefined,
+          );
+          await Promise.all(started.map(({ promise }) => promise));
+          controller.abort();
+          const result = await running;
+          expect(result.stopAfterPermissionCancel).toBe(false);
+          expect(aborted).toHaveBeenCalledTimes(2);
+          expect(queued).not.toHaveBeenCalled();
+          const records = mockChatRecordingService.recordToolResult.mock.calls;
+          expect(records).toHaveLength(4);
+          expect(records.at(-1)?.[1].callId).toBe('exec-parent');
+        },
+      );
+
+      it('cancels and drains unawaited dispatches before completing exec', async () => {
+        vi.stubEnv('QWEN_CODE_MAX_TOOL_CONCURRENCY', '1');
+        const started = deferred();
+        const queued = vi.fn().mockResolvedValue(output('should not run'));
+        const active = nestedTool(
+          'read_active',
+          core.Kind.Read,
+          async (signal) => {
+            started.resolve();
+            await new Promise<void>((resolve) =>
+              signal.addEventListener('abort', () => resolve(), { once: true }),
+            );
+            return output('cancelled');
+          },
+        );
+        let unawaited: Promise<unknown>;
+        await runCode(
+          [active, nestedTool('read_queued', core.Kind.Read, queued)],
+          async (runtime, signal) => {
+            unawaited = Promise.allSettled([
+              runtime.dispatch('read_active', {}, signal),
+              runtime.dispatch('read_queued', {}, signal),
+            ]);
+            await started.promise;
+            return 'finished without awaiting tools';
+          },
+        );
+        await unawaited!;
+        expect(queued).not.toHaveBeenCalled();
+        expect(
+          mockChatRecordingService.recordToolResult.mock.calls.map(
+            ([, meta]) => meta.callId,
+          ),
+        ).toEqual(['exec-parent:code:1', 'exec-parent:code:2', 'exec-parent']);
+      });
+
+      it('waits for skill hook registration before admitting shell calls whose hooks rewrite their arguments', async () => {
+        mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+        mockConfig.getMessageBus = vi.fn().mockReturnValue({});
+        let registered = false;
+        mockConfig.hasHooksForEvent = vi.fn(
+          (event) => event === 'PermissionRequest' && registered,
+        );
+        const hook = vi
+          .spyOn(core, 'firePermissionRequestHook')
+          .mockResolvedValue({
+            hasDecision: true,
+            shouldAllow: true,
+            updatedInput: { command: 'touch changed.txt' },
+          });
+        vi.spyOn(core, 'firePreToolUseHook').mockResolvedValue({
+          shouldProceed: true,
+        });
+        vi.spyOn(core, 'firePostToolUseHook').mockResolvedValue({
+          shouldStop: false,
+        });
+        const skillRelease = deferred();
+        const shellRelease = deferred();
+        const events: string[] = [];
+        const skill = nestedTool(
+          core.ToolNames.SKILL,
+          core.Kind.Read,
+          async () => {
+            events.push('skill');
+            await skillRelease.promise;
+            registered = true;
+            return output('registered');
+          },
+        );
+        const shell = nestedTool(
+          core.ToolNames.SHELL,
+          core.Kind.Execute,
+          async (_signal, args) => {
+            events.push(String(args['command']));
+            if (events.length === 2) await shellRelease.promise;
+            return output('done');
+          },
+          'ask',
+        );
+        const running = runCode([skill, shell], (runtime, signal) =>
+          Promise.allSettled([
+            runtime.dispatch(skill.name, {}, signal),
+            runtime.dispatch(shell.name, { command: 'git status' }, signal),
+            runtime.dispatch(shell.name, { command: 'git status' }, signal),
+          ]),
+        );
+        await vi.waitFor(() => expect(events).toEqual(['skill']));
+        skillRelease.resolve();
+        await vi.waitFor(() =>
+          expect(events).toEqual(['skill', 'touch changed.txt']),
+        );
+        expect(hook).toHaveBeenCalledOnce();
+        shellRelease.resolve();
+        await running;
+        expect(events).toEqual([
+          'skill',
+          'touch changed.txt',
+          'touch changed.txt',
+        ]);
+        expect(hook).toHaveBeenCalledTimes(2);
+        expect(mockClient.requestPermission).not.toHaveBeenCalled();
+      });
+    });
+
     function emitNestedAskUserQuestion(
       eventEmitter: EventEmitter,
       respond: ReturnType<typeof vi.fn>,
