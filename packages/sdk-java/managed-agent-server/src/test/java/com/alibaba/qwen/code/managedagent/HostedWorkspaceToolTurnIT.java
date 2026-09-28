@@ -43,9 +43,10 @@ class HostedWorkspaceToolTurnIT {
     private Path temporary;
 
     @Test
-    @Timeout(180)
+    @Timeout(360)
     void packagedHarnessUsesSavedWorkspacesThroughRealBrokerWorkerAndSqlStore() throws Exception {
-        runDriver(List.of("alpha", "beta"), "workspace-tool-turn");
+        runDriver(List.of("alpha", "beta", "shell", "storage-failure", "raw-reply-loss", "cancel"),
+                "workspace-tool-turn");
     }
 
     @Test
@@ -161,10 +162,12 @@ class HostedWorkspaceToolTurnIT {
                         "sha256:" + "a".repeat(64), "qwen-code", null, null, List.of(), null,
                         new WorkspaceSelection(workspaceId, "child"));
                 sessions.add(Map.of("sessionId", created.sessionId(), "workspaceId", workspaceId,
+                        "toolProfile", faults || index < 2 ? "hosted-workspace-files/1" : "hosted-workspace-shell/1",
                         "directory", workspaces.get(index).resolve("child").toString(), "fault", cases.get(index)));
                 if (faults) Files.writeString(workspaces.get(index).resolve("child/proof.txt"), "x");
             }
             Path config = temporary.resolve("driver.json");
+            Path resultFile = temporary.resolve("shell-output.json");
             EmbeddedRuntimeBroker broker = spring.getBean(EmbeddedRuntimeBroker.class);
             CompletableFuture<Void> statusGate = new CompletableFuture<>();
             HttpServer gateServer = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
@@ -203,6 +206,7 @@ class HostedWorkspaceToolTurnIT {
                     }
                 }
                 new ObjectMapper().writeValue(config.toFile(), Map.of("tenantId", tenant, "sessions", sessions,
+                        "resultFile", resultFile.toString(),
                         "storeUrl", "http://127.0.0.1:" + spring.getWebServer().getPort(),
                         "brokerUrl", broker.getBaseUri().toString(),
                         "statusGateUrl", "http://127.0.0.1:" + gateServer.getAddress().getPort() + "/release"));
@@ -211,7 +215,7 @@ class HostedWorkspaceToolTurnIT {
                         "integration-tests/helpers/hosted-" + driverName + "-driver.ts", config.toString())
                         .directory(root.toFile()).redirectErrorStream(true).redirectOutput(log.toFile()).start();
                 try {
-                    assertThat(driver.waitFor(130, TimeUnit.SECONDS)).as("Driver timeout: %s", Files.readString(log)).isTrue();
+                    assertThat(driver.waitFor(faults ? 130 : 270, TimeUnit.SECONDS)).as("Driver timeout: %s", Files.readString(log)).isTrue();
                     assertThat(driver.exitValue()).as("Driver output: %s", Files.readString(log)).isZero();
                     System.out.println(Files.readString(log));
                     assertThat(Files.readString(log)).contains(cancellations ? "HOSTED_CANCELLATION_OK"
@@ -224,12 +228,33 @@ class HostedWorkspaceToolTurnIT {
                         Path workspace = workspaces.get(index);
                         if (cancellations) cancellationProbe.assertReport(sessions.get(index), reports.get(index));
                         else if (faults) assertFaultLedger(jdbc, tenant, sessions.get(index), index, reports.get(index), storeFaults);
-                        else assertThat(Files.readString(workspace.resolve("child/proof.txt"))).isEqualTo("after");
+                        else if (index < 2) assertThat(Files.readString(workspace.resolve("child/proof.txt"))).isEqualTo("after");
                         assertThat(workspace.resolve("proof.txt")).doesNotExist();
                     }
                 } finally {
                     driver.descendants().forEach(process -> process.destroyForcibly());
                     if (driver.isAlive()) driver.destroyForcibly();
+                }
+                if (!faults) {
+                    List<ProcessHandle> producers = ProcessHandle.current().descendants().toList();
+                    assertThat(producers).as("Runtime producers before Broker shutdown").isNotEmpty();
+                    broker.close();
+                    for (ProcessHandle producer : producers) {
+                        producer.onExit().get(10, TimeUnit.SECONDS);
+                        assertThat(producer.isAlive()).as("Producer %s before retained read", producer.pid()).isFalse();
+                    }
+                    System.out.println("HOSTED_SHELL_PRODUCERS_EXITED: " + producers.size());
+                    Path readerLog = temporary.resolve("reader.log");
+                    Process reader = new ProcessBuilder(node, "--import", "tsx",
+                            "integration-tests/helpers/hosted-shell-result-reader.ts", resultFile.toString())
+                            .directory(root.toFile()).redirectErrorStream(true).redirectOutput(readerLog.toFile()).start();
+                    try {
+                        assertThat(reader.waitFor(60, TimeUnit.SECONDS)).as("Reader timeout: %s", Files.readString(readerLog)).isTrue();
+                        assertThat(reader.exitValue()).as("Reader output: %s", Files.readString(readerLog)).isZero();
+                        assertThat(Files.readString(readerLog)).contains("HOSTED_SHELL_RETAINED_OUTPUT_OK");
+                    } finally {
+                        if (reader.isAlive()) reader.destroyForcibly();
+                    }
                 }
             } finally {
                 statusGate.complete(null);

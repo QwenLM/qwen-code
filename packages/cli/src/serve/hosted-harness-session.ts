@@ -31,8 +31,11 @@ import { runHostedHarnessTextTurn } from './hosted-harness-model.js';
 import type { HostedWorkspaceBrokerOptions } from './hosted-workspace-broker.js';
 import {
   HOSTED_WORKSPACE_FILE_PROFILE,
+  HOSTED_WORKSPACE_SHELL_PROFILE,
   HostedToolRecoveryRequiredError,
   HostedWorkspaceToolTurn,
+  type HostedWorkspaceToolProfile,
+  type HostedShellTurnOptions,
 } from './hosted-workspace-tool-turn.js';
 import type { HostedHarnessContract } from './hosted-harness-contract.js';
 
@@ -49,7 +52,8 @@ interface HostedSession {
   active?: { promptId: string; digest: string; abort: AbortController };
   admissions: Map<string, { digest: string; lastEventId: number }>;
   blocked: boolean;
-  toolProfile?: typeof HOSTED_WORKSPACE_FILE_PROFILE;
+  toolProfile?: HostedWorkspaceToolProfile;
+  shell?: HostedShellTurnOptions;
 }
 
 function object(value: unknown): Record<string, unknown> | null {
@@ -239,7 +243,9 @@ export function registerHostedHarnessSessionRoutes(
     const toolProfile = body?.['toolProfile'];
     if (
       toolProfile !== undefined &&
-      (toolProfile !== HOSTED_WORKSPACE_FILE_PROFILE || !brokerOptions)
+      ((toolProfile !== HOSTED_WORKSPACE_FILE_PROFILE &&
+        toolProfile !== HOSTED_WORKSPACE_SHELL_PROFILE) ||
+        !brokerOptions)
     ) {
       error(res, 400, 'hosted_tool_profile_unavailable');
       return;
@@ -321,6 +327,14 @@ export function registerHostedHarnessSessionRoutes(
         admissions: new Map(),
         blocked: false,
         ...(toolProfile ? { toolProfile } : {}),
+        ...(toolProfile === HOSTED_WORKSPACE_SHELL_PROFILE
+          ? {
+              shell: {
+                resources: stores.toolResultResources,
+                assertWritable: stores.assertWritable,
+              },
+            }
+          : {}),
       };
       const definition = object(
         JSON.parse(
@@ -446,6 +460,7 @@ export function registerHostedHarnessSessionRoutes(
     timer?.unref();
     session.active = { promptId, digest, abort };
     void (async () => {
+      let toolTurn: HostedWorkspaceToolTurn | undefined;
       let admitted = false;
       let settled = false;
       let turnResult: ChatRecord | undefined;
@@ -529,7 +544,7 @@ export function registerHostedHarnessSessionRoutes(
             parentUuid = message.uuid;
             return message.uuid;
           };
-          const toolTurn =
+          toolTurn =
             session.toolProfile && brokerOptions
               ? new HostedWorkspaceToolTurn(
                   brokerOptions,
@@ -542,6 +557,7 @@ export function registerHostedHarnessSessionRoutes(
                       JSON.stringify(messageRecord(type, parts, model)),
                     ) <=
                     HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes,
+                  session.shell,
                 )
               : undefined;
           let state: 'completed' | 'cancelled' | 'error' = 'completed';
@@ -603,6 +619,14 @@ export function registerHostedHarnessSessionRoutes(
         if (!res.headersSent) error(res, 503, 'hosted_prompt_admission_failed');
       } finally {
         if (timer) clearTimeout(timer);
+        try {
+          await toolTurn?.close();
+        } catch (cause) {
+          session.blocked = true;
+          writeStderrLineSafe(
+            `qwen serve: Hosted Shell publisher cleanup failed: ${String(cause)}`,
+          );
+        }
         session.active = undefined;
       }
     })();
