@@ -154,8 +154,8 @@ describe('resolveThreadStatus', () => {
   });
 
   it('does not pin the thread to a failure that later work superseded', () => {
-    // Round-2 finding I2: acknowledgement was human-only, so one launch
-    // failure blocked the thread forever even after another agent finished.
+    // If acknowledgement were human-only, one launch
+    // failure would block the thread forever after another agent finished.
     const failed = thread({
       runs: [run({ id: 'rn_alice', status: 'failed', error: 'launch failed' })],
     });
@@ -174,8 +174,8 @@ describe('resolveThreadStatus', () => {
   });
 
   it('treats a same-thread wait as satisfied by a later close', () => {
-    // Round-2 finding I1: A waits for B, B reviews without @-ing A. Blocked
-    // outranks review, so the thread used to report blocked when it was ready.
+    // A waits for B, B reviews without @-ing A. Blocked
+    // outranks review, so the thread must not report blocked when it is ready.
     const waiting = thread({
       runs: [run({ id: 'rn_alice', closeKind: 'waiting' })],
     });
@@ -208,7 +208,7 @@ describe('resolveThreadStatus', () => {
   });
 
   it('blocks a quiescent thread whose last admission booked nothing', () => {
-    // Round-2 finding I6: the silent path. A post whose assignee is gone left
+    // The silent path: a post whose assignee is gone must not leave
     // the thread in in_progress with no live run and no explanation.
     const result = resolve(
       thread({

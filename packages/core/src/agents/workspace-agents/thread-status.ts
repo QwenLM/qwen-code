@@ -269,8 +269,8 @@ export function resolveThreadStatus(
  * Discharges outstanding close obligations at a message sequence.
  *
  * `select` narrows which ones. The close path releases peer waits; admission
- * always releases superseded failures and unclosed returns, while the
- * conservative §9.11 default lets only a human booking release every blocker.
+ * always releases superseded failures and unclosed returns, while by default
+ * only a human booking releases every blocker.
  */
 export function acknowledgeCloseObligations(
   thread: Thread,

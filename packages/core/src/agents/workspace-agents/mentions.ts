@@ -102,9 +102,7 @@ export function parseMentions(
 
 /**
  * The exact token an agent should paste to address another agent. Handed to
- * the model in the thread prompt so it never has to guess the spelling — the
- * same reason Multica gives its squad leader ready-made mention markdown
- * rather than a bare name.
+ * the model in the thread prompt so it never has to guess the spelling.
  */
 export function mentionToken(agent: WorkspaceAgent): string {
   return `@${agent.name}`;

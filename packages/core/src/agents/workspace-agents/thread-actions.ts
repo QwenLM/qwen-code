@@ -332,9 +332,9 @@ export async function postMessageInTransaction(
     ),
   };
   // A post that actually books work says the thread has moved on, so an
-  // earlier failure or unclosed return stops pinning it to `blocked`. Round-2
-  // finding I2: acknowledgement used to be human-only, which left one launch
-  // failure blocking the thread even after another agent finished the job.
+  // earlier failure or unclosed return stops pinning it to `blocked`. If only a
+  // human could acknowledge, one launch failure would keep blocking the thread
+  // even after another agent finished the job.
   if (
     dispatched.length > 0 ||
     outcomes.some((o) => o.decision.kind === 'coalesce')
