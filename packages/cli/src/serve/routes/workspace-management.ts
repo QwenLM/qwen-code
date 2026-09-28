@@ -2235,11 +2235,16 @@ export function registerWorkspaceManagementRoutes(
         }
 
         // Find the registry entry that owns this registration ID.
+        // Also match by workspaceId to handle cases where the client sends
+        // the canonical path hash instead of a stored path hash (alias paths).
         let targetEntry: WorkspaceEntry | undefined;
         if (typeof workspaceRegistry.listAllEntries === 'function') {
           const entries = workspaceRegistry.listAllEntries();
           for (const entry of entries) {
-            if (entry.registrationIds.includes(requestedId)) {
+            if (
+              entry.registrationIds.includes(requestedId) ||
+              entry.workspaceId === requestedId
+            ) {
               targetEntry = entry;
               break;
             }

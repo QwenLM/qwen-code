@@ -3592,10 +3592,15 @@ export function WebShellSidebar({
   const handleToggleWorkspacePin = useCallback(
     (workspaceCapability: DaemonWorkspaceCapability) => {
       const targetPinned = !workspaceCapability.isPinned;
+      // Use the first registration ID (stored path hash) instead of the
+      // capability id (canonical path hash) to handle alias paths where
+      // stored path differs from realpath (e.g. macOS /var → /private/var).
+      const registrationId = workspaceCapability.registrationIds?.[0];
+      if (!registrationId) return;
       void (async () => {
         try {
           await workspaceActions.updateWorkspacePin(
-            workspaceCapability.id,
+            registrationId,
             targetPinned,
           );
         } catch (error) {
