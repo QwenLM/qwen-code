@@ -11,6 +11,7 @@ import process from 'node:process';
 import {
   FatalConfigError,
   getErrorMessage,
+  isValidAdvisorMaxUses,
   Storage,
   createDebugLogger,
   stripRuntimeSnapshotPrefix,
@@ -20,6 +21,13 @@ import type {
   McpServerScope,
 } from '@qwen-code/qwen-code-core';
 import stripJsonComments from 'strip-json-comments';
+import {
+  parseExecutionSandboxSettings,
+  readBareModeOperatorSettings,
+  readOperatorSandboxSettings,
+  selectOperatorExecutionSandbox,
+  stripUtf8Bom,
+} from './execution-sandbox-settings.js';
 import { isWorkspaceTrusted } from './trustedFolders.js';
 import { hasOwnModelProviders } from './modelProvidersScope.js';
 import {
@@ -33,6 +41,7 @@ import { resolveEnvVarsInObject } from '@qwen-code/qwen-code-core/envVarResolver
 import {
   setNestedPropertySafe,
   WORKSPACE_NON_OVERRIDING_SETTINGS,
+  WORKSPACE_RESTRICTED_ROOT_SETTINGS,
   WORKSPACE_RESTRICTED_SETTINGS,
   WORKSPACE_TIGHTEN_ONLY_SETTINGS,
 } from './settingsUtils.js';
@@ -55,9 +64,11 @@ import {
   DEFAULT_LIGHT_THEME_NAME,
 } from './default-theme-names.js';
 import {
+  getGlobalQwenDirLite,
   getSystemDefaultsPath,
   getSystemSettingsPath,
 } from './storage-paths-lite.js';
+import { readConfigFile } from './read-config-file.js';
 
 export {
   DEFAULT_EXCLUDED_ENV_VARS,
@@ -379,6 +390,12 @@ export function getSettingsWarnings(loadedSettings: LoadedSettings): string[] {
   // the strip that produces it.
   const workspaceFile = loadedSettings.forScope(SettingScope.Workspace);
   if (workspaceFile.rawJson !== undefined) {
+    for (const key of WORKSPACE_RESTRICTED_ROOT_SETTINGS) {
+      if (workspaceFile.originalSettings[key] === undefined) continue;
+      warningSet.add(
+        `Warning: ${key} in workspace settings (${workspaceFile.path}) is ignored. This setting is only honored from User, System, or SystemDefaults scope settings.`,
+      );
+    }
     for (const { section, key } of WORKSPACE_RESTRICTED_SETTINGS) {
       const sectionValue = workspaceFile.originalSettings[section] as
         | Record<string, unknown>
@@ -424,6 +441,18 @@ export function getSettingsWarnings(loadedSettings: LoadedSettings): string[] {
         );
       }
     }
+  }
+  // Core falls back to unlimited for an invalid value instead of refusing to
+  // start; say so, since the user asked for a limit.
+  const advisorMaxUses: unknown = loadedSettings.merged.advisorMaxUses;
+  if (
+    advisorMaxUses !== undefined &&
+    advisorMaxUses !== null &&
+    !isValidAdvisorMaxUses(advisorMaxUses)
+  ) {
+    warningSet.add(
+      `Warning: advisorMaxUses must be a non-negative integer (0 means unlimited); ignoring ${JSON.stringify(advisorMaxUses)}. Advisor consultations are not limited in this session.`,
+    );
   }
   return [...warningSet];
 }
@@ -490,7 +519,13 @@ function stripSettingKeys(
  * cannot opt the user into those capabilities.
  */
 function stripWorkspaceRestrictedSettings(settings: Settings): Settings {
-  return stripSettingKeys(settings, WORKSPACE_RESTRICTED_SETTINGS);
+  let stripped = settings;
+  for (const key of WORKSPACE_RESTRICTED_ROOT_SETTINGS) {
+    if (stripped[key] === undefined) continue;
+    const { [key]: _restricted, ...rest } = stripped;
+    stripped = rest as Settings;
+  }
+  return stripSettingKeys(stripped, WORKSPACE_RESTRICTED_SETTINGS);
 }
 
 /**
@@ -613,7 +648,7 @@ function mergeSettings(
   // 2. User Settings
   // 3. Workspace Settings
   // 4. System Settings (as overrides)
-  return customDeepMerge(
+  const merged = customDeepMerge(
     getMergeStrategyForPath,
     {}, // Start with an empty object
     systemDefaults,
@@ -621,6 +656,33 @@ function mergeSettings(
     safeWorkspace,
     tagMcpServerScope(system, 'system'),
   ) as Settings;
+  const executionSandbox = selectOperatorExecutionSandbox(
+    systemDefaults,
+    user,
+    system,
+  );
+  const legacySandbox = [systemDefaults, user, system].reduce<
+    NonNullable<Settings['tools']>['sandbox']
+  >((current, scope) => scope.tools?.sandbox ?? current, undefined);
+  // Restore the complete operator object even if a project replaced `tools`
+  // with null, a scalar, or an array during the ordinary settings merge.
+  if (executionSandbox) {
+    const tools = merged.tools;
+    merged.tools = {
+      ...(tools && typeof tools === 'object' && !Array.isArray(tools)
+        ? tools
+        : {}),
+      executionSandbox,
+    };
+    if (legacySandbox === undefined) {
+      delete merged.tools.sandbox;
+    } else {
+      merged.tools.sandbox = legacySandbox;
+    }
+  } else if (merged.tools && typeof merged.tools === 'object') {
+    delete merged.tools.executionSandbox;
+  }
+  return merged;
 }
 
 export class LoadedSettings {
@@ -787,8 +849,11 @@ export class LoadedSettings {
       }
 
       const content = fs.readFileSync(file.path, 'utf-8');
-      const parsed = JSON.parse(stripJsonComments(content));
+      const parsed = JSON.parse(stripJsonComments(stripUtf8Bom(content)));
       if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        if (scope !== SettingScope.Workspace) {
+          parseExecutionSandboxSettings(parsed.tools?.executionSandbox);
+        }
         const resolved = resolveEnvVarsInObject(
           parsed as Settings,
           getHomeEnvFallbackVars((message) => debugLogger.warn(message)),
@@ -878,6 +943,22 @@ export class LoadedSettings {
  * Used in stream-json mode where settings are ignored.
  */
 export function createMinimalSettings(): LoadedSettings {
+  const operator = readBareModeOperatorSettings();
+  const executionSandbox = parseExecutionSandboxSettings(
+    operator.tools?.executionSandbox,
+  );
+  const legacy = operator.tools?.sandbox;
+  const operatorSettings: Settings = {
+    ...(executionSandbox || legacy === 'bwrap'
+      ? {
+          tools: {
+            executionSandbox,
+            sandbox: legacy as boolean | string | undefined,
+          },
+        }
+      : {}),
+    ...(operator.privacy ? { privacy: operator.privacy } : {}),
+  };
   const emptySettingsFile: SettingsFile = {
     path: '',
     settings: {},
@@ -885,7 +966,11 @@ export function createMinimalSettings(): LoadedSettings {
     rawJson: '{}',
   };
   return new LoadedSettings(
-    emptySettingsFile,
+    {
+      ...emptySettingsFile,
+      settings: operatorSettings,
+      originalSettings: operatorSettings,
+    },
     emptySettingsFile,
     emptySettingsFile,
     emptySettingsFile,
@@ -960,22 +1045,73 @@ export function loadSettings(
     typeof consumeCorruptionEnvVars === 'object'
       ? consumeCorruptionEnvVars
       : { consumeCorruptionEnvVars };
+  return readSettingsLayers(workspaceDir, opts);
+}
+
+/**
+ * Reads every settings layer with the merge, migration, trust and variable
+ * rules of `loadSettings`, but writes nothing: no migration, version
+ * normalization, backup, corruption recovery or environment change. A layer
+ * that cannot be read whole, is not a JSON object or carries a version this
+ * build cannot migrate throws, where `loadSettings` repairs, skips or accepts
+ * some of these. `environment` locates the user and system files and is the
+ * only source for `${VAR}` placeholders; without one, nothing is read.
+ */
+export function readSettingsSnapshot(
+  workspaceDir: string,
+  options: {
+    environment: Readonly<NodeJS.ProcessEnv>;
+    workspaceTrusted: boolean;
+  },
+): LoadedSettings {
+  const { environment } = options;
+  if (typeof environment !== 'object' || environment === null) {
+    throw new TypeError('A settings snapshot needs an environment.');
+  }
+  return readSettingsLayers(
+    workspaceDir,
+    {
+      consumeCorruptionEnvVars: false,
+      skipLoadEnvironment: true,
+      skipWorkspaceSettings: !options.workspaceTrusted,
+      workspaceTrusted: options.workspaceTrusted,
+    },
+    { environment },
+  );
+}
+
+function readSettingsLayers(
+  workspaceDir: string,
+  opts: LoadSettingsOptions,
+  snapshotOf?: { readonly environment: Readonly<NodeJS.ProcessEnv> },
+): LoadedSettings {
+  // A snapshot reads through the given environment and writes nothing.
+  const snapshot = snapshotOf !== undefined;
+  const snapshotEnvironment = snapshotOf?.environment;
   // Apply any QWEN_HOME / QWEN_RUNTIME_DIR set in user-level `.env` files
   // BEFORE any code reads a path derived from them. After this call, the
   // lazy `getUserSettingsPath()` / `Storage.getGlobalQwenDir()` getters
   // return the post-bootstrap value.
-  preResolveHomeEnvOverrides();
-  const userSettingsPath = getUserSettingsPath();
-  const qwenHomeRedirectWarning =
-    detectQwenHomeRedirectWithoutMigration(userSettingsPath);
+  if (!snapshot) preResolveHomeEnvOverrides();
+  // A malformed operator file cannot silently reset a confinement policy.
+  // Validate literals before environment substitution and corruption recovery.
+  const operatorSandbox = snapshot
+    ? undefined
+    : readOperatorSandboxSettings().tools?.executionSandbox;
+  const userSettingsPath = snapshot
+    ? path.join(getGlobalQwenDirLite(snapshotEnvironment), 'settings.json')
+    : getUserSettingsPath();
+  const qwenHomeRedirectWarning = snapshot
+    ? null
+    : detectQwenHomeRedirectWithoutMigration(userSettingsPath);
 
   let systemSettings: Settings = {};
   let systemDefaultSettings: Settings = {};
   let userSettings: Settings = {};
   let workspaceSettings: Settings = {};
   const settingsErrors: SettingsError[] = [];
-  const systemSettingsPath = getSystemSettingsPath();
-  const systemDefaultsPath = getSystemDefaultsPath();
+  const systemSettingsPath = getSystemSettingsPath(snapshotEnvironment);
+  const systemDefaultsPath = getSystemDefaultsPath(snapshotEnvironment);
   const migratedInMemoryScopes = new Set<SettingScope>();
 
   // Resolve paths to their canonical representation to handle symlinks
@@ -1008,8 +1144,12 @@ export function loadSettings(
     wasRecovered?: boolean;
   } => {
     try {
-      if (fs.existsSync(filePath)) {
-        const content = fs.readFileSync(filePath, 'utf-8');
+      const content = snapshot
+        ? readConfigFile(filePath)
+        : fs.existsSync(filePath)
+          ? fs.readFileSync(filePath, 'utf-8')
+          : undefined;
+      if (content !== undefined) {
         let rawSettings: unknown;
         // Carry corruption state through to the final return so it
         // can be attached after the migration pipeline runs.
@@ -1018,8 +1158,10 @@ export function loadSettings(
         let recoveredFromEnvVar: boolean | null = null;
 
         try {
-          rawSettings = JSON.parse(stripJsonComments(content));
+          rawSettings = JSON.parse(stripJsonComments(stripUtf8Bom(content)));
         } catch (parseError: unknown) {
+          if (snapshot || scope !== SettingScope.Workspace || operatorSandbox)
+            throw parseError;
           // ===== JSON parse failed — enter corruption recovery =====
           // Strategy: save corrupted file as .corrupted → reset to empty →
           // show dialog in UI. Never crash due to a corrupted settings file.
@@ -1101,6 +1243,11 @@ export function loadSettings(
           return { settings: {} };
         }
 
+        if (scope !== SettingScope.Workspace) {
+          parseExecutionSandboxSettings(
+            (rawSettings as Settings).tools?.executionSandbox,
+          );
+        }
         let settingsObject = rawSettings as Record<string, unknown>;
         const hasVersionKey = SETTINGS_VERSION_KEY in settingsObject;
         const versionValue = settingsObject[SETTINGS_VERSION_KEY];
@@ -1108,9 +1255,20 @@ export function loadSettings(
           hasVersionKey && typeof versionValue !== 'number';
         const hasLegacyNumericVersion =
           typeof versionValue === 'number' && versionValue < SETTINGS_VERSION;
+        if (
+          snapshot &&
+          hasVersionKey &&
+          !(Number.isInteger(versionValue) && (versionValue as number) >= 1)
+        ) {
+          throw new Error(
+            `Settings file has an unsupported ${SETTINGS_VERSION_KEY}.`,
+          );
+        }
         let migrationWarnings: string[] | undefined;
 
         const persistSettingsObject = (warningPrefix: string) => {
+          if (snapshot) return;
+          if (operatorSandbox && scope === SettingScope.Workspace) return;
           try {
             // Use sync mode to remove deprecated keys (zombie key prevention)
             // while preserving comments and formatting from the original file.
@@ -1167,6 +1325,14 @@ export function loadSettings(
           // that would create a .orig file from the freshly reset settings.
           settingsObject[SETTINGS_VERSION_KEY] = SETTINGS_VERSION;
           persistSettingsObject('Error normalizing settings version on disk');
+        }
+        if (
+          snapshot &&
+          settingsObject[SETTINGS_VERSION_KEY] !== SETTINGS_VERSION
+        ) {
+          throw new Error(
+            `Settings file has an unsupported ${SETTINGS_VERSION_KEY}.`,
+          );
         }
 
         // Attach corruption state propagated from the parent via env vars.
@@ -1226,21 +1392,36 @@ export function loadSettings(
   // effective precedence is: process.env > home .env > unresolved placeholder.
   // The resolver checks customEnv before process.env, but since customEnv
   // never contains a process.env key, process.env always wins.
-  const homeEnvFallback = getHomeEnvFallbackVars((message) =>
-    debugLogger.warn(message),
-  );
+  // A snapshot environment is the environment of the session hosts it
+  // describes and carries the user-level `.env` values its runtime applied, so
+  // it is the only source.
+  const homeEnvFallback = snapshotOf
+    ? Object.fromEntries(
+        Object.entries(snapshotOf.environment).filter(
+          (entry): entry is [string, string] => typeof entry[1] === 'string',
+        ),
+      )
+    : getHomeEnvFallbackVars((message) => debugLogger.warn(message));
+  const resolveOptions = { processEnvFallback: !snapshot };
   systemSettings = resolveEnvVarsInObject(
     systemResult.settings,
     homeEnvFallback,
+    resolveOptions,
   );
   systemDefaultSettings = resolveEnvVarsInObject(
     systemDefaultsResult.settings,
     homeEnvFallback,
+    resolveOptions,
   );
-  userSettings = resolveEnvVarsInObject(userResult.settings, homeEnvFallback);
+  userSettings = resolveEnvVarsInObject(
+    userResult.settings,
+    homeEnvFallback,
+    resolveOptions,
+  );
   workspaceSettings = resolveEnvVarsInObject(
     workspaceResult.settings,
     homeEnvFallback,
+    resolveOptions,
   );
 
   // Support legacy theme names
@@ -1255,12 +1436,18 @@ export function loadSettings(
     workspaceSettings.ui.theme = DEFAULT_DARK_THEME_NAME;
   }
 
-  // For the initial trust check, we can only use user and system settings.
+  // For the initial trust check we can only use the scopes that do not need
+  // the decision being computed. `system-defaults` participates so an operator
+  // enabling `security.folderTrust` there reaches the same "trust enabled"
+  // answer the final merged settings (and `loadCliConfig`'s `trustedFolder`)
+  // use; the workspace scope stays out, since a workspace file that only a
+  // trusted workspace may contribute cannot decide its own trust.
   const initialTrustCheckSettings = customDeepMerge(
     getMergeStrategyForPath,
     {},
-    systemSettings,
+    systemDefaultSettings,
     userSettings,
+    systemSettings,
   );
   const isTrusted =
     opts.workspaceTrusted ??
@@ -1269,7 +1456,7 @@ export function loadSettings(
       undefined,
       realWorkspaceDir,
     ).isTrusted ??
-    true;
+    false;
 
   // Create a temporary merged settings object to pass to loadEnvironment.
   const tempMergedSettings = mergeSettings(

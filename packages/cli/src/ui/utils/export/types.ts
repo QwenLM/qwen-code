@@ -63,6 +63,7 @@ export interface ExportMessage {
     title: string | object;
     status: 'pending' | 'in_progress' | 'completed' | 'failed';
     rawInput?: string | object;
+    rawOutput?: unknown;
     content?: Array<{
       type: string;
       [key: string]: unknown;

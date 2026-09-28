@@ -2,6 +2,12 @@
 
 [English](browser-use.md) | [简体中文](browser-use.zh-CN.md)
 
+This document describes the original single-session architecture. The
+[concurrent-session design](browser-use-concurrent-sessions.md) supersedes its
+socket ownership, Native Host installation and session lifecycle decisions.
+That implementation is under validation; its remaining acceptance gaps are
+recorded in the linked design.
+
 ## Goal
 
 Browser Use gives models a structured API for controlling the user's existing
@@ -49,12 +55,15 @@ Browser Use ships with Qwen Code as a bundled skill and its runtime resources.
 No separate Browser Use runtime package or second Qwen extension is required;
 the existing Qwen Chrome extension is reused. The skill's `runtime/` directory
 contains the Browser SDK, Native Host, and pinned Playwright dependency. The
-skill registers `runtime/node_modules` with the existing Node
-REPL and imports `runtime/index.js`; the CLI does not execute browser logic.
-The kernel evaluates that import in an isolated realm without Node globals, so
-the runtime bundle binds `process` itself at its top through `createRequire`;
-the build's load check runs in the main realm and cannot detect a missing
-binding, so a kernel-backed test pins it. Source development, transpiled builds, and the published CLI use this same
+skill imports `runtime/index.js` into the existing Node REPL without
+registering any module directory; the CLI does not execute browser logic.
+The kernel evaluates that import in an isolated realm without Node globals and
+resolves bare imports only from registered module roots and the working
+directory's `node_modules`, so the runtime bundle
+binds `process` and loads its pinned `playwright-core` itself through
+`createRequire`, which resolves from the bundle's own location. The build's
+load check runs in the main realm and cannot detect either gap, so a
+kernel-backed test pins both. Source development, transpiled builds, and the published CLI use this same
 layout. The generic Node REPL MCP server must be configured, and the Qwen
 Chrome extension must be installed in the browser. Bundling does not connect
 to Chrome at CLI startup; the SDK connects when first used.
@@ -67,8 +76,13 @@ tree; the normal installation `prepare` hook builds the package those copies
 come from. After changing Browser Use sources or dependencies, run
 `npm run build --workspace=@qwen-code/browser-use` and start `npm run dev`
 again to refresh the development copy. CLI and Core continue to run directly
-from TypeScript source. If the runtime is missing, the skill's existing setup
-check reports the incomplete runtime when invoked.
+from TypeScript source. If the runtime entry is missing, the import fails and
+the skill tells the model to stop and report an incomplete runtime. If its
+pinned `playwright-core` cannot be found, the SDK reports the incomplete
+runtime itself. Node's lookup continues into parent directories, so the SDK
+checks the version of the copy it finds: another version is refused as an
+incomplete runtime, while a copy of the pinned version is used, because it runs
+the same code.
 
 Browser Use is available to the model by default and is selected according to
 the user's task. Users can disable it through `/skills` or `skills.disabled`,
@@ -79,31 +93,37 @@ the skill does not unload instructions already in a conversation or disconnect
 an existing SDK session.
 
 Native Host registration is native-side product setup, not a Chrome-extension
-operation. On macOS and Linux, the first Browser runtime initialization
-checks Google Chrome, Chrome for Testing, and Chromium's standard `Default`
-and `Profile N` profiles for the Qwen extension. It reads the extension's
-registration in `Secure Preferences` or `Preferences` and confirms that its
-manifest exists, supporting both packaged and unpacked installations. Leftover
-extension directories alone do not count as an installed extension. If the
-extension is not found, initialization reports how to install it without
-writing Native Host files. After detection, initialization idempotently
-installs the launcher and manifests for existing browser roots. A configured
-`QWEN_BROWSER_USE_SOCKET_PATH` keeps using its externally managed setup.
+operation. On macOS and Linux, initiating a Browser Use task opts into automatic
+local Host setup. Initialization idempotently installs or reuses the launcher
+and manifests for existing browser roots, then the transport discovers a live
+Host and validates its extension, protocol and profile handshake. A configured
+`QWEN_BROWSER_USE_SOCKET_PATH` or `QWEN_BROWSER_USE_DISCOVERY_DIR` keeps using its
+externally managed setup.
 
-Installing the Qwen Chrome extension opts into this automatic local setup on
-first use. The launcher and Native Messaging registrations persist after
-Qwen exits. The installer refuses to overwrite
-foreign files: a conflicting launcher aborts initialization, while a
-conflicting browser manifest is skipped and named in a warning on stderr.
-Running
-`node <skill-base>/runtime/scripts/native-host-setup.js uninstall` removes
-files owned by Browser Use; `status` checks them and `install` explicitly
-registers them. To prevent automatic registration on a later Browser Use
-initialization, also uninstall the Chrome extension. Only a missing file is
-treated as absent; other
-read failures abort the operation without overwriting the unreadable file. The
-Chrome extension only opens the registered host
-through `connectNative()`.
+Initialization does not read `Secure Preferences` or `Preferences` to detect
+an installed extension. Those private configuration files may be unreadable,
+and an installation entry cannot establish that the extension is enabled or
+connected. Host registration can finish before the extension is available. If
+no connection appears, tell the user to open Chrome and install or enable the
+extension in the intended profile, then retry; a timeout alone does not prove
+that the extension is missing. Protocol mismatches retain their update guidance.
+Profile names remain optional enrichment and never gate the connection.
+
+The launcher and Native Messaging registrations persist after Qwen exits. The
+installer refuses to overwrite foreign files: a conflicting launcher aborts
+initialization, while a conflicting browser manifest is skipped and named in a
+warning on stderr. Running
+`node <skill-base>/runtime/scripts/native-host-setup.js uninstall` removes files
+owned by Browser Use; `status` checks them and `install` explicitly registers
+them. A later Browser Use initialization can register the Host again. Only a
+missing required Host file is treated as absent; other read failures abort the
+operation without overwriting the unreadable file. The Chrome extension opens
+the registered host through `connectNative()`.
+
+Initialization acceptance includes unreadable Chrome preference files, setup
+before extension availability, actionable disconnected guidance, and preserved
+Host file-access errors. Existing extension identity, protocol, profile and
+session ownership checks remain required before browser operations.
 
 ## Responsibilities
 

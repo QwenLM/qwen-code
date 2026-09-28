@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { createHash } from 'node:crypto';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 const settingsMock = vi.hoisted(() => vi.fn(() => ({ merged: {} })));
 vi.mock('../../config/settings.js', async (importOriginal) => {
@@ -13,10 +14,14 @@ vi.mock('../../config/settings.js', async (importOriginal) => {
 });
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
-  rmSync,
-  writeFileSync,
+  readdirSync,
   readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -52,6 +57,38 @@ beforeEach(() => {
 afterEach(() => {
   process.chdir(cwd);
   if (dir) rmSync(dir, { recursive: true, force: true });
+});
+
+describe('plan-diff — the scratch directory guard', () => {
+  it.skipIf(process.platform === 'win32')(
+    'refuses a symlinked .qwen/tmp before writing the plan',
+    () => {
+      // A standalone plan-diff is a round's first writer into `.qwen/tmp`;
+      // the shared entry guard runs here too, so a workspace-planted link
+      // refuses the command with nothing landed through it.
+      const victim = realpathSync(mkdtempSync(join(tmpdir(), 'victim-')));
+      try {
+        writeFileSync(join(dir, 'diff.txt'), makeDiff('src/a.ts', 3));
+        mkdirSync(join(dir, '.qwen'), { recursive: true });
+        symlinkSync(victim, join(dir, '.qwen', 'tmp'));
+        // The handler reports refusals as a non-zero exit code, not a throw.
+        run(join(dir, 'diff.txt'), join('.qwen', 'tmp', 'plan.json'));
+        expect(process.exitCode).toBe(1);
+        expect(readdirSync(victim)).toEqual([]);
+
+        // …and an `--out` that stays outside the scratch directory is not
+        // this command's business: it writes nothing there, so a redirect
+        // it never touches must not refuse the round.
+        process.exitCode = undefined;
+        run(join(dir, 'diff.txt'), join(dir, 'elsewhere', 'plan.json'));
+        expect(process.exitCode).toBeUndefined();
+        expect(existsSync(join(dir, 'elsewhere', 'plan.json'))).toBe(true);
+        expect(readdirSync(victim)).toEqual([]);
+      } finally {
+        rmSync(victim, { recursive: true, force: true });
+      }
+    },
+  );
 });
 
 describe('plan-diff — the round cap the handler actually records', () => {
@@ -230,6 +267,24 @@ describe('plan-diff', () => {
     expect(plan.srcDiffLines).toBe(plan.diffLines);
     expect(plan.files[0].path).toBe('src/a.ts');
     expect(plan.files[0].kind).toBe('source');
+  });
+
+  it('records the identity of the diff it planned over', () => {
+    // The coverage reader re-hashes the file at `diffPathAbsolute` and
+    // compares it to this, so it must digest the text this command read —
+    // any other string at the call site type-checks and reads as drift on
+    // every run.
+    const diffPath = join(dir, 'local.diff');
+    const out = join(dir, 'plan.json');
+    writeFileSync(diffPath, makeDiff('src/a.ts', 1200));
+    run(diffPath, out);
+
+    const plan = JSON.parse(readFileSync(out, 'utf8'));
+    expect(plan.selection.sourceArtifactSha256).toBe(
+      createHash('sha256')
+        .update(readFileSync(diffPath, 'utf8'), 'utf8')
+        .digest('hex'),
+    );
   });
 
   it('carries the PR identity when told to — the roster requires Agent 0 from it', () => {

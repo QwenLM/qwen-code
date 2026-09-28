@@ -469,36 +469,41 @@ describe('fetchGitRemotes config-read failure discrimination', () => {
     // answer it on the string test (no discount) and never spawn the
     // probe — the include-held residue then refuses through the
     // swept-resolving re-verify, exactly as the bare-word twin does.
+    // The name needs more than one character before the colon: on
+    // win32 a single-character prefix (`h:p`) IS a drive path —
+    // git's has_dos_drive_prefix takes any non-NUL char plus a colon
+    // — so the gate must probe it as a local transport, and the
+    // assertion below would read that probe as a leak.
     runGit
       .mockResolvedValueOnce(
-        'local\u0000file:.git/config\u0000remote.h:p.url\nhttps://example.com/h\u0000',
+        'local\u0000file:.git/config\u0000remote.host:path.url\nhttps://example.com/h\u0000',
       ) // origin pre-flight read
       .mockResolvedValueOnce('.git\n') // rev-parse --git-dir
       .mockResolvedValueOnce('.git\n') // rev-parse --git-common-dir
       .mockResolvedValueOnce('/repo\n') // rev-parse --show-toplevel
       .mockResolvedValueOnce(
-        'local\u0000branch.feat.remote\nsurvivor\u0000worktree\u0000branch.feat.remote\nh:p\u0000',
+        'local\u0000branch.feat.remote\nsurvivor\u0000worktree\u0000branch.feat.remote\nhost:path\u0000',
       ) // snapshot: feat pointed (worktree value), local survivor backup
       .mockResolvedValueOnce('') // git remote remove
-      .mockResolvedValueOnce('h:p\u0000') // restore remote presence read (include-held residue; --get-all frames values bare)
+      .mockResolvedValueOnce('host:path\u0000') // restore remote presence read (include-held residue; --get-all frames values bare)
       .mockResolvedValueOnce('') // restore pushremote presence read
       .mockResolvedValueOnce('local\u0000core.x\ny\u0000') // gate scope read (no section)
-      .mockResolvedValueOnce('h:p\n') // fixed: the merge read; a mutant without the sectionless skip spends this on the gate resolver echo and then spawns the path probe
+      .mockResolvedValueOnce('host:path\n') // fixed: the merge read; a mutant without the sectionless skip spends this on the gate resolver echo and then spawns the path probe
       .mockResolvedValueOnce('.git\n') // listing probe
       .mockResolvedValueOnce('') // listing read: the row is gone
       .mockResolvedValueOnce('') // union gate scope read
-      .mockResolvedValueOnce('h:p\n') // union gate resolver echo
+      .mockResolvedValueOnce('host:path\n') // union gate resolver echo
       .mockResolvedValueOnce('') // tracking-refs sweep: for-each-ref
       .mockResolvedValueOnce('') // tracking-refs sweep: git remote
       .mockResolvedValueOnce('') // tracking-refs sweep: fetch dest namespaces
       .mockResolvedValueOnce('') // tracking-refs re-verify: for-each-ref
       .mockResolvedValueOnce('') // tracking-refs re-verify: git remote
       .mockResolvedValueOnce('') // tracking-refs re-verify: fetch dest namespaces
-      .mockResolvedValueOnce('local\u0000branch.feat.remote\nh:p\u0000') // sweep dump
+      .mockResolvedValueOnce('local\u0000branch.feat.remote\nhost:path\u0000') // sweep dump
       .mockResolvedValueOnce('') // the fixed-value unset
-      .mockResolvedValueOnce('local\u0000branch.feat.remote\nh:p\u0000'); // swept-resolving re-verify: the residue stands
+      .mockResolvedValueOnce('local\u0000branch.feat.remote\nhost:path\u0000'); // swept-resolving re-verify: the residue stands
     const base = runGit.mock.calls.length;
-    await expect(gitRemoteRemove('/repo', 'h:p')).rejects.toThrow(
+    await expect(gitRemoteRemove('/repo', 'host:path')).rejects.toThrow(
       /remote still configured after removal/,
     );
     const calls = runGit.mock.calls
@@ -507,7 +512,7 @@ describe('fetchGitRemotes config-read failure discrimination', () => {
     // Drain discipline: a mutant that spends extra spawns here would
     // otherwise leak its unconsumed queue into the next witness.
     runGit.mockReset();
-    expect(calls).not.toContain('ls-remote -- h:p');
+    expect(calls).not.toContain('ls-remote -- host:path');
   });
 
   it('refuses the removal when a pushInsteadOf alias raced into the union gate dump', async () => {

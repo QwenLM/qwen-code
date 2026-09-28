@@ -167,17 +167,13 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   'XDG_CONFIG_HOME',
   'GIT_CONFIG_COUNT',
   'GIT_CONFIG_PARAMETERS',
-  // The sandbox backend selection and network mode are confinement decisions.
-  // QWEN_SANDBOX decides whether confinement runs at all and which backend
-  // (an untrusted repo could cancel it with `QWEN_SANDBOX=false`, or force a
-  // backend over the operator's choice), and QWEN_SANDBOX_IMAGE selects the
-  // container image the agent runs inside. `resolveSandboxNetworkMode` flips
-  // to `proxied` purely on the presence of QWEN_SANDBOX_PROXY_COMMAND, and
-  // the bwrap branch then executes that value through `bash -c` on the host,
-  // outside the confinement, before the agent starts. A project `.env` or
-  // settings.env supplying any of them is repository content deciding the
-  // confinement — the same class as GIT_PROXY_COMMAND. The operator's launch
-  // environment or a home `.env` remains the only trusted source.
+  // Whole-CLI sandbox selection and network controls remain operator inputs.
+  // QWEN_SANDBOX decides whether a legacy container/Seatbelt boundary runs,
+  // QWEN_SANDBOX_IMAGE selects its image, and the proxy command can execute on
+  // the host during launcher setup. The tool execution sandbox rejects these
+  // legacy controls when its policy is active. A project `.env` or settings.env
+  // must not select either boundary or create a mixed-boundary startup failure.
+  // The operator's launch environment or a home `.env` remains trusted.
   'QWEN_SANDBOX',
   'QWEN_SANDBOX_IMAGE',
   'QWEN_SANDBOX_PROXY_COMMAND',
@@ -186,12 +182,11 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   // They also belong to the all-scope provenance gate below.
   'SANDBOX',
   'SANDBOX_ENFORCEMENT',
-  // The bwrap writable-root derivation reads XDG_CACHE_HOME and, via
-  // os.tmpdir(), TMPDIR/TMP/TEMP (its POSIX fallback order). A project `.env`
-  // pointing one inside the home directory ($HOME/.ssh, $HOME/.aws, …) would
-  // make the confinement bind that directory read-write. Values from the
-  // launch environment or a home `.env` are the operator's own choice and
-  // stay honored.
+  // Tool-confined execution creates and binds writable scratch beneath
+  // os.tmpdir(), whose POSIX fallback order reads TMPDIR/TMP/TEMP. Cache and
+  // temporary roots are process-wide host locations, so repository content
+  // cannot redirect them before the runtime constructs its boundary. Values
+  // from the launch environment or a home `.env` remain operator-controlled.
   'XDG_CACHE_HOME',
   'TMPDIR',
   'TMP',

@@ -26,6 +26,10 @@ import {
 import type { ExecutionWorkerOptions } from './execution-environment.js';
 import { ExecutionCleanupError } from './execution-environment.js';
 import type { ToolResult } from '../tools/tools.js';
+import {
+  isShellResultDisplay,
+  shellResultText,
+} from '../utils/shell-result.js';
 
 describe('container execution boundary', () => {
   it('preserves preparation errors and cleanup ownership when release fails', async () => {
@@ -83,6 +87,25 @@ describe('container execution boundary', () => {
       outputBudgetApplied: true,
       error: { message: 'partial installation output' },
     },
+    {
+      llmContent: 'installed package',
+      returnDisplay: {
+        type: 'shell_result',
+        version: 1,
+        text: 'installation complete',
+        output: 'installed package',
+        directory: '/workspace',
+        exitCode: 0,
+        signal: null,
+        pid: 42,
+        error: null,
+        outcome: 'completed',
+        notices: ['existing notice'],
+        truncated: false,
+        outputFiles: [],
+      },
+      outputBudgetApplied: true,
+    },
   ] satisfies ToolResult[])(
     'preserves the tool result and cleanup ownership when installation cleanup fails: %j',
     async (toolResult) => {
@@ -118,11 +141,24 @@ describe('container execution boundary', () => {
             ? toolResult.llmContent
             : toolResult.llmContent[0].text,
         );
-        expect(result.returnDisplay).toContain(toolResult.returnDisplay);
+        expect(shellResultText(result.returnDisplay)).toContain(
+          shellResultText(toolResult.returnDisplay),
+        );
         expect(JSON.stringify(result.llmContent)).toContain(
           'Container cleanup failed after tool execution',
         );
-        expect(result.returnDisplay).toContain('do not automatically retry');
+        expect(shellResultText(result.returnDisplay)).toContain(
+          'do not automatically retry',
+        );
+        if (isShellResultDisplay(toolResult.returnDisplay)) {
+          expect(result.returnDisplay).toMatchObject({
+            output: toolResult.returnDisplay.output,
+            notices: [
+              'existing notice',
+              expect.stringContaining('Container cleanup failed'),
+            ],
+          });
+        }
         expect(result.outputBudgetApplied).not.toBe(true);
         if (toolResult.error) {
           expect(result.error?.message).toContain(toolResult.error.message);

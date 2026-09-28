@@ -22,6 +22,17 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 const debugLogger = createDebugLogger('HOOK_AGGREGATOR');
 
 /**
+ * Ranking for PreToolUse `hookSpecificOutput.permissionDecision` values.
+ * Higher rank wins when multiple hooks match the same tool call, so a
+ * `deny` can never be silently overridden by another hook's `allow`.
+ */
+const PERMISSION_DECISION_RANK: Record<'allow' | 'ask' | 'deny', number> = {
+  allow: 1,
+  ask: 2,
+  deny: 3,
+};
+
+/**
  * Aggregated result from multiple hook executions
  */
 export interface AggregatedHookResult {
@@ -141,7 +152,7 @@ export class HookAggregator {
    */
   private mergeWithOrLogic(
     outputs: HookOutput[],
-    _eventName?: HookEventName,
+    eventName?: HookEventName,
   ): HookOutput {
     const merged: HookOutput = {};
     const reasons: string[] = [];
@@ -151,6 +162,10 @@ export class HookAggregator {
     let hasContinueFalse = false;
     let stopReason: string | undefined;
     const otherHookSpecificFields: Record<string, unknown> = {};
+    const isPreToolUse = eventName === HookEventName.PreToolUse;
+    let winningPermissionDecision: 'allow' | 'ask' | 'deny' | undefined;
+    let winningPermissionRank = 0;
+    const winningPermissionReasons: string[] = [];
 
     for (const output of outputs) {
       // Check for blocking decisions
@@ -176,6 +191,30 @@ export class HookAggregator {
 
       // Collect other hookSpecificOutput fields (later values win)
       if (output.hookSpecificOutput) {
+        // PreToolUse permission decisions aggregate most-restrictive-first
+        // (deny > ask > allow), independent of hook completion/config order.
+        if (isPreToolUse) {
+          const decision = output.hookSpecificOutput['permissionDecision'];
+          if (
+            decision === 'allow' ||
+            decision === 'ask' ||
+            decision === 'deny'
+          ) {
+            const rank = PERMISSION_DECISION_RANK[decision];
+            if (rank > winningPermissionRank) {
+              winningPermissionRank = rank;
+              winningPermissionDecision = decision;
+              winningPermissionReasons.length = 0;
+            }
+            if (rank === winningPermissionRank) {
+              const reason =
+                output.hookSpecificOutput['permissionDecisionReason'];
+              if (typeof reason === 'string' && reason.length > 0) {
+                winningPermissionReasons.push(reason);
+              }
+            }
+          }
+        }
         for (const [key, value] of Object.entries(output.hookSpecificOutput)) {
           if (key === 'artifacts' && Array.isArray(value)) {
             const validArtifacts = value.filter(isToolArtifactLike);
@@ -189,6 +228,11 @@ export class HookAggregator {
             debugLogger.warn(
               'Dropped malformed hookSpecificOutput.artifacts; expected array',
             );
+          } else if (
+            isPreToolUse &&
+            (key === 'permissionDecision' || key === 'permissionDecisionReason')
+          ) {
+            // Handled by the ranking logic above, not last-wins.
           } else if (key !== 'additionalContext' && key !== 'artifacts') {
             otherHookSpecificFields[key] = value;
           }
@@ -231,6 +275,13 @@ export class HookAggregator {
     const hookSpecificOutput: Record<string, unknown> = {
       ...otherHookSpecificFields,
     };
+    if (winningPermissionDecision !== undefined) {
+      hookSpecificOutput['permissionDecision'] = winningPermissionDecision;
+      if (winningPermissionReasons.length > 0) {
+        hookSpecificOutput['permissionDecisionReason'] =
+          winningPermissionReasons.join('\n');
+      }
+    }
     if (additionalContexts.length > 0) {
       hookSpecificOutput['additionalContext'] = additionalContexts.join('\n');
     }

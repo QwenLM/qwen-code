@@ -74,6 +74,16 @@ const press = (key: { name: string; sequence?: string }) => {
   act(() => handler(key));
 };
 
+/** One React batch: the renderer delivers a burst of keys to the handler
+ *  registered by the last render, with no re-render in between. */
+const pressBatched = (keys: Array<{ name: string; sequence?: string }>) => {
+  const handler = handlers[handlers.length - 1];
+  if (!handler) throw new Error('no keyboard handler registered');
+  act(() => {
+    for (const key of keys) handler(key);
+  });
+};
+
 describe('useDialogSelect numeric quick-select', () => {
   beforeEach(() => {
     handlers.length = 0;
@@ -120,6 +130,32 @@ describe('useDialogSelect numeric quick-select', () => {
     });
     expect(onSelect).toHaveBeenCalledTimes(1);
     expect(onSelect).toHaveBeenCalledWith('item-0');
+  });
+});
+
+describe('useDialogSelect cursor within one key batch', () => {
+  beforeEach(() => {
+    handlers.length = 0;
+  });
+
+  it('moves the highlight once per arrow key in a single batch', () => {
+    const { result } = renderHook(() =>
+      useDialogSelect({ items, numbers: false }),
+    );
+    pressBatched([{ name: 'down' }, { name: 'down' }, { name: 'down' }]);
+    expect(result.current.activeIndex).toBe(3);
+  });
+
+  it('selects the row the batch arrows reached, not the pre-batch one', () => {
+    const onSelect = vi.fn();
+    renderHook(() => useDialogSelect({ items, numbers: false, onSelect }));
+    pressBatched([
+      { name: 'down' },
+      { name: 'down' },
+      { name: 'return', sequence: '\r' },
+    ]);
+    expect(onSelect).toHaveBeenCalledTimes(1);
+    expect(onSelect).toHaveBeenCalledWith('item-2');
   });
 });
 

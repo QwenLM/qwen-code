@@ -11,7 +11,7 @@ It provides:
 - **Service worker** — a CDP-tunnel pipe. It connects to the daemon's `/acp`
   WebSocket and bridges `cdp_*` frames into `chrome.debugger`, so the agent can
   drive the real browser when an external CDP MCP adapter is configured.
-- **Browser Use bridge** — connects to the local `com.qwen.browser` Native
+- **Browser Use bridge** — connects to the local `com.qwen.browser_use` Native
   Messaging host, lists open HTTP(S) tabs, and forwards Playwright CDP traffic
   for tabs claimed by Browser Use.
 - **Readiness warning** — the framed Web Shell stays usable for chat while a
@@ -19,6 +19,11 @@ It provides:
   browser automation adapter.
 
 ## Build
+
+To use the extension, install it from the
+[Chrome Web Store](https://chromewebstore.google.com/detail/qwen-code/hdhmmjclhibojdddmancfgbkleahfaph).
+The steps below build it from source, for development or where the listing is
+not available.
 
 ```bash
 npm run build        # -> dist/extension (static assets + bundled service worker)
@@ -52,19 +57,25 @@ welcome screen for the chat UI automatically.
 
 Browser Use ships with Qwen Code as a built-in skill and SDK runtime, using
 Qwen's standard Node REPL. No separate Qwen extension installation is needed.
-On macOS and Linux, its first initialization checks that this Chrome extension
-is installed before automatically registering the local Native Messaging host.
-Installing the extension opts into that local setup. If the extension is not
-found, Browser Use prompts you to install it without writing Native Host files.
-It does not require `qwen serve`, does not expose
-a Chrome debugging port, and supports one active Browser Use session in this
-release.
+On macOS and Linux, the first browser task automatically registers the shared
+Native Messaging host in the user's installation directory. The SDK can finish
+this local setup before the extension connects; it verifies the live connection
+and protocol instead of reading Chrome's extension preferences. If it cannot
+connect, open Chrome and install or enable the extension in the intended profile,
+then retry. Later sessions reuse an installed Host of the same protocol, and a
+Host installed by a newer Qwen Code is never downgraded. Run
+`node <skill-base>/runtime/scripts/native-host-setup.js status` to inspect the
+installation, `install` to switch it to this Qwen Code's Host from the next
+Host start, or `uninstall` to remove files owned by Browser Use. `<skill-base>`
+is the base directory shown when loading the Browser Use skill. A later Browser
+Use initialization can register the Host again.
 
-The Native Host launcher and browser registrations remain after Qwen exits.
-Run `node <skill-base>/runtime/scripts/native-host-setup.js status` to inspect
-them, or use `uninstall` to remove files owned by Browser Use. `<skill-base>` is
-the Browser Use skill's base directory shown when loading the skill. Uninstall
-the Chrome extension as well to prevent automatic registration on a later use.
+The Chrome-launched Host serves multiple independent Qwen sessions per profile.
+Each session controls its own tabs and groups; claiming another session's tab
+returns `TAB_OWNERSHIP_CONFLICT`. A CLI exit leaves other sessions and the Host
+running. Host files persist in the user's installation directory independently
+of individual CLI checkouts. Updating the launcher takes effect on the next
+Host start. Browser Use does not require `qwen serve` or a Chrome debugging port.
 
 Installing the Chrome extension authorizes Browser Use to list and claim open
 top-level HTTP(S) tabs. Its declared `history` permission supports explicit,
@@ -92,7 +103,7 @@ The pinned adapter requires Node.js 22.12 or newer.
 ```bash
 npm install -g chrome-devtools-mcp@1.5.0
 QWEN_CDP_MCP_COMMAND=chrome-devtools-mcp \
-  qwen serve --allow-origin chrome-extension://idkijaaipeeinemigojbjkmfmabokbdk
+  qwen serve --allow-origin chrome-extension://<this-extension-id>
 ```
 
 The separately installed adapter is not included in the Qwen Code npm package
@@ -146,7 +157,8 @@ Packaging (`npm run package`) and the release test require the POSIX `zip`
 utility.
 
 ```bash
-npm run package      # -> chrome-extension.zip (manifest at the zip root)
+npm run package        # -> chrome-extension.zip (manifest at the zip root)
+npm run package:store  # -> chrome-extension-store.zip, without the manifest key
 ```
 
 Run the complete release check from the repository root. It builds the main npm
@@ -157,10 +169,25 @@ generated payloads for external Chrome DevTools MCP source signatures:
 npm run test:chrome-extension:release
 ```
 
-The generated manifest version follows this package's version. Upload the zip
-to a GitHub prerelease for alpha side-loading, or to the Chrome Web Store
-Developer Dashboard for managed distribution. The `debugger` permission will
+The generated manifest version follows this package's version. `Release Chrome
+Extension` (`.github/workflows/release-chrome-extension.yml`) packages and
+uploads it on a published stable release, and can be dispatched by hand; its
+`dry_run` default packages and scans without uploading anything. Automatic
+publishing pauses while the repository variable `RELEASE_CHROME_SYNC_PUBLISH`
+is `false`. Nightly and preview builds are not published to the store, because
+every upload takes a version bump and a review; upload the zip to a GitHub
+prerelease for alpha side-loading instead. The `debugger` permission will
 draw manual review and must be justified in the store listing.
+
+**Extension id note:** the manifest's `key` fixes the id of an unpacked build.
+The store rejected that key on the first upload and assigned the listing its
+own id, so the two builds carry different ids. `npm run package` zips the built
+manifest verbatim, for side-loading; `npm run package:store` stages a copy
+without the key, which is what the release workflow uploads. Browser Use treats
+the id as a set (`CHROME_EXTENSION_IDS` in the Browser Use package): the Native
+Messaging registration lists every known origin and the handshake accepts any
+of them, so both builds reach the same Host. Adding an id there also means
+bumping the Host revision, so installed Hosts are replaced rather than reused.
 
 **Version note:** the manifest version is derived from this package's semver
 (e.g. `0.21.2.65535`), which is lower than the legacy side-loaded `1.0.0`

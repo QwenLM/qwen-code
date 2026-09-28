@@ -162,6 +162,17 @@ describe('fileUtils', () => {
       modalities: { image: true, video: true },
     }),
     getFileSystemService: () => fsService,
+    getToolRegistry: () => ({
+      getFunctionDeclarations: () => [
+        { name: 'read_file' },
+        { name: 'tool_search' },
+      ],
+      getDeferredToolSummary: () => [{ name: 'zoom_image' }],
+      getCodeModeBindingPlan: () => ({
+        bindings: [{ name: 'zoom_image' }],
+        collisions: [],
+      }),
+    }),
   } as unknown as Config;
 
   beforeEach(() => {
@@ -1153,6 +1164,31 @@ describe('fileUtils', () => {
         actualNodeFs.unlinkSync(testBinaryFilePath);
     });
 
+    it.each([undefined, '1-2'])(
+      'rejects sandbox PDF processing before invoking host helpers (pages=%s)',
+      async (pages) => {
+        actualNodeFs.writeFileSync(testPdfFilePath, '%PDF-1.4\n');
+        const config = {
+          ...mockConfig,
+          getShellExecutionSandbox: () => ({
+            workspace: tempRootDir,
+            installation: '/installation',
+            state: '/state',
+            filesystem: 'workspace-write',
+            network: 'closed',
+          }),
+        } as Config;
+        const result = await processSingleFileContent(testPdfFilePath, config, {
+          fileType: 'pdf',
+          pages,
+        });
+        expect(result.errorType).toBe(ToolErrorType.READ_CONTENT_FAILURE);
+        expect(result.error).toContain('sandboxed Shell');
+        expect(execFile).not.toHaveBeenCalled();
+        expect(mockRender).not.toHaveBeenCalled();
+      },
+    );
+
     it('should read a text file successfully', async () => {
       const content = 'Line 1\\nLine 2\\nLine 3';
       actualNodeFs.writeFileSync(testTextFilePath, content);
@@ -1349,10 +1385,13 @@ describe('fileUtils', () => {
       );
       const parts = result.llmContent as Part[];
       expect(parts[0]).toEqual({
+        // The shared stub declares tool_search and defers zoom_image, so the
+        // hint takes the bridge form: review through tool_search, invoke
+        // through tool_call.
         text:
-          'Image overview: 20x10; oriented source: 20x10. ' +
-          'If details are too small, use tool_search for "zoom image", then ' +
-          'call zoom_image with coordinates normalized from 0 to 1000.',
+          'Image overview: 20x10; oriented source: 20x10.' +
+          ' If details are too small, review zoom_image with tool_search and' +
+          ' invoke it through tool_call, with coordinates normalized from 0 to 1000.',
       });
       expect(parts[1]).toEqual({
         inlineData: {
@@ -1367,6 +1406,79 @@ describe('fileUtils', () => {
       expect(metadata).toMatchObject({ width: 20, height: 10 });
       expect(result.returnDisplay).toContain('Read image file: image.png');
     });
+
+    it.each<{
+      codeModeOnly: boolean;
+      declared: string[];
+      deferred: string[];
+      bindings: string[];
+      hint: string;
+    }>([
+      {
+        codeModeOnly: false,
+        declared: ['read_file', 'tool_search'],
+        deferred: [],
+        bindings: [],
+        hint: '',
+      },
+      {
+        codeModeOnly: false,
+        declared: ['read_file', 'tool_search'],
+        deferred: ['zoom_image'],
+        bindings: [],
+        hint:
+          ' If details are too small, review zoom_image with tool_search and' +
+          ' invoke it through tool_call, with coordinates normalized from 0 to 1000.',
+      },
+      {
+        codeModeOnly: false,
+        declared: ['read_file', 'zoom_image'],
+        deferred: [],
+        bindings: [],
+        hint: ' If details are too small, call zoom_image with coordinates normalized from 0 to 1000.',
+      },
+      {
+        codeModeOnly: true,
+        declared: ['exec'],
+        deferred: [],
+        bindings: [],
+        hint: '',
+      },
+      {
+        codeModeOnly: true,
+        declared: ['exec'],
+        deferred: [],
+        bindings: ['zoom_image'],
+        hint: ' If details are too small, call tools.zoom_image with coordinates normalized from 0 to 1000.',
+      },
+    ])(
+      'uses only exposed tools for image guidance: $declared, code mode $codeModeOnly',
+      async ({ codeModeOnly, declared, deferred, bindings, hint }) => {
+        await sharp({
+          create: { width: 20, height: 10, channels: 3, background: '#306090' },
+        })
+          .png()
+          .toFile(testImageFilePath);
+        mockMimeGetType.mockReturnValue('image/png');
+        const result = await processSingleFileContent(testImageFilePath, {
+          ...mockConfig,
+          getCodeModeOnly: () => codeModeOnly,
+          getToolRegistry: () => ({
+            getFunctionDeclarations: () => declared.map((name) => ({ name })),
+            getDeferredToolSummary: () => deferred.map((name) => ({ name })),
+            getCodeModeBindingPlan: () => ({
+              bindings: bindings.map((name) => ({ name })),
+              collisions: [],
+            }),
+          }),
+        } as unknown as Config);
+        const parts = result.llmContent as Part[];
+        expect(parts[0]).toEqual({
+          text: `Image overview: 20x10; oriented source: 20x10.${hint}`,
+        });
+        expect(parts[1].inlineData?.mimeType).toBe('image/jpeg');
+      },
+    );
 
     it('points the zoom hint at tools.zoom_image in CodeModeOnly', async () => {
       await sharp({

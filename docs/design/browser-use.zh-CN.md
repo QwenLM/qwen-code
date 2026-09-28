@@ -2,6 +2,10 @@
 
 [English](browser-use.md) | [简体中文](browser-use.zh-CN.md)
 
+本文描述原有的单会话架构。[并发会话设计](browser-use-concurrent-sessions.zh-CN.md)
+更新了其中的 socket 归属、Native Host 安装和会话生命周期决策。该实现正在验证中，
+剩余验收缺口见链接文档。
+
 ## 目标
 
 Browser Use 为模型提供结构化 API，使其能够从 Qwen Code 控制用户现有的 Chrome。
@@ -39,15 +43,19 @@ flowchart TB
 
 `playwright-core@1.62.1` 通过 `chromium.connectOverCDP(transport)` 接受公共自定义 CDP transport。因此 Qwen 保留 Native Messaging，不添加本地 WebSocket server。
 
-Browser Use 以内置 skill 及其运行时资源随 Qwen Code 一起发布，无需单独安装 Browser Use 运行时包或第二个 Qwen 扩展，复用现有的 Qwen Chrome 扩展。Skill 的 `runtime/` 目录包含 Browser SDK、Native Host 和固定版本的 Playwright 依赖。Skill 向现有 Node REPL 注册 `runtime/node_modules` 并导入 `runtime/index.js`；CLI 本身不执行浏览器逻辑。kernel 在没有 Node 全局对象的隔离 realm 中执行该导入，因此运行时 bundle 在开头通过 `createRequire` 自行绑定 `process`；构建时的加载检查运行在主 realm，无法发现缺失的绑定，故由一个基于 kernel 的测试固定该行为。源码开发、转译构建和发布的 CLI 使用同一布局。仍需配置通用 Node REPL MCP server，并在浏览器安装 Qwen Chrome 扩展。内置资源不会在 CLI 启动时连接 Chrome；SDK 在首次使用时才连接。
+Browser Use 以内置 skill 及其运行时资源随 Qwen Code 一起发布，无需单独安装 Browser Use 运行时包或第二个 Qwen 扩展，复用现有的 Qwen Chrome 扩展。Skill 的 `runtime/` 目录包含 Browser SDK、Native Host 和固定版本的 Playwright 依赖。Skill 直接在现有 Node REPL 中导入 `runtime/index.js`，无需注册任何模块目录；CLI 本身不执行浏览器逻辑。kernel 在没有 Node 全局对象的隔离 realm 中执行该导入，且只从已注册的模块根和工作目录的 `node_modules` 解析裸包名，因此运行时 bundle 通过 `createRequire` 自行绑定 `process` 并加载固定版本的 `playwright-core`，后者从 bundle 自身所在位置解析。构建时的加载检查运行在主 realm，无法发现这两类问题，故由一个基于 kernel 的测试固定该行为。源码开发、转译构建和发布的 CLI 使用同一布局。仍需配置通用 Node REPL MCP server，并在浏览器安装 Qwen Chrome 扩展。内置资源不会在 CLI 启动时连接 Chrome；SDK 在首次使用时才连接。
 
-没有任何构建步骤会把该运行时写进源码树：打包步骤把它复制到 `dist/bundled/browser-use/runtime` 供发布的 CLI 使用；`npm run dev` 把同样的文件复制到源码 `SKILL.md` 旁边（git 忽略的位置），因为只有开发模式会从源码树读取内置 skill；正常安装的 `prepare` hook 负责构建这些副本的来源包。修改 Browser Use 源码或依赖后，运行 `npm run build --workspace=@qwen-code/browser-use` 并重新启动 `npm run dev` 以刷新开发副本；CLI 和 Core 仍直接运行 TypeScript 源码。若运行时缺失，调用 skill 时已有的 setup 检查会报告资源不完整。
+没有任何构建步骤会把该运行时写进源码树：打包步骤把它复制到 `dist/bundled/browser-use/runtime` 供发布的 CLI 使用；`npm run dev` 把同样的文件复制到源码 `SKILL.md` 旁边（git 忽略的位置），因为只有开发模式会从源码树读取内置 skill；正常安装的 `prepare` hook 负责构建这些副本的来源包。修改 Browser Use 源码或依赖后，运行 `npm run build --workspace=@qwen-code/browser-use` 并重新启动 `npm run dev` 以刷新开发副本；CLI 和 Core 仍直接运行 TypeScript 源码。若运行时入口缺失，导入会失败，skill 会让模型停止并报告运行时不完整；若找不到固定版本的 `playwright-core`，SDK 会自行报告运行时不完整。Node 的查找会延伸到上层目录，因此 SDK 会校验找到的副本版本：其他版本按运行时不完整拒绝加载；固定版本的副本则照常使用，因为其代码完全相同。
 
 Browser Use 默认对模型可用，由模型根据用户任务选择。用户可通过 `/skills` 或 `skills.disabled` 禁用，使用与 Computer Use 相同的控制方式。禁用的 skill 不参与模型发现和 skill 调用。这是 Computer Use 也使用的通用 skill 机制，不是浏览器权限边界：禁用 skill 不会移除已有对话中的指令，也不会断开现有 SDK 会话。
 
-Native Host 注册属于本机产品初始化，不由 Chrome 扩展执行。在 macOS 和 Linux 上，Browser runtime 首次初始化时检查 Google Chrome、Chrome for Testing 和 Chromium 的标准 `Default`、`Profile N` profile 中是否安装 Qwen 扩展。它读取 `Secure Preferences` 或 `Preferences` 中的扩展注册信息，并确认 manifest 存在，同时支持打包和解压安装。仅有残留扩展目录不视为已安装。若未找到扩展，初始化会提示安装方式，不写入 Native Host 文件。检测成功后，为已存在的浏览器根目录幂等安装 launcher 和 manifest。配置了 `QWEN_BROWSER_USE_SOCKET_PATH` 时继续使用外部管理的安装。
+Native Host 注册属于本机产品初始化，不由 Chrome 扩展执行。在 macOS 和 Linux 上，发起 Browser Use 任务即同意自动完成本机 Host 配置。初始化为已存在的浏览器根目录幂等安装或复用 launcher 和 manifest，然后由 transport 发现存活的 Host，并验证扩展、协议和 profile 握手。配置了 `QWEN_BROWSER_USE_SOCKET_PATH` 或 `QWEN_BROWSER_USE_DISCOVERY_DIR` 时继续使用外部管理的安装。
 
-安装 Qwen Chrome 扩展即同意首次使用时自动完成上述本机配置。Qwen 退出后，launcher 和 Native Messaging 注册仍然保留。安装器拒绝覆盖其他程序的文件：launcher 冲突会终止初始化，浏览器 manifest 冲突则跳过该 manifest，并在 stderr 上给出指明该文件的警告。运行 `node <skill-base>/runtime/scripts/native-host-setup.js uninstall` 可删除 Browser Use 拥有的文件；`status` 检查这些文件，`install` 显式注册。若要阻止后续 Browser Use 初始化时自动注册，还需卸载 Chrome 扩展。只有文件不存在才视为缺失；其他读取失败会终止操作，不覆盖无法读取的文件。Chrome 扩展仅通过 `connectNative()` 打开已注册的 host。
+初始化不通过读取 `Secure Preferences` 或 `Preferences` 检测扩展安装。这些私有配置文件可能无法读取，安装记录也无法证明扩展已启用或连接。Host 注册可以在扩展可用之前完成。若始终没有连接，应提示用户打开 Chrome，在目标 profile 中安装或启用扩展后重试；仅凭超时无法断定扩展未安装。协议不匹配仍提供更新指引。Profile 名称属于可选补充信息，不作为连接前提。
+
+Qwen 退出后，launcher 和 Native Messaging 注册仍然保留。安装器拒绝覆盖其他程序的文件：launcher 冲突会终止初始化，浏览器 manifest 冲突则跳过该 manifest，并在 stderr 上给出指明该文件的警告。运行 `node <skill-base>/runtime/scripts/native-host-setup.js uninstall` 可删除 Browser Use 拥有的文件；`status` 检查这些文件，`install` 显式注册。后续 Browser Use 初始化仍可重新注册 Host。只有必需的 Host 文件不存在才视为缺失；其他读取失败会终止操作，不覆盖无法读取的文件。Chrome 扩展通过 `connectNative()` 打开已注册的 host。
+
+初始化验收覆盖 Chrome 配置文件不可读、扩展尚不可用时完成配置、明确的未连接指引，以及保留 Host 文件访问错误。执行浏览器操作前仍必须通过已有的扩展身份、协议、profile 和 session 归属检查。
 
 ## 职责
 

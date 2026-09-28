@@ -56,6 +56,7 @@ describe('side panel capability status assets', () => {
     expect(manifest.permissions).toEqual([
       'tabs',
       'tabGroups',
+      'webNavigation',
       'storage',
       'debugger',
       'history',

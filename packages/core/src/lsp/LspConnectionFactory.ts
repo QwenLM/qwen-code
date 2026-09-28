@@ -29,7 +29,7 @@ interface PendingRequest {
 }
 
 class JsonRpcConnection {
-  private buffer = '';
+  private buffer = Buffer.alloc(0);
   private nextId = 1;
   private disposed = false;
   private pendingRequests = new Map<string | number, PendingRequest>();
@@ -160,7 +160,10 @@ class JsonRpcConnection {
       return;
     }
 
-    this.buffer += chunk.toString('utf8');
+    // Content-Length counts UTF-8 bytes, so framing must stay in bytes: a
+    // string accumulator would compare UTF-16 code units against it and cut
+    // multi-byte characters at the wrong offset.
+    this.buffer = Buffer.concat([this.buffer, chunk]);
 
     while (true) {
       const headerEnd = this.buffer.indexOf('\r\n\r\n');
@@ -168,10 +171,10 @@ class JsonRpcConnection {
         break;
       }
 
-      const header = this.buffer.slice(0, headerEnd);
+      const header = this.buffer.subarray(0, headerEnd).toString('utf8');
       const lengthMatch = /Content-Length:\s*(\d+)/i.exec(header);
       if (!lengthMatch) {
-        this.buffer = this.buffer.slice(headerEnd + 4);
+        this.buffer = this.buffer.subarray(headerEnd + 4);
         continue;
       }
 
@@ -179,12 +182,14 @@ class JsonRpcConnection {
       const messageStart = headerEnd + 4;
       const messageEnd = messageStart + contentLength;
 
-      if (this.buffer.length < messageEnd) {
+      if (this.buffer.byteLength < messageEnd) {
         break;
       }
 
-      const body = this.buffer.slice(messageStart, messageEnd);
-      this.buffer = this.buffer.slice(messageEnd);
+      const body = this.buffer
+        .subarray(messageStart, messageEnd)
+        .toString('utf8');
+      this.buffer = this.buffer.subarray(messageEnd);
 
       try {
         const message = JSON.parse(body);

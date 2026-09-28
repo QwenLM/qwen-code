@@ -37,7 +37,12 @@ import type { CliArgs } from './config/config.js';
 import { type LoadedSettings } from './config/settings.js';
 import { appEvents, AppEvent } from './utils/events.js';
 import type { ChatRecord, Config } from '@qwen-code/qwen-code-core';
-import { ApprovalMode, OutputFormat, Storage } from '@qwen-code/qwen-code-core';
+import {
+  ApprovalMode,
+  InputFormat,
+  OutputFormat,
+  Storage,
+} from '@qwen-code/qwen-code-core';
 import { EXTERNAL_TOOL_GUARD_REQUIRED_VALUE } from '@qwen-code/acp-bridge/externalToolGuard';
 
 const mockPrepareFileWatchersForProcessExit = vi.hoisted(() => vi.fn());
@@ -223,6 +228,16 @@ vi.mock('./utils/stdioHelpers.js', () => ({
 vi.mock('./utils/relaunch.js', () => ({
   relaunchAppInChildProcess: vi.fn(),
   relaunchOnExitCode: vi.fn((fn: () => Promise<number>) => fn()),
+}));
+
+vi.mock('./utils/processUtils.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./utils/processUtils.js')>()),
+  superviseInProcess: vi.fn(),
+}));
+
+vi.mock('./config/environment.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./config/environment.js')>()),
+  hasLoadedEnvironmentValues: vi.fn(() => false),
 }));
 
 vi.mock('./config/sandboxConfig.js', () => ({
@@ -1266,6 +1281,239 @@ describe('llm.tsx main function', () => {
       vi.unstubAllEnvs();
     }
   });
+
+  // Pins the process-replacement predicate in llm.tsx: a one-shot headless
+  // prompt replaces the already-loaded process, while supervisor-backed
+  // modes (ACP, -i, stream-json / file / json-fd input) keep the parent.
+  // The slash-command row pins the contract: a headless `/update` updates
+  // standalone installs in-process or prints manual instructions and never
+  // emits a relaunch exit code, so it keeps the execve optimization like any
+  // other one-shot prompt.
+  describe('relaunch routing', () => {
+    // 'in-process': no relaunch at all; otherwise the replaceProcess flag
+    // passed to the supervised relaunch.
+    const rows: Array<{
+      label: string;
+      argv: Partial<CliArgs>;
+      dualOutputInputFile?: string;
+      envFileValues?: boolean;
+      expected: 'in-process' | boolean;
+    }> = [
+      {
+        label: 'plain one-shot prompt',
+        argv: { prompt: 'summarize this repository' },
+        expected: 'in-process',
+      },
+      {
+        label: 'headless slash-command prompt',
+        argv: { prompt: '/update' },
+        expected: 'in-process',
+      },
+      {
+        label: 'acp mode',
+        argv: { acp: true, prompt: 'hi' },
+        expected: false,
+      },
+      {
+        label: 'interactive prompt (-i)',
+        argv: { prompt: 'hi', promptInteractive: 'follow-up' },
+        expected: 'in-process',
+      },
+      {
+        label: 'file input',
+        argv: { prompt: 'hi', inputFile: 'input.txt' },
+        expected: false,
+      },
+      {
+        label: 'json-fd input',
+        argv: { prompt: 'hi', jsonFd: 3 },
+        expected: false,
+      },
+      {
+        label: 'stream-json input',
+        argv: { prompt: 'hi', inputFormat: InputFormat.STREAM_JSON },
+        expected: false,
+      },
+      {
+        label: 'dual-output file input',
+        argv: { prompt: 'hi' },
+        dualOutputInputFile: 'session.jsonl',
+        expected: false,
+      },
+      {
+        // In-session restarts re-exec this process in place instead of
+        // going through a supervising parent.
+        label: 'plain interactive launch (no prompt)',
+        argv: {},
+        expected: 'in-process',
+      },
+      {
+        // Modules loaded before .env / settings.env were applied read the old
+        // environment; only a fresh image sees those values.
+        label: 'plain one-shot prompt with env-file values',
+        argv: { prompt: 'hi' },
+        envFileValues: true,
+        expected: true,
+      },
+      {
+        label: 'plain interactive launch with env-file values',
+        argv: {},
+        envFileValues: true,
+        expected: false,
+      },
+    ];
+
+    it.each(rows)(
+      'routes $label to $expected',
+      async ({ argv, dualOutputInputFile, envFileValues, expected }) => {
+        const originalIsTTY = Object.getOwnPropertyDescriptor(
+          process.stdin,
+          'isTTY',
+        );
+        Object.defineProperty(process.stdin, 'isTTY', {
+          value: true,
+          configurable: true,
+        });
+        vi.stubEnv('QWEN_CODE_NO_RELAUNCH', '');
+
+        const { parseArguments } = await import('./config/config.js');
+        const { loadSettings } = await import('./config/settings.js');
+        const { loadSandboxConfig } = await import('./config/sandboxConfig.js');
+        const { relaunchAppInChildProcess } = await import(
+          './utils/relaunch.js'
+        );
+        const { superviseInProcess } = await import('./utils/processUtils.js');
+        const { hasLoadedEnvironmentValues } = await import(
+          './config/environment.js'
+        );
+        vi.mocked(hasLoadedEnvironmentValues).mockReturnValue(
+          envFileValues ?? false,
+        );
+        vi.mocked(parseArguments).mockResolvedValue(argv as CliArgs);
+        vi.mocked(loadSandboxConfig).mockResolvedValue(undefined);
+        vi.mocked(loadSettings).mockReturnValue({
+          errors: [],
+          merged: {
+            advanced: {},
+            security: { auth: {} },
+            ui: {},
+            dualOutput: dualOutputInputFile
+              ? { inputFile: dualOutputInputFile }
+              : undefined,
+          },
+          setValue: vi.fn(),
+          forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
+          migrationWarnings: [],
+          getSystemHooks: () => undefined,
+          getUserHooks: () => undefined,
+          getProjectHooks: () => undefined,
+        } as never);
+
+        let route: 'in-process' | boolean | undefined;
+        vi.mocked(relaunchAppInChildProcess).mockImplementation(
+          async (_memoryArgs, _extraArgs, options) => {
+            route = options?.replaceProcess;
+            throw new Error('stop after routing check');
+          },
+        );
+        vi.mocked(superviseInProcess).mockImplementation(() => {
+          route = 'in-process';
+          throw new Error('stop after routing check');
+        });
+
+        try {
+          await expect(main()).rejects.toThrow('stop after routing check');
+        } finally {
+          vi.mocked(hasLoadedEnvironmentValues).mockReturnValue(false);
+          vi.unstubAllEnvs();
+          if (originalIsTTY) {
+            Object.defineProperty(process.stdin, 'isTTY', originalIsTTY);
+          } else {
+            delete (process.stdin as { isTTY?: unknown }).isTTY;
+          }
+        }
+
+        expect(route).toBe(expected);
+      },
+    );
+  });
+
+  // The synchronous 'auto' baseline runs `defaults read` on macOS, which
+  // blocks the event loop; a run that renders no theme colors must not pay it.
+  it.each([
+    { stdoutIsTTY: false, promptInteractive: undefined, expectAuto: false },
+    { stdoutIsTTY: true, promptInteractive: undefined, expectAuto: false },
+    { stdoutIsTTY: true, promptInteractive: 'true', expectAuto: true },
+  ])(
+    'resolves the auto theme baseline only when the run can render it (stdoutIsTTY=$stdoutIsTTY, promptInteractive=$promptInteractive)',
+    async ({ stdoutIsTTY, promptInteractive, expectAuto }) => {
+      const stubIsTTY = (
+        stream: { isTTY?: unknown },
+        value: boolean | undefined,
+      ): (() => void) => {
+        const original = Object.getOwnPropertyDescriptor(stream, 'isTTY');
+        Object.defineProperty(stream, 'isTTY', { value, configurable: true });
+        return () => {
+          if (original) {
+            Object.defineProperty(stream, 'isTTY', original);
+          } else {
+            delete stream.isTTY;
+          }
+        };
+      };
+      const restoreStdoutIsTTY = stubIsTTY(process.stdout, stdoutIsTTY);
+      // `-i` exits early unless stdin is a terminal.
+      const restoreStdinIsTTY = stubIsTTY(process.stdin, true);
+      vi.stubEnv('QWEN_CODE_NO_RELAUNCH', '');
+
+      const { parseArguments } = await import('./config/config.js');
+      const { loadSettings } = await import('./config/settings.js');
+      const { loadSandboxConfig } = await import('./config/sandboxConfig.js');
+      const { relaunchAppInChildProcess } = await import('./utils/relaunch.js');
+      const { themeManager, AUTO_THEME_NAME } = await import(
+        './ui/themes/theme-manager.js'
+      );
+      const setActiveTheme = vi
+        .spyOn(themeManager, 'setActiveTheme')
+        .mockReturnValue(true);
+      vi.mocked(parseArguments).mockResolvedValue({
+        prompt: 'hi',
+        outputFormat: 'json',
+        promptInteractive,
+      } as CliArgs);
+      vi.mocked(loadSandboxConfig).mockResolvedValue(undefined);
+      vi.mocked(loadSettings).mockReturnValue({
+        errors: [],
+        merged: { advanced: {}, security: { auth: {} }, ui: {} },
+        setValue: vi.fn(),
+        forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
+        migrationWarnings: [],
+        getSystemHooks: () => undefined,
+        getUserHooks: () => undefined,
+        getProjectHooks: () => undefined,
+      } as never);
+      vi.mocked(relaunchAppInChildProcess).mockImplementation(async () => {
+        throw new Error('stop after theme baseline');
+      });
+      // A plain one-shot run supervises itself in-process instead.
+      const { superviseInProcess } = await import('./utils/processUtils.js');
+      vi.mocked(superviseInProcess).mockImplementation(() => {
+        throw new Error('stop after theme baseline');
+      });
+
+      try {
+        await expect(main()).rejects.toThrow('stop after theme baseline');
+        expect(
+          setActiveTheme.mock.calls.some(([name]) => name === AUTO_THEME_NAME),
+        ).toBe(expectAuto);
+      } finally {
+        setActiveTheme.mockRestore();
+        vi.unstubAllEnvs();
+        restoreStdoutIsTTY();
+        restoreStdinIsTTY();
+      }
+    },
+  );
 
   // Regression for #8653 (sandbox hop): getSandboxPassthroughEnvArgs
   // forwards the QWEN_CODE_SERVE stamp into the container, so the sandboxed
@@ -2480,7 +2728,7 @@ describe('llm.tsx OpenTUI renderer dispatch', () => {
 
   // Drives main() to the renderer dispatch: interactive config, no
   // relaunch, TTY stdin — the same harness the kitty-protocol tests use.
-  const interactiveMainSetup = async () => {
+  const interactiveMainSetup = async (screenReader = false) => {
     const { loadCliConfig, parseArguments } = await import(
       './config/config.js'
     );
@@ -2508,7 +2756,7 @@ describe('llm.tsx OpenTUI renderer dispatch', () => {
       waitForMcpReady: vi.fn().mockResolvedValue(undefined),
       getIdeMode: () => false,
       getExperimentalZedIntegration: () => false,
-      getScreenReader: () => false,
+      getScreenReader: () => screenReader,
       getMemoryFileCount: () => 0,
       getWarnings: () => [],
       isSafeMode: () => false,
@@ -2629,6 +2877,23 @@ describe('llm.tsx OpenTUI renderer dispatch', () => {
     await main();
 
     expect(mockStartPostRenderPrefetches).toHaveBeenCalled();
+  });
+
+  it('hands the screen-reader flag to the renderer gate', async () => {
+    await interactiveMainSetup(/* screenReader */ true);
+    selectOpentui(false);
+    mockStartOpenTuiUI.mockResolvedValue(false);
+
+    await main();
+
+    // The gate is what keeps a screen-reader session on ink; dropping this
+    // argument would silently serve OpenTUI, which has no SR render path.
+    expect(mockSelectTuiRenderer).toHaveBeenLastCalledWith(
+      undefined,
+      undefined,
+      expect.anything(),
+      true,
+    );
   });
 });
 

@@ -114,9 +114,9 @@ describe('SubagentManager', () => {
       ]),
       // `buildSubagentContextOverride` now rebuilds the tool registry on
       // its override and copies discovered tools from this parent
-      // registry. The real implementation iterates `source.tools.values()`,
-      // so the stub needs a `tools` Map to avoid a TypeError.
+      // registry. Mirror both discovered-tool maps read by that copy.
       tools: new Map(),
+      mcpAppTools: new Map(),
     } as unknown as ToolRegistry;
 
     // Create mock Config object using test utility
@@ -3015,6 +3015,25 @@ bad`);
         ]);
       });
 
+      it('keeps inherit-all for an empty tools array combined with disallowedTools', async () => {
+        // An empty allow-list is the documented "inherit everything" marker
+        // for definition files, not a request for a zero-tool agent. `[]` is
+        // truthy, so testing only for presence produced `tools: []` here, and
+        // AgentCore reads an explicit empty list as deny-all: an agent defined
+        // with `tools: []` plus `disallowedTools: [write_file]` declared 16
+        // tools on the merge base and 0 on this branch, with no warning.
+        const runtimeConfig = await manager.convertToRuntimeConfig({
+          ...validConfig,
+          tools: [],
+          disallowedTools: ['write_file'],
+        });
+
+        expect(runtimeConfig.toolConfig?.tools).toEqual(['*']);
+        expect(runtimeConfig.toolConfig?.disallowedTools).toEqual([
+          'write_file',
+        ]);
+      });
+
       it('should transform display names to tool names in tool configuration', async () => {
         const configWithDisplayNames: SubagentConfig = {
           ...validConfig,
@@ -3217,6 +3236,38 @@ bad`);
         mockAgentHeadlessCreate.mockReset();
         vi.restoreAllMocks();
       });
+
+      it.each([
+        { executor: executorConfig.executor },
+        { mcpServers: { remote: { command: 'node' } } },
+        { hooks: { Stop: [] } },
+      ])(
+        'rejects sandbox child overrides %j before invoking any executor',
+        async (overrides) => {
+          vi.spyOn(mockConfig, 'getShellExecutionSandbox').mockReturnValue(
+            {} as NonNullable<ReturnType<Config['getShellExecutionSandbox']>>,
+          );
+          const externalCreate = vi.fn();
+          vi.spyOn(mockConfig, 'getExternalAgentExecutor').mockReturnValue({
+            create: externalCreate,
+          });
+          await expect(
+            manager.createAgentHeadless(
+              {
+                ...executorConfig,
+                executor: undefined,
+                ...overrides,
+              } as SubagentConfig,
+              mockConfig,
+            ),
+          ).rejects.toThrow(
+            'does not support agent executors, MCP servers or hooks',
+          );
+          expect(externalCreate).not.toHaveBeenCalled();
+          expect(mockAgentHeadlessCreate).not.toHaveBeenCalled();
+          expect(mockToolRegistry.warmAll).not.toHaveBeenCalled();
+        },
+      );
 
       it('refuses to run in-process when no executor is registered', async () => {
         vi.spyOn(mockConfig, 'getExternalAgentExecutor').mockReturnValue(

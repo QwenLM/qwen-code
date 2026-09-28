@@ -91,6 +91,7 @@ import {
   computeUniqueBranchTitle,
   normalizeDerivedBranchTitle,
   BranchPointInvalidError,
+  SessionForkSourceUnavailableError,
   parseGoalSnapshotV2,
   parseGoalStateCause,
   ToolNames,
@@ -157,6 +158,14 @@ import {
   extractAndStripMeta,
   listWorkflowSnapshots,
   claimInterruptedWorkflowRuns,
+  claimInterruptedWorkflowRun,
+  isWorkflowRunId,
+  readWorkflowCheckpoint,
+  readWorkflowSnapshot,
+  snapshotArgsUnavailable,
+  WorkflowCheckpointUnwritableError,
+  WorkflowJournalUnavailableError,
+  type WorkflowStatus,
   type TurnResultRecordPayload,
   qualifySkillName,
   sessionIdContext,
@@ -220,6 +229,11 @@ import {
 import { observeAcpToolResultWire } from '../nonInteractive/tool-result-boundary-diagnostics.js';
 import { Readable } from 'node:stream';
 import { normalizeDisabledToolList } from '../config/normalizeDisabledTools.js';
+import {
+  SESSION_EXECUTION_ENGINE_META_KEY,
+  SessionExecutionEngineError,
+  type SessionExecutionEngine,
+} from '@qwen-code/qwen-code-core/services/session-execution-engine.js';
 import type { Stats } from 'node:fs';
 import { realpathSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
@@ -325,6 +339,7 @@ import {
   collectHistoryReplayUpdates,
   copyCumulativeUsage,
   createReplayCumulativeUsage,
+  degradeReplayEnvelopeAppHtml,
   HistoryReplayLimitError,
   replayTranscriptRecordPage,
 } from './session/history-replay-page.js';
@@ -345,6 +360,7 @@ import { runWithAcpRuntimeOutputDir } from './runtimeOutputDirContext.js';
 import { ACP_ERROR_CODES } from './errorCodes.js';
 import { registerCleanup, runExitCleanup } from '../utils/cleanup.js';
 import { QWEN_CODE_SERVE_ENV } from '../config/acp-channel-fallback.js';
+import { isSshWorkspaceExtMethodAllowed } from './ssh-workspace-guards.js';
 import { PeerMessaging } from '../peerMessaging/peer-messaging.js';
 import { isCrossSessionMessagingEnabled } from '../peerMessaging/enabled.js';
 import { startNonInteractiveOpenAILogHousekeeping } from '../services/housekeeping/scheduler.js';
@@ -507,6 +523,27 @@ function isSessionOwnedWorkflowTool(
   );
 }
 
+/** What a `workflow-action` answers. */
+type WorkflowActionResult = {
+  changed: boolean;
+  status?: WorkflowStatus;
+  taskId?: string;
+};
+
+/**
+ * The run a `retry` or `rerun` starts from: a live registry entry, or the
+ * snapshot of a run no registry holds any more.
+ */
+interface WorkflowRestartSource {
+  runId: string;
+  status: WorkflowStatus;
+  script: string;
+  scriptPath?: string;
+  args: unknown;
+  sourceRef?: WorkflowSourceRef;
+  workflowName?: string;
+}
+
 /**
  * Start a session-owned run, reporting a rejected parameter as one.
  *
@@ -530,7 +567,35 @@ async function startSessionOwnedWorkflow(
       error instanceof Error ? error.message : String(error),
     );
   }
-  const result = await invocation.execute(new AbortController().signal);
+  let result: WorkflowToolResult;
+  try {
+    result = await invocation.execute(new AbortController().signal);
+  } catch (error) {
+    // A retry resumes its run's journal, and the runner refuses one with no
+    // journal to replay. That is the run's state, not a fault here, and a
+    // rerun is what answers it.
+    if (error instanceof WorkflowJournalUnavailableError) {
+      debugLogger.debug(error.message);
+      throw RequestError.invalidParams(
+        { errorKind: 'workflow_journal_unavailable' },
+        error.reason === 'missing'
+          ? `Workflow run ${error.runId} has no journal on disk, so a retry has nothing to resume; rerun it to start it from the beginning.`
+          : `The journal of workflow run ${error.runId} could not be read, so a retry cannot resume it; rerun it to start it from the beginning.`,
+      );
+    }
+    // The run is recorded as running again before it registers, because a
+    // retry from history refuses a run whose checkpoint is still there. When
+    // that record cannot be written the resume does not start, and the
+    // caller is told so rather than being handed a daemon fault.
+    if (error instanceof WorkflowCheckpointUnwritableError) {
+      debugLogger.debug(error.message);
+      throw RequestError.invalidParams(
+        { errorKind: 'workflow_not_recorded' },
+        error.message,
+      );
+    }
+    throw error;
+  }
   if (result.error?.type === ToolErrorType.INVALID_TOOL_PARAMS) {
     throw RequestError.invalidParams(
       { errorKind: 'workflow_invalid_params' },
@@ -1021,12 +1086,48 @@ async function resolvePersistedSessionIdForRestore(
   }
 }
 
+/**
+ * A paired Bridge names the engine it selected; this host only executes
+ * Legacy sessions, so any other selection is refused before session work.
+ */
+function requestedExecutionEngine(
+  meta: Record<string, unknown> | null | undefined,
+  sessionId: string | undefined,
+): SessionExecutionEngine | undefined {
+  const engine = meta?.[SESSION_EXECUTION_ENGINE_META_KEY];
+  if (engine === undefined || engine === 'legacy') return engine;
+  throw new RequestError(
+    -32024,
+    'This ACP host only executes legacy sessions.',
+    {
+      errorKind: 'session_execution_engine_unavailable',
+      ...(sessionId !== undefined ? { sessionId } : {}),
+    },
+  );
+}
+
+function withExecutionEngineReceipt<
+  T extends { _meta?: Record<string, unknown> | null },
+>(response: T, engine: SessionExecutionEngine | undefined): T {
+  if (engine === undefined) return response;
+  return {
+    ...response,
+    _meta: { ...response._meta, [SESSION_EXECUTION_ENGINE_META_KEY]: engine },
+  };
+}
+
 function mapSessionRestoreRequestError(
   error: unknown,
   sessionId: string,
 ): unknown {
   const mappedWriterError = mapSessionWriterRequestError(error);
   if (mappedWriterError !== error) return mappedWriterError;
+  if (error instanceof SessionExecutionEngineError) {
+    return new RequestError(-32024, error.message, {
+      errorKind: error.errorKind,
+      sessionId,
+    });
+  }
   if (error instanceof SessionTranscriptSnapshotUnavailableError) {
     return new RequestError(-32010, error.message, {
       errorKind: 'transcript_snapshot_unavailable',
@@ -1407,6 +1508,8 @@ type QwenMcpServerConfig = {
   headers?: Record<string, string>;
   timeout?: number;
   versionNegotiation?: 'auto' | 'legacy';
+  appResourceMaxBytes?: number;
+  appResourceTimeoutMs?: number;
   trust?: boolean;
   description?: string;
   includeTools?: string[];
@@ -1817,7 +1920,7 @@ function resolveExistingProviderApiKey(
   // so a reconnect reads the key of the conversation model being connected and
   // only falls back to service entries when no conversation model matched.
   const conversation = matched.filter(
-    (model) => !model.imageOnly && !model.voiceOnly,
+    (model) => !model.imageOnly && !model.voiceOnly && !model.realtimeOnly,
   );
   if (
     !conversation.length &&
@@ -2144,6 +2247,12 @@ function normalizeOptionalNumber(value: unknown): number | undefined {
   return numberValue;
 }
 
+function toMcpAppResourceLimit(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value)
+    ? value
+    : undefined;
+}
+
 function normalizeMcpServerConfig(value: unknown): QwenMcpServerConfig {
   const input = toRecord(value);
   const transport = input['transport'];
@@ -2176,6 +2285,12 @@ function normalizeMcpServerConfig(value: unknown): QwenMcpServerConfig {
     );
   }
   server.versionNegotiation = versionNegotiation;
+  server.appResourceMaxBytes = toMcpAppResourceLimit(
+    input['appResourceMaxBytes'],
+  );
+  server.appResourceTimeoutMs = toMcpAppResourceLimit(
+    input['appResourceTimeoutMs'],
+  );
   if (typeof input['trust'] === 'boolean') server.trust = input['trust'];
   server.includeTools = normalizeStringArray(input['includeTools']);
   server.excludeTools = normalizeStringArray(input['excludeTools']);
@@ -2215,6 +2330,8 @@ function toStoredMcpServerConfig(
   for (const key of [
     'timeout',
     'versionNegotiation',
+    'appResourceMaxBytes',
+    'appResourceTimeoutMs',
     'trust',
     'description',
     'includeTools',
@@ -2246,6 +2363,10 @@ function toMcpServerConfig(value: unknown): QwenMcpServerConfig | undefined {
       headers: normalizeStringRecord(server['headers']),
       timeout: normalizeOptionalNumber(server['timeout']),
       versionNegotiation: toMcpVersionNegotiation(server['versionNegotiation']),
+      appResourceMaxBytes: toMcpAppResourceLimit(server['appResourceMaxBytes']),
+      appResourceTimeoutMs: toMcpAppResourceLimit(
+        server['appResourceTimeoutMs'],
+      ),
       trust: typeof server['trust'] === 'boolean' ? server['trust'] : undefined,
       description:
         typeof server['description'] === 'string'
@@ -2266,6 +2387,10 @@ function toMcpServerConfig(value: unknown): QwenMcpServerConfig | undefined {
       headers: normalizeStringRecord(server['headers']),
       timeout: normalizeOptionalNumber(server['timeout']),
       versionNegotiation: toMcpVersionNegotiation(server['versionNegotiation']),
+      appResourceMaxBytes: toMcpAppResourceLimit(server['appResourceMaxBytes']),
+      appResourceTimeoutMs: toMcpAppResourceLimit(
+        server['appResourceTimeoutMs'],
+      ),
       trust: typeof server['trust'] === 'boolean' ? server['trust'] : undefined,
       description:
         typeof server['description'] === 'string'
@@ -2288,6 +2413,10 @@ function toMcpServerConfig(value: unknown): QwenMcpServerConfig | undefined {
       env: normalizeStringRecord(server['env']),
       timeout: normalizeOptionalNumber(server['timeout']),
       versionNegotiation: toMcpVersionNegotiation(server['versionNegotiation']),
+      appResourceMaxBytes: toMcpAppResourceLimit(server['appResourceMaxBytes']),
+      appResourceTimeoutMs: toMcpAppResourceLimit(
+        server['appResourceTimeoutMs'],
+      ),
       trust: typeof server['trust'] === 'boolean' ? server['trust'] : undefined,
       description:
         typeof server['description'] === 'string'
@@ -2866,6 +2995,11 @@ export async function runAcpAgent(
     externalToolGuardProviderAttached?: boolean;
   },
 ) {
+  if (config.getShellExecutionSandbox?.()) {
+    throw new Error(
+      'Tool execution sandbox does not support ACP sessions yet.',
+    );
+  }
   // Conversations-runtime provenance, accepted by the CLI entry point only in
   // ACP mode with the private parent capability present. Frozen for the
   // process lifetime alongside the writer-lease snapshot.
@@ -3939,6 +4073,7 @@ class QwenAgent implements Agent {
           }`,
         );
       }
+      session.cancelMcpAppCalls();
       void session.cancelPendingPrompt().catch((error) => {
         debugLogger.debug(
           `Session ${session.getId()} cancel during managed shutdown failed: ${
@@ -4156,6 +4291,7 @@ class QwenAgent implements Agent {
           {
             ...this.argv,
             sessionId: 'workspace-mcp-discovery',
+            experimentalLsp: false,
             resume: undefined,
             continue: false,
             chatRecording: false,
@@ -4673,6 +4809,7 @@ class QwenAgent implements Agent {
       await waitForSessionDrain(
         (async () => {
           try {
+            session.cancelMcpAppCalls();
             await session.cancelPendingPrompt();
           } catch (err) {
             debugLogger.debug(
@@ -4982,6 +5119,11 @@ class QwenAgent implements Agent {
     private readonly externalToolGuardProviderAttached = false,
     private readonly conversationsRuntimeProvenance = false,
   ) {
+    if (config.getShellExecutionSandbox?.()) {
+      throw new Error(
+        'Tool execution sandbox does not support ACP sessions yet.',
+      );
+    }
     // Pool kill switch via env var so operators can A/B compare or
     // roll back without rebuilding. `run-qwen-serve.ts` sets this when
     // `--no-mcp-pool` is passed at daemon startup.
@@ -5449,6 +5591,10 @@ class QwenAgent implements Agent {
     }
     const requestedSessionId =
       parsedSessionId.kind === 'valid' ? parsedSessionId.sessionId : undefined;
+    const executionEngine = requestedExecutionEngine(
+      params._meta,
+      requestedSessionId,
+    );
     const releaseStartingSessionId = requestedSessionId
       ? this.reserveStartingSessionId(requestedSessionId)
       : undefined;
@@ -5509,6 +5655,9 @@ class QwenAgent implements Agent {
                     ...(deferMcpDiscovery ? { skipMcpDiscovery: true } : {}),
                   }
                 : undefined,
+              undefined,
+              undefined,
+              executionEngine,
             ),
           );
           let session: Session;
@@ -5544,15 +5693,20 @@ class QwenAgent implements Agent {
             });
           }
           profiler.setSessionId(session.getId());
-          return profiler.timeSync('response_build', () => ({
-            sessionId: session.getId(),
-            models: this.buildAvailableModels(config),
-            modes: this.buildModesData(config),
-            configOptions: this.buildConfigOptions(
-              config,
-              session.getDefaultReasoningConfig(),
+          return profiler.timeSync('response_build', () =>
+            withExecutionEngineReceipt<NewSessionResponse>(
+              {
+                sessionId: session.getId(),
+                models: this.buildAvailableModels(config),
+                modes: this.buildModesData(config),
+                configOptions: this.buildConfigOptions(
+                  config,
+                  session.getDefaultReasoningConfig(),
+                ),
+              },
+              executionEngine,
             ),
-          }));
+          );
         },
         parentContext ? { parentContext } : {},
       );
@@ -5564,21 +5718,26 @@ class QwenAgent implements Agent {
 
   async loadSession(params: LoadSessionRequest): Promise<LoadSessionResponse> {
     const sessionId = normalizeSessionIdForLookup(params.sessionId);
+    const executionEngine = requestedExecutionEngine(params._meta, sessionId);
     const parentContext = extractDaemonTraceContext(params);
-    return await withDaemonSpan(
-      'qwen-code.daemon.session_restore',
-      {
-        'qwen-code.daemon.operation': 'acp_session_load',
-        'qwen-code.daemon.session_restore.action': 'load',
-        'session.id': sessionId,
-      },
-      async (span) =>
-        this.loadSessionWithProfiler(
-          params,
-          sessionId,
-          createAcpSessionRestoreProfiler(span),
-        ),
-      parentContext ? { parentContext } : {},
+    return withExecutionEngineReceipt(
+      await withDaemonSpan(
+        'qwen-code.daemon.session_restore',
+        {
+          'qwen-code.daemon.operation': 'acp_session_load',
+          'qwen-code.daemon.session_restore.action': 'load',
+          'session.id': sessionId,
+        },
+        async (span) =>
+          this.loadSessionWithProfiler(
+            params,
+            sessionId,
+            createAcpSessionRestoreProfiler(span),
+            executionEngine,
+          ),
+        parentContext ? { parentContext } : {},
+      ),
+      executionEngine,
     );
   }
 
@@ -5586,6 +5745,7 @@ class QwenAgent implements Agent {
     params: LoadSessionRequest,
     initialSessionId: string,
     profiler: AcpSessionRestoreProfiler,
+    executionEngine: SessionExecutionEngine | undefined,
   ): Promise<LoadSessionResponse> {
     let sessionId = initialSessionId;
     const sessionSource = getSessionSource(params);
@@ -5762,6 +5922,9 @@ class QwenAgent implements Agent {
                 : {}),
               ...(replayPage.hasMore ? { hasMore: true } : {}),
             };
+            if (enforceLimits) {
+              degradeReplayEnvelopeAppHtml(envelope, LOAD_REPLAY_MAX_BYTES);
+            }
             validateLoadReplayEnvelope(sessionId, envelope, enforceLimits);
             // The card is presentation: a full page simply goes without it.
             appendGoalUpdatesWithinLimits(
@@ -5821,6 +5984,7 @@ class QwenAgent implements Agent {
           { skipLlmInitialization: true },
           undefined,
           restoreOptions,
+          executionEngine,
         ),
       );
       if (suppressRestoreAskUserQuestion) {
@@ -5934,6 +6098,12 @@ class QwenAgent implements Agent {
                     : {}),
                   ...(projection.replay.hasMore ? { hasMore: true } : {}),
                 };
+                if (restoreOptions.replay.kind === 'recent') {
+                  degradeReplayEnvelopeAppHtml(
+                    replayEnvelope,
+                    LOAD_REPLAY_MAX_BYTES,
+                  );
+                }
                 validateLoadReplayEnvelope(
                   sessionId,
                   replayEnvelope,
@@ -6097,21 +6267,26 @@ class QwenAgent implements Agent {
     params: ResumeSessionRequest,
   ): Promise<ResumeSessionResponse> {
     const sessionId = normalizeSessionIdForLookup(params.sessionId);
+    const executionEngine = requestedExecutionEngine(params._meta, sessionId);
     const parentContext = extractDaemonTraceContext(params);
-    return await withDaemonSpan(
-      'qwen-code.daemon.session_restore',
-      {
-        'qwen-code.daemon.operation': 'acp_session_resume',
-        'qwen-code.daemon.session_restore.action': 'resume',
-        'session.id': sessionId,
-      },
-      async (span) =>
-        this.resumeSessionWithProfiler(
-          params,
-          sessionId,
-          createAcpSessionRestoreProfiler(span),
-        ),
-      parentContext ? { parentContext } : {},
+    return withExecutionEngineReceipt(
+      await withDaemonSpan(
+        'qwen-code.daemon.session_restore',
+        {
+          'qwen-code.daemon.operation': 'acp_session_resume',
+          'qwen-code.daemon.session_restore.action': 'resume',
+          'session.id': sessionId,
+        },
+        async (span) =>
+          this.resumeSessionWithProfiler(
+            params,
+            sessionId,
+            createAcpSessionRestoreProfiler(span),
+            executionEngine,
+          ),
+        parentContext ? { parentContext } : {},
+      ),
+      executionEngine,
     );
   }
 
@@ -6119,6 +6294,7 @@ class QwenAgent implements Agent {
     params: ResumeSessionRequest,
     initialSessionId: string,
     profiler: AcpSessionRestoreProfiler,
+    executionEngine: SessionExecutionEngine | undefined,
   ): Promise<ResumeSessionResponse> {
     let sessionId = initialSessionId;
     const sessionSource = getSessionSource(params);
@@ -6223,6 +6399,7 @@ class QwenAgent implements Agent {
           { skipLlmInitialization: true },
           undefined,
           RESUME_RESTORE_OPTIONS,
+          executionEngine,
         ),
       );
       if (suppressRestoreAskUserQuestion) {
@@ -6340,7 +6517,11 @@ class QwenAgent implements Agent {
       const sessionPath = config
         .getSessionService()
         .getWorktreeSessionPath(config.getSessionId());
-      const restored = await restoreWorktreeContext(sessionPath);
+      const restored = await restoreWorktreeContext(
+        sessionPath,
+        (error) => debugLogger.warn(`ACP worktree restore warning: ${error}`),
+        config.getSessionId(),
+      );
       if (restored.contextMessage) {
         session.pendingWorktreeNotice = restored.contextMessage;
       }
@@ -8693,6 +8874,7 @@ class QwenAgent implements Agent {
         runSavedArgs: true,
         runScript: true,
         nameOnly: config.isWorkflowNameOnly?.() === true,
+        retryHistorical: true,
       },
       savedWorkflows,
     };
@@ -9283,9 +9465,27 @@ class QwenAgent implements Agent {
     method: string,
     params: Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
+    const sessionId = params['sessionId'];
+    const sessionConfig =
+      typeof sessionId === 'string'
+        ? this.sessions.get(sessionId)?.getConfig()
+        : undefined;
+    if (
+      (this.config.getExecutionEnvironment?.() ||
+        sessionConfig?.getExecutionEnvironment?.()) &&
+      !isSshWorkspaceExtMethodAllowed(method)
+    ) {
+      throw RequestError.invalidParams(
+        { errorKind: 'unsupported_operation' },
+        'This operation is unavailable for SSH workspaces.',
+      );
+    }
     const requestedCwd =
       typeof params['cwd'] === 'string' ? params['cwd'] : undefined;
     const cwd = requestedCwd || process.cwd();
+    const UUID_V4_RE =
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
     switch (method) {
       case SERVE_STATUS_EXT_METHODS.channelPing: {
         const nonce = params['nonce'];
@@ -11047,6 +11247,51 @@ class QwenAgent implements Agent {
         }
         return { requestId, cancelled };
       }
+      case 'qwen/session/mcp-app/call':
+      case 'qwen/session/mcp-app/cancel': {
+        if (!this.isTrustedManagedParent()) {
+          throw RequestError.invalidParams(
+            undefined,
+            'MCP App calls require a trusted private ACP parent',
+          );
+        }
+        const { sessionId, callId } = params;
+        if (
+          typeof sessionId !== 'string' ||
+          typeof callId !== 'string' ||
+          !callId.startsWith('mcp-app-')
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid MCP App session or call id',
+          );
+        }
+        const session = this.sessionOrThrow(sessionId);
+        if (method === 'qwen/session/mcp-app/cancel') {
+          session.cancelMcpAppCall(callId);
+          return {};
+        }
+        const { serverName, resourceUri, name, arguments: args } = params;
+        if (
+          typeof serverName !== 'string' ||
+          typeof resourceUri !== 'string' ||
+          typeof name !== 'string' ||
+          !args ||
+          typeof args !== 'object' ||
+          Array.isArray(args)
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid MCP App tool call',
+          );
+        }
+        return session.callMcpAppTool(callId, {
+          serverName,
+          resourceUri,
+          name,
+          arguments: args as Record<string, unknown>,
+        });
+      }
       case 'qwen/session/sources/list':
       case 'qwen/session/sources/upsert':
       case 'qwen/session/sources/remove':
@@ -11346,6 +11591,13 @@ class QwenAgent implements Agent {
             ? { sourceId: source.sourceId }
             : {}),
           persisted: ok,
+          ...(!ok
+            ? {
+                reason: recording
+                  ? 'write_not_confirmed'
+                  : 'recording_unavailable',
+              }
+            : {}),
         };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionLiveConversation: {
@@ -12888,6 +13140,15 @@ class QwenAgent implements Agent {
           return attempt.value;
         }
         const task = registry.get(taskId);
+        if (!task && (action === 'retry' || action === 'rerun')) {
+          return this.restartWorkflowRunFromHistory(
+            sessionId,
+            config,
+            action,
+            taskId,
+            mutationClaim,
+          );
+        }
         if (!task) return { changed: false };
         if (action === 'retry' || action === 'rerun') {
           // A retry reuses its runId over the one journal/snapshot store
@@ -12915,74 +13176,16 @@ class QwenAgent implements Agent {
           if (!canStart || (!task.script && !savedScriptPath)) {
             return { changed: false, status: task.status };
           }
-          const attempt = await tryWithWorkflowTaskMutation(
-            mutationClaim,
-            async () => {
-              const workflowTool = config
-                .getToolRegistry()
-                .getTool(ToolNames.WORKFLOW);
-              if (!isSessionOwnedWorkflowTool(workflowTool)) {
-                throw RequestError.invalidParams(
-                  undefined,
-                  `The workflow tool is unavailable; cannot ${action} this run.`,
-                );
-              }
-              let readableScriptPath: string | undefined;
-              if (savedScriptPath) {
-                try {
-                  await resolveSavedWorkflowScript(
-                    { scriptPath: savedScriptPath },
-                    config,
-                  );
-                  readableScriptPath = savedScriptPath;
-                } catch {
-                  readableScriptPath = undefined;
-                }
-              }
-              if (!readableScriptPath && !task.script) {
-                return { changed: false, status: task.status };
-              }
-              const startParams: Omit<WorkflowParams, 'run_in_background'> = {
-                ...(readableScriptPath
-                  ? { scriptPath: readableScriptPath }
-                  : { script: task.script }),
-                args: task.args,
-                ...(task.sourceRef ? { sourceRef: task.sourceRef } : {}),
-                ...(action === 'retry' ? { resumeFromRunId: task.runId } : {}),
-              };
-              const result = await startSessionOwnedWorkflow(
-                workflowTool,
-                startParams,
-                readableScriptPath ? task.workflowName : undefined,
-              );
-              if (action === 'rerun') {
-                const rerunTask = result.workflowRunId
-                  ? registry.get(result.workflowRunId)
-                  : undefined;
-                if (rerunTask) {
-                  registry.setLineage(rerunTask.runId, task.runId, 'rerun');
-                }
-                return rerunTask
-                  ? {
-                      changed: true,
-                      status: rerunTask.status,
-                      taskId: rerunTask.runId,
-                    }
-                  : { changed: false, status: task.status };
-              }
-              // `execute()` reports a start that never registered — a
-              // cancel landing in the retry's starting window, whether from
-              // `cancelStarting` or a session dispose — by omitting
-              // `workflowRunId`, the same shape the rerun and run-saved
-              // branches gate on. Answering `changed: true` there tells the
-              // client a run exists that nothing will ever progress.
-              return result.workflowRunId
-                ? {
-                    changed: true,
-                    status: registry.get(result.workflowRunId)?.status,
-                  }
-                : { changed: false, status: task.status };
-            },
+          const attempt = await tryWithWorkflowTaskMutation(mutationClaim, () =>
+            this.startWorkflowRestart(config, action, {
+              runId: task.runId,
+              status: task.status,
+              script: task.script,
+              ...(savedScriptPath ? { scriptPath: savedScriptPath } : {}),
+              args: task.args,
+              ...(task.sourceRef ? { sourceRef: task.sourceRef } : {}),
+              ...(task.workflowName ? { workflowName: task.workflowName } : {}),
+            }),
           );
           if (!attempt.acquired) {
             return { changed: false, status: task.status };
@@ -13786,13 +13989,30 @@ class QwenAgent implements Agent {
         }
         const name = params['name'];
         const atRecordId = params['atRecordId'];
+        const targetSessionId = params['targetSessionId'];
         if (atRecordId !== undefined && typeof atRecordId !== 'string') {
           throw RequestError.invalidParams(undefined, 'Invalid atRecordId');
+        }
+        if (
+          targetSessionId !== undefined &&
+          (typeof targetSessionId !== 'string' ||
+            !UUID_V4_RE.test(targetSessionId))
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid targetSessionId',
+          );
         }
         if (isSideTask && atRecordId !== undefined) {
           throw RequestError.invalidParams(
             undefined,
             'atRecordId is not supported for side tasks',
+          );
+        }
+        if (isSideTask && targetSessionId !== undefined) {
+          throw RequestError.invalidParams(
+            undefined,
+            'targetSessionId is not supported for side tasks',
           );
         }
 
@@ -13854,7 +14074,7 @@ class QwenAgent implements Agent {
                     baseName,
                     sessionService,
                   );
-                  const newSessionId = randomUUID();
+                  const newSessionId = targetSessionId ?? randomUUID();
                   const fork = () =>
                     sessionService.forkSession(sessionId, newSessionId, {
                       title,
@@ -13876,6 +14096,12 @@ class QwenAgent implements Agent {
               throw new RequestError(-32009, error.message, {
                 errorKind: 'branch_point_invalid',
                 recordId: error.recordId,
+              });
+            }
+            if (error instanceof SessionForkSourceUnavailableError) {
+              throw new RequestError(-32004, error.message, {
+                errorKind: 'session_not_found',
+                sessionId: error.sessionId,
               });
             }
             throw error;
@@ -14746,6 +14972,7 @@ class QwenAgent implements Agent {
     initializeOptions: ConfigInitializeOptions = {},
     chatRecording?: boolean,
     restoreOptions?: SelectiveSessionRestoreOptions,
+    executionEngine?: SessionExecutionEngine,
   ): Promise<Config> {
     // Transcript replay is the only recording-disabled Config and must remain
     // id-less; it borrows the validated target session context from extMethod.
@@ -14782,6 +15009,7 @@ class QwenAgent implements Agent {
             chatRecording,
             restoreOptions,
             sessionIdGenerated,
+            executionEngine,
           );
         }),
       );
@@ -14815,6 +15043,7 @@ class QwenAgent implements Agent {
     chatRecording?: boolean,
     restoreOptions?: SelectiveSessionRestoreOptions,
     sessionIdGenerated?: boolean,
+    executionEngine?: SessionExecutionEngine,
   ): Promise<Config> {
     const provisionalWorkspace = isReservedStandaloneSessionSourceType(
       sessionSource?.sourceType,
@@ -14936,11 +15165,15 @@ class QwenAgent implements Agent {
       // not process.exit(1) the shared ACP child and every session on its
       // channel. newSessionConfig maps the throw to a RequestError.
       true,
-      this.managedToolInvocationGuard || restoreOptions || provisionalWorkspace
+      this.managedToolInvocationGuard ||
+        restoreOptions ||
+        provisionalWorkspace ||
+        executionEngine
         ? {
             ...(provisionalWorkspace
               ? { provisionalWorkspace: true as const }
               : {}),
+            ...(executionEngine ? { executionEngine } : {}),
             ...(this.managedToolInvocationGuard
               ? { toolInvocationGuard: this.managedToolInvocationGuard }
               : {}),
@@ -15265,6 +15498,187 @@ class QwenAgent implements Agent {
       },
     );
     config.setFileSystemService(acpFileSystemService);
+  }
+
+  /**
+   * `retry` or `rerun` of a run no registry here holds: one a previous daemon
+   * process ran, or one this session's registry has evicted. Its snapshot is
+   * the only record left of what it ran and with what.
+   */
+  private async restartWorkflowRunFromHistory(
+    sessionId: string,
+    config: Config,
+    action: 'retry' | 'rerun',
+    runId: string,
+    mutationClaim: string,
+  ): Promise<WorkflowActionResult> {
+    // The id is joined into paths under the runs directory. A live registry
+    // entry vouched for it until now; a client's `taskId` does not.
+    if (!isWorkflowRunId(runId)) return { changed: false };
+    const registry = config.getWorkflowRunRegistry();
+    // A run whose process exited mid-run has only the snapshot of an earlier
+    // attempt until its checkpoint is claimed. Claimed before the lock below,
+    // which the claim takes too.
+    await claimInterruptedWorkflowRun(config, runId);
+    const attempt = await tryWithWorkflowTaskMutation(
+      mutationClaim,
+      async (): Promise<WorkflowActionResult> => {
+        // Under this lock no start of the run can begin in this process —
+        // the runner takes the same lock to resume — so nothing read below
+        // goes stale before the retry registers.
+        const current = registry.get(runId);
+        if (current) return { changed: false, status: current.status };
+        // A run that is live is not history, whatever its snapshot says:
+        // starting here, settling here under a handle its evicted entry no
+        // longer shows (terminal entries are capped), or running in a
+        // sibling session. A rerun takes a new run id and so cannot corrupt
+        // the live run, but it would spend a second run's worth of tokens
+        // on work already in flight — and the live path refuses it too,
+        // because a live entry is not in a terminal state.
+        if (
+          QwenAgent.isWorkflowRunLiveInRegistry(registry, runId) ||
+          this.isWorkflowRunLiveOutsideSession(sessionId, runId)
+        ) {
+          return { changed: false };
+        }
+        const snapshot = await readWorkflowSnapshot(config, runId);
+        if (!snapshot) return { changed: false };
+        if (
+          (action === 'retry' && snapshot.status !== 'failed') ||
+          (!snapshot.script && !snapshot.scriptPath)
+        ) {
+          return { changed: false, status: snapshot.status };
+        }
+        // A checkpoint the claim above left in place records a process that
+        // has not been seen to exit: one still running here, one on another
+        // machine (never claimed, because its liveness cannot be observed),
+        // or one whose pid a live process has since reused. Resuming under
+        // its run id would put a second runner on its journal, so the retry
+        // is refused — and named, because from the run's history alone a
+        // client cannot tell this from an unknown run id, and because the
+        // way forward is a rerun, which takes a new run id and leaves this
+        // journal alone.
+        const checkpoint =
+          action === 'retry'
+            ? await readWorkflowCheckpoint(config, runId)
+            : undefined;
+        if (checkpoint) {
+          throw RequestError.invalidParams(
+            { errorKind: 'workflow_run_live_elsewhere' },
+            `Workflow run ${runId} is recorded as running in another process (host ${checkpoint.hostname}, pid ${checkpoint.pid}), so retrying it here would run two copies against its journal. Rerun it instead: that starts a new run id and leaves this one alone.`,
+          );
+        }
+        // Starting a run from history with the wrong args is worse than
+        // refusing it: the journal's key chain is rooted in a hash of the
+        // args, so a retry that supplies none replays nothing and
+        // re-dispatches every agent under the old run id, while the script
+        // reads `args` as undefined. A snapshot written before args were
+        // kept cannot say whether the run had any, so it is refused for the
+        // same reason as one whose args were too large — the cost is a
+        // legacy run that truly had none, which a relaunch covers.
+        // The same answer the task projection reports as `argsUnavailable`,
+        // so a client is never offered an action this refuses.
+        const unavailable = snapshotArgsUnavailable(snapshot);
+        const startedWith =
+          unavailable === 'omitted'
+            ? 'args too large to keep in its history'
+            : unavailable === 'unrecorded'
+              ? 'args this daemon recorded before it kept them, so its history cannot say what they were'
+              : undefined;
+        if (startedWith) {
+          throw RequestError.invalidParams(
+            { errorKind: 'workflow_args_unavailable' },
+            `Workflow run ${runId} was launched with ${startedWith}, so it cannot be ${action === 'retry' ? 'retried' : 'rerun'} from there. Start it again with run-saved or run-script and the args it should have.`,
+          );
+        }
+        return this.startWorkflowRestart(config, action, {
+          runId,
+          status: snapshot.status,
+          script: snapshot.script,
+          ...(snapshot.scriptPath ? { scriptPath: snapshot.scriptPath } : {}),
+          args: snapshot.args,
+          ...(snapshot.sourceRef ? { sourceRef: snapshot.sourceRef } : {}),
+          ...(snapshot.workflowName
+            ? { workflowName: snapshot.workflowName }
+            : {}),
+        });
+      },
+    );
+    return attempt.acquired ? attempt.value : { changed: false };
+  }
+
+  /**
+   * Start a `retry` (same run id, resuming its journal) or `rerun` (new run
+   * id) of `source`. The caller holds the run's mutation lock and has
+   * checked that the action applies.
+   */
+  private async startWorkflowRestart(
+    config: Config,
+    action: 'retry' | 'rerun',
+    source: WorkflowRestartSource,
+  ): Promise<WorkflowActionResult> {
+    const registry = config.getWorkflowRunRegistry();
+    const workflowTool = config.getToolRegistry().getTool(ToolNames.WORKFLOW);
+    if (!isSessionOwnedWorkflowTool(workflowTool)) {
+      throw RequestError.invalidParams(
+        undefined,
+        `The workflow tool is unavailable; cannot ${action} this run.`,
+      );
+    }
+    let readableScriptPath: string | undefined;
+    if (source.scriptPath) {
+      try {
+        await resolveSavedWorkflowScript(
+          { scriptPath: source.scriptPath },
+          config,
+        );
+        readableScriptPath = source.scriptPath;
+      } catch {
+        readableScriptPath = undefined;
+      }
+    }
+    if (!readableScriptPath && !source.script) {
+      return { changed: false, status: source.status };
+    }
+    const startParams: Omit<WorkflowParams, 'run_in_background'> = {
+      ...(readableScriptPath
+        ? { scriptPath: readableScriptPath }
+        : { script: source.script }),
+      args: source.args,
+      ...(source.sourceRef ? { sourceRef: source.sourceRef } : {}),
+      ...(action === 'retry' ? { resumeFromRunId: source.runId } : {}),
+    };
+    const result = await startSessionOwnedWorkflow(
+      workflowTool,
+      startParams,
+      readableScriptPath ? source.workflowName : undefined,
+    );
+    if (action === 'rerun') {
+      const rerunTask = result.workflowRunId
+        ? registry.get(result.workflowRunId)
+        : undefined;
+      if (rerunTask) {
+        registry.setLineage(rerunTask.runId, source.runId, 'rerun');
+      }
+      return rerunTask
+        ? {
+            changed: true,
+            status: rerunTask.status,
+            taskId: rerunTask.runId,
+          }
+        : { changed: false, status: source.status };
+    }
+    // `execute()` reports a start that never registered — a cancel landing
+    // in the retry's starting window, whether from `cancelStarting` or a
+    // session dispose — by omitting `workflowRunId`, the same shape the
+    // rerun and run-saved branches gate on. Answering `changed: true` there
+    // tells the client a run exists that nothing will ever progress.
+    return result.workflowRunId
+      ? {
+          changed: true,
+          status: registry.get(result.workflowRunId)?.status,
+        }
+      : { changed: false, status: source.status };
   }
 
   /**

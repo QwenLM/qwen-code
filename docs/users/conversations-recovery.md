@@ -58,6 +58,16 @@ the more limited compatibility check described below.
    children, other daemons, containers, namespaces, and machines sharing the
    filesystem. Verify the fence from the relevant host/namespace. If you cannot
    establish this, stop here and ask an operator who can.
+   If a daemon was killed by `SIGKILL` or an OOM event on the same boot, its
+   detached ACP writer child may still be alive and holding the lease. Killing
+   the daemon does not clear that fence: fence the child as well before
+   continuing, and do not retry around or remove the lock to bypass it. A host
+   reboot or a restart into a new PID namespace is a different identity-boundary
+   case; it does not mean that a writer child survived.
+   If a daemon runs under a wrapper or supervisor, record its ACP descendants
+   before an orderly stop and include them in the stop/fence operation. That
+   lets normal shutdown reclaim them and limits this manual path to genuinely
+   non-graceful exits.
 3. Inspect the exact record and any associated claim/retired artifacts with a
    maintainer. Determine whether the last transcript and handoff proof are
    authoritative. Do not edit ownership identity fields to manufacture a match.

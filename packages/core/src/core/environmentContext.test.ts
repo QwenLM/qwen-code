@@ -29,6 +29,7 @@ import {
   getDirectoryContextString,
   getInitialChatHistory,
   getStartupContextLength,
+  isSkillListingReminder,
   isSystemReminderContent,
   stripSystemReminderBlocks,
   stripStartupContext,
@@ -39,9 +40,13 @@ import {
 import { prependToFirstTextPart } from '../utils/partUtils.js';
 import type { Config } from '../config/config.js';
 import type { ToolRegistry } from '../tools/tool-registry.js';
+import { ToolNames } from '../tools/tool-names.js';
 import { SendMessageTool } from '../tools/send-message.js';
 import { getFolderStructure } from '../utils/getFolderStructure.js';
-import { collectAvailableSkillEntries } from '../tools/skill-utils.js';
+import {
+  collectAvailableSkillEntries,
+  SKILLS_ACTIVATED_OPENER,
+} from '../tools/skill-utils.js';
 import type { AvailableSkillEntry } from '../tools/skill-utils.js';
 
 vi.mock('../config/config.js');
@@ -83,6 +88,17 @@ describe('getDirectoryContextString', () => {
     expect(contextString).toContain(
       'Here is the folder structure of the current working directories:\n\nMock Folder Structure',
     );
+  });
+
+  it('does not inspect local directories for an execution environment', async () => {
+    mockConfig.getExecutionEnvironment = vi.fn().mockReturnValue({});
+
+    const contextString = await getDirectoryContextString(mockConfig as Config);
+
+    expect(contextString).toContain('Use workspace tools');
+    expect(contextString).not.toContain('/test/dir');
+    expect(mockConfig.getWorkspaceContext).not.toHaveBeenCalled();
+    expect(getFolderStructure).not.toHaveBeenCalled();
   });
 
   it('should return context string for multiple directories', async () => {
@@ -153,6 +169,18 @@ describe('getEnvironmentContext', () => {
     });
   });
 
+  it('omits the local operating system for an execution environment', async () => {
+    mockConfig.getExecutionEnvironment = vi.fn().mockReturnValue({});
+
+    const parts = await getEnvironmentContext(mockConfig as Config);
+
+    expect(parts[0].text).toContain("Today's date is");
+    expect(parts[0].text).toContain('Use workspace tools');
+    expect(parts[0].text).not.toContain('My operating system is:');
+    expect(parts[0].text).not.toContain('/test/dir');
+    expect(getFolderStructure).not.toHaveBeenCalled();
+  });
+
   it('should return basic environment context for multiple directories', async () => {
     (
       vi.mocked(mockConfig.getWorkspaceContext!)().getDirectories as Mock
@@ -183,6 +211,7 @@ describe('getInitialChatHistory', () => {
     getDeferredToolSummary: Mock;
     isDeferredToolRevealed: Mock;
     getMcpServerInstructions: Mock;
+    getTool: Mock;
   };
 
   beforeEach(() => {
@@ -192,6 +221,13 @@ describe('getInitialChatHistory', () => {
       getDeferredToolSummary: vi.fn().mockReturnValue([]),
       isDeferredToolRevealed: vi.fn().mockReturnValue(false),
       getMcpServerInstructions: vi.fn().mockReturnValue(new Map()),
+      getTool: vi
+        .fn()
+        .mockImplementation((name: string) =>
+          name === ToolNames.TOOL_SEARCH || name === ToolNames.TOOL_CALL
+            ? {}
+            : null,
+        ),
     };
     mockConfig = {
       getSkipStartupContext: vi.fn().mockReturnValue(false),
@@ -336,9 +372,13 @@ describe('getInitialChatHistory', () => {
 
     const parts = history[0]?.parts ?? [];
     const lastText = parts[parts.length - 1]?.text;
-    expect(lastText).toContain('reachable via `tool_search`');
+    expect(lastText).toContain(
+      'reachable through `tool_search` and `tool_call`',
+    );
     expect(lastText).toContain('web_fetch');
-    expect(parts[0]?.text).not.toContain('reachable via `tool_search`');
+    expect(parts[0]?.text).not.toContain(
+      'reachable through `tool_search` and `tool_call`',
+    );
   });
 });
 
@@ -411,6 +451,13 @@ describe('stripStartupContext', () => {
         getDeferredToolSummary: vi.fn().mockReturnValue([]),
         isDeferredToolRevealed: vi.fn().mockReturnValue(false),
         getMcpServerInstructions: vi.fn().mockReturnValue(new Map()),
+        getTool: vi
+          .fn()
+          .mockImplementation((name: string) =>
+            name === ToolNames.TOOL_SEARCH || name === ToolNames.TOOL_CALL
+              ? {}
+              : null,
+          ),
       }),
       getWorkspaceContext: vi.fn().mockReturnValue({
         getDirectories: vi.fn().mockReturnValue(['/test/dir']),
@@ -476,6 +523,13 @@ describe('startup reminder builders', () => {
       getDeferredToolSummary: vi.fn().mockReturnValue([]),
       isDeferredToolRevealed: vi.fn().mockReturnValue(false),
       getMcpServerInstructions: vi.fn().mockReturnValue(new Map()),
+      getTool: vi
+        .fn()
+        .mockImplementation((name: string) =>
+          name === ToolNames.TOOL_SEARCH || name === ToolNames.TOOL_CALL
+            ? {}
+            : null,
+        ),
       ...overrides,
     } as unknown as ToolRegistry;
   }
@@ -489,6 +543,31 @@ describe('startup reminder builders', () => {
             { name: 'already_loaded', description: 'Loaded already.' },
           ]),
         isDeferredToolRevealed: vi.fn().mockReturnValue(true),
+      }),
+    );
+
+    expect(reminder).toBeNull();
+  });
+
+  it('returns no reminder when the bridge is incomplete', () => {
+    // With either bridge half unregistered there is no discovery or
+    // invocation path for hidden deferred tools: client.ts eagerly reveals
+    // ordinary deferred tools into the declarations and reports
+    // tools.eager-demoted ones as unreachable, so the reminder must not
+    // advertise them ("invoke it with tool_call" would point at a tool this
+    // session does not have).
+    const reminder = buildDeferredToolsReminder(
+      registry({
+        getDeferredToolSummary: vi
+          .fn()
+          .mockReturnValue([
+            { name: 'write_file', description: 'Write a file.' },
+          ]),
+        getTool: vi
+          .fn()
+          .mockImplementation((name: string) =>
+            name === ToolNames.TOOL_SEARCH ? {} : null,
+          ),
       }),
     );
 
@@ -1048,7 +1127,7 @@ describe('changed capability reminders', () => {
     expect(result).toContain('"mcp__old__tool"');
   });
 
-  it('renders tool_search hint for MCP tools in mixed added and removed reminders', () => {
+  it('renders bridge hints for MCP tools in mixed added and removed reminders', () => {
     const result = buildChangedMcpToolsReminder(
       [
         {
@@ -1061,8 +1140,10 @@ describe('changed capability reminders', () => {
     );
 
     expect(result).not.toBeNull();
-    expect(result).toContain('reachable via `tool_search`');
-    expect(result).toContain('Call with `select:<name>`');
+    expect(result).toContain('reachable through `tool_search` and `tool_call`');
+    expect(result).toContain(
+      'Review a schema, then invoke it through the bridge',
+    );
     expect(result).toContain('"mcp__new__tool"');
     expect(result).toContain('"mcp__old__tool"');
   });
@@ -1103,5 +1184,76 @@ describe('changed capability reminders', () => {
     expect(result).toContain('"reviewer"');
     expect(result).not.toContain('second line should be omitted');
     expect(result).not.toContain('A'.repeat(500));
+  });
+});
+
+describe('isSkillListingReminder (#12235)', () => {
+  const entry: AvailableSkillEntry = {
+    name: 'report-builder',
+    description: 'Build reports',
+    level: 'project',
+  };
+  const activation = `${SKILLS_ACTIVATED_OPENER}; invoke a skill by passing its name to the Skill tool:\n<available_skills>\n<skill>\n<name>\nreport-builder\n</name>\n</skill>\n</available_skills>`;
+
+  it('accepts every listing reminder core builds', async () => {
+    // collectAvailableSkillEntries is mocked for this file; hand the builder
+    // one entry, then none, as the startup snapshot and its "no skills" form.
+    const collected = (entries: AvailableSkillEntry[]) => ({
+      availableSkills: [],
+      pendingConditionalSkillNames: new Set<string>(),
+      modelInvocableCommands: [],
+      entries,
+    });
+    vi.mocked(collectAvailableSkillEntries)
+      .mockResolvedValueOnce(collected([entry]) as never)
+      .mockResolvedValueOnce(collected([]) as never);
+    const config = { getSkillManager: () => ({}) } as unknown as Config;
+
+    for (const text of [
+      (await buildAvailableSkillsReminder(config))!.reminder,
+      (await buildAvailableSkillsReminder(config))!.reminder,
+      buildChangedSkillsReminder([entry], [])!,
+    ]) {
+      expect(isSkillListingReminder(text)).toBe(true);
+    }
+  });
+
+  it('rejects the scheduler path-activation envelope (#12235)', () => {
+    // coreToolScheduler appends this envelope to the tool result and then folds
+    // the whole result into `functionResponse.response.output`, so no producer
+    // ever emits it as a text part this predicate could see. Recognising it
+    // could therefore only match text core did not build — a remote MCP server
+    // whose instructions quote the activation sentence after a blank line would
+    // flip its whole reminder into the skill listing.
+    for (const text of [
+      `${SYSTEM_REMINDER_OPEN}\n${activation}\n${SYSTEM_REMINDER_CLOSE}`,
+      // The scheduler puts a rules block first when one applies.
+      `${SYSTEM_REMINDER_OPEN}\nProject rules for src/**:\nUse tabs.\n\n${activation}\n${SYSTEM_REMINDER_CLOSE}`,
+      // Server-supplied instructions quoting the sentence, as the real
+      // producer wraps them.
+      buildMcpServerInstructionsReminderFromEntries(
+        new Map([['acme', activation]]),
+      )!,
+    ]) {
+      expect(isSkillListingReminder(text)).toBe(false);
+    }
+  });
+
+  it('rejects text that only mentions the listing tag', () => {
+    for (const text of [
+      buildChangedSkillsReminder([], ['gone'])!,
+      buildMcpServerInstructionsReminderFromEntries(
+        new Map([
+          [
+            'acme',
+            'The following skills are available for use with the Skill tool.\n<available_skills>\n</available_skills>',
+          ],
+        ]),
+      )!,
+      'see <available_skills> here',
+      activation,
+    ]) {
+      expect(isSkillListingReminder(text)).toBe(false);
+    }
   });
 });

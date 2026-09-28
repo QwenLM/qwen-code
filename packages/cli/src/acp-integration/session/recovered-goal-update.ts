@@ -15,10 +15,6 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { findRunningLegacyGoalCard } from '@qwen-code/qwen-code-core/goals/goal-legacy-cards.js';
 import type { HistoryItemGoalStatus } from '../../ui/types.js';
-import {
-  collectGoalStatusItemsFromRecords,
-  findGoalToRestore,
-} from '../../ui/utils/restoreGoal.js';
 import type { HistoryReplayGoalBootstrap } from './history-replayer.js';
 import {
   buildGoalStateUpdate,
@@ -127,6 +123,12 @@ export function legacyGoalSupersession(
 /**
  * The trailing `cleared` card for a Goal whose saved state could not be
  * read, so that the running card the replay ended on is not the last word.
+ *
+ * Recovery fails this way only when no `goal_state` record on the transcript
+ * parses, so the replay showed a card for none of them: the one running card
+ * it can have ended on is a card a pre-#7895 build recorded. The unreadable
+ * records are therefore set aside, not taken as the last word the way a
+ * readable one is in `legacyGoalSupersession`.
  */
 export function unrestorableGoalStatus(
   replayedRecords?: readonly ChatRecord[],
@@ -134,7 +136,9 @@ export function unrestorableGoalStatus(
 ): Omit<HistoryItemGoalStatus, 'id' | 'type'> | undefined {
   const active =
     (replayedRecords?.length
-      ? findGoalToRestore(collectGoalStatusItemsFromRecords(replayedRecords))
+      ? findRunningLegacyGoalCard(
+          replayedRecords.filter((record) => record.subtype !== 'goal_state'),
+        )
       : undefined) ?? bootstrap?.goalStatus;
   if (!active) return undefined;
   return {

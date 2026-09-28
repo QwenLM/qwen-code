@@ -99,7 +99,7 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
     );
     const registry = child.getToolRegistry();
     expect(registry.getAllToolNames().sort()).toEqual(
-      [...EXECUTION_TOOL_NAMES, ToolNames.TOOL_SEARCH]
+      [...EXECUTION_TOOL_NAMES, ToolNames.TOOL_CALL, ToolNames.TOOL_SEARCH]
         .filter((name) => name !== ToolNames.LS)
         .sort(),
     );
@@ -165,7 +165,7 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
       await registry.warmAll();
       expect(
         registry.getFunctionDeclarations().map((tool) => tool.name),
-      ).toEqual([ToolNames.TOOL_SEARCH]);
+      ).toEqual([ToolNames.TOOL_CALL, ToolNames.TOOL_SEARCH]);
       expect(registry.isPermissionDeferred(ToolNames.READ_FILE)).toBe(true);
       expect(registry.isDeferredAndHidden(ToolNames.READ_FILE)).toBe(true);
       expect(registry.getAllToolNames()).not.toContain(ToolNames.SHELL);
@@ -183,10 +183,10 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
       expect(result.llmContent).toContain(
         `Not found: ${ToolNames.SHELL}, ${parentTool.name}`,
       );
-      expect(registry.isDeferredAndHidden(ToolNames.READ_FILE)).toBe(false);
+      expect(registry.isDeferredAndHidden(ToolNames.READ_FILE)).toBe(true);
       expect(
         registry.getFunctionDeclarations().map((tool) => tool.name),
-      ).toEqual([ToolNames.READ_FILE, ToolNames.TOOL_SEARCH]);
+      ).toEqual([ToolNames.TOOL_CALL, ToolNames.TOOL_SEARCH]);
       expect(parentRegistry.isDeferredAndHidden(ToolNames.READ_FILE)).toBe(
         true,
       );
@@ -201,7 +201,7 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
     }
   });
 
-  it('declares and executes a newly discovered worker tool on the next model round', async () => {
+  it('discovers and executes a deferred worker tool through the stable bridge', async () => {
     const parent = new Config({ ...baseParams, eagerTools: [] });
     const permissions = new PermissionManager(parent);
     permissions.initialize();
@@ -242,8 +242,11 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
       },
       {
         id: 'read',
-        name: ToolNames.READ_FILE,
-        args: { file_path: '/worker-only.txt' },
+        name: ToolNames.TOOL_CALL,
+        args: {
+          name: ToolNames.READ_FILE,
+          arguments: { file_path: '/worker-only.txt' },
+        },
       },
     ];
     let round = 0;
@@ -293,7 +296,12 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
         requests[1][1].config.tools[0].functionDeclarations.map(
           (tool) => tool.name,
         ),
-      ).toContain(ToolNames.READ_FILE);
+      ).not.toContain(ToolNames.READ_FILE);
+      expect(
+        requests[1][1].config.tools[0].functionDeclarations.map(
+          (tool) => tool.name,
+        ),
+      ).toContain(ToolNames.TOOL_CALL);
       expect(JSON.stringify(requests[2][1].message)).toContain(
         'worker file content',
       );

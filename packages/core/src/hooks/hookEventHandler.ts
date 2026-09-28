@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { isShellResultDisplay } from '../utils/shell-result.js';
 import type { Config } from '../config/config.js';
 import type { HookPlanner, HookEventContext } from './hookPlanner.js';
 import { getHookMatcherTarget } from './hookPlanner.js';
@@ -167,12 +168,15 @@ function getHookDisplayName(config: HookConfig): string {
   }
 }
 
-function normalizeQuestionHookResponse(
+function normalizeHookDisplayResponse(
   toolName: string,
   response: Record<string, unknown>,
   displayKey: 'returnDisplay' | 'result_display',
 ): Record<string, unknown> {
   const display = response[displayKey];
+  if (toolName === ToolNames.SHELL && isShellResultDisplay(display)) {
+    return { ...response, [displayKey]: display.text };
+  }
   if (
     toolName === ToolNames.ASK_USER_QUESTION &&
     display !== null &&
@@ -533,7 +537,7 @@ export class HookEventHandler {
       permission_mode: permissionMode,
       tool_name: toolName,
       tool_input: toolInput,
-      tool_response: normalizeQuestionHookResponse(
+      tool_response: normalizeHookDisplayResponse(
         toolName,
         toolResponse,
         'returnDisplay',
@@ -634,7 +638,7 @@ export class HookEventHandler {
         call.tool_response
           ? {
               ...call,
-              tool_response: normalizeQuestionHookResponse(
+              tool_response: normalizeHookDisplayResponse(
                 call.tool_name,
                 call.tool_response,
                 'result_display',
