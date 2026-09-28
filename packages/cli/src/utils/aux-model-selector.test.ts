@@ -107,6 +107,28 @@ describe('publicAuxModelSelectorValue', () => {
     expect(publicAuxModelSelectorValue(hidden)).toBe('openai:gpt-x');
   });
 
+  it.each([
+    ['a plain slash', '/'],
+    ['an opening brace', '{'],
+    ['a semicolon', ';'],
+    ['a percent-encoded space', '%20'],
+    ['a zero-width space (U+200B)', '\u200b'],
+  ])(
+    'drops a suffix whose second authority hides behind %s the fold guard does not list',
+    (_label, join) => {
+      // An input-character enumeration cannot converge: each of these joins
+      // also leaves `username`/`password`/`search`/`hash` empty, and a plain
+      // `/` involves no folding at all, so the "already clean" shortcut used
+      // to return the UNPARSED suffix with the credential still in it. The
+      // gate validates the text it is about to emit instead — a pathname that
+      // embeds a second authority is not publishable — so removing that output
+      // check must red every row here.
+      const hidden = `openai:gpt-x\0https://gw.example/v1${join}https://user:sk-secret@other.example/v1`;
+      expect(publicAuxModelSelectorValue(hidden)).toBe('openai:gpt-x');
+      expect(publicAuxModelSelectorValue(hidden)).not.toContain('sk-secret');
+    },
+  );
+
   it('renders a non-string value instead of throwing', () => {
     // `loadSettings` applies no type validation, so a workspace-scope
     // `settings.json` can hand a wire site `fastModel: 42`. The scrub's first

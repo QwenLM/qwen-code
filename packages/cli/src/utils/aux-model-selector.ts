@@ -10,9 +10,17 @@
  * `authType:<modelId>\0<baseUrl>`, where the NUL-separated suffix pins the
  * provider endpoint. A provider baseUrl can embed userinfo
  * (`https://user:sk-...@host/v1`), which is a credential. This module owns
- * how such a selector is published and displayed so the suffix never leaks
- * it; egress surfaces call these helpers instead of hand-rolling their own
- * `split('\0')`.
+ * how such a selector is published and displayed, so every surface that calls
+ * it publishes a credential-free value; egress surfaces call these helpers
+ * instead of hand-rolling their own `split('\0')`.
+ *
+ * The guarantee is per call site, not per key. Surfaces that interpolate the
+ * stored value raw are not converted by this module and stay tracked in
+ * #12856: the `/model --fast` and `/model --compaction` readbacks
+ * (`modelCommand.ts:619`, `:841`) and the startup advisor-validation error,
+ * which puts the raw selector into a `FatalConfigError` message
+ * (`config.ts` `formatUnavailableAdvisorModelMessage`) that
+ * `handleCriticalError` writes to stderr.
  *
  * The persisted value is deliberately not rewritten. That suffix is the
  * routing key: `modelRegistry` copies the configured `baseUrl` verbatim, and
@@ -72,9 +80,23 @@ function hasFoldedCharacter(baseUrl: string): boolean {
  */
 function publishableSelectorBaseUrl(baseUrl: string): string | undefined {
   if (hasFoldedCharacter(baseUrl)) return undefined;
-  if (!/^https?:\/\//i.test(baseUrl.trim())) return undefined;
+  // No `.trim()` here: the guard above already rejects every character
+  // `String.prototype.trim` strips, so normalizing on this line could not
+  // change any outcome — and this module's contract is that it does not
+  // normalize.
+  if (!/^https?:\/\//i.test(baseUrl)) return undefined;
   try {
     const url = new URL(baseUrl);
+    // Both returns below hand back text that was never re-derived from the
+    // parsed fields this gate inspects, so those fields cannot certify it: a
+    // second authority folded into the pathname
+    // (`…/v1/https://user:sk@other.example/v1`) reads empty on all four while
+    // the credential is still in the emitted string, and enumerating the
+    // characters that can hide it does not converge — a plain `/` join needs
+    // no folding at all. Validate the text being emitted instead. Stripping
+    // userinfo, query and hash does not change the pathname, so one check
+    // covers both branches.
+    if (/:\/\//.test(url.pathname)) return undefined;
     if (!url.username && !url.password && !url.search && !url.hash) {
       return baseUrl;
     }
