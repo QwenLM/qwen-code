@@ -3745,6 +3745,7 @@ export class LlmClient {
         messageType,
       });
       interactionOwner = getActiveInteractionSpan(prompt_id);
+      this.interactionStartTypes.clear();
       this.interactionStartTypes.set(prompt_id, messageType);
       if (
         interactionOwner &&
