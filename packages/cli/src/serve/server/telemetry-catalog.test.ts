@@ -103,7 +103,7 @@ describe('legacy session telemetry route drift guard', () => {
       .map(({ method, path }) => `${method} ${path}`)
       .sort();
 
-    expect(registered).toHaveLength(74);
+    expect(registered).toHaveLength(75);
     expect(registered).toEqual(catalog);
   });
 });

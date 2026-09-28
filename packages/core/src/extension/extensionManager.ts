@@ -63,6 +63,7 @@ import {
   type DiscoveredPlugin,
 } from './sourceRegistry.js';
 import {
+  InsecureArchiveUrlError,
   loadMarketplaceConfigFromSource,
   parseInstallSource,
 } from './marketplace.js';
@@ -1250,13 +1251,17 @@ export class ExtensionManager {
       // marketplace.json). A single extension repo (Gemini/Claude/git/npm) is
       // not a marketplace — guide the user to install it directly instead.
       let isInstallableExtension = false;
+      let probeError: unknown;
       try {
         await parseInstallSource(trimmed, {
           networkPolicy: this.networkPolicy,
         });
         isInstallableExtension = true;
-      } catch {
-        // Not a recognizable install source either.
+      } catch (error) {
+        // Not a recognizable install source either; remember why so a
+        // policy rejection below can surface its real reason instead of the
+        // misleading "no marketplace" message.
+        probeError = error;
       }
       const redacted = redactUrlCredentials(trimmed);
       if (isInstallableExtension) {
@@ -1264,6 +1269,15 @@ export class ExtensionManager {
           `"${redacted}" looks like a single extension, not a marketplace. ` +
             `Install it directly with: /extensions install ${redacted}`,
         );
+      }
+      // A policy rejection (e.g. an insecure archive URL) is the actionable
+      // diagnosis for this source — rethrow it so the user sees the reason
+      // instead of the generic "No marketplace found" guidance. Note the
+      // marketplace probe above has already attempted the fetch by this
+      // point; rethrowing here only changes the reported reason, not the
+      // request behaviour.
+      if (probeError instanceof InsecureArchiveUrlError) {
+        throw probeError;
       }
       throw new Error(
         `No marketplace found at "${redacted}". ` +

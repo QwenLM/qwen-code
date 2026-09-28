@@ -25,6 +25,7 @@ import {
   type ToolCallConfirmationDetails,
   type ToolConfirmationPayload,
   type ToolResult,
+  type McpAppToolResult,
   type ToolResultDisplay,
   type ShellProgressData,
   type ChatRecord,
@@ -375,6 +376,10 @@ import {
   settingExistsInScope,
 } from '../../config/settingsUtils.js';
 import { recordDaemonSessionModel } from '../session-model-persistence.js';
+import {
+  recordDaemonSessionApprovalMode,
+  recordDaemonSessionApprovalModeFromConfig,
+} from '../session-approval-mode-persistence.js';
 import {
   applyReasoningSelection,
   clearReasoningRequestOverrides,
@@ -2103,6 +2108,7 @@ function isCallerCausedModelRefusal(error: Error): boolean {
  * - SubAgentTracker for tracking sub-agent tool calls
  */
 export class Session implements SessionContext {
+  private readonly mcpAppCalls = new Map<string, AbortController>();
   private pendingPrompt: AbortController | null = null;
   private activeGoalProposalTurn?: AgentResponseCapture['goalProposalTurn'];
   /**
@@ -2236,6 +2242,7 @@ export class Session implements SessionContext {
   private closeGateCompletion: Promise<void> | null = null;
   private resolveCloseGate: (() => void) | null = null;
   private unsubscribeChatRecordingFailure?: () => void;
+  private unsubscribeApprovalModeChange?: () => void;
   /** The exact status-change callback this Session installed, so dispose can
    *  retract its own and nobody else's. */
   #statusChangeCallback: (() => void) | undefined;
@@ -2432,6 +2439,22 @@ export class Session implements SessionContext {
     this.planEmitter = new PlanEmitter(this);
     this.historyReplayer = new HistoryReplayer(this);
     this.messageEmitter = new MessageEmitter(this);
+
+    this.unsubscribeApprovalModeChange = this.config.onApprovalModeChange?.(
+      (mode, prePlanMode) => {
+        void recordDaemonSessionApprovalMode(this.config, {
+          mode,
+          ...(mode === ApprovalMode.PLAN
+            ? {
+                prePlanMode,
+                ...(this.config.getPlanExecutionMode?.()
+                  ? { planExecutionMode: this.config.getPlanExecutionMode() }
+                  : {}),
+              }
+            : {}),
+        });
+      },
+    );
 
     this.#bindGoalRuntime();
     this.#registerBackgroundNotificationCallbacks();
@@ -4318,6 +4341,7 @@ export class Session implements SessionContext {
       }
     }
     if (
+      this.mcpAppCalls.size > 0 ||
       this.historyMutationActive ||
       this.goalProcessing ||
       this.cronProcessing ||
@@ -4352,7 +4376,8 @@ export class Session implements SessionContext {
     // Task captures wait for queued turns; a temporary close gate must drain
     // only executing turns so it can reopen and let those queues progress.
     return Boolean(
-      this.pendingPrompt ||
+      this.mcpAppCalls.size > 0 ||
+        this.pendingPrompt ||
         this.historyMutationActive ||
         this.pendingPromptCompletion ||
         this.goalProcessing ||
@@ -4396,6 +4421,7 @@ export class Session implements SessionContext {
       );
     }
     this.closing = true;
+
     let resolveGate!: () => void;
     const completion = new Promise<void>((resolve) => {
       resolveGate = resolve;
@@ -4484,6 +4510,7 @@ export class Session implements SessionContext {
   dispose(): void {
     this.disposed = true;
     this.closing = true;
+    this.cancelMcpAppCalls();
     for (const capture of this.channelTaskCaptures) {
       capture.controller.abort(SESSION_DISPOSE_ABORT_REASON);
     }
@@ -4491,6 +4518,8 @@ export class Session implements SessionContext {
     this.notificationAdmissionRetry = undefined;
     this.backgroundTurn = undefined;
     this.clearActiveTodoPlanRevision();
+    this.unsubscribeApprovalModeChange?.();
+    this.unsubscribeApprovalModeChange = undefined;
     this.pendingPrompt?.abort(SESSION_DISPOSE_ABORT_REASON);
     this.pendingPrompt = null;
     this.resolveCloseGate?.();
@@ -4718,12 +4747,25 @@ export class Session implements SessionContext {
       : snapshotsBeforeRewind.slice(0, targetTurnIndex);
     fileHistoryService.restoreFromSnapshots(survivingSnapshots);
 
+    const approvalMode = this.config.getApprovalMode();
     this.config
       .getChatRecordingService()
       ?.rewindRecording(
         targetTurnIndex,
         { truncatedCount: Math.max(0, apiHistory.length - apiTruncateIndex) },
         survivingSnapshots,
+        {
+          mode: approvalMode,
+          ...(approvalMode === ApprovalMode.PLAN
+            ? {
+                prePlanMode:
+                  this.config.getPrePlanMode() ?? ApprovalMode.DEFAULT,
+                ...(this.config.getPlanExecutionMode?.()
+                  ? { planExecutionMode: this.config.getPlanExecutionMode() }
+                  : {}),
+              }
+            : {}),
+        },
       );
 
     if (shouldDrainAutomaticQueues) {
@@ -6059,6 +6101,7 @@ export class Session implements SessionContext {
             let strippedOrphanEntries: Content[] | null = null;
             let orphanPushCountSnapshot = 0;
             if (goalTurn?.origin === 'runtime') {
+              void recordDaemonSessionApprovalModeFromConfig(this.config);
               this.config.getChatRecordingService()?.recordGoalRuntimeMessage(
                 modelPromptBlocks
                   .filter((block) => block.type === 'text')
@@ -6086,6 +6129,7 @@ export class Session implements SessionContext {
                 );
                 return { stopReason: 'end_turn' };
               }
+              void recordDaemonSessionApprovalModeFromConfig(this.config);
               if (recoveryPlan.continuation.mode === 'retry_user_parts') {
                 strippedOrphanEntries =
                   this.config
@@ -6097,6 +6141,8 @@ export class Session implements SessionContext {
               } else {
                 continuationParts = recoveryPlan.continuation.parts;
               }
+            } else if (!isRestoreAskUserQuestion) {
+              void recordDaemonSessionApprovalModeFromConfig(this.config);
             }
 
             if (goalTurn?.origin === 'runtime') {
@@ -6378,6 +6424,16 @@ export class Session implements SessionContext {
 
             if (isFreshUserTurn) {
               managedMemoryRecallStarted = true;
+              // Mirror LlmClient.sendMessageStream: commit a prepared
+              // legacy->structured recall transition before the per-turn
+              // reset, so ACP sessions leave legacy mode once migration
+              // completes instead of re-scanning the corpus every turn.
+              await this.config
+                .getLlmClient()
+                .activatePreparedMemoryRecallTransition();
+              this.config
+                .getMemoryManager()
+                .resetExhaustedBodyRefsForCurrentTurn();
               this.config
                 .getLlmClient()
                 .beginManagedAutoMemoryRecall(promptText, pendingSend.signal);
@@ -6444,14 +6500,6 @@ export class Session implements SessionContext {
             // plan mode in ACP has no effect because the model never learns it
             // should avoid edits.
             const systemReminders = await this.#buildInitialSystemReminders();
-            if (isFreshUserTurn) {
-              const memory = await this.config
-                .getLlmClient()
-                .consumeManagedAutoMemoryRecall('initial');
-              if (memory?.prompt) {
-                systemReminders.unshift({ text: memory.prompt });
-              }
-            }
             if (systemReminders.length > 0 && !isRestoreAskUserQuestion) {
               // On an `interrupted_prompt` continuation the replayed orphaned
               // user run can already carry the reminders that were prepended on
@@ -6727,7 +6775,11 @@ export class Session implements SessionContext {
                       promptId,
                       nextMessage?.parts ?? [],
                       pendingSend.signal,
-                      { modelOverride: fullTurnModelOverride },
+                      {
+                        modelOverride: fullTurnModelOverride,
+                        consumeInitialMemory:
+                          isFreshUserTurn && turnCount === 1,
+                      },
                     );
                   if (!sendResult.responseStream) {
                     this.todoStopGuard.suspend();
@@ -8598,6 +8650,7 @@ export class Session implements SessionContext {
       beforeSend?: (
         context: BeforeModelSendContext,
       ) => Promise<BeforeModelSendDecision>;
+      consumeInitialMemory?: boolean;
     } = {},
   ): Promise<AutoCompressionSendResult> {
     const llmClient = this.config.getLlmClient()!;
@@ -8754,14 +8807,15 @@ export class Session implements SessionContext {
       return { responseStream: null, stopReason: 'cancelled' };
     }
 
-    if (message[0]?.functionResponse) {
-      const memory =
-        await llmClient.consumeManagedAutoMemoryRecall('tool_result');
-      if (memory?.prompt) {
-        message = insertAfterFunctionResponses(message, [
-          { text: memory.prompt },
-        ]);
-      }
+    const memoryDelivery = options.consumeInitialMemory
+      ? await llmClient.consumeManagedAutoMemoryRecall('initial')
+      : message[0]?.functionResponse
+        ? await llmClient.consumeManagedAutoMemoryRecall('tool_result')
+        : null;
+    if (memoryDelivery?.prompt) {
+      message = insertAfterFunctionResponses(message, [
+        { text: memoryDelivery.prompt },
+      ]);
     }
 
     const chat = this.#getCurrentChat();
@@ -8772,9 +8826,57 @@ export class Session implements SessionContext {
       },
     };
     const goalPermit = goalTurnContext.getStore();
-    const responseStream = goalPermit
-      ? await chat.sendMessageStream(model, request, promptId, goalPermit)
-      : await chat.sendMessageStream(model, request, promptId);
+    let sourceStream: AsyncGenerator<StreamEvent>;
+    try {
+      sourceStream = goalPermit
+        ? await chat.sendMessageStream(model, request, promptId, goalPermit)
+        : await chat.sendMessageStream(model, request, promptId);
+    } catch (error) {
+      llmClient.discardManagedAutoMemoryRecallDelivery(memoryDelivery);
+      throw error;
+    }
+    if (!sourceStream) {
+      llmClient.discardManagedAutoMemoryRecallDelivery(memoryDelivery);
+      return { responseStream: null, stopReason: 'end_turn' };
+    }
+    const responseStream = (async function* () {
+      let committed = false;
+      let receivedChunk = false;
+      let memoryDeliveryStateInvalidated = false;
+      const commitMemoryDelivery = () => {
+        llmClient.commitManagedAutoMemoryRecallDelivery(memoryDelivery);
+        if (memoryDeliveryStateInvalidated) {
+          llmClient.resetManagedAutoMemoryAfterCompression();
+        }
+        committed = true;
+      };
+      try {
+        for await (const event of sourceStream) {
+          if (event.type === StreamEventType.CHUNK) {
+            receivedChunk = true;
+          } else if (event.type === StreamEventType.COMPRESSED) {
+            llmClient.resetManagedAutoMemoryAfterCompression();
+            memoryDeliveryStateInvalidated = true;
+          } else if (
+            event.type === StreamEventType.RETRY ||
+            event.type === StreamEventType.MODEL_FALLBACK
+          ) {
+            receivedChunk = false;
+          }
+          yield event;
+        }
+        if (receivedChunk) {
+          commitMemoryDelivery();
+        }
+      } finally {
+        if (!committed && receivedChunk && abortSignal.aborted) {
+          commitMemoryDelivery();
+        }
+        if (!committed) {
+          llmClient.discardManagedAutoMemoryRecallDelivery(memoryDelivery);
+        }
+      }
+    })();
     return { responseStream, requestRouteKey };
   }
 
@@ -8931,10 +9033,25 @@ export class Session implements SessionContext {
     }
     this.config.getLlmClient().captureCacheSafeParams();
     const memoryManager = this.config.getMemoryManager();
+    const projectRoot = this.config.getProjectRoot();
     const history = this.#getCurrentChat().getHistoryShallow();
+    for (const scope of ['project', 'user'] as const) {
+      void memoryManager
+        .scheduleMetadataMigration({
+          projectRoot,
+          scope,
+          config: this.config,
+        })
+        .catch((error: unknown) => {
+          debugLogger.warn(
+            `Failed to schedule ACP ${scope} memory metadata migration.`,
+            error,
+          );
+        });
+    }
     void memoryManager
       .scheduleExtract({
-        projectRoot: this.config.getProjectRoot(),
+        projectRoot,
         sessionId: this.config.getSessionId(),
         history,
         config: this.config,
@@ -8947,7 +9064,7 @@ export class Session implements SessionContext {
       });
     void memoryManager
       .scheduleDream({
-        projectRoot: this.config.getProjectRoot(),
+        projectRoot,
         sessionId: this.config.getSessionId(),
         config: this.config,
       })
@@ -10014,6 +10131,7 @@ export class Session implements SessionContext {
             try {
               await this.assertCanStartTurn();
               if (ac.signal.aborted) return;
+              void recordDaemonSessionApprovalModeFromConfig(this.config);
               this.config.startAutomaticActiveTodoWorkChain(
                 promptId,
                 item.todoWorkChainId,
@@ -10146,6 +10264,14 @@ export class Session implements SessionContext {
                 content: { type: 'text', text: echoText },
                 _meta: { source: item.source },
               });
+
+              // Cron-fired prompts stream through the chat directly and never
+              // enter LlmClient.sendMessageStream, so core's per-turn reset is
+              // not on this path; without it a claimed search_memory signature
+              // or exhausted body ref would persist across cron turns.
+              this.config
+                .getMemoryManager()
+                .resetExhaustedBodyRefsForCurrentTurn();
 
               // Prepend session-level system reminders (same rationale as the
               // user-query path in #executePrompt).
@@ -12988,6 +13114,90 @@ export class Session implements SessionContext {
     return reminders;
   }
 
+  cancelMcpAppCalls(): void {
+    for (const controller of this.mcpAppCalls.values()) controller.abort();
+  }
+
+  cancelMcpAppCall(callId: string): void {
+    this.mcpAppCalls.get(callId)?.abort();
+  }
+
+  async callMcpAppTool(
+    callId: string,
+    request: {
+      serverName: string;
+      resourceUri: string;
+      name: string;
+      arguments: Record<string, unknown>;
+    },
+  ): Promise<McpAppToolResult> {
+    if (this.mcpAppCalls.has(callId)) throw new Error('Duplicate MCP App call');
+    const controller = new AbortController();
+    this.mcpAppCalls.set(callId, controller);
+    this.#activeWorkChanged();
+    try {
+      await this.assertCanStartTurn();
+      controller.signal.throwIfAborted();
+      const registry = this.config.getToolRegistry();
+      if (
+        !registry.hasMcpAppResource(request.serverName, request.resourceUri)
+      ) {
+        throw new Error('MCP App resource is not available in this session');
+      }
+      const tool = registry.getMcpAppTool(request.serverName, request.name);
+      if (!tool)
+        throw new Error('MCP App tool is not available on this server');
+      let rawResult: McpAppToolResult | undefined;
+      let delivered = false;
+      const recordResult: QueueToolResultRecord = (_fc, record) => {
+        delivered =
+          record.metadata.status === 'success' ||
+          (rawResult?.isError === true &&
+            record.metadata.errorType === ToolErrorType.MCP_TOOL_ERROR);
+      };
+      const result = await promptIdContext.run(callId, () =>
+        this.runTool(
+          controller.signal,
+          callId,
+          { id: callId, name: tool.name, args: request.arguments },
+          undefined,
+          undefined,
+          undefined,
+          recordResult,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          {
+            tool,
+            onResult: (value) => {
+              rawResult = value;
+            },
+          },
+        ),
+      );
+      controller.signal.throwIfAborted();
+      if (rawResult && delivered) return rawResult;
+      const response = result.parts.find((part) => part.functionResponse)
+        ?.functionResponse?.response;
+      return {
+        isError: true,
+        content: [
+          {
+            type: 'text',
+            text:
+              typeof response?.['error'] === 'string'
+                ? response['error']
+                : 'MCP App tool call was not executed.',
+          },
+        ],
+      };
+    } finally {
+      this.mcpAppCalls.delete(callId);
+      this.#activeWorkChanged();
+    }
+  }
+
   private async runTool(
     abortSignal: AbortSignal,
     promptId: string,
@@ -13008,6 +13218,10 @@ export class Session implements SessionContext {
       source: 'code_mode';
     },
     finalizeCodeModeToolResult?: (result: RunToolResult) => Promise<Part[]>,
+    appExecution?: {
+      tool: DiscoveredMCPTool;
+      onResult: (result: McpAppToolResult) => void;
+    },
   ): Promise<RunToolResult> {
     const callId = fc.id ?? generatedCallId ?? `${fc.name}-${Date.now()}`;
     const modelFacingToolName = fc.name ?? 'unknown_tool';
@@ -13291,6 +13505,7 @@ export class Session implements SessionContext {
 
     let toolName = fc.name;
     if (
+      !appExecution &&
       this.config.getToolMode?.() === ToolMode.CodeModeOnly &&
       !isCodeModeToolCallAllowed(toolName, codeModeContext?.source ?? 'model')
     ) {
@@ -13308,7 +13523,7 @@ export class Session implements SessionContext {
     }
     const toolRegistry = this.config.getToolRegistry();
     const pm = this.config.getPermissionManager?.();
-    let tool = toolRegistry.getTool(toolName);
+    let tool = appExecution?.tool ?? toolRegistry.getTool(toolName);
 
     if (canonicalToolName(toolName) === ToolNames.TOOL_CALL) {
       let bridgeEnabled = true;
@@ -13552,7 +13767,13 @@ export class Session implements SessionContext {
 
         let toolBuildSucceeded = false;
         try {
-          const invocation = tool.build(args);
+          const invocation = appExecution
+            ? appExecution.tool.buildForApp(
+                args,
+                appExecution.onResult,
+                this.config,
+              )
+            : tool.build(args);
           const callIdAware = invocation as {
             setCallId?: (id: string) => void;
           };
@@ -14267,6 +14488,7 @@ export class Session implements SessionContext {
               }
               const params: RequestPermissionRequest = {
                 sessionId: this.sessionId,
+                ...(appExecution ? { _meta: { mcpAppCallId: callId } } : {}),
                 options: permissionOptions,
                 toolCall: {
                   toolCallId: callId,

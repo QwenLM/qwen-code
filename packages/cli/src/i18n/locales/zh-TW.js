@@ -194,6 +194,8 @@ export default {
   'toolDisplayName.UpdateGoal': '更新目標',
   'toolDisplayName.ProposeGoal': '提議目標',
   'toolDisplayName.SaveMemory': '儲存記憶',
+  'toolDisplayName.ManageMemory': '管理記憶',
+  'toolDisplayName.SearchMemory': '搜尋記憶',
   'toolDisplayName.Agent': 'Agent',
   'toolDisplayName.Advisor': '審查模型',
   'toolDisplayName.Artifact': '製品',
@@ -2517,4 +2519,6 @@ export default {
   'Kept model as {{model}}': '模型保持為 {{model}}',
   'Review messages held from other Qwen Code sessions (accept | deny), and manage trusted controllers (controllers | revoke)':
     '檢視其他 Qwen Code 工作階段傳來的待處理訊息（accept | deny），並管理受信任控制器（controllers | revoke）',
+  'Create a git commit with an AI-drafted message':
+    '使用 AI 起草的提交訊息建立 git 提交',
 };

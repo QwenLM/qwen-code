@@ -13,6 +13,8 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.runtimebroker.InMemoryRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.InMemoryRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.InMemoryToolExecutionRepository;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import java.net.HttpURLConnection;
 import java.net.URI;
 import java.nio.file.Path;
@@ -56,7 +58,28 @@ class EmbeddedRuntimeBrokerTest {
     }
 
     @Test
-    void rejectsUnsupportedBrokerRoutesBeforeAnySideEffects()
+    void boundSessionCannotResolveTheGlobalRuntimeWorkspace()
+            throws Exception {
+        ManagedAgentStore store = mock(ManagedAgentStore.class);
+        ContextBinding binding = new ContextBinding("tenant-a", "ws-a", 1,
+                "storage-a", ".", "config-a", 1);
+        when(store.findSessionById(SESSION_ID)).thenReturn(Optional.of(
+                new SessionRecord("tenant-a", SESSION_ID, "qwen-code",
+                        null, null, "ACTIVE", null, null, 0, 0, 0, 1, 1, null,
+                        0, binding)));
+        try (EmbeddedRuntimeBroker broker = broker(store, properties())) {
+            assertThatThrownBy(() -> broker.warm(SESSION_ID)
+                    .toCompletableFuture().join())
+                    .hasCauseInstanceOf(RuntimeBrokerException.class)
+                    .satisfies(error -> assertThat(
+                            ((RuntimeBrokerException) error.getCause())
+                                    .getCode())
+                            .isEqualTo("workspace_unavailable"));
+        }
+    }
+
+    @Test
+    void rejectsUnsupportedOrMalformedBrokerRoutesBeforeAnySideEffects()
             throws Exception {
         ManagedAgentStore store = mock(ManagedAgentStore.class);
         try (EmbeddedRuntimeBroker broker = broker(store, properties())) {
@@ -71,10 +94,12 @@ class EmbeddedRuntimeBrokerTest {
                         "Bearer broker-token");
                 connection.setDoOutput(true);
                 connection.getOutputStream().write("{}".getBytes());
-                assertThat(connection.getResponseCode()).isEqualTo(501);
+                boolean unsupported = route.endsWith(":resolve");
+                assertThat(connection.getResponseCode()).isEqualTo(unsupported ? 501 : 409);
                 assertThat(new String(connection.getErrorStream()
                         .readAllBytes(), java.nio.charset.StandardCharsets.UTF_8))
-                        .contains("runtime_broker_operation_unsupported");
+                        .contains(unsupported ? "runtime_broker_operation_unsupported"
+                                : "runtime_broker_protocol_conflict");
                 connection.disconnect();
             }
             org.mockito.Mockito.verifyNoInteractions(store);

@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { JavaManagedAgentClient } from './java-managed-agent-client';
+import {
+  isJavaAgentResyncRequired,
+  JavaManagedAgentClient,
+} from './java-managed-agent-client';
 import type { JavaManagedAgentHttpError } from './java-managed-agent-client';
 
 function jsonResponse(value: unknown, status = 200): Response {
@@ -90,6 +93,39 @@ describe('JavaManagedAgentClient', () => {
     });
   });
 
+  it('decodes the resync frame that ends an expired stream', async () => {
+    const client = new JavaManagedAgentClient({
+      baseUrl: 'https://product.example',
+      fetch: vi
+        .fn<typeof fetch>()
+        .mockResolvedValue(
+          new Response(
+            'event:agent.session.resync_required\ndata:{"type":"agent.session.resync_required","sessionId":"session-1","replayFloorSequence":40,"snapshotThroughSequence":42,"action":"reload_snapshot"}\n\n',
+            { status: 200 },
+          ),
+        ),
+    });
+
+    const frames = [];
+    for await (const frame of client.streamEvents({
+      sessionId: 'session-1',
+      afterSequence: 3,
+    })) {
+      frames.push(frame);
+    }
+
+    expect(frames).toEqual([
+      {
+        type: 'agent.session.resync_required',
+        sessionId: 'session-1',
+        replayFloorSequence: 40,
+        snapshotThroughSequence: 42,
+        action: 'reload_snapshot',
+      },
+    ]);
+    expect(isJavaAgentResyncRequired(frames[0]!)).toBe(true);
+  });
+
   it('maps the stable Java error envelope', async () => {
     const client = new JavaManagedAgentClient({
       baseUrl: 'https://product.example',
@@ -111,7 +147,7 @@ describe('JavaManagedAgentClient', () => {
         requestId: 'r1',
         idempotencyKey: 'key-1',
         agentId: 'dataworks_data_agent',
-        input: [{ type: 'text', text: 'hello' }],
+        input: [{ type: 'input_text', text: 'hello' }],
       }),
     ).rejects.toEqual(
       expect.objectContaining<Partial<JavaManagedAgentHttpError>>({

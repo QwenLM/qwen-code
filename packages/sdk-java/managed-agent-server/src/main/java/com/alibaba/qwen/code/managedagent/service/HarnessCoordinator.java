@@ -205,6 +205,10 @@ public class HarnessCoordinator {
             AtomicBoolean leaseLost, AtomicBoolean submissionAttempted) {
         SessionRecord session = store.requireSession(claimed.tenantId(),
                 claimed.sessionId());
+        if (session.workspace() != null) {
+            return fail(claimed, "workspace_unavailable",
+                    "Hosted Workspace execution is not available.");
+        }
         if ("CANCELLING".equals(claimed.status())
                 && claimed.harnessEventEpoch() == null
                 && !claimed.submissionAttempted()) {
@@ -533,6 +537,9 @@ public class HarnessCoordinator {
             }
             SessionRecord session = store.requireSession(tenantId,
                     sessionId);
+            if (session.workspace() != null) {
+                return;
+            }
             Attachment attachment = harness.createOrLoad(
                     session.tenantId(), session.sessionId(),
                     session.harnessBootId() != null);
@@ -572,7 +579,8 @@ public class HarnessCoordinator {
                     "Hosted Harness remained unavailable before Turn"
                             + " admission.");
         }
-        long delay = retryDelay(turn.retryCount());
+        long delay = retryDelay(retryInitialDelay, retryMaxDelay,
+                turn.retryCount());
         long retryAfter = Math.addExact(clock.millis(), delay);
         store.scheduleTurnRetry(turn.tenantId(), turn.sessionId(),
                 turn.turnId(), owner, retryAfter);
@@ -584,9 +592,10 @@ public class HarnessCoordinator {
         return true;
     }
 
-    private long retryDelay(int retryCount) {
-        long initial = retryInitialDelay.toMillis();
-        long maximum = retryMaxDelay.toMillis();
+    static long retryDelay(Duration initialDelay, Duration maxDelay,
+            int retryCount) {
+        long initial = initialDelay.toMillis();
+        long maximum = maxDelay.toMillis();
         int shift = Math.min(retryCount, 62);
         if (initial > (Long.MAX_VALUE >> shift)) {
             return maximum;
