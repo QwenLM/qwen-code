@@ -157,6 +157,10 @@
   width: var(--artifact-panel-dock-width);
   min-width: 0;
   display: flex;
+  /* The dock portals into a display:contents slot, so it is a direct
+     .appShell child, not a .contextShell descendant — apply the same macOS
+     overlay-titlebar inset here or the drag strip covers the panel toolbar. */
+  padding-top: var(--web-shell-desktop-titlebar-height, 0);
   animation: artifactPanelDockOpen 200ms cubic-bezier(0.32, 0.72, 0, 1);
 }
 
