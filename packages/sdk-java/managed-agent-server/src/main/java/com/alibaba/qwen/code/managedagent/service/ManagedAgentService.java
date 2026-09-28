@@ -32,6 +32,7 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.EventRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.EventPage;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.ItemPartRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.ItemRecord;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.ReplayWindow;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionPage;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutationCommand;
@@ -61,9 +62,10 @@ public class ManagedAgentService {
     private static final String DELETE = "DELETE_SESSION";
     private static final Pattern IDEMPOTENCY_KEY = Pattern.compile(
             "^[\\x21-\\x7e]{1,128}$");
-    // Snapshot reset and resync arrive with event replay (Stage D3).
     private static final SessionCapabilities CAPABILITIES =
-            new SessionCapabilities(true, false, false, false);
+            new SessionCapabilities(true, true, false, true);
+    // Catch-up reads of a stream use pages of this size.
+    static final int STREAM_PAGE = 100;
     // A context stays ready until cwd changes arrive (W2).
     private static final String WORKSPACE_STATE = "ready";
     // "text" is the spelling that clients used before the contract.
@@ -354,18 +356,21 @@ public class ManagedAgentService {
                 page.hasMore());
     }
 
-    public List<PublicEvent> publicEvents(String tenantId, String actorId,
-            String sessionId, long afterSequence, int requestedLimit) {
-        return events(tenantId, actorId, sessionId, afterSequence,
-                requestedLimit)
-                .stream().map(this::publicEvent).toList();
-    }
-
-    public List<WebShellEvent> webShellEvents(String tenantId, String actorId,
-            String sessionId, long afterSequence, int requestedLimit) {
-        return events(tenantId, actorId, sessionId, afterSequence,
-                requestedLimit)
-                .stream().map(this::webShellEvent).toList();
+    public PublicList<PublicEvent> publicEvents(String tenantId,
+            String actorId, String sessionId, long afterSequence,
+            int requestedLimit) {
+        requireEventCursor(afterSequence);
+        SessionRecord session = requireReadableSession(tenantId, actorId,
+                sessionId);
+        int limit = eventLimit(requestedLimit);
+        List<EventRecord> rows = replayableEvents(session, afterSequence,
+                limit + 1);
+        boolean hasMore = rows.size() > limit;
+        List<PublicEvent> events = rows.stream().limit(limit)
+                .map(this::publicEvent).toList();
+        String nextCursor = hasMore
+                ? Long.toString(events.getLast().sequence()) : null;
+        return new PublicList<>("list", events, hasMore, nextCursor);
     }
 
     public PublicItemList listPublicItems(String tenantId, String actorId,
@@ -399,7 +404,7 @@ public class ManagedAgentService {
             String sessionId, String cursor, int requestedLimit) {
         SessionRecord session = requireReadableSession(tenantId, actorId,
                 sessionId);
-        int limit = limit(requestedLimit);
+        int limit = eventLimit(requestedLimit);
         if (cursor == null || cursor.isBlank()) {
             SnapshotRecord snapshot = store.findSnapshot(tenantId, sessionId)
                     .orElse(null);
@@ -428,16 +433,27 @@ public class ManagedAgentService {
                 page.hasMore(), session.lastSequence());
     }
 
-    private List<EventRecord> events(String tenantId, String actorId,
-            String sessionId, long afterSequence, int requestedLimit) {
+    // Events are read before the floor: a floor that is not above the cursor
+    // after the read was not above it during the read either, so no event
+    // after the cursor had been pruned.
+    private List<EventRecord> replayableEvents(SessionRecord session,
+            long afterSequence, int limit) {
+        List<EventRecord> events = store.findEvents(session.tenantId(),
+                session.sessionId(), afterSequence, limit);
+        ReplayWindow window = store.findReplayWindow(session.tenantId(),
+                session.sessionId());
+        if (afterSequence < window.floorSequence()) {
+            throw new ReplayCursorExpired(window);
+        }
+        return events;
+    }
+
+    private static void requireEventCursor(long afterSequence) {
         if (afterSequence < 0) {
             throw new ApiException(HttpStatus.BAD_REQUEST,
                     "invalid_event_cursor",
                     "Event sequence must be non-negative.");
         }
-        requireReadableSession(tenantId, actorId, sessionId);
-        return store.findEvents(tenantId, sessionId, afterSequence,
-                limit(requestedLimit));
     }
 
     private PublicSession publicSession(SessionRecord session) {
@@ -450,7 +466,7 @@ public class ManagedAgentService {
                 session.status().toLowerCase(),
                 session.createdAt() / 1000, session.updatedAt() / 1000,
                 metadata, activeTurn == null ? null : publicTurn(activeTurn),
-                session.lastSequence(), 0,
+                session.lastSequence(), session.replayFloorSequence(),
                 store.findSnapshotCoveredSequence(session.tenantId(),
                         session.sessionId()),
                 CAPABILITIES, publicWorkspace(session));
@@ -527,15 +543,19 @@ public class ManagedAgentService {
     }
 
     PublicEvent publicEvent(EventRecord event) {
-        return new PublicEvent(event.sequence(), event.eventId(),
-                event.sessionId(), event.turnId(), event.type(),
-                event.createdAt() / 1000, event.data(), event.terminal());
+        return new PublicEvent(event.schemaVersion(),
+                event.projectionVersion(), event.sequence(), event.eventId(),
+                event.sessionId(), event.turnId(), event.itemId(),
+                event.contentPartId(), event.type(), event.createdAt() / 1000,
+                event.data(), event.terminal());
     }
 
     WebShellEvent webShellEvent(EventRecord event) {
-        return new WebShellEvent(event.sequence(), event.eventId(),
-                event.sessionId(), event.turnId(), event.type(),
-                event.createdAt(), event.data(), event.terminal());
+        return new WebShellEvent(event.schemaVersion(),
+                event.projectionVersion(), event.sequence(), event.eventId(),
+                event.sessionId(), event.turnId(), event.itemId(),
+                event.contentPartId(), event.type(), event.createdAt(),
+                event.data(), event.terminal());
     }
 
     private PublicItem publicItem(ItemRecord item) {
@@ -672,14 +692,14 @@ public class ManagedAgentService {
         }
     }
 
+    /**
+     * Reads the next catch-up page of a stream.
+     *
+     * @throws ReplayCursorExpired when the cursor is below the replay floor
+     */
     List<EventRecord> streamEvents(SessionRecord session, long afterSequence) {
-        if (afterSequence < 0) {
-            throw new ApiException(HttpStatus.BAD_REQUEST,
-                    "invalid_event_cursor",
-                    "Event sequence must be non-negative.");
-        }
-        return store.findEvents(session.tenantId(), session.sessionId(),
-                afterSequence, 100);
+        requireEventCursor(afterSequence);
+        return replayableEvents(session, afterSequence, STREAM_PAGE);
     }
 
     private SessionRecord requireVisibleSession(String tenantId,
@@ -796,6 +816,14 @@ public class ManagedAgentService {
         if (requested <= 0 || requested > 100) {
             throw new ApiException(HttpStatus.BAD_REQUEST, "invalid_limit",
                     "Limit must be between 1 and 100.");
+        }
+        return requested;
+    }
+
+    private static int eventLimit(int requested) {
+        if (requested <= 0 || requested > 1000) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "invalid_limit",
+                    "Limit must be between 1 and 1000.");
         }
         return requested;
     }

@@ -3151,6 +3151,25 @@ bad`);
         ]);
       });
 
+      it('keeps inherit-all for an empty tools array combined with disallowedTools', async () => {
+        // An empty allow-list is the documented "inherit everything" marker
+        // for definition files, not a request for a zero-tool agent. `[]` is
+        // truthy, so testing only for presence produced `tools: []` here, and
+        // AgentCore reads an explicit empty list as deny-all: an agent defined
+        // with `tools: []` plus `disallowedTools: [write_file]` declared 16
+        // tools on the merge base and 0 on this branch, with no warning.
+        const runtimeConfig = await manager.convertToRuntimeConfig({
+          ...validConfig,
+          tools: [],
+          disallowedTools: ['write_file'],
+        });
+
+        expect(runtimeConfig.toolConfig?.tools).toEqual(['*']);
+        expect(runtimeConfig.toolConfig?.disallowedTools).toEqual([
+          'write_file',
+        ]);
+      });
+
       it('should transform display names to tool names in tool configuration', async () => {
         const configWithDisplayNames: SubagentConfig = {
           ...validConfig,
