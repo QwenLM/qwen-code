@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import type { FunctionDeclaration, Part } from '@google/genai';
 import type { ToolCallRequestInfo } from '@qwen-code/qwen-code-core/core/turn.js';
 import {
@@ -12,6 +13,16 @@ import {
   convertToFunctionErrorResponse,
 } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
+import { managedToolDigest } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
+import type { HttpToolPublicationOwner } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
+import {
+  parseToolResultEnvelope,
+  type ToolResultEnvelope,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
+import {
+  assertManagedSessionDurableRef,
+  type ManagedSessionDurableRef,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import type { ManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
 import { HTTP_MANAGED_SESSION_STORE_CONTRACT } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import { normalizeWorkspaceRelativePath } from './managed-workspace-binding.js';
@@ -23,6 +34,7 @@ import {
 } from './hosted-workspace-broker.js';
 
 export const HOSTED_WORKSPACE_FILE_PROFILE = 'hosted-workspace-files/1';
+export const HOSTED_WORKSPACE_SHELL_PROFILE = 'hosted-workspace-shell/1';
 
 const pathProperty = {
   type: 'string',
@@ -74,6 +86,24 @@ export const HOSTED_WORKSPACE_FILE_TOOLS: FunctionDeclaration[] = [
   },
 ];
 
+export const HOSTED_WORKSPACE_SHELL_TOOLS: FunctionDeclaration[] = [
+  ...HOSTED_WORKSPACE_FILE_TOOLS,
+  {
+    name: 'run_shell_command',
+    description: 'Run one foreground Shell command in the remote Workspace.',
+    parametersJsonSchema: {
+      type: 'object',
+      properties: {
+        command: { type: 'string' },
+        timeout: { type: 'integer', minimum: 1, maximum: 600000 },
+        description: { type: 'string' },
+      },
+      required: ['command'],
+      additionalProperties: false,
+    },
+  },
+];
+
 export class HostedToolRecoveryRequiredError extends Error {
   constructor(cause: unknown) {
     super(
@@ -98,12 +128,17 @@ export class HostedWorkspaceToolTurn {
       type: 'assistant' | 'tool_result',
       parts: Part[],
       model: string,
+      identity?: { uuid: string; timestamp: string },
     ) => Promise<string>,
     private readonly messageFitsInline: (
       type: 'assistant' | 'tool_result',
       parts: Part[],
       model: string,
     ) => boolean,
+    private readonly publication?: {
+      owner: HttpToolPublicationOwner;
+      captureBytes: number;
+    },
   ) {
     this.broker = new HostedWorkspaceBroker(
       options,
@@ -115,6 +150,12 @@ export class HostedWorkspaceToolTurn {
     void this.warmed.catch(() => undefined);
   }
 
+  get declarations(): FunctionDeclaration[] {
+    return this.publication
+      ? HOSTED_WORKSPACE_SHELL_TOOLS
+      : HOSTED_WORKSPACE_FILE_TOOLS;
+  }
+
   async execute(
     calls: ToolCallRequestInfo[],
     parts: Part[],
@@ -123,20 +164,37 @@ export class HostedWorkspaceToolTurn {
   ): Promise<Part[]> {
     const ids = new Set<string>();
     const requests = calls.map((call) => {
+      const shell = call.name === 'run_shell_command';
       if (
-        !HOSTED_WORKSPACE_FILE_TOOLS.some((tool) => tool.name === call.name) ||
+        !this.declarations.some((tool) => tool.name === call.name) ||
         ids.has(call.callId) ||
         call.wasOutputTruncated === true
       )
         throw new Error('Hosted Workspace profile refused a tool call.');
       ids.add(call.callId);
-      const file = call.args['file_path'];
-      if (typeof file !== 'string')
-        throw new Error('Hosted file tools require a relative file_path.');
-      const relativeFile = normalizeWorkspaceRelativePath(file.trim());
+      let input: Record<string, unknown>;
+      if (shell) {
+        if (
+          typeof call.args['command'] !== 'string' ||
+          call.args['command'].length === 0 ||
+          Object.keys(call.args).some(
+            (key) => !['command', 'timeout', 'description'].includes(key),
+          )
+        )
+          throw new Error('Hosted Shell requires one foreground command.');
+        input = { ...call.args };
+      } else {
+        const file = call.args['file_path'];
+        if (typeof file !== 'string')
+          throw new Error('Hosted file tools require a relative file_path.');
+        input = {
+          ...call.args,
+          file_path: normalizeWorkspaceRelativePath(file.trim()),
+        };
+      }
       const payloadJson = JSON.stringify({
         toolName: call.name,
-        input: { ...call.args, file_path: relativeFile },
+        input,
       });
       const inputBytes = Buffer.from(
         JSON.stringify({
@@ -158,6 +216,10 @@ export class HostedWorkspaceToolTurn {
         payloadJson,
         inputBytes,
         digest: `sha256:${createHash('sha256').update(payloadJson).digest('hex')}`,
+        argsDigest: `sha256:${managedToolDigest(input)}`,
+        shell,
+        publicationId: shell ? randomUUID() : null,
+        runtimeCallId: shell ? randomUUID() : call.callId,
       };
     });
     if (!this.messageFitsInline('assistant', parts, model))
@@ -198,6 +260,22 @@ export class HostedWorkspaceToolTurn {
       }
     }
     const reserved: string[] = [];
+    const shellBindings = new Map<
+      string,
+      {
+        publicationId: string;
+        publicationToken: string;
+        runtimeBindingId: string;
+        bindingGeneration: string;
+        runtimeCallId: string;
+        argsDigest: string;
+        requestDigest: string;
+        argsRef: ManagedSessionDurableRef;
+        intentSequence: number;
+        modelCallId: string;
+        captureId: string;
+      }
+    >();
     try {
       this.uncertain = true;
       const messageId = await this.commit('assistant', parts, model);
@@ -207,24 +285,29 @@ export class HostedWorkspaceToolTurn {
           'managed-tool-input',
           request.inputBytes,
         );
-        const executionCallId = await this.broker.prepare(
-          randomUUID(),
-          request.digest,
-        );
+        const prepared = request.shell
+          ? await this.broker.prepareV3(
+              request.runtimeCallId,
+              request.argsDigest,
+              request.digest,
+              request.publicationId!,
+            )
+          : null;
+        const executionCallId =
+          prepared?.executionCallId ??
+          (await this.broker.prepare(randomUUID(), request.digest));
         reserved.push(executionCallId);
         const toolDefinitionRef = await this.session.resources.publish(
           'managed-tool-definition',
           Buffer.from(
             JSON.stringify(
-              HOSTED_WORKSPACE_FILE_TOOLS.find(
-                (tool) => tool.name === request.call.name,
-              ),
+              this.declarations.find((tool) => tool.name === request.call.name),
             ),
           ),
         );
         const authority = this.session.authority;
         const activation = this.session.activation;
-        await authority.appendExecutionEvent(
+        const intent = await authority.appendExecutionEvent(
           {
             operation: 'toolIntent',
             commandId: `tool-intent:${executionCallId}`,
@@ -254,6 +337,21 @@ export class HostedWorkspaceToolTurn {
           }),
           { class: 'harness', activation },
         );
+        if (prepared) {
+          shellBindings.set(executionCallId, {
+            publicationId: request.publicationId!,
+            publicationToken: randomBytes(32).toString('base64url'),
+            runtimeBindingId: prepared.runtimeBindingId,
+            bindingGeneration: prepared.bindingGeneration,
+            runtimeCallId: request.runtimeCallId,
+            argsDigest: request.argsDigest,
+            requestDigest: request.digest,
+            argsRef: routeRef,
+            intentSequence: intent.lastSequence,
+            modelCallId: request.call.callId,
+            captureId: randomUUID(),
+          });
+        }
         bindings.push({
           functionCallId: request.call.callId,
           toolName: request.call.name,
@@ -267,16 +365,97 @@ export class HostedWorkspaceToolTurn {
             (part) => part.functionCall?.id === request.call.callId,
           ),
           ordinal,
-          inputDigest: request.digest.slice(7),
+          inputDigest: (request.shell
+            ? request.argsDigest
+            : request.digest
+          ).slice(7),
           progressCursor: null,
           attemptId: messageId,
           routeRef,
         });
       }
       await this.harness.commitAwaitRuntimeBatch(bindings);
+      if (shellBindings.size > 0) {
+        const owner = await this.publication!.owner.owner();
+        const authority = this.session.authority;
+        const key = authority.sessionHeader.sessionKey;
+        const checkpointRef = authority.latestCheckpoint?.stateRef;
+        if (!checkpointRef)
+          throw new Error('Tool v3 await_runtime checkpoint is missing.');
+        for (const [executionCallId, saved] of shellBindings) {
+          const binding = {
+            publication: 'managed-tool-publication/1',
+            publicationId: saved.publicationId,
+            sessionKey: key,
+            turnId: this.promptId,
+            executionCallId,
+            modelCallId: saved.modelCallId,
+            runtimeBindingId: saved.runtimeBindingId,
+            reference: {
+              sessionId: this.promptId,
+              promptId: this.promptId,
+              callId: saved.runtimeCallId,
+              argsDigest: saved.argsDigest,
+            },
+            bindingGeneration: saved.bindingGeneration,
+            captureId: saved.captureId,
+            revision: 1,
+            captureScope: 'process_pipes',
+            capturePolicy: 'complete_required',
+            argsRef: saved.argsRef,
+            requestDigest: saved.requestDigest,
+            writerId: owner.writerId,
+            writerGeneration: owner.writerGeneration,
+            activationId: this.session.activation.activationId,
+            activationEpoch: this.session.activation.epoch,
+            intentSequence: saved.intentSequence,
+            checkpointRef,
+          };
+          const grant = await this.publication!.owner.request(
+            '/grants',
+            {
+              publication: 'managed-tool-publication/1',
+              operation: 'reserve',
+              sessionKey: key,
+              owner,
+              binding,
+              captureBytes: this.publication!.captureBytes,
+            },
+            saved.publicationToken,
+          );
+          if (
+            typeof grant !== 'object' ||
+            grant === null ||
+            (grant as Record<string, unknown>)['state'] !== 'OPEN'
+          )
+            throw new Error('Tool publication reservation was not confirmed.');
+        }
+      }
       const responses: Part[] = [];
       for (const [index, request] of requests.entries()) {
         const executionCallId = reserved[index];
+        if (request.shell) {
+          const saved = shellBindings.get(executionCallId);
+          if (!saved) throw new Error('Original Shell publication is missing.');
+          const result = await this.broker.executeV3(
+            executionCallId,
+            request.payloadJson,
+            saved.publicationId,
+            saved.publicationToken,
+            signal,
+          );
+          responses.push(
+            ...(await this.acceptShell(
+              request.call,
+              executionCallId,
+              saved.publicationId,
+              saved.publicationToken,
+              result,
+              model,
+            )),
+          );
+          continue;
+        }
         const result = await this.broker.execute(
           executionCallId,
           request.payloadJson,
@@ -360,6 +539,213 @@ export class HostedWorkspaceToolTurn {
       await Promise.allSettled(reserved.map((id) => this.broker.cancel(id)));
       throw new HostedToolRecoveryRequiredError(cause);
     }
+  }
+
+  private async acceptShell(
+    call: ToolCallRequestInfo,
+    executionCallId: string,
+    publicationId: string,
+    publicationToken: string,
+    brokerResult: ToolResultEnvelope,
+    model: string,
+  ): Promise<Part[]> {
+    if (
+      brokerResult.executionStatus === 'not_started' &&
+      brokerResult.capture === null
+    ) {
+      const owner = this.publication!.owner;
+      const closed = (await owner.request(
+        '/grants',
+        {
+          publication: 'managed-tool-publication/1',
+          operation: 'close_not_started',
+          sessionKey: this.session.authority.sessionHeader.sessionKey,
+          owner: await owner.owner(),
+          publicationId,
+        },
+        publicationToken,
+      )) as Record<string, unknown>;
+      if (closed['state'] !== 'NOT_STARTED')
+        throw new Error('Original Shell was not proven unstarted.');
+      const converted = convertToFunctionErrorResponse(
+        call.name,
+        call.callId,
+        [],
+        'Runtime Shell did not start.',
+      );
+      const response = converted[0]?.functionResponse;
+      if (
+        !response ||
+        converted.length !== 1 ||
+        !this.messageFitsInline('tool_result', converted, model)
+      )
+        throw new Error('Unstarted Shell result cannot be recorded.');
+      response.response = {
+        ...response.response,
+        executionStatus: 'not_started',
+      };
+      const outcome = Buffer.from(
+        JSON.stringify({ executionCallId, ...converted[0] }),
+      );
+      if (
+        outcome.length >
+        HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes
+      )
+        throw new Error('Unstarted Shell outcome exceeds its limit.');
+      const ref = await this.session.resources.publish(
+        'managed-tool-outcome',
+        outcome,
+      );
+      await this.commit('tool_result', converted, model);
+      await this.harness.resolveAwaitRuntime(executionCallId, ref);
+      return converted;
+    }
+    const owner = this.publication!.owner;
+    const finished = await owner.request(
+      `/publications/${publicationId}/finished`,
+      {},
+    );
+    const source = finished as Record<string, unknown>;
+    const envelope = parseToolResultEnvelope(source['result']);
+    if (!isDeepStrictEqual(envelope, parseToolResultEnvelope(brokerResult)))
+      throw new Error('Broker result differs from the finished publication.');
+    const manifestRef = envelope.capture?.manifest ?? null;
+    const decision =
+      envelope.capture?.captureStatus === 'complete' ? 'committed' : 'blocked';
+    const authority = this.session.authority;
+    let receipt = authority
+      .eventsInSequenceRange(1, authority.committedSequence)
+      .find(
+        (event) =>
+          event.kind === 'tool.receipt' &&
+          event.payload['executionCallId'] === executionCallId,
+      );
+    let ref: ManagedSessionDurableRef;
+    let converted: Part[];
+    let messageId: string;
+    let timestamp: string;
+    if (receipt) {
+      ref = assertManagedSessionDurableRef(
+        receipt.payload['toolOutcomeRef'],
+        'original tool outcome',
+      );
+      const saved = JSON.parse(
+        (await this.session.resources.read(ref)).toString('utf8'),
+      ) as Record<string, unknown>;
+      const history = saved['history'] as Record<string, unknown> | undefined;
+      if (
+        saved['schemaVersion'] !== 1 ||
+        saved['decision'] !== decision ||
+        !isDeepStrictEqual(saved['envelope'], envelope) ||
+        !isDeepStrictEqual(saved['manifestRef'], manifestRef) ||
+        !isDeepStrictEqual(
+          receipt.payload['resultRef'],
+          decision === 'committed' ? manifestRef : null,
+        ) ||
+        typeof history?.['messageId'] !== 'string' ||
+        typeof history['timestamp'] !== 'string' ||
+        typeof history['model'] !== 'string' ||
+        !Array.isArray(history['parts'])
+      )
+        throw new Error('Original Shell receipt conflicts with its result.');
+      converted = history['parts'] as Part[];
+      model = history['model'];
+      messageId = history['messageId'];
+      timestamp = history['timestamp'];
+    } else {
+      const responseParts = envelope.responseParts as Part[];
+      converted =
+        envelope.executionStatus === 'success'
+          ? convertToFunctionResponse(call.name, call.callId, responseParts)
+          : convertToFunctionErrorResponse(
+              call.name,
+              call.callId,
+              responseParts,
+              envelope.error?.message ??
+                `Runtime tool ${envelope.executionStatus}.`,
+            );
+      if (
+        converted.length !== 1 ||
+        !converted[0]?.functionResponse ||
+        !this.messageFitsInline('tool_result', converted, model)
+      ) {
+        converted = [
+          {
+            functionResponse: {
+              id: call.callId,
+              name: call.name,
+              response: {
+                executionStatus: envelope.executionStatus,
+                captureStatus: envelope.capture?.captureStatus ?? 'unavailable',
+                outputOmitted: true,
+                summary: 'The Shell result was saved in its immutable capture.',
+              },
+            },
+          },
+        ];
+      }
+      messageId = randomUUID();
+      timestamp = new Date().toISOString();
+      const outcome = {
+        schemaVersion: 1,
+        decision,
+        envelope,
+        manifestRef,
+        history: { messageId, timestamp, model, parts: converted },
+      };
+      ref = (await owner.request(
+        `/publications/${publicationId}/admissions/prepare`,
+        outcome,
+      )) as ManagedSessionDurableRef;
+      owner.rememberAdmission(publicationId, ref);
+      await authority.appendExecutionEvent(
+        {
+          operation: 'recordToolResult',
+          commandId: executionCallId,
+          sessionKey: authority.sessionHeader.sessionKey,
+          contentDigest: ref.digest,
+        },
+        (sequence) => ({
+          v: 1,
+          sequence,
+          eventId: `tool-receipt:${executionCallId}`,
+          sessionKey: authority.sessionHeader.sessionKey,
+          kind: 'tool.receipt',
+          occurredAt: Date.now(),
+          payload: {
+            executionCallId,
+            toolOutcomeRef: ref,
+            resultRef: decision === 'committed' ? manifestRef : null,
+            resources: manifestRef ? [manifestRef] : [],
+            historyRevision: sequence,
+          },
+        }),
+        { class: 'trusted_entry' },
+      );
+      receipt = authority
+        .eventsInSequenceRange(1, authority.committedSequence)
+        .find(
+          (event) =>
+            event.kind === 'tool.receipt' &&
+            event.payload['executionCallId'] === executionCallId,
+        );
+    }
+    if (!receipt) throw new Error('Original Shell receipt disappeared.');
+    await this.commit('tool_result', converted, model, {
+      uuid: messageId,
+      timestamp,
+    });
+    if (decision === 'committed')
+      await this.harness.resolveAwaitRuntime(executionCallId, ref);
+    await this.broker.acknowledgeV3(executionCallId, {
+      executionCallId,
+      manifest: manifestRef,
+      deliveryStatus: decision,
+      historyRevision: decision === 'committed' ? receipt.sequence : null,
+    });
+    if (decision !== 'committed')
+      throw new Error('Incomplete Shell capture blocked the Hosted tool turn.');
+    return converted;
   }
 
   async consumeResults(): Promise<void> {

@@ -72,6 +72,16 @@ public final class ToolPublicationAdmissionStore {
         JsonNode binding = ToolPublicationContract.readJson(
                 ((String) candidate.get("binding_json")).getBytes(StandardCharsets.UTF_8));
         validateReceipt(key, binding, outcome, outcomeRef, request, publicationId);
+        JsonNode manifestRef = outcome.path("manifestRef");
+        byte[] manifestBytes = manifestRef.isNull() ? null
+                : data.readResource(key, publicationId, text(manifestRef, "resourceId"));
+        if (manifestBytes != null) {
+            require("managed-tool-result-manifest".equals(text(manifestRef, "kind"))
+                    && manifestBytes.length == manifestRef.path("byteLength").asLong(-1)
+                    && ToolPublicationContract.sha256(manifestBytes).equals(text(manifestRef, "digest"))
+                    && manifestBytes.length <= ManagedSessionStoreModels.MAX_INLINE_RESOURCE_BYTES,
+                    "Original manifest resource conflicts");
+        }
         return transactions.execute(status -> {
             lockTenant(key);
             sessions.lockPublicationWriter(text(key, "tenantId"), text(key, "workspaceId"),
@@ -99,6 +109,9 @@ public final class ToolPublicationAdmissionStore {
                     "Publication is not ready for receipt");
             installSessionResource(key, request, outcomeRef, admissionBytes,
                     (String) object.get("object_key"));
+            if (manifestBytes != null) {
+                installManifestResource(key, request, manifestRef, manifestBytes);
+            }
             var receipt = sessions.commit(text(key, "tenantId"), text(key, "sessionId"),
                     writerToken, request);
             jdbc.update("UPDATE qwen_tool_publication SET producer_phase = 'REFERENCED',"
@@ -175,6 +188,26 @@ public final class ToolPublicationAdmissionStore {
                 inline ? bytes : null, inline ? null : objectKey, request.commandId(),
                 jdbc.queryForObject("SELECT CURRENT_TIMESTAMP(6)", Timestamp.class),
                 jdbc.queryForObject("SELECT CURRENT_TIMESTAMP(6)", Timestamp.class));
+    }
+
+    private void installManifestResource(JsonNode key, CommitTransactionRequest request,
+            JsonNode ref, byte[] bytes) {
+        String resourceId = text(ref, "resourceId");
+        String scopeKey = ToolPublicationContract.sha256((text(key, "tenantId") + "\u0000"
+                + text(key, "sessionId")).getBytes(StandardCharsets.UTF_8));
+        Long existing = jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_resource"
+                + " WHERE session_scope_key = ? AND resource_id = ?", Long.class, scopeKey, resourceId);
+        if (existing != null && existing > 0) {
+            return;
+        }
+        Timestamp now = jdbc.queryForObject("SELECT CURRENT_TIMESTAMP(6)", Timestamp.class);
+        jdbc.update("INSERT INTO qwen_managed_session_resource (session_scope_key, tenant_id,"
+                        + " workspace_id, session_id, resource_id, kind, schema_version, byte_length, sha256,"
+                        + " storage_kind, inline_bytes, publish_command_id, state, created_at, last_verified_at)"
+                        + " VALUES (?, ?, ?, ?, ?, 'managed-tool-result-manifest', 1, ?, ?, 'MYSQL_INLINE',"
+                        + " ?, ?, 'REFERENCED', ?, ?)", scopeKey, text(key, "tenantId"),
+                text(key, "workspaceId"), text(key, "sessionId"), resourceId,
+                bytes.length, text(ref, "digest"), bytes, request.commandId(), now, now);
     }
 
     private JsonNode replay(JsonNode key, JsonNode binding, JsonNode outcome,

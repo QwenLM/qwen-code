@@ -16,6 +16,7 @@ import {
 import {
   createHttpManagedSessionStores,
   HTTP_MANAGED_SESSION_STORE_CONTRACT,
+  type HttpToolPublicationOwner,
 } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import {
   openManagedSession,
@@ -31,6 +32,7 @@ import { runHostedHarnessTextTurn } from './hosted-harness-model.js';
 import type { HostedWorkspaceBrokerOptions } from './hosted-workspace-broker.js';
 import {
   HOSTED_WORKSPACE_FILE_PROFILE,
+  HOSTED_WORKSPACE_SHELL_PROFILE,
   HostedToolRecoveryRequiredError,
   HostedWorkspaceToolTurn,
 } from './hosted-workspace-tool-turn.js';
@@ -49,7 +51,10 @@ interface HostedSession {
   active?: { promptId: string; digest: string; abort: AbortController };
   admissions: Map<string, { digest: string; lastEventId: number }>;
   blocked: boolean;
-  toolProfile?: typeof HOSTED_WORKSPACE_FILE_PROFILE;
+  toolProfile?:
+    | typeof HOSTED_WORKSPACE_FILE_PROFILE
+    | typeof HOSTED_WORKSPACE_SHELL_PROFILE;
+  publication?: { owner: HttpToolPublicationOwner; captureBytes: number };
 }
 
 function object(value: unknown): Record<string, unknown> | null {
@@ -237,11 +242,25 @@ export function registerHostedHarnessSessionRoutes(
     const body = object(req.body);
     const sessionId = create ? body?.['sessionId'] : req.params['id'];
     const toolProfile = body?.['toolProfile'];
+    const captureBytes = body?.['captureBytes'];
     if (
       toolProfile !== undefined &&
-      (toolProfile !== HOSTED_WORKSPACE_FILE_PROFILE || !brokerOptions)
+      (![
+        HOSTED_WORKSPACE_FILE_PROFILE,
+        HOSTED_WORKSPACE_SHELL_PROFILE,
+      ].includes(toolProfile as string) ||
+        !brokerOptions)
     ) {
       error(res, 400, 'hosted_tool_profile_unavailable');
+      return;
+    }
+    if (
+      toolProfile === HOSTED_WORKSPACE_SHELL_PROFILE &&
+      (!Number.isSafeInteger(captureBytes) ||
+        (captureBytes as number) < 1 ||
+        (captureBytes as number) > 2 ** 41)
+    ) {
+      error(res, 400, 'hosted_shell_capture_capacity_required');
       return;
     }
     if (
@@ -290,6 +309,9 @@ export function registerHostedHarnessSessionRoutes(
                   engine: 'managed',
                   sessionId,
                   ...(toolProfile ? { toolProfile } : {}),
+                  ...(toolProfile === HOSTED_WORKSPACE_SHELL_PROFILE
+                    ? { captureBytes }
+                    : {}),
                 }),
               ),
             ),
@@ -320,7 +342,21 @@ export function registerHostedHarnessSessionRoutes(
         streams: new Set(),
         admissions: new Map(),
         blocked: false,
-        ...(toolProfile ? { toolProfile } : {}),
+        ...(toolProfile
+          ? {
+              toolProfile: toolProfile as
+                | typeof HOSTED_WORKSPACE_FILE_PROFILE
+                | typeof HOSTED_WORKSPACE_SHELL_PROFILE,
+            }
+          : {}),
+        ...(toolProfile === HOSTED_WORKSPACE_SHELL_PROFILE
+          ? {
+              publication: {
+                owner: stores.publication,
+                captureBytes: captureBytes as number,
+              },
+            }
+          : {}),
       };
       const definition = object(
         JSON.parse(
@@ -331,7 +367,11 @@ export function registerHostedHarnessSessionRoutes(
           ).toString('utf8'),
         ),
       );
-      if (definition?.['toolProfile'] !== toolProfile) {
+      if (
+        definition?.['toolProfile'] !== toolProfile ||
+        (toolProfile === HOSTED_WORKSPACE_SHELL_PROFILE &&
+          definition?.['captureBytes'] !== captureBytes)
+      ) {
         await managed.close();
         error(res, 409, 'hosted_tool_profile_conflict');
         return;
@@ -513,18 +553,21 @@ export function registerHostedHarnessSessionRoutes(
             type: 'assistant' | 'tool_result',
             parts: Part[],
             model: string,
+            identity?: { uuid: string; timestamp: string },
           ) =>
             record(session, req.params['id'], type, parentUuid, {
               daemonPromptId: promptId,
               model,
               message: { role: type === 'assistant' ? 'model' : 'user', parts },
+              ...identity,
             });
           const commit = async (
             type: 'assistant' | 'tool_result',
             parts: Part[],
             model: string,
+            identity?: { uuid: string; timestamp: string },
           ) => {
-            const message = messageRecord(type, parts, model);
+            const message = messageRecord(type, parts, model, identity);
             await session.managed.sink.write(message);
             parentUuid = message.uuid;
             return message.uuid;
@@ -542,6 +585,7 @@ export function registerHostedHarnessSessionRoutes(
                       JSON.stringify(messageRecord(type, parts, model)),
                     ) <=
                     HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes,
+                  session.publication,
                 )
               : undefined;
           let state: 'completed' | 'cancelled' | 'error' = 'completed';

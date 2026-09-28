@@ -9,7 +9,6 @@ import type { AddressInfo } from 'node:net';
 import type { Readable } from 'node:stream';
 import express from 'express';
 import { MANAGED_TOOL_RESULT_ROUTES } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
-import type { LocalShellResultSession } from '@qwen-code/qwen-code-core/managed-runtime/local-shell-result-session.js';
 import {
   OWNED_MANAGED_RUNTIME_ROUTES,
   ownedManagedRuntimeRouteGate,
@@ -26,7 +25,12 @@ import {
   MANAGED_CONTEXT_WORKER_ROUTES,
   registerManagedContextRoutes,
 } from './managed-context-worker.js';
-import { ManagedToolExecutor } from './managed-runtime-tool-executor.js';
+import {
+  ManagedToolExecutor,
+  type ShellCapturePublisher,
+} from './managed-runtime-tool-executor.js';
+import { PUBLICATION_INSTALL_ROUTE } from './remote-shell-result-publication.js';
+import { WORKSPACE_CAPABILITY_DIGEST } from './managed-workspace-activation.js';
 import { registerManagedRuntimeToolRoutes } from './managed-runtime-tool-routes.js';
 
 const MANAGED_RUNTIME_WORKER_BOOT_LIMIT_BYTES = 32 * 1024;
@@ -139,7 +143,7 @@ export async function readManagedRuntimeWorkerBoot(
 
 export async function startManagedRuntimeAttestationWorker(
   boot: ManagedRuntimeWorkerBoot | ManagedContextBoot,
-  capturePublisher?: Pick<LocalShellResultSession, 'prepare' | 'accept'>,
+  capturePublisher?: ShellCapturePublisher,
 ): Promise<ManagedRuntimeAttestationWorkerHandle> {
   const app = express();
   app.disable('x-powered-by');
@@ -158,8 +162,13 @@ export async function startManagedRuntimeAttestationWorker(
     ownedManagedRuntimeRouteGate(
       app,
       boot.version === 2
-        ? capturePublisher
-          ? [...MANAGED_CONTEXT_WORKER_ROUTES, ...MANAGED_TOOL_RESULT_ROUTES]
+        ? capturePublisher ||
+          boot.capabilityDigest === WORKSPACE_CAPABILITY_DIGEST
+          ? [
+              ...MANAGED_CONTEXT_WORKER_ROUTES,
+              ...MANAGED_TOOL_RESULT_ROUTES,
+              ...(capturePublisher ? [] : [PUBLICATION_INSTALL_ROUTE]),
+            ]
           : MANAGED_CONTEXT_WORKER_ROUTES
         : OWNED_MANAGED_RUNTIME_ROUTES,
     ),

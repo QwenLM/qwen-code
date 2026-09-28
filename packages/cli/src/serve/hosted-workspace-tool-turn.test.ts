@@ -17,6 +17,7 @@ import {
 import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
 import type { ManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
+import type { HttpToolPublicationOwner } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import { HostedWorkspaceBrokerRejection } from './hosted-workspace-broker.js';
 import {
   HostedWorkspaceToolTurn,
@@ -27,7 +28,10 @@ const broker = vi.hoisted(() => ({
   warm: vi.fn(),
   acquire: vi.fn(),
   prepare: vi.fn(),
+  prepareV3: vi.fn(),
   execute: vi.fn(),
+  executeV3: vi.fn(),
+  acknowledgeV3: vi.fn(),
   cancel: vi.fn(),
   release: vi.fn(),
 }));
@@ -37,7 +41,10 @@ vi.mock('./hosted-workspace-broker.js', async (importOriginal) => ({
     warm = broker.warm;
     acquire = broker.acquire;
     prepare = broker.prepare;
+    prepareV3 = broker.prepareV3;
     execute = broker.execute;
+    executeV3 = broker.executeV3;
+    acknowledgeV3 = broker.acknowledgeV3;
     cancel = broker.cancel;
     release = broker.release;
   },
@@ -173,6 +180,169 @@ it('commits the whole batch before the first dispatch and each receipt before re
   await turn.consumeResults();
   await turn.finish();
   expect(broker.release).toHaveBeenCalledOnce();
+});
+
+it('commits the original Shell receipt before history, checkpoint and ACK', async () => {
+  const shellCall = {
+    ...calls[0],
+    name: 'run_shell_command',
+    callId: 'shell-call',
+    args: { command: 'printf hi' },
+  };
+  const shellParts: Part[] = [
+    {
+      functionCall: {
+        id: shellCall.callId,
+        name: shellCall.name,
+        args: shellCall.args,
+      },
+    },
+  ];
+  const manifest = await session.resources.publish(
+    'managed-tool-result-manifest',
+    Buffer.from('{}'),
+  );
+  const envelope = {
+    executionStatus: 'success' as const,
+    responseParts: [{ text: 'hi' }],
+    capture: {
+      manifest,
+      captureStatus: 'complete' as const,
+      captureReason: null,
+      previewTruncated: false,
+      deliveryStatus: 'pending' as const,
+    },
+  };
+  const order: string[] = [];
+  broker.prepareV3.mockResolvedValue({
+    executionCallId: 'shell-execution',
+    runtimeBindingId: 'binding-1',
+    bindingGeneration: '1',
+  });
+  broker.executeV3.mockImplementation(async () => {
+    order.push('execute');
+    expect(session.authority.latestCheckpoint?.boundary).toBe('durable_wait');
+    return envelope;
+  });
+  broker.acknowledgeV3.mockImplementation(async () => {
+    order.push('ack');
+    expect((await session.sink.project()).at(-1)?.type).toBe('tool_result');
+    expect(session.authority.latestCheckpoint?.boundary).toBeNull();
+  });
+  const request = vi.fn(async (route: string, body: unknown) => {
+    if (route === '/grants') {
+      order.push('reserve');
+      return { state: 'OPEN' };
+    }
+    if (route.endsWith('/finished')) {
+      order.push('finished');
+      return { result: envelope };
+    }
+    if (route.endsWith('/admissions/prepare')) {
+      order.push('admission');
+      return session.resources.publish(
+        'managed-tool-outcome',
+        Buffer.from(JSON.stringify(body)),
+      );
+    }
+    throw new Error('Unexpected publication route ' + route);
+  });
+  const owner = {
+    owner: async () => ({ writerId: 'worker', writerGeneration: 1 }),
+    request,
+    rememberAdmission: vi.fn(),
+  } as unknown as HttpToolPublicationOwner;
+  const originalAppend = session.authority.appendExecutionEvent.bind(
+    session.authority,
+  );
+  vi.spyOn(session.authority, 'appendExecutionEvent').mockImplementation(
+    async (...args) => {
+      if (args[0].operation === 'recordToolResult') order.push('receipt');
+      return originalAppend(...args);
+    },
+  );
+  const shellTurn = new HostedWorkspaceToolTurn(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    harness,
+    'prompt',
+    async (type, messageParts, model, identity) => {
+      order.push(type);
+      const uuid = identity?.uuid ?? randomUUID();
+      await session.sink.write({
+        uuid,
+        parentUuid: null,
+        sessionId: session.authority.sessionHeader.sessionKey.sessionId,
+        timestamp: identity?.timestamp ?? new Date().toISOString(),
+        type,
+        cwd: root,
+        version: 'test',
+        daemonPromptId: 'prompt',
+        model,
+        message: {
+          role: type === 'assistant' ? 'model' : 'user',
+          parts: messageParts,
+        },
+      });
+      return uuid;
+    },
+    () => true,
+    { owner, captureBytes: 1024 * 1024 },
+  );
+  const result = await shellTurn.execute(
+    [shellCall],
+    shellParts,
+    'model',
+    new AbortController().signal,
+  );
+  expect(result[0]?.functionResponse?.response).toMatchObject({
+    output: 'hi',
+  });
+  expect(order).toEqual([
+    'assistant',
+    'reserve',
+    'execute',
+    'finished',
+    'admission',
+    'receipt',
+    'tool_result',
+    'ack',
+  ]);
+  expect(
+    session.authority
+      .eventsInSequenceRange(1, session.authority.committedSequence)
+      .filter((event) => event.kind === 'tool.receipt'),
+  ).toHaveLength(1);
+  const publicationId = broker.prepareV3.mock.calls[0]?.[3] as string;
+  await (
+    shellTurn as unknown as {
+      acceptShell: (
+        call: typeof shellCall,
+        executionCallId: string,
+        publicationId: string,
+        publicationToken: string,
+        result: typeof envelope,
+        model: string,
+      ) => Promise<Part[]>;
+    }
+  ).acceptShell(
+    shellCall,
+    'shell-execution',
+    publicationId,
+    'unused-token',
+    envelope,
+    'model',
+  );
+  expect(
+    request.mock.calls.filter(([route]) =>
+      String(route).endsWith('/admissions/prepare'),
+    ),
+  ).toHaveLength(1);
+  expect(
+    session.authority
+      .eventsInSequenceRange(1, session.authority.committedSequence)
+      .filter((event) => event.kind === 'tool.receipt'),
+  ).toHaveLength(1);
 });
 
 it.each(['input', 'intent', 'wait', 'result'] as const)(

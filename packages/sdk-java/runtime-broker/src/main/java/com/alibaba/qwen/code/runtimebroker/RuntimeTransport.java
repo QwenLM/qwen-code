@@ -54,6 +54,41 @@ public interface RuntimeTransport {
     CompletionStage<Map<String, Object>> execute(RuntimeLease lease,
             RuntimeSession session, Map<String, Object> reference);
 
+    default CompletionStage<Void> installPublication(RuntimeLease lease,
+            RuntimeSession session, RuntimePublicationGrant grant) {
+        return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
+                "runtime_publication_unsupported",
+                "Runtime transport does not support publication grants.", false));
+    }
+
+    default CompletionStage<Map<String, Object>> executeV3(RuntimeLease lease,
+            RuntimeSession session, Map<String, Object> reference,
+            Map<String, Object> payload, Map<String, Object> capture) {
+        return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
+                "runtime_tool_v3_unsupported",
+                "Runtime transport does not support Tool v3.", false));
+    }
+
+    default CompletionStage<Map<String, Object>> statusV3(RuntimeLease lease,
+            RuntimeSession session, Map<String, Object> reference,
+            long afterSequence) {
+        return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
+                "runtime_tool_v3_unsupported", "Runtime transport does not support Tool v3 status.", false));
+    }
+
+    default CompletionStage<Map<String, Object>> cancelV3(RuntimeLease lease,
+            RuntimeSession session, Map<String, Object> reference) {
+        return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
+                "runtime_tool_v3_unsupported", "Runtime transport does not support Tool v3 cancel.", false));
+    }
+
+    default CompletionStage<Map<String, Object>> acknowledgeV3(RuntimeLease lease,
+            RuntimeSession session, Map<String, Object> reference,
+            Map<String, Object> receipt) {
+        return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
+                "runtime_tool_v3_unsupported", "Runtime transport does not support Tool v3 ACK.", false));
+    }
+
     default CompletionStage<Map<String, Object>> execute(RuntimeLease lease,
             RuntimeSession session, Map<String, Object> reference,
             Map<String, Object> payload) {

@@ -9,6 +9,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionSeed;
+import com.alibaba.qwen.code.runtimebroker.RuntimePublicationGrant;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository;
@@ -99,6 +100,51 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
             }
         }
         return delegate.execute(lease, session, reference);
+    }
+
+    @Override
+    public CompletionStage<Void> installPublication(RuntimeLease lease,
+            RuntimeSession session, RuntimePublicationGrant grant) {
+        requireOwnedWorkspace(lease, session);
+        return delegate.installPublication(lease, session, grant);
+    }
+
+    @Override
+    public CompletionStage<Map<String, Object>> executeV3(RuntimeLease lease,
+            RuntimeSession session, Map<String, Object> reference,
+            Map<String, Object> payload, Map<String, Object> capture) {
+        requireOwnedWorkspace(lease, session);
+        return delegate.executeV3(lease, session, reference, payload, capture);
+    }
+
+    @Override
+    public CompletionStage<Map<String, Object>> statusV3(RuntimeLease lease,
+            RuntimeSession session, Map<String, Object> reference,
+            long afterSequence) {
+        return delegate.statusV3(lease, session, reference, afterSequence);
+    }
+
+    @Override
+    public CompletionStage<Map<String, Object>> cancelV3(RuntimeLease lease,
+            RuntimeSession session, Map<String, Object> reference) {
+        requireOwnedWorkspace(lease, session);
+        return delegate.cancelV3(lease, session, reference);
+    }
+
+    @Override
+    public CompletionStage<Map<String, Object>> acknowledgeV3(RuntimeLease lease,
+            RuntimeSession session, Map<String, Object> reference,
+            Map<String, Object> receipt) {
+        requireOwnedWorkspace(lease, session);
+        return delegate.acknowledgeV3(lease, session, reference, receipt);
+    }
+
+    private void requireOwnedWorkspace(RuntimeLease lease, RuntimeSession session) {
+        if (!managed(session)) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+        Context context = context(lease, session, true);
+        ownership.assertHeld(context.binding(), context.session());
     }
 
     @Override

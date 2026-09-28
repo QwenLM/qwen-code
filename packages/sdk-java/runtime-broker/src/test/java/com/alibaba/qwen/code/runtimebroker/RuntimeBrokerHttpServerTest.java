@@ -119,6 +119,83 @@ class RuntimeBrokerHttpServerTest {
     }
 
     @Test
+    void v3ReservationKeepsCanonicalInputAndExactPayloadDigestsSeparate() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            fixture.service.acquire("harness", "runtime", "bootstrap").toCompletableFuture().join();
+            String payload = "{\"toolName\":\"run_shell_command\",\"input\":{\"command\":\"printf hi\"}}";
+            String exact = "sha256:" + HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
+                    .digest(payload.getBytes(StandardCharsets.UTF_8)));
+            String canonical = "sha256:" + HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
+                    .digest("{\"command\":\"printf hi\"}".getBytes(StandardCharsets.UTF_8)));
+            Map<String, Object> reference = Map.of("sessionId", "runtime", "promptId", "turn",
+                    "callId", "call", "argsDigest", canonical);
+            HttpResponse<String> reserved = fixture.post("/executions:prepare", Map.ofEntries(
+                    Map.entry("protocolVersion", 1), Map.entry("requestId", "prepare-v3"),
+                    Map.entry("idempotencyKey", "v3-key"), Map.entry("harnessSessionId", "harness"),
+                    Map.entry("runtimeSessionId", "runtime"), Map.entry("turnId", "turn"),
+                    Map.entry("toolCallId", "call"), Map.entry("requestDigest", exact),
+                    Map.entry("toolProtocol", "v3"), Map.entry("publicationId", "pub-1"),
+                    Map.entry("reference", reference)));
+            assertEquals(200, reserved.statusCode(), reserved.body());
+            String id = JSON.parseObject(reserved.body()).getString("executionCallId");
+            ToolExecutionRecord record = fixture.service.getExecution("harness", "runtime", id)
+                    .toCompletableFuture().join();
+            assertEquals(exact, record.getRequestDigest());
+            assertEquals(canonical, record.getReference().get("argsDigest"));
+            assertEquals("deferred_v3", record.getReference().get("dispatchMode"));
+            assertEquals(0, fixture.transport.executions.get());
+            assertEquals(503, fixture.post("/executions/" + id + ":start", Map.of(
+                    "protocolVersion", 1, "requestId", "start-v3", "harnessSessionId", "harness",
+                    "runtimeSessionId", "runtime", "payloadJson", payload)).statusCode());
+            assertEquals(0, fixture.transport.executions.get());
+            HttpResponse<String> cancelled = fixture.post("/executions/" + id + ":cancel", Map.of(
+                    "protocolVersion", 1, "requestId", "cancel-v3", "harnessSessionId", "harness",
+                    "runtimeSessionId", "runtime"));
+            assertEquals(200, cancelled.statusCode(), cancelled.body());
+            var result = JSON.parseObject(cancelled.body()).getJSONObject("status").getJSONObject("result");
+            assertEquals("not_started", result.getString("executionStatus"));
+            assertTrue(result.getJSONArray("responseParts").isEmpty());
+            assertTrue(result.containsKey("capture") && result.get("capture") == null);
+        }
+    }
+
+    @Test
+    void v3InstallsOneGrantAndReconcilesTheOriginalFinishedResult() throws Exception {
+        try (Fixture fixture = new Fixture(true)) {
+            fixture.service.acquire("harness", "runtime", "bootstrap").toCompletableFuture().join();
+            String payload = "{\"toolName\":\"run_shell_command\",\"input\":{\"command\":\"printf hi\"}}";
+            String exact = "sha256:" + HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
+                    .digest(payload.getBytes(StandardCharsets.UTF_8)));
+            String canonical = "sha256:" + HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
+                    .digest("{\"command\":\"printf hi\"}".getBytes(StandardCharsets.UTF_8)));
+            HttpResponse<String> reserved = fixture.post("/executions:prepare", Map.ofEntries(
+                    Map.entry("protocolVersion", 1), Map.entry("requestId", "prepare-v3"),
+                    Map.entry("idempotencyKey", "v3-key"), Map.entry("harnessSessionId", "harness"),
+                    Map.entry("runtimeSessionId", "runtime"), Map.entry("turnId", "turn"),
+                    Map.entry("toolCallId", "call"), Map.entry("requestDigest", exact),
+                    Map.entry("toolProtocol", "v3"), Map.entry("publicationId", "pub-1"),
+                    Map.entry("reference", Map.of("sessionId", "runtime", "promptId", "turn",
+                            "callId", "call", "argsDigest", canonical))));
+            assertEquals(200, reserved.statusCode(), reserved.body());
+            String id = JSON.parseObject(reserved.body()).getString("executionCallId");
+            Map<String, Object> start = Map.of("protocolVersion", 1, "requestId", "start-v3",
+                    "harnessSessionId", "harness", "runtimeSessionId", "runtime",
+                    "payloadJson", payload, "publicationId", "pub-1", "publicationToken", "token");
+            assertEquals(200, fixture.post("/executions/" + id + ":start", start).statusCode());
+            for (int attempt = 0; attempt < 50 && !fixture.service.getExecution("harness", "runtime", id)
+                    .toCompletableFuture().join().isSettled(); attempt++) {
+                Thread.sleep(20);
+            }
+            assertTrue(fixture.service.getExecution("harness", "runtime", id)
+                    .toCompletableFuture().join().isSettled());
+            assertEquals(1, fixture.transport.installs.get());
+            assertEquals(1, fixture.transport.v3Executions.get());
+            assertEquals(200, fixture.post("/executions/" + id + ":start", start).statusCode());
+            assertEquals(1, fixture.transport.v3Executions.get());
+        }
+    }
+
+    @Test
     void immediateExecutionRejectsDeferredReferencesBeforeDispatch() throws Exception {
         try (Fixture fixture = new Fixture()) {
             fixture.transport.fail = false;
@@ -164,8 +241,31 @@ class RuntimeBrokerHttpServerTest {
         private final RuntimeBrokerHttpServer server;
 
         private Fixture() throws Exception {
+            this(false);
+        }
+
+        private Fixture(boolean v3) throws Exception {
             RuntimeScope scope = new RuntimeScope("tenant", "workspace",
                     "generation", "/workspace", "capability", "workspace");
+            RuntimePublicationVerifier verifier = v3 ? new RuntimePublicationVerifier() {
+                @Override
+                public RuntimePublicationGrant verify(ToolExecutionRecord execution,
+                        String publicationId, String token) {
+                    assertEquals("pub-1", publicationId);
+                    assertEquals("token", token);
+                    return new RuntimePublicationGrant(publicationId, token,
+                            "https://publication.example/", Map.of("sessionKey",
+                                    Map.of("tenantId", "tenant", "sessionId", "harness"),
+                                    "turnId", "turn", "executionCallId", execution.getExecutionCallId(),
+                                    "bindingGeneration", "1"));
+                }
+
+                @Override
+                public Map<String, Object> finished(ToolExecutionRecord execution) {
+                    return transport.v3Executions.get() == 0 ? null
+                            : Map.of("executionStatus", "success", "responseParts", java.util.List.of());
+                }
+            } : null;
             service = new RuntimeBrokerService(
                     id -> CompletableFuture.completedFuture(scope),
                     new StaticRuntimeProvisioner(new RuntimeLease("instance",
@@ -173,7 +273,7 @@ class RuntimeBrokerHttpServerTest {
                     transport, new InMemoryRuntimeBindingRepository(),
                     new InMemoryRuntimeSessionRepository(),
                     new InMemoryToolExecutionRepository(Clock.systemUTC()),
-                    "broker", Duration.ofMinutes(1), Duration.ofMinutes(1));
+                    "broker", Duration.ofMinutes(1), Duration.ofMinutes(1), verifier);
             server = new RuntimeBrokerHttpServer(new InetSocketAddress("127.0.0.1", 0),
                     "secret", service);
             server.start();
@@ -200,6 +300,8 @@ class RuntimeBrokerHttpServerTest {
 
     private static final class FailingTransport implements RuntimeTransport {
         private final AtomicInteger executions = new AtomicInteger();
+        private final AtomicInteger installs = new AtomicInteger();
+        private final AtomicInteger v3Executions = new AtomicInteger();
         private boolean fail = true;
         private Map<String, Object> lastReference;
 
@@ -221,6 +323,27 @@ class RuntimeBrokerHttpServerTest {
             lastReference = reference;
             if (!fail) return CompletableFuture.completedFuture(Map.of("executionStatus", "success", "responseParts", java.util.List.of()));
             return CompletableFuture.failedFuture(new IllegalStateException("connection lost"));
+        }
+
+        @Override
+        public CompletionStage<Void> installPublication(RuntimeLease lease,
+                RuntimeSession session, RuntimePublicationGrant grant) {
+            installs.incrementAndGet();
+            return CompletableFuture.completedFuture(null);
+        }
+
+        @Override
+        public CompletionStage<Map<String, Object>> executeV3(RuntimeLease lease,
+                RuntimeSession session, Map<String, Object> reference,
+                Map<String, Object> payload, Map<String, Object> capture) {
+            v3Executions.incrementAndGet();
+            return CompletableFuture.completedFuture(Map.of("state", "executing"));
+        }
+
+        @Override
+        public CompletionStage<Map<String, Object>> statusV3(RuntimeLease lease,
+                RuntimeSession session, Map<String, Object> reference, long afterSequence) {
+            return CompletableFuture.completedFuture(Map.of("state", "executing"));
         }
 
         @Override

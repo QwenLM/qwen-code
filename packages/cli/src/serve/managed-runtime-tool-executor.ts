@@ -19,6 +19,7 @@ import type {
   LocalShellResultSession,
 } from '@qwen-code/qwen-code-core/managed-runtime/local-shell-result-session.js';
 import type { LocalShellResultCapture } from '@qwen-code/qwen-code-core/managed-runtime/local-shell-result-capture.js';
+import type { ToolResultExpectedIdentity } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result-store.js';
 import { MANAGED_TOOL_RESULT_PROTOCOL } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
 import type { ManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import {
@@ -133,6 +134,18 @@ export interface ManagedToolV3View {
   readonly result?: ToolResultEnvelope;
 }
 
+export interface ShellCapturePublisher {
+  prepare(request: LocalShellCaptureRequest): Promise<{
+    identity: ToolResultExpectedIdentity;
+    sink: LocalShellResultCapture;
+  }>;
+  accept?: LocalShellResultSession['accept'];
+  finish?: (
+    identity: ToolResultExpectedIdentity,
+    result: ToolResultEnvelope,
+  ) => Promise<void>;
+}
+
 /**
  * Executes the admitted ordinary tools for one Managed Runtime worker and
  * journals every invocation so `status` and `cancel` can answer by the
@@ -147,10 +160,7 @@ export class ManagedToolExecutor {
 
   constructor(
     private readonly toolsFor: ManagedToolSetResolver,
-    private readonly capturePublisher?: Pick<
-      LocalShellResultSession,
-      'prepare' | 'accept'
-    >,
+    private readonly capturePublisher?: ShellCapturePublisher,
   ) {}
 
   static forWorkspace(workspaceCwd: string, runtimeInstanceId: string) {
@@ -289,7 +299,7 @@ export class ManagedToolExecutor {
           'Managed Runtime invocation identity conflicts.',
         );
       }
-      await existing.promise;
+      if (!this.capturePublisher?.finish) await existing.promise;
       return v3View(existing);
     }
     if (!this.capturePublisher || toolName !== ShellTool.Name) {
@@ -345,7 +355,7 @@ export class ManagedToolExecutor {
     };
     this.entries.set(reference.callId, entry);
     entry.promise = this.run(entry, tool, tools.sessionId);
-    await entry.promise;
+    if (!this.capturePublisher.finish) await entry.promise;
     return v3View(entry);
   }
 
@@ -569,23 +579,30 @@ export class ManagedToolExecutor {
           };
         }
         if (entry.v3Result.capture) {
-          const receipt = await this.capturePublisher!.accept(
-            entry.captureSink!.identity,
-            entry.v3Result,
-          );
-          entry.v3Result = {
-            ...entry.v3Result,
-            capture: {
-              ...entry.v3Result.capture,
+          if (this.capturePublisher!.finish) {
+            await this.capturePublisher!.finish(
+              entry.captureSink!.identity,
+              entry.v3Result,
+            );
+          } else if (this.capturePublisher!.accept) {
+            const receipt = await this.capturePublisher!.accept(
+              entry.captureSink!.identity,
+              entry.v3Result,
+            );
+            entry.v3Result = {
+              ...entry.v3Result,
+              capture: {
+                ...entry.v3Result.capture,
+                deliveryStatus: receipt.deliveryStatus,
+              },
+            };
+            entry.acknowledgement = {
+              executionCallId: receipt.executionCallId,
+              manifest: receipt.manifest,
               deliveryStatus: receipt.deliveryStatus,
-            },
-          };
-          entry.acknowledgement = {
-            executionCallId: receipt.executionCallId,
-            manifest: receipt.manifest,
-            deliveryStatus: receipt.deliveryStatus,
-            historyRevision: receipt.historyRevision,
-          };
+              historyRevision: receipt.historyRevision,
+            };
+          }
         }
       } catch {
         entry.state = 'unknown';

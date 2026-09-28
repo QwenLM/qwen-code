@@ -43,6 +43,7 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
     static final String V3_STATUS_PATH = "/internal/managed-runtime/v3/status";
     static final String V3_CANCEL_PATH = "/internal/managed-runtime/v3/cancel";
     static final String V3_ACKNOWLEDGE_PATH = "/internal/managed-runtime/v3/acknowledge";
+    static final String PUBLICATION_INSTALL_PATH = "/internal/managed-runtime/v3/publications:install";
     private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(30);
     private static final Set<String> RESPONSE_FIELDS = Set.of(
             "protocolVersion", "runtimeInstanceId", "runtimeIncarnation",
@@ -57,7 +58,7 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
             "not_started", "success", "error", "cancelled");
     private static final Set<String> CALLER_REFERENCE_FIELDS = Set.of(
             "sessionId", "promptId", "callId", "argsDigest", "toolName",
-            "input");
+            "input", "payloadDigest", "publicationId");
     private static final Set<String> RESULT_FIELDS = Set.of(
             "executionStatus", "responseParts", "error");
     private static final Set<String> ERROR_FIELDS = Set.of("message", "type");
@@ -343,6 +344,46 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
         Map<String, Object> body = v3Body(reference);
         body.put("toolName", referenceString(reference, "toolName"));
         body.put("input", referenceInput(reference));
+        body.put("capture", capture);
+        return post(lease, V3_EXECUTE_PATH,
+                encodeToolRequest(body, TOOL_REQUEST_LIMIT_BYTES),
+                TOOL_RESULT_LIMIT_BYTES)
+                .thenApply(bytes -> parseV3Response(bytes, "execute"));
+    }
+
+    @Override
+    public CompletionStage<Void> installPublication(RuntimeLease lease,
+            RuntimeSession session, RuntimePublicationGrant grant) {
+        requireV3Context(lease, session);
+        Map<String, Object> body = Map.of("protocolVersion", 3,
+                "publication", "managed-tool-publication/1",
+                "publicationId", grant.publicationId(),
+                "publicationToken", grant.token(),
+                "serviceBaseUrl", grant.serviceBaseUrl(),
+                "binding", grant.binding());
+        return post(lease, PUBLICATION_INSTALL_PATH,
+                encodeToolRequest(body, 64 * 1024), BODY_LIMIT_BYTES)
+                .thenApply(bytes -> {
+                    Map<String, Object> response = JsonCodec.parseObject(bytes,
+                            "publication installation response");
+                    if (!Integer.valueOf(3).equals(response.get("protocolVersion"))
+                            || !"managed-tool-publication/1".equals(response.get("publication"))
+                            || !Boolean.TRUE.equals(response.get("installed"))) {
+                        throw protocol("Publication installation was not confirmed.");
+                    }
+                    return null;
+                });
+    }
+
+    @Override
+    public CompletionStage<Map<String, Object>> executeV3(RuntimeLease lease,
+            RuntimeSession session, Map<String, Object> reference,
+            Map<String, Object> payload, Map<String, Object> capture) {
+        requireV3Context(lease, session);
+        requireClosed(capture, V3_CAPTURE_REQUEST_FIELDS, "capture");
+        Map<String, Object> body = v3Body(reference);
+        body.put("toolName", payload.get("toolName"));
+        body.put("input", payload.get("input"));
         body.put("capture", capture);
         return post(lease, V3_EXECUTE_PATH,
                 encodeToolRequest(body, TOOL_REQUEST_LIMIT_BYTES),

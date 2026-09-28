@@ -8,6 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { ManagedSessionKey } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import type { ManagedToolResultPayload } from './managed-runtime-tool-executor.js';
+import type { ToolResultEnvelope } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
 import { resolveManagedRuntimeBrokerBaseUrl } from './managed-runtime-broker-url.js';
 import { WORKSPACE_CAPABILITY_DIGEST } from './managed-workspace-activation.js';
 
@@ -92,6 +93,104 @@ export class HostedWorkspaceBroker {
     return id;
   }
 
+  async prepareV3(
+    callId: string,
+    argsDigest: string,
+    requestDigest: string,
+    publicationId: string,
+  ): Promise<{
+    executionCallId: string;
+    runtimeBindingId: string;
+    bindingGeneration: string;
+  }> {
+    const response = await this.request('/executions:prepare', {
+      idempotencyKey: `${this.identity.runtimeSessionId}:${callId}`,
+      turnId: this.identity.runtimeSessionId,
+      toolCallId: callId,
+      requestDigest,
+      toolProtocol: 'v3',
+      publicationId,
+      reference: {
+        sessionId: this.identity.runtimeSessionId,
+        promptId: this.identity.runtimeSessionId,
+        callId,
+        argsDigest,
+      },
+    });
+    const executionCallId = response['executionCallId'];
+    const runtimeBindingId = response['runtimeBindingId'];
+    const bindingGeneration = response['bindingGeneration'];
+    if (
+      typeof executionCallId !== 'string' ||
+      typeof runtimeBindingId !== 'string' ||
+      typeof bindingGeneration !== 'string' ||
+      !/^[1-9][0-9]{0,18}$/u.test(bindingGeneration) ||
+      object(response['status'])['state'] !== 'prepared'
+    )
+      throw new Error(
+        'Hosted Broker did not reserve the original Tool v3 execution.',
+      );
+    return { executionCallId, runtimeBindingId, bindingGeneration };
+  }
+
+  async executeV3(
+    id: string,
+    payloadJson: string,
+    publicationId: string,
+    publicationToken: string,
+    signal: AbortSignal,
+  ): Promise<ToolResultEnvelope> {
+    const path = `/executions/${encodeURIComponent(id)}`;
+    let response: Record<string, unknown> | undefined;
+    let cancellationSent = false;
+    if (!signal.aborted) {
+      try {
+        response = await this.request(`${path}:start`, {
+          payloadJson,
+          publicationId,
+          publicationToken,
+        });
+      } catch (failure) {
+        if (
+          failure instanceof HostedWorkspaceBrokerRejection &&
+          [400, 401, 403, 404, 409].includes(failure.status)
+        )
+          throw failure;
+      }
+    }
+    const deadline = Date.now() + 30 * 60_000;
+    while (Date.now() < deadline) {
+      if (signal.aborted && !cancellationSent) {
+        cancellationSent = true;
+        response = await this.request(`${path}:cancel`, {});
+      }
+      response ??= await this.request(path);
+      if (response['executionCallId'] !== id)
+        throw new Error('Tool v3 execution identity changed.');
+      const status = object(response['status']);
+      if (status['state'] === 'settled') {
+        const result = object(status['result']);
+        if (
+          !['success', 'error', 'cancelled', 'not_started'].includes(
+            String(result['executionStatus']),
+          ) ||
+          !Array.isArray(result['responseParts'])
+        )
+          throw new Error('Tool v3 result is invalid.');
+        return result as unknown as ToolResultEnvelope;
+      }
+      if (
+        !['prepared', 'executing', 'cancel_requested'].includes(
+          String(status['state']),
+        )
+      )
+        throw new Error('Tool v3 execution outcome is unknown.');
+      response = undefined;
+      await delay(100);
+    }
+    throw new Error('Tool v3 execution exceeded its observation deadline.');
+  }
+
   async execute(
     id: string,
     payloadJson: string,
@@ -157,6 +256,23 @@ export class HostedWorkspaceBroker {
 
   async cancel(id: string): Promise<void> {
     await this.request(`/executions/${encodeURIComponent(id)}:cancel`, {});
+  }
+
+  async acknowledgeV3(
+    id: string,
+    receipt: {
+      executionCallId: string;
+      manifest: unknown;
+      deliveryStatus: 'committed' | 'blocked';
+      historyRevision: number | null;
+    },
+  ): Promise<void> {
+    const response = await this.request(
+      `/executions/${encodeURIComponent(id)}:acknowledge`,
+      { receipt },
+    );
+    if (object(response['acknowledged'])['state'] !== 'settled')
+      throw new Error('Original Tool v3 ACK was not confirmed.');
   }
 
   async release(): Promise<void> {

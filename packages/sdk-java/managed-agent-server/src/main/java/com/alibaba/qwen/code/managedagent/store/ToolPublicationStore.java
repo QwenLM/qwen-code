@@ -61,6 +61,36 @@ public final class ToolPublicationStore {
         return transactions.execute(status -> applyLocked(request, writerToken, hash));
     }
 
+    /** Rechecks the saved grant and original execution before installing it on a worker. */
+    public JsonNode verifyDispatch(ToolExecutionRecord execution,
+            String publicationId, String publicationToken) {
+        RuntimeBindingRecord runtime = bindings.findById(execution.getBindingId());
+        require(runtime != null, "Original Runtime binding is missing");
+        var runtimeScope = runtime.getRequest().getScope();
+        String tenant = runtimeScope.getTenantId();
+        String workspace = runtimeScope.getWorkspaceId();
+        String session = execution.getHarnessSessionId();
+        String scope = hash(JSON.createArrayNode().add(tenant).add(workspace)
+                .add(session).toString());
+        return transactions.execute(status -> {
+            String tenantKey = hash(tenant);
+            jdbc.update("INSERT INTO qwen_tool_publication_tenant (tenant_key, tenant_id)"
+                    + " VALUES (?, ?) ON DUPLICATE KEY UPDATE tenant_key = tenant_key",
+                    tenantKey, tenant);
+            String saved = jdbc.queryForObject("SELECT tenant_id FROM qwen_tool_publication_tenant"
+                    + " WHERE tenant_key = ? FOR UPDATE", String.class, tenantKey);
+            require(tenant.equals(saved), "Publication tenant conflicts");
+            JsonNode binding = producerBindingLocked(scope, publicationId, publicationToken);
+            require(publicationId.equals(text(binding, "publicationId"))
+                    && execution.getExecutionCallId().equals(text(binding, "executionCallId"))
+                    && execution.getRequestDigest().equals(text(binding, "requestDigest"))
+                    && execution.getReference().get("argsDigest").equals(
+                            text(binding.path("reference"), "argsDigest")),
+                    "Original publication execution conflicts");
+            return binding;
+        });
+    }
+
     JsonNode producerBindingLocked(String scope, String publicationId, String publicationToken) {
         String suppliedHash = ToolPublicationContract.tokenHash(publicationToken);
         List<Row> rows = jdbc.query("SELECT * FROM qwen_tool_publication WHERE scope_key = ?"
@@ -336,7 +366,8 @@ public final class ToolPublicationStore {
                 && "in_progress".equals(text(item, "state"))
                 && "runtime".equals(text(item, "outcomeSource"))
                 && text(b, "modelCallId").equals(text(item, "functionCallId"))
-                && text(b, "requestDigest").equals("sha256:" + text(item, "inputDigest")),
+                && text(b.path("reference"), "argsDigest")
+                        .equals("sha256:" + text(item, "inputDigest")),
                 "Checkpoint execution identity conflicts");
     }
 
@@ -366,6 +397,9 @@ public final class ToolPublicationStore {
                 && execution.getRuntimeSessionId().equals(text(ref, "sessionId"))
                 && execution.getTurnId().equals(text(ref, "promptId"))
                 && execution.getToolCallId().equals(text(ref, "callId"))
+                && "deferred_v3".equals(execution.getReference().get("dispatchMode"))
+                && text(b, "publicationId").equals(execution.getReference().get("publicationId"))
+                && text(ref, "argsDigest").equals(execution.getReference().get("argsDigest"))
                 && execution.getRequestDigest().equals(text(b, "requestDigest")), "Broker execution identity conflicts");
         if (live) {
             require(runtime.getState() == RuntimeBindingRecord.State.READY && !runtime.isDrainRequested()

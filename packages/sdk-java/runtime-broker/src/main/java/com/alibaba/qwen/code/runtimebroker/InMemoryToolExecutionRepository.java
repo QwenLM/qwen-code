@@ -182,7 +182,9 @@ public final class InMemoryToolExecutionRepository
             // Never dispatched: no dispatcher exists to observe the intent,
             // so the cancel settles immediately without stop evidence.
             requested = requested.withResult(
-                    Map.of("executionStatus", "cancelled"),
+                    "deferred_v3".equals(current.getReference().get("dispatchMode"))
+                            ? ToolExecutionRecord.cancelledBeforeV3Start()
+                            : Map.of("executionStatus", "cancelled"),
                     current.getLastSequence(), clock.instant());
         }
         ToolExecutionRecord updated = requested.withVersion(

@@ -23,9 +23,13 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.nio.charset.StandardCharsets;
 import java.io.ByteArrayInputStream;
 import java.io.InputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Base64;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -35,6 +39,7 @@ import org.flywaydb.core.Flyway;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -99,13 +104,16 @@ class ToolPublicationStoreTest {
         cp.set("continuation", JSON.createObjectNode().put("phase", "await_runtime"));
         cp.set("tools", JSON.createObjectNode().set("items", JSON.createArrayNode().add(JSON.createObjectNode()
                 .put("executionCallId", "execution-1").put("functionCallId", "model-1").put("toolName", "run_shell_command")
-                .put("state", "in_progress").put("outcomeSource", "runtime").put("inputDigest", digest(payload)))));
+                .put("state", "in_progress").put("outcomeSource", "runtime")
+                .put("inputDigest", digest("{\"command\":\"printf hi\"}")))));
         checkpoint = cp;
         binding.set("checkpointRef", ref("checkpoint-1", "managed-checkpoint", checkpoint));
         executions.findOrCreate(ToolExecutionRecord.prepared("execution-1", "idempotency-1", "binding-1", 1,
                 "session-1", "runtime-1", "runtime-prompt-1", "runtime-call-1", "sha256:" + digest(payload),
                 Map.of("sessionId", "runtime-1", "promptId", "runtime-prompt-1", "callId", "runtime-call-1",
-                        "argsDigest", "sha256:" + digest(payload))));
+                        "argsDigest", "sha256:" + digest("{\"command\":\"printf hi\"}"),
+                        "payloadDigest", "sha256:" + digest(payload), "dispatchMode", "deferred_v3",
+                        "publicationId", "pub-1")));
         new TransactionTemplate(manager).executeWithoutResult(status -> sessions.acquireWriter("tenant-1", "session-1",
                 WRITER_TOKEN, new ManagedSessionStoreModels.AcquireWriterRequest("workspace-1", "writer-1", 300000L)));
         append("session.create", "{}\n{}\n", 0, List.of(), null);
@@ -311,11 +319,15 @@ class ToolPublicationStoreTest {
                         new ManagedSessionStoreModels.CommitResource(admission.path("resourceId").asText(),
                                 "managed-tool-outcome", 1, admission.path("byteLength").asLong(),
                                 admission.path("digest").asText(), null),
-                        resource(manifestRef, manifest)));
+                        new ManagedSessionStoreModels.CommitResource(manifestRef.path("resourceId").asText(),
+                                "managed-tool-result-manifest", 1, manifestRef.path("byteLength").asLong(),
+                                manifestRef.path("digest").asText(), null)));
         var admissions = new ToolPublicationAdmissionStore(jdbc, manager, sessions, data);
         JsonNode committed = admissions.commitReceipt(key, "pub-1", WRITER_TOKEN, commit);
         assertThat(committed.path("historyRevision").asLong()).isEqualTo(receiptSequence);
         assertThat(admissions.commitReceipt(key, "pub-1", WRITER_TOKEN, commit)).isEqualTo(committed);
+        assertThat(data.receiptForBroker(executions.findByExecutionCallId("execution-1"))
+                .path("historyRevision").asLong()).isEqualTo(receiptSequence);
         assertThat(sessions.readResource("tenant-1", "workspace-1", "session-1",
                 admission.path("resourceId").asText(), WRITER_TOKEN).bytes())
                 .isEqualTo(outcome.toString().getBytes(StandardCharsets.UTF_8));
@@ -331,6 +343,121 @@ class ToolPublicationStoreTest {
                 identity, "stdout", 0, 1)).hasMessageContaining("digest changed");
         assertThat(jdbc.queryForObject("SELECT state FROM qwen_tool_publication_object"
                 + " WHERE slot_key = 'segment:stdout:0'", String.class)).isEqualTo("QUARANTINED");
+    }
+
+    @Test
+    void streamsLargeOutputAndReadsItsTailAfterStoreReplacement(@TempDir Path root) throws Exception {
+        int segments = "1".equals(System.getenv("O2_STRESS")) ? 1024 : 100;
+        long captureBytes = (long) segments * 1024 * 1024;
+        long allocated = captureBytes + ToolPublicationContract.PRODUCER_BYTES
+                + ToolPublicationContract.ADMISSION_BYTES;
+        store = new ToolPublicationStore(jdbc, manager, sessions, executions, bindings,
+                new ToolPublicationStore.Capacity(captureBytes, allocated, allocated, 1));
+        store.apply(request("reserve").put("captureBytes", captureBytes), WRITER_TOKEN, PUBLICATION_TOKEN);
+        ToolPublicationObjectStore bucket = new ToolPublicationObjectStore() {
+            private Path file(String key) { return root.resolve(digest(key)); }
+
+            @Override
+            public void putIfAbsent(String key, byte[] bytes) {
+                try {
+                    Files.write(file(key), bytes, StandardOpenOption.CREATE_NEW);
+                } catch (java.nio.file.FileAlreadyExistsException ignored) {
+                } catch (java.io.IOException error) {
+                    throw new java.io.UncheckedIOException(error);
+                }
+            }
+
+            @Override
+            public InputStream open(String key) {
+                try {
+                    return Files.newInputStream(file(key));
+                } catch (java.io.IOException error) {
+                    throw new java.io.UncheckedIOException(error);
+                }
+            }
+
+            @Override
+            public void requireUnversioned() {
+            }
+        };
+        ToolPublicationDataStore data = new ToolPublicationDataStore(jdbc, manager, store, sessions,
+                bucket, Duration.ofMinutes(20), Duration.ofMinutes(10));
+        JsonNode key = binding.get("sessionKey");
+        byte[] unit = new byte[1024 * 1024];
+        java.util.Arrays.fill(unit, (byte) 0x91);
+        java.security.MessageDigest hash = java.security.MessageDigest.getInstance("SHA-256");
+        ObjectNode page = JSON.createObjectNode().put("toolResult", "managed-tool-result/1")
+                .put("type", "page").put("captureId", "capture-1")
+                .put("streamId", "stdout").put("firstOrdinal", 0).put("offset", 0);
+        var descriptors = page.putArray("segments");
+        var pageLinks = JSON.createArrayNode();
+        String unitDigest = ToolPublicationContract.sha256(unit);
+        for (int ordinal = 0; ordinal < segments; ordinal++) {
+            data.publishSegment(key, "pub-1", PUBLICATION_TOKEN, "segment-" + ordinal,
+                    "stdout", ordinal, unit, unitDigest);
+            hash.update(unit);
+            descriptors.add(JSON.createObjectNode().put("byteLength", unit.length)
+                    .put("digest", unitDigest));
+            if (descriptors.size() == 512 || ordinal == segments - 1) {
+                int pageIndex = pageLinks.size();
+                JsonNode pageRef = data.publishResource(key, "pub-1", PUBLICATION_TOKEN,
+                        "page-stdout-" + pageIndex, "page:stdout:" + pageIndex,
+                        "managed-tool-result-page", page.toString().getBytes(StandardCharsets.UTF_8));
+                ObjectNode pageLink = JSON.createObjectNode().put("segmentCount", descriptors.size())
+                        .put("byteLength", (long) descriptors.size() * unit.length);
+                pageLink.set("ref", pageRef);
+                pageLinks.add(pageLink);
+                page = JSON.createObjectNode().put("toolResult", "managed-tool-result/1")
+                        .put("type", "page").put("captureId", "capture-1")
+                        .put("streamId", "stdout").put("firstOrdinal", ordinal + 1)
+                        .put("offset", (long) (ordinal + 1) * unit.length);
+                descriptors = page.putArray("segments");
+            }
+        }
+        String outputDigest = HexFormat.of().formatHex(hash.digest());
+        data.seal(key, "pub-1", PUBLICATION_TOKEN, "seal-stdout", "stdout",
+                segments, captureBytes, outputDigest);
+        data.seal(key, "pub-1", PUBLICATION_TOKEN, "seal-stderr", "stderr", 0,
+                0, digest(""));
+        ObjectNode manifest = JSON.createObjectNode().put("toolResult", "managed-tool-result/1")
+                .put("type", "manifest").put("tenantId", "tenant-1")
+                .put("sessionId", "session-1").put("turnId", "turn-1")
+                .put("executionCallId", "execution-1").put("callId", "runtime-call-1")
+                .put("invocationDigest", binding.path("reference").path("argsDigest").asText())
+                .put("bindingGeneration", "1").put("captureId", "capture-1")
+                .put("revision", 1).put("executionStatus", "success")
+                .put("exitCode", 0).putNull("signal").put("captureScope", "process_pipes")
+                .put("capturePolicy", "complete_required").put("captureStatus", "complete")
+                .putNull("captureReason").put("upstreamTruncated", false);
+        ObjectNode stdout = JSON.createObjectNode().put("streamId", "stdout")
+                .put("role", "stdout").put("mimeType", "application/octet-stream")
+                .put("state", "sealed").put("byteLength", captureBytes).put("digest", outputDigest);
+        stdout.putArray("missingRanges");
+        ObjectNode stdoutBody = JSON.createObjectNode();
+        stdoutBody.set("pages", pageLinks);
+        stdout.set("body", stdoutBody);
+        ObjectNode stderr = JSON.createObjectNode().put("streamId", "stderr")
+                .put("role", "stderr").put("mimeType", "application/octet-stream")
+                .put("state", "sealed").put("byteLength", 0).put("digest", digest(""));
+        stderr.putArray("missingRanges");
+        stderr.set("body", JSON.createObjectNode().set("pages", JSON.createArrayNode()));
+        manifest.putArray("contents").add(stdout).add(stderr);
+        JsonNode manifestRef = data.publishResource(key, "pub-1", PUBLICATION_TOKEN,
+                "manifest-1", "manifest:1", "managed-tool-result-manifest",
+                manifest.toString().getBytes(StandardCharsets.UTF_8));
+        ObjectNode capture = JSON.createObjectNode().put("captureStatus", "complete")
+                .putNull("captureReason").put("previewTruncated", true)
+                .put("deliveryStatus", "pending");
+        capture.set("manifest", manifestRef);
+        ObjectNode envelope = JSON.createObjectNode().put("executionStatus", "success");
+        envelope.putArray("responseParts");
+        envelope.set("capture", capture);
+        data.finish(key, "pub-1", PUBLICATION_TOKEN, "finish-1", envelope);
+        ToolPublicationDataStore reopened = new ToolPublicationDataStore(jdbc, manager, store, sessions,
+                bucket, Duration.ofMinutes(20), Duration.ofMinutes(10));
+        assertThat(reopened.readRange(key, "pub-1", WRITER_TOKEN, manifestRef,
+                manifest, "stdout", captureBytes - 64, 64))
+                .isEqualTo(java.util.Arrays.copyOf(unit, 64));
     }
 
     @Test
@@ -360,7 +487,7 @@ class ToolPublicationStoreTest {
         ((ObjectNode) changed.get("binding")).put("publicationId", "pub-2");
         ObjectNode duplicate = changed;
         assertThatThrownBy(() -> store.apply(duplicate, WRITER_TOKEN, PUBLICATION_TOKEN))
-                .isInstanceOf(org.springframework.dao.DuplicateKeyException.class);
+                .hasMessageContaining("Broker execution identity conflicts");
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_publication", Integer.class)).isEqualTo(1);
     }
 
@@ -556,7 +683,9 @@ class ToolPublicationStoreTest {
         String digest = binding.path("requestDigest").asText();
         executions.findOrCreate(ToolExecutionRecord.prepared("execution-2", "idempotency-2", "binding-1", 1,
                 "session-1", "runtime-1", "runtime-prompt-1", "runtime-call-2", digest,
-                Map.of("sessionId", "runtime-1", "promptId", "runtime-prompt-1", "callId", "runtime-call-2", "argsDigest", digest)));
+                Map.of("sessionId", "runtime-1", "promptId", "runtime-prompt-1", "callId", "runtime-call-2",
+                        "argsDigest", second.path("reference").path("argsDigest").asText(),
+                        "payloadDigest", digest, "dispatchMode", "deferred_v3", "publicationId", "pub-2")));
         return second;
     }
 

@@ -8,7 +8,6 @@ import { createHash } from 'node:crypto';
 import { constants, promises as fs, type BigIntStats } from 'node:fs';
 import path from 'node:path';
 import { sessionIdContext } from '@qwen-code/qwen-code-core/utils/sessionIdContext.js';
-import type { LocalShellResultSession } from '@qwen-code/qwen-code-core/managed-runtime/local-shell-result-session.js';
 import type express from 'express';
 import type { Application, Response } from 'express';
 import {
@@ -29,7 +28,9 @@ import {
 import {
   createManagedToolSet,
   ManagedToolExecutor,
+  type ShellCapturePublisher,
 } from './managed-runtime-tool-executor.js';
+import { RemoteShellResultPublisher } from './remote-shell-result-publication.js';
 import { registerManagedRuntimeToolRoutes } from './managed-runtime-tool-routes.js';
 import { registerManagedRuntimeToolV3Routes } from './managed-runtime-tool-v3-routes.js';
 import {
@@ -126,7 +127,7 @@ function isHostAbsolute(mountRoot: string): boolean {
 export function registerManagedContextRoutes(
   app: Application,
   bootDocument: ManagedContextBoot,
-  capturePublisher?: Pick<LocalShellResultSession, 'prepare' | 'accept'>,
+  capturePublisher?: ShellCapturePublisher,
 ): ManagedToolExecutor {
   const boot = parseManagedContextBoot(bootDocument);
   const installations = new ManagedContextInstallations(boot);
@@ -134,6 +135,12 @@ export function registerManagedContextRoutes(
   const activations = new WorkspaceActivations();
   const requiresActivation =
     boot.capabilityDigest === WORKSPACE_CAPABILITY_DIGEST;
+  const remotePublisher =
+    !capturePublisher && requiresActivation
+      ? new RemoteShellResultPublisher()
+      : undefined;
+  const publisher = capturePublisher ?? remotePublisher;
+  remotePublisher?.registerInstallRoute(app, boot);
   const [attestRoute, contextRoute] = MANAGED_CONTEXT_ROUTES;
 
   app.post(
@@ -192,10 +199,10 @@ export function registerManagedContextRoutes(
       ),
       isActive,
     };
-  }, capturePublisher);
+  }, publisher);
   activations.register(app, boot, installations, executor);
   registerManagedRuntimeToolRoutes(app, boot, executor);
-  if (capturePublisher) {
+  if (publisher) {
     registerManagedRuntimeToolV3Routes(app, boot, executor);
   }
   return executor;

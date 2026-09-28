@@ -73,7 +73,8 @@ public final class ToolExecutionRecord {
         if (!runtimeSessionId.equals(reference.get("sessionId"))
                 || !turnId.equals(reference.get("promptId"))
                 || !toolCallId.equals(reference.get("callId"))
-                || !requestDigest.equals(reference.get("argsDigest"))) {
+                || !requestDigest.equals("deferred_v3".equals(reference.get("dispatchMode"))
+                        ? reference.get("payloadDigest") : reference.get("argsDigest"))) {
             throw new IllegalArgumentException(
                     "reference identity does not match execution identity");
         }
@@ -252,6 +253,14 @@ public final class ToolExecutionRecord {
         return copy(State.SETTLED, (String) status, nextResult, sequence,
                 cancelRequested, dispatchOwner, dispatchLeaseUntil,
                 dispatchGeneration, version, completionTime);
+    }
+
+    static Map<String, Object> cancelledBeforeV3Start() {
+        Map<String, Object> result = new java.util.LinkedHashMap<>();
+        result.put("executionStatus", "not_started");
+        result.put("responseParts", java.util.List.of());
+        result.put("capture", null);
+        return result;
     }
 
     public ToolExecutionRecord withUnknown() {
