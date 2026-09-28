@@ -19,8 +19,8 @@ import org.springframework.stereotype.Service;
  */
 @Service
 public class SessionLifecycleService {
-    // The command names that archive and delete digests used before V16, so
-    // a retry of an operation that V16 migrated still matches.
+    // The command names that archive and delete digests used before V17, so
+    // a retry of an operation that V17 migrated still matches.
     private static final Map<OperationKind, String> DIGEST_NAMES = Map.of(
             OperationKind.CLOSE, "CLOSE_SESSION",
             OperationKind.ARCHIVE, "ARCHIVE_SESSION",

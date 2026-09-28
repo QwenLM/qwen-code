@@ -135,7 +135,8 @@ V17 把每条待定的 `ARCHIVE_SESSION` 与 `DELETE_SESSION` 命令转换为待
 
 不支持新旧版本混跑的滚动升级：V17 运行之前必须停掉所有旧版本服务器。升级之后由旧服务器留下的待定 archive 或 delete 不会被转换，它的待定命令会让该 Session 之后的所有生命周期变更都返回 `409 session_operation_active`；旧服务器的 unarchive 还会重新打开被 D4 关闭的 Session。
 
-W0e 已占用 V16，因此本次生命周期迁移顺延至 V17；本分支的 O2 publication 迁移继续使用 V18 和 V19。升级测试按此顺序应用迁移后再启动服务。
+W0e（#12839）先占用了 V16，因此本迁移为 V17，即 `main` 上下一个空闲版本号。使用 V17 或更高版本的未合并 PR 必须重新编号到它之后；如果改为留出空号，已经应用了更高版本的数据库会被 Flyway 拒绝启动。
+本分支的 O2 publication 迁移接续使用 V18 和 V19。升级测试按此顺序应用迁移后再启动服务。
 
 ## 5. 测试
 
@@ -160,8 +161,9 @@ W0e 已占用 V16，因此本次生命周期迁移顺延至 V17；本分支的 O
 
 ## 7. 验证
 
-- D4 原始测试套件与 Checkstyle 在合并前通过。版本顺延后，H2 定向迁移及 publication 测试 24/24 通过。
-- 在全新 MySQL 8.4 schema 上，`ManagedAgentMySqlIT` 11/11 通过，V16–V19 依序成功应用；组合顺序的 MariaDB 验证仍待 CI。原 D4 的 `HostedHarnessMySqlIT` 曾以打包后的 CLI 通过。
+- Managed Agent 服务的 `mvn test`（151 个测试）与 Checkstyle 通过。
+- `ManagedAgentMySqlIT` 在 CI 使用的 `mariadb:10.11.18` 与 `mysql:8.4` 上通过，包括 V17 升级。`HostedHarnessMySqlIT` 在 `mysql:8.4` 上以打包后的 CLI 通过。
+- 本分支版本顺延后，H2 定向迁移及 publication 测试 24/24 通过。在全新 MySQL 8.4 schema 上，`ManagedAgentMySqlIT` 11/11 通过，V16–V19 依序成功应用；组合顺序的 MariaDB 验证仍待 CI。
 - Web Shell 的 managed 组件测试（73 个，含生成类型的新鲜度测试）与其类型检查通过。
 - 27 个变异各自让某个测试失败：受理时不封闭 Session；跳过 Harness 关闭或 Runtime 排空；在没有 Harness 的服务器上跳过曾被持有的 Session 的关闭，或删除活动 Session 时跳过关闭；在仍有 journal writer 持有 Session 时完成，或把已过期的 writer 租约当作仍有效；完成时不检查认领代次；失败的尝试保留租约；扫描忽略已过期的租约；跨 actor 或跨类型重放；归档活动 Session；有活动 Turn 时关闭；在墓碑上受理；隐藏墓碑的 operation；公共路由接受过长的 operation id；忽略待定命令或未完成的 operation；绑定的 Session 声明生命周期能力；把每次完成、任何回答或被替换的 Harness 的回答都当作确认；unarchive 重新打开 Session；V17 让命令保持待定或转换已完成的命令；以及改用新的摘要名称。跳过 Harness 关闭同样会让 Hosted 进程测试失败。
 
