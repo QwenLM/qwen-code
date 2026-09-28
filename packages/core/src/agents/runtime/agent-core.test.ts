@@ -13,6 +13,7 @@ import {
   AgentCore,
   buildInheritedForkExecutionToolNames,
   extractParentToolNames,
+  renderSubagentSystemPrompt,
   type ReasoningLoopResult,
 } from './agent-core.js';
 import { attachJsonlTranscriptWriter } from '../agent-transcript.js';
@@ -89,6 +90,33 @@ vi.mock(
     observeToolResultBoundary: boundaryObserveMock,
   }),
 );
+
+describe('renderSubagentSystemPrompt', () => {
+  it('does not give structured memory routing instructions to subagents', () => {
+    const runtimeContext = {
+      getUserMemory: () => '',
+      getAutoMemoryPrompt: () =>
+        'Use search_memory only when routed by the complete tree.',
+      getMemoryRecallMode: vi.fn().mockReturnValue('structured'),
+    } as unknown as Config;
+    const prompt = renderSubagentSystemPrompt(
+      { systemPrompt: 'You are a code reviewer.' } as PromptConfig,
+      new ContextState(),
+      runtimeContext,
+    );
+
+    expect(prompt).not.toContain('Use search_memory only when');
+
+    vi.mocked(runtimeContext.getMemoryRecallMode).mockReturnValue('legacy');
+    expect(
+      renderSubagentSystemPrompt(
+        { systemPrompt: 'You are a code reviewer.' } as PromptConfig,
+        new ContextState(),
+        runtimeContext,
+      ),
+    ).toContain('Use search_memory only when');
+  });
+});
 
 describe('AgentCore.createChat manual plan-exit notice ownership', () => {
   it('enables notices only for interactive agent chats', async () => {
@@ -2414,6 +2442,31 @@ describe('AgentCore.prepareTools', () => {
     );
     const names = tools.map((t) => t.name);
     expect(names).not.toContain(ToolNames.AGENT);
+    expect(names).toContain('read_file');
+  });
+
+  it('teammates never receive the session-scoped memory tools', async () => {
+    // Teammates run in-process on a Config prototype-chained to the
+    // leader's, so their search_memory would claim the leader's turn-scoped
+    // request signatures and manage_memory would mutate shared memory
+    // without the leader's review — the same hazard the subagent set lists.
+    const { core } = buildAgentForTools({ tools: ['*'] }, [
+      { name: ToolNames.SEARCH_MEMORY, description: 'search memory' },
+      { name: ToolNames.MANAGE_MEMORY, description: 'manage memory' },
+      { name: 'read_file', description: 'read' },
+    ] as FunctionDeclaration[]);
+    const identity: TeammateIdentity = {
+      agentId: 'scribe@demo',
+      agentName: 'scribe',
+      teamName: 'demo',
+      isTeamLead: false,
+    };
+    const tools = await runWithTeammateIdentity(identity, () =>
+      core.prepareTools(),
+    );
+    const names = tools.map((t) => t.name);
+    expect(names).not.toContain(ToolNames.SEARCH_MEMORY);
+    expect(names).not.toContain(ToolNames.MANAGE_MEMORY);
     expect(names).toContain('read_file');
   });
 
