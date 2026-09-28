@@ -189,6 +189,81 @@ describe('runAutoMemoryExtractionByAgent', () => {
     ]);
   });
 
+  it('drops a reminder-only message instead of inheriting it with empty parts', async () => {
+    // A reminder-only `Content` is the common structural shape — the startup
+    // skill-catalog prelude and mid-history MCP added-tool announcements are
+    // emitted as their own part — and dropping those whole messages is where
+    // this PR's token saving comes from. `parts.length > 0 ? … : []` is the
+    // branch doing it: keeping the message would hand the forked agent a
+    // `Content` with `parts: []` and put the reminder tokens right back.
+    vi.mocked(getCacheSafeParams).mockReturnValue({
+      generationConfig: {},
+      history: [
+        {
+          role: 'user',
+          parts: [
+            {
+              text: '<system-reminder>\n<available_skills>\n<skill>\n<name>pdf</name>\n<description>Work with PDF files.</description>\n</skill>\n</available_skills>\n</system-reminder>',
+            },
+          ],
+        },
+        { role: 'user', parts: [{ text: 'Remember that I prefer tabs.' }] },
+        {
+          role: 'model',
+          parts: [
+            { text: '<system-reminder>Context refreshed.</system-reminder>' },
+          ],
+        },
+      ],
+      model: 'qwen3-coder-plus',
+      version: 1,
+    });
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      filesTouched: [],
+      filesWritten: [],
+    });
+
+    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp');
+
+    // Both reminder-only messages are gone entirely — no empty-`parts` entry
+    // survives — the real turn is kept, and the resulting `user` tail is closed
+    // with a model ack so `extraHistory` stays non-empty and alternates.
+    expect(vi.mocked(runForkedAgent).mock.calls[0]?.[0].extraHistory).toEqual([
+      { role: 'user', parts: [{ text: 'Remember that I prefer tabs.' }] },
+      { role: 'model', parts: [{ text: 'Acknowledged.' }] },
+    ]);
+  });
+
+  it('inherits no history when every message sanitizes away', async () => {
+    vi.mocked(getCacheSafeParams).mockReturnValue({
+      generationConfig: {},
+      history: [
+        {
+          role: 'user',
+          parts: [{ text: '<system-reminder>skill catalog</system-reminder>' }],
+        },
+      ],
+      model: 'qwen3-coder-plus',
+      version: 1,
+    });
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      filesTouched: [],
+      filesWritten: [],
+    });
+
+    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp');
+
+    // The `sanitized.length === 0` guard returns `[]` instead of falling
+    // through to the tail handling, which would read `sanitized[-1]`. An empty
+    // `extraHistory` makes forkedAgent skip `initialMessages`, so the child
+    // rebuilds its own env prelude — deliberate, and now pinned.
+    expect(vi.mocked(runForkedAgent).mock.calls[0]?.[0].extraHistory).toEqual(
+      [],
+    );
+  });
+
   it('keeps the triggering turn when sanitization empties the trailing model message', async () => {
     vi.mocked(getCacheSafeParams).mockReturnValue({
       generationConfig: {},
@@ -438,6 +513,59 @@ describe('runAutoMemoryExtractionByAgent', () => {
         filePath: '/tmp/outside.md',
       }),
     ).toBe('deny');
+  });
+
+  it('confines the extraction agent reads to the managed memory roots', async () => {
+    // The inherited history is untrusted free text, and this agent runs under
+    // YOLO, so the task prompt's "do not inspect unrelated files" cannot be the
+    // only thing standing between a prompt-injected instruction and
+    // read_file/grep_search over the whole filesystem. Both sibling memory
+    // agents pass restrictReadsToMemoryPaths for the same read-only-memory job.
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      finalText: '',
+      filesTouched: [],
+    });
+
+    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp');
+
+    const call = vi.mocked(runForkedAgent).mock.calls[0]?.[0];
+    const permissionManager = call?.config.getPermissionManager?.();
+    expect(permissionManager).toBeDefined();
+    expect(
+      permissionManager!.findMatchingDenyRule({
+        toolName: ToolNames.READ_FILE,
+        filePath: '/home/dev/.ssh/id_rsa',
+      }),
+    ).toBe(
+      'ManagedAutoMemory(read_file: only within /tmp/user-memory or /tmp/auto-memory)',
+    );
+    await expect(
+      permissionManager!.evaluate({
+        toolName: ToolNames.READ_FILE,
+        filePath: '/home/dev/.ssh/id_rsa',
+      }),
+    ).resolves.toBe('deny');
+    await expect(
+      permissionManager!.evaluate({
+        toolName: ToolNames.GREP,
+        filePath: '/home/dev/.ssh',
+      }),
+    ).resolves.toBe('deny');
+    // Reads inside either managed root stay allowed — that is the agent's job,
+    // including the docs past the prompt's summary cap.
+    await expect(
+      permissionManager!.evaluate({
+        toolName: ToolNames.READ_FILE,
+        filePath: '/tmp/auto-memory/user/prefs.md',
+      }),
+    ).resolves.toBe('allow');
+    await expect(
+      permissionManager!.evaluate({
+        toolName: ToolNames.READ_FILE,
+        filePath: '/tmp/user-memory/feedback/terse.md',
+      }),
+    ).resolves.toBe('allow');
   });
 
   it('protects pinned memory in both managed-memory scopes', async () => {

@@ -314,6 +314,14 @@ export async function runAutoMemoryExtractionByAgent(
   const userMemoryRoot = getUserAutoMemoryRoot();
   const scopedConfig = createMemoryScopedAgentConfig(config, projectRoot, {
     protectPinnedMemory: true,
+    // Same read confinement the two sibling memory agents pass for this
+    // read-only-memory job (remember.ts, user-dream-agent-planner.ts). The task
+    // prompt already forbids inspecting repository code; without this the
+    // prompt would be the only thing standing between the inherited (untrusted)
+    // history and read_file/grep_search over the whole filesystem. Reads inside
+    // both managed memory roots stay allowed, and `buildExistingMemoryContext`
+    // above runs in the parent, so this does not narrow the parent's own scan.
+    restrictReadsToMemoryPaths: true,
   });
 
   const result = await runForkedAgent({

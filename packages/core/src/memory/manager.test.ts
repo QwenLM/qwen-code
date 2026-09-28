@@ -1486,6 +1486,98 @@ describe('MemoryManager', () => {
       expect(runAutoMemoryExtract).toHaveBeenCalledOnce();
     });
 
+    it('does not skip extraction after a direct memory write is rejected', async () => {
+      // Same invariant as `manage_memory` above, applied to the other arm of
+      // the predicate: prior-read enforcement, a `permissions.deny` rule on a
+      // memory path, EISDIR or ENOSPC all reject a `write_file` before anything
+      // reaches memory, so the turn's content still needs extracting.
+      vi.mocked(runAutoMemoryExtract).mockResolvedValue({
+        touchedTopics: [],
+        cursor: { sessionId: 'sess-1', updatedAt: new Date().toISOString() },
+      });
+      const mgr = new MemoryManager();
+      const rejected = await mgr.scheduleExtract({
+        projectRoot,
+        sessionId: 'sess-1',
+        history: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'write-1',
+                  name: 'write_file',
+                  args: {
+                    file_path: path.join(
+                      projectRoot,
+                      '.qwen/memory/user/test.md',
+                    ),
+                  },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'write-1',
+                  name: 'write_file',
+                  response: { error: 'permission denied by rule' },
+                },
+              },
+            ],
+          },
+        ],
+      });
+
+      expect(rejected.skippedReason).toBeUndefined();
+      expect(runAutoMemoryExtract).toHaveBeenCalledOnce();
+
+      // Control: the same shape with a successful response still suppresses,
+      // so the gate is absence-of-failure and not "always extract".
+      vi.mocked(runAutoMemoryExtract).mockClear();
+      const succeeded = await mgr.scheduleExtract({
+        projectRoot,
+        sessionId: 'sess-2',
+        history: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'write-2',
+                  name: 'write_file',
+                  args: {
+                    file_path: path.join(
+                      projectRoot,
+                      '.qwen/memory/user/test.md',
+                    ),
+                  },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'write-2',
+                  name: 'write_file',
+                  response: { output: 'wrote file' },
+                },
+              },
+            ],
+          },
+        ],
+      });
+
+      expect(succeeded.skippedReason).toBe('memory_tool');
+      expect(runAutoMemoryExtract).not.toHaveBeenCalled();
+    });
+
     it('does not skip extraction after a no-op manage_memory forget', async () => {
       vi.mocked(runAutoMemoryExtract).mockResolvedValue({
         touchedTopics: [],

@@ -429,6 +429,19 @@ function historyWritesToMemory(
         return true;
       }
       const filePath = memoryWritePath(part);
+      if (
+        filePath !== undefined &&
+        part.functionCall?.id &&
+        !successfulCallIds.has(part.functionCall.id)
+      ) {
+        // A *rejected* direct write — prior-read enforcement, a
+        // `permissions.deny` rule on a memory path, EISDIR/ENOSPC — wrote
+        // nothing to memory, so it must not suppress this turn's extraction.
+        // Same invariant as the `manage_memory` arm above. The gate is
+        // absence-of-failure rather than require-success: a call with no `id`
+        // has no response to check, and those keep the prior behaviour.
+        return false;
+      }
       return (
         filePath !== undefined &&
         (isAnyAutoMemPath(filePath, projectRoot) ||
