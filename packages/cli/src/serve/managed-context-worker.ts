@@ -8,6 +8,7 @@ import { createHash } from 'node:crypto';
 import { constants, promises as fs, type BigIntStats } from 'node:fs';
 import path from 'node:path';
 import { sessionIdContext } from '@qwen-code/qwen-code-core/utils/sessionIdContext.js';
+import type { LocalShellResultSession } from '@qwen-code/qwen-code-core/managed-runtime/local-shell-result-session.js';
 import type express from 'express';
 import type { Application, Response } from 'express';
 import {
@@ -30,6 +31,7 @@ import {
   ManagedToolExecutor,
 } from './managed-runtime-tool-executor.js';
 import { registerManagedRuntimeToolRoutes } from './managed-runtime-tool-routes.js';
+import { registerManagedRuntimeToolV3Routes } from './managed-runtime-tool-v3-routes.js';
 import {
   WorkspaceActivations,
   WORKSPACE_ACTIVATION_ROUTE,
@@ -124,6 +126,7 @@ function isHostAbsolute(mountRoot: string): boolean {
 export function registerManagedContextRoutes(
   app: Application,
   bootDocument: ManagedContextBoot,
+  capturePublisher?: Pick<LocalShellResultSession, 'prepare' | 'accept'>,
 ): ManagedToolExecutor {
   const boot = parseManagedContextBoot(bootDocument);
   const installations = new ManagedContextInstallations(boot);
@@ -189,9 +192,12 @@ export function registerManagedContextRoutes(
       ),
       isActive,
     };
-  });
+  }, capturePublisher);
   activations.register(app, boot, installations, executor);
   registerManagedRuntimeToolRoutes(app, boot, executor);
+  if (capturePublisher) {
+    registerManagedRuntimeToolV3Routes(app, boot, executor);
+  }
   return executor;
 }
 

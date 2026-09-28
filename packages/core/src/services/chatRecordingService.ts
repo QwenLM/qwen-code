@@ -16,7 +16,7 @@ import {
 import { getCurrentAgentId } from '../agents/runtime/agent-context.js';
 import path from 'node:path';
 import fs from 'node:fs';
-import { isManagedSessionTranscriptSync } from '../utils/sessionStorageUtils.js';
+import { isManagedExecutionTranscriptSync } from '../utils/sessionStorageUtils.js';
 import {
   SessionExecutionEngineError,
   type SessionExecutionEngine,
@@ -1176,7 +1176,7 @@ export class ChatRecordingService {
         );
       }
     }
-    if (isManagedSessionTranscriptSync(conversationFile)) {
+    if (isManagedExecutionTranscriptSync(conversationFile)) {
       throw new SessionExecutionEngineError(
         this.getSessionId(),
         'belongs to managed, cannot record with legacy',

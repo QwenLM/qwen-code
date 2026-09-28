@@ -22,6 +22,30 @@ script requires TypeScript integrations absent from this PR. See the
 for the remaining merge gates; earlier preview timing and recovery results
 below are not evidence for this split.
 
+## API contract
+
+`src/main/resources/openapi/managed-agent-public-api.openapi.json` is the
+single source for the public and WebShell routes. `ManagedAgentApiContractTest`
+compares the mapped routes, the `ApiModels` records and real responses with it;
+`src/test/resources/openapi/contract-known-gaps.txt` lists the differences that
+a later slice still has to close; none remain after D4. The WebShell client types are generated from the
+same file by `npm run generate:managed-agent-api` in `packages/web-shell`.
+Sessions record the agent revision from `QWEN_MANAGED_AGENT_REVISION` (default
+`1`) when they are created. Every response carries `X-Request-Id`, which error
+envelopes repeat as `request_id` and the logs print. Events keep the schema and
+projection versions and the Item and Part identity they were accepted with,
+except that a `stream.reconciled` event announces retracted deltas. A
+cursor below a Session's replay floor gets `409 cursor_expired` from the JSON
+event query and one `agent.session.resync_required` frame from either stream.
+Design: [English](../../../docs/design/2026-09-27-managed-agent-api-contract.md) |
+[简体中文](../../../docs/design/2026-09-27-managed-agent-api-contract.zh-CN.md);
+Session query: [English](../../../docs/design/2026-09-27-managed-agent-session-query.md) |
+[简体中文](../../../docs/design/2026-09-27-managed-agent-session-query.zh-CN.md);
+Event replay: [English](../../../docs/design/2026-09-27-managed-agent-event-replay.md) |
+[简体中文](../../../docs/design/2026-09-27-managed-agent-event-replay.zh-CN.md);
+Durable lifecycle: [English](../../../docs/design/2026-09-28-managed-agent-durable-lifecycle.md) |
+[简体中文](../../../docs/design/2026-09-28-managed-agent-durable-lifecycle.zh-CN.md)
+
 ## Prerequisites
 
 - Java 21
@@ -60,7 +84,7 @@ curl -sS http://127.0.0.1:8080/v1/agents/sessions \
   -H 'Content-Type: application/json' \
   -H 'X-Qwen-Tenant-Id: demo' \
   -H 'Idempotency-Key: create-1' \
-  -d '{"agent_id":"qwen-code","input":[{"type":"text","text":"hello"}]}'
+  -d '{"agent_id":"qwen-code","input":[{"type":"input_text","text":"hello"}]}'
 ```
 
 The returned `id` is an RFC UUID and is the canonical identity used by
@@ -69,10 +93,13 @@ not maintain a separate public-to-Harness Session mapping.
 
 ## Public Session lifecycle
 
-Flyway V5 adds durable lifecycle commands and soft-deletion timestamps. The
-public control plane owns lifecycle state and tenant/idempotency checks, while
-the Hosted Harness remains the private title authority and the Runtime Broker
-owns execution bindings.
+Close, archive and delete are durable operations (Flyway V17). Each answers
+`202` with a command operation that
+`GET /v1/agents/sessions/{id}/operations/{operationId}` reads back, also after a
+delete; the WebShell adapter offers the same routes. The public control plane
+owns lifecycle state and tenant/idempotency checks, while the Hosted Harness
+remains the private title authority and the Runtime Broker owns execution
+bindings.
 
 ```bash
 curl -sS -X PATCH \
@@ -81,6 +108,15 @@ curl -sS -X PATCH \
   -H 'X-Qwen-Tenant-Id: demo' \
   -H 'Idempotency-Key: rename-1' \
   -d '{"title":"investigate checkout failure"}'
+
+curl -sS -X POST \
+  http://127.0.0.1:8080/v1/agents/sessions/$SESSION_ID/close \
+  -H 'X-Qwen-Tenant-Id: demo' \
+  -H 'Idempotency-Key: close-1'
+
+curl -sS \
+  http://127.0.0.1:8080/v1/agents/sessions/$SESSION_ID/operations/$OPERATION_ID \
+  -H 'X-Qwen-Tenant-Id: demo'
 
 curl -sS -X POST \
   http://127.0.0.1:8080/v1/agents/sessions/$SESSION_ID/archive \
@@ -98,15 +134,19 @@ curl -sS -X DELETE \
   -H 'Idempotency-Key: delete-1'
 ```
 
-Archive and delete reject an active Turn. Rename waits for the Harness to
-durably commit `session_metadata`; archive closes the Harness attachment and
-requests Runtime drain (currently only an in-process retirement flag); delete closes it only when the Session was active
-and always drains the binding; unarchive clears the Runtime retirement fence
-and loads the Harness lazily on the next Turn. A failed external action leaves
-a `PENDING` command that the same idempotency key can safely resume. The
-command retains the pre-mutation state, so deleting an archived Session does
-not require the already-closed Harness. A different lifecycle command is
-blocked until it completes.
+Close and delete reject an active Turn and seal input as soon as they are
+admitted. A background worker then closes the Hosted Harness Session, waits
+until no Harness holds its journal writer under an unexpired lease (the
+holding Harness seals it when closing), drains the Runtime binding (currently
+only an in-process retirement flag) and completes the operation; a failed
+attempt is retried with the dispatch backoff until it succeeds, so a `202`
+never means that tools stopped. After the Hosted Harness restarts, its calls fail with a
+generation error until Java restarts too, as Turns do, and the operation waits. A Harness whose journal writes stopped after a failed commit answers every close with `503` until it restarts. A delete of a closed or archived Session
+needs no Harness. Archive accepts only a closed Session and completes at once;
+unarchive restores it to closed. Rename waits for the Harness to durably commit
+`session_metadata`, and a failed rename leaves a `PENDING` command that the
+same idempotency key can safely resume. One lifecycle change runs at a time. A
+retry with the same key from the same actor returns the original operation.
 
 Harness attachment uses strict create/load semantics: create returns `409` for
 an existing private Session authority, while load returns `404` for a missing
@@ -116,9 +156,10 @@ An in-memory Hosted attachment is bound to one normalized Store endpoint,
 tenant, workspace, and Harness writer generation; an attach or cold-load race
 with a different identity fails closed.
 
-Delete currently writes a public tombstone and hides the Session from get/list
-responses. It does not physically erase the private journal or resources;
-retention, writer sealing, and garbage collection remain future work.
+Delete writes a public tombstone: get and list stop returning the Session,
+while its operations stay readable. It does not physically erase the private
+journal, events or resources, and it does not mark the journal deleted;
+retention and garbage collection remain future work.
 
 The Phase 1 schema has not been released. A development database created by an
 older revision with `harness_session_id` must be recreated before running this
@@ -258,6 +299,14 @@ standalone reference keeps the one configured directory for legacy unbound
 Sessions. Persisted bound Sessions use the private Workspace execution path
 below.
 
+Flyway V12 aligns the Runtime tables with the Broker's own `schema.sql`, which
+its JDBC repositories are written against. `RuntimeBrokerFlywaySchemaTest`
+fails when the two definitions differ, so a change to either one needs a
+matching change to the other. V12 replaces two primary keys. MySQL rejects this
+when `sql_require_primary_key` is set: V12 fails before it changes anything, and
+Flyway records the failure. Unset the variable, run Flyway `repair`, and start
+the server again.
+
 ### Private Workspace tool execution (W0c-3)
 
 The worker entry is the built CLI bundle; the server launches it with
@@ -350,18 +399,23 @@ Hosted Harness process trees, deletes their old local homes, starts replacement
 owners against the same MySQL store, and verifies that the second Turn sees the
 first Turn's prompt and answer.
 
-To exercise an admitted in-flight Turn at the tool-intent boundary, run:
+The in-flight and continuation variants are not yet runnable. Both drive their
+assertion through a physical tool execution, and the Hosted Harness no-tool
+slice refuses every tool call by design, so the modes exit immediately with a
+not-yet-enabled error until the tool-capable Hosted turn tracked in #12380
+lands:
 
 ```bash
-npm run test:e2e:managed-inflight-failover
+npm run test:e2e:managed-inflight-failover       # gated: exits not-yet-enabled
+npm run test:e2e:managed-continuation-failover   # gated: exits not-yet-enabled
 ```
 
-This mode holds the first Broker `:start` request after the Harness has durably
-committed its `await_runtime` checkpoint, kills the original Spring and Hosted
-Harness process trees, deletes their homes, and starts replacement owners. It
-requires the replacement Harness to use the original `executionCallId`, execute
-the physical tool exactly once, continue the original Prompt without replay,
-and commit one public terminal event.
+Once enabled, the in-flight mode holds the first Broker `:start` request after
+the Harness has durably committed its `await_runtime` checkpoint, kills the
+original Spring and Hosted Harness process trees, deletes their homes, and
+starts replacement owners. It requires the replacement Harness to use the
+original `executionCallId`, execute the physical tool exactly once, continue
+the original Prompt without replay, and commit one public terminal event.
 
 Once the missing integration lands, a zero-delay run can check the real-model
 path. A controlled cold-start delay can then test output before Runtime

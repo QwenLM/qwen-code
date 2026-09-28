@@ -310,6 +310,11 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
       super(`Invalid or inactive branch point: ${recordId}`);
     }
   },
+  SessionForkSourceUnavailableError: class SessionForkSourceUnavailableError extends Error {
+    constructor(readonly sessionId: string) {
+      super(`Source session not found or empty: ${sessionId}`);
+    }
+  },
   INVOCATION_CONTEXT_META_KEY: 'qwen-code/invocation',
   registerSession: mockRegisterSession,
   getLastPeerInboxFailure: () => mockGetLastPeerInboxFailure(),
@@ -1169,6 +1174,7 @@ import type { CliArgs } from '../config/config.js';
 import {
   AuthType,
   BranchPointInvalidError,
+  SessionForkSourceUnavailableError,
   ExtensionManager,
   SessionEndReason,
   MCPServerConfig,
@@ -2460,6 +2466,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         beginClose: ReturnType<typeof vi.fn>;
         beginCloseIfAvailable: ReturnType<typeof vi.fn>;
         waitForActiveTurnsToSettle: ReturnType<typeof vi.fn>;
+        cancelMcpAppCalls: ReturnType<typeof vi.fn>;
         cancelPendingPrompt: ReturnType<typeof vi.fn>;
         enqueueBackgroundNotification: ReturnType<typeof vi.fn>;
         enableLiveScreenContext: ReturnType<typeof vi.fn>;
@@ -3603,6 +3610,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     });
     expect(lastSessionMock?.waitForActiveTurnsToSettle).not.toHaveBeenCalled();
     expect(lastSessionMock?.cancelPendingPrompt).not.toHaveBeenCalled();
+    expect(lastSessionMock?.cancelMcpAppCalls).not.toHaveBeenCalled();
     expect(closeGateHeld()).toBe(false);
 
     mockConnectionState.resolve();
@@ -3664,6 +3672,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     });
     expect(lastSessionMock?.waitForActiveTurnsToSettle).toHaveBeenCalledOnce();
     expect(lastSessionMock?.cancelPendingPrompt).not.toHaveBeenCalled();
+    expect(lastSessionMock?.cancelMcpAppCalls).not.toHaveBeenCalled();
     expect(abort).not.toHaveBeenCalled();
     expect(lastSessionMock?.dispose).not.toHaveBeenCalled();
     expect(closeGateHeld()).toBe(false);
@@ -3712,6 +3721,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       vi.useRealTimers();
     }
     expect(lastSessionMock?.cancelPendingPrompt).toHaveBeenCalledOnce();
+    expect(lastSessionMock?.cancelMcpAppCalls).toHaveBeenCalledOnce();
     expect(lastSessionMock?.dispose).not.toHaveBeenCalled();
     expect(closeGateHeld()).toBe(false);
 
@@ -3760,6 +3770,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       vi.useRealTimers();
     }
     expect(lastSessionMock?.cancelPendingPrompt).not.toHaveBeenCalled();
+    expect(lastSessionMock?.cancelMcpAppCalls).not.toHaveBeenCalled();
     expect(lastSessionMock?.dispose).not.toHaveBeenCalled();
     expect(closeGateHeld()).toBe(false);
 
@@ -3811,6 +3822,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     });
     expect(lastSessionMock?.waitForActiveTurnsToSettle).toHaveBeenCalled();
     expect(lastSessionMock?.cancelPendingPrompt).toHaveBeenCalledOnce();
+    expect(lastSessionMock?.cancelMcpAppCalls).toHaveBeenCalledOnce();
     expect(abort).toHaveBeenCalledOnce();
     const firstSettleOrder =
       lastSessionMock!.waitForActiveTurnsToSettle.mock.invocationCallOrder[0];
@@ -5014,6 +5026,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       hasHooksForEvent: vi.fn().mockReturnValue(false),
       isWorkflowsEnabled: vi.fn().mockReturnValue(false),
       setWorkflowsEnabled: vi.fn(),
+      isSafeMode: vi.fn().mockReturnValue(false),
       getBareMode: vi.fn().mockReturnValue(false),
       getFolderTrustFeature: vi.fn().mockReturnValue(false),
       isTrustedFolder: vi.fn().mockReturnValue(true),
@@ -5301,6 +5314,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           beginCloseIfAvailable: vi.fn().mockReturnValue(vi.fn()),
           waitForCloseGateToRelease: vi.fn().mockResolvedValue(undefined),
           waitForActiveTurnsToSettle: vi.fn().mockResolvedValue(undefined),
+          cancelMcpAppCalls: vi.fn(),
           cancelPendingPrompt: vi.fn().mockResolvedValue(undefined),
           enqueueBackgroundNotification: vi
             .fn()
@@ -5526,6 +5540,35 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       mockConnectionState.resolve();
       await agentPromise;
     });
+
+    // Both suppressions, on the path that hosts daemon sessions. The setting
+    // is on here, so this is the case the setting reader alone cannot see:
+    // an interactive TUI under the same flag binds nothing, while a hosted
+    // session that bound an inbox would publish its `ipcPath` — and having
+    // one is what makes a session addressable to every peer and allowed to
+    // send. Varying only the setting (the cases above) cannot tell the two
+    // gates apart.
+    it.each([
+      ['safe mode', 'isSafeMode'],
+      ['bare mode', 'getBareMode'],
+    ] as const)(
+      'registers nothing when the hosted session runs in %s',
+      async (_label, flag) => {
+        const innerConfig = await setupSessionMocks(`hosted-${flag}`);
+        innerConfig[flag].mockReturnValue(true);
+        vi.mocked(loadSettings).mockReturnValue(messagingOn());
+        const { agent, agentPromise } =
+          await bootInitializedAcpAgent(messagingOn());
+        await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+        expect(mockPeerMessagingStart).not.toHaveBeenCalled();
+        expect(mockRegisterSession).not.toHaveBeenCalled();
+        expect(innerConfig.updateSessionRegistryIpcPath).not.toHaveBeenCalled();
+
+        mockConnectionState.resolve();
+        await agentPromise;
+      },
+    );
 
     it("removes a session's record when the session goes", async () => {
       const innerConfig = await setupSessionMocks('hosted-gone');
@@ -6644,6 +6687,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await vi.waitFor(() => expect(cancellationSignal?.aborted).toBe(true));
     expect(cancellationSettled).toBe(false);
     expect(lastSessionMock?.cancelPendingPrompt).not.toHaveBeenCalled();
+    expect(lastSessionMock?.cancelMcpAppCalls).not.toHaveBeenCalled();
 
     finishPrompt?.({ stopReason: 'cancelled' });
     await expect(cancellation).resolves.toEqual({ cancelled: true });
@@ -6663,6 +6707,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       agent.extMethod(PROMPT_CANCEL_METHOD, { sessionId }),
     ).resolves.toEqual({ cancelled: false });
     expect(lastSessionMock?.cancelPendingPrompt).not.toHaveBeenCalled();
+    expect(lastSessionMock?.cancelMcpAppCalls).not.toHaveBeenCalled();
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -20117,6 +20162,68 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it.each([
+    {
+      transport: 'stdio',
+      command: 'node',
+      appResourceMaxBytes: 0,
+      appResourceTimeoutMs: 150.9,
+    },
+    {
+      transport: 'http',
+      httpUrl: 'https://example.com/mcp',
+      appResourceMaxBytes: 4_194_304,
+      appResourceTimeoutMs: 30_000,
+    },
+    {
+      transport: 'sse',
+      url: 'https://example.com/sse',
+      appResourceMaxBytes: -1,
+      appResourceTimeoutMs: 200_000,
+    },
+  ])(
+    'preserves App resource limits through $transport settings read and write',
+    async (server) => {
+      const settings = makeCoreSettings();
+      (settings.user.settings as Record<string, unknown>)['mcpServers'] = {
+        apps: server,
+      };
+      const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+      try {
+        const result = (await agent.extMethod('qwen/settings/getCore', {})) as {
+          user: {
+            mcpServers: Array<{
+              name: string;
+              server: Record<string, unknown>;
+            }>;
+          };
+        };
+        const entry = result.user.mcpServers.find(
+          (entry) => entry.name === 'apps',
+        );
+        expect(entry?.server).toMatchObject(server);
+        await agent.extMethod('qwen/settings/setMcpServer', {
+          scope: 'user',
+          name: 'apps',
+          server: entry?.server,
+        });
+        expect(settings.setValue).toHaveBeenCalledWith(
+          'User',
+          'mcpServers',
+          expect.objectContaining({
+            apps: expect.objectContaining({
+              appResourceMaxBytes: server.appResourceMaxBytes,
+              appResourceTimeoutMs: server.appResourceTimeoutMs,
+            }),
+          }),
+        );
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
+
   it('qwen/settings/setMcpServer rejects invalid version negotiation', async () => {
     const settings = makeCoreSettings();
     const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
@@ -25536,6 +25643,7 @@ describe('QwenAgent session-management routing (rename / delete / list / branch 
           getId: vi.fn().mockReturnValue(liveSessionId),
           shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
           getConfig: vi.fn().mockReturnValue(innerConfig),
+          cancelMcpAppCalls: vi.fn(),
           cancelPendingPrompt: liveCancelPendingPrompt,
           beginClose: liveBeginClose,
           beginCloseIfAvailable: liveBeginCloseIfAvailable,
@@ -26270,6 +26378,64 @@ describe('QwenAgent session-management routing (rename / delete / list / branch 
     await agentPromise;
   });
 
+  it('uses a daemon-reserved target session id for branch publication', async () => {
+    const targetSessionId = '11111111-1111-4111-8111-111111111111';
+    const recording = makeRecordingService();
+    const sessionService = {
+      forkSession: vi.fn().mockResolvedValue(undefined),
+      findSessionTitlesByPrefix: vi.fn().mockResolvedValue([]),
+    };
+    const innerConfig = makeLiveSessionInnerConfig(recording);
+    innerConfig.getSessionService.mockReturnValue(
+      sessionService as unknown as SessionService,
+    );
+    const { agent, agentPromise } = await bootAgent(innerConfig);
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    const result = await agent.extMethod(
+      SERVE_CONTROL_EXT_METHODS.sessionBranch,
+      {
+        cwd: '/tmp',
+        sessionId: liveSessionId,
+        targetSessionId,
+      },
+    );
+
+    expect(sessionService.forkSession).toHaveBeenCalledWith(
+      liveSessionId,
+      targetSessionId,
+      { title: 'Source session(1)' },
+    );
+    expect(result).toMatchObject({ newSessionId: targetSessionId });
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('rejects an invalid daemon-reserved branch target id', async () => {
+    const recording = makeRecordingService();
+    const sessionService = {
+      forkSession: vi.fn().mockResolvedValue(undefined),
+      findSessionTitlesByPrefix: vi.fn().mockResolvedValue([]),
+    };
+    const innerConfig = makeLiveSessionInnerConfig(recording);
+    innerConfig.getSessionService.mockReturnValue(
+      sessionService as unknown as SessionService,
+    );
+    const { agent, agentPromise } = await bootAgent(innerConfig);
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionBranch, {
+        cwd: '/tmp',
+        sessionId: liveSessionId,
+        targetSessionId: 'a'.repeat(32),
+      }),
+    ).rejects.toThrow('Invalid targetSessionId');
+    expect(sessionService.forkSession).not.toHaveBeenCalled();
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it.each([
     {
       sourceTitle: 'Source session(2)',
@@ -26596,6 +26762,37 @@ describe('QwenAgent session-management routing (rename / delete / list / branch 
     );
     expect(liveBeginHistoryMutation).toHaveBeenCalledOnce();
     expect(liveReleaseHistoryMutation).toHaveBeenCalledOnce();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('maps an empty fork source to session_not_found', async () => {
+    const recording = makeRecordingService();
+    const sessionService = {
+      forkSession: vi
+        .fn()
+        .mockRejectedValue(
+          new SessionForkSourceUnavailableError(liveSessionId),
+        ),
+      findSessionTitlesByPrefix: vi.fn().mockResolvedValue([]),
+    };
+    const innerConfig = makeLiveSessionInnerConfig(recording);
+    innerConfig.getSessionService.mockReturnValue(
+      sessionService as unknown as SessionService,
+    );
+    const { agent, agentPromise } = await bootAgent(innerConfig);
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionBranch, {
+        cwd: '/tmp',
+        sessionId: liveSessionId,
+      }),
+    ).rejects.toMatchObject({
+      code: -32004,
+      data: { errorKind: 'session_not_found', sessionId: liveSessionId },
+    });
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -27237,6 +27434,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         beginCloseIfAvailable: ReturnType<typeof vi.fn>;
         waitForCloseGateToRelease: ReturnType<typeof vi.fn>;
         waitForActiveTurnsToSettle: ReturnType<typeof vi.fn>;
+        cancelMcpAppCalls: ReturnType<typeof vi.fn>;
         cancelPendingPrompt: ReturnType<typeof vi.fn>;
         sendUpdate: ReturnType<typeof vi.fn>;
         dispose: ReturnType<typeof vi.fn>;
@@ -27654,6 +27852,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         beginCloseIfAvailable: vi.fn().mockReturnValue(releaseCloseGate),
         waitForCloseGateToRelease: vi.fn().mockResolvedValue(undefined),
         waitForActiveTurnsToSettle: vi.fn().mockResolvedValue(undefined),
+        cancelMcpAppCalls: vi.fn(),
         cancelPendingPrompt: vi.fn().mockResolvedValue(undefined),
         assertCanStartTurn: vi.fn().mockResolvedValue(undefined),
         isTurnIdle: vi.fn().mockReturnValue(true),
@@ -28478,6 +28677,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
 
         await agent.cancel({ sessionId: params.sessionId });
         expect(lastSessionMock?.cancelPendingPrompt).toHaveBeenCalledOnce();
+        expect(lastSessionMock?.cancelMcpAppCalls).not.toHaveBeenCalled();
       } finally {
         mockConnectionState.resolve();
         await agentPromise;
@@ -28514,6 +28714,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         // follow-up operations still reach the adopted session.
         await agent.cancel({ sessionId });
         expect(lastSessionMock?.cancelPendingPrompt).toHaveBeenCalledOnce();
+        expect(lastSessionMock?.cancelMcpAppCalls).not.toHaveBeenCalled();
       } finally {
         mockConnectionState.resolve();
         await agentPromise;
@@ -29091,6 +29292,80 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     expect(lastSessionMock?.sendUpdate).toHaveBeenCalledExactlyOnceWith(
       goalUpdate,
     );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('degrades the oldest replayed App html when the bulk replay page exceeds the envelope byte cap', async () => {
+    const messages = [{ role: 'user', parts: [{ text: 'hi' }] }];
+    bindRestoreMocks({
+      sessionExists: true,
+      resumedConversation: { messages },
+      recoveredGoalUpdates: [],
+    });
+    // U+0001 escapes to a 6-char JSON form, so a 2 M-char document
+    // serializes to ~12 MB and three of them sum past the 32 MiB envelope
+    // cap. Without the oldest-first degrade the load fails closed with
+    // transcript_page_too_large.
+    const bigHtml = (code: number) =>
+      String.fromCharCode(code).repeat(2_000_000);
+    const appUpdate = (callId: string, html: string, fallbackText: string) => ({
+      sessionUpdate: 'tool_call_update',
+      toolCallId: callId,
+      status: 'completed',
+      rawOutput: {
+        type: 'mcp_app',
+        serverName: 'amplitude',
+        resourceUri: 'ui://amplitude/chart',
+        html,
+        toolResult: {},
+        toolArguments: {},
+        fallbackText,
+      },
+    });
+    mockHistoryReplay.mockImplementation(
+      async (context: { sendUpdate: (update: unknown) => Promise<void> }) => {
+        await context.sendUpdate(
+          appUpdate('call-app-1', bigHtml(1), 'first chart'),
+        );
+        await context.sendUpdate(
+          appUpdate('call-app-2', bigHtml(2), 'second chart'),
+        );
+        await context.sendUpdate(
+          appUpdate('call-app-3', bigHtml(3), 'third chart'),
+        );
+      },
+    );
+    const { agent, agentPromise } = await spawnAgent();
+
+    const response = (await agent.loadSession({
+      cwd: '/tmp',
+      sessionId: 'persisted-1',
+      mcpServers: [],
+      _meta: {
+        'qwen.session.loadReplayMode': 'bulk',
+        'qwen.session.loadReplayPageSize': 50,
+      },
+    })) as {
+      _meta?: Record<
+        string,
+        {
+          updates: Array<{
+            rawOutput?: { html?: string; fallbackText?: string };
+          }>;
+        }
+      >;
+    };
+
+    const updates = response._meta?.['qwen.session.loadReplay']?.updates ?? [];
+    expect(updates).toHaveLength(3);
+    expect(updates[0]?.rawOutput).toMatchObject({
+      html: '',
+      fallbackText: 'first chart',
+    });
+    expect(updates[1]?.rawOutput?.html).toHaveLength(2_000_000);
+    expect(updates[2]?.rawOutput?.html).toHaveLength(2_000_000);
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -30187,6 +30462,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       beginClose: vi.fn().mockReturnValue(vi.fn()),
       beginCloseIfAvailable: vi.fn().mockReturnValue(vi.fn()),
       waitForCloseGateToRelease: vi.fn().mockResolvedValue(undefined),
+      cancelMcpAppCalls: vi.fn(),
       cancelPendingPrompt: vi.fn().mockResolvedValue(undefined),
       waitForActiveTurnsToSettle: vi.fn().mockResolvedValue(undefined),
       isTurnIdle: vi.fn().mockReturnValue(true),
@@ -30305,6 +30581,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         message: 'Session restore timed out after 30000ms',
       });
       expect(releaseCloseGate).toHaveBeenCalledOnce();
+      expect(firstSession.cancelMcpAppCalls).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
       mockConnectionState.resolve();
@@ -30932,6 +31209,7 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockArgv.experimentalLsp = undefined;
     vi.mocked(resolveOutputLanguageOrPreserveAuto).mockImplementation(
       (v: string | null | undefined) => v ?? 'auto',
     );
@@ -31257,6 +31535,7 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings);
     vi.mocked(loadCliConfig).mockResolvedValue(discoveryConfig);
+    mockArgv.experimentalLsp = true;
 
     const { agent, agentPromise } = await getAgent();
     await expect(
@@ -31563,6 +31842,16 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
       expect(
         discoveryManager.discoverAllMcpToolsIncremental,
       ).toHaveBeenCalled(),
+    );
+    const discoveryLoad = vi
+      .mocked(loadCliConfig)
+      .mock.calls.find(
+        ([, argv]) =>
+          (argv as CliArgs | undefined)?.sessionId ===
+          'workspace-mcp-discovery',
+      );
+    expect(discoveryLoad?.[1]).toEqual(
+      expect.objectContaining({ experimentalLsp: false }),
     );
     vi.mocked(getMCPServerStatus).mockReturnValue(MCPServerStatus.CONNECTED);
     await expect(
