@@ -373,12 +373,24 @@ export function assertToolPublicationPayload(
       typeof payload['input'] === 'object' &&
       !Array.isArray(payload['input']),
   );
-  requireValue(payload['input']['is_background'] !== true);
+  const input = payload['input'] as Record<string, ManagedSessionJsonValue>;
+  requireValue(
+    typeof input['command'] === 'string' &&
+      input['command'].length > 0 &&
+      Object.keys(input).every((key) =>
+        ['command', 'timeout', 'description'].includes(key),
+      ) &&
+      (input['timeout'] === undefined ||
+        (Number.isInteger(input['timeout']) &&
+          (input['timeout'] as number) >= 1 &&
+          (input['timeout'] as number) <= 600_000)) &&
+      (input['description'] === undefined ||
+        typeof input['description'] === 'string'),
+  );
   requireValue(
     parsed.requestDigest ===
       `sha256:${createHash('sha256').update(payloadJson).digest('hex')}` &&
-      parsed.reference.argsDigest ===
-        `sha256:${managedToolDigest(payload['input'])}`,
+      parsed.reference.argsDigest === `sha256:${managedToolDigest(input)}`,
   );
 }
 

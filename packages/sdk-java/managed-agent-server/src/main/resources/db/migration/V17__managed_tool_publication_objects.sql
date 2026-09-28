@@ -1,4 +1,5 @@
 ALTER TABLE qwen_tool_publication ADD COLUMN producer_phase VARCHAR(32) NOT NULL DEFAULT 'OPEN';
+ALTER TABLE qwen_tool_publication ADD COLUMN quarantined BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE qwen_tool_publication ADD COLUMN active_operation_id VARCHAR(128);
 ALTER TABLE qwen_tool_publication ADD COLUMN finish_operation_id VARCHAR(128);
 ALTER TABLE qwen_tool_publication ADD COLUMN finish_predecessor_id VARCHAR(128);

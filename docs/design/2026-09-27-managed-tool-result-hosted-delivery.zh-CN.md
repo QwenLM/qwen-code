@@ -4,7 +4,7 @@
 
 ## 1. 状态与建议
 
-O2 作为一个交付，内部按阶段提交。[O2a 契约与归属基础](2026-09-27-managed-tool-publication-ownership.zh-CN.md) 已在本地实现；O2b–O2d 待实施。2026-09-28 调研更新以 `e4f3a2351` 为基线，其基于 main 的 `302e7d88e`，已经包含 Hosted 文件工具轮次 #12831。随后主线 `c3e880b8` 只修改 Web Shell。最终接线前重新核对主线。
+O2 作为一个交付，内部按阶段提交。[O2a 契约与归属基础](2026-09-27-managed-tool-publication-ownership.zh-CN.md) 和 O2b–O2d 代码已在基于 main `302e7d88e` 的分支上本地实现，包含 Hosted 文件工具轮次 #12831；仍待 Draft PR 评审及下述环境依赖证据。2026-09-28 的调研从 `e4f3a2351` 开始；随后观察到的主线 `c3e880b8` 只修改 Web Shell。最终集成前重新核对主线。
 
 建议在现有 Java Managed Session Store 中增加私有 OSS 发布服务，catalog 与 Session journal 使用同一 SQL 数据库。复用 O1a 不可变分段、manifest 与 Tool v3，并按第 5 节显式澄清 call ID 语义；复用 O1c 捕获和背压。新增持久发布归属、经过校验的完整引用关系、有界容量准入，以及原始 Session 回执对账。
 
@@ -71,7 +71,7 @@ sequenceDiagram
 
 worker 不接收 Session writer token、本地 lease 或 OSS 凭证。Session owner 使用已有认证 Store 连接预留 publication；owner 在预留前生成 256-bit 随机、仅限本次 capture 的 bearer token；Java 只保存其 hash，并绑定下节完整身份。预留响应丢失时重试同一个 token。见 [O2a 实施细化](2026-09-27-managed-tool-publication-ownership.zh-CN.md)。Broker 在 v3 execute 前，通过认证且属于 selected-Runtime 的控制操作传递 grant。grant 不加入闭合的 Tool v3 请求体、boot JSON、持久 invocation reference、日志或公开事件。控制操作使用已有 worker bearer/lease 认证，上限 64 KiB，不能执行工具。缺少绑定时 execute 在副作用前拒绝。O2a 提供闭合的不可变 binding/request/grant schema；selected-Runtime grant-install 操作及 HTTP 接线属于 O2d。
 
-grant 仅允许本 publication 的 segment/resource 写入、seal、finish 和 status；不允许 journal 修改、任意资源读取、object listing 或自定义 object key。其有效期不超过当前 owner 授权。只有同一 Session writer generation、activation 和 Runtime binding 仍有效时才能续期。入口及最终 catalog 提交都重新校验这些 fence。fencing 后完成的上传可能留下需保留的候选对象，但不能返回成功发布回执。刷新授权不改变执行身份，也不重执行调用。
+grant 仅允许本 publication 的 segment/resource 写入、seal、finish 和 status；不允许 journal 修改、任意资源读取、object listing 或自定义 object key。其有效期不超过当前 owner 授权。原 Shell 执行前及运行期间定期续期，且仅在同一 Session writer generation、activation 和 Runtime binding 仍有效时进行；调用结束或 turn 退出时停止续期。入口及最终 catalog 提交都重新校验这些 fence。fencing 后完成的上传可能留下需保留的候选对象，但不能返回成功发布回执。刷新授权不改变执行身份，也不重执行调用。
 
 | 提议的操作族                                                               | 归属与认证                                                      | 消费方                                |
 | -------------------------------------------------------------------------- | --------------------------------------------------------------- | ------------------------------------- |
@@ -169,6 +169,8 @@ Session owner 首先查询已有原始 `tool.receipt`。若不存在，则加载
 
 Hosted Shell 在接纳原 outcome 的同时冻结有界模型历史投影，包括稳定的 message ID、时间、模型与 function response。按完整 ChatRecord 序列化后的 UTF-8 字节数核对 64 KiB 上限，逐步缩短预览，必要时退化为固定短摘要。回执 committed 后，追加前先查原历史 message，再推进 checkpoint。恢复时重用投影，不重建原执行、manifest 或旧 writer 的不确定事务。本地 O1c 接纳行为保持不变。
 
+私有 Hosted Shell load 仅在一个已接纳 turn 尚未结算、最新 checkpoint 中该批工具全部结算且处于 results_ready，并且当前 turn 以原始冻结的工具结果消息结束、其后没有 assistant 消息时，才可继续模型推理。若最终 assistant 消息已持久保存而只缺 turn 结算，则只补结算，不再调用模型。检查任一边界前先根据回执补齐缺失历史；后续重开也重试原 ACK，包括 turn 已结算的情况。其他未完成状态继续阻断恢复。
+
 未启动调用的 capture 为空，走现有无 capture 结果路径，并由 owner 幂等关闭其 publication 预留为 `NOT_STARTED`。要求原执行的权威证据，fence grant，核算已接收操作，再释放未用额度和活跃 capture 槽位。存在矛盾的 start/publication 证据时拒绝关闭。prepared cancellation 和明确的调度前拒绝可以提供证据；超时、lease 到期或查不到 status 均不能提供。该路径不能发送 Tool v3 capture ACK。
 
 append 异常后，当前 TypeScript authority 已进入 write-failed。通过受支持的归属路径关闭/重开并读取原 journal，不在同一对象上盲目追加。替代 writer 不能用新 token 重放旧事务：当前 Java duplicate-commit 规则要求原 writer 和 record identity。先读取并使用已有 receipt；仍需新增 receipt 时，由新的合法 owner 对同一 durable finished publication 做新的 fenced admission，通过唯一性约束避免重复回执。
@@ -242,16 +244,16 @@ append 异常后，当前 TypeScript authority 已进入 write-failed。通过�
 | 宿主替换   | 原 Runtime 磁盘不可访问，合法 writer 交接后在另一宿主重开，读取准确 100 MiB 尾部；异常丢失保持 unknown，不假定孤立进程可接管                                                                                                           |
 | 兼容性     | TS/Java 真实 v3 互通，原 v2/禁用门禁/W0c activation，HTTP inline 事务，本地 O1b/O1c，Hosted no-tool/file-only profile                                                                                                                  |
 
-### 12.2 本轮已经完成的调研验证
+### 12.2 已完成验证与待补证据
 
-在固定基线上通过两项现有 core 定向测试：拒绝需要尚未实现 OSS 路径的资源，以及暂存资源提交/恢复。测试使用已有假 HTTP Store，只证明现有 64 KiB/暂存行为。全局 `qwen --version` 返回 `0.24.6`；未发送模型请求。普通 CLI 对话无法进入本设计的 O2 publication 服务。
+固定基线上的两项现有 core 定向测试确认了 HTTP 暂存的 64 KiB 限制。实现后的 core 与 CLI 定向测试已经通过，其中原 O1a 的 28 组、136 步通过异步 HTTP 适配器及以 ledger 为后端的测试入口运行；Java H2 catalog 测试覆盖不可变对象、接纳、固定范围、故障注入，以及增量生成的 100 MiB 和 1 GiB 数据。Broker 模块验证、Server 定向验证、仓库 build/typecheck/bundle 与本地 MySQL 8.4.11 迁移/集成运行记载于配套 E2E 报告。最终 Server 全量测试仍遇到一个与本分支无关的主线同毫秒 Turn 排序失败，不能将该次全量运行计为通过。这些测试不能替代真实 OSS bucket 或第二宿主证据。
 
-上述完整 O2 实施验收尚未运行。O2a 验证记录在其链接的切片文档中，不证明 OSS 或宿主替换行为。后续验证必须包含 core/CLI/Java 定向测试、仓库 build/typecheck、真实 SQL/OSS 进程证据，以及连续两轮完整 diff 自审无新问题。分别报告 mock、真实进程和不同宿主的证据。本设计的验证范围是代码/来源调研、上述两项基线测试，以及文档一致性检查。
+完整验收矩阵仍缺真实 OSS 的禁止覆盖/versioning 行为、独立 worker/owner/service 进程故障、O2 专属 MySQL 并发竞争，以及原 Runtime 磁盘不可达时的合法跨宿主恢复。统一 PR 在这些检查和维护者评审完成前保持 Draft。mock、本机进程、真实 SQL、真实 OSS 和不同宿主证据分别报告；普通 CLI 对话不能验证此私有服务。
 
 ## 13. 启用前的部署决定
 
-- 确认私有 OSS region、endpoint、从未启用 versioning 的 bucket 和加密身份。若环境要求 bucket versioning 或禁止 worker 访问 Java，实施前修改存储/传输配置，不隐式降低保证。
+- 确认私有 OSS region、endpoint、从未启用 versioning 的 bucket 和加密身份。若环境要求 bucket versioning 或禁止 worker 访问 Java，启用前修改存储/传输配置，不隐式降低保证。
 - 提供测量后的字节/并发限制、publication/verification deadline 和保留运维方式。没有 GC 时已用及隔离字节继续占额，运维必须能观察容量；自动回收后续设计。
-- O2d 前固定最终 Hosted file/Shell bridge 依赖及其 payload/reference schema。通用 W0e 接管和自动 cold-load continuation 保持独立门禁。
+- 启用前确认 Hosted file/Shell bridge 依赖及其 payload/reference schema。通用 W0e 接管和自动 cold-load continuation 保持独立门禁。
 
-这些部署选择不阻止 O2a 契约与归属开发，但在未满足前，不能宣称已部署跨宿主保证或开放公开 Shell 能力。
+这些部署选择未满足前，不能宣称已部署跨宿主保证或开放公开 Shell 能力。

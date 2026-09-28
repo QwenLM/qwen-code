@@ -1253,7 +1253,7 @@ async function readBoundedPublicationJson(
       const item = await reader.read();
       if (item.done) break;
       length += item.value.byteLength;
-      if (length > 2 * 1024 * 1024)
+      if (length > 4 * 1024 * 1024)
         throw corrupt('Publication response exceeds its byte limit.');
       chunks.push(item.value);
     }

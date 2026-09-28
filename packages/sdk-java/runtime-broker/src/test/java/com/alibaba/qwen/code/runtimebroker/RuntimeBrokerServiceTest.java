@@ -1960,6 +1960,46 @@ class RuntimeBrokerServiceTest {
     }
 
     @Test
+    void finishedV3PublicationAnswersStatusWithoutAnActiveWorkerSession() {
+        RuntimePublicationVerifier verifier = new RuntimePublicationVerifier() {
+            @Override
+            public RuntimePublicationGrant verify(ToolExecutionRecord execution,
+                    String publicationId, String token) {
+                throw new AssertionError("Reconciliation cannot install another grant");
+            }
+
+            @Override
+            public Map<String, Object> finished(ToolExecutionRecord execution) {
+                assertEquals("durable-v3", execution.getExecutionCallId());
+                return Map.of("executionStatus", "success", "responseParts", java.util.List.of());
+            }
+        };
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE, verifier)) {
+            var prepared = fixture.executionRepository.findOrCreate(ToolExecutionRecord.prepared(
+                    "durable-v3", "v3-key", "binding-1", 1, "harness", "runtime", "prompt",
+                    "call", "digest", Map.of("sessionId", "runtime", "promptId", "prompt",
+                            "callId", "call", "argsDigest", "canonical", "payloadDigest", "digest",
+                            "dispatchMode", "deferred_v3",
+                            "publicationId", "pub-1")));
+            var claimed = fixture.executionRepository.claimDispatch("durable-v3", "other-broker",
+                    Duration.ofMinutes(1));
+            var executing = fixture.executionRepository.compareAndSet(claimed,
+                    claimed.withState(ToolExecutionRecord.State.EXECUTING, false),
+                    "other-broker", claimed.getDispatchGeneration());
+            assertEquals(prepared.getExecutionCallId(), executing.getExecutionCallId());
+            fixture.executionRepository.compareAndSet(executing, executing.withUnknown(),
+                    "other-broker", executing.getDispatchGeneration());
+
+            var settled = join(fixture.service.getExecution("harness", "runtime", "durable-v3"));
+            assertEquals(ToolExecutionRecord.State.SETTLED, settled.getState());
+            assertEquals(ExecutionReconciliation.Outcome.ALREADY_SETTLED,
+                    join(fixture.service.reconcileExecution("harness", "runtime", "durable-v3"))
+                            .getOutcome());
+            assertEquals(0, fixture.transport.statusCalls.get());
+        }
+    }
+
+    @Test
     void nonTerminalLookupKeepsTheExecutionUnknown() {
         for (String state : List.of("prepared", "executing",
                 "cancel_requested", "unknown")) {
@@ -2863,6 +2903,11 @@ class RuntimeBrokerServiceTest {
             this(scope, new MutableClock(START), Duration.ofMinutes(1));
         }
 
+        Fixture(RuntimeScope scope, RuntimePublicationVerifier verifier) {
+            this(scope, new MutableClock(START), Duration.ofMinutes(1),
+                    Duration.ofMinutes(1), verifier);
+        }
+
         Fixture(RuntimeScope scope, Clock clock,
                 Duration dispatchLeaseDuration) {
             this(scope, clock, Duration.ofMinutes(1),
@@ -2872,18 +2917,28 @@ class RuntimeBrokerServiceTest {
         Fixture(RuntimeScope scope, Clock clock,
                 Duration operationLeaseDuration,
                 Duration dispatchLeaseDuration) {
+            this(scope, clock, operationLeaseDuration, dispatchLeaseDuration, null);
+        }
+
+        private Fixture(RuntimeScope scope, Clock clock,
+                Duration operationLeaseDuration,
+                Duration dispatchLeaseDuration,
+                RuntimePublicationVerifier verifier) {
             bindingRepository = new InMemoryRuntimeBindingRepository(clock,
                     () -> "binding-" + bindingIds.incrementAndGet());
             executionRepository =
                     new InMemoryToolExecutionRepository(clock);
             resolver = new FakeResolver(scope);
             transport.executionRepository = executionRepository;
-            service = new RuntimeBrokerService(
-                    resolver,
-                    provisioner, transport, bindingRepository,
-                    sessionRepository, executionRepository, "broker",
-                    operationLeaseDuration, dispatchLeaseDuration, clock,
-                    () -> "execution-" + executionIds.incrementAndGet());
+            service = verifier == null
+                    ? new RuntimeBrokerService(resolver, provisioner, transport,
+                            bindingRepository, sessionRepository, executionRepository,
+                            "broker", operationLeaseDuration, dispatchLeaseDuration,
+                            clock, () -> "execution-" + executionIds.incrementAndGet())
+                    : new RuntimeBrokerService(resolver, provisioner, transport,
+                            bindingRepository, sessionRepository, executionRepository,
+                            "broker", operationLeaseDuration, dispatchLeaseDuration,
+                            verifier);
         }
 
         @Override

@@ -67,6 +67,12 @@ class ToolPublicationContractTest {
                 .isEqualTo(suite.required("bindingDigest").asText());
         ToolPublicationContract.requirePayload(binding,
                 suite.required("payloadJson").asText());
+        var wrongInputDigest = (com.fasterxml.jackson.databind.node.ObjectNode) binding.deepCopy();
+        ((com.fasterxml.jackson.databind.node.ObjectNode) wrongInputDigest.get("reference"))
+                .put("argsDigest", "sha256:" + "0".repeat(64));
+        assertThatThrownBy(() -> ToolPublicationContract.requirePayload(wrongInputDigest,
+                suite.required("payloadJson").asText()))
+                .hasMessageContaining("Canonical Shell input digest conflicts");
         assertThatThrownBy(() -> ToolPublicationContract.requirePayload(binding,
                 " " + suite.required("payloadJson").asText()))
                 .isInstanceOf(IllegalArgumentException.class);

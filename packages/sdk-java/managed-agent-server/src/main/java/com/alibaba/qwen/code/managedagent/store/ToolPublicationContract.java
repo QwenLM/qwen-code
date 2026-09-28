@@ -153,8 +153,22 @@ public final class ToolPublicationContract {
                 && body.get("input").isObject()
                 && !body.get("input").path("is_background").equals(JSON.getNodeFactory().booleanNode(true)),
                 "Only foreground Shell can publish");
+        JsonNode input = body.get("input");
+        require(input.has("command") && input.get("command").isTextual()
+                && !input.get("command").textValue().isEmpty(), "Shell command is invalid");
+        input.fieldNames().forEachRemaining(name -> require(
+                Set.of("command", "timeout", "description").contains(name), "Shell input field is invalid"));
+        require(!input.has("timeout") || input.get("timeout").isIntegralNumber()
+                && input.get("timeout").canConvertToInt()
+                && input.get("timeout").intValue() >= 1 && input.get("timeout").intValue() <= 600_000,
+                "Shell timeout is invalid");
+        require(!input.has("description") || input.get("description").isTextual(),
+                "Shell description is invalid");
         require(("sha256:" + sha256(bytes)).equals(text(binding, "requestDigest")),
                 "Original payload digest conflicts");
+        require(("sha256:" + sha256(canonical(input).toString().getBytes(StandardCharsets.UTF_8)))
+                .equals(text(binding.path("reference"), "argsDigest")),
+                "Canonical Shell input digest conflicts");
     }
 
     public static String bindingDigest(JsonNode binding) {

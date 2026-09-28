@@ -5,6 +5,7 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import type { Part } from '@google/genai';
 import type { Application, Request, Response } from 'express';
 import { parseBridgeManagedSessionStore } from '@qwen-code/acp-bridge/bridgeTypes';
@@ -26,10 +27,16 @@ import type {
   ManagedSessionDurableRef,
   ManagedSessionEvent,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
+import { assertManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
+import { parseToolResultEnvelope } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
 import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 import { runHostedHarnessTextTurn } from './hosted-harness-model.js';
-import type { HostedWorkspaceBrokerOptions } from './hosted-workspace-broker.js';
+import {
+  HostedWorkspaceBroker,
+  HostedWorkspaceBrokerRejection,
+  type HostedWorkspaceBrokerOptions,
+} from './hosted-workspace-broker.js';
 import {
   HOSTED_WORKSPACE_FILE_PROFILE,
   HOSTED_WORKSPACE_SHELL_PROFILE,
@@ -128,6 +135,134 @@ function hasUnsettledInput(session: HostedSession): boolean {
   return accepted.size > 0;
 }
 
+async function recoverShellReceipts(
+  session: HostedSession,
+  options: HostedWorkspaceBrokerOptions,
+): Promise<string | null> {
+  const authority = session.managed.authority;
+  const events = authority.eventsInSequenceRange(
+    1,
+    authority.committedSequence,
+  );
+  const pending = new Set<string>();
+  const receipts: Array<{ promptId: string; event: ManagedSessionEvent }> = [];
+  let currentPrompt: string | null = null;
+  for (const event of events) {
+    if (event.kind === 'input.accepted') {
+      const turnId = event.payload['turnId'];
+      if (typeof turnId === 'string') {
+        pending.add(turnId);
+        currentPrompt = turnId;
+      }
+    }
+    if (event.kind === 'tool.receipt' && currentPrompt) {
+      receipts.push({ promptId: currentPrompt, event });
+    }
+    if (event.kind === 'turn.settled') {
+      const turnId = event.payload['turnId'];
+      if (typeof turnId === 'string') {
+        pending.delete(turnId);
+        if (currentPrompt === turnId) currentPrompt = null;
+      }
+    }
+  }
+  const promptId = pending.size === 1 ? [...pending][0] : null;
+  const harness = createManagedHarnessHandle(session.managed);
+  for (const { promptId: receiptPromptId, event: receipt } of receipts) {
+    const executionCallId = receipt.payload['executionCallId'];
+    if (typeof executionCallId !== 'string')
+      throw new Error('Original Shell receipt has no execution identity.');
+    const ref = assertManagedSessionDurableRef(
+      receipt.payload['toolOutcomeRef'],
+      'original Shell outcome',
+    );
+    const outcome = object(
+      JSON.parse((await session.managed.resources.read(ref)).toString('utf8')),
+    );
+    const history = object(outcome?.['history']);
+    const envelope = parseToolResultEnvelope(outcome?.['envelope']);
+    const manifest = envelope.capture?.manifest ?? null;
+    const decision =
+      envelope.capture?.captureStatus === 'complete' ? 'committed' : 'blocked';
+    if (
+      outcome?.['schemaVersion'] !== 1 ||
+      outcome['decision'] !== decision ||
+      !isDeepStrictEqual(outcome['manifestRef'], manifest) ||
+      !isDeepStrictEqual(
+        receipt.payload['resultRef'],
+        decision === 'committed' ? manifest : null,
+      ) ||
+      receipt.payload['historyRevision'] !== receipt.sequence ||
+      typeof history?.['messageId'] !== 'string' ||
+      !UUID.test(history['messageId']) ||
+      typeof history['timestamp'] !== 'string' ||
+      typeof history['model'] !== 'string' ||
+      !Array.isArray(history['parts'])
+    )
+      throw new Error('Original Shell receipt or history conflicts.');
+    const projected = await session.managed.sink.project();
+    if (!projected.some((item) => item.uuid === history['messageId'])) {
+      if (receiptPromptId !== promptId)
+        throw new Error('Settled Shell history is missing.');
+      const result = record(
+        session,
+        authority.sessionHeader.sessionKey.sessionId,
+        'tool_result',
+        projected.at(-1)?.uuid ?? null,
+        {
+          uuid: history['messageId'],
+          timestamp: history['timestamp'],
+          daemonPromptId: receiptPromptId,
+          model: history['model'],
+          message: { role: 'user', parts: history['parts'] as Part[] },
+        },
+      );
+      if (
+        Buffer.byteLength(JSON.stringify(result)) >
+        HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes
+      )
+        throw new Error('Original Shell history exceeds the Session limit.');
+      await session.managed.sink.write(result);
+    }
+    const authorization = await authority.harnessRunAuthorization();
+    if (
+      decision === 'committed' &&
+      authorization.status === 'runnable' &&
+      authorization.checkpoint.continuation.phase === 'await_runtime' &&
+      receiptPromptId === promptId &&
+      authorization.checkpoint.tools?.items.some(
+        (item) => item.executionCallId === executionCallId,
+      )
+    )
+      await harness.resolveAwaitRuntime(executionCallId, ref);
+    try {
+      const broker = new HostedWorkspaceBroker(
+        options,
+        authority.sessionHeader.sessionKey,
+        receiptPromptId,
+      );
+      await broker.acknowledgeV3(executionCallId, {
+        executionCallId,
+        manifest,
+        deliveryStatus: decision,
+        historyRevision: decision === 'committed' ? receipt.sequence : null,
+      });
+    } catch (cause) {
+      if (
+        !(cause instanceof HostedWorkspaceBrokerRejection) ||
+        cause.status !== 409
+      ) {
+        writeStderrLineSafe(
+          'qwen serve: Tool v3 ACK remains retryable: ' + String(cause),
+        );
+      }
+    }
+  }
+  return promptId && receipts.some((item) => item.promptId === promptId)
+    ? promptId
+    : null;
+}
+
 async function eventEnvelope(
   session: HostedSession,
   event: ManagedSessionEvent,
@@ -222,6 +357,134 @@ async function eventEnvelope(
     type: 'managed_journal_event',
     data: { sessionId },
   };
+}
+
+async function executeHostedTurn(
+  session: HostedSession,
+  sessionId: string,
+  cwd: string,
+  promptId: string,
+  text: string,
+  abort: AbortController,
+  brokerOptions: HostedWorkspaceBrokerOptions | undefined,
+  resumeFromToolResults?: Part[],
+  onTurnResult?: (result: ChatRecord) => void,
+): Promise<ChatRecord> {
+  const authority = session.managed.authority;
+  const harness = createManagedHarnessHandle(session.managed);
+  let turnResult: ChatRecord | undefined;
+  await harness.run(async () => {
+    const projected = await session.managed.sink.project();
+    const settledPrompts = new Set(
+      authority
+        .eventsInSequenceRange(1, authority.committedSequence)
+        .filter((event) => event.kind === 'turn.settled')
+        .map((event) => event.payload['turnId']),
+    );
+    const history = session.toolProfile
+      ? projected.filter(
+          (entry) =>
+            settledPrompts.has(entry.daemonPromptId) ||
+            (resumeFromToolResults && entry.daemonPromptId === promptId),
+        )
+      : projected;
+    let parentUuid = projected.at(-1)?.uuid ?? null;
+    if (!resumeFromToolResults) {
+      const user = record(session, sessionId, 'user', parentUuid, {
+        daemonPromptId: promptId,
+        message: { role: 'user', parts: [{ text }] },
+      });
+      await session.managed.sink.write(user);
+      parentUuid = user.uuid;
+    }
+    const messageRecord = (
+      type: 'assistant' | 'tool_result',
+      parts: Part[],
+      model: string,
+      identity?: { uuid: string; timestamp: string },
+    ) =>
+      record(session, sessionId, type, parentUuid, {
+        daemonPromptId: promptId,
+        model,
+        message: { role: type === 'assistant' ? 'model' : 'user', parts },
+        ...identity,
+      });
+    const commit = async (
+      type: 'assistant' | 'tool_result',
+      parts: Part[],
+      model: string,
+      identity?: { uuid: string; timestamp: string },
+    ) => {
+      const message = messageRecord(type, parts, model, identity);
+      await session.managed.sink.write(message);
+      parentUuid = message.uuid;
+      return message.uuid;
+    };
+    const toolTurn =
+      session.toolProfile && brokerOptions
+        ? new HostedWorkspaceToolTurn(
+            brokerOptions,
+            session.managed,
+            harness,
+            promptId,
+            commit,
+            (type, parts, model) =>
+              Buffer.byteLength(
+                JSON.stringify(messageRecord(type, parts, model)),
+              ) <= HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes,
+            session.publication,
+          )
+        : undefined;
+    if (resumeFromToolResults) {
+      if (!toolTurn)
+        throw new HostedToolRecoveryRequiredError('Tool turn is unavailable.');
+      try {
+        await toolTurn.resumeCommittedResults();
+      } catch (cause) {
+        throw new HostedToolRecoveryRequiredError(cause);
+      }
+    }
+    let state: 'completed' | 'cancelled' | 'error' = 'completed';
+    let stopReason = 'end_turn';
+    try {
+      const result = await runHostedHarnessTextTurn({
+        sessionId,
+        cwd,
+        history,
+        prompt: text,
+        promptId,
+        signal: abort.signal,
+        ...(toolTurn ? { toolTurn } : {}),
+        ...(resumeFromToolResults ? { resumeFromToolResults } : {}),
+      });
+      await commit(
+        'assistant',
+        result.parts ?? [{ text: result.text }],
+        result.model,
+      );
+    } catch (cause) {
+      if (cause instanceof HostedToolRecoveryRequiredError) throw cause;
+      state = abort.signal.aborted ? 'cancelled' : 'error';
+      stopReason = state;
+      if (state === 'error') {
+        writeStderrLineSafe(
+          'qwen serve: Hosted Harness turn ' +
+            promptId +
+            ' failed: ' +
+            String(cause),
+        );
+      }
+    }
+    await toolTurn?.finish();
+    turnResult = record(session, sessionId, 'system', null, {
+      subtype: 'turn_result',
+      systemPayload: { promptId, state, stopReason, endedAt: Date.now() },
+    });
+    onTurnResult?.(turnResult);
+    await session.managed.sink.write(turnResult);
+  });
+  if (!turnResult) throw new Error('Hosted turn did not settle.');
+  return turnResult;
 }
 
 export function registerHostedHarnessSessionRoutes(
@@ -377,7 +640,65 @@ export function registerHostedHarnessSessionRoutes(
         return;
       }
       const restore = await managed.authority.restoreBundle();
-      if (restore.recoveryStatus !== 'ok' || hasUnsettledInput(session)) {
+      let resume: { promptId: string; text: string; parts: Part[] } | undefined;
+      let settlePromptId: string | undefined;
+      if (
+        restore.recoveryStatus === 'ok' &&
+        session.toolProfile === HOSTED_WORKSPACE_SHELL_PROFILE &&
+        brokerOptions
+      ) {
+        const promptId = await recoverShellReceipts(session, brokerOptions);
+        const authorization = await managed.authority.harnessRunAuthorization();
+        const projected = await managed.sink.project();
+        const current = projected.filter(
+          (item) => item.daemonPromptId === promptId,
+        );
+        const lastAssistant = current.findLastIndex(
+          (item) => item.type === 'assistant',
+        );
+        const tail = current.slice(lastAssistant + 1);
+        const user = current.find((item) => item.type === 'user');
+        const prompt = user?.message?.parts
+          ?.filter((part) => typeof part.text === 'string')
+          .map((part) => part.text)
+          .join('\n');
+        const parts = tail.flatMap((item) => item.message?.parts ?? []);
+        if (
+          promptId &&
+          authorization.status === 'runnable' &&
+          authorization.checkpoint.continuation.phase === 'results_ready' &&
+          authorization.checkpoint.tools?.items.every(
+            (item) => item.state === 'settled',
+          ) &&
+          lastAssistant >= 0 &&
+          tail.length > 0 &&
+          tail.every((item) => item.type === 'tool_result') &&
+          typeof prompt === 'string' &&
+          prompt.length > 0 &&
+          parts.length > 0
+        )
+          resume = { promptId, text: prompt, parts };
+        if (
+          promptId &&
+          authorization.status === 'runnable' &&
+          ['results_ready', 'turn_settled'].includes(
+            authorization.checkpoint.continuation.phase,
+          ) &&
+          authorization.checkpoint.tools?.items.every(
+            (item) => item.state === 'settled' && item.consumed,
+          ) &&
+          lastAssistant >= 0 &&
+          tail.length === 0 &&
+          current[lastAssistant].message?.parts?.every(
+            (part) => !part.functionCall,
+          )
+        )
+          settlePromptId = promptId;
+      }
+      if (
+        restore.recoveryStatus !== 'ok' ||
+        (hasUnsettledInput(session) && !resume && !settlePromptId)
+      ) {
         await managed.close();
         error(res, 409, 'hosted_turn_recovery_required');
         return;
@@ -390,6 +711,71 @@ export function registerHostedHarnessSessionRoutes(
         lastEventId: managed.authority.committedSequence,
         eventEpoch: epoch,
       });
+      if (resume) {
+        const abort = new AbortController();
+        session.active = {
+          promptId: resume.promptId,
+          digest: '',
+          abort,
+        };
+        void executeHostedTurn(
+          session,
+          sessionId,
+          cwd,
+          resume.promptId,
+          resume.text,
+          abort,
+          brokerOptions,
+          resume.parts,
+        )
+          .catch((cause: unknown) => {
+            session.blocked = true;
+            writeStderrLineSafe(
+              'qwen serve: Hosted Harness recovery remained blocked: ' +
+                String(cause),
+            );
+          })
+          .finally(() => {
+            session.active = undefined;
+          });
+      }
+      if (settlePromptId) {
+        const originalPromptId = settlePromptId;
+        const abort = new AbortController();
+        session.active = { promptId: originalPromptId, digest: '', abort };
+        void (async () => {
+          const harness = createManagedHarnessHandle(session.managed);
+          await harness.run(async () => {
+            await harness.settleConsumedRuntimeContinuation();
+            await new HostedWorkspaceBroker(
+              brokerOptions!,
+              session.managed.authority.sessionHeader.sessionKey,
+              originalPromptId,
+            ).release();
+            await session.managed.sink.write(
+              record(session, sessionId, 'system', null, {
+                subtype: 'turn_result',
+                systemPayload: {
+                  promptId: originalPromptId,
+                  state: 'completed',
+                  stopReason: 'end_turn',
+                  endedAt: Date.now(),
+                },
+              }),
+            );
+          });
+        })()
+          .catch((cause: unknown) => {
+            session.blocked = true;
+            writeStderrLineSafe(
+              'qwen serve: Hosted Harness final settlement remained blocked: ' +
+                String(cause),
+            );
+          })
+          .finally(() => {
+            session.active = undefined;
+          });
+      }
     } catch (cause) {
       await managed?.close().catch(() => undefined);
       await stores.close().catch(() => undefined);
@@ -528,98 +914,20 @@ export function registerHostedHarnessSessionRoutes(
         const lastEventId = authority.committedSequence;
         session.admissions.set(promptId, { digest, lastEventId });
         res.status(202).json({ promptId, lastEventId, eventEpoch: epoch });
-        const harness = createManagedHarnessHandle(session.managed);
-        await harness.run(async () => {
-          const projected = await session.managed.sink.project();
-          const settledPrompts = new Set(
-            authority
-              .eventsInSequenceRange(1, authority.committedSequence)
-              .filter((event) => event.kind === 'turn.settled')
-              .map((event) => event.payload['turnId']),
-          );
-          const history = session.toolProfile
-            ? projected.filter((entry) =>
-                settledPrompts.has(entry.daemonPromptId),
-              )
-            : projected;
-          let parentUuid = projected.at(-1)?.uuid ?? null;
-          const user = record(session, req.params['id'], 'user', parentUuid, {
-            daemonPromptId: promptId,
-            message: { role: 'user', parts: [{ text }] },
-          });
-          await session.managed.sink.write(user);
-          parentUuid = user.uuid;
-          const messageRecord = (
-            type: 'assistant' | 'tool_result',
-            parts: Part[],
-            model: string,
-            identity?: { uuid: string; timestamp: string },
-          ) =>
-            record(session, req.params['id'], type, parentUuid, {
-              daemonPromptId: promptId,
-              model,
-              message: { role: type === 'assistant' ? 'model' : 'user', parts },
-              ...identity,
-            });
-          const commit = async (
-            type: 'assistant' | 'tool_result',
-            parts: Part[],
-            model: string,
-            identity?: { uuid: string; timestamp: string },
-          ) => {
-            const message = messageRecord(type, parts, model, identity);
-            await session.managed.sink.write(message);
-            parentUuid = message.uuid;
-            return message.uuid;
-          };
-          const toolTurn =
-            session.toolProfile && brokerOptions
-              ? new HostedWorkspaceToolTurn(
-                  brokerOptions,
-                  session.managed,
-                  harness,
-                  promptId,
-                  commit,
-                  (type, parts, model) =>
-                    Buffer.byteLength(
-                      JSON.stringify(messageRecord(type, parts, model)),
-                    ) <=
-                    HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes,
-                  session.publication,
-                )
-              : undefined;
-          let state: 'completed' | 'cancelled' | 'error' = 'completed';
-          let stopReason = 'end_turn';
-          try {
-            const result = await runHostedHarnessTextTurn({
-              sessionId: req.params['id'],
-              cwd,
-              history,
-              prompt: text,
-              promptId,
-              signal: abort.signal,
-              ...(toolTurn ? { toolTurn } : {}),
-            });
-            await commit(
-              'assistant',
-              result.parts ?? [{ text: result.text }],
-              result.model,
-            );
-          } catch (cause) {
-            if (cause instanceof HostedToolRecoveryRequiredError) throw cause;
-            state = abort.signal.aborted ? 'cancelled' : 'error';
-            stopReason = state;
-            if (state === 'error') {
-              writeStderrLineSafe(
-                `qwen serve: Hosted Harness turn ${promptId} failed: ${String(cause)}`,
-              );
-            }
-          }
-          await toolTurn?.finish();
-          turnResult = turnResultRecord(state, stopReason);
-          await session.managed.sink.write(turnResult);
-          settled = true;
-        });
+        turnResult = await executeHostedTurn(
+          session,
+          req.params['id'],
+          cwd,
+          promptId,
+          text,
+          abort,
+          brokerOptions,
+          undefined,
+          (result) => {
+            turnResult = result;
+          },
+        );
+        settled = true;
       } catch (cause) {
         if (cause instanceof HostedToolRecoveryRequiredError) {
           session.blocked = true;

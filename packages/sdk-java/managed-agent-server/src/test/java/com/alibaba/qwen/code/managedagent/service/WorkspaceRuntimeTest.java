@@ -274,6 +274,18 @@ class WorkspaceRuntimeTest {
         authority.claim(session.workspace(), holder(session, "next"));
     }
 
+    @Test
+    void v3StatusDoesNotQueryWorkerAfterWorkspaceOwnershipChanges() throws Exception {
+        SessionRecord session = createSession("storage", ".");
+        var fixture = transport(session);
+        var runtimeSession = fixture.record().getSession();
+        authority.claim(session.workspace(), fixture.record());
+        jdbc.update("UPDATE managed_workspace_access SET can_read = FALSE WHERE tenant_id = ?", session.tenantId());
+        assertUnavailable(() -> fixture.transport().statusV3(fixture.lease(), runtimeSession,
+                Map.of("callId", "original"), 0));
+        verify(fixture.http(), never()).statusV3(any(), any(), any(), eq(0L));
+    }
+
     private TransportFixture transport(SessionRecord session) throws Exception {
         var resolver = resolver(session, temp.toRealPath());
         var resolved = resolver.resolve(session.sessionId());

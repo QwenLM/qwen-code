@@ -8,9 +8,11 @@ import com.alibaba.qwen.code.managedagent.store.ToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.store.ToolPublicationStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
+import com.aliyun.oss.ClientBuilderConfiguration;
 import com.aliyun.oss.OSS;
 import com.aliyun.oss.OSSClientBuilder;
 import com.aliyun.oss.common.auth.CredentialsProviderFactory;
+import com.aliyun.oss.common.comm.SignVersion;
 import java.net.URI;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
@@ -30,13 +32,17 @@ public class ToolPublicationConfiguration {
         if (!"https".equals(endpoint.getScheme()) || endpoint.getHost() == null
                 || endpoint.getRawPath() != null && !endpoint.getRawPath().isEmpty()
                 || endpoint.getRawQuery() != null || endpoint.getRawUserInfo() != null
-                || !endpoint.getHost().startsWith("oss-" + region + ".")) {
+                || !endpoint.getHost().equals("oss-" + region + ".aliyuncs.com")) {
             throw new IllegalStateException("Tool publication requires a fixed regional HTTPS OSS endpoint");
         }
         required(settings.getOssBucket(), "OSS bucket");
         required(settings.getServiceBaseUrl(), "publication service URL");
-        return new OSSClientBuilder().build(endpoint.toString(),
-                CredentialsProviderFactory.newEnvironmentVariableCredentialsProvider());
+        var client = new ClientBuilderConfiguration();
+        client.setSignatureVersion(SignVersion.V4);
+        return OSSClientBuilder.create().endpoint(endpoint.toString())
+                .region(region)
+                .credentialsProvider(CredentialsProviderFactory.newEnvironmentVariableCredentialsProvider())
+                .clientConfiguration(client).build();
     }
 
     @Bean

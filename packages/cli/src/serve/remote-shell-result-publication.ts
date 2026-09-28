@@ -4,21 +4,30 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import type { Application, Request, Response } from 'express';
 import type { ManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-storage.js';
 import {
   assertManagedSessionDurableRef,
+  ManagedSessionRecordError,
   type ManagedSessionDurableRef,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import type { ManagedSessionJsonValue } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-inbox.js';
+import { parseToolPublicationBinding } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-publication.js';
 import { LocalShellResultCapture } from '@qwen-code/qwen-code-core/managed-runtime/local-shell-result-capture.js';
 import type { LocalShellCaptureRequest } from '@qwen-code/qwen-code-core/managed-runtime/local-shell-result-session.js';
 import type {
   ToolResultExpectedIdentity,
   ToolResultSegmentStore,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result-store.js';
-import type { ToolResultEnvelope } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
+import {
+  parseToolResultPrefixRequest,
+  parseToolResultPublishRequest,
+  parseToolResultSealRequest,
+  type ToolResultEnvelope,
+  type ToolResultStoreCode,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
 import {
   authorizeManagedRuntime,
   handleManagedRuntimeJsonError,
@@ -44,6 +53,24 @@ interface InstalledPublication {
   readonly binding: Record<string, unknown>;
 }
 
+class PublicationRejection extends Error {
+  constructor(
+    readonly status: number,
+    readonly code: string,
+  ) {
+    super('Publication service rejected HTTP ' + status + '.');
+  }
+}
+
+function refusal(error: unknown): ToolResultStoreCode | null {
+  if (!(error instanceof PublicationRejection)) return null;
+  return error.code === 'managed_tool_result_invalid' ||
+    error.code === 'managed_tool_result_conflict' ||
+    error.code === 'managed_tool_result_digest_mismatch'
+    ? error.code
+    : null;
+}
+
 function record(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value))
     throw new Error('Publication record is invalid.');
@@ -51,7 +78,7 @@ function record(value: unknown): Record<string, unknown> {
 }
 
 function same(left: unknown, right: unknown): boolean {
-  return JSON.stringify(left) === JSON.stringify(right);
+  return isDeepStrictEqual(left, right);
 }
 
 function endpoint(value: string): URL {
@@ -96,7 +123,10 @@ async function boundedJson(
     const failure = record(body['error']);
     if (failure['code'] === 'managed_tool_publication_quota_exhausted')
       throw new Error('quota_exhausted');
-    throw new Error(`Publication service rejected HTTP ${response.status}.`);
+    throw new PublicationRejection(
+      response.status,
+      String(failure['code'] ?? 'unknown'),
+    );
   }
   return body;
 }
@@ -157,7 +187,15 @@ class PublicationClient {
         `/operations/${encodeURIComponent(operationId)}`,
         operationId,
       ).catch(() => null);
-      if (status === null) throw failure;
+      if (
+        status === null ||
+        (failure instanceof PublicationRejection &&
+          failure.status >= 400 &&
+          failure.status < 500 &&
+          failure.status !== 429 &&
+          status['state'] !== 'SUCCEEDED')
+      )
+        throw failure;
       initial = status;
     }
     if (initial['state'] === undefined) return initial;
@@ -204,7 +242,7 @@ export class RemoteShellResultPublisher {
     )
       throw new Error('Publication installation is invalid.');
     endpoint(body['serviceBaseUrl']);
-    const binding = record(body['binding']);
+    const binding = parseToolPublicationBinding(body['binding']);
     const key = record(binding['sessionKey']);
     const reference = record(binding['reference']);
     if (
@@ -221,7 +259,7 @@ export class RemoteShellResultPublisher {
       typeof binding['captureId'] !== 'string'
     )
       throw new Error('Publication binding conflicts with this worker.');
-    const grant = body as unknown as InstalledPublication;
+    const grant = { ...body, binding } as unknown as InstalledPublication;
     const prior = this.grants.get(binding['executionCallId']);
     if (prior && !same(prior, grant))
       throw new Error('Original publication installation conflicts.');
@@ -263,17 +301,40 @@ export class RemoteShellResultPublisher {
     const client = new PublicationClient(grant);
     const store: ToolResultSegmentStore = {
       publish: async (raw) => {
-        const item = record(raw);
-        const stream = String(item['streamId']);
-        const ordinal = Number(item['ordinal']);
-        const bytes = item['bytes'] as Buffer;
+        let item;
+        try {
+          item = parseToolResultPublishRequest(raw);
+        } catch (cause) {
+          if (cause instanceof ManagedSessionRecordError)
+            return { status: 'refused', code: 'managed_tool_result_invalid' };
+          throw cause;
+        }
+        if (item.captureId !== identity.captureId)
+          return { status: 'refused', code: 'managed_tool_result_conflict' };
+        if (!['stdout', 'stderr'].includes(item.streamId))
+          return { status: 'refused', code: 'managed_tool_result_invalid' };
+        const stream = item.streamId;
+        const ordinal = item.ordinal;
+        const bytes = Buffer.from(item.bytes);
         const digest = createHash('sha256').update(bytes).digest('hex');
-        const receipt = await client.operation(
-          `/segments/${stream}/${ordinal}`,
-          `seg-${stream}-${ordinal}`,
-          bytes,
-          { 'X-Qwen-Tool-Segment-Digest': digest },
-        );
+        if (item.expectedDigest && item.expectedDigest !== digest)
+          return {
+            status: 'refused',
+            code: 'managed_tool_result_digest_mismatch',
+          };
+        let receipt: Record<string, unknown>;
+        try {
+          receipt = await client.operation(
+            `/segments/${stream}/${ordinal}`,
+            `seg-${stream}-${ordinal}`,
+            bytes,
+            { 'X-Qwen-Tool-Segment-Digest': digest },
+          );
+        } catch (cause) {
+          const code = refusal(cause);
+          if (code) return { status: 'refused', code };
+          throw cause;
+        }
         if (
           receipt['ordinal'] !== ordinal ||
           receipt['byteLength'] !== bytes.length ||
@@ -288,8 +349,19 @@ export class RemoteShellResultPublisher {
         } as const;
       },
       seal: async (raw) => {
-        const item = record(raw);
-        const stream = String(item['streamId']);
+        let item;
+        try {
+          item = parseToolResultSealRequest(raw);
+        } catch (cause) {
+          if (cause instanceof ManagedSessionRecordError)
+            return { status: 'refused', code: 'managed_tool_result_invalid' };
+          throw cause;
+        }
+        if (item.captureId !== identity.captureId)
+          return { status: 'refused', code: 'managed_tool_result_conflict' };
+        if (!['stdout', 'stderr'].includes(item.streamId))
+          return { status: 'refused', code: 'managed_tool_result_invalid' };
+        const stream = item.streamId;
         const body = Buffer.from(
           JSON.stringify({
             segmentCount: item['segmentCount'],
@@ -297,12 +369,22 @@ export class RemoteShellResultPublisher {
             digest: item['digest'],
           }),
         );
-        const receipt = await client.operation(
-          `/streams/${stream}/seal`,
-          `seal-${stream}`,
-          body,
-          { 'Content-Type': 'application/json' },
-        );
+        let receipt: Record<string, unknown>;
+        try {
+          receipt = await client.operation(
+            `/streams/${stream}/seal`,
+            'seal-' +
+              stream +
+              '-' +
+              createHash('sha256').update(body).digest('hex').slice(0, 32),
+            body,
+            { 'Content-Type': 'application/json' },
+          );
+        } catch (cause) {
+          const code = refusal(cause);
+          if (code) return { status: 'refused', code };
+          throw cause;
+        }
         if (
           receipt['segmentCount'] !== item['segmentCount'] ||
           receipt['byteLength'] !== item['byteLength'] ||
@@ -312,14 +394,61 @@ export class RemoteShellResultPublisher {
         return {
           status: 'ok',
           result: {
-            segmentCount: item['segmentCount'] as number,
-            byteLength: item['byteLength'] as number,
-            digest: item['digest'] as string,
+            segmentCount: item.segmentCount,
+            byteLength: item.byteLength,
+            digest: item.digest,
           },
         } as const;
       },
-      prefix: async () => {
-        throw new Error('Worker prefix lookup is unavailable.');
+      prefix: async (raw) => {
+        let item;
+        try {
+          item = parseToolResultPrefixRequest(raw);
+        } catch (cause) {
+          if (cause instanceof ManagedSessionRecordError)
+            return { status: 'refused', code: 'managed_tool_result_invalid' };
+          throw cause;
+        }
+        if (item.captureId !== identity.captureId)
+          return { status: 'refused', code: 'managed_tool_result_conflict' };
+        if (!['stdout', 'stderr'].includes(item.streamId))
+          return {
+            status: 'ok',
+            result: {
+              segmentCount: 0,
+              byteLength: 0,
+              digest: createHash('sha256').digest('hex'),
+              sealed: false,
+            },
+          };
+        let receipt: Record<string, unknown>;
+        try {
+          receipt = await client.operation(
+            `/streams/${item.streamId}/prefix`,
+            'prefix-' + item.streamId + '-' + randomUUID(),
+            Buffer.alloc(0),
+          );
+        } catch (cause) {
+          const code = refusal(cause);
+          if (code) return { status: 'refused', code };
+          throw cause;
+        }
+        if (
+          !Number.isSafeInteger(receipt['segmentCount']) ||
+          !Number.isSafeInteger(receipt['byteLength']) ||
+          typeof receipt['digest'] !== 'string' ||
+          typeof receipt['sealed'] !== 'boolean'
+        )
+          throw new Error('Original prefix receipt is invalid.');
+        return {
+          status: 'ok',
+          result: {
+            segmentCount: receipt['segmentCount'] as number,
+            byteLength: receipt['byteLength'] as number,
+            digest: receipt['digest'],
+            sealed: receipt['sealed'],
+          },
+        };
       },
       readRange: async () => {
         throw new Error('Worker range lookup is unavailable.');
@@ -332,7 +461,7 @@ export class RemoteShellResultPublisher {
         const slot =
           kind === 'managed-tool-result-manifest'
             ? 'manifest:1'
-            : `page:${String(metadata['streamId'])}:${Number(metadata['firstOrdinal']) / 512}`;
+            : `page:${String(metadata['streamId'])}:${String(metadata['firstOrdinal'])}`;
         const published = await client.operation(
           `/resources/${kind}/${encodeURIComponent(slot)}`,
           `res-${slot.replaceAll(':', '-')}`,
@@ -367,13 +496,19 @@ export class RemoteShellResultPublisher {
     const grant = this.grants.get(identity.executionCallId);
     if (!grant || grant.binding['captureId'] !== identity.captureId)
       throw new Error('Original publication grant changed.');
+    const bytes = Buffer.from(JSON.stringify(envelope));
     const receipt = await new PublicationClient(grant).operation(
       '/finish',
       'finish',
-      Buffer.from(JSON.stringify(envelope)),
+      bytes,
       { 'Content-Type': 'application/json' },
     );
-    if (receipt['producerPhase'] !== 'FINISHED')
+    const terminal = record(receipt['terminal']);
+    if (
+      receipt['producerPhase'] !== 'FINISHED' ||
+      terminal['byteLength'] !== bytes.length ||
+      terminal['digest'] !== createHash('sha256').update(bytes).digest('hex')
+    )
       throw new Error('Publication finish was not confirmed.');
   }
 

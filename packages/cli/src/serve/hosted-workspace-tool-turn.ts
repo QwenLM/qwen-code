@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type { FunctionDeclaration, Part } from '@google/genai';
 import type { ToolCallRequestInfo } from '@qwen-code/qwen-code-core/core/turn.js';
@@ -14,6 +14,7 @@ import {
 } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import { managedToolDigest } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
+import { createToolPublicationToken } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-publication.js';
 import type { HttpToolPublicationOwner } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import {
   parseToolResultEnvelope,
@@ -25,6 +26,7 @@ import {
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import type { ManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
 import { HTTP_MANAGED_SESSION_STORE_CONTRACT } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
+import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 import { normalizeWorkspaceRelativePath } from './managed-workspace-binding.js';
 import { WORKSPACE_CAPABILITY_DIGEST } from './managed-workspace-activation.js';
 import {
@@ -156,6 +158,13 @@ export class HostedWorkspaceToolTurn {
       : HOSTED_WORKSPACE_FILE_TOOLS;
   }
 
+  async resumeCommittedResults(): Promise<void> {
+    if (this.acquired) return;
+    await this.warmed;
+    await this.broker.acquire();
+    this.acquired = true;
+  }
+
   async execute(
     calls: ToolCallRequestInfo[],
     parts: Part[],
@@ -179,7 +188,13 @@ export class HostedWorkspaceToolTurn {
           call.args['command'].length === 0 ||
           Object.keys(call.args).some(
             (key) => !['command', 'timeout', 'description'].includes(key),
-          )
+          ) ||
+          (call.args['timeout'] !== undefined &&
+            (!Number.isInteger(call.args['timeout']) ||
+              (call.args['timeout'] as number) < 1 ||
+              (call.args['timeout'] as number) > 600_000)) ||
+          (call.args['description'] !== undefined &&
+            typeof call.args['description'] !== 'string')
         )
           throw new Error('Hosted Shell requires one foreground command.');
         input = { ...call.args };
@@ -276,6 +291,9 @@ export class HostedWorkspaceToolTurn {
         captureId: string;
       }
     >();
+    let renewTimer: NodeJS.Timeout | undefined;
+    let renewInFlight: Promise<void> | null = null;
+    let renewGrants: (() => Promise<void>) | undefined;
     try {
       this.uncertain = true;
       const messageId = await this.commit('assistant', parts, model);
@@ -340,7 +358,7 @@ export class HostedWorkspaceToolTurn {
         if (prepared) {
           shellBindings.set(executionCallId, {
             publicationId: request.publicationId!,
-            publicationToken: randomBytes(32).toString('base64url'),
+            publicationToken: createToolPublicationToken(),
             runtimeBindingId: prepared.runtimeBindingId,
             bindingGeneration: prepared.bindingGeneration,
             runtimeCallId: request.runtimeCallId,
@@ -430,6 +448,37 @@ export class HostedWorkspaceToolTurn {
           )
             throw new Error('Tool publication reservation was not confirmed.');
         }
+        renewGrants = () => {
+          if (renewInFlight) return renewInFlight;
+          const pending = (async () => {
+            const writer = await this.publication!.owner.owner();
+            for (const saved of shellBindings.values()) {
+              await this.publication!.owner.request(
+                '/grants',
+                {
+                  publication: 'managed-tool-publication/1',
+                  operation: 'renew',
+                  sessionKey: key,
+                  owner: writer,
+                  publicationId: saved.publicationId,
+                },
+                saved.publicationToken,
+              );
+            }
+          })();
+          renewInFlight = pending.finally(() => {
+            renewInFlight = null;
+          });
+          return renewInFlight;
+        };
+        renewTimer = setInterval(() => {
+          void renewGrants!().catch((cause: unknown) => {
+            writeStderrLineSafe(
+              'qwen serve: Tool publication renewal failed: ' + String(cause),
+            );
+          });
+        }, 10_000);
+        renewTimer.unref();
       }
       const responses: Part[] = [];
       for (const [index, request] of requests.entries()) {
@@ -437,6 +486,7 @@ export class HostedWorkspaceToolTurn {
         if (request.shell) {
           const saved = shellBindings.get(executionCallId);
           if (!saved) throw new Error('Original Shell publication is missing.');
+          await renewGrants!();
           const result = await this.broker.executeV3(
             executionCallId,
             request.payloadJson,
@@ -444,6 +494,7 @@ export class HostedWorkspaceToolTurn {
             saved.publicationToken,
             signal,
           );
+          shellBindings.delete(executionCallId);
           responses.push(
             ...(await this.acceptShell(
               request.call,
@@ -538,6 +589,10 @@ export class HostedWorkspaceToolTurn {
       // Best-effort stop requests do not settle or release unknown effects.
       await Promise.allSettled(reserved.map((id) => this.broker.cancel(id)));
       throw new HostedToolRecoveryRequiredError(cause);
+    } finally {
+      if (renewTimer) clearInterval(renewTimer);
+      const activeRenewal = renewInFlight as Promise<void> | null;
+      await activeRenewal?.catch(() => undefined);
     }
   }
 
@@ -574,16 +629,14 @@ export class HostedWorkspaceToolTurn {
         'Runtime Shell did not start.',
       );
       const response = converted[0]?.functionResponse;
-      if (
-        !response ||
-        converted.length !== 1 ||
-        !this.messageFitsInline('tool_result', converted, model)
-      )
+      if (!response || converted.length !== 1)
         throw new Error('Unstarted Shell result cannot be recorded.');
       response.response = {
         ...response.response,
         executionStatus: 'not_started',
       };
+      if (!this.messageFitsInline('tool_result', converted, model))
+        throw new Error('Unstarted Shell result cannot be recorded.');
       const outcome = Buffer.from(
         JSON.stringify({ executionCallId, ...converted[0] }),
       );
@@ -664,6 +717,15 @@ export class HostedWorkspaceToolTurn {
               envelope.error?.message ??
                 `Runtime tool ${envelope.executionStatus}.`,
             );
+      if (converted.length === 1 && converted[0]?.functionResponse) {
+        const response = converted[0].functionResponse;
+        response.response = {
+          ...response.response,
+          manifestRef,
+          captureStatus: envelope.capture?.captureStatus ?? 'unavailable',
+          previewTruncated: envelope.capture?.previewTruncated ?? false,
+        };
+      }
       if (
         converted.length !== 1 ||
         !converted[0]?.functionResponse ||
@@ -677,6 +739,8 @@ export class HostedWorkspaceToolTurn {
               response: {
                 executionStatus: envelope.executionStatus,
                 captureStatus: envelope.capture?.captureStatus ?? 'unavailable',
+                manifestRef,
+                previewTruncated: envelope.capture?.previewTruncated ?? false,
                 outputOmitted: true,
                 summary: 'The Shell result was saved in its immutable capture.',
               },
@@ -684,6 +748,8 @@ export class HostedWorkspaceToolTurn {
           },
         ];
       }
+      if (!this.messageFitsInline('tool_result', converted, model))
+        throw new Error('Original Shell history exceeds the Session limit.');
       messageId = randomUUID();
       timestamp = new Date().toISOString();
       const outcome = {
@@ -737,12 +803,19 @@ export class HostedWorkspaceToolTurn {
     });
     if (decision === 'committed')
       await this.harness.resolveAwaitRuntime(executionCallId, ref);
-    await this.broker.acknowledgeV3(executionCallId, {
-      executionCallId,
-      manifest: manifestRef,
-      deliveryStatus: decision,
-      historyRevision: decision === 'committed' ? receipt.sequence : null,
-    });
+    try {
+      await this.broker.acknowledgeV3(executionCallId, {
+        executionCallId,
+        manifest: manifestRef,
+        deliveryStatus: decision,
+        historyRevision: decision === 'committed' ? receipt.sequence : null,
+      });
+    } catch (cause) {
+      writeStderrLineSafe(
+        'qwen serve: Tool v3 ACK can be retried after its Session receipt: ' +
+          String(cause),
+      );
+    }
     if (decision !== 'committed')
       throw new Error('Incomplete Shell capture blocked the Hosted tool turn.');
     return converted;

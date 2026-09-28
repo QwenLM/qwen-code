@@ -86,12 +86,14 @@ public final class ToolPublicationAdmissionStore {
             lockTenant(key);
             sessions.lockPublicationWriter(text(key, "tenantId"), text(key, "workspaceId"),
                     text(key, "sessionId"), request.writerId(), request.writerGeneration(), writerToken);
-            Map<String, Object> publication = jdbc.queryForMap("SELECT producer_phase, admission_resource_id,"
+            Map<String, Object> publication = jdbc.queryForMap("SELECT producer_phase,"
+                    + " CASE WHEN quarantined THEN 1 ELSE 0 END AS quarantined, admission_resource_id,"
                     + " receipt_sequence, receipt_revision, finish_digest, terminal_resource_id"
                     + " FROM qwen_tool_publication WHERE scope_key = ? AND publication_id = ? FOR UPDATE",
                     scope, publicationId);
             require(resourceId.equals(publication.get("admission_resource_id"))
-                    && candidate.get("terminal_resource_id").equals(publication.get("terminal_resource_id")),
+                    && candidate.get("terminal_resource_id").equals(publication.get("terminal_resource_id"))
+                    && ((Number) publication.get("quarantined")).intValue() == 0,
                     "Admission root changed");
             var object = jdbc.queryForMap("SELECT state, sha256, byte_length, object_key"
                     + " FROM qwen_tool_publication_object WHERE scope_key = ? AND publication_id = ?"
@@ -103,6 +105,11 @@ public final class ToolPublicationAdmissionStore {
                     && Objects.equals(candidate.get("object_key"), object.get("object_key")),
                     "Admission resource changed");
             if ("REFERENCED".equals(publication.get("producer_phase"))) {
+                var committed = sessions.commit(text(key, "tenantId"), text(key, "sessionId"),
+                        writerToken, request);
+                require(committed.journalRevision() == ((Number) publication.get("receipt_revision")).longValue()
+                        && committed.lastSequence() == ((Number) publication.get("receipt_sequence")).longValue(),
+                        "Receipt replay conflicts with original transaction");
                 return replay(key, binding, outcome, outcomeRef, publication);
             }
             require("FINISHED".equals(publication.get("producer_phase")),

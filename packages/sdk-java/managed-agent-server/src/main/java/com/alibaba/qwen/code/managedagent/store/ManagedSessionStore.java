@@ -970,6 +970,7 @@ public class ManagedSessionStore {
                             + " AND o.publication_id = p.publication_id"
                             + " WHERE p.tenant_id = ? AND p.workspace_id = ? AND p.session_id = ?"
                             + " AND p.admission_resource_id = ? AND p.producer_phase IN ('FINISHED', 'REFERENCED')"
+                            + " AND p.quarantined = FALSE"
                             + " AND o.slot_key = 'admission' AND o.state = 'VERIFIED'"
                             + " AND o.resource_id = ? AND o.object_key = ? AND o.sha256 = ?"
                             + " AND o.byte_length = ?",
@@ -991,6 +992,16 @@ public class ManagedSessionStore {
                 || !sha256(resource.bytes()).equals(resource.digest())) {
             throw resourceCorrupt();
         }
+        if ("managed-tool-outcome".equals(resource.kind())) {
+            Long quarantined = jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_publication"
+                            + " WHERE tenant_id = ? AND workspace_id = ? AND session_id = ?"
+                            + " AND admission_resource_id = ? AND quarantined = TRUE",
+                    Long.class, resource.tenantId(), resource.workspaceId(),
+                    resource.sessionId(), resource.resourceId());
+            if (quarantined != null && quarantined > 0) {
+                throw resourceCorrupt();
+            }
+        }
     }
 
     private byte[] readPublicationObject(ResourceRow resource) {
@@ -1001,6 +1012,11 @@ public class ManagedSessionStore {
             byte[] bytes = stream.readNBytes(Math.toIntExact(resource.byteLength()) + 1);
             if (bytes.length != resource.byteLength()
                     || !sha256(bytes).equals(resource.digest())) {
+                jdbc.update("UPDATE qwen_tool_publication p SET quarantined = TRUE"
+                        + " WHERE EXISTS (SELECT 1 FROM qwen_tool_publication_object o"
+                        + " WHERE o.scope_key = p.scope_key AND o.publication_id = p.publication_id"
+                        + " AND o.resource_id = ? AND o.object_key = ?)",
+                        resource.resourceId(), resource.objectKey());
                 jdbc.update("UPDATE qwen_tool_publication_object SET state = 'QUARANTINED'"
                         + " WHERE resource_id = ? AND object_key = ? AND state = 'VERIFIED'",
                         resource.resourceId(), resource.objectKey());

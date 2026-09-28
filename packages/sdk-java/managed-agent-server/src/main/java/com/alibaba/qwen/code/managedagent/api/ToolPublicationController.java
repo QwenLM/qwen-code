@@ -137,15 +137,16 @@ public class ToolPublicationController {
             @PathVariable String publicationId, @PathVariable String operationId,
             @RequestParam String workspaceId,
             @RequestHeader(PUBLICATION_TOKEN_HEADER) String token) {
-        return data.operationStatus(scope(tenant, workspaceId, sessionId),
-                publicationId, token, operationId);
+        return limited(() -> data.operationStatus(scope(tenant, workspaceId, sessionId),
+                publicationId, token, operationId));
     }
 
     @GetMapping("/publications/{publicationId}/finished")
     public JsonNode finished(TenantContext tenant, @PathVariable String sessionId,
             @PathVariable String publicationId, @RequestParam String workspaceId,
             @RequestHeader(ManagedSessionStoreModels.WRITER_TOKEN_HEADER) String writerToken) {
-        return data.finished(scope(tenant, workspaceId, sessionId), publicationId, writerToken);
+        return limited(() -> data.finished(scope(tenant, workspaceId, sessionId),
+                publicationId, writerToken));
     }
 
     @PostMapping("/publications/{publicationId}/admissions/prepare")

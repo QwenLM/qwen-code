@@ -231,7 +231,11 @@ it('commits the original Shell receipt before history, checkpoint and ACK', asyn
   });
   const request = vi.fn(async (route: string, body: unknown) => {
     if (route === '/grants') {
-      order.push('reserve');
+      order.push(
+        (body as { operation: string }).operation === 'renew'
+          ? 'renew'
+          : 'reserve',
+      );
       return { state: 'OPEN' };
     }
     if (route.endsWith('/finished')) {
@@ -297,10 +301,14 @@ it('commits the original Shell receipt before history, checkpoint and ACK', asyn
   );
   expect(result[0]?.functionResponse?.response).toMatchObject({
     output: 'hi',
+    manifestRef: manifest,
+    captureStatus: 'complete',
+    previewTruncated: false,
   });
   expect(order).toEqual([
     'assistant',
     'reserve',
+    'renew',
     'execute',
     'finished',
     'admission',
@@ -314,6 +322,7 @@ it('commits the original Shell receipt before history, checkpoint and ACK', asyn
       .filter((event) => event.kind === 'tool.receipt'),
   ).toHaveLength(1);
   const publicationId = broker.prepareV3.mock.calls[0]?.[3] as string;
+  broker.acknowledgeV3.mockRejectedValueOnce(new Error('ACK transport down'));
   await (
     shellTurn as unknown as {
       acceptShell: (

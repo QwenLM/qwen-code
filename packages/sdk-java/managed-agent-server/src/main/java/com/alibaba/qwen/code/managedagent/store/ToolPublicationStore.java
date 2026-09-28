@@ -20,7 +20,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
-/** Internal O2a reservations. No upload or production route is enabled here. */
+/** Reserves publication capacity and fences producer grants against the Session owner. */
 public final class ToolPublicationStore {
     public record Capacity(long executionBytes, long sessionBytes, long tenantBytes,
             long activeCaptures) {
@@ -403,7 +403,7 @@ public final class ToolPublicationStore {
                 && execution.getRequestDigest().equals(text(b, "requestDigest")), "Broker execution identity conflicts");
         if (live) {
             require(runtime.getState() == RuntimeBindingRecord.State.READY && !runtime.isDrainRequested()
-                    && execution.getState() != ToolExecutionRecord.State.UNKNOWN && !execution.isSettled(),
+                    && !execution.isSettled(),
                     "Runtime cannot authorize publication");
         }
         return execution;

@@ -192,6 +192,9 @@ class RuntimeBrokerHttpServerTest {
             assertEquals(1, fixture.transport.v3Executions.get());
             assertEquals(200, fixture.post("/executions/" + id + ":start", start).statusCode());
             assertEquals(1, fixture.transport.v3Executions.get());
+            Map<String, Object> changedGrant = new java.util.HashMap<>(start);
+            changedGrant.put("publicationToken", "other-token");
+            assertEquals(409, fixture.post("/executions/" + id + ":start", changedGrant).statusCode());
         }
     }
 
@@ -252,7 +255,10 @@ class RuntimeBrokerHttpServerTest {
                 public RuntimePublicationGrant verify(ToolExecutionRecord execution,
                         String publicationId, String token) {
                     assertEquals("pub-1", publicationId);
-                    assertEquals("token", token);
+                    if (!"token".equals(token)) {
+                        throw new RuntimeBrokerException(409, "runtime_execution_conflict",
+                                "Original publication token changed", false);
+                    }
                     return new RuntimePublicationGrant(publicationId, token,
                             "https://publication.example/", Map.of("sessionKey",
                                     Map.of("tenantId", "tenant", "sessionId", "harness"),

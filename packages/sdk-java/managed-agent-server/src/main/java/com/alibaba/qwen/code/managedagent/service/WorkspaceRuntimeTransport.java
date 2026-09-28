@@ -121,6 +121,7 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
     public CompletionStage<Map<String, Object>> statusV3(RuntimeLease lease,
             RuntimeSession session, Map<String, Object> reference,
             long afterSequence) {
+        requireOwnedWorkspace(lease, session);
         return delegate.statusV3(lease, session, reference, afterSequence);
     }
 

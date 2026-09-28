@@ -102,6 +102,24 @@ describe('managed-tool-publication/1', () => {
       requestDigest: `sha256:${createHash('sha256').update(spaced).digest('hex')}`,
     };
     expect(() => assertToolPublicationPayload(changed, spaced)).not.toThrow();
+    const invalidInput = { command: 'printf hi', timeout: 0 };
+    const invalidPayload = JSON.stringify({
+      toolName: 'run_shell_command',
+      input: invalidInput,
+    });
+    expect(() =>
+      assertToolPublicationPayload(
+        {
+          ...binding,
+          requestDigest: `sha256:${createHash('sha256').update(invalidPayload).digest('hex')}`,
+          reference: {
+            ...binding.reference,
+            argsDigest: `sha256:${createHash('sha256').update(JSON.stringify(invalidInput)).digest('hex')}`,
+          },
+        },
+        invalidPayload,
+      ),
+    ).toThrow();
     expect(() =>
       assertToolPublicationPayload(
         {

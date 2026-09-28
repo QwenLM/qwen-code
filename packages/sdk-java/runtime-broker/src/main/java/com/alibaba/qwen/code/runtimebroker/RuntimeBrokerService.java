@@ -337,11 +337,11 @@ public final class RuntimeBrokerService implements AutoCloseable {
                         || Boolean.TRUE.equals(((Map<?, ?>) payload.get("input")).get("is_background"))) {
                     throw invalid("runtime_payload_invalid", "Tool v3 requires foreground Shell");
                 }
+                RuntimePublicationGrant grant = publicationVerifier.verify(record,
+                        publicationId, publicationToken);
                 if (!shouldDriveDispatch(record)) {
                     return CompletableFuture.completedFuture(record);
                 }
-                RuntimePublicationGrant grant = publicationVerifier.verify(record,
-                        publicationId, publicationToken);
                 requireUsableLease(context);
                 return mapFailure(safeStage(() -> transport.installPublication(
                         context.lease(), context.session(), grant)),
@@ -366,9 +366,25 @@ public final class RuntimeBrokerService implements AutoCloseable {
         requireOpen();
         String executionId = BrokerValues.requireId(executionCallId,
                 "executionCallId");
-        return requireReadySession(harnessSessionId, runtimeSessionId)
-                .thenApply(context -> requireExecution(context,
-                        executionId));
+        return safeStage(() -> {
+            ToolExecutionRecord saved = requireOwnedExecution(harnessSessionId,
+                    runtimeSessionId, executionId);
+            if ("deferred_v3".equals(saved.getReference().get("dispatchMode"))) {
+                if (saved.isSettled()) {
+                    return CompletableFuture.completedFuture(saved);
+                }
+                if (saved.getState() == ToolExecutionRecord.State.UNKNOWN
+                        && publicationVerifier != null) {
+                    Map<String, Object> durable = publicationVerifier.finished(saved);
+                    if (durable != null) {
+                        return CompletableFuture.completedFuture(absorbRuntimeStatus(saved,
+                                Map.of("state", "settled", "result", durable)).getRecord());
+                    }
+                }
+            }
+            return requireReadySession(harnessSessionId, runtimeSessionId)
+                    .thenApply(context -> requireExecution(context, executionId));
+        });
     }
 
     public CompletionStage<Map<String, Object>> acknowledgeExecution(
@@ -553,6 +569,14 @@ public final class RuntimeBrokerService implements AutoCloseable {
             return CompletableFuture.completedFuture(notUnknown(unknown,
                     null));
         }
+        if ("deferred_v3".equals(unknown.getReference().get("dispatchMode"))
+                && publicationVerifier != null) {
+            Map<String, Object> durable = publicationVerifier.finished(unknown);
+            if (durable != null) {
+                return CompletableFuture.completedFuture(absorbRuntimeStatus(unknown,
+                        Map.of("state", "settled", "result", durable)));
+            }
+        }
         CompletableFuture<SessionContext> local = sessions.get(
                 runtimeSessionId);
         // Process-local Sessions are keyed by Runtime Session id alone, so a
@@ -624,17 +648,13 @@ public final class RuntimeBrokerService implements AutoCloseable {
         CompletableFuture<Map<String, Object>> lookup =
                 new CompletableFuture<>();
         try {
-            Map<String, Object> durable = "deferred_v3".equals(
-                    unknown.getReference().get("dispatchMode")) && publicationVerifier != null
-                    ? publicationVerifier.finished(unknown) : null;
-            CompletionStage<Map<String, Object>> query = durable == null
-                    ? safeStage(() -> "deferred_v3".equals(unknown.getReference().get("dispatchMode"))
+            CompletionStage<Map<String, Object>> query = safeStage(() ->
+                    "deferred_v3".equals(unknown.getReference().get("dispatchMode"))
                             ? transport.statusV3(context.lease(), context.session(),
                                     unknown.getReference(), unknown.getLastSequence())
                                     .thenApply(RuntimeBrokerService::projectV3Status)
                             : transport.status(context.lease(), context.session(),
-                                    unknown.getReference(), unknown.getLastSequence()))
-                    : CompletableFuture.completedFuture(Map.of("state", "settled", "result", durable));
+                                    unknown.getReference(), unknown.getLastSequence()));
             query
                     .whenComplete((status, error) -> {
                         if (error == null) {
@@ -1916,6 +1936,11 @@ public final class RuntimeBrokerService implements AutoCloseable {
             return;
         }
         try {
+            Map<String, Object> finished = publicationVerifier.finished(original);
+            if (finished != null) {
+                answer.complete(finished);
+                return;
+            }
             ToolExecutionRecord current = executionRepository.findByExecutionCallId(
                     original.getExecutionCallId());
             if (current == null || !ownsDispatch(current, original)
@@ -1923,11 +1948,6 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     || current.getRuntimeGeneration() != context.binding().getGeneration()
                     || !provisioner.isUsable(context.lease()) || !clock.instant().isBefore(deadline)) {
                 throw evidenceUnavailable();
-            }
-            Map<String, Object> finished = publicationVerifier.finished(original);
-            if (finished != null) {
-                answer.complete(finished);
-                return;
             }
             safeStage(() -> transport.statusV3(context.lease(), context.session(),
                     original.getReference(), 0)).whenComplete((status, error) -> {

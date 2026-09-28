@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.store.ToolPublicationContract;
 import com.alibaba.qwen.code.managedagent.store.ToolPublicationDataStore;
@@ -158,8 +159,11 @@ class ToolPublicationStoreTest {
         ObjectNode outcome = JSON.createObjectNode().put("schemaVersion", 1)
                 .put("decision", "blocked").putNull("manifestRef");
         outcome.set("envelope", envelope);
-        outcome.set("history", JSON.createObjectNode().put("messageId", "history-large")
-                .put("createdAt", "2026-09-28T00:00:00Z").put("model", "test"));
+        ObjectNode history = JSON.createObjectNode()
+                .put("messageId", "11111111-1111-4111-8111-111111111111")
+                .put("timestamp", "2026-09-28T00:00:00Z").put("model", "test");
+        history.putArray("parts").addObject().put("text", "Shell capture unavailable");
+        outcome.set("history", history);
         JsonNode admission = data.prepareAdmission(key, "pub-1", "writer-1", 1, WRITER_TOKEN, outcome);
         assertThat(admission.path("byteLength").asLong()).isGreaterThan(64 * 1024);
         ObjectNode receiptPayload = JSON.createObjectNode().put("executionCallId", "execution-1")
@@ -178,6 +182,14 @@ class ToolPublicationStoreTest {
         var admissions = new ToolPublicationAdmissionStore(jdbc, manager, sessions, data);
         assertThat(admissions.commitReceipt(key, "pub-1", WRITER_TOKEN, commit)
                 .path("decision").asText()).isEqualTo("blocked");
+        var changedReplay = new ManagedSessionStoreModels.CommitTransactionRequest("workspace-1", "writer-1", 1,
+                revision, sequence, "different-transaction", "recordToolResult", "execution-1",
+                admission.path("digest").asText(), sequence + 1, sequence + 1, 1,
+                digest(records), commitDigest, digest(records), 1, null, 2,
+                Base64.getEncoder().encodeToString(records.getBytes(StandardCharsets.UTF_8)),
+                digest(records), commit.resources());
+        assertThatThrownBy(() -> admissions.commitReceipt(key, "pub-1", WRITER_TOKEN, changedReplay))
+                .hasMessageContaining("different content");
         assertThat(admissions.commitReceipt(key, "pub-1", WRITER_TOKEN, commit)
                 .path("decision").asText()).isEqualTo("blocked");
         assertThat(sessions.readResource("tenant-1", "workspace-1", "session-1",
@@ -186,6 +198,10 @@ class ToolPublicationStoreTest {
         String objectKey = jdbc.queryForObject("SELECT object_key FROM qwen_tool_publication_object"
                 + " WHERE slot_key = 'admission'", String.class);
         objects.get(objectKey)[0] = 'z';
+        assertThatThrownBy(() -> sessions.readResource("tenant-1", "workspace-1", "session-1",
+                admission.path("resourceId").asText(), WRITER_TOKEN)).hasMessageContaining("verification");
+        assertThat(jdbc.queryForObject("SELECT quarantined FROM qwen_tool_publication"
+                + " WHERE publication_id = 'pub-1'", Boolean.class)).isTrue();
         assertThatThrownBy(() -> sessions.readResource("tenant-1", "workspace-1", "session-1",
                 admission.path("resourceId").asText(), WRITER_TOKEN)).hasMessageContaining("verification");
     }
@@ -241,6 +257,10 @@ class ToolPublicationStoreTest {
                 .put("type", "page").put("captureId", "capture-1")
                 .put("streamId", "stdout").put("firstOrdinal", 0).put("offset", 0);
         page.putArray("segments").add(JSON.createObjectNode().put("byteLength", 3).put("digest", digest("abc")));
+        assertThatThrownBy(() -> data.publishResource(key, "pub-1", PUBLICATION_TOKEN,
+                "wrong-page-slot", "page:stdout:1", "managed-tool-result-page",
+                page.toString().getBytes(StandardCharsets.UTF_8)))
+                .hasMessageContaining("slot conflicts");
         JsonNode ref = data.publishResource(key, "pub-1", PUBLICATION_TOKEN,
                 "operation-3", "page:stdout:0", "managed-tool-result-page",
                 page.toString().getBytes(StandardCharsets.UTF_8));
@@ -297,8 +317,11 @@ class ToolPublicationStoreTest {
                 .put("decision", "committed");
         outcome.set("envelope", envelope);
         outcome.set("manifestRef", manifestRef);
-        outcome.set("history", JSON.createObjectNode().put("messageId", "history-1")
-                .put("createdAt", "2026-09-28T00:00:00Z").put("model", "test"));
+        ObjectNode history = JSON.createObjectNode()
+                .put("messageId", "22222222-2222-4222-8222-222222222222")
+                .put("timestamp", "2026-09-28T00:00:00Z").put("model", "test");
+        history.putArray("parts").addObject().put("text", "done");
+        outcome.set("history", history);
         JsonNode admission = data.prepareAdmission(key, "pub-1", "writer-1", 1,
                 WRITER_TOKEN, outcome);
         assertThat(data.readResource(key, "pub-1", admission.path("resourceId").asText()))
@@ -343,6 +366,149 @@ class ToolPublicationStoreTest {
                 identity, "stdout", 0, 1)).hasMessageContaining("digest changed");
         assertThat(jdbc.queryForObject("SELECT state FROM qwen_tool_publication_object"
                 + " WHERE slot_key = 'segment:stdout:0'", String.class)).isEqualTo("QUARANTINED");
+        assertThatThrownBy(() -> sessions.readResource("tenant-1", "workspace-1", "session-1",
+                admission.path("resourceId").asText(), WRITER_TOKEN)).hasMessageContaining("verification");
+    }
+
+    @Test
+    void isolatesCorruptCandidateWithoutBlockingVerifiedPrefix() {
+        reserve();
+        Map<String, byte[]> objects = new java.util.HashMap<>();
+        boolean[] corruptNext = {false};
+        ToolPublicationObjectStore bucket = new ToolPublicationObjectStore() {
+            @Override
+            public void putIfAbsent(String key, byte[] bytes) {
+                byte[] stored = bytes.clone();
+                if (corruptNext[0]) {
+                    stored[0] ^= 1;
+                    corruptNext[0] = false;
+                }
+                objects.putIfAbsent(key, stored);
+            }
+
+            @Override
+            public InputStream open(String key) {
+                return new ByteArrayInputStream(objects.get(key));
+            }
+
+            @Override
+            public void requireUnversioned() {
+            }
+        };
+        var data = new ToolPublicationDataStore(jdbc, manager, store, sessions, bucket,
+                Duration.ofMinutes(2), Duration.ofSeconds(30));
+        JsonNode key = binding.get("sessionKey");
+        data.publishSegment(key, "pub-1", PUBLICATION_TOKEN, "good-segment",
+                "stdout", 0, "abc".getBytes(StandardCharsets.UTF_8), digest("abc"));
+        corruptNext[0] = true;
+        assertThatThrownBy(() -> data.publishSegment(key, "pub-1", PUBLICATION_TOKEN,
+                "bad-segment", "stdout", 1, "def".getBytes(StandardCharsets.UTF_8), digest("def")))
+                .hasMessageContaining("digest changed");
+        assertThat(jdbc.queryForObject("SELECT state FROM qwen_tool_publication_object"
+                + " WHERE slot_key = 'segment:stdout:1'", String.class)).isEqualTo("QUARANTINED");
+        assertThat(jdbc.queryForObject("SELECT quarantined FROM qwen_tool_publication"
+                + " WHERE publication_id = 'pub-1'", Boolean.class)).isFalse();
+        assertThat(data.prefix(key, "pub-1", PUBLICATION_TOKEN, "good-prefix", "stdout")
+                .path("byteLength").asLong()).isEqualTo(3);
+        assertThatThrownBy(() -> data.publishSegment(key, "pub-1", PUBLICATION_TOKEN,
+                "bad-segment", "stdout", 1, "def".getBytes(StandardCharsets.UTF_8), digest("def")))
+                .hasMessageContaining("quarantined");
+    }
+
+    @Test
+    void preservesSegmentAndSealRefusalCodesAcrossCatalogOperations() {
+        reserve();
+        Map<String, byte[]> objects = new java.util.HashMap<>();
+        ToolPublicationObjectStore bucket = new ToolPublicationObjectStore() {
+            @Override
+            public void putIfAbsent(String key, byte[] bytes) {
+                objects.putIfAbsent(key, bytes.clone());
+            }
+
+            @Override
+            public InputStream open(String key) {
+                return new ByteArrayInputStream(objects.get(key));
+            }
+
+            @Override
+            public void requireUnversioned() {
+            }
+        };
+        var data = new ToolPublicationDataStore(jdbc, manager, store, sessions, bucket,
+                Duration.ofMinutes(2), Duration.ofSeconds(30));
+        JsonNode key = binding.get("sessionKey");
+        byte[] abc = "abc".getBytes(StandardCharsets.UTF_8);
+        assertThatThrownBy(() -> data.publishSegment(key, "pub-1", PUBLICATION_TOKEN,
+                "bad-digest", "stdout", 0, abc, digest("other")))
+                .isInstanceOfSatisfying(ApiException.class, error ->
+                        assertThat(error.getCode()).isEqualTo("managed_tool_result_digest_mismatch"));
+        data.publishSegment(key, "pub-1", PUBLICATION_TOKEN, "segment-0", "stdout", 0, abc, digest("abc"));
+        data.publishSegment(key, "pub-1", PUBLICATION_TOKEN, "segment-1", "stderr", 0, abc, digest("abc"));
+        assertThatThrownBy(() -> data.publishSegment(key, "pub-1", PUBLICATION_TOKEN,
+                "segment-1", "stdout", 0, abc, digest("abc")))
+                .hasMessageContaining("operation conflicts");
+        assertThatThrownBy(() -> data.publishSegment(key, "pub-1", PUBLICATION_TOKEN,
+                "other-segment", "stdout", 0, "abd".getBytes(StandardCharsets.UTF_8), null))
+                .isInstanceOfSatisfying(ApiException.class, error ->
+                        assertThat(error.getCode()).isEqualTo("managed_tool_result_conflict"));
+        assertThatThrownBy(() -> data.seal(key, "pub-1", PUBLICATION_TOKEN,
+                "missing-segment", "stdout", 2, 3, digest("abc")))
+                .isInstanceOfSatisfying(ApiException.class, error ->
+                        assertThat(error.getCode()).isEqualTo("managed_tool_result_conflict"));
+        assertThatThrownBy(() -> data.seal(key, "pub-1", PUBLICATION_TOKEN,
+                "wrong-length", "stdout", 1, 4, digest("abc")))
+                .isInstanceOfSatisfying(ApiException.class, error ->
+                        assertThat(error.getCode()).isEqualTo("managed_tool_result_digest_mismatch"));
+        data.seal(key, "pub-1", PUBLICATION_TOKEN, "seal-correct", "stdout", 1, 3, digest("abc"));
+        assertThatThrownBy(() -> data.seal(key, "pub-1", PUBLICATION_TOKEN,
+                "seal-conflict", "stdout", 1, 3, digest("abd")))
+                .isInstanceOfSatisfying(ApiException.class, error ->
+                        assertThat(error.getCode()).isEqualTo("managed_tool_result_conflict"));
+    }
+
+    @Test
+    void renewsTheOriginalClaimWhileScanningSlowObjectBytes() {
+        reserve();
+        byte[] segment = "abc".getBytes(StandardCharsets.UTF_8);
+        boolean[] slow = {false};
+        ToolPublicationObjectStore bucket = new ToolPublicationObjectStore() {
+            @Override
+            public void putIfAbsent(String key, byte[] bytes) {
+            }
+
+            @Override
+            public InputStream open(String key) {
+                return new ByteArrayInputStream(segment) {
+                    @Override
+                    public synchronized int read(byte[] target, int offset, int length) {
+                        if (available() == 0) {
+                            return -1;
+                        }
+                        if (slow[0]) {
+                            try {
+                                Thread.sleep(45);
+                            } catch (InterruptedException error) {
+                                Thread.currentThread().interrupt();
+                                throw new IllegalStateException(error);
+                            }
+                        }
+                        return super.read(target, offset, Math.min(length, 1));
+                    }
+                };
+            }
+
+            @Override
+            public void requireUnversioned() {
+            }
+        };
+        var data = new ToolPublicationDataStore(jdbc, manager, store, sessions, bucket,
+                Duration.ofSeconds(2), Duration.ofMillis(90));
+        JsonNode key = binding.get("sessionKey");
+        data.publishSegment(key, "pub-1", PUBLICATION_TOKEN, "slow-segment",
+                "stdout", 0, segment, digest("abc"));
+        slow[0] = true;
+        assertThat(data.seal(key, "pub-1", PUBLICATION_TOKEN, "slow-seal", "stdout",
+                1, segment.length, digest("abc")).path("segmentCount").asInt()).isEqualTo(1);
     }
 
     @Test
@@ -401,7 +567,7 @@ class ToolPublicationStoreTest {
             if (descriptors.size() == 512 || ordinal == segments - 1) {
                 int pageIndex = pageLinks.size();
                 JsonNode pageRef = data.publishResource(key, "pub-1", PUBLICATION_TOKEN,
-                        "page-stdout-" + pageIndex, "page:stdout:" + pageIndex,
+                        "page-stdout-" + pageIndex, "page:stdout:" + page.path("firstOrdinal").asInt(),
                         "managed-tool-result-page", page.toString().getBytes(StandardCharsets.UTF_8));
                 ObjectNode pageLink = JSON.createObjectNode().put("segmentCount", descriptors.size())
                         .put("byteLength", (long) descriptors.size() * unit.length);
@@ -587,6 +753,12 @@ class ToolPublicationStoreTest {
         var execution = executions.claimDispatch("execution-1", "dispatcher", java.time.Duration.ofMinutes(1));
         assertThat(executions.compareAndSet(execution, execution.withState(ToolExecutionRecord.State.EXECUTING, false),
                 "dispatcher", execution.getDispatchGeneration())).isNotNull();
+        assertThat(reserve()).isEqualTo(original);
+        assertThat(store.apply(request("renew"), WRITER_TOKEN, PUBLICATION_TOKEN).path("bindingDigest"))
+                .isEqualTo(original.path("bindingDigest"));
+        var running = executions.findByExecutionCallId("execution-1");
+        assertThat(executions.compareAndSet(running, running.withUnknown(),
+                "dispatcher", running.getDispatchGeneration())).isNotNull();
         assertThat(reserve()).isEqualTo(original);
         assertThat(store.apply(request("renew"), WRITER_TOKEN, PUBLICATION_TOKEN).path("bindingDigest"))
                 .isEqualTo(original.path("bindingDigest"));
