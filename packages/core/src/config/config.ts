@@ -5023,20 +5023,25 @@ export class Config {
           }
         }
       }
-      // The readiness scan walks the frontmatter of every memory file, so skip
-      // it while the structured protocol is opted out: a disabled feature must
-      // not cost startup I/O either. Leaving corpusStatus undefined keeps the
-      // initialization below on 'legacy'.
-      const corpusStatus = this.getStructuredMemoryRecallEnabled()
-        ? await this.scanMemoryRecallCorpusStatus().catch((error: unknown) => {
-            this.debugLogger.warn(
-              'memory metadata readiness scan failed; preserving the active recall protocol',
-              error,
-            );
-            return undefined;
-          })
-        : undefined;
+      // The readiness scan walks the frontmatter of every memory file, so run
+      // it only where its result is consumed — once, when the mode is settled.
+      // Skipping it while the structured protocol is opted out keeps a disabled
+      // feature from costing startup I/O; skipping it afterwards keeps an
+      // enabled one from re-walking the whole corpus on every refresh (this
+      // runs per user query) only to discard the result. Leaving corpusStatus
+      // undefined keeps the initialization below on 'legacy'.
       if (!this.memoryRecallModeInitialized) {
+        const corpusStatus = this.getStructuredMemoryRecallEnabled()
+          ? await this.scanMemoryRecallCorpusStatus().catch(
+              (error: unknown) => {
+                this.debugLogger.warn(
+                  'memory metadata readiness scan failed; preserving the active recall protocol',
+                  error,
+                );
+                return undefined;
+              },
+            )
+          : undefined;
         this.memoryRecallMode = corpusStatus?.ready ? 'structured' : 'legacy';
         this.memoryCorpusRevision = corpusStatus?.revision ?? '';
         this.memoryRecallModeInitialized = true;

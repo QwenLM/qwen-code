@@ -10221,6 +10221,52 @@ describe('Server Config (config.ts)', () => {
     expect(config.getMemoryRecallMode()).toBe('legacy');
   });
 
+  it('runs the corpus readiness scan once, not on every refresh', async () => {
+    // The scan walks the frontmatter of every memory file, and its result is
+    // consumed only while the mode is still uninitialized. Since
+    // refreshHierarchicalMemory runs per user query, re-walking the whole
+    // corpus after the mode has settled would put a full-corpus read on the
+    // prompt critical path and then throw the result away.
+    const previousEnv = process.env['QWEN_CODE_MEMORY_STRUCTURED_RECALL'];
+    process.env['QWEN_CODE_MEMORY_STRUCTURED_RECALL'] = '1';
+    try {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isManagedMemoryAvailable').mockReturnValue(true);
+      vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
+        memoryContent: '',
+        fileCount: 0,
+        contextFilePaths: [],
+        ruleCount: 0,
+        conditionalRules: [],
+        projectRoot: '/tmp',
+      });
+      vi.mocked(scanMemoryMetadataCorpusStatus).mockResolvedValue({
+        ready: true,
+        revision: 'structured-revision',
+        files: 1,
+        legacyFiles: 0,
+        legacyByScope: { project: 0, user: 0, team: 0 },
+      });
+
+      await config.refreshHierarchicalMemory();
+      expect(config.getMemoryRecallMode()).toBe('structured');
+      expect(scanMemoryMetadataCorpusStatus).toHaveBeenCalledTimes(1);
+
+      await config.refreshHierarchicalMemory();
+      await config.refreshHierarchicalMemory();
+
+      // Settled: the mode is not re-derived, so the scan must not re-run.
+      expect(scanMemoryMetadataCorpusStatus).toHaveBeenCalledTimes(1);
+      expect(config.getMemoryRecallMode()).toBe('structured');
+    } finally {
+      if (previousEnv === undefined) {
+        delete process.env['QWEN_CODE_MEMORY_STRUCTURED_RECALL'];
+      } else {
+        process.env['QWEN_CODE_MEMORY_STRUCTURED_RECALL'] = previousEnv;
+      }
+    }
+  });
+
   it('refreshHierarchicalMemory should include appended auto-memory in the context warning estimate', async () => {
     const config = new Config({
       ...baseParams,
