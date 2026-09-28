@@ -9,8 +9,9 @@
 留在范围之外的部分，服务于 #12380。基于上游 `302e7d88ef`；M3 的更新基于
 `3f5ae3ffeb`。本文实现 B2d 设计中的“Managed 引擎接口”与“配置兼容契约”，并把工作
 拆成 M1 到 M6 六个切片。M1 是 B2d 设计要求在任何 Managed 会话出现之前完成的前置条件
-（Legacy 拒绝与用途标记），已经实现（#12861）。M3 是配置快照与兼容评估，随 M3 的更新
-一同实现。M2 以及 M4 到 M6 仍是提议，各自落地时更新设计。
+（Legacy 拒绝与用途标记），已经实现（#12861）；M1 的后续修改把拒绝扩展到重命名，并让
+owner 证据与 owner 读取器一致。M3 是配置快照与兼容评估，随 M3 的更新一同实现。M2 以及
+M4 到 M6 仍是提议，各自落地时更新设计。
 
 参考实现为分支 `doudouOUC/qwen-code:feature/managed-agents-p0-p8` 的
 `032392a673`。本文记录哪些内容移植到上游、按什么顺序移植，以及上游移植在哪些地方
@@ -156,14 +157,19 @@ Managed 的切片。
 
 #### Legacy 拒绝
 
-明确的 Managed 证据包括原有的 Managed Session header，以及一条完整的 transcript
-行，其记录为 `type: "system"`、`subtype: "session_execution_engine"` 且
-`systemPayload.engine: "managed"`。消息中的文本不算。Managed owner 总是先于其他内容
-写入，因此该检查读取与 header 检查相同的 64 KiB 头部窗口。与 header 检查一样，读取
-出错时它放行：无法读取的 transcript 之后会自行失败。
+明确的 Managed 证据包括原有的 Managed Session header，以及 owner 读取器的行解析器能从
+头部某一行中恢复出的一条记录，其 `type: "system"`、
+`subtype: "session_execution_engine"` 且 `systemPayload.engine: "managed"`。某一行
+无法整体解析时，该解析器仍会恢复它能界定出的完整记录，因此这样的记录即使与另一条记录
+同处一行也算数；在该记录内部被截断的行则恢复不出记录。消息中的文本不算。Managed owner 总是先于其他内容写入，因此该检查读取与 header
+检查相同的 64 KiB 头部窗口。与 header 检查一样，读取出错时它放行；下文的风险记录了这会
+在哪些情况下放过 Managed transcript。owner 证据
+只由一个谓词 `isManagedOwnerRecord` 定义，该检查与会话列表的 Managed 识别都使用它。
+owner 读取器对 owner 记录的校验更严格（例如要求 `version: 1`），它拒绝的记录会被报告
+为 unavailable，而不会被当作 Legacy。
 
-三个现有的拒绝点改用新的检查。每个执行、记录或 fork transcript 的 Legacy 入口都会经过
-其中之一：
+三个现有的拒绝点以及没有存活 recorder 时的重命名改用新的检查。每个执行、记录、重命名
+或 fork transcript 的 Legacy 入口都会经过其中之一：
 
 | 入口                                                                                                          | 拒绝点                                                                                                        |
 | ------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
@@ -174,12 +180,19 @@ Managed 的切片。
 | TUI `/resume`（Ink 与 OpenTUI）                                                                               | `assertLegacySessionExecution`                                                                                |
 | TUI `/branch`、ACP 分支与 side task                                                                           | `SessionService.forkSession`                                                                                  |
 | 不持 writer lease 写入的 recorder                                                                             | `ChatRecordingService` 中的会话文件检查                                                                       |
+| 没有存活 recorder 时的重命名：daemon 元数据路由（含 standalone）、ACP、TUI `/rename`、分支、取消归档          | `SessionService.renameSession` 或 `renameSessionForLifecycle`                                                 |
 
 热 attach 或 live load 复用存活会话，而 Legacy 子进程只会持有 Legacy 会话。只读的
-transcript 读取、重放和列表仍然可用。重命名和封存维护 lease 仍只检查 header，读取器
-选择 Managed projection 时也一样：它们依赖 Managed Session log 格式（Managed 的标题是
-一条已提交的领域记录），而单独一条 owner 记录并不具备这种格式。双引擎宿主不变；
-其选择器已经会拒绝没有引擎能运行的 Managed owner。
+transcript 读取、重放和列表仍然可用。封存维护 lease 仍只检查 header，读取器选择
+Managed projection 时也一样：它们依赖 Managed Session log 格式，而单独一条 owner 记录
+并不具备这种格式。把关执行、记录与 fork 的拒绝不改变双引擎宿主的行为：其选择器已经会
+拒绝没有引擎能运行的 Managed owner。
+
+重命名在所有宿主上（无论是否双引擎）遇到任一种证据都会拒绝，因为没有存活 recorder 时的
+重命名会直接追加写入 transcript。Managed 创建若在 owner 记录与 header 之间中断，只会
+留下 owner 记录；下一次 Managed 打开只有在 transcript 中除 owner 记录外没有别的记录时
+才会补完这次创建。在这次后续修改之前，Legacy 重命名会在这里追加标题，使 transcript
+变得两个引擎都打不开。
 
 #### 用途标记
 
@@ -329,11 +342,15 @@ M3 确定了契约中的以下细节：
 
 M1：
 
-1. 未配对的 Legacy 宿主拒绝执行、fork 或记录唯一 Managed 证据是 `managed` owner
-   记录的 transcript，并使用已有的分类；transcript 字节不变，也不会创建 fork 目标。
-2. 带 Legacy owner、没有 owner 记录、含有无法完整解析的行，或在消息文本或其他记录中
-   包含 owner 记录内容的 transcript，不会被当作 Managed：未配对的 Legacy 宿主仍能执行
-   它们，带 Legacy owner 的 transcript 仍能 fork。
+1. 未配对的 Legacy 宿主拒绝执行、fork、记录或重命名唯一 Managed 证据是 `managed`
+   owner 记录的 transcript，并使用已有的分类；transcript 字节不变，也不会创建 fork
+   目标。在 header 之前中断的 Managed 创建仍能由下一次 Managed 打开补完。
+2. 只有 header，或 owner 读取器的行解析器能从头部某一行恢复出的 Managed owner 记录，
+   才会让 transcript 成为 Managed。Legacy owner、没有 owner 记录、在 owner 记录内部被
+   截断的行，或在能完整解析的行中位于消息文本或其他记录内部的 owner 记录内容，都不会：
+   未配对的 Legacy 宿主仍能执行和重命名这样的 transcript，带 Legacy owner 的 transcript
+   仍能 fork。在头部窗口内，owner 读取器确认为 Managed 的记录都是 owner 证据；读取器
+   拒绝的 owner 证据会让 owner 成为 unavailable。
 3. 带 Managed Session header 的 transcript 行为不变，包括拒绝重命名。
 4. worktree reset 在 spawn 替代会话时带上 worktree 元数据，双引擎选择器把它视为延期
    用途。
@@ -382,3 +399,12 @@ M3：
 - 基于文件的自定义命令可以注入 shell 输出（`!{…}`），用户调用命令时会在宿主中运行
   进程。它们不是契约的输入；由 M5 或 M6 决定 Managed 会话拒绝它们，还是由评估将其判为
   deferred。
+- Managed 会话的标题与某个活动会话的标题冲突时，取消归档会失败：冲突时的改名是一次
+  Legacy 重命名，而它会拒绝 Managed transcript。本地 Managed 日志从 M4 起才会出现，
+  因此 M4 或 M6 必须通过会话 authority 改名，或者跳过这次改名。
+- owner 检查与 header 检查背后的头部读取以不跟随链接的方式打开 transcript。Windows
+  没有这种打开方式，于是它改为证明文件身份，并拒绝没有 inode 编号的卷（FAT、exFAT、
+  部分 SMB 共享）上的所有文件。此时检查找不到证据并放行操作，而离线重命名会跟随链接并
+  追加写入。因此，经由链接的 Managed transcript，以及 Windows 上位于这类卷上的任何
+  Managed transcript，都会绕过 Legacy 拒绝。header 检查在 M1 之前就有同样的缺口。后续
+  修改应让证据读取与被守护的操作以相同方式打开文件。
