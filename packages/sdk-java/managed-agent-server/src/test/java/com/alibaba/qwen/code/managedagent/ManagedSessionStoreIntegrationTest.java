@@ -9,6 +9,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
+import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecordStore;
+import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecordStore.TaskRow;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -17,9 +19,11 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
 import java.util.HexFormat;
+import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
@@ -61,6 +65,54 @@ class ManagedSessionStoreIntegrationTest {
 
     @Autowired
     private JdbcTemplate jdbc;
+
+    @Autowired
+    private ManagedExtensionRecordStore records;
+
+    @Test
+    void acceptsTheStageHTransactionsTheAuthorityWrote() throws Exception {
+        // The requests the TypeScript authority sent through its HTTP store,
+        // pinned by http-managed-session-store.test.ts.
+        JsonNode written = ManagedExtensionProjectionContractTest.contract(
+                "managed-extension-journal-v1.fixtures.json");
+        JsonNode key = written.required("sessionKey");
+        String tenant = key.required("tenantId").textValue();
+        String session = key.required("sessionId").textValue();
+        String base = "/internal/managed-session-store/v1/sessions/"
+                + session;
+        String token = "c".repeat(32);
+        List<JsonNode> requests = new ArrayList<>();
+        requests.add(objectMapper.createObjectNode()
+                .put("workspaceId", key.required("workspaceId").textValue())
+                .put("writerId", written.required("writerId").textValue())
+                .put("leaseMillis", 60_000));
+        written.required("commits").forEach(requests::add);
+        for (int index = 0; index < requests.size(); index++) {
+            MvcResult result = mvc.perform(post(base + (index == 0
+                            ? "/writers:acquire" : "/transactions:commit"))
+                            .header(TenantContextFilter.HEADER, tenant)
+                            .header(ManagedSessionStoreModels
+                                    .WRITER_TOKEN_HEADER, token)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content(requests.get(index).toString()))
+                    .andReturn();
+            assertThat(result.getResponse().getStatus())
+                    .as(result.getResponse().getContentAsString())
+                    .isEqualTo(200);
+        }
+        JsonNode tasks = written.required("tasks");
+        assertThat(tasks).isNotEmpty();
+        for (JsonNode task : tasks) {
+            TaskRow row = records.findTask(tenant, session,
+                    task.required("taskId").textValue()).orElseThrow();
+            assertThat(row.kind()).isEqualTo(task.required("kind")
+                    .textValue());
+            assertThat(row.projection()).isEqualTo(
+                    ManagedExtensionProjectionContractTest.view(task));
+        }
+        assertThat(records.listTasks(tenant, session, null, null, 100)
+                .tasks()).hasSize(tasks.size());
+    }
 
     @Test
     void requiresTrustedTenantAndWriterToken() throws Exception {

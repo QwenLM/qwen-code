@@ -9,6 +9,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.security.SecureRandom;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
@@ -22,6 +23,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Function;
 import java.util.regex.Pattern;
 
 /**
@@ -37,9 +39,11 @@ public final class LocalProcessRuntimeProvisioner
             Pattern.compile("sha256:[0-9a-f]{64}");
     private static final SecureRandom RANDOM = new SecureRandom();
 
+    private final String ownerDomain = UUID.randomUUID().toString();
     private final List<String> command;
     private final Path workingDirectory;
     private final HttpRuntimeTransport transport;
+    private final Function<RuntimeScope, String> storageResolver;
     private final ExecutorService executor = Executors.newCachedThreadPool(
             task -> {
                 Thread thread = new Thread(task, "runtime-provisioner");
@@ -52,6 +56,13 @@ public final class LocalProcessRuntimeProvisioner
 
     public LocalProcessRuntimeProvisioner(List<String> command,
             Path workingDirectory, HttpRuntimeTransport transport) {
+        this(command, workingDirectory, transport, null);
+    }
+
+    /** The optional resolver must come from trusted storage configuration. */
+    public LocalProcessRuntimeProvisioner(List<String> command,
+            Path workingDirectory, HttpRuntimeTransport transport,
+            Function<RuntimeScope, String> storageResolver) {
         if (command == null || command.isEmpty() || workingDirectory == null
                 || transport == null) {
             throw new IllegalArgumentException(
@@ -60,6 +71,16 @@ public final class LocalProcessRuntimeProvisioner
         this.command = List.copyOf(command);
         this.workingDirectory = workingDirectory;
         this.transport = transport;
+        this.storageResolver = storageResolver;
+    }
+
+    @Override
+    public RuntimeProvisionRequest createRequest(RuntimeScope scope,
+            String isolationKey) {
+        return storageResolver == null
+                ? RuntimeProvisioner.super.createRequest(scope, isolationKey)
+                : new RuntimeProvisionRequest(scope, isolationKey, kind(),
+                        ManagedContextProtocol.storageId(storageResolver.apply(scope)));
     }
 
     @Override
@@ -118,6 +139,11 @@ public final class LocalProcessRuntimeProvisioner
             RuntimeLease lease) {
         return CompletableFuture.runAsync(() -> attestOwned(request, lease),
                 executor);
+    }
+
+    @Override
+    public boolean canRetryFailedConfirm(RuntimeLease lease) {
+        return isUsable(lease);
     }
 
     @Override
@@ -184,32 +210,47 @@ public final class LocalProcessRuntimeProvisioner
             boot.put("workspaceCwd", scope.getCanonicalCwd());
             boot.put("workspaceGeneration", scope.getWorkspaceGeneration());
             boot.put("workspaceId", scope.getWorkspaceId());
+            Map<String, Object> document = request.isManagedContext()
+                    ? ManagedContextProtocol.boot(request, seed) : boot;
+            byte[] encoded = JsonCodec.encode(document);
+            if (encoded.length > READY_RECORD_LIMIT) {
+                throw new IllegalArgumentException("Managed Runtime boot exceeds 32 KiB.");
+            }
             Process process = new ProcessBuilder(command)
                     .directory(workingDirectory.toFile())
                     .redirectError(ProcessBuilder.Redirect.DISCARD)
                     .start();
             ownedProcess = new OwnedProcess(process, seed);
-            process.getOutputStream().write(boot.toJSONString()
-                    .getBytes(StandardCharsets.UTF_8));
+            process.getOutputStream().write(encoded);
             process.getOutputStream().close();
             String readyLine = readReadyLine(process);
-            Map<String, Object> ready = JsonCodec.parseObject(
-                    readyLine.getBytes(StandardCharsets.UTF_8),
-                    "Managed Runtime ready record");
-            if (!"ready".equals(ready.get("type"))
-                    || !Long.valueOf(1L).equals(number(ready.get("version")))
-                    || !runtimeInstanceId.equals(
-                            ready.get("runtimeInstanceId"))
-                    || !runtimeIncarnation.equals(
-                            ready.get("runtimeIncarnation"))
-                    || !leaseId.equals(ready.get("leaseId"))
-                    || !Long.valueOf(epoch).equals(number(ready.get("epoch")))) {
-                throw failed("Managed Runtime ready record is invalid.");
+            byte[] readyBytes = readyLine.getBytes(StandardCharsets.UTF_8);
+            if (readyBytes.length > READY_RECORD_LIMIT) {
+                throw failed("Managed Runtime ready record exceeds 32 KiB.");
             }
-            URI endpoint = URI.create(String.valueOf(ready.get("url")));
-            if (!"http".equals(endpoint.getScheme())
-                    || !"127.0.0.1".equals(endpoint.getHost())) {
-                throw failed("Managed Runtime ready record is invalid.");
+            Map<String, Object> ready = request.isManagedContext()
+                    ? ManagedContextProtocol.parse(readyBytes)
+                    : JsonCodec.parseObject(readyBytes,
+                            "Managed Runtime ready record");
+            URI endpoint;
+            if (request.isManagedContext()) {
+                endpoint = ManagedContextProtocol.ready(ready, document);
+            } else {
+                if (!"ready".equals(ready.get("type"))
+                        || !Long.valueOf(1L).equals(number(ready.get("version")))
+                        || !runtimeInstanceId.equals(
+                                ready.get("runtimeInstanceId"))
+                        || !runtimeIncarnation.equals(
+                                ready.get("runtimeIncarnation"))
+                        || !leaseId.equals(ready.get("leaseId"))
+                        || !Long.valueOf(epoch).equals(number(ready.get("epoch")))) {
+                    throw failed("Managed Runtime ready record is invalid.");
+                }
+                endpoint = URI.create(String.valueOf(ready.get("url")));
+                if (!"http".equals(endpoint.getScheme())
+                        || !"127.0.0.1".equals(endpoint.getHost())) {
+                    throw failed("Managed Runtime ready record is invalid.");
+                }
             }
             RuntimeLease lease = new RuntimeLease(runtimeInstanceId,
                     endpoint, token, leaseId, epoch);
@@ -226,9 +267,16 @@ public final class LocalProcessRuntimeProvisioner
             owned.put(key, ownedProcess);
             adopted = true;
             return lease;
-        } catch (IOException exception) {
-            throw failed("Managed Runtime worker failed to start.",
-                    exception);
+        } catch (IOException | RuntimeException exception) {
+            if (request.isManagedContext()) {
+                throw new RuntimeBrokerException(503, "runtime_provision_failed",
+                        "Managed context startup failed; recovery is blocked.",
+                        false, exception);
+            }
+            if (exception instanceof RuntimeException failure) {
+                throw failure;
+            }
+            throw failed("Managed Runtime worker failed to start.", exception);
         } finally {
             if (!adopted && ownedProcess != null) {
                 ownedProcess.process.destroyForcibly();
@@ -249,8 +297,19 @@ public final class LocalProcessRuntimeProvisioner
         if (process == null) {
             return RuntimeObservation.unknown(handle);
         }
+        if (!process.seed.equals(seed)) {
+            return RuntimeObservation.conflict(handle);
+        }
         if (!process.process.isAlive()) {
-            return RuntimeObservation.notFound();
+            if (handle == null) {
+                return RuntimeObservation.notFound();
+            }
+            return RuntimeObservation.notFound(new RuntimeRecoveryEvidence(
+                    seed.getProvisionRequestId() + ":journal-lost",
+                    RuntimeRecoveryEvidence.Fact.JOURNAL_LOST, "owned-process-exit",
+                    Instant.now(), ownerDomain + ":" + process.process.pid(),
+                    seed.getProvisionRequestId(), seed.getProvisionalRuntimeId(),
+                    seed.getGatewayIncarnation(), seed.getLeaseId(), seed.getEpoch(), handle), null);
         }
         try {
             attest(request, seed, lastLease);
@@ -318,7 +377,7 @@ public final class LocalProcessRuntimeProvisioner
         CompletableFuture<String> line = new CompletableFuture<>();
         Thread reader = new Thread(() -> {
             BufferedReader input = new BufferedReader(new InputStreamReader(
-                    process.getInputStream(), StandardCharsets.UTF_8));
+                    process.getInputStream(), StandardCharsets.UTF_8.newDecoder()));
             try {
                 line.complete(readLine(input, true));
             } catch (Throwable throwable) {
@@ -369,9 +428,6 @@ public final class LocalProcessRuntimeProvisioner
             any = true;
             if (value == '\n') {
                 return builder.toString();
-            }
-            if (value == '\r') {
-                continue;
             }
             if (builder.length() >= READY_RECORD_LIMIT) {
                 if (bounded) {

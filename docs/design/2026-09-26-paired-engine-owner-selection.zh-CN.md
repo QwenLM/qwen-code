@@ -71,14 +71,15 @@ Config 即返回回执。
 
 ### 宿主选择器
 
-CLI serve 层的
-`createSessionExecutionEngineSelector({ newSessionEngine, runtimeBaseDir })`
-构造双引擎 Bridge 的 `select` 回调。
+CLI serve 层的 `createSessionExecutionEngineSelector` 以 runtime 的会话 base 目录
+（`runtimeBaseDir`）构造双引擎 Bridge 的 `select` 回调。
 
-- Spawn 返回 `newSessionEngine`。B2d 会用配置兼容策略替换这一输入。
+- 本切片中 spawn 返回固定的 `newSessionEngine`。B2d 已用其用途规则与已注册 Managed
+  引擎的兼容检查替换这一输入；见[双引擎宿主接线](./2026-09-26-paired-engine-host-wiring.zh-CN.md)。
 - Load 与 resume 先解析 ACP 子进程将要恢复的持久化拼写（大小写不敏感查找），再用
-  严格 owner 累计器读取整个活跃 transcript，返回已核验的 owner。没有 owner 记录的
-  完整历史属于 Legacy。transcript 缺失或为空时报 `SessionNotFoundError`。非法、
+  严格 owner 累计器读取整个活跃 transcript，返回已核验的 owner；自 B2d 起，Managed
+  owner 只有在已注册的 Managed 引擎证明其兼容时才会运行，否则以
+  `SessionExecutionEngineError` 拒绝。没有 owner 记录的完整历史属于 Legacy。transcript 缺失或为空时报 `SessionNotFoundError`。非法、
   冲突或不完整的 owner 证据报 `SessionExecutionEngineError`。恢复绝不使用宿主默认值。
 
 选择器与 ACP 子进程读取同一个 transcript，子进程还会从其恢复快照再次核验 owner，
@@ -108,7 +109,8 @@ REST 此前已返回 409；ACP 传输现在也带上相同的 409 分类，不�
 直接创建方保留各自的错误词汇。`LocalManagedRuntimeProvider` 把已存活 ID 的拒绝
 映射为不可重试的 `managed_runtime_identity_conflict`。standalone 服务把未派发的
 已存活 ID 拒绝映射为 `standalone_session_conflict`，而不是
-`standalone_creation_rolled_back`。
+`standalone_creation_rolled_back`。此时它不检查该 ID 是否有已持久化的内容，因为存活
+owner 自己的 transcript 本就应当存在；发现它不能导致 runtime 被隔离。
 
 ## 文件与消费者
 
@@ -143,5 +145,6 @@ REST 此前已返回 409；ACP 传输现在也带上相同的 409 分类，不�
 - 如上所述，未使用或创建失败的双引擎会话留下的纯 owner transcript 会出现在列表中，
   并保持 ID 占用。
 - 选择器在冷恢复前读取整个 transcript，与恢复本身相同，成本随 transcript 增长。
-- 选择器尚未接线。B2d 必须用 runtime 的会话 base 目录构造它，并决定新会话的选择。
+- 本切片没有为选择器接线。B2d 在 `--experimental-paired-engines` 开关之后，用每个
+  runtime 的会话 base 目录构造它，并决定新会话的选择；见[双引擎宿主接线](./2026-09-26-paired-engine-host-wiring.zh-CN.md)。
   #12737 中关于选择器输入、下发失败、隔离恢复和 Hosted 边界的问题不由本切片决定。

@@ -85,14 +85,18 @@ and its ID stays occupied. Single-factory sessions keep today's behavior.
 
 ### Host selector
 
-`createSessionExecutionEngineSelector({ newSessionEngine, runtimeBaseDir })`
-builds the paired Bridge `select` callback in the CLI serve layer.
+`createSessionExecutionEngineSelector` builds the paired Bridge `select`
+callback in the CLI serve layer from the runtime's session base directory
+(`runtimeBaseDir`).
 
-- Spawn returns `newSessionEngine`. B2d replaces this input with the
-  configuration-compatibility policy.
+- In this slice, spawn returned a fixed `newSessionEngine`. B2d replaced that
+  input with its purpose rules and a registered Managed engine's compatibility
+  check; see [Paired engine host wiring](./2026-09-26-paired-engine-host-wiring.md).
 - Load and resume resolve the persisted spelling that the ACP child restores
   (case-insensitive lookup), then read the whole active transcript with the
-  strict owner accumulator and return the verified owner. A complete history
+  strict owner accumulator and return the verified owner; since B2d, a Managed
+  owner runs only when a registered Managed engine proves it compatible, and
+  is otherwise refused with `SessionExecutionEngineError`. A complete history
   without an owner record is Legacy. A missing or empty transcript is
   `SessionNotFoundError`. Invalid, conflicting or incomplete owner evidence is
   `SessionExecutionEngineError`. A restore never uses the host default.
@@ -131,7 +135,9 @@ The direct creators keep their own vocabulary. `LocalManagedRuntimeProvider`
 maps a live-ID rejection to its non-retryable
 `managed_runtime_identity_conflict`. The standalone service maps an undispatched
 live-ID rejection to `standalone_session_conflict` instead of
-`standalone_creation_rolled_back`.
+`standalone_creation_rolled_back`. It does not check that nothing was persisted
+for that ID, because the live owner's own transcript is expected there; finding
+it must not quarantine the runtime.
 
 ## Files and consumers
 
@@ -175,7 +181,9 @@ classification changes.
   keep their IDs occupied, as described above.
 - The selector reads the whole transcript before a cold restore, as the restore
   itself does, so its cost grows with the transcript.
-- The selector is not wired. B2d must construct it with the runtime's session
-  base directory and decide new-session selection. The questions in #12737
-  about selector inputs, propagation failure, quarantine recovery and the
-  Hosted boundary are not decided by this slice.
+- This slice did not wire the selector. B2d constructs it with each runtime's
+  session base directory and decides new-session selection, behind
+  `--experimental-paired-engines`; see
+  [Paired engine host wiring](./2026-09-26-paired-engine-host-wiring.md). The
+  questions in #12737 about selector inputs, propagation failure, quarantine
+  recovery and the Hosted boundary are not decided by this slice.
