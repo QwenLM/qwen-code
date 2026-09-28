@@ -16,10 +16,13 @@ its model-facing prompt.
 - Persist the id on the user `ChatRecord`.
 - Attach it to the corresponding in-memory API `Content` as Symbol metadata,
   so it is not sent to providers.
-- Preserve the metadata through recording, compression, resume, and branch
-  paths.
+- Preserve the metadata through recording, compression, resume, branch, and
+  checkpoint-restore paths.
 - Resolve an identified rewind target only by an exact id lookup that is unique
   in both histories.
+- Scope both that lookup and the duplicate census to the retained region after
+  the last successful compression marker, so an id whose twin was already
+  absorbed does not refuse the turn that still resolves uniquely.
 - Return `-1` when the id is missing or duplicated on either side rather than
   guessing with positional alignment.
 - Retain the existing positional mapping only for legacy turns without an id.
@@ -50,9 +53,12 @@ Compression records persist prompt ids in an array parallel to their history
 snapshot. Restoring a compression checkpoint reattaches each id to the same
 entry.
 
-JSON checkpoints created by `/restore` cannot preserve Symbol metadata. Their
-file keys remain usable for file-only restore, but conversation rewind fails
-closed instead of applying positional alignment to identified turns.
+JSON checkpoints created by `/restore` cannot carry Symbol metadata through the
+file itself, so the writer persists the ids in an array parallel to
+`clientHistory` and restore reattaches each id before installing that history.
+A checkpoint written before this change has no such array: its file keys remain
+usable for file-only restore, but conversation rewind fails closed instead of
+applying positional alignment to identified turns.
 
 ## Scope
 
