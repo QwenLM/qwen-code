@@ -553,6 +553,47 @@ describe('BrokerManagedRuntimeProvider', () => {
     expect(fetchImpl).toHaveBeenCalledTimes(2);
   });
 
+  it.each([
+    'inspectExecution',
+    'reconcileExecution',
+    'cancelExecution',
+  ] as const)(
+    '%s preserves terminal uncertainty without acquiring, starting or polling',
+    async (method) => {
+      const fetchImpl = vi.fn<typeof fetch>(
+        async () =>
+          new Response(
+            JSON.stringify({
+              code: 'runtime_broker_execution_unknown',
+              retryable: false,
+              details: { terminal: true, reason: 'runtime_lost' },
+            }),
+            { status: 409, headers: { 'content-type': 'application/json' } },
+          ),
+      );
+      const provider = new BrokerManagedRuntimeProvider({
+        baseUrl: 'http://127.0.0.1:8080',
+        token: 'secret',
+        fetch: fetchImpl,
+      });
+      await expect(
+        provider[method]({
+          harnessSessionId,
+          runtimeSessionId,
+          executionCallId: 'abandoned',
+        }),
+      ).resolves.toEqual({
+        outcome: 'unknown',
+        terminal: true,
+        reason: 'runtime_lost',
+      });
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+      expect(String(fetchImpl.mock.calls[0][0])).toContain(
+        '/executions/abandoned',
+      );
+    },
+  );
+
   it('cancels and waits for the original execution without starting or acquiring', async () => {
     const pending = {
       state: 'prepared' as const,

@@ -42,8 +42,9 @@ Content-Encoding。TypeScript 客户端保留限长原因。这些诊断信息�
 与释放幂等。同一 Runtime Session 换用 Harness 或 turn kind 会产生冲突。释放拒绝
 运行中的工作，取消尚未预留的准备调用，并永久关闭新操作准入，不清除当前回合的
 状态/取消证据。开始新回合仍遵循 runtime 既有清理策略；较早已派发的调用仍保留在
-Broker 持久日志中。Broker HTTP 观察仍要求 Session 为 READY；释放不删除持久证据。
-已持久化的 Broker 预留必须在释放前显式取消。
+Broker 持久日志中。Broker HTTP 可在 Session 非 READY 时读取归属已验证的终态执行回执；
+实时观察与文件历史控制仍要求 READY。释放不删除持久证据。已持久化的 Broker 预留必须在
+释放前显式取消。
 
 ## Runtime 与持久化
 
@@ -74,7 +75,8 @@ provider 的 reserve/start 路径需要 Broker 持久预留。预留创建 PREPA
 `not_started` 或 `cancelled` 结果，再确认已准备调用的取消。UNKNOWN 只能观察，不能
 变成重放许可。这包括继承的派发期间 HTTP 拒绝保守处理：没有权威执行证据时，即使
 worker 的原因描述为拒绝，仍保持 UNKNOWN。该状态阻止释放，并可能继续持有 Workspace
-存储。仅凭错误码不能证明执行从未开始。现有即时 Tool v2 行为独立保留。
+存储。仅凭错误码不能证明执行从未开始。Broker 的 Runtime 丢失恢复可将不确定执行封存为
+ABANDONED：结果永久未知，可通过持久归属读取，但不能重放。现有即时 Tool v2 行为独立保留。
 
 #12831 的原始 reserve/start 路径继续使用同一组 Broker 路由：预留四字段 reference，
 仅在 start 时提供精确的 `payloadJson`。provider 预留使用七字段 reference 并拒绝
@@ -106,7 +108,8 @@ worker 日志仅属于当前代际。重启 worker 不能从 Broker reference �
 完整 Hosted 产品已就绪。
 
 释放后，私有 worker 路由保留当前回合的状态/取消证据及已绑定的文件历史状态；较早回合的
-调用条目仍可能被清理。Broker HTTP 接口与 provider 客户端不向已释放的 Session 提供
-这些观察。worker 当前保留 Session 的 Config、工具与 runtime，直到 worker 关闭，因此
+调用条目仍可能被清理。释放后，Broker 执行检查可返回持久终态回执，无需重开 worker；
+已关闭的 provider 工具客户端仍不提供私有历史和实时调用观察。worker 当前保留 Session 的
+Config、工具与 runtime，直到 worker 关闭，因此
 内存可能随已释放的 provider Session 数量增长。在保留私有观察语义的前提下减少这部分
 保留是后续工作。

@@ -193,6 +193,36 @@ class LostResponseFaultGateTest {
                 .getBindingId());
     }
 
+    @Test
+    void aTransientConfirmFailureKeepsAnOwnedWorkerReady()
+            throws Exception {
+        broker.warm(HARNESS).requireOk();
+        RuntimeBindingRecord original = rig.activeBinding();
+        proxy.schedule("attest", FaultProxy.Action.RESET);
+
+        BrokerProcess.Reply failed = broker.warm(HARNESS);
+        assertFalse(failed.ok());
+        assertEquals(503, failed.status());
+        assertTrue(failed.retryable());
+        assertEquals(RuntimeBindingRecord.State.READY,
+                rig.activeBinding().getState());
+        assertEquals(original.getBindingId(), rig.activeBinding()
+                .getBindingId());
+
+        assertEquals("READY", broker.warm(HARNESS).object()
+                .getString("state"));
+        assertEquals(original.getBindingId(), rig.activeBinding()
+                .getBindingId());
+        RuntimeScope other = new RuntimeScope(rig.scope.getTenantId(),
+                "workspace-b", rig.scope.getWorkspaceGeneration(),
+                rig.scope.getCanonicalCwd(), rig.scope.getCapabilityDigest(),
+                rig.scope.getIsolationClass());
+        RuntimeProvisionRequest candidate = new RuntimeProvisionRequest(
+                other, null, LocalProcessRuntimeProvisioner.KIND);
+        assertEquals(RuntimeBindingRecord.State.PROVISIONING,
+                rig.bindings.findOrCreate(candidate).getState());
+    }
+
     private void acquire() {
         assertEquals("READY", broker.warm(HARNESS).object()
                 .getString("state"), rig.logs());

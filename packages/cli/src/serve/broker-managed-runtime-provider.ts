@@ -100,6 +100,7 @@ class BrokerResponseError extends Error {
     readonly code?: string,
     readonly retryable?: boolean,
     reason?: string,
+    readonly abandoned = false,
   ) {
     super(
       `Managed Runtime Broker returned HTTP ${status}.${reason ? ` ${reason}` : ''}`,
@@ -546,6 +547,7 @@ export class ManagedRuntimeBrokerClient {
       let code: string | undefined;
       let retryable: boolean | undefined;
       let reason: string | undefined;
+      let abandoned = false;
       try {
         const text = await readBoundedResponseText(
           response,
@@ -579,10 +581,23 @@ export class ManagedRuntimeBrokerClient {
         if (typeof body['retryable'] === 'boolean') {
           retryable = body['retryable'];
         }
+        if (body['details'] !== undefined) {
+          const details = record(body['details']);
+          abandoned =
+            code === 'runtime_broker_execution_unknown' &&
+            details['terminal'] === true &&
+            details['reason'] === 'runtime_lost';
+        }
       } catch {
         await response.body?.cancel().catch(() => undefined);
       }
-      throw new BrokerResponseError(response.status, code, retryable, reason);
+      throw new BrokerResponseError(
+        response.status,
+        code,
+        retryable,
+        reason,
+        abandoned,
+      );
     }
     const contentLength = Number(response.headers.get('content-length'));
     if (
@@ -723,7 +738,9 @@ export class BrokerManagedRuntimeProvider implements ManagedRuntimeProvider {
         error instanceof BrokerResponseError &&
         error.code === 'runtime_broker_execution_unknown'
       ) {
-        return { outcome: 'unknown' };
+        return error.abandoned
+          ? { outcome: 'unknown', terminal: true, reason: 'runtime_lost' }
+          : { outcome: 'unknown' };
       }
       throw error;
     }
@@ -769,7 +786,9 @@ export class BrokerManagedRuntimeProvider implements ManagedRuntimeProvider {
         error instanceof BrokerResponseError &&
         error.code === 'runtime_broker_execution_unknown'
       ) {
-        return { outcome: 'unknown' };
+        return error.abandoned
+          ? { outcome: 'unknown', terminal: true, reason: 'runtime_lost' }
+          : { outcome: 'unknown' };
       }
       throw error;
     }
@@ -815,7 +834,9 @@ export class BrokerManagedRuntimeProvider implements ManagedRuntimeProvider {
         error instanceof BrokerResponseError &&
         error.code === 'runtime_broker_execution_unknown'
       ) {
-        return { outcome: 'unknown' };
+        return error.abandoned
+          ? { outcome: 'unknown', terminal: true, reason: 'runtime_lost' }
+          : { outcome: 'unknown' };
       }
       throw error;
     }

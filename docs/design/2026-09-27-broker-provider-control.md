@@ -55,9 +55,10 @@ is a conflict. Release refuses running work, cancels preparations that have not
 been reserved, and permanently closes admission without clearing the current
 turn's status/cancellation evidence. Starting a new turn retains the runtime's
 existing eviction policy; earlier dispatched invocations remain in the durable
-Broker journal. Broker HTTP observation keeps its existing READY Session
-requirement; release does not erase the persisted evidence. A durable Broker
-reservation must be explicitly cancelled before release.
+Broker journal. Broker HTTP can read owned terminal execution receipts without
+a READY Session; live observation and file-history controls still require READY.
+Release does not erase persisted evidence. A durable Broker reservation must be
+explicitly cancelled before release.
 
 ## Runtime and persistence
 
@@ -104,8 +105,10 @@ never becomes permission to replay. This includes the inherited conservative
 handling of an HTTP rejection during dispatch: without authoritative execution
 evidence it remains UNKNOWN, even when the worker's reason describes a refusal.
 That state blocks release and can retain Workspace storage ownership. Error
-codes alone do not prove that execution never started. Existing immediate Tool
-v2 behavior stays available independently.
+codes alone do not prove that execution never started. The Broker's Runtime-loss
+recovery may fence an uncertain execution as ABANDONED: it remains permanently
+unknown, can be read through its persisted owner, and cannot be replayed.
+Existing immediate Tool v2 behavior stays available independently.
 
 The raw reserve/start path from #12831 remains available on the same Broker
 routes. It reserves a four-field reference and supplies the exact `payloadJson`
@@ -144,8 +147,10 @@ turns or claim complete Hosted product readiness.
 
 After release, the private worker route retains status/cancellation evidence
 for the current turn and any bound file-history state; earlier turns' invocation
-entries remain subject to eviction. The Broker HTTP surface and provider client
-do not expose these observations for a released Session. The worker currently
+entries remain subject to eviction. After release, Broker execution inspection
+can return persisted terminal receipts without reopening the worker; private
+history and live invocation observations remain unavailable through the closed
+provider tool client. The worker currently
 retains the Session's Config, tools and runtime until worker shutdown, so memory
 can grow with released provider Sessions. Reducing that retention while
 preserving private observation semantics is follow-up work.

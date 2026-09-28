@@ -1361,7 +1361,11 @@ describe('NodeReplKernelManager', () => {
       const controller = new AbortController();
       const pending = manager.exec({
         code: `const fs = await import('node:fs'); fs.writeFileSync(${JSON.stringify(readyFile)}, 'ready'); nodeRepl.write('before hang'); ${code}`,
-        timeoutMs: status === 'cancelled' ? 60_000 : 200,
+        // The timeout must comfortably exceed kernel start-up on a loaded
+        // shared runner: if the cancel frame arrives while the kernel is
+        // still suspended at the pre-hang await, the kernel cancels cleanly
+        // and survives, so no replacement is observed.
+        timeoutMs: status === 'cancelled' ? 60_000 : 2_000,
         signal: controller.signal,
       });
       await expect.poll(() => fs.existsSync(readyFile)).toBe(true);
@@ -1382,7 +1386,7 @@ describe('NodeReplKernelManager', () => {
       expect(manager.getKernelPid()).not.toBe(pid);
       expect(manager.getGeneration()).toBeGreaterThan(generation);
     },
-    10_000,
+    20_000,
   );
 
   it(

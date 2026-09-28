@@ -58,6 +58,23 @@ arguments.
 This module intentionally does not wire a Spring service or dispatch Tool
 calls.
 
+Before upgrading an installation that already used the Broker, stop new
+admission and check for historical seeded failures:
+
+```sql
+SELECT tenant_id, COUNT(*) AS failed_bindings
+FROM qwen_runtime_binding
+WHERE binding_state = 'FAILED' AND provision_seed_ciphertext IS NOT NULL
+GROUP BY tenant_id;
+```
+
+The new placement guard blocks affected tenants, including when a later
+generation is `READY`. Do not resume their traffic until the original writer
+domain is physically stopped and an evidence-preserving operator migration is
+available. This module does not ship that migration; deleting old rows or
+fabricating stop evidence would lose the safety fence. A nonempty result is a
+rollout blocker for this database.
+
 Run the optional real-MySQL contract with:
 
 ```bash
