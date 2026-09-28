@@ -670,7 +670,7 @@ export function AgentsManagerPage({
           <div className="flex gap-2">
             {collaborationAvailable ? (
               <Button variant="outline" onClick={() => setAgentsOpen(true)}>
-                Shared threads
+                {t('collab.sharedThreads')}
               </Button>
             ) : null}
             <Button

@@ -89,7 +89,10 @@ export function createThreadsHttpApi(
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
       },
     });
-    const body = (await response.json()) as T & { error?: string };
+    // A proxy or a route mounted after startup can answer with HTML.
+    const body = (await response.json().catch(() => ({}))) as T & {
+      error?: string;
+    };
     if (!response.ok) {
       throw new Error(
         body.error || `Agent request failed (${response.status})`,
@@ -422,7 +425,9 @@ export function ThreadsRoute({
           typeof result.dispatchError === 'string'
         ) {
           setActionError(
-            `The change was saved, but background processing failed: ${result.dispatchError}`,
+            t('collab.error.dispatchAfterSave', {
+              error: result.dispatchError,
+            }),
           );
         }
       } catch (cause) {
@@ -433,7 +438,7 @@ export function ThreadsRoute({
       }
       return true;
     },
-    [refresh],
+    [refresh, t],
   );
 
   if (!client) {

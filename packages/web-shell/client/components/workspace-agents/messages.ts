@@ -122,6 +122,8 @@ export const COLLAB_MESSAGES_EN: Record<string, CollabMessage> = {
   'collab.reason.runCancelled': 'A run was cancelled. Reply to continue.',
   'collab.reason.runFailed': 'A run failed. Reply to try again.',
   'collab.reason.noHandoff': 'An agent stopped without handing off',
+  'collab.reason.parked':
+    'A run was paused when collaboration was turned off. Reply to continue.',
   'collab.reason.strandedWait': 'An agent is waiting on work that is gone',
   'collab.reason.bookedNothing': 'Your last message reached no agent',
   'collab.reason.review': 'Ready for your review',
@@ -171,6 +173,10 @@ export const COLLAB_MESSAGES_EN: Record<string, CollabMessage> = {
   'collab.agentStatus.paused': 'Paused',
   'collab.agentStatus.retired': 'Retired',
   'collab.team.title': 'Team',
+  'collab.chat.title': 'Collaboration',
+  'collab.sharedThreads': 'Shared threads',
+  'collab.error.dispatchAfterSave': (v) =>
+    `The change was saved, but background processing failed: ${v?.error}`,
   'collab.team.members': (v) => `Members (${v?.count ?? 0})`,
   'collab.team.empty': 'No agent has joined yet.',
   'collab.team.lead': 'lead',
@@ -390,6 +396,7 @@ export const COLLAB_MESSAGES_ZH: Record<string, CollabMessage> = {
   'collab.reason.runCancelled': '有一次运行被取消了，回复即可继续',
   'collab.reason.runFailed': '有一次运行失败了，回复即可重试',
   'collab.reason.noHandoff': 'Agent 停下了，没有交接',
+  'collab.reason.parked': '协作关闭时有一次运行被搁置了，回复即可继续',
   'collab.reason.strandedWait': 'Agent 在等一个已经不存在的任务',
   'collab.reason.bookedNothing': '你上一条消息没有发给任何 Agent',
   'collab.reason.review': '等你查看结果',
@@ -431,6 +438,10 @@ export const COLLAB_MESSAGES_ZH: Record<string, CollabMessage> = {
   'collab.agentStatus.paused': '已停用',
   'collab.agentStatus.retired': '已退役',
   'collab.team.title': '团队',
+  'collab.chat.title': '协作对话',
+  'collab.sharedThreads': '共享线程',
+  'collab.error.dispatchAfterSave': (v) =>
+    `更改已保存，但后台处理失败：${v?.error}`,
   'collab.team.members': (v) => `成员（${v?.count ?? 0}）`,
   'collab.team.empty': '还没有 Agent 加入。',
   'collab.team.lead': '负责人',
