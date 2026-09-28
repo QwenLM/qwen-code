@@ -455,13 +455,18 @@ describe('Hosted Harness no-tool session', () => {
       .set('X-Qwen-Client-Id', clientId)
       .send({ prompt, promptId: PROMPT_ID, payloadDigest })
       .expect(202);
-    await vi.waitFor(async () => {
-      const status = await headers(
-        supertest(server).get(`/session/${SESSION_ID}/status`),
-      ).set('X-Qwen-Client-Id', clientId);
-      expect(status.body.hasActivePrompt).toBe(false);
-      expect(status.body.recoveryBlocked).toBe(false);
-    });
+    // The default 1s waitFor timeout races this turn's durable writes on
+    // contended CI runners; the assertions are unchanged.
+    await vi.waitFor(
+      async () => {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', clientId);
+        expect(status.body.hasActivePrompt).toBe(false);
+        expect(status.body.recoveryBlocked).toBe(false);
+      },
+      { timeout: 5_000 },
+    );
     expect(response?.['outputOmitted']).toBe(true);
     expect(response?.['executionStatus']).toBe('success');
     expect(release).toHaveBeenCalledOnce();

@@ -292,6 +292,41 @@ describe('EmbeddedApp host wiring', () => {
     expect(container.querySelector('#qwen-session-history')).toBeNull();
   });
 
+  it('renders the Host-gate guidance for a daemonPreAuthHostGate bootstrap error', async () => {
+    await renderApp();
+    await act(async () => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'webShellBootstrapError',
+            data: { reason: 'daemonPreAuthHostGate' },
+          },
+        }),
+      );
+    });
+    // Runtime came from the dataset, so the error surfaces as the over-
+    // transcript notice rather than the pre-bootstrap full-panel state.
+    const notice = document.querySelector('[role="alert"]');
+    expect(notice?.textContent).toMatch(/4170:localhost:4170/);
+    expect(notice?.textContent).toMatch(/same port number/i);
+  });
+
+  it('still renders a plain bootstrap error message', async () => {
+    await renderApp();
+    await act(async () => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'webShellBootstrapError',
+            data: { message: 'daemon exploded' },
+          },
+        }),
+      );
+    });
+    const notice = document.querySelector('[role="alert"]');
+    expect(notice?.textContent).toContain('daemon exploded');
+  });
+
   it('attributes an internal new session to VS Code after a foreign clear', async () => {
     await renderApp();
     await act(async () => {

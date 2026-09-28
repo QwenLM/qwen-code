@@ -93,7 +93,7 @@ not maintain a separate public-to-Harness Session mapping.
 
 ## Public Session lifecycle
 
-Close, archive and delete are durable operations (Flyway V16). Each answers
+Close, archive and delete are durable operations (Flyway V17). Each answers
 `202` with a command operation that
 `GET /v1/agents/sessions/{id}/operations/{operationId}` reads back, also after a
 delete; the WebShell adapter offers the same routes. The public control plane
