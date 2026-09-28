@@ -1244,9 +1244,12 @@ describe('memory metadata migration', () => {
         return readdir(...args);
       });
     try {
-      await expect(runMemoryMetadataMigration(params)).rejects.toThrow(
-        'incomplete',
-      );
+      await expect(runMemoryMetadataMigration(params)).resolves.toMatchObject({
+        attempted: 1,
+        committed: 1,
+        remainingLegacyFiles: 0,
+        indexRebuildError: expect.stringContaining('incomplete'),
+      });
       expect(generateMetadata).toHaveBeenCalledTimes(1);
       expect(await fs.readFile(filePath, 'utf-8')).toContain(
         'name: Migrated memory',
@@ -1288,13 +1291,20 @@ describe('memory metadata migration', () => {
       generateMetadata,
     };
 
-    await expect(runMemoryMetadataMigration(params)).rejects.toThrow();
-    await fs.rmdir(index);
     await expect(runMemoryMetadataMigration(params)).resolves.toMatchObject({
+      attempted: 1,
+      committed: 1,
+      remainingLegacyFiles: 0,
+      indexRebuildError: expect.any(String),
+    });
+    await fs.rmdir(index);
+    const repaired = await runMemoryMetadataMigration(params);
+    expect(repaired).toMatchObject({
       attempted: 0,
       committed: 0,
       remainingLegacyFiles: 0,
     });
+    expect(repaired).not.toHaveProperty('indexRebuildError');
     expect(generateMetadata).toHaveBeenCalledTimes(1);
     await expect(fs.readFile(index, 'utf-8')).resolves.toContain('legacy.md');
   });

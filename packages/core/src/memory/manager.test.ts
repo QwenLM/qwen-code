@@ -828,6 +828,46 @@ describe('MemoryManager', () => {
       }
     });
 
+    it('preserves committed counts when the index rebuild fails', async () => {
+      await writeLegacy(getAutoMemoryRoot(projectRoot), 'project.md');
+      vi.spyOn(
+        metadataMigration,
+        'runMemoryMetadataMigration',
+      ).mockResolvedValue({
+        filesScanned: 1,
+        legacyFiles: 1,
+        remainingLegacyFiles: 0,
+        attempted: 1,
+        committed: 1,
+        conflicts: 0,
+        failed: 0,
+        agentDurationMs: 1,
+        inputTokens: 1,
+        outputTokens: 1,
+        totalTokens: 2,
+        indexRebuildError: 'Index rebuild failed',
+      });
+      const scheduled = await new MemoryManager().scheduleMetadataMigration({
+        projectRoot,
+        scope: 'project',
+        config: makeMockConfig(),
+      });
+
+      expect(scheduled.status).toBe('scheduled');
+      if (scheduled.status !== 'scheduled') return;
+      const record = await scheduled.promise;
+      expect(record).toMatchObject({
+        status: 'failed',
+        error: 'Index rebuild failed',
+        metadata: {
+          attempted: 1,
+          committed: 1,
+          remainingLegacyFiles: 0,
+          indexRebuildError: 'Index rebuild failed',
+        },
+      });
+    });
+
     it('tells the manual dream gate that the migration has stalled', async () => {
       // dream.ts owns the manual migration gate but cannot read the stall
       // counter, so the manager has to hand it over. Without the flag a

@@ -100,6 +100,7 @@ interface MemoryMetadataMigrationResult {
   inputTokens: number;
   outputTokens: number;
   totalTokens: number;
+  indexRebuildError?: string;
 }
 
 interface GeneratedMemoryMetadataWithUsage {
@@ -758,7 +759,12 @@ export async function runMemoryMetadataMigration(params: {
     }
   }
   // A previous run may have committed metadata before its index write failed.
-  await rebuildIndexes(roots);
+  try {
+    await rebuildIndexes(roots);
+  } catch (error) {
+    result.indexRebuildError =
+      error instanceof Error ? error.message : String(error);
+  }
   result.remainingLegacyFiles = (
     await Promise.all(
       roots.map((root) =>
