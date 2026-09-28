@@ -307,12 +307,39 @@ const STEP_STATUSES: ReadonlySet<unknown> = new Set([
   'failed',
 ]);
 
+function isValidPermissionOption(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    typeof value['optionId'] === 'string' &&
+    typeof value['name'] === 'string' &&
+    (value['kind'] === undefined || typeof value['kind'] === 'string')
+  );
+}
+
+function isValidPermission(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    typeof value['requestId'] === 'string' &&
+    typeof value['title'] === 'string' &&
+    Array.isArray(value['options']) &&
+    value['options'].every(isValidPermissionOption)
+  );
+}
+
+function isValidStep(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    typeof value['id'] === 'string' &&
+    typeof value['title'] === 'string' &&
+    STEP_STATUSES.has(value['status'])
+  );
+}
+
 // `progress` is a display snapshot, but `outputText` decides whether a
 // completed run closes as `unclosed`, so its shape is checked like the rest.
 function isValidProgress(value: unknown): boolean {
   if (value === undefined) return true;
   if (!isRecord(value)) return false;
-  const permission = value['permission'];
   const steps = value['steps'];
   return (
     isNonNegativeInteger(value['attempt']) &&
@@ -325,28 +352,9 @@ function isValidProgress(value: unknown): boolean {
       typeof value['outputText'] === 'string') &&
     (value['thoughtText'] === undefined ||
       typeof value['thoughtText'] === 'string') &&
-    (permission === undefined ||
-      (isRecord(permission) &&
-        typeof permission['requestId'] === 'string' &&
-        typeof permission['title'] === 'string' &&
-        Array.isArray(permission['options']) &&
-        permission['options'].every(
-          (option) =>
-            isRecord(option) &&
-            typeof option['optionId'] === 'string' &&
-            typeof option['name'] === 'string' &&
-            (option['kind'] === undefined ||
-              typeof option['kind'] === 'string'),
-        ))) &&
-    (steps === undefined ||
-      (Array.isArray(steps) &&
-        steps.every(
-          (step) =>
-            isRecord(step) &&
-            typeof step['id'] === 'string' &&
-            typeof step['title'] === 'string' &&
-            STEP_STATUSES.has(step['status']),
-        )))
+    (value['permission'] === undefined ||
+      isValidPermission(value['permission'])) &&
+    (steps === undefined || (Array.isArray(steps) && steps.every(isValidStep)))
   );
 }
 
@@ -1169,9 +1177,10 @@ export async function updateWorkspaceAgents(
   mutate: (agents: WorkspaceAgent[]) => WorkspaceAgent[],
 ): Promise<WorkspaceAgent[]> {
   return withAgentStoreTransaction(projectRoot, async (transaction) => {
-    const agents = await transaction.readAgents();
-    const next = mutate(agents);
-    if (next !== agents) await transaction.writeAgents(next);
+    // Always written: `mutate` may edit the roster in place and return the
+    // same array, and skipping on identity would drop that change silently.
+    const next = mutate(await transaction.readAgents());
+    await transaction.writeAgents(next);
     return next;
   });
 }
@@ -1463,7 +1472,8 @@ export async function reconcileThreadOutbox(
    * pending rather than acknowledged, so a kind whose consumer does not exist
    * yet is visibly outstanding instead of silently dropped.
    */
-  filter: (event: ThreadEvent) => boolean = () => true,
+  filter: (event: ThreadEvent) => boolean = (event) =>
+    event.kind === 'parent_report',
 ): Promise<Thread> {
   return withAgentStoreTransaction(projectRoot, async (transaction) => {
     let source = await transaction.readThread(threadId);

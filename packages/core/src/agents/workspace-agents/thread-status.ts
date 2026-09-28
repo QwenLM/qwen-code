@@ -40,7 +40,7 @@ import type {
 import { isThreadTerminal } from './types.js';
 
 /** Run states that keep a thread `in_progress` regardless of any obligation. */
-const LIVE_RUN_STATUSES = new Set([
+export const LIVE_RUN_STATUSES: ReadonlySet<string> = new Set([
   'queued',
   'running',
   'finishing',
@@ -62,6 +62,7 @@ export type CloseObligationKind =
   | 'blocked'
   | 'cancelled'
   | 'failure'
+  | 'stranded'
   | 'unclosed'
   | 'waiting'
   | 'review';
@@ -79,6 +80,7 @@ const BLOCKING_KINDS = new Set<CloseObligationKind>([
   'blocked',
   'cancelled',
   'failure',
+  'stranded',
   'unclosed',
 ]);
 
@@ -89,6 +91,14 @@ function obligationFor(run: ThreadRun): CloseObligation | undefined {
     run.closeAcknowledgedAtSequence === undefined
       ? {}
       : { acknowledgedAtSequence: run.closeAcknowledgedAtSequence };
+  // A stranded run is not an ordinary failure: the system parked it when the
+  // collaboration opt-in went away, and by contract only a person decides
+  // what happens next — classifying it as `failure` would let any post that
+  // books work release it (see the release list in thread-actions.ts, which
+  // deliberately omits `stranded`).
+  if (run.closeKind === 'stranded') {
+    return { ...base, kind: 'stranded', ...acknowledged };
+  }
   // A failed run outranks whatever it managed to record first: the failure is
   // the thing a person has to see.
   if (run.status === 'failed') {
@@ -205,9 +215,11 @@ export function resolveThreadStatus(
           ? 'an Agent asked a question and is waiting for you'
           : first.kind === 'cancelled'
             ? 'an Agent run was cancelled and no successor is runnable'
-            : first.kind === 'failure'
-              ? 'an Agent run failed and no successor is runnable'
-              : 'an Agent ended without a hand-off',
+            : first.kind === 'stranded'
+              ? 'an Agent run was parked when collaboration was turned off and is waiting for you'
+              : first.kind === 'failure'
+                ? 'an Agent run failed and no successor is runnable'
+                : 'an Agent ended without a hand-off',
       outstanding,
     };
   }
@@ -226,15 +238,16 @@ export function resolveThreadStatus(
   }
 
   // Only a person's post that reached nobody is a dead end. An agent's reply
-  // that wakes no one is the normal end of its turn.
-  const lastMessage = thread.messages[thread.messages.length - 1];
-  if (
-    lastMessage?.authorKind === 'human' &&
-    admissionBookedNothing(lastMessage)
-  ) {
+  // that wakes no one is the normal end of its turn — and a later system
+  // report must not bury the dead end either, so read the most recent human
+  // admission, not the last message overall.
+  const lastAdmission = thread.messages.findLast(
+    (message) => message.authorKind === 'human',
+  );
+  if (lastAdmission && admissionBookedNothing(lastAdmission)) {
     return {
       status: 'blocked',
-      reason: `the last post booked no work (${lastMessage.outcomes
+      reason: `the last post booked no work (${lastAdmission.outcomes
         .map((outcome) => outcome.reason ?? outcome.kind)
         .join(', ')})`,
       outstanding,

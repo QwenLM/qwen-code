@@ -73,6 +73,22 @@ describe('parseMentions', () => {
     });
   });
 
+  it('leaves prose `@words` out of routing', () => {
+    // Recorded as unknown, each of these used to suppress the assignee.
+    const scope = `@${'a'.repeat(60)}/plugin`;
+    const text = `add @Override, see @media and @pytest.mark, or ${scope}`;
+    expect(parseMentions(text, agents)).toEqual({ ids: [], unknown: [] });
+  });
+
+  it('does not read a longer Latin word as a shorter name', () => {
+    const roster: WorkspaceAgent[] = [
+      { id: 'ag_mar', name: 'mar', createdAt: 1 },
+      { id: 'ag_alice', name: 'alice', createdAt: 1 },
+    ];
+    const parsed = parseMentions('@maría escribió, @alice２ también', roster);
+    expect(parsed).toEqual({ ids: [], unknown: ['maría', 'alice２'] });
+  });
+
   it('does not stretch a name into a longer ASCII word', () => {
     const roster: WorkspaceAgent[] = [
       { id: 'ag_alice', name: 'alice', createdAt: 1 },

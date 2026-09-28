@@ -263,6 +263,80 @@ describe('agent run lifecycle', () => {
     ).rejects.toThrow(/no longer the active attempt/);
   });
 
+  it('reports blocked to the parent when a failed run was never reported itself', async () => {
+    // A failure while a sibling is live queues no child_failed — the sibling's
+    // completion is expected to carry the news — but a plain completion emits
+    // nothing, so without the aggregate fallback the parent never hears it.
+    const parent = await seed();
+    const child = await createThread(PROJECT_ROOT, {
+      title: 'child',
+      parentThreadId: parent.id,
+    });
+    await writeThread(PROJECT_ROOT, {
+      ...child,
+      status: 'in_progress',
+      runs: [
+        run({ queueSequence: 100 }),
+        run({ id: 'rn_bob', agentId: BOB.id, queueSequence: 101 }),
+      ],
+    });
+
+    // Alice fails while Bob is still running: no report yet.
+    let stored = await finish(child.id, 'rn_alice', { status: 'failed' });
+    expect(stored.outbox).toEqual([]);
+
+    // Bob completes: a plain completion emits nothing either…
+    stored = await finish(child.id, 'rn_bob', { status: 'completed' });
+    expect(
+      stored.outbox.some((event) => event.payload['event'] === 'child_failed'),
+    ).toBe(false);
+    // …but the aggregate block must not stay silent: the failure was never
+    // reported, so the block itself is the news the parent gets.
+    expect(stored.status).toBe('blocked');
+    expect(
+      stored.outbox.some(
+        (event) =>
+          event.payload['event'] === 'child_blocked' &&
+          event.causedByRunId === 'rn_alice',
+      ),
+    ).toBe(true);
+  });
+
+  it('does not stack child_cancelled on top of a person-done report', async () => {
+    // Marking a thread done already queued child_done; settling the runs its
+    // cancellation started must not append a contradicting child_cancelled.
+    const parent = await seed();
+    const child = await createThread(PROJECT_ROOT, {
+      title: 'child',
+      parentThreadId: parent.id,
+    });
+    await writeThread(PROJECT_ROOT, {
+      ...child,
+      status: 'done',
+      runs: [run({ status: 'cancelling' })],
+      outbox: [
+        {
+          id: 'ev_done',
+          kind: 'parent_report',
+          payload: {
+            event: 'child_done',
+            threadId: child.id,
+            parentThreadId: parent.id,
+          },
+          status: 'pending',
+          attempts: 0,
+          createdAt: 1,
+        },
+      ],
+    });
+
+    const stored = await finish(child.id, 'rn_alice', { status: 'cancelled' });
+    expect(
+      stored.outbox.filter((event) => event.kind === 'parent_report'),
+    ).toHaveLength(1);
+    expect(stored.outbox[0]?.payload['event']).toBe('child_done');
+  });
+
   it('discharges a peer wait so a review is not reported as blocked', async () => {
     const thread = await seed({
       runs: [
@@ -295,6 +369,57 @@ describe('agent run lifecycle', () => {
     expect(finished.status).not.toBe('blocked');
     expect(finished.status).toBe('in_progress');
     expect(finished.runs.some((entry) => entry.status === 'queued')).toBe(true);
+  });
+
+  it('discharges a waiter that is still finishing when the close wakes it', async () => {
+    // Alice closed `waiting` but her run has not landed yet. Bob's close
+    // @-mentions her; the same close must discharge her wait, or it outlives
+    // the answer and reads as blocked once she is woken and replies.
+    const thread = await seed({
+      runs: [
+        run({ id: 'rn_wait', status: 'finishing', closeKind: 'waiting' }),
+        run({
+          id: 'rn_bob',
+          agentId: BOB.id,
+          status: 'running',
+          queueSequence: 101,
+        }),
+      ],
+    });
+
+    const closed = await closeRun(PROJECT_ROOT, {
+      context: context(thread.id, { agentId: BOB.id, runId: 'rn_bob' }),
+      request: { kind: 'review', summary: 'the flake is the retry path' },
+    });
+    const wait = closed.thread.runs.find((entry) => entry.id === 'rn_wait');
+    expect(wait?.closeAcknowledgedAtSequence).toBe(closed.message?.sequence);
+  });
+
+  it('does not count a quiet child as a dependency a wait can rest on', async () => {
+    // A child left `in_progress` by a plain answer has nothing running and
+    // owes nothing: it can never wake the parent, so waiting on it would
+    // strand the parent in `in_progress`.
+    const parent = await seed();
+    const created = await createThread(PROJECT_ROOT, {
+      title: 'answered',
+      parentThreadId: parent.id,
+    });
+    const quietChild: Thread = {
+      ...created,
+      status: 'in_progress',
+      runs: [run({ id: 'rn_child', agentId: BOB.id, status: 'completed' })],
+    };
+    await writeThread(PROJECT_ROOT, quietChild);
+
+    expect(hasLiveDescendant([{ ...parent }, quietChild], parent.id)).toBe(
+      false,
+    );
+    await expect(
+      closeRun(PROJECT_ROOT, {
+        context: context(parent.id),
+        request: { kind: 'waiting' },
+      }),
+    ).rejects.toThrow(RunCloseRejectedError);
   });
 
   it('records a clean exit with no closing tool as unclosed and blocks', async () => {
