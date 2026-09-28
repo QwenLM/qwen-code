@@ -15,6 +15,7 @@ import com.alibaba.qwen.code.managedagent.api.ApiModels;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.CommandAdmission;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.CreateSessionRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.InputBlock;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicCommandOperation;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicContentPart;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicEvent;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicItem;
@@ -29,11 +30,14 @@ import com.alibaba.qwen.code.managedagent.api.ApiModels.SessionResyncRequired;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.UpdateSessionRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellAdmission;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellCancelRequest;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellCommandOperation;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellContentPart;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellCreateRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellEvent;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellItem;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellLifecycleRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellListRequest;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellOperationRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellResyncRequired;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellPage;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSession;
@@ -119,6 +123,8 @@ class ManagedAgentApiContractTest {
                     entry(WebShellWorkspace.class,
                             List.of("WebShellWorkspaceContext")),
                     entry(PublicSession.class, List.of("PublicSession")),
+                    entry(PublicCommandOperation.class,
+                            List.of("PublicCommandOperation")),
                     entry(SessionCapabilities.class,
                             List.of("SessionCapabilities")),
                     entry(PublicList.class,
@@ -146,6 +152,12 @@ class ManagedAgentApiContractTest {
                             List.of("WebShellCancelRequest")),
                     entry(WebShellAdmission.class,
                             List.of("WebShellAdmission")),
+                    entry(WebShellLifecycleRequest.class,
+                            List.of("WebShellLifecycleRequest")),
+                    entry(WebShellOperationRequest.class,
+                            List.of("WebShellOperationRequest")),
+                    entry(WebShellCommandOperation.class,
+                            List.of("WebShellCommandOperation")),
                     entry(WebShellTurn.class, List.of("WebShellTurn")),
                     entry(WebShellSession.class, List.of("WebShellSession")),
                     entry(WebShellPage.class,
@@ -354,34 +366,109 @@ class ManagedAgentApiContractTest {
                         .header(TENANT, tenant)
                         .header(IDEMPOTENCY_KEY, "contract-rename"),
                 "{\"title\":\"renamed\"}");
-        harness.setAvailable(false);
+        exchange(drift, "archiveSession", 409,
+                post("/v1/agents/sessions/{id}/archive", sessionId)
+                        .header(TENANT, tenant)
+                        .header(IDEMPOTENCY_KEY, "contract-archive-active"),
+                null);
+        exchange(drift, "closeSession", 400,
+                post("/v1/agents/sessions/{id}/close", sessionId)
+                        .header(TENANT, tenant)
+                        .header(IDEMPOTENCY_KEY, "two words"), null);
+        exchange(drift, "closeSession", 404,
+                post("/v1/agents/sessions/{id}/close", sessionId)
+                        .header(TENANT, otherTenant)
+                        .header(IDEMPOTENCY_KEY, "contract-foreign-close"),
+                null);
+        exchange(drift, "closeSession", 403,
+                post("/v1/agents/sessions/{id}/close", sessionId)
+                        .header(TENANT, tenant).principal(actor(otherTenant))
+                        .header(IDEMPOTENCY_KEY, "contract-foreign-close"),
+                null);
+        // The Harness fails every close, so the close waits and the Session
+        // reads closing until the Harness closes it.
+        String closeId;
+        harness.failCloses(Integer.MAX_VALUE);
         try {
-            assertThat(mvc.perform(
-                            post("/v1/agents/sessions/{id}/archive", sessionId)
-                                    .header(TENANT, tenant)
-                                    .header(IDEMPOTENCY_KEY,
-                                            "contract-archive"))
-                    .andReturn().getResponse().getStatus()).isEqualTo(503);
+            JsonNode closing = json(exchange(drift, "closeSession", 202,
+                    post("/v1/agents/sessions/{id}/close", sessionId)
+                            .header(TENANT, tenant)
+                            .header(IDEMPOTENCY_KEY, "contract-close"), null));
+            assertThat(closing.get("status").asText()).isEqualTo("pending");
+            closeId = closing.get("id").asText();
+            await().atMost(Duration.ofSeconds(5)).until(() ->
+                    jdbc.queryForObject("SELECT attempt_count FROM"
+                                    + " managed_agent_operation WHERE"
+                                    + " operation_id = ?", Integer.class,
+                            closeId) > 0);
+            assertThat(json(exchange(drift, "getSession", 200,
+                    get("/v1/agents/sessions/{id}", sessionId)
+                            .header(TENANT, tenant), null))
+                    .get("status").asText()).isEqualTo("closing");
+            assertThat(json(exchange(drift, "getSessionCwdOperation", 200,
+                    get("/v1/agents/sessions/{id}/operations/{op}",
+                            sessionId, closeId).header(TENANT, tenant), null))
+                    .get("status").asText()).isEqualTo("running");
+            exchange(drift, "deleteSession", 409,
+                    delete("/v1/agents/sessions/{id}", sessionId)
+                            .header(TENANT, tenant)
+                            .header(IDEMPOTENCY_KEY, "contract-delete-busy"),
+                    null);
+            exchange(drift, "deleteWebShellSession", 409,
+                    post(WEB_SHELL + "/sessions/delete").header(TENANT, tenant),
+                    """
+                    {"sessionId":"%s","idempotencyKey":"contract-web-busy"}
+                    """.formatted(sessionId));
         } finally {
-            harness.setAvailable(true);
+            harness.failCloses(0);
         }
+        awaitOperation(tenant, sessionId, closeId);
+        JsonNode replayedClose = json(exchange(drift, "closeSession", 202,
+                post("/v1/agents/sessions/{id}/close", sessionId)
+                        .header(TENANT, tenant)
+                        .header(IDEMPOTENCY_KEY, "contract-close"), null));
+        assertThat(replayedClose.get("id").asText()).isEqualTo(closeId);
+        assertThat(replayedClose.get("replayed").asBoolean()).isTrue();
+        assertThat(replayedClose.get("admission_stage").asText())
+                .isEqualTo("harness_confirmed");
+        exchange(drift, "closeSession", 409,
+                post("/v1/agents/sessions/{id}/close", sessionId)
+                        .header(TENANT, tenant)
+                        .header(IDEMPOTENCY_KEY, "contract-close-again"), null);
+        exchange(drift, "getSessionCwdOperation", 404,
+                get("/v1/agents/sessions/{id}/operations/{op}", sessionId,
+                        closeId).header(TENANT, otherTenant), null);
+        exchange(drift, "getSessionCwdOperation", 404,
+                get("/v1/agents/sessions/{id}/operations/{op}", sessionId,
+                        "op_missing").header(TENANT, tenant), null);
+        exchange(drift, "getSessionCwdOperation", 403,
+                get("/v1/agents/sessions/{id}/operations/{op}", sessionId,
+                        closeId).header(TENANT, tenant)
+                        .principal(actor(otherTenant)), null);
+        exchange(drift, "getSessionCwdOperation", 400,
+                get("/v1/agents/sessions/{id}/operations/{op}", sessionId,
+                        closeId), null);
+        assertThat(json(exchange(drift, "getSessionCwdOperation", 400,
+                get("/v1/agents/sessions/{id}/operations/{op}", sessionId,
+                        "op_" + "0".repeat(62)).header(TENANT, tenant), null))
+                .path("error").path("code").asText())
+                .isEqualTo("invalid_request");
+        JsonNode archived = json(exchange(drift, "archiveSession", 202,
+                post("/v1/agents/sessions/{id}/archive", sessionId)
+                        .header(TENANT, tenant)
+                        .header(IDEMPOTENCY_KEY, "contract-archive"), null));
+        assertThat(archived.get("status").asText()).isEqualTo("completed");
         assertThat(json(exchange(drift, "getSession", 200,
                 get("/v1/agents/sessions/{id}", sessionId)
                         .header(TENANT, tenant), null))
-                .get("status").asText()).isEqualTo("archiving");
-        exchange(drift, "archiveSession", 202,
-                post("/v1/agents/sessions/{id}/archive", sessionId)
-                        .header(TENANT, tenant)
-                        .header(IDEMPOTENCY_KEY, "contract-archive"), null);
-        exchange(drift, "getSession", 200,
-                get("/v1/agents/sessions/{id}", sessionId)
-                        .header(TENANT, tenant), null);
+                .get("status").asText()).isEqualTo("archived");
         exchange(drift, "listSessions", 200, get("/v1/agents/sessions")
                 .param("limit", "100").header(TENANT, tenant), null);
-        exchange(drift, "unarchiveSession", 200,
+        assertThat(json(exchange(drift, "unarchiveSession", 200,
                 post("/v1/agents/sessions/{id}/unarchive", sessionId)
                         .header(TENANT, tenant)
-                        .header(IDEMPOTENCY_KEY, "contract-unarchive"), null);
+                        .header(IDEMPOTENCY_KEY, "contract-unarchive"), null))
+                .get("status").asText()).isEqualTo("closed");
 
         String cancelledId = json(exchange(drift, "createSession", 202,
                 post("/v1/agents/sessions").header(TENANT, tenant)
@@ -526,14 +613,150 @@ class ManagedAgentApiContractTest {
                 """)).get("sessionId").asText();
         awaitMaterialized(tenant, webInputId);
 
-        for (String id : List.of(sessionId, cancelledId, webSessionId,
-                webInputId)) {
-            exchange(drift, "deleteSession", 202,
+        exchange(drift, "closeWebShellSession", 400,
+                post(WEB_SHELL + "/sessions/close").header(TENANT, tenant),
+                "{\"sessionId\":\"%s\"}".formatted(webSessionId));
+        exchange(drift, "closeWebShellSession", 404,
+                post(WEB_SHELL + "/sessions/close").header(TENANT, otherTenant),
+                """
+                {"sessionId":"%s","idempotencyKey":"contract-web-foreign"}
+                """.formatted(webSessionId));
+        exchange(drift, "closeWebShellSession", 403,
+                post(WEB_SHELL + "/sessions/close").header(TENANT, tenant)
+                        .principal(actor(otherTenant)),
+                """
+                {"sessionId":"%s","idempotencyKey":"contract-web-foreign"}
+                """.formatted(webSessionId));
+        exchange(drift, "archiveWebShellSession", 409,
+                post(WEB_SHELL + "/sessions/archive").header(TENANT, tenant),
+                """
+                {"sessionId":"%s","idempotencyKey":"contract-web-active"}
+                """.formatted(webSessionId));
+        String webCloseId = json(exchange(drift, "closeWebShellSession", 202,
+                post(WEB_SHELL + "/sessions/close").header(TENANT, tenant),
+                """
+                {"sessionId":"%s","idempotencyKey":"contract-web-close"}
+                """.formatted(webSessionId))).get("operationId").asText();
+        awaitOperation(tenant, webSessionId, webCloseId);
+        JsonNode webClosed = json(exchange(drift,
+                "webShellQueryCwdOperation", 200,
+                post(WEB_SHELL + "/operations/query").header(TENANT, tenant),
+                """
+                {"sessionId":"%s","operationId":"%s"}
+                """.formatted(webSessionId, webCloseId)));
+        assertThat(webClosed.get("status").asText()).isEqualTo("completed");
+        assertThat(webClosed.get("replayed").asBoolean()).isFalse();
+        exchange(drift, "closeWebShellSession", 409,
+                post(WEB_SHELL + "/sessions/close").header(TENANT, tenant),
+                """
+                {"sessionId":"%s","idempotencyKey":"contract-web-again"}
+                """.formatted(webSessionId));
+        exchange(drift, "webShellQueryCwdOperation", 404,
+                post(WEB_SHELL + "/operations/query")
+                        .header(TENANT, otherTenant),
+                """
+                {"sessionId":"%s","operationId":"%s"}
+                """.formatted(webSessionId, webCloseId));
+        exchange(drift, "webShellQueryCwdOperation", 400,
+                post(WEB_SHELL + "/operations/query").header(TENANT, tenant),
+                "{\"sessionId\":\"%s\"}".formatted(webSessionId));
+        exchange(drift, "webShellQueryCwdOperation", 400,
+                post(WEB_SHELL + "/operations/query").header(TENANT, tenant),
+                """
+                {"sessionId":"%s","operationId":"op_%s"}
+                """.formatted(webSessionId, "0".repeat(62)));
+        exchange(drift, "webShellQueryCwdOperation", 403,
+                post(WEB_SHELL + "/operations/query").header(TENANT, tenant)
+                        .principal(actor(otherTenant)),
+                """
+                {"sessionId":"%s","operationId":"%s"}
+                """.formatted(webSessionId, webCloseId));
+        exchange(drift, "archiveWebShellSession", 202,
+                post(WEB_SHELL + "/sessions/archive").header(TENANT, tenant),
+                """
+                {"sessionId":"%s","idempotencyKey":"contract-web-archive"}
+                """.formatted(webSessionId));
+        exchange(drift, "archiveWebShellSession", 404,
+                post(WEB_SHELL + "/sessions/archive")
+                        .header(TENANT, otherTenant),
+                """
+                {"sessionId":"%s","idempotencyKey":"contract-web-foreign"}
+                """.formatted(webSessionId));
+        exchange(drift, "archiveWebShellSession", 400,
+                post(WEB_SHELL + "/sessions/archive").header(TENANT, tenant),
+                "{}");
+        exchange(drift, "archiveWebShellSession", 403,
+                post(WEB_SHELL + "/sessions/archive").header(TENANT, tenant)
+                        .principal(actor(otherTenant)),
+                """
+                {"sessionId":"%s","idempotencyKey":"contract-web-foreign"}
+                """.formatted(webSessionId));
+        exchange(drift, "deleteWebShellSession", 404,
+                post(WEB_SHELL + "/sessions/delete")
+                        .header(TENANT, otherTenant),
+                """
+                {"sessionId":"%s","idempotencyKey":"contract-web-foreign"}
+                """.formatted(webSessionId));
+        exchange(drift, "deleteWebShellSession", 400,
+                post(WEB_SHELL + "/sessions/delete").header(TENANT, tenant),
+                "{}");
+        exchange(drift, "deleteWebShellSession", 403,
+                post(WEB_SHELL + "/sessions/delete").header(TENANT, tenant)
+                        .principal(actor(otherTenant)),
+                """
+                {"sessionId":"%s","idempotencyKey":"contract-web-foreign"}
+                """.formatted(webSessionId));
+        String webDeleteId = json(exchange(drift, "deleteWebShellSession", 202,
+                post(WEB_SHELL + "/sessions/delete").header(TENANT, tenant),
+                """
+                {"sessionId":"%s","idempotencyKey":"contract-web-delete"}
+                """.formatted(webSessionId))).get("operationId").asText();
+        awaitOperation(tenant, webSessionId, webDeleteId);
+        exchange(drift, "deleteSession", 400,
+                delete("/v1/agents/sessions/{id}", webInputId)
+                        .header(TENANT, tenant)
+                        .header(IDEMPOTENCY_KEY, "two words"), null);
+        exchange(drift, "deleteSession", 403,
+                delete("/v1/agents/sessions/{id}", webInputId)
+                        .header(TENANT, tenant).principal(actor(otherTenant))
+                        .header(IDEMPOTENCY_KEY, "contract-foreign-delete"),
+                null);
+        exchange(drift, "deleteSession", 404,
+                delete("/v1/agents/sessions/{id}", webInputId)
+                        .header(TENANT, otherTenant)
+                        .header(IDEMPOTENCY_KEY, "contract-foreign-delete"),
+                null);
+        exchange(drift, "archiveSession", 400,
+                post("/v1/agents/sessions/{id}/archive", webInputId)
+                        .header(TENANT, tenant)
+                        .header(IDEMPOTENCY_KEY, "two words"), null);
+        exchange(drift, "archiveSession", 403,
+                post("/v1/agents/sessions/{id}/archive", webInputId)
+                        .header(TENANT, tenant).principal(actor(otherTenant))
+                        .header(IDEMPOTENCY_KEY, "contract-foreign-archive"),
+                null);
+        exchange(drift, "archiveSession", 404,
+                post("/v1/agents/sessions/{id}/archive", webInputId)
+                        .header(TENANT, otherTenant)
+                        .header(IDEMPOTENCY_KEY, "contract-foreign-archive"),
+                null);
+        awaitIdle(tenant, webInputId);
+        for (String id : List.of(sessionId, cancelledId, webInputId)) {
+            String deleteId = json(exchange(drift, "deleteSession", 202,
                     delete("/v1/agents/sessions/{id}", id)
                             .header(TENANT, tenant)
                             .header(IDEMPOTENCY_KEY, "contract-delete-" + id),
-                    null);
+                    null)).get("id").asText();
+            awaitOperation(tenant, id, deleteId);
+            exchange(drift, "getSessionCwdOperation", 200,
+                    get("/v1/agents/sessions/{id}/operations/{op}", id,
+                            deleteId).header(TENANT, tenant), null);
         }
+        exchange(drift, "deleteSession", 404,
+                delete("/v1/agents/sessions/{id}", sessionId)
+                        .header(TENANT, tenant)
+                        .header(IDEMPOTENCY_KEY, "contract-delete-again"),
+                null);
         checkStream(drift, "getSessionEvents", "PublicEvent", publicStream);
         checkStream(drift, "webShellStreamEvents", "WebShellEvent",
                 webShellStream);
@@ -704,7 +927,7 @@ class ManagedAgentApiContractTest {
             assertThat(session.get("agent_revision").asText()).isEqualTo("1");
             assertThat(session.get("capabilities")).isEqualTo(json("""
                     {"items":true,"snapshots":true,"artifacts":false,
-                     "resync":true}
+                     "resync":true,"session_lifecycle":true}
                     """));
             assertThat(session.get("replay_floor_sequence").asLong()).isZero();
             assertThat(session.get("snapshot_through_sequence").asLong())
@@ -1007,6 +1230,17 @@ class ManagedAgentApiContractTest {
                                 .header(TENANT, tenant),
                         "{\"sessionId\":\"%s\",\"afterSequence\":0}"
                                 .formatted(sessionId)));
+    }
+
+    private void awaitOperation(String tenant, String sessionId,
+            String operationId) {
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
+                assertThat(json(mvc.perform(get(
+                                "/v1/agents/sessions/{id}/operations/{op}",
+                                sessionId, operationId).header(TENANT, tenant))
+                        .andReturn().getResponse()
+                        .getContentAsString(StandardCharsets.UTF_8))
+                        .get("status").asText()).isEqualTo("completed"));
     }
 
     private int awaitHeldTurn() {

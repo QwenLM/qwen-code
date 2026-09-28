@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Qwen Managed Agent Public and WebShell API",
-    "version": "1.17.0",
-    "description": "Canonical contract for the public Managed Agent resources and the WebShell adapter. partial means that the route exists but generated types and full contract tests are pending; planned means that the route or field is not implemented. Workspace context and cwd operations are v1.9 target contracts, not current server capabilities. v1.10 adds planned command admission, Actions, lifecycle and actor authorization. v1.12 refines planned W0 creation discovery, actor-specific create hints and explicit default selection. Full tool-result descriptors from the v1.11 design are not yet included. Filter planned fields as well as routes from production SDKs. v1.13 moves this contract into the Qwen Code repository as its single source and records the shipped rename, archive, unarchive and delete routes as partial. v1.14 integrates W0d workspace discovery, the WebShell workspace lookup, and empty-session binding as partial; workspace_binding/workspaceBinding advertises this narrow flow without enabling workspace execution or context switching. v1.15 adds the archived, archiving and deleting Session statuses and the cancelling Turn status, requires request_id in error envelopes, declares the error responses that the server returns, and marks Session create, list and get on both surfaces implemented. v1.16 adds the planned Stage H task contract (SessionTaskView as PublicTask, task list, detail, events and cancel) and names the MCP catalog, hook catalog, automation and channel resources as planned; their shapes arrive with Stages H1 to H6. v1.17 implements event replay: events carry their schema and projection versions and a top-level Item and Part identity, JSON event pages return has_more and next_cursor and accept limits up to 1000, and a persisted replay floor answers expired cursors with 409 cursor_expired in JSON and one agent.session.resync_required frame over SSE; it marks the public event query and stream, the WebShell event stream and the WebShell transcript implemented."
+    "version": "1.18.0",
+    "description": "Canonical contract for the public Managed Agent resources and the WebShell adapter. partial means that the route exists but generated types and full contract tests are pending; planned means that the route or field is not implemented. Workspace context and cwd operations are v1.9 target contracts, not current server capabilities. v1.10 adds planned command admission, Actions, lifecycle and actor authorization. v1.12 refines planned W0 creation discovery, actor-specific create hints and explicit default selection. Full tool-result descriptors from the v1.11 design are not yet included. Filter planned fields as well as routes from production SDKs. v1.13 moves this contract into the Qwen Code repository as its single source and records the shipped rename, archive, unarchive and delete routes as partial. v1.14 integrates W0d workspace discovery, the WebShell workspace lookup, and empty-session binding as partial; workspace_binding/workspaceBinding advertises this narrow flow without enabling workspace execution or context switching. v1.15 adds the archived, archiving and deleting Session statuses and the cancelling Turn status, requires request_id in error envelopes, declares the error responses that the server returns, and marks Session create, list and get on both surfaces implemented. v1.16 adds the planned Stage H task contract (SessionTaskView as PublicTask, task list, detail, events and cancel) and names the MCP catalog, hook catalog, automation and channel resources as planned; their shapes arrive with Stages H1 to H6. v1.17 implements event replay: events carry their schema and projection versions and a top-level Item and Part identity, JSON event pages return has_more and next_cursor and accept limits up to 1000, and a persisted replay floor answers expired cursors with 409 cursor_expired in JSON and one agent.session.resync_required frame over SSE; it marks the public event query and stream, the WebShell event stream and the WebShell transcript implemented. v1.18 implements the durable Session lifecycle (Stage D4): close, archive and delete answer 202 with a command operation on both surfaces, an archive requires a closed Session, a deleted Session leaves a tombstone whose operations stay readable, and the operation query serves them; unarchive restores a closed Session, and Session capabilities advertise session_lifecycle."
   },
   "servers": [
     {
@@ -328,7 +328,8 @@
       "delete": {
         "tags": ["Public Sessions"],
         "operationId": "deleteSession",
-        "x-qwen-implementation-status": "partial",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Accepts an active, closed or archived Session. 409 turn_active while a Turn is active, session_operation_active while another lifecycle change is pending, and workspace_unavailable for a Workspace-bound Session. The same key from the same actor returns the original operation, also after the Session was deleted.",
         "parameters": [
           {
             "$ref": "#/components/parameters/IdempotencyKey"
@@ -336,7 +337,7 @@
         ],
         "responses": {
           "202": {
-            "description": "Deletion accepted; seal admission and settle/clean up before content deletion. Shared Workspace is retained. Query the original operation through its tombstone after completion.",
+            "description": "Deletion accepted. The Session stops accepting input and reads deleting. If it was active, the operation first closes it as a close does; it then drains the Session's Runtime binding and leaves a tombstone: Session reads return 404, while its operations stay readable. The shared Workspace is never deleted, and no Session content is erased yet. 202 does not mean that tools have stopped.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1094,10 +1095,11 @@
       "get": {
         "tags": ["Public Sessions"],
         "operationId": "getSessionCwdOperation",
-        "x-qwen-implementation-status": "planned",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Reads one operation of the Session. Close, archive and delete operations are served now; cwd, command and task operations arrive with their slices. 404 operation_not_found for an unknown operation.",
         "responses": {
           "200": {
-            "description": "Authorized cwd, command, lifecycle or task operation; available without Runtime startup and through the deletion retry horizon.",
+            "description": "Authorized operation with its latest durable status, readable without Runtime startup and after the Session was deleted. Reading is not a replay, so replayed is false.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1199,7 +1201,7 @@
       "post": {
         "tags": ["WebShell"],
         "operationId": "webShellQueryCwdOperation",
-        "x-qwen-implementation-status": "planned",
+        "x-qwen-implementation-status": "implemented",
         "requestBody": {
           "required": true,
           "content": {
@@ -1212,7 +1214,7 @@
         },
         "responses": {
           "200": {
-            "description": "Authorized command/cwd/lifecycle/task operation; query survives Runtime downtime and deletion within the retry horizon.",
+            "description": "Same authorized operation semantics as the public API.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1382,10 +1384,11 @@
       "post": {
         "tags": ["Public Sessions"],
         "operationId": "closeSession",
-        "x-qwen-implementation-status": "planned",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Accepts an active Session; 409 session_state_conflict otherwise. 409 turn_active while a Turn is active, session_operation_active while another lifecycle change is pending, and workspace_unavailable for a Workspace-bound Session.",
         "responses": {
           "202": {
-            "description": "Close seals input and awaits ordered cleanup.",
+            "description": "Close accepted. The Session stops accepting input and reads closing. The operation asks the Hosted Harness to close the Session and completes once no Harness holds the Session's journal writer under an unexpired lease (the Harness that holds the Session seals it when closing) and the Session's Runtime binding drained; the Session then reads closed. 202 does not mean that tools have stopped.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1423,10 +1426,11 @@
       "post": {
         "tags": ["Public Sessions"],
         "operationId": "archiveSession",
-        "x-qwen-implementation-status": "partial",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Accepts a closed Session; 409 session_state_conflict otherwise, session_operation_active while another lifecycle change is pending, and workspace_unavailable for a Workspace-bound Session.",
         "responses": {
           "202": {
-            "description": "Archive requires a closed Session and retains history.",
+            "description": "Archive requires a closed Session and retains history. Java is its only authority, so a new archive is complete when it is admitted.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1465,7 +1469,7 @@
         "tags": ["Public Sessions"],
         "operationId": "unarchiveSession",
         "x-qwen-implementation-status": "partial",
-        "description": "Restores an archived Session. Shipped before the v1.10 lifecycle review, which does not cover it; the lifecycle work decides whether it becomes a durable operation like archive.",
+        "description": "Restores an archived Session to closed. Shipped before the v1.10 lifecycle review, which does not cover it. It stays a synchronous mutation rather than a command operation: Java is its only authority, and the Session stays closed.",
         "parameters": [
           {
             "$ref": "#/components/parameters/IdempotencyKey"
@@ -1626,7 +1630,7 @@
       "post": {
         "tags": ["WebShell"],
         "operationId": "closeWebShellSession",
-        "x-qwen-implementation-status": "planned",
+        "x-qwen-implementation-status": "implemented",
         "responses": {
           "202": {
             "description": "Same authorized operation semantics as the public API.",
@@ -1667,7 +1671,7 @@
       "post": {
         "tags": ["WebShell"],
         "operationId": "archiveWebShellSession",
-        "x-qwen-implementation-status": "planned",
+        "x-qwen-implementation-status": "implemented",
         "responses": {
           "202": {
             "description": "Same authorized operation semantics as the public API.",
@@ -1708,7 +1712,7 @@
       "post": {
         "tags": ["WebShell"],
         "operationId": "deleteWebShellSession",
-        "x-qwen-implementation-status": "planned",
+        "x-qwen-implementation-status": "implemented",
         "responses": {
           "202": {
             "description": "Same authorized operation semantics as the public API.",
@@ -2748,7 +2752,7 @@
           "session_lifecycle": {
             "type": "boolean",
             "default": false,
-            "x-qwen-implementation-status": "planned"
+            "description": "True when the Session accepts close, archive and delete operations; false for a Workspace-bound Session."
           },
           "tasks": {
             "type": "boolean",
@@ -4375,8 +4379,7 @@
             "minLength": 1,
             "maxLength": 64
           }
-        },
-        "x-qwen-implementation-status": "planned"
+        }
       },
       "WebShellCwdOperation": {
         "type": "object",
@@ -4943,18 +4946,20 @@
             "maxLength": 128
           },
           "action_resolution": {
-            "$ref": "#/components/schemas/ActionResolution"
+            "$ref": "#/components/schemas/ActionResolution",
+            "x-qwen-implementation-status": "planned"
           },
           "failure_code": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 128
+            "maxLength": 128,
+            "x-qwen-implementation-status": "planned",
+            "description": "Why the operation failed. Close, archive and delete retry until they complete, so they never report one."
           },
           "replayed": {
             "type": "boolean"
           }
         },
-        "x-qwen-implementation-status": "planned",
         "allOf": [
           {
             "if": {
@@ -5052,13 +5057,13 @@
       "PublicOperation": {
         "oneOf": [
           {
-            "$ref": "#/components/schemas/PublicCwdOperation"
+            "$ref": "#/components/schemas/PublicCwdOperation",
+            "x-qwen-implementation-status": "planned"
           },
           {
             "$ref": "#/components/schemas/PublicCommandOperation"
           }
-        ],
-        "x-qwen-implementation-status": "planned"
+        ]
       },
       "WebShellAction": {
         "oneOf": [
@@ -5253,18 +5258,20 @@
             "maxLength": 128
           },
           "actionResolution": {
-            "$ref": "#/components/schemas/WebShellActionResolution"
+            "$ref": "#/components/schemas/WebShellActionResolution",
+            "x-qwen-implementation-status": "planned"
           },
           "failureCode": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 128
+            "maxLength": 128,
+            "x-qwen-implementation-status": "planned",
+            "description": "Why the operation failed. Close, archive and delete retry until they complete, so they never report one."
           },
           "replayed": {
             "type": "boolean"
           }
         },
-        "x-qwen-implementation-status": "planned",
         "allOf": [
           {
             "if": {
@@ -5660,13 +5667,13 @@
       "WebShellOperation": {
         "oneOf": [
           {
-            "$ref": "#/components/schemas/WebShellCwdOperation"
+            "$ref": "#/components/schemas/WebShellCwdOperation",
+            "x-qwen-implementation-status": "planned"
           },
           {
             "$ref": "#/components/schemas/WebShellCommandOperation"
           }
-        ],
-        "x-qwen-implementation-status": "planned"
+        ]
       },
       "WebShellActionQueryRequest": {
         "type": "object",
@@ -5746,8 +5753,7 @@
             "minLength": 1,
             "maxLength": 128
           }
-        },
-        "x-qwen-implementation-status": "planned"
+        }
       },
       "WebShellWorkspaceQueryRequest": {
         "type": "object",
