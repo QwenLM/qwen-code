@@ -147,7 +147,6 @@ export async function selectRelevantAutoMemoryDocumentsByModel(
     // then main session model when no fast model is configured.
     systemInstruction: SELECT_MEMORIES_SYSTEM_PROMPT,
     config: {
-      temperature: 0,
     },
     validate: (value) => {
       if (!Array.isArray(value.selected_memories)) {

@@ -236,7 +236,6 @@ export function createGoalVerifier(
         skipOutputLanguagePreference: true,
         systemInstruction: GOAL_VERIFIER_SYSTEM_PROMPT,
         config: {
-          temperature: 0,
           responseMimeType: 'application/json',
           responseJsonSchema: GOAL_VERIFIER_SCHEMA,
           thinkingConfig: { thinkingBudget: 0, includeThoughts: false },

@@ -304,14 +304,7 @@ export class PromptHookRunner {
         systemInstruction: {
           parts: [{ text: LLM_HOOK_SYSTEM_PROMPT }],
         },
-        ...(isReasoningModel
-          ? {}
-          : {
-              // Deterministic allow/block decisions — same input must
-              // produce the same gating outcome to keep security checks
-              // reliable.
-              temperature: 0,
-            }),
+        ...(isReasoningModel ? {} : {}),
         // Responses are tiny JSON objects; cap output to avoid
         // runaway generations on misbehaving models.
         maxOutputTokens: 500,

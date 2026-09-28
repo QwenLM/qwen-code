@@ -504,9 +504,11 @@ describe('PromptHookRunner', () => {
       await promptRunner.execute(config, HookEventName.PreToolUse, input);
 
       const callArg = mockGenerateContent.mock.calls[0][0];
-      // Allow/block decisions must be deterministic to keep security
-      // gating reliable across identical inputs.
-      expect(callArg.config?.temperature).toBe(0);
+      // #12928: hard-coded temperature was removed; the hook now uses the
+      // provider's default for non-reasoning models. If deterministic
+      // security gating needs to be preserved, restore the explicit
+      // override via a helper that takes the temperature as a parameter.
+      expect(callArg.config?.temperature).toBeUndefined();
       // Output is a tiny JSON object — cap tokens to avoid runaway
       // generations and unnecessary cost.
       expect(callArg.config?.maxOutputTokens).toBe(500);

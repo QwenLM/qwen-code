@@ -751,8 +751,6 @@ export class AnthropicContentGenerator implements ContentGenerator {
       const budget = Math.min(thinking.budget_tokens, sampling.max_tokens - 1);
       thinking =
         budget >= 1024 ? { ...thinking, budget_tokens: budget } : undefined;
-      if (thinking && sampling.temperature !== undefined)
-        sampling.temperature = 1;
     }
     const isDeepSeek =
       isDeepSeekAnthropicHostname(this.contentGeneratorConfig) ||
@@ -945,27 +943,29 @@ export class AnthropicContentGenerator implements ContentGenerator {
       }
     }
 
-    // Claude 4.8+ deprecated temperature — the server rejects it with a 400.
-    // Omit the parameter entirely for those models; older models keep the
-    // default of 1 (Anthropic's documented neutral value).
-    const temperatureDropped = this.modelRejectsTemperature();
-    if (temperatureDropped && !this.temperatureDropWarned) {
-      const userTemp = getParam<number>('temperature', 'temperature');
-      if (userTemp !== undefined) {
-        debugLogger.warn(
-          `temperature=${userTemp} is not supported by '${
-            this.contentGeneratorConfig.model ?? 'unknown'
-          }' (deprecated on 4.8+); ignoring.`,
-        );
-      }
+    // Providers increasingly reject or deprecate the temperature parameter.
+    // Omit it unless the caller explicitly set one; let the provider pick
+    // its own default. For Claude 4.8+, the server returns 400 on any
+    // temperature, so the parameter is dropped unconditionally there.
+    const userTemp = getParam<number>('temperature', 'temperature');
+    const temperatureDropped =
+      this.modelRejectsTemperature() || userTemp === undefined;
+    if (
+      this.modelRejectsTemperature() &&
+      userTemp !== undefined &&
+      !this.temperatureDropWarned
+    ) {
+      debugLogger.warn(
+        `temperature=${userTemp} is not supported by '${
+          this.contentGeneratorConfig.model ?? 'unknown'
+        }' (deprecated on 4.8+); ignoring.`,
+      );
       this.temperatureDropWarned = true;
     }
 
     return {
       max_tokens: maxTokens,
-      ...(temperatureDropped
-        ? {}
-        : { temperature: getParam<number>('temperature', 'temperature') ?? 1 }),
+      ...(temperatureDropped ? {} : { temperature: userTemp }),
       top_p: getParam<number>('top_p', 'topP'),
       top_k: getParam<number>('top_k', 'topK'),
     };

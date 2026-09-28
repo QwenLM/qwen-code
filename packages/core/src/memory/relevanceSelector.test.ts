@@ -73,7 +73,8 @@ describe('selectRelevantAutoMemoryDocumentsByModel', () => {
       mockConfig,
       expect.objectContaining({
         purpose: 'auto-memory-recall',
-        config: { temperature: 0 },
+        config: expect.objectContaining({}),
+        // #12928: hard-coded temperature removed; field omitted unless caller supplied.
       }),
     );
   });
@@ -226,7 +227,8 @@ describe('selectRelevantAutoMemoryDocumentsByModel', () => {
       mockConfig,
       expect.objectContaining({
         purpose: 'auto-memory-recall',
-        config: { temperature: 0 },
+        config: expect.objectContaining({}),
+        // #12928: hard-coded temperature removed; field omitted unless caller supplied.
       }),
     );
     expect(
@@ -251,7 +253,8 @@ describe('selectRelevantAutoMemoryDocumentsByModel', () => {
       mockConfig,
       expect.objectContaining({
         purpose: 'auto-memory-recall',
-        config: { temperature: 0 },
+        config: expect.objectContaining({}),
+        // #12928: hard-coded temperature removed; field omitted unless caller supplied.
       }),
     );
     expect(

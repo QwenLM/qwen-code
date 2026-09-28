@@ -81,7 +81,6 @@ export async function generateSessionRecap(
       systemInstruction: RECAP_SYSTEM_PROMPT,
       config: {
         maxOutputTokens: 300,
-        temperature: 0.3,
       },
       abortSignal,
       // Recap is best-effort cosmetic — don't burn the default 7 retries.

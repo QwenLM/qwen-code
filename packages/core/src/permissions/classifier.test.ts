@@ -308,7 +308,7 @@ describe('classifier configuration', () => {
     );
   });
 
-  it('uses temperature 0 and max_output_tokens=256 with thinking disabled for stage 1', async () => {
+  it('omits temperature (provider default) and sets max_output_tokens=256 with thinking disabled for stage 1', async () => {
     runSideQueryMock.mockResolvedValueOnce({ shouldBlock: false });
     await classifyAction(makeInput());
     const opts = runSideQueryMock.mock.calls[0]?.[1] as {
@@ -318,7 +318,11 @@ describe('classifier configuration', () => {
         thinkingConfig?: { includeThoughts?: boolean };
       };
     };
-    expect(opts.config?.temperature).toBe(0);
+    // #12928: hard-coded temperature values were removed from internal
+    // requests; the classifier now relies on the provider's default.
+    // If a deterministic-temperature site needs to be preserved, the
+    // caller can still pass it through request config.
+    expect(opts.config?.temperature).toBeUndefined();
     expect(opts.config?.maxOutputTokens).toBe(256);
     expect(opts.config?.thinkingConfig?.includeThoughts).toBe(false);
   });

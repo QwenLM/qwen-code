@@ -187,7 +187,6 @@ export async function classifyAction(
       skipOutputLanguagePreference: true,
       maxAttempts: 2,
       config: {
-        temperature: 0,
         // 32 tokens is insufficient for adaptive-thinking models (Claude
         // 4.6+) which emit server-driven thinking that consumes output
         // budget before any tool_use. 256 gives enough headroom for
@@ -240,7 +239,6 @@ export async function classifyAction(
       skipOutputLanguagePreference: true,
       maxAttempts: 2,
       config: {
-        temperature: 0,
         maxOutputTokens: 4096,
         // API thinking stays off by default: this gate is latency-sensitive
         // and a reasoning budget can worsen unavailable-result timeouts. The

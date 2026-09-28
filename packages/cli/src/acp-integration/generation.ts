@@ -75,7 +75,6 @@ export async function executeGeneration(
         abortSignal: signal,
         tools: [],
         thinkingConfig: { thinkingBudget: 0, includeThoughts: false },
-        temperature: 0.2,
       },
     },
     `generation:${requestId}`,

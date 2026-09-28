@@ -176,8 +176,10 @@ describe('AnthropicContentGenerator', () => {
         output_config: { effort: 'medium' },
       });
       if (profile === 'anthropic-manual') {
+        // #12928: caller supplied temperature: 0 in samplingParams flows
+        // through (no longer overridden to 1 with manual thinking).
         expect(anthropicState.lastCreateArgs?.[0]).toMatchObject({
-          temperature: 1,
+          temperature: 0,
         });
         await generator.generateContent({
           model: 'company-alias',
