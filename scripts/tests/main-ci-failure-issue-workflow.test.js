@@ -22,8 +22,12 @@ describe('main CI failure issue workflow', () => {
 
   it('opens an autofix-ready issue only for failed main CI runs', () => {
     expect(workflow).toContain('workflow_run:');
+    // 'SDK Java' joined for its post-merge push run: its path filter keeps it
+    // off most commits to main, so a red push run is the only signal for a
+    // merge result neither PR could fail — the duplicate-V16 Flyway collision
+    // of #12940 sat unnoticed for two hours without it.
     expect(workflow).toContain(
-      "workflows: ['E2E Tests', 'SDK Python', 'Qwen Code CI']",
+      "workflows: ['E2E Tests', 'SDK Java', 'SDK Python', 'Qwen Code CI']",
     );
     expect(workflow).toContain("types: ['completed']");
     // 'Qwen Code CI' joined the list when the macOS and Windows lanes got a

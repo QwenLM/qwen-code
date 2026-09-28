@@ -60,6 +60,50 @@ test('keeps the full pytest node id when parameters contain spaces', () => {
   ]);
 });
 
+// Verbatim lines of SDK Java run 36382763760 (the duplicate-V16 merge of
+// #12940): one inline Surefire line per errored test, each preceded by the
+// class-level summary line that names no method and must not register.
+const MAVEN_LOG = [
+  '2026-09-28T05:40:26.0787691Z [ERROR] Tests run: 1, Failures: 0, Errors: 1, Skipped: 0, Time elapsed: 0.592 s <<< FAILURE! -- in com.alibaba.qwen.code.managedagent.ManagedSessionOperationMigrationTest',
+  '2026-09-28T05:40:26.0790051Z [ERROR] com.alibaba.qwen.code.managedagent.ManagedSessionOperationMigrationTest.finishesLifecycleCommandsThatWaitedBeforeTheUpgrade -- Time elapsed: 0.569 s <<< ERROR!',
+  '2026-09-28T05:40:26.2087318Z [ERROR] Tests run: 1, Failures: 0, Errors: 1, Skipped: 0, Time elapsed: 0.060 s <<< FAILURE! -- in com.alibaba.qwen.code.managedagent.ManagedEventIdentityMigrationTest',
+  '2026-09-28T05:40:26.2115597Z [ERROR] com.alibaba.qwen.code.managedagent.ManagedEventIdentityMigrationTest.backfillsTheIdentityThatTheSnapshotUses -- Time elapsed: 0.058 s <<< ERROR!',
+].join('\n');
+
+test('extracts surefire failures without the package or the elapsed time', () => {
+  assert.deepEqual(extractFailingTests(MAVEN_LOG), [
+    'ManagedSessionOperationMigrationTest.finishesLifecycleCommandsThatWaitedBeforeTheUpgrade',
+    'ManagedEventIdentityMigrationTest.backfillsTheIdentityThatTheSnapshotUses',
+  ]);
+});
+
+test('extracts a surefire assertion failure, deduped across matrix legs', () => {
+  const log = [
+    '[ERROR] com.example.LedgerTest.totals -- Time elapsed: 0.011 s <<< FAILURE!',
+    '[ERROR] com.example.LedgerTest.totals -- Time elapsed: 0.009 s <<< FAILURE!',
+  ].join('\n');
+  assert.deepEqual(extractFailingTests(log), ['LedgerTest.totals']);
+});
+
+test('ignores Maven error lines that name no test', () => {
+  // Also verbatim from run 36382763760: the goal failure, the run-level
+  // tally, and the help pointer carry no `Class.method` failure line.
+  const log = [
+    '[ERROR] Failed to execute goal org.apache.maven.plugins:maven-surefire-plugin:3.5.6:test (default-test) on project qwen-managed-agent-server:',
+    '[ERROR] Tests run: 153, Failures: 0, Errors: 88, Skipped: 0',
+    '[ERROR] -> [Help 1]',
+  ].join('\n');
+  assert.deepEqual(extractFailingTests(log), []);
+});
+
+test('an SDK Java analysis titles the issue by the failing test', () => {
+  const analysis = analyzeLogs('SDK Java', [MAVEN_LOG]);
+  assert.equal(
+    analysis.title,
+    'Main CI failed: SDK Java — ManagedSessionOperationMigrationTest.finishesLifecycleCommandsThatWaitedBeforeTheUpgrade (+1 more)',
+  );
+});
+
 test('keeps first-seen order across several failures', () => {
   const log = [
     ' FAIL  cli/b.test.ts > second',

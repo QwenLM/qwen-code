@@ -42,7 +42,18 @@ const VITEST_FAIL_PATTERN = /^FAIL\s+(.+)$/;
 // Anchoring on ` - ` rather than the first space keeps parametrized node ids
 // whose parameters contain spaces (`test_x[case one]`).
 const PYTEST_FAIL_PATTERN = /^FAILED\s+(.+?)(?:\s+-\s.*)?$/;
+// Maven Surefire prints one line per failed test as its class finishes:
+// `[ERROR] com.example.FooTest.caseName -- Time elapsed: 0.569 s <<< ERROR!`
+// (`<<< FAILURE!` for a failed assertion). The elapsed time varies run to
+// run, so the identifier is the class-and-method id ahead of it. The
+// class-level `Tests run: N ... <<< FAILURE! -- in <class>` line names no
+// method and is not a test.
+const MAVEN_FAIL_PATTERN =
+  /^\[ERROR\] (.+?) -- Time elapsed: [\d.]+ s <<< (?:ERROR|FAILURE)!$/;
 const TEST_FILE_PATTERN = /\.(?:test|spec)\.[cm]?[jt]sx?\b|\.py\b/;
+// A Surefire id is a dotted `Class.method`, optionally with the parameter
+// types and invocation index of a parameterized case.
+const JAVA_ID_PATTERN = /^(?:[\w$]+\.)+[\w$]+(?:\([^)]*\))?(?:\[\d+])?$/;
 
 function cleanLine(line) {
   return line
@@ -53,8 +64,20 @@ function cleanLine(line) {
 }
 
 /**
+ * Reduce a Surefire id to `Class.method`: the package prefix adds no signal
+ * next to the class name and pushes the method out of the issue title, and
+ * package segments are lowercase by convention.
+ */
+function javaTestId(raw) {
+  if (!JAVA_ID_PATTERN.test(raw)) return undefined;
+  const segments = raw.split('.');
+  const start = segments.findIndex((segment) => /^[A-Z]/.test(segment));
+  return segments.slice(Math.max(start, 0)).join('.');
+}
+
+/**
  * Collect the failing test identifiers a runner reported, first-seen order.
- * Both runners print their failures more than once (inline plus summary), and a
+ * Every runner prints its failures more than once (inline plus summary), and a
  * matrix leg repeats them per job, so identifiers are deduped.
  */
 export function extractFailingTests(logText) {
@@ -63,7 +86,16 @@ export function extractFailingTests(logText) {
     const line = cleanLine(rawLine);
     const vitest = VITEST_FAIL_PATTERN.exec(line);
     const pytest = PYTEST_FAIL_PATTERN.exec(line);
-    if (!vitest && !pytest) continue;
+    const maven = MAVEN_FAIL_PATTERN.exec(line);
+    if (!vitest && !pytest && !maven) continue;
+
+    if (maven) {
+      // The `Class.method` shape is this lane's own guard against the phrase
+      // appearing in a test's captured stdout.
+      const id = javaTestId(maven[1]);
+      if (id) seen.add(id);
+      continue;
+    }
 
     // pytest -q appends ` - <error message>`; the message varies run to run and
     // would defeat deduping, so keep only the `file::test` node id.

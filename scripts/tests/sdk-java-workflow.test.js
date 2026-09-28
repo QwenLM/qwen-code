@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { parse } from 'yaml';
 import { describe, expect, it } from 'vitest';
 
 const workflow = readFileSync('.github/workflows/sdk-java.yml', 'utf8');
@@ -83,4 +84,28 @@ describe('SDK Java self-hosted workflow guards', () => {
       expect(block).not.toContain('rm -f "${HOME}/.m2/toolchains.xml"');
     },
   );
+});
+
+// #12940: the duplicate-version guard is the fast lane for a collision two
+// green PRs can only produce in the merge result, so it runs on every
+// trigger — no self-hosted routing, no Java, no database.
+describe('SDK Java Flyway migration version guard', () => {
+  it('runs the uniqueness check as an unconditional job', () => {
+    const block = job('flyway-migrations');
+    expect(block).toContain("runs-on: 'ubuntu-latest'");
+    expect(block).toContain('actions/checkout@');
+    expect(block).not.toContain('if:');
+    expect(block).toContain(
+      "run: 'node scripts/check-flyway-migrations.js packages/sdk-java/managed-agent-server'",
+    );
+  });
+
+  it('triggers the workflow when the guard script itself changes', () => {
+    const yml = parse(workflow);
+    for (const event of ['pull_request', 'push']) {
+      expect(yml.on[event].paths).toContain(
+        'scripts/check-flyway-migrations.js',
+      );
+    }
+  });
 });
