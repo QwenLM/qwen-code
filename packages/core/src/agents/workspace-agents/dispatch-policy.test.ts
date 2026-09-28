@@ -218,6 +218,24 @@ describe('decideDispatch', () => {
     ).toEqual({ kind: 'skip', reason: 'thread_done' });
   });
 
+  it('does not book work on a cancelled thread either', () => {
+    expect(
+      decideDispatch(context({ thread: thread({ status: 'cancelled' }) })),
+    ).toEqual({ kind: 'skip', reason: 'thread_done' });
+  });
+
+  it('reports a retired agent instead of queueing a run it cannot start', () => {
+    expect(
+      decideDispatch(context({ target: agent({ retiredAt: 5_000 }) })),
+    ).toEqual({ kind: 'skip', reason: 'agent_retired' });
+    // Checked before `enabled`: retirement is the reason a person must see.
+    expect(
+      decideDispatch(
+        context({ target: agent({ retiredAt: 5_000, enabled: false }) }),
+      ),
+    ).toEqual({ kind: 'skip', reason: 'agent_retired' });
+  });
+
   it('still dispatches on a blocked thread, which is how a person unblocks it', () => {
     expect(
       decideDispatch(context({ thread: thread({ status: 'blocked' }) })),

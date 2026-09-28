@@ -72,6 +72,7 @@ import { resolveThreadStatus } from './thread-status.js';
 import {
   HUMAN_AUTHOR_ID,
   AGENTS_SCHEMA_VERSION,
+  DEFAULT_THREAD_TOKEN_BUDGET,
   MAX_THREAD_RUNS,
   type WorkspaceAgent,
   type Thread,
@@ -322,7 +323,9 @@ describe('agent versioned store', () => {
     });
     await writeRaw(getAgentsFilePath(PROJECT_ROOT), {
       schemaVersion: AGENTS_SCHEMA_VERSION,
-      agents: [{ ...ALICE, runtimeId: 'runtime_local' }],
+      agents: [
+        { ...ALICE, description: 'Reviews builds', maxConcurrentRuns: 2 },
+      ],
     });
     await writeRaw(
       getThreadPath(PROJECT_ROOT, 'th_root'),
@@ -330,7 +333,7 @@ describe('agent versioned store', () => {
     );
 
     await expect(readWorkspaceAgents(PROJECT_ROOT)).resolves.toMatchObject([
-      { id: ALICE.id, runtimeId: 'runtime_local' },
+      { id: ALICE.id, description: 'Reviews builds', maxConcurrentRuns: 2 },
     ]);
     await expect(readThread(PROJECT_ROOT, 'th_root')).resolves.toMatchObject({
       schemaVersion: AGENTS_SCHEMA_VERSION,
@@ -553,6 +556,30 @@ describe('agent versioned store', () => {
     );
     expect(fromPerson.outcomes[0]?.decision).toEqual({ kind: 'dispatch' });
   });
+
+  it("charges only a thread's own tree against the token budget", async () => {
+    // Another tree far over the budget must not hold this one's agents.
+    await writeThread(
+      PROJECT_ROOT,
+      thread({
+        id: 'th_other',
+        rootThreadId: 'th_other',
+        runs: [run(1, DEFAULT_THREAD_TOKEN_BUDGET + 1)],
+      }),
+    );
+    await writeThread(
+      PROJECT_ROOT,
+      thread({ assigneeAgentId: ALICE.id, runs: [run(2, 10, { id: 'rn_2' })] }),
+    );
+
+    const fromAgent = await postMessage(
+      PROJECT_ROOT,
+      'th_root',
+      { from: BOB.id, text: 'continue' },
+      { agents: [ALICE, BOB] },
+    );
+    expect(fromAgent.outcomes[0]?.decision).toEqual({ kind: 'dispatch' });
+  });
 });
 
 describe('retiring an agent', () => {
@@ -651,6 +678,17 @@ describe('retiring an agent', () => {
 
     const [alice] = await readWorkspaceAgents(PROJECT_ROOT);
     expect(isAgentAddressable(alice)).toBe(false);
+  });
+
+  it('makes a disabled agent addressable again when re-enabled', async () => {
+    await seed([ALICE]);
+    await setWorkspaceAgentEnabled(PROJECT_ROOT, ALICE.id, false);
+
+    await expect(
+      setWorkspaceAgentEnabled(PROJECT_ROOT, ALICE.id, true),
+    ).resolves.toBe('updated');
+    const [alice] = await readWorkspaceAgents(PROJECT_ROOT);
+    expect(isAgentAddressable(alice)).toBe(true);
   });
 
   it('cancels queued runs on disable so they cannot wedge their thread', async () => {

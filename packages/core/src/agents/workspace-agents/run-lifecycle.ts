@@ -28,7 +28,8 @@ import {
   type AgentStoreTransaction,
 } from './store.js';
 import {
-  acknowledgeCloseObligations,
+  LIVE_RUN_STATUSES,
+  outstandingCloseObligations,
   resolveThreadStatus,
 } from './thread-status.js';
 import { requireAgentRunContext, type AgentRunContext } from './run-context.js';
@@ -182,15 +183,12 @@ export function hasLiveDescendant(
         (event) => event.kind === 'parent_report' && event.status === 'pending',
       );
       if (isThreadTerminal(child.status) && !owesReport) continue;
+      // Evidence of pending work, not the status label: a child left
+      // `in_progress` by a plain answer, with nothing running and nothing
+      // owed, can never come back to wake the parent.
       const canWakeParent =
-        child.status !== 'open' ||
-        child.runs.some(
-          (run) =>
-            run.status === 'queued' ||
-            run.status === 'running' ||
-            run.status === 'finishing' ||
-            run.status === 'cancelling',
-        ) ||
+        outstandingCloseObligations(child).length > 0 ||
+        child.runs.some((run) => LIVE_RUN_STATUSES.has(run.status)) ||
         owesReport;
       if (canWakeParent) return true;
     }
@@ -348,13 +346,20 @@ export async function closeRunInTransaction(
 
   // Any close discharges peers' waits on this thread: whatever they were
   // waiting to see has now happened, and leaving the obligation outstanding
-  // would report the thread blocked when it is merely finished.
-  next = acknowledgeCloseObligations(
-    next,
-    next.nextMessageSequence - 1,
-    (obligation) =>
-      obligation.kind === 'waiting' && obligation.runId !== run.id,
-  );
+  // would report the thread blocked when it is merely finished. Stamped on
+  // the run itself so a waiter still `finishing` — one the mention above
+  // just woke — is discharged too; the obligation list skips live runs.
+  const dischargedAt = next.nextMessageSequence - 1;
+  next = {
+    ...next,
+    runs: next.runs.map((entry) =>
+      entry.id !== run.id &&
+      entry.closeKind === 'waiting' &&
+      entry.closeAcknowledgedAtSequence === undefined
+        ? { ...entry, closeAcknowledgedAtSequence: dischargedAt }
+        : entry,
+    ),
+  };
 
   next = {
     ...next,
