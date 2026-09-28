@@ -9,6 +9,8 @@ public final class ExecutionReconciliation {
         UNRESOLVED,
         /** The record was already settled; polling can stop. */
         ALREADY_SETTLED,
+        /** The original journal is permanently lost; no result is invented. */
+        ABANDONED,
         /**
          * The record is neither settled nor UNKNOWN, so there is nothing to
          * reconcile yet. This does not prove a dispatcher is still working
