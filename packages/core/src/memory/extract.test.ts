@@ -10,7 +10,13 @@ import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import type { Content } from '@google/genai';
-import { getAutoMemoryExtractCursorPath, getAutoMemoryRoot } from './paths.js';
+import {
+  getAutoMemoryExtractCursorPath,
+  getAutoMemoryRoot,
+  getAutoMemoryIndexPath,
+  getUserAutoMemoryRoot,
+  getUserAutoMemoryIndexPath,
+} from './paths.js';
 import {
   registerMemoryChangedListener,
   type MemoryChangedNotice,
@@ -89,6 +95,7 @@ describe('auto-memory extraction', () => {
   });
 
   afterEach(async () => {
+    vi.unstubAllEnvs();
     await fs.rm(tempDir, {
       recursive: true,
       force: true,
@@ -755,6 +762,79 @@ describe('auto-memory extraction', () => {
       expect(result.cursor.processedOffset).toBe(1);
     });
   });
+
+  it.each(['project', 'user'] as const)(
+    'keeps a symlink %s index update with the extracting session',
+    async (scope) => {
+      vi.stubEnv('QWEN_CODE_MEMORY_BASE_DIR', path.join(tempDir, 'memories'));
+      await fs.mkdir(path.join(projectRoot, '.git'));
+      const root =
+        scope === 'project'
+          ? getAutoMemoryRoot(projectRoot)
+          : getUserAutoMemoryRoot();
+      const indexPath =
+        scope === 'project'
+          ? getAutoMemoryIndexPath(projectRoot)
+          : getUserAutoMemoryIndexPath();
+      await fs.mkdir(path.join(root, scope), { recursive: true });
+      await fs.writeFile(
+        path.join(root, scope, 'routing.md'),
+        `---\nname: Routing memory\ndescription: Owner routing\ntype: ${scope}\n---\nKeep session ownership.\n`,
+      );
+      const target = path.join(tempDir, 'index.md');
+      await fs.writeFile(target, 'stale index');
+      await fs.rm(indexPath, { force: true });
+      await fs.symlink(target, indexPath);
+      const realIndexer =
+        await vi.importActual<typeof import('./indexer.js')>('./indexer.js');
+      if (scope === 'project') {
+        vi.mocked(rebuildManagedAutoMemoryIndex).mockImplementationOnce(
+          realIndexer.rebuildManagedAutoMemoryIndex,
+        );
+      } else {
+        vi.mocked(rebuildUserAutoMemoryIndex).mockImplementationOnce(
+          realIndexer.rebuildUserAutoMemoryIndex,
+        );
+      }
+      vi.mocked(runAutoMemoryExtractionByAgent).mockResolvedValue({
+        touchedTopics: [scope],
+        touchedProjectScope: scope === 'project',
+        touchedUserScope: scope === 'user',
+        hasToolActivity: true,
+        systemMessage: undefined,
+      });
+      const owner = vi.fn();
+      const sibling = vi.fn();
+      const unregisterOwner = registerMemoryChangedListener(projectRoot, owner);
+      const unregisterSibling = registerMemoryChangedListener(
+        projectRoot,
+        sibling,
+      );
+      mockConfig.getMemoryHookDeliveryId = () => unregisterOwner.id;
+      try {
+        await runAutoMemoryExtract({
+          projectRoot,
+          sessionId: 'session-1',
+          config: mockConfig,
+          history: [{ role: 'user', parts: [{ text: 'Remember routing.' }] }],
+        });
+        expect(await fs.readFile(target, 'utf-8')).toContain('Routing memory');
+        expect.soft(sibling).not.toHaveBeenCalled();
+        expect.soft(owner).toHaveBeenCalledExactlyOnceWith(
+          expect.objectContaining({
+            scope,
+            operation: 'update',
+            relativePaths: ['MEMORY.md'],
+          }),
+          undefined,
+        );
+      } finally {
+        unregisterOwner();
+        unregisterSibling();
+        vi.unstubAllEnvs();
+      }
+    },
+  );
 
   it('does not attribute documents landed by the instruction refresh to the extract window', async () => {
     // The refresh can pull team memory (syncTeamMemory). If it ran inside

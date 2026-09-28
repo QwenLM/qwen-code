@@ -229,16 +229,20 @@ export async function runAutoMemoryExtract(params: {
             ? // Either explicitly touched, or the defensive fallback when both
               // scope flags were unset (e.g. older planner) — both paths must
               // surface project-level rebuild failures.
-              rebuildManagedAutoMemoryIndex(params.projectRoot)
+              rebuildManagedAutoMemoryIndex(
+                params.projectRoot,
+                config.getMemoryHookDeliveryId?.(),
+              )
             : Promise.resolve();
         const userRebuild = result.touchedUserScope
-          ? rebuildUserAutoMemoryIndex(params.projectRoot).catch(
-              (error: unknown) => {
-                debugLogger.warn(
-                  `Auto-memory user-level index rebuild failed (non-critical, project-level rebuild unaffected): ${error instanceof Error ? error.message : String(error)}`,
-                );
-              },
-            )
+          ? rebuildUserAutoMemoryIndex(
+              params.projectRoot,
+              config.getMemoryHookDeliveryId?.(),
+            ).catch((error: unknown) => {
+              debugLogger.warn(
+                `Auto-memory user-level index rebuild failed (non-critical, project-level rebuild unaffected): ${error instanceof Error ? error.message : String(error)}`,
+              );
+            })
           : Promise.resolve();
         await Promise.all([projectRebuild, userRebuild]);
       }

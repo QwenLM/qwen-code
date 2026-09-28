@@ -95,7 +95,11 @@ export async function runManagedAutoMemoryDream(
       //   2. If still alive, rebuild the index (informational, powers
       //      recall) — but only when topics actually changed.
       if (!abortSignal?.aborted && result.touchedTopics.length > 0) {
-        await rebuildManagedAutoMemoryIndex(projectRoot);
+        await rebuildManagedAutoMemoryIndex(
+          projectRoot,
+          config.getMemoryHookDeliveryId?.(),
+          abortSignal,
+        );
       }
       return result;
     },

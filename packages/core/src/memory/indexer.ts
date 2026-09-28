@@ -243,6 +243,7 @@ async function readAutoMemoryMetadata(
 export async function rebuildManagedAutoMemoryIndex(
   projectRoot: string,
   deliveryId?: symbol,
+  signal?: AbortSignal,
 ): Promise<string> {
   const [docs, metadata] = await Promise.all([
     scanAutoMemoryTopicDocuments(projectRoot),
@@ -253,7 +254,7 @@ export async function rebuildManagedAutoMemoryIndex(
     projectRoot,
     getAutoMemoryIndexPath(projectRoot),
     content,
-    { deliveryId },
+    { deliveryId, signal },
   );
   return content;
 }

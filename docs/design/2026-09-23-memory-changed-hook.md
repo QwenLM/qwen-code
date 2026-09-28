@@ -45,7 +45,7 @@ Add a post-write, non-blocking hook event, `MemoryChanged`. The change is alread
 
 Snapshot keys use the filesystem's stored spelling while preserving symlink components. A path hidden by a new symlink is unknown to the walk, not a deletion. An outside delete remains the baseline even when the opening snapshot could not read the document.
 
-Team-memory synchronization registers a boundary around the pull and its imported-content baseline. Snapshots wait for that boundary and retry if a sync overlaps their read. Only the Git-changed document paths move the baseline, using checkout-converted content; local raw edits that differ from that content still produce events. A newer explicit notification wins over a delayed sync baseline. Unnotified writes to the shared user-memory tree remain the previously accepted cross-window attribution limitation.
+Team-memory synchronization registers a boundary around the pull and its imported-content baseline. Snapshots wait for that boundary and retry if a sync overlaps their read. Only the Git-changed document paths move the baseline, using checkout-converted content; local raw edits that differ from that content still produce events. A newer explicit notification wins over a delayed sync baseline. Concurrent windows cannot reliably attribute unnotified raw writes in the shared user-memory tree to their originating session. This known snapshot limitation remains outside this change.
 
 ### On/off toggle
 
