@@ -30,14 +30,14 @@ so every expected value here is derived from the code, not observed.
 
 ## Matrix
 
-| # | Scenario | Expected |
-|---|---|---|
-| 1 | Post `@lead` asking for a long task that makes `lead` hand work to `helper` back and forth | Before the tree passes 20k, runs proceed. Once the tree passes it, the next pass marks the running agent-triggered run `cancelling` / `token_budget_exhausted`, and it ends `cancelled`. The thread shows `blocked`. Tree total ≤ 20k + one pass's spend. |
-| 2 | After 1, `helper` posts (agent-authored) | Admission refuses with `token_budget_exhausted`; no run is booked. |
-| 3 | After 1, a person posts `@lead continue` | A run is booked and keeps running past the budget; it is not cancelled. |
-| 4 | Kill the daemon (`kill -9`) while a run is mid-turn, with the tree near the budget; restart | The replayed attempt's spend is charged: `usageByRound` has an entry for each attempt. If the tree is over budget, the replayed agent-triggered run is stopped within one pass. |
-| 5 | Kill the daemon while a run is `cancelling` for budget; restart | The run ends `cancelled`, keeps `error: token_budget_exhausted`, and is not re-dispatched. |
-| 6 | Drive a thread past 200 runs (lower `MAX_THREAD_RUNS` locally if needed) | The thread file stops growing in runs; `trimmedTokens` > 0; the tree total at admission equals the pre-trim total. |
+| #   | Scenario                                                                                    | Expected                                                                                                                                                                                                                                                  |
+| --- | ------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | Post `@lead` asking for a long task that makes `lead` hand work to `helper` back and forth  | Before the tree passes 20k, runs proceed. Once the tree passes it, the next pass marks the running agent-triggered run `cancelling` / `token_budget_exhausted`, and it ends `cancelled`. The thread shows `blocked`. Tree total ≤ 20k + one pass's spend. |
+| 2   | After 1, `helper` posts (agent-authored)                                                    | Admission refuses with `token_budget_exhausted`; no run is booked.                                                                                                                                                                                        |
+| 3   | After 1, a person posts `@lead continue`                                                    | A run is booked and keeps running past the budget; it is not cancelled.                                                                                                                                                                                   |
+| 4   | Kill the daemon (`kill -9`) while a run is mid-turn, with the tree near the budget; restart | The replayed attempt's spend is charged: `usageByRound` has an entry for each attempt. If the tree is over budget, the replayed agent-triggered run is stopped within one pass.                                                                           |
+| 5   | Kill the daemon while a run is `cancelling` for budget; restart                             | The run ends `cancelled`, keeps `error: token_budget_exhausted`, and is not re-dispatched.                                                                                                                                                                |
+| 6   | Drive a thread past 200 runs (lower `MAX_THREAD_RUNS` locally if needed)                    | The thread file stops growing in runs; `trimmedTokens` > 0; the tree total at admission equals the pre-trim total.                                                                                                                                        |
 
 For each row, record: tree total before and after, the run's final
 `status` / `error`, and the thread `status` / `reason`
