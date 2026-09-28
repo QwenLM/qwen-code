@@ -428,7 +428,11 @@ afterAll(async () => {
 /** Open an authenticated SSE stream and yield parsed frames. */
 async function* sseFrames(
   sessionId: string,
-  opts: { signal?: AbortSignal; lastEventId?: number } = {},
+  opts: {
+    signal?: AbortSignal;
+    lastEventId?: number;
+    onOpen?: () => void;
+  } = {},
 ): AsyncGenerator<DaemonEvent> {
   const headers: Record<string, string> = {
     Authorization: `Bearer ${TOKEN}`,
@@ -442,6 +446,12 @@ async function* sseFrames(
     signal: opts.signal,
   });
   if (!res.ok) throw new Error(`SSE open failed: ${res.status}`);
+  // The daemon registers the bus subscription synchronously in the route
+  // handler before flushing the response headers, so once `fetch` resolves
+  // the subscriber is guaranteed to observe events published afterwards.
+  // Tests that must not miss an event fired right after connect (the
+  // SIGKILL `session_died` flow below) await this hook before proceeding.
+  opts.onOpen?.();
   // Forward the abort signal into parseSseStream so a post-connect
   // abort stops iteration immediately. Without this, the parser
   // stays parked on `reader.read()` until the upstream actually
@@ -655,10 +665,15 @@ describePOSIX('qwen serve — child-crash recovery (real SIGKILL)', () => {
 
     const ac = new AbortController();
     const collected: DaemonEvent[] = [];
+    let resolveSseOpen!: () => void;
+    const sseOpen = new Promise<void>((resolve) => {
+      resolveSseOpen = resolve;
+    });
     const consumer = (async () => {
       try {
         for await (const e of sseFrames(session.sessionId, {
           signal: ac.signal,
+          onOpen: resolveSseOpen,
         })) {
           collected.push(e);
           if (e.type === 'session_died') break;
@@ -667,6 +682,12 @@ describePOSIX('qwen serve — child-crash recovery (real SIGKILL)', () => {
         /* aborted */
       }
     })();
+
+    // Killing before the subscription is registered loses the event: the
+    // daemon removes the session from its maps when it publishes
+    // `session_died`, so a late connect 404s, and a fresh subscriber gets
+    // no replay without `Last-Event-ID`. Wait for the stream to open.
+    await sseOpen;
 
     // Kill the child outright.
     for (const pid of childPids) {
