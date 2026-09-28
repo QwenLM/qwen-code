@@ -424,6 +424,38 @@ it('irreversibly blocks capture after a lost raw write acknowledgement', async (
   ).toBe('await_runtime');
 });
 
+it('retains the accepted prefix when a producer holds a pipe past the drain boundary', async () => {
+  const { registry, request, resources } = await fixture();
+  const { sink, identity } = await registry.prepare(request);
+  physical(sink);
+  const bytes = Buffer.from('accepted before drain');
+  await sink.write('stdout', bytes);
+  await Promise.all([
+    sink.finish('stdout', false),
+    sink.finish('stderr', true),
+  ]);
+
+  const envelope = await sink.finalize('success', [{ text: 'preview' }]);
+  expect(envelope.capture).toMatchObject({
+    captureStatus: 'partial',
+    captureReason: 'producer_lost',
+  });
+  expect((await registry.accept(identity, envelope)).deliveryStatus).toBe(
+    'blocked',
+  );
+  const reader = new ResourceToolResultSegmentStore(resources);
+  expect(
+    await reader.readRange({
+      manifestRef: envelope.capture!.manifest!,
+      expectedIdentity: identity,
+      streamId: 'stdout',
+      offset: 0,
+      length: bytes.length,
+    }),
+  ).toEqual({ status: 'ok', result: bytes });
+  await reader.close();
+});
+
 it('refuses missing registration and immutable descriptor changes', async () => {
   const { registry, request, register, descriptor } = await fixture();
   expect((await register()).status).toBe(200);

@@ -236,7 +236,6 @@ export class HostedShellPublisher {
         entry.envelope
       )
         throw new Error('Invalid Shell finish.');
-      if (!body['complete']) sink.failCapture();
       entry.ended[stream] = true;
       await sink.finish(stream, body['complete']);
       return { accepted: true };
