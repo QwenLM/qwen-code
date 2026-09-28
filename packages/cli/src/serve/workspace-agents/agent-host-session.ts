@@ -48,7 +48,7 @@ interface AgentHostBridge {
 
 export interface AgentHostSessionOwner {
   dispatch(): Promise<void>;
-  stop(): void;
+  stop(): Promise<void>;
 }
 
 export function startAgentHostSessionOwner(options: {
@@ -172,27 +172,33 @@ export function startAgentHostSessionOwner(options: {
 
   let running = false;
   let stopped = false;
+  let inFlight: Promise<void> | undefined;
   // Declared before `stop` so the closure can clear it, and assigned after so
   // the interval's own callback can call `stop`. The cycle is why this is a
   // `let` that eslint reads as never reassigned before its first use.
   // eslint-disable-next-line prefer-const
   let timer: ReturnType<typeof setInterval> | undefined;
-  const stop = () => {
+  const stop = async (): Promise<void> => {
     if (stopped) return;
     stopped = true;
     if (timer) clearInterval(timer);
+    // A tick or dispatch already in flight can still be inside ensure();
+    // releasing the host session before it settles would orphan whatever it
+    // spawns. Drain first — the caller's teardown order depends on it.
+    await Promise.allSettled([inFlight, dispatching, ensuring]);
   };
   timer = setInterval(() => {
     if (options.generationGuard?.closed) {
-      stop();
+      void stop();
       return;
     }
     if (running) return;
     running = true;
-    void tick()
+    inFlight = tick()
       .catch(() => {})
       .finally(() => {
         running = false;
+        inFlight = undefined;
       });
   }, DEFAULT_AGENT_KEEPALIVE_INTERVAL_MS);
   timer.unref?.();

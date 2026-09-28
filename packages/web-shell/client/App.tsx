@@ -10305,7 +10305,7 @@ export function App({
   const chatHeaderTitle = collaborationThreadId
     ? collaborationTitle?.id === collaborationThreadId
       ? collaborationTitle.title
-      : '协作对话'
+      : t('collab.chat.title')
     : sessionDisplayName;
   useEffect(() => {
     onSessionInfoChange?.({

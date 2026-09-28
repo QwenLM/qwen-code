@@ -42,6 +42,9 @@ export function useProjectConversations(cwds: readonly string[]) {
   useEffect(() => {
     if (!enabled) return;
     const sessionsByCwd = cache.current!.sessionsByCwd;
+    // The capability says some workspace has collaboration on, not this one;
+    // a workspace that answers "disabled" is left alone until the list changes.
+    const disabled = new Set<string>();
     let disposed = false;
     let busy = false;
     let again = false;
@@ -53,6 +56,7 @@ export function useProjectConversations(cwds: readonly string[]) {
       busy = true;
       const results = await Promise.all(
         (JSON.parse(key) as string[]).map(async (cwd) => {
+          if (disabled.has(cwd)) return { sessions: [] };
           try {
             const { threads } = await createThreadsHttpApi(
               workspace.baseUrl,
@@ -73,7 +77,14 @@ export function useProjectConversations(cwds: readonly string[]) {
               }));
             if (!disposed) sessionsByCwd.set(cwd, sessions);
             return { sessions };
-          } catch {
+          } catch (error) {
+            if (
+              error instanceof Error &&
+              error.message === 'agent_collaboration_disabled'
+            ) {
+              disabled.add(cwd);
+              return { sessions: [] };
+            }
             return {
               sessions: sessionsByCwd.get(cwd) ?? [],
               // The project's name; the sidebar words the failure.
@@ -94,31 +105,44 @@ export function useProjectConversations(cwds: readonly string[]) {
         void refresh();
       }
     };
-    void refresh();
     // Refetch when a workspace's store changes; poll only while a stream is down.
     // Each stream holds one of the browser's six HTTP/1.1 connections to the
-    // daemon, so workspaces past the first few are polled instead.
-    const cwds = JSON.parse(key) as string[];
-    const down = new Set(cwds.slice(MAX_STREAMS));
-    let poll: ReturnType<typeof setInterval> | undefined =
-      down.size > 0 ? setInterval(() => void refresh(), 5000) : undefined;
-    const stops = cwds.slice(0, MAX_STREAMS).map((cwd) =>
-      createThreadsHttpApi(workspace.baseUrl, workspace.token, cwd).subscribe!(
-        (event) => {
-          if (event.type === 'changed') void refresh();
-        },
-        (state) => {
-          if (state === 'closed') down.add(cwd);
-          else down.delete(cwd);
-          if (down.size > 0) {
-            poll ??= setInterval(() => void refresh(), 5000);
-          } else {
-            clearInterval(poll);
-            poll = undefined;
-          }
-        },
-      ),
-    );
+    // daemon, so workspaces past the first few are polled instead. Streams
+    // open after the first read, so none is held open against a workspace
+    // that has collaboration off.
+    let poll: ReturnType<typeof setInterval> | undefined;
+    const stops: Array<() => void> = [];
+    void refresh().then(() => {
+      if (disposed) return;
+      const cwds = (JSON.parse(key) as string[]).filter(
+        (cwd) => !disabled.has(cwd),
+      );
+      const down = new Set(cwds.slice(MAX_STREAMS));
+      if (down.size > 0) poll = setInterval(() => void refresh(), 5000);
+      for (const cwd of cwds.slice(0, MAX_STREAMS)) {
+        const api = createThreadsHttpApi(
+          workspace.baseUrl,
+          workspace.token,
+          cwd,
+        );
+        const stop = api.subscribe!(
+          (event) => {
+            if (event.type === 'changed') void refresh();
+          },
+          (state) => {
+            if (state === 'closed') down.add(cwd);
+            else down.delete(cwd);
+            if (down.size > 0) {
+              poll ??= setInterval(() => void refresh(), 5000);
+            } else {
+              clearInterval(poll);
+              poll = undefined;
+            }
+          },
+        );
+        stops.push(stop);
+      }
+    });
     return () => {
       disposed = true;
       for (const stop of stops) stop();

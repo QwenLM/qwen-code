@@ -14,7 +14,10 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { AGENT_HOST_SESSION_SOURCE_TYPE } from '../../runtime/agent-session-source.js';
+import {
+  AGENT_HOST_SESSION_SOURCE_TYPE,
+  AGENT_SESSION_SOURCE_TYPE,
+} from '../../runtime/agent-session-source.js';
 import type {
   ListSessionsResult,
   SessionListItem,
@@ -265,7 +268,10 @@ export function useSessionPicker({
       try {
         const result: ListSessionsResult = await sessionService.listSessions({
           size: SESSION_PAGE_SIZE,
-          excludeSourceType: AGENT_HOST_SESSION_SOURCE_TYPE,
+          excludeSourceTypes: [
+            AGENT_HOST_SESSION_SOURCE_TYPE,
+            AGENT_SESSION_SOURCE_TYPE,
+          ],
         });
         setSessionState({
           sessions: result.items,
@@ -290,7 +296,10 @@ export function useSessionPicker({
       const result: ListSessionsResult = await sessionService.listSessions({
         size: SESSION_PAGE_SIZE,
         cursor: sessionState.nextCursor,
-        excludeSourceType: AGENT_HOST_SESSION_SOURCE_TYPE,
+        excludeSourceTypes: [
+          AGENT_HOST_SESSION_SOURCE_TYPE,
+          AGENT_SESSION_SOURCE_TYPE,
+        ],
       });
       setSessionState((prev) => ({
         sessions: [...prev.sessions, ...result.items],

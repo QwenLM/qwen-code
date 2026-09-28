@@ -14,6 +14,7 @@ import {
   type Task,
 } from '@a2a-js/sdk';
 import {
+  A2AError,
   JsonRpcRequestMalformedError,
   JsonRpcTaskNotFoundError,
   JsonRpcUnsupportedOperationError,
@@ -56,6 +57,7 @@ import type {
 import type { RateLimiterInstance } from '../rate-limit.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
 import { requireTrustedWorkspaceRuntime } from '../workspace-route-runtime.js';
+import { writeStderrLine } from '../../utils/stdioHelpers.js';
 
 const A2A_PATH = '/a2a/v1';
 const REQUEST_REFUSED = -32010;
@@ -103,6 +105,7 @@ function rateLimitExceeded(res: Response): void {
 function authenticateA2A(
   registry: WorkspaceRegistry,
   rateLimiter?: Pick<RateLimiterInstance, 'checkRate'>,
+  isEnabledFor?: (workspaceCwd: string) => boolean,
 ): RequestHandler {
   return async (request, res, next) => {
     const req = request as A2ARequest;
@@ -124,7 +127,15 @@ function authenticateA2A(
     const callerId = req.get(HEADER_CALLER);
     const agentId = req.get(HEADER_AGENT);
     const runtime = workspaceId ? runtimeFor(registry, workspaceId) : undefined;
-    if (!authorization || !callerId || !agentId || !runtime) {
+    // A workspace that has since opted out keeps its grants on disk; they
+    // stop working with the rest of its collaboration surface.
+    if (
+      !authorization ||
+      !callerId ||
+      !agentId ||
+      !runtime ||
+      (isEnabledFor !== undefined && !isEnabledFor(runtime.workspaceCwd))
+    ) {
       next();
       return;
     }
@@ -397,8 +408,40 @@ function unsupported(): JsonRpcUnsupportedOperationError {
   });
 }
 
+/**
+ * The SDK answers any error that is not an A2A error with its own message, so
+ * a store failure would hand an outside caller absolute paths and other
+ * callers' thread ids. Those are logged here; the caller learns only that the
+ * request failed.
+ */
+function withoutInternalDetail(handler: A2ARequestHandler): A2ARequestHandler {
+  const methods = [
+    'getAuthenticatedExtendedAgentCard',
+    'sendMessage',
+    'getTask',
+    'listTasks',
+    'cancelTask',
+  ] as const;
+  const wrapped: Record<string, unknown> = { ...handler };
+  for (const name of methods) {
+    const method = handler[name] as (...args: unknown[]) => Promise<unknown>;
+    wrapped[name] = async (...args: unknown[]) => {
+      try {
+        return await method.apply(handler, args);
+      } catch (error) {
+        if (error instanceof A2AError) throw error;
+        writeStderrLine(
+          `qwen serve: A2A ${name} failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        throw new Error('Internal error.');
+      }
+    };
+  }
+  return wrapped as unknown as A2ARequestHandler;
+}
+
 function requestHandler(_registry: WorkspaceRegistry): A2ARequestHandler {
-  return {
+  return withoutInternalDetail({
     getAgentCard: async () => publicCard('http://localhost'),
 
     getAuthenticatedExtendedAgentCard: async (_params, context) => {
@@ -519,13 +562,14 @@ function requestHandler(_registry: WorkspaceRegistry): A2ARequestHandler {
     resubscribe(): AsyncGenerator<StreamResponse, void, undefined> {
       throw unsupported();
     },
-  };
+  });
 }
 
 export function registerA2ATransportRoutes(
   app: Application,
   workspaceRegistry: WorkspaceRegistry,
   rateLimiter?: Pick<RateLimiterInstance, 'checkRate'>,
+  isEnabledFor?: (workspaceCwd: string) => boolean,
 ): void {
   app.get(`/${A2A_AGENT_CARD_PATH}`, (req: Request, res: Response): void => {
     res.setHeader('A2A-Version', A2A_PROTOCOL_VERSION);
@@ -537,7 +581,7 @@ export function registerA2ATransportRoutes(
 
   app.use(
     A2A_PATH,
-    authenticateA2A(workspaceRegistry, rateLimiter),
+    authenticateA2A(workspaceRegistry, rateLimiter, isEnabledFor),
     (req: Request, res: Response, next: NextFunction): void => {
       if (req.is(A2A_CONTENT_TYPE)) {
         req.headers['content-type'] = 'application/json';

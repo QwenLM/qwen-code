@@ -18,6 +18,7 @@
  * exercised before any of that exists.
  */
 
+import { outstandingCloseObligations } from './thread-status.js';
 import type { Thread, ThreadStatus } from './types.js';
 
 /**
@@ -117,6 +118,48 @@ export function toA2ATaskState(status: ThreadStatus): A2ATaskState {
       throw new Error(`Unmapped thread status: ${String(unreachable)}`);
     }
   }
+}
+
+const LIVE_RUN_STATUSES: ReadonlySet<string> = new Set([
+  'queued',
+  'running',
+  'finishing',
+  'cancelling',
+]);
+
+/**
+ * The A2A task state an external caller sees.
+ *
+ * `toA2ATaskState` alone never reaches a terminal state for one: `done` is set
+ * only by a local person, a quiescent thread with nothing outstanding stays
+ * `in_progress`, and the `INPUT_REQUIRED` it would report is a dead end
+ * because continuing a task is refused. So once no run is live the outcome is
+ * read from what the runs left behind: a failure, a cancellation, or a run
+ * parked by an opt-out is `FAILED`; anything else — an answer, a summary for
+ * review, a question — is `COMPLETED`, carrying the agent's last post. A
+ * local person can still reply afterwards; the caller sees that as new work
+ * only through the extension metadata.
+ */
+export function toExternalA2ATaskState(thread: Thread): A2ATaskState {
+  if (thread.status === 'done' || thread.status === 'cancelled')
+    return toA2ATaskState(thread.status);
+  if (thread.runs.length === 0) return 'TASK_STATE_SUBMITTED';
+  if (thread.runs.some((run) => LIVE_RUN_STATUSES.has(run.status)))
+    return 'TASK_STATE_WORKING';
+  const outstanding = outstandingCloseObligations(thread);
+  // A wait on a subtask that is still live keeps the task working; one whose
+  // subtask is gone is what the thread status reports as blocked.
+  if (outstanding.some((obligation) => obligation.kind === 'waiting'))
+    return thread.status === 'in_progress'
+      ? 'TASK_STATE_WORKING'
+      : 'TASK_STATE_FAILED';
+  const failed = outstanding.some(
+    (obligation) =>
+      obligation.kind === 'failure' ||
+      obligation.kind === 'cancelled' ||
+      obligation.kind === 'stranded',
+  );
+  return failed ? 'TASK_STATE_FAILED' : 'TASK_STATE_COMPLETED';
 }
 
 /**

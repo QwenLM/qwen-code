@@ -6,7 +6,10 @@
 
 import { SessionService } from '@qwen-code/qwen-code-core';
 import type { SessionListItem } from '@qwen-code/qwen-code-core';
-import { AGENT_HOST_SESSION_SOURCE_TYPE } from '../../runtime/agent-session-source.js';
+import {
+  AGENT_HOST_SESSION_SOURCE_TYPE,
+  AGENT_SESSION_SOURCE_TYPE,
+} from '../../runtime/agent-session-source.js';
 import type { Suggestion } from '../components/SuggestionsDisplay.js';
 import {
   buildSessionRef,
@@ -50,7 +53,10 @@ async function listSessionsCached(
   try {
     const res = await new SessionService(cwd).listSessions({
       size: MAX_SESSION_SUGGESTIONS,
-      excludeSourceType: AGENT_HOST_SESSION_SOURCE_TYPE,
+      excludeSourceTypes: [
+        AGENT_HOST_SESSION_SOURCE_TYPE,
+        AGENT_SESSION_SOURCE_TYPE,
+      ],
     });
     listingCache.set(cwd, {
       items: res.items,

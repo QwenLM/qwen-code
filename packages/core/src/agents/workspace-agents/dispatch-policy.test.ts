@@ -113,7 +113,7 @@ describe('decideDispatch', () => {
 
   it('coalesces into a run already executing this same thread', () => {
     // Mid-run delivery is available here, so booking a second run would be
-    // waste — this is the case Multica has to defer.
+    // waste.
     expect(
       decideDispatch(
         context({ thread: thread({ runs: [run({ status: 'running' })] }) }),

@@ -128,8 +128,9 @@ const HIDDEN_SETTING_KEYS = new Set([
   'ui.compactMode',
   'mcpServers',
   'model.reasoningEffort',
-  // Read once when the daemon starts, so a toggle here would appear to do
-  // nothing until a restart; it is set in settings.json or via the env var.
+  // The daemon mounts the collaboration routes only if some workspace had it
+  // on at startup, so a first toggle here would appear to do nothing until a
+  // restart; it is set in settings.json or via the env var.
   'experimental.agentCollaboration',
 ]);
 const LIVE_SETTING_KEYS = new Set([

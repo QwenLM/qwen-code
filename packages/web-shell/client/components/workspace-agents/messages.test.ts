@@ -38,11 +38,23 @@ describe('collaboration messages', () => {
     expect(triggerLabel('mentioned by lead', zh)).toBe('lead @ 了它');
     expect(triggerLabel('something new', zh)).toBe('something new');
     expect(formatElapsed(405_000, zh)).toBe('6 分 45 秒');
-    // Status reasons: the live line comes in Chinese, the rest in English.
+    // Status reasons arrive in English and are translated by exact form.
     const en = getTranslator('en');
-    expect(statusReasonLabel('3 个智能体执行中，1 个排队中', en)).toBe(
+    expect(statusReasonLabel('3 Agents are running, 1 queued', en)).toBe(
       '3 working, 1 queued',
     );
+    expect(statusReasonLabel('1 Agent is running', zh)).toBe(
+      '1 个 Agent 正在工作',
+    );
+    expect(statusReasonLabel('2 Agents are queued and not started', zh)).toBe(
+      '2 个 Agent 排队中，还没开始',
+    );
+    expect(
+      statusReasonLabel(
+        'an Agent run was parked when collaboration was turned off and is waiting for you',
+        zh,
+      ),
+    ).toBe('协作关闭时有一次运行被搁置了，回复即可继续');
     expect(statusReasonLabel('no outstanding close obligation', zh)).toBe(
       '没有待处理的事',
     );

@@ -1060,12 +1060,17 @@ function isParentReport(event: ThreadEvent): boolean {
 }
 
 function parentReportText(thread: Thread, event: ThreadEvent): string {
-  const label = `Sub-thread ${thread.id} ("${thread.title}")`;
+  // Titles and payload strings are child-controlled free text, but every post
+  // is scanned for @mentions: an unmatched token would suppress the parent
+  // assignee's wake, and a matching one would wake the wrong agent. The
+  // full-width lookalike keeps the text readable without routing authority.
+  const safe = (value: unknown): string => String(value).replace(/@/g, '＠');
+  const label = `Sub-thread ${thread.id} ("${safe(thread.title)}")`;
   switch (event.payload['event']) {
     case 'child_blocked':
-      return `${label} is blocked: ${String(event.payload['reason'] ?? 'it needs input')}`;
+      return `${label} is blocked: ${safe(event.payload['reason'] ?? 'it needs input')}`;
     case 'child_failed':
-      return `${label} failed: ${String(event.payload['error'] ?? 'unknown error')}`;
+      return `${label} failed: ${safe(event.payload['error'] ?? 'unknown error')}`;
     case 'child_cancelled':
       return `${label} was cancelled.`;
     case 'child_done':

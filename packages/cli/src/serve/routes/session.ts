@@ -172,7 +172,10 @@ import {
   withPromptTerminals,
 } from '../prompt-terminal-ledger.js';
 import { createSessionOrganizationService } from '../session-organization-helpers.js';
-import { AGENT_HOST_SESSION_SOURCE_TYPE } from '../../runtime/agent-session-source.js';
+import {
+  AGENT_HOST_SESSION_SOURCE_TYPE,
+  AGENT_SESSION_SOURCE_TYPE,
+} from '../../runtime/agent-session-source.js';
 import {
   omitSkillDetailsForSdkSurface,
   omitSkillDetailsFromReplayArrays,
@@ -1507,7 +1510,10 @@ export function registerSessionRoutes(
         archiveState: 'active',
         size: 1,
         signal,
-        excludeSourceType: AGENT_HOST_SESSION_SOURCE_TYPE,
+        excludeSourceTypes: [
+          AGENT_HOST_SESSION_SOURCE_TYPE,
+          AGENT_SESSION_SOURCE_TYPE,
+        ],
       });
       signal.throwIfAborted();
       return page.items.length > 0;
@@ -3080,6 +3086,10 @@ export function registerSessionRoutes(
           .find(
             (session) =>
               session.sourceType !== AGENT_HOST_SESSION_SOURCE_TYPE &&
+              // Mesh agent bodies hold no user edits and are driven by the
+              // daemon, not by a person at a checkout — they must not block
+              // branch creation in the workspace they happen to share.
+              session.sourceType !== AGENT_SESSION_SOURCE_TYPE &&
               !session.worktree &&
               session.clientCount > 0,
           );
@@ -4015,9 +4025,15 @@ export function registerSessionRoutes(
               sourceId: _reservedSourceId,
               ...metadataWithoutSource
             } = metadata;
+            // Agent-source sessions strip their source on restore as well:
+            // the restore is a person reading history, and the admission gate
+            // in acpAgent refuses `sourceType: 'agent'` materialisation with
+            // no live run behind it — keeping the source would make a finished
+            // agent's transcript unopenable while it stays listed.
             const restoreMetadata =
-              !isInternalWorkspaceRuntime(runtime) &&
-              isReservedStandaloneSessionSource(metadata)
+              (!isInternalWorkspaceRuntime(runtime) &&
+                isReservedStandaloneSessionSource(metadata)) ||
+              metadata.sourceType === AGENT_SESSION_SOURCE_TYPE
                 ? metadataWithoutSource
                 : metadata;
             const hasPersistedSource =
@@ -5091,8 +5107,9 @@ export function registerSessionRoutes(
               try {
                 assertRuntimeGenerationOpen?.();
                 // 1. The replacement spawns in the root workspace with the
-                // same thread-scope and source metadata conventions as a
-                // fresh worktree creation, minus worktree creation.
+                // same thread-scope, source and worktree metadata conventions
+                // as a fresh worktree creation, minus worktree creation. The
+                // worktree metadata also keeps it on the Legacy engine.
                 const spawned = await runtime.bridge.spawnOrAttach({
                   workspaceCwd,
                   modelServiceId,
@@ -5104,6 +5121,11 @@ export function registerSessionRoutes(
                   ...(source.sourceId !== undefined
                     ? { sourceId: source.sourceId }
                     : {}),
+                  worktree: {
+                    slug: effectiveOldSidecar.slug,
+                    path: realTarget,
+                    branch: effectiveOldSidecar.worktreeBranch,
+                  },
                 });
                 spawnedNew = { sessionId: spawned.sessionId };
                 // 2. Relocate into the checkout.

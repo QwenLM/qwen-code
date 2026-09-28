@@ -16,6 +16,10 @@ It follows [paired engine owner selection](./2026-09-26-paired-engine-owner-sele
 merged: workspace contracts (B2b, #12776 and #12807) and per-engine operations
 (B2c, #12795), which apply the
 [Q2/Q3 decisions](https://github.com/QwenLM/qwen-code/issues/12737#issuecomment-5846370487).
+The Managed engine itself is designed in
+[ordinary-host Managed engine](./2026-09-27-ordinary-host-managed-engine.md).
+Its slice M1 closes the Legacy refusal and purpose marking items of the
+Managed engine seam below, and that design settles the seam's open questions.
 
 ## Problem and current behavior
 
@@ -202,12 +206,13 @@ To be paired, a Managed engine supplies, per workspace runtime:
   that restores or forks a transcript refuses its sessions, either because its
   transcripts carry the Managed Session header those entries already refuse, or
   because the refusal is extended to its owner record. Otherwise switching the
-  opt-in off would let a Managed session run on Legacy;
+  opt-in off would let a Managed session run on Legacy. M1 of the engine design
+  extends the refusal to the owner record;
 - workspace control: permission rules and Skills changes need the Legacy
   workspace-control channel (B2b), so with only Managed live they cannot be
   applied. The engine slice decides whether the host starts workspace control
   for those routes; in B2d no Managed channel starts, so the case does not
-  arise;
+  arise. The engine design starts it (Decision 3);
 - a bounded evaluation: the Bridge bounds each selection, owner read included,
   by its initialize timeout, and a selection that exceeds it fails the creation
   or restore instead of selecting Legacy. The evaluation therefore settles well
@@ -220,7 +225,9 @@ To be paired, a Managed engine supplies, per workspace runtime:
   without `worktree` and moved into the checkout afterwards. A task that a Live
   conversation starts in a project also creates its thread with no source, and
   the engine slice decides whether that thread is a Live purpose. To the rules
-  above, both are ordinary creations.
+  above, both are ordinary creations. M1 of the engine design marks the reset
+  replacement with its worktree, and the engine design keeps the Live thread an
+  ordinary creation (Decision 6).
 
 B2d registers no engine. The paired `managed` factory then rejects with an
 unavailable error. The selector never returns `managed` without a registered
@@ -373,10 +380,12 @@ classification is B2a's.
   session ineligible. An internal creator of a deferred purpose that does not
   mark its sessions becomes eligible once an engine exists; the purpose marking
   item of the Managed engine seam names the known cases, and the engine slice
-  re-audits the rest.
-- An unpaired Legacy host does not recognize a Managed owner record today. This
-  is harmless while no ordinary host creates Managed sessions; the Managed
-  engine seam makes closing it a precondition of the engine slice, which also
-  settles how `session_execution_engine` relates to the Managed Session header.
+  re-audits the rest. M1 of the engine design records that audit.
+- Until M1 of the engine design, an unpaired Legacy host did not recognize a
+  Managed owner record. That was harmless while no ordinary host created
+  Managed sessions, and the Managed engine seam made closing it a precondition
+  of the engine slice, which also settles how `session_execution_engine`
+  relates to the Managed Session header (engine design, Decision 1).
 - How the engine shares its evaluated inputs with its host for revalidation is
-  decided together with the engine.
+  decided together with the engine: the host re-reads and re-evaluates the
+  same strict snapshot (engine design, Decision 5).

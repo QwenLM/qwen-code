@@ -27241,7 +27241,7 @@ describe('QwenAgent unstable_listSessions cursor parsing', () => {
         expect(listSessions).toHaveBeenCalledWith({
           cursor: undefined,
           size: undefined,
-          excludeSourceType: 'agent-host',
+          excludeSourceTypes: ['agent-host', 'agent'],
         });
       }
     } finally {
@@ -27285,7 +27285,7 @@ describe('QwenAgent unstable_listSessions cursor parsing', () => {
         expect(listSessions).toHaveBeenCalledWith({
           cursor: undefined,
           size: undefined,
-          excludeSourceType: 'agent-host',
+          excludeSourceTypes: ['agent-host', 'agent'],
         });
       }
     } finally {
@@ -27326,7 +27326,7 @@ describe('QwenAgent unstable_listSessions cursor parsing', () => {
         expect(listSessions).toHaveBeenCalledWith({
           cursor: undefined,
           size: expected,
-          excludeSourceType: 'agent-host',
+          excludeSourceTypes: ['agent-host', 'agent'],
         });
       }
     } finally {
@@ -27383,7 +27383,7 @@ describe('QwenAgent unstable_listSessions cursor parsing', () => {
       expect(listSessions).toHaveBeenCalledWith({
         cursor: 1_797_860_000_000.5,
         size: 2,
-        excludeSourceType: 'agent-host',
+        excludeSourceTypes: ['agent-host', 'agent'],
       });
     } finally {
       mockConnectionState.resolve();
