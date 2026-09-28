@@ -32,7 +32,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 /**
- * Upgrades an archive and a delete that waited for a retry before V16 on H2
+ * Upgrades an archive and a delete that waited for a retry before V17 on H2
  * in MySQL mode and finishes them; ManagedAgentMySqlIT runs the same upgrade
  * on MySQL.
  */

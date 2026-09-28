@@ -10,7 +10,7 @@ import java.util.UUID;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 /**
- * Lifecycle commands as the server left them before V16: an archive and a
+ * Lifecycle commands as the server left them before V17: an archive and a
  * delete that waited for a retry, a finished archive and a pending rename.
  */
 final class LegacyLifecycleCommands {
@@ -42,7 +42,7 @@ final class LegacyLifecycleCommands {
     }
 
     /**
-     * Checks that V16 made the waiting archive and delete pending operations
+     * Checks that V17 made the waiting archive and delete pending operations
      * under their keys and left the other commands alone.
      *
      * @return the archive and the delete operation IDs
