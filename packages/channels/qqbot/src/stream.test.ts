@@ -1987,12 +1987,14 @@ describe('error recovery paths', () => {
       { msgId: string; timestamp: number }
     >;
     const turnCounter = chp['turnCounter'] as Map<string, number>;
+    const completedTurns = chp['completedTurns'] as Map<string, number>;
 
     flushingSessions.set('sess-1', flushMarkerState());
     pendingStreamDelete.add('sess-1');
     flushedSessions.add('sess-1');
     sessionAnchors.set('sess-1', { msgId: 'msg-A', timestamp: Date.now() });
     turnCounter.set('sess-1', 3);
+    completedTurns.set('sess-1', 3);
 
     (chp['disconnect'] as () => void)();
 
@@ -2002,6 +2004,7 @@ describe('error recovery paths', () => {
     expect(flushedSessions.size).toBe(0);
     expect(sessionAnchors.size).toBe(0);
     expect(turnCounter.size).toBe(0);
+    expect(completedTurns.size).toBe(0);
   });
 
   it('onSessionDied cleans up stream state for dead session', () => {
@@ -2018,6 +2021,10 @@ describe('error recovery paths', () => {
     onPromptStart(ch, 'test-chat', 'sess-1', 'msg-1');
     expect(sessionAnchors.has('sess-1')).toBe(true);
     onResponseChunk(ch, 'test-chat', 'alive', 'sess-1');
+    // A completion record for this session must not outlive it, or a later
+    // session reusing the session id would inherit it.
+    const completedTurns = chp['completedTurns'] as Map<string, number>;
+    completedTurns.set('sess-1', 1);
     // The anchor's seq counter: onSessionDied disarms the entry (timer nulled,
     // buffer cleared) before its release, so the dead session's residual is
     // dropped by the same call and the only remaining vetoes are a genuine
@@ -2046,6 +2053,7 @@ describe('error recovery paths', () => {
       false,
     );
     expect((chp['flushedSessions'] as Set<string>).has('sess-1')).toBe(false);
+    expect(completedTurns.has('sess-1')).toBe(false);
     // The dead session's turn counter is dropped too.
     expect((chp['turnCounter'] as Map<string, number>).has('sess-1')).toBe(
       false,
@@ -5074,5 +5082,97 @@ describe('R14-1 acceptance: an in-flight flush must not clear a newer seal', () 
     // Three attempts: HEAD, the residual that was rejected, and the re-stash
     // that delivers it. Two would mean the sealed residual was silently lost.
     expect(sentContents()).toEqual(['HEAD', 'B', 'B']);
+  });
+});
+
+describe('R15-1 acceptance: tail hand-off must not stash under an ended turn', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockSendQQMessage.mockResolvedValue(mockResponse(true));
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('delivers the sealed head instead of re-stashing it under a finished successor', async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const pendingStreamDelete = chp['pendingStreamDelete'] as Set<string>;
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    await reachStashedOrphan(ch);
+
+    // Turn 2's drained send goes out carrying the sealed head and stays in
+    // flight.
+    onResponseBoundary(ch, 'test-chat', 's1');
+    let rejectDrain!: (e: unknown) => void;
+    mockSendQQMessage.mockReturnValueOnce(
+      new Promise<MockResponse>((_resolve, reject) => {
+        rejectDrain = reject;
+      }),
+    );
+    onResponseChunk(ch, 'test-chat', 'T2-REST', 's1');
+    vi.advanceTimersByTime(2000);
+    await drain();
+
+    // Turn 3 supersedes turn 2, then runs to completion AND ends while turn 2's
+    // send is still in flight: completion defers onto the park flag and
+    // onPromptEnd early-returns on it. Turn 3 is over.
+    setReplyMsgId(ch, 'test-chat', 'msg-C');
+    onPromptStart(ch, 'test-chat', 's1', 'msg-C');
+    onResponseChunk(ch, 'test-chat', 'T3-HEAD', 's1');
+    mockSendQQMessage.mockResolvedValue(mockResponse(true));
+    await onResponseComplete(ch, 'test-chat', 'T3-HEADT3-REST', 's1');
+    onPromptEnd(ch, 'test-chat', 's1');
+    expect(pendingStreamDelete.has('s1')).toBe(true);
+    const sendsBeforeFailure = mockSendQQMessage.mock.calls.length;
+
+    // Only now does turn 2's in-flight send fail transiently. Turn 3 has
+    // already run the completion that consumes a stash tagged turn 3, so
+    // re-stashing under it would be a write nothing can ever read.
+    rejectDrain(new Error('transient'));
+    await drain();
+    await vi.advanceTimersByTimeAsync(20_000);
+    await drain();
+
+    // The sealed opening must reach the user exactly once after the failure.
+    const sendsSince = sentContents().slice(sendsBeforeFailure);
+    expect(sendsSince.filter((c) => c.includes('T2-HEAD '))).toHaveLength(1);
+
+    // And a next turn must not find it parked as a superseded stash: the text
+    // is delivered rather than dropped with a misattributed log line.
+    setReplyMsgId(ch, 'test-chat', 'msg-D');
+    onPromptStart(ch, 'test-chat', 's1', 'msg-D');
+    expect(
+      stderrSpy.mock.calls
+        .map((c) => String(c[0]))
+        .filter((line) => line.includes('dropping')),
+    ).toHaveLength(0);
+    stderrSpy.mockRestore();
+  });
+
+  it('drops a finished turn record so a reused turn number cannot alias it', async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const completedTurns = chp['completedTurns'] as Map<string, number>;
+    setReplyMsgId(ch, 'test-chat', 'msg-A');
+    onPromptStart(ch, 'test-chat', 's1', 'msg-A');
+
+    // Turn 1 completes and ends, leaving a record behind for turn 1.
+    onResponseChunk(ch, 'test-chat', 'H', 's1');
+    mockSendQQMessage.mockResolvedValue(mockResponse(true));
+    await onResponseComplete(ch, 'test-chat', 'H', 's1');
+    onPromptEnd(ch, 'test-chat', 's1');
+    expect(completedTurns.get('s1')).toBe(1);
+
+    // The turn counter is gone, so the next prompt is turn 1 again. A record
+    // left over from the finished turn 1 would alias it and make a later
+    // hand-off treat a turn whose completion never ran as already completed.
+    setReplyMsgId(ch, 'test-chat', 'msg-B');
+    onPromptStart(ch, 'test-chat', 's1', 'msg-B');
+    expect(completedTurns.has('s1')).toBe(false);
   });
 });

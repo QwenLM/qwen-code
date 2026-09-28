@@ -323,6 +323,15 @@ export class QQChannel extends ChannelBase {
     string,
     { turn: number; text: string; pre?: string }
   > = new Map();
+  /**
+   * The turn whose onResponseComplete has already run, per session. The
+   * completion that prepends a turn's stash cannot run a second time, so a
+   * stash tagged with that turn has no guaranteed consumer, and
+   * handOffSealedPre delivers its text directly instead of writing it. Cleared
+   * when a new turn starts, on session death, and on disconnect, so it holds at
+   * most one entry per session seen since the last of those.
+   */
+  private completedTurns: Map<string, number> = new Map();
   private readonly qqStatePath: string;
   /**
    * Path to the global sessions.json managed by start.ts.
@@ -1224,6 +1233,7 @@ export class QQChannel extends ChannelBase {
     this.flushedSessions.clear();
     this.activePromptSessions.clear();
     this.streamOrphanBuffer.clear();
+    this.completedTurns.clear();
   }
 
   /**
@@ -1258,6 +1268,12 @@ export class QQChannel extends ChannelBase {
     // drops them so this turn's chunks cannot leak into the old turn's state.
     const turn = (this.turnCounter.get(sessionId) ?? 0) + 1;
     this.turnCounter.set(sessionId, turn);
+    // A new turn starts: a completion recorded for an earlier turn can never
+    // match this generation again, and the counter restarts at 1 after a
+    // teardown, so drop the record rather than let a reused number alias onto a
+    // turn that has already finished. The number carries no generation of its
+    // own, so this clear is the only guard against that alias.
+    this.completedTurns.delete(sessionId);
     // A previous turn may have stashed chunks in the orphan buffer while its
     // deferred chain still owned the streamState entry; a fresh turn can
     // never own an existing entry, so anything left is dead text and must not
@@ -2157,6 +2173,10 @@ export class QQChannel extends ChannelBase {
   ): Promise<void> {
     const state = this.streamState.get(sessionId);
     const currentTurn = this.turnCounter.get(sessionId) ?? 0;
+    // This turn's completion has run — the deferred branch below counts too.
+    // It will not run again for this turn, so a stash tagged with it would have
+    // no guaranteed consumer: record that for handOffSealedPre.
+    this.completedTurns.set(sessionId, currentTurn);
     if (state && state.turn !== currentTurn) {
       // Stale entry owned by a previous turn's deferred flush chain — it
       // will deliver its own residual and tear itself down. Send this turn's
@@ -2424,7 +2444,10 @@ export class QQChannel extends ChannelBase {
    * counter, so the block that drops the entry also drops the counter and a
    * stash would be discarded as superseded. Deliver the sealed head on this
    * turn's own anchor instead — the same path onPromptEnd already uses for a
-   * parked cancelled turn's HEAD.
+   * parked cancelled turn's HEAD. The same delivery is taken when the turn
+   * being tagged has already run its completion (see completedTurns): its
+   * completion is the reader that would prepend the stash, it will not run
+   * again, and a stash it cannot consume is dropped by the next onPromptStart.
    *
    * `turnIsOver` defaults to the park flag, which is still armed at the four
    * sites that reach here while it is; the pending-exhaustion branch has
@@ -2438,18 +2461,28 @@ export class QQChannel extends ChannelBase {
     const sealed = state.sealedPre;
     if (sealed === undefined) return;
     state.sealedPre = undefined;
+    // The turn this text ends up tagged with: the one an existing stash already
+    // carries when the two are merged, since the write below keeps that tag.
+    const existing = this.streamOrphanBuffer.get(sessionId);
+    const taggedTurn =
+      existing?.turn ?? this.turnCounter.get(sessionId) ?? state.turn;
     const noSuccessorCanConsume =
       turnIsOver && (this.turnCounter.get(sessionId) ?? 0) === state.turn;
-    if (noSuccessorCanConsume) {
+    // That turn has already run its own onResponseComplete, so a re-stash is a
+    // write with no guaranteed consumer: the next onPromptStart drops it as
+    // superseded and the sealed opening is lost. Deliver it on this turn's
+    // anchor instead.
+    const completionAlreadyRan =
+      this.completedTurns.get(sessionId) === taggedTurn;
+    if (noSuccessorCanConsume || completionAlreadyRan) {
       void this.deliverCancelledStash(state.chatId, sessionId, sealed);
       return;
     }
-    const existing = this.streamOrphanBuffer.get(sessionId);
     this.streamOrphanBuffer.set(
       sessionId,
       existing === undefined
         ? {
-            turn: this.turnCounter.get(sessionId) ?? state.turn,
+            turn: taggedTurn,
             text: sealed,
             pre: sealed,
           }
@@ -2486,6 +2519,7 @@ export class QQChannel extends ChannelBase {
     this.activePromptSessions.delete(sessionId);
     this.turnCounter.delete(sessionId);
     this.streamOrphanBuffer.delete(sessionId);
+    this.completedTurns.delete(sessionId);
     super.onSessionDied(sessionId);
   }
   // ── State Persistence (cross-server context continuation) ──────
