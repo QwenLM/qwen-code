@@ -5,7 +5,11 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { computeApiTruncationIndex, isRealUserTurn } from './historyMapping.js';
+import {
+  computeApiTruncationIndex,
+  isIdentifiedRetainedTurn,
+  isRealUserTurn,
+} from './historyMapping.js';
 import type { HistoryItem } from '../types.js';
 import type { Content, Part } from '@google/genai';
 import {
@@ -978,5 +982,36 @@ describe('isRealUserTurn', () => {
     const item = userItem(1, 'hello world');
     item.display = { suppressOnRestore: true };
     expect(isRealUserTurn(item)).toBe(true);
+  });
+});
+
+describe('isIdentifiedRetainedTurn', () => {
+  const identified = (id: number, promptId: string) =>
+    ({ ...userItem(id, `prompt ${id}`), promptId }) as HistoryItem;
+
+  it('is true for an identified turn after the compression boundary', () => {
+    expect(
+      isIdentifiedRetainedTurn(
+        [userItem(1), compressionItem(2), identified(3, 'session########2')],
+        3,
+      ),
+    ).toBe(true);
+  });
+
+  it('is false for an identified turn absorbed by compression', () => {
+    expect(
+      isIdentifiedRetainedTurn(
+        [identified(1, 'session########0'), llmItem(2), compressionItem(3)],
+        1,
+      ),
+    ).toBe(false);
+  });
+
+  it('is false for a legacy turn with no identity', () => {
+    expect(isIdentifiedRetainedTurn([userItem(1), llmItem(2)], 1)).toBe(false);
+  });
+
+  it('is false for an unknown target', () => {
+    expect(isIdentifiedRetainedTurn([userItem(1)], 99)).toBe(false);
   });
 });

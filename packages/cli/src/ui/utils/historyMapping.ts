@@ -171,3 +171,22 @@ export function computeApiTruncationIndex(
   // compression): the target turn is unreachable.
   return -1;
 }
+
+/**
+ * Whether the target is an identified turn in the retained region, so a -1
+ * from `computeApiTruncationIndex` means its identity could not be resolved
+ * (e.g. a retry re-sent the prompt unmarked) rather than that compression
+ * absorbed it. Used only to name the cause of a refusal.
+ */
+export function isIdentifiedRetainedTurn(
+  uiHistory: HistoryItem[],
+  targetUserItemId: number,
+): boolean {
+  const targetIndex = uiHistory.findIndex(
+    (item) => item.id === targetUserItemId,
+  );
+  if (targetIndex === -1) return false;
+  const target = uiHistory[targetIndex]!;
+  if (!isRealUserTurn(target) || !target.promptId) return false;
+  return targetIndex > findLastSuccessfulCompressionIndex(uiHistory);
+}

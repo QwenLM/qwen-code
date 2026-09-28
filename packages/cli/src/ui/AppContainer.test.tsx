@@ -106,6 +106,7 @@ import {
   describeDropReason,
   PEER_ADMISSION_LIMITS,
   markApiHistoryPrompt,
+  CompressionStatus,
   WorktreeRestoreRefusedError,
   type DropNotice,
   type HeldMessage,
@@ -7729,7 +7730,22 @@ describe('AppContainer State Management', () => {
 
     it('bails before file restore when the target turn is compressed', async () => {
       const harness = renderRewindHarness({
-        apiHistory: [apiUser('first prompt'), apiModel('first response')],
+        history: [
+          rewindUserItem(1, 'first prompt', 'prompt-1'),
+          { id: 2, type: 'gemini', text: 'first response' },
+          rewindUserItem(3, 'second prompt', 'prompt-2'),
+          { id: 4, type: 'gemini', text: 'second response' },
+          {
+            id: 5,
+            type: 'compression',
+            compression: {
+              isPending: false,
+              originalTokenCount: 100,
+              newTokenCount: 40,
+              compressionStatus: CompressionStatus.COMPRESSED,
+            },
+          } as HistoryItem,
+        ],
       });
 
       await runRewind(harness.target, 'both');
@@ -7741,6 +7757,32 @@ describe('AppContainer State Management', () => {
         expect.objectContaining({
           type: 'error',
           text: 'Cannot rewind to a turn that was compressed. Try a more recent turn.',
+        }),
+        expect.any(Number),
+      );
+    });
+
+    it('names an unresolved identity instead of compression, e.g. after a retry', async () => {
+      // A retry re-sends the prompt unmarked, so the retained turn keeps its
+      // promptId in the UI but has no matching model-history entry.
+      const harness = renderRewindHarness({
+        apiHistory: [
+          apiUser('first prompt', 'prompt-1'),
+          apiModel('first response'),
+          apiUser('second prompt'),
+          apiModel('second response'),
+        ],
+      });
+
+      await runRewind(harness.target, 'both');
+
+      expect(harness.rewind).not.toHaveBeenCalled();
+      expect(harness.truncateHistory).not.toHaveBeenCalled();
+      expect(harness.loadHistory).not.toHaveBeenCalled();
+      expect(harness.addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'error',
+          text: 'Cannot rewind the conversation to this turn: it no longer matches the model history (for example, after a retry). Try a more recent turn.',
         }),
         expect.any(Number),
       );
