@@ -3107,8 +3107,14 @@ describe('rebuilt edit diff annotation', () => {
     );
   });
 
-  it('renders no annotation when a failed edit has no diff', () => {
-    const container = expandCompletedEdit({ status: 'failed' });
+  it('renders a failed edit diff without the annotation', () => {
+    const container = expandCompletedEdit({
+      status: 'failed',
+      content: [
+        { type: 'diff', oldText: 'const a = 1;\n', newText: 'const a = 2;\n' },
+      ],
+    });
+    expect(container.textContent).toContain('const a = 2;');
     expect(container.textContent).not.toContain(
       'Diff rebuilt from the tool call arguments',
     );
@@ -3116,6 +3122,43 @@ describe('rebuilt edit diff annotation', () => {
 
   it('does not annotate an in-flight edit preview', () => {
     const container = expandCompletedEdit({ status: 'in_progress' });
+    expect(container.textContent).not.toContain(
+      'Diff rebuilt from the tool call arguments',
+    );
+  });
+
+  it('annotates a safe-projection edit that carries preview arg names', () => {
+    const container = expandCompletedEdit({
+      args: {
+        path: '/repo/app.ts',
+        oldText: 'const a = 1;\n',
+        newText: 'const a = 2;\n',
+      },
+    });
+    expect(container.textContent).toContain(
+      'Diff rebuilt from the tool call arguments',
+    );
+  });
+
+  it('annotates a completed edit whose recorded diff was truncated by session history', () => {
+    const container = expandCompletedEdit({
+      rawOutput: {
+        truncatedForSession: true,
+        fileName: '/repo/app.ts',
+        newContent: 'const a = 2;\nconst b = 3;\n',
+        fileDiff: 'diff --git a/app.ts b/app.ts\n',
+      },
+    });
+    expect(container.textContent).toContain(
+      'Diff rebuilt from the tool call arguments',
+    );
+  });
+
+  it('does not annotate a whole-file write rebuilt from its arguments', () => {
+    const container = expandCompletedEdit({
+      args: { path: '/repo/app.ts', newText: 'const a = 2;\nconst b = 3;\n' },
+    });
+    expect(container.textContent).toContain('const a = 2;');
     expect(container.textContent).not.toContain(
       'Diff rebuilt from the tool call arguments',
     );

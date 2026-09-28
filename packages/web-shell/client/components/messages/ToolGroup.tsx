@@ -170,21 +170,48 @@ function isEditToolName(toolName: string): boolean {
   );
 }
 
-export function extractDiff(tool: ACPToolCall): string {
+export type DiffSource =
+  | 'none'
+  | 'recorded'
+  | 'content-block'
+  | 'patch-arg'
+  | 'rebuilt-from-args';
+
+/**
+ * Resolve the diff a completed edit surface should show, and report which
+ * source produced it, so provenance decisions read the same ladder the
+ * renderer walks instead of re-encoding it. The source order is the render
+ * order: a recorded fileDiff wins, then a tool-provided diff content block,
+ * then the call's own `patch` argument (a real unified diff), and finally a
+ * rebuild from the edit's old/new text — the only source whose 0-based,
+ * snippet-scoped rendering needs a reconstruction note.
+ */
+export function resolveDiff(tool: ACPToolCall): {
+  diff: string;
+  source: DiffSource;
+} {
   const rawFileDiff = getRawFileDiff(tool);
-  if (rawFileDiff) return rawFileDiff;
+  if (rawFileDiff) return { diff: rawFileDiff, source: 'recorded' };
 
   if (tool.content) {
     const diffBlock = tool.content.find((b) => b.type === 'diff');
     if (diffBlock && diffBlock.type === 'diff') {
-      return buildUnifiedDiff(diffBlock.oldText || '', diffBlock.newText || '');
+      return {
+        diff: buildUnifiedDiff(
+          diffBlock.oldText || '',
+          diffBlock.newText || '',
+        ),
+        source: 'content-block',
+      };
     }
   }
 
-  if (tool.status === 'failed' || tool.wasCancelled) return '';
+  if (tool.status === 'failed' || tool.wasCancelled)
+    return { diff: '', source: 'none' };
 
   const previewPatch = tool.args?.patch;
-  if (typeof previewPatch === 'string' && previewPatch) return previewPatch;
+  if (typeof previewPatch === 'string' && previewPatch)
+    return { diff: previewPatch, source: 'patch-arg' };
   // `newText`/`oldText` come from the safe tool preview projection; the full
   // projection carries the edit tool's real parameter names instead.
   const previewNewText = tool.args?.newText ?? tool.args?.new_string;
@@ -193,13 +220,20 @@ export function extractDiff(tool: ACPToolCall): string {
     typeof previewNewText === 'string' ||
     typeof previewOldText === 'string'
   ) {
-    return buildUnifiedDiff(
-      typeof previewOldText === 'string' ? previewOldText : '',
-      typeof previewNewText === 'string' ? previewNewText : '',
-    );
+    return {
+      diff: buildUnifiedDiff(
+        typeof previewOldText === 'string' ? previewOldText : '',
+        typeof previewNewText === 'string' ? previewNewText : '',
+      ),
+      source: 'rebuilt-from-args',
+    };
   }
 
-  return '';
+  return { diff: '', source: 'none' };
+}
+
+export function extractDiff(tool: ACPToolCall): string {
+  return resolveDiff(tool).diff;
 }
 
 export function getRawFileDiff(tool: ACPToolCall): string {
@@ -218,25 +252,23 @@ function isTruncatedSessionDiff(raw: Record<string, unknown>): boolean {
 }
 
 /**
- * True when the diff a completed edit card shows was rebuilt by
- * extractDiff from the call's own old/new text arguments because no
- * recorded fileDiff survived session-history truncation. Such a rebuild
- * only spans the edit snippet: line numbers are snippet-relative and a
- * replace_all edit renders as a single occurrence, so the card must say
- * the diff was reconstructed rather than recorded. Approval-time and
- * in-flight previews legitimately come from the arguments, so only
- * completed calls are annotated.
+ * True when the diff a completed edit surface shows was rebuilt from the
+ * call's own old/new text arguments because no recorded fileDiff survived
+ * session-history truncation, and the call is edit-shaped (an old-text
+ * argument exists — whole-file writes rebuild the entire file, where the
+ * note's clauses do not apply). Such a rebuild's gutter counts from 0
+ * within the rebuilt text and a replace_all edit renders as a single
+ * occurrence, so the card must say the diff was reconstructed rather than
+ * recorded. Approval-time and in-flight previews legitimately come from
+ * the arguments, so only completed calls are annotated.
  */
 export function isDiffRebuiltFromArgs(tool: ACPToolCall): boolean {
   if (tool.status !== 'completed' || tool.wasCancelled) return false;
-  if (getRawFileDiff(tool)) return false;
-  if (tool.content?.some((b) => b.type === 'diff')) return false;
-  // A `patch` argument is the real unified diff the tool was given, not a
-  // snippet rebuild, so it needs no reconstruction note.
-  if (typeof tool.args?.patch === 'string' && tool.args.patch) return false;
-  const newText = tool.args?.newText ?? tool.args?.new_string;
   const oldText = tool.args?.oldText ?? tool.args?.old_string;
-  return typeof newText === 'string' || typeof oldText === 'string';
+  return (
+    resolveDiff(tool).source === 'rebuilt-from-args' &&
+    typeof oldText === 'string'
+  );
 }
 
 // A description longer than this is likely ellipsised on a normal-width row, so

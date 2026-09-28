@@ -49,6 +49,7 @@ import { formatDurationMs } from '../messages/tools/toolDisplay';
 import { ToolFilePreviewButton } from '../messages/ToolFilePreviewButton';
 import {
   extractDiff,
+  isDiffRebuiltFromArgs,
   fencedCodeBlock,
   ToolSummaryIcon,
 } from '../messages/ToolGroup';
@@ -685,29 +686,32 @@ const TurnCallRowItem = memo(function TurnCallRowItem({
     2000,
   );
   const isShell = isShellToolName(tool.toolName);
-  const { diff, shell, argumentsText, resultText } = useMemo(() => {
-    if (!expanded) return { diff: '', argumentsText: '', resultText: '' };
-    const diff = editTool ? extractDiff(tool) : '';
-    const shell = isShell ? shellDetails(tool) : undefined;
-    return {
-      diff,
-      shell,
-      argumentsText: shell ? shell.command : stringifyValue(block.rawInput),
-      resultText: diff
-        ? ''
-        : shell
-          ? shell.output
-          : stringifyValue(block.rawOutput ?? block.content),
-    };
-  }, [
-    expanded,
-    editTool,
-    isShell,
-    tool,
-    block.rawInput,
-    block.rawOutput,
-    block.content,
-  ]);
+  const { diff, diffRebuilt, shell, argumentsText, resultText } =
+    useMemo(() => {
+      if (!expanded) return { diff: '', argumentsText: '', resultText: '' };
+      const diff = editTool ? extractDiff(tool) : '';
+      const diffRebuilt = diff ? isDiffRebuiltFromArgs(tool) : false;
+      const shell = isShell ? shellDetails(tool) : undefined;
+      return {
+        diff,
+        diffRebuilt,
+        shell,
+        argumentsText: shell ? shell.command : stringifyValue(block.rawInput),
+        resultText: diff
+          ? ''
+          : shell
+            ? shell.output
+            : stringifyValue(block.rawOutput ?? block.content),
+      };
+    }, [
+      expanded,
+      editTool,
+      isShell,
+      tool,
+      block.rawInput,
+      block.rawOutput,
+      block.content,
+    ]);
   const hasDetails = Boolean(
     isShell ||
       block.rawInput != null ||
@@ -858,6 +862,11 @@ const TurnCallRowItem = memo(function TurnCallRowItem({
               {diff ? (
                 <>
                   <DiffView diff={diff.slice(0, MAX_DETAIL_LENGTH)} />
+                  {diffRebuilt && (
+                    <p className="text-xs text-muted-foreground">
+                      {t('toolGroup.diffRebuiltFromArgs')}
+                    </p>
+                  )}
                   {diff.length > MAX_DETAIL_LENGTH && (
                     <p className="text-xs text-muted-foreground">
                       {t('gitDiff.truncated')}
