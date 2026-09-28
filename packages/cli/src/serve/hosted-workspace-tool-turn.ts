@@ -14,6 +14,7 @@ import {
 } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import { managedToolDigest } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
+import { TOOL_OUTPUT_TRUNCATED_PREFIX } from '@qwen-code/qwen-code-core/tools/truncation.js';
 import {
   createToolPublicationToken,
   parseToolPublicationBinding,
@@ -29,7 +30,10 @@ import {
   type ManagedSessionDurableRef,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import type { ManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
-import { HTTP_MANAGED_SESSION_STORE_CONTRACT } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
+import {
+  HTTP_MANAGED_SESSION_STORE_CONTRACT,
+  ManagedSessionStoreHttpError,
+} from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 import { normalizeWorkspaceRelativePath } from './managed-workspace-binding.js';
 import { WORKSPACE_CAPABILITY_DIGEST } from './managed-workspace-activation.js';
@@ -41,6 +45,26 @@ import {
 
 export const HOSTED_WORKSPACE_FILE_PROFILE = 'hosted-workspace-files/1';
 export const HOSTED_WORKSPACE_SHELL_PROFILE = 'hosted-workspace-shell/1';
+
+function shellHistoryId(executionCallId: string): string {
+  const bytes = createHash('sha1')
+    .update('qwen-hosted-shell-history/1:')
+    .update(executionCallId)
+    .digest();
+  bytes[6] = (bytes[6]! & 0x0f) | 0x50;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  const hex = bytes.subarray(0, 16).toString('hex');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+function hostedShellPreview(text: string): string {
+  if (!text.startsWith(TOOL_OUTPUT_TRUNCATED_PREFIX)) return text;
+  const marker = 'Truncated part of the output:\n';
+  const start = text.indexOf(marker);
+  return start < 0
+    ? 'The Shell output was retained in its immutable capture.'
+    : `Shell output preview:\n${text.slice(start + marker.length)}\nThe complete raw output is retained in the manifest.`;
+}
 
 const pathProperty = {
   type: 'string',
@@ -741,7 +765,7 @@ export class HostedWorkspaceToolTurn {
           event.kind === 'tool.receipt' &&
           event.payload['executionCallId'] === executionCallId,
       );
-    let ref: ManagedSessionDurableRef;
+    let ref!: ManagedSessionDurableRef;
     let converted: Part[];
     let messageId: string;
     let timestamp: string;
@@ -774,7 +798,11 @@ export class HostedWorkspaceToolTurn {
       messageId = history['messageId'];
       timestamp = history['timestamp'];
     } else {
-      const responseParts = envelope.responseParts as Part[];
+      const responseParts = (envelope.responseParts as Part[]).map((part) =>
+        typeof part.text === 'string'
+          ? { ...part, text: hostedShellPreview(part.text) }
+          : part,
+      );
       converted =
         envelope.executionStatus === 'success'
           ? convertToFunctionResponse(call.name, call.callId, responseParts)
@@ -782,8 +810,9 @@ export class HostedWorkspaceToolTurn {
               call.name,
               call.callId,
               responseParts,
-              envelope.error?.message ??
-                `Runtime tool ${envelope.executionStatus}.`,
+              (envelope.error?.message
+                ? hostedShellPreview(envelope.error.message)
+                : undefined) ?? `Runtime tool ${envelope.executionStatus}.`,
             );
       if (converted.length === 1 && converted[0]?.functionResponse) {
         const response = converted[0].functionResponse;
@@ -818,8 +847,16 @@ export class HostedWorkspaceToolTurn {
       }
       if (!this.messageFitsInline('tool_result', converted, model))
         throw new Error('Original Shell history exceeds the Session limit.');
-      messageId = randomUUID();
-      timestamp = new Date().toISOString();
+      const originalIntent = authority
+        .eventsInSequenceRange(1, authority.committedSequence)
+        .find(
+          (event) =>
+            event.kind === 'tool.intent' &&
+            event.payload['executionCallId'] === executionCallId,
+        );
+      if (!originalIntent) throw new Error('Original Shell intent is missing.');
+      messageId = shellHistoryId(executionCallId);
+      timestamp = new Date(originalIntent.occurredAt).toISOString();
       const outcome = {
         schemaVersion: 1,
         decision,
@@ -827,10 +864,24 @@ export class HostedWorkspaceToolTurn {
         manifestRef,
         history: { messageId, timestamp, model, parts: converted },
       };
-      ref = (await owner.request(
-        `/publications/${publicationId}/admissions/prepare`,
-        outcome,
-      )) as ManagedSessionDurableRef;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          ref = (await owner.request(
+            `/publications/${publicationId}/admissions/prepare`,
+            outcome,
+          )) as ManagedSessionDurableRef;
+          break;
+        } catch (error) {
+          const uncertain =
+            (error instanceof ManagedSessionStoreHttpError &&
+              error.status >= 500) ||
+            error instanceof TypeError ||
+            (error instanceof DOMException &&
+              ['AbortError', 'TimeoutError'].includes(error.name));
+          if (!uncertain || attempt === 2) throw error;
+          await new Promise((resolve) => setTimeout(resolve, 250));
+        }
+      }
       owner.rememberAdmission(publicationId, ref);
       await authority.appendExecutionEvent(
         {

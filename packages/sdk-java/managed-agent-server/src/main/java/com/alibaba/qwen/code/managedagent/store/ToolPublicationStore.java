@@ -211,9 +211,14 @@ public final class ToolPublicationStore {
             require(bytes <= capacity.executionBytes(), "Execution capture capacity exceeded");
             long allocation = bytes + ToolPublicationContract.PRODUCER_BYTES
                     + ToolPublicationContract.ADMISSION_BYTES;
+            jdbc.update("UPDATE qwen_tool_publication SET state = 'FENCED', expires_at = NULL,"
+                    + " capture_held_bytes = capture_used_bytes, producer_held_bytes = producer_used_bytes,"
+                    + " admission_held_bytes = CASE WHEN producer_phase IN ('FINISHED', 'REFERENCED')"
+                    + " THEN admission_held_bytes ELSE admission_used_bytes END"
+                    + " WHERE tenant_key = ? AND state = 'OPEN' AND expires_at <= ?", tenantKey, writer.now());
             var totals = jdbc.queryForMap("SELECT COALESCE(SUM(capture_held_bytes + producer_held_bytes"
                     + " + admission_held_bytes), 0) AS reserved,"
-                    + " COALESCE(SUM(CASE WHEN producer_phase IN ('OPEN', 'FINISHING')"
+                    + " COALESCE(SUM(CASE WHEN state = 'OPEN' AND producer_phase IN ('OPEN', 'FINISHING')"
                     + " THEN 1 ELSE 0 END), 0) AS captures"
                     + " FROM qwen_tool_publication WHERE tenant_key = ? AND state <> 'NOT_STARTED'", tenantKey);
             long reserved = ((Number) totals.get("reserved")).longValue();
@@ -268,9 +273,11 @@ public final class ToolPublicationStore {
             state = row.state();
         }
         jdbc.update("UPDATE qwen_tool_publication SET state = ?, expires_at = NULL,"
-                + " capture_held_bytes = CASE WHEN ? = 'NOT_STARTED' THEN 0 ELSE capture_held_bytes END,"
-                + " producer_held_bytes = CASE WHEN ? = 'NOT_STARTED' THEN 0 ELSE producer_held_bytes END,"
-                + " admission_held_bytes = CASE WHEN ? = 'NOT_STARTED' THEN 0 ELSE admission_held_bytes END"
+                + " capture_held_bytes = CASE WHEN ? = 'NOT_STARTED' THEN 0 ELSE capture_used_bytes END,"
+                + " producer_held_bytes = CASE WHEN ? = 'NOT_STARTED' THEN 0 ELSE producer_used_bytes END,"
+                + " admission_held_bytes = CASE WHEN ? = 'NOT_STARTED' THEN 0"
+                + " WHEN producer_phase IN ('FINISHED', 'REFERENCED') THEN admission_held_bytes"
+                + " ELSE admission_used_bytes END"
                 + " WHERE scope_key = ? AND publication_id = ?", state, state, state, state, scope, id);
         return grant(id, row.withState(state, null));
     }

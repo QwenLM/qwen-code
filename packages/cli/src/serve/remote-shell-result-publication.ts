@@ -200,16 +200,44 @@ class PublicationClient {
     headers?: Record<string, string>,
   ): Promise<Record<string, unknown>> {
     const deadline = Date.now() + 30 * 60_000;
-    let initial: Record<string, unknown>;
-    while (true) {
+    const statusPath = `/operations/${encodeURIComponent(operationId)}`;
+    const retryable = (failure: unknown): boolean =>
+      failure instanceof PublicationRejection
+        ? failure.status === 429 || failure.status >= 500
+        : failure instanceof TypeError ||
+          (failure instanceof DOMException &&
+            ['AbortError', 'TimeoutError'].includes(failure.name));
+    const observe = async (): Promise<Record<string, unknown> | null> => {
+      while (Date.now() < deadline) {
+        try {
+          return await this.request(statusPath, operationId);
+        } catch (failure) {
+          if (
+            failure instanceof PublicationRejection &&
+            failure.code === 'managed_tool_publication_operation_unknown'
+          )
+            return null;
+          if (!retryable(failure)) throw failure;
+          await new Promise((resolve) => setTimeout(resolve, 250));
+        }
+      }
+      throw new Error(
+        'Publication operation exceeded its observation deadline.',
+      );
+    };
+    while (Date.now() < deadline) {
+      let initial: Record<string, unknown>;
       try {
         initial = await this.request(suffix, operationId, body, headers);
-        break;
       } catch (failure) {
-        const status = await this.request(
-          `/operations/${encodeURIComponent(operationId)}`,
-          operationId,
-        ).catch(() => null);
+        if (failure instanceof Error && failure.message === 'quota_exhausted')
+          throw failure;
+        if (
+          failure instanceof PublicationRejection &&
+          failure.code === 'managed_tool_publication_storage_denied'
+        )
+          throw failure;
+        const status = await observe();
         if (status !== null) {
           if (
             failure instanceof PublicationRejection &&
@@ -220,30 +248,30 @@ class PublicationClient {
           )
             throw failure;
           initial = status;
-          break;
+        } else {
+          if (!retryable(failure)) throw failure;
+          await new Promise((resolve) => setTimeout(resolve, 250));
+          continue;
         }
-        if (
-          !(failure instanceof PublicationRejection) ||
-          failure.status !== 429 ||
-          Date.now() >= deadline
-        )
-          throw failure;
-        await new Promise((resolve) => setTimeout(resolve, 250));
       }
-    }
-    if (initial['state'] === undefined) return initial;
-    let status = initial;
-    while (Date.now() < deadline) {
-      if (status['state'] === 'SUCCEEDED') return record(status['receipt']);
-      if (status['state'] !== 'PENDING')
-        throw new Error(
-          `Publication operation ended as ${String(status['state'])}.`,
-        );
+      if (initial['state'] === undefined) return initial;
+      let status = initial;
+      while (Date.now() < deadline) {
+        if (status['state'] === 'SUCCEEDED') return record(status['receipt']);
+        if (status['state'] === 'RETRYABLE') break;
+        if (status['state'] !== 'PENDING')
+          throw new Error(
+            `Publication operation ended as ${String(status['state'])}.`,
+          );
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        const current = await observe();
+        if (current === null)
+          throw new Error(
+            'Publication operation disappeared during observation.',
+          );
+        status = current;
+      }
       await new Promise((resolve) => setTimeout(resolve, 250));
-      status = await this.request(
-        `/operations/${encodeURIComponent(operationId)}`,
-        operationId,
-      );
     }
     throw new Error('Publication operation exceeded its observation deadline.');
   }

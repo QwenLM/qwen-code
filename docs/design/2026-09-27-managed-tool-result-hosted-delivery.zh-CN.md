@@ -252,7 +252,11 @@ W0e 将 Broker 执行标记为 `ABANDONED` 后，其 ledger 保持终态，不�
 
 固定基线上的两项现有 core 定向测试确认了 HTTP 暂存的 64 KiB 限制。实现后的 core 与 CLI 定向测试已经通过，其中原 O1a 的 28 组、136 步通过异步 HTTP 适配器及以 ledger 为后端的测试入口运行；Java H2 catalog 测试覆盖不可变对象、接纳、固定范围、故障注入，以及增量生成的 100 MiB 和 1 GiB 数据。Broker 模块验证、Server 定向验证、仓库 build/typecheck/bundle 与本地 MySQL 8.4.11 迁移/集成运行记载于配套 E2E 报告。最终 Server 全量测试仍遇到一个与本分支无关的主线同毫秒 Turn 排序失败，不能将该次全量运行计为通过。这些测试不能替代真实 OSS bucket 或第二宿主证据。
 
-完整验收矩阵仍缺真实 OSS 的禁止覆盖/versioning 行为、独立 worker/owner/service 进程故障、O2 专属 MySQL 并发竞争，以及原 Runtime 磁盘不可达时的合法跨宿主恢复。统一 PR 在这些检查和维护者评审完成前保持 Draft。mock、本机进程、真实 SQL、真实 OSS 和不同宿主证据分别报告；普通 CLI 对话不能验证此私有服务。
+完整验收矩阵仍缺真实 OSS 的禁止覆盖/versioning 行为、独立 worker/owner/service 进程故障、O2 专属 MySQL 并发竞争，以及原 Runtime 磁盘不可达时的合法跨宿主恢复。PR 可以进入 Ready 状态接受维护者评审，但在这些检查和部署决定完成前不得启用私有 Shell profile。mock、本机进程、真实 SQL、真实 OSS 和不同宿主证据分别报告；普通 CLI 对话不能验证此私有服务。
+
+### 12.3 评审反馈加固
+
+producer 在状态查询显示原操作未知后，使用相同 operation ID 和字节重试；明确的存储 `AccessDenied` 或配额拒绝立即失败。服务端对终态请求的原始字节计算摘要，并拒绝非整数或溢出的范围坐标。admission 与回执响应丢失时均有界重放完全相同的请求；Hosted admission 的历史 ID 和时间取自原始持久 intent，使重复接纳具有稳定内容。显式 fence 及后续 reserve 对过期 grant 的扫描只释放未用的 capture 与 producer 额度，已用和不确定的候选字节继续计费，已完成 publication 的 admission 额度仍保留。私有 Shell 预览有界保留开头与末尾，并在写入模型历史前移除 worker 本地 spill 文件指令。如第 10 节所述，本切片仍不包括“admission 已准备、receipt 尚未提交”后的自动 cold-load 续跑；该 Session 保持恢复阻断，不能伪造回执。
 
 ## 13. 启用前的部署决定
 

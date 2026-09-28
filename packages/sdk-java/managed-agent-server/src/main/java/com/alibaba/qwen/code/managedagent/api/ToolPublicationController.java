@@ -126,7 +126,7 @@ public class ToolPublicationController {
             @RequestHeader(OPERATION_ID_HEADER) String operationId,
             HttpServletRequest request) throws IOException {
         return limited(() -> {
-            JsonNode body = ToolPublicationContract.readJson(read(request, 2 * 1024 * 1024));
+            byte[] body = read(request, 2 * 1024 * 1024);
             JsonNode key = scope(tenant, workspaceId, sessionId);
             return data.finish(key, publicationId, token, operationId, body);
         });
@@ -186,10 +186,15 @@ public class ToolPublicationController {
             HttpServletRequest request) throws IOException {
         byte[] bytes = limited(() -> {
             JsonNode body = ToolPublicationContract.readJson(read(request, 64 * 1024));
+            JsonNode offset = body.path("offset");
+            JsonNode length = body.path("length");
+            if (!offset.isIntegralNumber() || !offset.canConvertToLong()
+                    || !length.isIntegralNumber() || !length.canConvertToInt()) {
+                throw new IllegalArgumentException("Invalid publication range");
+            }
             return data.readRange(scope(tenant, workspaceId, sessionId),
                     publicationId, writerToken, body.path("manifestRef"), body.path("expectedIdentity"),
-                    body.path("streamId").asText(), body.path("offset").asLong(-1),
-                    body.path("length").asInt(-1));
+                    body.path("streamId").asText(), offset.longValue(), length.intValue());
         });
         return ResponseEntity.ok().header(HttpHeaders.CACHE_CONTROL, "no-store")
                 .contentType(MediaType.APPLICATION_OCTET_STREAM).body(bytes);

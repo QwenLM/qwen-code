@@ -186,17 +186,23 @@ public final class ToolPublicationDataStore {
         require(operationId != null && operationId.matches("[a-z0-9_-]{1,128}"),
                 "Invalid publication operation ID");
         String scope = scope(key);
-        var rows = jdbc.query("SELECT o.state, o.receipt_json, o.deadline, p.tenant_id, p.token_hash,"
+        var rows = jdbc.query("SELECT o.state, o.receipt_json, o.deadline,"
+                        + " CASE WHEN o.claim_owner IS NULL OR o.claim_until < CURRENT_TIMESTAMP(6)"
+                        + " THEN 1 ELSE 0 END AS retryable, p.tenant_id, p.token_hash,"
                         + " p.workspace_id, p.session_id FROM qwen_tool_publication_operation o"
                         + " JOIN qwen_tool_publication p ON p.scope_key = o.scope_key"
                         + " AND p.publication_id = o.publication_id WHERE o.scope_key = ?"
                         + " AND o.publication_id = ? AND o.operation_id = ?",
                 (r, n) -> Map.<String, Object>of("state", r.getString("state"), "deadline", r.getTimestamp("deadline"),
                         "tenant", r.getString("tenant_id"), "workspace", r.getString("workspace_id"),
-                        "session", r.getString("session_id"), "tokenHash", r.getString("token_hash"), "receipt",
+                        "session", r.getString("session_id"), "tokenHash", r.getString("token_hash"),
+                        "retryable", r.getInt("retryable"), "receipt",
                         r.getString("receipt_json") == null ? "" : r.getString("receipt_json")),
                 scope, publicationId, operationId);
-        require(rows.size() == 1, "Publication operation is unknown");
+        if (rows.isEmpty()) {
+            throw new ApiException(HttpStatus.NOT_FOUND,
+                    "managed_tool_publication_operation_unknown", "Publication operation is unknown");
+        }
         Map<String, Object> row = rows.get(0);
         require(text(key, "tenantId").equals(row.get("tenant"))
                 && text(key, "workspaceId").equals(row.get("workspace"))
@@ -212,6 +218,8 @@ public final class ToolPublicationDataStore {
                     ((String) row.get("receipt")).getBytes(StandardCharsets.UTF_8)));
         } else if (((Timestamp) row.get("deadline")).before(now())) {
             response.put("state", "EXPIRED");
+        } else if ("PENDING".equals(state) && ((Number) row.get("retryable")).intValue() == 1) {
+            response.put("state", "RETRYABLE");
         }
         return response;
     }
@@ -460,9 +468,8 @@ public final class ToolPublicationDataStore {
     }
 
     public JsonNode finish(JsonNode key, String publicationId, String token,
-            String operationId, JsonNode envelope) {
-        require(envelope != null, "Missing terminal result");
-        byte[] bytes = envelope.toString().getBytes(StandardCharsets.UTF_8);
+            String operationId, byte[] bytes) {
+        require(bytes != null, "Missing terminal result");
         JsonNode result = ToolPublicationContract.parseToolResult("result", bytes, MAX_TERMINAL);
         require(!"not_started".equals(text(result, "executionStatus"))
                 && result.path("capture").isObject()

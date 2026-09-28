@@ -294,7 +294,7 @@ describe('remote Shell result publication', () => {
         if (input.pathname.includes('/operations/'))
           return new Response(
             JSON.stringify({
-              error: { code: 'managed_tool_publication_unknown' },
+              error: { code: 'managed_tool_publication_operation_unknown' },
             }),
             { status: 404 },
           );
@@ -336,6 +336,186 @@ describe('remote Shell result publication', () => {
       }),
     ).toMatchObject({ status: 'ok' });
     expect(operationIds).toEqual(['seg-stdout-0', 'seg-stdout-0']);
+  });
+
+  it.each(['http failure', 'lost request'])(
+    'replays an unknown operation after %s',
+    async (failure) => {
+      const attempts: Array<{ id: string; bytes: Buffer }> = [];
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (input: URL, init: RequestInit) => {
+          if (input.pathname.includes('/operations/'))
+            return new Response(
+              JSON.stringify({
+                error: { code: 'managed_tool_publication_operation_unknown' },
+              }),
+              { status: 404 },
+            );
+          const bytes = Buffer.from(init.body as Buffer);
+          attempts.push({
+            id: (init.headers as Record<string, string>)[
+              'X-Qwen-Tool-Publication-Operation'
+            ],
+            bytes,
+          });
+          if (attempts.length === 1) {
+            if (failure === 'lost request')
+              throw new TypeError('connection reset');
+            return new Response(
+              JSON.stringify({ error: { code: 'internal_error' } }),
+              { status: 503 },
+            );
+          }
+          return new Response(
+            JSON.stringify({
+              captureId: 'capture-a',
+              streamId: 'stdout',
+              ordinal: 0,
+              byteLength: bytes.length,
+              digest: digest(bytes),
+            }),
+          );
+        }),
+      );
+      const publisher = new RemoteShellResultPublisher();
+      publisher.install(installation, boot);
+      const { sink } = await publisher.prepare(request);
+      const store = Reflect.get(sink, 'store') as ToolResultSegmentStore;
+      expect(
+        await store.publish({
+          captureId: 'capture-a',
+          streamId: 'stdout',
+          ordinal: 0,
+          bytes: Buffer.from('same bytes'),
+        }),
+      ).toMatchObject({ status: 'ok' });
+      expect(attempts).toHaveLength(2);
+      expect(attempts[0]).toEqual(attempts[1]);
+    },
+  );
+
+  it('waits through a failed status lookup before replaying the original segment', async () => {
+    let posts = 0;
+    let reads = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: URL, init: RequestInit) => {
+        if (input.pathname.includes('/operations/')) {
+          reads++;
+          return reads === 1
+            ? new Response(
+                JSON.stringify({ error: { code: 'internal_error' } }),
+                { status: 503 },
+              )
+            : new Response(
+                JSON.stringify({
+                  error: { code: 'managed_tool_publication_operation_unknown' },
+                }),
+                { status: 404 },
+              );
+        }
+        posts++;
+        if (posts === 1)
+          return new Response(
+            JSON.stringify({ error: { code: 'internal_error' } }),
+            { status: 503 },
+          );
+        const bytes = Buffer.from(init.body as Buffer);
+        return new Response(
+          JSON.stringify({
+            captureId: 'capture-a',
+            streamId: 'stdout',
+            ordinal: 0,
+            byteLength: bytes.length,
+            digest: digest(bytes),
+          }),
+        );
+      }),
+    );
+    const publisher = new RemoteShellResultPublisher();
+    publisher.install(installation, boot);
+    const { sink } = await publisher.prepare(request);
+    const store = Reflect.get(sink, 'store') as ToolResultSegmentStore;
+    expect(
+      await store.publish({
+        captureId: 'capture-a',
+        streamId: 'stdout',
+        ordinal: 0,
+        bytes: Buffer.from('replay'),
+      }),
+    ).toMatchObject({ status: 'ok' });
+    expect(posts).toBe(2);
+    expect(reads).toBe(2);
+  });
+
+  it('replays a failed server operation after its claim is released', async () => {
+    let posts = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: URL, init: RequestInit) => {
+        if (input.pathname.includes('/operations/'))
+          return new Response(JSON.stringify({ state: 'RETRYABLE' }));
+        posts++;
+        if (posts === 1)
+          return new Response(
+            JSON.stringify({ error: { code: 'internal_error' } }),
+            { status: 503 },
+          );
+        const bytes = Buffer.from(init.body as Buffer);
+        return new Response(
+          JSON.stringify({
+            captureId: 'capture-a',
+            streamId: 'stdout',
+            ordinal: 0,
+            byteLength: bytes.length,
+            digest: digest(bytes),
+          }),
+        );
+      }),
+    );
+    const publisher = new RemoteShellResultPublisher();
+    publisher.install(installation, boot);
+    const { sink } = await publisher.prepare(request);
+    const store = Reflect.get(sink, 'store') as ToolResultSegmentStore;
+    expect(
+      await store.publish({
+        captureId: 'capture-a',
+        streamId: 'stdout',
+        ordinal: 0,
+        bytes: Buffer.from('replay'),
+      }),
+    ).toMatchObject({ status: 'ok' });
+    expect(posts).toBe(2);
+  });
+
+  it('stops capture on a definite storage permission failure', async () => {
+    let statusReads = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: URL) => {
+        if (input.pathname.includes('/operations/')) statusReads++;
+        return new Response(
+          JSON.stringify({
+            error: { code: 'managed_tool_publication_storage_denied' },
+          }),
+          { status: 403 },
+        );
+      }),
+    );
+    const publisher = new RemoteShellResultPublisher();
+    publisher.install(installation, boot);
+    const { sink } = await publisher.prepare(request);
+    const store = Reflect.get(sink, 'store') as ToolResultSegmentStore;
+    await expect(
+      store.publish({
+        captureId: 'capture-a',
+        streamId: 'stdout',
+        ordinal: 0,
+        bytes: Buffer.from('denied'),
+      }),
+    ).rejects.toThrow('HTTP 403');
+    expect(statusReads).toBe(0);
   });
 
   it('rejects a grant for another Workspace before recording it', () => {
@@ -501,6 +681,13 @@ it.each(fixtureSuite.segmentSequences)(
         const publicationId = route.match(/\/publications\/([^/]+)\//u)?.[1];
         const captureId = publicationId && captures.get(publicationId);
         if (!captureId) throw new Error('Unknown fixture publication.');
+        if (route.includes('/operations/'))
+          return new Response(
+            JSON.stringify({
+              error: { code: 'managed_tool_publication_operation_unknown' },
+            }),
+            { status: 404 },
+          );
         const bytes = Buffer.from(init.body as Buffer);
         const segment = route.match(/\/segments\/([^/]+)\/([0-9]+)$/u);
         const stream = route.match(/\/streams\/([^/]+)\/(seal|prefix)$/u);

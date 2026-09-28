@@ -154,7 +154,16 @@ export class HostedWorkspaceBroker {
     const path = `/executions/${encodeURIComponent(id)}`;
     let response: Record<string, unknown> | undefined;
     let cancellationSent = false;
+    let startUncertain = false;
+    let startAttempts = 0;
+    let preparedObservations = 0;
+    const definiteStartFailure = (failure: unknown): boolean =>
+      failure instanceof HostedWorkspaceBrokerRejection &&
+      ([400, 401, 403, 404, 409].includes(failure.status) ||
+        (failure.status === 501 &&
+          failure.code === 'runtime_tool_v3_unsupported'));
     if (!signal.aborted) {
+      startAttempts++;
       try {
         response = await this.request(`${path}:start`, {
           payloadJson,
@@ -162,11 +171,8 @@ export class HostedWorkspaceBroker {
           publicationToken,
         });
       } catch (failure) {
-        if (
-          failure instanceof HostedWorkspaceBrokerRejection &&
-          [400, 401, 403, 404, 409].includes(failure.status)
-        )
-          throw failure;
+        if (definiteStartFailure(failure)) throw failure;
+        startUncertain = true;
       }
     }
     const deadline = Date.now() + 30 * 60_000;
@@ -189,6 +195,27 @@ export class HostedWorkspaceBroker {
         )
           throw new Error('Tool v3 result is invalid.');
         return result as unknown as ToolResultEnvelope;
+      }
+      if (status['state'] === 'prepared' && startUncertain && !signal.aborted) {
+        preparedObservations++;
+        if (preparedObservations >= 10) {
+          if (startAttempts >= 3)
+            throw new Error('Tool v3 start was not confirmed.');
+          startAttempts++;
+          preparedObservations = 0;
+          try {
+            response = await this.request(`${path}:start`, {
+              payloadJson,
+              publicationId,
+              publicationToken,
+            });
+            startUncertain = false;
+          } catch (failure) {
+            if (definiteStartFailure(failure)) throw failure;
+            response = undefined;
+          }
+          continue;
+        }
       }
       if (
         !['prepared', 'executing', 'cancel_requested'].includes(

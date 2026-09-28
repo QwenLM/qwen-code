@@ -543,15 +543,30 @@ class ManagedSessionStoreHttpClient {
       recordDigest: sha256(recordBytes),
       resources: commitResources,
     };
-    const receipt = asRecord(
-      publicationId === undefined
-        ? await this.json('/transactions:commit', 'POST', commitBody)
-        : await this.publicationRequest(
+    let committed: unknown;
+    if (publicationId === undefined) {
+      committed = await this.json('/transactions:commit', 'POST', commitBody);
+    } else {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          committed = await this.publicationRequest(
             `/publications/${encodeURIComponent(publicationId)}/receipts/commit`,
             commitBody,
-          ),
-      'commit receipt',
-    );
+          );
+          break;
+        } catch (error) {
+          const uncertain =
+            (error instanceof ManagedSessionStoreHttpError &&
+              error.status >= 500) ||
+            error instanceof TypeError ||
+            (error instanceof DOMException &&
+              ['AbortError', 'TimeoutError'].includes(error.name));
+          if (!uncertain || attempt === 2) throw error;
+          await new Promise((resolve) => setTimeout(resolve, 250));
+        }
+      }
+    }
+    const receipt = asRecord(committed, 'commit receipt');
     const revision = safeCounter(receipt['journalRevision'], 'journalRevision');
     if (
       revision !== grant.journalRevision + 1 ||

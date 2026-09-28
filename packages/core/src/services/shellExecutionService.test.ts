@@ -3135,6 +3135,45 @@ describe('ShellExecutionService child_process fallback', () => {
     return { result, handle, abortController };
   };
 
+  it('keeps a bounded head and tail preview while capturing every raw byte', async () => {
+    Object.assign(mockChildProcess.stdout!, {
+      pause: vi.fn(),
+      resume: vi.fn(),
+    });
+    Object.assign(mockChildProcess.stderr!, {
+      pause: vi.fn(),
+      resume: vi.fn(),
+    });
+    const bytes = Buffer.from(`HEAD${'x'.repeat(100)}TAIL`);
+    const capture = {
+      write: vi.fn(async () => {}),
+      finish: vi.fn(async () => {}),
+      setStarted: vi.fn(),
+      setProcessResult: vi.fn(),
+    };
+    const handle = await ShellExecutionService.execute(
+      'printf output',
+      '/test/dir',
+      onOutputEventMock,
+      new AbortController().signal,
+      true,
+      { ...shellExecutionConfig, maxBufferedOutputBytes: 64 },
+      { rawCapture: capture },
+    );
+    mockChildProcess.stdout!.emit('data', bytes);
+    mockChildProcess.stdout!.emit('end');
+    mockChildProcess.stderr!.emit('end');
+    mockChildProcess.emit('exit', 0, null);
+    mockChildProcess.emit('close', 0, null);
+    const result = await handle.result;
+    expect(capture.write).toHaveBeenCalledWith('stdout', bytes);
+    expect(result.rawOutput.byteLength).toBe(32);
+    expect(result.output).toContain('HEAD');
+    expect(result.output).toContain('TAIL');
+    expect(result.output).toContain('Middle output omitted');
+    expect(result.output).not.toContain('x'.repeat(100));
+  });
+
   describe('child environment sanitization (#6601)', () => {
     it('strips Qwen-internal daemon secrets from the child_process env while keeping user vars and third-party credentials', async () => {
       // Replace (not mutate in place): this file restores process.env by

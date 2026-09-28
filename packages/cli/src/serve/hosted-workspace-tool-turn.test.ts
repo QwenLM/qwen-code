@@ -187,7 +187,7 @@ it('commits the whole batch before the first dispatch and each receipt before re
 });
 
 async function shellReceiptScenario(
-  mode: 'normal' | 'abandoned' | 'mismatched',
+  mode: 'normal' | 'abandoned' | 'mismatched' | 'truncated' | 'lost-admission',
 ) {
   const shellCall = {
     ...calls[0],
@@ -210,12 +210,19 @@ async function shellReceiptScenario(
   );
   const envelope = {
     executionStatus: 'success' as const,
-    responseParts: [{ text: 'hi' }],
+    responseParts: [
+      {
+        text:
+          mode === 'truncated'
+            ? 'Tool output was too large and has been truncated.\nThe full output has been saved to: /private/tmp/worker-output\nTo read the complete output, use the read_file tool with the absolute file path above.\nTruncated part of the output:\nHEAD\n... [CONTENT TRUNCATED] ...\nTAIL'
+            : 'hi',
+      },
+    ],
     capture: {
       manifest,
       captureStatus: 'complete' as const,
       captureReason: null,
-      previewTruncated: false,
+      previewTruncated: mode === 'truncated',
       deliveryStatus: 'pending' as const,
     },
   };
@@ -229,7 +236,7 @@ async function shellReceiptScenario(
   broker.executeV3.mockImplementation(async () => {
     order.push('execute');
     expect(session.authority.latestCheckpoint?.boundary).toBe('durable_wait');
-    if (mode !== 'normal')
+    if (mode !== 'normal' && mode !== 'truncated' && mode !== 'lost-admission')
       throw new HostedWorkspaceBrokerRejection(
         409,
         'runtime_broker_execution_unknown',
@@ -246,6 +253,8 @@ async function shellReceiptScenario(
         'runtime_broker_execution_unknown',
       );
   });
+  let admissionRef: ManagedSessionDurableRef | undefined;
+  let admissionBody: string | undefined;
   const request = vi.fn(async (route: string, body: unknown) => {
     if (route === '/grants') {
       order.push(
@@ -269,10 +278,20 @@ async function shellReceiptScenario(
     }
     if (route.endsWith('/admissions/prepare')) {
       order.push('admission');
-      return session.resources.publish(
+      const bytes = JSON.stringify(body);
+      if (admissionBody && admissionBody !== bytes)
+        throw new Error('Admission changed on replay.');
+      admissionBody = bytes;
+      admissionRef ??= await session.resources.publish(
         'managed-tool-outcome',
-        Buffer.from(JSON.stringify(body)),
+        Buffer.from(bytes),
       );
+      if (
+        mode === 'lost-admission' &&
+        order.filter((step) => step === 'admission').length === 1
+      )
+        throw new TypeError('Admission response lost.');
+      return admissionRef;
     }
     throw new Error('Unexpected publication route ' + route);
   });
@@ -340,11 +359,13 @@ async function shellReceiptScenario(
   const result = await execution;
   expect(broker.executeV3).toHaveBeenCalledOnce();
   expect(result[0]?.functionResponse?.response).toMatchObject({
-    output: 'hi',
+    output: mode === 'truncated' ? expect.stringContaining('TAIL') : 'hi',
     manifestRef: manifest,
     captureStatus: 'complete',
-    previewTruncated: false,
+    previewTruncated: mode === 'truncated',
   });
+  if (mode === 'truncated')
+    expect(JSON.stringify(result)).not.toContain('/private/tmp/worker-output');
   expect(order).toEqual([
     'assistant',
     'reserve',
@@ -353,6 +374,7 @@ async function shellReceiptScenario(
     ...(mode === 'abandoned' ? ['finished'] : []),
     'finished',
     'admission',
+    ...(mode === 'lost-admission' ? ['admission'] : []),
     'receipt',
     'tool_result',
     'ack',
@@ -388,7 +410,7 @@ async function shellReceiptScenario(
     request.mock.calls.filter(([route]) =>
       String(route).endsWith('/admissions/prepare'),
     ),
-  ).toHaveLength(1);
+  ).toHaveLength(mode === 'lost-admission' ? 2 : 1);
   expect(
     session.authority
       .eventsInSequenceRange(1, session.authority.committedSequence)
@@ -396,7 +418,13 @@ async function shellReceiptScenario(
   ).toHaveLength(1);
 }
 
-it.each(['normal', 'abandoned', 'mismatched'] as const)(
+it.each([
+  'normal',
+  'abandoned',
+  'mismatched',
+  'truncated',
+  'lost-admission',
+] as const)(
   'uses only the original Shell publication after Broker %s',
   shellReceiptScenario,
 );

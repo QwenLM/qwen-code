@@ -1054,8 +1054,49 @@ export class ShellExecutionService {
         let totalOutputBytes = 0;
         let outputCaptureLimitExceeded = false;
         let outputCaptureLimitWarningEmitted = false;
+        const previewHeadBytes = rawCapture
+          ? Math.floor(maxBufferedOutputBytes / 2)
+          : maxBufferedOutputBytes;
+        const previewTail = rawCapture
+          ? Buffer.alloc(maxBufferedOutputBytes - previewHeadBytes)
+          : null;
+        let previewTailLength = 0;
+        let previewTailPosition = 0;
+
+        const retainPreviewTail = (data: Buffer) => {
+          if (!previewTail || previewTail.length === 0) return;
+          if (data.length >= previewTail.length) {
+            data.copy(previewTail, 0, data.length - previewTail.length);
+            previewTailLength = previewTail.length;
+            previewTailPosition = 0;
+            return;
+          }
+          const first = Math.min(
+            data.length,
+            previewTail.length - previewTailPosition,
+          );
+          data.copy(previewTail, previewTailPosition, 0, first);
+          data.copy(previewTail, 0, first);
+          previewTailPosition =
+            (previewTailPosition + data.length) % previewTail.length;
+          previewTailLength = Math.min(
+            previewTail.length,
+            previewTailLength + data.length,
+          );
+        };
+
+        const retainedTail = (): Buffer => {
+          if (!previewTail || previewTailLength === 0) return Buffer.alloc(0);
+          if (previewTailLength < previewTail.length)
+            return previewTail.subarray(0, previewTailLength);
+          return Buffer.concat([
+            previewTail.subarray(previewTailPosition),
+            previewTail.subarray(0, previewTailPosition),
+          ]);
+        };
 
         const markOutputCaptureLimitExceeded = () => {
+          if (rawCapture && totalOutputBytes <= maxBufferedOutputBytes) return;
           outputCaptureLimitExceeded = true;
           if (outputCaptureLimitWarningEmitted) {
             return;
@@ -1064,17 +1105,17 @@ export class ShellExecutionService {
           debugLogger.warn(
             `Shell output capture exceeded maxBufferedOutputBytes ` +
               `(${maxBufferedOutputBytes} bytes). Total bytes: ` +
-              `${totalOutputBytes}. Discarding excess.`,
+              `${totalOutputBytes}. ${rawCapture ? 'Truncating the preview.' : 'Discarding excess.'}`,
           );
         };
 
         const captureOutputData = (data: Buffer): Buffer | null => {
-          if (capturedOutputBytes >= maxBufferedOutputBytes) {
+          if (capturedOutputBytes >= previewHeadBytes) {
             markOutputCaptureLimitExceeded();
             return null;
           }
 
-          const remainingBytes = maxBufferedOutputBytes - capturedOutputBytes;
+          const remainingBytes = previewHeadBytes - capturedOutputBytes;
           const captured =
             data.length > remainingBytes
               ? data.subarray(0, remainingBytes)
@@ -1094,6 +1135,7 @@ export class ShellExecutionService {
 
         const handleOutput = (data: Buffer, stream: 'stdout' | 'stderr') => {
           totalOutputBytes += data.length;
+          retainPreviewTail(data);
           const capturedData = captureOutputData(data);
           if (streamRawOutput) {
             onOutputEvent({
@@ -1233,12 +1275,28 @@ export class ShellExecutionService {
             stdout + (stderr ? (stdout ? separator : '') + stderr : '');
 
           const finalStrippedOutput = stripAnsi(combinedOutput).trim();
-          const boundedOutput = appendOutputCaptureLimitNotice(
-            finalStrippedOutput,
-            outputCaptureLimitExceeded,
-            totalOutputBytes,
-            maxBufferedOutputBytes,
-          );
+          const boundedOutput =
+            rawCapture &&
+            isStreamingRawContent &&
+            totalOutputBytes > previewHeadBytes
+              ? totalOutputBytes <= maxBufferedOutputBytes
+                ? stripAnsi(
+                    decodeBufferedOutput(
+                      Buffer.concat([
+                        finalBuffer,
+                        retainedTail().subarray(
+                          -(totalOutputBytes - capturedOutputBytes),
+                        ),
+                      ]),
+                    ),
+                  ).trim()
+                : `${finalStrippedOutput}\n\n[Middle output omitted from this preview; complete bytes are retained in the managed capture.]\n${stripAnsi(decodeBufferedOutput(retainedTail())).trim()}`
+              : appendOutputCaptureLimitNotice(
+                  finalStrippedOutput,
+                  outputCaptureLimitExceeded,
+                  totalOutputBytes,
+                  maxBufferedOutputBytes,
+                );
 
           if (isStreamingRawContent) {
             // In streaming mode chunks were already emitted as they arrived;

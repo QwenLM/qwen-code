@@ -127,6 +127,84 @@ class ToolPublicationStoreTest {
     }
 
     @Test
+    void finishPreservesTheSubmittedTerminalBytes() {
+        reserve();
+        ToolPublicationObjectStore bucket = new ToolPublicationObjectStore() {
+            @Override
+            public void putIfAbsent(String key, byte[] bytes) { throw new AssertionError("Unexpected OSS write"); }
+
+            @Override
+            public InputStream open(String key) { throw new AssertionError("Unexpected OSS read"); }
+
+            @Override
+            public void requireUnversioned() { }
+        };
+        var data = new ToolPublicationDataStore(jdbc, manager, store, sessions, bucket,
+                Duration.ofMinutes(2), Duration.ofSeconds(30));
+        ObjectNode capture = JSON.createObjectNode().put("captureStatus", "unavailable")
+                .put("captureReason", "storage_failed").put("previewTruncated", false)
+                .put("deliveryStatus", "pending").putNull("manifest");
+        ObjectNode envelope = JSON.createObjectNode().put("executionStatus", "success");
+        envelope.putArray("responseParts").add("\b\u000b\u001f");
+        envelope.set("capture", capture);
+        String jackson = envelope.toString();
+        String submitted = jackson.replace("\\u000B", "\\u000b").replace("\\u001F", "\\u001f");
+        assertThat(submitted).isNotEqualTo(jackson);
+        byte[] bytes = submitted.getBytes(StandardCharsets.UTF_8);
+        JsonNode receipt = data.finish(binding.get("sessionKey"), "pub-1", PUBLICATION_TOKEN,
+                "finish-raw", bytes);
+        assertThat(receipt.path("terminal").path("digest").asText()).isEqualTo(digest(submitted));
+        assertThat(data.finished(binding.get("sessionKey"), "pub-1", WRITER_TOKEN).path("result"))
+                .isEqualTo(envelope);
+    }
+
+    @Test
+    void failedObjectWriteExposesRetryableOriginalOperation() {
+        reserve();
+        Map<String, byte[]> objects = new java.util.HashMap<>();
+        java.util.concurrent.atomic.AtomicInteger writes = new java.util.concurrent.atomic.AtomicInteger();
+        ToolPublicationObjectStore bucket = new ToolPublicationObjectStore() {
+            @Override
+            public void putIfAbsent(String key, byte[] bytes) {
+                if (writes.incrementAndGet() == 1) {
+                    throw new IllegalStateException("temporary object-store failure");
+                }
+                objects.putIfAbsent(key, bytes.clone());
+            }
+
+            @Override
+            public InputStream open(String key) {
+                return new ByteArrayInputStream(objects.get(key));
+            }
+
+            @Override
+            public void requireUnversioned() { }
+        };
+        var data = new ToolPublicationDataStore(jdbc, manager, store, sessions, bucket,
+                Duration.ofMinutes(2), Duration.ofSeconds(30));
+        JsonNode key = binding.get("sessionKey");
+        byte[] bytes = "retry".getBytes(StandardCharsets.UTF_8);
+        assertThatThrownBy(() -> data.publishSegment(key, "pub-1", PUBLICATION_TOKEN,
+                "original-operation", "stdout", 0, bytes, digest("retry")))
+                .hasMessageContaining("temporary object-store failure");
+        assertThat(data.operationStatus(key, "pub-1", PUBLICATION_TOKEN, "original-operation")
+                .path("state").asText()).isEqualTo("RETRYABLE");
+        assertThat(data.publishSegment(key, "pub-1", PUBLICATION_TOKEN,
+                "original-operation", "stdout", 0, bytes, digest("retry"))
+                .path("ordinal").asInt()).isZero();
+        assertThat(writes.get()).isEqualTo(2);
+        store.apply(request("fence"), WRITER_TOKEN, null);
+        var held = jdbc.queryForMap("SELECT capture_held_bytes, capture_used_bytes,"
+                + " producer_held_bytes, producer_used_bytes, admission_held_bytes"
+                + " FROM qwen_tool_publication WHERE publication_id = 'pub-1'");
+        assertThat(((Number) held.get("capture_held_bytes")).longValue()).isEqualTo(bytes.length);
+        assertThat(((Number) held.get("capture_used_bytes")).longValue()).isEqualTo(bytes.length);
+        assertThat(((Number) held.get("producer_held_bytes")).longValue()).isZero();
+        assertThat(((Number) held.get("producer_used_bytes")).longValue()).isZero();
+        assertThat(((Number) held.get("admission_held_bytes")).longValue()).isZero();
+    }
+
+    @Test
     void commitsLargeBlockedOutcomeThroughVerifiedCatalogObject() {
         reserve();
         Map<String, byte[]> objects = new java.util.HashMap<>();
@@ -155,7 +233,8 @@ class ToolPublicationStoreTest {
         ObjectNode envelope = JSON.createObjectNode().put("executionStatus", "error");
         envelope.putArray("responseParts").add("x".repeat(100_000));
         envelope.set("capture", capture);
-        data.finish(key, "pub-1", PUBLICATION_TOKEN, "large-finish", envelope);
+        data.finish(key, "pub-1", PUBLICATION_TOKEN, "large-finish",
+                envelope.toString().getBytes(StandardCharsets.UTF_8));
         ObjectNode outcome = JSON.createObjectNode().put("schemaVersion", 1)
                 .put("decision", "blocked").putNull("manifestRef");
         outcome.set("envelope", envelope);
@@ -309,9 +388,14 @@ class ToolPublicationStoreTest {
         envelope.putArray("responseParts");
         envelope.set("capture", capture);
         assertThat(data.finish(key, "pub-1", PUBLICATION_TOKEN,
-                "operation-finish", envelope).path("producerPhase").asText()).isEqualTo("FINISHED");
+                "operation-finish", envelope.toString().getBytes(StandardCharsets.UTF_8))
+                .path("producerPhase").asText()).isEqualTo("FINISHED");
         assertThat(data.finished(key, "pub-1", WRITER_TOKEN).path("result")).isEqualTo(envelope);
         store.apply(request("fence"), WRITER_TOKEN, null);
+        var held = jdbc.queryForMap("SELECT admission_held_bytes, admission_bytes"
+                + " FROM qwen_tool_publication WHERE publication_id = 'pub-1'");
+        assertThat(((Number) held.get("admission_held_bytes")).longValue())
+                .isEqualTo(((Number) held.get("admission_bytes")).longValue());
         assertThat(data.finished(key, "pub-1", WRITER_TOKEN).path("result")).isEqualTo(envelope);
         ObjectNode outcome = JSON.createObjectNode().put("schemaVersion", 1)
                 .put("decision", "committed");
@@ -618,7 +702,8 @@ class ToolPublicationStoreTest {
         ObjectNode envelope = JSON.createObjectNode().put("executionStatus", "success");
         envelope.putArray("responseParts");
         envelope.set("capture", capture);
-        data.finish(key, "pub-1", PUBLICATION_TOKEN, "finish-1", envelope);
+        data.finish(key, "pub-1", PUBLICATION_TOKEN, "finish-1",
+                envelope.toString().getBytes(StandardCharsets.UTF_8));
         ToolPublicationDataStore reopened = new ToolPublicationDataStore(jdbc, manager, store, sessions,
                 bucket, Duration.ofMinutes(20), Duration.ofMinutes(10));
         assertThat(reopened.readRange(key, "pub-1", WRITER_TOKEN, manifestRef,
@@ -692,7 +777,7 @@ class ToolPublicationStoreTest {
     }
 
     @Test
-    void fencesWithoutFreeingCapacityAndRequiresDurableNoStart() {
+    void fencesUnusedCapacityAndRequiresDurableNoStartForFullRelease() {
         reserve();
         assertThat(store.apply(request("fence"), WRITER_TOKEN, null).path("state").asText()).isEqualTo("FENCED");
         assertThatThrownBy(() -> store.apply(request("renew"), WRITER_TOKEN, PUBLICATION_TOKEN)).hasMessageContaining("fenced");
@@ -705,6 +790,36 @@ class ToolPublicationStoreTest {
         assertThat(store.apply(request("close_not_started"), WRITER_TOKEN, null)).isEqualTo(closed);
         assertThat(store.apply(request("fence"), WRITER_TOKEN, null)).isEqualTo(closed);
         assertThatThrownBy(this::reserve).hasMessageContaining("fenced");
+    }
+
+    @Test
+    void fencedProducerDoesNotOccupyAnActiveCaptureSlot() {
+        ObjectNode second = addSecondExecution();
+        store = newStore(2 * ALLOCATION, 1);
+        reserve();
+        store.apply(request("fence"), WRITER_TOKEN, null);
+        ObjectNode next = request("reserve");
+        next.set("binding", second);
+        assertThat(store.apply(next, WRITER_TOKEN, PUBLICATION_TOKEN)
+                .path("state").asText()).isEqualTo("OPEN");
+    }
+
+    @Test
+    void expiredUnusedReservationReleasesCapacityOnTheNextReserve() {
+        ObjectNode second = addSecondExecution();
+        store = newStore(ALLOCATION, 1);
+        reserve();
+        jdbc.update("UPDATE qwen_tool_publication SET expires_at = 1 WHERE publication_id = 'pub-1'");
+        ObjectNode next = request("reserve");
+        next.set("binding", second);
+        assertThat(store.apply(next, WRITER_TOKEN, PUBLICATION_TOKEN)
+                .path("state").asText()).isEqualTo("OPEN");
+        var expired = jdbc.queryForMap("SELECT state, capture_held_bytes, producer_held_bytes,"
+                + " admission_held_bytes FROM qwen_tool_publication WHERE publication_id = 'pub-1'");
+        assertThat(expired.get("state")).isEqualTo("FENCED");
+        assertThat(((Number) expired.get("capture_held_bytes")).longValue()).isZero();
+        assertThat(((Number) expired.get("producer_held_bytes")).longValue()).isZero();
+        assertThat(((Number) expired.get("admission_held_bytes")).longValue()).isZero();
     }
 
     @Test
@@ -797,7 +912,7 @@ class ToolPublicationStoreTest {
     }
 
     @Test
-    void concurrentDistinctReservationsCannotOversubscribeAndOnlyNoStartFreesCapacity() throws Exception {
+    void concurrentDistinctReservationsCannotOversubscribeAndFenceReleasesUnusedCapacity() throws Exception {
         ObjectNode second = addSecondExecution();
         store = newStore(ALLOCATION, 10);
         ObjectNode firstRequest = request("reserve");
@@ -817,7 +932,7 @@ class ToolPublicationStoreTest {
         ObjectNode loser = "pub-1".equals(winner) ? secondRequest : firstRequest;
         ObjectNode fence = request("fence").put("publicationId", winner);
         store.apply(fence, WRITER_TOKEN, null);
-        assertThatThrownBy(() -> store.apply(loser, WRITER_TOKEN, PUBLICATION_TOKEN)).hasMessageContaining("capacity exhausted");
+        assertThat(store.apply(loser, WRITER_TOKEN, PUBLICATION_TOKEN).path("state").asText()).isEqualTo("OPEN");
         String executionId = "pub-1".equals(winner) ? "execution-1" : "execution-2";
         var execution = executions.findByExecutionCallId(executionId);
         executions.requestCancel(executionId, execution.getVersion());
