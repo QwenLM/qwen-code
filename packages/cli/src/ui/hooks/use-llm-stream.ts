@@ -1087,6 +1087,36 @@ export const useLlmStream = (
     [],
   );
 
+  const notificationQueueRef = useRef<QueuedNotification[]>([]);
+  // Keep display ownership separate from model admission: a full model queue
+  // must not discard a foreground result, nor may admission failure hide it.
+  const pendingWorkflowDisplaysRef = useRef<
+    Array<{ batchId?: string; items: QueuedNotification[] }>
+  >([]);
+  const flushWorkflowDisplays = useCallback(
+    (completedBatchId?: string) => {
+      const pending = pendingWorkflowDisplaysRef.current;
+      if (completedBatchId !== undefined) {
+        for (const display of pending) {
+          if (display.batchId === completedBatchId) display.batchId = undefined;
+        }
+      }
+      while (pending.length > 0 && pending[0].batchId === undefined) {
+        const display = pending.shift()!;
+        for (const item of display.items) {
+          if (!item.displayed) {
+            addItem(
+              { type: 'notification', text: item.displayText },
+              Date.now(),
+            );
+            item.displayed = true;
+          }
+        }
+      }
+    },
+    [addItem],
+  );
+
   const [toolCalls, scheduleToolCalls, markToolsAsSubmitted] =
     useReactToolScheduler(
       async (completedToolCallsFromScheduler) => {
@@ -1121,6 +1151,7 @@ export const useLlmStream = (
             );
             toolGroupDisplay.batchId = batchId;
             addItem(toolGroupDisplay, Date.now());
+            flushWorkflowDisplays(batchId);
 
             // Handle tool response submission immediately when tools complete
             await handleCompletedTools(
@@ -6150,7 +6181,6 @@ export const useLlmStream = (
   }, [toolCalls, config, onDebugMessage, history, llmClient, storage]);
 
   // ─── Unified notification queue (cron + background agents) ──────
-  const notificationQueueRef = useRef<QueuedNotification[]>([]);
   const [notificationTrigger, setNotificationTrigger] = useState(0);
   /**
    * Notifications lost to queue overflow since the last drain, reported as one
@@ -6252,6 +6282,7 @@ export const useLlmStream = (
     }
     notificationQueueSessionIdRef.current = sessionStates.sessionId;
     notificationQueueRef.current = [];
+    pendingWorkflowDisplaysRef.current = [];
     droppedNotificationsRef.current.clear();
     pendingDroppedSummaryRef.current = undefined;
     autonomousLoopTickResolverRef.current?.resetCache();
@@ -6402,26 +6433,35 @@ export const useLlmStream = (
   useEffect(() => {
     const registry = config.getWorkflowRunRegistry();
     registry.setCompletionCallback((displayText, modelText, meta) => {
-      // The result must remain visible even if the model request is delayed
-      // or fails. Background notifications retain their existing drain timing.
-      const displayed = meta.isBackgrounded === false;
-      if (displayed) {
-        addItem({ type: 'notification', text: displayText }, Date.now());
-      }
-      admitNotification({
+      const item: QueuedNotification = {
         displayText,
         modelText,
         sendMessageType: SendMessageType.Notification,
         kind: 'workflow',
         taskId: meta.runId,
         todoWorkChainId: meta.todoWorkChainId,
-        displayed,
-      });
+      };
+      if (meta.isBackgrounded === false) {
+        const toolUseId = registry.get(meta.runId)?.toolUseId;
+        pendingWorkflowDisplaysRef.current.push({
+          batchId: toolUseId ? getToolBatchId(toolUseId) : undefined,
+          items: [
+            ...notificationQueueRef.current.filter(
+              (queued) =>
+                queued.sendMessageType === SendMessageType.Notification &&
+                !queued.interim,
+            ),
+            item,
+          ],
+        });
+      }
+      admitNotification(item);
+      flushWorkflowDisplays();
     });
     return () => {
       registry.setCompletionCallback(undefined);
     };
-  }, [addItem, admitNotification, config]);
+  }, [admitNotification, config, flushWorkflowDisplays, getToolBatchId]);
 
   // Register monitor notification callback onto the shared queue.
   useEffect(() => {

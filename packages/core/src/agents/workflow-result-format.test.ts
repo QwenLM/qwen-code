@@ -38,6 +38,71 @@ describe('workflow result formatting', () => {
     expect(stringifyWorkflowResult(new Error())).toBe('Error: ');
   });
 
+  it('retains cross-VM aggregate and cause reasons in every result shape', () => {
+    const failure: unknown = runInContext(
+      `new AggregateError([
+        new Error('sync failed', { cause: new TypeError('invalid locale') }),
+        new Error('disk full'),
+      ], 'All promises were rejected')`,
+      createContext({}),
+    );
+    for (const pretty of [false, true]) {
+      for (const result of [failure, { errors: [failure] }]) {
+        const text = stringifyWorkflowResult(result, pretty);
+        expect(text).toContain('AggregateError: All promises were rejected');
+        expect(text).toContain('Error: sync failed');
+        expect(text).toContain('TypeError: invalid locale');
+        expect(text).toContain('Error: disk full');
+        expect(text).not.toContain(' at ');
+      }
+    }
+  });
+
+  it('bounds cycles, deep causes, and wide aggregate errors', () => {
+    const cyclic = new Error('cycle');
+    cyclic.cause = cyclic;
+    expect(stringifyWorkflowResult(cyclic)).toContain('[Circular error]');
+    let deep = new Error('unreachable tail');
+    for (let i = 0; i < 20; i++)
+      deep = new Error(`level ${i}`, { cause: deep });
+    const deepText = stringifyWorkflowResult(deep);
+    expect(deepText).toContain('level 19');
+    expect(deepText).toContain('truncated');
+    expect(deepText).not.toContain('unreachable tail');
+    const wide = new AggregateError(
+      Array.from({ length: 100 }, (_, i) => new Error(`reason ${i}`)),
+      'batch failed',
+    );
+    expect(stringifyWorkflowResult(wide)).toContain('reason 0');
+    expect(stringifyWorkflowResult(wide)).toContain('truncated');
+    expect(stringifyWorkflowResult(wide)).not.toContain('reason 99');
+  });
+
+  it('caps rendered errors without splitting Unicode and skips cause getters', () => {
+    const error = new Error('🙂'.repeat(5_000));
+    const text = stringifyWorkflowResult(error);
+    expect(text.length).toBeLessThanOrEqual(4_096);
+    expect(text).toContain('truncated');
+    expect(text).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/);
+    const withGetter = new Error('outer');
+    Object.defineProperty(withGetter, 'cause', {
+      get() {
+        throw new Error('must not run');
+      },
+    });
+    expect(stringifyWorkflowResult(withGetter)).toBe('Error: outer');
+  });
+
+  it('retains repeated reasons that are not cycles and primitive causes', () => {
+    const shared = new Error('shared');
+    const text = stringifyWorkflowResult(new AggregateError([shared, shared]));
+    expect(text.match(/Error: shared/g)).toHaveLength(2);
+    expect(text).not.toContain('Circular');
+    expect(
+      stringifyWorkflowResult(new Error('failed', { cause: 'offline' })),
+    ).toContain('cause: offline');
+  });
+
   it('preserves Map keys, Set values, and nested VM Errors', () => {
     const result: unknown = runInContext(
       `({ failed: new Map([[1, new Error('numeric key')], ['1', new Set(['string key'])]]) })`,

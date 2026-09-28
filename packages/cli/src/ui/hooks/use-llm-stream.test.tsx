@@ -198,13 +198,14 @@ vi.mock('./useLogger.js', () => ({
 
 const mockStartNewPrompt = vi.fn();
 const mockAddUsage = vi.fn();
+let mockSessionId = 'test-session-id';
 vi.mock('../contexts/SessionContext.js', () => ({
   useSessionStats: vi.fn(() => ({
     startNewPrompt: mockStartNewPrompt,
     addUsage: mockAddUsage,
     getPromptCount: vi.fn(() => 5),
     stats: {
-      sessionId: 'test-session-id',
+      sessionId: mockSessionId,
     },
   })),
 }));
@@ -230,7 +231,7 @@ describe('useLlmStream', () => {
     setNotificationCallback: Mock;
   };
   let mockBackgroundShellRegistry: { setNotificationCallback: Mock };
-  let mockWorkflowRunRegistry: { setCompletionCallback: Mock };
+  let mockWorkflowRunRegistry: { setCompletionCallback: Mock; get: Mock };
   let mockMonitorRegistry: {
     setNotificationCallback: Mock;
     get: Mock;
@@ -274,6 +275,7 @@ describe('useLlmStream', () => {
     };
     mockWorkflowRunRegistry = {
       setCompletionCallback: vi.fn(),
+      get: vi.fn(),
     };
     mockMonitorRegistry = {
       setNotificationCallback: vi.fn(),
@@ -813,6 +815,135 @@ describe('useLlmStream', () => {
       ),
     ).toHaveLength(1);
   });
+
+  it.each(['success', 'model failure', 'queue full', 'session reset'])(
+    'commits the workflow card before ordered notices (%s)',
+    async (scenario) => {
+      mockHandleSlashCommand.mockResolvedValue({
+        type: 'schedule_tool',
+        toolName: 'workflow',
+        toolArgs: { script: 'return 42;' },
+      });
+      const {
+        result,
+        rerenderWithToolCalls,
+        completeToolRound,
+        mockSendMessageStream: send,
+      } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery('/audit');
+      });
+      const request = mockScheduleToolCalls.mock.calls[0][0][0];
+      const completed = {
+        request,
+        status: 'success',
+        responseSubmittedToLlm: false,
+        tool: { name: 'workflow', displayName: 'Workflow' },
+        invocation: { getDescription: () => 'audit' },
+        response: {
+          callId: request.callId,
+          responseParts: [{ text: '42' }],
+          resultDisplay: '42',
+          error: undefined,
+          errorType: undefined,
+        },
+      } as unknown as TrackedCompletedToolCall;
+      rerenderWithToolCalls([
+        { ...completed, status: 'executing' } as TrackedExecutingToolCall,
+      ]);
+      mockWorkflowRunRegistry.get.mockReturnValue({
+        toolUseId: request.callId,
+      });
+      const callback =
+        mockWorkflowRunRegistry.setCompletionCallback.mock.lastCall![0];
+      if (scenario === 'model failure') {
+        send.mockImplementation(async function* () {
+          yield await Promise.reject(new Error('model unavailable'));
+        });
+      }
+      act(() => {
+        callback(
+          'earlier background',
+          '<task-notification>bg</task-notification>',
+          {
+            runId: 'wf_bg',
+            status: 'completed',
+            isBackgrounded: true,
+          },
+        );
+        if (scenario === 'queue full') {
+          for (let i = 1; i < MAX_BACKGROUND_NOTIFICATION_QUEUE; i++) {
+            callback(`background ${i}`, `<bg-${i}/>`, {
+              runId: `wf_bg_${i}`,
+              status: 'completed',
+              isBackgrounded: true,
+            });
+          }
+        }
+        callback(
+          'foreground result',
+          '<task-notification>fg</task-notification>',
+          {
+            runId: 'wf_fg',
+            status: 'completed',
+            isBackgrounded: false,
+          },
+        );
+      });
+      expect(mockAddItem.mock.calls.map(([item]) => item.text)).not.toContain(
+        'foreground result',
+      );
+      if (scenario === 'session reset') {
+        mockSessionId = 'new-session';
+        rerenderWithToolCalls([
+          { ...completed, status: 'executing' } as TrackedExecutingToolCall,
+        ]);
+      }
+      await completeToolRound([completed]);
+      const relevant = () =>
+        mockAddItem.mock.calls
+          .map(([item]) => item)
+          .filter(
+            (item) =>
+              item.type === 'tool_group' || item.type === 'notification',
+          );
+      if (scenario === 'session reset') {
+        expect(relevant().map((item) => item.type)).toEqual(['tool_group']);
+        rerenderWithToolCalls([]);
+        expect(send).not.toHaveBeenCalled();
+        mockSessionId = 'test-session-id';
+        return;
+      }
+      const expectedDisplays = ['card', 'earlier background'];
+      if (scenario === 'queue full') {
+        for (let i = 1; i < MAX_BACKGROUND_NOTIFICATION_QUEUE; i++) {
+          expectedDisplays.push(`background ${i}`);
+        }
+      }
+      expectedDisplays.push('foreground result');
+      expect(
+        relevant().map((item) =>
+          item.type === 'tool_group' ? 'card' : item.text,
+        ),
+      ).toEqual(expectedDisplays);
+      rerenderWithToolCalls([]);
+      await waitFor(() => expect(send).toHaveBeenCalledOnce());
+      if (scenario === 'queue full') {
+        // The model queue rejects the extra protected result, but its display
+        // still belongs to the completing tool batch.
+        expect(send.mock.calls[0][0]).not.toContain(
+          '<task-notification>fg</task-notification>',
+        );
+      } else {
+        expect(send.mock.calls[0][0]).toBe(
+          '<task-notification>bg</task-notification>\n\n<task-notification>fg</task-notification>',
+        );
+      }
+      expect(
+        relevant().filter((item) => item.text === 'foreground result'),
+      ).toHaveLength(1);
+    },
+  );
 
   it('forwards submitted prompt provenance only for UserQuery', async () => {
     const { result, mockSendMessageStream } = renderTestHook();
@@ -14150,6 +14281,47 @@ describe('useLlmStream', () => {
               ([item]) => (item as { type?: string }).type === 'notification',
             )
             .map(([item]) => (item as { text: string }).text);
+
+        it('keeps foreground results visible while model admission is refused', async () => {
+          const { goalQueueRef, release } = blockedDrain();
+          const { rerender, client, mockSendMessageStream } = renderTestHook(
+            [],
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            goalQueueRef as never,
+          );
+          const callback =
+            mockWorkflowRunRegistry.setCompletionCallback.mock.lastCall![0];
+          act(() => {
+            callback('earlier background', '<bg/>', {
+              runId: 'wf_bg',
+              status: 'completed',
+              isBackgrounded: true,
+            });
+            callback('foreground result', '<fg/>', {
+              runId: 'wf_fg',
+              status: 'completed',
+              isBackgrounded: false,
+            });
+          });
+          expect(notificationTexts()).toEqual([
+            'earlier background',
+            'foreground result',
+          ]);
+          expect(mockSendMessageStream).not.toHaveBeenCalled();
+          release();
+          rerender(rerenderProps(client));
+          await waitFor(() =>
+            expect(mockSendMessageStream).toHaveBeenCalledOnce(),
+          );
+          expect(mockSendMessageStream.mock.calls[0][0]).toBe('<bg/>\n\n<fg/>');
+          expect(notificationTexts()).toEqual([
+            'earlier background',
+            'foreground result',
+          ]);
+        });
 
         it('evicts a queued monitor pulse before any other notification', async () => {
           const { goalQueueRef, release } = blockedDrain();

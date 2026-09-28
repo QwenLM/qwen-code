@@ -205,6 +205,55 @@ describe('WorkflowRunner', () => {
     );
   });
 
+  it.each([false, true])(
+    'names a failed workflow in its completion notification (background: %s)',
+    async (runInBackground) => {
+      const { config, registry } = configWithRegistry();
+      const completion = vi.fn();
+      registry.setCompletionCallback(completion);
+      const handle = await WorkflowRunner.start({
+        config,
+        signal: new AbortController().signal,
+        script: `export const meta = { name: 'locale-audit', description: 'Audit locales' }; throw new Error('missing fr');`,
+        args: undefined,
+        runInBackground,
+        notifyOnCompletion: true,
+        dispatch: async () => 'unused',
+      });
+      await handle.completion;
+      expect(completion).toHaveBeenCalledOnce();
+      const [display, model] = completion.mock.calls[0];
+      expect(display).toContain('"locale-audit" failed.');
+      if (!runInBackground)
+        expect(display).toContain(`Run ID: ${handle.runId}`);
+      expect(model).toContain(handle.runId);
+      expect(model).toContain('locale-audit');
+      expect(model).toContain('missing fr');
+    },
+  );
+
+  it('keeps an explicit failed workflow description', async () => {
+    const { config, registry } = configWithRegistry();
+    registry.setRegisterCallback((entry) => {
+      entry.description = 'caller description';
+    });
+    const completion = vi.fn();
+    registry.setCompletionCallback(completion);
+    const handle = await WorkflowRunner.start({
+      config,
+      signal: new AbortController().signal,
+      script: `export const meta = { name: 'locale-audit', description: 'Audit locales' }; throw new Error('missing fr');`,
+      args: undefined,
+      runInBackground: true,
+      dispatch: async () => 'unused',
+    });
+    await handle.completion;
+    expect(completion).toHaveBeenCalledOnce();
+    expect(completion.mock.calls[0][0]).toContain(
+      '"caller description" failed.',
+    );
+  });
+
   // The only path from the Workflow tool's authoring hint to a backgrounded
   // run's notification goes through the runner's registration. A backgrounded
   // run has no trailer; without this the hint would never reach it.

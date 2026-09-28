@@ -51,7 +51,9 @@ describe.skipIf(pickE2eRenderer() === 'opentui')(
       {
         source: 'slash',
         status: 'failed',
-        script: 'throw new Error("WORKFLOW_RUN_ERROR_12176");',
+        script:
+          'export const meta = { name: "locale-audit", description: "Audit locales" }; throw new Error("WORKFLOW_RUN_ERROR_12176");',
+        workflowName: 'locale-audit',
         marker: 'WORKFLOW_RUN_ERROR_12176',
       },
       {
@@ -62,6 +64,18 @@ describe.skipIf(pickE2eRenderer() === 'opentui')(
           'return { marker: "WORKFLOW_LARGE_RESULT_12176", rows: "&".repeat(30_000), failed: ["fr"] };',
         marker: 'WORKFLOW_LARGE_RESULT_12176',
         largeResult: true,
+      },
+      {
+        source: 'slash',
+        status: 'completed',
+        script:
+          'return { marker: "WORKFLOW_AGGREGATE_RESULT_12908", failed: ["fr"], error: new AggregateError([new Error("SYNC_FAILED_12908", { cause: new Error("INVALID_LOCALE_12908") }), new Error("DISK_FULL_12908")], "BATCH_FAILED_12908") };',
+        marker: 'WORKFLOW_AGGREGATE_RESULT_12908',
+        resultDetails: [
+          'SYNC_FAILED_12908',
+          'INVALID_LOCALE_12908',
+          'DISK_FULL_12908',
+        ],
       },
       {
         source: 'model',
@@ -216,6 +230,9 @@ describe.skipIf(pickE2eRenderer() === 'opentui')(
       }
       expect(screen).not.toContain('started in the background');
       expect(screen).toContain(testCase.marker);
+      if (testCase.workflowName) {
+        expect(screen).toContain(`"${testCase.workflowName}" failed.`);
+      }
       for (const detail of testCase.resultDetails ?? []) {
         expect(screen).toContain(detail);
       }
@@ -239,6 +256,8 @@ describe.skipIf(pickE2eRenderer() === 'opentui')(
         isSlash ? 1 : 0,
       );
       expect(messages).toContain(testCase.marker);
+      if (testCase.workflowName)
+        expect(messages).toContain(testCase.workflowName);
       if (testCase.reportedError) {
         const reported = messages.match(
           /<reported-failures>([\s\S]*?)<\/reported-failures>/,

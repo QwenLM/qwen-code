@@ -1352,6 +1352,27 @@ await agent('scan package.json')
     expect(completion.mock.calls[0][1]).toContain('French checked');
   });
 
+  it.each([false, true])(
+    'honors explicit completion notification enablement: %s',
+    async (enabled) => {
+      const { config, registry } = configWithRegistry();
+      config.isInteractive = () => true;
+      const completion = vi.fn();
+      registry.setCompletionCallback(completion);
+      const invocation = new WorkflowTool(config).build({
+        script: 'return "finished";',
+      });
+      (
+        invocation as unknown as {
+          setCompletionNotificationEnabled: (enabled: boolean) => void;
+        }
+      ).setCompletionNotificationEnabled(enabled);
+      const result = await invocation.execute(new AbortController().signal);
+      expect(JSON.stringify(result.llmContent)).toContain('finished');
+      expect(completion).toHaveBeenCalledTimes(enabled ? 1 : 0);
+    },
+  );
+
   it.each(['caller', 'dialog'])(
     'replaces running progress with cancelled state after %s cancellation',
     async (source) => {

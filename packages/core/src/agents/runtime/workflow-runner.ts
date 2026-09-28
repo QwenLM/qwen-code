@@ -817,6 +817,9 @@ export class WorkflowRunner {
             error instanceof WorkflowExecutionError ? error : undefined;
           const message = extractErrorMessage(error);
           if (entry && details?.meta && !entry.meta) entry.meta = details.meta;
+          if (entry?.meta?.name && entry.description === runId) {
+            entry.description = entry.meta.name;
+          }
           if (details?.logs) registry?.setRecentLogs(runId, details.logs);
           // Mirror of the guard on the success path. When the entry was
           // settled terminal from outside — the dialog's cancel, or the

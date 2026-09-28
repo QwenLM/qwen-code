@@ -9,9 +9,55 @@ import { stripAnsiAndControl } from '../utils/textUtils.js';
 import { stripDisplayControlChars } from '../utils/terminalSafe.js';
 
 function renderError(error: Error): string {
-  const name = typeof error.name === 'string' ? error.name : 'Error';
-  const message = String(error.message ?? '');
-  return `${name}: ${message}`;
+  const ancestors = new Set<Error>();
+  let remaining = 32;
+  let text = '';
+  let full = false;
+  const append = (part: string) => {
+    if (full) return;
+    const next = text + part;
+    full = next.length > 4_096;
+    text = truncateWorkflowText(next, 4_096);
+  };
+  const visit = (value: unknown, depth: number): void => {
+    if (full) return;
+    if (depth > 4 || remaining-- <= 0) {
+      append('… (truncated)');
+      return;
+    }
+    if (!types.isNativeError(value)) {
+      append(String(value));
+      return;
+    }
+    if (ancestors.has(value)) {
+      append('[Circular error]');
+      return;
+    }
+    ancestors.add(value);
+    const name = typeof value.name === 'string' ? value.name : 'Error';
+    append(`${name}: ${String(value.message ?? '')}`);
+    // Native cause/errors are data properties. Do not execute user getters.
+    const errors = Object.getOwnPropertyDescriptor(value, 'errors')?.value;
+    if (Array.isArray(errors) && errors.length > 0) {
+      append(' [errors: ');
+      const count = Math.min(errors.length, 8);
+      for (let i = 0; i < count; i++) {
+        if (i > 0) append('; ');
+        visit(errors[i], depth + 1);
+      }
+      if (errors.length > count) append('; … (truncated)');
+      append(']');
+    }
+    const cause = Object.getOwnPropertyDescriptor(value, 'cause')?.value;
+    if (cause !== undefined) {
+      append(' [cause: ');
+      visit(cause, depth + 1);
+      append(']');
+    }
+    ancestors.delete(value);
+  };
+  visit(error, 0);
+  return text;
 }
 
 export function workflowResultReplacer(_key: string, value: unknown): unknown {
