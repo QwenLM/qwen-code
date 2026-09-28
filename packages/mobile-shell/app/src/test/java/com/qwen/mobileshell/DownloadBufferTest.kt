@@ -73,7 +73,17 @@ class DownloadBufferTest {
     }
 
     @Test fun truncatingDestinationNamesDoesNotExposeTrailingDotsOrSpaces() {
-        assertEquals("a".repeat(254), DownloadBuffer.fileName("a".repeat(254) + ".txt"))
-        assertEquals("a".repeat(253), DownloadBuffer.fileName("a".repeat(253) + " .txt"))
+        assertEquals("a".repeat(251) + ".txt", DownloadBuffer.fileName("a".repeat(254) + ".txt"))
+        assertEquals("a".repeat(250) + ".txt", DownloadBuffer.fileName("a".repeat(250) + " .long.txt"))
+    }
+
+    @Test fun preservesExtensionsWhenBoundingLongUnicodeNames() {
+        assertEquals("报".repeat(84) + ".md", DownloadBuffer.fileName("报".repeat(100) + ".md"))
+        assertEquals("\uD83D\uDE00".repeat(62) + ".txt", DownloadBuffer.fileName("\uD83D\uDE00".repeat(70) + ".txt"))
+        val boundary = "a".repeat(251) + ".txt"
+        assertEquals(boundary, DownloadBuffer.fileName(boundary))
+        assertEquals("report.final.txt", DownloadBuffer.fileName("report.final.txt"))
+        assertEquals("notes .txt", DownloadBuffer.fileName("notes .txt"))
+        assertEquals("a".repeat(255), DownloadBuffer.fileName("a".repeat(260) + "." + "x".repeat(20)))
     }
 }

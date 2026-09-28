@@ -145,8 +145,8 @@ internal class NativeDownloads(
                     checkNotNull(output)
                     val bytes = request.buffer.bytes
                     var offset = 0
+                    // Once the destination is open, finish the bounded file even if its page goes away.
                     while (offset < bytes.size) {
-                        check(!request.cancelled.get())
                         val count = minOf(DownloadBuffer.CHUNK_SIZE, bytes.size - offset)
                         output.write(bytes, offset, count)
                         offset += count

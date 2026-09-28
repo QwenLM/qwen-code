@@ -17,6 +17,7 @@ import java.nio.ByteBuffer
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.TimeUnit
+import java.util.zip.CRC32
 
 @RunWith(AndroidJUnit4::class)
 class DownloadsDeviceTest {
@@ -144,6 +145,67 @@ class DownloadsDeviceTest {
             send(begin())
             assertEquals("ready", replies.last().getString("state"))
             downloads.cancel()
+        }
+    }
+
+    @Test fun cancellationDuringProviderWriteFinishesTheFileWithoutStaleSuccess() {
+        val uri = DownloadsFixtureProvider.URI
+        fun provider(method: String) = context.contentResolver.call(uri, method, null, null)!!
+        fun awaitProvider(predicate: (android.os.Bundle) -> Boolean): android.os.Bundle {
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
+            do {
+                val state = provider("status")
+                if (predicate(state)) return state
+                Thread.sleep(20)
+            } while (System.nanoTime() < deadline)
+            throw AssertionError("Provider did not reach the expected state")
+        }
+        val bytes = ByteArray(4 * 1024 * 1024) { (it % 251).toByte() }
+        lateinit var fixture: Fixture
+        provider("grant")
+        try {
+            instrumentation.runOnMainSync {
+                fixture = Fixture(context)
+                fixture.send(begin(bytes.size))
+                for (offset in bytes.indices step DownloadBuffer.CHUNK_SIZE) {
+                    val chunk = bytes.copyOfRange(offset, minOf(offset + DownloadBuffer.CHUNK_SIZE, bytes.size))
+                    val frame = ByteBuffer.allocate(DownloadBuffer.HEADER_SIZE + chunk.size)
+                        .put(id.toByteArray(Charsets.US_ASCII)).putInt(offset).put(chunk).array()
+                    fixture.downloads.receive(WebMessageCompat(frame), { true }) { error("Unexpected binary reply") }
+                }
+                fixture.send(command("finish"))
+                fixture.downloads.result(Activity.RESULT_OK, Intent().setData(uri).addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION))
+            }
+            awaitProvider { it.getInt("count") > 0 }
+            instrumentation.runOnMainSync {
+                fixture.downloads.cancel()
+                assertEquals("cancelled", fixture.state())
+                fixture.current = false
+            }
+            provider("resume")
+            val state = awaitProvider { it.getBoolean("done") }
+            assertNull("Provider must finish without I/O errors", state.getString("error"))
+            assertEquals("Cancelling after writing starts must preserve the whole file", bytes.size, state.getInt("count"))
+            assertEquals(CRC32().apply { update(bytes) }.value, state.getLong("crc"))
+            // Wait for the writer's main-thread completion by retrying a new transfer.
+            var ready = false
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+            while (!ready && System.nanoTime() < deadline) {
+                instrumentation.runOnMainSync {
+                    fixture.current = true
+                    fixture.send(begin(0, "f".repeat(32)))
+                    ready = fixture.state() == "ready"
+                }
+                if (!ready) Thread.sleep(20)
+            }
+            assertTrue("Writer must release its slot", ready)
+            instrumentation.runOnMainSync {
+                assertFalse("A cancelled transfer must not report success", fixture.replies.any { it.getString("state") == "saved" })
+                fixture.downloads.cancel()
+            }
+        } finally {
+            provider("resume")
+            instrumentation.runOnMainSync { fixture.downloads.cancel() }
         }
     }
 

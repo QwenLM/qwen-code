@@ -28,20 +28,29 @@ internal class DownloadBuffer(val id: String, size: Int) {
         fun fileName(value: String): String {
             val clean = value.replace(Regex("[\\p{Cc}\\p{Cf}\\p{Cs}/\\\\:*?\"<>|]"), "_")
                 .trim { it.isWhitespace() || it == '.' }
+            val dot = clean.lastIndexOf('.')
+            val extension = if (dot > 0 && clean.length - dot in 2..16) clean.substring(dot) else ""
+            val source = clean.substring(0, clean.length - extension.length)
+            val limited = limitUtf8(source, 255 - extension.toByteArray(Charsets.UTF_8).size)
+            val stem = if (limited.length < source.length) limited.trimEnd { it.isWhitespace() || it == '.' } else limited
+            return stem.ifEmpty { "download" } + extension
+        }
+
+        private fun limitUtf8(value: String, limit: Int): String {
             val result = StringBuilder()
             var byteCount = 0
             var index = 0
             // Document providers commonly limit names in UTF-8 bytes, not UTF-16 units.
-            while (index < clean.length) {
-                val codePoint = clean.codePointAt(index)
+            while (index < value.length) {
+                val codePoint = value.codePointAt(index)
                 val part = String(Character.toChars(codePoint))
                 val bytes = part.toByteArray(Charsets.UTF_8).size
-                if (byteCount + bytes > 255) break
+                if (byteCount + bytes > limit) break
                 result.append(part)
                 byteCount += bytes
                 index += Character.charCount(codePoint)
             }
-            return result.toString().trim { it.isWhitespace() || it == '.' }.ifEmpty { "download" }
+            return result.toString()
         }
     }
 }
