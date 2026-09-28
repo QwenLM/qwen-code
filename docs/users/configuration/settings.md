@@ -425,6 +425,8 @@ The bridge-availability and missing-bridge warning rules below describe direct t
 
 See [Memory](../features/memory) for details on how auto-memory works and how to use the `/memory`, `/remember`, and `/dream` commands.
 
+For an external Mem0 service, configure `memory.mem0` in user or system settings. See [Mem0](../features/mem0) for endpoint/protocol selection, credentials, default repository scope, and opt-in writes. No separate npm package, MCP registration, or manually configured write-confirmation Hook is needed.
+
 #### agents
 
 | Setting                        | Type             | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 | Default     |

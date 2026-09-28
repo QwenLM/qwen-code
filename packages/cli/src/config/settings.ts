@@ -654,6 +654,22 @@ function mergeSettings(
     safeWorkspace,
     tagMcpServerScope(system, 'system'),
   ) as Settings;
+  const operatorMemory = customDeepMerge(
+    getMergeStrategyForPath,
+    {},
+    systemDefaults.memory ?? {},
+    user.memory ?? {},
+    system.memory ?? {},
+  ) as Settings['memory'];
+  if (operatorMemory?.mem0 !== undefined) {
+    const memory = merged.memory;
+    merged.memory = {
+      ...(memory && typeof memory === 'object' && !Array.isArray(memory)
+        ? memory
+        : {}),
+      mem0: operatorMemory.mem0,
+    };
+  }
   const executionSandbox = selectOperatorExecutionSandbox(
     systemDefaults,
     user,

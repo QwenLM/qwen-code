@@ -68,6 +68,7 @@ async function reloadHooksFromSettings(
         projectHooks: settings.getProjectHooks(),
       },
       config.getBareMode() || config.isSafeMode(),
+      config.getMcpServers()?.['external-context'],
     ),
   );
   await hookSystem.reload();

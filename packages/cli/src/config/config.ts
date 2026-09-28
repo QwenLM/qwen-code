@@ -70,6 +70,7 @@ import type { LoadedSettings, Settings } from './settings.js';
 import { loadSettings, SettingScope } from './settings.js';
 import { getSettingsSchema } from './settingsSchema.js';
 import { resolveHookSettingsForConfig } from './hook-settings.js';
+import { createBundledMem0Server } from './mem0-settings.js';
 import {
   resolveCliGenerationConfig,
   getAuthTypeFromEnv,
@@ -2404,10 +2405,37 @@ export async function loadCliConfig(
   // over the session source on a name clash. Both sit above settings/`.mcp.json`
   // and are never gated (#4615).
   const cliMcpServers = parseMcpConfig(argv.mcpConfig);
+  const mem0Server =
+    bareMode ||
+    safeMode ||
+    sshWorkspace ||
+    provisionalWorkspace ||
+    !trustedFolder ||
+    settings.memory?.mem0 === undefined
+      ? undefined
+      : createBundledMem0Server(
+          settings.memory.mem0,
+          cwd,
+          interactive && !isAcpMode && !settings.disableAllHooks,
+        );
   const topTierMcpServers =
-    sessionMcpServers || cliMcpServers
-      ? { ...sessionMcpServers, ...(cliMcpServers ?? {}) }
+    sessionMcpServers || cliMcpServers || mem0Server
+      ? {
+          ...(mem0Server ? { 'external-context': mem0Server } : {}),
+          ...sessionMcpServers,
+          ...(cliMcpServers ?? {}),
+        }
       : undefined;
+  if (
+    mem0Server &&
+    (settings.mcpServers?.['external-context'] ||
+      sessionMcpServers?.['external-context'] ||
+      cliMcpServers?.['external-context'])
+  ) {
+    throw new Error(
+      'Configure memory.mem0 or an external-context MCP server, not both.',
+    );
+  }
   // Bare/safe mode still drop settings.mcpServers/`.mcp.json` entirely (local,
   // ambient, file-sourced state they're meant to distrust) — but top-tier
   // servers are an explicit, per-invocation argument from the caller (ACP
@@ -2777,6 +2805,7 @@ export async function loadCliConfig(
       settings.hooks,
       hooksConfig,
       bareMode || safeMode,
+      mem0Server,
     ),
     disableAllHooks:
       bareMode || safeMode ? true : (settings.disableAllHooks ?? false),

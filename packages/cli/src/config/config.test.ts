@@ -36,6 +36,7 @@ import type { Settings } from './settings.js';
 import * as ServerConfig from '@qwen-code/qwen-code-core';
 import { isWorkspaceTrusted } from './trustedFolders.js';
 import { resetMcpApprovalsForTesting } from './mcpApprovals.js';
+import * as Mem0Settings from './mem0-settings.js';
 
 const sshWorkspaceProbe = vi.hoisted(() => vi.fn());
 vi.mock('../serve/ssh-workspace-store.js', () => ({
@@ -1276,6 +1277,27 @@ describe('loadCliConfig', () => {
     vi.unstubAllEnvs();
     resetMcpApprovalsForTesting();
     vi.restoreAllMocks();
+  });
+
+  it('registers bundled Mem0 automatically and limits headless sessions to search', async () => {
+    const server = {
+      command: process.execPath,
+      args: ['mem0/main.js'],
+      includeTools: ['context_search'],
+    };
+    const createServer = vi
+      .spyOn(Mem0Settings, 'createBundledMem0Server')
+      .mockReturnValue(server);
+    process.argv = ['node', 'script.js', '-p', 'hello'];
+    const argv = await parseArguments();
+    const mem0 = { baseUrl: 'https://mem0.example', enableWrites: true };
+    await loadCliConfig({ memory: { mem0 } }, argv);
+    expect(createServer).toHaveBeenCalledWith(mem0, expect.any(String), false);
+    expect(mockConfigConstructorParams).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        mcpServers: expect.objectContaining({ 'external-context': server }),
+      }),
+    );
   });
 
   it.each([undefined, '1'])(

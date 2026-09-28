@@ -17,6 +17,7 @@ describe('hooksCommand', () => {
     setHooksFromSettings: ReturnType<typeof vi.fn>;
     getBareMode: ReturnType<typeof vi.fn>;
     isSafeMode: ReturnType<typeof vi.fn>;
+    getMcpServers: ReturnType<typeof vi.fn>;
   };
 
   beforeEach(() => {
@@ -26,6 +27,7 @@ describe('hooksCommand', () => {
       setHooksFromSettings: vi.fn(),
       getBareMode: vi.fn().mockReturnValue(false),
       isSafeMode: vi.fn().mockReturnValue(false),
+      getMcpServers: vi.fn(),
       getHookSystem: vi.fn().mockReturnValue({
         reload: vi.fn().mockResolvedValue(undefined),
         getRegistry: vi.fn().mockReturnValue({
@@ -131,6 +133,7 @@ describe('hooksCommand', () => {
         setHooksFromSettings: vi.fn(),
         getBareMode: vi.fn().mockReturnValue(opts.bareMode ?? false),
         isSafeMode: vi.fn().mockReturnValue(opts.safeMode ?? false),
+        getMcpServers: vi.fn(),
         getWorkingDir: vi.fn().mockReturnValue('/work/dir'),
         getSessionId: vi.fn().mockReturnValue('session-1'),
       };

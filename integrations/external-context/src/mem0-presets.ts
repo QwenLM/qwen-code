@@ -51,7 +51,7 @@ const omittedScope: Mem0ScopeRule = {
   write: 'omit',
 };
 
-export const MEM0_PRESETS: Readonly<Record<Mem0PresetId, Mem0Preset>> = {
+const legacyPresets = {
   'mem0-platform-v3': {
     authentication: 'authorization-token',
     scope: {
@@ -109,6 +109,19 @@ export const MEM0_PRESETS: Readonly<Record<Mem0PresetId, Mem0Preset>> = {
       idField: 'id',
     },
   },
+} satisfies Record<string, Mem0Preset>;
+
+export const MEM0_PRESETS: Readonly<Record<Mem0PresetId, Mem0Preset>> = {
+  ...legacyPresets,
+  'mem0-v2': {
+    ...legacyPresets['aliyun-polardb-mysql-2026-08'],
+    search: {
+      ...legacyPresets['aliyun-polardb-mysql-2026-08'].search,
+      limitField: 'limit',
+    },
+  },
+  'mem0-v3': legacyPresets['mem0-platform-v3'],
+  'mem0-oss-2026-08': legacyPresets['mem0-oss-rest-2026-08'],
 };
 
 export function getMem0Preset(id: Mem0PresetId): Mem0Preset {

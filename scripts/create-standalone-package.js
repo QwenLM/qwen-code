@@ -70,6 +70,8 @@ const TARGET_OPENTUI_PACKAGES = new Map([
 ]);
 
 const DIST_REQUIRED_PATHS = [
+  'mem0/main.js',
+  'mem0/write-confirmation.js',
   'cli.js',
   'cli-entry.js',
   'codeModeHost.js',
@@ -81,6 +83,7 @@ const DIST_REQUIRED_PATHS = [
   'bundled/qc-helper/docs',
 ];
 const DIST_ALLOWED_ENTRIES = new Set([
+  'mem0',
   'cli.js',
   'execution-worker.js',
   // bin wrapper emitted by prepare-package.js. Standalone shims use it for

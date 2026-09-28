@@ -665,6 +665,21 @@ describe('Mem0CompatibleAdapter', () => {
 
   it.each([
     {
+      preset: 'mem0-v2' as const,
+      scope: { userId: 'fixed-user', agentId: 'fixed-agent' },
+      path: '/proxy/v2/memories/search',
+      authorization: 'Token project-key',
+      apiKey: undefined,
+      responseItem: { id: 'memory-1', memory: 'polardb memory' },
+      expectedBody: {
+        query: 'deployment',
+        limit: 5,
+        agent_id: 'fixed-agent',
+        filters: { user_id: 'fixed-user' },
+      },
+      expectedContent: 'polardb memory',
+    },
+    {
       preset: 'mem0-platform-v3' as const,
       scope: { appId: 'fixed-app' },
       path: '/proxy/v3/memories/search/',

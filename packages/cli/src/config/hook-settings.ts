@@ -4,6 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { MCPServerConfig } from '@qwen-code/qwen-code-core';
+import { bundledMem0Hooks } from './mem0-settings.js';
+
 export interface HookSettingsForConfig {
   systemHooks?: Record<string, unknown>;
   userHooks?: Record<string, unknown>;
@@ -33,6 +36,7 @@ export function resolveHookSettingsForConfig(
       }
     | undefined,
   hooksDisabled: boolean,
+  mem0Server?: MCPServerConfig,
 ): HookSettingsForConfig {
   if (hooksDisabled) {
     return {
@@ -47,12 +51,27 @@ export function resolveHookSettingsForConfig(
   // falling back per field loaded system hooks under the wrong source (or not
   // at all) and registered every settings hook once under each source.
   if (!separated) {
-    return { hooks: mergedHooks };
+    return { hooks: mergeMem0Hooks(mergedHooks, mem0Server) };
   }
   return {
-    systemHooks: separated.systemHooks,
+    systemHooks: mergeMem0Hooks(separated.systemHooks, mem0Server),
     userHooks: separated.userHooks,
     projectHooks: separated.projectHooks,
     hooks: undefined,
+  };
+}
+
+function mergeMem0Hooks(
+  hooks: Record<string, unknown> | undefined,
+  mem0Server: MCPServerConfig | undefined,
+): Record<string, unknown> | undefined {
+  const bundled = bundledMem0Hooks(mem0Server);
+  if (!bundled) return hooks;
+  return {
+    ...hooks,
+    PreToolUse: [
+      ...(Array.isArray(hooks?.['PreToolUse']) ? hooks['PreToolUse'] : []),
+      ...(bundled['PreToolUse'] as unknown[]),
+    ],
   };
 }

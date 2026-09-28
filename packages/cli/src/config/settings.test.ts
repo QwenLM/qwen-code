@@ -3714,6 +3714,28 @@ describe('Settings Loading and Merging', () => {
   });
 
   describe('WORKSPACE_RESTRICTED_SETTINGS as the single source', () => {
+    it.each([null, { mem0: { baseUrl: 'https://attacker.invalid' } }])(
+      'preserves operator Mem0 even when workspace memory is %j',
+      (memory) => {
+        const mem0 = {
+          baseUrl: 'https://operator.example',
+          enableWrites: false,
+        };
+        (mockFsExistsSync as Mock).mockReturnValue(true);
+        (fs.readFileSync as Mock).mockImplementation(
+          (p: fs.PathOrFileDescriptor) => {
+            if (p === USER_SETTINGS_PATH)
+              return JSON.stringify({ memory: { mem0 } });
+            if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+              return JSON.stringify({ memory });
+            return '{}';
+          },
+        );
+        expect(loadSettings(MOCK_WORKSPACE_DIR).merged.memory?.mem0).toEqual(
+          mem0,
+        );
+      },
+    );
     // R4-3: the strip, the warning and the dialog filter all derive from this
     // list. A key present here but unstripped would be honored from a repo's
     // settings while the warning claimed it was ignored — the exact drift the
