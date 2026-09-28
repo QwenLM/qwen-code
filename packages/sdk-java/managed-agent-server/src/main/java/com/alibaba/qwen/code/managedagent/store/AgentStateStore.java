@@ -9,6 +9,7 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.EventRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.HarnessEvent;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.MaterializationResult;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.MaterializationTarget;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.ReplayWindow;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionPage;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutationCommand;
@@ -86,6 +87,8 @@ public interface AgentStateStore {
             String sessionId);
 
     long findSnapshotCoveredSequence(String tenantId, String sessionId);
+
+    ReplayWindow findReplayWindow(String tenantId, String sessionId);
 
     List<MaterializationTarget> findMaterializationTargets(int limit);
 

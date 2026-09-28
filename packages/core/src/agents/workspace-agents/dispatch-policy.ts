@@ -18,12 +18,10 @@
  * scheduling decision inside a rules function and gave the same situation two
  * spellings. A run that cannot start yet is simply a queued run.
  *
- * Four rules mirror what Multica arrived at (`server/internal/handler/
- * comment.go`): coalesce rather than double-book, never let an author wake
+ * The rules: coalesce rather than double-book, never let an author wake
  * itself, let an explicit mention take routing away from the assignee, and
- * fail closed. The budget rules are ours: Multica's runs terminate on their
- * own and a human owns the issue, whereas two workspace agents answering each other
- * have nothing to stop them.
+ * fail closed. The budget rules exist because two workspace agents answering
+ * each other have nothing else to stop them.
  */
 
 import { isAgentEnabled, queueLimitFor } from './store.js';

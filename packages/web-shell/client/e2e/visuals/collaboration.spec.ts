@@ -86,7 +86,7 @@ function mainThread(): ThreadDetailView {
     title: 'Speed up the test suite',
     body: 'Context from the conversation this was sent from:\n\nUser: unit tests now take 14 minutes.',
     status: 'in_progress',
-    reason: '3 个智能体执行中，1 个排队中',
+    reason: '3 Agents are running, 1 queued',
     assigneeName: 'lead',
     posts: [
       {
@@ -209,7 +209,7 @@ function mainThread(): ThreadDetailView {
         id: 'th_child_1',
         title: 'Check barrel imports in packages/cli',
         status: 'in_progress',
-        reason: '1 个智能体执行中',
+        reason: '1 Agent is running',
         assigneeName: 'reviewer',
       },
     ],

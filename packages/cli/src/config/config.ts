@@ -58,7 +58,10 @@ import {
   type OutputStyleDefinition,
   validateModelProvidersConfig,
 } from '@qwen-code/qwen-code-core';
-import { AGENT_HOST_SESSION_SOURCE_TYPE } from '../runtime/agent-session-source.js';
+import {
+  AGENT_HOST_SESSION_SOURCE_TYPE,
+  AGENT_SESSION_SOURCE_TYPE,
+} from '../runtime/agent-session-source.js';
 import { extensionsCommand } from '../commands/extensions.js';
 import {
   agentExecutionBackend,
@@ -2271,7 +2274,10 @@ export async function loadCliConfig(
     const sessionService = new SessionService(cwd);
     if (argv.continue) {
       sessionData = await sessionService.loadLastSession({
-        excludeSourceType: AGENT_HOST_SESSION_SOURCE_TYPE,
+        excludeSourceTypes: [
+          AGENT_HOST_SESSION_SOURCE_TYPE,
+          AGENT_SESSION_SOURCE_TYPE,
+        ],
       });
       if (sessionData) {
         sessionId = sessionData.conversation.sessionId;

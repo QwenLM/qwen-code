@@ -399,6 +399,8 @@ const STATUS_REASON_KEYS: Record<string, string> = {
     'collab.reason.runCancelled',
   'an Agent run failed and no successor is runnable': 'collab.reason.runFailed',
   'an Agent ended without a hand-off': 'collab.reason.noHandoff',
+  'an Agent run was parked when collaboration was turned off and is waiting for you':
+    'collab.reason.parked',
   'an Agent is waiting on work that no longer exists':
     'collab.reason.strandedWait',
   'an Agent submitted a summary for review': 'collab.reason.review',
@@ -407,9 +409,8 @@ const STATUS_REASON_KEYS: Record<string, string> = {
 };
 
 /**
- * A thread's status reason in the reader's language. The server words it
- * from a fixed set (the live-run line in Chinese, the rest in English);
- * anything outside it is shown as sent.
+ * A thread's status reason in the reader's language. The server words it in
+ * English from a fixed set; anything outside it is shown as sent.
  */
 export function statusReasonLabel(reason: string, t: Translate): string {
   const key = STATUS_REASON_KEYS[reason];
@@ -417,9 +418,13 @@ export function statusReasonLabel(reason: string, t: Translate): string {
   if (reason.startsWith('the last post booked no work')) {
     return t('collab.reason.bookedNothing');
   }
-  const queued = /^(\d+) 个智能体排队中/.exec(reason);
+  const queued = /^(\d+) Agents? (?:is|are) queued and not started$/.exec(
+    reason,
+  );
   if (queued) return t('collab.reason.queued', { count: Number(queued[1]) });
-  const working = /^(\d+) 个智能体执行中(?:，(\d+) 个排队中)?$/.exec(reason);
+  const working = /^(\d+) Agents? (?:is|are) running(?:, (\d+) queued)?$/.exec(
+    reason,
+  );
   if (working) {
     return working[2]
       ? t('collab.reason.workingQueued', {

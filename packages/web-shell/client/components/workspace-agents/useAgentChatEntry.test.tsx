@@ -29,15 +29,17 @@ function deferred<T>() {
 function Probe({
   baseUrl,
   getContext,
+  onSubmit = vi.fn(),
 }: {
   baseUrl: string;
   getContext: () => string;
+  onSubmit?: () => void;
 }) {
   latestSubmit = useAgentChatEntry({
     enabled: true,
     cwd: '/repo',
     baseUrl,
-    onSubmit: vi.fn(),
+    onSubmit,
     onOpen: vi.fn(),
     onError: vi.fn(),
     getContext,
@@ -98,4 +100,37 @@ it('does not submit captured mentions after the workspace API changes', async ()
   expect(oldApi.createThread).not.toHaveBeenCalled();
   expect(newApi.createThread).not.toHaveBeenCalled();
   expect(newContext).not.toHaveBeenCalled();
+});
+
+it('sends an @ message as ordinary chat when the roster cannot be read', async () => {
+  const api = {
+    listAgents: vi
+      .fn()
+      .mockRejectedValue(new Error('agent_collaboration_disabled')),
+    createThread: vi.fn(),
+  };
+  createThreadsHttpApi.mockReturnValue(api);
+  const onSubmit = vi.fn();
+  const node = document.createElement('div');
+  const root = createRoot(node);
+  mounted.push({ root, node });
+
+  act(() =>
+    root.render(
+      <Probe baseUrl="x" getContext={() => ''} onSubmit={onSubmit} />,
+    ),
+  );
+  await act(async () => {
+    expect(latestSubmit('see @README.md')).toBe(false);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+
+  expect(api.createThread).not.toHaveBeenCalled();
+  expect(onSubmit).toHaveBeenCalledWith(
+    'see @README.md',
+    undefined,
+    undefined,
+    expect.any(Function),
+    undefined,
+  );
 });

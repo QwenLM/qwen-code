@@ -187,7 +187,11 @@ export function useAgentChatEntry({
       const context = getContext?.() ?? '';
       void (async () => {
         try {
-          const agents = await listAgents();
+          // No roster (collaboration off here, or the daemon unreachable)
+          // means no agent can be addressed: send it as an ordinary message.
+          const agents = await listAgents().catch(
+            (): WorkspaceAgentSummaryView[] => [],
+          );
           if (activeApi.current !== api || submission.current !== submissionId)
             return;
           // The first agent addressed leads the thread: a follow-up without an

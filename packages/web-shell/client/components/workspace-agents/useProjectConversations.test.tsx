@@ -86,3 +86,23 @@ it('does not reuse conversations across daemon credentials', async () => {
   expect(latest.sessions).toEqual([]);
   expect(latest.error).toBe('repo');
 });
+
+it('leaves a workspace with collaboration off alone', async () => {
+  const subscribe = vi.fn(() => () => {});
+  createThreadsHttpApi.mockImplementation(() => ({
+    listThreads: vi
+      .fn()
+      .mockRejectedValue(new Error('agent_collaboration_disabled')),
+    subscribe,
+  }));
+  const node = document.createElement('div');
+  const root = createRoot(node);
+  mounted.push({ root, node });
+
+  act(() => root.render(<Probe />));
+  await flush();
+
+  expect(latest.sessions).toEqual([]);
+  expect(latest.error).toBeUndefined();
+  expect(subscribe).not.toHaveBeenCalled();
+});

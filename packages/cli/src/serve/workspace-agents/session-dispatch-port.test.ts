@@ -131,6 +131,24 @@ describe('session dispatch port', () => {
     });
   });
 
+  it('closes a transcript a person restored before running the agent in it', async () => {
+    // Restoring strips the agent source, so the id can sit resident as an
+    // ordinary session; attaching to it would run without the persona.
+    const sessionId = agentThreadSessionId(AGENT.id, TURN.threadId);
+    const { bridge } = makeBridge([{ sessionId }]);
+    const closeSession = vi.fn().mockResolvedValue(undefined);
+    Object.assign(bridge, { closeSession });
+    const port = createSessionDispatchPort({ bridge, workspaceCwd: WS });
+
+    const result = await port.start({ agent: AGENT, prompt: 'work', ...TURN });
+
+    expect(result.status).toBe('started');
+    expect(closeSession).toHaveBeenCalledWith(sessionId);
+    expect(bridge.spawnOrAttach).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId, sourceType: 'agent' }),
+    );
+  });
+
   it('leaves mid-run replies for durable rebooking instead of another prompt', async () => {
     const { bridge, sendPrompt } = makeBridge([
       {

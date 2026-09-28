@@ -352,6 +352,7 @@ import {
 import { loadChannelsConfig } from '../commands/channel/runtime.js';
 import { writeStderrLine, writeStderrLineSafe } from '../utils/stdioHelpers.js';
 import { loadSettings, SettingScope } from '../config/settings.js';
+import { loadSettingsCached } from '../config/settings-cache.js';
 import { getModelProvidersOwnerScope } from '../config/modelProvidersScope.js';
 import { registerLiveRoutes } from './routes/live.js';
 import { registerLiveSetupRoutes } from './routes/live-setup.js';
@@ -1125,13 +1126,11 @@ export function createServeApp(
     }
     return () => guard.assertOpen();
   };
-  // Resolved once, below, from the settings read at daemon startup — not per
-  // request and not per session. The collaboration surface includes work no
-  // session owns: a recovery scan and a 5s dispatch timer. A per-session read
-  // cannot govern those, so the setting carries `requiresRestart: true` and
-  // this value is fixed for the daemon's lifetime.
-  // `agentTeamEnabled` reads per session; this one deliberately does not.
-  let agentCollaborationEnabled = false;
+  // The collaboration flag is resolved per workspace at request time (see
+  // `isAgentCollaborationEnabledFor` below). One boot-time decision remains:
+  // when no registered workspace has it on, the routes and the recovery sweep
+  // are never registered, so enabling it for the first time still needs a
+  // daemon restart — the setting keeps `requiresRestart: true` for that case.
   let standaloneSessionsAvailable = false;
   const { languageCodes, currentServeFeatures, invalidateServeFeaturesCache } =
     createServeFeatures({
@@ -1186,7 +1185,10 @@ export function createServeApp(
       sessionShellCommandEnabled,
       multiWorkspaceSessionsEnabled: () =>
         workspaceRegistry.listEntries().length > 1,
-      agentCollaborationEnabled: () => agentCollaborationEnabled,
+      // Present only while the routes are: a workspace opted in after boot
+      // does not mount them until the daemon restarts.
+      agentCollaborationEnabled: () =>
+        agentCollaborationRoutesMounted && anyAgentCollaborationEnabled(),
       dynamicWorkspaceRegistrationAvailable:
         deps.createWorkspaceRuntime !== undefined,
       persistentWorkspaceRegistrationAvailable:
@@ -1577,12 +1579,36 @@ export function createServeApp(
       return undefined;
     }
   })();
-  // Read from the same boot snapshot as Live Voice. The env override matches
-  // `Config.isAgentCollaborationEnabled` so a daemon and the sessions it hosts
-  // cannot disagree about whether the feature is on.
-  agentCollaborationEnabled =
-    process.env['QWEN_CODE_ENABLE_AGENT_COLLABORATION'] === '1' ||
-    liveSettingsAtBoot?.experimental?.agentCollaboration === true;
+  // The collaboration opt-in is workspace-scoped like the feature itself:
+  // every surface resolves it from the same per-workspace merge a hosted
+  // session sees (workspace scope wins), and the env var stays the
+  // operator's process-wide override. The predicate is consulted at request
+  // time, so a workspace registered or reconfigured after boot is seen
+  // without a daemon restart.
+  // A settings file caught mid-edit (half-written JSON) keeps the last answer
+  // read for that workspace: reading it as "off" would strand every live run
+  // there within one recovery tick.
+  const lastAgentCollaborationSetting = new Map<string, boolean>();
+  const isAgentCollaborationEnabledFor = (workspaceCwd: string): boolean => {
+    if (process.env['QWEN_CODE_ENABLE_AGENT_COLLABORATION'] === '1')
+      return true;
+    try {
+      const enabled =
+        loadSettingsCached(workspaceCwd).merged.experimental
+          ?.agentCollaboration === true;
+      lastAgentCollaborationSetting.set(workspaceCwd, enabled);
+      return enabled;
+    } catch {
+      return lastAgentCollaborationSetting.get(workspaceCwd) ?? false;
+    }
+  };
+  // Whether the routes and the recovery sweep exist at all. Evaluated at
+  // call time over the registry rather than snapshotted at boot.
+  let agentCollaborationRoutesMounted = false;
+  const anyAgentCollaborationEnabled = () =>
+    workspaceRegistry
+      .listAll()
+      .some((runtime) => isAgentCollaborationEnabledFor(runtime.workspaceCwd));
 
   const liveConfigAtBoot = liveSettingsAtBoot
     ? readLiveVoiceConfiguration(liveSettingsAtBoot)
@@ -2350,6 +2376,12 @@ export function createServeApp(
       app,
       hostedHarness,
       primaryBoundWorkspace,
+      opts.managedRuntimeBrokerUrl && opts.managedRuntimeBrokerToken
+        ? {
+            baseUrl: opts.managedRuntimeBrokerUrl,
+            token: opts.managedRuntimeBrokerToken,
+          }
+        : undefined,
     );
     app.use((req, res, next) => {
       if (req.path === '/capabilities' || req.path === '/health') next();
@@ -3463,11 +3495,13 @@ export function createServeApp(
   // collaboration storage and re-dispatching booked runs on a daemon whose
   // operator never opted in. Skipping the call leaves the routes 404, which is
   // also what the absent `agent_collaboration_v1` capability tells clients.
-  if (agentCollaborationEnabled) {
+  if (anyAgentCollaborationEnabled()) {
     registerWorkspaceAgentRoutes(app, {
       workspaceRegistry,
       mutate,
+      isAgentCollaborationEnabledFor,
     });
+    agentCollaborationRoutesMounted = true;
   } else {
     // Close out runs the switch left mid-flight. Recovery cannot tell "the
     // daemon crashed" from "the operator turned this off" — both look like a
