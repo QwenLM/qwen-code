@@ -256,10 +256,20 @@ describe('SDK MCP Server Integration (E2E)', () => {
         tools: [calculatorTool],
       });
       let streamingRequestIndex = 0;
+      let resumedToolCallServed = false;
+      let resumed = false;
       fakeResponse = ({ body }) => {
         if (body['stream'] !== true) {
           return { content: '{"selected_memories":[]}' };
         }
+        const tools = body['tools'];
+        const advertisedNames = Array.isArray(tools)
+          ? tools.flatMap((entry): string[] => {
+              const name = (entry as { function?: { name?: unknown } }).function
+                ?.name;
+              return typeof name === 'string' ? [name] : [];
+            })
+          : [];
         const requestIndex = streamingRequestIndex++;
         if (requestIndex === 0) {
           return {
@@ -275,7 +285,12 @@ describe('SDK MCP Server Integration (E2E)', () => {
             toolCalls: [fakeToolCall(MCP_CALCULATE_SUM, { a: 25, b: 17 })],
           };
         }
-        if (requestIndex === 3) {
+        if (
+          resumed &&
+          !resumedToolCallServed &&
+          advertisedNames.includes(MCP_CALCULATE_SUM)
+        ) {
+          resumedToolCallServed = true;
           // The resumed model calls the historical tool directly, without a
           // second tool_search request.
           return {
@@ -308,6 +323,10 @@ describe('SDK MCP Server Integration (E2E)', () => {
         await firstQuery.close();
       }
 
+      const firstQueryStreamingRequests = fakeServer.requests.filter(
+        ({ body }) => body['stream'] === true,
+      ).length;
+      resumed = true;
       const resumedQuery = query({
         prompt: 'Now calculate 8 + 5 with the same tool.',
         options: {
@@ -324,7 +343,22 @@ describe('SDK MCP Server Integration (E2E)', () => {
           resumedMessages.push(message);
         }
 
-        expect(advertisedToolNames(fakeServer, 3)).toContain(MCP_CALCULATE_SUM);
+        const resumedRequests = fakeServer.requests
+          .filter(({ body }) => body['stream'] === true)
+          .slice(firstQueryStreamingRequests);
+        expect(
+          resumedRequests.some(({ body }) => {
+            const tools = body['tools'];
+            return (
+              Array.isArray(tools) &&
+              tools.some(
+                (entry) =>
+                  (entry as { function?: { name?: unknown } }).function
+                    ?.name === MCP_CALCULATE_SUM,
+              )
+            );
+          }),
+        ).toBe(true);
         const resumedResults = findToolResults(
           resumedMessages,
           MCP_CALCULATE_SUM,
