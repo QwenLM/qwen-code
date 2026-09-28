@@ -7415,15 +7415,16 @@ describe('SessionArtifactStore', () => {
   // the record and pick `restorable` over the coerced `ephemeral`. The
   // coercion must mark `retentionExplicit` so the merge preserves the
   // ephemeral choice.
-  it('keeps the coerced ephemeral pin across publish and workspace re-record (R2-2 / R1-2)', async () => {
+  it('keeps the workspace-published upgrade restorable across publish and workspace re-record (R2-2 / R1-2)', async () => {
     // Three steps, mirroring the R1-2 witness: a non-explicit workspace
-    // record (write_file auto-record), a trusted local publish that
-    // coerces to ephemeral + explicit, then a workspace re-record with no
-    // stated retention. mergeArtifact must propagate retentionExplicit
-    // from the coerced incoming record; if the flag is dropped, the
-    // re-record's mergeRetention falls through to
-    // strongestRetention('ephemeral','restorable') and the store holds
-    // 'restorable' — the exact shape the coercion's comment forbids.
+    // record (write_file auto-record), a trusted local publish of the
+    // same managedId, then a workspace re-record with no stated
+    // retention. R4-1 scoped the write-time coercion to standalone
+    // publishes, so the upgrade no longer coerces to ephemeral: the
+    // merged record stays restorable and the re-record keeps it
+    // restorable. The coerced-ephemeral pin itself (mergeArtifact's
+    // retentionExplicit propagation) is covered by the standalone
+    // publish pin test below.
     const store = new SessionArtifactStore({
       sessionId: 's11-pin-propagates',
       workspaceCwd: workspace,
@@ -7464,10 +7465,140 @@ describe('SessionArtifactStore', () => {
         {
           id: expect.any(String),
           storage: 'published',
+          retention: 'restorable',
+        },
+      ],
+    });
+  });
+
+  it('holds the coerced ephemeral pin across a standalone publish and later workspace re-record (R4-1 pin)', async () => {
+    // The R4-1 scope change leaves the standalone-publish coercion in
+    // place: with no durable predecessor the publish still coerces to
+    // ephemeral + explicit, and a later non-explicit workspace re-record
+    // must not upgrade it — mergeRetention's pin (the retentionExplicit
+    // propagation R1-2 added) has to hold.
+    const store = new SessionArtifactStore({
+      sessionId: 's11-pin-standalone',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async () => {},
+        recordSnapshot: async () => {},
+      },
+    });
+    await fs.mkdir(path.join(workspace, 'reports'), { recursive: true });
+    const artifactPath = path.join(workspace, 'reports/pin-standalone.html');
+    await fs.writeFile(artifactPath, 'hello');
+    const managedId = managedIdForWorkspacePath('reports/pin-standalone.html');
+
+    await store.upsertMany(
+      [
+        {
+          title: 'Published',
+          storage: 'published',
+          managedId,
+          url: pathToFileURL(artifactPath).href,
+          mimeType: 'text/html',
+        },
+      ],
+      { strict: true, trustedPublisher: true },
+    );
+    await store.upsertMany(
+      [{ title: 'Draft again', workspacePath: 'reports/pin-standalone.html' }],
+      { strict: true },
+    );
+
+    await expect(store.list()).resolves.toMatchObject({
+      artifacts: [
+        {
+          id: expect.any(String),
+          storage: 'published',
           retention: 'ephemeral',
         },
       ],
     });
+  });
+
+  it('keeps the workspace-published local page recoverable across a resume rebuild (R4-1)', async () => {
+    // A workspace auto-record (no stated retention) upgraded by a trusted
+    // local publish of the same managedId must stay restorable: the
+    // write-time coercion is scoped to standalone publishes. Coercing the
+    // upgrade successor used to strand the durable workspace record — the
+    // coerced ephemeral successor never reached the journal, so the
+    // rebuilt snapshot was empty, restore stayed silent, and the control
+    // plane skipped artifact re-ingest on resume, losing the page even
+    // though its file is still on disk.
+    const sessionId = 's11-published-upgrade-resume';
+    const events: SessionArtifactEventRecordPayload[] = [];
+    const source = new SessionArtifactStore({
+      sessionId,
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async (payload) => {
+          events.push(payload);
+        },
+        recordSnapshot: async () => {},
+      },
+    });
+    await fs.mkdir(path.join(workspace, 'reports'), { recursive: true });
+    const artifactPath = path.join(workspace, 'reports/resume-page.html');
+    await fs.writeFile(artifactPath, '<html></html>');
+    const artifactUrl = pathToFileURL(artifactPath).href;
+    const managedId = managedIdForWorkspacePath('reports/resume-page.html');
+
+    await source.upsertMany(
+      [{ title: 'Draft', workspacePath: 'reports/resume-page.html' }],
+      { strict: true },
+    );
+    await source.upsertMany(
+      [
+        {
+          title: 'Published',
+          storage: 'published',
+          managedId,
+          url: artifactUrl,
+          mimeType: 'text/html',
+        },
+      ],
+      { strict: true, trustedPublisher: true },
+    );
+
+    await expect(source.list()).resolves.toMatchObject({
+      artifacts: [
+        {
+          storage: 'published',
+          retention: 'restorable',
+        },
+      ],
+    });
+
+    const rebuilt = rebuildSessionArtifactSnapshot(
+      events.map((systemPayload) => ({
+        type: 'system',
+        subtype: 'session_artifact_event',
+        systemPayload,
+      })),
+    )!;
+    expect(rebuilt.artifacts).toHaveLength(1);
+
+    const restored = new SessionArtifactStore({
+      sessionId,
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async () => {},
+        recordSnapshot: async () => {},
+      },
+    });
+    // The restore gate still refuses to relink local published file://
+    // records (fail-closed), but the refusal must stay loud: the
+    // RESTORE_FAILED-prefixed warning is what makes the control plane set
+    // ingestArtifacts and recover the page from the transcript replay on
+    // resume.
+    const warnings = await restored.restore(rebuilt);
+    expect(
+      warnings.some((warning) =>
+        warning.startsWith('artifact snapshot restore failed'),
+      ),
+    ).toBe(true);
   });
 
   it('prunes over-limit restored artifacts and records eviction tombstones', async () => {

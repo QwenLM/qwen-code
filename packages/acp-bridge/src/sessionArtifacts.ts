@@ -1768,8 +1768,20 @@ export class SessionArtifactStore {
     // `ephemeral` up front; the snapshot path stays restorable via
     // `getWebPreviewSnapshotId`. Mark the result as `retentionExplicit`
     // so the workspace→published merge path doesn't upgrade it again.
+    // R4-1 (#12473): the coercion must not fire when the publish merges
+    // into an existing durable record (workspace→published upgrade).
+    // Coercing the successor to ephemeral would strand the durable
+    // workspace predecessor (its tombstone can't be undone on resume).
+    // Scope the coercion to standalone publishes only.
+    const publishedUpgradeTarget = this.findPublishedUpgradeTarget({
+      storage,
+      trustedPublisher,
+      managedId,
+      url,
+    } as NormalizedArtifact);
     if (
       retention !== 'ephemeral' &&
+      publishedUpgradeTarget === undefined &&
       storage === 'published' &&
       url !== undefined &&
       isFileArtifactUrl(url) &&
