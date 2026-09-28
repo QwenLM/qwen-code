@@ -1599,12 +1599,22 @@ export function registerWorkspaceAgentRoutes(
         res.status(400).json({ error: 'nothing_to_update' });
         return;
       }
+      // Narrowed on `apply` for the same reason as the create handler above:
+      // the `error` guard reads well but never discriminated the union. Gating
+      // on `touched` instead is not an option here — `nextConfig` has to stay
+      // the patched agent even when this request touched no config field, or
+      // the managed-host check below would miss an existing persona override.
+      const applyConfig = config.apply;
+      if (!applyConfig) {
+        res.status(500).json({ error: 'config_patch_unavailable' });
+        return;
+      }
       try {
         const agentId = String(req.params['id']);
         const current = (await readWorkspaceAgents(runtime.workspaceCwd)).find(
           (agent) => agent.id === agentId,
         );
-        const nextConfig = current ? config.apply(current) : undefined;
+        const nextConfig = current ? applyConfig(current) : undefined;
         const nextExecution = execution ?? current?.execution;
         if (
           nextExecution?.mode === 'managed-host' &&
