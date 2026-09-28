@@ -485,6 +485,37 @@ describe('getConnectionAfterSessionClear', () => {
     expect(next).not.toHaveProperty('standaloneSession');
     expect(getWorkspaceModelsAfterSessionClear(current)).toBeUndefined();
   });
+
+  it('drops the connection session context only when the clear asks for it', () => {
+    // Leaving Live has to be a real state change: `undefined` is the downstream
+    // sentinel for "inherit from the connection", so a cleared connection that
+    // still advertises { kind: 'live' } sends the next prompt straight back
+    // into Live, where createSession rejects a live context (#12620).
+    const current: DaemonConnectionState = {
+      status: 'connected',
+      sessionId: 'live-a',
+      sessionContext: { kind: 'live' },
+      commands: [commandInfo('old-command')],
+      skills: ['old-skill'],
+    };
+
+    const dropped = getConnectionAfterSessionClear(
+      current,
+      'live-a',
+      undefined,
+      true,
+    );
+
+    expect(dropped).not.toHaveProperty('sessionContext');
+    expect(dropped).not.toHaveProperty('sessionId');
+
+    // The drop stays opt-in: every other call site keeps the 3-arg shape, so a
+    // context nobody chose to leave must survive the clear, and the incoming
+    // state is never mutated in place.
+    const kept = getConnectionAfterSessionClear(current, 'live-a');
+    expect(kept.sessionContext).toEqual({ kind: 'live' });
+    expect(current.sessionContext).toEqual({ kind: 'live' });
+  });
 });
 
 /**
@@ -1211,8 +1242,8 @@ describe('createDaemonSessionActions', () => {
       session: source,
     });
 
-    const firstBranch = actions.branchSession('First');
-    const secondBranch = actions.branchSession('Second');
+    const firstBranch = actions.branchSession({ name: 'First' });
+    const secondBranch = actions.branchSession({ name: 'Second' });
     await expect(secondBranch).rejects.toMatchObject({
       name: 'InvalidStateError',
     });
@@ -1244,7 +1275,7 @@ describe('createDaemonSessionActions', () => {
       },
     );
 
-    const pending = actions.branchSession('Late branch');
+    const pending = actions.branchSession({ name: 'Late branch' });
     await actions.clearSession();
     branched.resolve({
       sessionId: 'session-b',
@@ -1265,6 +1296,36 @@ describe('createDaemonSessionActions', () => {
       'client-b',
     );
   });
+
+  it('detaches a late historical worktree branch response', async () => {
+    const source = createMockSession('session-a', 'client-a');
+    const branched = createDeferred<{
+      sessionId: string;
+      displayName: string;
+      clientId: string;
+    }>();
+    source.client.branchSession.mockReturnValueOnce(branched.promise);
+    const { actions } = createActionsHarness({ session: source });
+
+    const pending = actions.branchSession({
+      atRecordId: 'checkpoint-1',
+      worktree: {},
+    });
+    await actions.clearSession();
+    branched.resolve({
+      sessionId: 'session-b',
+      displayName: 'Worktree branch',
+      clientId: 'client-b',
+    });
+
+    await expect(pending).resolves.toMatchObject({ switchStarted: false });
+    await Promise.resolve();
+    expect(source.client.detachSession).toHaveBeenCalledWith(
+      'session-b',
+      'client-b',
+    );
+  });
+
   it('creates from the active session client when the connection matches', async () => {
     const existingSession = createMockSession('session-a');
     const nextSession = createMockSession('session-b');
@@ -5527,10 +5588,33 @@ describe('createDaemonSessionActions', () => {
     );
     const { actions } = createActionsHarness({ addNotice, session });
 
-    await expect(actions.branchSession(undefined, 'a1')).rejects.toMatchObject({
-      _alreadyDispatched: true,
-    });
+    await expect(
+      actions.branchSession({ atRecordId: 'a1' }),
+    ).rejects.toMatchObject({ _alreadyDispatched: true });
     expect(addNotice).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['branch_worktree_activation_failed', 0],
+    ['branch_worktree_outcome_unknown', 1],
+    ['worktree_create_failed', 1],
+  ] as const)('handles %s with %i generic notices', async (code, count) => {
+    const session = createMockSession('session-a');
+    const addNotice = vi.fn((notice) => notice);
+    const error = new DaemonHttpError(500, { code }, 'Worktree failed');
+    session.client.branchSession.mockRejectedValueOnce(error);
+    const { actions } = createActionsHarness({ addNotice, session });
+
+    await expect(
+      actions.branchSession({ atRecordId: 'a1', worktree: {} }),
+    ).rejects.toBe(error);
+    expect(error).toMatchObject({ _alreadyDispatched: true });
+    expect(addNotice).toHaveBeenCalledTimes(count);
+    if (count) {
+      expect(addNotice).toHaveBeenCalledWith(
+        expect.objectContaining({ operation: 'branch_session' }),
+      );
+    }
   });
 
   it('lets the SDK own the branch deadline instead of adding a 30s action timeout', async () => {
@@ -5550,7 +5634,7 @@ describe('createDaemonSessionActions', () => {
 
       let settled = false;
       const branch = actions
-        .branchSession(undefined, 'checkpoint-1')
+        .branchSession({ atRecordId: 'checkpoint-1' })
         .finally(() => {
           settled = true;
         });
@@ -5589,7 +5673,7 @@ describe('createDaemonSessionActions', () => {
       session,
     });
 
-    const branch = actions.branchSession(undefined, 'checkpoint-1');
+    const branch = actions.branchSession({ atRecordId: 'checkpoint-1' });
     const newerLoad = actions.loadSession('session-b');
     expect(pendingSessionLoadRef.current?.sessionId).toBe('session-b');
 
@@ -5779,6 +5863,40 @@ describe('createDaemonSessionActions', () => {
       }
     },
   );
+
+  it('drops the connection session context through the real clearSession action', async () => {
+    const session = createMockSession('session-a');
+    const { actions, getConnection } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionId: 'session-a',
+        sessionContext: { kind: 'live' },
+      },
+      session,
+    });
+
+    await actions.clearSession({ dropSessionContext: true });
+
+    expect(getConnection().sessionContext).toBeUndefined();
+    expect(getConnection().sessionId).toBeUndefined();
+  });
+
+  it('keeps the connection session context when clearSession drops only the session', async () => {
+    const session = createMockSession('session-a');
+    const { actions, getConnection } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionId: 'session-a',
+        sessionContext: { kind: 'live' },
+      },
+      session,
+    });
+
+    await actions.clearSession();
+
+    expect(getConnection().sessionId).toBeUndefined();
+    expect(getConnection().sessionContext).toEqual({ kind: 'live' });
+  });
 
   it('captures and marks a clear before waiting for persisted reasoning', async () => {
     const session = createMockSession('session-a');

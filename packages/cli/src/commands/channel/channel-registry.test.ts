@@ -868,11 +868,11 @@ describe('channel registry', () => {
       );
       expect(
         fields
-          ?.find((field) => field.key === 'senderPolicy')
+          ?.find((field) => field.key === 'privatePolicy')
           ?.options?.map((option) => option.value),
-      ).toEqual(['pairing', 'allowlist', 'open']);
+      ).toEqual(['disabled', 'pairing', 'allowlist', 'open']);
       expect(
-        fields?.find((field) => field.key === 'senderPolicy'),
+        fields?.find((field) => field.key === 'privatePolicy'),
       ).toMatchObject({ default: 'pairing' });
       expect(fields).toContainEqual(
         expect.objectContaining({
@@ -908,7 +908,7 @@ describe('channel registry', () => {
         }),
       );
       expect(
-        fields?.filter((field) => field.key === 'senderPolicy'),
+        fields?.filter((field) => field.key === 'privatePolicy'),
       ).toHaveLength(1);
       expect(
         fields?.filter((field) => field.key === 'groupPolicy'),
@@ -927,7 +927,7 @@ describe('channel registry', () => {
       ).toContain('pairing');
       expect(fields).toContainEqual(
         expect.objectContaining({
-          key: 'senderPolicy',
+          key: 'privatePolicy',
           kind: 'enum',
           required: true,
         }),

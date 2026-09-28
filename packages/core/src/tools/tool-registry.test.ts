@@ -10,7 +10,11 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { ConfigParameters } from '../config/config.js';
 import { Config, ApprovalMode } from '../config/config.js';
 import { PermissionManager } from '../permissions/permission-manager.js';
-import { ToolRegistry, DiscoveredTool } from './tool-registry.js';
+import {
+  ToolRegistry,
+  DiscoveredTool,
+  deferredDeclarationFingerprint,
+} from './tool-registry.js';
 import { DiscoveredMCPTool } from './mcp-tool.js';
 import { ExitPlanModeTool } from './exitPlanMode.js';
 import type { FunctionDeclaration, CallableTool } from '@google/genai';
@@ -155,6 +159,113 @@ describe('ToolRegistry', () => {
     vi.restoreAllMocks();
   });
 
+  const appTool = (
+    server: string,
+    name: string,
+    visibility?: readonly string[],
+    resourceUri = 'ui://app/view',
+  ) =>
+    new DiscoveredMCPTool(
+      createMockCallableTool([]),
+      server,
+      name,
+      'App tool',
+      { type: 'object', properties: {} },
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      false,
+      resourceUri,
+      undefined,
+      undefined,
+      visibility,
+    );
+
+  it('keeps App-only tools outside every model lookup and clears them on removal', () => {
+    const tool = appTool('tableau', 'get-token', ['app']);
+    toolRegistry.registerTool(tool);
+    expect(toolRegistry.getMcpAppTool('tableau', 'get-token')).toBe(tool);
+    expect(toolRegistry.getMcpAppTool('other', 'get-token')).toBeUndefined();
+    expect(toolRegistry.getMcpAppTool('tableau', tool.name)).toBeUndefined();
+    expect(toolRegistry.getTool(tool.name)).toBeUndefined();
+    expect(toolRegistry.getAllToolNames()).not.toContain(tool.name);
+    expect(toolRegistry.getAllTools()).not.toContain(tool);
+    expect(toolRegistry.getFunctionDeclarations()).not.toContainEqual(
+      tool.schema,
+    );
+    toolRegistry.removeMcpToolsByServer('tableau');
+    expect(toolRegistry.getMcpAppTool('tableau', 'get-token')).toBeUndefined();
+  });
+
+  it('honors App visibility and disabled rules while retaining model-only App resources', () => {
+    const model = appTool('tableau', 'show', ['model']);
+    const disabled = appTool('tableau', 'disabled', ['app']);
+    vi.spyOn(config, 'getDisabledTools').mockReturnValue(
+      new Set([disabled.name]),
+    );
+    for (const tool of [
+      model,
+      disabled,
+      appTool('tableau', 'empty', []),
+      appTool('tableau', 'unknown', ['unknown']),
+      appTool('tableau', 'default'),
+    ]) {
+      toolRegistry.registerTool(tool);
+    }
+    expect(toolRegistry.hasMcpAppResource('tableau', 'ui://app/view')).toBe(
+      true,
+    );
+    for (const name of ['show', 'disabled', 'empty', 'unknown']) {
+      expect(toolRegistry.getMcpAppTool('tableau', name)).toBeUndefined();
+    }
+    expect(toolRegistry.getMcpAppTool('tableau', 'default')).toBeDefined();
+    expect(toolRegistry.getTool(model.name)).toBe(model);
+  });
+
+  it('copies App-only tools and model-only source resources, then clears only the re-discovered server', async () => {
+    const source = new ToolRegistry(config);
+    source.registerTool(appTool('tableau', 'token', ['app']));
+    source.registerTool(
+      appTool('tableau', 'source', ['model'], 'ui://model/source'),
+    );
+    source.registerTool(appTool('other', 'token', ['app']));
+    toolRegistry.copyDiscoveredToolsFrom(source);
+    expect(toolRegistry.getMcpAppTool('tableau', 'token')).toBeDefined();
+    expect(toolRegistry.getTool('mcp__tableau__token')).toBeUndefined();
+    expect(toolRegistry.hasMcpAppResource('tableau', 'ui://model/source')).toBe(
+      true,
+    );
+    vi.spyOn(
+      McpClientManager.prototype,
+      'discoverMcpToolsForServer',
+    ).mockResolvedValue();
+    await toolRegistry.discoverToolsForServer('tableau');
+    expect(toolRegistry.getMcpAppTool('tableau', 'token')).toBeUndefined();
+    expect(toolRegistry.hasMcpAppResource('tableau', 'ui://model/source')).toBe(
+      false,
+    );
+    expect(toolRegistry.getMcpAppTool('other', 'token')).toBeDefined();
+  });
+
+  it('clears App-only tools on full discovery and shutdown', async () => {
+    vi.spyOn(
+      McpClientManager.prototype,
+      'discoverAllMcpTools',
+    ).mockResolvedValue();
+    vi.spyOn(McpClientManager.prototype, 'stop').mockResolvedValue();
+    toolRegistry.registerTool(appTool('tableau', 'token', ['app']));
+    await toolRegistry.discoverMcpTools();
+    expect(toolRegistry.getMcpAppTool('tableau', 'token')).toBeUndefined();
+    toolRegistry.registerTool(appTool('tableau', 'token', ['app']));
+    await toolRegistry.stop();
+    expect(toolRegistry.getMcpAppTool('tableau', 'token')).toBeUndefined();
+  });
+
   it('hides a loaded image tool while disabled and restores it when re-enabled', async () => {
     const enabled = vi
       .spyOn(config, 'isImageGenerationEnabled')
@@ -248,6 +359,14 @@ describe('ToolRegistry', () => {
       const tool = new MockTool({ name: 'mock-tool' });
       toolRegistry.registerTool(tool);
       expect(toolRegistry.getTool('mock-tool')).toBe(tool);
+    });
+
+    it('unregisters an eager tool', () => {
+      toolRegistry.registerTool(new MockTool({ name: 'eager' }));
+
+      toolRegistry.unregisterTool('eager');
+
+      expect(toolRegistry.getTool('eager')).toBeUndefined();
     });
 
     it('renames an MCP tool whose name shadows a registered lazy factory', async () => {
@@ -1023,6 +1142,43 @@ describe('ToolRegistry', () => {
 
       toolRegistry.removeMcpToolsByServer('slack');
       expect(toolRegistry.isDeferredToolRevealed(toolName)).toBe(false);
+    });
+
+    it('keeps the reviewed declaration after removal so a changed replacement is refused (#11321)', () => {
+      const declaration = {
+        type: 'object',
+        properties: { text: { type: 'string' } },
+      };
+      const tool = new DiscoveredMCPTool(
+        {} as CallableTool,
+        'slack',
+        'send_message',
+        'send a message',
+        declaration,
+      );
+      toolRegistry.registerTool(tool);
+      toolRegistry.recordReviewedDeclaration(tool);
+      const recorded = toolRegistry.getReviewedDeclaration(tool.name);
+      expect(recorded).toBe(deferredDeclarationFingerprint(tool));
+
+      toolRegistry.removeMcpToolsByServer('slack');
+
+      // Deliberately NOT pruned. A dropped entry reads as "never reviewed" and
+      // passes a replacement through, while a retained one can only match the
+      // same server, schema name and parameter schema — so it either still
+      // describes the live tool or forces a re-review. No removal route has to
+      // remember to touch this map, which is the point.
+      expect(toolRegistry.getReviewedDeclaration(tool.name)).toBe(recorded);
+
+      // A replacement republishing a changed contract does not match it.
+      const replacement = new DiscoveredMCPTool(
+        {} as CallableTool,
+        'slack',
+        'send_message',
+        'send a message',
+        { type: 'object', properties: { channel: { type: 'string' } } },
+      );
+      expect(deferredDeclarationFingerprint(replacement)).not.toBe(recorded);
     });
 
     it('includes deferred tools listed in visibleTools in function declarations', () => {

@@ -591,6 +591,35 @@ describe('POST /workspace/settings', () => {
     expect(persistSetting).not.toHaveBeenCalled();
   });
 
+  it('rejects a root-level workspace-restricted key at workspace scope', async () => {
+    // `advisorModel` is served to the Web Shell, whose model panel persists to
+    // the scope of the active settings tab, so it reaches this route; its
+    // Workspace value is stripped on merge, since the root list has no section
+    // to flatten into WORKSPACE_RESTRICTED_SETTING_KEYS.
+    const { app, persistSetting } = makeApp();
+
+    const workspace = await request(app).post('/workspace/settings').send({
+      scope: 'workspace',
+      key: 'advisorModel',
+      value: 'openai:configured-test-model',
+    });
+
+    expect(workspace.status).toBe(400);
+    expect(workspace.body).toMatchObject({
+      code: 'workspace_restricted_setting',
+    });
+    expect(persistSetting).not.toHaveBeenCalled();
+
+    const user = await request(app).post('/workspace/settings').send({
+      scope: 'user',
+      key: 'advisorModel',
+      value: 'openai:configured-test-model',
+    });
+
+    expect(user.status).toBe(200);
+    expect(persistSetting).toHaveBeenCalled();
+  });
+
   it('still accepts the same key at user scope', async () => {
     // User scope honors the setting — the guard must not reach beyond
     // workspace scope, or this PR's whole enablement path dies with it.

@@ -122,11 +122,20 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
           _meta,
           ...rest
         } = body as Record<string, unknown>;
+        const startupScope =
+          body.startupConfig !== undefined && _ !== undefined
+            ? { sessionScope: _ }
+            : {};
         if (sessionId === undefined) {
-          return { ...rest, ...(_meta !== undefined ? { _meta } : {}) };
+          return {
+            ...rest,
+            ...startupScope,
+            ...(_meta !== undefined ? { _meta } : {}),
+          };
         }
         return {
           ...rest,
+          ...startupScope,
           _meta: {
             ...(isRecord(_meta) ? _meta : {}),
             [REQUESTED_SESSION_ID_META_KEY]: sessionId,
