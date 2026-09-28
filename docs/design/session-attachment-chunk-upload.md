@@ -44,6 +44,9 @@ archives, voice uploads, image compression, resumable uploads across restarts,
 parallel chunks within one file, and general reverse-proxy deployment support
 are separate work. It introduces no CLI flags or host configuration options.
 A proxy with a body cap below 512 KiB remains outside this transport guarantee.
+The same 1 MiB proxy can still reject larger requests to `/file/upload` (up to
+50 MiB), extension archives, or voice uploads; this PR does not make those
+routes proxy-compatible.
 
 ## Decisions
 
@@ -262,7 +265,8 @@ captured `entries`; a regression test checks that shutdown closes their stores.
    discovery, queueing, and every request.
 2. For files at most 512 KiB, use the existing one-request endpoint. For larger
    files, inspect REST capabilities using the client's authenticated REST fetch.
-   Reuse/coalesce valid discovery within the existing short cache window. A
+   Coalesce valid REST discovery for 60 seconds, separately from transport
+   discovery, which may be served through ACP-WS. A
    successful legacy response without the feature chooses the legacy endpoint;
    authentication, network, malformed-response, and server failures propagate as
    upload errors, without triggering a legacy 404 fallback.

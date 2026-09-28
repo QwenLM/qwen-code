@@ -852,6 +852,7 @@ export class DaemonClient {
   private capabilitiesRequest?: Promise<DaemonCapabilities>;
   private attachmentCapabilities?: { chunked: boolean; expiresAt: number };
   private attachmentCapabilitiesRequest?: Promise<boolean>;
+  private attachmentCapabilitiesGeneration = 0;
   private activeAttachmentUploads = 0;
   private readonly attachmentUploadQueue: Array<() => void> = [];
   private capabilitiesGeneration = 0;
@@ -4444,7 +4445,8 @@ export class DaemonClient {
       return this.attachmentCapabilities.chunked;
     }
     if (!this.attachmentCapabilitiesRequest) {
-      this.attachmentCapabilitiesRequest = this.fetchWithTimeout(
+      const generation = this.attachmentCapabilitiesGeneration;
+      const request = this.fetchWithTimeout(
         `${this.baseUrl}/capabilities`,
         { headers: this.headers() },
         async (res) => {
@@ -4464,17 +4466,24 @@ export class DaemonClient {
           const chunked = body.features.includes(
             'session_attachment_chunk_upload',
           );
-          this.attachmentCapabilities = {
-            chunked,
-            expiresAt: Date.now() + CAPABILITY_PREFLIGHT_TTL_MS,
-          };
+          if (generation === this.attachmentCapabilitiesGeneration) {
+            this.attachmentCapabilities = {
+              chunked,
+              expiresAt: Date.now() + CAPABILITY_PREFLIGHT_TTL_MS,
+            };
+          }
           return chunked;
         },
         undefined,
         'rest',
-      ).finally(() => {
-        this.attachmentCapabilitiesRequest = undefined;
-      });
+      );
+      this.attachmentCapabilitiesRequest = request;
+      const clearRequest = () => {
+        if (this.attachmentCapabilitiesRequest === request) {
+          this.attachmentCapabilitiesRequest = undefined;
+        }
+      };
+      void request.then(clearRequest, clearRequest);
     }
     return waitForAttachmentRequest(this.attachmentCapabilitiesRequest, signal);
   }
@@ -6836,6 +6845,9 @@ export class DaemonClient {
     this.restoreBudgetGeneration = ++this.capabilitiesGeneration;
     this.capabilitiesRequest = undefined;
     this.capabilityFeatures = undefined;
+    this.attachmentCapabilitiesGeneration += 1;
+    this.attachmentCapabilitiesRequest = undefined;
+    this.attachmentCapabilities = undefined;
     // Dropping in-flight entries makes the next workspace-providers call
     // start a fresh request, which the disposed transport rejects with
     // DaemonTransportClosedError — matching how every other post-dispose

@@ -286,25 +286,25 @@ export const legacySessionTelemetryRoutes = [
   {
     method: 'POST',
     path: '/session/:id/attachment-uploads',
-    attribution: 'pre_resolved',
+    attribution: 'handler_resolved',
     route: 'POST /session/:id/attachment-uploads',
   },
   {
     method: 'POST',
     path: '/session/:id/attachment-uploads/:uploadId/chunks',
-    attribution: 'pre_resolved',
+    attribution: 'handler_resolved',
     route: 'POST /session/:id/attachment-uploads/:uploadId/chunks',
   },
   {
     method: 'POST',
     path: '/session/:id/attachment-uploads/:uploadId/complete',
-    attribution: 'pre_resolved',
+    attribution: 'handler_resolved',
     route: 'POST /session/:id/attachment-uploads/:uploadId/complete',
   },
   {
     method: 'DELETE',
     path: '/session/:id/attachment-uploads/:uploadId',
-    attribution: 'pre_resolved',
+    attribution: 'handler_resolved',
     route: 'DELETE /session/:id/attachment-uploads/:uploadId',
   },
   {

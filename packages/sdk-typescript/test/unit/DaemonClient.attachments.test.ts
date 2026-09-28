@@ -174,6 +174,51 @@ describe('session attachment chunk client', () => {
     ).toHaveLength(2);
   });
 
+  it('ignores an in-flight discovery result after disposal', async () => {
+    let resolveFirst!: (response: Response) => void;
+    const first = new Promise<Response>((resolve) => {
+      resolveFirst = resolve;
+    });
+    let discoveries = 0;
+    const { fetch, calls } = setup(({ url }) => {
+      if (!url.endsWith('/capabilities')) return undefined;
+      discoveries += 1;
+      return discoveries === 1 ? first : json({ features: [] });
+    });
+    const transportFetch = vi.fn(async () => {
+      throw new Error('Must use REST');
+    });
+    const transport: DaemonTransport = {
+      type: 'acp-http',
+      supportsReplay: true,
+      connected: true,
+      fetch: transportFetch,
+      restFetch: fetch as typeof globalThis.fetch,
+      async *subscribeEvents() {},
+      dispose() {},
+    };
+    const client = new DaemonClient({ baseUrl: 'http://daemon', transport });
+    const upload = () =>
+      client.uploadSessionAttachment(
+        's',
+        large,
+        'file.bin',
+        'application/octet-stream',
+      );
+
+    const pending = upload();
+    await vi.waitFor(() => expect(discoveries).toBe(1));
+    client.dispose();
+    await upload();
+    resolveFirst(json({ features: ['session_attachment_chunk_upload'] }));
+    await pending;
+    await upload();
+
+    expect(discoveries).toBe(2);
+    expect(calls.at(-1)!.url).toContain('/attachments?');
+    expect(transportFetch).not.toHaveBeenCalled();
+  });
+
   it.each([
     json({ features: null }),
     json({ error: 'not found' }, 404),
