@@ -13,7 +13,7 @@ const createThreadsHttpApi = vi.hoisted(() => vi.fn());
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useWorkspace: () => mockWorkspace,
 }));
-vi.mock('./ThreadsRoute', () => ({ createThreadsHttpApi }));
+vi.mock('./threads-api', () => ({ createThreadsHttpApi }));
 
 const { useProjectConversations } = await import('./useProjectConversations');
 

@@ -31,7 +31,7 @@ import { AgentCreatePage } from './AgentCreatePage';
  * `CONDITIONAL_SERVE_FEATURES` in packages/cli/src/serve/capabilities.ts.
  */
 const AGENT_COLLABORATION_FEATURE = 'agent_collaboration_v1';
-import { ThreadsRoute } from '../workspace-agents/ThreadsRoute';
+import { LazyThreadsRoute } from '../workspace-agents/LazyThreadsRoute';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -350,7 +350,7 @@ export function AgentsManagerPage({
     return (
       <div className="flex w-full flex-col gap-6 pb-8">
         {navigation}
-        <ThreadsRoute
+        <LazyThreadsRoute
           initialView={initialAgentView}
           onOpenThreadChat={onOpenThreadChat}
           {...(onOpenAgentSession ? { onOpenAgentSession } : {})}

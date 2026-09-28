@@ -43795,7 +43795,9 @@ it('does not restore a workspace-agent thread when collaboration is disabled', a
     features: ['agent_collaboration_v1'],
   };
   rerender();
-  await flush();
+  await act(async () => {
+    await vi.dynamicImportSettled();
+  });
 
   expect(
     container.querySelector('[data-testid="workspace-agent-thread-route"]'),

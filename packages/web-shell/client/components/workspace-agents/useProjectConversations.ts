@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useWorkspace } from '@qwen-code/web-shell/daemon-react-sdk';
 import type { DaemonSessionSummary } from '@qwen-code/sdk/daemon';
-import { createThreadsHttpApi } from './ThreadsRoute';
+import { createThreadsHttpApi } from './threads-api';
 
 export const COLLABORATION_SOURCE = 'workspace_collaboration';
 /** Live streams the sidebar may hold; the chat needs connections too. */

@@ -203,7 +203,7 @@ import {
   saveManagedSelection,
 } from './components/managed/managed-session-storage';
 import { AgentsManagerPage } from './components/agents/AgentsManagerPage';
-import { ThreadsRoute } from './components/workspace-agents/ThreadsRoute';
+import { LazyThreadsRoute } from './components/workspace-agents/LazyThreadsRoute';
 import {
   conversationContext,
   useAgentChatEntry,
@@ -21006,7 +21006,7 @@ export function App({
                 }
               >
                 {collaborationThreadId && (
-                  <ThreadsRoute key={`${collaborationThread?.cwd}:${collaborationThreadId}`} chat initialThreadId={collaborationThreadId}
+                  <LazyThreadsRoute key={`${collaborationThread?.cwd}:${collaborationThreadId}`} chat initialThreadId={collaborationThreadId}
                     workspaceCwd={collaborationThread?.cwd}
                     headerActionsContainer={collaborationHeaderActions}
                     onTitleChange={updateCollaborationTitle}
