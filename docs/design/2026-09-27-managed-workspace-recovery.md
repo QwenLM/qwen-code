@@ -323,6 +323,12 @@ old `FAILED` records are not stop proof. Online configuration migration while
 an unobserved old runtime is still READY remains unsupported: deployments must
 keep their mapping stable until verified cleanup.
 
+A local-process managed startup blocked before any lease or attested generation
+was persisted still blocks its own placement. It does not block other placements
+in that Workspace: no Session context or tool writer could have been admitted
+through the unready binding. A `RECOVERY_BLOCKED` binding with either persisted
+fact still guards the Workspace; other provisioner kinds remain fail-closed.
+
 Before upgrading an installation that has enabled the Broker, quiesce new
 admission and inventory seeded `FAILED` bindings. A past crash can leave such a
 row even when a later generation is `READY`; the new guard will reject new
@@ -402,6 +408,7 @@ W0d's narrow `workspace_binding` capability remains unchanged.
 | Old writer                           | With or without Broker restart, escaped/delayed writers remain capable of writes: replacement stays blocked; after verified domain death, no old marker appears after new holder starts |
 | Configuration / authorization drift  | Original binding stays fixed; revoked actors cannot execute; trusted cleanup does not require restoring their grant                                                                     |
 | Placement-key drift                  | Changing path/profile/isolation/provisioner cannot bypass an unreclaimed domain by provisioning under a new slot                                                                        |
+| Local managed startup                | A failure before lease and attestation keeps its placement blocked; another Session may start because no tool writer was admitted                                                       |
 | Legacy / schema / HTTP               | Boot v1 obeys the same reuse gate; migration preserves receipts; terminal read works after release and does not expose physical identities                                              |
 
 Run the existing Stage F process gates, new repository contracts on H2 and real

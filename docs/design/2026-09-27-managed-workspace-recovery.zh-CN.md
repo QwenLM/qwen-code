@@ -108,6 +108,8 @@ Binding 仓库负责准入和恢复事务。生产 JDBC 仓库必须使用同一
 
 新增小型租户 guard 表，将新 placement 创建与失联标记串行化。Managed Workspace 存在尚未回收的 lost／blocked generation 时，不能通过更换映射或 profile key 创建新 placement；稳定域为 `(tenantId, workspaceId)`，不包含物理和 profile 字段。Legacy Workspace ID 可能由路径派生，因此未清理的 legacy 失联会保守地阻止该租户创建新 placement，直到完成清理；已有 placement 仍可读取。此限制也识别历史 durable FAILED 行，旧 `FAILED` 记录不能作为停写证明。尚未观察到失联、仍为 READY 的旧 Runtime 不支持在线配置迁移；部署必须在验证清理前保持映射稳定。
 
+本地进程的 Managed 启动在持久化任何 lease 或已认证代数前进入 `RECOVERY_BLOCKED` 时，仍封闭自身 placement，但不阻止同 Workspace 的其他 placement：未就绪的 Binding 不可能准入 Session context 或工具写入者。已经持久化其中任一事实的 `RECOVERY_BLOCKED` Binding 仍阻止整个 Workspace 的新 placement；其他 provisioner 类型保持保守阻断。
+
 升级已启用 Broker 的部署前，先暂停新准入并盘点带 seed 的历史 `FAILED` Binding。即使后来代数已是 `READY`，早前崩溃仍可能留下这类记录；新 guard 会拒绝该租户创建 placement。若存在此类记录，受影响流量必须保持停止，直到原写入域已被物理停止，且有保留证据的运维迁移可用。后续 `READY` Binding、删行或伪造停写回执都不能作为清理证明。本切片本身无法让含有这些记录的部署安全恢复准入。
 
 Local provisioner 仅能为自身仍持有并已观察到退出的进程证明 journal 丢失，严格匹配 seed、lease 和 handle。它不证明子孙进程已停止，也不提供 Broker 重启后的 worker 接管。对仍存活的自有进程，短暂的 attestation 传输错误只使本次请求失败；Binding 保持 `READY`，下次调用重新认证。进程死亡或身份冲突仍会封闭 Binding，单次网络超时不会变成永久的物理失联证据。只有本地进程 provisioner 通过自有进程存活检查显式启用此重试，其他 provisioner 默认保持封闭。重启后缺少 ownership 仍不能提供证据。本切片没有生产 `WRITERS_STOPPED` 产生器，通过确定性 supervisor fixture 验证证据消费。Workspace storage holder 清理仍属于 W0e-3；仅有失联证据的恢复不会调用 transport release，也不会清除 holder。缓存 Session 的释放先检查持久状态，再检查存活性，确保已回收释放可幂等确认，而 LOST 代数不能走普通 transport 释放路径。Session 的最终释放在同一个代数锁下校验父 Binding 并更新 Session。正常 holder 释放在 SQL 事务内锁定并检查原 Binding 仍存活；迟到的停用响应不能在失联屏障后清除 holder。这仅保护普通清理，不启用 W0e-3 回收。
@@ -146,6 +148,7 @@ Flyway V16 和独立 initializer 增加可空证据／放弃字段及 placement 
 | 旧写入者                  | 无论 Broker 是否重启，逃逸/迟到 writer 仍可写入时替代者继续阻断；证明执行域死亡后，新 holder 开始后没有旧 marker |
 | 配置 / 授权漂移           | 原绑定保持固定；撤权 actor 不能执行；可信清理不要求恢复该 actor 授权                                             |
 | placement key 漂移        | 改变路径/profile/isolation/provisioner 不能通过新 slot 的 provisioning 绕过未回收执行域                          |
+| 本地启动未认证            | 原 placement 保持封闭；该 Binding 未准入工具写入者，因此同 Workspace 的另一个 Session 可以启动                   |
 | legacy / schema / HTTP    | boot v1 使用相同复用门禁；迁移保留回执；释放后能读取终态且不泄露物理身份                                         |
 
 运行现有 Stage F 进程门禁、新仓库契约在 H2 和真实 MySQL/MariaDB 上的验证、Spring 到 worker 的 holder 恢复，以及受支持宿主重启或隔离域测试。反例使用真正逃逸的后代进程；仅 mock observation 不能证明物理安全。实现阶段运行仓库 build、typecheck、bundle、定向 TypeScript 测试、Java verification/Checkstyle，以及连续两轮干净的完整 diff 自审。详细本地测试计划保存在 `.qwen/e2e-tests/managed-workspace-w0e.md`。

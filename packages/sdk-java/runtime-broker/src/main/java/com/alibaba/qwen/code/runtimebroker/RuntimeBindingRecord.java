@@ -321,8 +321,17 @@ public final class RuntimeBindingRecord {
     }
 
     boolean blocksPlacement(RuntimeProvisionRequest candidate) {
-        return (state == State.LOST || state == State.RECOVERY_BLOCKED
-                || state == State.FAILED && provisionSeed != null)
+        // A local managed worker without a lease or attested generation never
+        // admitted a Session; failed startup still blocks its own slot.
+        boolean unreclaimed = state == State.LOST
+                || state == State.RECOVERY_BLOCKED
+                        && (!request.isManagedContext()
+                                || !LocalProcessRuntimeProvisioner.KIND.equals(
+                                        request.getProvisionerKind())
+                                || lease != null
+                                || attestationGeneration > 0)
+                || state == State.FAILED && provisionSeed != null;
+        return unreclaimed
                 && request.getScope().getTenantId().equals(candidate.getScope().getTenantId())
                 && (!request.isManagedContext()
                         || request.getScope().getWorkspaceId().equals(
