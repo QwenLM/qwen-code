@@ -360,6 +360,114 @@ describe('managed harness factory', () => {
     await session.close();
   });
 
+  it('binds a new Runtime turn to the activation after reload', async () => {
+    const session = await open(await createWorkspace());
+    const previous = createManagedHarnessHandle(session);
+    await previous.ensureRunnable();
+    await settleTurnComplete(session);
+    await previous.detach();
+
+    const activation = await session.replaceActivation();
+    const next = createManagedHarnessHandle(session);
+    await next.commitAwaitRuntimeBatch([await runtimeCommit(session)], {
+      turnId: 'turn-2',
+      promptId: 'turn-2',
+    });
+
+    const checkpoint = parseHarnessCheckpointV1(
+      (await session.authority.readCheckpointState())!,
+    );
+    expect(checkpoint.identity).toMatchObject({
+      activationId: activation.activationId,
+      turnId: 'turn-2',
+      promptId: 'turn-2',
+    });
+    await session.close();
+  });
+
+  it('binds a new Runtime turn to the activation after reopening the Session', async () => {
+    const workspace = await createWorkspace();
+    let session = await open(workspace);
+    const previous = createManagedHarnessHandle(session);
+    await previous.ensureRunnable();
+    await settleTurnComplete(session);
+    const previousActivation = session.activation.activationId;
+    await previous.detach();
+    await session.close();
+    session = await open(workspace);
+    try {
+      expect(session.activation.activationId).not.toBe(previousActivation);
+      const next = createManagedHarnessHandle(session);
+      await next.commitAwaitRuntimeBatch([await runtimeCommit(session)], {
+        turnId: 'reopened-turn',
+        promptId: 'reopened-prompt',
+      });
+      const checkpoint = parseHarnessCheckpointV1(
+        (await session.authority.readCheckpointState())!,
+      );
+      expect(checkpoint.identity).toMatchObject({
+        activationId: session.activation.activationId,
+        turnId: 'reopened-turn',
+        promptId: 'reopened-prompt',
+      });
+    } finally {
+      await session.close();
+    }
+  });
+
+  it('refuses new Runtime work in an unfinished turn from another activation', async () => {
+    const session = await open(await createWorkspace());
+    const previous = createManagedHarnessHandle(session);
+    await previous.ensureRunnable();
+    const first = await runtimeCommit(session);
+    await previous.commitAwaitRuntimeBatch([first], {
+      turnId: 'turn-1',
+      promptId: 'turn-1',
+    });
+    const originalActivationId = session.activation.activationId;
+    const originalCheckpointId =
+      session.authority.latestCheckpoint?.checkpointId;
+    await previous.detach();
+    await session.replaceActivation();
+    const originalSequence = session.authority.committedSequence;
+
+    const second = {
+      ...first,
+      functionCallId: 'fc-2',
+      executionCallId: 'ex-2',
+      invocationBindingId: 'bind-2',
+    };
+    const next = createManagedHarnessHandle(session);
+    await expect(
+      next.commitAwaitRuntimeBatch([first], {
+        turnId: 'turn-1',
+        promptId: 'turn-1',
+      }),
+    ).resolves.toMatchObject({
+      kind: 'durable_wait',
+      checkpointId: originalCheckpointId,
+    });
+    await expect(
+      next.commitAwaitRuntimeBatch([first, second], {
+        turnId: 'turn-1',
+        promptId: 'turn-1',
+      }),
+    ).rejects.toThrow(/prior activation/);
+    expect(
+      managedRuntimeDispatchGate(sessionKey).state('ex-2'),
+    ).toBeUndefined();
+    const checkpoint = parseHarnessCheckpointV1(
+      (await session.authority.readCheckpointState())!,
+    );
+    expect(checkpoint.identity.activationId).toBe(originalActivationId);
+    expect(checkpoint.identity.checkpointId).toBe(originalCheckpointId);
+    expect(checkpoint.tools?.items.map((item) => item.executionCallId)).toEqual(
+      ['ex-1'],
+    );
+    expect(session.authority.committedSequence).toBe(originalSequence);
+    await session.close();
+  });
+
   it('requires a new boundary after starting the next Agent', async () => {
     const session = await open(await createWorkspace());
     const previous = createManagedHarnessHandle(session);
@@ -674,10 +782,23 @@ describe('managed harness factory', () => {
       ordinal: 1,
       inputDigest: '8'.repeat(64),
     };
-    await handle.commitAwaitRuntimeBatch([first, second]);
+    await handle.commitAwaitRuntimeBatch([first, second], {
+      turnId: 'current-turn',
+      promptId: 'current-prompt',
+    });
+    await expect(
+      handle.commitAwaitRuntimeBatch([first, second], {
+        turnId: 'other-turn',
+        promptId: 'other-prompt',
+      }),
+    ).rejects.toThrow(/unfinished turn/);
     const wait = parseHarnessCheckpointV1(
       (await session.authority.readCheckpointState())!,
     );
+    expect(wait.identity).toMatchObject({
+      turnId: 'current-turn',
+      promptId: 'current-prompt',
+    });
     expect(wait.tools?.items.map((item) => item.executionCallId)).toEqual([
       'ex-1',
       'ex-2',

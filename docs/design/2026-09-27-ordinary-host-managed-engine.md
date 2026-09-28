@@ -318,19 +318,28 @@ approval mode. The runtime carries:
   and system settings files and the extension store; without `QWEN_HOME`, the
   user directory is under the process's home directory. It is also the only
   source for placeholders, and it already carries the user-level `.env` values
-  the runtime applied. On Windows, the locating names and the placeholders are
-  read as a spawned session host sees them: case-insensitively, and of several
-  spellings the first in sorted order. A location that depends on the working
-  directory is `unknown`, because a session host resolves it against its own:
-  a relative path, on Windows also a path without a drive root or a UNC server
-  and share, and a value that is not a string. So is an empty or relative home
-  directory, which settings loading resolves both for the user directory and
-  to tell whether the workspace is the home directory. `QWEN_HOME` may be `~`
-  or start with `~/` or `~\`, which expands against the home directory. In the
-  daemon, the locating variables and `HOME` are excluded from workspace
-  overlays, and on Windows an overlay does not replace the `USERPROFILE` that
-  gives the home directory once it is set, so they equal the daemon's own; in a
-  session host, they are its own environment.
+  the runtime applied. The evaluation reads it once, and M6 must spawn the
+  hosts with the same variables. The locating variables and the placeholders
+  are read as a spawned session host receives them: as strings; on Windows,
+  case-insensitively, and of several spellings the first in sorted order. A
+  variable named like an array index, such as `0`, is left out, since a Node
+  process gets no value for such a name from `process.env`. An environment
+  that a host would not receive as it is cannot be read: a missing one, for
+  which spawn passes on its own; a variable that cannot be read, a Symbol value
+  or a NUL byte, which spawn refuses or which cuts the value short; and a name
+  that reaches the host as another name because it contains `=`. A location
+  that depends on the working directory is `unknown`, because a session host
+  resolves it against its own: a relative path, and on Windows also a path
+  without a drive root or a UNC server and share. So is an empty or relative
+  home directory, which settings loading resolves both for the user directory
+  and to tell whether the workspace is the home directory. A home directory
+  that cannot be looked up cannot be read, and neither can any other that
+  cannot be resolved, for example because it does not exist. `QWEN_HOME` may
+  be `~` or start with `~/` or `~\`, which expands against the home
+  directory. In the daemon, the locating variables and `HOME` are excluded
+  from workspace overlays, and on Windows an overlay does not replace the
+  `USERPROFILE` that gives the home directory once it is set, so they equal
+  the daemon's own; in a session host, they are its own environment.
 - **Project MCP file.** In strict mode, a read failure of `.mcp.json` is kept as
   an error instead of counting as an absent file. In both modes, a file that
   does not parse, has no `mcpServers` object or holds an entry that is not an
@@ -371,6 +380,7 @@ The first condition that applies decides the result:
 | `--restore-ask-user-question` is forwarded                              | deferred   |
 | Another argument is forwarded                                           | unknown    |
 | The running workspace holds MCP servers outside its files               | deferred   |
+| The home directory or the environment cannot be read                    | unknown    |
 | A settings location in the environment depends on the working directory | unknown    |
 | A settings layer cannot be read                                         | unknown    |
 | MCP servers in any settings layer, or `mcp.serverCommand`               | deferred   |
