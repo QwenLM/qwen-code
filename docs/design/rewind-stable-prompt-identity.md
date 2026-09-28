@@ -25,6 +25,10 @@ its model-facing prompt.
   absorbed does not refuse the turn that still resolves uniquely.
 - Return `-1` when the id is missing or duplicated on either side rather than
   guessing with positional alignment.
+- Name the cause of that refusal. An identified turn in the retained region
+  that does not resolve — for example after a retry, which re-sends the prompt
+  unmarked — reports that it no longer matches the model history, not that it
+  was compressed.
 - Retain the existing positional mapping only for legacy turns without an id.
 
 The existing compression guard continues to reject turns that were absorbed
@@ -73,6 +77,10 @@ It also leaves out, deliberately:
 - Seeding the OpenTUI backend's own prompt counter. OpenTUI is an opt-in
   renderer with no rewind surface of its own, and its counter is not the one
   the TUI rewind path reads.
-- Widening the seed past retained file-history snapshot keys. Doing so for one
-  entrance and not the others is what made the floor partial; the loud refusal
-  above covers the hazard uniformly instead.
+- Widening the seed past retained file-history snapshot keys. The refusal
+  above fires only when two snapshots share a key. If a turn minted after
+  resume re-wears the key of a snapshot that a conversation-only rewind left
+  behind, and writes no files itself, a code restore of that turn resolves to
+  the older snapshot. The seed that preceded this change counted user records
+  only, so live turns already had this exposure; it is accepted as a residual
+  risk and tracked in #11408.
