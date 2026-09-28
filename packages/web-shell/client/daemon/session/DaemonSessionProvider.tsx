@@ -1797,6 +1797,16 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       let stopPersistenceUnconfirmed = false;
 
       while (!disposed && !abort.signal.aborted) {
+        if (pendingStrictDetachRef.current) {
+          await pendingStrictDetachRef.current.catch(() => undefined);
+        }
+        if (
+          disposed ||
+          abort.signal.aborted ||
+          (session && sessionRef.current !== session)
+        ) {
+          return;
+        }
         const skipMetadataRefreshThisIteration = skipMetadataRefresh;
         skipMetadataRefresh = false;
         let loadingRequestedSession = false;
@@ -3507,6 +3517,16 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               ),
             }));
           };
+          if (pendingStrictDetachRef.current) {
+            await pendingStrictDetachRef.current.catch(() => undefined);
+          }
+          if (
+            disposed ||
+            abort.signal.aborted ||
+            sessionRef.current !== activeSession
+          ) {
+            return;
+          }
           const eventStreamController = new AbortController();
           eventStream = {
             sessionId: activeSession.sessionId,

@@ -14442,6 +14442,126 @@ describe('DaemonSessionProvider', () => {
     },
   );
 
+  it.each([
+    ['success', false],
+    ['failure', false],
+    ['success', true],
+  ] as const)(
+    'does not resubscribe during strict detach in reconnect backoff (%s, early: %s)',
+    async (outcome, detachBeforeBackoff) => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () => new Response(null, { status: 204 })),
+      );
+      sdkMocks.capabilities.mockResolvedValue({
+        workspaceCwd: '/primary',
+        features: ['standalone_sessions_v1'],
+      });
+      const interruptStream = createDeferred<void>();
+      const detach = createDeferred<void>();
+      const events = vi.fn(async function* reconnectEvents(
+        opts: { signal?: AbortSignal } = {},
+      ) {
+        if (events.mock.calls.length === 1) {
+          await interruptStream.promise;
+          throw new TypeError('fetch failed');
+        }
+        yield* createIdleEvents()(opts);
+      });
+      const session = createMockSession({
+        sessionId: 'standalone-backoff-detach',
+        clientId: 'client-backoff-detach',
+        session: {
+          sessionId: 'standalone-backoff-detach',
+          workspaceCwd: '/private/standalone-backoff-detach',
+          sourceType: 'standalone',
+          context: { kind: 'standalone' },
+          workingDirectory: { state: 'ready' },
+        },
+        events,
+        detach: vi.fn().mockReturnValueOnce(detach.promise).mockResolvedValue(),
+      });
+      sdkMocks.sessions.push(session);
+      let actions: DaemonSessionActions | undefined;
+      let connection: DaemonConnectionState | undefined;
+      function Harness() {
+        actions = useDaemonActions();
+        connection = useDaemonConnection();
+        return null;
+      }
+      await renderWithProvider(<Harness />, {
+        autoConnect: true,
+        sessionId: session.sessionId,
+        sessionContext: { kind: 'standalone' },
+        reconnectDelayMs: 1000,
+        maxReconnectDelayMs: 1000,
+      });
+      expect(events).toHaveBeenCalledOnce();
+      vi.useFakeTimers();
+      try {
+        await act(async () => {
+          interruptStream.resolve();
+          await flushPromises();
+        });
+        expect(connection?.status).toBe('disconnected');
+
+        let clear!: Promise<{ error?: unknown }>;
+        act(() => {
+          clear = requireActions(actions)
+            .clearSession({ requireDetachSessionId: session.sessionId })
+            .then(
+              () => ({}),
+              (error: unknown) => ({ error }),
+            );
+        });
+        await act(async () => {
+          await flushPromises();
+        });
+        expect(session.detach).toHaveBeenCalledOnce();
+
+        let result: { error?: unknown } = {};
+        if (detachBeforeBackoff) {
+          await act(async () => {
+            detach.resolve();
+            result = await clear;
+            await vi.advanceTimersByTimeAsync(1000);
+            await flushPromises();
+          });
+          expect(result.error).toBeUndefined();
+          expect(connection?.sessionId).toBeUndefined();
+          expect(events).toHaveBeenCalledOnce();
+          return;
+        }
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(1000);
+          await flushPromises();
+        });
+        expect(events).toHaveBeenCalledOnce();
+        expect(connection?.status).toBe('disconnected');
+
+        await act(async () => {
+          if (outcome === 'failure') detach.reject(new Error('detach failed'));
+          else detach.resolve();
+          result = await clear;
+          await flushPromises();
+        });
+        if (outcome === 'failure') {
+          expect(result.error).toEqual(new Error('detach failed'));
+          expect(connection?.sessionId).toBe(session.sessionId);
+          expect(events).toHaveBeenCalledTimes(2);
+        } else {
+          expect(result.error).toBeUndefined();
+          expect(connection?.sessionId).toBeUndefined();
+          expect(events).toHaveBeenCalledOnce();
+        }
+      } finally {
+        interruptStream.resolve();
+        detach.resolve();
+        vi.useRealTimers();
+      }
+    },
+  );
+
   it.each(['end', 'error'] as const)(
     'receives responses after failed strict detach when the stream exits with %s',
     async (streamExit) => {
