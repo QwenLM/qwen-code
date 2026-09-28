@@ -82,6 +82,9 @@ export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
   ToolNames.THREAD_REVIEW,
   ToolNames.THREAD_CREATE,
   ToolNames.THREAD_READ,
+  // Recall state and shared memory writes belong to the parent session.
+  ToolNames.SEARCH_MEMORY,
+  ToolNames.MANAGE_MEMORY,
 ]);
 
 /**
@@ -119,6 +122,9 @@ export const EXCLUDED_TOOLS_FOR_TEAMMATES: ReadonlySet<string> = new Set([
   ToolNames.THREAD_REVIEW,
   ToolNames.THREAD_CREATE,
   ToolNames.THREAD_READ,
+  // Teammates also share the leader's memory state.
+  ToolNames.SEARCH_MEMORY,
+  ToolNames.MANAGE_MEMORY,
 ]);
 
 /**
