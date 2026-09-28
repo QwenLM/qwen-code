@@ -1652,7 +1652,7 @@ export const useLlmStream = (
               undefined,
               undefined,
               undefined,
-              prompt_id,
+              submitType === SendMessageType.UserQuery ? prompt_id : undefined,
             )
           : false;
 

@@ -56,12 +56,12 @@ file-history snapshot 的 key 可能比声明它的轮次活得更久。
 序号对账（ordinal reconciliation）或其他对齐启发式；
 那些做法会重新造出本设计意图消除的"双权威"问题。
 
-以下内容也是刻意排除在外的：
+OpenTUI 会在铸造新 id 之前，把自己的 prompt 计数器播种到 resume transcript
+已声明的身份之后。虽然 OpenTUI 自身没有回退界面，但这些 id 会被持久化，
+之后可能由 Ink rewind 消费。
 
-- 为 OpenTUI 后端自己的 prompt 计数器播种。OpenTUI 是一个 opt-in 的渲染器，
-  自身没有回退界面，而它的计数器也不是 TUI 回退路径所读取的那一个。
-- 把播种范围扩大到已保留的 file-history snapshot key 之上。
-  上面那处拒绝只在两个 snapshot 共享同一个 key 时触发。如果 resume 之后铸造的新轮次
-  重新穿戴了某个"仅回退对话"遗留下来的 snapshot 的 key，且自身没有写文件，
-  那么对该轮次做代码恢复会解析到那个更早的 snapshot。本次改动之前的播种只统计用户记录，
-  实时轮次本来就有这一暴露面；它作为残余风险被接受，并在 #11408 中跟踪。
+本次改动仍刻意不把播种范围扩大到已保留的 file-history snapshot key 之上。
+上面那处拒绝只在两个 snapshot 共享同一个 key 时触发。如果 resume 之后铸造的新轮次
+重新穿戴了某个"仅回退对话"遗留下来的 snapshot 的 key，且自身没有写文件，
+那么对该轮次做代码恢复会解析到那个更早的 snapshot。本次改动之前的播种只统计用户记录，
+实时轮次本来就有这一暴露面；它作为残余风险被接受，并在 #11408 中跟踪。

@@ -72,15 +72,15 @@ notification provenance, ordinal reconciliation, or other alignment
 heuristics; those would recreate the dual-authority problem this design is
 intended to remove.
 
-It also leaves out, deliberately:
+OpenTUI seeds its prompt counter past identities claimed by a resumed
+transcript before minting a new id. Although OpenTUI has no rewind surface of
+its own, those ids are persisted and may later be consumed by Ink rewind.
 
-- Seeding the OpenTUI backend's own prompt counter. OpenTUI is an opt-in
-  renderer with no rewind surface of its own, and its counter is not the one
-  the TUI rewind path reads.
-- Widening the seed past retained file-history snapshot keys. The refusal
-  above fires only when two snapshots share a key. If a turn minted after
-  resume re-wears the key of a snapshot that a conversation-only rewind left
-  behind, and writes no files itself, a code restore of that turn resolves to
-  the older snapshot. The seed that preceded this change counted user records
-  only, so live turns already had this exposure; it is accepted as a residual
-  risk and tracked in #11408.
+The change deliberately leaves out widening the seed past retained file-history
+snapshot keys. The refusal
+above fires only when two snapshots share a key. If a turn minted after
+resume re-wears the key of a snapshot that a conversation-only rewind left
+behind, and writes no files itself, a code restore of that turn resolves to
+the older snapshot. The seed that preceded this change counted user records
+only, so live turns already had this exposure; it is accepted as a residual
+risk and tracked in #11408.

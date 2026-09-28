@@ -14625,7 +14625,7 @@ describe('useLlmStream', () => {
               undefined,
               undefined,
               undefined,
-              'test-session-id########5',
+              undefined,
             ),
           );
           expect(mockSendMessageStream).not.toHaveBeenCalled();
@@ -14712,7 +14712,7 @@ describe('useLlmStream', () => {
               undefined,
               undefined,
               undefined,
-              'test-session-id########5',
+              undefined,
             ),
           );
 
