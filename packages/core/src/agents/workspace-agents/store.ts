@@ -1402,20 +1402,41 @@ export async function heartbeatAgentHost(
   });
 }
 
+/**
+ * Checks a Host's credential without the workspace lock.
+ *
+ * The registry is replaced atomically, so a read outside the lock sees either
+ * the old or the new file, never a torn one; and a request with a wrong secret
+ * must not be able to queue on the lock the dispatcher and the UI share.
+ */
 export async function authenticateAgentHost(
   projectRoot: string,
   hostId: string,
   secret: string,
 ): Promise<AgentHostView | undefined> {
-  return withWorkspaceLock(projectRoot, async () => {
-    await ensureMigratedUnlocked(projectRoot);
-    const host = (await readAgentHostsUnlocked(projectRoot)).hosts.find(
-      (candidate) => candidate.id === hostId,
-    );
-    return host && matchesAgentHostSecret(secret, host.secretHash)
-      ? publicAgentHost(host)
-      : undefined;
+  const host = (await readAgentHostsUnlocked(projectRoot)).hosts.find(
+    (candidate) => candidate.id === hostId,
+  );
+  return host && matchesAgentHostSecret(secret, host.secretHash)
+    ? publicAgentHost(host)
+    : undefined;
+}
+
+/**
+ * Drops a Host from the registry, which revokes its secret. For callers inside
+ * the workspace lock; `removeAgentHost` also unbinds agents and settles runs.
+ */
+export async function removeAgentHostUnlocked(
+  projectRoot: string,
+  hostId: string,
+): Promise<boolean> {
+  const registry = await readAgentHostsUnlocked(projectRoot);
+  if (!registry.hosts.some((host) => host.id === hostId)) return false;
+  await writeAgentHostsUnlocked(projectRoot, {
+    ...registry,
+    hosts: registry.hosts.filter((host) => host.id !== hostId),
   });
+  return true;
 }
 
 /**

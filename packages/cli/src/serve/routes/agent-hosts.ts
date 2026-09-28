@@ -6,7 +6,12 @@
 
 import express from 'express';
 import { setTimeout as delay } from 'node:timers/promises';
-import type { Application, Request, Response } from 'express';
+import type {
+  Application,
+  Request,
+  RequestHandler,
+  Response,
+} from 'express';
 import type { HostRunResult } from '@qwen-code/qwen-code-core';
 import {
   parseHostRunSteps,
@@ -51,6 +56,10 @@ function readWaitMs(value: unknown): number | undefined {
     : undefined;
 }
 
+/** A result's summary may be as long as the progress text it replaces. */
+const MAX_RESULT_SUMMARY = 262_144;
+const MAX_RESULT_ERROR = 4_096;
+
 function readHostResult(
   input: Record<string, unknown>,
   hostId: string,
@@ -74,6 +83,8 @@ function readHostResult(
   ) {
     return undefined;
   }
+  const errorText =
+    typeof error === 'string' ? error.slice(0, MAX_RESULT_ERROR) : undefined;
   let close: HostRunResult['close'];
   if (rawClose !== undefined) {
     if (typeof rawClose !== 'object' || rawClose === null) return undefined;
@@ -81,7 +92,8 @@ function readHostResult(
     if (
       value['kind'] === 'review' &&
       typeof value['summary'] === 'string' &&
-      value['summary'].trim()
+      value['summary'].trim() &&
+      value['summary'].length <= MAX_RESULT_SUMMARY
     ) {
       close = { kind: 'review', summary: value['summary'].trim() };
     } else {
@@ -97,7 +109,7 @@ function readHostResult(
     attempt,
     status,
     ...(close ? { close } : {}),
-    ...(error ? { error } : {}),
+    ...(errorText ? { error: errorText } : {}),
   };
 }
 
@@ -107,6 +119,32 @@ export function registerAgentHostTransportRoutes(
   rateLimiter?: Pick<RateLimiterInstance, 'checkRate'>,
 ): void {
   const json = express.json({ limit: '16kb' });
+  // Runs before the large-body routes parse anything, so a request with a
+  // wrong secret never gets 2 MB read on its behalf.
+  const authenticated: RequestHandler = async (req, res, next) => {
+    const runtime = runtimeFor(
+      workspaceRegistry,
+      String(req.params['workspaceId']),
+    );
+    if (!runtime) {
+      res.status(404).json({ error: 'Workspace not found.' });
+      return;
+    }
+    if (!requireTrustedWorkspaceRuntime(runtime, res)) return;
+    const secret = hostSecret(req);
+    if (
+      !secret ||
+      !(await authenticateAgentHost(
+        runtime.workspaceCwd,
+        String(req.params['hostId']),
+        secret,
+      ))
+    ) {
+      res.status(401).json({ error: 'Invalid Agent Host credential.' });
+      return;
+    }
+    next();
+  };
 
   app.use('/agent-hosts', (req, res, next) => {
     const enrollment = req.originalUrl.startsWith('/agent-hosts/enroll');
@@ -133,6 +171,7 @@ export function registerAgentHostTransportRoutes(
 
   app.post(
     '/agent-hosts/:workspaceId/:hostId/progress',
+    authenticated,
     express.json({ limit: '2mb' }),
     async (req, res) => {
       const { workspaceId, hostId } = req.params;
@@ -242,10 +281,9 @@ export function registerAgentHostTransportRoutes(
         providers,
       });
       res.status(201).json(enrolled);
-    } catch (error) {
-      res.status(401).json({
-        error: error instanceof Error ? error.message : String(error),
-      });
+    } catch {
+      // Unauthenticated: the store's message can name file paths.
+      res.status(401).json({ error: 'Agent Host enrollment refused.' });
     }
   });
 
@@ -362,6 +400,8 @@ export function registerAgentHostTransportRoutes(
       try {
         const deadline = Date.now() + waitMs;
         for (;;) {
+          // A Host that hung up must not have a run claimed for it here.
+          if (req.socket.destroyed || res.writableEnded) return;
           if (runtimeFor(workspaceRegistry, workspaceId) !== runtime) {
             res.status(404).json({ error: 'Workspace not found.' });
             return;
@@ -395,6 +435,7 @@ export function registerAgentHostTransportRoutes(
 
   app.post(
     '/agent-hosts/:workspaceId/:hostId/result',
+    authenticated,
     // Carries the whole answer, which easily passes 16 KB.
     express.json({ limit: '2mb' }),
     async (req: Request, res: Response) => {

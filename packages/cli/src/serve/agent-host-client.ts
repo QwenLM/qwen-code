@@ -17,6 +17,7 @@ import type {
 import { ApprovalMode } from '@qwen-code/qwen-code-core/config/approval-mode.js';
 import { SessionService } from '@qwen-code/qwen-code-core/services/sessionService.js';
 import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
+import { DEFAULT_RUN_LEASE_MS } from '@qwen-code/qwen-code-core/agents/workspace-agents/host-lease.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import type { AcpSessionBridge } from './acp-session-bridge.js';
 import type { WorkspaceGenerationGuard } from './workspace-registry.js';
@@ -52,15 +53,21 @@ let detectedProviders: AgentHostProvider[] | undefined;
  * shows up as one runtime offering several programs.
  */
 function hostProviders(preferred: AgentHostProvider): string[] {
-  detectedProviders ??= [
-    'qwen',
-    ...(preferred === 'codex' || isCommandAvailable('codex').available
-      ? (['codex'] as const)
-      : []),
-    ...(isCommandAvailable(CLAUDE_ACP_COMMAND).available
-      ? (['claude'] as const)
-      : []),
-  ];
+  // Neither external program can be started from a Windows host yet (the
+  // Claude path refuses win32, and `codex` is spawned without a shell, which
+  // misses npm's .cmd shim), so offering them would only bind runs that fail.
+  if (!detectedProviders) {
+    const external = process.platform !== 'win32';
+    const codex =
+      external &&
+      (preferred === 'codex' || isCommandAvailable('codex').available);
+    const claude = external && isCommandAvailable(CLAUDE_ACP_COMMAND).available;
+    detectedProviders = [
+      'qwen',
+      ...(codex ? (['codex'] as const) : []),
+      ...(claude ? (['claude'] as const) : []),
+    ];
+  }
   return detectedProviders.map((provider) => AGENT_PROGRAM_LABELS[provider]);
 }
 
@@ -240,8 +247,13 @@ async function executeAssignment(
   const promptId = `agent-host:${assignment.runId}:${assignment.attempt}`;
   const execution = new AbortController();
   let finished = false;
-  // Measured on this host's clock: the coordinator's may disagree.
-  const leaseMs = assignment.lease.expiresAt - assignment.lease.acquiredAt;
+  // Measured on this host's clock: the coordinator's may disagree. A held
+  // lease re-picked keeps its first `acquiredAt`, so the span is capped at
+  // one lease term rather than read as a longer one.
+  const leaseMs = Math.min(
+    assignment.lease.expiresAt - assignment.lease.acquiredAt,
+    DEFAULT_RUN_LEASE_MS,
+  );
   let renewedAt = Date.now();
   const renewLease = async () => {
     try {

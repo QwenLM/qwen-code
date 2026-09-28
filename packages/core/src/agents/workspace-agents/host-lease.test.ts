@@ -11,19 +11,23 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Storage } from '../../config/storage.js';
 import { createAssignedThread, postMessage } from './thread-actions.js';
 import {
+  AGENT_HOST_REMOVED,
   AGENT_PROGRAM_UNAVAILABLE,
   DEFAULT_RUN_LEASE_MS,
   applyHostRunResult,
   parseHostRunSteps,
   pickupRunForHost,
+  removeAgentHost,
   renewRunLease,
   reportHostRunProgress,
 } from './host-lease.js';
 import {
+  authenticateAgentHost,
   createThread,
   enrollAgentHost,
   issueAgentHostEnrollment,
   readThread,
+  readWorkspaceAgents,
   updateWorkspaceAgents,
   writeThread,
 } from './store.js';
@@ -50,14 +54,18 @@ afterEach(async () => {
 });
 
 async function host(name: string, programs: AgentProgram[]) {
+  return (await enroll(name, programs)).id;
+}
+
+async function enroll(name: string, programs: AgentProgram[]) {
   const { token } = await issueAgentHostEnrollment(PROJECT_ROOT);
-  const { host: enrolled } = await enrollAgentHost(PROJECT_ROOT, {
+  const { host: enrolled, secret } = await enrollAgentHost(PROJECT_ROOT, {
     token,
     name,
     workspaceCwd: `/work/${name}`,
     providers: programs.map((program) => AGENT_PROGRAM_LABELS[program]),
   });
-  return enrolled.id;
+  return { id: enrolled.id, secret };
 }
 
 async function placeAgent(hostIds: string[], provider?: AgentProgram) {
@@ -274,5 +282,44 @@ describe('host progress steps', () => {
     ).resolves.toEqual({ ok: true });
     const run = (await readThread(PROJECT_ROOT, threadId))?.runs[0];
     expect(run?.progress?.steps).toEqual(steps);
+  });
+});
+
+describe('removeAgentHost', () => {
+  it('revokes the host, unbinds its agents and ends the run it held', async () => {
+    const lost = await enroll('lost', ['qwen']);
+    await placeAgent([lost.id]);
+    const threadId = await seedQueued();
+    await pickupRunForHost(PROJECT_ROOT, lost.id, T0);
+
+    await expect(removeAgentHost(PROJECT_ROOT, lost.id)).resolves.toEqual({
+      removed: true,
+      agentsMadeLocal: ['ag_remote'],
+      runsEnded: 1,
+    });
+
+    await expect(
+      authenticateAgentHost(PROJECT_ROOT, lost.id, lost.secret),
+    ).resolves.toBeUndefined();
+    const [agent] = await readWorkspaceAgents(PROJECT_ROOT);
+    expect(agent?.execution).toEqual({ mode: 'local' });
+    const run = (await readThread(PROJECT_ROOT, threadId))?.runs[0];
+    expect(run).toMatchObject({ status: 'failed', error: AGENT_HOST_REMOVED });
+    await expect(removeAgentHost(PROJECT_ROOT, lost.id)).resolves.toEqual({
+      removed: false,
+    });
+  });
+
+  it('keeps an agent on its remaining hosts', async () => {
+    const lost = await host('lost', ['qwen']);
+    const kept = await host('kept', ['qwen']);
+    await placeAgent([lost, kept]);
+
+    await expect(removeAgentHost(PROJECT_ROOT, lost)).resolves.toMatchObject({
+      removed: true,
+      agentsMadeLocal: [],
+    });
+    const [agent] = await readWorkspaceAgents(PROJECT_ROOT);
+    expect(agent?.execution).toEqual({ mode: 'managed-host', hostIds: [kept] });
   });
 });

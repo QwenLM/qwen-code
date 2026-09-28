@@ -88,6 +88,7 @@ import {
   hasLiveDescendant,
 } from '@qwen-code/qwen-code-core/agents/workspace-agents/run-lifecycle.js';
 import { parseMentions } from '@qwen-code/qwen-code-core/agents/workspace-agents/mentions.js';
+import { removeAgentHost } from '@qwen-code/qwen-code-core/agents/workspace-agents/host-lease.js';
 import {
   THREAD_TOOL_NAMES,
   AGENT_TOOL_CLASSIFICATION,
@@ -858,6 +859,33 @@ export function registerWorkspaceAgentRoutes(
         res.status(201).json({
           ...(await issueAgentHostEnrollment(runtime.workspaceCwd)),
           workspaceId: runtime.workspaceId,
+        });
+      } catch (error) {
+        fail(res, error);
+      }
+    },
+  );
+
+  // Removing a Host is also how its credential is revoked: a lost machine or
+  // a leaked host file stops authenticating on the next request.
+  app.delete(
+    `${prefix}/hosts/:hostId`,
+    deps.mutate({ strict: true }),
+    async (req: Request, res: Response) => {
+      const runtime = runtimeFor(req, res);
+      if (!runtime) return;
+      try {
+        const result = await removeAgentHost(
+          runtime.workspaceCwd,
+          String(req.params['hostId']),
+        );
+        if (!result.removed) {
+          res.status(404).json({ error: 'host_not_found' });
+          return;
+        }
+        res.json({
+          agentsMadeLocal: result.agentsMadeLocal,
+          runsEnded: result.runsEnded,
         });
       } catch (error) {
         fail(res, error);

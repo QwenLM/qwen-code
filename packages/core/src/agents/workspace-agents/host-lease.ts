@@ -31,6 +31,7 @@ import {
   isAgentExecutableByHost,
   maxConcurrentRunsFor,
   readAgentHostsUnlocked,
+  removeAgentHostUnlocked,
   withAgentStoreTransaction,
   type AgentStoreTransaction,
 } from './store.js';
@@ -100,6 +101,82 @@ function boundProgram(agent: WorkspaceAgent) {
 
 /** Deliberately short. A dead Host should not hold work for long. */
 export const DEFAULT_RUN_LEASE_MS = 60_000;
+
+/** Error recorded on a run whose Host was removed while it held the lease. */
+export const AGENT_HOST_REMOVED = 'agent_host_removed';
+
+/**
+ * Removes a Host: its secret stops authenticating, agents bound to it lose it,
+ * and runs it holds end now rather than waiting on a machine that is gone.
+ *
+ * An agent whose only Host this was falls back to running locally — the other
+ * choice, leaving it bound to nothing, would queue its work forever. Returned
+ * so the caller can say which agents moved.
+ */
+export async function removeAgentHost(
+  projectRoot: string,
+  hostId: string,
+): Promise<
+  | { removed: false }
+  | { removed: true; agentsMadeLocal: string[]; runsEnded: number }
+> {
+  return withAgentStoreTransaction(projectRoot, async (transaction) => {
+    if (!(await removeAgentHostUnlocked(projectRoot, hostId))) {
+      return { removed: false as const };
+    }
+    const agentsMadeLocal: string[] = [];
+    let agentsChanged = false;
+    const agents = (await transaction.readAgents()).map(
+      (agent): WorkspaceAgent => {
+        const execution = agent.execution;
+        if (
+          execution?.mode !== 'managed-host' ||
+          !execution.hostIds.includes(hostId)
+        ) {
+          return agent;
+        }
+        agentsChanged = true;
+        const hostIds = execution.hostIds.filter((id) => id !== hostId);
+        if (hostIds.length > 0) {
+          return { ...agent, execution: { ...execution, hostIds } };
+        }
+        agentsMadeLocal.push(agent.id);
+        return { ...agent, execution: { mode: 'local' } };
+      },
+    );
+    if (agentsChanged) await transaction.writeAgents(agents);
+    let runsEnded = 0;
+    const now = Date.now();
+    for (const thread of (await transaction.listThreads()).threads) {
+      for (const run of thread.runs) {
+        if (
+          run.lease?.hostId !== hostId ||
+          (run.status !== 'running' &&
+            run.status !== 'finishing' &&
+            run.status !== 'cancelling')
+        ) {
+          continue;
+        }
+        runsEnded += 1;
+        await finishRunInTransaction(transaction, {
+          threadId: thread.id,
+          runId: run.id,
+          outcome:
+            run.status === 'finishing'
+              ? { status: 'completed', attempt: run.attempts }
+              : {
+                  status: 'failed',
+                  attempt: run.attempts,
+                  error: AGENT_HOST_REMOVED,
+                  failureStage: 'host',
+                },
+          now,
+        });
+      }
+    }
+    return { removed: true as const, agentsMadeLocal, runsEnded };
+  });
+}
 
 export type LeaseRefusal =
   | 'no_such_run'
