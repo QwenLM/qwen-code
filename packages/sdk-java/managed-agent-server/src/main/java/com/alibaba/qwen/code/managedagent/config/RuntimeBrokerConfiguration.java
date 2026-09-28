@@ -91,10 +91,6 @@ public class RuntimeBrokerConfiguration {
             public CompletableFuture<Void> drain(String sessionId) {
                 return CompletableFuture.completedFuture(null);
             }
-
-            @Override
-            public void resume(String sessionId) {
-            }
         };
     }
 

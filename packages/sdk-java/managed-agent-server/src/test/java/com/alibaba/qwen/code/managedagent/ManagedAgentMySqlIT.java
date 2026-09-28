@@ -17,6 +17,8 @@ import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.RenewW
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.SealWriterRequest;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.WriterGrant;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.Admission;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.ReplayWindow;
 import com.alibaba.qwen.code.runtimebroker.JdbcRepositoryContract;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -28,6 +30,7 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.sql.Timestamp;
 import java.time.Clock;
+import java.time.Duration;
 import java.util.Base64;
 import java.util.HexFormat;
 import java.util.List;
@@ -69,9 +72,16 @@ class ManagedAgentMySqlIT {
                 + " 'legacy-digest', 'session_upgrade', 1)");
         LegacyEvents.insert(jdbc, "mysql-upgrade", "session_upgrade");
         Flyway.configure().dataSource(dataSource)
+                .locations("classpath:db/migration")
+                .target(MigrationVersion.fromVersion("15")).load().migrate();
+        LegacyLifecycleCommands.Sessions lifecycle =
+                LegacyLifecycleCommands.insert(jdbc, "mysql-lifecycle");
+        Flyway.configure().dataSource(dataSource)
                 .locations("classpath:db/migration").load().migrate();
         LegacyEvents.assertBackfilled(jdbc, "mysql-upgrade",
                 "session_upgrade");
+        LegacyLifecycleCommands.assertMigrated(jdbc, "mysql-lifecycle",
+                lifecycle);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
                         + " managed_agent_consumer_progress WHERE tenant_id = ?"
                         + " AND session_id = ? AND consumer_name = ?",
@@ -596,6 +606,103 @@ class ManagedAgentMySqlIT {
                 .locations("classpath:db/migration").load().migrate();
         JdbcRepositoryContract.verify(dataSource,
                 "flyway-" + UUID.randomUUID());
+    }
+
+    @Test
+    @Order(8)
+    void admitsClaimsAndCompletesSessionOperationsOnMySql()
+            throws InterruptedException {
+        DriverManagerDataSource dataSource = dataSource();
+        Flyway.configure().dataSource(dataSource)
+                .locations("classpath:db/migration").load().migrate();
+        JdbcTemplate jdbc = new JdbcTemplate(dataSource);
+        ManagedAgentStore store = new ManagedAgentStore(jdbc,
+                new ObjectMapper(), Clock.systemUTC(), ignored -> {
+                }, new ManagedWorkspaceRegistry(jdbc),
+                new ManagedAgentProperties());
+        TransactionTemplate transactions = new TransactionTemplate(
+                new DataSourceTransactionManager(dataSource));
+        String tenant = "mysql-operation-" + UUID.randomUUID();
+        String sessionId = store.insertSessionCommand(tenant,
+                "CREATE_SESSION", "create", "digest-create", "qwen-code", null,
+                null, List.of(), null).sessionId();
+        String actor = "sha256:" + "a".repeat(64);
+        OperationRecord close = inTransaction(transactions,
+                () -> store.beginOperation(tenant, sessionId,
+                        OperationKind.CLOSE, actor, "Key", "digest-close"))
+                .operation();
+        assertThat(inTransaction(transactions, () -> store.beginOperation(
+                tenant, sessionId, OperationKind.CLOSE, actor, "Key",
+                "digest-close"))).satisfies(replay -> {
+                    assertThat(replay.replayed()).isTrue();
+                    assertThat(replay.operation().operationId())
+                            .isEqualTo(close.operationId());
+                });
+        // Keys stay case-sensitive, and another actor's key is another
+        // request; both meet the open close.
+        for (String[] request : List.of(new String[] {actor, "key"},
+                new String[] {"sha256:" + "b".repeat(64), "Key"})) {
+            assertThatThrownBy(() -> inTransaction(transactions,
+                    () -> store.beginOperation(tenant, sessionId,
+                            OperationKind.CLOSE, request[0], request[1],
+                            "digest-close")))
+                    .isInstanceOfSatisfying(ApiException.class, error ->
+                            assertThat(error.getCode())
+                                    .isEqualTo("session_operation_active"));
+        }
+        assertThat(store.findDeliverableOperations(Long.MAX_VALUE, 1000))
+                .extracting(target -> target.operationId())
+                .contains(close.operationId());
+        OperationRecord claimed = inTransaction(transactions,
+                () -> store.claimOperation(tenant, sessionId,
+                        close.operationId(), "worker-a",
+                        Duration.ofMinutes(1))).orElseThrow();
+        assertThat(inTransaction(transactions, () -> store.claimOperation(
+                tenant, sessionId, close.operationId(), "worker-b",
+                Duration.ofMinutes(1)))).isEmpty();
+        assertThat(inTransaction(transactions, () -> store.completeOperation(
+                tenant, sessionId, close.operationId(), "worker-b",
+                claimed.claimGeneration(), true))).isFalse();
+        assertThat(inTransaction(transactions, () -> store.completeOperation(
+                tenant, sessionId, close.operationId(), "worker-a",
+                claimed.claimGeneration(), true))).isTrue();
+        assertThat(store.requireSession(tenant, sessionId).status())
+                .isEqualTo("CLOSED");
+        assertThat(store.findOperation(tenant, sessionId,
+                close.operationId())).get().satisfies(completed -> {
+                    assertThat(completed.state()).isEqualTo("COMPLETED");
+                    assertThat(completed.admissionStage())
+                            .isEqualTo("HARNESS_CONFIRMED");
+                    assertThat(completed.receiptId()).startsWith("rcpt_");
+                });
+        assertThat(inTransaction(transactions, () -> store.beginOperation(
+                tenant, sessionId, OperationKind.ARCHIVE, actor, "Key",
+                "digest-archive")).operation().state())
+                .isEqualTo("COMPLETED");
+        assertThat(store.findEvents(tenant, sessionId, 0, 100))
+                .extracting(event -> event.type())
+                .containsExactly("session.created", "session.close.requested",
+                        "session.closed", "session.archived");
+
+        // A writer holds the journal until it is sealed or database time
+        // passes its lease; the lifecycle worker waits for that.
+        ManagedSessionStore journals = new ManagedSessionStore(jdbc);
+        String token = "mysql-lifecycle-writer-token-00000000";
+        long generation = inTransaction(transactions,
+                () -> journals.acquireWriter(tenant, sessionId, token,
+                        new AcquireWriterRequest("workspace", "writer",
+                                60_000L))).writerGeneration();
+        assertThat(journals.hasLiveWriter(tenant, sessionId)).isTrue();
+        inTransaction(transactions, () -> journals.sealWriter(tenant,
+                sessionId, token, new SealWriterRequest("workspace", "writer",
+                        generation)));
+        assertThat(journals.hasLiveWriter(tenant, sessionId)).isFalse();
+        inTransaction(transactions, () -> journals.acquireWriter(tenant,
+                sessionId, token, new AcquireWriterRequest("workspace",
+                        "writer", 1_000L)));
+        assertThat(journals.hasLiveWriter(tenant, sessionId)).isTrue();
+        Thread.sleep(1_500);
+        assertThat(journals.hasLiveWriter(tenant, sessionId)).isFalse();
     }
 
     private static Process startWorkspaceProcess(String action,

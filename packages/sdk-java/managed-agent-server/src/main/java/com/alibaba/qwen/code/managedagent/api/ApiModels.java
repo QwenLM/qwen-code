@@ -68,7 +68,8 @@ public final class ApiModels {
     }
 
     public record SessionCapabilities(boolean items, boolean snapshots,
-            boolean artifacts, boolean resync) {
+            boolean artifacts, boolean resync,
+            @JsonProperty("session_lifecycle") boolean sessionLifecycle) {
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
@@ -88,8 +89,14 @@ public final class ApiModels {
             @JsonProperty("workspace") PublicWorkspace workspace) {
     }
 
-    public record DeletedSession(String id, String object,
-            boolean deleted) {
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record PublicCommandOperation(String id,
+            @JsonProperty("session_id") String sessionId, String type,
+            String status,
+            @JsonProperty("admission_stage") String admissionStage,
+            @JsonProperty("delivery_state") String deliveryState,
+            @JsonProperty("receipt_id") String receiptId,
+            boolean replayed) {
     }
 
     public record PublicList<T>(String object, List<T> data,
@@ -183,6 +190,21 @@ public final class ApiModels {
     @JsonInclude(JsonInclude.Include.NON_NULL)
     public record WebShellAdmission(String sessionId, String turnId,
             String status, boolean replayed) {
+    }
+
+    public record WebShellLifecycleRequest(@NotBlank String sessionId,
+            @NotBlank @Size(max = 128) String idempotencyKey) {
+    }
+
+    public record WebShellOperationRequest(@NotBlank String sessionId,
+            @NotBlank @Size(max = 64) String operationId) {
+    }
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record WebShellCommandOperation(String operationId,
+            String sessionId, String type, String status,
+            String admissionStage, String deliveryState, String receiptId,
+            boolean replayed) {
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)

@@ -162,6 +162,22 @@ export interface ExtensionStoreOptions {
   enablementPath?: string;
 }
 
+export type ExtensionStoreEmptiness =
+  | { status: 'empty' }
+  | { status: 'installed' | 'unknown'; reason: string };
+
+const STORE_TRANSACTION_DIRS = ['staging', 'rollback', 'transactions'];
+const STORE_FILES = new Set(['state.json', 'state.previous.json', 'lock']);
+// What a write of a state file leaves when it stops before its rename; the
+// store never reads it.
+const STATE_WRITE_LEFTOVER = /^state(?:\.previous)?\.json\.[0-9a-f]{12}\.tmp$/;
+
+// The store names nothing with a leading dot; such entries belong to the file
+// system or its browsers, such as `.DS_Store`.
+function isStoreName(name: string): boolean {
+  return !name.startsWith('.');
+}
+
 export type InitialExtensionActivation =
   | { scope: 'user' }
   | { scope: 'workspace'; workspacePath: string };
@@ -260,6 +276,17 @@ function canonicalizeWorkspacePath(workspacePath: string): string {
     return fs.realpathSync.native(resolved);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return resolved;
+    throw error;
+  }
+}
+
+async function readDirectoryIfPresent(
+  directory: string,
+): Promise<string[] | null> {
+  try {
+    return await fsp.readdir(directory);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
     throw error;
   }
 }
@@ -527,6 +554,177 @@ export class ExtensionStore {
       'agent-plugins',
       extensionId,
     );
+  }
+
+  /**
+   * Whether the installed extension set is provably empty, read without the
+   * store's lock, recovery or initialization and without writing anything.
+   * Evidence that is inconsistent, in flight or changes while it is read is
+   * `unknown`, never `empty`.
+   */
+  async inspectEmptiness(): Promise<ExtensionStoreEmptiness> {
+    try {
+      const before = await this.emptinessFingerprint();
+      const result = await this.inspectEmptinessOnce();
+      if ((await this.emptinessFingerprint()) !== before) {
+        return {
+          status: 'unknown',
+          reason: 'the extension store changed while it was read',
+        };
+      }
+      return result;
+    } catch (error) {
+      return {
+        status: 'unknown',
+        reason:
+          error instanceof ExtensionStoreCorruptError
+            ? 'the extension store state is corrupt'
+            : `the extension store could not be read (${
+                (error as NodeJS.ErrnoException).code ?? 'error'
+              })`,
+      };
+    }
+  }
+
+  private async inspectEmptinessOnce(): Promise<ExtensionStoreEmptiness> {
+    // The manager loads directories only; files there are control files.
+    for (const entry of (await readDirectoryIfPresent(this.extensionsDir)) ??
+      []) {
+      const entryPath = path.join(this.extensionsDir, entry);
+      const stats = await fsp.lstat(entryPath);
+      if (
+        stats.isDirectory() ||
+        (stats.isSymbolicLink() && (await fsp.stat(entryPath)).isDirectory())
+      ) {
+        return {
+          status: 'installed',
+          reason: 'an extension directory is present',
+        };
+      }
+    }
+    const storeEntries = await readDirectoryIfPresent(this.storeDir);
+    for (const entry of (storeEntries ?? []).filter(isStoreName)) {
+      const stats = await fsp.lstat(path.join(this.storeDir, entry));
+      if (STORE_TRANSACTION_DIRS.includes(entry) && stats.isDirectory()) {
+        const contents = await fsp.readdir(path.join(this.storeDir, entry));
+        if (entry === 'transactions') {
+          // Recovery acts only on `.json` journals. It leaves the journals it
+          // quarantined, and temporary files, where they are for good.
+          if (contents.some((name) => name.endsWith('.json'))) {
+            return {
+              status: 'unknown',
+              reason:
+                'an extension store transaction is in progress or awaits recovery',
+            };
+          }
+        } else if (contents.some(isStoreName)) {
+          // An install prepares its staging directory without the lock or a
+          // journal, so nothing removes one it leaves before it commits;
+          // recovery clears only what a journal names.
+          return {
+            status: 'unknown',
+            reason:
+              'an extension install or removal is in progress or was interrupted',
+          };
+        }
+      } else if (
+        !(entry === 'plugin-data' && stats.isDirectory()) &&
+        !(
+          (STORE_FILES.has(entry) || STATE_WRITE_LEFTOVER.test(entry)) &&
+          stats.isFile()
+        )
+      ) {
+        return {
+          status: 'unknown',
+          reason:
+            entry === 'lock.lock'
+              ? 'the extension store is locked'
+              : 'the extension store holds an unexpected entry',
+        };
+      }
+    }
+    const state = await this.readSnapshotUnlocked();
+    let enablement: fs.Stats | undefined;
+    try {
+      enablement = await fsp.stat(this.enablementPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+    if (enablement && !enablement.isFile()) {
+      return {
+        status: 'unknown',
+        reason: 'the extension enablement file is not a regular file',
+      };
+    }
+    let projection: AllExtensionsEnablementConfig;
+    try {
+      projection = await this.readLegacyProjection();
+    } catch (error) {
+      if (!(error instanceof ExtensionStoreCorruptError)) throw error;
+      return {
+        status: 'unknown',
+        reason: 'the extension enablement file is corrupt',
+      };
+    }
+    if (!state) {
+      if (storeEntries?.includes('state.previous.json')) {
+        return {
+          status: 'unknown',
+          reason: 'the extension store state was replaced incompletely',
+        };
+      }
+      return Object.keys(projection).length === 0
+        ? { status: 'empty' }
+        : {
+            status: 'unknown',
+            reason: 'extension enablement exists without a store state',
+          };
+    }
+    if (Object.keys(state.extensions).length > 0) {
+      return {
+        status: 'installed',
+        reason: 'the extension store records extensions',
+      };
+    }
+    // Legacy rules the state keeps for extensions that are not installed wait
+    // for an install of that name; they enable nothing.
+    if (projectionHash(projection) !== state.legacyProjectionHash) {
+      return {
+        status: 'unknown',
+        reason: 'the extension enablement projection needs reconciliation',
+      };
+    }
+    return { status: 'empty' };
+  }
+
+  private async emptinessFingerprint(): Promise<string> {
+    const parts: string[] = [];
+    for (const directory of [
+      this.extensionsDir,
+      this.storeDir,
+      ...STORE_TRANSACTION_DIRS.map((name) => path.join(this.storeDir, name)),
+    ]) {
+      const entries = await readDirectoryIfPresent(directory);
+      parts.push(entries === null ? '-' : [...entries].sort().join('/'));
+    }
+    for (const file of [
+      this.statePath,
+      this.previousStatePath,
+      this.enablementPath,
+    ]) {
+      let stats: fs.BigIntStats | undefined;
+      try {
+        stats = await fsp.stat(file, { bigint: true });
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      }
+      parts.push(
+        stats
+          ? `${stats.dev}:${stats.ino}:${stats.size}:${stats.mtimeNs}:${stats.ctimeNs}`
+          : '-',
+      );
+    }
+    return parts.join('\n');
   }
 
   async ensureInitialized(
@@ -1937,7 +2135,7 @@ export class ExtensionStore {
     await fsp.mkdir(this.storeDir, { recursive: true, mode: 0o700 });
     const privateDirectories = [
       this.storeDir,
-      ...['staging', 'rollback', 'transactions'].map((directory) =>
+      ...STORE_TRANSACTION_DIRS.map((directory) =>
         path.join(this.storeDir, directory),
       ),
     ];
