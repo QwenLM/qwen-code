@@ -131,10 +131,10 @@ test('mesh shows growing replies before completion, survives reload, and replace
     thread.title,
   );
   await expect(
-    page.getByRole('button', { name: '任务详情', exact: true }),
+    page.getByRole('button', { name: '团队', exact: true }),
   ).toBeVisible();
   await expect(
-    page.getByRole('button', { name: 'Task details', exact: true }),
+    page.getByRole('button', { name: 'Team', exact: true }),
   ).toHaveCount(0);
   await send(page, '@stream-worker Please explain streaming.');
   await expect.poll(() => sent).toBe(1);

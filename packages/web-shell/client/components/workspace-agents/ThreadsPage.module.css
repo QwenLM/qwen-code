@@ -1,109 +1,74 @@
-/* Threads list — grouped by what each thread needs, never by recency. */
+/* The Agents page, in the same frame as the role templates it swaps with:
+   cards for the people, a list for the conversations. */
 
-.page {
-  display: flex;
-  min-height: 100%;
-  flex-direction: column;
-  margin: -16px -20px 0;
-}
-
-.pageHeader {
-  display: flex;
-  min-height: 46px;
-  flex: 0 0 auto;
-  align-items: center;
-  gap: 10px;
-  padding: 10px 20px;
-  border-block-end: 1px solid var(--border);
-}
-
-.headerActions,
 .formActions {
   display: flex;
+  justify-content: flex-end;
   gap: 8px;
-  margin-inline-start: auto;
 }
 
-.viewTabs {
-  display: flex;
-  gap: 2px;
-}
-
+/* Native selects and plain fields, dressed as the shared Input. */
 .field {
-  min-height: 36px;
-  padding: 7px 9px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--background);
+  width: 100%;
+  min-height: 32px;
+  padding: 5px 10px;
+  border: 1px solid var(--input);
+  border-radius: var(--radius-lg, 8px);
+  background: transparent;
   color: var(--foreground);
   font: inherit;
+  font-size: 14px;
 }
 
 .field:focus-visible {
-  outline: 2px solid var(--ring);
-  outline-offset: -2px;
+  border-color: var(--ring);
+  outline: 3px solid color-mix(in srgb, var(--ring) 50%, transparent);
+  outline-offset: 0;
+}
+
+:global(.dark) .field {
+  background: color-mix(in srgb, var(--input) 30%, transparent);
 }
 
 .roster {
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  padding-bottom: 18px;
-  border-bottom: 1px solid var(--border);
+  gap: 12px;
 }
 
-.sectionTitle {
-  margin-bottom: 6px;
-  color: var(--muted-foreground);
-  font-size: 13px;
-  font-weight: 600;
+.agentCard {
+  padding-block: 0;
+  gap: 0;
 }
 
 .agentRow {
-  display: grid;
-  /* Every row is its own grid, so the waiting count gets a fixed track: an
-     auto one let a row with "1 waiting" shift its columns off the others. */
-  grid-template-columns:
-    10px minmax(80px, 0.5fr) minmax(120px, 1fr) minmax(120px, 1fr)
-    6.5rem auto auto;
-  gap: 10px;
-  align-items: center;
-  min-height: 34px;
-  padding: 4px 8px;
-  font-size: 13px;
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 14px 16px;
 }
 
 .agentRowDisabled {
-  color: var(--muted-foreground);
+  opacity: 0.6;
 }
 
-.agentDot,
-.agentDotDisabled {
-  width: 8px;
-  height: 8px;
-  border: 2px solid currentcolor;
-  border-radius: 50%;
-  background: currentcolor;
-  color: var(--status-running-fg);
+.agentMain {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 4px;
 }
 
-.agentDotDisabled {
-  background: transparent;
-  color: var(--muted-foreground);
+.agentTitleLine {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
 }
 
-.agentDescription,
-.agentActivity,
-.agentWaiting,
-.emptyRoster {
-  overflow: hidden;
-  color: var(--muted-foreground);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.agentName,
-.agentActivityLink {
+.agentName {
+  max-width: 100%;
   overflow: hidden;
   padding: 0;
   border: 0;
@@ -116,74 +81,143 @@
   cursor: pointer;
 }
 
-.agentName {
-  font-weight: 600;
-}
-
-.agentName:hover,
-.agentActivityLink:hover {
-  color: var(--foreground);
+.agentName:hover {
   text-decoration: underline;
+  text-underline-offset: 3px;
 }
 
-.agentWaiting {
-  font-variant-numeric: tabular-nums;
-  text-align: end;
+.statusBadge {
+  font-size: 10px;
 }
 
-.agentAction {
-  white-space: nowrap;
-  padding: 2px 4px;
+.statusBadge[data-status='working'] {
+  background: var(--status-running-bg);
+  color: var(--status-running-fg);
+}
+
+.statusBadge[data-status='blocked'],
+.statusBadge[data-status='error'] {
+  background: var(--status-attention-bg);
+  color: var(--status-attention-fg);
+}
+
+.agentActivityLink {
+  width: fit-content;
+  max-width: 100%;
+  overflow: hidden;
+  padding: 0;
   border: 0;
   background: none;
   color: var(--muted-foreground);
   font: inherit;
   font-size: 12px;
+  text-align: start;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   cursor: pointer;
 }
 
-.agentAction:hover:not(:disabled) {
+.agentActivityLink:hover {
   color: var(--foreground);
+  text-decoration: underline;
+  text-underline-offset: 3px;
 }
 
-.agentAction:disabled {
-  opacity: 0.4;
-  cursor: default;
+.agentActions {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 4px;
 }
 
 .emptyRoster {
-  padding: 8px;
+  padding: 8px 10px;
+  color: var(--muted-foreground);
   font-size: 13px;
 }
 
-@media (max-width: 720px) {
-  .agentRow {
-    grid-template-columns: 10px minmax(80px, 1fr) auto;
-  }
-
-  .agentAction {
-    grid-column: 2 / -1;
-    justify-self: end;
-  }
-
-  .agentDescription,
-  .agentActivity {
-    display: none;
-  }
-}
-
-.pageBody {
+/* Settings and assigned conversations open inside the card they belong to,
+   under a rule, so they read as that agent's and not as a second panel. */
+.agentConfig,
+.agentWorkspace {
   display: flex;
-  min-width: 0;
   flex-direction: column;
-  gap: 20px;
-  padding: 20px 24px 32px;
+  gap: 12px;
+  padding: 14px 16px 16px;
+  border-top: 1px solid var(--border);
 }
+
+.agentWorkspace {
+  gap: 2px;
+}
+
+.agentWorkspaceHeader {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 0 6px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.agentWorkspaceHeader strong {
+  color: var(--foreground);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.configLabel {
+  display: grid;
+  gap: 6px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.configNote {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+/* The boundary every agent runs under. Stated once at the foot of the roster
+   because it belongs to the workspace, not to any one identity. */
+.ceiling {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px 16px;
+  border-radius: var(--radius-xl, 12px);
+  background: var(--secondary);
+}
+
+.ceilingTitle {
+  margin: 0;
+  color: var(--foreground);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.ceilingText {
+  max-width: 72ch;
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.ceilingTools {
+  margin: 6px 0 0;
+  overflow-wrap: anywhere;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+/* Conversations */
 
 .group {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 8px;
 }
 
 /* Sentence case, not a tracked-out eyebrow. The count is part of the
@@ -192,13 +226,13 @@
   display: flex;
   align-items: baseline;
   gap: 8px;
-  margin: 0 0 6px;
+  margin: 0;
   padding: 0;
   border: 0;
   background: none;
-  color: var(--muted-foreground);
+  color: var(--foreground);
   font: inherit;
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 600;
   text-align: start;
   cursor: default;
@@ -209,7 +243,7 @@
 }
 
 .groupHeadingToggle:hover {
-  color: var(--foreground);
+  color: var(--muted-foreground);
 }
 
 .groupCount {
@@ -219,13 +253,21 @@
   font-variant-numeric: tabular-nums;
 }
 
+.list {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border-radius: var(--radius-xl, 12px);
+  background: var(--card);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--foreground) 10%, transparent);
+}
+
 .row {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 2px 12px;
-  padding: 8px 10px 9px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
   border: 0;
-  border-radius: var(--radius);
   background: none;
   color: inherit;
   font: inherit;
@@ -233,8 +275,12 @@
   cursor: pointer;
 }
 
+.row + .row {
+  border-top: 1px solid var(--border);
+}
+
 .row:hover {
-  background: var(--secondary);
+  background: color-mix(in srgb, var(--foreground) 4%, transparent);
 }
 
 .row:focus-visible {
@@ -242,15 +288,12 @@
   outline-offset: -2px;
 }
 
-/* The single attention treatment. Carried by nothing else on the page, and
-   always paired with the sentence below the title so it is never colour
-   alone. `blocked` and `in_review` share it: they are opposite in valence but
-   they are the same query — this is waiting on me. */
-.attention {
-  border-inline-start: 2px solid var(--status-attention-fg);
-  border-start-start-radius: 0;
-  border-end-start-radius: 0;
-  padding-inline-start: 8px;
+.rowText {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
 }
 
 .rowTitle {
@@ -265,108 +308,24 @@
 
 /* The resolver's own sentence, rendered verbatim. */
 .rowReason {
-  grid-column: 1;
   min-width: 0;
   overflow: hidden;
   color: var(--muted-foreground);
-  font-size: 13px;
+  font-size: 12px;
   line-height: 1.45;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.emptyState {
-  padding: 40px 0;
+/* The single attention treatment: this conversation is waiting on you.
+   Always paired with the sentence, so it is never colour alone. */
+.row[data-attention] .rowReason {
+  color: var(--status-attention-fg);
+}
+
+.rowChevron {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
   color: var(--muted-foreground);
-  font-size: 13px;
-  line-height: 1.6;
-  text-align: center;
-}
-
-.emptyLead {
-  color: var(--foreground);
-  font-size: 14px;
-}
-
-/* The configuration form opens inside the row it belongs to, spanning it, so
-   it reads as that agent's settings and not as a second panel about nothing
-   in particular. */
-.agentConfig {
-  display: grid;
-  grid-column: 1 / -1;
-  gap: 10px;
-  margin: 8px 0 4px;
-  padding: 14px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-}
-
-.agentWorkspace {
-  display: flex;
-  grid-column: 1 / -1;
-  flex-direction: column;
-  gap: 2px;
-  margin: 8px 0 4px;
-  padding: 12px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-}
-
-.agentWorkspaceHeader {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 0 8px 6px;
-  color: var(--muted-foreground);
-  font-size: 12px;
-}
-
-.agentWorkspaceHeader strong {
-  color: var(--foreground);
-  font-size: 13px;
-}
-
-.configLabel {
-  display: grid;
-  gap: 4px;
-  color: var(--muted-foreground);
-  font-size: 12px;
-}
-
-.configNote {
-  margin: 0;
-  color: var(--muted-foreground);
-  font-size: 12px;
-}
-
-/* The boundary every agent runs under. Stated once at the foot of the roster
-   because it belongs to the workspace, not to any one identity. */
-.ceiling {
-  margin-top: 14px;
-  padding: 12px;
-  border: 1px dashed var(--border);
-  border-radius: var(--radius);
-}
-
-.ceilingTitle {
-  margin: 0 0 4px;
-  color: var(--foreground);
-  font-size: 13px;
-  font-weight: 600;
-}
-
-.ceilingText {
-  max-width: 72ch;
-  margin: 0;
-  color: var(--muted-foreground);
-  font-size: 13px;
-  line-height: 1.6;
-}
-
-.ceilingTools {
-  margin: 6px 0 0;
-  overflow-wrap: anywhere;
-  color: var(--muted-foreground);
-  font-family: var(--font-mono);
-  font-size: 12px;
 }
