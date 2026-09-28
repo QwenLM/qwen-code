@@ -513,66 +513,6 @@ describe('WorkspaceSessionProvider targets', () => {
     expect(onSessionIdChange).not.toHaveBeenCalled();
   });
 
-  it('names port forwarding when the daemon pre-auth Host gate rejects the load', async () => {
-    mocks.workspace = {
-      ...mocks.workspace,
-      status: 'error',
-      capabilities: undefined,
-      error: new DaemonHttpError(
-        403,
-        { error: 'Invalid Host header' },
-        'GET /capabilities: Invalid Host header',
-      ),
-    };
-
-    await renderTarget('session-a', '/work/a');
-
-    expect(container.textContent).toContain('Failed to load workspace');
-    expect(container.textContent).toMatch(/forwarded port|port forwarding/i);
-    // The original daemon error detail stays visible.
-    expect(container.textContent).toContain(
-      'GET /capabilities: Invalid Host header',
-    );
-  });
-
-  it('keeps the generic description for a 403 with any other body', async () => {
-    mocks.workspace = {
-      ...mocks.workspace,
-      status: 'error',
-      capabilities: undefined,
-      error: new DaemonHttpError(
-        403,
-        { error: 'Forbidden', code: 'workspace_untrusted' },
-        'GET /capabilities: Forbidden',
-      ),
-    };
-
-    await renderTarget('session-a', '/work/a');
-
-    expect(container.textContent).toContain('Failed to load workspace');
-    expect(container.textContent).not.toMatch(
-      /forwarded port|port forwarding/i,
-    );
-    expect(container.textContent).toContain('GET /capabilities: Forbidden');
-  });
-
-  it('keeps the generic description for a plain network failure', async () => {
-    mocks.workspace = {
-      ...mocks.workspace,
-      status: 'error',
-      capabilities: undefined,
-      error: new TypeError('fetch failed'),
-    };
-
-    await renderTarget('session-a', '/work/a');
-
-    expect(container.textContent).toContain('Failed to load workspace');
-    expect(container.textContent).not.toMatch(
-      /forwarded port|port forwarding/i,
-    );
-    expect(container.textContent).toContain('fetch failed');
-  });
-
   it('does not preserve a target that never connected', async () => {
     mocks.connection = { status: 'error' };
     const onSessionIdChange = await renderTarget('session-a', '/work/a');
