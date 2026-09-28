@@ -125,7 +125,7 @@
                         <version>${maven-failsafe-plugin.version}</version>
                         <configuration>
                             <excludes>
-                                <exclude>**/HostedHarnessMySqlIT.java</exclude>
+                                <exclude>**/Hosted*IT.java</exclude>
                             </excludes>
                         </configuration>
                         <executions>
@@ -150,7 +150,7 @@
                         <version>${maven-failsafe-plugin.version}</version>
                         <configuration>
                             <includes>
-                                <include>**/HostedHarnessMySqlIT.java</include>
+                                <include>**/Hosted*IT.java</include>
                             </includes>
                             <failIfNoTests>true</failIfNoTests>
                             <forkedProcessTimeoutInSeconds>180</forkedProcessTimeoutInSeconds>
@@ -166,6 +166,20 @@
                     </plugin>
                 </plugins>
             </build>
+        </profile>
+        <profile>
+            <id>hosted-workspace-tools</id>
+            <build><plugins><plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <version>${maven-failsafe-plugin.version}</version>
+                <configuration>
+                    <includes><include>**/HostedWorkspaceToolTurnIT.java</include></includes>
+                    <failIfNoTests>true</failIfNoTests>
+                    <forkedProcessTimeoutInSeconds>210</forkedProcessTimeoutInSeconds>
+                </configuration>
+                <executions><execution><goals><goal>integration-test</goal><goal>verify</goal></goals></execution></executions>
+            </plugin></plugins></build>
         </profile>
     </profiles>
 </project>

@@ -2,7 +2,7 @@
 
 [English](2026-09-27-managed-agent-api-contract.md) | [简体中文](2026-09-27-managed-agent-api-contract.zh-CN.md)
 
-状态：D1 已在本次变更中实现；D2、D3 待实现
+状态：D1 已实现；D2 已在[会话查询](2026-09-27-managed-agent-session-query.zh-CN.md)中实现；D3 已在[事件回放](2026-09-27-managed-agent-event-replay.zh-CN.md)中实现
 日期：2026-09-27
 Issue：[#12793](https://github.com/QwenLM/qwen-code/issues/12793)，属于 [#12380](https://github.com/QwenLM/qwen-code/issues/12380)
 
@@ -33,11 +33,11 @@ Managed Agent 服务在 `/v1/agents/sessions` 下提供公共 Session 路由，�
 
 ## 3. 非目标
 
-- 没有路由改为 `implemented`。唯一的状态变化是把服务端已提供的归档与删除从
-  `planned` 记为 `partial`（4.3）。
+- 没有路由改为 `implemented`。已上线的生命周期路由（4.3）以及 W0d 的发现与
+  绑定能力（4.5）记为 `partial`。
 - 不改变服务行为。D1 只记录 D2、D3 必须修复的内容。
 - 不为了让当前服务通过而删除 schema 字段。
-- 持久准入、Turn、AgentDefinition、Artifact、Workspace、Action 与事件保留策略
+- 持久准入、Turn、AgentDefinition、Artifact、Workspace 执行与上下文切换、Action 与事件保留策略
   与 issue 一致，不在范围内。
 
 ## 4. 决策
@@ -51,10 +51,11 @@ spec 迁入
 它以 JSON 而不是 YAML 保存。本仓库的 yamllint 规则要求标量使用单引号且使用块
 风格，上游 YAML 有 2264 处不符合。JSON 沿用
 `docs/developers/daemon-rest-api.openapi.json` 的先例，两端都不需要 YAML 解析
-器，并与仓库其余文件一样由 Prettier 格式化。转换保留键顺序，除 4.3 的改动外
+器，并与仓库其余文件一样由 Prettier 格式化。转换保留键顺序，除 4.3 与 4.5 的改动外
 无损。
 
-由于本次新增了路由（4.3），版本改为 `1.13.0`。
+D1 为生命周期路由（4.3）引入了 `1.13.0`。集成 W0d 新增了 Workspace 查询路由，
+版本推进到 `1.14.0`（4.5）。
 
 ### 4.2 生成 TypeScript，校验 Java
 
@@ -84,6 +85,22 @@ main 已经提供改名（`PATCH /v1/agents/sessions/{sessionId}`）、`unarchiv
 AgentDefinition 落地之前，D2 返回取自服务端 agent 配置的固定 revision。D1 只
 记录该字段缺失。
 
+### 4.5 W0d 发现与空会话绑定
+
+W0d 集成把公共 Workspace 列表与查询、WebShell Workspace 列表与查询，以及
+Session 的 Workspace 选择与读回标为 `partial`，补上缺失的 WebShell
+`workspaces/get` operation，并重新生成客户端类型。Workspace 列表使用独立的请求
+schema：limit 默认 50、上限 100，cursor 最长 2048 个字符。
+
+发现响应中必填的 `workspace_binding` / `workspaceBinding` 能力只表示发现、
+空会话创建与绑定读回，不启用 Workspace 执行或上下文切换。既有的
+`workspace_context` / `workspaceContext` 能力仍为 false。
+
+发现接口现已返回目标 schema 要求的公共 Workspace `id` 与 `object`，以及
+WebShell 的小写状态。绑定 Session 仍只有 Workspace 标识与 cwd，因此真实请求
+覆盖把缺少的上下文 revision 与状态记录给 W2。客户端本地覆盖仅用于该 Session
+绑定。
+
 ## 5. Java 契约测试
 
 `ManagedAgentApiContractTest` 运行在普通的 `mvn test` 中，使用
@@ -96,10 +113,11 @@ spec 的 JSON Pointer 定位，因此 `$ref` 在同一个文件内解析。
 
 ### 5.1 路由
 
-测试从 Spring 的 `RequestMappingHandlerMapping` 读取 `/v1/agents` 与
-`/api/agent/web-shell/v1` 下的全部路由，与 spec 对照。映射了 spec 中不存在或
-标为 `planned` 的路由会失败；`partial` 或 `implemented` 的路由没有映射也会失败。
-4.3 之后没有路由差异。
+测试从 Spring 的 `RequestMappingHandlerMapping` 读取 `/v1/agent` 与
+`/api/agent/web-shell/v1` 下的全部路由，与 spec 对照。第一个前缀覆盖 `/v1/agents` 以及
+[H0a 任务契约](2026-09-27-managed-agent-task-contract.zh-CN.md)命名的 `/v1/agent-*` 资源；
+D1 只读取 `/v1/agents`。映射了 spec 中不存在或标为 `planned` 的路由会失败；
+`partial` 或 `implemented` 的路由没有映射也会失败。4.3 与 4.5 之后没有路由差异。
 
 ### 5.2 Record
 
@@ -118,7 +136,8 @@ spec 的 JSON Pointer 定位，因此 `$ref` 在同一个文件内解析。
 上的一个已完成 Turn、一次输入与一次取消、改名、归档、对已归档 Session 的一次查询
 与一次列表、取消归档与删除；WebShell 适配层上带首条消息与不带首条消息的创建、
 列表、查询、transcript、提交、取消与 SSE 流；以及跨租户 `404` 和幂等 `409` 错误。
-每次调用检查：
+Workspace 请求覆盖四条发现路由、当前页外的默认 Workspace，以及两个入口的绑定
+空会话创建与读回（包括 cwd 规范化）。每次调用检查：
 
 - 测试发送的请求体符合请求 schema；
 - 状态码是 spec 对该调用期望的状态码；
@@ -169,12 +188,12 @@ override 把 `openapi-typescript>supports-color` 固定为仓库已在使用的 
 
 ## 7. D1 记录的差异
 
-| 切片                       | 差异                                                                                                                                                                                                                                                                                                                                  |
-| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| D2                         | 所有 Session 响应缺 `agent_revision` 与 `capabilities`；record 缺 `replay_floor_sequence`、`snapshot_through_sequence` 与 `PublicTurn.input_item_id`；`CreateSessionRequest` 缺 `agent_revision`；WebShell 命令不回传 `X-Request-Id`；record 中仍有 `WebShellStreamRequest.limit`；输入块只接受 `text`，不接受契约中的 `input_text`。 |
-| D3                         | 公共与 WebShell 事件（JSON 与 SSE）缺 `schema_version`、`projection_version`、`item_id` 与 `content_part_id`；事件与 transcript 分页对大于 100 的 `limit` 返回 `400 invalid_limit`。                                                                                                                                                  |
-| 生命周期工作               | `archive` 与 `DELETE` 返回 `200`，而不是带命令 operation 的 `202`；`DeletedSession` 没有 schema；已归档的 Session 读回时 `status` 为 `"archived"`，而契约的状态枚举没有该值（v1.10 用计划中的 `archived_at` 表示归档）。                                                                                                              |
-| Workspace 上下文（W0d/W2） | 两个入口上 Session 的 `workspace` 都缺 `context_revision` 与 `state`。                                                                                                                                                                                                                                                                |
+| 切片                   | 差异                                                                                                                                                                                                                                                                                                                                  |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| D2                     | 所有 Session 响应缺 `agent_revision` 与 `capabilities`；record 缺 `replay_floor_sequence`、`snapshot_through_sequence` 与 `PublicTurn.input_item_id`；`CreateSessionRequest` 缺 `agent_revision`；WebShell 命令不回传 `X-Request-Id`；record 中仍有 `WebShellStreamRequest.limit`；输入块只接受 `text`，不接受契约中的 `input_text`。 |
+| D3                     | 公共与 WebShell 事件（JSON 与 SSE）缺 `schema_version`、`projection_version`、`item_id` 与 `content_part_id`；事件与 transcript 分页对大于 100 的 `limit` 返回 `400 invalid_limit`。                                                                                                                                                  |
+| 生命周期工作           | `archive` 与 `DELETE` 返回 `200`，而不是带命令 operation 的 `202`；`DeletedSession` 没有 schema；已归档的 Session 读回时 `status` 为 `"archived"`，而契约的状态枚举没有该值（v1.10 用计划中的 `archived_at` 表示归档）。                                                                                                              |
+| Workspace 上下文（W2） | 两个入口上 Session 的 `workspace` 都缺 `context_revision` 与 `state`，通过 record 和已绑定会话响应校验。                                                                                                                                                                                                                              |
 
 输入类型不一致不在 issue 列出的差异中，是 5.3 的请求校验发现的。服务端的
 `input()` 只接受 `text`，WebShell 客户端也发送 `text`，因此两者必须在 D2 中一起
@@ -211,13 +230,8 @@ D2 与 D3 可以并行开始。各自关闭第 7 节中属于自己的差异，�
 - **符合 schema 的语义问题（D3）。** 事件分页已满时仍返回 `has_more: false` 与
   `next_cursor: null`。该响应符合 schema，差异文件无法记录，必须由 D3 自己的测试
   覆盖。
-- **绑定 Workspace 的 Session。** 绑定 W0b workspace 的 Session 读回时缺
-  `context_revision` 与 `state`。四行 `record … WorkspaceContext` 已间接覆盖；
-  Workspace 上下文切片应在场景中加入对已绑定 Session 的读取。
-- **与 W0d 的合入顺序。** W0d 映射了 v1.13 中标为 `planned` 的 workspace 路由，
-  新增了 spec 中没有的 WebShell `workspaces/get` 路由，并加入了生成器按
-  `planned` 剔除的 Session `workspace` 字段。后合入的一方负责把这些路由和字段改为
-  `partial`、补上缺失的路由，并重新生成 TypeScript 类型。
+- **绑定 Workspace 的 Session（W2）。** 两个入口的创建与读回现在直接覆盖缺失的
+  `context_revision` 与 `state`。W2 补齐字段后，移除相应 record 与响应差异。
 
 [contract]: https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-api-contract.md
 [openapi]: https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-public-api.openapi.yaml

@@ -14,11 +14,15 @@ import com.sun.net.httpserver.Headers;
 import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
 import java.math.BigDecimal;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Arrays;
@@ -37,6 +41,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Assumptions;
 
 class HttpRuntimeTransportTest {
     private static final ObjectMapper JSON = new ObjectMapper();
@@ -608,6 +613,143 @@ class HttpRuntimeTransportTest {
         assertEquals("success",
                 JSON.valueToTree(result).required("executionStatus")
                         .textValue());
+    }
+
+    @Test
+    void usesExplicitToolV3RoutesAndRejectsAV2Answer() throws Exception {
+        RuntimeLease lease = toolLease(server.getAddress().getPort());
+        RuntimeSession session = toolSession();
+        Map<String, Object> reference = toolReference();
+        reference.put("toolName", "run_shell_command");
+        reference.put("input", Map.of("command", "printf hello"));
+        Map<String, Object> capture = new LinkedHashMap<>();
+        capture.put("tenantId", "tenant-a");
+        capture.put("sessionId", "managed-session-a");
+        capture.put("turnId", "prompt-01");
+        capture.put("executionCallId", "execution-a");
+        capture.put("bindingGeneration", "1");
+        capture.put("capturePolicy", "complete_required");
+        Map<String, Object> capturedResult = new LinkedHashMap<>();
+        capturedResult.put("captureStatus", "unavailable");
+        capturedResult.put("captureReason", "storage_failed");
+        capturedResult.put("manifest", null);
+        capturedResult.put("previewTruncated", false);
+        capturedResult.put("deliveryStatus", "blocked");
+        Map<String, Object> envelope = new LinkedHashMap<>();
+        envelope.put("executionStatus", "success");
+        envelope.put("responseParts", List.of("hello"));
+        envelope.put("capture", capturedResult);
+        Map<String, Object> settled = Map.of(
+                "protocolVersion", 3,
+                "toolResult", "managed-tool-result/1",
+                "state", "settled",
+                "result", envelope);
+        reply.set(json(200, JSON.writeValueAsBytes(settled)));
+
+        assertEquals("settled", transport.executeV3(lease, session, reference,
+                capture).toCompletableFuture().get(2, TimeUnit.SECONDS).get("state"));
+        assertEquals(HttpRuntimeTransport.V3_EXECUTE_PATH, capturedPath.get());
+        assertEquals("managed-tool-result/1", JSON.readTree(captured.get())
+                .required("toolResult").asText());
+        assertEquals("managed-session-a", JSON.readTree(captured.get())
+                .required("capture").required("sessionId").asText());
+
+        assertEquals("settled", transport.statusV3(lease, session, reference, 0)
+                .toCompletableFuture().get(2, TimeUnit.SECONDS).get("state"));
+        assertEquals(HttpRuntimeTransport.V3_STATUS_PATH, capturedPath.get());
+        assertEquals("settled", transport.cancelV3(lease, session, reference)
+                .toCompletableFuture().get(2, TimeUnit.SECONDS).get("state"));
+        assertEquals(HttpRuntimeTransport.V3_CANCEL_PATH, capturedPath.get());
+        Map<String, Object> receipt = new LinkedHashMap<>();
+        receipt.put("executionCallId", "execution-a");
+        receipt.put("manifest", null);
+        receipt.put("deliveryStatus", "blocked");
+        receipt.put("historyRevision", null);
+        assertEquals("settled", transport.acknowledgeV3(lease, session,
+                reference, receipt).toCompletableFuture()
+                .get(2, TimeUnit.SECONDS).get("state"));
+        assertEquals(HttpRuntimeTransport.V3_ACKNOWLEDGE_PATH,
+                capturedPath.get());
+        assertEquals("blocked", JSON.readTree(captured.get())
+                .required("receipt").required("deliveryStatus").asText());
+
+        reply.set(json(200, JsonCodec.encode(Map.of(
+                "protocolVersion", 2,
+                "state", "unknown"))));
+        assertThrows(ExecutionException.class, () -> transport.statusV3(
+                lease, session, reference, 0).toCompletableFuture()
+                .get(2, TimeUnit.SECONDS));
+    }
+
+    @Test
+    void exchangesToolV3WithTheRealTypeScriptHandler() throws Exception {
+        Path repository = Path.of("").toAbsolutePath()
+                .resolve("../../..").normalize();
+        Path handler = repository.resolve("packages/cli/dist/src/serve/managed-runtime-tool-v3-routes.js");
+        Assumptions.assumeTrue(Files.isRegularFile(handler),
+                "Build the TypeScript workspace before the interop test.");
+        Path serverScript = Path.of("src/test/resources/tool-v3-interop-server.mjs")
+                .toAbsolutePath();
+        Process worker = new ProcessBuilder("node", serverScript.toString())
+                .directory(repository.toFile())
+                .start();
+        try {
+            BufferedReader output = new BufferedReader(new InputStreamReader(
+                    worker.getInputStream(), StandardCharsets.UTF_8));
+            String ready = CompletableFuture.supplyAsync(() -> {
+                try {
+                    return output.readLine();
+                } catch (IOException error) {
+                    throw new CompletionException(error);
+                }
+            }).get(20, TimeUnit.SECONDS);
+            assertTrue(ready != null && ready.startsWith("READY:"), ready);
+            int port = Integer.parseInt(ready.substring("READY:".length()));
+            RuntimeLease lease = toolLease(port);
+            Map<String, Object> reference = toolReference();
+            reference.put("toolName", "run_shell_command");
+            reference.put("input", Map.of("command", "printf hello"));
+            reference.put("argsDigest",
+                    "424b16b9aa8d9f0648c8b2e91ecd9fb09faba205685214a7ccb01702b3dd0ce8");
+            Map<String, Object> capture = Map.of(
+                    "tenantId", "tenant-a",
+                    "sessionId", "managed-session-a",
+                    "turnId", "turn-1",
+                    "executionCallId", "execution-a",
+                    "bindingGeneration", "1",
+                    "capturePolicy", "complete_required");
+            Map<String, Object> answer = transport.executeV3(
+                    lease, toolSession(), reference, capture)
+                    .toCompletableFuture().get(10, TimeUnit.SECONDS);
+            assertEquals("settled", answer.get("state"));
+            @SuppressWarnings("unchecked")
+            Map<String, Object> result = (Map<String, Object>) answer.get("result");
+            @SuppressWarnings("unchecked")
+            Map<String, Object> raw = (Map<String, Object>) result.get("capture");
+            assertEquals("complete", raw.get("captureStatus"));
+            assertEquals("committed", raw.get("deliveryStatus"));
+            assertEquals("settled", transport.statusV3(lease, toolSession(),
+                    reference, 0).toCompletableFuture()
+                    .get(10, TimeUnit.SECONDS).get("state"));
+            Map<String, Object> receipt = new LinkedHashMap<>();
+            receipt.put("executionCallId", "execution-a");
+            receipt.put("manifest", raw.get("manifest"));
+            receipt.put("deliveryStatus", "committed");
+            receipt.put("historyRevision", 7);
+            assertEquals("settled", transport.acknowledgeV3(lease,
+                    toolSession(), reference, receipt)
+                    .toCompletableFuture().get(10, TimeUnit.SECONDS)
+                    .get("state"));
+            receipt.put("historyRevision", 8);
+            assertThrows(ExecutionException.class, () -> transport.acknowledgeV3(
+                    lease, toolSession(), reference, receipt)
+                    .toCompletableFuture().get(10, TimeUnit.SECONDS));
+        } finally {
+            worker.destroy();
+            if (!worker.waitFor(5, TimeUnit.SECONDS)) {
+                worker.destroyForcibly();
+            }
+        }
     }
 
     @Test

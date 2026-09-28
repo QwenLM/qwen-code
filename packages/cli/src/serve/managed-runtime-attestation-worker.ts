@@ -8,6 +8,8 @@ import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import type { Readable } from 'node:stream';
 import express from 'express';
+import { MANAGED_TOOL_RESULT_ROUTES } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
+import type { LocalShellResultSession } from '@qwen-code/qwen-code-core/managed-runtime/local-shell-result-session.js';
 import {
   OWNED_MANAGED_RUNTIME_ROUTES,
   ownedManagedRuntimeRouteGate,
@@ -137,12 +139,13 @@ export async function readManagedRuntimeWorkerBoot(
 
 export async function startManagedRuntimeAttestationWorker(
   boot: ManagedRuntimeWorkerBoot | ManagedContextBoot,
+  capturePublisher?: Pick<LocalShellResultSession, 'prepare' | 'accept'>,
 ): Promise<ManagedRuntimeAttestationWorkerHandle> {
   const app = express();
   app.disable('x-powered-by');
   let executor: ManagedToolExecutor;
   if (boot.version === 2) {
-    executor = registerManagedContextRoutes(app, boot);
+    executor = registerManagedContextRoutes(app, boot, capturePublisher);
   } else {
     registerManagedRuntimeAttestationRoute(app, boot);
     executor = ManagedToolExecutor.forWorkspace(
@@ -155,7 +158,9 @@ export async function startManagedRuntimeAttestationWorker(
     ownedManagedRuntimeRouteGate(
       app,
       boot.version === 2
-        ? MANAGED_CONTEXT_WORKER_ROUTES
+        ? capturePublisher
+          ? [...MANAGED_CONTEXT_WORKER_ROUTES, ...MANAGED_TOOL_RESULT_ROUTES]
+          : MANAGED_CONTEXT_WORKER_ROUTES
         : OWNED_MANAGED_RUNTIME_ROUTES,
     ),
   );
