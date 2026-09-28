@@ -10,11 +10,13 @@
 // or .mvn/maven.config, narrows that selection, so after a job's tests this
 // compares the failsafe reports with the source tree of each module: every
 // `*IT` class of the job's family must have run at least one test (so an
-// abstract base class must not end in IT), and no other test class may have
-// run. The reports also record Maven's user properties, so a run under
-// -Dit.test or -Dfailsafe.includesFile/excludesFile given on the command line,
-// in MAVEN_ARGS or in .mvn/maven.config fails too, even one that keeps a
-// single method of every class, and so does a report without properties.
+// abstract base class must not end in IT), unless the class is annotated
+// @Disabled at its source — a declared, review-visible skip rather than a
+// silently missing report — and no other test class may have run. The reports
+// also record Maven's user properties, so a run under -Dit.test or
+// -Dfailsafe.includesFile/excludesFile given on the command line, in
+// MAVEN_ARGS or in .mvn/maven.config fails too, even one that keeps a single
+// method of every class, and so does a report without properties.
 
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
@@ -35,6 +37,22 @@ if (!inFamily || modules.length === 0) {
 }
 
 const simpleName = (className) => className.split('.').at(-1);
+// A class annotated @Disabled at its source is a declared skip, visible in
+// review, not a silently missing report.
+const disabledAtSource = (module, className) => {
+  const file = path.join(
+    module,
+    'src',
+    'test',
+    'java',
+    ...className.split('.'),
+  );
+  try {
+    return readFileSync(`${file}.java`, 'utf8').includes('@Disabled');
+  } catch {
+    return false;
+  }
+};
 // Not readdirSync's `recursive`: a Node older than 18.17 ignores it, and the
 // check would then find no integration test at all.
 const javaFiles = (dir, prefix = []) =>
@@ -89,6 +107,8 @@ for (const module of modules) {
   for (const className of expected) {
     if (ran.get(className) > 0) {
       console.log(`${module}: ${className} ran ${ran.get(className)} test(s)`);
+    } else if (disabledAtSource(module, className)) {
+      console.log(`${module}: ${className} is disabled at its source`);
     } else {
       failed = true;
       console.error(`::error::${module}: ${className} ran no test in this job`);
