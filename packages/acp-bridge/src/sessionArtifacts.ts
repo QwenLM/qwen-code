@@ -425,8 +425,13 @@ export class SessionArtifactStore {
             this.findPublishedUpgradeTarget(artifact) ??
             this.findPublishedWorkspaceTarget(artifact);
           if (!existing) {
+            // Standalone publish of a local file:// page (non-snapshot):
+            // coerce to ephemeral so it never journals as a durable record
+            // that restore cannot relink. Upgrade merges keep the
+            // predecessor's retention — mergeRetention decides.
+            const coerced = this.coerceStandalonePublishedFile(artifact);
             const stored: StoredArtifact = {
-              ...artifact,
+              ...coerced,
               insertSeq: ++this.insertSeq,
             };
             this.artifacts.set(stored.id, stored);
@@ -604,8 +609,14 @@ export class SessionArtifactStore {
     });
   }
 
+  // Narrowed to the fields the helper reads: a future field read inside
+  // must fail typecheck here instead of silently seeing undefined at
+  // partial-literal call sites (R5-3).
   private findPublishedUpgradeTarget(
-    artifact: NormalizedArtifact,
+    artifact: Pick<
+      NormalizedArtifact,
+      'storage' | 'trustedPublisher' | 'managedId' | 'url'
+    >,
   ): StoredArtifact | undefined {
     if (
       artifact.storage !== 'published' ||
@@ -642,6 +653,31 @@ export class SessionArtifactStore {
     }
 
     return undefined;
+  }
+
+  // Restore-time trust rules treat a local file:// published page
+  // (non-snapshot) as untrusted, so journaling it `restorable` produces a
+  // dead record whose only effect is piled-up restore warnings. Coerce it
+  // to `ephemeral` up front and mark the choice explicit so later merges
+  // keep the pin. Runs only for records with no durable predecessor —
+  // upgrade merges keep the predecessor's retention instead (R4-1).
+  private coerceStandalonePublishedFile(
+    artifact: NormalizedArtifact,
+  ): NormalizedArtifact {
+    if (
+      artifact.retention !== 'ephemeral' &&
+      artifact.storage === 'published' &&
+      artifact.url !== undefined &&
+      isFileArtifactUrl(artifact.url) &&
+      getWebPreviewSnapshotId(artifact) === undefined
+    ) {
+      return {
+        ...artifact,
+        retention: 'ephemeral',
+        retentionExplicit: true,
+      };
+    }
+    return artifact;
   }
 
   private findPublishedWorkspaceTarget(
@@ -1757,47 +1793,15 @@ export class SessionArtifactStore {
       trustedPublisher,
     });
 
-    let retention = normalizeRetention(input.retention, {
+    const retention = normalizeRetention(input.retention, {
       persistenceAvailable: this.persistence !== undefined,
     });
-    let retentionCoercedToEphemeral = false;
-    // Local file:// published pages (non-snapshot) must not be persisted:
-    // restore-time trust rules treat them as untrusted, so storing them
-    // as `restorable` produces a dead record whose only effect is to pile
-    // up `skipped artifact restore: …` warnings on every load. Coerce to
-    // `ephemeral` up front; the snapshot path stays restorable via
-    // `getWebPreviewSnapshotId`. Mark the result as `retentionExplicit`
-    // so the workspace→published merge path doesn't upgrade it again.
-    // R4-1 (#12473): the coercion must not fire when the publish merges
-    // into an existing durable record (workspace→published upgrade).
-    // Coercing the successor to ephemeral would strand the durable
-    // workspace predecessor (its tombstone can't be undone on resume).
-    // Scope the coercion to standalone publishes only.
-    const publishedUpgradeTarget = this.findPublishedUpgradeTarget({
-      storage,
-      trustedPublisher,
-      managedId,
-      url,
-    } as NormalizedArtifact);
-    if (
-      retention !== 'ephemeral' &&
-      publishedUpgradeTarget === undefined &&
-      storage === 'published' &&
-      url !== undefined &&
-      isFileArtifactUrl(url) &&
-      getWebPreviewSnapshotId({
-        kind: input.kind,
-        managedId,
-        storage,
-        url,
-        metadata: input.metadata,
-        source,
-        toolName: input.toolName,
-      }) === undefined
-    ) {
-      retention = 'ephemeral';
-      retentionCoercedToEphemeral = true;
-    }
+    // Local file:// published pages (non-snapshot) are coerced to
+    // `ephemeral` by the upsert apply loop, not here: standalone-vs-upgrade
+    // is a property of the store state at apply time, so deciding it during
+    // normalization would make durability depend on batch boundaries
+    // (R5-3). The snapshot path stays restorable via
+    // `getWebPreviewSnapshotId`.
     const workspaceStatus = workspacePath
       ? options.workspaceAccess === 'metadata-only'
         ? {
@@ -1841,8 +1845,7 @@ export class SessionArtifactStore {
       id,
       identityKey,
       receivedSeq,
-      retentionExplicit:
-        input.retention !== undefined || retentionCoercedToEphemeral,
+      retentionExplicit: input.retention !== undefined,
       retentionSource: source,
       trustedPublisher,
       kind,

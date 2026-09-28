@@ -7411,10 +7411,10 @@ describe('SessionArtifactStore', () => {
     });
   });
 
-  // Issue #12389 R1-2: a workspace→published upgrade path would re-merge
-  // the record and pick `restorable` over the coerced `ephemeral`. The
-  // coercion must mark `retentionExplicit` so the merge preserves the
-  // ephemeral choice.
+  // Issue #12389 R1-2/R4-1: the upgrade merge used to re-coerce the
+  // successor to `ephemeral`; the coercion now lives in the upsert apply
+  // loop and only fires without a durable predecessor, so the upgrade
+  // keeps the record restorable across publish and workspace re-record.
   it('keeps the workspace-published upgrade restorable across publish and workspace re-record (R2-2 / R1-2)', async () => {
     // Three steps, mirroring the R1-2 witness: a non-explicit workspace
     // record (write_file auto-record), a trusted local publish of the
@@ -7475,8 +7475,9 @@ describe('SessionArtifactStore', () => {
     // The R4-1 scope change leaves the standalone-publish coercion in
     // place: with no durable predecessor the publish still coerces to
     // ephemeral + explicit, and a later non-explicit workspace re-record
-    // must not upgrade it — mergeRetention's pin (the retentionExplicit
-    // propagation R1-2 added) has to hold.
+    // must not upgrade it — mergeRetention's pin branch has to hold.
+    // (The retentionExplicit OR-propagation itself is pinned by the
+    // persist-failure downgrade test below.)
     const store = new SessionArtifactStore({
       sessionId: 's11-pin-standalone',
       workspaceCwd: workspace,
@@ -7515,6 +7516,97 @@ describe('SessionArtifactStore', () => {
           retention: 'ephemeral',
         },
       ],
+    });
+  });
+
+  it('keeps the same-batch workspace upgrade restorable without stranding (R5-3)', async () => {
+    // ONE upsertMany carrying the workspace record and the trusted local
+    // publish: the coercion is decided at apply time, where the
+    // predecessor is already stored. Deciding it during normalization
+    // fired the coercion first and stranded the durable predecessor
+    // behind a batch boundary — the exact R4-1 stranding, batch-dependent.
+    const store = new SessionArtifactStore({
+      sessionId: 's11-same-batch-upgrade',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async () => {},
+        recordSnapshot: async () => {},
+      },
+    });
+    await fs.mkdir(path.join(workspace, 'reports'), { recursive: true });
+    const artifactPath = path.join(workspace, 'reports/same-batch.html');
+    await fs.writeFile(artifactPath, 'hello');
+    const managedId = managedIdForWorkspacePath('reports/same-batch.html');
+
+    const { changes } = await store.upsertMany(
+      [
+        { title: 'Draft', workspacePath: 'reports/same-batch.html' },
+        {
+          title: 'Published',
+          storage: 'published',
+          managedId,
+          url: pathToFileURL(artifactPath).href,
+          mimeType: 'text/html',
+        },
+      ],
+      { strict: true, trustedPublisher: true },
+    );
+
+    expect(
+      changes.some(
+        (change) =>
+          change.action === 'removed' && change.reason === 'unpin_to_ephemeral',
+      ),
+    ).toBe(false);
+    await expect(store.list()).resolves.toMatchObject({
+      artifacts: [
+        {
+          storage: 'published',
+          retention: 'restorable',
+        },
+      ],
+    });
+  });
+
+  it('holds the ephemeral pin across a persist-failure downgrade and explicit re-pin (R5-2)', async () => {
+    // downgradeDurableChanges sets retention='ephemeral' WITHOUT the
+    // explicit flag; the explicit-ephemeral re-write must propagate
+    // retentionExplicit through mergeArtifact so the later non-explicit
+    // re-record still holds the pin instead of silently becoming durable
+    // again. Three separate upsertMany calls: coalescing would bypass
+    // mergeArtifact entirely.
+    let fail = true;
+    const store = new SessionArtifactStore({
+      sessionId: 's11-downgrade-pin',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async () => {
+          if (fail) throw new Error('persist failed');
+        },
+        recordSnapshot: async () => {},
+      },
+    });
+    await fs.mkdir(path.join(workspace, 'reports'), { recursive: true });
+    const artifactPath = path.join(workspace, 'reports/downgrade-pin.html');
+    await fs.writeFile(artifactPath, 'hello');
+
+    await store.upsertMany([
+      { title: 'Draft', workspacePath: 'reports/downgrade-pin.html' },
+    ]);
+    fail = false;
+    await store.upsertMany([
+      {
+        title: 'Draft again',
+        workspacePath: 'reports/downgrade-pin.html',
+        retention: 'ephemeral',
+      },
+    ]);
+    await store.upsertMany([
+      { title: 'Draft once more', workspacePath: 'reports/downgrade-pin.html' },
+    ]);
+
+    await expect(store.list()).resolves.toMatchObject({
+      artifacts: [{ retention: 'ephemeral' }],
     });
   });
 
