@@ -5,6 +5,7 @@
  */
 
 import stripAnsi from 'strip-ansi';
+import { isUtf8 } from 'node:buffer';
 import type { PtyImplementation } from '../utils/getPty.js';
 import { getPty } from '../utils/getPty.js';
 import { spawn as cpSpawn, spawnSync } from 'node:child_process';
@@ -306,6 +307,20 @@ function getMaxBufferedOutputBytes(config: ShellExecutionConfig): number {
 function decodeBufferedOutput(finalBuffer: Buffer): string {
   const fallbackEncoding = getCachedEncodingForBuffer(finalBuffer);
   return new TextDecoder(fallbackEncoding).decode(finalBuffer);
+}
+
+function decodePreviewTail(buffer: Buffer): string {
+  let start = 0;
+  while (start < buffer.length && start < 3 && (buffer[start] & 0xc0) === 0x80)
+    start++;
+  const aligned = buffer.subarray(start);
+  // A ring can start inside a UTF-8 character; keep legacy bytes unless the
+  // remainder contains a valid multibyte UTF-8 sequence.
+  return decodeBufferedOutput(
+    start > 0 && isUtf8(aligned) && aligned.some((byte) => byte >= 0xc2)
+      ? aligned
+      : buffer,
+  );
 }
 
 function appendOutputCaptureLimitNotice(
@@ -1060,7 +1075,6 @@ export class ShellExecutionService {
         const stderrTailBytes = rawCapture
           ? Math.min(8192, Math.floor(maxBufferedOutputBytes / 8))
           : 0;
-        const completePreviewBytes = maxBufferedOutputBytes - stderrTailBytes;
         const createTail = (capacity: number) => {
           const bytes = Buffer.alloc(capacity);
           let length = 0;
@@ -1090,16 +1104,16 @@ export class ShellExecutionService {
             },
           };
         };
-        const previewTail = rawCapture
-          ? createTail(
-              maxBufferedOutputBytes - previewHeadBytes - stderrTailBytes,
-            )
+        let previewTail = rawCapture
+          ? createTail(maxBufferedOutputBytes - previewHeadBytes)
           : null;
-        const stderrTail = rawCapture ? createTail(stderrTailBytes) : null;
+        let stderrTail: ReturnType<typeof createTail> | null = null;
         const retainedTail = () => previewTail?.read() ?? Buffer.alloc(0);
+        const completePreviewBytes = () =>
+          maxBufferedOutputBytes - (stderrTail ? stderrTailBytes : 0);
 
         const markOutputCaptureLimitExceeded = () => {
-          if (rawCapture && totalOutputBytes <= completePreviewBytes) return;
+          if (rawCapture && totalOutputBytes <= completePreviewBytes()) return;
           outputCaptureLimitExceeded = true;
           if (outputCaptureLimitWarningEmitted) {
             return;
@@ -1107,7 +1121,7 @@ export class ShellExecutionService {
           outputCaptureLimitWarningEmitted = true;
           debugLogger.warn(
             `Shell output ${rawCapture ? 'preview' : 'capture'} exceeded ` +
-              `${rawCapture ? completePreviewBytes : maxBufferedOutputBytes} bytes. Total bytes: ` +
+              `${rawCapture ? completePreviewBytes() : maxBufferedOutputBytes} bytes. Total bytes: ` +
               `${totalOutputBytes}. ${rawCapture ? 'Truncating the preview.' : 'Discarding excess.'}`,
           );
         };
@@ -1138,6 +1152,14 @@ export class ShellExecutionService {
 
         const handleOutput = (data: Buffer, stream: 'stdout' | 'stderr') => {
           totalOutputBytes += data.length;
+          if (stream === 'stderr' && stderrTailBytes > 0 && !stderrTail) {
+            const previous = retainedTail();
+            previewTail = createTail(
+              maxBufferedOutputBytes - previewHeadBytes - stderrTailBytes,
+            );
+            previewTail.add(previous);
+            stderrTail = createTail(stderrTailBytes);
+          }
           previewTail?.add(data);
           if (stream === 'stderr') stderrTail?.add(data);
           const capturedData = captureOutputData(data);
@@ -1280,22 +1302,29 @@ export class ShellExecutionService {
 
           const finalStrippedOutput = stripAnsi(combinedOutput).trim();
           const stderrPreview = stderrTail?.read() ?? Buffer.alloc(0);
+          const tailPreview = retainedTail();
+          const tailText = rawCapture
+            ? stripAnsi(decodeBufferedOutput(tailPreview)).trim()
+            : '';
+          const stderrText = stderrPreview.length
+            ? stripAnsi(decodePreviewTail(stderrPreview)).trim()
+            : '';
           const boundedOutput =
             rawCapture &&
             isStreamingRawContent &&
             totalOutputBytes > previewHeadBytes
-              ? totalOutputBytes <= completePreviewBytes
+              ? totalOutputBytes <= completePreviewBytes()
                 ? stripAnsi(
                     decodeBufferedOutput(
                       Buffer.concat([
                         finalBuffer,
-                        retainedTail().subarray(
+                        tailPreview.subarray(
                           -(totalOutputBytes - capturedOutputBytes),
                         ),
                       ]),
                     ),
                   ).trim()
-                : `${finalStrippedOutput}\n\n[Middle output omitted from this preview; complete bytes are retained in the managed capture.]\n${stripAnsi(decodeBufferedOutput(retainedTail())).trim()}${stderrPreview.length ? `\n\n[Recent stderr]\n${stripAnsi(decodeBufferedOutput(stderrPreview)).trim()}` : ''}`
+                : `${finalStrippedOutput}\n\n[Middle output omitted from this preview; complete bytes are retained in the managed capture.]\n${tailText}${stderrText ? `\n\n[Recent stderr]\n${stderrText}` : ''}`
               : appendOutputCaptureLimitNotice(
                   finalStrippedOutput,
                   outputCaptureLimitExceeded,

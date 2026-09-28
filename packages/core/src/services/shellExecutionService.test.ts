@@ -3218,6 +3218,78 @@ describe('ShellExecutionService child_process fallback', () => {
     );
   });
 
+  it('decodes a stderr preview that starts inside a UTF-8 character', async () => {
+    Object.assign(mockChildProcess.stdout!, {
+      pause: vi.fn(),
+      resume: vi.fn(),
+    });
+    Object.assign(mockChildProcess.stderr!, {
+      pause: vi.fn(),
+      resume: vi.fn(),
+    });
+    const capture = {
+      write: vi.fn(async () => {}),
+      finish: vi.fn(async () => {}),
+      setStarted: vi.fn(),
+      setProcessResult: vi.fn(),
+    };
+    const stderr = Buffer.from(`${'错'.repeat(30)}END\n`);
+    const handle = await ShellExecutionService.execute(
+      'failing build',
+      '/test/dir',
+      onOutputEventMock,
+      new AbortController().signal,
+      true,
+      { ...shellExecutionConfig, maxBufferedOutputBytes: 64 },
+      { rawCapture: capture },
+    );
+    mockChildProcess.stdout!.emit('data', Buffer.from('HEAD' + 'x'.repeat(80)));
+    mockChildProcess.stderr!.emit('data', stderr);
+    mockChildProcess.stdout!.emit('data', Buffer.from('y'.repeat(100)));
+    mockChildProcess.stdout!.emit('end');
+    mockChildProcess.stderr!.emit('end');
+    mockChildProcess.emit('exit', 3, null);
+    mockChildProcess.emit('close', 3, null);
+    const result = await handle.result;
+    expect(result.output.split('[Recent stderr]\n')[1]).toBe('错END');
+    expect(capture.write).toHaveBeenCalledWith('stderr', stderr);
+  });
+
+  it('keeps a stdout-only preview complete within its byte limit', async () => {
+    Object.assign(mockChildProcess.stdout!, {
+      pause: vi.fn(),
+      resume: vi.fn(),
+    });
+    Object.assign(mockChildProcess.stderr!, {
+      pause: vi.fn(),
+      resume: vi.fn(),
+    });
+    const capture = {
+      write: vi.fn(async () => {}),
+      finish: vi.fn(async () => {}),
+      setStarted: vi.fn(),
+      setProcessResult: vi.fn(),
+    };
+    const stdout = Buffer.from('x'.repeat(60));
+    const handle = await ShellExecutionService.execute(
+      'printf output',
+      '/test/dir',
+      onOutputEventMock,
+      new AbortController().signal,
+      true,
+      { ...shellExecutionConfig, maxBufferedOutputBytes: 64 },
+      { rawCapture: capture },
+    );
+    mockChildProcess.stdout!.emit('data', stdout);
+    mockChildProcess.stdout!.emit('end');
+    mockChildProcess.stderr!.emit('end');
+    mockChildProcess.emit('exit', 0, null);
+    mockChildProcess.emit('close', 0, null);
+    const result = await handle.result;
+    expect(result.output).toBe(stdout.toString());
+    expect(capture.write).toHaveBeenCalledWith('stdout', stdout);
+  });
+
   describe('child environment sanitization (#6601)', () => {
     it('strips Qwen-internal daemon secrets from the child_process env while keeping user vars and third-party credentials', async () => {
       // Replace (not mutate in place): this file restores process.env by
