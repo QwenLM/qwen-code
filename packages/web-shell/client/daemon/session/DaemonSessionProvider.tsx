@@ -1253,6 +1253,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     consecutiveFailures: 0,
   });
   const manualSessionClearRef = useRef(false);
+  const pendingStrictDetachRef = useRef<Promise<void> | undefined>(undefined);
   const skipNextCleanupDetachSessionRef = useRef<
     DaemonSessionClient | undefined
   >(undefined);
@@ -4121,6 +4122,18 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             }));
             return;
           }
+          if (pendingStrictDetachRef.current) {
+            // clearSession owns detach errors and attachment teardown. If it
+            // fails, keep this runner alive to resume the existing stream.
+            await pendingStrictDetachRef.current.catch(() => undefined);
+            if (
+              disposed ||
+              abort.signal.aborted ||
+              sessionRef.current !== activeSession
+            ) {
+              return;
+            }
+          }
           if (manualSessionClearRef.current) {
             session = undefined;
             sessionRef.current = undefined;
@@ -4166,6 +4179,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         } catch (error) {
           const restartRequested = eventStream?.restartRequested === true;
           clearEventStream();
+          if (pendingStrictDetachRef.current) {
+            await pendingStrictDetachRef.current.catch(() => undefined);
+          }
           if (session && sessionRef.current !== session) {
             clearPendingTranscriptEvents();
             return;
@@ -4841,6 +4857,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         sessionRecoveryGeneration: sessionRecoveryGenerationRef.current,
         heartbeatSupportedRef,
         manualSessionClearRef,
+        pendingStrictDetachRef,
         skipNextCleanupDetachSessionRef,
         passiveAssistantDoneTimerRef,
         daemonActivePromptRef,

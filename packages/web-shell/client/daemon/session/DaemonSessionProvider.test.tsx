@@ -14237,6 +14237,257 @@ describe('DaemonSessionProvider', () => {
     ]);
   });
 
+  it.each(['success', 'failure'] as const)(
+    'handles stream completion before strict detach %s',
+    async (outcome) => {
+      sdkMocks.capabilities.mockResolvedValue({
+        workspaceCwd: '/primary',
+        features: ['standalone_sessions_v1'],
+      });
+      const stream = createClosableEvents();
+      const detach = createDeferred<void>();
+      const detachMock = vi
+        .fn()
+        .mockReturnValueOnce(detach.promise)
+        .mockResolvedValue(undefined);
+      const events = vi.fn(stream.events);
+      const session = createMockSession({
+        sessionId: 'standalone-detach-race',
+        clientId: 'client-detach-race',
+        session: {
+          sessionId: 'standalone-detach-race',
+          workspaceCwd: '/private/standalone-detach-race',
+          sourceType: 'standalone',
+          context: { kind: 'standalone' },
+          workingDirectory: { state: 'ready' },
+        },
+        replaySnapshot: createTextReplaySnapshot('old session transcript'),
+        events,
+        detach: detachMock,
+      });
+      sdkMocks.sessions.push(session);
+      let actions: DaemonSessionActions | undefined;
+      let connection: DaemonConnectionState | undefined;
+      let blocks: readonly DaemonTranscriptBlock[] = [];
+      function Harness() {
+        actions = useDaemonActions();
+        connection = useDaemonConnection();
+        blocks = useDaemonTranscriptBlocks();
+        return null;
+      }
+      await renderWithProvider(<Harness />, {
+        autoConnect: true,
+        sessionId: session.sessionId,
+        sessionContext: { kind: 'standalone' },
+      });
+      await act(async () => {
+        await vi.waitFor(() => {
+          expect(events).toHaveBeenCalled();
+          expect(connection?.sessionId).toBe(session.sessionId);
+          expect(connection?.clientId).toBe(session.clientId);
+          expect(blocks.length).toBeGreaterThan(0);
+        });
+      });
+      let pending!: Promise<{ error?: unknown }>;
+      act(() => {
+        pending = requireActions(actions)
+          .clearSession({ requireDetachSessionId: session.sessionId })
+          .then(
+            () => ({}),
+            (error: unknown) => ({ error }),
+          );
+      });
+      await act(async () => {
+        await vi.waitFor(() => expect(detachMock).toHaveBeenCalledOnce());
+        stream.close();
+        await flushPromises();
+      });
+      let result: { error?: unknown } = {};
+      await act(async () => {
+        if (outcome === 'failure') detach.reject(new Error('detach failed'));
+        else detach.resolve();
+        result = await pending;
+      });
+      if (outcome === 'failure') {
+        expect(result.error).toEqual(new Error('detach failed'));
+        expect(connection?.sessionId).toBe(session.sessionId);
+        expect(connection?.clientId).toBe(session.clientId);
+        await act(async () => {
+          await expect(
+            requireActions(actions).clearSession({
+              requireDetachSessionId: session.sessionId,
+            }),
+          ).resolves.toBeUndefined();
+        });
+        expect(detachMock).toHaveBeenCalledTimes(2);
+      } else {
+        expect(result.error).toBeUndefined();
+      }
+      expect(connection?.sessionId).toBeUndefined();
+      expect(connection?.clientId).toBeUndefined();
+      expect(blocks).toEqual([]);
+    },
+  );
+
+  it.each(['end', 'error'] as const)(
+    'receives responses after failed strict detach when the stream exits with %s',
+    async (streamExit) => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () => new Response(null, { status: 204 })),
+      );
+      sdkMocks.capabilities.mockResolvedValue({
+        workspaceCwd: '/primary',
+        features: ['standalone_sessions_v1'],
+      });
+      const streamEnded = createDeferred<void>();
+      const promptAccepted = createDeferred<void>();
+      const responseReleased = createDeferred<void>();
+      const detach = createDeferred<void>();
+      const events = vi.fn(async function* continuationEvents(
+        opts: { signal?: AbortSignal } = {},
+      ) {
+        const subscription = events.mock.calls.length;
+        const abort = new Promise<void>((resolve) => {
+          if (opts.signal?.aborted) resolve();
+          else
+            opts.signal?.addEventListener('abort', () => resolve(), {
+              once: true,
+            });
+        });
+        if (subscription === 1) {
+          await Promise.race([streamEnded.promise, abort]);
+          if (streamExit === 'error' && !opts.signal?.aborted) {
+            throw new Error('stream interrupted');
+          }
+          return;
+        }
+        await Promise.race([responseReleased.promise, abort]);
+        if (opts.signal?.aborted) return;
+        yield {
+          v: 1,
+          id: 10,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: 'response after failed delete' },
+            },
+          },
+        } satisfies DaemonEvent;
+        yield {
+          v: 1,
+          id: 11,
+          type: 'turn_complete',
+          data: { promptId: 'continuation-prompt', stopReason: 'end_turn' },
+        } satisfies DaemonEvent;
+        await abort;
+      });
+      const submitPrompt = vi.fn(async () => {
+        promptAccepted.resolve();
+        return { promptId: 'continuation-prompt', lastEventId: 9 };
+      });
+      const session = createMockSession({
+        sessionId: 'standalone-continue',
+        clientId: 'client-continue',
+        session: {
+          sessionId: 'standalone-continue',
+          workspaceCwd: '/private/standalone-continue',
+          sourceType: 'standalone',
+          context: { kind: 'standalone' },
+          workingDirectory: { state: 'ready' },
+        },
+        replaySnapshot: createTextReplaySnapshot('old session transcript'),
+        events,
+        detach: vi.fn(() => detach.promise),
+        submitPrompt,
+      });
+      sdkMocks.sessions.push(session);
+      let actions: DaemonSessionActions | undefined;
+      let connection: DaemonConnectionState | undefined;
+      let blocks: readonly DaemonTranscriptBlock[] = [];
+      let streamingState: ReturnType<typeof useDaemonStreamingState> = 'idle';
+      function Harness() {
+        actions = useDaemonActions();
+        connection = useDaemonConnection();
+        blocks = useDaemonTranscriptBlocks();
+        streamingState = useDaemonStreamingState();
+        return null;
+      }
+      await renderWithProvider(<Harness />, {
+        autoConnect: true,
+        sessionId: session.sessionId,
+        sessionContext: { kind: 'standalone' },
+      });
+      expect(events).toHaveBeenCalledOnce();
+      let clear!: Promise<{ error?: unknown }>;
+      act(() => {
+        clear = requireActions(actions)
+          .clearSession({ requireDetachSessionId: session.sessionId })
+          .then(
+            () => ({}),
+            (error: unknown) => ({ error }),
+          );
+      });
+      await act(async () => {
+        await vi.waitFor(() => expect(session.detach).toHaveBeenCalledOnce());
+        streamEnded.resolve();
+        await flushPromises();
+      });
+      await act(async () => {
+        detach.reject(new Error('detach failed'));
+        expect((await clear).error).toEqual(new Error('detach failed'));
+      });
+      expect(connection?.sessionId).toBe(session.sessionId);
+      expect(connection?.clientId).toBe(session.clientId);
+      let promptSettled = false;
+      let promptError: unknown;
+      await act(async () => {
+        void requireActions(actions)
+          .sendPrompt('continue after cancelling delete')
+          .then(
+            () => {
+              promptSettled = true;
+            },
+            (error: unknown) => {
+              promptSettled = true;
+              promptError = error;
+            },
+          );
+        await promptAccepted.promise;
+        await flushPromises();
+      });
+      expect(submitPrompt).toHaveBeenCalledOnce();
+      await act(async () => {
+        responseReleased.resolve();
+        await flushPromises();
+      });
+      await act(async () => {
+        await expect
+          .poll(
+            () => ({
+              eventSubscriptions: events.mock.calls.length,
+              promptSettled,
+              streamingState,
+              receivedAnswer: blocks.some(
+                (block) =>
+                  block.kind === 'assistant' &&
+                  block.text.includes('response after failed delete'),
+              ),
+            }),
+            { timeout: 1000 },
+          )
+          .toMatchObject({
+            eventSubscriptions: 2,
+            promptSettled: true,
+            streamingState: 'idle',
+            receivedAnswer: true,
+          });
+      });
+      expect(promptError).toBeUndefined();
+    },
+  );
+
   it('clears connection state before detach resolves', async () => {
     const detached = createDeferred<void>();
     const firstSession = createMockSession({

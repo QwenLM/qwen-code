@@ -199,6 +199,7 @@ export interface CreateDaemonSessionActionsArgs {
   sessionRecoveryGeneration: WeakMap<DaemonSessionClient, number>;
   heartbeatSupportedRef: RefBox<boolean>;
   manualSessionClearRef: RefBox<boolean>;
+  pendingStrictDetachRef: RefBox<Promise<void> | undefined>;
   skipNextCleanupDetachSessionRef: RefBox<DaemonSessionClient | undefined>;
   passiveAssistantDoneTimerRef: TimerRef;
   /**
@@ -424,6 +425,7 @@ export function createDaemonSessionActions({
   sessionRecoveryGeneration,
   heartbeatSupportedRef,
   manualSessionClearRef,
+  pendingStrictDetachRef,
   skipNextCleanupDetachSessionRef,
   passiveAssistantDoneTimerRef,
   daemonActivePromptRef,
@@ -2397,6 +2399,26 @@ export function createDaemonSessionActions({
           throw new Error('Current session attachment is not ready for detach');
         }
         manualSessionClearRef.current = true;
+        const detach = withActionTimeout(
+          session.detach(),
+          'Clear session timed out',
+        );
+        pendingStrictDetachRef.current = detach;
+        try {
+          await detach;
+        } catch (error) {
+          if (
+            sessionRef.current === session &&
+            pendingStrictDetachRef.current === detach
+          ) {
+            manualSessionClearRef.current = false;
+          }
+          throw error;
+        } finally {
+          if (pendingStrictDetachRef.current === detach) {
+            pendingStrictDetachRef.current = undefined;
+          }
+        }
       }
       if (sessionRef.current === session) {
         const refreshStandaloneOptions =
@@ -2415,11 +2437,10 @@ export function createDaemonSessionActions({
           setRestoreSessionNonce((nonce) => nonce + 1);
         }
       }
-      if (session) {
+      if (session && !requiredSessionId) {
         try {
           await withActionTimeout(session.detach(), 'Clear session timed out');
         } catch (error) {
-          if (requiredSessionId) throw error;
           console.warn('[DaemonSessionActions] detach on clear failed:', error);
         }
       }

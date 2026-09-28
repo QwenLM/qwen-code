@@ -128,6 +128,7 @@ export function StandaloneRecents({
   const loadedRef = useRef(false);
   const previousRefreshKeyRef = useRef(refreshKey);
   const busySessionIdRef = useRef<string | undefined>(undefined);
+  const pendingDeleteLeaveSessionIdRef = useRef<string | undefined>(undefined);
   const openGenerationRef = useRef(0);
   const openingSessionIdRef = useRef<string | undefined>(undefined);
   const { t } = useI18n();
@@ -378,8 +379,14 @@ export function StandaloneRecents({
     async (session: DaemonStandaloneSessionSummary): Promise<boolean> => {
       let leftCurrentSession = false;
       const succeeded = await run(session.sessionId, async () => {
-        if (session.sessionId === currentSessionId && !leftCurrentSession) {
+        if (
+          !leftCurrentSession &&
+          (session.sessionId === currentSessionId ||
+            session.sessionId === pendingDeleteLeaveSessionIdRef.current)
+        ) {
+          pendingDeleteLeaveSessionIdRef.current = session.sessionId;
           if (!(await onLeaveCurrentSession(session.sessionId))) return false;
+          pendingDeleteLeaveSessionIdRef.current = undefined;
           leftCurrentSession = true;
         }
         const result = await workspace.client.deleteStandaloneSessions([
@@ -476,6 +483,7 @@ export function StandaloneRecents({
     ) {
       return;
     }
+    pendingDeleteLeaveSessionIdRef.current = undefined;
     setDeleteCandidate(undefined);
   };
 
@@ -589,7 +597,10 @@ export function StandaloneRecents({
                   archiveState === 'archived'
                     ? () => void unarchiveSession(session)
                     : undefined,
-                onDelete: () => setDeleteCandidate(session),
+                onDelete: () => {
+                  pendingDeleteLeaveSessionIdRef.current = undefined;
+                  setDeleteCandidate(session);
+                },
               });
             })}
             {!loading && !loadError && visibleSessions.length === 0 && (
