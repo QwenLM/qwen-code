@@ -5053,6 +5053,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       hasHooksForEvent: vi.fn().mockReturnValue(false),
       isWorkflowsEnabled: vi.fn().mockReturnValue(false),
       setWorkflowsEnabled: vi.fn(),
+      isSafeMode: vi.fn().mockReturnValue(false),
       getBareMode: vi.fn().mockReturnValue(false),
       getFolderTrustFeature: vi.fn().mockReturnValue(false),
       isTrustedFolder: vi.fn().mockReturnValue(true),
@@ -5566,6 +5567,35 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       mockConnectionState.resolve();
       await agentPromise;
     });
+
+    // Both suppressions, on the path that hosts daemon sessions. The setting
+    // is on here, so this is the case the setting reader alone cannot see:
+    // an interactive TUI under the same flag binds nothing, while a hosted
+    // session that bound an inbox would publish its `ipcPath` — and having
+    // one is what makes a session addressable to every peer and allowed to
+    // send. Varying only the setting (the cases above) cannot tell the two
+    // gates apart.
+    it.each([
+      ['safe mode', 'isSafeMode'],
+      ['bare mode', 'getBareMode'],
+    ] as const)(
+      'registers nothing when the hosted session runs in %s',
+      async (_label, flag) => {
+        const innerConfig = await setupSessionMocks(`hosted-${flag}`);
+        innerConfig[flag].mockReturnValue(true);
+        vi.mocked(loadSettings).mockReturnValue(messagingOn());
+        const { agent, agentPromise } =
+          await bootInitializedAcpAgent(messagingOn());
+        await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+        expect(mockPeerMessagingStart).not.toHaveBeenCalled();
+        expect(mockRegisterSession).not.toHaveBeenCalled();
+        expect(innerConfig.updateSessionRegistryIpcPath).not.toHaveBeenCalled();
+
+        mockConnectionState.resolve();
+        await agentPromise;
+      },
+    );
 
     it("removes a session's record when the session goes", async () => {
       const innerConfig = await setupSessionMocks('hosted-gone');
@@ -31206,6 +31236,7 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockArgv.experimentalLsp = undefined;
     vi.mocked(resolveOutputLanguageOrPreserveAuto).mockImplementation(
       (v: string | null | undefined) => v ?? 'auto',
     );
@@ -31531,6 +31562,7 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings);
     vi.mocked(loadCliConfig).mockResolvedValue(discoveryConfig);
+    mockArgv.experimentalLsp = true;
 
     const { agent, agentPromise } = await getAgent();
     await expect(
@@ -31837,6 +31869,16 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
       expect(
         discoveryManager.discoverAllMcpToolsIncremental,
       ).toHaveBeenCalled(),
+    );
+    const discoveryLoad = vi
+      .mocked(loadCliConfig)
+      .mock.calls.find(
+        ([, argv]) =>
+          (argv as CliArgs | undefined)?.sessionId ===
+          'workspace-mcp-discovery',
+      );
+    expect(discoveryLoad?.[1]).toEqual(
+      expect.objectContaining({ experimentalLsp: false }),
     );
     vi.mocked(getMCPServerStatus).mockReturnValue(MCPServerStatus.CONNECTED);
     await expect(

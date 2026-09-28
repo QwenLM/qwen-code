@@ -33,8 +33,43 @@ export function resolveConfigPathLite(dir: string, cwd?: string): string {
   return resolved;
 }
 
-export function getGlobalQwenDirLite(): string {
-  const envDir = process.env['QWEN_HOME'];
+/**
+ * Reads a variable from `env` as a process spawned with that environment
+ * sees it, for an environment of string values. On Windows, names are
+ * case-insensitive, and of several spellings of one name only the first in
+ * sorted order is passed on, as Node's spawn does.
+ */
+export function readEnvironmentVariable(
+  env: Readonly<NodeJS.ProcessEnv>,
+  name: string,
+): string | undefined {
+  if (env === process.env || os.platform() !== 'win32') {
+    return env[name];
+  }
+  const upperName = name.toUpperCase();
+  const keys: string[] = [];
+  for (const key in env) keys.push(key);
+  const passed = keys
+    .sort()
+    .find((candidate) => candidate.toUpperCase() === upperName);
+  return passed === undefined ? undefined : env[passed];
+}
+
+/**
+ * Whether a path names one place for every process. On Windows, `\x` and
+ * `/x` take the drive of the working directory and `C:x` its directory on
+ * that drive; only a drive root or a UNC path with a server and a share does.
+ */
+export function isFullyQualifiedPath(location: string): boolean {
+  return os.platform() === 'win32'
+    ? /^(?:[a-zA-Z]:[\\/]|[\\/]{2}[^\\/]+[\\/]+[^\\/]+)/.test(location)
+    : path.isAbsolute(location);
+}
+
+export function getGlobalQwenDirLite(
+  env: Readonly<NodeJS.ProcessEnv> = process.env,
+): string {
+  const envDir = readEnvironmentVariable(env, 'QWEN_HOME');
   if (envDir) {
     return resolveConfigPathLite(envDir);
   }
@@ -45,9 +80,15 @@ export function getGlobalQwenDirLite(): string {
   return path.join(homeDir, SETTINGS_DIRECTORY_NAME);
 }
 
-export function getSystemSettingsPath(): string {
-  if (process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH']) {
-    return process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'];
+export function getSystemSettingsPath(
+  env: Readonly<NodeJS.ProcessEnv> = process.env,
+): string {
+  const configured = readEnvironmentVariable(
+    env,
+    'QWEN_CODE_SYSTEM_SETTINGS_PATH',
+  );
+  if (configured) {
+    return configured;
   }
   if (os.platform() === 'darwin') {
     return '/Library/Application Support/QwenCode/settings.json';
@@ -58,12 +99,18 @@ export function getSystemSettingsPath(): string {
   return '/etc/qwen-code/settings.json';
 }
 
-export function getSystemDefaultsPath(): string {
-  if (process.env['QWEN_CODE_SYSTEM_DEFAULTS_PATH']) {
-    return process.env['QWEN_CODE_SYSTEM_DEFAULTS_PATH'];
+export function getSystemDefaultsPath(
+  env: Readonly<NodeJS.ProcessEnv> = process.env,
+): string {
+  const configured = readEnvironmentVariable(
+    env,
+    'QWEN_CODE_SYSTEM_DEFAULTS_PATH',
+  );
+  if (configured) {
+    return configured;
   }
   return path.join(
-    path.dirname(getSystemSettingsPath()),
+    path.dirname(getSystemSettingsPath(env)),
     'system-defaults.json',
   );
 }

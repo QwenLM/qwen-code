@@ -27,7 +27,7 @@ async function fixture(
   handler: (
     path: string,
     body: Record<string, unknown>,
-  ) => { code?: number; body: unknown },
+  ) => { code?: number; body?: unknown; drop?: boolean },
 ) {
   server = createServer(async (req, res) => {
     expect(req.headers.authorization).toBe('Bearer test');
@@ -38,6 +38,10 @@ async function fixture(
       new URL(req.url!, 'http://fixture').pathname,
       body ? JSON.parse(body) : {},
     );
+    if (response.drop) {
+      res.destroy();
+      return;
+    }
     res.writeHead(response.code ?? 200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(response.body));
   });
@@ -111,6 +115,67 @@ it('waits for original terminal evidence after a cancellation request', async ()
     responseParts: [],
   });
   expect(starts).toBe(1);
+});
+
+it('retries a lost prepare reply with the original reservation', async () => {
+  const requests: Array<Record<string, unknown>> = [];
+  const broker = await fixture((path, body) => {
+    expect(path).toBe('/internal/runtime-broker/v1/executions:prepare');
+    requests.push(body);
+    return requests.length === 1
+      ? { drop: true }
+      : {
+          body: {
+            ...identity,
+            executionCallId: 'reserved',
+            status: { state: 'prepared' },
+          },
+        };
+  });
+  await expect(broker.prepare('call', 'sha256:original')).resolves.toBe(
+    'reserved',
+  );
+  expect(requests).toHaveLength(2);
+  expect(requests[1]).toEqual({
+    ...requests[0],
+    requestId: expect.any(String),
+  });
+  expect(requests[0]).toMatchObject({
+    idempotencyKey: 'turn:call',
+    toolCallId: 'call',
+    requestDigest: 'sha256:original',
+    reference: {
+      sessionId: 'turn',
+      promptId: 'turn',
+      callId: 'call',
+      argsDigest: 'sha256:original',
+    },
+  });
+});
+
+it('stops after two lost prepare replies', async () => {
+  let requests = 0;
+  const broker = await fixture(() => {
+    requests++;
+    return { drop: true };
+  });
+  await expect(broker.prepare('call', 'digest')).rejects.toThrow();
+  expect(requests).toBe(2);
+});
+
+it.each([
+  { code: 409, body: { code: 'runtime_idempotency_conflict' } },
+  { code: 503, body: { code: 'runtime_unavailable' } },
+  { body: { ...identity, harnessSessionId: 'wrong' } },
+  { body: { ...identity, status: { state: 'prepared' } } },
+])('does not retry a definite or invalid prepare reply: %j', async (reply) => {
+  let requests = 0;
+  const broker = await fixture(() => {
+    requests++;
+    return reply;
+  });
+  await expect(broker.prepare('call', 'digest')).rejects.toThrow();
+  expect(requests).toBe(1);
 });
 
 it('never starts a pre-cancelled reservation', async () => {
