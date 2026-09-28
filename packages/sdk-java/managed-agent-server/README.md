@@ -141,7 +141,7 @@ holding Harness seals it when closing), drains the Runtime binding (currently
 only an in-process retirement flag) and completes the operation; a failed
 attempt is retried with the dispatch backoff until it succeeds, so a `202`
 never means that tools stopped. After the Hosted Harness restarts, its calls fail with a
-generation error until Java restarts too, as Turns do, and the operation waits. A Harness that still holds the Session after its writer lease lapsed answers every close with `503` until it restarts. A delete of a closed or archived Session
+generation error until Java restarts too, as Turns do, and the operation waits. A Harness whose journal writes stopped after a failed commit answers every close with `503` until it restarts. A delete of a closed or archived Session
 needs no Harness. Archive accepts only a closed Session and completes at once;
 unarchive restores it to closed. Rename waits for the Harness to durably commit
 `session_metadata`, and a failed rename leaves a `PENDING` command that the

@@ -94,7 +94,7 @@ archive 只需要 Java 这一个权威，因此在同一个事务里完成：Ses
 
 失败的尝试让 operation 回到待定状态并计数，退避沿用 dispatch 设置：从 `dispatch.retry-initial-delay` 起翻倍，直到 `dispatch.retry-max-delay`。没有最后一次尝试：operation 只有在各步骤成功之后才会完成，因此 `202` 从不表示工具已停止；Harness 调用持续失败时，operation 保持 `running`。Hosted Harness 重启之后，Java 连接器仍沿用之前的 boot，因此它的调用会以 generation 错误失败，直到 Java 也重启为止，与 Turn 分发的情况相同；期间 operation 一直等待，之后还要等旧进程的 writer 租约过期。
 
-在 writer 租约过期后仍持有该 Session 的 Harness 同样无法关闭它：它的关闭要先记录其 activation 已结束，而租约过期后存储会拒绝这次写入，因此它对每次尝试都返回 `503`，operation 一直保持 `running`，直到该 Harness 重启，并且如上所述 Java 也要随之重启。目前只要一次续约失败，Harness 就会停止续约，例如跨越一次只重启 Java 的过程，因此空闲的 Session 可能落入这种状态。D4 不会在没有 Harness 的情况下完成这样的 close：[契约][contract]第 10 节让 close 与 delete 仍经过既有的 Hooks 与资源结算，而只有 Harness 能报告它的 Session 已结算。
+停止写入该 Session journal 的 Harness 同样无法关闭它。任何一次 journal 提交失败之后（例如在 Java 或其数据库不可用时发生的提交），Harness 会拒绝该 Session 之后的所有提交；而它的关闭要先记录其 activation 已结束，因此它对每次尝试都返回 `503`。它的 writer 租约可能仍然有效，因为 writer 自己的续约还在继续，所以其他服务器也无法完成这个 close；operation 一直保持 `running`，直到该 Harness 重启，并且如上所述 Java 也要随之重启。只有该租约也过期后，另一台服务器的 Harness 才能完成它（第 2 步）。D4 不会在没有 Harness 的情况下完成这样的 close：[契约][contract]第 10 节让 close 与 delete 仍经过既有的 Hooks 与资源结算，而只有 Harness 能报告它的 Session 已结算。
 
 两个步骤都是幂等的，因此重复的尝试是安全的。租约与 Turn 租约一样使用各服务器自己的时钟，而不是[契约收敛][closure]第 1 节要求的数据库时间，并且不续约。在默认租约（60 秒）与 Harness 请求超时（30 秒）下，同一服务器上的尝试只有在 worker 丢失后才会重叠；但时钟偏差、更短的租约或较慢的首次连接也可能让尝试重叠。认领代次让过期的尝试无法完成，重复的关闭也不会造成影响。
 
@@ -133,6 +133,8 @@ V16 把每条待定的 `ARCHIVE_SESSION` 与 `DELETE_SESSION` 命令转换为待
 
 已完成的命令不转换。重试它们会得到新的受理：重复的 archive 返回 `409 session_state_conflict`，重复的 delete 返回 `404`。升级前已归档的 Session 视为已关闭。
 
+不支持新旧版本混跑的滚动升级：V16 运行之前必须停掉所有旧版本服务器。升级之后由旧服务器留下的待定 archive 或 delete 不会被转换，它的待定命令会让该 Session 之后的所有生命周期变更都返回 `409 session_operation_active`；旧服务器的 unarchive 还会重新打开被 D4 关闭的 Session。
+
 V16 是 `main` 上下一个空闲版本号，两个未合并的 PR 也使用了它。它们之中后合并的那个必须重新编号；如果改为留出空号，已经应用了更高版本的数据库会被 Flyway 拒绝启动。
 
 ## 5. 测试
@@ -170,7 +172,7 @@ V16 是 `main` 上下一个空闲版本号，两个未合并的 PR 也使用了�
 - 重试窗口过后清理墓碑与 operation、清除已删除 Session 的内容，以及无法推进的 operation 的 `recovery_blocked` 结果。
 - D7 把其输入与取消 operation 加入同一张表与路由。
 - 不重启 Java 也能重新连接重启后的 Hosted Harness，Turn 分发同样需要这一点。
-- 让 Harness 在一次续约失败后仍继续续约 writer，使仍持有 Session 的 Harness 能够关闭它（4.5）。
+- 让 journal 写入因失败而停止的 Harness 仍能封存其 writer 并释放该 Session，使 close 能够完成结算（4.5）。
 - 使用数据库时间并续约的租约，即契约收敛第 1 节对持久投递的要求。
 - WebShell 的 capability 对象实现后提供 `sessionLifecycle`。
 

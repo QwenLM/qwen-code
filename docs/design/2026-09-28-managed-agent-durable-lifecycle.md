@@ -191,14 +191,16 @@ restarts, the Java connector keeps the previous boot, so its calls fail with a
 generation error until Java restarts too, as Turn dispatch does; the operation
 waits meanwhile, and then until the old process's writer lease expires.
 
-A Harness that still holds the Session after its writer lease lapsed cannot
-close it either. Its close first records that its activation ended, which the
-store refuses once the lease has lapsed, so it answers every attempt with
-`503` and the operation stays `running` until that Harness restarts, and Java
-with it as above. Today one failed renewal stops a Harness's renewals, for
-example across a Java-only restart, so an idle Session can end up there. D4
-does not complete such a close without the Harness: section 10 of the
-[contract][contract] keeps close and delete behind the existing Hooks and
+A Harness that stopped writing the Session's journal cannot close it either.
+After any failed journal commit, for example one made while Java or its
+database was unavailable, the Harness refuses every further commit for that
+Session, and its close first records that its activation ended, so it answers
+every attempt with `503`. Its writer lease can stay live, because the writer's
+own renewal keeps running, so no other server can complete the close; the
+operation stays `running` until that Harness restarts, and Java with it as
+above. Only when that lease lapses too can another server's Harness complete it
+(step 2). D4 does not complete such a close without the Harness: section 10 of
+the [contract][contract] keeps close and delete behind the existing Hooks and
 resource settlement, and only the Harness can report that its Session settled.
 
 Both steps are idempotent, so a repeated attempt is safe. Leases use each
@@ -280,6 +282,13 @@ actor. With one, the retry is a new request and meets the open operation
 Completed commands are not converted. A retry of one gets a new admission: a
 repeated archive answers `409 session_state_conflict` and a repeated delete
 `404`. A Session archived before the upgrade counts as closed.
+
+Mixed-version rolling upgrades are not supported: stop every server of the
+previous version before V16 runs. An archive or delete that an old server
+leaves pending after the upgrade is never converted, and its pending command
+blocks every later lifecycle change on that Session with
+`409 session_operation_active`; an old server's unarchive would also reopen a
+Session that D4 closed.
 
 V16 is the next free version on `main`, which two open pull requests also
 take. Whichever of them merges later must renumber; a gap left instead would
@@ -382,8 +391,8 @@ make Flyway refuse to start a database that already applied the later version.
 - D7 adding its input and cancel operations to the same table and route.
 - Reconnecting to a restarted Hosted Harness without restarting Java, which
   Turn dispatch needs as well.
-- Keeping the Harness's writer renewal alive after a failed renewal, so that a
-  Harness that still holds a Session can close it (4.5).
+- Letting a Harness whose journal writes stopped after a failure still seal its
+  writer and release the Session, so that a close can settle it (4.5).
 - Leases on database time with renewal, as section 1 of the contract closure
   asks for durable delivery.
 - The WebShell `sessionLifecycle` capability once the WebShell capability
