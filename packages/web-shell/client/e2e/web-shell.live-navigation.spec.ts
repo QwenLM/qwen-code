@@ -164,6 +164,9 @@ test('Live combines existing settings, voice entry and history without starting 
   ).toBeVisible();
   await rail.getByRole('button', { name: 'More', exact: true }).click();
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await expect(panel.getByRole('button', { name: /Experimental/ })).toHaveCount(
+    0,
+  );
   await expect(
     panel.getByRole('switch', { name: 'Enable Qwen Live' }),
   ).toHaveCount(0);
@@ -203,4 +206,20 @@ test('Live keeps legacy settings in hosts without its rail entry and Back in nar
   await page.getByRole('button', { name: /^back$/i }).click();
   await expect(page.getByRole('button', { name: 'Toggle menu' })).toBeVisible();
   expect(mutations).toEqual([]);
+});
+
+test('disabled Live without a registered workspace has an empty state', async ({
+  page,
+  baseURL,
+}) => {
+  const scenario = createWebShellDaemonScenario();
+  await installMockDaemon(page, scenario, { baseURL });
+  await page.goto('/?language=en-US');
+  await page
+    .locator('[data-web-shell-navigation-rail]')
+    .getByRole('button', { name: 'Live', exact: true })
+    .click();
+  const column = page.locator('[data-web-shell-sidebar-section="live"]');
+  await expect(column.locator('[data-slot="empty"]')).toBeVisible();
+  await expect(column).toContainText('No sessions');
 });

@@ -30,6 +30,7 @@ import {
 } from '@qwen-code/sdk/daemon';
 import {
   HouseIcon,
+  InboxIcon,
   BlocksIcon,
   BotIcon,
   TargetIcon,
@@ -72,6 +73,7 @@ import { useBrand, useBrandName } from '../../brandContext';
 import { useI18n } from '../../i18n';
 import { Input } from '../ui/input';
 import { Button } from '../ui/button';
+import { Empty, EmptyMedia, EmptyDescription } from '../ui/empty';
 import { Tabs, TabsList, TabsTrigger } from '../ui/tabs';
 import { Field, FieldGroup, FieldLabel } from '../ui/field';
 import {
@@ -6355,6 +6357,19 @@ export function WebShellSidebar({
                       </TabsTrigger>
                     </TabsList>
                   </Tabs>
+                )}
+              {liveView &&
+                connection.capabilities &&
+                !livePresence &&
+                liveWorkspaces.length === 0 && (
+                  <Empty className="gap-2 py-8">
+                    <EmptyMedia className="mb-0 text-muted-foreground/40">
+                      <InboxIcon size={40} strokeWidth={1} aria-hidden="true" />
+                    </EmptyMedia>
+                    <EmptyDescription className="text-xs">
+                      {t('sidebar.noSessions')}
+                    </EmptyDescription>
+                  </Empty>
                 )}
               {!channelView &&
                 (!liveNavigationEnabled || liveView) &&

@@ -426,6 +426,112 @@ describe('LiveVoiceSettingsCard', () => {
     },
   );
 
+  it.each([false, true])(
+    'refreshes reverted edits and blocks conflicting dirty edits (dirty=%s)',
+    async (dirty) => {
+      const setup = setupResult({ voice: 'Tina', nativeHost: false });
+      const container = mount(setup);
+      const voice = () =>
+        container.querySelector<HTMLInputElement>('#live-realtime-voice')!;
+      const save = () =>
+        container.querySelector<HTMLButtonElement>(
+          '[data-live-settings-save]',
+        )!;
+      act(() => setInputValue(voice(), 'Ethan'));
+      if (!dirty) act(() => setInputValue(voice(), 'Tina'));
+      const refreshed = {
+        ...setup,
+        status: { ...setup.status!, voice: 'Alice' },
+      };
+      act(() =>
+        mounted
+          .at(-1)!
+          .root.render(<LiveVoiceSettingsCard setup={refreshed} />),
+      );
+      expect(voice().value).toBe(dirty ? 'Ethan' : 'Alice');
+      expect(save().disabled).toBe(true);
+      await act(async () => save().click());
+      expect(setup.update).not.toHaveBeenCalled();
+      if (dirty) {
+        expect(container.textContent).toContain('settings.liveSetup.conflict');
+        act(() =>
+          Array.from(container.querySelectorAll('button'))
+            .find((button) =>
+              button.textContent?.includes('settings.liveSetup.reloadSettings'),
+            )!
+            .click(),
+        );
+        expect(voice().value).toBe('Alice');
+        expect(save().disabled).toBe(true);
+        act(() => setInputValue(voice(), 'Ethan'));
+        await act(async () => save().click());
+        expect(setup.update).toHaveBeenCalledExactlyOnceWith({
+          voice: 'Ethan',
+        });
+      }
+    },
+  );
+
+  it('does not block a dirty voice when an unrelated field refreshes', async () => {
+    const setup = setupResult({
+      voice: 'Tina',
+      endpoint: 'https://old.example/v1',
+      nativeHost: false,
+    });
+    const container = mount(setup);
+    act(() =>
+      setInputValue(
+        container.querySelector<HTMLInputElement>('#live-realtime-voice')!,
+        'Ethan',
+      ),
+    );
+    act(() =>
+      mounted.at(-1)!.root.render(
+        <LiveVoiceSettingsCard
+          setup={{
+            ...setup,
+            status: { ...setup.status!, endpoint: 'https://new.example/v1' },
+          }}
+        />,
+      ),
+    );
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('[data-live-settings-save]')!
+        .click(),
+    );
+    expect(setup.update).toHaveBeenCalledExactlyOnceWith({ voice: 'Ethan' });
+  });
+
+  it('keeps staged key removal visible and undoable after re-enabling', async () => {
+    const setup = setupResult({
+      nativeHost: false,
+      enabled: true,
+      storedKey: true,
+    });
+    const container = mount(setup);
+    const toggle =
+      container.querySelector<HTMLButtonElement>('[role="switch"]')!;
+    act(() => toggle.click());
+    act(() => removeKeyButton(container)!.click());
+    act(() => toggle.click());
+    expect(container.textContent).toContain(
+      'settings.liveSetup.keyRemovalPending',
+    );
+    act(() =>
+      Array.from(container.querySelectorAll('button'))
+        .find((button) =>
+          button.textContent?.includes('settings.liveSetup.undoRemoveKey'),
+        )!
+        .click(),
+    );
+    expect(
+      container.querySelector<HTMLButtonElement>('[data-live-settings-save]')!
+        .disabled,
+    ).toBe(true);
+    expect(setup.update).not.toHaveBeenCalled();
+  });
+
   it('stages shortcut clearing with other edits', async () => {
     const setup = setupResult({ voice: 'Tina' });
     const container = mount(setup);
@@ -680,7 +786,10 @@ describe('LiveVoiceSettingsCard', () => {
       // Every voice change is refused invalid_live_model here; offering the
       // control would only discard what the user typed.
       expect(input?.disabled).toBe(true);
-      expect(container.querySelector('[data-live-voice-save]')).toBeNull();
+      expect(
+        container.querySelector<HTMLButtonElement>('[data-live-settings-save]')!
+          .disabled,
+      ).toBe(true);
     });
 
     it('offers no voice control when the daemon predates selectable voices', () => {
@@ -692,7 +801,10 @@ describe('LiveVoiceSettingsCard', () => {
       // refused with empty_live_setup_update, so the control must not invite
       // one.
       expect(input?.disabled).toBe(true);
-      expect(container.querySelector('[data-live-voice-save]')).toBeNull();
+      expect(
+        container.querySelector<HTMLButtonElement>('[data-live-settings-save]')!
+          .disabled,
+      ).toBe(true);
     });
 
     it('notes that model and voice changes apply to the next call', () => {

@@ -3298,6 +3298,8 @@ export function App({
     () => resolveSidebarOptions(sidebar),
     [sidebar],
   );
+  // Menu defaults do not restrict page URLs; only explicit host lists do.
+  const hostSidebar = typeof sidebar === 'object' ? sidebar : undefined;
   const showMobileAccess = header?.showMobileAccess ?? false;
   const chatHeaderItems = header?.items ?? DEFAULT_CHAT_HEADER_ITEMS;
   const chatHeaderEnabled =
@@ -9350,8 +9352,25 @@ export function App({
       setSidebarSection(activePanel);
     }
   }, [activePanel]);
+  const appliedHistoryRevision = useRef<number | undefined>(undefined);
+  useEffect(() => {
+    if (navigation?.historyRevision === appliedHistoryRevision.current) return;
+    appliedHistoryRevision.current = navigation?.historyRevision;
+    if (navigation?.route.page === 'chat') {
+      setSidebarSection(
+        navigation.route.context === 'live' && liveSidebarEnabled
+          ? 'live'
+          : 'home',
+      );
+    }
+  }, [navigation, liveSidebarEnabled]);
   const sidebarPage =
-    activePanel ??
+    (activePanel === 'mcp' ||
+    activePanel === 'skills' ||
+    activePanel === 'agents' ||
+    activePanel === 'extensions'
+      ? 'home'
+      : activePanel) ??
     (mainView === 'chat' || mainView === 'cockpit'
       ? (sidebarSection === 'channels' && channelSidebarEnabled) ||
         (sidebarSection === 'live' && liveSidebarEnabled)
@@ -9437,9 +9456,9 @@ export function App({
       (projectFeaturesAvailable &&
         (page !== 'live' || liveSidebarEnabled) &&
         (page === 'settings'
-          ? sidebarOptions.footer !== false &&
-            (sidebarOptions.footer?.items?.includes('settings') ?? true)
-          : (sidebarOptions.primaryNav?.items?.some(
+          ? hostSidebar?.footer !== false &&
+            (hostSidebar?.footer?.items?.includes('settings') ?? true)
+          : (hostSidebar?.primaryNav?.items?.some(
               (item) => item === primaryItem,
             ) ?? true)));
     if (navigationAppliedRef.current === navigation.revision && allowed) return;
@@ -9468,8 +9487,8 @@ export function App({
   }, [
     navigation,
     projectFeaturesAvailable,
-    sidebarOptions.footer,
-    sidebarOptions.primaryNav?.items,
+    hostSidebar?.footer,
+    hostSidebar?.primaryNav?.items,
     liveSidebarEnabled,
     workspaceCapabilitiesReady,
   ]);

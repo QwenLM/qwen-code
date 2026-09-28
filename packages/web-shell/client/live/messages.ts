@@ -132,6 +132,11 @@ export const LIVE_MESSAGES_EN: Record<string, LiveMessage> = {
   'settings.liveSetup.confirmTitle': 'Enable experimental Qwen Live?',
   'settings.liveSetup.confirmDescription':
     'Qwen Code will download, verify, install, and open the signed Qwen Live Host app. macOS will then ask you to grant Microphone, Accessibility, and Screen Recording access.',
+  'settings.liveSetup.conflict':
+    'Settings changed elsewhere while you were editing. Your draft has not been saved. Load the latest settings and review your changes before saving.',
+  'settings.liveSetup.reloadSettings': 'Discard draft and load latest settings',
+  'settings.liveSetup.keyRemovalPending': 'Key will be removed on save',
+  'settings.liveSetup.undoRemoveKey': 'Undo removal',
   'settings.liveSetup.cancel': 'Cancel',
   'settings.liveSetup.confirm': 'Enable and install',
   'live.refresh': 'Refresh status',
@@ -275,6 +280,11 @@ export const LIVE_MESSAGES_ZH: Record<string, LiveMessage> = {
   'settings.liveSetup.confirmTitle': '启用实验性 Qwen Live？',
   'settings.liveSetup.confirmDescription':
     'Qwen Code 将自动下载、校验、安装并打开已签名的 Qwen Live Host。之后 macOS 会要求授予麦克风、辅助功能和屏幕录制权限。',
+  'settings.liveSetup.conflict':
+    '编辑期间设置已在其他地方发生变化，当前草稿尚未保存。请加载最新设置，重新核对修改后再保存。',
+  'settings.liveSetup.reloadSettings': '放弃草稿并加载最新设置',
+  'settings.liveSetup.keyRemovalPending': '保存时将移除 Key',
+  'settings.liveSetup.undoRemoveKey': '撤销移除',
   'settings.liveSetup.cancel': '取消',
   'settings.liveSetup.confirm': '启用并安装',
   'live.refresh': '刷新状态',

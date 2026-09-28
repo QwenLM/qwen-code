@@ -891,6 +891,7 @@ const result = await shellRef.current?.navigateToMessage({
 基础路径下支持 `/session/<id>`、`/plugins`、`/channels`、`/live`、`/scheduled-tasks`、
 `/goals` 和 `/settings`。会话保留原有 `workspace` / `context` 协议，页面仅定位
 页面，设置不持久化分类或作用域。无关参数（包括宿主的实例参数）和 fragment 保留。
+路由可用性遵守宿主显式传入的菜单列表；省略列表时的仅首页默认布局，不限制既有设置、插件、目标等页面 URL。`/live` 仍要求存在可用 Live 导航入口。
 主动导航新增历史，重复点击不新增；浏览器前进后退恢复页面和会话。页面来源保存在
 history.state，直接打开或复制到新标签页的页面没有来源时返回空白聊天，不创建会话。
 

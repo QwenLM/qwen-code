@@ -4,6 +4,8 @@ import {
   installMockDaemon,
 } from './utils/mockDaemon';
 
+import { submitLocalCommand } from './visuals/harness';
+
 const homeColumn = '[data-web-shell-home-column]';
 const railSelector = '[data-web-shell-navigation-rail]';
 
@@ -243,4 +245,26 @@ test('Home-only hosts retain secondary collapse and hosts with another item show
   await expect(
     page.getByRole('button', { name: 'Split View', exact: true }),
   ).toBeVisible();
+});
+
+test('local management commands keep Home visible and selected', async ({
+  page,
+  baseURL,
+}) => {
+  const scenario = createWebShellDaemonScenario();
+  await installMockDaemon(page, scenario, { baseURL });
+  await page.route('**/workspaces/*/runtime/mcp', (route) =>
+    route.fulfill({ json: scenario.mcp }),
+  );
+  for (const command of ['mcp', 'skills', 'agents', 'extensions']) {
+    await page.goto('/?language=en-US');
+    await submitLocalCommand(page, `/${command}`);
+    await expect(page.getByTestId('inline-panel')).toBeVisible();
+    await expect(page.locator(homeColumn)).toBeVisible();
+    await expect(
+      page
+        .locator(railSelector)
+        .getByRole('button', { name: 'Home', exact: true }),
+    ).toHaveAttribute('aria-current', 'page');
+  }
 });

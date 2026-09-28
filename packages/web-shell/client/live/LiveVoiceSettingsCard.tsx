@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { FlaskConicalIcon } from 'lucide-react';
 import type {
   DaemonLiveRequirementState,
@@ -81,6 +81,7 @@ export function LiveVoiceSettingsCard({
   const [customModel, setCustomModel] = useState(false);
   const [saving, setSaving] = useState(false);
   const status = setup.status;
+  const draftBaseline = useRef(new Map<keyof DaemonLiveSetupUpdate, unknown>());
   const savedEnabled = status?.enabled === true;
   const enabled = draft.enabled ?? savedEnabled;
   const busy = saving || setup.mutating || (setup.loading && !status);
@@ -120,6 +121,38 @@ export function LiveVoiceSettingsCard({
   const nativeHost = status?.nativeHost !== false;
   const shortcut = draft.shortcut ?? status?.shortcut ?? 'Command+E';
 
+  const savedValue = (key: keyof DaemonLiveSetupUpdate) =>
+    key === 'apiKey'
+      ? JSON.stringify([
+          status?.keyConfigured,
+          status?.keySource,
+          status?.storedKey,
+          status?.keyEnv,
+        ])
+      : key === 'endpoint'
+        ? JSON.stringify([status?.keySource, savedEndpoint])
+        : status?.[key];
+  const stage = <K extends keyof DaemonLiveSetupUpdate>(
+    key: K,
+    value: DaemonLiveSetupUpdate[K],
+  ) => {
+    if (draft[key] === undefined)
+      draftBaseline.current.set(key, savedValue(key));
+    setDraft((current) => {
+      const next = { ...current, [key]: value };
+      // Route status does not expose the saved independent endpoint. An
+      // explicitly cleared endpoint must still be sent when leaving a route.
+      if (
+        value === undefined ||
+        (key !== 'apiKey' &&
+          !(key === 'endpoint' && status?.keySource === 'route') &&
+          value === (key === 'endpoint' ? savedEndpoint : savedValue(key)))
+      )
+        delete next[key];
+      return next;
+    });
+  };
+
   useEffect(() => {
     if (!status) {
       setDraft({});
@@ -153,11 +186,14 @@ export function LiveVoiceSettingsCard({
     update.shortcut = shortcut;
   const dirty = Object.keys(update).length > 0;
   const invalid = update.model === '' || update.voice === '';
+  const conflict = (
+    Object.keys(update) as Array<keyof DaemonLiveSetupUpdate>
+  ).some((key) => draftBaseline.current.get(key) !== savedValue(key));
 
   // Validate the entire candidate configuration in one daemon request; retain
   // the draft on failure so a rejected field can be corrected and retried.
   const save = async () => {
-    if (busy || !status || !dirty || invalid) return;
+    if (busy || !status || !dirty || invalid || conflict) return;
     setSaving(true);
     try {
       await setup.update(update);
@@ -170,14 +206,14 @@ export function LiveVoiceSettingsCard({
     }
   };
   const requestSave = () => {
-    if (busy || !status || !dirty || invalid) return;
+    if (busy || !status || !dirty || invalid || conflict) return;
     if (enabled && !savedEnabled && nativeHost) setConfirmOpen(true);
     else void save();
   };
   const chooseModel = (value: string) => {
     setCustomModel(value === CUSTOM_MODEL);
     if (value !== CUSTOM_MODEL) {
-      setDraft((current) => ({ ...current, model: value }));
+      stage('model', value);
     }
   };
 
@@ -214,9 +250,7 @@ export function LiveVoiceSettingsCard({
             checked={enabled}
             disabled={busy || !status}
             aria-label={t('settings.liveSetup.enable')}
-            onCheckedChange={(enabled) =>
-              setDraft((current) => ({ ...current, enabled }))
-            }
+            onCheckedChange={(enabled) => stage('enabled', enabled)}
           />
         )}
       </div>
@@ -255,12 +289,7 @@ export function LiveVoiceSettingsCard({
                         ? t('settings.liveSetup.endpointUnchanged')
                         : DEFAULT_BASE_URL
                     }
-                    onChange={(event) =>
-                      setDraft((current) => ({
-                        ...current,
-                        endpoint: event.target.value,
-                      }))
-                    }
+                    onChange={(event) => stage('endpoint', event.target.value)}
                     onKeyDown={(event) => {
                       if (event.key === 'Enter') requestSave();
                     }}
@@ -302,20 +331,30 @@ export function LiveVoiceSettingsCard({
                   {t('settings.liveSetup.configured')}
                 </span>
               )}
-              {!enabled &&
-              (status?.storedKey === true ||
-                (status?.keyConfigured === true && !keyFromRoute)) ? (
+              {keyCleared ? (
+                <>
+                  <span className="text-xs text-muted-foreground">
+                    {t('settings.liveSetup.keyRemovalPending')}
+                  </span>
+                  <Button
+                    type="button"
+                    size="xs"
+                    variant="ghost"
+                    disabled={busy}
+                    onClick={() => stage('apiKey', undefined)}
+                  >
+                    {t('settings.liveSetup.undoRemoveKey')}
+                  </Button>
+                </>
+              ) : !enabled &&
+                (status?.storedKey === true ||
+                  (status?.keyConfigured === true && !keyFromRoute)) ? (
                 <Button
                   type="button"
                   size="xs"
                   variant="ghost"
                   disabled={busy || keyCleared}
-                  onClick={() =>
-                    setDraft((current) => ({
-                      ...current,
-                      apiKey: { operation: 'clear' },
-                    }))
-                  }
+                  onClick={() => stage('apiKey', { operation: 'clear' })}
                 >
                   {t('settings.liveSetup.removeKey')}
                 </Button>
@@ -360,10 +399,12 @@ export function LiveVoiceSettingsCard({
                     : t('settings.liveSetup.apiKeyPlaceholder')
                 }
                 onChange={(event) =>
-                  setDraft((current) => ({
-                    ...current,
-                    apiKey: { operation: 'replace', value: event.target.value },
-                  }))
+                  stage(
+                    'apiKey',
+                    event.target.value
+                      ? { operation: 'replace', value: event.target.value }
+                      : undefined,
+                  )
                 }
                 onKeyDown={(event) => {
                   if (event.key === 'Enter') requestSave();
@@ -417,12 +458,7 @@ export function LiveVoiceSettingsCard({
                 data-live-model-input
                 value={model}
                 disabled={busy}
-                onChange={(event) =>
-                  setDraft((current) => ({
-                    ...current,
-                    model: event.target.value,
-                  }))
-                }
+                onChange={(event) => stage('model', event.target.value)}
                 onKeyDown={(event) => {
                   if (event.key === 'Enter') requestSave();
                 }}
@@ -457,12 +493,7 @@ export function LiveVoiceSettingsCard({
               autoComplete="off"
               value={voice}
               disabled={busy || !voiceEditable}
-              onChange={(event) =>
-                setDraft((current) => ({
-                  ...current,
-                  voice: event.target.value,
-                }))
-              }
+              onChange={(event) => stage('voice', event.target.value)}
               onKeyDown={(event) => {
                 if (event.key === 'Enter') requestSave();
               }}
@@ -486,19 +517,34 @@ export function LiveVoiceSettingsCard({
             captureLabel={t('settings.liveShortcut.capture')}
             clearLabel={t('settings.liveShortcut.clear')}
             offLabel={t('settings.liveShortcut.off')}
-            onChange={async (shortcut) =>
-              setDraft((current) => ({ ...current, shortcut }))
-            }
+            onChange={async (shortcut) => stage('shortcut', shortcut)}
           />
         </div>
       </div>
 
+      {conflict && (
+        <div role="alert" className="space-y-2 text-sm text-destructive">
+          <p>{t('settings.liveSetup.conflict')}</p>
+          <Button
+            type="button"
+            variant="outline"
+            disabled={busy}
+            onClick={() => {
+              setDraft({});
+              setCustomModel(false);
+              setConfirmOpen(false);
+            }}
+          >
+            {t('settings.liveSetup.reloadSettings')}
+          </Button>
+        </div>
+      )}
       <div className="flex justify-end">
         <Button
           type="button"
           data-live-settings-save
           className="transition-none"
-          disabled={busy || !status || !dirty || invalid}
+          disabled={busy || !status || !dirty || invalid || conflict}
           onClick={requestSave}
         >
           {saving || setup.mutating ? <Spinner /> : null}

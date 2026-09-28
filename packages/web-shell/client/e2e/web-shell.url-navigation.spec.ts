@@ -93,6 +93,12 @@ for (const [path, label] of pages) {
     await page.goBack();
     await expect(page).toHaveURL(/\/\?instanceId=host&instanceType=dsw$/);
     await expect(page.getByTestId('inline-panel')).toHaveCount(0);
+    await expect(
+      page
+        .locator('[data-web-shell-navigation-rail]')
+        .getByRole('button', { name: 'Home', exact: true }),
+    ).toHaveAttribute('aria-current', 'page');
+    await expect(page.locator('[data-web-shell-home-column]')).toBeVisible();
     await page.goForward();
     await expectPage(page, path);
     expect(
@@ -290,4 +296,35 @@ test('failed sidebar session keeps its URL and retry targets that session @smoke
   expect(
     daemon.requests.filter((r) => r.method === 'POST' && r.path === '/session'),
   ).toHaveLength(0);
+});
+
+test('host defaults keep existing page URLs while explicit lists still restrict routes', async ({
+  page,
+  baseURL,
+}) => {
+  await install(page, baseURL!);
+  await page.route('**/agentic-code**', async (route) => {
+    if (!route.request().isNavigationRequest()) return route.fallback();
+    const response = await route.fetch({
+      url: `${baseURL}/e2e/url-navigation-harness.html`,
+    });
+    await route.fulfill({ response });
+  });
+  for (const mode of ['hidden', 'omitted', 'default']) {
+    for (const path of ['settings', 'plugins', 'goals']) {
+      await page.goto(`/agentic-code/${path}?sidebar=${mode}`);
+      await expectPage(page, path);
+      await expect(page).toHaveURL(
+        new RegExp(`/agentic-code/${path}\\?sidebar=${mode}$`),
+      );
+    }
+    await page.goto(`/agentic-code/live?sidebar=${mode}`);
+    await expect(page).toHaveURL(
+      new RegExp(`/agentic-code\\?sidebar=${mode}$`),
+    );
+    await expect(page.getByTestId('inline-panel')).toHaveCount(0);
+  }
+  await page.goto('/agentic-code/live?sidebar=explicit');
+  await expect(page).toHaveURL(/\/agentic-code\?sidebar=explicit$/);
+  await expect(page.getByTestId('inline-panel')).toHaveCount(0);
 });
