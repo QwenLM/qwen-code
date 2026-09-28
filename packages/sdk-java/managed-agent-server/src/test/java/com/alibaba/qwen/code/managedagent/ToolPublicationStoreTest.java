@@ -6,6 +6,9 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.store.ToolPublicationContract;
+import com.alibaba.qwen.code.managedagent.store.ToolPublicationDataStore;
+import com.alibaba.qwen.code.managedagent.store.ToolPublicationAdmissionStore;
+import com.alibaba.qwen.code.managedagent.store.ToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.store.ToolPublicationStore;
 import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
@@ -18,6 +21,9 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.nio.charset.StandardCharsets;
+import java.io.ByteArrayInputStream;
+import java.io.InputStream;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.Base64;
 import java.util.List;
@@ -109,6 +115,222 @@ class ToolPublicationStoreTest {
                 + event(2, "tool.intent", intent) + "{}\n", 2,
                 List.of(resource(binding.get("argsRef"), args), resource(binding.get("checkpointRef"), checkpoint)),
                 "checkpoint-1");
+    }
+
+    @Test
+    void commitsLargeBlockedOutcomeThroughVerifiedCatalogObject() {
+        reserve();
+        Map<String, byte[]> objects = new java.util.HashMap<>();
+        ToolPublicationObjectStore bucket = new ToolPublicationObjectStore() {
+            @Override
+            public void putIfAbsent(String key, byte[] bytes) {
+                objects.putIfAbsent(key, bytes.clone());
+            }
+
+            @Override
+            public InputStream open(String key) {
+                return new ByteArrayInputStream(objects.get(key));
+            }
+
+            @Override
+            public void requireUnversioned() {
+            }
+        };
+        sessions.setPublicationObjects(bucket);
+        var data = new ToolPublicationDataStore(jdbc, manager, store, sessions, bucket,
+                Duration.ofMinutes(2), Duration.ofSeconds(30));
+        JsonNode key = binding.get("sessionKey");
+        ObjectNode capture = JSON.createObjectNode().put("captureStatus", "unavailable")
+                .put("captureReason", "storage_failed").put("previewTruncated", false)
+                .put("deliveryStatus", "pending").putNull("manifest");
+        ObjectNode envelope = JSON.createObjectNode().put("executionStatus", "error");
+        envelope.putArray("responseParts").add("x".repeat(100_000));
+        envelope.set("capture", capture);
+        data.finish(key, "pub-1", PUBLICATION_TOKEN, "large-finish", envelope);
+        ObjectNode outcome = JSON.createObjectNode().put("schemaVersion", 1)
+                .put("decision", "blocked").putNull("manifestRef");
+        outcome.set("envelope", envelope);
+        outcome.set("history", JSON.createObjectNode().put("messageId", "history-large")
+                .put("createdAt", "2026-09-28T00:00:00Z").put("model", "test"));
+        JsonNode admission = data.prepareAdmission(key, "pub-1", "writer-1", 1, WRITER_TOKEN, outcome);
+        assertThat(admission.path("byteLength").asLong()).isGreaterThan(64 * 1024);
+        ObjectNode receiptPayload = JSON.createObjectNode().put("executionCallId", "execution-1")
+                .put("historyRevision", sequence + 1).putNull("resultRef");
+        receiptPayload.set("toolOutcomeRef", admission);
+        receiptPayload.putArray("resources");
+        String records = event(sequence + 1, "tool.receipt", receiptPayload) + "{}\n";
+        var commit = new ManagedSessionStoreModels.CommitTransactionRequest("workspace-1", "writer-1", 1,
+                revision, sequence, "transaction-large", "recordToolResult", "execution-1",
+                admission.path("digest").asText(), sequence + 1, sequence + 1, 1,
+                digest(records), commitDigest, digest(records), 1, null, 2,
+                Base64.getEncoder().encodeToString(records.getBytes(StandardCharsets.UTF_8)),
+                digest(records), List.of(new ManagedSessionStoreModels.CommitResource(
+                        admission.path("resourceId").asText(), "managed-tool-outcome", 1,
+                        admission.path("byteLength").asLong(), admission.path("digest").asText(), null)));
+        var admissions = new ToolPublicationAdmissionStore(jdbc, manager, sessions, data);
+        assertThat(admissions.commitReceipt(key, "pub-1", WRITER_TOKEN, commit)
+                .path("decision").asText()).isEqualTo("blocked");
+        assertThat(admissions.commitReceipt(key, "pub-1", WRITER_TOKEN, commit)
+                .path("decision").asText()).isEqualTo("blocked");
+        assertThat(sessions.readResource("tenant-1", "workspace-1", "session-1",
+                admission.path("resourceId").asText(), WRITER_TOKEN).bytes())
+                .isEqualTo(outcome.toString().getBytes(StandardCharsets.UTF_8));
+        String objectKey = jdbc.queryForObject("SELECT object_key FROM qwen_tool_publication_object"
+                + " WHERE slot_key = 'admission'", String.class);
+        objects.get(objectKey)[0] = 'z';
+        assertThatThrownBy(() -> sessions.readResource("tenant-1", "workspace-1", "session-1",
+                admission.path("resourceId").asText(), WRITER_TOKEN)).hasMessageContaining("verification");
+    }
+
+    @Test
+    void publishesImmutableSegmentAndResourceUnderOriginalAuthorization() {
+        reserve();
+        Map<String, byte[]> objects = new java.util.HashMap<>();
+        ToolPublicationObjectStore bucket = new ToolPublicationObjectStore() {
+            @Override
+            public void putIfAbsent(String key, byte[] bytes) {
+                objects.putIfAbsent(key, bytes.clone());
+            }
+
+            @Override
+            public InputStream open(String key) {
+                return new ByteArrayInputStream(objects.get(key));
+            }
+
+            @Override
+            public void requireUnversioned() {
+            }
+        };
+        var data = new ToolPublicationDataStore(jdbc, manager, store, sessions, bucket,
+                Duration.ofMinutes(2), Duration.ofSeconds(30));
+        JsonNode key = binding.get("sessionKey");
+        byte[] segment = "abc".getBytes(StandardCharsets.UTF_8);
+        JsonNode first = data.publishSegment(key, "pub-1", PUBLICATION_TOKEN,
+                "operation-1", "stdout", 0, segment, digest("abc"));
+        segment[0] = 'x';
+        assertThat(data.publishSegment(key, "pub-1", PUBLICATION_TOKEN,
+                "operation-1", "stdout", 0, "abc".getBytes(StandardCharsets.UTF_8), digest("abc")))
+                .isEqualTo(first);
+        assertThat(data.operationStatus(key, "pub-1", PUBLICATION_TOKEN, "operation-1")
+                .path("receipt")).isEqualTo(first);
+        assertThat(objects.values()).singleElement().satisfies(bytes ->
+                assertThat(bytes).isEqualTo("abc".getBytes(StandardCharsets.UTF_8)));
+        assertThat(data.prefix(key, "pub-1", PUBLICATION_TOKEN, "operation-prefix", "stdout")
+                .path("byteLength").asLong()).isEqualTo(3);
+        assertThat(data.seal(key, "pub-1", PUBLICATION_TOKEN, "operation-seal", "stdout", 1,
+                3, digest("abc")).path("segmentCount").asInt()).isEqualTo(1);
+        data.seal(key, "pub-1", PUBLICATION_TOKEN, "operation-seal-empty", "stderr", 0,
+                0, digest(""));
+        assertThat(data.prefix(key, "pub-1", PUBLICATION_TOKEN, "operation-prefix-2", "stdout")
+                .path("sealed").asBoolean()).isTrue();
+        assertThatThrownBy(() -> data.publishSegment(key, "pub-1", PUBLICATION_TOKEN,
+                "operation-extra", "stdout", 1, "x".getBytes(StandardCharsets.UTF_8), null))
+                .hasMessageContaining("sealed");
+        assertThatThrownBy(() -> data.publishSegment(key, "pub-1", PUBLICATION_TOKEN,
+                "operation-2", "stdout", 0, "abd".getBytes(StandardCharsets.UTF_8), null))
+                .hasMessageContaining("conflicts");
+        ObjectNode page = JSON.createObjectNode().put("toolResult", "managed-tool-result/1")
+                .put("type", "page").put("captureId", "capture-1")
+                .put("streamId", "stdout").put("firstOrdinal", 0).put("offset", 0);
+        page.putArray("segments").add(JSON.createObjectNode().put("byteLength", 3).put("digest", digest("abc")));
+        JsonNode ref = data.publishResource(key, "pub-1", PUBLICATION_TOKEN,
+                "operation-3", "page:stdout:0", "managed-tool-result-page",
+                page.toString().getBytes(StandardCharsets.UTF_8));
+        assertThat(data.readResource(key, "pub-1", ref.path("resourceId").asText()))
+                .isEqualTo(page.toString().getBytes(StandardCharsets.UTF_8));
+        assertThat(jdbc.queryForObject("SELECT capture_used_bytes FROM qwen_tool_publication",
+                Long.class)).isEqualTo(3L);
+        assertThat(jdbc.queryForObject("SELECT producer_used_bytes FROM qwen_tool_publication",
+                Long.class)).isEqualTo(page.toString().getBytes(StandardCharsets.UTF_8).length);
+        ObjectNode manifest = JSON.createObjectNode().put("toolResult", "managed-tool-result/1")
+                .put("type", "manifest").put("tenantId", "tenant-1").put("sessionId", "session-1")
+                .put("turnId", "turn-1").put("executionCallId", "execution-1")
+                .put("callId", "runtime-call-1")
+                .put("invocationDigest", binding.path("reference").path("argsDigest").asText())
+                .put("bindingGeneration", "1").put("captureId", "capture-1")
+                .put("revision", 1).put("executionStatus", "success").put("exitCode", 0)
+                .putNull("signal").put("captureScope", "process_pipes")
+                .put("capturePolicy", "complete_required").put("captureStatus", "complete")
+                .putNull("captureReason").put("upstreamTruncated", false);
+        ObjectNode content = JSON.createObjectNode().put("streamId", "stdout")
+                .put("role", "stdout").put("mimeType", "application/octet-stream")
+                .put("state", "sealed").put("byteLength", 3).put("digest", digest("abc"));
+        content.putArray("missingRanges");
+        ObjectNode body = JSON.createObjectNode();
+        ObjectNode pageLink = JSON.createObjectNode().put("segmentCount", 1).put("byteLength", 3);
+        pageLink.set("ref", ref);
+        body.putArray("pages").add(pageLink);
+        content.set("body", body);
+        manifest.putArray("contents").add(content);
+        ObjectNode stderr = JSON.createObjectNode().put("streamId", "stderr")
+                .put("role", "stderr").put("mimeType", "application/octet-stream")
+                .put("state", "sealed").put("byteLength", 0).put("digest", digest(""));
+        stderr.putArray("missingRanges");
+        ObjectNode emptyBody = JSON.createObjectNode();
+        emptyBody.putArray("pages");
+        stderr.set("body", emptyBody);
+        ((com.fasterxml.jackson.databind.node.ArrayNode) manifest.path("contents")).add(stderr);
+        JsonNode manifestRef = data.publishResource(key, "pub-1", PUBLICATION_TOKEN,
+                "operation-manifest", "manifest:1", "managed-tool-result-manifest",
+                manifest.toString().getBytes(StandardCharsets.UTF_8));
+        ObjectNode capture = JSON.createObjectNode().put("captureStatus", "complete")
+                .putNull("captureReason").put("previewTruncated", false)
+                .put("deliveryStatus", "pending");
+        capture.set("manifest", manifestRef);
+        ObjectNode envelope = JSON.createObjectNode().put("executionStatus", "success");
+        envelope.putArray("responseParts");
+        envelope.set("capture", capture);
+        assertThat(data.finish(key, "pub-1", PUBLICATION_TOKEN,
+                "operation-finish", envelope).path("producerPhase").asText()).isEqualTo("FINISHED");
+        assertThat(data.finished(key, "pub-1", WRITER_TOKEN).path("result")).isEqualTo(envelope);
+        store.apply(request("fence"), WRITER_TOKEN, null);
+        assertThat(data.finished(key, "pub-1", WRITER_TOKEN).path("result")).isEqualTo(envelope);
+        ObjectNode outcome = JSON.createObjectNode().put("schemaVersion", 1)
+                .put("decision", "committed");
+        outcome.set("envelope", envelope);
+        outcome.set("manifestRef", manifestRef);
+        outcome.set("history", JSON.createObjectNode().put("messageId", "history-1")
+                .put("createdAt", "2026-09-28T00:00:00Z").put("model", "test"));
+        JsonNode admission = data.prepareAdmission(key, "pub-1", "writer-1", 1,
+                WRITER_TOKEN, outcome);
+        assertThat(data.readResource(key, "pub-1", admission.path("resourceId").asText()))
+                .isEqualTo(outcome.toString().getBytes(StandardCharsets.UTF_8));
+        ObjectNode receiptPayload = JSON.createObjectNode().put("executionCallId", "execution-1")
+                .put("historyRevision", sequence + 1);
+        receiptPayload.set("toolOutcomeRef", admission);
+        receiptPayload.set("resultRef", manifestRef);
+        receiptPayload.putArray("resources").add(manifestRef);
+        String recordBytes = event(sequence + 1, "tool.receipt", receiptPayload) + "{}\n";
+        long receiptSequence = sequence + 1;
+        var commit = new ManagedSessionStoreModels.CommitTransactionRequest("workspace-1", "writer-1", 1,
+                revision, sequence, "transaction-receipt", "recordToolResult", "execution-1",
+                admission.path("digest").asText(), receiptSequence, receiptSequence, 1,
+                digest(recordBytes), commitDigest, digest(recordBytes), 1, null, 2,
+                Base64.getEncoder().encodeToString(recordBytes.getBytes(StandardCharsets.UTF_8)),
+                digest(recordBytes), List.of(
+                        new ManagedSessionStoreModels.CommitResource(admission.path("resourceId").asText(),
+                                "managed-tool-outcome", 1, admission.path("byteLength").asLong(),
+                                admission.path("digest").asText(), null),
+                        resource(manifestRef, manifest)));
+        var admissions = new ToolPublicationAdmissionStore(jdbc, manager, sessions, data);
+        JsonNode committed = admissions.commitReceipt(key, "pub-1", WRITER_TOKEN, commit);
+        assertThat(committed.path("historyRevision").asLong()).isEqualTo(receiptSequence);
+        assertThat(admissions.commitReceipt(key, "pub-1", WRITER_TOKEN, commit)).isEqualTo(committed);
+        assertThat(sessions.readResource("tenant-1", "workspace-1", "session-1",
+                admission.path("resourceId").asText(), WRITER_TOKEN).bytes())
+                .isEqualTo(outcome.toString().getBytes(StandardCharsets.UTF_8));
+        ObjectNode identity = manifest.deepCopy();
+        assertThat(data.readRange(key, "pub-1", WRITER_TOKEN, manifestRef, identity,
+                "stdout", 1, 2)).isEqualTo("bc".getBytes(StandardCharsets.UTF_8));
+        assertThat(data.readRange(key, "pub-1", WRITER_TOKEN, manifestRef, identity,
+                "stdout", 3, 0)).isEmpty();
+        assertThatThrownBy(() -> data.readRange(key, "pub-1", WRITER_TOKEN, manifestRef,
+                identity, "stdout", 2, 2)).hasMessageContaining("range exceeds");
+        objects.values().iterator().next()[0] = 'z';
+        assertThatThrownBy(() -> data.readRange(key, "pub-1", WRITER_TOKEN, manifestRef,
+                identity, "stdout", 0, 1)).hasMessageContaining("digest changed");
+        assertThat(jdbc.queryForObject("SELECT state FROM qwen_tool_publication_object"
+                + " WHERE slot_key = 'segment:stdout:0'", String.class)).isEqualTo("QUARANTINED");
     }
 
     @Test

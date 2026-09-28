@@ -5,7 +5,11 @@ import com.fasterxml.jackson.core.StreamReadFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.networknt.schema.JsonSchema;
+import com.networknt.schema.JsonSchemaFactory;
+import com.networknt.schema.SpecVersion.VersionFlag;
 import java.io.IOException;
+import java.io.InputStream;
 import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.nio.ByteBuffer;
@@ -34,6 +38,7 @@ public final class ToolPublicationContract {
             "captureId", "revision", "captureScope", "capturePolicy", "argsRef",
             "requestDigest", "writerId", "writerGeneration", "activationId",
             "activationEpoch", "intentSequence", "checkpointRef");
+    private static final JsonNode RESULT_SCHEMA = resultSchema();
 
     private ToolPublicationContract() {
     }
@@ -177,6 +182,30 @@ public final class ToolPublicationContract {
                     .FAIL_ON_TRAILING_TOKENS).readTree(text);
         } catch (IOException error) {
             throw new IllegalArgumentException("Invalid publication JSON", error);
+        }
+    }
+
+    public static JsonNode parseToolResult(String kind, byte[] bytes, int maxBytes) {
+        require(Set.of("manifest", "page", "result").contains(kind)
+                && bytes != null && bytes.length <= maxBytes, "Invalid tool-result record size");
+        JsonNode value = readJson(bytes);
+        ObjectNode selected = JSON.createObjectNode().put("$schema", "https://json-schema.org/draft/2020-12/schema")
+                .put("$ref", "#/$defs/" + kind);
+        selected.set("$defs", RESULT_SCHEMA.path("$defs"));
+        JsonSchema schema = JsonSchemaFactory.getInstance(VersionFlag.V202012).getSchema(selected);
+        require(schema.validate(value).isEmpty(), "Invalid tool-result " + kind);
+        return value;
+    }
+
+    private static JsonNode resultSchema() {
+        try (InputStream stream = ToolPublicationContract.class.getResourceAsStream(
+                "/contracts/managed-tool-result-v1.schema.json")) {
+            if (stream == null) {
+                throw new IllegalStateException("Tool-result schema is missing");
+            }
+            return JSON.readTree(stream);
+        } catch (IOException error) {
+            throw new IllegalStateException("Tool-result schema could not be read", error);
         }
     }
 

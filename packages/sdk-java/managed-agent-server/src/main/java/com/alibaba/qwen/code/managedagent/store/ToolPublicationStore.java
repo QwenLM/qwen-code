@@ -12,6 +12,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.sql.Timestamp;
 import java.util.Base64;
 import java.util.List;
 import java.util.Objects;
@@ -60,6 +61,77 @@ public final class ToolPublicationStore {
         return transactions.execute(status -> applyLocked(request, writerToken, hash));
     }
 
+    JsonNode producerBindingLocked(String scope, String publicationId, String publicationToken) {
+        String suppliedHash = ToolPublicationContract.tokenHash(publicationToken);
+        List<Row> rows = jdbc.query("SELECT * FROM qwen_tool_publication WHERE scope_key = ?"
+                        + " AND publication_id = ?",
+                (r, index) -> new Row(r.getString("tenant_id"), r.getString("workspace_id"),
+                        r.getString("session_id"), r.getString("binding_json"), r.getString("binding_digest"),
+                        r.getString("token_hash"), r.getString("state"), r.getObject("expires_at", Long.class),
+                        r.getLong("capture_bytes")), scope, publicationId);
+        require(rows.size() == 1, "Publication does not exist");
+        Row row = rows.get(0);
+        JsonNode binding = ToolPublicationContract.parseBytes("binding",
+                row.binding().getBytes(StandardCharsets.UTF_8));
+        require(ToolPublicationContract.bindingDigest(binding).equals(row.digest())
+                && equalHash(suppliedHash, row.tokenHash()) && "OPEN".equals(row.state()),
+                "Publication grant conflicts");
+        Timestamp now = jdbc.queryForObject("SELECT CURRENT_TIMESTAMP(6)", Timestamp.class);
+        require(now != null && row.expiresAt() != null && row.expiresAt() > now.getTime(),
+                "Publication grant expired");
+        JsonNode key = binding.get("sessionKey");
+        require(row.tenant().equals(text(key, "tenantId"))
+                && row.workspace().equals(text(key, "workspaceId"))
+                && row.session().equals(text(key, "sessionId")), "Publication scope conflicts");
+        var head = jdbc.queryForMap("SELECT workspace_id, state, writer_id, writer_generation,"
+                        + " writer_lease_until, recovery_status, activation_epoch, journal_revision"
+                        + " FROM qwen_managed_session_journal_head WHERE tenant_id = ? AND session_id = ? FOR UPDATE",
+                row.tenant(), row.session());
+        Timestamp lease = (Timestamp) head.get("writer_lease_until");
+        require(row.workspace().equals(head.get("workspace_id")) && "ACTIVE".equals(head.get("state"))
+                && text(binding, "writerId").equals(head.get("writer_id"))
+                && ((Number) head.get("writer_generation")).longValue() == binding.get("writerGeneration").longValue()
+                && lease != null && lease.after(now) && "READY".equals(head.get("recovery_status"))
+                && ((Number) head.get("activation_epoch")).longValue() == binding.get("activationEpoch").longValue(),
+                "Original Session owner is fenced");
+        boolean found = false;
+        for (long revision = ((Number) head.get("journal_revision")).longValue(); revision > 0 && !found; revision--) {
+            byte[] record = jdbc.queryForObject("SELECT record_bytes FROM qwen_managed_session_journal_tx"
+                    + " WHERE tenant_id = ? AND session_id = ? AND journal_revision = ?",
+                    byte[].class, row.tenant(), row.session(), revision);
+            if (record == null) {
+                continue;
+            }
+            String[] lines = new String(record, StandardCharsets.UTF_8).split("\n");
+            for (int index = lines.length - 1; index >= 0; index--) {
+                JsonNode event = ToolPublicationContract.readJson(lines[index].getBytes(StandardCharsets.UTF_8));
+                if (!"managed_session_event_v1".equals(text(event, "subtype"))
+                        || !"activation.changed".equals(text(event.path("managedSession"), "kind"))) {
+                    continue;
+                }
+                JsonNode activation = event.path("managedSession").path("payload");
+                require("active".equals(text(activation, "phase"))
+                        && text(binding, "activationId").equals(text(activation, "activationId"))
+                        && binding.get("activationEpoch").longValue() == activation.path("epoch").asLong()
+                        && activation.path("expiresAt").asLong() > now.getTime(),
+                        "Original activation is fenced");
+                found = true;
+                break;
+            }
+        }
+        require(found, "Original activation is missing");
+        requireExecution(binding, true);
+        var current = jdbc.queryForMap("SELECT token_hash, state, expires_at, binding_digest"
+                + " FROM qwen_tool_publication WHERE scope_key = ? AND publication_id = ? FOR UPDATE",
+                scope, publicationId);
+        require(equalHash(suppliedHash, (String) current.get("token_hash"))
+                && "OPEN".equals(current.get("state"))
+                && row.digest().equals(current.get("binding_digest"))
+                && ((Number) current.get("expires_at")).longValue() > now.getTime(),
+                "Publication grant changed");
+        return binding;
+    }
+
     private JsonNode applyLocked(JsonNode request, String writerToken, String tokenHash) {
         JsonNode key = request.get("sessionKey");
         String tenant = text(key, "tenantId");
@@ -106,24 +178,28 @@ public final class ToolPublicationStore {
             require(bytes <= capacity.executionBytes(), "Execution capture capacity exceeded");
             long allocation = bytes + ToolPublicationContract.PRODUCER_BYTES
                     + ToolPublicationContract.ADMISSION_BYTES;
-            var totals = jdbc.queryForMap("SELECT COALESCE(SUM(capture_bytes + producer_bytes"
-                    + " + admission_bytes), 0) AS reserved, COUNT(*) AS captures"
+            var totals = jdbc.queryForMap("SELECT COALESCE(SUM(capture_held_bytes + producer_held_bytes"
+                    + " + admission_held_bytes), 0) AS reserved,"
+                    + " COALESCE(SUM(CASE WHEN producer_phase IN ('OPEN', 'FINISHING')"
+                    + " THEN 1 ELSE 0 END), 0) AS captures"
                     + " FROM qwen_tool_publication WHERE tenant_key = ? AND state <> 'NOT_STARTED'", tenantKey);
             long reserved = ((Number) totals.get("reserved")).longValue();
             long count = ((Number) totals.get("captures")).longValue();
-            Long sessionReserved = jdbc.queryForObject("SELECT COALESCE(SUM(capture_bytes + producer_bytes"
-                    + " + admission_bytes), 0) FROM qwen_tool_publication"
+            Long sessionReserved = jdbc.queryForObject("SELECT COALESCE(SUM(capture_held_bytes + producer_held_bytes"
+                    + " + admission_held_bytes), 0) FROM qwen_tool_publication"
                     + " WHERE scope_key = ? AND state <> 'NOT_STARTED'", Long.class, scope);
             require(reserved <= capacity.tenantBytes() - allocation
                     && sessionReserved <= capacity.sessionBytes() - allocation
                     && count < capacity.activeCaptures(), "Publication capacity exhausted");
             jdbc.update("INSERT INTO qwen_tool_publication (scope_key, tenant_key, tenant_id, workspace_id,"
                             + " session_id, publication_id, execution_key, capture_id, binding_json, binding_digest,"
-                            + " token_hash, state, expires_at, capture_bytes, producer_bytes, admission_bytes)"
-                            + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?, ?)",
+                            + " token_hash, state, expires_at, capture_bytes, producer_bytes, admission_bytes,"
+                            + " capture_held_bytes, producer_held_bytes, admission_held_bytes)"
+                            + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?, ?, ?, ?, ?)",
                     scope, tenantKey, tenant, workspace, session, id, hash(text(candidate, "executionCallId")),
                     text(candidate, "captureId"), candidate.toString(), digest, tokenHash, expires, bytes,
-                    ToolPublicationContract.PRODUCER_BYTES, ToolPublicationContract.ADMISSION_BYTES);
+                    ToolPublicationContract.PRODUCER_BYTES, ToolPublicationContract.ADMISSION_BYTES,
+                    bytes, ToolPublicationContract.PRODUCER_BYTES, ToolPublicationContract.ADMISSION_BYTES);
             return grant(id, new Row(tenant, workspace, session, candidate.toString(), digest, tokenHash,
                     "OPEN", expires, bytes));
         }
@@ -146,12 +222,23 @@ public final class ToolPublicationStore {
             require(execution.isSettled() && ("not_started".equals(execution.getExecutionStatus())
                     || "cancelled".equals(execution.getExecutionStatus()) && execution.getDispatchGeneration() == 0),
                     "Execution has no authoritative not-started proof");
+            Long published = jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_publication_object"
+                    + " WHERE scope_key = ? AND publication_id = ?", Long.class, scope, id);
+            Long attempted = jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_publication_operation"
+                    + " WHERE scope_key = ? AND publication_id = ?", Long.class, scope, id);
+            require(published == 0 && attempted == 0 && "OPEN".equals(jdbc.queryForObject(
+                    "SELECT producer_phase FROM qwen_tool_publication WHERE scope_key = ?"
+                            + " AND publication_id = ?", String.class, scope, id)),
+                    "Publication has accepted producer work");
             state = "NOT_STARTED";
         } else if ("NOT_STARTED".equals(row.state())) {
             state = row.state();
         }
-        jdbc.update("UPDATE qwen_tool_publication SET state = ?, expires_at = NULL"
-                + " WHERE scope_key = ? AND publication_id = ?", state, scope, id);
+        jdbc.update("UPDATE qwen_tool_publication SET state = ?, expires_at = NULL,"
+                + " capture_held_bytes = CASE WHEN ? = 'NOT_STARTED' THEN 0 ELSE capture_held_bytes END,"
+                + " producer_held_bytes = CASE WHEN ? = 'NOT_STARTED' THEN 0 ELSE producer_held_bytes END,"
+                + " admission_held_bytes = CASE WHEN ? = 'NOT_STARTED' THEN 0 ELSE admission_held_bytes END"
+                + " WHERE scope_key = ? AND publication_id = ?", state, state, state, state, scope, id);
         return grant(id, row.withState(state, null));
     }
 
