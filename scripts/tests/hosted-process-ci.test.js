@@ -118,6 +118,7 @@ describe('Hosted real-process gates', () => {
       (step) => step.name === 'Verify Hosted Java, Spring and MySQL processes',
     );
     expect(run.run).toContain('-Phosted-harness-mysql');
+    expect(run.run).toContain('-Dnode.executable="$(command -v node)"');
     // The profile's include selects the tests; -Dit.test would override it.
     expect(run.run).not.toContain('-Dit.test');
     expect(run.run).toContain(

@@ -46,6 +46,7 @@ import { hasVerifiableInode } from '../utils/file-identity.js';
 import { readRuntimeStatus } from '../utils/runtimeStatus.js';
 import {
   LITE_READ_BUF_SIZE,
+  isManagedExecutionTranscriptSync,
   isManagedSessionTranscriptSync,
   managedSessionResourceRoot,
   readManagedSessionTitleInfoSync,
@@ -1063,7 +1064,7 @@ export class SessionService {
 
   assertLegacySessionExecution(sessionId: string): void {
     if (
-      isManagedSessionTranscriptSync(this.getSessionTranscriptPath(sessionId))
+      isManagedExecutionTranscriptSync(this.getSessionTranscriptPath(sessionId))
     ) {
       throw new SessionExecutionEngineError(
         sessionId,
@@ -4020,7 +4021,7 @@ export class SessionService {
     const sourcePath = path.join(chatsDir, `${sourceSessionId}.jsonl`);
     const targetPath = path.join(chatsDir, `${newSessionId}.jsonl`);
 
-    if (isManagedSessionTranscriptSync(sourcePath)) {
+    if (isManagedExecutionTranscriptSync(sourcePath)) {
       throw new SessionExecutionEngineError(
         sourceSessionId,
         'belongs to managed, cannot fork with the legacy session service',

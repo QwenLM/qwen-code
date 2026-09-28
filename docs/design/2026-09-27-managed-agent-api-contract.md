@@ -2,7 +2,7 @@
 
 [English](2026-09-27-managed-agent-api-contract.md) | [简体中文](2026-09-27-managed-agent-api-contract.zh-CN.md)
 
-Status: D1 implemented; D2 implemented in [Session query](2026-09-27-managed-agent-session-query.md); D3 pending
+Status: D1 implemented; D2 implemented in [Session query](2026-09-27-managed-agent-session-query.md); D3 implemented in [Event replay](2026-09-27-managed-agent-event-replay.md)
 Date: 2026-09-27
 Issue: [#12793](https://github.com/QwenLM/qwen-code/issues/12793), part of [#12380](https://github.com/QwenLM/qwen-code/issues/12380)
 

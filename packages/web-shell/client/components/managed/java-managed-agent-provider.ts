@@ -1,4 +1,5 @@
 import {
+  isJavaAgentResyncRequired,
   JavaManagedAgentClient,
   type JavaAgentSession,
   type JavaManagedAgentClientOptions,
@@ -168,6 +169,18 @@ export function createJavaManagedAgentProvider(
         { sessionId, afterSequence: request.lastEventId },
         request.signal,
       )) {
+        if (isJavaAgentResyncRequired(event)) {
+          // Events after the cursor are gone: reload the transcript.
+          yield {
+            id: request.lastEventId ?? 0,
+            at: Date.now(),
+            type: 'stream_gap',
+            sessionId,
+            turnId: '',
+            data: event,
+          };
+          return;
+        }
         const projected = projectJavaAgentEvent(event);
         if (projected) yield projected;
       }
