@@ -231,10 +231,19 @@ describe('getInitialChatHistory', () => {
         .mockReturnValue([{ name: ToolNames.SKILL }]),
       isDeferredToolRevealed: vi.fn().mockReturnValue(false),
       getMcpServerInstructions: vi.fn().mockReturnValue(new Map()),
+      // Post-`warmAll()` an eagerly registered tool satisfies all three reads
+      // (`getAllToolNames()`, `getFunctionDeclarations()`, `getTool()`), so the
+      // default fixture hands back an instance for SKILL as well. A name that
+      // `getAllToolNames()` lists while `getTool()` returns null is otherwise
+      // only reachable through a rejected warm. `buildDeferredToolsReminder`
+      // reads just the two bridge names, so this changes no deferred-reminder
+      // expectation in this suite.
       getTool: vi
         .fn()
         .mockImplementation((name: string) =>
-          name === ToolNames.TOOL_SEARCH || name === ToolNames.TOOL_CALL
+          name === ToolNames.TOOL_SEARCH ||
+          name === ToolNames.TOOL_CALL ||
+          name === ToolNames.SKILL
             ? {}
             : null,
         ),
@@ -482,24 +491,30 @@ describe('getInitialChatHistory', () => {
       // A Skill tool demoted behind `tool_search` by an active `tools.eager`
       // allowlist stays registered, and `getAllToolNames()` unions factory
       // registrations, so it is still listed — while `getFunctionDeclarations()`
-      // skips permission-deferred tools. `getInitialChatHistory` awaits
-      // `warmAll()` before the gate, and `warmAll()` materializes every factory
-      // (`ensureTool` -> `this.tools.set`), so `getTool()` *does* see the tool
-      // in this state; a listed name with a null from `getTool()` means the
-      // factory's warm rejected, which is a different state and must not be
-      // modelled as deferral. The listing has to survive the demotion, so this
-      // is the case a declarations-based gate wrongly drops — and the only one
-      // in the suite that clears the eager default declaration list.
+      // skips permission-deferred tools. That demoted state is defined by both
+      // bridge halves being registered (`bundled-reference.ts`: without them the
+      // Skill tool is registered but unreachable, which is no route at all), so
+      // the stub lists them too rather than pinning a shape that cannot occur.
+      // `getInitialChatHistory` awaits `warmAll()` before the gate and
+      // `warmAll()` materializes every factory (`ensureTool` -> `this.tools.set`),
+      // so the default `getTool()` stub already returns the instance here; a
+      // listed name with a null from `getTool()` means the warm rejected, which
+      // is a different state and must not be modelled as deferral. The listing
+      // has to survive the demotion, so this is the case a declarations-based
+      // gate wrongly drops — and the only one in the suite that clears the eager
+      // default declaration list.
+      mockToolRegistry.getAllToolNames.mockReturnValue([
+        ToolNames.SKILL,
+        ToolNames.TOOL_SEARCH,
+        ToolNames.TOOL_CALL,
+      ]);
       mockToolRegistry.getFunctionDeclarations.mockReturnValue([]);
-      mockToolRegistry.getTool.mockImplementation((name: string) =>
-        name === ToolNames.TOOL_SEARCH ||
-        name === ToolNames.TOOL_CALL ||
-        name === ToolNames.SKILL
-          ? {}
-          : null,
-      );
 
-      expect(mockToolRegistry.getAllToolNames()).toEqual([ToolNames.SKILL]);
+      expect(mockToolRegistry.getAllToolNames()).toEqual([
+        ToolNames.SKILL,
+        ToolNames.TOOL_SEARCH,
+        ToolNames.TOOL_CALL,
+      ]);
       expect(mockToolRegistry.getFunctionDeclarations()).toEqual([]);
       expect(mockToolRegistry.getTool(ToolNames.SKILL)).toEqual({});
 
@@ -612,7 +627,9 @@ describe('stripStartupContext', () => {
         getTool: vi
           .fn()
           .mockImplementation((name: string) =>
-            name === ToolNames.TOOL_SEARCH || name === ToolNames.TOOL_CALL
+            name === ToolNames.TOOL_SEARCH ||
+            name === ToolNames.TOOL_CALL ||
+            name === ToolNames.SKILL
               ? {}
               : null,
           ),
