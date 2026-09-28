@@ -38,7 +38,7 @@ Android API 26+ and Android System WebView 111+ with the AndroidX `MULTI_PROFILE
 
 Before first use, the app clears the connection's complete browser storage through the official completion callback and durably records initialization before loading any page or token. Updating from the previous vault format preserves native credentials but clears existing browser sessions/cache once. A name missing from the provider's registry requires another clear even if the native flag was saved. Known initialized profiles retain browser state; changing origin or credential starts with a new uninitialized identity. Returning to Connections or destroying the Activity cancels preparation. See the [initialization guard design](../../docs/design/mobile-profile-initialization.md).
 
-Use HTTPS for remote daemons. Cleartext is disabled except for explicit loopback entries; LAN HTTP hosts need explicit network-security configuration. Secure web APIs require HTTPS or a trustworthy loopback origin.
+Use HTTPS for remote daemons. Cleartext is disabled except for explicit loopback entries (`localhost`, `127.0.0.1` and IPv6 `::1`, including bracketed URL hosts such as `http://[::1]:4170`); LAN HTTP hosts need explicit network-security configuration. Secure web APIs require HTTPS or a trustworthy loopback origin.
 
 An emulator's localhost is the emulator itself. For a host daemon on port 4170,
 run `adb reverse tcp:4170 tcp:4170` and use `http://127.0.0.1:4170` in the
