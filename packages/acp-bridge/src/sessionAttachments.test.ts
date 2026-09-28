@@ -185,6 +185,87 @@ describe('SessionAttachmentStore', () => {
     }
   });
 
+  it('reads different published attachments concurrently', async () => {
+    const store = new SessionAttachmentStore();
+    const first = await store.putAttachment(
+      Buffer.from('first'),
+      'text/plain',
+      'first.txt',
+    );
+    const second = await store.putAttachment(
+      Buffer.from('second'),
+      'text/plain',
+      'second.txt',
+    );
+    const originalRead = fs.readFile.bind(fs);
+    let finish!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const read = vi
+      .spyOn(fs, 'readFile')
+      .mockImplementation(async (...args) => {
+        await gate;
+        return originalRead(...args);
+      });
+    try {
+      const reading = Promise.all([
+        store.read(first.attachmentId),
+        store.read(second.attachmentId),
+      ]);
+      await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(2));
+      finish();
+      expect((await reading).map((result) => result?.data.toString())).toEqual([
+        'first',
+        'second',
+      ]);
+    } finally {
+      finish();
+      read.mockRestore();
+      await store.close();
+    }
+  });
+
+  it('keeps a stored name while a same-name write waits behind a read', async () => {
+    const store = new SessionAttachmentStore();
+    const first = await store.putAttachment(
+      Buffer.from('A-bytes'),
+      'text/plain',
+      'data.csv',
+    );
+    const originalRead = fs.readFile.bind(fs);
+    let finish!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const read = vi
+      .spyOn(fs, 'readFile')
+      .mockImplementationOnce(async (...args) => {
+        await gate;
+        return originalRead(...args);
+      });
+    try {
+      const reading = store.read(first.attachmentId);
+      await vi.waitFor(() => expect(read).toHaveBeenCalled());
+      const writing = store.putAttachment(
+        Buffer.from('B-bytes'),
+        'text/plain',
+        'data.csv',
+      );
+      expect(await store.remove(first.attachmentId)).toBe(false);
+      finish();
+      expect((await reading)?.data.toString()).toBe('A-bytes');
+      expect((await writing).attachmentId).toBe('data (1).csv');
+      expect((await store.read(first.attachmentId))?.data.toString()).toBe(
+        'A-bytes',
+      );
+    } finally {
+      finish();
+      read.mockRestore();
+      await store.close();
+    }
+  });
+
   it('keeps a rejected final write hidden when failed-write cleanup also fails', async () => {
     const store = new SessionAttachmentStore();
     const originalWrite = fs.writeFile.bind(fs);
@@ -240,11 +321,10 @@ describe('SessionAttachmentStore', () => {
     try {
       await target.copyFrom(source);
       expect(await target.list()).toEqual([]);
-      const write = vi.spyOn(fs, 'writeFile').mockRejectedValueOnce(
-        Object.assign(new Error('EIO: /private/secret/path'), {
-          code: 'EIO',
-        }),
-      );
+      const cause = Object.assign(new Error('EIO: /private/secret/path'), {
+        code: 'EIO',
+      });
+      const write = vi.spyOn(fs, 'writeFile').mockRejectedValueOnce(cause);
       try {
         await expect(
           source.completeUpload(uploadId, undefined, () => {}),
@@ -252,10 +332,46 @@ describe('SessionAttachmentStore', () => {
           status: 500,
           code: 'attachment_upload_storage_failed',
           message: 'Could not store attachment',
+          cause,
         });
       } finally {
         write.mockRestore();
       }
+    } finally {
+      await source.close();
+      await target.close();
+    }
+  });
+
+  it('retries completion after a concurrent session copy', async () => {
+    const source = new SessionAttachmentStore();
+    const target = new SessionAttachmentStore();
+    try {
+      await source.putAttachment(Buffer.from('seed'), 'text/plain', 'seed.txt');
+      const { uploadId } = source.createUpload({
+        name: 'queued.txt',
+        mimeType: 'text/plain',
+        size: 3,
+      });
+      source.appendUpload(uploadId, 0, Buffer.from('abc'));
+
+      const completing = source.completeUpload(uploadId, undefined, () => {});
+      const copying = target.copyFrom(source);
+      await expect(completing).rejects.toMatchObject({
+        status: 503,
+        code: 'attachment_upload_store_busy',
+      });
+      await copying;
+
+      const reference = await source.completeUpload(
+        uploadId,
+        undefined,
+        () => {},
+      );
+      expect(reference.attachmentId).toBe('queued.txt');
+      expect((await source.read(reference.attachmentId))?.data.toString()).toBe(
+        'abc',
+      );
     } finally {
       await source.close();
       await target.close();

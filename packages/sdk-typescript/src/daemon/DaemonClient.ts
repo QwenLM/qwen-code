@@ -4565,6 +4565,13 @@ export class DaemonClient {
                   'POST attachment upload',
                 );
                 if (
+                  error.status === 413 &&
+                  (typeof error.body !== 'object' || error.body === null)
+                ) {
+                  error.message +=
+                    '; a reverse proxy request-body limit may be rejecting this attachment';
+                }
+                if (
                   error.status === 429 &&
                   !(
                     error.body &&

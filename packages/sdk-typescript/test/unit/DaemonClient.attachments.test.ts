@@ -84,6 +84,9 @@ describe('session attachment chunk client', () => {
       mimeType: 'application/octet-stream',
       size: large.size,
     });
+    expect(
+      new Headers(calls[1]!.init.headers).get('Content-Type')?.split(';')[0],
+    ).toBe('application/json');
     const chunks = calls.filter(({ url }) => url.includes('/chunks?'));
     expect(chunks.map(({ init }) => (init.body as Blob).size)).toEqual([
       CHUNK,
@@ -96,10 +99,17 @@ describe('session attachment chunk client', () => {
         ).arrayBuffer(),
       ),
     ).toEqual(new Uint8Array(await large.arrayBuffer()));
-    for (const { init } of calls.slice(1)) {
+    for (const { init } of chunks) {
+      expect(new Headers(init.headers).get('Content-Type')?.split(';')[0]).toBe(
+        'application/octet-stream',
+      );
+    }
+    for (const { init } of calls) {
       expect(new Headers(init.headers).get('Authorization')).toBe(
         'Bearer secret',
       );
+    }
+    for (const { init } of calls.slice(1)) {
       expect(new Headers(init.headers).get('X-Qwen-Client-Id')).toBe(
         'client-1',
       );
@@ -229,6 +239,19 @@ describe('session attachment chunk client', () => {
     expect(calls).toHaveLength(1);
   });
 
+  it('retries discovery on the next upload after a failed probe', async () => {
+    let discoveries = 0;
+    const { upload, calls } = setup(({ url }) =>
+      url.endsWith('/capabilities') && discoveries++ === 0
+        ? json({ error: 'unavailable' }, 503)
+        : undefined,
+    );
+    await expect(upload()).rejects.toBeInstanceOf(DaemonAttachmentUploadError);
+    await expect(upload()).resolves.toEqual(reference);
+    expect(discoveries).toBe(2);
+    expect(calls.at(-1)!.url).toContain('/complete');
+  });
+
   it('retries identical append and complete after lost responses without creating again', async () => {
     vi.useFakeTimers();
     const seen = new Map<string, number>();
@@ -278,6 +301,34 @@ describe('session attachment chunk client', () => {
       );
     },
   );
+
+  it('points generic chunk 413 responses to a request-body limit', async () => {
+    const { upload } = setup(({ url }) =>
+      url.includes('/chunks?')
+        ? new Response('<html>413 Request Entity Too Large</html>', {
+            status: 413,
+          })
+        : undefined,
+    );
+    const failure = await upload().catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(DaemonAttachmentUploadError);
+    expect((failure as DaemonAttachmentUploadError).cause).toMatchObject({
+      message: expect.stringContaining('reverse proxy'),
+    });
+  });
+
+  it('preserves the daemon size error without a proxy hint', async () => {
+    const { upload } = setup(({ url }) =>
+      url.includes('/chunks?')
+        ? json({ code: 'attachment_upload_too_large' }, 413)
+        : undefined,
+    );
+    const failure = await upload().catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(DaemonAttachmentUploadError);
+    expect((failure as DaemonAttachmentUploadError).cause).not.toMatchObject({
+      message: expect.stringContaining('reverse proxy'),
+    });
+  });
 
   it('preserves definitive pre-ID invalid_client_id for repair but never replays after an ID exists', async () => {
     const rejected = json({ code: 'invalid_client_id' }, 400);

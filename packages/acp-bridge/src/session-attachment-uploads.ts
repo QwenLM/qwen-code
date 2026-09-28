@@ -25,8 +25,9 @@ export class SessionAttachmentUploadError extends Error {
     readonly status: number,
     readonly code: string,
     message: string,
+    cause?: unknown,
   ) {
-    super(message);
+    super(message, { cause });
     this.name = 'SessionAttachmentUploadError';
   }
 }
@@ -195,6 +196,7 @@ export class SessionAttachmentUploads {
       );
     }
     upload.state = 'completing';
+    let retryableFailure = false;
     const assertActive = () => {
       if (this.closed || this.records.get(id) !== upload) throw notFound();
     };
@@ -209,11 +211,26 @@ export class SessionAttachmentUploads {
           return reference;
         },
         (error: unknown) => {
-          upload.state = 'failed';
+          if (
+            error instanceof SessionAttachmentUploadError &&
+            error.code === 'attachment_upload_store_busy'
+          ) {
+            upload.state = 'receiving';
+            upload.completion = undefined;
+            retryableFailure = true;
+          } else {
+            upload.state = 'failed';
+          }
           throw error;
         },
       )
       .finally(() => {
+        if (retryableFailure) {
+          if (this.closed || this.records.get(id) !== upload) {
+            this.discard(upload);
+          }
+          return;
+        }
         this.releaseBuffer(upload);
         if (this.closed || this.records.get(id) !== upload) {
           this.discard(upload);

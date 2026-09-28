@@ -72,7 +72,7 @@ daemon 在 `capabilities.features` 中同时声明 `session_attachment_chunk_upl
 | ---------------------------------- | -------------------------------------------------- | -------------------------------------------- |
 | `POST U`                           | JSON `{ name, mimeType, size }`                    | 201 `{ uploadId }`                           |
 | `POST U/:uploadId/chunks?offset=N` | 原始字节，`Content-Type: application/octet-stream` | 200 `{ offset }`，表示下一个可接收的字节位置 |
-| `POST U/:uploadId/complete`        | 空请求体                                           | 200，返回现有附件引用                        |
+| `POST U/:uploadId/complete`        | 无需请求体；JSON 请求体会被忽略                    | 200，返回现有附件引用                        |
 | `DELETE U/:uploadId`               | 空请求体                                           | 未完成或已不存在的上传返回 204               |
 
 Bearer 和可选的 `X-Qwen-Client-Id` 请求头沿用现有语义。缺省 client ID 是一种
@@ -116,6 +116,9 @@ Bearer 和可选的 `X-Qwen-Client-Id` 请求头沿用现有语义。缺省 clie
 
 实际存储失败后，该 ID 进入终态：在回执保留窗口内记录失败结果，写入结束后
 释放暂存资源。重复完成返回相同失败，不再执行第二次存储写入。
+如果并发的会话复制暂时阻止存储，完成操作返回带 `retryable: true` 的
+`503 attachment_upload_store_busy`，并保留字节，复制结束后可用同一上传 ID
+再次完成。
 
 DELETE 丢弃正在接收或已收齐的上传。开始完成后，DELETE 返回
 `409 attachment_upload_finalizing`；成功后返回
@@ -143,6 +146,7 @@ daemon 重启。
 | 415    | 分片 Content-Type 或 Content-Encoding 不受支持    |
 | 429    | `attachment_upload_capacity_exceeded`；未分配资源 |
 | 500    | 存储失败，响应不包含内部错误详情                  |
+| 503    | 会话附件复制期间，存储暂时繁忙                    |
 
 现有可选 mutation 请求限流同样适用于这些请求。不豁免新路由，也不提高现有
 限流值。请求限流的 `Retry-After` 与暂存容量不足是不同的错误情况。
@@ -175,11 +179,12 @@ generation、live entry 身份和创建者注册状态。这扩展了现有存�
 受保护的引用校验。复制会话只包含已完成附件，不等待多请求上传结束。
 
 只在入口检查 pending-name 不够，因为 `read()` 会等待目录查询和文件 I/O。
-在 store 内用一个范围明确的发布串行门协调磁盘读取与最终写入：第一次读取
-await 前取得执行权，写入方一直持有到提交校验或失败写入清理结束。先开始的
+在 store 内用一个范围明确的发布门协调磁盘读取与最终写入：并发读取共享一批，
+写入等待先前的读取，并一直持有门到提交校验或失败写入清理结束。先开始的
 读取在新写入创建文件前结束，后开始的读取只看到写入结束后的结果。共享 store
-内的旧路径和分片最终写入都遵循该规则，接收分片不进入此串行门。同步引用准入
-直接拒绝 pending-name，不等待。复用已有的 pending-write/copy 协调机制，保证
+内的旧路径和分片最终写入都遵循该规则，接收分片不进入此门。同步引用准入
+直接拒绝 pending-name，不等待。排队写入只针对删除预留原始文件名，不会隐藏
+已有的同名引用。复用已有的 pending-write/copy 协调机制，保证
 排队写入不能绕过关闭检查，也不会与会话复制死锁；无需引入通用锁框架。
 
 ## 状态、资源与生命周期
@@ -189,6 +194,7 @@ stateDiagram-v2
     [*] --> receiving: 创建
     receiving --> receiving: 追加或相同的上一片重试
     receiving --> completing: 字节收齐后完成
+    completing --> receiving: 并发复制，稍后重试
     completing --> completed: 存储成功
     completing --> failed: 存储或提交检查失败
     receiving --> [*]: 取消 / 过期 / 关闭
@@ -266,7 +272,7 @@ shutdown 会关闭这些 store。
 404 的回退：它表示本次上传失败，不是附件能力不存在。必须显式测试此区别。
 调用方取消仍以 abort 错误传播。
 
-旧路径返回 413 时，保留 daemon 结构化的大小错误。文件不超过 8 MiB 却收到
+附件上传返回 413 时，保留 daemon 结构化的大小错误。文件不超过 8 MiB 却收到
 通用 413 时，给出可操作的提示：服务端或中间代理拒绝了请求体，代理限制可能
 更低。不能断言所有 413 都来自代理。保留原始状态和响应体用于诊断，无需改写
 通用 HTTP 错误处理。

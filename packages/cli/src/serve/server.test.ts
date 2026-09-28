@@ -12350,7 +12350,8 @@ describe('createServeApp', () => {
         request(app)
           .post(url)
           .set('Host', `127.0.0.1:${baseOpts.port}`)
-          .set('Authorization', 'Bearer secret');
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1');
       try {
         const created = await post('/session/s-1/attachment-uploads').send({
           name: 'large.bin',
@@ -12359,6 +12360,12 @@ describe('createServeApp', () => {
         });
         expect(created.status).toBe(201);
         const url = `/session/s-1/attachment-uploads/${created.body.uploadId}`;
+        const foreign = await post(`${url}/chunks?offset=0`)
+          .set('X-Qwen-Client-Id', 'client-2')
+          .set('Content-Type', 'application/octet-stream')
+          .send(Buffer.from([1]));
+        expect(foreign.status).toBe(404);
+        expect(foreign.body.code).toBe('attachment_upload_not_found');
         expect(
           (
             await post(`${url}/chunks?offset=0`)
@@ -12381,13 +12388,32 @@ describe('createServeApp', () => {
         const cancelled = await request(app)
           .delete(url)
           .set('Host', `127.0.0.1:${baseOpts.port}`)
-          .set('Authorization', 'Bearer secret');
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1');
         expect(cancelled.status).toBe(409);
         expect(cancelled.body.code).toBe('attachment_upload_completed');
         expect(bridge.createSessionAttachmentUpload).toHaveBeenCalledWith(
           's-1',
           expect.any(Object),
-          undefined,
+          { clientId: 'client-1' },
+        );
+        expect(bridge.appendSessionAttachmentUpload).toHaveBeenCalledWith(
+          's-1',
+          created.body.uploadId,
+          0,
+          expect.any(Buffer),
+          { clientId: 'client-1' },
+        );
+        expect(bridge.completeSessionAttachmentUpload).toHaveBeenCalledWith(
+          's-1',
+          created.body.uploadId,
+          { clientId: 'client-1' },
+          expect.any(Function),
+        );
+        expect(bridge.cancelSessionAttachmentUpload).toHaveBeenCalledWith(
+          's-1',
+          created.body.uploadId,
+          { clientId: 'client-1' },
         );
       } finally {
         await store.close();
@@ -12442,6 +12468,19 @@ describe('createServeApp', () => {
             .send('a')
         ).status,
       ).toBe(415);
+      const compressed = await post(`${base}/id/chunks?offset=0`)
+        .set('Content-Type', 'application/octet-stream')
+        .set('Content-Encoding', 'gzip')
+        .send(Buffer.from([1]));
+      expect(compressed.status).toBe(415);
+      expect(compressed.body.code).toBe('invalid_attachment_upload_encoding');
+      const unsupportedCharset = await post(base)
+        .set('Content-Type', 'application/json; charset=iso-8859-1')
+        .send('{"name":"a.txt","mimeType":"text/plain","size":1}');
+      expect(unsupportedCharset.status).toBe(415);
+      expect(unsupportedCharset.body.code).toBe(
+        'invalid_attachment_upload_content_type',
+      );
       expect(bridge.createSessionAttachmentUpload).not.toHaveBeenCalled();
       expect(bridge.appendSessionAttachmentUpload).not.toHaveBeenCalled();
       expect(

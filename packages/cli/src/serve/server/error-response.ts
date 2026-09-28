@@ -279,7 +279,18 @@ export function sendBridgeError(
   daemonLog?: DaemonLogger,
 ): void {
   if (err instanceof SessionAttachmentUploadError) {
-    res.status(err.status).json({ error: err.message, code: err.code });
+    if (err.status >= 500) {
+      reportBridgeError(err.cause ?? err, ctx, daemonLog);
+    } else {
+      recordExpectedBridgeError(err, ctx, daemonLog);
+    }
+    res.status(err.status).json({
+      error: err.message,
+      code: err.code,
+      ...(err.code === 'attachment_upload_store_busy'
+        ? { retryable: true }
+        : {}),
+    });
     return;
   }
   const sourceErrorKind =

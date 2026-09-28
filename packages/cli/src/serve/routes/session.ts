@@ -7525,7 +7525,11 @@ export function registerSessionRoutes(
         code:
           status === 413
             ? 'attachment_upload_too_large'
-            : 'invalid_attachment_upload_body',
+            : status === 415
+              ? error.type === 'encoding.unsupported'
+                ? 'invalid_attachment_upload_encoding'
+                : 'invalid_attachment_upload_content_type'
+              : 'invalid_attachment_upload_body',
       });
       return;
     }

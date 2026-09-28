@@ -357,12 +357,18 @@ function validateAttachmentName(mimeType: string, name?: string): string {
 export class SessionAttachmentStore {
   private readonly uploads = new SessionAttachmentUploads();
   private publication = Promise.resolve();
+  private readerBatch?: {
+    previous: Promise<void>;
+    release: () => void;
+    count: number;
+  };
   private directoryPromise?: Promise<string>;
   private readonly persistentDirectory?: string;
   private readonly persistentFallbackDirectory?: string;
   private activeDirectory?: string;
   private pendingItems = 0;
   private readonly pendingNames = new Map<string, number>();
+  private readonly queuedNames = new Map<string, number>();
   private readonly removingNames = new Set<string>();
   private readonly pendingDrainWaiters: Array<() => void> = [];
   private readonly copyDrainWaiters: Array<() => void> = [];
@@ -414,11 +420,37 @@ export class SessionAttachmentStore {
     clientId: string | undefined,
     assertCanCommit: () => void,
   ) {
-    return this.uploads.complete(id, clientId, (data, metadata, assertActive) =>
-      this.putAttachment(data, metadata.mimeType, metadata.name, () => {
-        assertActive();
-        assertCanCommit();
-      }),
+    const assertAvailable = () => {
+      if (this.closed || this.closing) {
+        throw new SessionAttachmentUploadError(
+          404,
+          'attachment_upload_not_found',
+          'Attachment upload is unavailable',
+        );
+      }
+      if (this.copying) {
+        throw new SessionAttachmentUploadError(
+          503,
+          'attachment_upload_store_busy',
+          'Session attachments are being copied',
+        );
+      }
+    };
+    return this.uploads.complete(
+      id,
+      clientId,
+      (data, metadata, assertActive) => {
+        assertAvailable();
+        return this.putAttachment(
+          data,
+          metadata.mimeType,
+          metadata.name,
+          () => {
+            assertActive();
+            assertCanCommit();
+          },
+        );
+      },
     );
   }
 
@@ -431,12 +463,33 @@ export class SessionAttachmentStore {
   }
 
   private acquirePublication(): Promise<() => void> {
+    this.readerBatch = undefined;
     const previous = this.publication;
     let release!: () => void;
     this.publication = new Promise<void>((resolve) => {
       release = resolve;
     });
     return previous.then(() => release);
+  }
+
+  private acquireReadPublication(): Promise<() => void> {
+    let batch = this.readerBatch;
+    if (!batch) {
+      const previous = this.publication;
+      let release!: () => void;
+      this.publication = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      batch = { previous, release, count: 0 };
+      this.readerBatch = batch;
+    }
+    batch.count += 1;
+    return batch.previous.then(() => () => {
+      if (--batch.count === 0) {
+        if (this.readerBatch === batch) this.readerBatch = undefined;
+        batch.release();
+      }
+    });
   }
 
   async putAttachment(
@@ -463,6 +516,7 @@ export class SessionAttachmentStore {
     let pendingName: string | undefined;
     let removeFileOnFailure = false;
     this.pendingItems += 1;
+    this.queuedNames.set(safeName, (this.queuedNames.get(safeName) ?? 0) + 1);
     const releasePublication = await this.acquirePublication();
     try {
       if (this.closed || this.closing)
@@ -549,11 +603,15 @@ export class SessionAttachmentStore {
           500,
           'attachment_upload_storage_failed',
           'Could not store attachment',
+          error,
         );
       }
       throw error;
     } finally {
       if (pendingName) this.releasePendingName(pendingName);
+      const queued = this.queuedNames.get(safeName)!;
+      if (queued === 1) this.queuedNames.delete(safeName);
+      else this.queuedNames.set(safeName, queued - 1);
       releasePublication();
       if (!this.closed) {
         this.pendingItems -= 1;
@@ -684,7 +742,7 @@ export class SessionAttachmentStore {
   async read(
     attachmentId: string,
   ): Promise<{ data: Buffer; mimeType: string } | undefined> {
-    const releasePublication = await this.acquirePublication();
+    const releasePublication = await this.acquireReadPublication();
     try {
       return await this.readPublished(attachmentId);
     } finally {
@@ -891,6 +949,7 @@ export class SessionAttachmentStore {
       name !== attachmentId ||
       this.copying ||
       this.pendingNames.has(name) ||
+      this.queuedNames.has(name) ||
       this.removingNames.has(name)
     ) {
       return false;

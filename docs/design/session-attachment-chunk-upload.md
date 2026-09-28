@@ -77,7 +77,7 @@ never a filename or path. Successful JSON responses use `Cache-Control: no-store
 | ---------------------------------- | --------------------------------------------------- | ----------------------------------------------- |
 | `POST U`                           | JSON `{ name, mimeType, size }`                     | 201 `{ uploadId }`                              |
 | `POST U/:uploadId/chunks?offset=N` | Raw bytes, `Content-Type: application/octet-stream` | 200 `{ offset }`, the next accepted byte offset |
-| `POST U/:uploadId/complete`        | Empty body                                          | 200, existing attachment reference              |
+| `POST U/:uploadId/complete`        | No body needed; JSON body is ignored                | 200, existing attachment reference              |
 | `DELETE U/:uploadId`               | Empty body                                          | 204 for an incomplete or already absent upload  |
 
 The bearer and optional `X-Qwen-Client-Id` headers retain existing semantics.
@@ -128,6 +128,9 @@ the same reference, including the deduplicated filename.
 An actual storage failure is terminal for that ID: retain its failure result for
 the receipt window and release staging after the write settles. A repeated
 completion returns that failure instead of attempting a second storage write.
+If a concurrent session copy temporarily blocks storage, completion returns
+`503 attachment_upload_store_busy` with `retryable: true` and retains the bytes
+so the same upload ID can be completed after the copy finishes.
 
 DELETE discards a receiving/ready upload. Once completion has started, DELETE
 returns `409 attachment_upload_finalizing`; after success it returns
@@ -156,6 +159,7 @@ client, session, trust, archive, and runtime error envelopes.
 | 415    | Unsupported chunk content type or content encoding             |
 | 429    | `attachment_upload_capacity_exceeded`; no allocation performed |
 | 500    | Storage failure, with internal detail kept out of the response |
+| 503    | Store temporarily busy copying session attachments             |
 
 The existing opt-in mutation rate limiter also covers these requests. No route
 is exempted and no existing rate limit is raised. Its `Retry-After` remains
@@ -198,15 +202,17 @@ includes only completed attachments; it does not wait for a multi-request upload
 to finish.
 
 An entry-time pending-name check alone is insufficient because `read()` awaits
-directory lookup and file I/O. Serialize the on-disk read and final write through
-a narrow per-store publication gate, acquired before the first read await and
-held through commit validation/failed-write cleanup. A read that starts first
-finishes before a new write creates its file; a read that follows a write sees
-only its settled result. Apply this to both legacy and chunked final writes in
-the shared store. Keep receiving chunks outside this gate. Synchronous reference
-admission rejects pending names instead of waiting. Reuse the existing
-pending-write/copy coordination so queued writes cannot bypass close or deadlock
-with session copying; this needs no general locking framework.
+directory lookup and file I/O. Order on-disk reads and final writes through a
+narrow per-store publication gate: concurrent readers share a batch, while a
+writer waits for prior readers and holds the gate through commit validation or
+failed-write cleanup. A read that starts first finishes before a new write
+creates its file; a read that follows a write sees only its settled result.
+Apply this to both legacy and chunked final writes in the shared store. Keep
+receiving chunks outside this gate. Synchronous reference admission rejects
+pending names instead of waiting. A queued write reserves its original name
+against deletion without hiding an existing same-name reference. Reuse the
+existing pending-write/copy coordination so queued writes cannot bypass close
+or deadlock with session copying; this needs no general locking framework.
 
 ## State, resources, and lifecycle
 
@@ -215,6 +221,7 @@ stateDiagram-v2
     [*] --> receiving: create
     receiving --> receiving: append or identical last-chunk retry
     receiving --> completing: complete with all bytes
+    completing --> receiving: concurrent copy; retry later
     completing --> completed: storage succeeds
     completing --> failed: storage or commit check fails
     receiving --> [*]: cancel / expiry / close
@@ -310,9 +317,10 @@ must not reach Web Shell's legacy raw-endpoint 404 fallback: it means the curren
 upload failed, not that attachment support is absent. Test that distinction
 explicitly. Caller cancellation remains an abort error.
 
-For legacy-path 413, preserve the daemon's structured size error. When a file
-within 8 MiB receives a generic 413, give an actionable message that the server
-or an intermediary rejected the request body and a proxy limit may be lower.
+For attachment-upload 413 responses, preserve the daemon's structured size
+error. When a file within 8 MiB receives a generic 413, give an actionable
+message that the server or an intermediary rejected the request body and a
+proxy limit may be lower.
 Do not assert that every 413 originated in a proxy. Preserve the original status
 and body as diagnostic data. No generic HTTP-error rewrite is needed.
 
