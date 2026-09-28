@@ -131,18 +131,29 @@ function id(value: unknown): string {
 /**
  * Envelope Session ids become core's `Config.sessionId` and the file-history
  * owner's directory name, both of which are interpolated into file names, so
- * only the lowercase UUID form every in-repo producer already generates is
- * admitted. Lowercase-only (no case folding): `checkSession` compares this
- * value verbatim against core's lowercased identity, and the response echoes
- * it unchanged for the Broker's equality check.
+ * they must be printable, path-safe text: no separators, no `.`/`..`
+ * segments, no control characters, no unpaired surrogates. The wire contract
+ * deliberately does not require the UUID form — the Broker's own fault gates
+ * drive this route with opaque ids, and non-identity operations
+ * (acquire/release/manifest) stay available to them. Identity-bearing
+ * operations keep requiring core's UUID form through `checkSession`.
  */
-const ENVELOPE_SESSION_ID_PATTERN =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+// eslint-disable-next-line no-control-regex
+const UNSAFE_SESSION_ID = /[\0-\x1f\x7f-\x9f\uD800-\uDFFF]|\.\./;
 
 function envelopeSessionId(value: unknown): void {
-  if (typeof value !== 'string' || !ENVELOPE_SESSION_ID_PATTERN.test(value))
+  if (
+    typeof value !== 'string' ||
+    value.length === 0 ||
+    value.length > 512 ||
+    value === '.' ||
+    value === '..' ||
+    value.includes('/') ||
+    value.includes('\\') ||
+    UNSAFE_SESSION_ID.test(value)
+  )
     throw new ManagedRuntimeProviderProtocolError(
-      'Managed Runtime provider Session identity must be a lowercase UUID.',
+      'Managed Runtime provider Session identity must be printable and path-safe.',
     );
 }
 

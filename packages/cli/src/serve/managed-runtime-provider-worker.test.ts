@@ -126,15 +126,18 @@ describe('Managed Runtime provider worker', () => {
       }),
     });
   }
-  async function control<T = unknown>(operation: unknown): Promise<T> {
-    const response = await post(operation);
+  async function control<T = unknown>(
+    operation: unknown,
+    session = SESSION,
+  ): Promise<T> {
+    const response = await post(operation, session);
     const body = await response.json();
     expect(response.status).toBe(200);
     expect(response.headers.get('cache-control')).toBe('no-store');
     expect(body).toMatchObject({
       protocolVersion: 1,
       providerProtocol: MANAGED_RUNTIME_PROVIDER_PROTOCOL,
-      session: SESSION,
+      session,
     });
     return body.result as T;
   }
@@ -916,11 +919,12 @@ describe('Managed Runtime provider worker', () => {
     expect(await control({ kind: 'release' })).toBe(true);
   });
 
-  it('refuses envelope Session ids that are not lowercase UUIDs', async () => {
+  it('refuses envelope Session ids that are not printable and path-safe', async () => {
     for (const session of [
       { ...SESSION, runtimeSessionId: '../escape' },
-      { ...SESSION, runtimeSessionId: SESSION.runtimeSessionId.toUpperCase() },
+      { ...SESSION, runtimeSessionId: 'a/b\nc' },
       { ...SESSION, harnessSessionId: '../../etc' },
+      { ...SESSION, runtimeSessionId: 'has\\backslash' },
     ]) {
       const response = await post({ kind: 'acquire' }, session);
       expect(response.status).toBe(400);
@@ -928,6 +932,14 @@ describe('Managed Runtime provider worker', () => {
         code: 'managed_runtime_provider_invalid',
       });
     }
+    // The wire contract does not require the UUID form: an opaque but
+    // path-safe id still acquires, exactly as the Broker's fault gates drive.
+    expect(
+      await control(
+        { kind: 'acquire' },
+        { ...SESSION, runtimeSessionId: 'sess-opaque-01' },
+      ),
+    ).toBe(true);
     expect(await control({ kind: 'acquire' })).toBe(true);
   });
 

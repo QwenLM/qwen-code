@@ -21,10 +21,12 @@ reference 和原始参数；provider 使用七字段的已准备调用 reference
 `/internal/managed-runtime/provider/v1/control` 使用封闭信封：
 `protocolVersion: 1`、`providerProtocol: managed-runtime-provider/1`、`session`
 和 `operation`。Session 包含 `harnessSessionId`、`runtimeSessionId` 及
-`turnKind`（`bootstrap` 或 `continuation`）。两个 Session id 都采用仓库内各
-生产方本就生成的小写 UUID 形式；其他拼写在信封处即被拒绝，早于该 id 成为
-core 会话 id 或文件历史目录名的任何时机。成功响应重复版本、协议与 Session，
-并包含 `result`；无返回值时为 null。现有 bearer、lease 和 epoch 请求头隔离选中的
+`turnKind`（`bootstrap` 或 `continuation`）。两个 Session id 都必须是可打印、
+路径安全的文本（不含路径分隔符、`.`/`..` 片段、控制字符或未配对代理项）；
+其他拼写在信封处即被拒绝，早于该 id 成为 core 会话 id 或文件历史目录名的任何
+时机。线上契约不要求 UUID 形式：携带身份的操作本就通过身份检查要求 UUID，
+而 acquire、release 和 manifest 对不透明 id 保持可用。成功响应重复版本、协议与
+Session，并包含 `result`；无返回值时为 null。现有 bearer、lease 和 epoch 请求头隔离选中的
 物理 Runtime。
 
 operation 是封闭的判别联合。公开 Broker 控制为 `manifest`、`begin-turn`、

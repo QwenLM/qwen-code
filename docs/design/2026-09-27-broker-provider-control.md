@@ -25,10 +25,13 @@ The authenticated, no-store POST route
 `/internal/managed-runtime/provider/v1/control` carries a closed envelope:
 `protocolVersion: 1`, `providerProtocol: managed-runtime-provider/1`, `session`
 and `operation`. Session contains `harnessSessionId`, `runtimeSessionId` and
-`turnKind` (`bootstrap` or `continuation`). Both Session ids use the lowercase
-UUID form every in-repo producer already generates; the worker rejects any
-other spelling at the envelope, before the id can become core's session id or
-a file-history directory name. Every successful response repeats
+`turnKind` (`bootstrap` or `continuation`). Both Session ids must be
+printable, path-safe text (no separators, no `.`/`..` segments, no control
+characters or unpaired surrogates); the worker rejects any other spelling at
+the envelope, before the id can become core's session id or a file-history
+directory name. The UUID form is not required: identity-bearing operations
+already require it through the identity check, while acquire, release and
+manifest stay available to opaque ids. Every successful response repeats
 the version, protocol and Session and contains `result`; void results are null.
 Existing bearer, lease and epoch headers fence the selected physical Runtime.
 
