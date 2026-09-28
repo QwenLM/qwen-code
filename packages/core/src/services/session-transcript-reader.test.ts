@@ -58,6 +58,7 @@ import {
   type ChatRecord,
 } from './chatRecordingService.js';
 import { buildSessionHistoryFromConversation } from './session-api-history.js';
+import { ApprovalMode } from '../config/approval-mode.js';
 import {
   buildApiHistoryFromConversation,
   getResumeTokenCounts,
@@ -2152,6 +2153,147 @@ describe('SessionTranscriptReader', () => {
     expect(projection?.runtime.recording.lastAssistantModel).toBe(
       'other-turn-model',
     );
+  });
+
+  it('restores the last valid session approval state independently of replay', async () => {
+    const yolo: ChatRecord = {
+      ...record('approval-1', null, ''),
+      type: 'system',
+      subtype: 'session_approval_mode',
+      message: undefined,
+      systemPayload: { mode: ApprovalMode.YOLO },
+    };
+    const invalid = {
+      ...record('approval-3', 'approval-2', ''),
+      type: 'system' as const,
+      subtype: 'session_approval_mode',
+      message: undefined,
+      systemPayload: {
+        mode: ApprovalMode.PLAN,
+        prePlanMode: ApprovalMode.PLAN,
+      },
+    };
+    const autoWithIgnoredPredecessor = {
+      ...record('approval-2', 'approval-1', ''),
+      type: 'system' as const,
+      subtype: 'session_approval_mode',
+      message: undefined,
+      systemPayload: {
+        mode: ApprovalMode.AUTO,
+        prePlanMode: 'not-a-mode',
+      },
+    };
+    await writeRecords([
+      yolo,
+      autoWithIgnoredPredecessor as unknown as ChatRecord,
+      invalid as unknown as ChatRecord,
+    ]);
+
+    const projection = await new SessionTranscriptReader(
+      workspaceDir,
+    ).readRestoreProjection(sessionId, { replay: { kind: 'none' } });
+
+    expect(projection?.runtime.recording.sessionApprovalMode).toEqual({
+      mode: ApprovalMode.AUTO,
+    });
+  });
+
+  it('defaults a legacy Plan approval record predecessor to default', async () => {
+    await writeRecords([
+      {
+        ...record('approval-1', null, ''),
+        type: 'system',
+        subtype: 'session_approval_mode',
+        message: undefined,
+        systemPayload: { mode: ApprovalMode.PLAN },
+      },
+    ]);
+
+    const projection = await new SessionTranscriptReader(
+      workspaceDir,
+    ).readRestoreProjection(sessionId, { replay: { kind: 'none' } });
+
+    expect(projection?.runtime.recording.sessionApprovalMode).toEqual({
+      mode: ApprovalMode.PLAN,
+      prePlanMode: ApprovalMode.DEFAULT,
+    });
+  });
+
+  it('keeps the last valid Plan execution mode when the tail is invalid', async () => {
+    await writeRecords([
+      {
+        ...record('approval-1', null, ''),
+        type: 'system',
+        subtype: 'session_approval_mode',
+        message: undefined,
+        systemPayload: {
+          mode: ApprovalMode.PLAN,
+          prePlanMode: ApprovalMode.YOLO,
+          planExecutionMode: ApprovalMode.AUTO_EDIT,
+        },
+      },
+      {
+        ...record('approval-2', 'approval-1', ''),
+        type: 'system',
+        subtype: 'session_approval_mode',
+        message: undefined,
+        systemPayload: {
+          mode: ApprovalMode.PLAN,
+          prePlanMode: ApprovalMode.YOLO,
+          planExecutionMode: ApprovalMode.PLAN,
+        },
+      } as ChatRecord,
+    ]);
+
+    const projection = await new SessionTranscriptReader(
+      workspaceDir,
+    ).readRestoreProjection(sessionId, { replay: { kind: 'none' } });
+
+    expect(projection?.runtime.recording.sessionApprovalMode).toEqual({
+      mode: ApprovalMode.PLAN,
+      prePlanMode: ApprovalMode.YOLO,
+      planExecutionMode: ApprovalMode.AUTO_EDIT,
+    });
+  });
+
+  it('selects approval state from the active branch after rewind', async () => {
+    const approval = (
+      uuid: string,
+      parentUuid: string | null,
+      mode: ApprovalMode,
+    ): ChatRecord => ({
+      ...record(uuid, parentUuid, ''),
+      type: 'system',
+      subtype: 'session_approval_mode',
+      message: undefined,
+      systemPayload: { mode },
+    });
+    await writeRecords([
+      approval('approval-default', null, ApprovalMode.DEFAULT),
+      record('u1', 'approval-default', 'first'),
+      record('a1', 'u1', 'answer'),
+      approval('approval-abandoned', 'a1', ApprovalMode.YOLO),
+      record('u2', 'approval-abandoned', 'abandoned'),
+      record('a2', 'u2', 'abandoned answer'),
+      {
+        ...record('rewind', 'a1', ''),
+        type: 'system',
+        subtype: 'rewind',
+        message: undefined,
+        systemPayload: { truncatedCount: 1 },
+      },
+      approval('approval-active', 'rewind', ApprovalMode.AUTO),
+      record('u3', 'approval-active', 'active'),
+      record('a3', 'u3', 'active answer'),
+    ]);
+
+    const projection = await new SessionTranscriptReader(
+      workspaceDir,
+    ).readRestoreProjection(sessionId, { replay: { kind: 'none' } });
+
+    expect(projection?.runtime.recording.sessionApprovalMode).toEqual({
+      mode: ApprovalMode.AUTO,
+    });
   });
 
   it('captures lastAssistantModel when no session_model record exists', async () => {

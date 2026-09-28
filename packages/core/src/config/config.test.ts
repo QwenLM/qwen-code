@@ -30,6 +30,7 @@ import {
   APPROVAL_MODE_INFO,
   MCPServerConfig,
   deriveAgentConfig,
+  deriveApprovalModeConfig,
   deriveConfig,
   deriveWorktreeConfig,
   TrustGateError,
@@ -14194,6 +14195,41 @@ describe('setApprovalMode with folder trust', () => {
   });
 
   describe('DAC plan workflow', () => {
+    it('notifies after a Plan execution mode is selected or changed', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+      config.setApprovalMode(ApprovalMode.YOLO);
+      const states: Array<{
+        mode: ApprovalMode;
+        prePlanMode: ApprovalMode;
+        executionMode: ApprovalMode | undefined;
+      }> = [];
+      config.onApprovalModeChange((mode, prePlanMode) => {
+        states.push({
+          mode,
+          prePlanMode: prePlanMode ?? ApprovalMode.DEFAULT,
+          executionMode: config.getPlanExecutionMode(),
+        });
+      });
+
+      config.setPlanMode(true, ApprovalMode.YOLO);
+      config.setPlanMode(true, ApprovalMode.AUTO_EDIT);
+      config.setPlanMode(true, ApprovalMode.AUTO_EDIT);
+
+      expect(states).toEqual([
+        {
+          mode: ApprovalMode.PLAN,
+          prePlanMode: ApprovalMode.YOLO,
+          executionMode: ApprovalMode.YOLO,
+        },
+        {
+          mode: ApprovalMode.PLAN,
+          prePlanMode: ApprovalMode.YOLO,
+          executionMode: ApprovalMode.AUTO_EDIT,
+        },
+      ]);
+    });
+
     it.each([
       ApprovalMode.DEFAULT,
       ApprovalMode.AUTO_EDIT,
@@ -14267,6 +14303,43 @@ describe('setApprovalMode with folder trust', () => {
   });
 
   describe('prePlanMode tracking', () => {
+    it('notifies canonical listeners after approval state changes', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+      const listener = vi.fn();
+      const unsubscribe = config.onApprovalModeChange(listener);
+
+      config.setApprovalMode(ApprovalMode.YOLO);
+      config.setApprovalMode(ApprovalMode.PLAN);
+      config.setApprovalMode(ApprovalMode.PLAN);
+      unsubscribe();
+      config.setApprovalMode(ApprovalMode.DEFAULT);
+
+      expect(listener).toHaveBeenNthCalledWith(1, ApprovalMode.YOLO, undefined);
+      expect(listener).toHaveBeenNthCalledWith(
+        2,
+        ApprovalMode.PLAN,
+        ApprovalMode.YOLO,
+      );
+      expect(listener).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not notify when trust rejects a mode or a derived config changes', () => {
+      const config = new Config(baseParams);
+      const listener = vi.fn();
+      config.onApprovalModeChange(listener);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(false);
+
+      expect(() => config.setApprovalMode(ApprovalMode.YOLO)).toThrow(
+        TrustGateError,
+      );
+      const derived = deriveApprovalModeConfig(config, ApprovalMode.PLAN);
+      derived.config.setApprovalMode(ApprovalMode.DEFAULT);
+
+      expect(listener).not.toHaveBeenCalled();
+      derived.cleanup();
+    });
+
     it('should save pre-plan mode when entering plan mode', () => {
       const config = new Config(baseParams);
       vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);

@@ -5310,6 +5310,128 @@ describe('SessionService', () => {
       expect(srcLines.every((r) => !r.forkedFrom)).toBe(true);
     });
 
+    it('copies the selected branch approval state into a fork', async () => {
+      const oldId = '11111111-1111-1111-1111-111111111131';
+      const newId = '22222222-2222-2222-2222-222222222242';
+      const { file, lines } = seedSession(oldId);
+      lines[1]!['parentUuid'] = 'approval-yolo';
+      fs.writeFileSync(
+        file,
+        [
+          lines[0],
+          {
+            uuid: 'approval-yolo',
+            parentUuid: 'u1',
+            sessionId: oldId,
+            type: 'system',
+            subtype: 'session_approval_mode',
+            timestamp: '2026-04-22T00:00:00.500Z',
+            cwd,
+            version: 'test',
+            systemPayload: { mode: 'yolo' },
+          },
+          lines[1],
+        ]
+          .map((record) => JSON.stringify(record))
+          .join('\n') + '\n',
+      );
+
+      const result = await service.forkSession(oldId, newId);
+      const written = fs
+        .readFileSync(result.filePath, 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line));
+
+      expect(written).toContainEqual(
+        expect.objectContaining({
+          sessionId: newId,
+          subtype: 'session_approval_mode',
+          systemPayload: { mode: 'yolo' },
+        }),
+      );
+    });
+
+    it('copies approval state at a historical fork checkpoint', async () => {
+      const oldId = '11111111-1111-1111-1111-111111111132';
+      const newId = '22222222-2222-2222-2222-222222222243';
+      const { file, lines } = seedSession(oldId);
+      lines[1]!['parentUuid'] = 'approval-default';
+      const checkpoint = {
+        uuid: 'checkpoint-approval',
+        parentUuid: 'u2',
+        sessionId: oldId,
+        type: 'system',
+        subtype: 'branch_checkpoint',
+        timestamp: '2026-04-22T00:00:01.500Z',
+        cwd,
+        version: 'test',
+        systemPayload: {
+          v: 1,
+          startExclusiveRecordUuid: null,
+          assistantRecordUuid: 'u2',
+          promptId: `${oldId}########0`,
+        },
+      };
+      fs.writeFileSync(
+        file,
+        [
+          lines[0],
+          {
+            uuid: 'approval-default',
+            parentUuid: 'u1',
+            sessionId: oldId,
+            type: 'system',
+            subtype: 'session_approval_mode',
+            timestamp: '2026-04-22T00:00:00.500Z',
+            cwd,
+            version: 'test',
+            systemPayload: { mode: 'default' },
+          },
+          lines[1],
+          checkpoint,
+          {
+            uuid: 'approval-yolo',
+            parentUuid: 'checkpoint-approval',
+            sessionId: oldId,
+            type: 'system',
+            subtype: 'session_approval_mode',
+            timestamp: '2026-04-22T00:00:02.000Z',
+            cwd,
+            version: 'test',
+            systemPayload: { mode: 'yolo' },
+          },
+          {
+            uuid: 'u3',
+            parentUuid: 'approval-yolo',
+            sessionId: oldId,
+            type: 'user',
+            timestamp: '2026-04-22T00:00:03.000Z',
+            cwd,
+            version: 'test',
+            message: { role: 'user', parts: [{ text: 'later' }] },
+          },
+        ]
+          .map((record) => JSON.stringify(record))
+          .join('\n') + '\n',
+      );
+
+      const result = await service.forkSession(oldId, newId, {
+        atRecordId: 'checkpoint-approval',
+      });
+      const written = fs
+        .readFileSync(result.filePath, 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line));
+      const approvalRecords = written.filter(
+        (record) => record.subtype === 'session_approval_mode',
+      );
+
+      expect(approvalRecords).toHaveLength(1);
+      expect(approvalRecords[0].systemPayload).toEqual({ mode: 'default' });
+    });
+
     it('remaps persisted telemetry prompt ids into the fork', async () => {
       const oldId = '51515151-5151-5151-5151-515151515151';
       const newId = '61616161-6161-6161-6161-616161616161';

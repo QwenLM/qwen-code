@@ -37,6 +37,8 @@ projection versions and the Item and Part identity they were accepted with,
 except that a `stream.reconciled` event announces retracted deltas. A
 cursor below a Session's replay floor gets `409 cursor_expired` from the JSON
 event query and one `agent.session.resync_required` frame from either stream.
+`GET /v1/agents/sessions/{id}/turns` lists a Session's Turns newest first with
+an opaque cursor, and `GET /v1/agents/sessions/{id}/turns/{turnId}` reads one.
 Design: [English](../../../docs/design/2026-09-27-managed-agent-api-contract.md) |
 [简体中文](../../../docs/design/2026-09-27-managed-agent-api-contract.zh-CN.md);
 Session query: [English](../../../docs/design/2026-09-27-managed-agent-session-query.md) |
@@ -44,7 +46,9 @@ Session query: [English](../../../docs/design/2026-09-27-managed-agent-session-q
 Event replay: [English](../../../docs/design/2026-09-27-managed-agent-event-replay.md) |
 [简体中文](../../../docs/design/2026-09-27-managed-agent-event-replay.zh-CN.md);
 Durable lifecycle: [English](../../../docs/design/2026-09-28-managed-agent-durable-lifecycle.md) |
-[简体中文](../../../docs/design/2026-09-28-managed-agent-durable-lifecycle.zh-CN.md)
+[简体中文](../../../docs/design/2026-09-28-managed-agent-durable-lifecycle.zh-CN.md);
+Turn queries: [English](../../../docs/design/2026-09-28-managed-agent-turn-queries.md) |
+[简体中文](../../../docs/design/2026-09-28-managed-agent-turn-queries.zh-CN.md)
 
 ## Prerequisites
 
