@@ -27,6 +27,7 @@ import {
   readWorkspaceAgents,
   readAgentWorkspace,
   reconcileThreadOutbox,
+  threadTokens,
   withAgentStoreTransaction,
   type AgentStoreTransaction,
 } from './store.js';
@@ -50,7 +51,7 @@ import type {
   ThreadEvent,
   ThreadRun,
 } from './types.js';
-import { threadPriorityRank } from './types.js';
+import { DEFAULT_THREAD_TOKEN_BUDGET, threadPriorityRank } from './types.js';
 import { isThreadTerminal } from './types.js';
 
 /** What the runtime says about one agent's session on one thread. */
@@ -827,6 +828,108 @@ async function chargeRunUsage(
   });
 }
 
+/** Recorded on a run stopped because its tree reached the token budget. */
+export const TOKEN_BUDGET_EXHAUSTED = 'token_budget_exhausted';
+
+/**
+ * Holds a tree to its token budget while runs are going, not only at
+ * admission.
+ *
+ * Admission refuses new agent-authored work once a tree is over budget, but a
+ * run already started used to keep spending until it ended — one
+ * crash-replayed run closed at 666,749 tokens against a 200,000 budget. Each
+ * pass records every running run's spend so far (written only when it moved)
+ * and moves the running runs of an over-budget tree to `cancelling`, which
+ * the next reconcile stops through the ordinary cancel path. The overshoot is
+ * at most what a run spent since the previous pass.
+ *
+ * A run a person triggered is left alone: a person's post passes the budget
+ * at admission, and stopping the work they asked for mid-run would undo that.
+ */
+async function enforceTreeBudgets(
+  projectRoot: string,
+  port: AgentDispatchPort,
+  agents: readonly WorkspaceAgent[],
+  threads: readonly Thread[],
+): Promise<DispatchRecord[]> {
+  if (!port.totalTokens) return [];
+  let running = false;
+  for (const thread of threads) {
+    for (const run of thread.runs) {
+      if (run.status !== 'running') continue;
+      const agent = agents.find((candidate) => candidate.id === run.agentId);
+      if (!agent) continue;
+      running = true;
+      const total = await port.totalTokens({
+        agent,
+        threadId: thread.id,
+        ...(run.sessionId ? { sessionId: run.sessionId } : {}),
+      });
+      if (total === undefined) continue;
+      const spent = Math.max(0, total - (run.usageBaselineTokens ?? 0));
+      const recorded = run.usageByRound.find(
+        (usage) =>
+          usage.attempt === run.attempts && usage.round === SESSION_USAGE_ROUND,
+      )?.tokens;
+      if (spent === 0 || spent === recorded) continue;
+      await upsertRunUsage(projectRoot, thread.id, run.id, {
+        attempt: run.attempts,
+        round: SESSION_USAGE_ROUND,
+        tokens: spent,
+      });
+    }
+  }
+  if (!running) return [];
+  return withAgentStoreTransaction(projectRoot, async (transaction) => {
+    const { threads: current } = await transaction.listThreads();
+    const treeTokens = new Map<string, number>();
+    for (const thread of current) {
+      treeTokens.set(
+        thread.rootThreadId,
+        (treeTokens.get(thread.rootThreadId) ?? 0) + threadTokens(thread),
+      );
+    }
+    const records: DispatchRecord[] = [];
+    for (const thread of current) {
+      const tree = treeTokens.get(thread.rootThreadId) ?? 0;
+      if (tree < DEFAULT_THREAD_TOKEN_BUDGET) continue;
+      const humanPosts = new Set(
+        thread.messages
+          .filter((message) => message.authorKind === 'human')
+          .map((message) => message.id),
+      );
+      const stopped = thread.runs.filter(
+        (run) =>
+          run.status === 'running' &&
+          !run.triggerMessageIds.some((id) => humanPosts.has(id)),
+      );
+      if (stopped.length === 0) continue;
+      await transaction.writeThread({
+        ...thread,
+        runs: thread.runs.map((run) =>
+          stopped.includes(run)
+            ? {
+                ...run,
+                status: 'cancelling' as const,
+                error: TOKEN_BUDGET_EXHAUSTED,
+              }
+            : run,
+        ),
+      });
+      for (const run of stopped) {
+        records.push({
+          agentId: run.agentId,
+          threadId: thread.id,
+          runId: run.id,
+          kind: 'cancelling',
+          detail: TOKEN_BUDGET_EXHAUSTED,
+        });
+      }
+    }
+    return records;
+  });
+}
+
 export async function dispatchOnce(
   projectRoot: string,
   port: AgentDispatchPort,
@@ -838,6 +941,10 @@ export async function dispatchOnce(
   let { threads } = await listThreads(projectRoot);
   const records: DispatchRecord[] = [];
 
+  records.push(
+    ...(await enforceTreeBudgets(projectRoot, port, agents, threads)),
+  );
+  ({ threads } = await listThreads(projectRoot));
   records.push(
     ...(await reconcileInterruptedRuns(
       projectRoot,

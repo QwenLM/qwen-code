@@ -413,6 +413,11 @@ export interface Thread {
    * turn counter it is not reset by a human post.
    */
   tokensUsed: number;
+  /**
+   * Tokens spent by runs that retention has since dropped. Folded in before a
+   * run is trimmed, so the tree budget still counts what those runs spent.
+   */
+  trimmedTokens?: number;
 }
 
 export interface AgentDelivery {
@@ -455,5 +460,11 @@ export const DEFAULT_THREAD_TOKEN_BUDGET = 1_000_000;
 /** Recent-post retention target; referenced and idempotency records are retained. */
 export const MAX_THREAD_MESSAGES = 500;
 
-/** Recent-run retention target; live, accounting and unresolved records are retained. */
+/** Recent-run retention target; live and unresolved runs are retained. */
 export const MAX_THREAD_RUNS = 200;
+
+/**
+ * Acknowledged outbox events kept for audit. Pending events are always kept;
+ * an acknowledged one is never replayed, so dropping older ones is safe.
+ */
+export const MAX_ACKNOWLEDGED_OUTBOX = 50;
