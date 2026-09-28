@@ -56,10 +56,11 @@ install-metadata sidecar 读取、`loadExtensionWorkflows`（含其候选路径�
 `refreshCacheIfSourcesChanged` 会重试——而不是把一个被截断（或为空）的
 扩展集提交并盖上"已是最新"的戳。
 
-启动时没有既有缓存可保留、也没有下一次 refresh 可重试，因此
-`Config.initialize` 让启动阶段的扩展 refresh 经过一个辅助方法：遇到资源
-耗尽先重试一次，仍失败则不带扩展集继续启动，而不是中止初始化；启动之后
-的 refresh 仍保持上述 fail-closed 语义。
+`Config.initialize` 在启动前段和后段各刷新一次扩展，均通过辅助方法处理：资源
+耗尽先重试一次，仍失败则使用先前完整的缓存（冷启动时为空）继续，而不是
+中止初始化。若首次刷新放弃、最终启动刷新成功，继续初始化前会重新同步
+hooks 和 skills；同步失败则初始化失败。启动之后的 refresh 仍保持上述
+fail-closed 语义。
 
 Executor refusal 与已提交的运行时缓存分开保存。声明了无效
 `executor`/`executionBackend` 的文件会在 `extension.agentExecutorRefusals`
@@ -80,6 +81,11 @@ pending refusal，即使冷缓存也会拒绝按名回退。回调会过滤已�
 加载也遵循此规则。卸载删除该名称的记录；完整刷新还会删除安装目录已确认
 不存在的记录。目录不可读和 `ENOTDIR` 不代表扩展已移除。Pending 状态不跨
 进程重启持久化。
+
+只有显式的运行时刷新才会初始化运行时缓存，即使首次扫描失败、缓存仍为空。
+安装/更新可以替换该缓存中的条目，但不会初始化它。因此，主动跳过扩展加载的
+模式在安装后仍保持隔离；目录查询也不会修改运行时缓存。普通运行时仍可在
+首次扫描失败后，通过安装完整扩展恢复并取代对应拒绝记录。
 
 Commands 遍历按当前路径的祖先链记录符号链接目标：指向同一目录的不同
 别名都会被列出，同一路径上的重复目标则终止循环。Plugin manifest 的路径

@@ -63,11 +63,13 @@ cache and fingerprint baseline stay in place, and the next
 `refreshCacheIfSourcesChanged` retries — instead of committing a truncated
 (or empty) extension set stamped as up to date.
 
-At startup there is no previous cache to keep and no later refresh to
-retry, so `Config.initialize` routes its extension refreshes through a
-helper that retries resource exhaustion once and otherwise continues
-without the extension set rather than aborting initialization; post-startup
-refreshes keep the fail-closed semantics above.
+`Config.initialize` performs an initial and a final extension refresh. Each
+uses a helper that retries resource exhaustion once and otherwise continues
+with the previous complete cache (empty on a cold start) rather than aborting
+initialization. If the initial refresh gives up and the final startup refresh
+succeeds, hooks and skills are synchronized before initialization continues.
+A synchronization failure rejects initialization. Post-startup refreshes keep
+the fail-closed semantics above.
 
 Executor refusals are kept separately from the committed runtime cache. A file
 that declares an invalid `executor`/`executionBackend` records a refusal in
@@ -95,6 +97,13 @@ reloads. Uninstall removes the name; a full refresh also drops records whose
 installation directory is confirmed missing. Unreadable directories and
 `ENOTDIR` are not proof of removal. Pending state does not persist across
 process restarts.
+
+Only an explicit runtime refresh initializes the runtime cache, even if that
+first scan fails and leaves it empty. Install/update operations can replace
+entries in that cache, but never initialize it. Modes that skip extension
+loading therefore stay isolated after an install; catalog reads also leave the
+runtime cache untouched. A normal runtime can still recover from an initial
+failed scan by installing a complete extension and superseding its refusals.
 
 The commands walk tracks symlink targets per traversal ancestry: separate
 aliases to one directory are both listed, while repeated targets on the same

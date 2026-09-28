@@ -8,7 +8,13 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Mock } from 'vitest';
 import type { ConfigParameters } from './config.js';
 import { Config } from './config.js';
-import { ExtensionManager } from '../extension/extensionManager.js';
+import {
+  ExtensionManager,
+  type Extension,
+} from '../extension/extensionManager.js';
+import { HookSystem } from '../hooks/index.js';
+import { HookType } from '../hooks/types.js';
+import { SkillManager } from '../skills/skill-manager.js';
 import * as fs from 'node:fs';
 
 vi.mock('node:fs', async (importOriginal) => {
@@ -85,6 +91,7 @@ vi.mock('../memory/store.js', () => ({
 vi.mock('../hooks/index.js', () => {
   const HookSystemMock = vi.fn();
   HookSystemMock.prototype.initialize = vi.fn().mockResolvedValue(undefined);
+  HookSystemMock.prototype.reload = vi.fn().mockResolvedValue(undefined);
   HookSystemMock.prototype.hasHooksForEvent = vi.fn().mockReturnValue(false);
   HookSystemMock.prototype.getAllHooks = vi.fn().mockReturnValue([]);
   return {
@@ -221,9 +228,8 @@ describe('Config startup extension refresh', () => {
   });
 
   it('retries a transient resource-exhaustion rejection once and finishes startup', async () => {
-    // The loaders fail a refresh closed on EMFILE; at startup there is no
-    // previous cache to keep and no later refresh to retry, so a single
-    // transient failure must not abort initialization.
+    // The loaders fail a refresh closed on EMFILE; a single transient failure
+    // must not abort initialization.
     vi.mocked(ExtensionManager.prototype.refreshCache)
       .mockRejectedValueOnce(emfile())
       .mockResolvedValue(undefined);
@@ -251,6 +257,122 @@ describe('Config startup extension refresh', () => {
     ).toHaveLength(4);
     expect(config.getExtensions()).toEqual([]);
   });
+
+  it.each([0, 2])(
+    'registers extension hooks and skills after %i initial exhaustion failures',
+    async (failures) => {
+      const { HookSystem: RealHookSystem } =
+        await vi.importActual<typeof import('../hooks/index.js')>(
+          '../hooks/index.js',
+        );
+      const { SkillManager: RealSkillManager } = await vi.importActual<
+        typeof import('../skills/skill-manager.js')
+      >('../skills/skill-manager.js');
+      const extension: Extension = {
+        id: 'aa'.repeat(32),
+        name: 'recovered',
+        version: '1.0.0',
+        path: '/tmp/recovered',
+        isActive: true,
+        config: { name: 'recovered', version: '1.0.0' },
+        contextFiles: [],
+        hooks: {
+          PreToolUse: [
+            { hooks: [{ type: HookType.Command, command: 'echo recovered' }] },
+          ],
+        },
+        skills: [
+          {
+            name: 'recovered-skill',
+            description: 'Recovered skill',
+            body: 'Recovered skill body',
+            filePath: '/tmp/recovered/skills/recovered-skill/SKILL.md',
+            level: 'extension',
+          },
+        ],
+      };
+      let loaded: Extension[] = [];
+      vi.mocked(
+        ExtensionManager.prototype.getLoadedExtensions,
+      ).mockImplementation(() => loaded);
+      const refresh = vi.mocked(ExtensionManager.prototype.refreshCache);
+      for (let attempt = 0; attempt < failures; attempt++) {
+        refresh.mockRejectedValueOnce(emfile());
+      }
+      refresh.mockImplementation(async () => {
+        loaded = [extension];
+      });
+      vi.mocked(HookSystem).mockImplementation(
+        (config) => new RealHookSystem(config),
+      );
+      vi.mocked(SkillManager).mockImplementation(
+        (config) => new RealSkillManager(config),
+      );
+      const watching = vi
+        .spyOn(RealSkillManager.prototype, 'startWatching')
+        .mockImplementation(async function (
+          this: InstanceType<typeof RealSkillManager>,
+        ) {
+          await this.refreshCache();
+        });
+      const config = new Config({
+        ...baseParams,
+        overrideExtensions: undefined,
+      });
+      const levels = vi
+        .spyOn(config, 'getDisabledSkillLevels')
+        .mockReturnValue(new Set(['user', 'project', 'bundled']));
+      try {
+        await config.initialize();
+        expect(config.getActiveExtensions()).toHaveLength(1);
+        expect.soft(config.getHookSystem()?.getAllHooks()).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              source: 'extensions',
+              eventName: 'PreToolUse',
+            }),
+          ]),
+        );
+        expect
+          .soft(
+            await config.getSkillManager()?.listSkills({ level: 'extension' }),
+          )
+          .toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({ name: 'recovered:recovered-skill' }),
+            ]),
+          );
+      } finally {
+        watching.mockRestore();
+        levels.mockRestore();
+        vi.mocked(HookSystem).mockReset();
+        vi.mocked(SkillManager).mockReset();
+        vi.mocked(
+          ExtensionManager.prototype.getLoadedExtensions,
+        ).mockReturnValue([]);
+      }
+    },
+  );
+
+  it.each(['hooks', 'skills'])(
+    'fails initialization if recovered extension %s cannot synchronize',
+    async (consumer) => {
+      const failure = new Error(`${consumer} synchronization failed`);
+      vi.mocked(ExtensionManager.prototype.refreshCache)
+        .mockRejectedValueOnce(emfile())
+        .mockRejectedValueOnce(emfile());
+      if (consumer === 'hooks') {
+        vi.mocked(HookSystem.prototype.reload).mockRejectedValueOnce(failure);
+      } else {
+        vi.mocked(SkillManager.prototype.refreshCache).mockRejectedValueOnce(
+          failure,
+        );
+      }
+
+      const config = new Config(baseParams);
+      await expect(config.initialize()).rejects.toBe(failure);
+    },
+  );
 
   it('does not retry a non-exhaustion rejection', async () => {
     const failure = new Error('corrupt extension store');

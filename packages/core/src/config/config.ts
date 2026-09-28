@@ -3923,20 +3923,22 @@ export class Config {
           (n) => n.trim() !== '' && n.toLowerCase() !== 'none',
         );
     recordStartupEvent('config_initialize_extensions_initial_start');
+    let initialExtensionRefreshSucceeded = false;
     if (
       !this.executionEnvironment &&
       !this.shellExecutionSandbox &&
       !this.isSafeMode() &&
       !this.getBareMode()
     ) {
-      await this.refreshExtensionsAtStartup();
+      initialExtensionRefreshSucceeded =
+        await this.refreshExtensionsAtStartup();
     } else if (
       !this.executionEnvironment &&
       !this.shellExecutionSandbox &&
       !this.isSafeMode() &&
       explicitExtensionNames.length > 0
     ) {
-      await this.refreshExtensionsAtStartup({
+      initialExtensionRefreshSucceeded = await this.refreshExtensionsAtStartup({
         names: explicitExtensionNames,
       });
     }
@@ -4377,7 +4379,11 @@ export class Config {
       !this.getBareMode() &&
       !this.isSafeMode()
     ) {
-      await this.refreshExtensionsAtStartup();
+      const refreshed = await this.refreshExtensionsAtStartup();
+      if (refreshed && !initialExtensionRefreshSucceeded) {
+        await this.hookSystem?.reload();
+        await this.skillManager?.refreshCache({ throwOnError: true });
+      }
     }
     recordStartupEvent('config_initialize_extensions_final_end');
     options?.signal?.throwIfAborted();
@@ -9879,17 +9885,16 @@ export class Config {
 
   /**
    * Startup refresh: the extension loaders fail a refresh closed on
-   * resource exhaustion. At startup there is no previous cache to keep and
-   * no later refresh to retry, so retry once and otherwise continue without
-   * the extension set instead of aborting initialization — a single
-   * transient EMFILE must not kill or hang the CLI.
+   * resource exhaustion. Retry once, then keep the previous complete cache
+   * (empty on the first attempt). Report success so a later startup refresh
+   * can synchronize consumers if the initial refresh gave up.
    */
   private async refreshExtensionsAtStartup(options?: {
     names?: string[];
-  }): Promise<void> {
+  }): Promise<boolean> {
     try {
       await this.extensionManager.refreshCache(options);
-      return;
+      return true;
     } catch (error) {
       if (!isResourceExhaustion(error)) throw error;
       this.debugLogger.warn(
@@ -9898,11 +9903,13 @@ export class Config {
     }
     try {
       await this.extensionManager.refreshCache(options);
+      return true;
     } catch (error) {
       if (!isResourceExhaustion(error)) throw error;
       this.debugLogger.warn(
         `Extension load still exhausted; continuing without it: ${getErrorMessage(error)}`,
       );
+      return false;
     }
   }
 

@@ -1519,6 +1519,9 @@ export class ExtensionManager {
   async refreshCacheWithSnapshot(options?: {
     names?: string[];
   }): Promise<ExtensionStoreSnapshot> {
+    // A refresh opts into runtime loading even if its first scan fails.
+    // Installation alone must not opt in modes that deliberately skip it.
+    this.extensionCache ??= new Map();
     const requestedNames = options?.names?.filter(Boolean) ?? [];
     // Captured before the load, not after: an install landing mid-refresh must
     // leave the committed fingerprint stale so the next check still sees it.
@@ -3057,9 +3060,10 @@ export class ExtensionManager {
           throw error;
         }
 
-        this.extensionCache ??= new Map();
-        this.extensionCache.set(extension.name, extension);
-        this.clearPendingScanRefusals(extension);
+        if (this.extensionCache) {
+          this.extensionCache.set(extension.name, extension);
+          this.clearPendingScanRefusals(extension);
+        }
 
         if (isUpdate) {
           logExtensionUpdateEvent(
@@ -3306,9 +3310,10 @@ export class ExtensionManager {
             { throwOnError: true },
           )) ?? undefined;
         if (!extension) throw new Error('Extension not found after commit.');
-        this.extensionCache ??= new Map();
-        this.extensionCache.set(extension.name, extension);
-        this.clearPendingScanRefusals(extension);
+        if (this.extensionCache) {
+          this.extensionCache.set(extension.name, extension);
+          this.clearPendingScanRefusals(extension);
+        }
         this.applyStoreActivation(snapshot);
       } catch (error) {
         this.extensionCache?.delete(prepared.identity.name);
