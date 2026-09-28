@@ -1,5 +1,7 @@
 # Structured Auto Memory Recall
 
+[English](structured-auto-memory-recall-design.md) | [简体中文](structured-auto-memory-recall-design.zh-CN.md)
+
 ## Goals
 
 The legacy Auto Memory path adds a flat `MEMORY.md` index to the main model
