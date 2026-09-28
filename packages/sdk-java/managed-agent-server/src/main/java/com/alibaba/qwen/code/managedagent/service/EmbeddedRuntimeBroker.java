@@ -150,11 +150,6 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
         return CompletableFuture.completedFuture(null);
     }
 
-    @Override
-    public void resume(String sessionId) {
-        retired.remove(sessionId);
-    }
-
     public URI getBaseUri() {
         return server.getBaseUri();
     }

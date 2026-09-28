@@ -40,6 +40,8 @@ export const AGENT_TOOL_CLASSIFICATION = {
   [ToolNames.EXEC]: 'deny',
   [ToolNames.TODO_WRITE]: 'deny',
   [ToolNames.MEMORY]: 'deny',
+  [ToolNames.MANAGE_MEMORY]: 'deny',
+  [ToolNames.SEARCH_MEMORY]: 'deny',
   [ToolNames.AGENT]: 'deny',
   [ToolNames.ADVISOR]: 'deny',
   [ToolNames.SKILL]: 'allow',

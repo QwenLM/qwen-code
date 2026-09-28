@@ -742,9 +742,9 @@ describe('retiring an agent', () => {
 
   it('refuses disabling before writing the roster when a thread is unreadable', async () => {
     await seed([ALICE]);
-    // A file with the current schema version but an invalid shape lands in
-    // the `unreadable` bucket; a bare `{}` would instead read as a schema
-    // mismatch, which propagates by design.
+    // Versioned but unparseable is what "unreadable" means here. A record with
+    // no schema version at all is a schema failure, which listThreads rethrows
+    // rather than deferring — that path is covered by the version tests above.
     await writeRaw(getThreadPath(PROJECT_ROOT, 'th_broken'), {
       schemaVersion: AGENTS_SCHEMA_VERSION,
     });

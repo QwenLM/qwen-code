@@ -10,21 +10,17 @@ import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.JdbcToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
-import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
-import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
 import java.sql.ResultSet;
 import java.sql.SQLException;
-import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
 import java.util.UUID;
-import java.util.concurrent.atomic.AtomicInteger;
 import javax.sql.DataSource;
 import org.assertj.core.api.SoftAssertions;
 import org.flywaydb.core.Flyway;
@@ -38,9 +34,6 @@ import org.junit.jupiter.api.Test;
  * Broker's own schema.sql. These checks keep the two definitions equal.
  */
 class RuntimeBrokerFlywaySchemaTest {
-    private static final Instant START = Instant.parse(
-            "2026-09-27T00:00:00Z");
-
     @Test
     void flywayCreatesTheBrokerSchema() throws SQLException {
         DataSource broker = dataSource();
@@ -78,58 +71,34 @@ class RuntimeBrokerFlywaySchemaTest {
                 migrate(dataSource(), MigrationVersion.LATEST), "flyway");
     }
 
-    @Test
-    void alignmentKeepsRuntimeRowsWrittenBeforeIt() {
-        DataSource dataSource = migrate(dataSource(),
-                MigrationVersion.fromVersion("11"));
-        RuntimeScope scope = new RuntimeScope("tenant", "workspace",
-                "generation", "/workspace", "capability", "session");
-        RuntimeProvisionRequest request = new RuntimeProvisionRequest(scope,
-                "isolation", "local-process");
-        AtomicInteger bindingIds = new AtomicInteger();
-        JdbcRuntimeBindingRepository bindings =
-                new JdbcRuntimeBindingRepository(dataSource,
-                        new AesGcmSecretProtector("key", new byte[32]),
-                        () -> "binding-" + bindingIds.incrementAndGet());
-        JdbcRuntimeSessionRepository sessions =
-                new JdbcRuntimeSessionRepository(dataSource);
-        JdbcToolExecutionRepository executions =
-                new JdbcToolExecutionRepository(dataSource);
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"11", "13"})
+    void migrationsPreserveRowsWrittenByOldBinaries(String version) throws SQLException {
+        DataSource source = migrate(dataSource(), MigrationVersion.fromVersion(version));
+        RuntimeProvisionRequest request = JdbcRepositoryContract.writeLegacyRows(source, "upgrade");
+        migrate(source, MigrationVersion.LATEST);
+        JdbcRuntimeBindingRepository bindings = new JdbcRuntimeBindingRepository(source,
+                new AesGcmSecretProtector("key", new byte[32]));
         RuntimeBindingRecord binding = bindings.findOrCreate(request);
-        RuntimeSessionRecord session = sessions.findOrCreate(
-                new RuntimeSessionRecord(new RuntimeSession("harness",
-                        "runtime-session", "bootstrap", scope),
-                        binding.getBindingId(), binding.getGeneration(),
-                        RuntimeSessionRecord.State.ACQUIRING, 0, START));
-        ToolExecutionRecord execution = executions.findOrCreate(
-                ToolExecutionRecord.prepared("execution", "idempotency",
-                        binding.getBindingId(), binding.getGeneration(),
-                        "harness", "runtime-session", "turn", "tool",
-                        "digest", Map.of("sessionId", "runtime-session",
-                                "promptId", "turn", "callId", "tool",
-                                "argsDigest", "digest")));
-
-        migrate(dataSource, MigrationVersion.LATEST);
-
-        RuntimeBindingRecord upgradedBinding = bindings.findOrCreate(request);
-        assertThat(upgradedBinding.getBindingId())
-                .isEqualTo(binding.getBindingId());
-        assertThat(upgradedBinding.getVersion())
-                .isEqualTo(binding.getVersion());
-        RuntimeSessionRecord upgradedSession = sessions.findById(scope,
-                "runtime-session");
-        assertThat(upgradedSession.getBindingId())
-                .isEqualTo(session.getBindingId());
-        assertThat(upgradedSession.getVersion())
-                .isEqualTo(session.getVersion());
-        ToolExecutionRecord upgradedExecution =
-                executions.findByExecutionCallId("execution");
-        assertThat(upgradedExecution.getIdempotencyKey())
-                .isEqualTo(execution.getIdempotencyKey());
-        assertThat(upgradedExecution.getVersion())
-                .isEqualTo(execution.getVersion());
-        assertThat(executions.findByIdempotencyKey("idempotency")
-                .getExecutionCallId()).isEqualTo("execution");
+        assertThat(binding.getBindingId()).isEqualTo("upgrade-binding");
+        assertThat(binding.getVersion()).isEqualTo(3);
+        assertThat(binding.getLossEvidence()).isNull();
+        assertThat(binding.getStopEvidence()).isNull();
+        RuntimeSessionRecord session = new JdbcRuntimeSessionRepository(source)
+                .findById(request.getScope(), "upgrade-session");
+        assertThat(session.getBindingId()).isEqualTo("upgrade-binding");
+        assertThat(session.getVersion()).isEqualTo(4);
+        JdbcToolExecutionRepository executions = new JdbcToolExecutionRepository(source);
+        for (String state : List.of("PREPARED", "UNKNOWN", "SETTLED")) {
+            ToolExecutionRecord execution = executions.findByIdempotencyKey("upgrade-" + state + "-key");
+            assertThat(execution.getState().name()).isEqualTo(state);
+            assertThat(execution.getExecutionCallId()).isEqualTo("upgrade-" + state);
+            assertThat(execution.getVersion()).isEqualTo(5);
+            assertThat(execution.getAbandonedAt()).isNull();
+            if (execution.isSettled()) {
+                assertThat(execution.getResult()).containsEntry("executionStatus", "success");
+            }
+        }
     }
 
     private static DataSource migrate(DataSource dataSource,

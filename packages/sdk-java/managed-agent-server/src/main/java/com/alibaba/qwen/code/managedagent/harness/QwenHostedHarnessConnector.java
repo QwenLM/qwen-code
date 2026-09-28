@@ -165,9 +165,12 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     @Override
-    public void closeSession(String tenantId, String sessionId) {
+    public String closeSession(String tenantId, String sessionId) {
         attachments.remove(new AttachmentKey(tenantId, sessionId));
-        client().closeSession(sessionId);
+        HostedHarnessClient current = client();
+        current.closeSession(sessionId);
+        // The client rejects an answer from any other boot.
+        return current.capabilities().getBootId();
     }
 
     @Override
