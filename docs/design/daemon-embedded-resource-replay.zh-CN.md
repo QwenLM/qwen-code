@@ -20,7 +20,7 @@ ACP `session/prompt` 接收嵌入式 `resource` 块，并将其内联内容交�
 
 Daemon UI SDK 暴露携带类型化 `DaemonEmbeddedResource` 的 `user.resource.delta`，并将资源保存在 `DaemonTextTranscriptBlock.embeddedResources` 中。标准化过程使原始 ACP 块与 `resource_link`、原生文件事件保持区分；reducer 将资源归入所属用户轮次，并计入 transcript 保留预算。同一轮中完全相同的资源块回显会去重，不同轮次中的相同 URI 仍分别保留。
 
-本契约仅保留文本资源，且只保留回放能够发出的块：没有非空 URI 的资源既不保留也不计费，与回放校验器一致。一个 ACP Prompt 内写入日志的直接嵌入式文本资源块以合计 256 KiB、最多 256 块为界，与实时回显上限一致。该界限只限制保留：Prompt 始终执行，超出界限的块仍会送达模型，用户记录以 `embeddedResourcesTruncated` 标记该损失。子进程在写入记录处应用该界限，作用于其持久化的 schema 规范化块；Daemon 不再做准入复核。通过新位置元数据识别的原生文本附件不受此限额约束；旧元数据下的歧义块仍受其约束。Blob 资源仍按现有方式进入模型，但本契约不持久化；大体积内联 Blob 的保留需要独立的存储策略。客户端提供的 URI 和元数据会被保留，而不会被抓取。新保留的用户内容仍由现有 journal 与 transcript 访问控制保护。
+本契约仅保留文本资源，且只保留回放能够发出的块：没有非空 URI 的资源既不保留也不计费，与回放校验器一致。一个 ACP Prompt 内写入日志的直接嵌入式文本资源块最多保留 256 块，与 bridge 的实时回显块上限（`MAX_ECHO_CONTENT_BLOCKS`）一致；256 KiB 的字节预算是独立的日志保留决策，没有实时回显侧的对应项——回显会原样发布非文本块，因此超预算的资源在实时可见、刷新后消失。该界限只限制保留：Prompt 始终执行，超出界限的块仍会送达模型，用户记录以 `embeddedResourcesTruncated` 标记该损失。子进程在写入记录处应用该界限，作用于其持久化的 schema 规范化块；Daemon 不再做准入复核。通过新位置元数据识别的原生文本附件不受此限额约束；旧元数据下的歧义块仍受其约束。Blob 资源仍按现有方式进入模型，但本契约不持久化；大体积内联 Blob 的保留需要独立的存储策略。客户端提供的 URI 和元数据会被保留，而不会被抓取。新保留的用户内容仍由现有 journal 与 transcript 访问控制保护。
 
 ## 验证与验收
 

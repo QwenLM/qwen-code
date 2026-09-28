@@ -452,6 +452,8 @@ import {
   CHANNEL_STARTUP_PROFILE_META_KEY,
   CHANNEL_STARTUP_PROFILE_VERSION,
   CLIENT_MCP_OVER_WS_CONFIG_FLAG,
+  DAEMON_ATTACHMENT_REFERENCES_META_KEY,
+  DAEMON_ATTACHMENT_RESOURCE_INDEXES_META_KEY,
   DAEMON_CHANNEL_DELIVERY_META_KEY,
   DAEMON_MODEL_PROMPT_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
@@ -6806,6 +6808,10 @@ class QwenAgent implements Agent {
     const suppliedChannelOutputMode = meta[CHANNEL_OUTPUT_MODE_META_KEY];
     const suppliedGoalProposalApproval = meta['qwen.goalProposalApproval'];
     const suppliedChannelDelivery = meta[DAEMON_CHANNEL_DELIVERY_META_KEY];
+    const suppliedAttachmentReferences =
+      meta[DAEMON_ATTACHMENT_REFERENCES_META_KEY];
+    const suppliedAttachmentResourceIndexes =
+      meta[DAEMON_ATTACHMENT_RESOURCE_INDEXES_META_KEY];
     delete meta[INVOCATION_CONTEXT_META_KEY];
     delete meta[DAEMON_MODEL_PROMPT_META_KEY];
     delete meta[PRIVATE_PARENT_CAPABILITY_META_KEY];
@@ -6825,6 +6831,8 @@ class QwenAgent implements Agent {
       meta['qwen.goalProposalApproval'] = true;
     }
     delete meta[DAEMON_CHANNEL_DELIVERY_META_KEY];
+    delete meta[DAEMON_ATTACHMENT_REFERENCES_META_KEY];
+    delete meta[DAEMON_ATTACHMENT_RESOURCE_INDEXES_META_KEY];
     // The user-facing display projection is caller-controlled metadata; honor
     // it only for trusted parents (the daemon bridge re-injects the trusted
     // channel-worker value here). A plain delete would drop that re-injection.
@@ -6856,6 +6864,19 @@ class QwenAgent implements Agent {
       suppliedChannelDelivery !== undefined
     ) {
       meta[DAEMON_CHANNEL_DELIVERY_META_KEY] = suppliedChannelDelivery;
+    }
+    // Attachment provenance exempts native expansion blocks from the durable
+    // journal; an untrusted caller must not exempt its own prompt blocks.
+    // The daemon re-injects both keys after computing them itself.
+    if (this.privateParentState === 'trusted') {
+      if (suppliedAttachmentReferences !== undefined) {
+        meta[DAEMON_ATTACHMENT_REFERENCES_META_KEY] =
+          suppliedAttachmentReferences;
+      }
+      if (suppliedAttachmentResourceIndexes !== undefined) {
+        meta[DAEMON_ATTACHMENT_RESOURCE_INDEXES_META_KEY] =
+          suppliedAttachmentResourceIndexes;
+      }
     }
     if (Object.keys(meta).length > 0) {
       sanitizedParams._meta = meta;

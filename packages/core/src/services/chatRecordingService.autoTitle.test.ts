@@ -484,6 +484,31 @@ describe('ChatRecordingService - auto-title trigger', () => {
     );
   });
 
+  it('keeps truncation-only resource records eligible for auto-titling', async () => {
+    mockOk('Inspect embedded resource replay');
+    chatRecordingService.recordUserMessage('', undefined, {
+      displayText: '',
+      hookContext: '',
+      embeddedResourcesTruncated: true,
+    });
+
+    expect(chatRecordingService.getUserDisplayTextsForTitle()).toEqual([
+      undefined,
+    ]);
+
+    chatRecordingService.recordAssistantTurn({
+      model: 'qwen-plus',
+      message: [{ text: 'reply' }],
+    });
+    await flushMicrotasks();
+
+    expect(tryGenerateSessionTitleMock).toHaveBeenCalledWith(
+      mockConfig,
+      expect.any(AbortSignal),
+      [undefined],
+    );
+  });
+
   it('keeps an empty channel display projection as a title projection marker', () => {
     chatRecordingService.recordUserMessage(
       [{ text: 'hidden channel instructions' }],
@@ -524,6 +549,40 @@ describe('ChatRecordingService - auto-title trigger', () => {
               },
             },
           ],
+        },
+      },
+    ];
+    const resumedConfig = {
+      ...mockConfig,
+      getResumedSessionData: vi.fn().mockReturnValue({
+        conversation: { messages },
+        lastCompletedUuid: 'user-1',
+      }),
+    } as unknown as Config;
+    const service = activateRecording(
+      new ChatRecordingService(resumedConfig, undefined, true),
+      resumedConfig,
+    );
+
+    expect(service.getUserDisplayTextsForTitle()).toEqual([undefined]);
+  });
+
+  it('restores truncation-only resource records without a title projection marker', () => {
+    const messages: ChatRecord[] = [
+      {
+        uuid: 'user-1',
+        parentUuid: null,
+        sessionId: 'test-session-id',
+        timestamp: '2026-01-01T00:00:00.000Z',
+        type: 'user',
+        provenance: 'real_user',
+        cwd: '/test/project/root',
+        version: '1.0.0',
+        message: { role: 'user', parts: [{ text: '' }] },
+        systemPayload: {
+          displayText: '',
+          hookContext: '',
+          embeddedResourcesTruncated: true,
         },
       },
     ];

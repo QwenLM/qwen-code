@@ -11372,11 +11372,10 @@ describe('Session', () => {
       expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
         '',
         undefined,
-        {
-          displayText: '',
+        expect.objectContaining({
           hookContext: '',
           embeddedResourcesTruncated: true,
-        },
+        }),
         undefined,
       );
     });
@@ -28048,6 +28047,60 @@ describe('Session', () => {
             hookContext: '',
             embeddedResourcesTruncated: true,
           },
+          'daemon-advisor',
+        );
+      });
+
+      it('records daemon attachment references for a deferred custom advisor command', async () => {
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockResolvedValueOnce({
+          type: 'submit_prompt',
+          content: [{ text: 'Shadowed advisor prompt' }],
+          resolvedCommand: {
+            name: 'advisor',
+            kind: CommandKind.FILE,
+          },
+        });
+        mockChatRecordingService.recordUserMessage.mockClear();
+        const attachmentReferences = [
+          {
+            type: 'resource' as const,
+            attachmentId: 'notes.txt',
+            mimeType: 'text/plain',
+            size: 6,
+          },
+        ];
+
+        await session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [
+              { type: 'text', text: '/advisor check my work' },
+              {
+                type: 'resource',
+                resource: {
+                  uri: 'attachment:///notes.txt',
+                  mimeType: 'text/plain',
+                  text: 'hello',
+                },
+              },
+            ],
+            _meta: {
+              'qwen.daemon.attachmentReferences': attachmentReferences,
+            },
+          },
+          {
+            version: 1,
+            sessionId: 'test-session-id',
+            promptId: 'daemon-advisor',
+          },
+        );
+
+        expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+          '/advisor check my work',
+          undefined,
+          expect.objectContaining({ attachmentReferences }),
           'daemon-advisor',
         );
       });

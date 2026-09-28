@@ -11,6 +11,7 @@ import {
   readDaemonNativeResourceIndexes,
   snapshotReplayableEmbeddedResources,
 } from './embedded-resource-replay.js';
+import { attachmentResourceUri } from './attachment-resource-uri.js';
 import type { SessionAttachmentReference } from './sessionAttachments.js';
 
 function textResource(uri: string, text: string): ContentBlock {
@@ -133,7 +134,7 @@ describe('readDaemonNativeResourceIndexes', () => {
       null,
       { type: 'resource' },
       { type: 'resource', resource: null },
-      textResource('attachment:///notes.txt', 'native'),
+      textResource(attachmentResourceUri('notes.txt'), 'native'),
     ] as unknown as ContentBlock[];
 
     expect(
@@ -144,8 +145,8 @@ describe('readDaemonNativeResourceIndexes', () => {
   it('keeps ambiguous same-URI blocks on the legacy path', () => {
     const references = [resourceReference('notes.txt')];
     const prompt = [
-      textResource('attachment:///notes.txt', 'native'),
-      textResource('attachment:///notes.txt', 'direct'),
+      textResource(attachmentResourceUri('notes.txt'), 'native'),
+      textResource(attachmentResourceUri('notes.txt'), 'direct'),
     ];
 
     expect(
@@ -157,7 +158,7 @@ describe('readDaemonNativeResourceIndexes', () => {
     const references = [resourceReference('notes.txt')];
     const prompt = [
       null,
-      textResource('attachment:///notes.txt', 'native'),
+      textResource(attachmentResourceUri('notes.txt'), 'native'),
       { type: 'resource', resource: null },
     ] as unknown as ContentBlock[];
 
@@ -181,10 +182,7 @@ describe('readDaemonNativeResourceIndexes', () => {
       resourceReference(`notes-${index}.txt`),
     );
     const prompt = references.map((reference) =>
-      textResource(
-        `attachment:///${encodeURIComponent(reference.attachmentId)}`,
-        '',
-      ),
+      textResource(attachmentResourceUri(reference.attachmentId), ''),
     );
     const value = Array.from({ length: count }, (_, index) => index);
 

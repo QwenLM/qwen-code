@@ -7,6 +7,7 @@
 import { Buffer } from 'node:buffer';
 import type { ContentBlock } from '@agentclientprotocol/sdk';
 import type { SessionAttachmentReference } from './sessionAttachments.js';
+import { attachmentResourceUri } from './attachment-resource-uri.js';
 
 export const MAX_RECORDED_EMBEDDED_RESOURCES_BYTES = 256 * 1024;
 export const MAX_RECORDED_EMBEDDED_RESOURCES = 256;
@@ -117,10 +118,7 @@ export function readDaemonNativeResourceIndexes(
     const nativeUris = new Set(
       references
         .filter((reference) => reference.type === 'resource')
-        .map(
-          (reference) =>
-            `attachment:///${encodeURIComponent(reference.attachmentId)}`,
-        ),
+        .map((reference) => attachmentResourceUri(reference.attachmentId)),
     );
     const matchingIndexes = new Map<string, number[]>();
     for (const [index, block] of prompt.entries()) {
@@ -145,10 +143,7 @@ export function readDaemonNativeResourceIndexes(
   const nativeUris = new Set(
     (references ?? [])
       .filter((reference) => reference.type === 'resource')
-      .map(
-        (reference) =>
-          `attachment:///${encodeURIComponent(reference.attachmentId)}`,
-      ),
+      .map((reference) => attachmentResourceUri(reference.attachmentId)),
   );
   const seenIndexes = new Set<number>();
   const indexes: number[] = [];

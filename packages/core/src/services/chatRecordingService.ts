@@ -1262,7 +1262,8 @@ export class ChatRecordingService {
   ): void {
     this.trackUserDisplayTextForTitle(
       payload?.displayText === '' &&
-        (payload.embeddedResources?.length ?? 0) > 0
+        ((payload.embeddedResources?.length ?? 0) > 0 ||
+          payload.embeddedResourcesTruncated === true)
         ? undefined
         : payload?.displayText,
     );

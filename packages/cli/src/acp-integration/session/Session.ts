@@ -6207,18 +6207,27 @@ export class Session implements SessionContext {
                 goalTurn?.origin !== 'runtime' &&
                 !isRetry
               ) {
+                const resourceLinks = params.prompt
+                  .filter((block) => block.type === 'resource_link')
+                  .map((block) => structuredClone(block));
                 const recorder = this.config.getChatRecordingService();
                 recorder?.recordUserMessage(
                   promptText,
                   goalTurn?.permit,
                   promptDisplayText !== undefined ||
                     inputAnnotations ||
+                    attachmentReferences ||
+                    resourceLinks.length > 0 ||
                     embeddedResources.length > 0 ||
                     embeddedResourcesTruncated
                     ? {
                         displayText: promptDisplayText ?? promptText,
                         hookContext: '',
                         ...(inputAnnotations ? { inputAnnotations } : {}),
+                        ...(attachmentReferences
+                          ? { attachmentReferences }
+                          : {}),
+                        ...(resourceLinks.length > 0 ? { resourceLinks } : {}),
                         ...(embeddedResources.length > 0
                           ? { embeddedResources }
                           : {}),

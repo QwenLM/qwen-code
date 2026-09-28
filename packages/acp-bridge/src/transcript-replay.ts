@@ -983,11 +983,15 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
     emit: (update: SessionUpdate) => TranscriptReplayEmission,
     meta: UpdateMetaOptions,
   ): Iterable<TranscriptReplayEmission> {
+    let projectedAny = false;
     const references = payload?.['attachmentReferences'];
     for (const reference of Array.isArray(references) ? references : []) {
       if (!isObjectRecord(reference)) continue;
       const update = createTranscriptAttachmentReferenceUpdate(reference, meta);
-      if (update) yield emit(update);
+      if (update) {
+        projectedAny = true;
+        yield emit(update);
+      }
     }
     const resourceLinks = payload?.['resourceLinks'];
     for (const link of Array.isArray(resourceLinks) ? resourceLinks : []) {
@@ -1001,6 +1005,7 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
         continue;
       }
       const updateMeta = buildUpdateMeta(meta);
+      projectedAny = true;
       yield emit({
         sessionUpdate: 'user_message_chunk',
         content: structuredClone(link),
@@ -1022,11 +1027,29 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
         continue;
       }
       const updateMeta = buildUpdateMeta(meta);
+      projectedAny = true;
       yield emit({
         sessionUpdate: 'user_message_chunk',
         content: structuredClone(block),
         ...(updateMeta ? { _meta: updateMeta } : {}),
       } as SessionUpdate);
+    }
+    // A truncation marker with nothing else projectable (displayText '' and
+    // no retained media) would otherwise emit zero updates, leaving the user
+    // turn invisible on replay; surface the loss instead.
+    if (
+      !projectedAny &&
+      payload?.['embeddedResourcesTruncated'] === true &&
+      (typeof payload['displayText'] !== 'string' ||
+        payload['displayText'].length === 0)
+    ) {
+      yield emit(
+        createTranscriptMessageUpdate({
+          role: 'user',
+          text: '[Embedded resource too large to replay]',
+          ...meta,
+        }),
+      );
     }
   }
 

@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import type { ContentBlock } from '@agentclientprotocol/sdk';
 import { getSpecificMimeType } from '@qwen-code/qwen-code-core';
+import { attachmentResourceUri } from './attachment-resource-uri.js';
 
 export const SESSION_ATTACHMENT_MAX_ITEM_BYTES = 8 * 1024 * 1024;
 const SESSION_ATTACHMENT_MAX_NAME_BYTES = 255;
@@ -1022,7 +1023,7 @@ export class SessionAttachmentStore {
     }
     if (reference.type === 'resource') {
       const resource = {
-        uri: `attachment:///${encodeURIComponent(reference.attachmentId)}`,
+        uri: attachmentResourceUri(reference.attachmentId),
         mimeType: attachment.mimeType,
         ...(isTextAttachment(attachment.data, attachment.mimeType)
           ? { text: attachment.data.toString('utf8') }

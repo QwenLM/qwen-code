@@ -1271,6 +1271,48 @@ describe('createTranscriptReplayMachine', () => {
       expect(projected).toEqual([]);
     });
 
+    it('projects a placeholder for a truncation-only marker record', () => {
+      const projected = updates(
+        createTranscriptReplayMachine(),
+        record('user-truncated-embedded', 'user', {
+          message: { role: 'user', parts: [{ text: '' }] },
+          systemPayload: {
+            displayText: '',
+            hookContext: '',
+            embeddedResourcesTruncated: true,
+          },
+        }),
+      );
+
+      expect(
+        projected.map((update) =>
+          'content' in update ? update.content : update,
+        ),
+      ).toEqual([
+        { type: 'text', text: '[Embedded resource too large to replay]' },
+      ]);
+    });
+
+    it('does not add a placeholder when the truncated prompt has visible text', () => {
+      const projected = updates(
+        createTranscriptReplayMachine(),
+        record('user-truncated-with-text', 'user', {
+          message: { role: 'user', parts: [{ text: 'show this' }] },
+          systemPayload: {
+            displayText: 'show this',
+            hookContext: '',
+            embeddedResourcesTruncated: true,
+          },
+        }),
+      );
+
+      expect(
+        projected.map((update) =>
+          'content' in update ? update.content : update,
+        ),
+      ).toEqual([{ type: 'text', text: 'show this' }]);
+    });
+
     it('ignores invalid resource references and does not infer them from fileData', () => {
       const projected = updates(
         createTranscriptReplayMachine(),

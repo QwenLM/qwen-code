@@ -39,6 +39,16 @@ describe('daemon embedded-resource admission', () => {
         }),
       ).resolves.toMatchObject({ stopReason: 'end_turn' });
       expect(handle.agent.promptCalls).toHaveLength(1);
+      const forwarded = handle.agent.promptCalls[0]?.prompt[0];
+      expect(forwarded).toMatchObject({
+        type: 'resource',
+        resource: { uri: 'context://example/oversized' },
+      });
+      const forwardedText =
+        forwarded?.type === 'resource' && 'text' in forwarded.resource
+          ? forwarded.resource.text
+          : undefined;
+      expect(forwardedText).toHaveLength(256 * 1024);
       await vi.waitFor(() =>
         expect(
           events.some((event) => {
@@ -50,6 +60,21 @@ describe('daemon embedded-resource admission', () => {
           }),
         ).toBe(true),
       );
+      const echo = events.find(
+        (event) =>
+          event.type === 'session_update' &&
+          (event.data as { update?: { sessionUpdate?: string } }).update
+            ?.sessionUpdate === 'user_message_chunk',
+      );
+      expect(echo?.data as unknown).toMatchObject({
+        update: {
+          sessionUpdate: 'user_message_chunk',
+          content: {
+            type: 'resource',
+            resource: { uri: 'context://example/oversized' },
+          },
+        },
+      });
       abort.abort();
       await collecting;
     } finally {
@@ -123,6 +148,19 @@ describe('daemon embedded-resource admission', () => {
       ).resolves.toMatchObject({ stopReason: 'end_turn' });
       expect(handle.agent.promptCalls).toHaveLength(1);
       expect(handle.agent.promptCalls[0]).toMatchObject({
+        prompt: [
+          {
+            type: 'resource',
+            resource: { uri: 'attachment:///notes.txt', text: 'native' },
+          },
+          {
+            type: 'resource',
+            resource: {
+              uri: 'attachment:///notes.txt',
+              text: 'x'.repeat(256 * 1024),
+            },
+          },
+        ],
         _meta: { 'qwen.daemon.attachmentResourceIndexes': [0] },
       });
     } finally {
