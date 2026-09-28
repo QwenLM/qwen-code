@@ -11344,7 +11344,9 @@ describe('CoreToolScheduler truncated output protection', () => {
 
     const toolsByName = new Map<string, AnyDeclarativeTool>([
       [tool.name, tool],
-      ...(options.extraTools ?? []).map((extra) => [extra.name, extra] as const),
+      ...(options.extraTools ?? []).map(
+        (extra) => [extra.name, extra] as const,
+      ),
     ]);
     const mockToolRegistry = {
       getTool: (name: string) => toolsByName.get(name) ?? tool,

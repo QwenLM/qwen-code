@@ -67,9 +67,7 @@ export interface DeferredToolCallOptions {
    * pre-check so a denied target keeps its specific EXECUTION_DENIED refusal
    * instead of surfacing a parameter error for a call that could never run.
    */
-  isTargetExecutionAllowed?: (
-    targetName: string,
-  ) => boolean | Promise<boolean>;
+  isTargetExecutionAllowed?: (targetName: string) => boolean | Promise<boolean>;
 }
 
 export const DEFERRED_TOOL_CALL_REFUSAL_PREFIX = '[tool_call bridge refused] ';
@@ -300,7 +298,10 @@ export async function resolveDeferredToolCall(
     try {
       const argsClone = structuredClone(invocation.params.arguments);
       paramsError = isMediaPolicyTarget
-        ? SchemaValidator.validate(target.schema.parametersJsonSchema, argsClone)
+        ? SchemaValidator.validate(
+            target.schema.parametersJsonSchema,
+            argsClone,
+          )
         : target.validateToolParams(argsClone);
     } catch {
       // A target whose validation throws under this pre-check must not become
