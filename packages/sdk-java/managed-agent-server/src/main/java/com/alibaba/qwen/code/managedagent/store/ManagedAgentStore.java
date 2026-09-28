@@ -14,6 +14,10 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.ItemPartRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.ItemRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.MaterializationResult;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.MaterializationTarget;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationAdmission;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationTarget;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.ProjectedEvent;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.ReplayWindow;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionPage;
@@ -148,6 +152,26 @@ public class ManagedAgentStore implements AgentStateStore {
                             result.getLong("created_at"),
                             result.getLong("updated_at"),
                             result.getLong("revision")));
+    private final RowMapper<OperationRecord> operationMapper =
+            (result, row) -> new OperationRecord(
+                    result.getString("tenant_id"),
+                    result.getString("session_id"),
+                    result.getString("operation_id"),
+                    OperationKind.valueOf(result.getString("operation_kind")),
+                    result.getString("request_digest"),
+                    result.getString("state"),
+                    result.getString("admission_stage"),
+                    result.getString("delivery_state"),
+                    result.getString("session_status_before"),
+                    result.getString("receipt_id"),
+                    result.getString("lease_owner"),
+                    result.getLong("claim_generation"),
+                    result.getInt("attempt_count"));
+    private final RowMapper<OperationTarget> operationTargetMapper =
+            (result, row) -> new OperationTarget(
+                    result.getString("tenant_id"),
+                    result.getString("session_id"),
+                    result.getString("operation_id"));
 
     public ManagedAgentStore(JdbcTemplate jdbc, ObjectMapper objectMapper,
             Clock clock, CommittedEventPublisher eventPublisher,
@@ -439,34 +463,18 @@ public class ManagedAgentStore implements AgentStateStore {
                         "The idempotency key was reused with different content.");
             }
             return new SessionMutationCommand(sessionId, command.status(),
-                    command.sessionStatusBefore(), true);
+                    true);
         }
-        Integer pending = jdbc.queryForObject("SELECT COUNT(*) FROM"
-                        + " managed_agent_command WHERE tenant_id = ? AND"
-                        + " session_id = ? AND command_status = 'PENDING'",
-                Integer.class, tenantId, sessionId);
-        if (pending != null && pending > 0) {
-            throw new ApiException(HttpStatus.CONFLICT,
-                    "session_operation_active",
-                    "The Session already has a lifecycle operation in progress.");
-        }
-        validateMutationStart(session, kind);
+        requireNoOpenOperation(tenantId, sessionId);
+        validateMutationStatus(session, kind);
         long now = clock.millis();
         insertCommand(tenantId, operation, idempotencyKey, requestDigest,
                 sessionId, null, "PENDING", session.status(), now);
-        String pendingStatus = pendingStatus(kind);
-        if (pendingStatus != null) {
-            jdbc.update("UPDATE managed_agent_session SET status = ?,"
-                            + " updated_at = ?, version = version + 1 WHERE"
-                            + " tenant_id = ? AND session_id = ?",
-                    pendingStatus, now, tenantId, sessionId);
-        }
         appendEvent(tenantId, sessionId, null,
                 mutationEvent(kind, "requested"),
                 Map.of("sessionId", sessionId), false,
                 mutationSource(operation, idempotencyKey, "requested"), now);
-        return new SessionMutationCommand(sessionId, "PENDING",
-                session.status(), false);
+        return new SessionMutationCommand(sessionId, "PENDING", false);
     }
 
     @Transactional
@@ -493,7 +501,7 @@ public class ManagedAgentStore implements AgentStateStore {
             throw new IllegalStateException(
                     "Session mutation command has an unknown status");
         }
-        validateMutationCompletion(session, kind);
+        validateMutationStatus(session, kind);
         long now = clock.millis();
         Map<String, Object> data = Map.of("sessionId", sessionId);
         switch (kind) {
@@ -507,17 +515,169 @@ public class ManagedAgentStore implements AgentStateStore {
                 data = Map.of("sessionId", sessionId,
                         "metadata", Map.of("title", title));
             }
-            case ARCHIVE -> jdbc.update("UPDATE managed_agent_session SET"
-                            + " status = 'ARCHIVED', harness_event_epoch = NULL,"
-                            + " harness_last_event_id = 0, updated_at = ?,"
-                            + " version = version + 1 WHERE tenant_id = ? AND"
-                            + " session_id = ?",
-                    now, tenantId, sessionId);
+            // An archived Session was closed first, so it stays closed.
             case UNARCHIVE -> jdbc.update("UPDATE managed_agent_session SET"
-                            + " status = 'ACTIVE', updated_at = ?, version ="
+                            + " status = 'CLOSED', updated_at = ?, version ="
                             + " version + 1 WHERE tenant_id = ? AND"
                             + " session_id = ?",
                     now, tenantId, sessionId);
+        }
+        jdbc.update("UPDATE managed_agent_command SET command_status ="
+                        + " 'COMPLETED', updated_at = ? WHERE tenant_id = ?"
+                        + " AND operation = ? AND idempotency_key = ?",
+                now, tenantId, operation, idempotencyKey);
+        appendEvent(tenantId, sessionId, null,
+                mutationEvent(kind, "completed"), data, false,
+                mutationSource(operation, idempotencyKey,
+                        "completed"), now);
+        return requireSessionForUpdate(tenantId, sessionId);
+    }
+
+    @Override
+    @Transactional
+    public OperationAdmission beginOperation(String tenantId,
+            String sessionId, OperationKind kind, String actorDigest,
+            String idempotencyKey, String requestDigest) {
+        SessionRecord session = requireSessionForUpdate(tenantId, sessionId);
+        if (session.workspace() != null) {
+            throw workspaceExecutionUnavailable();
+        }
+        Optional<OperationRecord> existing = jdbc.query("SELECT * FROM"
+                        + " managed_agent_operation WHERE tenant_id = ? AND"
+                        + " session_id = ? AND operation_kind = ? AND"
+                        + " actor_digest = ? AND idempotency_key = ? AND"
+                        + " CAST(CONCAT(idempotency_key, '!') AS BINARY(513))"
+                        + " = CAST(CONCAT(?, '!') AS BINARY(513))",
+                operationMapper, tenantId, sessionId, kind.name(),
+                actorDigest, idempotencyKey, idempotencyKey)
+                .stream().findFirst();
+        if (existing.isPresent()) {
+            if (!existing.get().requestDigest().equals(requestDigest)) {
+                throw new ApiException(HttpStatus.CONFLICT,
+                        "idempotency_conflict",
+                        "The idempotency key was reused with different content.");
+            }
+            return new OperationAdmission(existing.get(), true);
+        }
+        if ("DELETED".equals(session.status())) {
+            throw new ApiException(HttpStatus.NOT_FOUND, "session_not_found",
+                    "The Session was not found.");
+        }
+        requireNoOpenOperation(tenantId, sessionId);
+        validateOperationStart(session, kind);
+        long now = clock.millis();
+        String operationId = publicId("op");
+        Map<String, Object> data = Map.of("sessionId", sessionId,
+                "operationId", operationId);
+        // Java is the only authority an archive needs, so it completes here.
+        boolean archive = kind == OperationKind.ARCHIVE;
+        jdbc.update("INSERT INTO managed_agent_operation (tenant_id,"
+                        + " session_id, operation_id, operation_kind,"
+                        + " actor_digest, idempotency_key, request_digest,"
+                        + " state, admission_stage, delivery_state,"
+                        + " session_status_before, receipt_id, available_at,"
+                        + " created_at, updated_at, completed_at) VALUES"
+                        + " (?, ?, ?, ?, ?, ?, ?, ?, 'JAVA_DURABLE', ?, ?, ?,"
+                        + " ?, ?, ?, ?)",
+                tenantId, sessionId, operationId, kind.name(), actorDigest,
+                idempotencyKey, requestDigest,
+                archive ? "COMPLETED" : "PENDING",
+                archive ? "CONFIRMED" : "PENDING", session.status(),
+                archive ? publicId("rcpt") : null, now, now, now,
+                archive ? now : null);
+        jdbc.update("UPDATE managed_agent_session SET status = ?,"
+                        + " updated_at = ?, version = version + 1 WHERE"
+                        + " tenant_id = ? AND session_id = ?",
+                archive ? "ARCHIVED" : pendingStatus(kind), now, tenantId,
+                sessionId);
+        appendEvent(tenantId, sessionId, null,
+                archive ? completedEvent(kind) : requestedEvent(kind), data,
+                false, operationSource(operationId,
+                        archive ? "completed" : "requested"), now);
+        return new OperationAdmission(findOperation(tenantId, sessionId,
+                operationId).orElseThrow(), false);
+    }
+
+    @Override
+    public Optional<OperationRecord> findOperation(String tenantId,
+            String sessionId, String operationId) {
+        return jdbc.query("SELECT * FROM managed_agent_operation WHERE"
+                        + " tenant_id = ? AND session_id = ? AND"
+                        + " operation_id = ?",
+                operationMapper, tenantId, sessionId, operationId)
+                .stream().findFirst();
+    }
+
+    @Override
+    public List<OperationTarget> findDeliverableOperations(long now,
+            int limit) {
+        List<OperationTarget> targets = new ArrayList<>(jdbc.query("SELECT"
+                        + " tenant_id, session_id, operation_id FROM"
+                        + " managed_agent_operation WHERE delivery_state ="
+                        + " 'PENDING' AND available_at <= ? ORDER BY"
+                        + " available_at LIMIT ?",
+                operationTargetMapper, now, limit));
+        if (targets.size() < limit) {
+            targets.addAll(jdbc.query("SELECT tenant_id, session_id,"
+                            + " operation_id FROM managed_agent_operation"
+                            + " WHERE delivery_state = 'LEASED' AND"
+                            + " lease_until < ? ORDER BY lease_until LIMIT ?",
+                    operationTargetMapper, now, limit - targets.size()));
+        }
+        return List.copyOf(targets);
+    }
+
+    @Override
+    @Transactional
+    public Optional<OperationRecord> claimOperation(String tenantId,
+            String sessionId, String operationId, String owner,
+            Duration leaseDuration) {
+        long now = clock.millis();
+        int updated = jdbc.update("UPDATE managed_agent_operation SET state ="
+                        + " 'RUNNING', delivery_state = 'LEASED',"
+                        + " lease_owner = ?, lease_until = ?,"
+                        + " claim_generation = claim_generation + 1,"
+                        + " updated_at = ? WHERE tenant_id = ? AND"
+                        + " session_id = ? AND operation_id = ? AND"
+                        + " ((delivery_state = 'PENDING' AND available_at <= ?)"
+                        + " OR (delivery_state = 'LEASED' AND lease_until < ?))",
+                owner, Math.addExact(now, leaseDuration.toMillis()), now,
+                tenantId, sessionId, operationId, now, now);
+        return updated == 1 ? findOperation(tenantId, sessionId, operationId)
+                : Optional.empty();
+    }
+
+    @Override
+    @Transactional
+    public boolean completeOperation(String tenantId, String sessionId,
+            String operationId, String owner, long claimGeneration,
+            boolean harnessConfirmed) {
+        SessionRecord session = requireSessionForUpdate(tenantId, sessionId);
+        OperationRecord operation = jdbc.query("SELECT * FROM"
+                        + " managed_agent_operation WHERE tenant_id = ? AND"
+                        + " session_id = ? AND operation_id = ? FOR UPDATE",
+                operationMapper, tenantId, sessionId, operationId).stream()
+                .findFirst().orElseThrow(() -> new IllegalStateException(
+                        "Session operation is unavailable"));
+        if (!"LEASED".equals(operation.deliveryState())
+                || !owner.equals(operation.leaseOwner())
+                || operation.claimGeneration() != claimGeneration) {
+            return false;
+        }
+        if (!pendingStatus(operation.kind()).equals(session.status())) {
+            throw new IllegalStateException("Session " + sessionId + " is "
+                    + session.status() + " during its "
+                    + operation.kind() + " operation");
+        }
+        long now = clock.millis();
+        switch (operation.kind()) {
+            case CLOSE, ARCHIVE -> jdbc.update("UPDATE managed_agent_session"
+                            + " SET status = ?, harness_event_epoch = NULL,"
+                            + " harness_last_event_id = 0, updated_at = ?,"
+                            + " version = version + 1 WHERE tenant_id = ? AND"
+                            + " session_id = ?",
+                    operation.kind() == OperationKind.CLOSE ? "CLOSED"
+                            : "ARCHIVED", now, tenantId, sessionId);
             case DELETE -> jdbc.update("UPDATE managed_agent_session SET"
                             + " status = 'DELETED', harness_boot_id = NULL,"
                             + " harness_event_epoch = NULL,"
@@ -526,16 +686,37 @@ public class ManagedAgentStore implements AgentStateStore {
                             + " tenant_id = ? AND session_id = ?",
                     now, now, tenantId, sessionId);
         }
-        jdbc.update("UPDATE managed_agent_command SET command_status ="
-                        + " 'COMPLETED', updated_at = ? WHERE tenant_id = ?"
-                        + " AND operation = ? AND idempotency_key = ?",
-                now, tenantId, operation, idempotencyKey);
+        jdbc.update("UPDATE managed_agent_operation SET state = 'COMPLETED',"
+                        + " admission_stage = ?, delivery_state = 'CONFIRMED',"
+                        + " receipt_id = ?, lease_owner = NULL,"
+                        + " lease_until = NULL, updated_at = ?,"
+                        + " completed_at = ? WHERE tenant_id = ? AND"
+                        + " session_id = ? AND operation_id = ?",
+                harnessConfirmed ? "HARNESS_CONFIRMED" : "JAVA_DURABLE",
+                publicId("rcpt"), now, now, tenantId, sessionId,
+                operationId);
         appendEvent(tenantId, sessionId, null,
-                mutationEvent(kind, "completed"), data,
-                kind == SessionMutationKind.DELETE,
-                mutationSource(operation, idempotencyKey,
-                        "completed"), now);
-        return requireSessionForUpdate(tenantId, sessionId);
+                completedEvent(operation.kind()),
+                Map.of("sessionId", sessionId, "operationId", operationId),
+                operation.kind() == OperationKind.DELETE,
+                operationSource(operationId, "completed"), now);
+        return true;
+    }
+
+    @Override
+    @Transactional
+    public void retryOperation(String tenantId, String sessionId,
+            String operationId, String owner, long claimGeneration,
+            long availableAt) {
+        jdbc.update("UPDATE managed_agent_operation SET delivery_state ="
+                        + " 'PENDING', lease_owner = NULL, lease_until = NULL,"
+                        + " attempt_count = attempt_count + 1,"
+                        + " available_at = ?, updated_at = ? WHERE"
+                        + " tenant_id = ? AND session_id = ? AND"
+                        + " operation_id = ? AND delivery_state = 'LEASED'"
+                        + " AND lease_owner = ? AND claim_generation = ?",
+                availableAt, clock.millis(), tenantId, sessionId,
+                operationId, owner, claimGeneration);
     }
 
     public Admission replayCommand(String tenantId, String operation,
@@ -1387,6 +1568,29 @@ public class ManagedAgentStore implements AgentStateStore {
         }
     }
 
+    @Transactional
+    public void appendLiveSessionEventIfAbsent(String tenantId,
+            String sessionId, String type, Map<String, Object> data,
+            String sourceKey) {
+        // A locking read sees the latest committed status, where a plain one
+        // could still see the snapshot taken before a deletion committed.
+        Optional<SessionRecord> session = jdbc.query("SELECT * FROM"
+                        + " managed_agent_session WHERE tenant_id = ?"
+                        + " AND CAST(CONCAT(tenant_id, '!') AS BINARY(513))"
+                        + " = CAST(CONCAT(?, '!') AS BINARY(513)) AND"
+                        + " session_id = ? FOR UPDATE",
+                sessionMapper, tenantId, tenantId, sessionId).stream()
+                .findFirst();
+        if (session.isEmpty() || "DELETING".equals(session.get().status())
+                || "DELETED".equals(session.get().status())) {
+            return;
+        }
+        if (!hasSourceEvent(tenantId, sessionId, sourceKey)) {
+            appendEvent(tenantId, sessionId, null, type, data, false,
+                    sourceKey, clock.millis());
+        }
+    }
+
     public SessionRecord requireSession(String tenantId, String sessionId) {
         return findSession(tenantId, sessionId).orElseThrow(() ->
                 new ApiException(HttpStatus.NOT_FOUND, "session_not_found",
@@ -1703,68 +1907,97 @@ public class ManagedAgentStore implements AgentStateStore {
                 sessionId, turnId, status, sessionStatusBefore, now, now);
     }
 
-    private void validateMutationStart(SessionRecord session,
+    // A mutation leaves the status unchanged until it completes.
+    private static void validateMutationStatus(SessionRecord session,
             SessionMutationKind kind) {
+        requireSessionStatus(session.status(),
+                kind == SessionMutationKind.RENAME ? "ACTIVE" : "ARCHIVED");
+    }
+
+    private static String mutationEvent(SessionMutationKind kind,
+            String phase) {
+        if ("completed".equals(phase)) {
+            return kind == SessionMutationKind.RENAME ? "session.updated"
+                    : "session.unarchived";
+        }
+        return "session."
+                + (kind == SessionMutationKind.RENAME ? "update" : "unarchive")
+                + "." + phase;
+    }
+
+    private static String mutationSource(String operation,
+            String idempotencyKey, String phase) {
+        return "control:" + operation + ":" + idempotencyKey + ":" + phase;
+    }
+
+    // One lifecycle change at a time: a pending rename or unarchive command
+    // blocks an operation, and an open operation blocks both commands.
+    private void requireNoOpenOperation(String tenantId, String sessionId) {
+        Integer commands = jdbc.queryForObject("SELECT COUNT(*) FROM"
+                        + " managed_agent_command WHERE tenant_id = ? AND"
+                        + " session_id = ? AND command_status = 'PENDING'",
+                Integer.class, tenantId, sessionId);
+        Integer operations = jdbc.queryForObject("SELECT COUNT(*) FROM"
+                        + " managed_agent_operation WHERE tenant_id = ? AND"
+                        + " session_id = ? AND state IN ('PENDING', 'RUNNING')",
+                Integer.class, tenantId, sessionId);
+        if ((commands != null && commands > 0)
+                || (operations != null && operations > 0)) {
+            throw new ApiException(HttpStatus.CONFLICT,
+                    "session_operation_active",
+                    "The Session already has a lifecycle operation in progress.");
+        }
+    }
+
+    private void validateOperationStart(SessionRecord session,
+            OperationKind kind) {
         String status = session.status();
         switch (kind) {
-            case RENAME, ARCHIVE -> requireSessionStatus(status, "ACTIVE");
-            case UNARCHIVE -> requireSessionStatus(status, "ARCHIVED");
+            case CLOSE -> requireSessionStatus(status, "ACTIVE");
+            case ARCHIVE -> requireSessionStatus(status, "CLOSED");
             case DELETE -> {
-                if (!"ACTIVE".equals(status)
-                        && !"ARCHIVED".equals(status)) {
+                if (!List.of("ACTIVE", "CLOSED", "ARCHIVED")
+                        .contains(status)) {
                     throw sessionStateConflict(status);
                 }
             }
         }
-        if ((kind == SessionMutationKind.ARCHIVE
-                || kind == SessionMutationKind.DELETE)
+        if ("ACTIVE".equals(status)
                 && hasActiveTurn(session.tenantId(), session.sessionId())) {
             throw new ApiException(HttpStatus.CONFLICT, "turn_active",
                     "The Session has an active Turn.");
         }
     }
 
-    private static void validateMutationCompletion(SessionRecord session,
-            SessionMutationKind kind) {
-        String expected = switch (kind) {
-            case RENAME -> "ACTIVE";
-            case ARCHIVE -> "ARCHIVING";
-            case UNARCHIVE -> "ARCHIVED";
-            case DELETE -> "DELETING";
-        };
-        requireSessionStatus(session.status(), expected);
-    }
-
-    private static String pendingStatus(SessionMutationKind kind) {
+    // ARCHIVING remains only for an archive admitted before V17, which closes
+    // the Harness as archive used to.
+    private static String pendingStatus(OperationKind kind) {
         return switch (kind) {
+            case CLOSE -> "CLOSING";
             case ARCHIVE -> "ARCHIVING";
             case DELETE -> "DELETING";
-            case RENAME, UNARCHIVE -> null;
         };
     }
 
-    private static String mutationEvent(SessionMutationKind kind,
+    private static String requestedEvent(OperationKind kind) {
+        return switch (kind) {
+            case CLOSE -> "session.close.requested";
+            case ARCHIVE -> "session.archive.requested";
+            case DELETE -> "session.delete.requested";
+        };
+    }
+
+    private static String completedEvent(OperationKind kind) {
+        return switch (kind) {
+            case CLOSE -> "session.closed";
+            case ARCHIVE -> "session.archived";
+            case DELETE -> "session.deleted";
+        };
+    }
+
+    private static String operationSource(String operationId,
             String phase) {
-        if ("completed".equals(phase)) {
-            return switch (kind) {
-                case RENAME -> "session.updated";
-                case ARCHIVE -> "session.archived";
-                case UNARCHIVE -> "session.unarchived";
-                case DELETE -> "session.deleted";
-            };
-        }
-        String operation = switch (kind) {
-            case RENAME -> "update";
-            case ARCHIVE -> "archive";
-            case UNARCHIVE -> "unarchive";
-            case DELETE -> "delete";
-        };
-        return "session." + operation + "." + phase;
-    }
-
-    private static String mutationSource(String operation,
-            String idempotencyKey, String phase) {
-        return "control:" + operation + ":" + idempotencyKey + ":" + phase;
+        return "operation:" + operationId + ":" + phase;
     }
 
     private static void requireSessionStatus(String actual,

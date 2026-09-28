@@ -24,7 +24,6 @@ import fs from 'node:fs';
 import { MockTool } from '../test-utils/mock-tool.js';
 import type { MediaPolicyToolDescriptor } from './tools.js';
 import { CHARS_PER_TOKEN } from '../services/tokenEstimation.js';
-import { ToolMode } from './code-mode.js';
 
 import { McpClientManager } from './mcp-client-manager.js';
 import {
@@ -34,6 +33,7 @@ import {
   updateMCPServerStatus,
 } from './mcp-client.js';
 import { ToolErrorType } from './tool-error.js';
+import { ToolMode } from './code-mode.js';
 
 vi.mock('node:fs');
 
@@ -700,6 +700,66 @@ describe('ToolRegistry', () => {
   });
 
   describe('deferred tool filtering', () => {
+    it('exposes structured memory tools only in structured recall mode', () => {
+      toolRegistry.registerTool(new MockTool({ name: 'search_memory' }));
+      toolRegistry.registerTool(new MockTool({ name: 'manage_memory' }));
+      toolRegistry.registerTool(new MockTool({ name: 'read_file' }));
+      const mode = vi.spyOn(config, 'getMemoryRecallMode');
+
+      mode.mockReturnValue('legacy');
+      expect(
+        toolRegistry
+          .getFunctionDeclarations()
+          .map((declaration) => declaration.name),
+      ).toEqual(['read_file']);
+
+      mode.mockReturnValue('structured');
+      expect(
+        toolRegistry
+          .getFunctionDeclarations()
+          .map((declaration) => declaration.name),
+      ).toEqual(['manage_memory', 'read_file', 'search_memory']);
+    });
+
+    it('does not declare exec for an explicitly empty code-mode allowlist', () => {
+      vi.spyOn(config, 'getToolMode').mockReturnValue(ToolMode.CodeModeOnly);
+      toolRegistry.registerTool(new MockTool({ name: 'exec' }));
+      toolRegistry.registerTool(new MockTool({ name: 'read_file' }));
+      expect(toolRegistry.getFunctionDeclarationsFiltered([])).toEqual([]);
+      expect(
+        toolRegistry
+          .getFunctionDeclarationsFiltered(['read_file'])
+          .map((tool) => tool.name),
+      ).toContain('exec');
+    });
+
+    it('keeps structured memory tools out of the code-mode bindings in legacy mode', () => {
+      // A code-mode session reaches these tools through the exec binding plan,
+      // not through getFunctionDeclarations, so the recall-mode filter has to
+      // be applied there too — otherwise legacy mode advertises tools whose
+      // every call is denied.
+      toolRegistry.registerTool(new MockTool({ name: 'search_memory' }));
+      toolRegistry.registerTool(new MockTool({ name: 'manage_memory' }));
+      toolRegistry.registerTool(new MockTool({ name: 'read_file' }));
+      const mode = vi.spyOn(config, 'getMemoryRecallMode');
+
+      mode.mockReturnValue('legacy');
+      expect(
+        toolRegistry
+          .getCodeModeBindingPlan()
+          .bindings.map((binding) => binding.name)
+          .sort(),
+      ).toEqual(['read_file']);
+
+      mode.mockReturnValue('structured');
+      expect(
+        toolRegistry
+          .getCodeModeBindingPlan()
+          .bindings.map((binding) => binding.name)
+          .sort(),
+      ).toEqual(['manage_memory', 'read_file', 'search_memory']);
+    });
+
     it('sorts visible function declarations by canonical name', () => {
       toolRegistry.registerTool(new MockTool({ name: 'zeta' }));
       toolRegistry.registerTool(new MockTool({ name: 'alpha' }));

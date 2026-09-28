@@ -2,7 +2,7 @@
 
 [English](2026-09-27-managed-agent-task-contract.md) | [简体中文](2026-09-27-managed-agent-task-contract.zh-CN.md)
 
-状态：H0a 已在本次变更中实现，仅限契约（新增的每个路由和 schema，以及加到现有 schema 的每个属性，均为 `planned`）；H0b、H0c 和 H1～H6 待实现
+状态：H0a 已实现，仅限契约（它新增的每个路由和 schema，以及它加到现有 schema 的每个属性，当时均为 `planned`）；H0b 已合入；H0c 把四条任务读取路由及其 schema 标记为 `partial`，并去掉 `capabilities.tasks` 上的标记，提供任务列表与详情并宣告任务变化（[设计](2026-09-27-managed-extension-authority.zh-CN.md)）；任务事件、取消和 H1～H6 待实现
 日期：2026-09-27
 Issue：[#12827](https://github.com/QwenLM/qwen-code/issues/12827)，属于 [#12380](https://github.com/QwenLM/qwen-code/issues/12380)
 

@@ -2413,6 +2413,16 @@ const SETTINGS_SCHEMA = {
           'When team memory is enabled, automatically commit, fast-forward-pull, and push the `.qwen/team-memory/` directory at session start so collaborators stay in sync. Off by default; requires a configured git upstream.',
         showInDialog: false,
       },
+      enableStructuredRecall: {
+        type: 'boolean',
+        label: 'Enable Structured Memory Recall',
+        category: 'Memory',
+        requiresRestart: true,
+        default: false,
+        description:
+          'Switch memory recall from the flat MEMORY.md listing to the structured protocol: hierarchical memory tree, focused subtree, and the search_memory tool. Off by default — while off, the metadata migration that would make the corpus structured-ready is never scheduled, so the protocol costs no background model calls. Override with QWEN_CODE_MEMORY_STRUCTURED_RECALL=0|1.',
+        showInDialog: false,
+      },
     },
   },
 

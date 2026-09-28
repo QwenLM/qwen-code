@@ -347,9 +347,9 @@ export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
   'settings.label.tools.listDirectory.enabled': '启用 ListDirectory',
   'settings.description.tools.listDirectory.enabled':
     '启用内置 list_directory 工具。默认关闭；当它被显式列入 coreTools 白名单（--core-tools / tools.core）时会自动启用。',
-  'settings.label.tools.codeModeOnly': '仅代码模式（实验性）',
-  'settings.description.tools.codeModeOnly':
-    '普通工具只通过隔离的 exec JavaScript 工具暴露给模型。直接控制类工具仍然可用。在 safe 和 bare 模式下忽略。',
+  'settings.label.tools.mode': '工具模式（实验性）',
+  'settings.description.tools.mode':
+    '选择工具向模型暴露的方式。Direct 使用普通工具调用；Code Mode 额外提供隔离的 exec JavaScript 工具；Code Mode Only 仅通过 exec 暴露普通工具。safe 和 bare 模式始终使用 Direct。容器执行时，Code Mode 会警告并使用直接工具，Code Mode Only 则被拒绝。SSH 工作区会警告并将两种代码模式回退为 Direct。Code Mode Only 在会话工具界面忽略 eager/visible 的 schema 延迟加载：可调用工具保留完整嵌套 schema，tool_search 被隐藏。两种代码模式下，AgentCore 都不会将仍被 tools.eager 隐藏的工具加入嵌套绑定；未授予 exec 的智能体白名单会收窄嵌套绑定。继承或显式授予 exec 会保留其他规则允许的所有普通代码模式工具绑定。执行白名单只要提及任一 MCP 工具，就会进一步将 MCP 绑定限制为匹配的精确名称或服务器模式。',
   'settings.label.tools.todoWrite.enabled': '启用 Todo Write',
   'settings.description.tools.todoWrite.enabled':
     '启用内置 todo_write 工具及其系统提示词引导。',
