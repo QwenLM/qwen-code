@@ -125,15 +125,15 @@ function captureStatus(structured) {
   };
 }
 
-function observationText(treeText, capture, maxTextChars, appContext) {
-  let warning = "";
+function observationText(treeText, capture, maxTextChars, appContext, screenshotWarning = "") {
+  let warning = screenshotWarning;
   if (capture.complete === false) {
-    warning =
+    warning +=
       capture.truncated && capture.readComplete !== false
         ? "Accessibility capture is incomplete (traversal limit); this view covers captured nodes only.\n"
         : `Accessibility capture is incomplete; use current snapshot ${appContext ? "IDs" : "tokens"} only. Retry after the UI settles or use a screenshot.\n`;
     if (capture.incompleteDetails.length) {
-      warning += `Capture details: ${capture.incompleteDetails.join("; ").slice(0, 180)}\n`;
+      warning += `Capture details: ${capture.incompleteDetails.join("; ").slice(0, screenshotWarning ? 40 : 180)}\n`;
     }
   }
   const lines = treeText.split("\n");
@@ -1074,8 +1074,12 @@ export class ComputerUse {
     const { text, structured, images } = observed;
     const envelope = structured?.observation_revision;
     const capture = captureStatus(structured);
+    const screenshotReason = structured?.screenshot_error?.reason;
+    const screenshotWarning = options.includeChildWindows && structured?.screenshot_frame_valid === false
+      ? `Child-window screenshot unavailable${typeof screenshotReason === "string" ? `: ${screenshotReason.slice(0, 80)}` : ""}. Retry with includeChildWindows: false.\n`
+      : "";
     const treeText = structured?.tree_markdown ?? text ?? "";
-    const publicText = observationText(treeText, capture, maxTextChars, options.appContext);
+    const publicText = observationText(treeText, capture, maxTextChars, options.appContext, screenshotWarning);
     return {
       pid,
       windowId,

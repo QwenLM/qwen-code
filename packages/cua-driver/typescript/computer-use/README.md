@@ -69,10 +69,14 @@ On macOS 14.2+, `getState({ includeScreenshot: true, includeChildWindows: true }
 requests child-window content for that screenshot only. The next observation
 without the option returns to the default capture policy. The option preserves
 the native target, AX controls, keyboard routing and screenshot coordinate frame;
-use coordinates from the current image. It does not enable background popup input.
-Expanded capture is unavailable for attached-window display crops and when its
-native capture fails; existing AX information remains available. Other platforms
+use coordinates from the current image. Child content outside the requested window
+is clipped, not scaled into the image. It does not enable background popup input.
+Expanded capture requires Metal and a window fully on one display. It is unavailable
+for attached-window display crops and when native capture fails; existing AX
+information remains available. Other platforms
 reject true. `observeWindow` accepts the same option.
+If expanded capture fails, observation text reports the reason and suggests
+retrying with `includeChildWindows: false`; AX actions remain available.
 
 Native code selects semantic or synthesized input after checking the target.
 App input makes one guarded activation of the exact target, dispatches once and

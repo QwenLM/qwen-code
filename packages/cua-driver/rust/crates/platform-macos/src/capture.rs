@@ -470,6 +470,10 @@ fn build_window_capture_plan(
     if include_child_windows && expected_identity.requires_display_crop {
         anyhow::bail!("child-window capture is unavailable for an attached-window crop");
     }
+    if include_child_windows && !has_metal_device() {
+        anyhow::bail!("child-window capture requires a Metal device");
+    }
+    let use_display_crop = expected_identity.requires_display_crop || include_child_windows;
 
     let content = SCShareableContent::get()
         .map_err(|e| anyhow::anyhow!("SCShareableContent::get failed: {e}"))?;
@@ -511,9 +515,9 @@ fn build_window_capture_plan(
     // Desktop-independent window filter (captures only the specified window):
     // https://developer.apple.com/documentation/screencapturekit/sccontentfilter/init(desktopindependentwindow:)
     // Single-window mode scales the entire AppKit attachment group into the
-    // requested sheet size. sourceRect is ignored in that mode. A display
+    // requested window size. sourceRect is ignored in that mode. A display
     // filter restricted to this window preserves its actual point coordinates.
-    let filter = if expected_identity.requires_display_crop {
+    let filter = if use_display_crop {
         if !window.is_on_screen() {
             anyhow::bail!("window {window_id} is not on screen for display-relative capture");
         }
@@ -537,7 +541,7 @@ fn build_window_capture_plan(
     let scale = f64::from(filter.point_pixel_scale());
     let (width_pts, height_pts) = {
         let rect = filter.content_rect();
-        if expected_identity.requires_display_crop {
+        if use_display_crop {
             (frame.size.width, frame.size.height)
         } else if content_rect_usable(rect) {
             (rect.size.width, rect.size.height)
@@ -552,11 +556,12 @@ fn build_window_capture_plan(
     let mut config = SCStreamConfiguration::new()
         .with_width(out_w)
         .with_height(out_h);
-    if expected_identity.requires_display_crop {
+    if use_display_crop {
         let source = relative_capture_rect(frame, filter.content_rect())
             .ok_or_else(|| anyhow::anyhow!("capture filter does not cover window {window_id}"))?;
         config = config.with_source_rect(source).with_shows_cursor(false);
-    } else {
+    }
+    if !expected_identity.requires_display_crop {
         // SCK may otherwise scale a GTK attachment group into this window's frame.
         config = config.with_includes_child_windows(include_child_windows);
         if include_child_windows && !config.includes_child_windows() {
