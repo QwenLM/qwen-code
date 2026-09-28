@@ -68,6 +68,13 @@ export interface PostMessageResult {
   dispatched: ThreadRun[];
 }
 
+/** What {@link PostMessageInput.authorKind} defaults to for a given author. */
+function authorKindOf(from: string): ThreadMessage['authorKind'] {
+  if (from === HUMAN_AUTHOR_ID) return 'human';
+  if (from === SYSTEM_AUTHOR_ID) return 'system';
+  return 'agent';
+}
+
 export interface PostMessageOptions {
   agents?: readonly WorkspaceAgent[];
   now?: number;
@@ -207,8 +214,7 @@ export async function postMessageInTransaction(
   const message: ThreadMessage = {
     id: generateMessageId(),
     sequence: current.nextMessageSequence,
-    authorKind:
-      input.authorKind ?? (input.from === HUMAN_AUTHOR_ID ? 'human' : 'agent'),
+    authorKind: input.authorKind ?? authorKindOf(input.from),
     from: input.from,
     authorNameSnapshot:
       input.from === HUMAN_AUTHOR_ID || input.from === SYSTEM_AUTHOR_ID

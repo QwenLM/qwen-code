@@ -45,7 +45,11 @@ function agentForToken(
   let best: WorkspaceAgent | undefined;
   for (const agent of agents) {
     if (!lowered.startsWith(agent.name.toLowerCase())) continue;
-    if (/^[A-Za-z0-9_-]/.test(token.slice(agent.name.length))) continue;
+    const rest = token.slice(agent.name.length);
+    if (/^[A-Za-z0-9_-]/.test(rest)) continue;
+    // Nor into more of a Latin word: "@maría" is not "mar", "@alice２" is not
+    // "alice". A Han or kana continuation is still a separate word.
+    if (/^[\p{Script=Latin}\p{Nd}]/u.test(rest)) continue;
     if (!best || agent.name.length > best.name.length) best = agent;
   }
   return best;

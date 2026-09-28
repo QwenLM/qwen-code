@@ -371,6 +371,57 @@ describe('agent run lifecycle', () => {
     expect(finished.runs.some((entry) => entry.status === 'queued')).toBe(true);
   });
 
+  it('discharges a waiter that is still finishing when the close wakes it', async () => {
+    // Alice closed `waiting` but her run has not landed yet. Bob's close
+    // @-mentions her; the same close must discharge her wait, or it outlives
+    // the answer and reads as blocked once she is woken and replies.
+    const thread = await seed({
+      runs: [
+        run({ id: 'rn_wait', status: 'finishing', closeKind: 'waiting' }),
+        run({
+          id: 'rn_bob',
+          agentId: BOB.id,
+          status: 'running',
+          queueSequence: 101,
+        }),
+      ],
+    });
+
+    const closed = await closeRun(PROJECT_ROOT, {
+      context: context(thread.id, { agentId: BOB.id, runId: 'rn_bob' }),
+      request: { kind: 'review', summary: 'the flake is the retry path' },
+    });
+    const wait = closed.thread.runs.find((entry) => entry.id === 'rn_wait');
+    expect(wait?.closeAcknowledgedAtSequence).toBe(closed.message?.sequence);
+  });
+
+  it('does not count a quiet child as a dependency a wait can rest on', async () => {
+    // A child left `in_progress` by a plain answer has nothing running and
+    // owes nothing: it can never wake the parent, so waiting on it would
+    // strand the parent in `in_progress`.
+    const parent = await seed();
+    const created = await createThread(PROJECT_ROOT, {
+      title: 'answered',
+      parentThreadId: parent.id,
+    });
+    const quietChild: Thread = {
+      ...created,
+      status: 'in_progress',
+      runs: [run({ id: 'rn_child', agentId: BOB.id, status: 'completed' })],
+    };
+    await writeThread(PROJECT_ROOT, quietChild);
+
+    expect(hasLiveDescendant([{ ...parent }, quietChild], parent.id)).toBe(
+      false,
+    );
+    await expect(
+      closeRun(PROJECT_ROOT, {
+        context: context(parent.id),
+        request: { kind: 'waiting' },
+      }),
+    ).rejects.toThrow(RunCloseRejectedError);
+  });
+
   it('records a clean exit with no closing tool as unclosed and blocks', async () => {
     const thread = await seed();
 
