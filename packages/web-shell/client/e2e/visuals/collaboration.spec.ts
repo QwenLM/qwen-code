@@ -230,10 +230,24 @@ async function setup(page: Page, baseURL: string): Promise<string> {
   const thread = mainThread();
   await page.route('**/workspaces/*/agent/**', async (route) => {
     const path = new URL(route.request().url()).pathname;
+    const method = route.request().method();
     // Without the live stream the page falls back to reads, which is all a
     // still capture needs.
     if (path.endsWith('/events')) return route.abort();
     if (path.endsWith('/agents')) return route.fulfill({ json: { agents } });
+    if (path.endsWith(`/threads/${thread.id}`) && method === 'PATCH') {
+      const { assignee } = route.request().postDataJSON() as {
+        assignee: string | null;
+      };
+      if (assignee) thread.assigneeName = assignee;
+      else delete thread.assigneeName;
+      return route.fulfill({ json: { id: thread.id, assignee } });
+    }
+    if (path.endsWith(`/threads/${thread.id}/done`) && method === 'POST') {
+      thread.status = 'done';
+      thread.reason = 'a person marked this thread done';
+      return route.fulfill({ json: { id: thread.id, status: 'done' } });
+    }
     if (path.endsWith(`/threads/${thread.id}`))
       return route.fulfill({ json: thread });
     if (path.endsWith('/threads'))
@@ -294,13 +308,55 @@ for (const theme of THEMES) {
   test(`collaboration conversation (${theme})`, async ({ page }, testInfo) => {
     const cwd = await setup(page, resolveBaseURL(testInfo));
     await openConversation(page, theme, cwd);
+    await expect(
+      page.getByRole('button', { name: 'Accept and mark done' }),
+    ).toBeVisible();
     await clearFocus(page);
     await captureScreenshot(page, `collab-conversation-${theme}`);
 
     await page.getByRole('button', { name: 'Team', exact: true }).click();
     await expect(page.getByRole('tab', { name: 'Team' })).toBeVisible();
+    await page.getByRole('button', { name: 'Assignee' }).click();
+    await expect(page.getByRole('menuitem', { name: 'No lead' })).toBeVisible();
+    await expect(page.getByRole('menuitem', { name: 'docs' })).toBeVisible();
+    await page.keyboard.press('Escape');
     await clearFocus(page);
     await captureScreenshot(page, `collab-team-panel-${theme}`);
+
+    await page.getByRole('button', { name: 'Assignee' }).click();
+    const assignDocs = page.waitForRequest(
+      (request) =>
+        request.method() === 'PATCH' &&
+        request.url().endsWith('/threads/th_main'),
+    );
+    await page.getByRole('menuitem', { name: 'docs' }).click();
+    expect((await assignDocs).postDataJSON()).toEqual({ assignee: 'docs' });
+    await expect(page.getByRole('button', { name: 'Assignee' })).toHaveText(
+      'docs',
+    );
+
+    await page.getByRole('button', { name: 'Assignee' }).click();
+    const clearLead = page.waitForRequest(
+      (request) =>
+        request.method() === 'PATCH' &&
+        request.url().endsWith('/threads/th_main'),
+    );
+    await page.getByRole('menuitem', { name: 'No lead' }).click();
+    expect((await clearLead).postDataJSON()).toEqual({ assignee: null });
+    await expect(page.getByRole('button', { name: 'Assignee' })).toHaveText(
+      'No lead',
+    );
+
+    const markDone = page.waitForRequest(
+      (request) =>
+        request.method() === 'POST' &&
+        request.url().endsWith('/threads/th_main/done'),
+    );
+    await page.getByRole('button', { name: 'Accept and mark done' }).click();
+    await markDone;
+    await expect(
+      page.getByRole('button', { name: 'Accept and mark done' }),
+    ).toHaveCount(0);
   });
 
   test(`collaboration mention picker (${theme})`, async ({

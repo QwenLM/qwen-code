@@ -29,7 +29,7 @@ import {
 import { useCopiedFlash } from '../../hooks/useCopiedFlash';
 import type { DaemonSessionGenerationEvent } from '@qwen-code/sdk/daemon';
 import type { DaemonMessageAuthor } from '../../adapters/messageTypes';
-import { AuthorAvatar } from './author-avatar';
+import { AuthorAvatar } from './AuthorAvatar';
 import { Button } from '../ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import flashStyles from '../MessageLocateFlash.module.css';
