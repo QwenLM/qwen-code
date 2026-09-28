@@ -849,6 +849,24 @@ describe('Hosted Harness no-tool session', () => {
         expect.objectContaining({ type: 'turn_complete', promptId: PROMPT_ID }),
       ]),
     );
+    await headers(supertest(third).delete('/session/' + SESSION_ID)).expect(
+      204,
+    );
+    const project = vi.spyOn(ManagedSessionRecordSink.prototype, 'project');
+    const fourth = app(true);
+    const settled = await headers(
+      supertest(fourth).post('/session/' + SESSION_ID + '/load'),
+    ).send({
+      managedSessionStore: store(),
+      toolProfile: 'hosted-workspace-shell/1',
+      captureBytes: 1024 * 1024,
+    });
+    expect(settled.status).toBe(200);
+    expect(acknowledge).toHaveBeenCalledTimes(2);
+    expect(project).toHaveBeenCalledTimes(2);
+    await headers(supertest(fourth).delete('/session/' + SESSION_ID)).expect(
+      204,
+    );
   });
 
   it('ends an event stream when its attachment closes', async () => {

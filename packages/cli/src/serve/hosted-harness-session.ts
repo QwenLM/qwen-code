@@ -168,6 +168,8 @@ async function recoverShellReceipts(
   }
   const promptId = pending.size === 1 ? [...pending][0] : null;
   const harness = createManagedHarnessHandle(session.managed);
+  const projected = receipts.length ? await session.managed.sink.project() : [];
+  const projectedIds = new Set(projected.map((item) => item.uuid));
   for (const { promptId: receiptPromptId, event: receipt } of receipts) {
     const executionCallId = receipt.payload['executionCallId'];
     if (typeof executionCallId !== 'string')
@@ -200,8 +202,7 @@ async function recoverShellReceipts(
       !Array.isArray(history['parts'])
     )
       throw new Error('Original Shell receipt or history conflicts.');
-    const projected = await session.managed.sink.project();
-    if (!projected.some((item) => item.uuid === history['messageId'])) {
+    if (!projectedIds.has(history['messageId'])) {
       if (receiptPromptId !== promptId)
         throw new Error('Settled Shell history is missing.');
       const result = record(
@@ -223,6 +224,8 @@ async function recoverShellReceipts(
       )
         throw new Error('Original Shell history exceeds the Session limit.');
       await session.managed.sink.write(result);
+      projected.push(result);
+      projectedIds.add(result.uuid);
     }
     const authorization = await authority.harnessRunAuthorization();
     if (
@@ -235,6 +238,7 @@ async function recoverShellReceipts(
       )
     )
       await harness.resolveAwaitRuntime(executionCallId, ref);
+    if (receiptPromptId !== promptId) continue;
     try {
       const broker = new HostedWorkspaceBroker(
         options,

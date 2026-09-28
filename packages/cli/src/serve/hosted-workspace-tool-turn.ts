@@ -35,7 +35,10 @@ import {
   ManagedSessionStoreHttpError,
 } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
-import { normalizeWorkspaceRelativePath } from './managed-workspace-binding.js';
+import {
+  InvalidWorkspaceRelativePathError,
+  normalizeWorkspaceRelativePath,
+} from './managed-workspace-binding.js';
 import { WORKSPACE_CAPABILITY_DIGEST } from './managed-workspace-activation.js';
 import {
   HostedWorkspaceBroker,
@@ -43,6 +46,7 @@ import {
   type HostedWorkspaceBrokerOptions,
 } from './hosted-workspace-broker.js';
 import { HostedShellPublisher } from './hosted-shell-publisher.js';
+import { boundedShellPreview } from './managed-shell-publisher.js';
 
 export const HOSTED_WORKSPACE_FILE_PROFILE = 'hosted-workspace-files/1';
 export const HOSTED_WORKSPACE_SHELL_PROFILE = 'hosted-workspace-shell/1';
@@ -273,12 +277,20 @@ export class HostedWorkspaceToolTurn {
           : { ...args, is_background: false };
       } else {
         const file = call.args['file_path'];
-        if (typeof file !== 'string')
-          throw new Error('Hosted file tools require a relative file_path.');
-        input = {
-          ...call.args,
-          file_path: normalizeWorkspaceRelativePath(file.trim()),
-        };
+        input = { ...call.args };
+        const filePathError =
+          'Hosted file tools require file_path relative to the saved Session working directory. Absolute paths and ".." traversal are not allowed. Correct file_path and retry.';
+        if (typeof file !== 'string') {
+          validationError = filePathError;
+        } else {
+          try {
+            input['file_path'] = normalizeWorkspaceRelativePath(file.trim());
+          } catch (cause) {
+            if (!(cause instanceof InvalidWorkspaceRelativePathError))
+              throw cause;
+            validationError = filePathError;
+          }
+        }
       }
       const payloadJson = JSON.stringify({
         toolName: call.name,
@@ -326,7 +338,7 @@ export class HostedWorkspaceToolTurn {
           request.call.callId,
           [],
           request.validationError ??
-            'This tool was not executed because another call in the batch has invalid Shell arguments. Retry the batch with corrected arguments.',
+            'This tool was not executed because another call in the batch has invalid arguments. Retry the batch with corrected arguments.',
         ),
       );
       if (!this.messageFitsInline('tool_result', responses, model))
@@ -950,7 +962,9 @@ export class HostedWorkspaceToolTurn {
       messageId = history['messageId'];
       timestamp = history['timestamp'];
     } else {
-      const responseParts = envelope.responseParts as Part[];
+      const responseParts = boundedShellPreview(
+        envelope.responseParts,
+      ) as Part[];
       converted =
         envelope.executionStatus === 'success'
           ? convertToFunctionResponse(call.name, call.callId, responseParts)

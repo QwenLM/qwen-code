@@ -58,6 +58,7 @@ import com.alibaba.qwen.code.managedagent.api.RequestIdFilter;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnRecord;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.introspect.BeanPropertyDefinition;
@@ -135,7 +136,8 @@ class ManagedAgentApiContractTest {
                     entry(SessionCapabilities.class,
                             List.of("SessionCapabilities")),
                     entry(PublicList.class, List.of("PublicSessionList",
-                            "PublicEventList", "PublicTaskList")),
+                            "PublicEventList", "PublicTaskList",
+                            "PublicTurnList")),
                     entry(PublicEvent.class, List.of("PublicEvent")),
                     entry(SessionResyncRequired.class,
                             List.of("SessionResyncRequired")),
@@ -864,6 +866,7 @@ class ManagedAgentApiContractTest {
         assertThat(webBound.at("/workspace/state").asText())
                 .isEqualTo("ready");
         exchangeTasks(drift, tenant, otherTenant);
+        exchangeTurns(drift, tenant, otherTenant);
         assertThat(exercised).containsExactlyInAnyOrderElementsOf(
                 CONTRACT.operations().stream()
                         .filter(operation -> !"planned".equals(
@@ -949,6 +952,107 @@ class ManagedAgentApiContractTest {
         exchange(drift, "getWebShellTask", 400,
                 post(WEB_SHELL + "/tasks/get").header(TENANT, tenant),
                 "{\"sessionId\":\"%s\"}".formatted(sessionId));
+    }
+
+    /**
+     * Pages through the Turns of a new Session: the Turn its creation ran and
+     * a failed Turn written after it.
+     */
+    private void exchangeTurns(Map<String, String> drift, String tenant,
+            String otherTenant) throws Exception {
+        String sessionId = json(mvc.perform(post("/v1/agents/sessions")
+                        .header(TENANT, tenant)
+                        .header(IDEMPOTENCY_KEY, "contract-turns")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"agent_id":"qwen-code",
+                                 "input":[{"type":"input_text","text":"turns"}]}
+                                """))
+                .andReturn().getResponse()
+                .getContentAsString(StandardCharsets.UTF_8)).get("id")
+                .asText();
+        awaitIdle(tenant, sessionId);
+        TurnRecord first = store.findLatestTurn(tenant, sessionId)
+                .orElseThrow();
+        // The fixture Harness runs one Turn per Session, so the second Turn
+        // is written as a failed dispatch would leave it.
+        String second = "turn_" + UUID.randomUUID().toString()
+                .replace("-", "");
+        jdbc.update("INSERT INTO managed_agent_turn (tenant_id, session_id,"
+                        + " turn_id, prompt_id, input_json, payload_digest,"
+                        + " status, error_code, created_at, updated_at,"
+                        + " completed_at) VALUES (?, ?, ?, ?, '[]', 'digest',"
+                        + " 'FAILED', 'hosted_harness_unavailable', ?, ?,"
+                        + " ?)",
+                tenant, sessionId, second, UUID.randomUUID().toString(),
+                first.createdAt() + 1_000, first.createdAt() + 2_000,
+                first.createdAt() + 2_000);
+
+        JsonNode page = json(exchange(drift, "listTurns", 200,
+                get("/v1/agents/sessions/{id}/turns", sessionId)
+                        .param("limit", "1").header(TENANT, tenant), null));
+        assertThat(page.at("/data/0/id").asText()).isEqualTo(second);
+        assertThat(page.at("/data/0/status").asText()).isEqualTo("failed");
+        assertThat(page.at("/data/0/error_code").asText())
+                .isEqualTo("hosted_harness_unavailable");
+        assertThat(page.get("has_more").asBoolean()).isTrue();
+        JsonNode rest = json(exchange(drift, "listTurns", 200,
+                get("/v1/agents/sessions/{id}/turns", sessionId)
+                        .param("cursor", page.get("next_cursor").asText())
+                        .header(TENANT, tenant), null));
+        assertThat(rest.get("data")).hasSize(1);
+        assertThat(rest.at("/data/0/id").asText()).isEqualTo(first.turnId());
+        assertThat(rest.at("/data/0/status").asText()).isEqualTo("completed");
+        assertThat(rest.at("/data/0/input_item_id").asText())
+                .isEqualTo("item_" + first.turnId() + "_input");
+        assertThat(rest.get("has_more").asBoolean()).isFalse();
+        assertThat(rest.get("next_cursor").isNull()).isTrue();
+        assertThat(code(exchange(drift, "listTurns", 400,
+                get("/v1/agents/sessions/{id}/turns", sessionId)
+                        .param("cursor", "bad").header(TENANT, tenant),
+                null))).isEqualTo("invalid_cursor");
+        assertThat(code(exchange(drift, "listTurns", 400,
+                get("/v1/agents/sessions/{id}/turns", sessionId)
+                        .param("limit", "101").header(TENANT, tenant),
+                null))).isEqualTo("invalid_limit");
+        exchange(drift, "listTurns", 400,
+                get("/v1/agents/sessions/{id}/turns", sessionId), null);
+        exchange(drift, "listTurns", 403,
+                get("/v1/agents/sessions/{id}/turns", sessionId)
+                        .header(TENANT, tenant)
+                        .principal(actor(otherTenant)), null);
+        assertThat(code(exchange(drift, "listTurns", 404,
+                get("/v1/agents/sessions/{id}/turns", sessionId)
+                        .header(TENANT, otherTenant), null)))
+                .isEqualTo("session_not_found");
+
+        assertThat(json(exchange(drift, "getTurn", 200,
+                get("/v1/agents/sessions/{id}/turns/{turn}", sessionId,
+                        first.turnId()).header(TENANT, tenant), null)))
+                .isEqualTo(rest.at("/data/0"));
+        assertThat(code(exchange(drift, "getTurn", 404,
+                get("/v1/agents/sessions/{id}/turns/{turn}", sessionId,
+                        "turn_missing").header(TENANT, tenant), null)))
+                .isEqualTo("turn_not_found");
+        assertThat(code(exchange(drift, "getTurn", 404,
+                get("/v1/agents/sessions/{id}/turns/{turn}", sessionId,
+                        second).header(TENANT, otherTenant), null)))
+                .isEqualTo("session_not_found");
+        assertThat(code(exchange(drift, "getTurn", 400,
+                get("/v1/agents/sessions/{id}/turns/{turn}", sessionId,
+                        "turn_" + "0".repeat(60)).header(TENANT, tenant),
+                null))).isEqualTo("invalid_request");
+        exchange(drift, "getTurn", 400,
+                get("/v1/agents/sessions/{id}/turns/{turn}", sessionId,
+                        second), null);
+        exchange(drift, "getTurn", 403,
+                get("/v1/agents/sessions/{id}/turns/{turn}", sessionId,
+                        second).header(TENANT, tenant)
+                        .principal(actor(otherTenant)), null);
+    }
+
+    private String code(String content) throws IOException {
+        return json(content).at("/error/code").asText();
     }
 
     @Test
