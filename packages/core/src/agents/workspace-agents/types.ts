@@ -134,9 +134,7 @@ export function isThreadTerminal(status: ThreadStatus): boolean {
 /**
  * How urgently a thread wants a turn, highest first.
  *
- * These names are ours. Multica's issue carries a priority, but its value set
- * was not verified from source, so inventing a match would be a guess wearing
- * a citation. Four levels is what an ordering needs: one above normal for
+ * Four levels is what an ordering needs: one above normal for
  * "before the queue", one for "soon", the default, and one for "whenever".
  */
 export type ThreadPriority = 'urgent' | 'high' | 'normal' | 'low';

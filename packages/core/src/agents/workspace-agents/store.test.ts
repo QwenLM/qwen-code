@@ -45,6 +45,7 @@ vi.mock('../../utils/atomicFileWrite.js', async (importOriginal) => {
 });
 
 import { Storage } from '../../config/storage.js';
+import { mockCompromisedLock } from '../../test-utils/mock-compromised-lock.js';
 import {
   allocateRunSequence,
   getAgentsFilePath,
@@ -341,6 +342,52 @@ describe('agent versioned store', () => {
         readWorkspaceAgents(PROJECT_ROOT),
       ),
     ).rejects.toThrow(/Nested agent workspace transactions/);
+  });
+
+  it('keeps a transaction result when its workspace lock is compromised', async () => {
+    const { lockSpy, getOnCompromised } = mockCompromisedLock();
+    try {
+      await expect(allocateRunSequence(PROJECT_ROOT)).resolves.toBe(1);
+      expect(getOnCompromised()).toBeTypeOf('function');
+    } finally {
+      lockSpy.mockRestore();
+    }
+    await expect(allocateRunSequence(PROJECT_ROOT)).resolves.toBe(2);
+  });
+
+  it('rejects a thread whose progress snapshot is malformed', async () => {
+    await writeThread(
+      PROJECT_ROOT,
+      thread({
+        runs: [
+          run(1, 0, {
+            progress: {
+              attempt: 1,
+              sequence: 2,
+              receivedAt: 3,
+              activityAt: 3,
+              stage: 'tool',
+              detail: '',
+              outputText: 'done',
+              steps: [{ id: 'st_1', title: 'Read', status: 'done' }],
+            },
+          }),
+        ],
+      }),
+    );
+    await expect(readThread(PROJECT_ROOT, 'th_root')).resolves.toMatchObject({
+      runs: [{ progress: { outputText: 'done' } }],
+    });
+
+    await writeRaw(
+      getThreadPath(PROJECT_ROOT, 'th_root'),
+      thread({
+        runs: [{ ...run(1, 0), progress: 'x' } as unknown as ThreadRun],
+      }),
+    );
+    await expect(readThread(PROJECT_ROOT, 'th_root')).rejects.toThrow(
+      /Malformed/,
+    );
   });
 
   it('persists a run counter allocation before any thread write', async () => {
