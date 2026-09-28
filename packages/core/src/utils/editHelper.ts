@@ -515,11 +515,10 @@ function lineEndingBefore(content: string, index: number): string | null {
 /**
  * The first line ending in `content`, or `'\n'` when it has none.
  *
- * This is a last resort for text that sits on a line with no break in front of
- * it and none after it, which in a file whose only break is at the very end means
- * the first line of the file. It is reached only from code that has already
- * established the content contains a CRLF, so a bare `'\n'` here would put an LF
- * into a CRLF file.
+ * This is a last resort when an edit span starts on the first line, does not end
+ * on a break, and is not immediately followed by one. It is reached only from
+ * code that has already established the content contains a CRLF, so a bare
+ * `'\n'` here would put an LF into a CRLF file.
  */
 function firstLineEnding(content: string): string {
   const index = content.indexOf('\n');

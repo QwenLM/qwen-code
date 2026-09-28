@@ -120,9 +120,10 @@ interface CalculatedEdit {
   currentContent: string | null;
   newContent: string;
   /**
-   * `newContent` with the file's own line endings restored, for the bytes that
-   * go to disk. Equal to `newContent` for a new file, and byte-identical to it
-   * for a file that is already uniformly LF or uniformly CRLF.
+   * Payload to write. For a new file it is `newContent`; for an existing file
+   * containing CRLF, the replacement is spliced into the original bytes so
+   * untouched line endings are preserved. Uniformly CRLF files still match the
+   * previous write path.
    */
   contentForWrite: string;
   occurrences: number;
