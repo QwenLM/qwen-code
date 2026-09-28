@@ -1486,6 +1486,63 @@ describe('MemoryManager', () => {
       expect(runAutoMemoryExtract).toHaveBeenCalledOnce();
     });
 
+    it('does not skip extraction after a no-op manage_memory forget', async () => {
+      vi.mocked(runAutoMemoryExtract).mockResolvedValue({
+        touchedTopics: [],
+        cursor: { sessionId: 'sess-1', updatedAt: new Date().toISOString() },
+      });
+      const mgr = new MemoryManager();
+      const result = await mgr.scheduleExtract({
+        projectRoot,
+        sessionId: 'sess-1',
+        history: [
+          {
+            role: 'user',
+            parts: [
+              {
+                text: 'Forget the old deploy rule - and note deploys now need two approvals.',
+              },
+            ],
+          },
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'manage-memory',
+                  name: ToolNames.MANAGE_MEMORY,
+                  args: { action: 'forget', content: 'old deploy rule' },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'manage-memory',
+                  name: ToolNames.MANAGE_MEMORY,
+                  // manage_memory reports forget success with removed: 0 when
+                  // nothing matched - no error key, no throw.
+                  response: {
+                    output:
+                      '{"action":"forget","removed":0,"touchedScopes":[]}',
+                  },
+                },
+              },
+            ],
+          },
+          { role: 'model', parts: [{ text: 'Nothing matched that rule.' }] },
+        ],
+      });
+
+      // A successful call does not imply a write, so skipping here would
+      // silently drop the new durable fact stated in the same turn.
+      expect(result.skippedReason).toBeUndefined();
+      expect(runAutoMemoryExtract).toHaveBeenCalledOnce();
+    });
+
     it('does not treat an unrelated bridged call as a memory write', async () => {
       vi.mocked(runAutoMemoryExtract).mockResolvedValue({
         touchedTopics: [],

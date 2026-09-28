@@ -30,7 +30,10 @@ import {
 import { ToolNames } from '../tools/tool-names.js';
 import { createMemoryScopedAgentConfig } from './memory-scoped-agent-config.js';
 import { renderWriterKeywordVocabularySnapshot } from './writer-keyword-vocabulary.js';
-import { stripSystemReminderBlocks } from '../core/environmentContext.js';
+import {
+  formatDateForContext,
+  stripSystemReminderBlocks,
+} from '../core/environmentContext.js';
 
 const MAX_TOPIC_SUMMARY_CHARS = 280;
 
@@ -93,16 +96,31 @@ function buildAgentHistory(history: Content[]): Content[] {
     });
     return parts.length > 0 ? [{ ...message, parts }] : [];
   });
-  const last = sanitized.at(-1);
-  if (last?.role !== 'model') return sanitized.slice(0, -1);
-  const openCalls = (last.parts ?? []).filter((part) => part.functionCall);
-  if (openCalls.length === 0) return sanitized;
+  if (sanitized.length === 0) return [];
+  const last = sanitized[sanitized.length - 1];
+  if (last.role === 'model') {
+    const openCalls = (last.parts ?? []).filter((part) => part.functionCall);
+    if (openCalls.length === 0) return sanitized;
+    return [
+      ...sanitized,
+      {
+        role: 'user' as const,
+        parts: buildFunctionResponseParts(
+          last,
+          'Background extraction started.',
+        ),
+      },
+      { role: 'model' as const, parts: [{ text: 'Acknowledged.' }] },
+    ];
+  }
+  // The tail is a `user` turn — an unanswered prompt or tool responses.
+  // Sanitization above can delete whole messages, so this turn may be the one
+  // that triggered extraction; popping it would silently cost the extractor
+  // the most recent content and can also leave an earlier `functionCall`
+  // dangling at the tail. Appending the model ack satisfies the same
+  // user/model alternation the task prompt needs without discarding anything.
   return [
     ...sanitized,
-    {
-      role: 'user' as const,
-      parts: buildFunctionResponseParts(last, 'Background extraction started.'),
-    },
     { role: 'model' as const, parts: [{ text: 'Acknowledged.' }] },
   ];
 }
@@ -176,6 +194,13 @@ function buildTaskPrompt(
     `- PROJECT memory (this project only): \`${projectMemoryRoot}\``,
     '',
     'Scan the recent conversation history in your context and update durable managed memory in whichever directory each memory belongs.',
+    '',
+    // Inherited history is scrubbed of `<system-reminder>` blocks above, and
+    // those are the only place a date reaches the model (the startup prelude
+    // and the per-turn refresh). Passing extraHistory also suppresses the
+    // fork's own env bootstrap, so the date has to be stated here or the
+    // "convert relative dates to absolute ones" instruction is unanswerable.
+    `Today's date is ${formatDateForContext()} — use it to turn any relative date in the history into an absolute one before saving.`,
     '',
     'Available tools in this run: `read_file`, `grep_search`, `glob`, and `write_file`/`edit` for paths inside EITHER managed memory directory above.',
     '- Do not use any other tools.',

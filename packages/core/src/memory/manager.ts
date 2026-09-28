@@ -414,10 +414,17 @@ function historyWritesToMemory(
   const successfulCallIds = successfulFunctionCallIds(history);
   return history.some((msg) =>
     (msg.parts ?? []).some((part) => {
+      const { name, args } = resolvedFunctionCall(part);
       if (
         part.functionCall?.id &&
         successfulCallIds.has(part.functionCall.id) &&
-        resolvedFunctionCall(part).name === ToolNames.MANAGE_MEMORY
+        name === ToolNames.MANAGE_MEMORY &&
+        // Only `remember` implies a write: runManagedRememberByAgent throws
+        // `remember_no_update` when nothing was persisted, whereas `forget`
+        // returns `{ removed: 0 }` with no error key when nothing matched.
+        // Skipping on a no-op `forget` would suppress extraction of a turn
+        // that wrote nothing to memory.
+        args?.['action'] === 'remember'
       ) {
         return true;
       }

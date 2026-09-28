@@ -15,6 +15,7 @@ import {
 } from './paths.js';
 import { runForkedAgent, getCacheSafeParams } from '../agents/forkedAgent.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { formatDateForContext } from '../core/environmentContext.js';
 import { AUTO_MEMORY_TREE_CATEGORIES } from './types.js';
 
 vi.mock('./structured-scan.js', async (importOriginal) => {
@@ -186,6 +187,126 @@ describe('runAutoMemoryExtractionByAgent', () => {
       },
       { role: 'model', parts: [{ text: 'Understood.' }] },
     ]);
+  });
+
+  it('keeps the triggering turn when sanitization empties the trailing model message', async () => {
+    vi.mocked(getCacheSafeParams).mockReturnValue({
+      generationConfig: {},
+      history: [
+        { role: 'user', parts: [{ text: 'Remember I prefer tabs.' }] },
+        { role: 'model', parts: [{ thought: true, text: 'reasoning' }] },
+      ],
+      model: 'qwen3-coder-plus',
+      version: 1,
+    });
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      filesTouched: [],
+      filesWritten: [],
+    });
+
+    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp');
+
+    // The thought-only model message sanitizes away, leaving a `user` tail.
+    // Dropping it would hand the extractor an empty history (forkedAgent
+    // turns `[]` into `initialMessages: undefined`), so the turn that
+    // triggered extraction is kept and closed with a model ack instead.
+    expect(vi.mocked(runForkedAgent).mock.calls[0]?.[0].extraHistory).toEqual([
+      { role: 'user', parts: [{ text: 'Remember I prefer tabs.' }] },
+      { role: 'model', parts: [{ text: 'Acknowledged.' }] },
+    ]);
+  });
+
+  it('never leaves an unanswered functionCall at the tail of the inherited history', async () => {
+    vi.mocked(getCacheSafeParams).mockReturnValue({
+      generationConfig: {},
+      history: [
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-1',
+                name: 'read_file',
+                args: { path: '/tmp/a' },
+              },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'call-1',
+                name: 'read_file',
+                response: { output: 'real tool result' },
+              },
+            },
+          ],
+        },
+        { role: 'model', parts: [{ thought: true, text: 'reasoning' }] },
+      ],
+      model: 'qwen3-coder-plus',
+      version: 1,
+    });
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      filesTouched: [],
+      filesWritten: [],
+    });
+
+    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp');
+
+    // A one-shot trailing trim would delete the real `functionResponse` and
+    // leave `functionCall` open at the tail, which the client then closes by
+    // synthesizing an *error* response — telling the extractor its parent's
+    // successful call failed.
+    expect(vi.mocked(runForkedAgent).mock.calls[0]?.[0].extraHistory).toEqual([
+      {
+        role: 'model',
+        parts: [
+          {
+            functionCall: {
+              id: 'call-1',
+              name: 'read_file',
+              args: { path: '/tmp/a' },
+            },
+          },
+        ],
+      },
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'call-1',
+              name: 'read_file',
+              response: { output: 'real tool result' },
+            },
+          },
+        ],
+      },
+      { role: 'model', parts: [{ text: 'Acknowledged.' }] },
+    ]);
+  });
+
+  it("states today's date in the task prompt", async () => {
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      finalText: '',
+      filesTouched: [],
+    });
+
+    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp');
+
+    // The inherited history is scrubbed of `<system-reminder>` blocks, and
+    // those are the only carrier of the date; passing extraHistory also
+    // suppresses the fork's env bootstrap. Without this line the prompt's
+    // "convert relative dates to absolute dates" rule is unanswerable.
+    const call = vi.mocked(runForkedAgent).mock.calls[0]?.[0];
+    expect(call?.taskPrompt).toContain(`Today's date is`);
+    expect(call?.taskPrompt).toContain(formatDateForContext());
   });
 
   it('does not inherit the session auto-memory routing contract', async () => {
@@ -405,7 +526,7 @@ describe('runAutoMemoryExtractionByAgent', () => {
     );
   });
 
-  it('does not advertise the opt-in list_directory tool to the extraction agent', async () => {
+  it('does not advertise unregistered tools to the extraction agent', async () => {
     vi.mocked(runForkedAgent).mockResolvedValue({
       status: 'completed',
       finalText: '',
@@ -419,6 +540,11 @@ describe('runAutoMemoryExtractionByAgent', () => {
     // list_directory is disabled by default, so the prompt must not steer this
     // turn-budgeted background agent toward an unregistered tool.
     expect(call?.taskPrompt).not.toContain('list_directory');
+    // Same for shell: it is no longer in this agent's `tools` list and the
+    // scoped config denies it, so advertising it would burn one of the 5
+    // turns on a call that cannot execute. The sibling dream agent does keep
+    // shell (dreamAgentPlanner passes allowShell), so this stays per-agent.
+    expect(call?.taskPrompt).not.toContain('run_shell_command');
   });
 
   it('throws when getCacheSafeParams returns null', async () => {
