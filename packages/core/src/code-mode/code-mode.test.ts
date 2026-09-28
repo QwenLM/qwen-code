@@ -270,6 +270,8 @@ describe('CodeModeOnly exposure', () => {
     );
     expect(buildExecDescription(first)).toContain('ImageContent');
     expect(buildExecDescription(first)).toContain('generatedImage');
+    expect(buildExecDescription(first)).toContain('text(result.value.output)');
+    expect(buildExecDescription(first)).not.toContain('text(result.value)');
     expect(buildExecDescription(first)).toContain(
       'setTimeout(callback: () => void, delayMs?: number)',
     );

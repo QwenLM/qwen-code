@@ -18890,6 +18890,12 @@ describe('Fire hook functions integration', () => {
     });
 
     describe('isToolCallConcurrencySafe', () => {
+      it('treats skill loading as unsafe despite its read kind', () => {
+        expect(isToolCallConcurrencySafe(ToolNames.SKILL, Kind.Read, {})).toBe(
+          false,
+        );
+      });
+
       it('treats agent tools as safe regardless of resolved kind', () => {
         expect(isToolCallConcurrencySafe(ToolNames.AGENT, undefined, {})).toBe(
           true,
@@ -19250,6 +19256,51 @@ describe('Fire hook functions integration', () => {
       expect(editEnd).not.toBe(-1);
       expect(read3Start).not.toBe(-1);
       expect(read3Start).toBeGreaterThan(editEnd);
+    });
+
+    it('serializes skill loading between safe tool batches', async () => {
+      const events: string[] = [];
+      const tools = new Map(
+        [ToolNames.READ_FILE, ToolNames.SKILL].map((name) => [
+          name,
+          new MockTool({
+            name,
+            kind: Kind.Read,
+            execute: async (params) => {
+              const { id } = params as { id: string };
+              events.push(`start:${id}`);
+              await new Promise<void>((resolve) => setImmediate(resolve));
+              events.push(`end:${id}`);
+              return { llmContent: id, returnDisplay: id };
+            },
+          }),
+        ]),
+      );
+      const onComplete = vi.fn();
+      const scheduler = createScheduler(tools, onComplete, vi.fn());
+
+      await scheduler.schedule(
+        ['before-1', 'before-2', 'skill', 'after'].map((id) => ({
+          callId: id,
+          name: id === 'skill' ? ToolNames.SKILL : ToolNames.READ_FILE,
+          args: { id },
+          isClientInitiated: false,
+          prompt_id: 'p1',
+        })),
+        new AbortController().signal,
+      );
+
+      const calls = onComplete.mock.calls[0][0] as ToolCall[];
+      expect(calls).toHaveLength(4);
+      expect(calls.every((call) => call.status === 'success')).toBe(true);
+      expect(events.slice(0, 2)).toEqual(['start:before-1', 'start:before-2']);
+      expect(events.slice(2, 4)).toEqual(['end:before-1', 'end:before-2']);
+      expect(events.slice(4)).toEqual([
+        'start:skill',
+        'end:skill',
+        'start:after',
+        'end:after',
+      ]);
     });
 
     it('should run read-only shell commands concurrently and non-read-only sequentially', async () => {

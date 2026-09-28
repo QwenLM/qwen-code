@@ -26,8 +26,10 @@ calls to settle, and later calls wait for it. Explicit sequential JavaScript
 awaits retain their ordering. Queue admission follows submission order and
 does not rely on timers to collect batches.
 
-Skill loading also forms a barrier: despite its `Read` kind, it can register
-hooks and change the session's tool environment before subsequent calls.
+The shared safety predicate classifies skill loading as unsafe: despite its
+`Read` kind, it can register hooks and change session permissions. This makes
+skill execution a barrier in Core (including nested Code Mode), headless tool
+batching, and Session nested dispatch.
 
 Each call still re-enters `Session.runTool` for validation, permissions, hooks,
 progress, telemetry, and recording. Finalize nested results by call ID so
@@ -45,27 +47,30 @@ authoritative.
 
 ## Scope and decisions
 
-Changes cover Code Mode guidance and examples, Session nested dispatch and
-recording, and focused regression tests. Core scheduling and direct Session
-tool batching keep their existing behavior. Unknown tools and stateful MCP
-tools retain the existing conservative safety classification. No new setting,
-permission policy, tool-search behavior, or provider-specific path is added.
+Changes cover Code Mode guidance and examples, the shared skill safety
+classification, Session nested dispatch and recording, and focused regression
+tests. Core retains its permission preparation order before execution batching;
+direct Session tool batching keeps its existing behavior. Unknown tools and
+stateful MCP tools retain the existing conservative safety classification. No
+new setting, permission policy, tool-search behavior, or provider-specific path
+is added.
 
 The implementation touches `packages/core/src/core/prompts.ts`,
+`packages/core/src/core/coreToolScheduler.ts`,
 `packages/core/src/tools/code-mode.ts`, and
 `packages/cli/src/acp-integration/session/Session.ts`, with tests alongside the
-existing prompt, host, and Session tests.
+existing prompt, scheduler, host, and Session tests.
 
 ## Risks and validation
 
 Concurrency exposes shared result queues, permission cancellation races, and
 hooks that rewrite arguments. Tests must check result ownership, safe-read
 overlap, unsafe barriers, explicit sequential awaits, the concurrency cap,
-failure isolation, and cancellation of active and queued calls. Any hook-driven
-change in concurrency safety must be handled conservatively: shell calls are
-serialized while enabled `PermissionRequest` hooks can rewrite their arguments.
-Evaluate safety when admitting a call, after earlier barriers, because loading
-a skill may register new hooks.
+failure isolation, and cancellation of active and queued calls. Session handles
+hook-driven changes conservatively: shell calls are serialized while enabled
+`PermissionRequest` hooks can rewrite their arguments. Evaluate safety when
+admitting a call, after earlier barriers, because loading a skill may register
+new hooks.
 
 Run deterministic CLI and ACP probes against the global baseline and the local
 bundle. Verify the full Session chain through controlled model tool calls;

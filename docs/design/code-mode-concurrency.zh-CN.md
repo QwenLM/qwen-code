@@ -21,8 +21,9 @@ Session 在每个 `exec` 内使用 Core 的 `isToolCallConcurrencySafe` 判定�
 10。不安全调用等待之前的调用结束，后续调用再等待它结束。JavaScript 中显式的
 逐项 await 保留原有顺序。队列按提交顺序接纳调用，无需通过定时器收集批次。
 
-加载 skill 同样作为顺序边界：虽然它的工具类型为 `Read`，但它可以注册 hook，
-改变后续调用使用的 Session 工具环境。
+共享安全判定将加载 skill 视为不安全调用：虽然它的工具类型为 `Read`，但它可以
+注册 hook、修改会话权限。因此 Core（包括嵌套 Code Mode）、headless 工具分批
+和 Session 嵌套调度都会将 skill 执行作为顺序边界。
 
 每个调用仍经过 `Session.runTool` 的校验、权限、hooks、进度、遥测和记录流程。
 按调用 ID 完成嵌套结果处理，避免并发完成的调用消耗其他调用的记录。模型看到的
@@ -36,24 +37,25 @@ Session 在每个 `exec` 内使用 Core 的 `isToolCallConcurrencySafe` 判定�
 
 ## 范围和决策
 
-修改 Code Mode 指引和示例、Session 嵌套调度与结果记录，并添加针对性回归测试。
-Core 调度和 Session 顶层工具批处理保持现有行为。未知工具和有状态的 MCP 工具
-沿用现有保守的并发安全判定。无需新增设置、权限策略、工具搜索行为或 provider
-专用路径。
+修改 Code Mode 指引和示例、共享的 skill 安全判定、Session 嵌套调度与结果记录，
+并添加针对性回归测试。Core 保留先准备权限、再对执行分批的现有顺序；Session
+顶层工具批处理保持现有行为。未知工具和有状态的 MCP 工具沿用现有保守的并发
+安全判定。无需新增设置、权限策略、工具搜索行为或 provider 专用路径。
 
 实现涉及 `packages/core/src/core/prompts.ts`、
+`packages/core/src/core/coreToolScheduler.ts`、
 `packages/core/src/tools/code-mode.ts` 和
 `packages/cli/src/acp-integration/session/Session.ts`，测试放在现有 prompt、
-host 和 Session 测试中。
+scheduler、host 和 Session 测试中。
 
 ## 风险和验证
 
 并发可能暴露共享结果队列、权限取消时序和 hook 修改参数的问题。测试需要覆盖
 结果归属、安全读取重叠、不安全操作的顺序边界、显式逐项 await、并发上限、
-失败隔离，以及运行中和排队调用的取消。hook 导致并发安全性改变时，应采用保守
-处理：启用的 `PermissionRequest` hook 可能修改 shell 参数时，shell 调用串行
-执行。并发安全性在接纳调用时判定，并等待之前的顺序边界，因为加载 skill 可能
-注册新的 hook。
+失败隔离，以及运行中和排队调用的取消。Session 保守处理 hook 导致的变化：
+启用的 `PermissionRequest` hook 可能修改 shell 参数时，shell 调用串行执行。
+并发安全性在接纳调用时判定，并等待之前的顺序边界，因为加载 skill 可能注册
+新的 hook。
 
 对全局基线和本地 bundle 运行确定性 CLI 和 ACP 探针。使用受控模型工具调用
 验证完整 Session 链路；headless CLI 只覆盖 Core 调度器，无法证明 ACP 并发。

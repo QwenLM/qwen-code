@@ -15083,9 +15083,7 @@ export class Session implements SessionContext {
                     const kind = this.config
                       .getToolRegistry()
                       .getTool(nestedName)?.kind;
-                    // Skills register hooks that can rewrite later shell commands.
                     const safe =
-                      canonicalToolName(nestedName) !== ToolNames.SKILL &&
                       isToolCallConcurrencySafe(nestedName, kind, nestedArgs) &&
                       !(
                         kind === Kind.Execute &&
