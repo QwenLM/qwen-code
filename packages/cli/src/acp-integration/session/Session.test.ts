@@ -36260,6 +36260,87 @@ describe('Session', () => {
           expect(executeSpy).not.toHaveBeenCalled();
         });
 
+        it.each([
+          ['runs the tool with a valid updatedInput', null],
+          [
+            'fails the call on an invalid updatedInput',
+            'path must be absolute',
+          ],
+        ])('%s', async (_name, validationError) => {
+          const messageBus = {
+            request: vi
+              .fn()
+              .mockImplementation(async (request: { eventName: string }) => ({
+                success: true,
+                output:
+                  request.eventName === 'PreToolUse'
+                    ? {
+                        hookSpecificOutput: {
+                          hookEventName: 'PreToolUse',
+                          updatedInput: { path: '/tmp/other.txt' },
+                        },
+                      }
+                    : {},
+              })),
+          };
+          mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+          mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+          mockConfig.getApprovalMode = vi
+            .fn()
+            .mockReturnValue(ApprovalMode.YOLO);
+
+          const executeSpy = vi.fn().mockResolvedValue({
+            llmContent: 'result',
+            returnDisplay: 'done',
+          });
+          const invocation = {
+            params: { path: '/tmp/test.txt' },
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            execute: executeSpy,
+          };
+          const validateToolParams = vi.fn().mockReturnValue(validationError);
+          const tool = {
+            name: 'read_file',
+            kind: core.Kind.Read,
+            build: vi.fn().mockReturnValue(invocation),
+            validateToolParams,
+          };
+
+          mockToolRegistry.getTool.mockReturnValue(tool);
+          mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'call-1',
+                      name: 'read_file',
+                      args: { path: '/tmp/test.txt' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          );
+
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'read the file' }],
+          });
+
+          expect(validateToolParams).toHaveBeenCalledWith({
+            path: '/tmp/other.txt',
+          });
+          if (validationError) {
+            expect(executeSpy).not.toHaveBeenCalled();
+            expect(invocation.params).toEqual({ path: '/tmp/test.txt' });
+          } else {
+            expect(executeSpy).toHaveBeenCalledTimes(1);
+            expect(invocation.params).toEqual({ path: '/tmp/other.txt' });
+          }
+        });
+
         it('runs the host guard with final params and denies before execution', async () => {
           mockConfig.getApprovalMode = vi
             .fn()

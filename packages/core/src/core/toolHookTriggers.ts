@@ -47,6 +47,11 @@ export interface PreToolUseHookResult {
   /** Additional context to add */
   additionalContext?: string;
   /**
+   * Tool input that replaces the original one. Set only when the tool may
+   * still run: the hook allowed it, made no decision, or asked the user.
+   */
+  updatedInput?: Record<string, unknown>;
+  /**
    * Set when the hook helper caught and absorbed a transport / dispatch
    * error. The tool execution still proceeds (existing non-blocking
    * contract), but observers (telemetry spans, debug logs) can detect
@@ -184,6 +189,8 @@ export async function firePreToolUseHook(
       };
     }
 
+    const updatedInput = preToolOutput.getUpdatedInput();
+
     // Check if user confirmation is required
     if (preToolOutput.isAsk()) {
       return {
@@ -192,6 +199,7 @@ export async function firePreToolUseHook(
           preToolOutput.getPermissionDecisionReason() ||
           'User confirmation required',
         blockType: 'ask',
+        ...(updatedInput && { updatedInput }),
       };
     }
 
@@ -210,6 +218,7 @@ export async function firePreToolUseHook(
     return {
       shouldProceed: true,
       additionalContext,
+      ...(updatedInput && { updatedInput }),
     };
   } catch (error) {
     // Hook errors should not block tool execution

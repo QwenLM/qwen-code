@@ -5265,8 +5265,8 @@ export class CoreToolScheduler {
   ): Promise<void> {
     const { callId, name: toolName } = scheduledCall.request;
     const canonicalName = canonicalToolName(toolName);
-    const invocation = scheduledCall.invocation;
-    const toolInput = scheduledCall.request.args as Record<string, unknown>;
+    let invocation = scheduledCall.invocation;
+    let toolInput = scheduledCall.request.args as Record<string, unknown>;
 
     // Re-execution after the user approved a PreToolUse 'ask' bounce: the
     // hook already ran and the user already confirmed. Consuming the marker
@@ -5373,6 +5373,19 @@ export class CoreToolScheduler {
                 hasAdditionalContext: !!r.additionalContext,
               },
       );
+      // The hook replaced the tool input: rebuild the invocation so the new
+      // input is validated like the model's, and use it from here on,
+      // including in the confirmation an 'ask' shows.
+      if (preHookResult.updatedInput) {
+        if (!this.setArgsInternal(callId, preHookResult.updatedInput)) {
+          return;
+        }
+        scheduledCall = this.toolCalls.find(
+          (call) => call.request.callId === callId,
+        ) as ScheduledToolCall;
+        invocation = scheduledCall.invocation;
+        toolInput = scheduledCall.request.args as Record<string, unknown>;
+      }
       if (!signal.aborted && !preHookResult.shouldProceed) {
         // A PreToolUse hook returning permissionDecision:'ask' wants the
         // user to confirm in the TUI before the tool runs. When we can

@@ -16,6 +16,7 @@ import type {
   HookInput,
   HookOutput,
   HookExecutionResult,
+  PreToolUseHookOutput,
   PreToolUseInput,
   UserPromptExpansionInput,
   UserPromptSubmitInput,
@@ -1099,15 +1100,12 @@ export class HookRunner {
           break;
 
         case HookEventName.PreToolUse:
-          if ('tool_input' in hookOutput.hookSpecificOutput) {
-            const newToolInput = hookOutput.hookSpecificOutput[
-              'tool_input'
-            ] as Record<string, unknown>;
-            if (newToolInput && 'tool_input' in modifiedInput) {
-              (modifiedInput as PreToolUseInput).tool_input = {
-                ...(modifiedInput as PreToolUseInput).tool_input,
-                ...newToolInput,
-              };
+          {
+            const updatedInput = (
+              createHookOutput(eventName, hookOutput) as PreToolUseHookOutput
+            ).getUpdatedInput();
+            if (updatedInput && 'tool_input' in modifiedInput) {
+              (modifiedInput as PreToolUseInput).tool_input = updatedInput;
             }
           }
           break;

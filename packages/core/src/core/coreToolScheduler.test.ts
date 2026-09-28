@@ -15591,6 +15591,147 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(execute).not.toHaveBeenCalled();
   });
 
+  // PreToolUse hookSpecificOutput.updatedInput replaces the tool input.
+  function updatedInputMessageBus(
+    hookSpecificOutput: Record<string, unknown>,
+  ): { request: ReturnType<typeof vi.fn> } {
+    return {
+      request: vi
+        .fn()
+        .mockImplementation(async (req: { eventName?: string }) =>
+          req.eventName === 'PreToolUse'
+            ? {
+                type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+                correlationId: 'pre-hook',
+                success: true,
+                output: { hookSpecificOutput },
+              }
+            : {
+                type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+                correlationId: 'post-hook',
+                success: true,
+                output: {},
+              },
+        ),
+    };
+  }
+
+  function inputSchemaTool(execute: ReturnType<typeof vi.fn>): MockTool {
+    return new MockTool({
+      name: 'mockTool',
+      params: {
+        type: 'object',
+        properties: { input: { type: 'string' } },
+        required: ['input'],
+        additionalProperties: false,
+      },
+      execute,
+    });
+  }
+
+  it('runs the tool with the input a PreToolUse hook returns in updatedInput', async () => {
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'ok',
+      returnDisplay: 'ok',
+    });
+    const messageBus = updatedInputMessageBus({
+      permissionDecision: 'allow',
+      updatedInput: { input: 'rewritten' },
+    });
+
+    const { completedCalls } = await runSingleTool({
+      messageBus,
+      disableHooks: false,
+      tools: [inputSchemaTool(execute)],
+    });
+
+    expect(completedCalls[0].status).toBe('success');
+    expect(completedCalls[0].request.args).toEqual({ input: 'rewritten' });
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(execute.mock.calls[0][0]).toEqual({ input: 'rewritten' });
+    const postToolUse = messageBus.request.mock.calls.find(
+      (call) => (call[0] as { eventName?: string }).eventName === 'PostToolUse',
+    )?.[0] as { input: { tool_input: unknown } };
+    expect(postToolUse.input.tool_input).toEqual({ input: 'rewritten' });
+  });
+
+  it('fails the call without running it when the updatedInput is invalid', async () => {
+    const execute = vi.fn();
+    const messageBus = updatedInputMessageBus({
+      updatedInput: { path: 'x' },
+    });
+
+    const { completedCalls } = await runSingleTool({
+      messageBus,
+      disableHooks: false,
+      tools: [inputSchemaTool(execute)],
+    });
+
+    const completed = completedCalls[0];
+    expect(completed.status).toBe('error');
+    if (completed.status === 'error') {
+      expect(completed.response.errorType).toBe(
+        ToolErrorType.INVALID_TOOL_PARAMS,
+      );
+    }
+    expect(execute).not.toHaveBeenCalled();
+    expect(getToolSpans()[0].ended).toBe(true);
+  });
+
+  it('runs an approved PreToolUse ask with the updatedInput', async () => {
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'ok',
+      returnDisplay: 'ok',
+    });
+    const messageBus = updatedInputMessageBus({
+      permissionDecision: 'ask',
+      permissionDecisionReason: 'please confirm',
+      updatedInput: { input: 'rewritten' },
+    });
+    const { onToolCallsUpdate, onAllToolCallsComplete } = await scheduleWithAsk(
+      { messageBus, tools: [inputSchemaTool(execute)] },
+    );
+
+    const waiting = (await waitForStatus(
+      onToolCallsUpdate,
+      'awaiting_approval',
+    )) as WaitingToolCall;
+    expect(waiting.request.args).toEqual({ input: 'rewritten' });
+    await waiting.confirmationDetails.onConfirm(
+      ToolConfirmationOutcome.ProceedOnce,
+    );
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(execute.mock.calls[0][0]).toEqual({ input: 'rewritten' });
+    expect(preToolUseCallCount(messageBus)).toBe(1);
+  });
+
+  it('builds the ask confirmation from the updatedInput', async () => {
+    const getConfirmationDetails = vi.spyOn(
+      MockEditToolInvocation.prototype,
+      'getConfirmationDetails',
+    );
+    const messageBus = updatedInputMessageBus({
+      permissionDecision: 'ask',
+      updatedInput: { file: 'rewritten.txt' },
+    });
+    const { onToolCallsUpdate } = await scheduleWithAsk({
+      messageBus,
+      tools: [new MockEditTool()],
+    });
+
+    await waitForStatus(onToolCallsUpdate, 'awaiting_approval');
+    expect(getConfirmationDetails).toHaveBeenCalledTimes(1);
+    expect(
+      (getConfirmationDetails.mock.contexts[0] as MockEditToolInvocation)
+        .params,
+    ).toEqual({ file: 'rewritten.txt' });
+    getConfirmationDetails.mockRestore();
+  });
+
   it('denies a PreToolUse ask (no bounce) in non-interactive mode', async () => {
     const execute = vi.fn();
     const messageBus = askMessageBus();

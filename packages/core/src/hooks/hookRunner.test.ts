@@ -15,10 +15,12 @@ import {
   HookType,
   HooksConfigSource,
   MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH,
+  PermissionMode,
 } from './types.js';
 import type {
   HookConfig,
   HookInput,
+  PreToolUseInput,
   UserPromptExpansionInput,
   UserPromptSubmitInput,
 } from './types.js';
@@ -722,6 +724,53 @@ describe('HookRunner', () => {
       expect(results).toHaveLength(2);
       expect(results[0].success).toBe(true);
       expect(results[1].success).toBe(true);
+    });
+
+    it('should pass a PreToolUse updatedInput to the next hook as tool_input', async () => {
+      const firstProcess = createMockProcess(
+        0,
+        JSON.stringify({
+          hookSpecificOutput: {
+            hookEventName: 'PreToolUse',
+            updatedInput: { command: 'ls -la' },
+          },
+        }),
+      );
+      const secondProcess = createMockProcess(0, '');
+      mockSpawn
+        .mockImplementationOnce(() => firstProcess)
+        .mockImplementationOnce(() => secondProcess);
+
+      const hookConfigs: HookConfig[] = [
+        {
+          type: HookType.Command,
+          command: 'echo first',
+          source: HooksConfigSource.Project,
+        },
+        {
+          type: HookType.Command,
+          command: 'echo second',
+          source: HooksConfigSource.Project,
+        },
+      ];
+      const input: PreToolUseInput = {
+        ...createMockInput({ hook_event_name: HookEventName.PreToolUse }),
+        permission_mode: PermissionMode.Default,
+        tool_name: 'run_shell_command',
+        tool_input: { command: 'ls', description: 'List files' },
+        tool_use_id: 'toolu_1',
+      };
+
+      await hookRunner.executeHooksSequential(
+        hookConfigs,
+        HookEventName.PreToolUse,
+        input,
+      );
+
+      const secondInput = JSON.parse(
+        secondProcess.stdin.write.mock.calls[0]?.[0] as string,
+      ) as PreToolUseInput;
+      expect(secondInput.tool_input).toEqual({ command: 'ls -la' });
     });
 
     it('should call onHookStart and onHookEnd callbacks', async () => {

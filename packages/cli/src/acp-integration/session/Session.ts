@@ -14765,6 +14765,26 @@ export class Session implements SessionContext {
               });
             }
 
+            if (preHookResult.updatedInput) {
+              const validationError = tool.validateToolParams(
+                preHookResult.updatedInput,
+              );
+              if (validationError) {
+                return earlyErrorResponse(
+                  new Error(validationError),
+                  toolName,
+                  {
+                    status: 'error',
+                    errorType: ToolErrorType.INVALID_TOOL_PARAMS,
+                    executionStatus: 'not_started',
+                  },
+                );
+              }
+              args = preHookResult.updatedInput;
+              invocation.params =
+                preHookResult.updatedInput as typeof invocation.params;
+            }
+
             // Add additional context from PreToolUse hook if provided
             // Note: This context would need to be passed to the tool invocation
             // For now, we just log it as the tool execution proceeds

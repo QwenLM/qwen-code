@@ -559,6 +559,8 @@ The `permissionDecision` value controls whether the tool runs:
 
 For `"ask"`, the TUI displays `permissionDecisionReason` as literal text rather than interpreting inline Markdown. This keeps formatting markers and link targets visible to the user.
 
+`updatedInput` replaces the whole tool input, so include the parameters you want to keep unchanged. It applies when the tool still runs: the hook allows it, makes no decision, or asks and the user confirms. With `"deny"` or `continue: false` it is ignored. The new input is validated against the tool's parameter schema like the model's input; if it is invalid, the tool does not run and the model receives the validation error. PreToolUse hooks run after the permission check, so the new input is not checked against permission rules or shown in an approval prompt again. The PostToolUse and PostToolUseFailure hooks of the call receive the new input as `tool_input`. With `sequential: true`, each following hook receives the new input as its `tool_input`; with parallel hooks, the last hook in configuration order that sets `updatedInput` wins.
+
 **Note**: While standard hook output fields like `decision` and `reason` are technically supported by the underlying class, the official interface expects the `hookSpecificOutput` with `permissionDecision` and `permissionDecisionReason`.
 
 **Example Output**:

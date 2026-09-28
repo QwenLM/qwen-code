@@ -249,6 +249,97 @@ describe('toolHookTriggers', () => {
       });
     });
 
+    it.each([
+      ['allow', { shouldProceed: true, additionalContext: undefined }],
+      [
+        'ask',
+        {
+          shouldProceed: false,
+          blockReason: 'User confirmation required',
+          blockType: 'ask',
+        },
+      ],
+    ])(
+      'should return updatedInput when the decision is %s',
+      async (permissionDecision, expected) => {
+        const mockMessageBus = createMockMessageBus();
+        (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
+          success: true,
+          output: {
+            hookSpecificOutput: {
+              permissionDecision,
+              updatedInput: { command: 'ls -la' },
+            },
+          },
+        });
+
+        const result = await firePreToolUseHook(
+          mockMessageBus,
+          'test-tool',
+          { command: 'ls' },
+          'test-id',
+          'auto',
+        );
+
+        expect(result).toEqual({
+          ...expected,
+          updatedInput: { command: 'ls -la' },
+        });
+      },
+    );
+
+    it('should drop updatedInput when the hook denies the tool', async () => {
+      const mockMessageBus = createMockMessageBus();
+      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
+        success: true,
+        output: {
+          hookSpecificOutput: {
+            permissionDecision: 'deny',
+            permissionDecisionReason: 'Not allowed',
+            updatedInput: { command: 'ls -la' },
+          },
+        },
+      });
+
+      const result = await firePreToolUseHook(
+        mockMessageBus,
+        'test-tool',
+        { command: 'ls' },
+        'test-id',
+        'auto',
+      );
+
+      expect(result).toEqual({
+        shouldProceed: false,
+        blockReason: 'Not allowed',
+        blockType: 'denied',
+      });
+    });
+
+    it.each([['a string'], [['an', 'array']], [null]])(
+      'should ignore an updatedInput that is not an object: %j',
+      async (updatedInput) => {
+        const mockMessageBus = createMockMessageBus();
+        (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
+          success: true,
+          output: { hookSpecificOutput: { updatedInput } },
+        });
+
+        const result = await firePreToolUseHook(
+          mockMessageBus,
+          'test-tool',
+          { command: 'ls' },
+          'test-id',
+          'auto',
+        );
+
+        expect(result).toEqual({
+          shouldProceed: true,
+          additionalContext: undefined,
+        });
+      },
+    );
+
     it('should handle hook execution errors gracefully', async () => {
       const mockMessageBus = createMockMessageBus();
       (mockMessageBus.request as ReturnType<typeof vi.fn>).mockRejectedValue(

@@ -557,6 +557,22 @@ export class PreToolUseHookOutput extends DefaultHookOutput {
   }
 
   /**
+   * Get the tool input that replaces the original one, when the hook set
+   * `hookSpecificOutput.updatedInput` to an object.
+   */
+  getUpdatedInput(): Record<string, unknown> | undefined {
+    const updatedInput = this.hookSpecificOutput?.['updatedInput'];
+    if (
+      typeof updatedInput === 'object' &&
+      updatedInput !== null &&
+      !Array.isArray(updatedInput)
+    ) {
+      return updatedInput as Record<string, unknown>;
+    }
+    return undefined;
+  }
+
+  /**
    * Check if permission was denied
    */
   isDenied(): boolean {
@@ -794,6 +810,7 @@ export interface PreToolUseOutput extends HookOutput {
     hookEventName: 'PreToolUse';
     permissionDecision: 'allow' | 'deny' | 'ask';
     permissionDecisionReason: string;
+    updatedInput?: Record<string, unknown>;
   };
 }
 
