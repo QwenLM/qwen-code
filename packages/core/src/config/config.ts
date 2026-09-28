@@ -3087,7 +3087,9 @@ export class Config {
   /** @deprecated Legacy merged hooks field - use userHooks/projectHooks instead */
   private hooks?: Record<string, unknown>;
   private hookSystem?: HookSystem;
-  private unregisterMemoryChanged?: () => void;
+  private unregisterMemoryChanged?: ReturnType<
+    typeof registerMemoryChangedListener
+  >;
   private memoryHookDeliveryId?: symbol;
   private messageBus?: MessageBus;
   private readonly messageBusListeners = new Set<(bus: MessageBus) => void>();
@@ -7143,6 +7145,7 @@ export class Config {
     // installs is owned and cleaned up by that profile.
     if (isDerivedConfig(this)) return;
     this.shutdownRequested = true;
+    this.unregisterMemoryChanged?.stopFallback();
     void this.shutdownExecutionEnvironments().catch(() => undefined);
     this.settingsWatcher?.stopWatching();
     const closeWriter = () =>

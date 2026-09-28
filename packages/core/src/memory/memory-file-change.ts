@@ -5,6 +5,7 @@
  */
 
 import * as fs from 'node:fs/promises';
+import { lstatSync, readdirSync, realpathSync } from 'node:fs';
 import path from 'node:path';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import {
@@ -58,6 +59,7 @@ interface MemoryChangedRegistration {
   id: symbol;
   workspace: string;
   listener: MemoryChangedListener;
+  acceptsFallback: boolean;
 }
 
 const listeners = new Set<MemoryChangedRegistration>();
@@ -80,23 +82,63 @@ const suppressDelivery = new AsyncLocalStorage<
 /**
  * Register a listener for one workspace. A write is delivered to the
  * registration named by `deliveryId` when the caller has one, and otherwise
- * to the newest registration for that workspace. Returns an unregister
- * function tagged with that id.
+ * to the newest active registration for that workspace. `stopFallback` retires
+ * a closing session from that fallback while retaining its pending id-based
+ * deliveries until the returned unregister function is called.
  */
 export function registerMemoryChangedListener(
   workspace: string,
   listener: MemoryChangedListener,
-): (() => void) & { id: symbol } {
+): (() => void) & { id: symbol; stopFallback: () => void } {
   const registration: MemoryChangedRegistration = {
     id: Symbol('memory-hook-delivery'),
     workspace: path.resolve(workspace),
     listener,
+    acceptsFallback: true,
   };
   listeners.add(registration);
   const unregister = () => {
     listeners.delete(registration);
   };
-  return Object.assign(unregister, { id: registration.id });
+  return Object.assign(unregister, {
+    id: registration.id,
+    stopFallback: () => {
+      registration.acceptsFallback = false;
+    },
+  });
+}
+
+function memoryPathSpelling(root: string, relative: string): string {
+  const original = path.resolve(root, relative);
+  try {
+    if (realpathSync.native(original) === original) return original;
+  } catch {
+    // Deleted documents can still have existing ancestors with case aliases.
+  }
+  let current = root;
+  for (const component of relative.split('/')) {
+    let spelling = component;
+    try {
+      const entries = readdirSync(current);
+      if (!entries.includes(component)) {
+        const requested = lstatSync(path.join(current, component));
+        spelling =
+          entries.find((entry) => {
+            if (
+              entry.normalize('NFC').toLowerCase() !==
+              component.normalize('NFC').toLowerCase()
+            )
+              return false;
+            const actual = lstatSync(path.join(current, entry));
+            return actual.dev === requested.dev && actual.ino === requested.ino;
+          }) ?? component;
+      }
+    } catch {
+      // Missing or unreadable components retain the caller's spelling.
+    }
+    current = path.join(current, spelling);
+  }
+  return current;
 }
 
 function relativeInside(root: string, filePath: string): string | undefined {
@@ -133,7 +175,8 @@ export function describeMemoryFileChange(
   projectRoot: string,
 ): MemoryChangedDocument | undefined {
   const absolutePath = path.resolve(filePath);
-  if (!isMemoryDocumentFilename(path.basename(absolutePath))) return undefined;
+  if (!isMemoryDocumentFilename(path.basename(absolutePath).toLowerCase()))
+    return undefined;
   const candidates: Array<{
     scope: MemoryChangedScope;
     root: string;
@@ -167,10 +210,15 @@ export function describeMemoryFileChange(
     if (!relativePath) continue;
     // All windows use the canonical root, keeping symlinks below it visible
     // to isTreeVisible instead of resolving away their lexical path segments.
+    const canonicalPath = memoryPathSpelling(resolvedRoot, relativePath);
+    if (!isMemoryDocumentFilename(path.basename(canonicalPath))) continue;
     return {
       scope: candidate.scope,
-      filePath: path.resolve(resolvedRoot, relativePath),
-      relativePath,
+      filePath: canonicalPath,
+      relativePath: path
+        .relative(resolvedRoot, canonicalPath)
+        .split(path.sep)
+        .join('/'),
     };
   }
   return undefined;
@@ -183,6 +231,49 @@ const SCOPE_ORDER: readonly MemoryChangedScope[] = ['user', 'project', 'team'];
  * `null` means the path was reported while absent.
  */
 const outsideWindowEmits = new Set<Map<string, ReportedMemoryContent>>();
+const teamMemorySyncs = new Set<{ root: string; settled: Promise<void> }>();
+let teamMemorySyncSequence = 0;
+
+/** Keep imported Git changes out of agent-owned snapshot differences. */
+export async function withTeamMemorySync<T>(
+  projectRoot: string,
+  sync: (
+    record: (filePath: string, content: string | null) => void,
+  ) => Promise<T>,
+): Promise<T> {
+  let finish!: () => void;
+  const pending = {
+    root: realpathNearestExisting(getTeamAutoMemoryRoot(projectRoot)),
+    settled: new Promise<void>((resolve) => {
+      finish = resolve;
+    }),
+  };
+  const predecessors = [...teamMemorySyncs].filter(
+    (sync) => sync.root === pending.root,
+  );
+  teamMemorySyncs.add(pending);
+  teamMemorySyncSequence++;
+  try {
+    await Promise.all(predecessors.map((sync) => sync.settled));
+    const startReportSequence = reportSequence;
+    return await sync((filePath, content) => {
+      const document = describeMemoryFileChange(filePath, projectRoot);
+      if (document?.scope !== 'team') return;
+      const reported = { content, sequence: ++reportSequence };
+      for (const bucket of outsideWindowEmits) {
+        if (
+          (bucket.get(document.filePath)?.sequence ?? 0) <= startReportSequence
+        ) {
+          bucket.set(document.filePath, reported);
+        }
+      }
+    });
+  } finally {
+    teamMemorySyncs.delete(pending);
+    teamMemorySyncSequence++;
+    finish();
+  }
+}
 
 /**
  * True when the tree walk can observe `filePath` under `root`: every ancestor
@@ -266,7 +357,8 @@ function recipientsFor(
     return named.length > 0 ? named : [];
   }
   const matched = [...listeners].filter(
-    (registration) => registration.workspace === workspace,
+    (registration) =>
+      registration.workspace === workspace && registration.acceptsFallback,
   );
   const newest = matched.at(-1);
   return newest ? [newest] : [];
@@ -495,6 +587,7 @@ interface MemoryTreeSnapshot {
    * candidates; an after-side unknown blocks a 'delete'.
    */
   unreadable: Set<string>;
+  symlinks: Set<string>;
   /**
    * False when a directory could not be enumerated. 'Could not enumerate' is
    * not 'empty' — a partial snapshot must never be one side of a difference.
@@ -519,6 +612,8 @@ async function readMemoryTree(
     const full = path.join(root, entry.name);
     if (entry.isDirectory()) {
       await readMemoryTree(full, snapshot);
+    } else if (entry.isSymbolicLink()) {
+      snapshot.symlinks.add(path.resolve(full));
     } else if (entry.isFile() && isMemoryDocumentFilename(entry.name)) {
       // Only memory documents enter the diff: an atomicWriteFile
       // `*.md.<hex>.tmp` sibling, an editor swap file, or a `.DS_Store` in a
@@ -539,22 +634,36 @@ async function readMemoryTree(
 async function readMemoryDocuments(
   projectRoot: string,
 ): Promise<MemoryTreeSnapshot> {
-  const snapshot: MemoryTreeSnapshot = {
-    documents: new Map(),
-    sequence: reportSequence,
-    unreadable: new Set(),
-    complete: true,
-  };
-  const roots = [getUserAutoMemoryRoot(), getAutoMemoryRoot(projectRoot)].map(
-    (root) => realpathNearestExisting(root),
-  );
   const teamRoot = getTeamAutoMemoryRoot(projectRoot);
-  const resolvedTeamRoot = realpathNearestExisting(teamRoot);
-  if (isTeamRootInRepository(teamRoot, resolvedTeamRoot)) {
-    roots.push(resolvedTeamRoot);
+  for (;;) {
+    const resolvedTeamRoot = realpathNearestExisting(teamRoot);
+    await Promise.all(
+      [...teamMemorySyncs]
+        .filter((sync) => sync.root === resolvedTeamRoot)
+        .map((sync) => sync.settled),
+    );
+    const syncSequence = teamMemorySyncSequence;
+    const snapshot: MemoryTreeSnapshot = {
+      documents: new Map(),
+      sequence: reportSequence,
+      unreadable: new Set(),
+      symlinks: new Set(),
+      complete: true,
+    };
+    const roots = [getUserAutoMemoryRoot(), getAutoMemoryRoot(projectRoot)].map(
+      (root) => realpathNearestExisting(root),
+    );
+    if (isTeamRootInRepository(teamRoot, resolvedTeamRoot)) {
+      roots.push(resolvedTeamRoot);
+    }
+    await Promise.all(roots.map((root) => readMemoryTree(root, snapshot)));
+    if (
+      syncSequence === teamMemorySyncSequence &&
+      ![...teamMemorySyncs].some((sync) => sync.root === resolvedTeamRoot)
+    ) {
+      return snapshot;
+    }
   }
-  await Promise.all(roots.map((root) => readMemoryTree(root, snapshot)));
-  return snapshot;
 }
 
 /**
@@ -622,11 +731,20 @@ export async function withCoalescedMemoryChanges<T>(
           if (after.documents.has(filePath) || after.unreadable.has(filePath)) {
             continue;
           }
+          if (
+            [...after.symlinks].some(
+              (link) =>
+                filePath === link ||
+                relativeInside(link, filePath) !== undefined,
+            )
+          ) {
+            continue;
+          }
           // A before-side unreadable entry has no content baseline, but the
           // opening walk SAW it on disk — present then, gone now is a delete.
           if (
             baseline(filePath) !== undefined ||
-            before.unreadable.has(filePath)
+            (before.unreadable.has(filePath) && !outside.has(filePath))
           ) {
             deleted.push(filePath);
           }

@@ -1417,6 +1417,64 @@ describe('Server Config (config.ts)', () => {
         }
       },
     );
+    it('does not intercept id-less memory changes while shutdown tasks drain', async () => {
+      const liveSeen: MemoryChangedNotice[] = [];
+      const config = new Config({ ...baseParams });
+      const unregisterLive = registerMemoryChangedListener(
+        config.getProjectRoot(),
+        (change) => {
+          liveSeen.push(change);
+        },
+      );
+      await config.initialize();
+      const hooks = config.getHookSystem()!;
+      vi.mocked(hooks.hasHooksForEvent).mockReturnValue(true);
+      const fire = vi.fn().mockResolvedValue({});
+      hooks.fireMemoryChangedEvent = fire;
+      let enter!: () => void;
+      const entered = new Promise<void>((resolve) => {
+        enter = resolve;
+      });
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      vi.mocked(runAutoMemoryExtract).mockImplementationOnce(async (params) => {
+        enter();
+        await gate;
+        return {
+          touchedTopics: [],
+          cursor: {
+            sessionId: params.sessionId,
+            updatedAt: new Date().toISOString(),
+          },
+        };
+      });
+      const task = config.getMemoryManager().scheduleExtract({
+        projectRoot: config.getProjectRoot(),
+        sessionId: config.getSessionId(),
+        config,
+        history: [
+          { role: 'user', parts: [{ text: 'Keep this durable fact.' }] },
+        ],
+      });
+      try {
+        await entered;
+        await config.shutdown({ shutdownTelemetry: false });
+        await notifyMemoryEnabledChange(config.getProjectRoot(), false);
+        expect.soft(liveSeen).toHaveLength(1);
+        expect.soft(fire).not.toHaveBeenCalled();
+      } finally {
+        release();
+        await task;
+        await config.getMemoryManager().drain();
+        await config.shutdown({ shutdownTelemetry: false });
+        unregisterLive();
+        vi.mocked(hooks.hasHooksForEvent).mockReturnValue(false);
+        vi.mocked(runAutoMemoryExtract).mockReset();
+      }
+    });
+
     it('releases its memory listener after ordinary shutdown', async () => {
       const config = new Config({ ...baseParams });
       await config.initialize();

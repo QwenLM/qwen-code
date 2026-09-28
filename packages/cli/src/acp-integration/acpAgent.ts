@@ -9689,10 +9689,11 @@ class QwenAgent implements Agent {
           const sessionId = params['sessionId'];
           const deliveryId =
             typeof sessionId === 'string' && sessionId.length > 0
-              ? this.sessions
+              ? (this.sessions
                   .get(sessionId)
                   ?.getConfig()
-                  .getMemoryHookDeliveryId?.()
+                  .getMemoryHookDeliveryId?.() ??
+                Symbol('unavailable-memory-session'))
               : undefined;
           if (deliveryId === undefined) {
             void notifyMemoryEnabledChange(settingsCwd, effectiveEnabled);

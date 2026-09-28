@@ -10,6 +10,11 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { syncTeamMemory } from './team-memory-sync.js';
+import {
+  registerMemoryChangedListener,
+  withCoalescedMemoryChanges,
+  type MemoryChangedNotice,
+} from './memory-file-change.js';
 import { clearAutoMemoryRootCache, getTeamAutoMemoryRoot } from './paths.js';
 
 function git(cwd: string, ...args: string[]): string {
@@ -151,6 +156,77 @@ describe('syncTeamMemory', () => {
       ),
     ).toBe(true);
   }, 30_000);
+
+  it.each([false, true])(
+    'excludes concurrent pulled documents while preserving local window writes (autocrlf=%s)',
+    async (autocrlf) => {
+      const { bare, repo } = freshRemoteAndClone('alice');
+      git(repo, 'config', 'core.autocrlf', String(autocrlf));
+      vi.stubEnv(
+        'QWEN_CODE_MEMORY_BASE_DIR',
+        path.join(path.dirname(repo), 'private-memory'),
+      );
+      const bob = makeWorkingClone(bare, 'bob');
+      cleanup.push(path.dirname(bob));
+      writeTeamMemory(bob, 'reference/remote.md', 'collaborator fact');
+      git(bob, 'add', '--', '.qwen/team-memory');
+      git(bob, 'commit', '-m', 'collaborator fact');
+      git(bob, 'push');
+
+      const seen: MemoryChangedNotice[] = [];
+      const registration = registerMemoryChangedListener(repo, (notice) => {
+        seen.push(notice);
+      });
+      let enter!: () => void;
+      const entered = new Promise<void>((resolve) => {
+        enter = resolve;
+      });
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const pending = withCoalescedMemoryChanges(
+        repo,
+        registration.id,
+        async () => {
+          enter();
+          await gate;
+          writeTeamMemory(repo, 'feedback/local.md', 'local shell write');
+        },
+      );
+      try {
+        await entered;
+        const result = await syncTeamMemory(repo, {
+          message: 'concurrent refresh',
+        });
+        expect(result.pulled).toBe(true);
+        const imported = fs.readFileSync(
+          path.join(getTeamAutoMemoryRoot(repo), 'reference/remote.md'),
+          'utf8',
+        );
+        expect(imported).toContain('collaborator fact');
+        expect(imported.includes('\r\n')).toBe(autocrlf);
+      } finally {
+        release();
+        await pending;
+        registration();
+      }
+      expect(
+        fs.readFileSync(
+          path.join(getTeamAutoMemoryRoot(repo), 'feedback/local.md'),
+          'utf8',
+        ),
+      ).toContain('local shell write');
+      expect(seen).toEqual([
+        expect.objectContaining({
+          scope: 'team',
+          operation: 'create',
+          relativePaths: ['feedback/local.md'],
+        }),
+      ]);
+    },
+    30_000,
+  );
 
   it('reconciles a second writer instead of diverging (commit lands on top)', async () => {
     const { bare, repo } = freshRemoteAndClone('alice');

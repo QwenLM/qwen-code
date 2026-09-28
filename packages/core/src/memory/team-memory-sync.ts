@@ -13,7 +13,8 @@ import {
   isGitRepository,
   NO_EXEC_CONFIG,
 } from '../utils/gitUtils.js';
-import { getTeamAutoMemoryRoot } from './paths.js';
+import { getTeamAutoMemoryRoot, isMemoryDocumentFilename } from './paths.js';
+import { withTeamMemorySync } from './memory-file-change.js';
 
 const execFileAsync = promisify(execFile);
 const debugLogger = createDebugLogger('TEAM_MEMORY_SYNC');
@@ -195,8 +196,43 @@ export async function syncTeamMemory(
     // would diverge a two-writer branch and wedge `--ff-only`. SIGKILL: a hung
     // pull is hung in its network fetch phase (which holds no index.lock); the
     // ff ref-advance afterwards is fast and local, so a hard kill is safe.
-    result.pulled =
-      (await tryGit(gitRoot, ['pull', '--ff-only'], 'SIGKILL')) !== null;
+    result.pulled = await withTeamMemorySync(projectRoot, async (record) => {
+      const before = (await tryGit(gitRoot, ['rev-parse', 'HEAD']))?.trim();
+      const pulled =
+        (await tryGit(gitRoot, ['pull', '--ff-only'], 'SIGKILL')) !== null;
+      if (!pulled || !before) return pulled;
+      const after = (await tryGit(gitRoot, ['rev-parse', 'HEAD']))?.trim();
+      if (!after || after === before) return pulled;
+      const changes = await tryGit(gitRoot, [
+        'diff',
+        '--raw',
+        '-z',
+        '--no-abbrev',
+        '--no-renames',
+        before,
+        after,
+        '--',
+        relPath,
+      ]);
+      const entries = changes?.split('\0') ?? [];
+      for (let i = 0; i + 1 < entries.length; i += 2) {
+        const [, mode, , blob] = entries[i]!.split(' ');
+        const filePath = path.join(gitRoot, entries[i + 1]!);
+        if (!isMemoryDocumentFilename(path.basename(filePath))) continue;
+        if (mode === '000000') {
+          record(filePath, null);
+        } else if ((mode === '100644' || mode === '100755') && blob) {
+          const content = await tryGit(gitRoot, [
+            'cat-file',
+            '--filters',
+            `--path=${entries[i + 1]!}`,
+            blob,
+          ]);
+          if (content !== null) record(filePath, content);
+        }
+      }
+      return pulled;
+    });
     if (!result.pulled) {
       // ff refused (diverged) or a transient error — nothing can be shared this
       // cycle. Skip cleanly WITHOUT committing, leaving the working tree as-is.
