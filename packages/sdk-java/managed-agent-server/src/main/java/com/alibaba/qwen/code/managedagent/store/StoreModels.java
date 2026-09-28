@@ -74,13 +74,37 @@ public final class StoreModels {
 
     public enum SessionMutationKind {
         RENAME,
-        ARCHIVE,
-        UNARCHIVE,
-        DELETE
+        UNARCHIVE
     }
 
     public record SessionMutationCommand(String sessionId, String status,
-            String sessionStatusBefore, boolean replayed) {
+            boolean replayed) {
+    }
+
+    public enum OperationKind {
+        CLOSE,
+        ARCHIVE,
+        DELETE
+    }
+
+    /**
+     * A durable lifecycle operation. {@code sessionStatusBefore} is the
+     * Session status when it was admitted; only an operation admitted on an
+     * active Session closes the Harness.
+     */
+    public record OperationRecord(String tenantId, String sessionId,
+            String operationId, OperationKind kind, String requestDigest,
+            String state, String admissionStage, String deliveryState,
+            String sessionStatusBefore, String receiptId, String leaseOwner,
+            long claimGeneration, int attemptCount) {
+    }
+
+    public record OperationAdmission(OperationRecord operation,
+            boolean replayed) {
+    }
+
+    public record OperationTarget(String tenantId, String sessionId,
+            String operationId) {
     }
 
     public record Admission(String sessionId, String turnId,
@@ -89,6 +113,14 @@ public final class StoreModels {
 
     public record SessionPage(List<SessionRecord> sessions,
             boolean hasMore) {
+    }
+
+    /** The fields of a Turn that its public view shows, without its input. */
+    public record TurnSummary(String sessionId, String turnId, String status,
+            long createdAt, Long completedAt, String errorCode) {
+    }
+
+    public record TurnPage(List<TurnSummary> turns, boolean hasMore) {
     }
 
     public record EventPage(List<EventRecord> events, boolean hasMore) {

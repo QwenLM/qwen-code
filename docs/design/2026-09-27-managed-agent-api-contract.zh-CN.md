@@ -2,7 +2,7 @@
 
 [English](2026-09-27-managed-agent-api-contract.md) | [简体中文](2026-09-27-managed-agent-api-contract.zh-CN.md)
 
-状态：D1 已实现；D2 已在[会话查询](2026-09-27-managed-agent-session-query.zh-CN.md)中实现；D3 已在[事件回放](2026-09-27-managed-agent-event-replay.zh-CN.md)中实现
+状态：D1 已实现；D2 已在[会话查询](2026-09-27-managed-agent-session-query.zh-CN.md)中实现；D3 已在[事件回放](2026-09-27-managed-agent-event-replay.zh-CN.md)中实现；生命周期工作作为 [#12867](https://github.com/QwenLM/qwen-code/issues/12867) 的 D4 已在[持久生命周期](2026-09-28-managed-agent-durable-lifecycle.zh-CN.md)中实现；D5 已在 [Turn 查询](2026-09-28-managed-agent-turn-queries.zh-CN.md)中实现
 日期：2026-09-27
 Issue：[#12793](https://github.com/QwenLM/qwen-code/issues/12793)，属于 [#12380](https://github.com/QwenLM/qwen-code/issues/12380)
 

@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Qwen Managed Agent Public and WebShell API",
-    "version": "1.17.0",
-    "description": "Canonical contract for the public Managed Agent resources and the WebShell adapter. partial means that the route exists but generated types and full contract tests are pending; planned means that the route or field is not implemented. Workspace context and cwd operations are v1.9 target contracts, not current server capabilities. v1.10 adds planned command admission, Actions, lifecycle and actor authorization. v1.12 refines planned W0 creation discovery, actor-specific create hints and explicit default selection. Full tool-result descriptors from the v1.11 design are not yet included. Filter planned fields as well as routes from production SDKs. v1.13 moves this contract into the Qwen Code repository as its single source and records the shipped rename, archive, unarchive and delete routes as partial. v1.14 integrates W0d workspace discovery, the WebShell workspace lookup, and empty-session binding as partial; workspace_binding/workspaceBinding advertises this narrow flow without enabling workspace execution or context switching. v1.15 adds the archived, archiving and deleting Session statuses and the cancelling Turn status, requires request_id in error envelopes, declares the error responses that the server returns, and marks Session create, list and get on both surfaces implemented. v1.16 adds the planned Stage H task contract (SessionTaskView as PublicTask, task list, detail, events and cancel) and names the MCP catalog, hook catalog, automation and channel resources as planned; their shapes arrive with Stages H1 to H6. v1.17 implements event replay: events carry their schema and projection versions and a top-level Item and Part identity, JSON event pages return has_more and next_cursor and accept limits up to 1000, and a persisted replay floor answers expired cursors with 409 cursor_expired in JSON and one agent.session.resync_required frame over SSE; it marks the public event query and stream, the WebShell event stream and the WebShell transcript implemented."
+    "version": "1.20.0",
+    "description": "Canonical contract for the public Managed Agent resources and the WebShell adapter. partial means that the route exists but generated types and full contract tests are pending; planned means that the route or field is not implemented. Workspace context and cwd operations are v1.9 target contracts, not current server capabilities. v1.10 adds planned command admission, Actions, lifecycle and actor authorization. v1.12 refines planned W0 creation discovery, actor-specific create hints and explicit default selection. Full tool-result descriptors from the v1.11 design are not yet included. Filter planned fields as well as routes from production SDKs. v1.13 moves this contract into the Qwen Code repository as its single source and records the shipped rename, archive, unarchive and delete routes as partial. v1.14 integrates W0d workspace discovery, the WebShell workspace lookup, and empty-session binding as partial; workspace_binding/workspaceBinding advertises this narrow flow without enabling workspace execution or context switching. v1.15 adds the archived, archiving and deleting Session statuses and the cancelling Turn status, requires request_id in error envelopes, declares the error responses that the server returns, and marks Session create, list and get on both surfaces implemented. v1.16 adds the planned Stage H task contract (SessionTaskView as PublicTask, task list, detail, events and cancel) and names the MCP catalog, hook catalog, automation and channel resources as planned; their shapes arrive with Stages H1 to H6. v1.17 implements event replay: events carry their schema and projection versions and a top-level Item and Part identity, JSON event pages return has_more and next_cursor and accept limits up to 1000, and a persisted replay floor answers expired cursors with 409 cursor_expired in JSON and one agent.session.resync_required frame over SSE; it marks the public event query and stream, the WebShell event stream and the WebShell transcript implemented. v1.18 implements the durable Session lifecycle (Stage D4): close, archive and delete answer 202 with a command operation on both surfaces, an archive requires a closed Session, a deleted Session leaves a tombstone whose operations stay readable, and the operation query serves them; unarchive restores a closed Session, and Session capabilities advertise session_lifecycle. v1.19 serves the task list and detail on both surfaces as partial (Stage H0c): the Session store projects them from the Stage H records the Session authority commits, a task.updated Session event announces each change of a task's view, and Session capabilities advertise tasks. Task events and cancel stay planned until a slice's tasks produce output and accept a cancel. v1.20 implements the Turn read model (Stage D5): the public Turn list and detail read a Session's Turns without their input, newest first by creation time in milliseconds and then Turn ID, with an opaque cursor; a deleted Session's Turns are not readable, and the durable admission fields of a Turn stay planned until D7."
   },
   "servers": [
     {
@@ -328,7 +328,8 @@
       "delete": {
         "tags": ["Public Sessions"],
         "operationId": "deleteSession",
-        "x-qwen-implementation-status": "partial",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Accepts an active, closed or archived Session. 409 turn_active while a Turn is active, session_operation_active while another lifecycle change is pending, and workspace_unavailable for a Workspace-bound Session. The same key from the same actor returns the original operation, also after the Session was deleted.",
         "parameters": [
           {
             "$ref": "#/components/parameters/IdempotencyKey"
@@ -336,7 +337,7 @@
         ],
         "responses": {
           "202": {
-            "description": "Deletion accepted; seal admission and settle/clean up before content deletion. Shared Workspace is retained. Query the original operation through its tombstone after completion.",
+            "description": "Deletion accepted. The Session stops accepting input and reads deleting. If it was active, the operation first closes it as a close does; it then drains the Session's Runtime binding and leaves a tombstone: Session reads return 404, while its operations stay readable. The shared Workspace is never deleted, and no Session content is erased yet. 202 does not mean that tools have stopped.",
             "content": {
               "application/json": {
                 "schema": {
@@ -479,7 +480,8 @@
       "get": {
         "tags": ["Public Resources"],
         "operationId": "listTurns",
-        "x-qwen-implementation-status": "planned",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Turns of this Session, newest first: by creation time in milliseconds, which created_at shows in whole seconds, then by id, both descending. next_cursor names the last Turn of the page and is null on the last page; a page never repeats or skips a Turn that existed when the first page was read. 400 invalid_limit for a 32-bit integer limit outside 1 to 100, invalid_request for a limit that is not a 32-bit integer, and invalid_cursor for a cursor that does not decode to the createdAt:turnId form this server issues. 404 session_not_found for an unknown, deleted or unreadable Session.",
         "parameters": [
           {
             "$ref": "#/components/parameters/Cursor"
@@ -499,6 +501,12 @@
               }
             }
           },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound"
           }
@@ -517,7 +525,8 @@
       "get": {
         "tags": ["Public Resources"],
         "operationId": "getTurn",
-        "x-qwen-implementation-status": "planned",
+        "x-qwen-implementation-status": "implemented",
+        "description": "404 session_not_found for an unknown, deleted or unreadable Session, and turn_not_found for a Turn that this Session does not have; an id that differs from a Turn's only by trailing spaces does not find it. 400 invalid_request for a Turn id longer than 64 characters.",
         "responses": {
           "200": {
             "description": "Turn state.",
@@ -528,6 +537,12 @@
                 }
               }
             }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
@@ -1094,10 +1109,11 @@
       "get": {
         "tags": ["Public Sessions"],
         "operationId": "getSessionCwdOperation",
-        "x-qwen-implementation-status": "planned",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Reads one operation of the Session. Close, archive and delete operations are served now; cwd, command and task operations arrive with their slices. 404 operation_not_found for an unknown operation.",
         "responses": {
           "200": {
-            "description": "Authorized cwd, command, lifecycle or task operation; available without Runtime startup and through the deletion retry horizon.",
+            "description": "Authorized operation with its latest durable status, readable without Runtime startup and after the Session was deleted. Reading is not a replay, so replayed is false.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1199,7 +1215,7 @@
       "post": {
         "tags": ["WebShell"],
         "operationId": "webShellQueryCwdOperation",
-        "x-qwen-implementation-status": "planned",
+        "x-qwen-implementation-status": "implemented",
         "requestBody": {
           "required": true,
           "content": {
@@ -1212,7 +1228,7 @@
         },
         "responses": {
           "200": {
-            "description": "Authorized command/cwd/lifecycle/task operation; query survives Runtime downtime and deletion within the retry horizon.",
+            "description": "Same authorized operation semantics as the public API.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1382,10 +1398,11 @@
       "post": {
         "tags": ["Public Sessions"],
         "operationId": "closeSession",
-        "x-qwen-implementation-status": "planned",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Accepts an active Session; 409 session_state_conflict otherwise. 409 turn_active while a Turn is active, session_operation_active while another lifecycle change is pending, and workspace_unavailable for a Workspace-bound Session.",
         "responses": {
           "202": {
-            "description": "Close seals input and awaits ordered cleanup.",
+            "description": "Close accepted. The Session stops accepting input and reads closing. The operation asks the Hosted Harness to close the Session and completes once no Harness holds the Session's journal writer under an unexpired lease (the Harness that holds the Session seals it when closing) and the Session's Runtime binding drained; the Session then reads closed. 202 does not mean that tools have stopped.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1423,10 +1440,11 @@
       "post": {
         "tags": ["Public Sessions"],
         "operationId": "archiveSession",
-        "x-qwen-implementation-status": "partial",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Accepts a closed Session; 409 session_state_conflict otherwise, session_operation_active while another lifecycle change is pending, and workspace_unavailable for a Workspace-bound Session.",
         "responses": {
           "202": {
-            "description": "Archive requires a closed Session and retains history.",
+            "description": "Archive requires a closed Session and retains history. Java is its only authority, so a new archive is complete when it is admitted.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1465,7 +1483,7 @@
         "tags": ["Public Sessions"],
         "operationId": "unarchiveSession",
         "x-qwen-implementation-status": "partial",
-        "description": "Restores an archived Session. Shipped before the v1.10 lifecycle review, which does not cover it; the lifecycle work decides whether it becomes a durable operation like archive.",
+        "description": "Restores an archived Session to closed. Shipped before the v1.10 lifecycle review, which does not cover it. It stays a synchronous mutation rather than a command operation: Java is its only authority, and the Session stays closed.",
         "parameters": [
           {
             "$ref": "#/components/parameters/IdempotencyKey"
@@ -1626,7 +1644,7 @@
       "post": {
         "tags": ["WebShell"],
         "operationId": "closeWebShellSession",
-        "x-qwen-implementation-status": "planned",
+        "x-qwen-implementation-status": "implemented",
         "responses": {
           "202": {
             "description": "Same authorized operation semantics as the public API.",
@@ -1667,7 +1685,7 @@
       "post": {
         "tags": ["WebShell"],
         "operationId": "archiveWebShellSession",
-        "x-qwen-implementation-status": "planned",
+        "x-qwen-implementation-status": "implemented",
         "responses": {
           "202": {
             "description": "Same authorized operation semantics as the public API.",
@@ -1708,7 +1726,7 @@
       "post": {
         "tags": ["WebShell"],
         "operationId": "deleteWebShellSession",
-        "x-qwen-implementation-status": "planned",
+        "x-qwen-implementation-status": "implemented",
         "responses": {
           "202": {
             "description": "Same authorized operation semantics as the public API.",
@@ -1790,10 +1808,10 @@
       "get": {
         "tags": ["Public Sessions"],
         "operationId": "listSessionTasks",
-        "x-qwen-implementation-status": "planned",
+        "x-qwen-implementation-status": "partial",
         "responses": {
           "200": {
-            "description": "Tasks of this Session, newest first (created_at descending, then id descending), merged from child agent, workflow, background shell, Monitor and automation runs. Settled tasks stay listed. The projection is rebuilt from durable domain records, so task IDs and order survive a restart. 400 unsupported_feature when the Session does not serve tasks (capabilities.tasks is false).",
+            "description": "Tasks of this Session, newest first (created_at descending, then id descending), merged from child agent, workflow, background shell, Monitor and automation runs. Settled tasks stay listed. The projection is rebuilt from durable domain records, so task IDs and order survive a restart. A task.updated Session event, with data.taskId and data.state, announces each change of a task's view. 400 unsupported_feature when the Session does not serve tasks (capabilities.tasks is false).",
             "content": {
               "application/json": {
                 "schema": {
@@ -1831,7 +1849,7 @@
       "get": {
         "tags": ["Public Sessions"],
         "operationId": "getSessionTask",
-        "x-qwen-implementation-status": "planned",
+        "x-qwen-implementation-status": "partial",
         "responses": {
           "200": {
             "description": "Current task view, including settled tasks. 404 task_not_found covers tasks outside the caller scope. 400 unsupported_feature when the Session does not serve tasks (capabilities.tasks is false).",
@@ -1944,7 +1962,7 @@
       "post": {
         "tags": ["WebShell"],
         "operationId": "queryWebShellTasks",
-        "x-qwen-implementation-status": "planned",
+        "x-qwen-implementation-status": "partial",
         "responses": {
           "200": {
             "description": "Same authorized task semantics as the public API.",
@@ -1979,7 +1997,7 @@
       "post": {
         "tags": ["WebShell"],
         "operationId": "getWebShellTask",
-        "x-qwen-implementation-status": "planned",
+        "x-qwen-implementation-status": "partial",
         "responses": {
           "200": {
             "description": "Same authorized task semantics as the public API.",
@@ -2711,7 +2729,7 @@
       "SessionCapabilities": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["items", "snapshots", "artifacts", "resync"],
+        "required": ["items", "snapshots", "artifacts", "resync", "tasks"],
         "properties": {
           "items": {
             "type": "boolean"
@@ -2748,12 +2766,10 @@
           "session_lifecycle": {
             "type": "boolean",
             "default": false,
-            "x-qwen-implementation-status": "planned"
+            "description": "True when the Session accepts close, archive and delete operations; false for a Workspace-bound Session."
           },
           "tasks": {
-            "type": "boolean",
-            "default": false,
-            "x-qwen-implementation-status": "planned"
+            "type": "boolean"
           }
         }
       },
@@ -3602,38 +3618,7 @@
             "x-qwen-implementation-status": "partial"
           },
           "capabilities": {
-            "type": "object",
-            "x-qwen-implementation-status": "planned",
-            "properties": {
-              "workspaceContext": {
-                "type": "boolean",
-                "default": false
-              },
-              "cwdChange": {
-                "type": "boolean",
-                "default": false
-              },
-              "durableOperations": {
-                "type": "boolean",
-                "default": false,
-                "x-qwen-implementation-status": "planned"
-              },
-              "actions": {
-                "type": "boolean",
-                "default": false,
-                "x-qwen-implementation-status": "planned"
-              },
-              "sessionLifecycle": {
-                "type": "boolean",
-                "default": false,
-                "x-qwen-implementation-status": "planned"
-              },
-              "tasks": {
-                "type": "boolean",
-                "default": false,
-                "x-qwen-implementation-status": "planned"
-              }
-            }
+            "$ref": "#/components/schemas/WebShellSessionCapabilities"
           },
           "archivedAt": {
             "type": ["integer", "null"],
@@ -3651,6 +3636,40 @@
             "format": "int64",
             "minimum": 0,
             "x-qwen-implementation-status": "planned"
+          }
+        }
+      },
+      "WebShellSessionCapabilities": {
+        "type": "object",
+        "required": ["tasks"],
+        "properties": {
+          "workspaceContext": {
+            "type": "boolean",
+            "default": false,
+            "x-qwen-implementation-status": "planned"
+          },
+          "cwdChange": {
+            "type": "boolean",
+            "default": false,
+            "x-qwen-implementation-status": "planned"
+          },
+          "durableOperations": {
+            "type": "boolean",
+            "default": false,
+            "x-qwen-implementation-status": "planned"
+          },
+          "actions": {
+            "type": "boolean",
+            "default": false,
+            "x-qwen-implementation-status": "planned"
+          },
+          "sessionLifecycle": {
+            "type": "boolean",
+            "default": false,
+            "x-qwen-implementation-status": "planned"
+          },
+          "tasks": {
+            "type": "boolean"
           }
         }
       },
@@ -4375,8 +4394,7 @@
             "minLength": 1,
             "maxLength": 64
           }
-        },
-        "x-qwen-implementation-status": "planned"
+        }
       },
       "WebShellCwdOperation": {
         "type": "object",
@@ -4943,18 +4961,20 @@
             "maxLength": 128
           },
           "action_resolution": {
-            "$ref": "#/components/schemas/ActionResolution"
+            "$ref": "#/components/schemas/ActionResolution",
+            "x-qwen-implementation-status": "planned"
           },
           "failure_code": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 128
+            "maxLength": 128,
+            "x-qwen-implementation-status": "planned",
+            "description": "Why the operation failed. Close, archive and delete retry until they complete, so they never report one."
           },
           "replayed": {
             "type": "boolean"
           }
         },
-        "x-qwen-implementation-status": "planned",
         "allOf": [
           {
             "if": {
@@ -5052,13 +5072,13 @@
       "PublicOperation": {
         "oneOf": [
           {
-            "$ref": "#/components/schemas/PublicCwdOperation"
+            "$ref": "#/components/schemas/PublicCwdOperation",
+            "x-qwen-implementation-status": "planned"
           },
           {
             "$ref": "#/components/schemas/PublicCommandOperation"
           }
-        ],
-        "x-qwen-implementation-status": "planned"
+        ]
       },
       "WebShellAction": {
         "oneOf": [
@@ -5253,18 +5273,20 @@
             "maxLength": 128
           },
           "actionResolution": {
-            "$ref": "#/components/schemas/WebShellActionResolution"
+            "$ref": "#/components/schemas/WebShellActionResolution",
+            "x-qwen-implementation-status": "planned"
           },
           "failureCode": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 128
+            "maxLength": 128,
+            "x-qwen-implementation-status": "planned",
+            "description": "Why the operation failed. Close, archive and delete retry until they complete, so they never report one."
           },
           "replayed": {
             "type": "boolean"
           }
         },
-        "x-qwen-implementation-status": "planned",
         "allOf": [
           {
             "if": {
@@ -5660,13 +5682,13 @@
       "WebShellOperation": {
         "oneOf": [
           {
-            "$ref": "#/components/schemas/WebShellCwdOperation"
+            "$ref": "#/components/schemas/WebShellCwdOperation",
+            "x-qwen-implementation-status": "planned"
           },
           {
             "$ref": "#/components/schemas/WebShellCommandOperation"
           }
-        ],
-        "x-qwen-implementation-status": "planned"
+        ]
       },
       "WebShellActionQueryRequest": {
         "type": "object",
@@ -5746,8 +5768,7 @@
             "minLength": 1,
             "maxLength": 128
           }
-        },
-        "x-qwen-implementation-status": "planned"
+        }
       },
       "WebShellWorkspaceQueryRequest": {
         "type": "object",
@@ -5788,7 +5809,7 @@
           "monitor",
           "automation_run"
         ],
-        "x-qwen-implementation-status": "planned"
+        "x-qwen-implementation-status": "partial"
       },
       "TaskState": {
         "type": "string",
@@ -5802,19 +5823,19 @@
           "degraded",
           "recovery_blocked"
         ],
-        "x-qwen-implementation-status": "planned",
+        "x-qwen-implementation-status": "partial",
         "description": "Logical run state. completed, failed and cancelled are terminal and are set only after the physical execution has settled. degraded means that the task still runs with reduced guarantees, such as a Monitor that lost its observation source. recovery_blocked means that recovery cannot prove the physical outcome: it is not settled, is never reported as success and is never re-run automatically."
       },
       "TaskRuntimeState": {
         "type": "string",
         "enum": ["unbound", "provisioning", "ready", "draining", "lost"],
-        "x-qwen-implementation-status": "planned",
+        "x-qwen-implementation-status": "partial",
         "description": "Redacted state of the Runtime that hosts the task, without binding identity or generation."
       },
       "TaskActionCapability": {
         "type": "string",
         "enum": ["cancel", "send_input", "read_output"],
-        "x-qwen-implementation-status": "planned",
+        "x-qwen-implementation-status": "partial",
         "description": "Actions the task supports now, the same for every caller. cancel: the cancel route accepts a new command for this task; whether a caller may use it is an authorization check (403 on the cancel route). send_input: reserved for a later capability route. read_output: the task events route returns output events for this task to any caller that can read it. read_output does not change during the task's life, and a task without it produces no output events: its output goes only to Artifacts, so the events route never filters out events that exist."
       },
       "PublicTask": {
@@ -5860,21 +5881,25 @@
           },
           "created_at": {
             "type": "integer",
-            "format": "int64"
+            "format": "int64",
+            "description": "Unix epoch milliseconds, unlike the seconds that the public Session, turn, event and item resources report."
           },
           "started_at": {
             "type": "integer",
-            "format": "int64"
+            "format": "int64",
+            "description": "Unix epoch milliseconds, unlike the seconds that the public Session, turn, event and item resources report."
           },
           "settled_at": {
             "type": "integer",
-            "format": "int64"
+            "format": "int64",
+            "description": "Unix epoch milliseconds, unlike the seconds that the public Session, turn, event and item resources report."
           },
           "output_cursor": {
             "type": "string",
             "minLength": 1,
             "maxLength": 512,
-            "description": "Task event cursor positioned after the newest event at read time; pass it as after on the task events route to follow only new events."
+            "description": "Task event cursor positioned after the newest event at read time; pass it as after on the task events route to follow only new events.",
+            "x-qwen-implementation-status": "planned"
           },
           "artifact_refs": {
             "type": "array",
@@ -5896,7 +5921,7 @@
             }
           }
         },
-        "x-qwen-implementation-status": "planned",
+        "x-qwen-implementation-status": "partial",
         "allOf": [
           {
             "if": {
@@ -6000,7 +6025,7 @@
             "maxLength": 512
           }
         },
-        "x-qwen-implementation-status": "planned",
+        "x-qwen-implementation-status": "partial",
         "allOf": [
           {
             "if": {
@@ -6212,21 +6237,25 @@
           },
           "createdAt": {
             "type": "integer",
-            "format": "int64"
+            "format": "int64",
+            "description": "Unix epoch milliseconds."
           },
           "startedAt": {
             "type": "integer",
-            "format": "int64"
+            "format": "int64",
+            "description": "Unix epoch milliseconds."
           },
           "settledAt": {
             "type": "integer",
-            "format": "int64"
+            "format": "int64",
+            "description": "Unix epoch milliseconds."
           },
           "outputCursor": {
             "type": "string",
             "minLength": 1,
             "maxLength": 512,
-            "description": "Task event cursor positioned after the newest event at read time; pass it as after on the task events route to follow only new events."
+            "description": "Task event cursor positioned after the newest event at read time; pass it as after on the task events route to follow only new events.",
+            "x-qwen-implementation-status": "planned"
           },
           "artifactRefs": {
             "type": "array",
@@ -6248,7 +6277,7 @@
             }
           }
         },
-        "x-qwen-implementation-status": "planned",
+        "x-qwen-implementation-status": "partial",
         "allOf": [
           {
             "if": {
@@ -6349,7 +6378,7 @@
             "maxLength": 512
           }
         },
-        "x-qwen-implementation-status": "planned",
+        "x-qwen-implementation-status": "partial",
         "allOf": [
           {
             "if": {
@@ -6566,7 +6595,7 @@
             "default": 20
           }
         },
-        "x-qwen-implementation-status": "planned"
+        "x-qwen-implementation-status": "partial"
       },
       "WebShellTaskGetRequest": {
         "type": "object",
@@ -6583,7 +6612,7 @@
             "maxLength": 128
           }
         },
-        "x-qwen-implementation-status": "planned"
+        "x-qwen-implementation-status": "partial"
       },
       "WebShellTaskEventQueryRequest": {
         "type": "object",

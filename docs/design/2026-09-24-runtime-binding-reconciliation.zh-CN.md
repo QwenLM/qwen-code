@@ -2,7 +2,7 @@
 
 [English](2026-09-24-runtime-binding-reconciliation.md) | [简体中文](2026-09-24-runtime-binding-reconciliation.zh-CN.md)
 
-状态：已在 `packages/sdk-java/runtime-broker` 实现；尚无生产 provisioner 启用
+状态：已在 `packages/sdk-java/runtime-broker` 实现。2026-09-27 更新：生产本地进程 provisioner 已使用持久身份，但 worker 归属仍仅在进程内保存，尚未实现重启后的接管。
 
 相关：#12380（Managed Agent 分阶段交付）、#12358 的集成预览，以及该分支上的端点恢复参考设计 `docs/design/2026-09-21-managed-runtime-endpoint-recovery.md`。
 
@@ -23,7 +23,7 @@
 
 范围外：
 
-- 可恢复的 provisioner 实现。本地进程 provisioner 保持当前的进程内所有权模型并报告 `legacy` 类型，其恢复的绑定仍按原样失败关闭。本地进程的可持久接管属于后续切片。
+- 可恢复的 provisioner 实现。本地进程 provisioner 报告 `local-process`，归属保存在内存。恢复的绑定进入对账，观察为 `UNKNOWN`，直到截止期仍未接管或退役。生产本地恢复由 #12766 跟踪，执行丢失的前提决策由 #12670 跟踪，参见待评审的 [W0e 恢复设计](2026-09-27-managed-workspace-recovery.zh-CN.md)。
 - Drain 生命周期、已接管绑定的后台健康刷新，以及 Kubernetes provisioner。
 - 对既有数据库的 schema 迁移。runtime-broker 的 schema 仍以 `CREATE TABLE IF NOT EXISTS` 应用，部署方按原方式重建 schema。
 
@@ -44,7 +44,7 @@ JDBC 仓储用必需的 `SecretProtector`（附带 `AesGcmSecretProtector`）按
 - `ensureResource(request, seed, knownHandle)` 以 `UnsupportedOperationException` 失败——启用持久类型的 provisioner 必须实现持久 provision 路径；
 - `reconcile(request, seed, handle, lastLease)` 返回 `RuntimeObservation.unknown(handle)`——无法观察的 provisioner 什么都证明不了，Broker 选择等待而不是猜测。
 
-`RuntimeTransport` 新增默认 `attest(lease, request, seed)`，以 `runtime_broker_attestation_unavailable` 失败关闭。目前尚无生产 transport 实现 `RuntimeTransport`，因此生产接线仍留待后续切片。
+`RuntimeTransport` 新增默认 `attest(lease, request, seed)`，以 `runtime_broker_attestation_unavailable` 失败关闭。后续切片已经增加生产 `HttpRuntimeTransport` 和本地 worker 接线，但实现 attestation 本身并不意味着可以恢复本地 worker 的归属。
 
 ### 3.3 持久 provision
 

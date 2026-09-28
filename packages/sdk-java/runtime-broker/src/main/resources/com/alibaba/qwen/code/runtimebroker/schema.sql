@@ -1,3 +1,8 @@
+CREATE TABLE IF NOT EXISTS qwen_runtime_placement_guard (
+    tenant_key CHAR(64) PRIMARY KEY,
+    tenant_id VARCHAR(512) NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS qwen_runtime_binding_slot (
     request_key CHAR(64) PRIMARY KEY,
     tenant_id VARCHAR(512) NOT NULL,
@@ -33,6 +38,8 @@ CREATE TABLE IF NOT EXISTS qwen_runtime_binding (
     credential_key_id VARCHAR(512),
     resource_handle_version INT,
     resource_handle_json LONGTEXT,
+    loss_evidence_json LONGTEXT,
+    stop_evidence_json LONGTEXT,
     runtime_instance_id VARCHAR(512),
     runtime_endpoint VARCHAR(2048),
     runtime_lease_id VARCHAR(512),
@@ -99,6 +106,8 @@ CREATE TABLE IF NOT EXISTS qwen_tool_execution (
     dispatch_generation BIGINT NOT NULL,
     record_version BIGINT NOT NULL,
     settled_at DATETIME(6),
+    abandoned_at DATETIME(6),
+    loss_evidence_id VARCHAR(512),
     CONSTRAINT uq_tool_execution_idempotency
         UNIQUE (idempotency_key_hash),
     INDEX idx_tool_execution_session

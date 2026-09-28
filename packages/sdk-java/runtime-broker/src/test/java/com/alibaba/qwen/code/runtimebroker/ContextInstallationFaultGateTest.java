@@ -244,7 +244,7 @@ class ContextInstallationFaultGateTest {
     }
 
     @Test
-    void aReplacementWorkerRunsNothingUntilItsOwnContextIsInstalled()
+    void aLostManagedWorkerKeepsItsContextAndWriterDomainPinned()
             throws Exception {
         FaultProxy proxy = rig.proxy();
         BrokerProcess broker = rig.broker("broker", proxy,
@@ -255,25 +255,17 @@ class ContextInstallationFaultGateTest {
 
         rig.killWorker(broker);
 
-        // The dead generation is retired; the next one starts a new worker
-        // whose memory holds no installation.
-        FaultGateRig.await(() -> broker.warm(HARNESS), BrokerProcess.Reply::ok,
-                "a new generation");
-        RuntimeBindingRecord replacement = rig.activeBinding();
-        assertTrue(replacement.getGeneration() > dead.getGeneration());
-        broker.acquire(HARNESS, NEXT_SESSION).requireOk();
-        assertEquals(2, proxy.count("context"));
-
-        // The old Session's tool reaches the new worker, which has no
-        // context for it and refuses it instead of running it elsewhere.
-        assertRefused(replacement.getLease(), SESSION);
-
-        String execution = create(broker, NEXT_SESSION);
-        rig.awaitExecution(execution, ToolExecutionRecord::isSettled,
-                "settled execution");
-        assertEquals("success", rig.execution(execution)
-                .getExecutionStatus());
-        assertEquals(List.of(rig.directory.toString()), rig.runs());
+        assertFalse(broker.warm(HARNESS).ok());
+        assertEquals("runtime_broker_runtime_lost", broker.warm(HARNESS).code());
+        assertEquals(dead.getBindingId(), rig.activeBinding().getBindingId());
+        assertEquals(RuntimeBindingRecord.State.LOST, rig.activeBinding().getState());
+        assertNull(rig.activeBinding().getStopEvidence());
+        assertFalse(broker.acquire(HARNESS, NEXT_SESSION).ok());
+        assertFalse(broker.release(HARNESS, SESSION).ok());
+        assertEquals(1, proxy.count("context"));
+        assertEquals(0, proxy.count("execute"));
+        assertTrue(broker.workers().isEmpty());
+        assertTrue(rig.runs().isEmpty());
     }
 
     @ParameterizedTest
