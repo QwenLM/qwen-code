@@ -87,10 +87,15 @@ final class BrokerValues {
             throw new IllegalArgumentException(
                     "JSON number must be finite");
         }
+        // The JDBC codec writes BigDecimal in plain form, so the digit
+        // count grows with the scale's magnitude on both sides: a scale
+        // of -N persists as an N-digit integer literal that the same
+        // codec then refuses to read back.
         if (value instanceof BigDecimal decimal
-                && decimal.scale() > MAXIMUM_DECIMAL_SCALE) {
+                && (decimal.scale() > MAXIMUM_DECIMAL_SCALE
+                        || decimal.scale() < -MAXIMUM_DECIMAL_SCALE)) {
             throw new IllegalArgumentException(
-                    "JSON number scale must be at most "
+                    "JSON number scale must be within ±"
                             + MAXIMUM_DECIMAL_SCALE);
         }
         // Mutable Number subtypes (AtomicLong, adders) would alias caller

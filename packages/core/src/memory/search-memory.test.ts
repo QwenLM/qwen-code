@@ -552,7 +552,7 @@ describe('executeSearchMemory', () => {
     expect(result.results[0]?.readLimitExhausted).toBeUndefined();
   });
 
-  it('marks a ref exhausted only after the per-ref fetch budget is spent', async () => {
+  it('preserves the exhausted signal when replaying an already covered window', async () => {
     const docs = [
       doc('project/long.md', {
         body: `${'A'.repeat(21000)} single-method orchestrator class`,
@@ -600,6 +600,25 @@ describe('executeSearchMemory', () => {
     expect(last?.nextCursor).toBeUndefined();
     expect(last?.readLimitExhausted).toBe(true);
     expect(exhaustedBodyRefs.has('project:project/long.md')).toBe(true);
+
+    const replayed = expectContentResult(
+      await executeSearchMemory(
+        {
+          mode: 'fetch',
+          refs: ['project:project/long.md'],
+          cursor: second?.nextCursor,
+        },
+        testOptions,
+      ),
+      'fetch',
+    ).results[0];
+    expect(replayed?.alreadyAvailable).toBe(true);
+    expect(replayed).not.toHaveProperty('content');
+    expect(replayed?.nextCursor).toBeUndefined();
+    expect(replayed?.readLimitExhausted).toBe(true);
+    expect(replayed?.readLimitMessage).toContain(
+      'per-ref fetch budget is exhausted',
+    );
 
     const searchResult = expectContentResult(
       await executeSearchMemory(

@@ -19,10 +19,15 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.net.HttpURLConnection;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -198,6 +203,116 @@ class HostedHarnessMySqlIT {
             System.err.println("HOSTED_MYSQL_HARNESS_LOG\n" + logs());
             throw failure;
         }
+    }
+
+    @Test
+    @Timeout(120)
+    void lifecycleOperationsCloseThePackagedHarnessSession() throws Exception {
+        Path cli = Path.of(required("qwen.cli.entry")).toAbsolutePath();
+        assertThat(cli).as("Build and bundle the packaged CLI first").isRegularFile();
+        jdbc = new JdbcTemplate(new DriverManagerDataSource(required("mysql.url"),
+                required("mysql.user"), System.getProperty("mysql.password", "")));
+        startModel();
+        startHarness(cli);
+        // The Harness writes to the Store through Spring, so Spring's address
+        // must be known before it starts.
+        try (ServerSocket socket = new ServerSocket(0, 0, InetAddress.getLoopbackAddress())) {
+            springPort = socket.getLocalPort();
+        }
+        spring = (ServletWebServerApplicationContext) new SpringApplicationBuilder(
+                ManagedAgentServerApplication.class).run(
+                "--server.address=127.0.0.1", "--server.port=" + springPort,
+                "--spring.datasource.url=" + required("mysql.url"),
+                "--spring.datasource.username=" + required("mysql.user"),
+                "--spring.datasource.password=" + System.getProperty("mysql.password", ""),
+                "--spring.datasource.driver-class-name=com.mysql.cj.jdbc.Driver",
+                "--spring.datasource.hikari.maximum-pool-size=3",
+                "--qwen.managed-agent.session-store.enabled=true",
+                "--qwen.managed-agent.session-store.base-url=http://127.0.0.1:" + springPort,
+                "--qwen.managed-agent.session-store.workspace-id=hosted-lifecycle-workspace",
+                "--qwen.managed-agent.harness.enabled=true",
+                "--qwen.managed-agent.harness.base-url=http://127.0.0.1:" + harnessPort,
+                "--qwen.managed-agent.harness.token=" + TOKEN,
+                "--qwen.managed-agent.harness.capability-digest=" + DIGEST,
+                "--qwen.managed-agent.runtime-broker.enabled=false",
+                "--qwen.managed-agent.dispatch.scan-delay=100ms");
+        try {
+            String id = api("POST", "/v1/agents/sessions", "create", """
+                    {"agent_id":"qwen-code",
+                     "input":[{"type":"input_text","text":"LIFECYCLE_FIRST"}]}
+                    """, 202).path("id").asText();
+            await(() -> api("GET", "/v1/agents/sessions/" + id + "/events", null, null, 200)
+                    .path("data").toString().contains("\"turn.completed\""), 30,
+                    "Turn completion");
+            assertThat(writerState(id)).isEqualTo("ACTIVE");
+
+            JsonNode close = api("POST", "/v1/agents/sessions/" + id + "/close", "close",
+                    null, 202);
+            assertThat(close.path("status").asText()).isEqualTo("pending");
+            JsonNode closed = awaitOperation(id, close.path("id").asText());
+            assertThat(closed.path("admission_stage").asText()).isEqualTo("harness_confirmed");
+            // The Harness settled the Session before the operation completed.
+            assertThat(writerState(id)).isEqualTo("SEALED");
+            assertThat(api("GET", "/v1/agents/sessions/" + id, null, null, 200)
+                    .path("status").asText()).isEqualTo("closed");
+
+            String deleteId = api("DELETE", "/v1/agents/sessions/" + id, "delete", null, 202)
+                    .path("id").asText();
+            assertThat(awaitOperation(id, deleteId).path("admission_stage").asText())
+                    .isEqualTo("java_durable");
+            api("GET", "/v1/agents/sessions/" + id, null, null, 404);
+            assertThat(writerState(id)).isEqualTo("SEALED");
+            assertThat(modelRequests).hasSize(1);
+            assertThat(modelFailure.get()).isNull();
+        } catch (Exception | AssertionError failure) {
+            System.err.println("HOSTED_MYSQL_HARNESS_LOG\n" + logs());
+            throw failure;
+        }
+    }
+
+    private JsonNode awaitOperation(String session, String operationId)
+            throws InterruptedException {
+        AtomicReference<JsonNode> operation = new AtomicReference<>();
+        await(() -> {
+            operation.set(api("GET", "/v1/agents/sessions/" + session + "/operations/"
+                    + operationId, null, null, 200));
+            return "completed".equals(operation.get().path("status").asText());
+        }, 30, "Operation " + operationId);
+        return operation.get();
+    }
+
+    private JsonNode api(String method, String path, String idempotencyKey, String body,
+            int expected) {
+        try {
+            HttpRequest.Builder request = HttpRequest.newBuilder(
+                    URI.create("http://127.0.0.1:" + springPort + path))
+                    .timeout(Duration.ofSeconds(10))
+                    .header("X-Qwen-Tenant-Id", tenant)
+                    .header("Accept", "application/json")
+                    .method(method, body == null ? HttpRequest.BodyPublishers.noBody()
+                            : HttpRequest.BodyPublishers.ofString(body));
+            if (body != null) {
+                request.header("Content-Type", "application/json");
+            }
+            if (idempotencyKey != null) {
+                request.header("Idempotency-Key", idempotencyKey);
+            }
+            HttpResponse<String> response = HttpClient.newHttpClient().send(request.build(),
+                    HttpResponse.BodyHandlers.ofString());
+            assertThat(response.statusCode()).as("%s %s: %s", method, path, response.body())
+                    .isEqualTo(expected);
+            return json.readTree(response.body());
+        } catch (IOException failure) {
+            throw new UncheckedIOException(failure);
+        } catch (InterruptedException failure) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException(failure);
+        }
+    }
+
+    private String writerState(String session) {
+        return jdbc.queryForObject("SELECT state FROM qwen_managed_session_journal_head"
+                + " WHERE tenant_id = ? AND session_id = ?", String.class, tenant, session);
     }
 
     private void startModel() throws IOException {
