@@ -1566,11 +1566,64 @@ describe('package scripts', () => {
     expect(releaseStepScript).toContain('already published; skipping');
     expect(releaseStepScript).toContain('exit 0');
     expect(releaseStepScript).toContain(
-      'corepack pnpm publish --no-git-checks --provenance "${publish_args[@]}"',
+      'npm publish --provenance "${publish_args[@]}"',
     );
     expect(releaseStepScript).toContain(
       'corepack pnpm -r publish "${publish_args[@]}"',
     );
+  });
+
+  it('publishes the generated CLI with a packer that keeps the ripgrep exec bit', () => {
+    // #12679: pnpm's packer writes 0644 for every entry outside `bin`, so a CLI
+    // published with it ships a vendored ripgrep that nobody can spawn. The
+    // generated CLI is the only package carrying vendored binaries and the only
+    // one `publish_package` is called for, so it alone goes back to npm.
+    expect(releaseStepScript).toContain("publish_package 'dist'");
+    expect(releaseStepScript).not.toContain('corepack pnpm publish');
+
+    const canPack =
+      process.platform !== 'win32' &&
+      spawnSync('npm', ['--version']).status === 0 &&
+      spawnSync('tar', ['--version']).status === 0;
+    if (!canPack) return;
+
+    const fixture = mkdtempSync(path.join(tmpdir(), 'pack-exec-bit-'));
+    try {
+      const binaryDir = path.join(fixture, 'vendor', 'ripgrep', 'x64-linux');
+      mkdirSync(binaryDir, { recursive: true });
+      writeFileSync(
+        path.join(fixture, 'package.json'),
+        JSON.stringify({
+          name: 'pack-exec-bit-probe',
+          version: '1.0.0',
+          files: ['vendor'],
+        }),
+      );
+      writeFileSync(path.join(binaryDir, 'rg'), '#!/bin/sh\n');
+      chmodSync(path.join(binaryDir, 'rg'), 0o755);
+
+      const packed = spawnSync('npm', ['pack', '--pack-destination', fixture], {
+        cwd: fixture,
+        encoding: 'utf8',
+      });
+      expect(packed.status).toBe(0);
+
+      const tarball = path.join(
+        fixture,
+        packed.stdout.trim().split('\n').pop(),
+      );
+      const listing = spawnSync('tar', ['-tvzf', tarball], {
+        encoding: 'utf8',
+      });
+      expect(listing.status).toBe(0);
+      const entry = listing.stdout
+        .split('\n')
+        .find((line) => line.endsWith('package/vendor/ripgrep/x64-linux/rg'));
+      expect(entry).toBeDefined();
+      expect(entry).toMatch(/^-rwxr-xr-x/);
+    } finally {
+      rmSync(fixture, { force: true, recursive: true });
+    }
   });
 
   it('meets npm trusted publishing requirements', () => {
