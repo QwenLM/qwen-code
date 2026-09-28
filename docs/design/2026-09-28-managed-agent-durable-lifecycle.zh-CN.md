@@ -67,7 +67,7 @@ close 让 `active` 经 `closing` 变为 `closed`。archive 把 `closed` 变为 `
 
 ### 4.3 operation 及其幂等域
 
-Flyway V16 新增 `managed_agent_operation`。每行保存 operation 所属的 Session、id（`op_` 加 32 位十六进制）、类型、actor 摘要、幂等键与请求摘要，它的状态、准入阶段与投递状态，受理时的 Session 状态，回执，以及投递用的租约、认领代次、尝试次数与 `available_at` 时间。
+Flyway V17 新增 `managed_agent_operation`。每行保存 operation 所属的 Session、id（`op_` 加 32 位十六进制）、类型、actor 摘要、幂等键与请求摘要，它的状态、准入阶段与投递状态，受理时的 Session 状态，回执，以及投递用的租约、认领代次、尝试次数与 `available_at` 时间。
 
 该表在租户、Session、类型、actor 摘要与幂等键上唯一，也就是契约第 3 节规定的幂等域。actor 摘要是可信 actor ID 的 SHA-256 摘要，没有可信 actor 的请求为空串，因此其他 actor 使用同一个键是另一个请求，永远不会拿到前一个 actor 的 operation。请求摘要覆盖 Session 与类型，并沿用 archive、delete 以前的命令名（`ARCHIVE_SESSION`、`DELETE_SESSION`，以及 `CLOSE_SESSION`），因此迁移过来的命令被重试时仍能匹配（4.10）。
 
@@ -109,7 +109,7 @@ delete 不动共享 Workspace：worker 只关闭该 Session 并排空它自己�
 | `delivery_state`  | 两次尝试之间为 `pending`，尝试期间为 `leased`，完成时为 `confirmed`。                        |
 | `receipt_id`      | operation 完成时由 Java 签发的不透明回执 `rcpt_…`。                                          |
 
-持有该 Session 的 Harness，是该 Session 所记录的 boot ID 对应的那个 Harness：Turn 分发会记录它挂接的 boot，而 rename 只在尚未记录任何 boot 时才记录，因此只经过 rename 之后，记录可能是较旧的 boot，这时 close 虽已封存，仍报告为 `java_durable`。新的 archive、删除已关闭或已归档的 Session，以及关闭或删除从未被任何 Harness 持有的 Session，完成时都保持 `java_durable`：没有任何 Harness 确认过该 Session 的任何事。Harness 因重启被替换的 Session 同样如此：新的 Harness 回答它没有持有该 Session，operation 要等旧进程的 writer 租约过期之后才完成，而那个 writer 没有被封存。V16 之前受理、迁移过来的 archive 是在活动 Session 上受理的，因此它会先关闭该 Session，可能以 `harness_confirmed` 完成（4.10）。不会产生 `failure_code`、`blocked`，以及 `failed`、`cancelled`、`recovery_blocked` 状态。
+持有该 Session 的 Harness，是该 Session 所记录的 boot ID 对应的那个 Harness：Turn 分发会记录它挂接的 boot，而 rename 只在尚未记录任何 boot 时才记录，因此只经过 rename 之后，记录可能是较旧的 boot，这时 close 虽已封存，仍报告为 `java_durable`。新的 archive、删除已关闭或已归档的 Session，以及关闭或删除从未被任何 Harness 持有的 Session，完成时都保持 `java_durable`：没有任何 Harness 确认过该 Session 的任何事。Harness 因重启被替换的 Session 同样如此：新的 Harness 回答它没有持有该 Session，operation 要等旧进程的 writer 租约过期之后才完成，而那个 writer 没有被封存。V17 之前受理、迁移过来的 archive 是在活动 Session 上受理的，因此它会先关闭该 Session，可能以 `harness_confirmed` 完成（4.10）。不会产生 `failure_code`、`blocked`，以及 `failed`、`cancelled`、`recovery_blocked` 状态。
 
 ### 4.7 读取 operation
 
@@ -129,13 +129,13 @@ unarchive 仍是以 `200` 返回 Session 的同步变更，仍为 `partial`。�
 
 ### 4.10 升级
 
-V16 把每条待定的 `ARCHIVE_SESSION` 与 `DELETE_SESSION` 命令转换为待定 operation，沿用其幂等键与摘要，actor 摘要为空，受理状态取命令记录的 Session 状态，并把该命令标记为 `MIGRATED`。worker 会完成它们。在活动 Session 上受理的 archive 会像以前的 archive 一样先关闭该 Session，再把它设为 `archived`。迁移过来的 operation 没有 actor，因此只有不带可信 actor 用原幂等键重试才会重放它。带可信 actor 的重试是新请求，会遇到未完成的 operation（`409 session_operation_active`），或在其完成之后遇到新的状态。
+V17 把每条待定的 `ARCHIVE_SESSION` 与 `DELETE_SESSION` 命令转换为待定 operation，沿用其幂等键与摘要，actor 摘要为空，受理状态取命令记录的 Session 状态，并把该命令标记为 `MIGRATED`。worker 会完成它们。在活动 Session 上受理的 archive 会像以前的 archive 一样先关闭该 Session，再把它设为 `archived`。迁移过来的 operation 没有 actor，因此只有不带可信 actor 用原幂等键重试才会重放它。带可信 actor 的重试是新请求，会遇到未完成的 operation（`409 session_operation_active`），或在其完成之后遇到新的状态。
 
 已完成的命令不转换。重试它们会得到新的受理：重复的 archive 返回 `409 session_state_conflict`，重复的 delete 返回 `404`。升级前已归档的 Session 视为已关闭。
 
-不支持新旧版本混跑的滚动升级：V16 运行之前必须停掉所有旧版本服务器。升级之后由旧服务器留下的待定 archive 或 delete 不会被转换，它的待定命令会让该 Session 之后的所有生命周期变更都返回 `409 session_operation_active`；旧服务器的 unarchive 还会重新打开被 D4 关闭的 Session。
+不支持新旧版本混跑的滚动升级：V17 运行之前必须停掉所有旧版本服务器。升级之后由旧服务器留下的待定 archive 或 delete 不会被转换，它的待定命令会让该 Session 之后的所有生命周期变更都返回 `409 session_operation_active`；旧服务器的 unarchive 还会重新打开被 D4 关闭的 Session。
 
-V16 是 `main` 上下一个空闲版本号，两个未合并的 PR 也使用了它。它们之中后合并的那个必须重新编号；如果改为留出空号，已经应用了更高版本的数据库会被 Flyway 拒绝启动。
+W0e（#12839）先占用了 V16，因此本迁移为 V17，即 `main` 上下一个空闲版本号。使用 V17 或更高版本的未合并 PR 必须重新编号到它之后；如果改为留出空号，已经应用了更高版本的数据库会被 Flyway 拒绝启动。
 
 ## 5. 测试
 
@@ -156,14 +156,14 @@ V16 是 `main` 上下一个空闲版本号，两个未合并的 PR 也使用了�
 - 新事件：`session.close.requested` 与 `session.closed`。archive 不再追加 `session.archive.requested`，close、archive 与 delete 的事件携带各自的 `operationId`。
 - 公共 Session 新增 `capabilities.session_lifecycle`。
 - 生成的 WebShell 类型新增生命周期请求与 operation。
-- Flyway V16 新增一张表并转换待定命令，不改动其他行。
+- Flyway V17 新增一张表并转换待定命令，不改动其他行。
 
 ## 7. 验证
 
 - Managed Agent 服务的 `mvn test`（151 个测试）与 Checkstyle 通过。
-- `ManagedAgentMySqlIT` 在 CI 使用的 `mariadb:10.11.18` 与 `mysql:8.4` 上通过，包括 V16 升级。`HostedHarnessMySqlIT` 在 `mysql:8.4` 上以打包后的 CLI 通过。
+- `ManagedAgentMySqlIT` 在 CI 使用的 `mariadb:10.11.18` 与 `mysql:8.4` 上通过，包括 V17 升级。`HostedHarnessMySqlIT` 在 `mysql:8.4` 上以打包后的 CLI 通过。
 - Web Shell 的 managed 组件测试（73 个，含生成类型的新鲜度测试）与其类型检查通过。
-- 27 个变异各自让某个测试失败：受理时不封闭 Session；跳过 Harness 关闭或 Runtime 排空；在没有 Harness 的服务器上跳过曾被持有的 Session 的关闭，或删除活动 Session 时跳过关闭；在仍有 journal writer 持有 Session 时完成，或把已过期的 writer 租约当作仍有效；完成时不检查认领代次；失败的尝试保留租约；扫描忽略已过期的租约；跨 actor 或跨类型重放；归档活动 Session；有活动 Turn 时关闭；在墓碑上受理；隐藏墓碑的 operation；公共路由接受过长的 operation id；忽略待定命令或未完成的 operation；绑定的 Session 声明生命周期能力；把每次完成、任何回答或被替换的 Harness 的回答都当作确认；unarchive 重新打开 Session；V16 让命令保持待定或转换已完成的命令；以及改用新的摘要名称。跳过 Harness 关闭同样会让 Hosted 进程测试失败。
+- 27 个变异各自让某个测试失败：受理时不封闭 Session；跳过 Harness 关闭或 Runtime 排空；在没有 Harness 的服务器上跳过曾被持有的 Session 的关闭，或删除活动 Session 时跳过关闭；在仍有 journal writer 持有 Session 时完成，或把已过期的 writer 租约当作仍有效；完成时不检查认领代次；失败的尝试保留租约；扫描忽略已过期的租约；跨 actor 或跨类型重放；归档活动 Session；有活动 Turn 时关闭；在墓碑上受理；隐藏墓碑的 operation；公共路由接受过长的 operation id；忽略待定命令或未完成的 operation；绑定的 Session 声明生命周期能力；把每次完成、任何回答或被替换的 Harness 的回答都当作确认；unarchive 重新打开 Session；V17 让命令保持待定或转换已完成的命令；以及改用新的摘要名称。跳过 Harness 关闭同样会让 Hosted 进程测试失败。
 
 ## 8. 后续工作
 
