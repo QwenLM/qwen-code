@@ -4316,7 +4316,7 @@ const SETTINGS_SCHEMA = {
         default: false,
         description:
           'Enable persistent workspace Agents collaborating on shared task threads (experimental). Independent of Agent Team: neither flag implies the other. Enabling permits collaboration; opening an Agent to outside callers, trusting a connection and registering a host each still require their own explicit configuration. Can also be enabled via QWEN_CODE_ENABLE_AGENT_COLLABORATION=1.',
-        showInDialog: true,
+        showInDialog: false,
       },
       artifact: {
         type: 'boolean',
