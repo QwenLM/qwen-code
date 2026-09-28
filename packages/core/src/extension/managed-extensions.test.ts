@@ -1067,6 +1067,110 @@ describe('managed extensions', () => {
     expect(await flagged.getExtensionStoreSnapshot()).toEqual(rekeyed);
   });
 
+  it('refuses the by-name uninstall of a re-keyed managed policy while the root is unlistable', async () => {
+    writeExtension(user, 'portable', { version: 'user' });
+    writeExtension(managed, 'portable');
+    vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const subject = manager();
+    await subject.refreshCache();
+    expect(
+      (await subject.getExtensionStoreSnapshot()).extensions[
+        subject.getLoadedExtensions()[0]!.id
+      ]?.managed,
+    ).toBe(true);
+
+    // The root disappears: the user copy is admitted and the retained
+    // managed policy is re-keyed onto it, marker kept.
+    fs.rmSync(managed, { recursive: true });
+    await subject.refreshCache();
+    const userCopy = subject
+      .getLoadedExtensions()
+      .find((extension) => extension.name === 'portable')!;
+    expect(userCopy.source).toBe('user');
+    const before = await subject.getExtensionStoreSnapshot();
+    expect(before.extensions[userCopy.id]?.managed).toBe(true);
+
+    await expect(
+      subject.uninstallExtension('portable', false),
+    ).rejects.toBeInstanceOf(ManagedExtensionReadOnlyError);
+    expect(await subject.getExtensionStoreSnapshot()).toEqual(before);
+
+    // The root lists cleanly again but the manager has not refreshed: the
+    // listing now proves absence *is* plausible, so only the policy's
+    // managed marker can still stop the destructive by-name uninstall.
+    fs.mkdirSync(managed);
+    await expect(
+      subject.uninstallExtension('portable', false),
+    ).rejects.toBeInstanceOf(ManagedExtensionReadOnlyError);
+    expect(await subject.getExtensionStoreSnapshot()).toEqual(before);
+  });
+
+  it('refuses a same-name user install while the managed root cannot be listed', async () => {
+    writeExtension(managed, 'portable');
+    const subject = manager();
+    await subject.refreshCache();
+    expect(
+      (await subject.getExtensionStoreSnapshot()).extensions[
+        subject.getLoadedExtensions()[0]!.id
+      ]?.managed,
+    ).toBe(true);
+
+    fs.rmSync(managed, { recursive: true });
+    vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    await subject.refreshCache();
+
+    // The listing proves nothing now, so the retained marker is the only
+    // record that the deployment owns the name: the gate must fail closed.
+    const candidate = writeExtension(temporary, 'candidate', {
+      name: 'portable',
+    });
+    await expect(
+      manager().installExtension({ type: 'local', source: candidate }),
+    ).rejects.toBeInstanceOf(ManagedExtensionReadOnlyError);
+  });
+
+  it('clears a blind home-path rule when disabling a re-keyed managed policy', async () => {
+    writeExtension(user, 'portable', { version: 'user' });
+    writeExtension(managed, 'portable');
+    vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const deployed = manager();
+    await deployed.refreshCache();
+
+    const unflagged = manager({ managedExtensionsDir: undefined });
+    await unflagged.refreshCache();
+    const userCopy = unflagged
+      .getLoadedExtensions()
+      .find((extension) => extension.name === 'portable')!;
+    expect(userCopy.source).toBe('user');
+    expect(
+      (await unflagged.getExtensionStoreSnapshot()).extensions[userCopy.id]
+        ?.managed,
+    ).toBe(true);
+
+    // A blind run with no deployment root writes the user-scope toggle as a
+    // home-path legacy rule onto the still-managed policy.
+    await store.setLegacyPathActivation(
+      { id: userCopy.id, name: 'portable' },
+      os.homedir(),
+      'enabled',
+    );
+
+    await unflagged.setExtensionDefaultActivation(userCopy.id, 'disabled');
+    const after = await unflagged.getExtensionStoreSnapshot();
+    const policy = after.extensions[userCopy.id]!;
+    expect(policy.managed).toBe(true);
+    expect(policy.defaultActivation).toBe('disabled');
+    expect(policy.legacyPathRules).toBeUndefined();
+    expect(
+      store.getActivation(
+        after,
+        userCopy.id,
+        'portable',
+        path.join(os.homedir(), 'sub'),
+      ),
+    ).toMatchObject({ effective: 'disabled' });
+  });
+
   it('skips a dangling symlink in the managed root instead of aborting discovery', async () => {
     writeExtension(managed, 'valid');
     writeExtension(user, 'user-package');

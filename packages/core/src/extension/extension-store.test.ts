@@ -142,6 +142,52 @@ describe('ExtensionStore', () => {
     expect(missing.extensions[identity.id].declarationOnly).toBe(true);
   });
 
+  it('restores the pre-managed stash instead of spending it on a plain update', async () => {
+    const store = makeStore();
+    const identity = { id: 'af'.repeat(32), name: 'updated' };
+    const destination = path.join(extensionsDir, identity.name);
+    const staging = await store.createStagingDirectory();
+    await fsp.writeFile(path.join(staging, 'qwen-extension.json'), '{}');
+    const installed = await store.commitArtifact({
+      operation: 'install',
+      identity,
+      destinationDirectory: destination,
+      stagingDirectory: staging,
+      initialActivation: { scope: 'user' },
+    });
+    // The claim stashes the user's pre-managed baseline...
+    const claimed = await store.ensureInitialized([
+      { ...identity, source: 'managed' },
+    ]);
+    expect(claimed.extensions[identity.id]?.preservedDefaultActivation).toBe(
+      'enabled',
+    );
+    // ...and the episode-era disable belongs to the managed package.
+    await store.setDefaultActivation(identity, 'disabled', {
+      clearLegacyPathRules: true,
+    });
+
+    const update = await store.createStagingDirectory();
+    await fsp.writeFile(path.join(update, 'qwen-extension.json'), '{}');
+    const updated = await store.commitArtifact({
+      operation: 'update',
+      identity,
+      destinationDirectory: destination,
+      stagingDirectory: update,
+      expectedArtifactGeneration:
+        installed.extensions[identity.id].artifactGeneration,
+    });
+
+    // Nothing was adopted and the deployment never proved a withdrawal, so
+    // the commit hands the pre-managed baseline back rather than keeping the
+    // managed-era disable.
+    const policy = updated.extensions[identity.id]!;
+    expect(policy.managed).toBeUndefined();
+    expect(policy.defaultActivation).toBe('enabled');
+    expect(policy).not.toHaveProperty('preservedDefaultActivation');
+    expect(policy).not.toHaveProperty('preservedWorkspaceOverrides');
+  });
+
   it.each(['same-id', 'different-id'] as const)(
     'clears managed ownership when an installer adopts a %s policy',
     async (mode) => {
@@ -3301,6 +3347,34 @@ describe('ExtensionStore', () => {
     },
   );
 
+  it('hands back the stored spelling when the returning user copy differs only in case', async () => {
+    const store = makeStore();
+    const managedId = 'a9'.repeat(32);
+    await store.ensureInitialized([
+      { id: managedId, name: 'MyExt', source: 'managed' },
+    ]);
+
+    // The package is withdrawn and a same-name user copy with a different
+    // case is discovered in the same refresh: the stale-entry migration
+    // re-keys and renames the policy before the hand-back runs, while the
+    // managed episode's secrets still live under the stored spelling.
+    const handedBackNames: string[] = [];
+    const userId = 'b8'.repeat(32);
+    const handedBack = await store.ensureInitialized(
+      [{ id: userId, name: 'myext', source: 'user' }],
+      {
+        managedAbsenceProven: true,
+        onManagedHandBack: (name) => {
+          handedBackNames.push(name);
+        },
+      },
+    );
+
+    expect(handedBack.extensions[userId]?.name).toBe('myext');
+    expect(handedBack.extensions[userId]?.managed).toBeUndefined();
+    expect(handedBackNames).toEqual(['MyExt']);
+  });
+
   it('restores a pre-managed default disable when the managed identity is withdrawn', async () => {
     const store = makeStore();
     const identity = { id: 'c1'.repeat(32), name: 'claimed' };
@@ -3832,6 +3906,57 @@ describe('ExtensionStore', () => {
       isAvailable.mockRestore();
       listSecrets.mockRestore();
     }
+  });
+
+  it('refuses to adopt a re-keyed managed policy whose secrets live under the managed id', async () => {
+    const store = makeStore();
+    const managed = {
+      id: 'ed'.repeat(32),
+      name: 'rekeyed',
+      source: 'managed' as const,
+    };
+    const user = { id: 'ee'.repeat(32), name: managed.name };
+    await store.ensureInitialized([managed]);
+    await updateSetting(
+      {
+        name: managed.name,
+        settings: [
+          {
+            name: 'Token',
+            description: 'token',
+            envVar: 'API_TOKEN',
+            sensitive: true,
+          },
+        ],
+      } as unknown as ExtensionConfig,
+      managed.id,
+      'API_TOKEN',
+      async () => 'super-secret-value',
+      ExtensionSettingScope.USER,
+    );
+    // A run that cannot prove the withdrawal re-keys the retained managed
+    // policy onto the same-name user identity, keeping the marker: probing
+    // only the record's current key would miss the managed-era credential.
+    const rekeyed = await store.ensureInitialized([user]);
+    expect(rekeyed.extensions[user.id]?.managed).toBe(true);
+    expect(rekeyed.extensions[managed.id]).toBeUndefined();
+    const before = await store.readSnapshot();
+
+    const destination = path.join(extensionsDir, managed.name);
+    const staging = await store.createStagingDirectory();
+    await fsp.writeFile(path.join(staging, 'qwen-extension.json'), '{}');
+    await expect(
+      store.commitArtifact({
+        operation: 'install',
+        identity: user,
+        destinationDirectory: destination,
+        stagingDirectory: staging,
+        initialActivation: { scope: 'user' },
+        allowManagedPolicyAdoption: true,
+        adoptionProbeManagedId: managed.id,
+      }),
+    ).rejects.toBeInstanceOf(ExtensionConflictError);
+    expect(await store.readSnapshot()).toEqual(before);
   });
 
   it('fails closed when current and previous state are corrupt', async () => {

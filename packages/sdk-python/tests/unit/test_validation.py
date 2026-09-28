@@ -326,6 +326,7 @@ def test_rejects_extra_args_with_reserved_flags() -> None:
         "--input-file",
         "--extensions",
         "-e",
+        "--managed-extensions",
         "--sandbox",
         "-s",
         "--no-sandbox",

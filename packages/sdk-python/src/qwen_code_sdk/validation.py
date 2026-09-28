@@ -55,6 +55,7 @@ _RESERVED_CLI_FLAGS = frozenset(
         "--allowed-mcp-server-names",
         "--extensions",
         "-e",
+        "--managed-extensions",
         "--proxy",
         "--sandbox",
         "--no-sandbox",

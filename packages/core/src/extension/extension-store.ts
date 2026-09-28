@@ -171,6 +171,14 @@ export interface CommitExtensionArtifactInput {
    * must never cover a narrower cwd set than the release path's clear.
    */
   adoptionProbeWorkspaceCwds?: readonly string[];
+  /**
+   * The id the managed episode's secrets were stored under. The store cannot
+   * derive it — it does not know the managed id formula — so a caller
+   * authorizing an adoption must supply it: a retained managed policy may
+   * have been re-keyed onto the same-name user identity, and probing only
+   * the record's current key would miss the managed-era credentials.
+   */
+  adoptionProbeManagedId?: string;
 }
 
 interface ExtensionTransactionJournal {
@@ -562,6 +570,12 @@ export class ExtensionStore {
     if (existing) {
       let changed = false;
       const renamedPolicyNames = new Set<string>();
+      // The hand-back below must name the secrets as they were STORED — the
+      // managed manifest's spelling — but the re-key migrations overwrite
+      // policy.name with the returning user identity's spelling. Remember
+      // each managed policy's pre-rename spelling so the callback does not
+      // clear a keychain service name that was never written.
+      const managedHandBackNames = new Map<string, string>();
       const importUnmappedLegacy =
         existing.legacyProjectionHash === projectionHash(legacy);
       let legacyProjectionIsNewer = false;
@@ -612,6 +626,9 @@ export class ExtensionStore {
               delete existing.extensions[declarationId];
               changed = true;
             }
+            if (directPolicy.managed) {
+              managedHandBackNames.set(identity.id, directPolicy.name);
+            }
             directPolicy.name = identity.name;
             changed = true;
           }
@@ -647,6 +664,9 @@ export class ExtensionStore {
             }
           }
           delete existing.extensions[staleId];
+          if (policy.managed && policy.name !== identity.name) {
+            managedHandBackNames.set(identity.id, policy.name);
+          }
           policy.name = identity.name;
           existing.extensions[identity.id] = policy;
           changed = true;
@@ -699,6 +719,9 @@ export class ExtensionStore {
                 previousRules.length !== rules.length ||
                 previousRules.some((rule, index) => rule !== rules[index]);
               if (!policyChanged) continue;
+              if (existingPolicy.managed) {
+                managedHandBackNames.set(identity.id, existingPolicy.name);
+              }
               existingPolicy.name = identity.name;
               if (rules.length > 0) {
                 existingPolicy.legacyPathRules = [...rules];
@@ -774,7 +797,9 @@ export class ExtensionStore {
         } else if (managedAbsenceProven) {
           delete policy.managed;
           restorePreservedActivationSurface(policy);
-          options.onManagedHandBack?.(policy.name);
+          options.onManagedHandBack?.(
+            managedHandBackNames.get(identity.id) ?? policy.name,
+          );
           changed = true;
         }
         // Absence unproven: the policy keeps its managed marker and stash so
@@ -892,16 +917,26 @@ export class ExtensionStore {
         const retainedIdentityId = currentPolicy
           ? input.identity.id
           : nameConflict![0];
-        if (
-          await hasStoredExtensionSecrets(
-            retainedPolicy.name,
-            retainedIdentityId,
-            input.adoptionProbeWorkspaceCwds,
-          )
-        ) {
-          throw new ExtensionConflictError(
-            `Extension "${input.identity.name}" cannot adopt the retained managed policy while stored credentials exist for it.`,
-          );
+        // A retained managed policy can have been re-keyed onto the
+        // same-name user identity while its managed-era secrets still live
+        // under the managed id — probe both, or the adoption orphans them.
+        const retainedProbeIds = new Set([
+          retainedIdentityId,
+          input.adoptionProbeManagedId,
+        ]);
+        for (const probeId of retainedProbeIds) {
+          if (
+            probeId !== undefined &&
+            (await hasStoredExtensionSecrets(
+              retainedPolicy.name,
+              probeId,
+              input.adoptionProbeWorkspaceCwds,
+            ))
+          ) {
+            throw new ExtensionConflictError(
+              `Extension "${input.identity.name}" cannot adopt the retained managed policy while stored credentials exist for it.`,
+            );
+          }
         }
         const stats = await fsp
           .lstat(destinationDirectory)
@@ -1078,12 +1113,22 @@ export class ExtensionStore {
           targetSnapshot.generation + 1;
       }
       if (input.operation !== 'uninstall') {
-        // Adopting a managed policy (or completing an install/update) hands
-        // it to the user identity. Unlike the refresh-time hand-back — which
-        // returns the user's own still-installed package — an explicit
-        // install adopts the retained managed activation as-is, so the
-        // pre-managed stash is spent: drop it rather than restore it.
+        // Adopting a managed policy hands it to the user identity. Unlike
+        // the refresh-time hand-back — which returns the user's own
+        // still-installed package — an explicit install adopts the retained
+        // managed activation as-is, so the pre-managed stash is spent: drop
+        // it rather than restore it. Any other commit (a plain update, or an
+        // install that merely re-keys the record) adopted nothing, so the
+        // user's pre-managed activation must be handed back before the
+        // marker goes — the deployment never proved its withdrawal.
         const committed = targetSnapshot.extensions[input.identity.id];
+        const adopted =
+          input.operation === 'install' &&
+          input.allowManagedPolicyAdoption === true &&
+          retainedPolicy?.managed === true;
+        if (!adopted) {
+          restorePreservedActivationSurface(committed);
+        }
         delete committed.managed;
         delete committed.preservedLegacyPathRules;
         delete committed.preservedDefaultActivation;

@@ -4923,6 +4923,25 @@ describe('extension tests', () => {
   });
 
   describe('loadExtensionConfig', () => {
+    it('still loads a user extension whose stray plugin.json is unparseable', async () => {
+      const extDir = path.join(userExtensionsDir, 'demo');
+      fs.mkdirSync(extDir);
+      fs.writeFileSync(
+        path.join(extDir, EXTENSIONS_CONFIG_FILENAME),
+        JSON.stringify({ name: 'demo', version: '1.0.0' }),
+      );
+      fs.writeFileSync(path.join(extDir, 'plugin.json'), '{');
+
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+
+      expect(
+        manager
+          .getLoadedExtensions()
+          .map((e) => ({ name: e.name, source: e.source })),
+      ).toEqual([{ name: 'demo', source: 'user' }]);
+    });
+
     it('should resolve environment variables in extension configuration', async () => {
       process.env['TEST_API_KEY'] = 'test-api-key-123';
       process.env['TEST_DB_URL'] = 'postgresql://localhost:5432/testdb';

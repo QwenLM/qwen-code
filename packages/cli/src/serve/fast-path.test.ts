@@ -407,9 +407,20 @@ describe('CLI entry import boundary', () => {
 
     expect(fastPathSource).not.toContain('../config/settings.js');
     expect(fastPathSource).not.toContain('../config/environment.js');
-    expect(fastPathSource).not.toMatch(
-      /from ['"]@qwen-code\/qwen-code-core['"]/,
-    );
+    // The fast path may depend only on the light core subpath it declares
+    // today: the root barrel, any other (heavy) subpath, or a dynamic
+    // import() of either would pull the full core into startup.
+    const fastPathCoreSpecifiers = [
+      ...fastPathSource.matchAll(
+        /import\s+(?!type\b)[^;]*?from\s+['"](@qwen-code\/qwen-code-core[^'"]*)['"]/g,
+      ),
+      ...fastPathSource.matchAll(
+        /import\(\s*['"](@qwen-code\/qwen-code-core[^'"]*)['"]/g,
+      ),
+    ].map((match) => match[1]);
+    expect(fastPathCoreSpecifiers).toEqual([
+      '@qwen-code/qwen-code-core/extension/managed-extension-dir.js',
+    ]);
     expect(fastPathSource).toContain('bootSettings: settings');
     expect(fastPathSource).toContain('resolveOnListen: true');
     expect(fastPathSource).toContain(

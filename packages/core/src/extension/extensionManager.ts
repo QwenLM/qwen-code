@@ -745,7 +745,7 @@ export class ExtensionManager {
           currentDir,
           'enabled',
         );
-      } else if (extension.source === 'managed') {
+      } else if (await this.isManagedPolicy(extension)) {
         snapshot = await this.extensionStore.setDefaultActivation(
           { id: extension.id, name: extension.name },
           'enabled',
@@ -803,7 +803,7 @@ export class ExtensionManager {
           currentDir,
           'disabled',
         );
-      } else if (extension.source === 'managed') {
+      } else if (await this.isManagedPolicy(extension)) {
         snapshot = await this.extensionStore.setDefaultActivation(
           { id: extension.id, name: extension.name },
           'disabled',
@@ -1010,7 +1010,7 @@ export class ExtensionManager {
       const snapshot = await this.extensionStore.setDefaultActivation(
         { id: extension.id, name: extension.name },
         activation,
-        { clearLegacyPathRules: extension.source === 'managed' },
+        { clearLegacyPathRules: await this.isManagedPolicy(extension) },
       );
       onCommitted?.(snapshot.generation);
       this.applyStoreActivation(snapshot);
@@ -1911,6 +1911,21 @@ export class ExtensionManager {
     return [...manageds, ...visibleUsers];
   }
 
+  // The batch activation path and the store both decide "is this managed?"
+  // from the policy's marker because a retained managed policy can be
+  // re-keyed onto the same-name user copy while the deployment root is
+  // unseen — in that state the loaded extension's source says 'user' for a
+  // package the deployment still owns.
+  private async isManagedPolicy(
+    extension: Pick<Extension, 'id' | 'source'>,
+  ): Promise<boolean> {
+    if (extension.source === 'managed') return true;
+    const policy = (await this.extensionStore.readSnapshot()).extensions[
+      extension.id
+    ];
+    return policy?.managed === true;
+  }
+
   private async assertUserManagedExtension(
     extension: Pick<Extension, 'name' | 'source'>,
   ): Promise<void> {
@@ -1938,9 +1953,14 @@ export class ExtensionManager {
       error: unknown;
       name?: string;
     }> = [];
+    let managedRootUnreadable = false;
     const manageds = await this.loadManagedExtensions(
       this.workspaceDir,
-      {},
+      {
+        onListFailure: () => {
+          managedRootUnreadable = true;
+        },
+      },
       (directory, error, name) => {
         failedManaged.push({ directory, error, name });
       },
@@ -1958,6 +1978,24 @@ export class ExtensionManager {
     }
     if (managedNames.has(extension.name.toLowerCase())) {
       throw new ManagedExtensionReadOnlyError(extension.name);
+    }
+    if (
+      managedRootUnreadable ||
+      failedManaged.some((failed) => failed.name === undefined)
+    ) {
+      // Absence unproven: an unlistable root or a nameless failure can still
+      // be the retained package, so only the store's managed marker can say
+      // whether this name belongs to the deployment — the same fail-closed
+      // rule the by-id release path applies.
+      const snapshot = await this.extensionStore.readSnapshot();
+      const retained = Object.values(snapshot.extensions).some(
+        (policy) =>
+          policy.managed === true &&
+          policy.name.toLowerCase() === extension.name.toLowerCase(),
+      );
+      if (retained) {
+        throw new ManagedExtensionReadOnlyError(extension.name);
+      }
     }
   }
 
@@ -2432,7 +2470,19 @@ export class ExtensionManager {
   ): LoadedExtensionManifest {
     const { extensionDir, workspaceDir = this.workspaceDir } = context;
     const agentPluginStatus = getAgentPluginSchemaStatus(extensionDir);
-    if (agentPluginStatus !== 'unrelated') {
+    // An unreadable plugin.json only governs when it is the directory's only
+    // manifest: a valid qwen-extension.json next to a stray or truncated
+    // plugin.json must keep loading as a Qwen extension, as it did before
+    // the 'unreadable' status existed. The managed governing-manifest probe
+    // keeps the strict reading so a plugin.json-only managed package still
+    // fails loudly and reserves its name.
+    const agentPluginGoverns =
+      agentPluginStatus !== 'unrelated' &&
+      !(
+        agentPluginStatus === 'unreadable' &&
+        fs.existsSync(path.join(extensionDir, EXTENSIONS_CONFIG_FILENAME))
+      );
+    if (agentPluginGoverns) {
       try {
         return {
           format: 'agent-plugins-v1',
@@ -3181,6 +3231,7 @@ export class ExtensionManager {
                 initialActivation,
                 allowManagedPolicyAdoption: true,
                 adoptionProbeWorkspaceCwds: [this.workspaceDir],
+                adoptionProbeManagedId: getManagedExtensionId(newExtensionName),
               }
             : {}),
           ...(expectedArtifactGeneration === undefined
@@ -3429,6 +3480,9 @@ export class ExtensionManager {
                 initialActivation: prepared.initialActivation,
                 allowManagedPolicyAdoption: true,
                 adoptionProbeWorkspaceCwds: [this.workspaceDir],
+                adoptionProbeManagedId: getManagedExtensionId(
+                  prepared.identity.name,
+                ),
               }
             : {
                 expectedArtifactGeneration:
@@ -3649,7 +3703,17 @@ export class ExtensionManager {
         }
         throw new Error(`Extension not found.`);
       }
-      await this.assertUserManagedExtension(extension);
+      // A retained managed policy can be re-keyed onto the same-name user
+      // copy while absence is unproven, so the loaded copy's 'user' source
+      // proves nothing — the store's managed marker is the record the by-id
+      // release path already refuses to destroy.
+      const uninstallPolicy = (await this.extensionStore.readSnapshot())
+        .extensions[extension.id];
+      await this.assertUserManagedExtension({
+        name: extension.name,
+        source:
+          uninstallPolicy?.managed === true ? 'managed' : extension.source,
+      });
       return await this.uninstallExtensionPolicy(
         { id: extension.id, name: extension.name },
         extension.installMetadata?.type === 'link'
