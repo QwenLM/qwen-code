@@ -145,7 +145,7 @@ export function createDaemonWorkspaceActions({
         'Update workspace pin timed out',
       );
       if (!res.ok) {
-        throw new Error(await readDaemonError(res, 'PATCH /workspace-registrations/:id/pin'));
+        throw new Error(await readDaemonError(res, `PATCH /workspace-registrations/${encodeURIComponent(registrationId)}/pin`));
       }
       return (await res.json()) as {
         id: string;

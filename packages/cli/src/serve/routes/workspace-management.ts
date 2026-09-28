@@ -2247,18 +2247,19 @@ export function registerWorkspaceManagementRoutes(
         }
         if (!targetEntry) {
           // Not found in registry — try the store directly for non-registry workspaces.
-          const changed = await workspaceRegistrationStore.setPinned(
-            requestedId,
-            isPinned,
+          await workspaceRegistrationStore.setPinned(requestedId, isPinned);
+          const snapshot = await workspaceRegistrationStore.read();
+          // Verify the registration exists in the store.
+          const exists = snapshot.workspaces.some(
+            (workspace) => workspaceRegistrationId(workspace) === requestedId,
           );
-          if (!changed) {
+          if (!exists) {
             res.status(404).json({
               error: 'Workspace registration not found',
               code: 'workspace_registration_not_found',
             });
             return;
           }
-          const snapshot = await workspaceRegistrationStore.read();
           const pinnedAt = snapshot.pinnedAts?.[requestedId];
           res.json({
             id: requestedId,

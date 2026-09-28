@@ -3352,6 +3352,30 @@ describe('persistent workspace registrations', () => {
     expect(res.status).toBe(501);
     expect(res.body.code).toBe('persistence_not_available');
   });
+
+  it('returns 503 when pinning while the daemon is sealed', async () => {
+    const registrationId = workspaceRegistrationId(REAL_DIR);
+    const setPinned = vi.fn().mockResolvedValue(true);
+    const read = vi.fn().mockResolvedValue({
+      schemaVersion: 1,
+      primaryWorkspace: '/primary',
+      workspaces: [REAL_DIR],
+    });
+    const { app, handle } = createApp({
+      workspaceRegistrationStore: {
+        setPinned,
+        read,
+      } as unknown as WorkspaceRegistrationStore,
+    });
+
+    await handle.sealAndWait();
+
+    const res = await request(app)
+      .patch(`/workspace-registrations/${registrationId}/pin`)
+      .send({ isPinned: true });
+    expect(res.status).toBe(503);
+    expect(setPinned).not.toHaveBeenCalled();
+  });
 });
 
 describe('GET /workspace-path-suggestions', () => {
