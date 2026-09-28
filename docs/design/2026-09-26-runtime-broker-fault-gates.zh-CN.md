@@ -48,7 +48,7 @@ W0c 上下文安装也有同样的缺口。Broker 的 managed-context/1 链路�
 
 两个测试适配器补上了生产代码的缺口：
 
-- `FaultGateTransport`。v2 worker 契约没有 Session 动词，`HttpRuntimeTransport` 对 `acquire` 和 `release` 返回 501（`runtime_session_verb_unsupported`），所以只用生产 transport 时服务无法走到派发。适配器把 attest、execute、status 和 cancel 交给 `HttpRuntimeTransport`；除了下文的 `MANAGED` placement，它在本地应答这两个动词。工具契约设计把 Session 动词列为后续工作。
+- `FaultGateTransport`。`HttpRuntimeTransport` 已实现 Session 动词（acquire 在 Broker 本地应答；release 走 provider control 路由），适配器把两个动词都委托给生产 transport。在下文的 `MANAGED` placement 下，它的 acquire 还会通过 `HttpRuntimeTransport` 执行 W0c-3 式的上下文安装与激活。
 - `RecoverableProcessProvisioner`。`LocalProcessRuntimeProvisioner` 把 worker 归属保存在内存中，所以其他进程里的 Broker 永远观测不到这个 worker。适配器包装生产 provisioner（worker 仍由它启动、验证并持有），只增加一份记录：每个 worker 的 pid、启动时间和 endpoint。对本进程不持有的租约：记录中的进程存活且重新验证通过即为 `READY`，记录中的进程已消失即为 `NOT_FOUND`，没有记录则为 `UNKNOWN`。它代替了对账设计中列为后续工作的"可恢复本地进程供给"，让门禁能在真实 worker 上驱动服务的收养（#12627）和接管（#12477）路径。
 
 FG5 的门禁以 `MANAGED` placement 打开测试台：
@@ -159,9 +159,9 @@ mvn checkstyle:check
 
 - 信号无法可靠地让 Broker 停在 `claimDispatch` 与 execute 调用之间，即 #12477 修复的那个窗口；该窗口仍由它的单元测试覆盖。FG4 覆盖的是围绕它的进程级接管。
 - 门禁需要 POSIX 信号，在 CI 中运行于 Linux。
-- 收养期间 attestation 应答丢失未覆盖。Session 动词还没有 worker 路由；FG5 只覆盖托管 acquire 所做的安装与激活。
+- 收养期间 attestation 应答丢失未覆盖。Session 动词走 provider control 路由；FG5 只覆盖托管 acquire 所做的安装与激活。
 - FG5 检验的是 Broker 的 W0c-2 链路和 worker，而不是 managed agent server。`FaultGateTransport` 只模仿 W0c-3 的安装与激活调用；W0c-3 的存储所有权、授权复核和目录预检仍由 `WorkspaceRuntimeTest` 覆盖。
 - Broker 不为安装持久化任何东西，因此 FG5 没有存储故障门禁，围绕一次安装的双 Broker 接管也未覆盖。release（关闭这道门）的应答丢失同样未覆盖。
 - 重放得到的回执与原回执逐字节相同，所以回执无法区分重放和全新安装；FG5 通过把上下文目录移走来证明重放，因为全新安装在那里会被拒绝。安装与激活回执的校验由单元测试（`HttpRuntimeTransportTest`）覆盖；门禁从不篡改回执。
 - worker 关闭时仍停在激活门的调用继续推迟，与 worker 设计的记录一致。
-- 后续：在 MySQL 上运行崩溃与接管门禁；持久化本地收养与 #12670 落地后翻转两个钉子；`HttpRuntimeTransport` 实现 Session 动词后移除 `FaultGateTransport`。Broker 在上下文拒绝时关闭 Session，或把这种拒绝结算为 `not_started` 时，翻转上下文目录的钉子。
+- 后续：在 MySQL 上运行崩溃与接管门禁；持久化本地收养与 #12670 落地后翻转两个钉子。`FaultGateTransport` 现已把两个 Session 动词委托给 `HttpRuntimeTransport`（它仅剩的职责是 MANAGED placement 的安装与激活），此前"transport 实现 Session 动词后移除该适配器"的前提已经满足；适配器仅为该 placement 保留。Broker 在上下文拒绝时关闭 Session，或把这种拒绝结算为 `not_started` 时，翻转上下文目录的钉子。

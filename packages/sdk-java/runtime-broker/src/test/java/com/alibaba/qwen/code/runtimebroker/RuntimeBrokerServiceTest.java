@@ -293,12 +293,32 @@ class RuntimeBrokerServiceTest {
             reference.put("input", Map.of());
             assertThrows(RuntimeBrokerException.class, () -> fixture.service.prepareExecution(
                     "harness", PROVIDER_SESSION, "key", reference));
+            assertNull(fixture.executionRepository.findByIdempotencyKey("key"));
+            assertFalse(fixture.executionRepository.hasActiveByRuntimeSession(PROVIDER_SESSION));
             reference.remove("input");
             reference.put("sessionId", "other");
             assertThrows(RuntimeBrokerException.class, () -> fixture.service.control(
                     "harness", PROVIDER_SESSION, Map.of("kind", "preflight", "reference", reference)));
             assertNull(fixture.transport.lastControl);
             assertEquals(0, fixture.transport.executeCalls.get());
+        }
+    }
+
+    @Test
+    void rejectsANullValuedDeferredReferenceOnTheStageChannel() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            join(fixture.service.acquire("harness", PROVIDER_SESSION, "bootstrap"));
+            Map<String, Object> reference = new HashMap<>();
+            reference.put("sessionId", null);
+            reference.put("promptId", "turn-1");
+            reference.put("callId", "call-1");
+            reference.put("argsDigest", "sha256:" + "a".repeat(64));
+            // The rejection must arrive on the returned stage, not as a
+            // synchronous throw escaping the method.
+            CompletionStage<ToolExecutionRecord> stage = fixture.service.prepareExecution(
+                    "harness", PROVIDER_SESSION, "key", reference);
+            assertEquals("runtime_reference_invalid", failure(stage).getCode());
+            assertNull(fixture.executionRepository.findByIdempotencyKey("key"));
         }
     }
 

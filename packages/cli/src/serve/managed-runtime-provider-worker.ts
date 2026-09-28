@@ -46,6 +46,7 @@ import {
   MANAGED_RUNTIME_PROVIDER_ROUTE,
   managedRuntimeProviderLimit,
   ManagedRuntimeProviderProtocolError,
+  fitManagedRuntimeProviderResult,
   parseManagedRuntimeProviderRequest,
   parseManagedRuntimeProviderResult,
   type ManagedRuntimeProviderOperation,
@@ -75,7 +76,6 @@ interface ProviderRuntime {
   readonly shell: AnyDeclarativeTool;
   history?: ManagedToolFileHistory;
   historyBinding?: string;
-  turnStarted: boolean;
 }
 
 interface ProviderSession {
@@ -87,8 +87,11 @@ interface ProviderSession {
   release?: Promise<boolean>;
 }
 
-function conflict(message: string): never {
-  throw new ManagedToolConflictError(message);
+function conflict(
+  message: string,
+  code: ManagedToolConflictError['code'] = 'managed_runtime_provider_operation_failed',
+): never {
+  throw new ManagedToolConflictError(message, code);
 }
 
 function history(value: ProviderRuntime): ManagedToolFileHistory {
@@ -121,7 +124,10 @@ class ManagedRuntimeProviderWorker {
       (session.identity.harnessSessionId !== identity.harnessSessionId ||
         session.identity.turnKind !== identity.turnKind)
     ) {
-      conflict('Managed Runtime Session identity conflicts.');
+      conflict(
+        'Managed Runtime Session identity conflicts.',
+        'managed_runtime_identity_conflict',
+      );
     }
     return session;
   }
@@ -276,7 +282,6 @@ class ManagedRuntimeProviderWorker {
         config,
         runtime,
         shell,
-        turnStarted: false,
       };
       registerSessionProjectDir(sessionId, config.storage.getProjectDir());
       return value;
@@ -305,7 +310,7 @@ class ManagedRuntimeProviderWorker {
       await history(value).ready();
       return history(value).state();
     }
-    if (value.turnStarted || value.runtime.hasActiveWork())
+    if (value.runtime.hasActiveWork())
       conflict(
         'Managed Runtime file history must be bound before starting a turn.',
       );
@@ -329,7 +334,6 @@ class ManagedRuntimeProviderWorker {
         return runtime.manifest();
       case 'begin-turn':
         await history(value).ready();
-        value.turnStarted = true;
         await runtime.beginTurn(operation.identity);
         return null;
       case 'prepare': {
@@ -426,24 +430,44 @@ export function registerManagedRuntimeProviderRoute(
     async (req: Request, res: Response) => {
       try {
         const request = parseManagedRuntimeProviderRequest(req.body);
-        const result: unknown = JSON.parse(
+        const raw: unknown = JSON.parse(
           JSON.stringify(
             await provider.control(request.session, request.operation),
           ),
+        );
+        const limit = Math.min(
+          MANAGED_RUNTIME_PROVIDER_ROUTE.responseBodyLimitBytes,
+          managedRuntimeProviderLimit(request.operation.kind),
+        );
+        // The result must leave room for the envelope carrying it; measuring
+        // a one-byte placeholder makes the budget exact, and fitting a large
+        // tool result keeps its terminal observation answerable instead of
+        // stranding the execution UNKNOWN behind a 400.
+        const envelopeOverhead =
+          Buffer.byteLength(
+            JSON.stringify({
+              protocolVersion: request.protocolVersion,
+              providerProtocol: request.providerProtocol,
+              session: request.session,
+              result: 0,
+            }),
+          ) - 1;
+        const result = fitManagedRuntimeProviderResult(
+          request.operation,
+          raw,
+          limit - envelopeOverhead,
         );
         parseManagedRuntimeProviderResult(
           request.operation,
           result,
           request.session,
         );
-        const response = {
+        const json = JSON.stringify({
           protocolVersion: request.protocolVersion,
           providerProtocol: request.providerProtocol,
           session: request.session,
           result,
-        };
-        const json = JSON.stringify(response);
-        const limit = managedRuntimeProviderLimit(request.operation.kind);
+        });
         if (Buffer.byteLength(json) > limit) {
           res.status(413).json({
             code: 'managed_runtime_provider_too_large',

@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.runtimebroker;
 import java.util.Map;
 import java.util.List;
 import java.util.Set;
+import java.util.regex.Pattern;
 
 /** The prepared-invocation contract, separate from raw Tool v2 references. */
 final class ProviderRuntimeProtocol {
@@ -15,6 +16,23 @@ final class ProviderRuntimeProtocol {
     private static final Set<String> REFERENCE_FIELDS = Set.of("sessionId",
             "promptId", "callId", "capabilityDigest", "policyRevision",
             "invocationId", "argsDigest");
+    // Mirrors SESSION_ID_PATTERN / DIGEST_PATTERN in core's
+    // managed-tool-protocol.ts; the case-insensitive flag is load-bearing.
+    private static final Pattern SESSION_ID = Pattern.compile(
+            "[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+            Pattern.CASE_INSENSITIVE);
+    private static final Pattern DIGEST = Pattern.compile("[a-f0-9]{64}");
+    private static final Set<String> CONFIRM_OUTCOMES = Set.of("proceed_once",
+            "proceed_once_and_switch_to_default", "proceed_always", "proceed_always_tool",
+            "proceed_always_server", "proceed_always_project", "proceed_always_user",
+            "cancel", "modify_with_editor");
+    private static final Set<String> BINDING_FIELDS = Set.of("ownerSessionId",
+            "ownerRuntimeSessionId", "executionCwd", "executionContext", "snapshots");
+    private static final Set<String> PAYLOAD_FIELDS = Set.of("newContent", "cancelMessage",
+            "permissionRules", "answers", "updatedInput");
+    private static final Set<String> PAYLOAD_TEXT_FIELDS = Set.of("newContent", "cancelMessage");
+    private static final Set<String> HISTORY_KINDS = Set.of("bind-history", "checkpoint",
+            "history");
 
     private ProviderRuntimeProtocol() {
     }
@@ -45,10 +63,7 @@ final class ProviderRuntimeProtocol {
             case "confirm" -> {
                 required = Set.of("kind", "reference", "outcome");
                 optional = Set.of("payload", "phase");
-                if (!Set.of("proceed_once", "proceed_once_and_switch_to_default",
-                        "proceed_always", "proceed_always_tool", "proceed_always_server",
-                        "proceed_always_project", "proceed_always_user", "cancel", "modify_with_editor")
-                        .contains(string(operation, "outcome"))) {
+                if (!CONFIRM_OUTCOMES.contains(string(operation, "outcome"))) {
                     throw invalid();
                 }
                 if (operation.containsKey("phase")
@@ -62,8 +77,7 @@ final class ProviderRuntimeProtocol {
                 Map<String, Object> binding = object(operation.get("binding"));
                 if (!sessionId.equals(string(binding, "ownerRuntimeSessionId"))
                         || !harnessSessionId.equals(string(binding, "ownerSessionId"))
-                        || !Set.of("ownerSessionId", "ownerRuntimeSessionId", "executionCwd",
-                                "executionContext", "snapshots").containsAll(binding.keySet())
+                        || !BINDING_FIELDS.containsAll(binding.keySet())
                         || !(binding.get("executionCwd") instanceof String)
                         || !(binding.get("snapshots") instanceof List)) {
                     throw invalid();
@@ -108,11 +122,10 @@ final class ProviderRuntimeProtocol {
         }
         if (operation.containsKey("payload")) {
             Map<String, Object> payload = object(operation.get("payload"));
-            if (!Set.of("newContent", "cancelMessage", "permissionRules", "answers", "updatedInput")
-                    .containsAll(payload.keySet())) {
+            if (!PAYLOAD_FIELDS.containsAll(payload.keySet())) {
                 throw invalid();
             }
-            for (String field : Set.of("newContent", "cancelMessage")) {
+            for (String field : PAYLOAD_TEXT_FIELDS) {
                 if (payload.containsKey(field) && !(payload.get(field) instanceof String)) {
                     throw invalid();
                 }
@@ -135,7 +148,7 @@ final class ProviderRuntimeProtocol {
     }
 
     static int limit(String kind) {
-        return Set.of("bind-history", "checkpoint", "history").contains(kind)
+        return HISTORY_KINDS.contains(kind)
                 ? HISTORY_LIMIT_BYTES : CONTROL_LIMIT_BYTES;
     }
 
@@ -147,15 +160,23 @@ final class ProviderRuntimeProtocol {
         for (String field : fields) {
             string(identity, field);
         }
-        if (!sessionId.equals(identity.get("sessionId"))
-                || !string(identity, "sessionId").matches(
-                        "(?i)[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
-                || string(identity, "promptId").length() > 128
-                || string(identity, "policyRevision").length() > 256
-                || !string(identity, "capabilityDigest").matches("[a-f0-9]{64}")
-                || fields.contains("invocationId") && (string(identity, "invocationId").length() > 128
-                        || !string(identity, "argsDigest").matches("[a-f0-9]{64}"))) {
+        String identitySession = string(identity, "sessionId");
+        String promptId = string(identity, "promptId");
+        String policyRevision = string(identity, "policyRevision");
+        String capabilityDigest = string(identity, "capabilityDigest");
+        if (!sessionId.equals(identitySession)
+                || !SESSION_ID.matcher(identitySession).matches()
+                || promptId.length() > 128
+                || policyRevision.length() > 256
+                || !DIGEST.matcher(capabilityDigest).matches()) {
             throw invalid();
+        }
+        if (fields.contains("invocationId")) {
+            String invocationId = string(identity, "invocationId");
+            String argsDigest = string(identity, "argsDigest");
+            if (invocationId.length() > 128 || !DIGEST.matcher(argsDigest).matches()) {
+                throw invalid();
+            }
         }
     }
 

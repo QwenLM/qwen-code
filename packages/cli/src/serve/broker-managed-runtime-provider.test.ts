@@ -432,6 +432,25 @@ describe('BrokerManagedRuntimeProvider', () => {
     provider.dispose();
   });
 
+  it('rejects malformed execution references before reserving them', async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async () =>
+      json(envelope({ acquired: true })),
+    );
+    const provider = new BrokerManagedRuntimeProvider({
+      baseUrl: 'http://127.0.0.1:8080',
+      token: 'secret',
+      fetch: fetchImpl,
+    });
+    const client = await provider.getToolV2Client(request(), {
+      harnessSessionId,
+    });
+    await expect(
+      client.execute({ ...reference(), argsDigest: 'b'.repeat(63) }),
+    ).rejects.toThrow();
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    provider.dispose();
+  });
+
   it('requires a null acknowledgement for void provider controls', async () => {
     const fetchImpl = vi.fn<typeof fetch>(async (url) =>
       json(
@@ -462,8 +481,11 @@ describe('BrokerManagedRuntimeProvider', () => {
   it('reserves replacement prepared invocations independently', async () => {
     const keys: string[] = [];
     const fetchImpl = vi.fn<typeof fetch>(async (url, init) => {
-      if (String(url).endsWith('tool-sessions:acquire'))
+      const target = String(url);
+      if (target.endsWith('tool-sessions:acquire'))
         return json(envelope({ acquired: true }));
+      if (target.endsWith(':release'))
+        return json(envelope({ released: true }));
       const body = JSON.parse(String(init?.body)) as { idempotencyKey: string };
       keys.push(body.idempotencyKey);
       return json(
@@ -495,6 +517,13 @@ describe('BrokerManagedRuntimeProvider', () => {
     });
     expect(keys).toHaveLength(2);
     expect(new Set(keys).size).toBe(2);
+    await provider.release(runtimeSessionId, request());
+    const reconnected = await provider.getToolV2Client(request(), {
+      harnessSessionId,
+    });
+    await reconnected.prepareExecution!(reference());
+    expect(keys).toHaveLength(3);
+    expect(keys[2]).toBe(keys[0]);
     provider.dispose();
   });
 

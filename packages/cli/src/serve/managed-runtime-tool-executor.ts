@@ -63,6 +63,7 @@ export class ManagedToolConflictError extends Error {
     message: string,
     readonly code:
       | 'managed_runtime_identity_conflict'
+      | 'managed_runtime_provider_operation_failed'
       | 'managed_tool_result_conflict' = 'managed_runtime_identity_conflict',
   ) {
     super(message);

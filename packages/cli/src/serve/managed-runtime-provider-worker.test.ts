@@ -10,6 +10,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import { ToolConfirmationOutcome } from '@qwen-code/qwen-code-core/tools/tools.js';
+import { managedToolDigest } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
 import type {
   ManagedToolCallIdentity,
   ManagedToolInvocationReference,
@@ -183,9 +184,11 @@ describe('Managed Runtime provider worker', () => {
       input,
     });
   }
-  async function execute(ref: ManagedToolInvocationReference) {
+  async function execute<T = unknown>(
+    ref: ManagedToolInvocationReference,
+  ): Promise<T> {
     await control({ kind: 'preflight', reference: ref });
-    return control({ kind: 'execute', reference: ref });
+    return control<T>({ kind: 'execute', reference: ref });
   }
 
   it('reports input errors separately from identity conflicts and permits corrected preparation', async () => {
@@ -237,7 +240,9 @@ describe('Managed Runtime provider worker', () => {
         file_path: path.join(workspace, 'input.txt'),
       }),
     );
-    expect(await execute(read)).toMatchObject({ executionStatus: 'success' });
+    const readResult = await execute<{ result?: unknown }>(read);
+    expect(readResult).toMatchObject({ executionStatus: 'success' });
+    expect(JSON.stringify(readResult.result)).toContain('original content');
     const output = path.join(workspace, 'output.txt');
     const prepared = await prepare(
       'write_file',
@@ -288,7 +293,9 @@ describe('Managed Runtime provider worker', () => {
         'shell',
       ),
     );
-    expect(await execute(shell)).toMatchObject({ executionStatus: 'success' });
+    const shellResult = await execute<{ result?: unknown }>(shell);
+    expect(shellResult).toMatchObject({ executionStatus: 'success' });
+    expect(JSON.stringify(shellResult.result)).toContain('provider-shell');
     const snapshot = await control<ManagedToolFileHistoryState>({
       kind: 'history',
     });
@@ -334,7 +341,10 @@ describe('Managed Runtime provider worker', () => {
       (
         await post(
           { kind: 'acquire' },
-          { ...SESSION, harnessSessionId: 'other' },
+          {
+            ...SESSION,
+            harnessSessionId: '550e8400-e29b-41d4-a716-4466554400ff',
+          },
         )
       ).status,
     ).toBe(409);
@@ -449,7 +459,11 @@ describe('Managed Runtime provider worker', () => {
 
   it('requires immutable history binding to its real directory before starting a turn', async () => {
     await acquire();
-    expect((await post({ kind: 'begin-turn', identity })).status).toBe(409);
+    const earlyBegin = await post({ kind: 'begin-turn', identity });
+    expect(earlyBegin.status).toBe(409);
+    expect(await earlyBegin.json()).toMatchObject({
+      code: 'managed_runtime_provider_operation_failed',
+    });
     expect(
       (
         await post({
@@ -511,16 +525,16 @@ describe('Managed Runtime provider worker', () => {
         })
       ).status,
     ).toBe(409);
-    expect(
-      (
-        await post({
-          kind: 'prepare',
-          identity,
-          toolName: 'run_shell_command',
-          input: { command: 'sleep 1', is_background: true },
-        })
-      ).status,
-    ).toBe(409);
+    const backgroundShell = await post({
+      kind: 'prepare',
+      identity,
+      toolName: 'run_shell_command',
+      input: { command: 'sleep 1', is_background: true },
+    });
+    expect(backgroundShell.status).toBe(409);
+    expect(await backgroundShell.json()).toMatchObject({
+      code: 'managed_runtime_provider_operation_failed',
+    });
   });
 
   it('rechecks directories for new work while status, cancellation and release remain available', async () => {
@@ -679,7 +693,10 @@ describe('Managed Runtime provider worker', () => {
       (
         await post(
           { kind: 'acquire' },
-          { ...SESSION, harnessSessionId: 'different-owner' },
+          {
+            ...SESSION,
+            harnessSessionId: '550e8400-e29b-41d4-a716-4466554400fe',
+          },
         )
       ).status,
     ).toBe(409);
@@ -835,4 +852,162 @@ describe('Managed Runtime provider worker', () => {
       expect((await post({ kind: 'acquire' })).status).toBe(409);
     },
   );
+
+  it('keeps an oversized shell result observable instead of failing the wire contract', async () => {
+    await begin();
+    const ref = reference(
+      await prepare(
+        'run_shell_command',
+        {
+          command: `"${process.execPath}" -e "process.stdout.write('x'.repeat(524288))"`,
+        },
+        'large',
+      ),
+    );
+    await control({ kind: 'preflight', reference: ref });
+    const result = await control<{
+      executionStatus: string;
+      result?: { llmContent?: unknown; returnDisplay?: unknown };
+    }>({ kind: 'execute', reference: ref });
+    expect(result.executionStatus).toBe('success');
+    expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThan(1024 * 1024);
+    expect(JSON.stringify(result.result)).toContain(
+      'Managed Runtime provider omitted',
+    );
+    expect(result.result?.returnDisplay).toMatchObject({
+      type: 'shell_result',
+      truncated: true,
+    });
+    const status = await control<{ state: string; result?: unknown }>({
+      kind: 'status',
+      reference: ref,
+    });
+    expect(status.state).toBe('settled');
+    expect(JSON.stringify(status.result)).toContain(
+      'Managed Runtime provider omitted',
+    );
+    await control({ kind: 'cancel', reference: ref });
+    expect(await control({ kind: 'release' })).toBe(true);
+  });
+
+  it('refuses envelope Session ids that are not lowercase UUIDs', async () => {
+    for (const session of [
+      { ...SESSION, runtimeSessionId: '../escape' },
+      { ...SESSION, runtimeSessionId: SESSION.runtimeSessionId.toUpperCase() },
+      { ...SESSION, harnessSessionId: '../../etc' },
+    ]) {
+      const response = await post({ kind: 'acquire' }, session);
+      expect(response.status).toBe(400);
+      expect(await response.json()).toMatchObject({
+        code: 'managed_runtime_provider_invalid',
+      });
+    }
+    expect(await control({ kind: 'acquire' })).toBe(true);
+  });
+
+  it('fences legacy Tool v3 execution out of a provider-owned Session', async () => {
+    await worker.close();
+    const { workspaceCwd: _cwd, ...boot } = BOOT;
+    worker = await startManagedRuntimeAttestationWorker(
+      {
+        ...boot,
+        version: 2,
+        managedContext: MANAGED_CONTEXT_PROTOCOL,
+        storageId: 'storage://pvc/workspace-a',
+        mountRoot: workspace,
+        capabilityDigest: WORKSPACE_CAPABILITY_DIGEST,
+      },
+      // A working capture path: without the legacy-admission fence the Shell
+      // below really runs, so its marker file witnesses the refusal.
+      {
+        prepare: async () => ({
+          identity: {},
+          sink: {
+            identity: {},
+            finalize: async (
+              executionStatus: string,
+              responseParts: unknown[],
+              error?: unknown,
+            ) => ({ executionStatus, responseParts, error, capture: null }),
+          },
+        }),
+        accept: async () => {
+          throw new Error('unexpected receipt');
+        },
+      } as never,
+    );
+    const contextPost = (route: string, body: unknown) =>
+      fetch(`${worker.ready.url}${route}`, {
+        method: 'POST',
+        headers: HEADERS,
+        body: JSON.stringify(body),
+      });
+    const context = {
+      tenantId: BOOT.tenantId,
+      workspaceId: BOOT.workspaceId,
+      workspaceGeneration: BOOT.workspaceGeneration,
+      storageId: 'storage://pvc/workspace-a',
+      cwdRelative: '.',
+      contextConfigRef: WORKSPACE_CONTEXT_CONFIG_REF,
+      contextRevision: '1',
+    };
+    const contextDigest = computeManagedContextDigest(context);
+    expect(
+      (
+        await contextPost('/internal/managed-runtime/v3/context', {
+          protocolVersion: 3,
+          managedContext: MANAGED_CONTEXT_PROTOCOL,
+          operationId: 'install-provider',
+          sessionId: SESSION.runtimeSessionId,
+          binding: context,
+          contextDigest,
+        })
+      ).status,
+    ).toBe(200);
+    expect(
+      (
+        await contextPost(WORKSPACE_ACTIVATION_ROUTE.path, {
+          protocolVersion: 1,
+          operation: 'activate',
+          sessionId: SESSION.runtimeSessionId,
+          contextDigest,
+          contextConfigRef: WORKSPACE_CONTEXT_CONFIG_REF,
+          profile: WORKSPACE_EXECUTION_PROFILE,
+        })
+      ).status,
+    ).toBe(200);
+    await control({ kind: 'acquire' });
+    const marker = path.join(workspace, 'v3-legacy-marker');
+    const input = { command: `touch ${JSON.stringify(marker)}` };
+    const response = await fetch(
+      `${worker.ready.url}/internal/managed-runtime/v3/execute`,
+      {
+        method: 'POST',
+        headers: HEADERS,
+        body: JSON.stringify({
+          protocolVersion: 3,
+          toolResult: 'managed-tool-result/1',
+          reference: {
+            sessionId: SESSION.runtimeSessionId,
+            promptId: 'turn-a',
+            callId: 'call-a',
+            argsDigest: managedToolDigest(input),
+          },
+          toolName: 'run_shell_command',
+          input,
+          capture: {
+            tenantId: BOOT.tenantId,
+            sessionId: SESSION.runtimeSessionId,
+            turnId: 'turn-a',
+            executionCallId: 'execution-a',
+            bindingGeneration: '1',
+            capturePolicy: 'complete_required',
+          },
+        }),
+      },
+    );
+    expect(response.status).toBe(409);
+    expect(fs.existsSync(marker)).toBe(false);
+    await control({ kind: 'release' });
+  });
 });

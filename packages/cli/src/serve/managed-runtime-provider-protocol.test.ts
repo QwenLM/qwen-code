@@ -7,7 +7,11 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { managedToolDigest } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
+import { ToolConfirmationOutcome } from '@qwen-code/qwen-code-core/tools/tools.js';
 import {
+  MANAGED_RUNTIME_PROVIDER_ROUTE,
+  fitManagedRuntimeProviderResult,
+  managedRuntimeProviderLimit,
   parseManagedRuntimeProviderOperation,
   parseManagedRuntimeProviderRequest,
   parseManagedRuntimeProviderResult,
@@ -23,7 +27,13 @@ const fixtures = JSON.parse(
     ),
     'utf8',
   ),
-) as { cases: Array<{ name: string; valid: boolean; request: unknown }> };
+) as {
+  cases: Array<{
+    name: string;
+    valid: boolean;
+    request: { operation?: { kind?: unknown; outcome?: unknown } };
+  }>;
+};
 const session: ManagedRuntimeProviderSession = {
   harnessSessionId: '550e8400-e29b-41d4-a716-446655440301',
   runtimeSessionId: '550e8400-e29b-41d4-a716-446655440302',
@@ -241,5 +251,166 @@ describe('managed-runtime-provider/1', () => {
         session,
       ),
     ).toThrow();
+  });
+
+  it('pins every accepted confirm outcome in the shared corpus', () => {
+    const pinned = new Set(
+      fixtures.cases
+        .filter(
+          (entry) => entry.valid && entry.request.operation?.kind === 'confirm',
+        )
+        .map((entry) => entry.request.operation?.outcome),
+    );
+    expect(pinned).toEqual(
+      new Set(
+        Object.values(ToolConfirmationOutcome).filter(
+          (outcome) => outcome !== ToolConfirmationOutcome.RestorePrevious,
+        ),
+      ),
+    );
+  });
+
+  it('ties the declared response bound to the enforced per-kind limits', () => {
+    const kinds = [
+      'acquire',
+      'release',
+      'manifest',
+      'history',
+      'begin-turn',
+      'prepare',
+      'confirmation',
+      'confirm',
+      'preflight',
+      'bind-history',
+      'checkpoint',
+      'execute',
+      'status',
+      'cancel',
+    ];
+    expect(MANAGED_RUNTIME_PROVIDER_ROUTE.responseBodyLimitBytes).toBe(
+      Math.max(...kinds.map(managedRuntimeProviderLimit)),
+    );
+  });
+
+  describe('fitManagedRuntimeProviderResult', () => {
+    const budget = 64 * 1024;
+    const execute = { kind: 'execute', reference } as const;
+
+    it('leaves fitting results and non-observation kinds untouched', () => {
+      const small = {
+        executionStatus: 'success',
+        result: { llmContent: 'ok' },
+      };
+      expect(fitManagedRuntimeProviderResult(execute, small, budget)).toBe(
+        small,
+      );
+      const prepareResult = { description: 'x'.repeat(budget * 2) };
+      expect(
+        fitManagedRuntimeProviderResult(
+          {
+            kind: 'prepare',
+            identity,
+            toolName: 'read_file',
+            input: {},
+          },
+          prepareResult,
+          budget,
+        ),
+      ).toBe(prepareResult);
+    });
+
+    it('cuts bulk result text head-and-tail with a notice and a truncated flag', () => {
+      const display = {
+        type: 'shell_result',
+        version: 1,
+        text: 't'.repeat(budget),
+        output: 'x'.repeat(budget),
+        directory: '/w',
+        exitCode: 0,
+        signal: null,
+        pid: null,
+        error: null,
+        outcome: 'completed',
+        notices: [],
+        truncated: false,
+        outputFiles: [],
+      };
+      const result = {
+        executionStatus: 'success',
+        result: { llmContent: 'l'.repeat(budget), returnDisplay: display },
+      };
+      const fitted = fitManagedRuntimeProviderResult(execute, result, budget);
+      expect(fitted).toBe(result);
+      expect(
+        Buffer.byteLength(JSON.stringify(result), 'utf8'),
+      ).toBeLessThanOrEqual(budget);
+      expect(display.truncated).toBe(true);
+      expect(display.output).toContain('Managed Runtime provider omitted');
+      expect(display.output.startsWith('x')).toBe(true);
+      expect(display.output.endsWith('x')).toBe(true);
+      expect(result.result.llmContent).toContain(
+        'Managed Runtime provider omitted',
+      );
+    });
+
+    it('evicts oldest progress before cutting a settled result', () => {
+      const status = {
+        state: 'settled',
+        cancelRequested: false,
+        lastSeq: 6,
+        firstAvailableSeq: 1,
+        progressGap: false,
+        progress: [1, 2, 3, 4, 5, 6].map((seq) => ({
+          seq,
+          output: 'p'.repeat(1024),
+        })),
+        result: {
+          executionStatus: 'success',
+          result: { llmContent: 'short' },
+        },
+      };
+      const fitted = fitManagedRuntimeProviderResult(
+        { kind: 'status', reference },
+        status,
+        2048,
+      );
+      expect(fitted).toBe(status);
+      expect(
+        Buffer.byteLength(JSON.stringify(status), 'utf8'),
+      ).toBeLessThanOrEqual(2048);
+      expect(status.progressGap).toBe(true);
+      expect(status.progress.length).toBeGreaterThan(0);
+      expect(status.progress[0].seq).toBe(status.firstAvailableSeq);
+      expect(status.result.result.llmContent).toBe('short');
+    });
+
+    it('keeps the terminal observation representable when everything is oversized', () => {
+      const status = {
+        state: 'settled',
+        cancelRequested: false,
+        lastSeq: 1,
+        firstAvailableSeq: 1,
+        progressGap: false,
+        progress: [{ seq: 1, output: 'p'.repeat(budget) }],
+        result: {
+          executionStatus: 'success',
+          result: {
+            llmContent: 'l'.repeat(budget),
+            returnDisplay: { custom: 'd'.repeat(budget) },
+          },
+          postHook: { note: 'h'.repeat(budget) },
+        },
+      };
+      fitManagedRuntimeProviderResult(
+        { kind: 'status', reference },
+        status,
+        budget,
+      );
+      expect(
+        Buffer.byteLength(JSON.stringify(status), 'utf8'),
+      ).toBeLessThanOrEqual(budget);
+      expect(status.state).toBe('settled');
+      expect(status.result.executionStatus).toBe('success');
+    });
   });
 });

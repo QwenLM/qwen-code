@@ -3,7 +3,8 @@
 [English](2026-09-24-managed-runtime-tool-contract.md) | [简体中文](2026-09-24-managed-runtime-tool-contract.zh-CN.md)
 
 Status: contract, worker handlers, and Java tool transport implemented;
-Broker transport wiring remains follow-up work
+Broker transport wired through `managed-runtime-provider/1` (see
+[2026-09-27-broker-provider-control.md](2026-09-27-broker-provider-control.md))
 
 Related: #12380 (Managed Agent staged delivery), the attestation contract in
 [2026-09-22-managed-runtime-attestation-contract.md](2026-09-22-managed-runtime-attestation-contract.md),
@@ -170,9 +171,15 @@ The worker handlers described below serve these routes.
 
 ## 5. Follow-up work
 
-- Complete the session verbs and wire `HttpRuntimeTransport` into
-  `RuntimeTransport`. Supply `toolName`/`input` separately from the stored
-  reference as described in §4.1, and cover real Broker dispatch end to end.
+- ~~Complete the session verbs and wire `HttpRuntimeTransport` into
+  `RuntimeTransport`.~~ Landed via the `managed-runtime-provider/1` protocol;
+  see
+  [2026-09-27-broker-provider-control.md](2026-09-27-broker-provider-control.md).
+  The remaining gap from §4.1: the immediate `POST /executions` route still
+  reads `toolName`/`input` from the stored reference, so its callers must
+  persist tool arguments in `reference_json`; use the deferred reserve/start
+  path or the provider protocol instead. Giving the immediate route the same
+  payload separation remains open.
 - The `UNKNOWN` execution reconciler shipped in #12655. Its transport must
   validate the status wire envelope, then project it to `{state, result}`
   (`result` only for `settled`). Strip `protocolVersion` and `lastSequence`;

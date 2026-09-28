@@ -83,7 +83,9 @@ class ProviderRuntimeTransportTest {
                 "managed_runtime_provider_invalid", 400,
                 "managed_runtime_identity_conflict", 409,
                 "managed_context_unavailable", 409,
+                "managed_context_conflict", 409,
                 "managed_runtime_provider_operation_failed", 409,
+                "managed_runtime_provider_incompatible", 409,
                 "managed_runtime_provider_too_large", 413,
                 "managed_runtime_provider_unsupported", 501).entrySet()) {
             status = failure.getValue();
@@ -160,6 +162,88 @@ class ProviderRuntimeTransportTest {
             exercised.add(kind);
         }
         assertEquals(publicKinds, Set.copyOf(exercised));
+    }
+
+    @Test
+    void refusesTransportOnlyOperationsOnThePublicControlShape() throws Exception {
+        JsonNode cases = new ObjectMapper().readTree(ManagedRuntimeAttestationConformanceTest
+                .contractDirectory().resolve("managed-runtime-provider-v1.fixtures.json").toFile())
+                .required("cases");
+        Set<String> publicKinds = Set.of("manifest", "history", "begin-turn", "prepare",
+                "confirmation", "preflight", "confirm", "bind-history", "checkpoint");
+        Set<String> refused = new java.util.HashSet<>();
+        for (JsonNode fixture : cases) {
+            if (!fixture.required("valid").asBoolean()) {
+                continue;
+            }
+            Map<String, Object> request = JsonCodec.parseObject(fixture.required("request")
+                    .toString().getBytes(StandardCharsets.UTF_8), "fixture");
+            Map<String, Object> operation = ProviderRuntimeProtocol.object(request.get("operation"));
+            String kind = String.valueOf(operation.get("kind"));
+            if (!publicKinds.contains(kind)) {
+                RuntimeBrokerException error = assertThrows(RuntimeBrokerException.class,
+                        () -> ProviderRuntimeProtocol.control(operation, HARNESS, SESSION), kind);
+                assertEquals("runtime_control_operation_invalid", error.getCode(), kind);
+                refused.add(kind);
+            }
+        }
+        assertEquals(Set.of("acquire", "release", "execute", "status", "cancel"), refused);
+    }
+
+    @Test
+    void pinsTheRoutePathAndThePerKindSizeTiers() {
+        assertEquals("/internal/managed-runtime/provider/v1/control", ProviderRuntimeProtocol.PATH);
+        for (String kind : Set.of("bind-history", "checkpoint", "history")) {
+            assertEquals(8 * 1024 * 1024, ProviderRuntimeProtocol.limit(kind), kind);
+        }
+        for (String kind : Set.of("acquire", "release", "manifest", "begin-turn", "prepare",
+                "confirmation", "confirm", "preflight", "execute", "status", "cancel")) {
+            assertEquals(1024 * 1024, ProviderRuntimeProtocol.limit(kind), kind);
+        }
+    }
+
+    @Test
+    void refusesVoidViolationsMissingResultsAndForeignModificationSources() {
+        Map<String, Object> reference = reference();
+        // A void control must answer with a null result.
+        result = Map.of();
+        assertThrows(CompletionException.class, () -> transport.control(lease, session,
+                Map.of("kind", "confirm", "reference", reference, "outcome", "proceed_once"))
+                .toCompletableFuture().join());
+        // A result-bearing control must answer with an object.
+        result = null;
+        assertThrows(CompletionException.class, () -> transport.control(lease, session,
+                Map.of("kind", "manifest")).toCompletableFuture().join());
+        // A content modification cannot cite another Session's invocation.
+        Map<String, Object> identity = new LinkedHashMap<>(reference);
+        identity.remove("invocationId");
+        identity.remove("argsDigest");
+        Map<String, Object> foreign = new LinkedHashMap<>(reference);
+        foreign.put("sessionId", HARNESS);
+        RuntimeBrokerException error = assertThrows(RuntimeBrokerException.class,
+                () -> ProviderRuntimeProtocol.control(Map.of("kind", "prepare", "identity", identity,
+                        "toolName", "edit", "input", Map.of(), "modification",
+                        Map.of("source", foreign, "newContent", "next")), HARNESS, SESSION));
+        assertEquals("runtime_control_operation_invalid", error.getCode());
+    }
+
+    @Test
+    void answersOversizedControlsWithADefinitive413() {
+        Map<String, Object> identity = new LinkedHashMap<>(reference());
+        identity.remove("invocationId");
+        identity.remove("argsDigest");
+        CompletionException failure = assertThrows(CompletionException.class,
+                () -> transport.control(lease, session, Map.of("kind", "prepare",
+                        "identity", identity, "toolName", "write_file",
+                        "input", Map.of("content", "x".repeat(2 * 1024 * 1024))))
+                        .toCompletableFuture().join());
+        RuntimeBrokerException error = (RuntimeBrokerException) failure.getCause();
+        assertEquals(413, error.getStatusCode());
+        assertEquals("runtime_control_operation_too_large", error.getCode());
+        assertEquals(false, error.isRetryable());
+        // Only the acquire prelude went out; the oversized operation never did.
+        assertEquals(1, requests.size());
+        assertEquals(Map.of("kind", "acquire"), requests.getFirst().get("operation"));
     }
 
     @Test

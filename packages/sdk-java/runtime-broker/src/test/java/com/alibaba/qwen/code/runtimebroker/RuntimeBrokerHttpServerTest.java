@@ -14,6 +14,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.util.HashMap;
 import java.util.HexFormat;
 import java.time.Clock;
 import java.time.Duration;
@@ -212,6 +213,30 @@ class RuntimeBrokerHttpServerTest {
                     "toolCallId", "call", "requestDigest", digest,
                     "reference", Map.of("sessionId", "runtime", "promptId", "turn",
                             "callId", "call", "argsDigest", digest), "extra", true));
+            assertEquals(400, response.statusCode(), response.body());
+            assertTrue(response.body().contains("runtime_broker_invalid_request"), response.body());
+            assertNull(fixture.executions.findByIdempotencyKey("key"));
+            assertFalse(fixture.executions.hasActiveByRuntimeSession("runtime"));
+            assertEquals(0, fixture.transport.controls.get());
+            assertEquals(0, fixture.transport.executions.get());
+        }
+    }
+
+    @Test
+    void rejectsPayloadBearingReserveReferencesBeforeWritingAReservation() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            fixture.service.acquire("harness", "runtime", "bootstrap").toCompletableFuture().join();
+            String digest = "sha256:" + "a".repeat(64);
+            // The extra field rides inside the reference, so the request passes the
+            // envelope shape and envelope/reference equality checks and is refused by
+            // the service's own reference-shape check.
+            Map<String, Object> reference = new HashMap<>(Map.of("sessionId", "runtime",
+                    "promptId", "turn", "callId", "call", "argsDigest", digest));
+            reference.put("input", Map.of());
+            HttpResponse<String> response = fixture.post("/executions:prepare", Map.of(
+                    "protocolVersion", 1, "requestId", "prepare", "idempotencyKey", "key",
+                    "harnessSessionId", "harness", "runtimeSessionId", "runtime", "turnId", "turn",
+                    "toolCallId", "call", "requestDigest", digest, "reference", reference));
             assertEquals(400, response.statusCode(), response.body());
             assertTrue(response.body().contains("runtime_reference_invalid"), response.body());
             assertNull(fixture.executions.findByIdempotencyKey("key"));

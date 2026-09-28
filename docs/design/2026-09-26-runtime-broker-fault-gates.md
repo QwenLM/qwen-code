@@ -85,13 +85,12 @@ Kubernetes provisioning, and Stage G failover. The failover modes of
 
 Two test adapters close gaps in production code:
 
-- `FaultGateTransport`. The v2 worker contract has no Session verbs, and
-  `HttpRuntimeTransport` fails `acquire` and `release` with 501
-  (`runtime_session_verb_unsupported`), so the service cannot reach dispatch
-  with the production transport alone. The adapter passes attest, execute,
-  status and cancel to `HttpRuntimeTransport` and, except under the
-  `MANAGED` placement below, answers those two verbs locally. The tool contract design lists the Session verbs as
-  follow-up work.
+- `FaultGateTransport`. `HttpRuntimeTransport` implements the Session verbs
+  (acquire answers Broker-local; release goes through the provider control
+  route), so the adapter delegates both to the production transport. Under
+  the `MANAGED` placement below its acquire additionally performs the
+  W0c-3-style context installation and activation through
+  `HttpRuntimeTransport`.
 - `RecoverableProcessProvisioner`. `LocalProcessRuntimeProvisioner` keeps
   worker ownership in memory, so a Broker in another process can never
   observe a worker. The adapter wraps the production provisioner, which still
@@ -278,8 +277,8 @@ patched the bundled worker instead of the Java code:
   window. FG4 covers the process-level takeover around it.
 - The gates need POSIX signals and run on Linux in CI.
 - Loss of the attestation answer during adoption is not covered. The Session
-  verbs have no worker routes yet; FG5 covers only what a managed acquire
-  does, installation and activation.
+  verbs run through the provider control route; FG5 covers only what a
+  managed acquire does, installation and activation.
 - FG5 exercises the Broker's W0c-2 path and the worker, not the managed agent
   server. `FaultGateTransport` mirrors only W0c-3's installation and
   activation calls; its storage ownership, grant rechecks and directory
@@ -295,7 +294,10 @@ patched the bundled worker instead of the Java code:
 - A call waiting at the activation gate when the worker closes stays
   deferred, as the worker design records.
 - Follow-up: run the crash and takeover gates on MySQL, flip the two pins
-  when durable local adoption and #12670 land, and drop
-  `FaultGateTransport` once `HttpRuntimeTransport` implements the Session
-  verbs. Flip the context-directory pin when the Broker closes the Session
-  on a context refusal, or settles the refusal as `not_started`.
+  when durable local adoption and #12670 land. `FaultGateTransport` now
+  delegates both Session verbs to `HttpRuntimeTransport` (its remaining role
+  is the MANAGED placement's install/activate), so the earlier "drop it once
+  the transport implements the Session verbs" precondition is met; the
+  adapter stays only for that placement. Flip the context-directory pin when
+  the Broker closes the Session on a context refusal, or settles the refusal
+  as `not_started`.

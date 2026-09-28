@@ -197,7 +197,7 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
         Map<String, Object> reference = requiredObject(body, "reference", "execution request");
         if (prepare && !body.keySet().equals(Set.of("protocolVersion", "requestId", "idempotencyKey",
                 "harnessSessionId", "runtimeSessionId", "turnId", "toolCallId", "requestDigest", "reference"))) {
-            throw new RuntimeBrokerException(400, "runtime_reference_invalid",
+            throw new RuntimeBrokerException(400, "runtime_broker_invalid_request",
                     "Prepared execution fields are invalid.", false);
         }
         if (prepare && (!runtimeSessionId.equals(reference.get("sessionId"))

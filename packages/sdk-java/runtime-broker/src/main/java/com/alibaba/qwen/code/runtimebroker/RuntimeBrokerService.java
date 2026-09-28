@@ -233,7 +233,14 @@ public final class RuntimeBrokerService implements AutoCloseable {
             }
             Map<String, Object> deferred = new LinkedHashMap<>(immutable);
             deferred.put("dispatchMode", "deferred");
-            immutable = Map.copyOf(deferred);
+            try {
+                immutable = Map.copyOf(deferred);
+            } catch (NullPointerException nullValue) {
+                // immutableMap admits null values; keep the rejection on the
+                // stage channel as a 400 rather than a synchronous NPE.
+                return CompletableFuture.failedFuture(invalid("runtime_reference_invalid",
+                        "Deferred execution reference is invalid"));
+            }
         }
         return createExecutionReceipt(harnessSessionId, runtimeSessionId, key, immutable, false);
     }

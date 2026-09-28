@@ -21,7 +21,9 @@ reference 和原始参数；provider 使用七字段的已准备调用 reference
 `/internal/managed-runtime/provider/v1/control` 使用封闭信封：
 `protocolVersion: 1`、`providerProtocol: managed-runtime-provider/1`、`session`
 和 `operation`。Session 包含 `harnessSessionId`、`runtimeSessionId` 及
-`turnKind`（`bootstrap` 或 `continuation`）。成功响应重复版本、协议与 Session，
+`turnKind`（`bootstrap` 或 `continuation`）。两个 Session id 都采用仓库内各
+生产方本就生成的小写 UUID 形式；其他拼写在信封处即被拒绝，早于该 id 成为
+core 会话 id 或文件历史目录名的任何时机。成功响应重复版本、协议与 Session，
 并包含 `result`；无返回值时为 null。现有 bearer、lease 和 epoch 请求头隔离选中的
 物理 Runtime。
 
@@ -38,8 +40,13 @@ reference 和未知字段。不支持的版本与操作明确失败，不回退�
 Content-Encoding。TypeScript 客户端保留限长原因。这些诊断信息不能证明执行是否已开始。
 
 历史控制请求与响应限制为 8 MiB，其他操作为 1 MiB。工具参数还受 core 既有的
-256 KiB 规范化 JSON 限制；满足外层信封限制并不绕过参数限制。相同完整 Session 身份的获取
-与释放幂等。同一 Runtime Session 换用 Harness 或 turn kind 会产生冲突。释放拒绝
+256 KiB 规范化 JSON 限制；满足外层信封限制并不绕过参数限制。超出所属操作响应
+预算的结果会被适配而非拒绝：worker 先淘汰最旧的 progress 事件（通过
+`firstAvailableSeq`/`progressGap` 告知），再把大文本字段按首尾截断并内联标记，
+shell 展示置 `truncated`，因此已结算的执行始终保有终态观察，释放也始终可应答。
+Broker 自身无法编码的超大操作，在发送前即以确定且不可重试的 413 拒绝。相同完整
+Session 身份的获取与释放幂等。同一 Runtime Session 换用 Harness 或 turn kind 会
+产生冲突。释放拒绝
 运行中的工作，取消尚未预留的准备调用，并永久关闭新操作准入，不清除当前回合的
 状态/取消证据。开始新回合仍遵循 runtime 既有清理策略；较早已派发的调用仍保留在
 Broker 持久日志中。Broker HTTP 可在 Session 非 READY 时读取归属已验证的终态执行回执；
@@ -109,6 +116,11 @@ HTTP 操作解析持久化 Harness Session。消费者为 `BrokerManagedRuntimeP
 worker 日志仅属于当前代际。重启 worker 不能从 Broker reference 行恢复准备参数或
 审批。恢复保持失败关闭。私有契约测试成功不代表公开 Workspace 回合启用，也不宣称
 完整 Hosted 产品已就绪。
+
+immediate `POST /executions` 路由仍从已保存的 reference 读取 `toolName`/`input`，
+其调用方必须把工具参数保存在 `reference_json` 中——这正是工具契约 §4.1 禁止写入
+持久状态的形态。deferred reserve/start 路径与本协议才是负载分离的路由；把同样的
+分离扩展到 immediate 路由是后续工作。
 
 释放后，私有 worker 路由保留当前回合的状态/取消证据及已绑定的文件历史状态；较早回合的
 调用条目仍可能被清理。释放后，Broker 执行检查可返回持久终态回执，无需重开 worker；

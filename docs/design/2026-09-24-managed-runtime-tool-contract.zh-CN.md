@@ -2,7 +2,7 @@
 
 [English](2026-09-24-managed-runtime-tool-contract.md) | [简体中文](2026-09-24-managed-runtime-tool-contract.zh-CN.md)
 
-状态：契约、worker 处理器与 Java 工具 transport 已实现；Broker transport 接入仍为后续工作
+状态：契约、worker 处理器与 Java 工具 transport 已实现；Broker transport 经 `managed-runtime-provider/1` 接入（见 [2026-09-27-broker-provider-control.zh-CN.md](2026-09-27-broker-provider-control.zh-CN.md)）
 
 相关：#12380（Managed Agent 分阶段交付）、[2026-09-22-managed-runtime-attestation-contract.md](2026-09-22-managed-runtime-attestation-contract.md) 的 attestation 契约，以及 #12380 上本契约所答复的对账讨论。
 
@@ -76,7 +76,7 @@ reference 是 harness 分配的原始调用身份；Runtime 不会得知任何 B
 
 ## 5. 后续工作
 
-- 完成会话操作并将 `HttpRuntimeTransport` 接为 `RuntimeTransport`。按 §4.1 所述从已保存的 reference 之外单独提供 `toolName`/`input`，并端到端覆盖真实 Broker 分发。
+- ~~完成会话操作并将 `HttpRuntimeTransport` 接为 `RuntimeTransport`。~~ 已经由 `managed-runtime-provider/1` 协议落地，见 [2026-09-27-broker-provider-control.zh-CN.md](2026-09-27-broker-provider-control.zh-CN.md)。§4.1 仍存的缺口：immediate `POST /executions` 路由仍然从已保存的 reference 读取 `toolName`/`input`，其调用方必须把工具参数持久化进 `reference_json`；请改用 deferred reserve/start 路径或 provider 协议。为 immediate 路由提供同样的负载分离仍为后续工作。
 - `UNKNOWN` 执行对账器已在 #12655 落地。其 transport 必须先校验 status 线上信封，再投影为 `{state, result}`（仅 `settled` 携带 `result`）。去掉 `protocolVersion` 与 `lastSequence`；Broker 拒绝额外字段，目前没有游标消费方。
 - 对 Runtime 报告仍在运行的执行是否发送物理取消，有意推迟。
 

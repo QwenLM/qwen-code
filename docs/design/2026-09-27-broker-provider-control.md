@@ -25,7 +25,10 @@ The authenticated, no-store POST route
 `/internal/managed-runtime/provider/v1/control` carries a closed envelope:
 `protocolVersion: 1`, `providerProtocol: managed-runtime-provider/1`, `session`
 and `operation`. Session contains `harnessSessionId`, `runtimeSessionId` and
-`turnKind` (`bootstrap` or `continuation`). Every successful response repeats
+`turnKind` (`bootstrap` or `continuation`). Both Session ids use the lowercase
+UUID form every in-repo producer already generates; the worker rejects any
+other spelling at the envelope, before the id can become core's session id or
+a file-history directory name. Every successful response repeats
 the version, protocol and Session and contains `result`; void results are null.
 Existing bearer, lease and epoch headers fence the selected physical Runtime.
 
@@ -49,6 +52,13 @@ This diagnostic evidence does not establish whether execution started.
 Control requests and responses are bounded at 8 MiB for history and 1 MiB for
 other operations. Tool arguments also have the existing core limit of 256 KiB
 of canonical JSON; fitting the outer envelope does not bypass that limit.
+A result that would exceed its operation's response budget is fitted rather
+than refused: the worker first evicts oldest progress events (announced
+through `firstAvailableSeq`/`progressGap`), then cuts bulk text fields
+head-and-tail with an inline notice and sets `truncated` on shell displays,
+so a settled execution always keeps a terminal observation and release stays
+answerable. An oversized operation the Broker itself cannot encode is refused
+with a definitive, non-retryable 413 before anything is sent.
 Acquisition and release are idempotent for the same complete
 Session identity. Reusing a Runtime Session for another Harness or turn kind
 is a conflict. Release refuses running work, cancels preparations that have not
@@ -149,6 +159,13 @@ The worker journal is generation-local. A restarted worker cannot recover
 prepared inputs or approvals from Broker reference rows. Recovery stays fail
 closed. A successful private contract test does not enable public Workspace
 turns or claim complete Hosted product readiness.
+
+The immediate `POST /executions` route still reads `toolName`/`input` from
+the stored reference, so its callers must keep tool arguments in
+`reference_json` — the shape the tool contract's §4.1 forbids for durable
+state. The deferred reserve/start path and this protocol are the
+payload-separated routes; extending that separation to the immediate route is
+follow-up work.
 
 After release, the private worker route retains status/cancellation evidence
 for the current turn and any bound file-history state; earlier turns' invocation

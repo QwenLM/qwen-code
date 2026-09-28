@@ -252,9 +252,16 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
     }
 
     /**
-     * Runs one tool call to settlement. The reference carries the identity
-     * four plus {@code toolName} and {@code input}; nothing else may ride
-     * along. Returns the settled result map.
+     * Runs one tool call to settlement. Two reference shapes select two
+     * protocols: the caller reference (the identity four plus
+     * {@code toolName} and {@code input}) dispatches over Tool v2 and settles
+     * to an {@code executionStatus}/{@code responseParts}/{@code error} map,
+     * while a seven-field prepared reference (the identity four plus
+     * {@code invocationId} and {@code argsDigest}, and no
+     * {@code toolName}/{@code input}) dispatches over the provider control
+     * protocol and settles to an {@code executionStatus}/{@code result}/
+     * {@code error}/{@code postHook}/{@code failureHook} map. Nothing else
+     * may ride along in either mode.
      */
     public CompletionStage<Map<String, Object>> execute(RuntimeLease lease,
             RuntimeSession session, Map<String, Object> reference) {
@@ -610,7 +617,17 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
                 "operation", operation);
         String kind = (String) operation.get("kind");
         int limit = ProviderRuntimeProtocol.limit(kind);
-        return post(lease, ProviderRuntimeProtocol.PATH, encodeToolRequest(body, limit), limit)
+        byte[] encoded;
+        try {
+            encoded = encodeToolRequest(body, limit);
+        } catch (IllegalArgumentException tooLarge) {
+            // An oversized operation can never succeed; answer the definitive
+            // 413 shape instead of letting a runtime exception degrade to a
+            // retryable 503 downstream.
+            throw new RuntimeBrokerException(413, "runtime_control_operation_too_large",
+                    "Runtime provider operation exceeds its size limit.", false);
+        }
+        return post(lease, ProviderRuntimeProtocol.PATH, encoded, limit)
                 .thenApply(bytes -> {
                     Map<String, Object> response;
                     try {
