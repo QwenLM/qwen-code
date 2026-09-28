@@ -3141,6 +3141,14 @@ describe('ExtensionStore.inspectEmptiness', () => {
       'the extension store holds an unexpected entry',
     ],
     [
+      'a file named like the state that the store never writes',
+      async () => {
+        await makeStore().ensureInitialized([]);
+        await fsp.writeFile(path.join(storeDir, 'state.json.bak'), '{}');
+      },
+      'the extension store holds an unexpected entry',
+    ],
+    [
       'a link in place of a transaction directory',
       async () => {
         await makeStore().ensureInitialized([]);

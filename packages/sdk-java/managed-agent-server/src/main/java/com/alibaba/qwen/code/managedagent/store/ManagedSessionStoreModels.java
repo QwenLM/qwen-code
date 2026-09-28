@@ -17,6 +17,8 @@ public final class ManagedSessionStoreModels {
     public static final int MAX_RESOURCES_PER_TRANSACTION = 1024;
     public static final int MAX_TRANSACTION_BYTES = 8 * 1024 * 1024;
     public static final int MAX_TRANSACTION_EVENTS = 256;
+    /** The deepest record line the Session authority's reader accepts. */
+    public static final int MAX_JSON_DEPTH = 64;
     public static final int MIN_WRITER_TOKEN_LENGTH = 32;
     public static final int MAX_WRITER_TOKEN_LENGTH = 512;
     public static final long MIN_LEASE_MILLIS = 1_000;
