@@ -1060,6 +1060,34 @@ describe('executeSearchMemory', () => {
     expect(searchResult.results[0]?.content?.startsWith('charlie')).toBe(true);
   });
 
+  it.each([
+    [[1000, 1316, 2000], 700],
+    [[1000, 2000, 2900], 700],
+  ] as const)(
+    'excludes body matches that only touch a window boundary',
+    async (positions, expectedStart) => {
+      const keywords = [
+        'marker alpha one',
+        'marker bravo two',
+        'marker charl tri',
+      ];
+      let body = '';
+      for (const [index, keyword] of keywords.entries()) {
+        body += 'x'.repeat(positions[index]! - body.length) + keyword;
+      }
+      body += 'x'.repeat(4000 - body.length);
+
+      const result = await executeSearchMemory(
+        { mode: 'search', keywords },
+        options([doc('project/window-boundary.md', { body })]),
+      );
+
+      expect(
+        expectContentResult(result, 'search').results[0]?.range?.start,
+      ).toBe(expectedStart);
+    },
+  );
+
   it('maps normalized match offsets back to the original body', async () => {
     const body = `${'\n'.repeat(3000)}${'A'.repeat(3000)}target phrase${'B'.repeat(2000)}`;
     const result = await executeSearchMemory(
