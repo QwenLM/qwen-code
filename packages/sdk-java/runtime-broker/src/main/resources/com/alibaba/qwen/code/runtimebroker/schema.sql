@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS qwen_runtime_binding_slot (
     isolation_class VARCHAR(32) NOT NULL,
     isolation_key VARCHAR(512),
     provisioner_kind VARCHAR(512) NOT NULL,
+    storage_id VARCHAR(256),
     last_generation BIGINT NOT NULL,
     active_binding_id VARCHAR(512)
 );
@@ -24,6 +25,7 @@ CREATE TABLE IF NOT EXISTS qwen_runtime_binding (
     isolation_class VARCHAR(32) NOT NULL,
     isolation_key VARCHAR(512),
     provisioner_kind VARCHAR(512) NOT NULL,
+    storage_id VARCHAR(256),
     runtime_generation BIGINT NOT NULL,
     binding_state VARCHAR(32) NOT NULL,
     provision_request_id VARCHAR(512),

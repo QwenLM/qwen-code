@@ -3,7 +3,6 @@ package com.alibaba.qwen.code.managedagent.api;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.CommandAdmission;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.DeletedSession;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.CreateSessionRequest;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicEvent;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicItemList;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicList;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicSession;
@@ -13,7 +12,6 @@ import com.alibaba.qwen.code.managedagent.service.ManagedAgentService;
 import com.alibaba.qwen.code.managedagent.service.ManagedAgentService.SessionMutationResult;
 import com.alibaba.qwen.code.managedagent.service.ManagedEventStreamService;
 import jakarta.validation.Valid;
-import java.util.List;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
@@ -45,16 +43,30 @@ public class PublicAgentController {
     public ResponseEntity<PublicSession> create(TenantContext tenant,
             @RequestHeader("Idempotency-Key") String idempotencyKey,
             @Valid @RequestBody CreateSessionRequest request) {
+        WorkspaceSelection selection = null;
+        if (request.workspace() != null) {
+            if (request.workspace().isNull()) {
+                throw new ApiException(HttpStatus.BAD_REQUEST,
+                        "invalid_request", "Workspace cannot be null.");
+            }
+            selection = WorkspaceSelection.parse(request.workspace(), false);
+            tenant.requireActorId();
+        }
         if (Boolean.TRUE.equals(request.stream())) {
             throw new ApiException(HttpStatus.BAD_REQUEST,
                     "unsupported_feature",
                     "Phase 1 streams through the Session events route.");
         }
-        CommandAdmission admission = service.createSession(
-                tenant.tenantId(), idempotencyKey, request.agentId(), null,
-                request.metadata(), request.input());
+        CommandAdmission admission = selection == null
+                ? service.createSession(tenant.tenantId(), idempotencyKey,
+                        request.agentId(), request.agentRevision(), null,
+                        request.metadata(), request.input())
+                : service.createWorkspaceSession(tenant.tenantId(),
+                        tenant.requireActorId(), idempotencyKey,
+                        request.agentId(), request.agentRevision(), null,
+                        request.metadata(), request.input(), selection);
         PublicSession session = service.getPublicSession(tenant.tenantId(),
-                admission.sessionId());
+                tenant.actorId(), admission.sessionId());
         return ResponseEntity.status(HttpStatus.ACCEPTED)
                 .header("X-Qwen-Idempotent-Replay",
                         Boolean.toString(admission.replayed()))
@@ -65,13 +77,15 @@ public class PublicAgentController {
     public PublicList<PublicSession> list(TenantContext tenant,
             @RequestParam(required = false) String cursor,
             @RequestParam(defaultValue = "20") int limit) {
-        return service.listPublicSessions(tenant.tenantId(), cursor, limit);
+        return service.listPublicSessions(tenant.tenantId(), tenant.actorId(),
+                cursor, limit);
     }
 
     @GetMapping("/{sessionId}")
     public PublicSession get(TenantContext tenant,
             @PathVariable String sessionId) {
-        return service.getPublicSession(tenant.tenantId(), sessionId);
+        return service.getPublicSession(tenant.tenantId(),
+                tenant.actorId(), sessionId);
     }
 
     @PatchMapping("/{sessionId}")
@@ -79,7 +93,7 @@ public class PublicAgentController {
             @PathVariable String sessionId,
             @RequestHeader("Idempotency-Key") String idempotencyKey,
             @Valid @RequestBody UpdateSessionRequest request) {
-        return mutation(service.renameSession(tenant.tenantId(),
+        return mutation(service.renameSession(tenant.tenantId(), tenant.actorId(),
                 idempotencyKey, sessionId, request.title()));
     }
 
@@ -87,7 +101,7 @@ public class PublicAgentController {
     public ResponseEntity<PublicSession> archive(TenantContext tenant,
             @PathVariable String sessionId,
             @RequestHeader("Idempotency-Key") String idempotencyKey) {
-        return mutation(service.archiveSession(tenant.tenantId(),
+        return mutation(service.archiveSession(tenant.tenantId(), tenant.actorId(),
                 idempotencyKey, sessionId));
     }
 
@@ -95,7 +109,7 @@ public class PublicAgentController {
     public ResponseEntity<PublicSession> unarchive(TenantContext tenant,
             @PathVariable String sessionId,
             @RequestHeader("Idempotency-Key") String idempotencyKey) {
-        return mutation(service.unarchiveSession(tenant.tenantId(),
+        return mutation(service.unarchiveSession(tenant.tenantId(), tenant.actorId(),
                 idempotencyKey, sessionId));
     }
 
@@ -104,7 +118,7 @@ public class PublicAgentController {
             @PathVariable String sessionId,
             @RequestHeader("Idempotency-Key") String idempotencyKey) {
         SessionMutationResult<DeletedSession> result = service.deleteSession(
-                tenant.tenantId(), idempotencyKey, sessionId);
+                tenant.tenantId(), tenant.actorId(), idempotencyKey, sessionId);
         return ResponseEntity.ok()
                 .header("X-Qwen-Idempotent-Replay",
                         Boolean.toString(result.replayed()))
@@ -118,7 +132,7 @@ public class PublicAgentController {
             @Valid @RequestBody SessionEventRequest request) {
         CommandAdmission admission;
         if ("agent.session.input.message".equals(request.type())) {
-            admission = service.submitTurn(tenant.tenantId(),
+            admission = service.submitTurn(tenant.tenantId(), tenant.actorId(),
                     idempotencyKey, sessionId, request.input());
         } else if ("agent.session.cancel".equals(request.type())) {
             if (request.turnId() == null || request.turnId().isBlank()) {
@@ -126,7 +140,7 @@ public class PublicAgentController {
                         "turn_id_required",
                         "Cancellation requires turn_id.");
             }
-            admission = service.cancelTurn(tenant.tenantId(),
+            admission = service.cancelTurn(tenant.tenantId(), tenant.actorId(),
                     idempotencyKey, sessionId, request.turnId());
         } else {
             throw new ApiException(HttpStatus.BAD_REQUEST,
@@ -152,12 +166,11 @@ public class PublicAgentController {
         boolean wantsStream = stream || (accept != null
                 && accept.contains(MediaType.TEXT_EVENT_STREAM_VALUE));
         if (wantsStream) {
-            return streams.publicStream(tenant.tenantId(), sessionId,
-                    cursor);
+            return streams.publicStream(tenant.tenantId(), tenant.actorId(),
+                    sessionId, cursor);
         }
-        List<PublicEvent> events = service.publicEvents(tenant.tenantId(),
+        return service.publicEvents(tenant.tenantId(), tenant.actorId(),
                 sessionId, cursor, limit);
-        return new PublicList<>("list", events, false, null);
     }
 
     @GetMapping("/{sessionId}/items")
@@ -165,8 +178,8 @@ public class PublicAgentController {
             @PathVariable String sessionId,
             @RequestParam(defaultValue = "0") long after,
             @RequestParam(defaultValue = "20") int limit) {
-        return service.listPublicItems(tenant.tenantId(), sessionId, after,
-                limit);
+        return service.listPublicItems(tenant.tenantId(), tenant.actorId(),
+                sessionId, after, limit);
     }
 
     private static long parseSequence(String header, long fallback) {

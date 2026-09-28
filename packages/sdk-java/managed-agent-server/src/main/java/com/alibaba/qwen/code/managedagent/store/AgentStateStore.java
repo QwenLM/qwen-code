@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.store;
 
+import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.Admission;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.CommandRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.DispatchTarget;
@@ -8,6 +9,7 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.EventRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.HarnessEvent;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.MaterializationResult;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.MaterializationTarget;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.ReplayWindow;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionPage;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutationCommand;
@@ -22,8 +24,17 @@ import java.util.Optional;
 public interface AgentStateStore {
     Admission insertSessionCommand(String tenantId, String operation,
             String idempotencyKey, String requestDigest, String agentId,
-            String title, List<Map<String, Object>> input,
-            String payloadDigest);
+            String requestedRevision, String title,
+            List<Map<String, Object>> input, String payloadDigest);
+
+    Admission insertWorkspaceSessionCommand(String tenantId, String actorId,
+            String idempotencyKey, String requestDigest, String agentId,
+            String requestedRevision, String title,
+            List<Map<String, Object>> input, String payloadDigest,
+            WorkspaceSelection selection);
+
+    Admission replayWorkspaceSessionCommand(String tenantId, String actorId,
+            String idempotencyKey, String requestDigest);
 
     Admission insertTurnCommand(String tenantId, String operation,
             String idempotencyKey, String requestDigest, String sessionId,
@@ -49,7 +60,8 @@ public interface AgentStateStore {
 
     Optional<SessionRecord> findSessionById(String sessionId);
 
-    SessionPage listSessions(String tenantId, Long beforeUpdatedAt,
+    SessionPage listSessions(String tenantId, String actorId,
+            Long beforeUpdatedAt,
             String beforeSessionId, int limit);
 
     Optional<TurnRecord> findTurn(String tenantId, String sessionId,
@@ -73,6 +85,10 @@ public interface AgentStateStore {
 
     Optional<SnapshotRecord> findSnapshot(String tenantId,
             String sessionId);
+
+    long findSnapshotCoveredSequence(String tenantId, String sessionId);
+
+    ReplayWindow findReplayWindow(String tenantId, String sessionId);
 
     List<MaterializationTarget> findMaterializationTargets(int limit);
 
