@@ -1307,7 +1307,10 @@ describe('BackgroundAgentResumeService', () => {
   it.each<
     [
       string,
-      { tools?: string[] | string | null; disallowedTools?: string[] },
+      {
+        tools?: string[] | string | null;
+        disallowedTools?: string[] | string;
+      },
       boolean,
       ToolMode?,
     ]
@@ -1328,6 +1331,15 @@ describe('BackgroundAgentResumeService', () => {
     // Only unvalidated SDK `initialize.agents` JSON produces this. Launch
     // resolves it to zero tools, so resume must neither throw nor list.
     ['declares a non-array tools value', { tools: 'read_file' }, false],
+    // Same ingress, sibling field. Launch resolves a scalar blocklist one
+    // character at a time (`"skill"` → `['s','k','i','l','l']`), so it denies
+    // nothing and the agent keeps the Skill tool: resume must neither throw
+    // (`blocklist.some is not a function`) nor drop the listing.
+    [
+      'declares a non-array disallowedTools value',
+      { disallowedTools: ToolNames.SKILL },
+      true,
+    ],
     // Under CodeModeOnly a finite list naming `exec` reaches `skill` through
     // the code-mode gateway, so launch keeps the manager and resume must keep
     // the listing. Dropping the tool-mode argument at the resume call site —

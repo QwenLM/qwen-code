@@ -125,10 +125,13 @@ const CONTAINER_EXECUTION_BLOCKED_REASON =
  * is the definition layer's "inherit everything" marker, while the `ToolConfig`
  * layer reads it as deny-all. A non-array value, which only unvalidated SDK
  * `initialize.agents` JSON can produce, resolves to zero tools at launch, so it
- * has no Skill tool here either. Names are otherwise matched as written — the
- * launch path also resolves display names through `convertToRuntimeConfig` and
- * this helper does not, so a definition that uses one can still drift.
- * Pre-existing, and outside #12424's measured scope.
+ * has no Skill tool here either. The same ingress can produce a non-array
+ * `disallowedTools`, which launch resolves one character at a time into entries
+ * that name no tool, so it denies nothing there and is dropped here. Names are
+ * otherwise matched as written — the launch path also resolves display names
+ * through `convertToRuntimeConfig` and this helper does not, so a definition
+ * that uses one can still drift. Pre-existing, and outside #12424's measured
+ * scope.
  */
 function subagentWillHaveSkillTool(
   subagentConfig: SubagentConfig | undefined,
@@ -140,10 +143,20 @@ function subagentWillHaveSkillTool(
   if (tools != null && !Array.isArray(tools)) {
     return false;
   }
+  const disallowedTools = subagentConfig?.disallowedTools;
   return toolConfigAllowsSkill(
     {
       tools: tools?.length ? tools : ['*'],
-      disallowedTools: subagentConfig?.disallowedTools,
+      // Launch reads `config.disallowedTools?.length`, which a non-empty string
+      // satisfies, and hands it to `resolveToolNames`, whose `for...of` walks
+      // the string per character and preserves every character as-is: the
+      // launched agent's blocklist is `['s','k','i','l','l']` for `"skill"`,
+      // which denies nothing. Dropping the scalar here mirrors that, and keeps
+      // `matchesAgentToolBlocklist` off a value whose `.length` passes its
+      // guard but which has no `.some`.
+      disallowedTools: Array.isArray(disallowedTools)
+        ? disallowedTools
+        : undefined,
     },
     codeModeOnly,
   );
