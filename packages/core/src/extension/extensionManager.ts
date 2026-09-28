@@ -115,6 +115,7 @@ import {
   resolveManagedExtensionsDir,
 } from './managed-extension-dir.js';
 import {
+  ExtensionConflictError,
   ExtensionStore,
   type ExtensionActivation,
   type ExtensionActivationResult,
@@ -1450,6 +1451,7 @@ export class ExtensionManager {
         async () => {
           let managedListFailed = false;
           let unnamedManagedFailure = false;
+          const manifestlessManagedDirs = new Set<string>();
           const discovered = await this.loadDiscoveredExtensions(
             this.workspaceDir,
             {
@@ -1462,6 +1464,13 @@ export class ExtensionManager {
                 // can still be a deployed package the stale-entry branch
                 // would otherwise hand back to a same-name user copy.
                 if (failure.name === undefined) unnamedManagedFailure = true;
+              },
+              onManagedEntrySkipped: (directory) => {
+                // A present entry whose manifest is momentarily missing (a
+                // non-atomic deploy) cannot prove its own package withdrawn.
+                manifestlessManagedDirs.add(
+                  path.basename(directory).toLowerCase(),
+                );
               },
             },
           );
@@ -1489,6 +1498,7 @@ export class ExtensionManager {
               this.managedExtensionsDir !== undefined &&
               !managedListFailed &&
               !unnamedManagedFailure,
+            unprovenManagedNames: manifestlessManagedDirs,
           };
         },
         {
@@ -1545,6 +1555,7 @@ export class ExtensionManager {
         async () => {
           let managedListFailed = false;
           let unnamedManagedFailure = false;
+          const manifestlessManagedDirs = new Set<string>();
           const loadedAll = await this.loadDiscoveredExtensions(
             this.workspaceDir,
             {
@@ -1554,6 +1565,11 @@ export class ExtensionManager {
               },
               onManagedLoadFailure: (failure) => {
                 if (failure.name === undefined) unnamedManagedFailure = true;
+              },
+              onManagedEntrySkipped: (directory) => {
+                manifestlessManagedDirs.add(
+                  path.basename(directory).toLowerCase(),
+                );
               },
             },
           );
@@ -1577,6 +1593,7 @@ export class ExtensionManager {
               this.managedExtensionsDir !== undefined &&
               !managedListFailed &&
               !unnamedManagedFailure,
+            unprovenManagedNames: manifestlessManagedDirs,
           };
         },
         {
@@ -1679,10 +1696,9 @@ export class ExtensionManager {
         installMetadata.source.length > 0
           ? installMetadata.source
           : extensionRoot;
-      const manifestName =
-        getAgentPluginSchemaStatus(effectiveRoot) === 'unrelated'
-          ? EXTENSIONS_CONFIG_FILENAME
-          : AGENT_PLUGIN_MANIFEST;
+      const manifestName = agentPluginManifestGoverns(effectiveRoot)
+        ? AGENT_PLUGIN_MANIFEST
+        : EXTENSIONS_CONFIG_FILENAME;
       let manifestPath = path.join(effectiveRoot, manifestName);
       let followManifestSymlink = true;
       if (manifestName === AGENT_PLUGIN_MANIFEST) {
@@ -1815,6 +1831,7 @@ export class ExtensionManager {
       manifestOnly?: boolean;
       createDataDir?: boolean;
       onListFailure?: (extensionsDir: string, error: unknown) => void;
+      onEntrySkipped?: (extensionDir: string) => void;
     } = {},
     onLoadFailure?: (
       extensionDir: string,
@@ -1852,10 +1869,15 @@ export class ExtensionManager {
         directory: string;
         name?: string;
       }) => void;
+      onManagedEntrySkipped?: (directory: string) => void;
     } = {},
   ): Promise<Extension[]> {
-    const { onManagedListFailure, onManagedLoadFailure, ...loadOptions } =
-      options;
+    const {
+      onManagedListFailure,
+      onManagedLoadFailure,
+      onManagedEntrySkipped,
+      ...loadOptions
+    } = options;
     const failedManaged: Array<{
       directory: string;
       error: unknown;
@@ -1865,6 +1887,7 @@ export class ExtensionManager {
       workspaceDir,
       {
         ...loadOptions,
+        onEntrySkipped: onManagedEntrySkipped,
         onListFailure: (directory, error) => {
           // A root that cannot be listed at all releases every reservation
           // at once: same-name user copies are then admitted because the
@@ -2020,6 +2043,7 @@ export class ExtensionManager {
         extensionName?: string,
       ) => void;
       onListFailure?: (extensionsDir: string, error: unknown) => void;
+      onEntrySkipped?: (extensionDir: string) => void;
     } = {},
   ): Promise<Extension[]> {
     const source = options.source ?? 'user';
@@ -2043,6 +2067,7 @@ export class ExtensionManager {
           createDataDir: options.createDataDir,
           source,
           onLoadFailure: options.onLoadFailure,
+          onEntrySkipped: options.onEntrySkipped,
         },
       );
       if (extension != null) {
@@ -2193,6 +2218,10 @@ export class ExtensionManager {
         error: unknown,
         extensionName?: string,
       ) => void;
+      // A managed entry skipped for holding no manifest. Not a failure — the
+      // entry reserves no name — but a present entry cannot prove its own
+      // package withdrawn, so absence-proof callers need the skip.
+      onEntrySkipped?: (extensionDir: string) => void;
     } = {},
   ): Promise<Extension | null> {
     const { extensionDir } = context;
@@ -2244,7 +2273,10 @@ export class ExtensionManager {
           return null;
         }
       }
-      if (!hasManifest) return null;
+      if (!hasManifest) {
+        options.onEntrySkipped?.(extensionDir);
+        return null;
+      }
     }
 
     let extension: Extension | undefined;
@@ -2469,20 +2501,7 @@ export class ExtensionManager {
     context: LoadExtensionContext,
   ): LoadedExtensionManifest {
     const { extensionDir, workspaceDir = this.workspaceDir } = context;
-    const agentPluginStatus = getAgentPluginSchemaStatus(extensionDir);
-    // An unreadable plugin.json only governs when it is the directory's only
-    // manifest: a valid qwen-extension.json next to a stray or truncated
-    // plugin.json must keep loading as a Qwen extension, as it did before
-    // the 'unreadable' status existed. The managed governing-manifest probe
-    // keeps the strict reading so a plugin.json-only managed package still
-    // fails loudly and reserves its name.
-    const agentPluginGoverns =
-      agentPluginStatus !== 'unrelated' &&
-      !(
-        agentPluginStatus === 'unreadable' &&
-        fs.existsSync(path.join(extensionDir, EXTENSIONS_CONFIG_FILENAME))
-      );
-    if (agentPluginGoverns) {
+    if (agentPluginManifestGoverns(extensionDir)) {
       try {
         return {
           format: 'agent-plugins-v1',
@@ -3226,12 +3245,15 @@ export class ExtensionManager {
           identity: { id: extensionId, name: newExtensionName },
           stagingDirectory: stagingPath,
           destinationDirectory: destinationPath,
+          // The marker-drop gate probes on non-adopting commits too (a plain
+          // update of a retained managed policy), so the managed id and the
+          // workspace cwds ride with both operations.
+          adoptionProbeWorkspaceCwds: [this.workspaceDir],
+          adoptionProbeManagedId: getManagedExtensionId(newExtensionName),
           ...(!isUpdate
             ? {
                 initialActivation,
                 allowManagedPolicyAdoption: true,
-                adoptionProbeWorkspaceCwds: [this.workspaceDir],
-                adoptionProbeManagedId: getManagedExtensionId(newExtensionName),
               }
             : {}),
           ...(expectedArtifactGeneration === undefined
@@ -3475,14 +3497,12 @@ export class ExtensionManager {
           identity: prepared.identity,
           stagingDirectory: prepared.stagingDirectory,
           destinationDirectory: prepared.destinationDirectory,
+          adoptionProbeWorkspaceCwds: [this.workspaceDir],
+          adoptionProbeManagedId: getManagedExtensionId(prepared.identity.name),
           ...(prepared.operation === 'install'
             ? {
                 initialActivation: prepared.initialActivation,
                 allowManagedPolicyAdoption: true,
-                adoptionProbeWorkspaceCwds: [this.workspaceDir],
-                adoptionProbeManagedId: getManagedExtensionId(
-                  prepared.identity.name,
-                ),
               }
             : {
                 expectedArtifactGeneration:
@@ -3761,12 +3781,21 @@ export class ExtensionManager {
           throw new ManagedExtensionReadOnlyError(policy.name);
         }
         const failedManaged: Array<{ directory: string; name?: string }> = [];
+        const manifestlessManagedDirs = new Set<string>();
         let managedRootUnreadable = false;
         const manageds = await this.loadManagedExtensions(
           this.workspaceDir,
           {
             onListFailure: () => {
               managedRootUnreadable = true;
+            },
+            onEntrySkipped: (directory) => {
+              // A present entry whose manifest is momentarily missing (a
+              // non-atomic deploy) reserves no name, but it cannot prove its
+              // own package withdrawn either — the release below destroys.
+              manifestlessManagedDirs.add(
+                path.basename(directory).toLowerCase(),
+              );
             },
           },
           (directory, _error, name) => {
@@ -3779,6 +3808,9 @@ export class ExtensionManager {
         for (const failed of failedManaged) {
           managedNames.add(path.basename(failed.directory).toLowerCase());
           if (failed.name) managedNames.add(failed.name.toLowerCase());
+        }
+        for (const skipped of manifestlessManagedDirs) {
+          managedNames.add(skipped);
         }
         if (
           managedRootUnreadable ||
@@ -3795,32 +3827,66 @@ export class ExtensionManager {
         // user-scope settings directory when it holds nothing but settings
         // (a real artifact directory — e.g. a shadowed user copy — is never
         // touched here).
-        await clearStoredExtensionSecrets(policy.name, extensionId, [
-          this.workspaceDir,
-        ]);
-        const settingsDirectory = path.join(this.configDir, policy.name);
-        const entries = await fs.promises
-          .readdir(settingsDirectory, { withFileTypes: true })
-          .catch((error: unknown) => {
-            if ((error as NodeJS.ErrnoException).code === 'ENOENT')
-              return undefined;
-            throw error;
-          });
-        if (
-          entries?.every(
-            (entry) =>
-              entry.name === EXTENSION_SETTINGS_FILENAME && entry.isFile(),
-          )
-        ) {
-          await fs.promises.rm(settingsDirectory, {
-            recursive: true,
-            force: true,
-          });
-        }
+        //
+        // The store transition commits FIRST: the destroy steps are
+        // irreversible, so they run only once the release has landed — a
+        // contended lock throws here with the secrets and the settings
+        // directory untouched, and a record that changed concurrently
+        // (removePolicy then silently keeps it) fails the release instead of
+        // being destroyed under a live policy.
         const released = await this.extensionStore.removePolicy({
           id: extensionId,
           name: policy.name,
         });
+        if (released.extensions[extensionId] !== undefined) {
+          throw new ExtensionConflictError(
+            `Extension "${policy.name}" changed while its release was being committed.`,
+          );
+        }
+        const warnings: NonNullable<ExtensionStoreMutationResult['warnings']> =
+          [];
+        try {
+          await clearStoredExtensionSecrets(policy.name, extensionId, [
+            this.workspaceDir,
+          ]);
+        } catch (error) {
+          debugLogger.warn(
+            `Managed extension "${policy.name}" was released, but stored-secret cleanup failed: ${getErrorMessage(error)}`,
+          );
+          warnings.push({
+            code: 'extension_secrets_cleanup_failed',
+            error: getErrorMessage(error),
+          });
+        }
+        try {
+          const settingsDirectory = path.join(this.configDir, policy.name);
+          const entries = await fs.promises
+            .readdir(settingsDirectory, { withFileTypes: true })
+            .catch((error: unknown) => {
+              if ((error as NodeJS.ErrnoException).code === 'ENOENT')
+                return undefined;
+              throw error;
+            });
+          if (
+            entries?.every(
+              (entry) =>
+                entry.name === EXTENSION_SETTINGS_FILENAME && entry.isFile(),
+            )
+          ) {
+            await fs.promises.rm(settingsDirectory, {
+              recursive: true,
+              force: true,
+            });
+          }
+        } catch (error) {
+          debugLogger.warn(
+            `Managed extension "${policy.name}" was released, but settings cleanup failed: ${getErrorMessage(error)}`,
+          );
+          warnings.push({
+            code: 'extension_settings_cleanup_failed',
+            error: getErrorMessage(error),
+          });
+        }
         // Mirror the regular uninstall: the retained managed policy's
         // lifetime preferences (favorites, scope, disabled MCP servers)
         // leave with it. A failure here must not abort the release.
@@ -3831,7 +3897,7 @@ export class ExtensionManager {
             `Managed extension "${policy.name}" was released, but preference cleanup failed: ${getErrorMessage(error)}`,
           );
         }
-        return released;
+        return warnings.length > 0 ? { ...released, warnings } : released;
       }
       if (extension) await this.assertUserManagedExtension(extension);
       if (!policy || policy.declarationOnly) return snapshot;
@@ -4184,6 +4250,25 @@ function withDeclaredExtensionName(
 
 function getManagedExtensionId(name: string): string {
   return hashValue(`managed:${name.toLowerCase()}`);
+}
+
+// The manifest the loader parses and the manifest the fingerprint stamps
+// must be chosen by the same rule or the two drift: an unreadable
+// plugin.json governs only when it is the directory's only manifest, so a
+// valid qwen-extension.json next to a stray or truncated plugin.json loads
+// — and must be stamped — as a Qwen extension. The managed skip probe in
+// loadExtension deliberately keeps the strict `=== 'unrelated'` reading
+// instead: an unrelated plugin.json (no agent-plugins $schema) does not
+// make the directory an extension when qwen-extension.json is absent.
+function agentPluginManifestGoverns(extensionDir: string): boolean {
+  const status = getAgentPluginSchemaStatus(extensionDir);
+  return (
+    status !== 'unrelated' &&
+    !(
+      status === 'unreadable' &&
+      fs.existsSync(path.join(extensionDir, EXTENSIONS_CONFIG_FILENAME))
+    )
+  );
 }
 
 export function getExtensionId(

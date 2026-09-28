@@ -13,7 +13,7 @@ import {
   ExtensionManager,
   ManagedExtensionReadOnlyError,
 } from './extensionManager.js';
-import { ExtensionStore } from './extension-store.js';
+import { ExtensionConflictError, ExtensionStore } from './extension-store.js';
 import {
   updateSetting,
   getScopedEnvContents,
@@ -495,6 +495,173 @@ describe('managed extension activation migration', () => {
         ExtensionSettingScope.USER,
       ),
     ).toEqual({});
+  });
+
+  it("keeps the managed package's secrets and settings when the release commit fails", async () => {
+    const settings = [
+      {
+        name: 'Endpoint',
+        description: 'Public endpoint',
+        envVar: 'PUBLIC_ENDPOINT',
+      },
+      {
+        name: 'Token',
+        description: 'Secret token',
+        envVar: 'API_TOKEN',
+        sensitive: true,
+      },
+    ];
+    const managedPackage = path.join(managedExtensionsDir, 'deployed');
+    writePackage(managedPackage, '2.0.0');
+    fs.writeFileSync(
+      path.join(managedPackage, 'qwen-extension.json'),
+      JSON.stringify({ name, version: '2.0.0', settings }),
+    );
+    const deployed = manager();
+    await deployed.refreshCache();
+    const [managed] = deployed.getLoadedExtensions();
+    // A settings write for the managed package creates the user-scope
+    // settings directory (non-sensitive values) and a backend entry
+    // (sensitive values) under the managed identity.
+    await updateSetting(
+      managed.config,
+      managed.id,
+      'Endpoint',
+      async () => 'https://example.invalid/saved',
+      ExtensionSettingScope.USER,
+    );
+    await updateSetting(
+      managed.config,
+      managed.id,
+      'Token',
+      async () => 'super-secret-value',
+      ExtensionSettingScope.USER,
+    );
+    const userDirectory = path.join(
+      process.env['QWEN_HOME']!,
+      'extensions',
+      name,
+    );
+    expect(fs.readdirSync(userDirectory)).toEqual(['.env']);
+    expect(await hasStoredExtensionSecrets(name, managed.id)).toBe(true);
+
+    fs.rmSync(managedPackage, { recursive: true });
+    await deployed.refreshCache();
+
+    // The destroy steps are irreversible, so they must run only after the
+    // store transition lands: a failing removePolicy aborts the release with
+    // the secrets and the settings directory untouched.
+    const removePolicy = vi
+      .spyOn(ExtensionStore.prototype, 'removePolicy')
+      .mockRejectedValueOnce(new Error('store busy'));
+    try {
+      await expect(
+        deployed.uninstallExtensionById(managed.id, false),
+      ).rejects.toThrow('store busy');
+    } finally {
+      removePolicy.mockRestore();
+    }
+    expect(await hasStoredExtensionSecrets(name, managed.id)).toBe(true);
+    expect(fs.existsSync(userDirectory)).toBe(true);
+    expect(
+      (await deployed.getExtensionStoreSnapshot()).extensions[managed.id],
+    ).toMatchObject({ managed: true, name });
+
+    // A removePolicy that silently keeps the record (a concurrent rename
+    // between the guard's read and the locked write) must fail the release
+    // the same way instead of destroying under a live policy.
+    const unchanged = await deployed.getExtensionStoreSnapshot();
+    const noOp = vi
+      .spyOn(ExtensionStore.prototype, 'removePolicy')
+      .mockResolvedValueOnce(unchanged);
+    try {
+      await expect(
+        deployed.uninstallExtensionById(managed.id, false),
+      ).rejects.toBeInstanceOf(ExtensionConflictError);
+    } finally {
+      noOp.mockRestore();
+    }
+    expect(await hasStoredExtensionSecrets(name, managed.id)).toBe(true);
+    expect(fs.existsSync(userDirectory)).toBe(true);
+    expect(
+      (await deployed.getExtensionStoreSnapshot()).extensions[managed.id],
+    ).toMatchObject({ managed: true, name });
+
+    // The failure is transient: with the store healthy again the release
+    // completes and cleans up.
+    await deployed.uninstallExtensionById(managed.id, false);
+    expect(await hasStoredExtensionSecrets(name, managed.id)).toBe(false);
+    expect(fs.existsSync(userDirectory)).toBe(false);
+  });
+
+  it('refuses the by-id release while the deployed package holds no manifest', async () => {
+    // A non-atomic deploy leaves the directory in place with the manifest
+    // momentarily missing: the release branch destroys secrets, so a present
+    // entry must count as unproven absence, not as a withdrawal.
+    const managedPackage = path.join(managedExtensionsDir, name);
+    writePackage(managedPackage, '2.0.0');
+    const deployed = manager();
+    await deployed.refreshCache();
+    const [managed] = deployed.getLoadedExtensions();
+    fs.rmSync(path.join(managedPackage, 'qwen-extension.json'));
+    // Refresh so the cache drops the entry: the by-id branch's guarded
+    // release is what must refuse, not the still-warm cache.
+    await deployed.refreshCache();
+    expect(deployed.getLoadedExtensions()).toEqual([]);
+    await expect(
+      deployed.uninstallExtensionById(managed.id, false),
+    ).rejects.toBeInstanceOf(ManagedExtensionReadOnlyError);
+    expect(
+      (await deployed.getExtensionStoreSnapshot()).extensions[managed.id]
+        ?.managed,
+    ).toBe(true);
+  });
+
+  it('keeps the retained managed policy when the deployed package loses its manifest mid-deploy', async () => {
+    const settings = [
+      {
+        name: 'Token',
+        description: 'Secret token',
+        envVar: 'API_TOKEN',
+        sensitive: true,
+      },
+    ];
+    writePackage(
+      path.join(process.env['QWEN_HOME']!, 'extensions', 'user-copy'),
+      '1.0.0',
+    );
+    // The directory basename matches the declared name, the shape deployment
+    // tooling produces when it copies the package non-atomically.
+    const managedPackage = path.join(managedExtensionsDir, name);
+    writePackage(managedPackage, '2.0.0');
+    fs.writeFileSync(
+      path.join(managedPackage, 'qwen-extension.json'),
+      JSON.stringify({ name, version: '2.0.0', settings }),
+    );
+    const deployed = manager();
+    await deployed.refreshCache();
+    const [managed] = deployed.getLoadedExtensions();
+    await updateSetting(
+      managed.config,
+      managed.id,
+      'Token',
+      async () => 'super-secret-value',
+      ExtensionSettingScope.USER,
+    );
+    expect(await hasStoredExtensionSecrets(name, managed.id)).toBe(true);
+
+    // A non-atomic deploy leaves the directory in place with the manifest
+    // momentarily missing. Present is not withdrawn: the hand-back must not
+    // fire and destroy the still-deployed package's secrets.
+    fs.rmSync(path.join(managedPackage, 'qwen-extension.json'));
+    await deployed.refreshCache();
+
+    const snapshot = await deployed.getExtensionStoreSnapshot();
+    const policy = Object.values(snapshot.extensions).find(
+      (candidate) => candidate.name === name,
+    );
+    expect(policy?.managed).toBe(true);
+    expect(await hasStoredExtensionSecrets(name, managed.id)).toBe(true);
   });
 
   it('rejects installing over a managed source hidden by a name-filtered cache', async () => {

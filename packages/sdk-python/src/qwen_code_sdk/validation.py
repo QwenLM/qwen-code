@@ -85,6 +85,70 @@ _RESERVED_CLI_FLAGS = frozenset(
 )
 
 
+def _yargs_camel_case(value: str) -> str:
+    """yargs-parser's camelCase, mirrored: hyphens and underscores are word
+    separators, and an already mixed-case word is not lowercased first. The
+    grammar is the entrance surface here, so the port must stay exact — an
+    approximation drifts from what the CLI actually binds.
+    """
+    is_mixed_case = value != value.lower() and value != value.upper()
+    word = value if is_mixed_case else value.lower()
+    if "-" not in word and "_" not in word:
+        return word
+    camel = ""
+    upper_next = False
+    i = 0
+    while i < len(word) and word[i] == "-":
+        i += 1
+    for j in range(i, len(word)):
+        chr_ = word[j]
+        if upper_next:
+            upper_next = False
+            chr_ = chr_.upper()
+        if j != 0 and chr_ in ("-", "_"):
+            upper_next = True
+        elif chr_ not in ("-", "_"):
+            camel += chr_
+    return camel
+
+
+_RESERVED_KEYS = frozenset(
+    _yargs_camel_case(flag.lstrip("-")) for flag in _RESERVED_CLI_FLAGS
+)
+
+
+def _is_reserved_arg(arg: str) -> bool:
+    """Canonicalize the way yargs binds a token before the lookup:
+    - ``--flag=value`` carries the value in the same token, and an inline
+      value disables boolean negation (``--no-sandbox=true`` binds
+      ``noSandbox``, not ``sandbox``), so the ``no-`` fold applies only
+      without ``=``.
+    - camel-case-expansion adds a camelCase alias key only when the key
+      contains a hyphen, and that expansion also splits on underscores, so
+      ``--allowed_mcp-server-names`` binds ``allowedMcpServerNames``.
+    - dot-notation nests under the first segment (``--m.x`` binds ``m``,
+      which alias-propagates to ``--model``), so the top-level key is the
+      segment before the first dot.
+    - a single-dash group binds every character (``-dm value`` binds
+      ``-m``), so any reserved short flag anywhere in the group is a match.
+    """
+    if arg.startswith("--"):
+        eq = arg.find("=")
+        key = arg[2:] if eq == -1 else arg[2:eq]
+        if eq == -1 and key.startswith("no-"):
+            key = key[len("no-") :]
+        top_level = key.split(".")[0]
+        if top_level in _RESERVED_KEYS:
+            return True
+        return "-" in key and _yargs_camel_case(top_level) in _RESERVED_KEYS
+    flag = arg.split("=")[0]
+    if flag.startswith("-") and len(flag) > 1:
+        return any(
+            f"-{char.lower()}" in _RESERVED_CLI_FLAGS for char in flag[1:]
+        )
+    return False
+
+
 def validate_query_options(options: QueryOptions) -> None:
     if (
         options.permission_mode
@@ -178,10 +242,9 @@ def validate_query_options(options: QueryOptions) -> None:
         for arg in options.extra_args:
             if not arg:
                 raise ValidationError("extra_args items cannot be empty")
-            flag = arg.split("=", 1)[0]
-            if flag in _RESERVED_CLI_FLAGS:
+            if _is_reserved_arg(arg):
                 raise ValidationError(
-                    f"extra_args cannot contain reserved flag: {flag}"
+                    f"extra_args cannot contain reserved flag: {arg.split('=', 1)[0]}"
                 )
 
     for field_name in (

@@ -77,6 +77,12 @@ export type WorkspaceActivation = ExtensionActivation | 'inherit';
 export interface ExtensionPolicy {
   name: string;
   managed?: true;
+  // The managed identity's spelling at claim time. The re-key migrations
+  // overwrite `name` with the returning user identity's spelling — possibly
+  // re-cased — while the keychain service name embeds the episode-era
+  // spelling case-sensitively. The hand-back and the secret probes must use
+  // this record, or they address a service name the episode never wrote.
+  managedName?: string;
   artifactDirectory?: string;
   artifactGeneration?: number;
   declarationOnly?: true;
@@ -114,6 +120,11 @@ export interface ExtensionStoreSnapshot {
 
 interface ManagedHandBackOptions {
   managedAbsenceProven?: boolean;
+  // Lowercased basenames of managed-root entries that are present but hold
+  // no manifest. A present entry — a package mid-deploy — cannot prove its
+  // own withdrawal, so the hand-back skips a policy whose name matches one
+  // even when absence is otherwise proven.
+  unprovenManagedNames?: ReadonlySet<string>;
   // Fired once per policy whose managed marker the proven-withdrawal
   // hand-back deletes. Secrets written during the managed episode live
   // under the managed identity and every cleanup path keys on the marker
@@ -165,18 +176,20 @@ export interface CommitExtensionArtifactInput {
   /** The caller verified that no same-name managed source is currently available. */
   allowManagedPolicyAdoption?: boolean;
   /**
-   * Workspace cwds the adoption gate must probe for stored workspace-scope
-   * secrets. The service name folds the writing process's cwd, and the
-   * committing process (e.g. a daemon) is not necessarily it — the probe
-   * must never cover a narrower cwd set than the release path's clear.
+   * Workspace cwds the stored-secret probes must cover — the adoption gate
+   * and the marker-drop gate for non-adopting commits alike. The service
+   * name folds the writing process's cwd, and the committing process (e.g. a
+   * daemon) is not necessarily it — the probe must never cover a narrower
+   * cwd set than the release path's clear.
    */
   adoptionProbeWorkspaceCwds?: readonly string[];
   /**
    * The id the managed episode's secrets were stored under. The store cannot
    * derive it — it does not know the managed id formula — so a caller
-   * authorizing an adoption must supply it: a retained managed policy may
-   * have been re-keyed onto the same-name user identity, and probing only
-   * the record's current key would miss the managed-era credentials.
+   * committing over a possibly retained managed policy must supply it: the
+   * policy may have been re-keyed onto the same-name user identity, and
+   * probing only the record's current key would miss the managed-era
+   * credentials.
    */
   adoptionProbeManagedId?: string;
 }
@@ -383,6 +396,9 @@ function parseState(
       typeof parsed.name === 'string' &&
       /^[a-zA-Z0-9-_.]+$/.test(parsed.name) &&
       (parsed.managed === undefined || parsed.managed === true) &&
+      (parsed.managedName === undefined ||
+        (typeof parsed.managedName === 'string' &&
+          /^[a-zA-Z0-9-_.]+$/.test(parsed.managedName))) &&
       (parsed.artifactDirectory === undefined ||
         (typeof parsed.artifactDirectory === 'string' &&
           /^[a-zA-Z0-9-_.]+$/.test(parsed.artifactDirectory) &&
@@ -527,14 +543,17 @@ export class ExtensionStore {
       value: T;
       extensions: readonly ExtensionIdentity[];
       managedAbsenceProven?: boolean;
+      unprovenManagedNames?: ReadonlySet<string>;
     }>,
     options: ManagedHandBackOptions = {},
   ): Promise<{ value: T; snapshot: ExtensionStoreSnapshot }> {
     return await this.withLock(async () => {
-      const { value, extensions, managedAbsenceProven } = await readArtifacts();
+      const { value, extensions, managedAbsenceProven, unprovenManagedNames } =
+        await readArtifacts();
       const snapshot = await this.ensureInitializedUnlocked(extensions, {
         ...options,
         managedAbsenceProven,
+        unprovenManagedNames,
       });
       return { value, snapshot };
     });
@@ -767,6 +786,7 @@ export class ExtensionStore {
         if (managed === (policy.managed === true)) continue;
         if (managed) {
           policy.managed = true;
+          policy.managedName = identity.name;
           // The record the name-keyed migration just handed to this managed
           // identity may still carry the user package's home-path rules.
           // The managed activation clear deletes legacyPathRules outright,
@@ -794,12 +814,18 @@ export class ExtensionStore {
             );
           }
           changed = true;
-        } else if (managedAbsenceProven) {
+        } else if (
+          managedAbsenceProven &&
+          !options.unprovenManagedNames?.has(identity.name.toLowerCase())
+        ) {
+          const handBackName =
+            policy.managedName ??
+            managedHandBackNames.get(identity.id) ??
+            policy.name;
           delete policy.managed;
+          delete policy.managedName;
           restorePreservedActivationSurface(policy);
-          options.onManagedHandBack?.(
-            managedHandBackNames.get(identity.id) ?? policy.name,
-          );
+          options.onManagedHandBack?.(handBackName);
           changed = true;
         }
         // Absence unproven: the policy keeps its managed marker and stash so
@@ -841,6 +867,7 @@ export class ExtensionStore {
       };
       if (identity.source === 'managed') {
         policy.managed = true;
+        policy.managedName = identity.name;
         // A policy born managed never passes the claim-time stash, so stamp
         // the pre-managed baseline here: the birth default with no workspace
         // state. Without it a managed-era disable would become the user
@@ -919,23 +946,33 @@ export class ExtensionStore {
           : nameConflict![0];
         // A retained managed policy can have been re-keyed onto the
         // same-name user identity while its managed-era secrets still live
-        // under the managed id — probe both, or the adoption orphans them.
+        // under the managed id — and the re-key can re-case the record while
+        // the keychain service name keeps the episode-era spelling. Probe
+        // every spelling the record has carried against both ids, or the
+        // adoption orphans them.
+        const retainedProbeNames = new Set(
+          [retainedPolicy.name, retainedPolicy.managedName].filter(
+            (probeName): probeName is string => probeName !== undefined,
+          ),
+        );
         const retainedProbeIds = new Set([
           retainedIdentityId,
           input.adoptionProbeManagedId,
         ]);
-        for (const probeId of retainedProbeIds) {
-          if (
-            probeId !== undefined &&
-            (await hasStoredExtensionSecrets(
-              retainedPolicy.name,
-              probeId,
-              input.adoptionProbeWorkspaceCwds,
-            ))
-          ) {
-            throw new ExtensionConflictError(
-              `Extension "${input.identity.name}" cannot adopt the retained managed policy while stored credentials exist for it.`,
-            );
+        for (const probeName of retainedProbeNames) {
+          for (const probeId of retainedProbeIds) {
+            if (
+              probeId !== undefined &&
+              (await hasStoredExtensionSecrets(
+                probeName,
+                probeId,
+                input.adoptionProbeWorkspaceCwds,
+              ))
+            ) {
+              throw new ExtensionConflictError(
+                `Extension "${input.identity.name}" cannot adopt the retained managed policy while stored credentials exist for it.`,
+              );
+            }
           }
         }
         const stats = await fsp
@@ -1126,10 +1163,40 @@ export class ExtensionStore {
           input.operation === 'install' &&
           input.allowManagedPolicyAdoption === true &&
           retainedPolicy?.managed === true;
-        if (!adopted) {
+        if (!adopted && committed.managed === true) {
+          // A non-adopting commit carries no secrets cleanup, and every
+          // cleanup path keys on the marker being present — dropping it here
+          // would orphan the managed episode's credentials. Fail closed and
+          // let the proven-withdrawal hand-back own the transition.
+          const probeNames = new Set(
+            [committed.name, committed.managedName].filter(
+              (probeName): probeName is string => probeName !== undefined,
+            ),
+          );
+          const probeIds = new Set([
+            input.identity.id,
+            input.adoptionProbeManagedId,
+          ]);
+          for (const probeName of probeNames) {
+            for (const probeId of probeIds) {
+              if (
+                probeId !== undefined &&
+                (await hasStoredExtensionSecrets(
+                  probeName,
+                  probeId,
+                  input.adoptionProbeWorkspaceCwds,
+                ))
+              ) {
+                throw new ExtensionConflictError(
+                  `Extension "${input.identity.name}" cannot drop the retained managed policy marker while stored credentials exist for it.`,
+                );
+              }
+            }
+          }
           restorePreservedActivationSurface(committed);
         }
         delete committed.managed;
+        delete committed.managedName;
         delete committed.preservedLegacyPathRules;
         delete committed.preservedDefaultActivation;
         delete committed.preservedWorkspaceOverrides;

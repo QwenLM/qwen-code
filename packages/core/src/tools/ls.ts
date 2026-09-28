@@ -14,6 +14,7 @@ import {
   unescapePath,
   isSubpaths,
   isSubpath,
+  realpathNearestExisting,
 } from '../utils/paths.js';
 import type { Config } from '../config/config.js';
 import type { PermissionDecision } from '../permissions/types.js';
@@ -140,8 +141,13 @@ class LSToolInvocation extends BaseToolInvocation<LSToolParams, ToolResult> {
       workspaceContext.isPathWithinWorkspace(dirPath) ||
       isSubpaths(userSkillsDirs, dirPath) ||
       isSubpath(userExtensionsDir, dirPath) ||
+      // The managed root is matched against the canonicalized candidate:
+      // execute() follows symlinks, so a link shipped inside the root would
+      // otherwise get an unprompted listing of its out-of-root target. The
+      // root itself stays lexical — it is the canonical path pinned at the
+      // process boundary (see file-read-permission.ts).
       (managedExtensionsDir !== undefined &&
-        isSubpath(managedExtensionsDir, dirPath)) ||
+        isSubpath(managedExtensionsDir, realpathNearestExisting(dirPath))) ||
       isSubpath(getMemoryBaseDir(), dirPath)
     ) {
       return 'allow';

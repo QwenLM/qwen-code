@@ -104,9 +104,10 @@ describe('LSTool', () => {
 
     it('should return allow for paths within the managed extensions directory', async () => {
       // Outside every workspace dir: without the managed-root allowlist entry
-      // this listing would need a confirmation prompt.
-      const managedRoot = await fs.mkdtemp(
-        path.join(os.tmpdir(), 'qwen-ls-managed-'),
+      // this listing would need a confirmation prompt. The root is realpath'd
+      // because the production boundary pins the canonical path.
+      const managedRoot = await fs.realpath(
+        await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-ls-managed-')),
       );
       try {
         const managedTool = new LSTool({
@@ -122,6 +123,36 @@ describe('LSTool', () => {
         await fs.rm(managedRoot, { recursive: true, force: true });
       }
     });
+
+    // Windows cannot create directory symlinks without extra privileges.
+    it.skipIf(process.platform === 'win32')(
+      'should return ask for a symlink inside the managed extensions directory that points outside',
+      async () => {
+        // execute() follows symlinks, so the permission check must classify
+        // the link by its target, not by where it sits.
+        const managedRoot = await fs.realpath(
+          await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-ls-managed-')),
+        );
+        const outsideDir = await fs.realpath(
+          await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-ls-outside-')),
+        );
+        try {
+          await fs.symlink(outsideDir, path.join(managedRoot, 'link'), 'dir');
+          const managedTool = new LSTool({
+            ...mockConfig,
+            getManagedExtensionsDir: () => managedRoot,
+          } as unknown as Config);
+          const invocation = managedTool.build({
+            path: path.join(managedRoot, 'link'),
+          });
+          const permission = await invocation.getDefaultPermission();
+          expect(permission).toBe('ask');
+        } finally {
+          await fs.rm(managedRoot, { recursive: true, force: true });
+          await fs.rm(outsideDir, { recursive: true, force: true });
+        }
+      },
+    );
   });
 
   describe('execute', () => {

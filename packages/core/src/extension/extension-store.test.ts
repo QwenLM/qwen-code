@@ -16,7 +16,11 @@ import {
   ExtensionStore,
   ExtensionStoreCorruptError,
 } from './extension-store.js';
-import { ExtensionSettingScope, updateSetting } from './extensionSettings.js';
+import {
+  ExtensionSettingScope,
+  hasStoredExtensionSecrets,
+  updateSetting,
+} from './extensionSettings.js';
 import { KeychainTokenStorage } from '../mcp/token-storage/keychain-token-storage.js';
 import type { ExtensionConfig } from './extensionManager.js';
 import { mockCompromisedLock } from '../test-utils/mock-compromised-lock.js';
@@ -315,6 +319,7 @@ describe('ExtensionStore', () => {
           artifactGeneration: after.generation,
         };
         delete expectedPolicy.managed;
+        delete expectedPolicy.managedName;
         delete expectedPolicy.preservedDefaultActivation;
         delete expectedPolicy.preservedWorkspaceOverrides;
         expect(after.extensions).toEqual({ [userIdentity.id]: expectedPolicy });
@@ -3375,6 +3380,72 @@ describe('ExtensionStore', () => {
     expect(handedBackNames).toEqual(['MyExt']);
   });
 
+  it('hands back the stored spelling when the re-key happened in an earlier refresh', async () => {
+    const store = makeStore();
+    const managedId = 'f8'.repeat(32);
+    const userId = 'f9'.repeat(32);
+    await store.ensureInitialized([
+      { id: managedId, name: 'MyExt', source: 'managed' },
+    ]);
+    // Absence unproven: the policy is re-keyed onto the same-name user copy
+    // and keeps its marker, and the per-call spelling record does not
+    // survive into the next refresh.
+    await store.ensureInitialized([
+      { id: userId, name: 'myext', source: 'user' },
+    ]);
+
+    const handedBackNames: string[] = [];
+    const handedBack = await store.ensureInitialized(
+      [{ id: userId, name: 'myext', source: 'user' }],
+      {
+        managedAbsenceProven: true,
+        onManagedHandBack: (name) => {
+          handedBackNames.push(name);
+        },
+      },
+    );
+
+    expect(handedBack.extensions[userId]?.managed).toBeUndefined();
+    expect(handedBackNames).toEqual(['MyExt']);
+  });
+
+  it('hands back the stored spelling when a late legacy import rewrites the policy in the same refresh', async () => {
+    const store = makeStore();
+    const managedId = 'fa'.repeat(32);
+    const userId = 'fb'.repeat(32);
+    await store.ensureInitialized([{ id: userId, name: 'myext' }]);
+    // The managed package claims the user policy; the episode's secrets are
+    // stored under its spelling.
+    await store.ensureInitialized([
+      { id: managedId, name: 'MyExt', source: 'managed' },
+    ]);
+    // A legacy projection written after the claim (an older CLI process, or
+    // a hand edit of the enablement file) is newer than the state snapshot,
+    // so the withdrawal refresh re-imports it; the import rename must not
+    // lose the stored spelling.
+    const rule = `!${legacyWorkspaceRule(workspacePath())}*`;
+    await fsp.writeFile(
+      enablementPath,
+      JSON.stringify({ myext: { overrides: [rule] } }),
+    );
+    const future = new Date(Date.now() + 10_000);
+    await fsp.utimes(enablementPath, future, future);
+
+    const handedBackNames: string[] = [];
+    const handedBack = await store.ensureInitialized(
+      [{ id: userId, name: 'myext', source: 'user' }],
+      {
+        managedAbsenceProven: true,
+        onManagedHandBack: (name) => {
+          handedBackNames.push(name);
+        },
+      },
+    );
+
+    expect(handedBack.extensions[userId]?.managed).toBeUndefined();
+    expect(handedBackNames).toEqual(['MyExt']);
+  });
+
   it('restores a pre-managed default disable when the managed identity is withdrawn', async () => {
     const store = makeStore();
     const identity = { id: 'c1'.repeat(32), name: 'claimed' };
@@ -3957,6 +4028,113 @@ describe('ExtensionStore', () => {
       }),
     ).rejects.toBeInstanceOf(ExtensionConflictError);
     expect(await store.readSnapshot()).toEqual(before);
+  });
+
+  it('refuses to adopt a re-keyed managed policy whose secrets live under the managed-era spelling', async () => {
+    const store = makeStore();
+    const managed = {
+      id: 'f4'.repeat(32),
+      name: 'demo',
+      source: 'managed' as const,
+    };
+    const user = { id: 'f5'.repeat(32), name: 'Demo' };
+    await store.ensureInitialized([managed]);
+    await updateSetting(
+      {
+        name: managed.name,
+        settings: [
+          {
+            name: 'Token',
+            description: 'token',
+            envVar: 'API_TOKEN',
+            sensitive: true,
+          },
+        ],
+      } as unknown as ExtensionConfig,
+      managed.id,
+      'API_TOKEN',
+      async () => 'super-secret-value',
+      ExtensionSettingScope.USER,
+    );
+    // Absence unproven: the retained managed policy is re-keyed AND re-cased
+    // onto the user identity, keeping the marker. The keychain service name
+    // embeds the episode-era spelling case-sensitively, so probing only the
+    // record's current name misses the credential.
+    const rekeyed = await store.ensureInitialized([user]);
+    expect(rekeyed.extensions[user.id]?.managed).toBe(true);
+    expect(rekeyed.extensions[managed.id]).toBeUndefined();
+    const before = await store.readSnapshot();
+
+    const destination = path.join(extensionsDir, user.name);
+    const staging = await store.createStagingDirectory();
+    await fsp.writeFile(path.join(staging, 'qwen-extension.json'), '{}');
+    await expect(
+      store.commitArtifact({
+        operation: 'install',
+        identity: user,
+        destinationDirectory: destination,
+        stagingDirectory: staging,
+        initialActivation: { scope: 'user' },
+        allowManagedPolicyAdoption: true,
+        adoptionProbeManagedId: managed.id,
+      }),
+    ).rejects.toBeInstanceOf(ExtensionConflictError);
+    expect(await store.readSnapshot()).toEqual(before);
+  });
+
+  it('fails closed when a non-adopting update would drop the managed marker over stored secrets', async () => {
+    const store = makeStore();
+    const managed = {
+      id: '10'.repeat(32),
+      name: 'updated-managed',
+      source: 'managed' as const,
+    };
+    const user = { id: '11'.repeat(32), name: 'Updated-Managed' };
+    await store.ensureInitialized([managed]);
+    await updateSetting(
+      {
+        name: managed.name,
+        settings: [
+          {
+            name: 'Token',
+            description: 'token',
+            envVar: 'API_TOKEN',
+            sensitive: true,
+          },
+        ],
+      } as unknown as ExtensionConfig,
+      managed.id,
+      'API_TOKEN',
+      async () => 'super-secret-value',
+      ExtensionSettingScope.USER,
+    );
+    // Absence unproven: the retained policy is re-keyed onto the same-name
+    // user identity with the marker kept — and re-cased, so the probe must
+    // cover the managed-era spelling the credentials were written under.
+    const rekeyed = await store.ensureInitialized([user]);
+    expect(rekeyed.extensions[user.id]?.managed).toBe(true);
+
+    const destination = path.join(extensionsDir, user.name);
+    await fsp.mkdir(destination, { recursive: true });
+    const staging = await store.createStagingDirectory();
+    await fsp.writeFile(path.join(staging, 'qwen-extension.json'), '{}');
+    const before = await store.readSnapshot();
+    // An update commit carries no adoption semantics and no cleanup for the
+    // managed episode's secrets — every cleanup path keys on the marker, so
+    // the commit must fail closed rather than orphan the credentials.
+    await expect(
+      store.commitArtifact({
+        operation: 'update',
+        identity: user,
+        destinationDirectory: destination,
+        stagingDirectory: staging,
+        adoptionProbeManagedId: managed.id,
+      }),
+    ).rejects.toBeInstanceOf(ExtensionConflictError);
+    expect(await store.readSnapshot()).toEqual(before);
+    expect(await hasStoredExtensionSecrets(managed.name, managed.id)).toBe(
+      true,
+    );
   });
 
   it('fails closed when current and previous state are corrupt', async () => {
