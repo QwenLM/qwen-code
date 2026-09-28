@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.service.EmbeddedRuntimeBroker;
+import com.alibaba.qwen.code.managedagent.service.HarnessEventProjector;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
@@ -26,6 +27,7 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -97,10 +99,20 @@ class HostedWorkspaceToolTurnIT {
         runDriver(cases, "cancellation");
     }
 
+    @Test
+    @Timeout(180)
+    void disconnectedObserversResumeWithoutReplayingTheToolOnMySql() throws Exception {
+        assertThat(System.getProperty("mysql.url")).as("FG6e requires -Dmysql.url").startsWith("jdbc:mysql:");
+        assertThat(System.getProperty("mysql.user")).as("FG6e requires -Dmysql.user").isNotBlank();
+        assertThat(System.getProperty("os.name").toLowerCase()).doesNotContain("windows");
+        runDriver(List.of("sse-gap"), "sse-gap");
+    }
+
     private void runDriver(List<String> cases, String driverName) throws Exception {
         boolean faults = !driverName.equals("workspace-tool-turn");
         boolean storeFaults = driverName.equals("store-failure");
         boolean cancellations = driverName.equals("cancellation");
+        boolean sseGaps = driverName.equals("sse-gap");
         Path cli = Path.of(System.getProperty("qwen.cli.entry", "../../../dist/cli.js")).toAbsolutePath().normalize();
         assertThat(cli).isRegularFile();
         String node = System.getProperty("node.executable");
@@ -139,12 +151,18 @@ class HostedWorkspaceToolTurnIT {
             arguments.add(prefix + "root=" + workspaces.get(index));
             Files.createDirectory(workspaces.get(index).resolve("child"));
         }
-        try (var spring = (ServletWebServerApplicationContext) new SpringApplicationBuilder(
-                ManagedAgentServerApplication.class).run(arguments.toArray(String[]::new))) {
+        var application = new SpringApplicationBuilder(ManagedAgentServerApplication.class);
+        if (sseGaps) {
+            arguments.add("--qwen.managed-agent.events.poll-interval=60s");
+            arguments.add("--qwen.managed-agent.events.heartbeat-interval=60s");
+            application.initializers(context -> context.getBeanFactory().registerSingleton(
+                    "fg6eAuthentication", HostedSseGapProbe.authentication(tenant)));
+        }
+        try (var spring = (ServletWebServerApplicationContext) application.run(arguments.toArray(String[]::new))) {
             JdbcTemplate jdbc = spring.getBean(JdbcTemplate.class);
             if (faults) {
                 var metadata = jdbc.queryForMap("SELECT VERSION() AS version, @@version_comment AS engine");
-                System.out.println((cancellations ? "FG6D_DATABASE " : storeFaults ? "FG6B_DATABASE " : "FG6A_DATABASE ") + metadata);
+                System.out.println((sseGaps ? "FG6E_DATABASE " : cancellations ? "FG6D_DATABASE " : storeFaults ? "FG6B_DATABASE " : "FG6A_DATABASE ") + metadata);
                 assertThat(metadata.toString().toLowerCase()).containsAnyOf("mysql", "mariadb");
             }
             ManagedAgentStore store = spring.getBean(ManagedAgentStore.class);
@@ -190,6 +208,8 @@ class HostedWorkspaceToolTurnIT {
             }
             HostedCancellationProbe cancellationProbe = cancellations
                     ? new HostedCancellationProbe(jdbc, tenant, sessions, broker, gateServer) : null;
+            HostedSseGapProbe sseProbe = sseGaps ? new HostedSseGapProbe(jdbc, tenant, sessions.getFirst(), broker,
+                    store, spring.getBean(HarnessEventProjector.class), gateServer) : null;
             gateServer.start();
             List<String> triggers = new ArrayList<>();
             try {
@@ -214,7 +234,7 @@ class HostedWorkspaceToolTurnIT {
                     assertThat(driver.waitFor(130, TimeUnit.SECONDS)).as("Driver timeout: %s", Files.readString(log)).isTrue();
                     assertThat(driver.exitValue()).as("Driver output: %s", Files.readString(log)).isZero();
                     System.out.println(Files.readString(log));
-                    assertThat(Files.readString(log)).contains(cancellations ? "HOSTED_CANCELLATION_OK"
+                    assertThat(Files.readString(log)).contains(sseGaps ? "HOSTED_SSE_GAP_OK" : cancellations ? "HOSTED_CANCELLATION_OK"
                             : storeFaults ? "HOSTED_STORE_FAILURES_OK"
                             : faults ? "HOSTED_REPLY_LOSS_OK" : "HOSTED_WORKSPACE_TOOLS_OK");
                     JsonNode reports = faults ? new ObjectMapper().readTree(
@@ -222,7 +242,8 @@ class HostedWorkspaceToolTurnIT {
                     if (faults && cases.contains("status")) assertThat(statusGate.isDone()).isTrue();
                     for (int index = 0; index < workspaces.size(); index++) {
                         Path workspace = workspaces.get(index);
-                        if (cancellations) cancellationProbe.assertReport(sessions.get(index), reports.get(index));
+                        if (sseGaps) sseProbe.assertReport(reports.get(index));
+                        else if (cancellations) cancellationProbe.assertReport(sessions.get(index), reports.get(index));
                         else if (faults) assertFaultLedger(jdbc, tenant, sessions.get(index), index, reports.get(index), storeFaults);
                         else assertThat(Files.readString(workspace.resolve("child/proof.txt"))).isEqualTo("after");
                         assertThat(workspace.resolve("proof.txt")).doesNotExist();
@@ -235,6 +256,8 @@ class HostedWorkspaceToolTurnIT {
                 statusGate.complete(null);
                 gateServer.stop(0);
                 if (cancellationProbe != null) cancellationProbe.close();
+                if (sseGaps) spring.getBean(ExecutorService.class).shutdownNow();
+                if (sseProbe != null) sseProbe.close();
                 RuntimeException cleanupFailure = null;
                 for (String trigger : triggers) {
                     try {
