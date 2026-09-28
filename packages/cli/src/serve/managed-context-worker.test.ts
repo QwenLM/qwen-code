@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -36,6 +37,14 @@ import {
   type ManagedToolReference,
 } from './managed-runtime-tool-executor.js';
 import { computeManagedContextDigest } from './managed-workspace-binding.js';
+import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
+import { getShellConfiguration } from '@qwen-code/qwen-code-core/utils/shell-utils.js';
+import {
+  WORKSPACE_ACTIVATION_ROUTE,
+  WORKSPACE_CAPABILITY_DIGEST,
+  WORKSPACE_CONTEXT_CONFIG_REF,
+  WORKSPACE_EXECUTION_PROFILE,
+} from './managed-workspace-activation.js';
 
 interface Expected {
   readonly status: number;
@@ -78,6 +87,7 @@ const CONTEXT = '/internal/managed-runtime/v3/context';
 const EXECUTE = '/internal/managed-runtime/v2/execute';
 const STATUS = '/internal/managed-runtime/v2/status';
 const CANCEL = '/internal/managed-runtime/v2/cancel';
+const ACTIVATION = WORKSPACE_ACTIVATION_ROUTE.path;
 const UNAVAILABLE = {
   code: 'managed_context_unavailable',
   error: 'Managed context directory is unavailable.',
@@ -213,6 +223,22 @@ function shell(sessionId: string, callId: string, command: string) {
   };
 }
 
+/**
+ * A shell command that writes the session and project directory its shell
+ * sees to `file`, in any shell the Shell tool picks.
+ */
+function writeShellEnvironment(file: string): string {
+  const script =
+    "process.stdout.write([process.env.QWEN_CODE_SESSION_ID, process.env.QWEN_CODE_PROJECT_DIR].join('|'))";
+  return `"${process.execPath}" -e "${script}" > ${file}`;
+}
+
+/** The session a Runtime Session's calls run as. */
+function sessionKey(sessionId: string): string {
+  const digest = createHash('sha256').update(sessionId).digest('hex');
+  return `${BOOT.runtimeInstanceId}.${digest.slice(0, 32)}`;
+}
+
 function tools(directory: string) {
   return createManagedToolSet(directory, 'runtime-01');
 }
@@ -237,6 +263,25 @@ describe('Managed context worker boot', () => {
       }
     },
   );
+
+  it.each([
+    ['an encoded surrogate', Buffer.from([0xed, 0xa0, 0x80])],
+    ['a byte that is never UTF-8', Buffer.from([0xff])],
+  ])('refuses a boot v2 document with %s', async (_label, bytes) => {
+    const [before, after] = JSON.stringify({
+      ...BOOT,
+      mountRoot: '/mnt/X',
+    }).split('X');
+    const document = Buffer.concat([
+      Buffer.from(before!),
+      bytes,
+      Buffer.from(after!),
+    ]);
+
+    await expect(
+      readManagedRuntimeWorkerBoot(Readable.from([document])),
+    ).rejects.toThrow('Managed Runtime worker boot payload is invalid.');
+  });
 
   it('answers ready v2 and serves exactly the boot v2 routes', async () => {
     const worker = await startManagedRuntimeAttestationWorker(BOOT);
@@ -295,6 +340,40 @@ describe('Managed context worker boot', () => {
       })),
     );
     expect(toolStatuses).toEqual([400, 400, 400]);
+  });
+
+  it('mounts Tool v3 only when a local publisher is injected', async () => {
+    const worker = await startManagedRuntimeAttestationWorker(BOOT, {
+      prepare: async () => {
+        throw new Error('unexpected capture');
+      },
+      accept: async () => {
+        throw new Error('unexpected receipt');
+      },
+    });
+    openWorkers.add(worker);
+    const response = await post(
+      worker.ready.url,
+      '/internal/managed-runtime/v3/status',
+      {
+        protocolVersion: 3,
+        toolResult: 'managed-tool-result/1',
+        reference: {
+          sessionId: 'runtime-session-a',
+          promptId: 'turn-a',
+          callId: 'call-a',
+          argsDigest:
+            '424b16b9aa8d9f0648c8b2e91ecd9fb09faba205685214a7ccb01702b3dd0ce8',
+        },
+      },
+    );
+    expect(response.status).toBe(200);
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(await response.json()).toEqual({
+      protocolVersion: 3,
+      toolResult: 'managed-tool-result/1',
+      state: 'unknown',
+    });
   });
 
   it('answers 404 to the v3 routes under boot v1', async () => {
@@ -476,7 +555,7 @@ describe('Managed context installation', () => {
     },
   );
 
-  it('refuses a directory that does not exist and records nothing', async () => {
+  it('refuses a directory that does not exist, and the same request succeeds after a repair', async () => {
     const root = workspace();
     const origin = await startWorker({ ...BOOT, mountRoot: root });
     const request = installation('session-1', 'services/missing');
@@ -553,19 +632,18 @@ describe('Managed context installation', () => {
   });
 
   it.skipIf(process.platform === 'win32')(
-    "refuses a mount root in the other platform's form",
+    "refuses a mount root in the other platform's form without resolving it",
     async () => {
-      // Resolved as a relative path, the root would name this directory.
-      const relative = `C:\\qwen-host-root-${process.pid}`;
-      fs.mkdirSync(path.join(relative, 'services', 'api'), { recursive: true });
-      onTestFinished(() =>
-        fs.rmSync(relative, { recursive: true, force: true }),
-      );
-      const origin = await startWorker({ ...BOOT, mountRoot: relative });
+      // As a relative path, the root would resolve against the working
+      // directory.
+      const realpath = vi.spyOn(fs.promises, 'realpath');
+      onTestFinished(() => realpath.mockRestore());
+      const origin = await startWorker({ ...BOOT, mountRoot: 'C:\\ws' });
 
       expect(await refusals(origin, ['services/api'])).toStrictEqual([
         UNAVAILABLE,
       ]);
+      expect(realpath).not.toHaveBeenCalled();
     },
   );
 
@@ -647,6 +725,49 @@ describe('Managed context installation', () => {
     );
   });
 
+  it('records neither the operation nor the Session of a refused installation', async () => {
+    const root = workspace();
+    const origin = await startWorker({ ...BOOT, mountRoot: root });
+
+    const refused = await post(
+      origin,
+      CONTEXT,
+      installation('session-1', 'services/missing', 'op-1'),
+    );
+    // Had either been recorded, another context under the same operation and
+    // Session would conflict.
+    const other = await post(
+      origin,
+      CONTEXT,
+      installation('session-1', 'services/api', 'op-1'),
+    );
+
+    expect(await refused.json()).toStrictEqual(UNAVAILABLE);
+    expect(other.status).toBe(200);
+  });
+
+  it('refuses a directory whose access check fails', async () => {
+    const root = workspace();
+    const access = vi
+      .spyOn(fs.promises, 'access')
+      .mockRejectedValueOnce(
+        Object.assign(new Error('permission denied'), { code: 'EACCES' }),
+      );
+    onTestFinished(() => access.mockRestore());
+    const origin = await startWorker({ ...BOOT, mountRoot: root });
+    const request = installation('session-1', 'services/api');
+
+    const refused = await post(origin, CONTEXT, request);
+    const repaired = await post(origin, CONTEXT, request);
+
+    expect(access).toHaveBeenCalledWith(
+      realDirectory(root, 'services/api'),
+      fs.constants.R_OK | fs.constants.X_OK,
+    );
+    expect(await refused.json()).toStrictEqual(UNAVAILABLE);
+    expect(repaired.status).toBe(200);
+  });
+
   it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
     'refuses a directory the worker cannot read',
     async () => {
@@ -724,6 +845,84 @@ describe('Managed context tool gate', () => {
           )
           .trim(),
       ).toBe(sessionId);
+    }
+  });
+
+  it("gives each Session's shells its own session and project directory", async () => {
+    const root = workspace(['services/api', 'services/web']);
+    const origin = await startWorker({ ...BOOT, mountRoot: root });
+    const sessions = [
+      ['session-api', 'services/api'],
+      ['tenant/../session-web', 'services/web'],
+    ] as const;
+    for (const [index, [sessionId, cwdRelative]] of sessions.entries()) {
+      await post(
+        origin,
+        CONTEXT,
+        installation(sessionId, cwdRelative, `op-${index}`),
+      );
+    }
+    const environment = async (index: number, callId: string) => {
+      const [sessionId, cwdRelative] = sessions[index]!;
+      await post(
+        origin,
+        EXECUTE,
+        shell(sessionId, callId, writeShellEnvironment('env.txt')),
+      );
+      const directory = realDirectory(root, cwdRelative);
+      const [session, projectDirectory] = fs
+        .readFileSync(path.join(directory, 'env.txt'), 'utf8')
+        .split('|');
+      expect(projectDirectory).toBe(new Storage(directory).getProjectDir());
+      return session;
+    };
+
+    const api = await environment(0, 'call-1');
+    const web = await environment(1, 'call-2');
+    const apiAgain = await environment(0, 'call-3');
+
+    expect([api, web, apiAgain]).toEqual([
+      sessionKey('session-api'),
+      sessionKey('tenant/../session-web'),
+      sessionKey('session-api'),
+    ]);
+  });
+
+  it("keeps each Session's shell environment under concurrent calls", async () => {
+    const directories = ['services/a', 'services/b', 'services/c'];
+    const sessions = ['séance', 'сессия', '会话'];
+    const root = workspace(directories);
+    const origin = await startWorker({ ...BOOT, mountRoot: root });
+    for (const [index, cwdRelative] of directories.entries()) {
+      await post(
+        origin,
+        CONTEXT,
+        installation(sessions[index]!, cwdRelative, `op-${index}`),
+      );
+    }
+    const calls = [0, 1, 2, 0, 1, 2].map((index, call) => ({ index, call }));
+
+    await Promise.all(
+      calls.map(({ index, call }) =>
+        post(
+          origin,
+          EXECUTE,
+          shell(
+            sessions[index]!,
+            `call-${call}`,
+            writeShellEnvironment(`env-${call}.txt`),
+          ),
+        ),
+      ),
+    );
+
+    for (const { index, call } of calls) {
+      const directory = realDirectory(root, directories[index]!);
+      expect(
+        fs.readFileSync(path.join(directory, `env-${call}.txt`), 'utf8'),
+      ).toBe(
+        `${sessionKey(sessions[index]!)}|${new Storage(directory).getProjectDir()}`,
+      );
     }
   });
 
@@ -968,5 +1167,298 @@ describe('Managed context tool gate', () => {
         .trim()
         .split(/\r?\n/),
     ).toHaveLength(1);
+  });
+});
+
+describe('Managed Workspace execution activation', () => {
+  function fixedInstallation(sessionId: string, cwd = '.') {
+    const request = installation(sessionId, cwd);
+    const binding = {
+      ...request.binding,
+      contextConfigRef: WORKSPACE_CONTEXT_CONFIG_REF,
+    };
+    return {
+      ...request,
+      binding,
+      contextDigest: computeManagedContextDigest(binding),
+    };
+  }
+
+  function activation(
+    request: ReturnType<typeof fixedInstallation>,
+    operation = 'activate',
+  ) {
+    return {
+      protocolVersion: 1,
+      operation,
+      sessionId: request.sessionId,
+      contextDigest: request.contextDigest,
+      contextConfigRef: request.binding.contextConfigRef,
+      profile: WORKSPACE_EXECUTION_PROFILE,
+    };
+  }
+
+  it('pins the explicit frozen configuration and capability digests', () => {
+    const refs = 'managed-runtime-tools/1\0preapproved-workspace-tools/1';
+    const digest = (text: string) =>
+      `sha256:${createHash('sha256').update(text).digest('hex')}`;
+    expect(digest(refs)).toBe(WORKSPACE_CONTEXT_CONFIG_REF);
+    expect(digest(`${WORKSPACE_EXECUTION_PROFILE}\0${refs}`)).toBe(
+      WORKSPACE_CAPABILITY_DIGEST,
+    );
+  });
+
+  it('refuses activation for an unsupported frozen configuration', async () => {
+    const root = workspace();
+    const origin = await startWorker({
+      ...BOOT,
+      mountRoot: root,
+      capabilityDigest: WORKSPACE_CAPABILITY_DIGEST,
+    });
+    const request = installation('unsupported-profile', '.');
+    expect(request.binding.contextConfigRef).not.toBe(
+      WORKSPACE_CONTEXT_CONFIG_REF,
+    );
+    expect((await post(origin, CONTEXT, request)).status).toBe(200);
+    expect((await post(origin, ACTIVATION, activation(request))).status).toBe(
+      409,
+    );
+    expect(
+      (
+        await post(
+          origin,
+          EXECUTE,
+          shell(request.sessionId, 'unsupported', 'touch unsupported.txt'),
+        )
+      ).status,
+    ).toBe(409);
+    expect(fs.existsSync(path.join(root, 'unsupported.txt'))).toBe(false);
+  });
+
+  it('refuses workspace activation on a worker with a legacy capability', async () => {
+    const root = workspace();
+    const origin = await startWorker({ ...BOOT, mountRoot: root });
+    const request = fixedInstallation('legacy-capability');
+    expect((await post(origin, CONTEXT, request)).status).toBe(200);
+    expect((await post(origin, ACTIVATION, activation(request))).status).toBe(
+      409,
+    );
+  });
+
+  it('requires activation, writes from a subdirectory, and permanently closes on release', async () => {
+    const root = workspace();
+    fs.mkdirSync(path.join(root, 'child'));
+    const origin = await startWorker({
+      ...BOOT,
+      mountRoot: root,
+      capabilityDigest: WORKSPACE_CAPABILITY_DIGEST,
+    });
+    const request = fixedInstallation('active-session', 'child');
+    expect((await post(origin, CONTEXT, request)).status).toBe(200);
+    const call = shell(
+      request.sessionId,
+      'write',
+      'echo activated > proof.txt',
+    );
+    expect((await post(origin, EXECUTE, call)).status).toBe(409);
+    expect(fs.existsSync(path.join(root, 'child/proof.txt'))).toBe(false);
+    const activate = activation(request);
+    for (const invalid of [
+      { ...activate, extra: true },
+      { ...activate, contextDigest: BOOT.capabilityDigest },
+      { ...activate, profile: 'unknown' },
+      { ...activate, operation: ['activate'] },
+    ]) {
+      expect(
+        (await post(origin, ACTIVATION, invalid)).status,
+      ).toBeGreaterThanOrEqual(400);
+    }
+    expect(
+      (
+        await post(origin, ACTIVATION, activate, {
+          ...HEADERS,
+          authorization: 'Bearer invalid',
+        })
+      ).status,
+    ).toBe(401);
+    const receipt = {
+      ...activate,
+      runtimeInstanceId: BOOT.runtimeInstanceId,
+      runtimeIncarnation: BOOT.runtimeIncarnation,
+      epoch: BOOT.epoch,
+      active: true,
+    };
+    for (let attempt = 0; attempt < 2; attempt++) {
+      expect(await (await post(origin, ACTIVATION, activate)).json()).toEqual(
+        receipt,
+      );
+    }
+    expect(
+      (await (await post(origin, EXECUTE, call)).json()).result.executionStatus,
+    ).toBe('success');
+    expect(
+      fs.readFileSync(path.join(root, 'child/proof.txt'), 'utf8').trim(),
+    ).toBe('activated');
+    const readRoot = {
+      ...shell(request.sessionId, 'read-root', ''),
+      toolName: 'read_file',
+      input: { file_path: path.join(realDirectory(root, '.'), 'root.txt') },
+    };
+    fs.writeFileSync(path.join(root, 'root.txt'), 'root-readable');
+    expect(
+      (await (await post(origin, EXECUTE, readRoot)).json()).result
+        .executionStatus,
+    ).toBe('success');
+    for (let attempt = 0; attempt < 2; attempt++) {
+      expect(
+        (await post(origin, ACTIVATION, activation(request, 'release'))).status,
+      ).toBe(200);
+    }
+    expect((await post(origin, ACTIVATION, activate)).status).toBe(409);
+    expect(
+      (
+        await post(
+          origin,
+          EXECUTE,
+          shell(request.sessionId, 'late', 'touch late.txt'),
+        )
+      ).status,
+    ).toBe(409);
+    expect(fs.existsSync(path.join(root, 'child/late.txt'))).toBe(false);
+    // An original settled call remains observable and idempotent after gate closure.
+    expect(
+      (await (await post(origin, EXECUTE, call)).json()).result.executionStatus,
+    ).toBe('success');
+  });
+
+  // Runs for 30 seconds unless it is cancelled, under bash and cmd.exe alike.
+  // cmd.exe has no `#` comments, so `sleep 30 # …` fails at once there.
+  const WAIT_30_SECONDS = `"${process.execPath}" -e "setTimeout(String, 30000)"`;
+
+  // Starts `command` as a shell call in the Session's `child` directory. The
+  // call reports `executing` before its shell starts.
+  async function startSlowCall(command: string) {
+    const root = workspace();
+    fs.mkdirSync(path.join(root, 'child'));
+    const origin = await startWorker({
+      ...BOOT,
+      mountRoot: root,
+      capabilityDigest: WORKSPACE_CAPABILITY_DIGEST,
+    });
+    const request = fixedInstallation('running-session', 'child');
+    expect((await post(origin, CONTEXT, request)).status).toBe(200);
+    expect((await post(origin, ACTIVATION, activation(request))).status).toBe(
+      200,
+    );
+    const call = shell(request.sessionId, 'slow', command);
+    const running = post(origin, EXECUTE, call);
+    // A test that fails before cancel() must not leave this unobserved.
+    running.catch(() => undefined);
+    const lookup = {
+      protocolVersion: 2,
+      reference: call.reference,
+      afterSequence: 0,
+    };
+    const status = async () =>
+      (await (await post(origin, STATUS, lookup)).json()).state;
+    await vi.waitFor(async () => {
+      expect(await status()).toBe('executing');
+    });
+    const cancel = async () => {
+      const cancelled = await post(origin, CANCEL, {
+        protocolVersion: 2,
+        reference: call.reference,
+      });
+      expect(cancelled.status).toBe(200);
+      expect(await cancelled.json()).toMatchObject({
+        state: 'cancel_requested',
+      });
+      // A cancel that does not stop the command would still settle as
+      // cancelled once the command ends by itself, 30 seconds in, so the call
+      // must settle well before that.
+      await vi.waitFor(
+        async () => {
+          expect(await status()).toBe('settled');
+        },
+        { timeout: 10_000 },
+      );
+      expect((await (await running).json()).result.executionStatus).toBe(
+        'cancelled',
+      );
+    };
+    const release = async () =>
+      (await post(origin, ACTIVATION, activation(request, 'release'))).status;
+    return { root, status, cancel, release };
+  }
+
+  it('refuses release while an invocation is active, and allows it once the invocation settles', async () => {
+    const { cancel, release } = await startSlowCall(WAIT_30_SECONDS);
+
+    expect(await release()).toBe(409);
+    await cancel();
+    expect(await release()).toBe(200);
+  });
+
+  // Windows refuses to rename a directory that a native process, such as
+  // cmd.exe or node, uses as its working directory. Under Git Bash, which CI
+  // uses, the rename succeeds once the shell has written `started.txt`. So on
+  // Windows the test runs only when the Shell tool runs bash.
+  it.skipIf(
+    process.platform === 'win32' && getShellConfiguration().shell !== 'bash',
+  )(
+    'retains status and cancel for an active invocation after its directory is lost',
+    async () => {
+      const { root, status, cancel, release } = await startSlowCall(
+        'echo started > started.txt && sleep 30',
+      );
+      await vi.waitFor(
+        () => {
+          expect(fs.existsSync(path.join(root, 'child', 'started.txt'))).toBe(
+            true,
+          );
+        },
+        { timeout: 10_000 },
+      );
+
+      // A scanner or a process starting in the directory can make Windows
+      // refuse the rename for a moment, so it is retried.
+      await vi.waitFor(
+        () => {
+          fs.renameSync(path.join(root, 'child'), path.join(root, 'moved'));
+        },
+        { timeout: 3_000 },
+      );
+      expect(await status()).toBe('executing');
+      await cancel();
+      expect(await release()).toBe(200);
+    },
+  );
+
+  it('rechecks a closed gate after an asynchronous tool resolver returns', async () => {
+    const root = workspace();
+    let resume!: () => void;
+    const waiting = new Promise<void>((resolve) => {
+      resume = resolve;
+    });
+    let active = true;
+    const executor = new ManagedToolExecutor(async () => {
+      await waiting;
+      return { ...tools(root), isActive: () => active };
+    });
+    const reference = {
+      sessionId: 'session',
+      promptId: 'prompt',
+      callId: 'call',
+      argsDigest: 'digest',
+    };
+    const pending = executor.execute(reference, 'run_shell_command', {
+      command: 'touch late.txt',
+    });
+    expect(executor.hasActiveSession(reference.sessionId)).toBe(false);
+    active = false;
+    resume();
+    await expect(pending).rejects.toThrow('unavailable');
+    expect(executor.status(reference)).toBeNull();
+    expect(fs.existsSync(path.join(root, 'late.txt'))).toBe(false);
   });
 });

@@ -8,6 +8,7 @@ import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import type { Readable } from 'node:stream';
 import express from 'express';
+import { MANAGED_TOOL_RESULT_ROUTES } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
 import {
   OWNED_MANAGED_RUNTIME_ROUTES,
   ownedManagedRuntimeRouteGate,
@@ -24,7 +25,14 @@ import {
   MANAGED_CONTEXT_WORKER_ROUTES,
   registerManagedContextRoutes,
 } from './managed-context-worker.js';
-import { ManagedToolExecutor } from './managed-runtime-tool-executor.js';
+import {
+  ManagedToolExecutor,
+  type ManagedShellCapturePublisher,
+} from './managed-runtime-tool-executor.js';
+import {
+  ManagedShellPublisherRegistry,
+  MANAGED_SHELL_PUBLISHER_ROUTE,
+} from './managed-shell-publisher.js';
 import { registerManagedRuntimeToolRoutes } from './managed-runtime-tool-routes.js';
 
 const MANAGED_RUNTIME_WORKER_BOOT_LIMIT_BYTES = 32 * 1024;
@@ -94,9 +102,10 @@ async function collectManagedRuntimeWorkerBoot(
     }
     chunks.push(bytes);
   }
+  const document = Buffer.concat(chunks);
   let parsed: unknown;
   try {
-    parsed = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    parsed = JSON.parse(document.toString('utf8'));
   } catch {
     throw new Error(INVALID_BOOT_MESSAGE);
   }
@@ -104,6 +113,8 @@ async function collectManagedRuntimeWorkerBoot(
     return parsed;
   }
   try {
+    // Boot v2 is UTF-8: bytes that are not are refused, never replaced.
+    new TextDecoder('utf-8', { fatal: true }).decode(document);
     return parseManagedContextBoot(parsed);
   } catch {
     throw new Error(INVALID_BOOT_MESSAGE);
@@ -134,12 +145,19 @@ export async function readManagedRuntimeWorkerBoot(
 
 export async function startManagedRuntimeAttestationWorker(
   boot: ManagedRuntimeWorkerBoot | ManagedContextBoot,
+  capturePublisher?: ManagedShellCapturePublisher,
+  remotePublishers?: ManagedShellPublisherRegistry,
 ): Promise<ManagedRuntimeAttestationWorkerHandle> {
   const app = express();
   app.disable('x-powered-by');
   let executor: ManagedToolExecutor;
   if (boot.version === 2) {
-    executor = registerManagedContextRoutes(app, boot);
+    executor = registerManagedContextRoutes(
+      app,
+      boot,
+      capturePublisher,
+      remotePublishers,
+    );
   } else {
     registerManagedRuntimeAttestationRoute(app, boot);
     executor = ManagedToolExecutor.forWorkspace(
@@ -152,7 +170,13 @@ export async function startManagedRuntimeAttestationWorker(
     ownedManagedRuntimeRouteGate(
       app,
       boot.version === 2
-        ? MANAGED_CONTEXT_WORKER_ROUTES
+        ? capturePublisher || remotePublishers
+          ? [
+              ...MANAGED_CONTEXT_WORKER_ROUTES,
+              ...MANAGED_TOOL_RESULT_ROUTES,
+              ...(remotePublishers ? [MANAGED_SHELL_PUBLISHER_ROUTE] : []),
+            ]
+          : MANAGED_CONTEXT_WORKER_ROUTES
         : OWNED_MANAGED_RUNTIME_ROUTES,
     ),
   );
@@ -211,7 +235,11 @@ export async function startManagedRuntimeAttestationWorker(
 
 export async function runManagedRuntimeAttestationWorker(): Promise<void> {
   const boot = await readManagedRuntimeWorkerBoot(process.stdin);
-  const worker = await startManagedRuntimeAttestationWorker(boot);
+  const worker = await startManagedRuntimeAttestationWorker(
+    boot,
+    undefined,
+    boot.version === 2 ? new ManagedShellPublisherRegistry() : undefined,
+  );
 
   await new Promise<void>((resolve, reject) => {
     let closing = false;

@@ -1872,6 +1872,7 @@ describe('DiscoveredMCPTool', () => {
       mcpClient: McpDirectClient,
       appResourceUi?: Record<string, unknown>,
       mcpTimeout?: number,
+      appResourceLimits?: DiscoveredMCPTool['appResourceLimits'],
     ) =>
       new DiscoveredMCPTool(
         mockCallableToolInstance,
@@ -1890,7 +1891,132 @@ describe('DiscoveredMCPTool', () => {
         false,
         'ui://demo/dashboard',
         appResourceUi,
+        appResourceLimits,
       );
+
+    it('returns App results privately without rendering or leaking them', async () => {
+      const raw = {
+        content: [{ type: 'text', text: 'APP_SECRET_TOKEN' }],
+        structuredContent: { jwt: 'APP_SECRET_TOKEN' },
+        _meta: { token: 'APP_SECRET_TOKEN' },
+      };
+      const client = {
+        callTool: vi.fn(async () => raw),
+        readResource: vi.fn(),
+      };
+      const received = vi.fn();
+      const progress = vi.fn();
+      const result = await createAppTool(client)
+        .buildForApp({ param: 'test' }, received)
+        .execute(new AbortController().signal, progress);
+      expect(received).toHaveBeenCalledWith(raw);
+      expect(JSON.stringify(result)).not.toContain('APP_SECRET_TOKEN');
+      expect(client.readResource).not.toHaveBeenCalled();
+      expect(result.error).toBeUndefined();
+    });
+
+    it('keeps App errors private and does not retry a transport failure', async () => {
+      const received = vi.fn();
+      const client = {
+        callTool: vi
+          .fn()
+          .mockResolvedValueOnce({
+            isError: true,
+            content: [{ type: 'text', text: 'APP_SECRET_TOKEN' }],
+          })
+          .mockRejectedValueOnce(
+            new Error('Connection closed APP_SECRET_TOKEN'),
+          ),
+      };
+      const tool = createAppTool(client);
+      const result = await tool
+        .buildForApp({ param: 'test' }, received)
+        .execute(new AbortController().signal);
+      expect(result.error?.type).toBe(ToolErrorType.MCP_TOOL_ERROR);
+      expect(JSON.stringify(result)).not.toContain('APP_SECRET_TOKEN');
+      await expect(
+        tool
+          .buildForApp({ param: 'test' }, received)
+          .execute(new AbortController().signal),
+      ).rejects.toThrow('MCP App tool call failed.');
+      expect(client.callTool).toHaveBeenCalledTimes(2);
+      expect(received).toHaveBeenCalledTimes(1);
+    });
+
+    it('suppresses App progress text and promptly cancels a non-cooperative server', async () => {
+      let resolveCall!: (value: { content: [] }) => void;
+      const progress = vi.fn();
+      const received = vi.fn();
+      const client: McpDirectClient = {
+        callTool: vi.fn<McpDirectClient['callTool']>((_params, options) => {
+          options?.onprogress?.({ progress: 1, message: 'APP_SECRET_TOKEN' });
+          return new Promise((resolve) => {
+            resolveCall = resolve;
+          });
+        }),
+      };
+      const abort = new AbortController();
+      const execution = createAppTool(client)
+        .buildForApp({ param: 'test' }, received)
+        .execute(abort.signal, progress);
+      abort.abort(new Error('APP_SECRET_TOKEN'));
+      await expect(execution).rejects.toThrow();
+      resolveCall({ content: [] });
+      await Promise.resolve();
+      expect(progress).not.toHaveBeenCalled();
+      expect(received).not.toHaveBeenCalled();
+      expect(client.callTool).toHaveBeenCalledTimes(1);
+    });
+
+    it('preserves App visibility through resource, qualified-name and session clones', () => {
+      const tool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        false,
+        false,
+        'ui://demo/app',
+        undefined,
+        undefined,
+        ['app'],
+      );
+      for (const clone of [
+        tool.asFullyQualifiedTool(),
+        tool.withAppResourceUi({}),
+        tool.withSessionConfig(true, true),
+        tool.withTrust(true),
+      ]) {
+        expect(clone.isAppVisible).toBe(true);
+        expect(clone.isModelVisible).toBe(false);
+        expect(clone.appVisibility).toEqual(['app']);
+      }
+    });
+
+    const expectDiscardedLimitWarn = (
+      key: 'appResourceMaxBytes' | 'appResourceTimeoutMs',
+      warned: string | undefined,
+    ) => {
+      // The display warning legitimately names the key too, so match on the
+      // discard line's own prefix to tell the two apart.
+      expect(
+        mockDebugWarn.mock.calls.some(
+          ([message]) =>
+            String(message).includes(
+              `Ignoring non-finite MCP App resource limit mcpServers.${serverName}.${key}`,
+            ) &&
+            (warned === undefined || String(message).includes(warned)),
+        ),
+      ).toBe(warned !== undefined);
+    };
 
     const expectAppLoadWarning = (result: ToolResult, reason: string) => {
       expect(result.returnDisplay).toEqual({
@@ -2090,7 +2216,7 @@ describe('DiscoveredMCPTool', () => {
         } else {
           expectAppLoadWarning(
             result,
-            'resource HTML is 1048577 bytes, exceeding the 1048576 byte (1 MiB) host limit',
+            `resource HTML is 1048577 bytes, exceeding the 1048576 byte host limit (mcpServers.${serverName}.appResourceMaxBytes)`,
           );
         }
         expect(result.llmContent).toEqual([{ text: 'Dashboard ready' }]);
@@ -2099,12 +2225,59 @@ describe('DiscoveredMCPTool', () => {
     );
 
     it.each([
-      { mcpTimeout: undefined, deadline: true, expectedTimeout: 10_000 },
-      { mcpTimeout: 60_000, deadline: true, expectedTimeout: 10_000 },
-      { mcpTimeout: 500, deadline: false, expectedTimeout: 500 },
+      {
+        mcpTimeout: undefined,
+        deadline: true,
+        expectedTimeout: 10_000,
+        expectedKey: 'appResourceTimeoutMs',
+      },
+      {
+        mcpTimeout: 60_000,
+        deadline: true,
+        expectedTimeout: 10_000,
+        expectedKey: 'appResourceTimeoutMs',
+      },
+      {
+        mcpTimeout: 600_000,
+        deadline: true,
+        expectedTimeout: 10_000,
+        expectedKey: 'appResourceTimeoutMs',
+      },
+      {
+        mcpTimeout: 10_000,
+        deadline: true,
+        expectedTimeout: 10_000,
+        expectedKey: 'appResourceTimeoutMs',
+      },
+      {
+        mcpTimeout: 500,
+        deadline: false,
+        expectedTimeout: 500,
+        expectedKey: 'timeout',
+      },
+      {
+        mcpTimeout: 50,
+        deadline: false,
+        expectedTimeout: 50,
+        expectedKey: 'timeout',
+      },
+      // An explicit App timeout owns the deadline, so the warning names it.
+      {
+        mcpTimeout: 60_000,
+        appResourceTimeoutMs: 30_000,
+        deadline: true,
+        expectedTimeout: 30_000,
+        expectedKey: 'appResourceTimeoutMs',
+      },
     ])(
       'reports the resource timeout with MCP timeout $mcpTimeout',
-      async ({ mcpTimeout, deadline, expectedTimeout }) => {
+      async ({
+        mcpTimeout,
+        appResourceTimeoutMs,
+        deadline,
+        expectedTimeout,
+        expectedKey,
+      }) => {
         const timeoutController = new AbortController();
         const timeoutSpy = vi
           .spyOn(AbortSignal, 'timeout')
@@ -2135,18 +2308,25 @@ describe('DiscoveredMCPTool', () => {
         };
 
         try {
-          const result = await createAppTool(mcpClient, undefined, mcpTimeout)
+          const result = await createAppTool(
+            mcpClient,
+            undefined,
+            mcpTimeout,
+            appResourceTimeoutMs === undefined
+              ? undefined
+              : { appResourceTimeoutMs },
+          )
             .build({ param: 'test' })
             .execute(new AbortController().signal);
 
-          expect(timeoutSpy).toHaveBeenCalledWith(10_000);
+          expect(timeoutSpy).toHaveBeenCalledWith(expectedTimeout);
           expect(mcpClient.readResource).toHaveBeenCalledWith(
             { uri: 'ui://demo/dashboard' },
             { timeout: expectedTimeout, signal: expect.any(AbortSignal) },
           );
           expectAppLoadWarning(
             result,
-            `resource read timed out (limit: ${expectedTimeout} ms)`,
+            `resource read timed out (limit: ${expectedTimeout} ms; mcpServers.${serverName}.${expectedKey})`,
           );
           expect(mockDebugWarn).toHaveBeenCalledWith(
             expect.stringContaining(
@@ -2156,6 +2336,210 @@ describe('DiscoveredMCPTool', () => {
         } finally {
           timeoutSpy.mockRestore();
         }
+      },
+    );
+
+    it.each(['text', 'blob'] as const)(
+      'loads larger configured %s resources through tool projections',
+      async (encoding) => {
+        const html = `<main>é</main>${' '.repeat(1_048_562)}`;
+        const mcpClient: McpDirectClient = {
+          callTool: vi.fn(async () => ({
+            content: [{ type: 'text', text: 'Dashboard ready' }],
+          })),
+          readResource: vi.fn(async () => ({
+            contents: [
+              {
+                uri: 'ui://demo/dashboard',
+                mimeType: 'text/html;profile=mcp-app',
+                ...(encoding === 'text'
+                  ? { text: html }
+                  : { blob: Buffer.from(html).toString('base64') }),
+              },
+            ],
+          })),
+        };
+        const configured = createAppTool(mcpClient, undefined, undefined, {
+          appResourceMaxBytes: 2 * 1024 * 1024,
+          appResourceTimeoutMs: 30_000,
+        });
+        const result = await configured
+          .asFullyQualifiedTool()
+          .withAppResourceUi({
+            csp: { connectDomains: ['https://example.com'] },
+          })
+          .withSessionConfig(true, true)
+          .build({ param: 'test' })
+          .execute(new AbortController().signal);
+
+        expect(Buffer.byteLength(html, 'utf8')).toBe(1_048_577);
+        expect(result.returnDisplay).toMatchObject({ type: 'mcp_app', html });
+        expect(result.llmContent).toEqual([{ text: 'Dashboard ready' }]);
+        expect(mcpClient.readResource).toHaveBeenCalledWith(
+          { uri: 'ui://demo/dashboard' },
+          { timeout: 30_000, signal: expect.any(AbortSignal) },
+        );
+      },
+    );
+
+    it.each([
+      { configured: 30_000, expected: 30_000, warned: undefined },
+      { configured: 1_000_000, expected: 120_000, warned: undefined },
+      { configured: -1, expected: 100, warned: undefined },
+      { configured: 150.9, expected: 150, warned: undefined },
+      { configured: Number.NaN, expected: 500, warned: 'NaN' },
+      {
+        configured: Number.POSITIVE_INFINITY,
+        expected: 500,
+        warned: 'Infinity',
+      },
+      // A quoted value from a hand-edited settings.json is not a number;
+      // it falls back and the drop must be logged, not silent.
+      {
+        configured: '30000' as unknown as number,
+        expected: 500,
+        warned: '"30000"',
+      },
+    ])(
+      'bounds the configured resource timeout $configured',
+      async ({ configured, expected, warned }) => {
+        const timeoutSpy = vi.spyOn(AbortSignal, 'timeout');
+        const mcpClient: McpDirectClient = {
+          callTool: vi.fn(async () => ({
+            content: [{ type: 'text', text: 'Dashboard ready' }],
+          })),
+          readResource: vi.fn(async () => ({
+            contents: [
+              {
+                uri: 'ui://demo/dashboard',
+                mimeType: 'text/html;profile=mcp-app',
+                text: '<main>ok</main>',
+              },
+            ],
+          })),
+        };
+        try {
+          const result = await createAppTool(mcpClient, undefined, 500, {
+            appResourceTimeoutMs: configured,
+          })
+            .build({ param: 'test' })
+            .execute(new AbortController().signal);
+          expect(result.returnDisplay).toMatchObject({
+            html: '<main>ok</main>',
+          });
+          expect(timeoutSpy).toHaveBeenCalledWith(expected);
+          expect(mcpClient.readResource).toHaveBeenCalledWith(
+            { uri: 'ui://demo/dashboard' },
+            { timeout: expected, signal: expect.any(AbortSignal) },
+          );
+          expectDiscardedLimitWarn('appResourceTimeoutMs', warned);
+        } finally {
+          timeoutSpy.mockRestore();
+        }
+      },
+    );
+
+    it.each([
+      { configured: 2_097_152, limit: 2_097_152, warned: undefined },
+      { configured: 100_000_000, limit: 4_194_304, warned: undefined },
+      { configured: 0, limit: 1, warned: undefined },
+      { configured: -1, limit: 1, warned: undefined },
+      { configured: 100.9, limit: 100, warned: undefined },
+      { configured: Number.NaN, limit: 1_048_576, warned: 'NaN' },
+      {
+        configured: Number.POSITIVE_INFINITY,
+        limit: 1_048_576,
+        warned: 'Infinity',
+      },
+      {
+        configured: '4194304' as unknown as number,
+        limit: 1_048_576,
+        warned: '"4194304"',
+      },
+    ])(
+      'enforces the configured HTML byte boundary $configured',
+      async ({ configured, limit, warned }) => {
+        let html = 'x'.repeat(limit);
+        const mcpClient: McpDirectClient = {
+          callTool: vi.fn(async () => ({
+            content: [{ type: 'text', text: 'Dashboard ready' }],
+          })),
+          readResource: vi.fn(async () => ({
+            contents: [
+              {
+                uri: 'ui://demo/dashboard',
+                mimeType: 'text/html;profile=mcp-app',
+                text: html,
+              },
+            ],
+          })),
+        };
+        const tool = createAppTool(mcpClient, undefined, undefined, {
+          appResourceMaxBytes: configured,
+        });
+        const accepted = await tool
+          .build({ param: 'test' })
+          .execute(new AbortController().signal);
+        expect(accepted.returnDisplay).toMatchObject({ html });
+        html += 'x';
+        const rejected = await tool
+          .build({ param: 'test' })
+          .execute(new AbortController().signal);
+        expectAppLoadWarning(
+          rejected,
+          `resource HTML is ${limit + 1} bytes, exceeding the ${limit} byte host limit (mcpServers.${serverName}.appResourceMaxBytes)`,
+        );
+        expectDiscardedLimitWarn('appResourceMaxBytes', warned);
+      },
+    );
+
+    it.each([
+      {
+        provenance: { extensionName: 'demo-ext' },
+        settingRef: `appResourceMaxBytes for server '${serverName}' declared by extension 'demo-ext'`,
+      },
+      {
+        provenance: { scope: 'project' as const },
+        settingRef: `appResourceMaxBytes for server '${serverName}' declared in .mcp.json`,
+      },
+    ])(
+      'names the declaring source in the limit warning: $settingRef',
+      async ({ provenance, settingRef }) => {
+        // Configuration sources replace whole server objects by precedence,
+        // so pointing at `mcpServers.<name>` in settings.json would shadow an
+        // extension- or project-declared server rather than merge with it.
+        const html = `<main>é</main>${' '.repeat(1_048_577 - 15)}`;
+        const mcpClient: McpDirectClient = {
+          callTool: vi.fn(async () => ({
+            content: [{ type: 'text', text: 'Dashboard ready' }],
+          })),
+          readResource: vi.fn(async () => ({
+            contents: [
+              {
+                uri: 'ui://demo/dashboard',
+                mimeType: 'text/html;profile=mcp-app',
+                text: html,
+              },
+            ],
+          })),
+        };
+
+        const result = await createAppTool(
+          mcpClient,
+          undefined,
+          undefined,
+          provenance,
+        )
+          .build({ param: 'test' })
+          .execute(new AbortController().signal);
+
+        expectAppLoadWarning(
+          result,
+          `resource HTML is 1048577 bytes, exceeding the 1048576 byte host limit (${settingRef})`,
+        );
+        expect(JSON.stringify(result.returnDisplay)).not.toContain(
+          `mcpServers.${serverName}`,
+        );
       },
     );
 
@@ -2201,31 +2585,36 @@ describe('DiscoveredMCPTool', () => {
       expectAppLoadWarning(result, 'Resource unavailable');
     });
 
-    it('keeps the tool result when aborting the optional app resource fetch', async () => {
-      const controller = new AbortController();
-      const mcpClient: McpDirectClient = {
-        callTool: vi.fn(async () => ({
-          content: [{ type: 'text', text: 'Dashboard ready' }],
-        })),
-        readResource: vi.fn(
-          async (_params, options) =>
-            new Promise<never>((_resolve, reject) => {
-              options?.signal?.addEventListener('abort', () => {
-                reject(options.signal?.reason);
-              });
-              controller.abort();
-            }),
-        ),
-      };
+    it.each([undefined, 30_000])(
+      'keeps the tool result when aborting an App read with timeout %s',
+      async (appResourceTimeoutMs) => {
+        const controller = new AbortController();
+        const mcpClient: McpDirectClient = {
+          callTool: vi.fn(async () => ({
+            content: [{ type: 'text', text: 'Dashboard ready' }],
+          })),
+          readResource: vi.fn(
+            async (_params, options) =>
+              new Promise<never>((_resolve, reject) => {
+                options?.signal?.addEventListener('abort', () => {
+                  reject(options.signal?.reason);
+                });
+                controller.abort();
+              }),
+          ),
+        };
 
-      const result = await createAppTool(mcpClient)
-        .build({ param: 'test' })
-        .execute(controller.signal);
+        const result = await createAppTool(mcpClient, undefined, undefined, {
+          appResourceTimeoutMs,
+        })
+          .build({ param: 'test' })
+          .execute(controller.signal);
 
-      expect(result.llmContent).toEqual([{ text: 'Dashboard ready' }]);
-      expect(result.returnDisplay).toBe('Dashboard ready');
-      expect(result.error).toBeUndefined();
-    });
+        expect(result.llmContent).toEqual([{ text: 'Dashboard ready' }]);
+        expect(result.returnDisplay).toBe('Dashboard ready');
+        expect(result.error).toBeUndefined();
+      },
+    );
   });
 
   describe('output truncation for large MCP results', () => {
@@ -2679,10 +3068,160 @@ describe('DiscoveredMCPTool', () => {
 
       expect(mockMcpClient.callTool).toHaveBeenCalledTimes(1);
       expect(newMockMcpClient.callTool).toHaveBeenCalledTimes(1);
-      expect(discoverToolsForServer).toHaveBeenCalledWith(serverName);
+      expect(discoverToolsForServer).toHaveBeenCalledWith(serverName, false);
       expect(ensureTool).toHaveBeenCalledWith(reconnectTool.name);
       expect(result.llmContent).toEqual([{ text: 'Success after reconnect' }]);
     });
+
+    it('keeps configured App resource limits across a reconnect replay', async () => {
+      const params = { param: 'test' };
+      // 1 MiB + 1 byte: over the default limit, under the configured one.
+      const htmlBytes = 1_048_577;
+      const initialClient: McpDirectClient = {
+        callTool: vi.fn().mockRejectedValueOnce(new Error('Connection closed')),
+      };
+      const reconnectedClient: McpDirectClient = {
+        callTool: vi.fn().mockResolvedValueOnce({
+          content: [{ type: 'text', text: 'Dashboard ready' }],
+        }),
+        readResource: vi.fn(async () => ({
+          contents: [
+            {
+              uri: 'ui://demo/dashboard',
+              mimeType: 'text/html;profile=mcp-app',
+              text: `<main>é</main>${' '.repeat(htmlBytes - 15)}`,
+            },
+          ],
+        })),
+      };
+      const rediscoveredTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        true,
+        undefined,
+        undefined,
+        reconnectedClient,
+        undefined,
+        undefined,
+        idempotentAnnotations,
+        false,
+        false,
+        'ui://demo/dashboard',
+        undefined,
+        { appResourceMaxBytes: 2_097_152 },
+      );
+      const discoverToolsForServer = vi.fn().mockResolvedValue(undefined);
+      const ensureTool = vi.fn().mockResolvedValue(rediscoveredTool);
+      const mockConfig = {
+        isTrustedFolder: () => true,
+        getToolRegistry: () => ({ discoverToolsForServer, ensureTool }),
+      };
+      const originalTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        true,
+        undefined,
+        mockConfig as any,
+        initialClient,
+        undefined,
+        undefined,
+        idempotentAnnotations,
+      );
+
+      updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
+      const result = await originalTool
+        .build(params)
+        .execute(new AbortController().signal);
+
+      expect(initialClient.callTool).toHaveBeenCalledTimes(1);
+      expect(reconnectedClient.callTool).toHaveBeenCalledTimes(1);
+      // Without the replay leg forwarding `appResourceLimits`, the replayed
+      // read falls back to the 1 MiB default and rejects this resource with
+      // a warning naming the setting the user already raised. Compare sizes
+      // rather than the document so a failure diff stays small.
+      const display = result.returnDisplay as {
+        type: string;
+        html: string;
+        fallbackText: string;
+      };
+      expect(display.type).toBe('mcp_app');
+      expect(Buffer.byteLength(display.html, 'utf8')).toBe(htmlBytes);
+      expect(display.fallbackText).not.toContain('Warning');
+    });
+
+    it.each(['repair', 'guarded', 'cancelled'] as const)(
+      'handles an App connection failure without replaying (%s)',
+      async (mode) => {
+        const params = { param: 'test' };
+        const controller = new AbortController();
+        const mockMcpClient: McpDirectClient = {
+          callTool: vi.fn().mockImplementation(async () => {
+            if (mode === 'cancelled') controller.abort();
+            throw new Error('Connection closed');
+          }),
+        };
+        const discoverToolsForServer = vi.fn().mockResolvedValue(undefined);
+        const reconnectedClient: McpDirectClient = {
+          callTool: vi.fn().mockResolvedValue({ content: [] }),
+        };
+        const reconnectedTool = new DiscoveredMCPTool(
+          mockCallableToolInstance,
+          serverName,
+          serverToolName,
+          baseDescription,
+          inputSchema,
+          undefined,
+          undefined,
+          undefined,
+          reconnectedClient,
+        );
+        const ensureTool = vi.fn().mockResolvedValue(reconnectedTool);
+        const received = vi.fn();
+        const mockConfig = {
+          isTrustedFolder: () => true,
+          getToolInvocationGuard: () => (mode === 'guarded' ? {} : undefined),
+          getToolRegistry: () => ({
+            discoverToolsForServer,
+            ensureTool,
+          }),
+        };
+
+        updateMCPServerStatus(serverName, MCPServerStatus.DISCONNECTED);
+        const appTool = new DiscoveredMCPTool(
+          mockCallableToolInstance,
+          serverName,
+          serverToolName,
+          baseDescription,
+          inputSchema,
+          undefined,
+          undefined,
+          mockConfig as unknown as Config,
+          mockMcpClient,
+        );
+
+        await expect(
+          appTool.buildForApp(params, received).execute(controller.signal),
+        ).rejects.toThrow(
+          mode === 'cancelled' ? /abort/i : 'MCP App tool call failed.',
+        );
+
+        expect(mockMcpClient.callTool).toHaveBeenCalledOnce();
+        expect(discoverToolsForServer).toHaveBeenCalledTimes(
+          mode === 'cancelled' ? 0 : 1,
+        );
+        if (mode !== 'cancelled') {
+          expect(discoverToolsForServer).toHaveBeenCalledWith(serverName, true);
+        }
+        expect(received).not.toHaveBeenCalled();
+        expect(reconnectedClient.callTool).not.toHaveBeenCalled();
+      },
+    );
 
     it('does not reconnect a guarded invocation after an ambiguous connection error', async () => {
       const params = { param: 'test' };
@@ -3052,7 +3591,7 @@ describe('DiscoveredMCPTool', () => {
       ).rejects.toThrow(unsafeReplayErrorMessage);
 
       expect(initialClient.callTool).toHaveBeenCalledTimes(1);
-      expect(discoverToolsForServer).toHaveBeenCalledWith(serverName);
+      expect(discoverToolsForServer).toHaveBeenCalledWith(serverName, false);
       expect(ensureTool).toHaveBeenCalledTimes(1);
     });
 
@@ -3100,7 +3639,7 @@ describe('DiscoveredMCPTool', () => {
           tool.build({ param: 'test' }).execute(new AbortController().signal),
         ).rejects.toThrow(unsafeReplayErrorMessage);
 
-        expect(discoverToolsForServer).toHaveBeenCalledWith(serverName);
+        expect(discoverToolsForServer).toHaveBeenCalledWith(serverName, false);
       },
     );
 
@@ -3146,7 +3685,7 @@ describe('DiscoveredMCPTool', () => {
       ).rejects.toThrow(unsafeReplayErrorMessage);
 
       expect(initialClient.callTool).toHaveBeenCalledTimes(1);
-      expect(discoverToolsForServer).toHaveBeenCalledWith(serverName);
+      expect(discoverToolsForServer).toHaveBeenCalledWith(serverName, false);
       expect(ensureTool).toHaveBeenCalledTimes(1);
     });
 

@@ -15,7 +15,10 @@ import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import * as path from 'node:path';
 import { getProjectHash } from './paths.js';
-import { _recoverObjectsFromLine } from './jsonl-utils.js';
+import {
+  _recoverObjectsFromLine,
+  parseLineTolerantWithIntegrity,
+} from './jsonl-utils.js';
 import { openSyncNoFollow } from './no-follow-open.js';
 
 /** Size of the head/tail buffer for lite metadata reads (64KB). */
@@ -822,6 +825,7 @@ export function isSinglePathSegment(value: string): boolean {
 }
 
 const MANAGED_HEADER_MARKER = '"subtype":"managed_session_header_v1"';
+const EXECUTION_ENGINE_SUBTYPE = 'session_execution_engine';
 const MANAGED_METADATA_MARKER = '"domain":"session_metadata"';
 const MANAGED_SOURCE_MARKER = '"domain":"session_source"';
 
@@ -890,10 +894,73 @@ export function isManagedSessionTranscriptSync(
   filePath: string,
   scratchBuffer?: Buffer,
 ): boolean {
+  return (
+    readTranscriptHeadSync(filePath, scratchBuffer)?.includes(
+      MANAGED_HEADER_MARKER,
+    ) === true
+  );
+}
+
+/**
+ * True when the transcript positively identifies as owned by the Managed
+ * engine: it carries the Managed Session header, or an execution-engine owner
+ * record naming `managed`. A Managed owner is written before anything else,
+ * so the head window holds it.
+ *
+ * Lines are parsed the way the owner reader parses them, so an owner record
+ * that parses whole counts even when another record shares its line. A line
+ * is parsed only when it could name the owner subtype: literally, or through a
+ * `\u` escape, the only JSON escape that can spell its letters and
+ * underscores.
+ *
+ * Gates executing, recording, renaming and forking a session with Legacy.
+ * Operations that depend on the Managed Session log format use
+ * {@link isManagedSessionTranscriptSync}: an owner record alone is no log.
+ */
+export function isManagedExecutionTranscriptSync(filePath: string): boolean {
+  const head = readTranscriptHeadSync(filePath);
+  if (head === undefined) return false;
+  return (
+    head.includes(MANAGED_HEADER_MARKER) ||
+    head
+      .split('\n')
+      .some(
+        (line) =>
+          (line.includes(EXECUTION_ENGINE_SUBTYPE) || line.includes('\\u')) &&
+          parseLineTolerantWithIntegrity(line, filePath).records.some(
+            isManagedOwnerRecord,
+          ),
+      )
+  );
+}
+
+/**
+ * True for a parsed transcript record that names the Managed engine as the
+ * owner: a system record of the execution-engine subtype whose payload
+ * engine is `managed`. It is the one definition of that positive evidence.
+ * The owner reader validates owner records more strictly and reports one it
+ * rejects as unavailable, never as Legacy.
+ */
+export function isManagedOwnerRecord(record: unknown): boolean {
+  if (!record || typeof record !== 'object') return false;
+  const { type, subtype, systemPayload } = record as Record<string, unknown>;
+  return (
+    type === 'system' &&
+    subtype === EXECUTION_ENGINE_SUBTYPE &&
+    !!systemPayload &&
+    typeof systemPayload === 'object' &&
+    (systemPayload as Record<string, unknown>)['engine'] === 'managed'
+  );
+}
+
+function readTranscriptHeadSync(
+  filePath: string,
+  scratchBuffer?: Buffer,
+): string | undefined {
   let fd: number | undefined;
   try {
     const fileSize = fs.statSync(filePath).size;
-    if (fileSize === 0) return false;
+    if (fileSize === 0) return undefined;
     fd = openSyncNoFollow(filePath);
     const buffer =
       scratchBuffer && scratchBuffer.length >= LITE_READ_BUF_SIZE
@@ -901,9 +968,9 @@ export function isManagedSessionTranscriptSync(
         : Buffer.alloc(LITE_READ_BUF_SIZE);
     const length = Math.min(fileSize, LITE_READ_BUF_SIZE);
     const read = fs.readSync(fd, buffer, 0, length, 0);
-    return buffer.toString('utf-8', 0, read).includes(MANAGED_HEADER_MARKER);
+    return buffer.toString('utf-8', 0, read);
   } catch {
-    return false;
+    return undefined;
   } finally {
     if (fd !== undefined) {
       try {

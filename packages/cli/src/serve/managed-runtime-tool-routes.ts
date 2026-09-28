@@ -4,11 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import express from 'express';
+import type express from 'express';
 import type { Application } from 'express';
 import {
   authorizeManagedRuntime,
   handleManagedRuntimeJsonError,
+  managedRuntimeJsonBody,
   managedRuntimeNoStore,
   OWNED_MANAGED_RUNTIME_ROUTES,
   type ManagedRuntimeRequestIdentity,
@@ -102,12 +103,7 @@ export function registerManagedRuntimeToolRoutes(
     routes.get('execute')!.path,
     managedRuntimeNoStore,
     authorizeManagedRuntime(identity),
-    express.json({
-      inflate: false,
-      limit: routes.get('execute')!.requestBodyLimitBytes,
-      strict: true,
-      type: 'application/json',
-    }),
+    managedRuntimeJsonBody(routes.get('execute')!.requestBodyLimitBytes),
     async (req: express.Request, res: express.Response) => {
       const body = parseClosedBody(req.body, [
         'protocolVersion',
@@ -165,12 +161,7 @@ export function registerManagedRuntimeToolRoutes(
     routes.get('status')!.path,
     managedRuntimeNoStore,
     authorizeManagedRuntime(identity),
-    express.json({
-      inflate: false,
-      limit: routes.get('status')!.requestBodyLimitBytes,
-      strict: true,
-      type: 'application/json',
-    }),
+    managedRuntimeJsonBody(routes.get('status')!.requestBodyLimitBytes),
     (req: express.Request, res: express.Response) => {
       const body = parseClosedBody(
         req.body,
@@ -190,17 +181,25 @@ export function registerManagedRuntimeToolRoutes(
         invalid(res);
         return;
       }
-      const view = executor.status(reference);
-      if (!view) {
-        res.status(200).json({ protocolVersion: 2, state: 'unknown' });
-        return;
+      try {
+        const view = executor.status(reference);
+        if (!view) {
+          res.status(200).json({ protocolVersion: 2, state: 'unknown' });
+          return;
+        }
+        res.status(200).json({
+          protocolVersion: 2,
+          state: view.state,
+          ...(view.state === 'settled' ? { result: view.result } : {}),
+          lastSequence: view.lastSequence,
+        });
+      } catch (error) {
+        if (error instanceof ManagedToolConflictError) {
+          res.status(409).json({ code: error.code, error: error.message });
+          return;
+        }
+        throw error;
       }
-      res.status(200).json({
-        protocolVersion: 2,
-        state: view.state,
-        ...(view.state === 'settled' ? { result: view.result } : {}),
-        lastSequence: view.lastSequence,
-      });
     },
     handleManagedRuntimeJsonError,
   );
@@ -209,12 +208,7 @@ export function registerManagedRuntimeToolRoutes(
     routes.get('cancel')!.path,
     managedRuntimeNoStore,
     authorizeManagedRuntime(identity),
-    express.json({
-      inflate: false,
-      limit: routes.get('cancel')!.requestBodyLimitBytes,
-      strict: true,
-      type: 'application/json',
-    }),
+    managedRuntimeJsonBody(routes.get('cancel')!.requestBodyLimitBytes),
     (req: express.Request, res: express.Response) => {
       const body = parseClosedBody(req.body, ['protocolVersion', 'reference']);
       const reference = body && parseReference(body['reference']);
@@ -222,16 +216,24 @@ export function registerManagedRuntimeToolRoutes(
         invalid(res);
         return;
       }
-      const view = executor.cancel(reference);
-      if (!view) {
-        res.status(200).json({ protocolVersion: 2, state: 'unknown' });
-        return;
+      try {
+        const view = executor.cancel(reference);
+        if (!view) {
+          res.status(200).json({ protocolVersion: 2, state: 'unknown' });
+          return;
+        }
+        res.status(200).json({
+          protocolVersion: 2,
+          state: view.state,
+          ...(view.state === 'settled' ? { result: view.result } : {}),
+        });
+      } catch (error) {
+        if (error instanceof ManagedToolConflictError) {
+          res.status(409).json({ code: error.code, error: error.message });
+          return;
+        }
+        throw error;
       }
-      res.status(200).json({
-        protocolVersion: 2,
-        state: view.state,
-        ...(view.state === 'settled' ? { result: view.result } : {}),
-      });
     },
     handleManagedRuntimeJsonError,
   );

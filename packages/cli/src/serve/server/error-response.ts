@@ -21,6 +21,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type { Response } from 'express';
 import { restoreRetryAfterSeconds } from '@qwen-code/acp-bridge/sessionRestoreTimeout';
+import { SessionExecutionEngineError } from '@qwen-code/qwen-code-core/services/session-execution-engine.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   AcpChildCapacityExceededError,
@@ -34,12 +35,14 @@ import {
   InvalidRewindTargetError,
   InvalidSessionMetadataError,
   InvalidSessionScopeError,
+  ManagedSessionBranchUnsupportedError,
   McpAuthenticationInProgressError,
   McpServerNotFoundError,
   McpServerRestartFailedError,
   PermissionForbiddenError,
   PermissionPolicyNotImplementedError,
   PromptQueueFullError,
+  RequestedSessionIdRejectedError,
   RestoreInProgressError,
   SessionRestoreTimeoutError,
   SessionArtifactAuthorizationError,
@@ -495,6 +498,19 @@ export function sendBridgeError(
     });
     return;
   }
+  if (err instanceof SessionExecutionEngineError) {
+    // The response names no cause, so the log keeps it: an operator must be
+    // able to tell a transcript that cannot prove its owner from an owner
+    // that cannot run here.
+    recordExpectedBridgeError(err, ctx, daemonLog);
+    res.status(409).json({
+      error:
+        'This session cannot be resumed with the current execution engine.',
+      code: err.errorKind,
+      errorKind: err.errorKind,
+    });
+    return;
+  }
   const skillError = mapWorkspaceSkillToggleError(err);
   if (skillError) {
     res.status(404).json(skillError);
@@ -634,6 +650,27 @@ export function sendBridgeError(
       error: err.message,
       code: 'branch_while_prompt_active',
       sessionId: err.sessionId,
+    });
+    return;
+  }
+  if (err instanceof ManagedSessionBranchUnsupportedError) {
+    res.status(409).json({
+      error: err.message,
+      code: 'managed_session_branch_unsupported',
+      sessionId: err.sessionId,
+    });
+    return;
+  }
+  if (err instanceof RequestedSessionIdRejectedError) {
+    if (err.errorKind === 'invalid_session_id') {
+      res.status(400).json({ error: err.message, code: err.errorKind });
+      return;
+    }
+    res.status(409).json({
+      error: err.message,
+      code: err.errorKind,
+      sessionId: err.sessionId,
+      conflict: 'live',
     });
     return;
   }
@@ -1024,6 +1061,11 @@ export function sendBridgeError(
         return;
       }
       if (kind === 'session_execution_engine_unavailable') {
+        recordExpectedBridgeError(
+          err instanceof Error ? err : new Error(errorMessage(err)),
+          ctx,
+          daemonLog,
+        );
         res.status(409).json({
           error:
             'This session cannot be resumed with the current execution engine.',
@@ -1057,6 +1099,15 @@ export function sendBridgeError(
           error: errorMessage(err),
           code: 'branch_point_invalid',
           errorKind: kind,
+        });
+        return;
+      }
+      if (kind === 'session_not_found') {
+        res.status(404).json({
+          error: errorMessage(err),
+          code: kind,
+          errorKind: kind,
+          ...(ctx?.sessionId ? { sessionId: ctx.sessionId } : {}),
         });
         return;
       }

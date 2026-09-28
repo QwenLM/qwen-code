@@ -95,6 +95,7 @@ class FakeAttestationWorkerTest {
         List<JsonNode> refused = new ArrayList<>();
         for (ObjectNode boot : List.of(v1, v2)) {
             refused.add(boot.deepCopy().put("extra", true));
+            refused.add(boot.deepCopy().put("type", "ready"));
             refused.add(boot.deepCopy().put("version",
                     3 - boot.get("version").asInt()));
             refused.add(boot.deepCopy().put("version",
@@ -128,8 +129,11 @@ class FakeAttestationWorkerTest {
                 assertEquals("", new String(
                         worker.getInputStream().readAllBytes(),
                         StandardCharsets.UTF_8), label);
-                assertFalse(new String(worker.getErrorStream().readAllBytes(),
-                        StandardCharsets.UTF_8).contains(token), label);
+                String stderr = new String(
+                        worker.getErrorStream().readAllBytes(),
+                        StandardCharsets.UTF_8);
+                assertFalse(stderr.contains(token)
+                        || stderr.contains(v2.get("token").asText()), label);
             } finally {
                 worker.destroyForcibly().waitFor(10, TimeUnit.SECONDS);
             }

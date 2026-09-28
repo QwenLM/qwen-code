@@ -216,9 +216,10 @@ W0c-1 已为 worker 回答了第 1、3、4 个问题：它不写拒绝记录，�
 
 ## 后续工作
 
-| 切片  | 范围                                                                                                                                                                                                                                 |
-| ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| W0c-1 | 已在 [Managed Context Worker](2026-09-26-managed-context-worker.zh-CN.md) 中完成：worker 接受 boot v2，并提供 attestation v3 和安装；支持 v2 的 fake worker；activation gate，它把每次 Tool v2 调用绑定到其 Session 已安装的上下文。 |
-| W0c-2 | provisioner 写出 boot v2；v3 transport 客户端；在写出标识符和 Session ID 之前，把 Broker 对它们的检查收紧到上述规则；测试 Broker 的 JSON 写入器不转义非 ASCII 字符。                                                                 |
-| W0c-3 | storage 解析器，以及控制面中的 Session 解析。                                                                                                                                                                                        |
-| W0e   | 在整个 W0 链路验证通过之后，再声明能力（`workspace_context`）。                                                                                                                                                                      |
+| 切片        | 范围                                                                                                                                                                                                                                                               |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| W0c-1       | 已在 [Managed Context Worker](2026-09-26-managed-context-worker.zh-CN.md) 中完成：worker 接受 boot v2，并提供 attestation v3 和安装；支持 v2 的 fake worker；activation gate，它把每次 Tool v2 调用绑定到其 Session 已安装的上下文。                               |
+| W0c-2       | provisioner 写出 boot v2；v3 transport 客户端；不降级，并为 boot v2 设置重试上限；处理安装和 `execute` 返回的 `managed_context_unavailable`；在写出标识符和 Session ID 之前，把 Broker 对它们的检查收紧到上述规则；测试 Broker 的 JSON 写入器不转义非 ASCII 字符。 |
+| W0c-3       | storage 解析器，以及控制面中的 Session 解析。                                                                                                                                                                                                                      |
+| W0c（后续） | 按 W0a 文档所述，把每次 Tool v2 调用绑定到 Runtime binding ID 与 generation 以及 Harness owner generation 的调用封装。                                                                                                                                             |
+| W0e         | 在整个 W0 链路验证通过之后，再声明能力（`workspace_context`）。                                                                                                                                                                                                    |

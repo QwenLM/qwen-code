@@ -6,10 +6,10 @@
 
 import { readSshWorkspace } from '../serve/ssh-workspace-store.js';
 import { SshExecutionEnvironment } from '@qwen-code/qwen-code-core/services/ssh-execution-environment.js';
+import type { SessionExecutionEngine } from '@qwen-code/qwen-code-core/services/session-execution-engine.js';
 import {
   type ModelProposedGoalsMode,
   ApprovalMode,
-  APPROVAL_MODES,
   type AuthType,
   Config,
   DEFAULT_QWEN_EMBEDDING_MODEL,
@@ -127,6 +127,9 @@ import {
 import { detectSystemLanguage } from '../i18n/index.js';
 import { normalizeSkillNames, resolveSkillSettings } from './skill-settings.js';
 import { checkAdvisorModelAvailability } from './advisor-model.js';
+import { parseApprovalModeValue } from './approval-mode-value.js';
+
+export { parseApprovalModeValue };
 
 const debugLogger = createDebugLogger('CONFIG');
 
@@ -147,34 +150,6 @@ const SKILL_LEVELS: readonly SkillLevel[] = [
 
 function isSkillLevel(value: unknown): value is SkillLevel {
   return SKILL_LEVELS.includes(value as SkillLevel);
-}
-
-function formatApprovalModeError(value: string): Error {
-  return new Error(
-    `Invalid approval mode: ${value}. Valid values are: ${APPROVAL_MODES.join(
-      ', ',
-    )}`,
-  );
-}
-
-/**
- * Normalizes an approval-mode spelling exactly the way boot accepts it:
- * trimmed, lowercased, with the legacy `auto_edit`/`autoedit` aliases mapped
- * to AUTO_EDIT. Throws for values boot would reject. Shared with the ACP
- * daemon's reload convergence so a settings file reload agrees with boot for
- * every accepted spelling.
- */
-export function parseApprovalModeValue(value: string): ApprovalMode {
-  const normalized = value.trim().toLowerCase();
-  const canonical =
-    normalized === 'auto_edit' || normalized === 'autoedit'
-      ? ApprovalMode.AUTO_EDIT
-      : normalized;
-  const approvalMode = APPROVAL_MODES.find((mode) => mode === canonical);
-  if (approvalMode === undefined) {
-    throw formatApprovalModeError(value);
-  }
-  return approvalMode;
 }
 
 export interface CliArgs {
@@ -1717,6 +1692,8 @@ export async function loadCliConfig(
         sessionId: string,
       ) => Promise<SessionRestoreProjection | undefined>;
     };
+    /** Engine a paired host selected; the Config persists or verifies it. */
+    executionEngine?: SessionExecutionEngine;
   },
   enabledSkillNamesProvider?: () => ReadonlySet<string>,
 ): Promise<Config> {
@@ -2441,6 +2418,7 @@ export async function loadCliConfig(
     sessionData,
     sessionRestoreProjection,
     sessionRestoreProjectionSource: boundSessionRestoreProjectionSource,
+    sessionExecutionEngine: hostPolicy?.executionEngine,
     embeddingModel: DEFAULT_QWEN_EMBEDDING_MODEL,
     sandbox: sandboxConfig,
     targetDir: cwd,
@@ -2741,6 +2719,10 @@ export async function loadCliConfig(
       bareMode || safeMode
         ? false
         : (settings.memory?.enableTeamMemorySync ?? false),
+    enableStructuredMemoryRecall:
+      bareMode || safeMode
+        ? false
+        : (settings.memory?.enableStructuredRecall ?? false),
     enableAutoSkill:
       bareMode || safeMode
         ? false
@@ -2846,6 +2828,7 @@ export async function loadCliConfig(
     configParams.enableManagedAutoDream = false;
     configParams.enableTeamMemory = false;
     configParams.enableTeamMemorySync = false;
+    configParams.enableStructuredMemoryRecall = false;
     configParams.enableAutoSkill = false;
     configParams.fileCheckpointingEnabled = false;
     configParams.artifactEnabled = false;

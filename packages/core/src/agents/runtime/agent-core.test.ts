@@ -13,6 +13,7 @@ import {
   AgentCore,
   buildInheritedForkExecutionToolNames,
   extractParentToolNames,
+  renderSubagentSystemPrompt,
   type ReasoningLoopResult,
 } from './agent-core.js';
 import { attachJsonlTranscriptWriter } from '../agent-transcript.js';
@@ -89,6 +90,33 @@ vi.mock(
     observeToolResultBoundary: boundaryObserveMock,
   }),
 );
+
+describe('renderSubagentSystemPrompt', () => {
+  it('does not give structured memory routing instructions to subagents', () => {
+    const runtimeContext = {
+      getUserMemory: () => '',
+      getAutoMemoryPrompt: () =>
+        'Use search_memory only when routed by the complete tree.',
+      getMemoryRecallMode: vi.fn().mockReturnValue('structured'),
+    } as unknown as Config;
+    const prompt = renderSubagentSystemPrompt(
+      { systemPrompt: 'You are a code reviewer.' } as PromptConfig,
+      new ContextState(),
+      runtimeContext,
+    );
+
+    expect(prompt).not.toContain('Use search_memory only when');
+
+    vi.mocked(runtimeContext.getMemoryRecallMode).mockReturnValue('legacy');
+    expect(
+      renderSubagentSystemPrompt(
+        { systemPrompt: 'You are a code reviewer.' } as PromptConfig,
+        new ContextState(),
+        runtimeContext,
+      ),
+    ).toContain('Use search_memory only when');
+  });
+});
 
 describe('AgentCore.createChat manual plan-exit notice ownership', () => {
   it('enables notices only for interactive agent chats', async () => {
@@ -1929,6 +1957,66 @@ describe('AgentCore.prepareTools', () => {
     expect(tools.map((t) => t.name)).toEqual(['lsp']);
   });
 
+  it('explicit empty tools array denies all tools (does not inherit)', async () => {
+    // An explicit `tools: []` is the documented deny-all contract (e.g.
+    // single-turn text-output agents); it must not fall into the wildcard
+    // inherit branch, or a no-tools agent silently runs with the full
+    // registry under forced auto-approval.
+    const { core, getFunctionDeclarationsSpy } = buildAgentForTools(
+      { tools: [] },
+      [
+        { name: 'core_tool', description: 'core' } as FunctionDeclaration,
+        {
+          name: 'mcp__github__create_issue',
+          description: 'mcp deferred',
+        } as FunctionDeclaration,
+      ],
+    );
+
+    const tools = await core.prepareTools();
+
+    expect(tools).toEqual([]);
+    expect(getFunctionDeclarationsSpy).not.toHaveBeenCalled();
+  });
+
+  it('explicit empty tools array denies all tools in CodeModeOnly', async () => {
+    const config = {
+      getToolRegistry: vi.fn().mockReturnValue({
+        warmAll: vi.fn().mockResolvedValue(undefined),
+        getAllToolNames: vi
+          .fn()
+          .mockReturnValue([ToolNames.EXEC, ToolNames.READ_FILE]),
+        getFunctionDeclarationsFiltered: vi.fn((names: string[]) =>
+          [ToolNames.EXEC, ToolNames.READ_FILE]
+            .filter((name) => names.includes(name))
+            .map((name) => ({ name }) as FunctionDeclaration),
+        ),
+        isPermissionDeferred: vi.fn().mockReturnValue(false),
+        isDeferredAndHidden: vi.fn().mockReturnValue(false),
+      }),
+      getDebugLogger: vi
+        .fn()
+        .mockReturnValue({ debug: vi.fn(), error: vi.fn() }),
+      getToolOutputBatchBudget: vi
+        .fn()
+        .mockReturnValue(Number.POSITIVE_INFINITY),
+      getToolResultBytesWritten: vi.fn().mockReturnValue(0),
+      getSessionId: vi.fn().mockReturnValue('code-mode-empty-tools'),
+      getMaxSubagentDepth: vi.fn().mockReturnValue(5),
+      getToolMode: vi.fn().mockReturnValue(ToolMode.CodeModeOnly),
+    } as unknown as Config;
+    const core = new AgentCore(
+      'code-mode-empty-tools-agent',
+      config,
+      { systemPrompt: '' },
+      { model: 'test-model' },
+      { max_turns: 1 },
+      { tools: [] },
+    );
+
+    await expect(core.prepareTools()).resolves.toEqual([]);
+  });
+
   it.each(['subagent', 'teammate'])(
     'excludes parent-owned record_source from a reused registry in a %s',
     async (context) => {
@@ -2345,6 +2433,31 @@ describe('AgentCore.prepareTools', () => {
     );
     const names = tools.map((t) => t.name);
     expect(names).not.toContain(ToolNames.AGENT);
+    expect(names).toContain('read_file');
+  });
+
+  it('teammates never receive the session-scoped memory tools', async () => {
+    // Teammates run in-process on a Config prototype-chained to the
+    // leader's, so their search_memory would claim the leader's turn-scoped
+    // request signatures and manage_memory would mutate shared memory
+    // without the leader's review — the same hazard the subagent set lists.
+    const { core } = buildAgentForTools({ tools: ['*'] }, [
+      { name: ToolNames.SEARCH_MEMORY, description: 'search memory' },
+      { name: ToolNames.MANAGE_MEMORY, description: 'manage memory' },
+      { name: 'read_file', description: 'read' },
+    ] as FunctionDeclaration[]);
+    const identity: TeammateIdentity = {
+      agentId: 'scribe@demo',
+      agentName: 'scribe',
+      teamName: 'demo',
+      isTeamLead: false,
+    };
+    const tools = await runWithTeammateIdentity(identity, () =>
+      core.prepareTools(),
+    );
+    const names = tools.map((t) => t.name);
+    expect(names).not.toContain(ToolNames.SEARCH_MEMORY);
+    expect(names).not.toContain(ToolNames.MANAGE_MEMORY);
     expect(names).toContain('read_file');
   });
 

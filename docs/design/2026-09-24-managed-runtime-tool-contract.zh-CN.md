@@ -52,7 +52,7 @@ reference 是 harness 分配的原始调用身份；Runtime 不会得知任何 B
 
 本切片只固定 `responseParts` 为数组，有意把元素结构推迟到 worker 处理器与 Broker 接入切片。后续必须从实际工具结果路径推导结构（`ToolCallResponseInfo.responseParts` 使用 SDK `Part[]`），并在提供结果之前补齐共享一致性覆盖。fixture 中的文本 part 仅作示例，不定义新的 part 格式。`settled` 下的 `not_started` 是 Runtime 明确给出的终态；记录缺失仍须返回 `unknown`，绝不能据此推导 `not_started`。
 
-失败沿用共享分类：401 凭据、400/413 协议、409 身份、404 不兼容。JSON 错误保留共享的稳定错误码；gate 的不兼容 404 为空响应体。含 attestation 名称的错误码由各路由共享；每个解析器执行对应路由的请求体上限。
+失败沿用共享分类：401 凭据、400/413 协议、409 身份、404 不兼容。在 `managed-context/1` 的 boot v2 下，`execute` 还可能返回 409 `managed_context_unavailable`，其类别为 recovery；见 [Managed Context Worker](2026-09-26-managed-context-worker.zh-CN.md)。JSON 错误保留共享的稳定错误码；gate 的不兼容 404 为空响应体。含 attestation 名称的错误码由各路由共享；每个解析器执行对应路由的请求体上限。
 
 ### 3.4 Conformance fixtures
 

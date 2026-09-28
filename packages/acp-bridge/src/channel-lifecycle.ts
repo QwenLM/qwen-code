@@ -13,6 +13,8 @@ import type { BridgeExecutionEngine } from './bridgeOptions.js';
 export interface HarnessChannel {
   readonly id: string;
   readonly executionEngine?: BridgeExecutionEngine;
+  /** Epoch allocated when the handshake completed; 0 until then. */
+  runtimeEpoch: number;
   lastUsedAt: number;
   readonly channel: AcpChannel;
   readonly connection: ClientSideConnection;
@@ -20,6 +22,8 @@ export interface HarnessChannel {
   workspaceControlInFlight: number;
   /** A timed-out workspace operation will retire this channel after Sessions drain. */
   retireWhenSessionsDrain: boolean;
+  /** Diagnostic cause, separate from the scheduling flag above. */
+  retiringAfterWorkspaceTimeout?: boolean;
   /**
    * Set when an empty channel should be reaped after overlapping
    * session/workspace-control work drains.

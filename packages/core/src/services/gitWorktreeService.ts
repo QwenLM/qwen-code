@@ -8,6 +8,7 @@ import nodeFs from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { randomBytes, randomInt } from 'node:crypto';
+import { constants as fsConstants } from 'node:fs';
 import { execFile, execSync } from 'node:child_process';
 import { promisify } from 'node:util';
 
@@ -19,7 +20,9 @@ import { isNodeError } from '../utils/errors.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { fileExists, isWithinRoot } from '../utils/fileUtils.js';
 import { NO_EXEC_CONFIG } from '../utils/gitUtils.js';
+import { runGitCapture } from '../utils/git-branches.js';
 import { loadSimpleGit } from '../utils/load-simple-git.js';
+import { gitEnv, gitRemoteEnv } from '../utils/git-branches.js';
 import { initRepositoryWithMainBranch } from './gitInit.js';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 
@@ -36,13 +39,197 @@ export function worktreeBranchForSlug(slug: string): string {
 /**
  * Filename of the in-worktree session marker. Created at worktree
  * provisioning time and consulted by `exit_worktree` to decide
- * whether the current session is allowed to drop the worktree. The
- * file is kept out of commits via the repository's common
- * `.git/info/exclude` (see `addWorktreeSessionMarkerExclude`).
+ * whether the current session is allowed to drop the worktree. Marker
+ * writers keep it and ownership-transfer temp files out of commits via
+ * the repository's common `.git/info/exclude`.
  */
 export const WORKTREE_SESSION_FILE = '.qwen-session';
-
 const WORKTREE_SESSION_MARKER_MAX_BYTES = 512;
+
+export class WorktreeSessionMarkerOwnerChangedError extends Error {
+  constructor() {
+    super('Worktree session marker owner changed');
+    this.name = 'WorktreeSessionMarkerOwnerChangedError';
+  }
+}
+
+/**
+ * Ignored directories whose contents are regenerable build or
+ * dependency output. They are exempt from the ignored-content check in
+ * {@link worktreeHasWork} so a checkout where an agent ran `npm install`
+ * or a build stays cleanable; every other ignored entry (agent artifacts
+ * like `.qwen/pr-drafts/`) still counts as work. An entry matches when
+ * its first path segment is in the set (root output, `node_modules/…`)
+ * or when it is an ignored directory whose last segment is in the set
+ * (a monorepo's `packages/app/node_modules/`); a nested ignored file
+ * outside those trees still counts as work.
+ */
+export const DISPOSABLE_IGNORED_ROOTS: ReadonlySet<string> = new Set([
+  'node_modules',
+  'dist',
+  'coverage',
+]);
+
+/**
+ * The one "is there work here?" predicate for every path that destroys a
+ * worktree checkout: the CLI startup sweep (`cleanupStaleAgentWorktrees`)
+ * and the daemon's orphan reaper both gate `removeUserWorktree` on this,
+ * so the two reapers cannot drift into disagreeing policies again
+ * (#12758).
+ *
+ * Runs `git status --porcelain --untracked-files=normal
+ * --ignored=matching`: tracked, untracked and ignored entries all count
+ * as work, except disposable build output ({@link DISPOSABLE_IGNORED_ROOTS}),
+ * symlinks (removing the checkout only unlinks them; the target lives
+ * elsewhere — this is what keeps `worktree.symlinkDirectories` checkouts
+ * reapable, nested values included, which git reports as a collapsed parent
+ * holding nothing but links), and the session marker
+ * ({@link WORKTREE_SESSION_FILE}) when git lists it as ignored (its exclude
+ * rule) or untracked (a fixture without one). A marker the repository tracks
+ * counts as work like any other tracked change: an edit to a tracked path is
+ * indistinguishable from user work, and since `writeWorktreeSessionMarker`
+ * overwrites a tracked marker unconditionally the daemon can be the author of
+ * that edit, so such a preserve is permanent rather than transient. The argv
+ * tokens added for this probe are literals placed after the `status`
+ * subcommand and are never caller-derived (see `load-simple-git.ts`), and
+ * `runGitCapture` scrubs the environment (`gitEnv`) so an inherited
+ * `GIT_DIR` or `status.showUntrackedFiles=no` cannot make a dirty checkout
+ * read clean.
+ *
+ * Fail-closed: any read error counts as work, preserving the checkout —
+ * including the one kind that arrives as a zero exit status: git reports
+ * a directory it cannot open as a stderr warning, leaving that content
+ * absent from stdout, so any stderr output preserves the checkout too.
+ * The `.git` access check exists because `runGitCapture` does not pin the
+ * repository: without it, git's upward discovery from a path whose own
+ * `.git` is gone (a sweep's `fs.rm` that threw partway, a restore that
+ * dropped the link file) would answer about the *enclosing* repository —
+ * and a clean enclosing repo would read as "no work", authorizing the
+ * destructive sinks this predicate gates.
+ */
+export async function worktreeHasWork(worktreePath: string): Promise<boolean> {
+  try {
+    await fs.access(path.join(worktreePath, '.git'));
+    const { stdout, stderr } = await runGitCapture(worktreePath, [
+      ...NO_EXEC_CONFIG,
+      '--no-optional-locks',
+      'status',
+      '--porcelain',
+      '--untracked-files=normal',
+      '--ignored=matching',
+    ]);
+    // `git status` reports a directory it cannot open as a stderr warning
+    // with exit 0, so that content is absent from stdout with no line to
+    // preserve it — the one read error that arrives without rejecting.
+    // Fail closed on it; the sweep's keeping line then carries the reason.
+    if (stderr.trim().length > 0) {
+      debugLogger.debug(
+        `worktreeHasWork: status probe at ${worktreePath} reported on stderr, treating as work: ${stderr.trim()}`,
+      );
+      return true;
+    }
+    for (const line of stdout.split('\n')) {
+      if (line.trim().length === 0) continue;
+      const entry = line.slice(3);
+      const status = line.slice(0, 2);
+      let waived: string | null = null;
+      if (
+        (status === '!!' || status === '??') &&
+        entry === WORKTREE_SESSION_FILE
+      ) {
+        waived = 'session-marker';
+      } else if (status === '!!' && isDisposableIgnoredEntry(entry)) {
+        waived = 'disposable-output';
+      } else if (
+        (status === '!!' || status === '??') &&
+        (await isSymlinkEntry(worktreePath, entry))
+      ) {
+        waived = 'symlink';
+      }
+      if (waived === null) return true;
+      // A waiver authorizes `git worktree remove --force` plus a branch
+      // delete, and it destroys the very state that authorized it — so name
+      // the entry while it can still be read. Stays at `debug` for the
+      // reason the sweep's own breadcrumb records: `info` on every CLI start
+      // that has any dirty worktree is log noise.
+      debugLogger.debug(
+        `worktreeHasWork: waiving ${status} ${entry} (${waived}) at ${worktreePath}`,
+      );
+    }
+    return false;
+  } catch (error) {
+    debugLogger.debug(
+      `worktreeHasWork: status probe at ${worktreePath} failed, treating as work: ${error}`,
+    );
+    return true;
+  }
+}
+
+/**
+ * Disposable build output at the root (`node_modules/`) or as a workspace
+ * package's own ignored directory (`packages/app/node_modules/`). That nested
+ * rendering depends on how the ignore rule is spelled rather than holding for
+ * every monorepo: git collapses the entry to `!! <dir>/` only when a rule
+ * matches the *directory* itself (`node_modules/`, or a bare `node_modules`).
+ * A rule matching the directory's *contents* instead (a package-local
+ * `node_modules/**`) makes git list them individually
+ * (`!! packages/app/node_modules/x/`), whose last segment is not in the set,
+ * so such a tree still counts as work and the checkout is preserved.
+ */
+function isDisposableIgnoredEntry(entry: string): boolean {
+  const segments = entry.replace(/\/$/, '').split('/');
+  if (DISPOSABLE_IGNORED_ROOTS.has(segments[0] ?? '')) return true;
+  return (
+    entry.endsWith('/') &&
+    DISPOSABLE_IGNORED_ROOTS.has(segments[segments.length - 1] ?? '')
+  );
+}
+
+/**
+ * A symlink holds no data in this checkout: `worktree.symlinkDirectories`
+ * links e.g. `node_modules` from the main repo, and git lists such a link as
+ * an untracked file when the ignore rule is directory-only
+ * (`node_modules/`) or as an ignored one when the rule is bare (`.turbo`).
+ * Removing the worktree unlinks it and never touches the target.
+ *
+ * A *nested* configured value (`tools/cache`) is reported differently:
+ * `symlinkConfiguredDirectories` has to `fs.mkdir` the untracked parent
+ * because `git worktree add` does not create it, and nothing writes an
+ * exclude rule for linked paths, so git collapses the whole subtree to a
+ * single `?? tools/` entry that never names the link. Such a collapsed
+ * directory is exempt only when it holds at least one entry and every entry
+ * inside it is itself a symlink — an empty one is not a link, a real file or
+ * directory beside the links is work, and any read error fails closed exactly
+ * like the status probe does.
+ *
+ * Quoted (special-character) paths are not resolved and count as work.
+ */
+async function isSymlinkEntry(
+  worktreePath: string,
+  entry: string,
+): Promise<boolean> {
+  if (entry.startsWith('"')) return false;
+  const absolute = path.join(worktreePath, entry.replace(/\/$/, ''));
+  try {
+    const stats = await fs.lstat(absolute);
+    if (stats.isSymbolicLink()) return true;
+    if (!stats.isDirectory()) return false;
+    // Dirents from `readdir` do not follow links, so a real subdirectory —
+    // which may hold work one level down — fails this check. An *empty*
+    // directory would satisfy "every child is a link" vacuously, and git does
+    // list empty ignored directories (`!! build/`), so require at least one
+    // link: waiving such an entry as `symlink` would authorize a removal with
+    // a breadcrumb naming an exemption the checkout has nothing to do with.
+    let sawLink = false;
+    for (const child of await fs.readdir(absolute, { withFileTypes: true })) {
+      if (!child.isSymbolicLink()) return false;
+      sawLink = true;
+    }
+    return sawLink;
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Diff flags that stop the tree being diffed from choosing the program that
@@ -75,16 +262,23 @@ export type StrictWorktreeSessionMarker =
     }
   | { state: 'invalid'; reason: string };
 
-async function addWorktreeSessionMarkerExclude(
+export async function ensureWorktreeSessionMarkerExcluded(
   worktreePath: string,
 ): Promise<void> {
+  // The marker lives inside the worktree dir so a subagent running
+  // `git add -A` inside it would otherwise add the session id to its
+  // first commit. Write a `.git/info/exclude` rule so the marker is
+  // ignored without requiring (or modifying) a tracked `.gitignore`.
+  // Linked worktrees use a per-worktree git dir, but Git reads the shared
+  // repository's info/exclude. Resolve `--git-common-dir` instead of joining
+  // `.git` naively.
   try {
     const { simpleGit } = await loadSimpleGit();
-    const wtGit = simpleGit(worktreePath);
-    const commonDir = (await wtGit.revparse(['--git-common-dir'])).trim();
-    const excludePath = path.isAbsolute(commonDir)
-      ? path.join(commonDir, 'info', 'exclude')
-      : path.join(worktreePath, commonDir, 'info', 'exclude');
+    const wtGit = simpleGit(worktreePath).env(gitEnv());
+    const gitDir = (await wtGit.revparse(['--git-common-dir'])).trim();
+    const excludePath = path.isAbsolute(gitDir)
+      ? path.join(gitDir, 'info', 'exclude')
+      : path.join(worktreePath, gitDir, 'info', 'exclude');
     await fs.mkdir(path.dirname(excludePath), { recursive: true });
     let existing = '';
     try {
@@ -94,9 +288,12 @@ async function addWorktreeSessionMarkerExclude(
     }
     // The second rule covers the sibling temp file `atomicWriteFile` stages
     // next to the marker during an ownership transfer
-    // (`<worktree>/.qwen-session.<hex>.tmp`). It lands in the main checkout's
-    // shared exclude too — accepted: the pattern is name-scoped.
-    const rules = [WORKTREE_SESSION_FILE, `${WORKTREE_SESSION_FILE}.*.tmp`];
+    // (`<worktree>/.qwen-session.<hex>.tmp`). Anchor both rules at the
+    // worktree root so nested user files with the same name stay visible.
+    const rules = [
+      `/${WORKTREE_SESSION_FILE}`,
+      `/${WORKTREE_SESSION_FILE}.*.tmp`,
+    ];
     let next = existing;
     for (const rule of rules) {
       if (!next.split(/\r?\n/).includes(rule)) {
@@ -108,28 +305,9 @@ async function addWorktreeSessionMarkerExclude(
       await fs.writeFile(excludePath, next, 'utf8');
     }
   } catch {
-    // The marker remains authoritative when the ignore rule cannot be added.
+    // Best-effort: ownership validation remains authoritative even if the
+    // ignore rule cannot be written.
   }
-}
-
-/** Writes the owning session id into the worktree's session marker. */
-export async function writeWorktreeSessionMarker(
-  worktreePath: string,
-  sessionId: string,
-): Promise<void> {
-  await fs.writeFile(
-    path.join(worktreePath, WORKTREE_SESSION_FILE),
-    sessionId,
-    'utf8',
-  );
-  // The marker lives inside the worktree dir so a subagent running
-  // `git add -A` inside it would otherwise add the session id to its
-  // first commit. Write a `.git/info/exclude` rule so the marker is
-  // ignored without requiring (or modifying) a tracked `.gitignore`.
-  // Linked worktrees share ignore rules from the repository's common
-  // `info/exclude`, so resolve `--git-common-dir` instead of the
-  // per-worktree administrative directory returned by `--git-dir`.
-  await addWorktreeSessionMarkerExclude(worktreePath);
 }
 
 /**
@@ -154,8 +332,6 @@ export class WorktreeMarkerCommittedError extends Error {
 
 /**
  * Creates the daemon-owned marker without replacing any existing path.
- * This is intentionally separate from {@link writeWorktreeSessionMarker},
- * whose overwrite semantics are required by interactive worktree tools.
  */
 export async function createWorktreeSessionMarkerExclusive(
   worktreePath: string,
@@ -244,7 +420,7 @@ export async function createWorktreeSessionMarkerExclusive(
     await handle.close().catch(() => {});
     throw new WorktreeMarkerCommittedError(sessionId, { cause: error });
   }
-  await addWorktreeSessionMarkerExclude(worktreePath);
+  await ensureWorktreeSessionMarkerExcluded(worktreePath);
 }
 
 function assertValidWorktreeSessionMarkerOwner(sessionId: string): void {
@@ -266,9 +442,9 @@ export async function readWorktreeSessionMarkerStrict(
   let observedMarker = false;
   try {
     const flags =
-      nodeFs.constants.O_RDONLY |
-      (nodeFs.constants.O_NOFOLLOW ?? 0) |
-      (nodeFs.constants.O_NONBLOCK ?? 0);
+      fsConstants.O_RDONLY |
+      (fsConstants.O_NOFOLLOW ?? 0) |
+      (fsConstants.O_NONBLOCK ?? 0);
     const before = await fs.lstat(markerPath);
     observedMarker = true;
     if (before.isSymbolicLink() || !before.isFile() || before.nlink !== 1) {
@@ -353,6 +529,115 @@ export async function readWorktreeSessionMarkerStrict(
   } finally {
     await handle?.close().catch(() => {});
   }
+}
+
+/** Writes the owning session id into the worktree's session marker. */
+export async function writeWorktreeSessionMarker(
+  worktreePath: string,
+  sessionId: string,
+): Promise<void> {
+  assertValidWorktreeSessionMarkerOwner(sessionId);
+  const marker = await readWorktreeSessionMarkerStrict(worktreePath);
+  if (marker.state === 'valid' && marker.sessionId === sessionId) {
+    await ensureWorktreeSessionMarkerExcluded(worktreePath);
+    return;
+  }
+  if (marker.state === 'valid') {
+    throw new WorktreeSessionMarkerOwnerChangedError();
+  }
+  if (marker.state === 'missing') {
+    await createWorktreeSessionMarker(worktreePath, sessionId);
+    return;
+  }
+  if (marker.reason !== 'invalid marker owner') {
+    throw new Error(`Worktree marker is invalid: ${marker.reason}`);
+  }
+
+  const markerPath = path.join(worktreePath, WORKTREE_SESSION_FILE);
+  const before = await fs.lstat(markerPath);
+  const confirmed = await readWorktreeSessionMarkerStrict(worktreePath);
+  const confirmedStat = await fs.lstat(markerPath);
+  if (
+    !before.isFile() ||
+    before.nlink !== 1 ||
+    before.ino === 0 ||
+    before.size > WORKTREE_SESSION_MARKER_MAX_BYTES ||
+    confirmed.state !== 'invalid' ||
+    confirmed.reason !== 'invalid marker owner' ||
+    confirmedStat.dev !== before.dev ||
+    confirmedStat.ino !== before.ino
+  ) {
+    throw new WorktreeSessionMarkerOwnerChangedError();
+  }
+  const euid = process.geteuid?.();
+  if (euid !== undefined && confirmedStat.uid !== euid) {
+    throw new Error('Worktree marker is owned by a different uid');
+  }
+  await atomicWriteFile(markerPath, sessionId, {
+    mode: 0o600,
+    noFollow: true,
+    assertCanCommit: () => {
+      const current = readWorktreeSessionMarkerStrictSync(worktreePath);
+      const currentStat = nodeFs.lstatSync(markerPath);
+      if (
+        current.state !== 'invalid' ||
+        current.reason !== 'invalid marker owner' ||
+        !currentStat.isFile() ||
+        currentStat.nlink !== 1 ||
+        currentStat.dev !== confirmedStat.dev ||
+        currentStat.ino !== confirmedStat.ino ||
+        currentStat.uid !== confirmedStat.uid
+      ) {
+        throw new WorktreeSessionMarkerOwnerChangedError();
+      }
+    },
+  });
+  await ensureWorktreeSessionMarkerExcluded(worktreePath);
+}
+
+async function readBoundedMarker(
+  handle: fs.FileHandle,
+): Promise<string | null> {
+  // Looped bounded read: POSIX permits short reads on regular files
+  // (FUSE/NFS), and a marker larger than the owner bound still reads as
+  // *present* — its bounded content can never equal a validated owner id
+  // (writers cap owners at WORKTREE_SESSION_MARKER_MAX_BYTES), so it fails
+  // closed as a foreign owner instead of collapsing into "no marker" for
+  // exit_worktree's removal guard. Only an empty marker reads as absent.
+  const buffer = Buffer.alloc(WORKTREE_SESSION_MARKER_MAX_BYTES + 1);
+  let bytesRead = 0;
+  while (bytesRead < buffer.length) {
+    const chunk = await handle.read(
+      buffer,
+      bytesRead,
+      buffer.length - bytesRead,
+      bytesRead,
+    );
+    if (chunk.bytesRead === 0) break;
+    bytesRead += chunk.bytesRead;
+  }
+  return buffer.subarray(0, bytesRead).toString('utf8').trim() || null;
+}
+
+/** Creates a fresh marker without following or replacing an existing path. */
+export async function createWorktreeSessionMarker(
+  worktreePath: string,
+  sessionId: string,
+): Promise<void> {
+  await createWorktreeSessionMarkerExclusive(worktreePath, sessionId);
+}
+
+/** Replaces a marker only when its current regular-file owner still matches. */
+export async function replaceWorktreeSessionMarker(
+  worktreePath: string,
+  expectedOwner: string,
+  sessionId: string,
+): Promise<void> {
+  await transferWorktreeSessionMarkerOwner(
+    worktreePath,
+    expectedOwner,
+    sessionId,
+  );
 }
 
 /**
@@ -503,13 +788,13 @@ export async function transferWorktreeSessionMarkerOwner(
   }
   if (opening.state === 'missing') {
     if (expectedOwner !== null) {
-      throw new Error('Worktree marker owner does not match the expectation');
+      throw new WorktreeSessionMarkerOwnerChangedError();
     }
     await createWorktreeSessionMarkerExclusive(worktreePath, newOwner);
     return;
   }
   if (opening.sessionId !== expectedOwner) {
-    throw new Error('Worktree marker owner does not match the expectation');
+    throw new WorktreeSessionMarkerOwnerChangedError();
   }
   const euid = process.geteuid?.();
   if (euid !== undefined && opening.uid !== null && opening.uid !== euid) {
@@ -528,40 +813,103 @@ export async function transferWorktreeSessionMarkerOwner(
         current.ino !== opening.ino ||
         current.uid !== opening.uid
       ) {
-        throw new Error('Worktree marker changed during ownership transfer');
+        throw new WorktreeSessionMarkerOwnerChangedError();
       }
     },
   });
-  await addWorktreeSessionMarkerExclude(worktreePath);
+  await ensureWorktreeSessionMarkerExcluded(worktreePath);
 }
 
 /**
- * Reads the owning session id stored at worktree provisioning time.
- * Returns `null` when the marker is missing or unreadable — callers
- * decide whether to treat that as "owner unknown, refuse" or "owner
- * unknown, allow with explicit override".
+ * Three-way outcome of the lenient marker read. Guards that DELETE on
+ * absence (exit_worktree) must distinguish "no marker" from "present but
+ * not read conclusively" (the inode changed mid-read, or the read failed):
+ * collapsing the latter into absence would turn a detected ownership swap
+ * into "no marker — allow removal". Callers that only badge or compare
+ * owners keep using {@link readWorktreeSessionMarker}, which maps both
+ * non-owned states to `null`.
  */
-export async function readWorktreeSessionMarker(
+export type WorktreeSessionMarkerOutcome =
+  | { state: 'missing' }
+  | { state: 'owned'; sessionId: string }
+  | { state: 'inconclusive' };
+
+/**
+ * Lenient marker read reporting the full three-way outcome. See
+ * {@link readWorktreeSessionMarker} for the collapsing variant.
+ */
+export async function readWorktreeSessionMarkerOutcome(
   worktreePath: string,
-): Promise<string | null> {
+): Promise<WorktreeSessionMarkerOutcome> {
   const markerPath = path.join(worktreePath, WORKTREE_SESSION_FILE);
+  let handle: fs.FileHandle | undefined;
   try {
-    const raw = await fs.readFile(markerPath, 'utf8');
-    const trimmed = raw.trim();
-    return trimmed.length > 0 ? trimmed : null;
+    // Deliberately no nlink check (unlike the strict reader):
+    // createWorktreeSessionMarkerExclusive publishes by linking the staged
+    // sibling onto the marker path and only then unlinking the sibling, so
+    // the marker sits at nlink 2 inside every publish window and permanently
+    // after a crash — with complete, fsync'd content. exit_worktree treats a
+    // missing marker as "no owner; allow removal", so that residue must
+    // still read as owned. Reading through a hard link is harmless; writing
+    // through one is not, and the strict readers gating writes keep the
+    // nlink rejection.
+    const pathStat = await fs.lstat(markerPath);
+    if (!pathStat.isFile()) return { state: 'inconclusive' };
+    handle = await fs.open(
+      markerPath,
+      fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0),
+    );
+    const openedStat = await handle.stat();
+    if (
+      !openedStat.isFile() ||
+      openedStat.dev !== pathStat.dev ||
+      openedStat.ino !== pathStat.ino
+    ) {
+      return { state: 'inconclusive' };
+    }
+    const raw = await readBoundedMarker(handle);
+    const finalStat = await fs.lstat(markerPath);
+    if (
+      !finalStat.isFile() ||
+      finalStat.dev !== openedStat.dev ||
+      finalStat.ino !== openedStat.ino
+    ) {
+      return { state: 'inconclusive' };
+    }
+    return raw === null
+      ? { state: 'missing' }
+      : { state: 'owned', sessionId: raw };
   } catch (error) {
     // Distinguish "marker missing" (legitimate — worktree predates the
     // session-ownership guard) from "marker unreadable" (disk error,
-    // permission, corrupt NFS). Both still return `null`, but the
-    // unreadable case logs so an operator chasing a "wrong session
-    // bypassed the ownership guard" report has a breadcrumb.
+    // permission, corrupt NFS). The unreadable case logs so an operator
+    // chasing a "wrong session bypassed the ownership guard" report has a
+    // breadcrumb, and reports inconclusive so deleting guards fail closed.
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
       debugLogger.warn(
         `readWorktreeSessionMarker: cannot read ${markerPath}: ${error}`,
       );
+      return { state: 'inconclusive' };
     }
-    return null;
+    return { state: 'missing' };
+  } finally {
+    await handle?.close();
   }
+}
+
+/**
+ * Reads the owning session id stored at worktree provisioning time.
+ * Returns `null` when the marker is missing, empty, or cannot be read
+ * conclusively — callers decide whether to treat that as "owner unknown,
+ * refuse" or "owner unknown, allow with explicit override". Guards that
+ * delete on `null` must use {@link readWorktreeSessionMarkerOutcome}
+ * instead so a mid-read identity change fails closed.
+ */
+export async function readWorktreeSessionMarker(
+  worktreePath: string,
+): Promise<string | null> {
+  const outcome = await readWorktreeSessionMarkerOutcome(worktreePath);
+  return outcome.state === 'owned' ? outcome.sessionId : null;
 }
 
 /**
@@ -701,7 +1049,7 @@ export class GitWorktreeService {
 
   private getGit(): Promise<SimpleGit> {
     this.gitPromise ??= loadSimpleGit().then(({ simpleGit }) =>
-      simpleGit(this.sourceRepoPath),
+      simpleGit(this.sourceRepoPath).env(gitEnv()),
     );
     return this.gitPromise;
   }
@@ -1961,7 +2309,7 @@ export class GitWorktreeService {
         {
           cwd: this.sourceRepoPath,
           timeout: timeoutMs,
-          env: { ...process.env, LANG: 'C', LC_ALL: 'C' },
+          env: gitRemoteEnv(),
         },
       );
       return { success: true };
@@ -2696,6 +3044,247 @@ export class GitWorktreeService {
     // did not opt into force-delete. Surface this so callers can leave
     // a note for the user.
     return { success: true, branchPreserved: true };
+  }
+
+  async removePreparedUserWorktree(
+    slug: string,
+    expectedOwner: string | null,
+    expectedBaseCommit: string,
+    onWorktreeRemoved?: () => Promise<void>,
+  ): Promise<{
+    success: boolean;
+    error?: string;
+    branchPreserved?: boolean;
+  }> {
+    const expectedPath = this.getUserWorktreePath(slug);
+    let worktreePath: string;
+    try {
+      worktreePath = await fs.realpath(expectedPath);
+      const initialPathStat = await fs.lstat(worktreePath);
+      const canonicalRepo = await fs.realpath(this.sourceRepoPath);
+      const canonicalExpectedPath = path.join(
+        canonicalRepo,
+        '.qwen',
+        WORKTREES_DIR,
+        slug,
+      );
+      if (
+        !initialPathStat.isDirectory() ||
+        worktreePath !== canonicalExpectedPath
+      ) {
+        return { success: false, error: 'Worktree path identity changed' };
+      }
+      const markerPath = path.join(worktreePath, WORKTREE_SESSION_FILE);
+      // Complete the interrupted publish's last step before the
+      // cleanliness gates: a crash between the marker's link and its
+      // post-commit unlink leaves `.qwen-session` (and the staged sibling)
+      // untracked with no info/exclude rule, which both `git status` and
+      // `git worktree remove` treat as blocking content. The path-identity
+      // check above proves this is the daemon-managed worktree, and the
+      // anchored rule names only the daemon's own bookkeeping files.
+      await ensureWorktreeSessionMarkerExcluded(worktreePath);
+      const markerMatches = async () => {
+        if (expectedOwner === null) {
+          return await fs
+            .lstat(markerPath)
+            .then(() => false)
+            .catch((error: NodeJS.ErrnoException) => {
+              if (error.code === 'ENOENT') return true;
+              throw error;
+            });
+        }
+        // Read-only owner comparison, so no nlink gate (unlike the
+        // write paths): the publisher's link-then-unlink leaves the marker
+        // at nlink 2 permanently after a crash, with complete fsync'd
+        // content. Removal unlinks names and never writes through the
+        // inode, so that residue must still match its owner — refusing it
+        // would make the crash residue impossible to clean up.
+        const markerStat = await fs.lstat(markerPath);
+        if (!markerStat.isFile()) return false;
+        const owner = await readWorktreeSessionMarker(worktreePath);
+        return owner === expectedOwner;
+      };
+      if (!(await markerMatches())) {
+        return { success: false, error: 'Worktree marker owner changed' };
+      }
+      const { simpleGit } = await loadSimpleGit();
+      const worktreeGit = simpleGit(worktreePath).env(gitEnv());
+      const trackedMarker = await worktreeGit.raw([
+        'ls-files',
+        '-z',
+        '--',
+        WORKTREE_SESSION_FILE,
+      ]);
+      if (trackedMarker.length > 0) {
+        return { success: false, error: 'Worktree marker is tracked' };
+      }
+      const checkoutMatches = async () => {
+        const [head, branch] = await Promise.all([
+          worktreeGit.revparse(['HEAD']),
+          worktreeGit.revparse(['--abbrev-ref', 'HEAD']),
+        ]);
+        return (
+          head.trim() === expectedBaseCommit &&
+          branch.trim() === worktreeBranchForSlug(slug)
+        );
+      };
+      if (!(await checkoutMatches())) {
+        return { success: false, error: 'Worktree checkout changed' };
+      }
+      const hasPopulatedGitlink = async () => {
+        const index = await worktreeGit.raw(['ls-files', '--stage', '-z']);
+        for (const entry of index.split('\0')) {
+          if (!entry.startsWith('160000 ')) continue;
+          const separator = entry.indexOf('\t');
+          if (separator < 0) return true;
+          const gitlinkPath = path.resolve(
+            worktreePath,
+            entry.slice(separator + 1),
+          );
+          if (
+            gitlinkPath === worktreePath ||
+            !gitlinkPath.startsWith(`${worktreePath}${path.sep}`)
+          ) {
+            return true;
+          }
+          const populated = await fs
+            .lstat(gitlinkPath)
+            .then(async (stat) => {
+              if (!stat.isDirectory()) return true;
+              return (await fs.readdir(gitlinkPath)).length > 0;
+            })
+            .catch((error: NodeJS.ErrnoException) => {
+              if (error.code === 'ENOENT') return false;
+              throw error;
+            });
+          if (populated) return true;
+        }
+        return false;
+      };
+      const isClean = async () => {
+        const status = await worktreeGit.status();
+        const hiddenIndexEntries = await worktreeGit.raw([
+          'ls-files',
+          '-v',
+          '-z',
+        ]);
+        const hasHiddenIndexBits = hiddenIndexEntries
+          .split('\0')
+          .some((entry) => /^(?:S|[a-z])/.test(entry));
+        return (
+          status.isClean() &&
+          !hasHiddenIndexBits &&
+          !(await hasPopulatedGitlink()) &&
+          (
+            await worktreeGit.raw([
+              'clean',
+              '-ndx',
+              '-e',
+              `/${WORKTREE_SESSION_FILE}`,
+              '-e',
+              `/${WORKTREE_SESSION_FILE}.*.tmp`,
+            ])
+          ).trim().length === 0
+        );
+      };
+      if (!(await isClean())) {
+        return { success: false, error: 'Worktree contains changes' };
+      }
+      let branchTip = await this.getPreparedUserWorktreeBranchTip(slug);
+      if (branchTip !== expectedBaseCommit) {
+        return { success: false, error: 'Worktree branch changed' };
+      }
+      if (!(await isClean())) {
+        return { success: false, error: 'Worktree contains changes' };
+      }
+      branchTip = await this.getPreparedUserWorktreeBranchTip(slug);
+      if (branchTip !== expectedBaseCommit) {
+        return { success: false, error: 'Worktree branch changed' };
+      }
+      const finalPath = await fs.realpath(expectedPath);
+      const finalPathStat = await fs.lstat(finalPath);
+      if (
+        finalPath !== worktreePath ||
+        !finalPathStat.isDirectory() ||
+        finalPathStat.dev !== initialPathStat.dev ||
+        finalPathStat.ino !== initialPathStat.ino
+      ) {
+        return { success: false, error: 'Worktree path identity changed' };
+      }
+      if (!(await markerMatches())) {
+        return { success: false, error: 'Worktree marker owner changed' };
+      }
+      if (!(await checkoutMatches())) {
+        return { success: false, error: 'Worktree checkout changed' };
+      }
+      const git = await this.getGit();
+      await git.raw(['worktree', 'remove', worktreePath]);
+      await onWorktreeRemoved?.();
+      return await this.finalizePreparedUserWorktreeBranch(
+        slug,
+        expectedBaseCommit,
+      );
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
+  async isPreparedUserWorktreeRegistered(slug: string): Promise<boolean> {
+    const expectedPath = path.resolve(this.getUserWorktreePath(slug));
+    const output = await (
+      await this.getGit()
+    ).raw(['worktree', 'list', '--porcelain', '-z']);
+    return output
+      .split('\0')
+      .some(
+        (record) =>
+          record.startsWith('worktree ') &&
+          path.resolve(record.slice('worktree '.length)) === expectedPath,
+      );
+  }
+
+  async getPreparedUserWorktreeBranchTip(slug: string): Promise<string | null> {
+    const branchName = worktreeBranchForSlug(slug);
+    const output = await (
+      await this.getGit()
+    ).raw([
+      'for-each-ref',
+      '--count=1',
+      '--format=%(objectname)',
+      `refs/heads/${branchName}`,
+    ]);
+    return output.trim() || null;
+  }
+
+  async finalizePreparedUserWorktreeBranch(
+    slug: string,
+    expectedBaseCommit: string,
+  ): Promise<{
+    success: boolean;
+    error?: string;
+    branchPreserved?: boolean;
+  }> {
+    try {
+      const branchTip = await this.getPreparedUserWorktreeBranchTip(slug);
+      if (branchTip === null) return { success: true };
+      if (branchTip !== expectedBaseCommit) {
+        return { success: true, branchPreserved: true };
+      }
+      try {
+        await (await this.getGit()).branch(['-d', worktreeBranchForSlug(slug)]);
+        return { success: true };
+      } catch {
+        return { success: true, branchPreserved: true };
+      }
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
   }
 
   /**

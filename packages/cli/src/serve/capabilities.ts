@@ -32,6 +32,7 @@ export interface ServeCapabilityDescriptor {
 export const SERVE_CAPABILITY_REGISTRY = {
   health: { since: 'v1' },
   daemon_status: { since: 'v1' },
+  daemon_update: { since: 'v1' },
   capabilities: { since: 'v1' },
   session_create: { since: 'v1' },
   hosted_harness_private_v1: { since: 'v1' },
@@ -392,6 +393,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_hooks: { since: 'v1' },
   workspace_extensions: { since: 'v1' },
   session_branch: { since: 'v1' },
+  session_branch_worktree: { since: 'v1' },
   rate_limit: { since: 'v1' },
   workspace_reload: { since: 'v1' },
   // Immediate best-effort channel delivery for prompt/scheduled finals and

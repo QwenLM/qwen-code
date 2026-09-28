@@ -569,8 +569,20 @@ export async function getInitialChatHistory(
 
   const includeDeferredToolsReminder =
     options.includeDeferredToolsReminder ?? true;
+  // Gate on registry presence, not just the caller's option: when the Skill
+  // tool is excluded (`--exclude-tools skill` / a coreTools allowlist) its
+  // factory never registers, and announcing skills the model cannot invoke
+  // wastes tokens. The per-turn skills drain already gates on registry
+  // presence (`drainSkillAndCommandReminders`, `client.ts`). The subagent and
+  // fork-resume paths gate on their own declared tool list instead
+  // (`willHaveSkillTool` / `subagentWillHaveSkillTool`), which reads agent
+  // config and so cannot see a parent's `--exclude-tools`; this adds the
+  // registry check those two cannot make. `getAllToolNames()` counts
+  // deferred-but-registered factories, so a Skill tool demoted behind
+  // `tool_search` keeps its listing; `getFunctionDeclarations()` would not.
   const includeAvailableSkillsReminder =
-    options.includeAvailableSkillsReminder ?? true;
+    (options.includeAvailableSkillsReminder ?? true) &&
+    toolRegistry.getAllToolNames().includes(ToolNames.SKILL);
   const startupReminder = config.getSkipStartupContext()
     ? null
     : await buildStartupContextReminder(config);
