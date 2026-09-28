@@ -661,7 +661,16 @@ describe('legacy-spelled wildcard prefixes keep covering their own server', () =
     );
 
   it('matches the persisted legacy prefix on all three matchers', () => {
-    expect(matchesMcpPattern(prefixRule, dotted.name, dottedRaw)).toBe(true);
+    // The legacy arm reads the reduction only when the alias channel
+    // advertises it — production always threads the tool's own aliases.
+    expect(
+      matchesMcpPattern(
+        prefixRule,
+        dotted.name,
+        dottedRaw,
+        dotted.permissionAliases,
+      ),
+    ).toBe(true);
     expect(
       matchesToolPattern(prefixRule, dotted.name, dotted.permissionAliases),
     ).toBe(true);
@@ -670,8 +679,9 @@ describe('legacy-spelled wildcard prefixes keep covering their own server', () =
 
   // The reduction can rewrite the server segment itself — `+` is out of the
   // legacy set, `.` is not — and the persisted prefix carries that rewrite.
-  // Provenance by server-chunk equality rejected this spelling and left the
-  // deny uncovered; only a reduction that *cut* the name vouches for nothing.
+  // A gate that re-derived the server chunk from the flattened spelling
+  // rejected this spelling and left the deny uncovered; only a reduction
+  // that *cut* the name vouches for nothing.
   it('keeps the prefix effective when the reduction rewrote the server segment', () => {
     const mixed = prodTool('foo.bar+baz', 'get+data');
     expect(mixed.permissionAliases).toContain('mcp__foo.bar_baz__get_data');
@@ -690,8 +700,8 @@ describe('legacy-spelled wildcard prefixes keep covering their own server', () =
   // restriction silently stops covering its own tool — fail-open on
   // `deny`/`ask`/`disallowedTools`, fail-closed only on `allow`. A reduction
   // that kept the length vouches for the tool it came from, because only the
-  // 63-character middle truncation shortens a name. Every row here answers
-  // `default`/`false` under the chunk-equality gate.
+  // 63-character middle truncation shortens a name. Every row here answered
+  // `default`/`false` under the flattened-spelling gate this file replaced.
   const rewrittenServerRule = 'mcp__foo.bar_baz__get_*';
 
   it.each([
@@ -894,6 +904,60 @@ describe('legacy-spelled bare server rules keep covering their own server', () =
     },
   );
 
+  it('keeps a bare legacy deny effective when truncation cut only the tool segment', async () => {
+    // The reduction rewrote the server segment's `/` AND middle-truncated:
+    // the raw name is 78 characters, but the 28-character head window kept
+    // the whole 18-character key, so the cut landed entirely in the tool
+    // segment and the reduction still vouches for its server. Deriving the
+    // boundary from the flattened spelling instead compared the substituted
+    // legacy chunk `github.com_octocat` against the raw `github.com/octocat`
+    // and dropped the reduction — this server's own persisted legacy deny
+    // stopped denying the day the tool name grew past the budget, a
+    // regression against main (R6-1).
+    const tool = prodTool(
+      'github.com/octocat',
+      'search_repository_issues_and_pull_requests_by_keyword',
+    );
+    const raw =
+      'mcp__github.com/octocat__search_repository_issues_and_pull_requests_by_keyword';
+    expect(raw.length).toBeGreaterThan(63);
+    expect(tool.permissionAliases[0]).toBe(raw);
+    const bareRule = 'mcp__github.com_octocat';
+
+    for (const spelling of [bareRule, `${bareRule}__*`]) {
+      expect(
+        matchesToolPattern(spelling, tool.name, tool.permissionAliases),
+      ).toBe(true);
+      expect(
+        matchesRule(
+          parseRule(spelling),
+          tool.name,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          tool.permissionAliases,
+        ),
+      ).toBe(true);
+
+      const pm = new PermissionManager(
+        makeConfig({ permissionsDeny: [spelling] }),
+      );
+      pm.initialize();
+      expect(
+        await pm.evaluate({
+          toolName: tool.name,
+          toolAliases: tool.permissionAliases,
+        }),
+      ).toBe('deny');
+      expect(
+        await pm.getToolRegistrationStatus(tool.name, tool.permissionAliases),
+      ).toBe('disabled');
+    }
+  });
+
   it('keeps the provider-safe bare rule matching through the registered name (control)', () => {
     // `foo:bar` registers as `mcp__foo_bar__…`, so the provider-safe bare
     // rule matched before the hoist and after — nothing changed here.
@@ -922,15 +986,23 @@ describe('exact entries in a truncated legacy spelling shared by two servers', (
     `mcp__weather-forecast-server__${sharedTool}`,
   );
 
-  it('publishes one byte-identical legacy alias for both servers (premise)', () => {
+  it('publishes the shared spelling only for the server whose cut stayed in its tool segment (premise)', () => {
     expect(own.name).not.toBe(sibling.name);
+    // Both reductions are still computable and still byte-identical…
     expect(sharedLegacy).toBe(
       generateLegacyMcpToolName(
         `mcp__weather-forecast-server-premium__${sharedTool}`,
       ),
     );
+    // …but only the own server advertises it: its 23-character key fits the
+    // 28-character head window, while the sibling's 31-character key was cut
+    // by it — a reduction that lost server characters vouches for no server,
+    // so the sibling publishes no legacy alias at all. That absence is what
+    // denies the sibling every arm below.
     expect(own.permissionAliases).toContain(sharedLegacy);
-    expect(sibling.permissionAliases).toContain(sharedLegacy);
+    expect(sibling.permissionAliases).toEqual([
+      `mcp__weather-forecast-server-premium__${sharedTool}`,
+    ]);
   });
 
   it('still matches the own server, whose cut stayed inside its tool segment', async () => {
@@ -1015,5 +1087,75 @@ describe('exact entries in a truncated legacy spelling shared by two servers', (
         own.permissionAliases,
       ),
     ).toBe(true);
+  });
+
+  it('matches no entry in a spelling shared by two keys that both contain the separator', async () => {
+    // Both keys contain `__` and both push the raw name past the
+    // 63-character budget, so the reductions are byte-identical AND the
+    // 28-character head window cut both keys at the same character — the
+    // divergence is past the window, so no predicate over the flattened
+    // spelling can tell the two tools apart, and "matches its own server
+    // but not the sibling" is not a distinction this reduction can carry:
+    // it vouches for no server and both refuse. The gate this replaces
+    // derived the boundary with `split('__', 2)[1]`, which answered `a` on
+    // both sides of the comparison, so it vouched for BOTH servers — a deny
+    // written for one stripped the other's tool (R6-1).
+    const alpha = prodTool('a__very_long_server_key_name_alpha', sharedTool);
+    const beta = prodTool('a__very_long_server_key_name_beta', sharedTool);
+    const sharedSpelling = generateLegacyMcpToolName(
+      `mcp__a__very_long_server_key_name_alpha__${sharedTool}`,
+    );
+    expect(sharedSpelling).toBe(
+      generateLegacyMcpToolName(
+        `mcp__a__very_long_server_key_name_beta__${sharedTool}`,
+      ),
+    );
+
+    for (const tool of [alpha, beta]) {
+      expect(
+        matchesToolPattern(sharedSpelling, tool.name, tool.permissionAliases),
+      ).toBe(false);
+      expect(
+        matchesRule(
+          parseRule(sharedSpelling),
+          tool.name,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          tool.permissionAliases,
+        ),
+      ).toBe(false);
+
+      const denyPm = new PermissionManager(
+        makeConfig({ permissionsDeny: [sharedSpelling] }),
+      );
+      denyPm.initialize();
+      expect(
+        await denyPm.evaluate({
+          toolName: tool.name,
+          toolAliases: tool.permissionAliases,
+        }),
+      ).toBe('default');
+      expect(
+        await denyPm.getToolRegistrationStatus(
+          tool.name,
+          tool.permissionAliases,
+        ),
+      ).toBe('registered');
+
+      const allowPm = new PermissionManager(
+        makeConfig({ permissionsAllow: [sharedSpelling] }),
+      );
+      allowPm.initialize();
+      expect(
+        await allowPm.evaluate({
+          toolName: tool.name,
+          toolAliases: tool.permissionAliases,
+        }),
+      ).toBe('default');
+    }
   });
 });

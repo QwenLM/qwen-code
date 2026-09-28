@@ -1642,8 +1642,9 @@ export function matchesDomainPattern(
  * `sanitizeToolNameForProvider`, which is what let a rule for the server
  * `foo.bar` authorize the differently-registered server `foo_bar` (#10199).
  * Prefix patterns additionally read the legacy reduction of the raw
- * identity, gated by `resolveLegacyMcpSpelling`, because a persisted rule
- * was copied from the spelling settings showed when it was written.
+ * identity, admitted by `resolveLegacyMcpSpelling` only when `toolAliases`
+ * advertises it, because a persisted rule was copied from the spelling
+ * settings showed when it was written.
  *
  * A rule written provider-safe (`mcp__foo_bar`) still matches any server
  * whose name sanitizes under it (`foo.bar`, `foo:bar`, `foo/bar`): the
@@ -1656,6 +1657,7 @@ export function matchesMcpPattern(
   pattern: string,
   toolName: string,
   rawToolName?: string,
+  toolAliases?: readonly string[],
 ): boolean {
   if (pattern === toolName) {
     return true;
@@ -1682,7 +1684,7 @@ export function matchesMcpPattern(
     rawToolName === undefined || rawToolName === toolName
       ? [toolName]
       : [toolName, rawToolName];
-  const legacySpelling = resolveLegacyMcpSpelling(rawToolName);
+  const legacySpelling = resolveLegacyMcpSpelling(rawToolName, toolAliases);
   if (legacySpelling !== undefined && !spellings.includes(legacySpelling)) {
     spellings.push(legacySpelling);
   }
@@ -1747,24 +1749,27 @@ function resolveRawMcpIdentity(
 
 /**
  * The legacy `generateLegacyMcpToolName` reduction of a tool's raw identity,
- * for a rule persisted in that spelling — or `undefined` when the reduction
- * cut into the server segment.
+ * for a rule persisted in that spelling — or `undefined` when the tool did
+ * not advertise that reduction.
  *
- * Character substitution is length-preserving, so the server segment stays
- * recognizable. Past 63 characters the reduction instead cuts at
- * `slice(0, 28) + '___' + slice(-32)`. Under a short legacy-safe server key
- * that cut lands entirely in the tool segment — the server segment survives
- * byte-identically, the reduction still vouches for its server, and refusing
- * it would silently retire a persisted `deny`/`ask`/`disallowedTools` entry
- * the day its tool's name grew past the budget. A cut that reached the
- * server segment instead keeps only its first 23 characters *and* injects
- * the very `__` separator a prefix match needs: two different long keys can
- * land in one window, and a rule written for `weather-forecast-server` would
- * reach `weather-forecast-server-premium`. That reduction vouches for no
- * server.
+ * `DiscoveredMCPTool.permissionAliases` publishes the reduction only while
+ * it still vouches for its server: character substitution is
+ * length-preserving, and a truncation cut that stayed inside the tool
+ * segment leaves the server segment intact, so both keep a persisted
+ * `deny`/`ask`/`disallowedTools` entry covering its own tool. A cut that
+ * reached the server segment keeps only its first 23 characters *and*
+ * injects the very `__` separator a prefix match needs: two different long
+ * keys land in one byte-identical window, so that reduction vouches for no
+ * server and is never advertised. Publication is the only provenance
+ * available here — `__` is reserved in neither segment of
+ * `mcp__<server>__<tool>` and the reduction rewrites characters, so the
+ * server boundary cannot be re-derived from the flattened spelling: a gate
+ * that tried vouched for two servers at once while refusing a rewritten key
+ * its own tool (R6-1).
  */
 function resolveLegacyMcpSpelling(
   rawToolName: string | undefined,
+  toolAliases: readonly string[] | undefined,
 ): string | undefined {
   if (rawToolName === undefined || !rawToolName.startsWith('mcp__')) {
     return undefined;
@@ -1773,23 +1778,16 @@ function resolveLegacyMcpSpelling(
   if (legacy === rawToolName) {
     return undefined;
   }
-  if (legacy.length === rawToolName.length) {
-    return legacy;
-  }
-  const serverSegment = (name: string) => name.split('__', 2)[1];
-  return serverSegment(legacy) === serverSegment(rawToolName)
-    ? legacy
-    : undefined;
+  return toolAliases?.includes(legacy) ? legacy : undefined;
 }
 
 /**
  * Whether a 3-part entry names the tool in the legacy spelling, so an exact
  * rule persisted before provider-safe names still covers the tool. The entry
- * is compared against the provenance-gated legacy reduction of the tool's
- * vouched raw identity: an advertised alias proves nothing on its own,
- * because two different long server keys publish one byte-identical
- * middle-truncated reduction, and a reduction whose cut reached the server
- * segment vouches for no server.
+ * is compared against the advertised legacy reduction of the tool's vouched
+ * raw identity: publication is the provenance, because two different long
+ * server keys reduce to one byte-identical middle-truncated spelling, and a
+ * reduction whose cut reached the server segment is never advertised.
  */
 function matchesAdvertisedExactName(
   pattern: string,
@@ -1799,14 +1797,8 @@ function matchesAdvertisedExactName(
   if (pattern.endsWith('*') || pattern.split('__').length < 3) {
     return false;
   }
-  const legacySpelling = resolveLegacyMcpSpelling(rawToolName);
-  return (
-    legacySpelling !== undefined &&
-    pattern === legacySpelling &&
-    (toolAliases ?? []).some(
-      (alias) => resolveToolName(alias) === legacySpelling,
-    )
-  );
+  const legacySpelling = resolveLegacyMcpSpelling(rawToolName, toolAliases);
+  return legacySpelling !== undefined && pattern === legacySpelling;
 }
 
 /**
@@ -1835,7 +1827,7 @@ export function matchesToolPattern(
   }
   const rawMcpToolName = resolveRawMcpIdentity(toolName, toolAliases);
   return (
-    matchesMcpPattern(pattern, toolName, rawMcpToolName) ||
+    matchesMcpPattern(pattern, toolName, rawMcpToolName, toolAliases) ||
     matchesAdvertisedExactName(pattern, toolAliases, rawMcpToolName)
   );
 }
@@ -1910,7 +1902,12 @@ export function matchesRule(
       toolAliases,
     );
     const matchesMcpName =
-      matchesMcpPattern(rule.toolName, canonicalCtxToolName, rawMcpToolName) ||
+      matchesMcpPattern(
+        rule.toolName,
+        canonicalCtxToolName,
+        rawMcpToolName,
+        toolAliases,
+      ) ||
       matchesAdvertisedExactName(rule.toolName, toolAliases, rawMcpToolName);
     if (!matchesMcpName) {
       return false;

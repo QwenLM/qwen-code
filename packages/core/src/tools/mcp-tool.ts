@@ -1168,15 +1168,27 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
    * Publishes the exact raw identity `mcp__<server>__<tool>` first — the only
    * spelling the permission matcher accepts as provenance for legacy unsafe
    * rules — then the legacy `generateLegacyMcpToolName` reduction for
-   * settings persisted in that spelling. A verbatim provider-safe
-   * registration lost nothing, so it advertises no alias at all.
+   * settings persisted in that spelling, but only while that reduction still
+   * vouches for its server: past the 63-character budget it middle-truncates
+   * at slice(0, 28), so a server key longer than 23 characters loses its tail
+   * to the window and two different long keys land in one byte-identical
+   * reduction — advertised by neither (R6-1). Publication is the provenance
+   * every consumer gates on; the flattened spelling cannot re-derive the
+   * boundary, because `__` is reserved in neither segment. A verbatim
+   * provider-safe registration lost nothing, so it advertises no alias at
+   * all.
    */
   get permissionAliases(): readonly string[] {
     const rawName = `mcp__${this.serverName}__${this.serverToolName}`;
     const legacyName = generateLegacyMcpToolName(rawName);
+    const legacyVouchesForServer =
+      legacyName.length === rawName.length ||
+      'mcp__'.length + this.serverName.length <= 28;
     return [
       ...(rawName === this.name ? [] : [rawName]),
-      ...(legacyName === this.name || legacyName === rawName
+      ...(legacyName === this.name ||
+      legacyName === rawName ||
+      !legacyVouchesForServer
         ? []
         : [legacyName]),
     ];
