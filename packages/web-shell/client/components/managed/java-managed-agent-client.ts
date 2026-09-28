@@ -32,6 +32,16 @@ export type JavaAgentSessionPage = Omit<
 
 export type JavaAgentEvent = Schemas['WebShellEvent'];
 
+export type JavaAgentResyncRequired = Schemas['WebShellResyncRequired'];
+
+const RESYNC_REQUIRED = 'agent.session.resync_required';
+
+export function isJavaAgentResyncRequired(
+  frame: JavaAgentEvent | JavaAgentResyncRequired,
+): frame is JavaAgentResyncRequired {
+  return frame.type === RESYNC_REQUIRED && !('sequence' in frame);
+}
+
 export type JavaAgentContentPart = Schemas['WebShellContentPart'];
 
 export type JavaAgentItem = Schemas['WebShellItem'];
@@ -136,7 +146,7 @@ export class JavaManagedAgentClient {
   async *streamEvents(
     request: Schemas['WebShellStreamRequest'],
     signal?: AbortSignal,
-  ): AsyncGenerator<JavaAgentEvent> {
+  ): AsyncGenerator<JavaAgentEvent | JavaAgentResyncRequired> {
     const response = await this.request(
       '/events/stream',
       request,
@@ -221,9 +231,12 @@ function nextFrameBoundary(
     : { index: match.index, length: match[0].length };
 }
 
-function decodeEventFrame(frame: string): JavaAgentEvent | undefined {
+function decodeEventFrame(
+  frame: string,
+): JavaAgentEvent | JavaAgentResyncRequired | undefined {
   const data: string[] = [];
   let id: number | undefined;
+  let name: string | undefined;
   for (const line of frame.split(/\r?\n/)) {
     if (!line || line.startsWith(':')) continue;
     const separator = line.indexOf(':');
@@ -232,10 +245,16 @@ function decodeEventFrame(frame: string): JavaAgentEvent | undefined {
       separator < 0 ? '' : line.slice(separator + 1).replace(/^ /, '');
     if (field === 'data') data.push(value);
     if (field === 'id' && /^\d+$/.test(value)) id = Number(value);
+    if (field === 'event') name = value;
   }
   if (data.length === 0) return undefined;
   const parsed: unknown = JSON.parse(data.join('\n'));
   if (typeof parsed !== 'object' || parsed === null) return undefined;
+  // The server's only frame without an id: the cursor fell below the replay
+  // floor, and the stream ends after it.
+  if (name === RESYNC_REQUIRED && id === undefined) {
+    return parsed as JavaAgentResyncRequired;
+  }
   const event = parsed as JavaAgentEvent;
   return id === undefined || event.sequence === id
     ? event
