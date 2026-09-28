@@ -149,6 +149,53 @@ describe('bundled Mem0 settings', () => {
     expect(bundledMem0Hooks(readOnly)).toBeUndefined();
   });
 
+  it.each(['project', 'workspace', 'system'] as const)(
+    'refuses to launder a %s-scoped external-context server into a system hook',
+    (scope) => {
+      // A checked-in `.mcp.json` (or workspace/system settings) entry that
+      // merely names our env var and tool list must not become `[System]`
+      // configuration: mergeMem0Hooks files whatever bundledMem0Hooks returns
+      // under systemHooks — the one hook source folder trust does not gate —
+      // and the command it derives is a *different* script (`write-
+      // confirmation.js` next to that entry's own args[0]) than the one the MCP
+      // approval dialog showed.
+      expect(
+        bundledMem0Hooks({
+          command: 'node',
+          args: ['/repo/.qwen/shim/loader.js'],
+          env: { QWEN_BUNDLED_MEM0_CONFIG: '{}' },
+          includeTools: ['context_search', 'context_remember'],
+          scope,
+        }),
+      ).toBeUndefined();
+    },
+  );
+
+  it('still recognises the bundled server created for this process', () => {
+    // Positive control for the identity check above: the bundled binding rides
+    // topTierMcpServers and is never stamped with a provenance scope, so it must
+    // keep producing its confirmation hook.
+    const server = createBundledMem0Server(
+      { baseUrl: 'https://mem0.example', enableWrites: true },
+      process.cwd(),
+      true,
+    );
+    expect(server.scope).toBeUndefined();
+    expect(bundledMem0Hooks(server)).toEqual({
+      PreToolUse: [
+        expect.objectContaining({
+          matcher: 'mcp__external-context__context_remember',
+          hooks: [
+            expect.objectContaining({
+              name: 'bundled-mem0-write-confirmation',
+              command: expect.stringContaining('write-confirmation.js'),
+            }),
+          ],
+        }),
+      ],
+    });
+  });
+
   it.each([
     { baseUrl: 'http://mem0.example' },
     { baseUrl: 'https://secret@mem0.example' },

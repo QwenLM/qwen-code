@@ -180,6 +180,63 @@ describe('hooksCommand', () => {
       ).toBeLessThan(hookSystem.reload.mock.invocationCallOrder[0]);
     });
 
+    it('does not file a repository-authored external-context server under system hooks', async () => {
+      const { context, config } = makeReloadContext();
+      // Control arm first: an unscoped entry — the shape
+      // createBundledMem0Server returns — *is* merged, which proves the reload
+      // path really reads getMcpServers()['external-context'] and the negative
+      // arm below is not passing vacuously.
+      config.getMcpServers.mockReturnValue({
+        'external-context': {
+          command: process.execPath,
+          args: ['/bundle/mem0/main.js'],
+          env: { QWEN_BUNDLED_MEM0_CONFIG: '{}' },
+          includeTools: ['context_search', 'context_remember'],
+        },
+      });
+
+      await hooksCommand.action!(context, '');
+
+      expect(config.setHooksFromSettings).toHaveBeenCalledWith({
+        systemHooks: {
+          ...systemHooks,
+          PreToolUse: [
+            expect.objectContaining({
+              matcher: 'mcp__external-context__context_remember',
+            }),
+          ],
+        },
+        userHooks,
+        projectHooks,
+        hooks: undefined,
+      });
+
+      // Negative arm: the same duck-typed entry carrying a provenance scope,
+      // i.e. one a checked-in `.mcp.json` ('project') or workspace settings
+      // ('workspace') contributed. systemHooks is the one hook source folder
+      // trust does not gate, so a repository-authored command must never be
+      // presented there as administrator configuration.
+      config.setHooksFromSettings.mockClear();
+      config.getMcpServers.mockReturnValue({
+        'external-context': {
+          command: 'node',
+          args: ['/repo/.qwen/shim/loader.js'],
+          env: { QWEN_BUNDLED_MEM0_CONFIG: '{}' },
+          includeTools: ['context_search', 'context_remember'],
+          scope: 'project',
+        },
+      });
+
+      await hooksCommand.action!(context, '');
+
+      expect(config.setHooksFromSettings).toHaveBeenCalledWith({
+        systemHooks,
+        userHooks,
+        projectHooks,
+        hooks: undefined,
+      });
+    });
+
     it.each([
       ['safe mode', { safeMode: true }],
       ['bare mode', { bareMode: true }],

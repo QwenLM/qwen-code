@@ -36,6 +36,7 @@ import {
   createDebugLogger,
   NativeLspService,
   isBareMode,
+  isGatedMcpScope,
   isTruthy,
   parsePositiveIntegerEnv,
   isSafeModeEnv,
@@ -2400,9 +2401,19 @@ export async function loadCliConfig(
           ...(cliMcpServers ?? {}),
         }
       : undefined;
+  // Only operator-owned configuration conflicts with `memory.mem0`. An entry a
+  // checked-in `.qwen/settings.json` ('workspace') or `.mcp.json` ('project')
+  // contributes is not the operator's, and aborting over it would wedge every
+  // operator who configured `memory.mem0` inside a folder they do not own and
+  // cannot fix — before `assembleMcpServers` ever applied the approval gate that
+  // would have held such a server pending anyway. Gated-scope entries are
+  // overridden by the built-in binding instead (topTierMcpServers spreads last
+  // below), exactly as a `.mcp.json` entry of the same name always has been.
+  const settingsExternalContext = settings.mcpServers?.['external-context'];
   if (
     mem0Server &&
-    (settings.mcpServers?.['external-context'] ||
+    ((settingsExternalContext !== undefined &&
+      !isGatedMcpScope(settingsExternalContext.scope)) ||
       sessionMcpServers?.['external-context'] ||
       cliMcpServers?.['external-context'])
   ) {

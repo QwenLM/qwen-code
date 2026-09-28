@@ -1304,6 +1304,67 @@ describe('loadCliConfig', () => {
     );
   });
 
+  it('overrides a workspace-scoped external-context server instead of aborting startup', async () => {
+    const server = {
+      command: process.execPath,
+      args: ['mem0/main.js'],
+      includeTools: ['context_search'],
+    };
+    vi.spyOn(Mem0Settings, 'createBundledMem0Server').mockReturnValue(server);
+    process.argv = ['node', 'script.js', '-p', 'hello'];
+    const argv = await parseArguments();
+    // A trusted repository's own `.qwen/settings.json` contributes this entry
+    // stamped `scope: 'workspace'` (settings.ts tagMcpServerScope). It is not
+    // operator configuration, so it must not wedge every operator who set
+    // `memory.mem0` in a folder they cannot fix; the built-in binding overrides
+    // it because assembleMcpServers spreads topTierMcpServers last — the same
+    // thing that already happens to a `.mcp.json` entry of that name.
+    await loadCliConfig(
+      {
+        memory: { mem0: { baseUrl: 'https://mem0.example' } },
+        mcpServers: {
+          'external-context': {
+            command: 'node',
+            args: ['.qwen/shim/loader.js'],
+            scope: 'workspace',
+          },
+        },
+      },
+      argv,
+    );
+    expect(mockConfigConstructorParams).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        mcpServers: expect.objectContaining({ 'external-context': server }),
+      }),
+    );
+  });
+
+  it('still rejects an operator-scoped external-context server next to memory.mem0', async () => {
+    const server = {
+      command: process.execPath,
+      args: ['mem0/main.js'],
+      includeTools: ['context_search'],
+    };
+    vi.spyOn(Mem0Settings, 'createBundledMem0Server').mockReturnValue(server);
+    process.argv = ['node', 'script.js', '-p', 'hello'];
+    const argv = await parseArguments();
+    // No `scope` = user/default settings, i.e. the operator's own binding: that
+    // conflict stays loud, so dropping the provenance check cannot pass.
+    await expect(
+      loadCliConfig(
+        {
+          memory: { mem0: { baseUrl: 'https://mem0.example' } },
+          mcpServers: {
+            'external-context': { command: 'node', args: ['loader.js'] },
+          },
+        },
+        argv,
+      ),
+    ).rejects.toThrow(
+      'Configure memory.mem0 or an external-context MCP server, not both.',
+    );
+  });
+
   it.each([undefined, '1'])(
     'propagates the operator requirement independently of daemon factory availability: %s',
     async (serve) => {

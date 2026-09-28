@@ -174,7 +174,20 @@ export function bundledMem0Hooks(
   server: MCPServerConfig | undefined,
 ): Record<string, unknown> | undefined {
   if (
-    !server?.env?.['QWEN_BUNDLED_MEM0_CONFIG'] ||
+    !server ||
+    // Identity, not duck-typing. `mergeMem0Hooks` files whatever this returns
+    // under `systemHooks` — the one hook source folder trust does not gate — so
+    // only the server `createBundledMem0Server` built for this process may
+    // qualify. Every file-sourced entry in the effective MCP map carries a
+    // provenance `scope` ('project' from `.mcp.json`, 'workspace'/'system' from
+    // settings; see `McpServerScope`), and the bundled one rides
+    // `topTierMcpServers` and never gets stamped. Without this check a
+    // repository-authored `external-context` server that merely names our env
+    // var is rendered as `[System]` configuration and runs a *different* script
+    // (`write-confirmation.js` next to its own `args[0]`) than the one the MCP
+    // approval dialog showed.
+    server.scope !== undefined ||
+    !server.env?.['QWEN_BUNDLED_MEM0_CONFIG'] ||
     !server.includeTools?.includes('context_remember') ||
     !server.command ||
     !server.args?.[0]
