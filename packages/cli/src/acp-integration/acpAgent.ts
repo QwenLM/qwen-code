@@ -299,6 +299,7 @@ import {
 } from './extension-skills.js';
 import { Session, registerCreateSubSessionTool } from './session/Session.js';
 import { restoreSessionModelThenAuthenticate } from './session-model-persistence.js';
+import { applyRestoredSessionApprovalMode } from './session-approval-mode-persistence.js';
 import { HistoryReplayer } from './session/history-replayer.js';
 import { renderPreparedGoalUpdate } from './session/recovered-goal-update.js';
 import { ActiveWorkReporter } from './active-work-reporter.js';
@@ -724,6 +725,7 @@ type AcpSessionProfileStage =
   | 'live_restore'
   | 'existence_check'
   | 'config_setup'
+  | 'restore_approval_mode'
   | 'restore_session_model'
   | 'auth'
   | 'file_system_setup'
@@ -3895,8 +3897,8 @@ class QwenAgent implements Agent {
    * converged on, seeded with the session's boot-derived mode at
    * publication. `workspaceReload` compares the reloaded disk value against
    * this — not against each session's live mode — because approval mode has
-   * runtime-only writers (`ExitPlanModeTool` approved plan exits, ACP
-   * `session/set_mode`, the `sessionApprovalMode` ext) that never persist,
+   * writers (`ExitPlanModeTool` approved plan exits, ACP `session/set_mode`,
+   * the `sessionApprovalMode` ext) that do not update workspace settings,
    * so a live session legitimately diverges from the file mid-workflow and
    * an unchanged file must not clobber those transitions. The record lives
    * on the daemon so it survives a `this.settings` cache swap, and per
@@ -5991,6 +5993,10 @@ class QwenAgent implements Agent {
         config.suppressRestorableAskUserQuestionPreservation();
       }
       const projection = config.consumeSessionRestoreProjection?.();
+      const fileDerivedApprovalMode = config.getApprovalMode();
+      profiler.timeSync('restore_approval_mode', () =>
+        applyRestoredSessionApprovalMode(config, projection),
+      );
       const suppressRecoveredGoalPresentation =
         projection?.runtime.goalRecoverySourceUuid !== undefined &&
         projection.runtime.goalRecoverySourceUuid !==
@@ -6038,6 +6044,7 @@ class QwenAgent implements Agent {
           this.createAndStoreSession(config, settings, undefined, {
             deferWorkspaceActivation: provisionalStandalone,
             configProviderRevision,
+            fileDerivedApprovalMode,
             ...(provisionalStandalone
               ? {
                   beforeDeferredWorkspaceActivation: () =>
@@ -6406,6 +6413,10 @@ class QwenAgent implements Agent {
         config.suppressRestorableAskUserQuestionPreservation();
       }
       const projection = config.consumeSessionRestoreProjection?.();
+      const fileDerivedApprovalMode = config.getApprovalMode();
+      profiler.timeSync('restore_approval_mode', () =>
+        applyRestoredSessionApprovalMode(config, projection),
+      );
       let response: ResumeSessionResponse | undefined;
       try {
         if (!provisionalStandalone) {
@@ -6424,6 +6435,7 @@ class QwenAgent implements Agent {
           this.createAndStoreSession(config, settings, undefined, {
             deferWorkspaceActivation: provisionalStandalone,
             configProviderRevision,
+            fileDerivedApprovalMode,
             ...(provisionalStandalone
               ? {
                   beforeDeferredWorkspaceActivation: () =>
@@ -15773,6 +15785,7 @@ class QwenAgent implements Agent {
       enableLiveScreenContext?: boolean;
       deferWorkspaceActivation?: boolean;
       configProviderRevision?: number;
+      fileDerivedApprovalMode?: ApprovalMode;
       beforeDeferredWorkspaceActivation?: () => Promise<void>;
       prepareBeforeSessionCreate?: () => Promise<void>;
       beforeSessionPublish?: () => void;
@@ -15979,12 +15992,11 @@ class QwenAgent implements Agent {
       }
       this.sessions.set(sessionId, session);
       this.registerHostedSession(sessionId, config, settings);
-      // The session boots converged on the mode its settings derived; later
-      // reloads track convergence from here. Restricted sessions derive
-      // DEFAULT, mirroring the fold the reload loop applies to them.
+      // Track the file-derived mode, not a mode restored from the transcript.
+      // An unchanged settings reload must not overwrite session-local state.
       this.sessionApprovalModeConverged.set(
         sessionId,
-        config.getApprovalMode(),
+        options.fileDerivedApprovalMode ?? config.getApprovalMode(),
       );
       published = true;
       // The Session set itself is part of the snapshot: publish so the daemon

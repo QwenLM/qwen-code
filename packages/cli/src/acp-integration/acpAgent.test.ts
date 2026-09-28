@@ -1209,6 +1209,7 @@ import {
   SESSION_ARTIFACT_PERSISTENCE_VERSION,
   mcpServerRequiresOAuth,
   APPROVAL_MODES,
+  ApprovalMode,
   ToolNames,
   GoalPersistenceUnavailableError,
   GoalConflictError,
@@ -27501,6 +27502,8 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       unregisterSessionRegistry: vi.fn().mockResolvedValue(undefined),
       reassertSessionRegistryRecord: vi.fn().mockResolvedValue(undefined),
     };
+    let approvalMode = ApprovalMode.DEFAULT;
+    let prePlanMode: ApprovalMode | undefined;
     const recording = {
       rebuildTurnBoundaries: vi.fn(),
       flush: vi.fn().mockResolvedValue(undefined),
@@ -27508,6 +27511,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       close: vi.fn().mockResolvedValue(undefined),
       hasWriteOwnership: vi.fn().mockReturnValue(false),
       recordSessionModel: vi.fn().mockResolvedValue(true),
+      recordSessionApprovalMode: vi.fn().mockResolvedValue(true),
       runWithWriteBarrier: vi.fn(
         async <T>(operation: () => Promise<T>): Promise<T> => operation(),
       ),
@@ -27542,7 +27546,21 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       getContentGeneratorConfig: vi.fn().mockReturnValue({}),
       getAvailableModels: vi.fn().mockReturnValue([]),
       getModes: vi.fn().mockReturnValue([]),
-      getApprovalMode: vi.fn().mockReturnValue('default'),
+      getApprovalMode: vi.fn(() => approvalMode),
+      getPrePlanMode: vi.fn(() => prePlanMode),
+      getBareMode: vi.fn().mockReturnValue(false),
+      isSafeMode: vi.fn().mockReturnValue(false),
+      setApprovalMode: vi.fn((mode: ApprovalMode) => {
+        if (mode === ApprovalMode.PLAN && approvalMode !== ApprovalMode.PLAN) {
+          prePlanMode = approvalMode;
+        } else if (
+          mode !== ApprovalMode.PLAN &&
+          approvalMode === ApprovalMode.PLAN
+        ) {
+          prePlanMode = undefined;
+        }
+        approvalMode = mode;
+      }),
       getSessionId: vi.fn().mockReturnValue('persisted-1'),
       getAuthType: vi.fn().mockReturnValue('api-key'),
       getAllConfiguredModels: vi.fn().mockReturnValue([]),
@@ -27702,6 +27720,9 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         const lastSessionModel = [...messages]
           .reverse()
           .find((message) => message['subtype'] === 'session_model');
+        const lastSessionApprovalMode = [...messages]
+          .reverse()
+          .find((message) => message['subtype'] === 'session_approval_mode');
         return {
           sessionId,
           filePath: '/tmp/session.jsonl',
@@ -27716,6 +27737,12 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
               turnParentUuids: [],
               ...(lastSessionModel?.['systemPayload']
                 ? { sessionModel: lastSessionModel['systemPayload'] }
+                : {}),
+              ...(lastSessionApprovalMode?.['systemPayload']
+                ? {
+                    sessionApprovalMode:
+                      lastSessionApprovalMode['systemPayload'],
+                  }
                 : {}),
             },
             artifactSnapshot: data.artifactSnapshot,
@@ -27861,6 +27888,79 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     }
     return { agent, agentPromise };
   }
+
+  it.each([
+    { action: 'load', standalone: false },
+    { action: 'resume', standalone: false },
+    { action: 'load', standalone: true },
+    { action: 'resume', standalone: true },
+  ] as const)(
+    'cold $action restores approval state before Session construction (standalone=$standalone)',
+    async ({ action, standalone }) => {
+      const innerConfig = bindRestoreMocks({
+        sessionExists: true,
+        resumedConversation: {
+          messages: [
+            {
+              uuid: 'approval-1',
+              type: 'system',
+              subtype: 'session_approval_mode',
+              systemPayload: { mode: ApprovalMode.YOLO },
+            },
+            { role: 'user', parts: [{ text: 'hello' }] },
+          ],
+        },
+      });
+      const { agent, agentPromise } = await spawnAgent(
+        standalone ? 'expected-capability' : undefined,
+      );
+      const request = {
+        cwd: '/tmp',
+        sessionId: 'persisted-1',
+        mcpServers: [],
+        ...(standalone
+          ? {
+              _meta: {
+                [SESSION_SOURCE_META_KEY]: {
+                  sourceType: 'standalone',
+                  [DAEMON_OWNED_STANDALONE_CREATION_KEY]: true,
+                },
+              },
+            }
+          : {}),
+      };
+
+      try {
+        if (action === 'load') {
+          await agent.loadSession(request);
+        } else {
+          await agent.unstable_resumeSession(request);
+        }
+
+        expect(innerConfig.getApprovalMode()).toBe(ApprovalMode.YOLO);
+        expect(innerConfig.setApprovalMode).toHaveBeenCalledWith(
+          ApprovalMode.YOLO,
+          { fromSessionRestore: true },
+        );
+        expect(
+          innerConfig.setApprovalMode.mock.invocationCallOrder[0],
+        ).toBeLessThan(vi.mocked(Session).mock.invocationCallOrder[0]!);
+        expect(
+          innerConfig.getChatRecordingService().recordSessionApprovalMode,
+        ).not.toHaveBeenCalled();
+        expect(
+          (
+            agent as unknown as {
+              sessionApprovalModeConverged: Map<string, ApprovalMode>;
+            }
+          ).sessionApprovalModeConverged.get('persisted-1'),
+        ).toBe(ApprovalMode.DEFAULT);
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
 
   it('loadSession throws resourceNotFound when the persisted session is missing', async () => {
     bindRestoreMocks({ sessionExists: false });
@@ -29489,7 +29589,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     const innerConfig = makeRestoreInnerConfig({
       resumedConversation: { messages },
     });
-    innerConfig.getApprovalMode.mockReturnValue('plan');
+    innerConfig.getApprovalMode.mockReturnValue(ApprovalMode.PLAN);
     innerConfig.getSessionService.mockReturnValue({
       loadSession: vi.fn(),
       readLiveRestoreProjection: vi.fn().mockResolvedValue({
@@ -33251,8 +33351,7 @@ describe('sessionLanguage multi-session propagation', () => {
   it('keeps runtime-only approval-mode transitions across unchanged-file reloads', async () => {
     // The file pins plan; the session legitimately exits plan through an
     // approved exit_plan_mode, which switches the live mode at runtime
-    // without ever persisting (core Config.setApprovalMode is runtime-only,
-    // as are ACP session/set_mode and the sessionApprovalMode ext). A reload
+    // without changing workspace settings. A reload
     // whose file value is unchanged must not re-apply the disk value: that
     // would flip the executing session back into PLAN between turns and
     // destroy its approved revision + stop-guard trust.

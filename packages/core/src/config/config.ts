@@ -3120,6 +3120,9 @@ export class Config {
   private readonly messageBusListeners = new Set<(bus: MessageBus) => void>();
   private readonly memoryManager: MemoryManager;
   private readonly modelChangeListeners = new Set<(model: string) => void>();
+  private readonly approvalModeChangeListeners = new Set<
+    (mode: ApprovalMode, prePlanMode: ApprovalMode | undefined) => void
+  >();
   // True on the Config that claimed the process-global QWEN_CODE_MODEL slot
   // (first in this process); gates the global write in publishModelEnv so no
   // other instance updates it. Per-session publishing is not gated on it.
@@ -6082,6 +6085,25 @@ export class Config {
     }
   }
 
+  onApprovalModeChange(
+    listener: (
+      mode: ApprovalMode,
+      prePlanMode: ApprovalMode | undefined,
+    ) => void,
+  ): () => void {
+    this.approvalModeChangeListeners.add(listener);
+    return () => {
+      this.approvalModeChangeListeners.delete(listener);
+    };
+  }
+
+  private notifyApprovalModeChangeListeners(): void {
+    if (isDerivedConfig(this)) return;
+    for (const listener of this.approvalModeChangeListeners) {
+      listener(this.approvalMode, this.prePlanMode);
+    }
+  }
+
   // Keeps QWEN_CODE_MODEL on the model that is actually active. A subprocess
   // has no other authoritative source: settings files miss /model switches and
   // describe the wrong home under QWEN_HOME isolation. Published per session —
@@ -8604,8 +8626,22 @@ export class Config {
         'Cannot enable privileged approval modes in an untrusted folder.',
       );
     }
-    this.setApprovalMode(enabled ? ApprovalMode.PLAN : executionMode);
-    this.planExecutionMode = enabled ? executionMode : undefined;
+    const previousMode = this.approvalMode;
+    const previousExecutionMode = this.planExecutionMode;
+    if (enabled) this.planExecutionMode = executionMode;
+    try {
+      this.setApprovalMode(enabled ? ApprovalMode.PLAN : executionMode);
+    } catch (error) {
+      this.planExecutionMode = previousExecutionMode;
+      throw error;
+    }
+    if (
+      enabled &&
+      previousMode === ApprovalMode.PLAN &&
+      previousExecutionMode !== executionMode
+    ) {
+      this.notifyApprovalModeChangeListeners();
+    }
   }
 
   getApprovalModeRevision(): number {
@@ -8654,6 +8690,8 @@ export class Config {
        * model was never told about, and queues a one-shot system reminder.
        */
       fromApprovedPlanExit?: boolean;
+      /** Suppress a synthetic restore exit notice without approving the plan. */
+      fromSessionRestore?: boolean;
     },
   ): void {
     // Specialized execution overlays install an own method that owns
@@ -8706,9 +8744,10 @@ export class Config {
     } else if (mode !== ApprovalMode.PLAN && fromMode === ApprovalMode.PLAN) {
       this.prePlanMode = undefined;
       noticeEvent.version++;
-      noticeEvent.kind = options?.fromApprovedPlanExit
-        ? 'clear'
-        : 'manual-exit';
+      noticeEvent.kind =
+        options?.fromApprovedPlanExit || options?.fromSessionRestore
+          ? 'clear'
+          : 'manual-exit';
       if (
         options?.fromApprovedPlanExit &&
         Object.getPrototypeOf(this) === Config.prototype
@@ -8749,6 +8788,7 @@ export class Config {
     if (mode !== ApprovalMode.PLAN) this.planExecutionMode = undefined;
     if (fromMode !== mode) {
       this.approvalModeRevision++;
+      this.notifyApprovalModeChangeListeners();
     }
   }
 
