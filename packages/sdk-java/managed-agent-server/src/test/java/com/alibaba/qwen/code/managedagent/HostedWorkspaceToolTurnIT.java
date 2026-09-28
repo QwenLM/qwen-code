@@ -153,6 +153,7 @@ class HostedWorkspaceToolTurnIT {
         }
         var application = new SpringApplicationBuilder(ManagedAgentServerApplication.class);
         if (sseGaps) {
+            // Keep SQL polling outside the 10s receive window to require live hub delivery.
             arguments.add("--qwen.managed-agent.events.poll-interval=60s");
             arguments.add("--qwen.managed-agent.events.heartbeat-interval=60s");
             application.initializers(context -> context.getBeanFactory().registerSingleton(
@@ -256,6 +257,7 @@ class HostedWorkspaceToolTurnIT {
                 statusGate.complete(null);
                 gateServer.stop(0);
                 if (cancellationProbe != null) cancellationProbe.close();
+                // Interrupt parked streams before Spring closes the executor and waits out the 60s poll.
                 if (sseGaps) spring.getBean(ExecutorService.class).shutdownNow();
                 if (sseProbe != null) sseProbe.close();
                 RuntimeException cleanupFailure = null;
