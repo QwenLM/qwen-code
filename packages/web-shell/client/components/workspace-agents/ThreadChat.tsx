@@ -23,10 +23,11 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '../ui/dropdown-menu';
 import { parseTitle, ToolApproval } from '../messages/ToolApproval';
-import { AuthorAvatar } from '../messages/author-avatar';
+import { AuthorAvatar } from '../messages/AuthorAvatar';
 import type {
   Message,
   PermissionOption,
@@ -36,6 +37,7 @@ import { RunRowView, type ThreadDetailView } from './ThreadView';
 import {
   buildRunRows,
   CONVERSATION_CONTEXT_PREFIX,
+  explainSkip,
   formatBudget,
   formatElapsed,
   statusReasonLabel,
@@ -136,24 +138,11 @@ function describeLiveRun(
 
 interface TeamMember {
   name: string;
-  agentId?: string;
   color?: string;
   lead: boolean;
   /** The live run if there is one, otherwise the latest. */
   run?: RunView;
 }
-
-const SKIP_REASONS = new Set([
-  'agent_unknown',
-  'agent_disabled',
-  'agent_retired',
-  'no_target',
-  'queue_full',
-  'turn_budget_exhausted',
-  'token_budget_exhausted',
-  'thread_done',
-  'self_trigger',
-]);
 
 const LIVE_STATUSES = new Set(['queued', 'running', 'finishing', 'cancelling']);
 const isLive = (run?: RunView) =>
@@ -200,14 +189,12 @@ function teamMembers(
       (isLive(run) === isLive(current) &&
         (run.startedAt ?? 0) >= (current.startedAt ?? 0));
     add(run.agentName, {
-      agentId: run.agentId,
       ...(run.agentColor ? { color: run.agentColor } : {}),
       ...(newer ? { run } : {}),
     });
   }
   for (const member of byName.values()) {
     const entry = agents.find((agent) => agent.name === member.name);
-    member.agentId ??= entry?.id;
     member.color ??= entry?.color;
   }
   return [...byName.values()].sort((a, b) => Number(b.lead) - Number(a.lead));
@@ -330,7 +317,7 @@ function TeamPanel({
   onOpenAgentSession?: (sessionId: string) => void;
   onCancelRun: (runId: string) => void;
   onOpenThread: (threadId: string) => void;
-  onAssign?: (assignee: string) => void;
+  onAssign?: (assignee?: string) => void;
 }) {
   const { t } = useI18n();
   const { live, past } = buildRunRows(thread.runs, t);
@@ -347,6 +334,45 @@ function TeamPanel({
         <p className={styles.teamReason}>
           {statusReasonLabel(thread.reason, t)}
         </p>
+        {onAssign ? (
+          <div className="mt-2 flex items-center gap-2">
+            <span className="text-xs text-muted-foreground">
+              {t('collab.form.assignee')}
+            </span>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={pending || closed}
+                  aria-label={t('collab.form.assignee')}
+                >
+                  {thread.assigneeName ?? t('collab.team.noLead')}
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" className="min-w-40">
+                <DropdownMenuItem onSelect={() => onAssign(undefined)}>
+                  {!thread.assigneeName ? <Check className="size-4" /> : null}
+                  {t('collab.team.noLead')}
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
+                {agents
+                  .filter((agent) => agent.enabled && !agent.retiredAt)
+                  .map((agent) => (
+                    <DropdownMenuItem
+                      key={agent.id}
+                      onSelect={() => onAssign(agent.name)}
+                    >
+                      {thread.assigneeName === agent.name ? (
+                        <Check className="size-4" />
+                      ) : null}
+                      {agent.name}
+                    </DropdownMenuItem>
+                  ))}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
+        ) : null}
         {thread.parent && (
           <button
             type="button"
@@ -377,16 +403,6 @@ function TeamPanel({
           const expandable = runs.length > 0 || member.run !== undefined;
           const open = expandable && (toggled[member.name] ?? runs.length > 0);
           const sessionId = member.run?.sessionId;
-          const rosterEntry = agents.find(
-            (agent) => agent.name === member.name,
-          );
-          const canLead = Boolean(
-            onAssign &&
-              !member.lead &&
-              !closed &&
-              rosterEntry?.enabled &&
-              !rosterEntry.retiredAt,
-          );
           return (
             <li key={member.name} className={styles.member}>
               <div className={styles.memberHead}>
@@ -423,7 +439,7 @@ function TeamPanel({
                     />
                   )}
                 </button>
-                {(sessionId && onOpenAgentSession) || canLead ? (
+                {sessionId && onOpenAgentSession ? (
                   <DropdownMenu>
                     <DropdownMenuTrigger asChild>
                       <Button
@@ -437,23 +453,13 @@ function TeamPanel({
                       </Button>
                     </DropdownMenuTrigger>
                     <DropdownMenuContent align="end" className="min-w-40">
-                      {sessionId && onOpenAgentSession ? (
-                        <DropdownMenuItem
-                          onSelect={() => onOpenAgentSession(sessionId)}
-                        >
-                          {t('collab.runRow.openSession', {
-                            agent: member.name,
-                          })}
-                        </DropdownMenuItem>
-                      ) : null}
-                      {canLead ? (
-                        <DropdownMenuItem
-                          disabled={pending}
-                          onSelect={() => onAssign?.(member.name)}
-                        >
-                          {t('collab.team.makeLead')}
-                        </DropdownMenuItem>
-                      ) : null}
+                      <DropdownMenuItem
+                        onSelect={() => onOpenAgentSession(sessionId)}
+                      >
+                        {t('collab.runRow.openSession', {
+                          agent: member.name,
+                        })}
+                      </DropdownMenuItem>
                     </DropdownMenuContent>
                   </DropdownMenu>
                 ) : null}
@@ -570,7 +576,7 @@ export function ThreadChat({
     optionId: string,
   ) => Promise<unknown>;
   /** Hands the conversation to another agent. */
-  onAssign?: (assignee: string) => void;
+  onAssign?: (assignee?: string) => void;
   /** Shown when the conversation is not in the shell's own chat column. */
   onBack?: () => void;
 }) {
@@ -632,9 +638,9 @@ export function ThreadChat({
     return (name: string) => colors.get(name);
   }, [agents, thread.runs]);
   const messages = useMemo<Message[]>(() => {
-    const author = (name: string) => {
+    const author = (name: string, displayName = name) => {
       const color = colorOf(name);
-      return { name, ...(color ? { color } : {}) };
+      return { name: displayName, ...(color ? { color } : {}) };
     };
     return [
       ...(thread.body && !thread.body.startsWith(CONVERSATION_CONTEXT_PREFIX)
@@ -646,8 +652,8 @@ export function ThreadChat({
             },
           ]
         : []),
-      ...thread.posts.map(
-        (post): Message =>
+      ...thread.posts.flatMap((post): Message[] => {
+        const message: Message =
           post.authorKind === 'human'
             ? {
                 id: post.id,
@@ -655,14 +661,50 @@ export function ThreadChat({
                 content: post.text,
                 timestamp: post.at,
               }
-            : {
-                id: post.id,
-                role: 'assistant',
-                content: post.text,
-                author: author(post.authorName),
-                timestamp: post.at,
-              },
-      ),
+            : post.authorKind === 'agent'
+              ? {
+                  id: post.id,
+                  role: 'assistant',
+                  content: post.text,
+                  author: author(
+                    post.authorName,
+                    post.authorDeleted
+                      ? t('collab.author.removed', {
+                          name: post.authorName,
+                        })
+                      : post.authorName,
+                  ),
+                  timestamp: post.at,
+                }
+              : {
+                  id: post.id,
+                  role: 'system',
+                  content: post.text,
+                  variant: 'info',
+                  source: 'agent_collaboration',
+                  timestamp: post.at,
+                };
+        const refused = (post.outcomes ?? []).filter(
+          (outcome) => outcome.kind === 'skip',
+        );
+        return [
+          message,
+          ...refused.map(
+            (outcome, index): Message => ({
+              id: `${post.id}:routing:${index}`,
+              role: 'system',
+              content: explainSkip(
+                outcome.reason ?? '',
+                outcome.agentName ?? '',
+                t,
+              ),
+              variant: 'warning',
+              source: 'agent_collaboration_routing',
+              timestamp: post.at,
+            }),
+          ),
+        ];
+      }),
       ...thread.runs
         .filter((run) => run.progress?.thoughtText)
         .map(
@@ -705,7 +747,7 @@ export function ThreadChat({
           }),
         ),
     ].sort((a: Message, b: Message) => (a.timestamp ?? 0) - (b.timestamp ?? 0));
-  }, [thread.id, thread.body, thread.posts, thread.runs, colorOf]);
+  }, [thread.id, thread.body, thread.posts, thread.runs, colorOf, t]);
 
   const members = useMemo(() => teamMembers(thread, agents), [thread, agents]);
   const composerCustomization = useMemo(
@@ -729,7 +771,7 @@ export function ThreadChat({
 
   const actions = (
     <div className="flex shrink-0 items-center gap-1">
-      {thread.status === 'in_review' && (
+      {thread.status !== 'done' && (
         <Button
           variant="ghost"
           size="icon"
@@ -1069,12 +1111,7 @@ export function ThreadChat({
           <div role="status" className={styles.note}>
             {skipped.map((target) => (
               <p key={`${target.agentName}:${target.reason}`}>
-                {t(
-                  SKIP_REASONS.has(target.reason ?? '')
-                    ? `collab.skip.${target.reason}`
-                    : 'collab.skip.other',
-                  { name: target.agentName },
-                )}
+                {explainSkip(target.reason ?? '', target.agentName, t)}
               </p>
             ))}
           </div>

@@ -49,7 +49,31 @@ test('mesh shows growing replies before completion, survives reload, and replace
     body: '',
     status: 'open',
     reason: 'Waiting for a message',
-    posts: [],
+    posts: [
+      {
+        id: 'system-1',
+        sequence: 1,
+        authorKind: 'system',
+        authorName: 'system',
+        text: '子任务报告：上一轮运行失败。',
+        at: Date.now() - 2,
+      },
+      {
+        id: 'human-skipped-1',
+        sequence: 2,
+        authorKind: 'human',
+        authorName: 'user',
+        text: '@missing-agent 请检查。',
+        at: Date.now() - 1,
+        outcomes: [
+          {
+            agentName: 'missing-agent',
+            kind: 'skip',
+            reason: 'agent_unknown',
+          },
+        ],
+      },
+    ],
     runs: [],
     budget: { turnsUsed: 0, turnLimit: 12, tokensUsed: 0, tokenLimit: 10000 },
   };
@@ -133,6 +157,13 @@ test('mesh shows growing replies before completion, survives reload, and replace
   );
   await expect(
     page.getByRole('button', { name: '团队', exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole('button', { name: '验收并完成', exact: true }),
+  ).toBeVisible();
+  await expect(page.getByText('子任务报告：上一轮运行失败。')).toBeVisible();
+  await expect(
+    page.getByText('没有名为 missing-agent 的 Agent。检查拼写，或者先新建它。'),
   ).toBeVisible();
   await expect(
     page.getByRole('button', { name: 'Team', exact: true }),
