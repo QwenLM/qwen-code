@@ -14,6 +14,7 @@ import {
   type Task,
 } from '@a2a-js/sdk';
 import {
+  A2AError,
   JsonRpcRequestMalformedError,
   JsonRpcTaskNotFoundError,
   JsonRpcUnsupportedOperationError,
@@ -56,6 +57,7 @@ import type {
 import type { RateLimiterInstance } from '../rate-limit.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
 import { requireTrustedWorkspaceRuntime } from '../workspace-route-runtime.js';
+import { writeStderrLine } from '../../utils/stdioHelpers.js';
 
 const A2A_PATH = '/a2a/v1';
 const REQUEST_REFUSED = -32010;
@@ -397,8 +399,40 @@ function unsupported(): JsonRpcUnsupportedOperationError {
   });
 }
 
+/**
+ * The SDK answers any error that is not an A2A error with its own message, so
+ * a store failure would hand an outside caller absolute paths and other
+ * callers' thread ids. Those are logged here; the caller learns only that the
+ * request failed.
+ */
+function withoutInternalDetail(handler: A2ARequestHandler): A2ARequestHandler {
+  const methods = [
+    'getAuthenticatedExtendedAgentCard',
+    'sendMessage',
+    'getTask',
+    'listTasks',
+    'cancelTask',
+  ] as const;
+  const wrapped: Record<string, unknown> = { ...handler };
+  for (const name of methods) {
+    const method = handler[name] as (...args: unknown[]) => Promise<unknown>;
+    wrapped[name] = async (...args: unknown[]) => {
+      try {
+        return await method.apply(handler, args);
+      } catch (error) {
+        if (error instanceof A2AError) throw error;
+        writeStderrLine(
+          `qwen serve: A2A ${name} failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        throw new Error('Internal error.');
+      }
+    };
+  }
+  return wrapped as unknown as A2ARequestHandler;
+}
+
 function requestHandler(_registry: WorkspaceRegistry): A2ARequestHandler {
-  return {
+  return withoutInternalDetail({
     getAgentCard: async () => publicCard('http://localhost'),
 
     getAuthenticatedExtendedAgentCard: async (_params, context) => {
@@ -519,7 +553,7 @@ function requestHandler(_registry: WorkspaceRegistry): A2ARequestHandler {
     resubscribe(): AsyncGenerator<StreamResponse, void, undefined> {
       throw unsupported();
     },
-  };
+  });
 }
 
 export function registerA2ATransportRoutes(

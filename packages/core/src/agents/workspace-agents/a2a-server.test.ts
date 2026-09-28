@@ -62,6 +62,21 @@ describe('A2A tasks', () => {
     });
   });
 
+  it('answers a malformed task id as not found', async () => {
+    const { secret } = await issueA2AGrant(PROJECT_ROOT, {
+      callerId: 'share_1',
+      agentId: 'ag_lead',
+    });
+    const caller = { callerId: 'share_1', secret };
+
+    await expect(
+      a2aGetTask(PROJECT_ROOT, caller, '../workspace'),
+    ).resolves.toEqual({ ok: false, kind: 'not_found' });
+    await expect(
+      a2aCancelTask(PROJECT_ROOT, caller, '../workspace'),
+    ).resolves.toEqual({ ok: false, kind: 'not_found' });
+  });
+
   it('cancels queued external work without leaving a live run', async () => {
     const { secret } = await issueA2AGrant(PROJECT_ROOT, {
       callerId: 'share_1',

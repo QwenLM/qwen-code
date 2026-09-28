@@ -21,7 +21,7 @@ import {
   A2A_PROTOCOL_VERSION,
   A2A_TRANSPORT_BINDING,
   QWEN_A2A_EXTENSION_URI,
-  toA2ATaskState,
+  toExternalA2ATaskState,
   toQwenA2ATaskMetadata,
 } from './a2a-contract.js';
 import type { A2ATaskState, QwenA2ATaskMetadata } from './a2a-contract.js';
@@ -34,7 +34,11 @@ import {
   ExternalIntakeConflictError,
   ExternalIntakeRefusedError,
 } from './external-intake.js';
-import { isAgentAddressable, readWorkspaceAgents } from './store.js';
+import {
+  isAgentAddressable,
+  isValidId,
+  readWorkspaceAgents,
+} from './store.js';
 import type { Thread, WorkspaceAgent } from './types.js';
 
 /**
@@ -72,8 +76,12 @@ export interface A2ACaller {
 }
 
 function taskView(thread: Thread): A2ATaskView {
+  // Only the granted agent answers: a post by anyone else a local person
+  // brought into the thread is not the caller's to read.
   const answer = thread.messages.findLast(
-    (message) => message.authorKind === 'agent',
+    (message) =>
+      message.authorKind === 'agent' &&
+      message.from === thread.externalIntake?.targetAgentId,
   )?.text;
   return {
     id: thread.id,
@@ -81,7 +89,7 @@ function taskView(thread: Thread): A2ATaskView {
     // collection of interactions", which is what a parent and its splits are.
     contextId: thread.rootThreadId,
     status: {
-      state: toA2ATaskState(thread.status),
+      state: toExternalA2ATaskState(thread),
       timestamp: new Date().toISOString(),
     },
     // Namespaced by the extension URI so a client that does not implement the
@@ -179,6 +187,8 @@ export async function a2aGetTask(
   caller: A2ACaller,
   taskId: string,
 ): Promise<A2AResult<A2ATaskView>> {
+  // Not a thread id at all is the same answer as someone else's thread.
+  if (!isValidId(taskId)) return { ok: false, kind: 'not_found' };
   const thread = await getExternalThreadForCaller(
     projectRoot,
     caller.callerId,
@@ -231,6 +241,7 @@ export async function a2aCancelTask(
   caller: A2ACaller,
   taskId: string,
 ): Promise<A2AResult<{ task: A2ATaskView; runsStillLive: number }>> {
+  if (!isValidId(taskId)) return { ok: false, kind: 'not_found' };
   const existing = await getExternalThreadForCaller(
     projectRoot,
     caller.callerId,
