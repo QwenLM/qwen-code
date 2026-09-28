@@ -9,7 +9,7 @@ import {
 import type { ChatEditor } from '../ChatEditor';
 import type { WebShellAtProvider } from '../../customization';
 import type { useI18n } from '../../i18n';
-import { createThreadsHttpApi } from './ThreadsRoute';
+import { createThreadsHttpApi } from './threads-api';
 import { CONVERSATION_CONTEXT_PREFIX } from './agents-view-logic';
 import type { WorkspaceAgentSummaryView } from './ThreadsPage';
 
