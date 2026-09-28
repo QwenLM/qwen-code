@@ -2783,6 +2783,33 @@ describe('WorkspaceChannelSettingsStore', () => {
     expect(persisted.serve.channels).toEqual(['bot']);
   });
 
+  it("removes a stale startup name only from its own scope, leaving another workspace's file untouched", async () => {
+    const otherWorkspace = path.join(testRoot, 'other-workspace');
+    const otherSettingsPath = path.join(
+      otherWorkspace,
+      '.qwen',
+      'settings.json',
+    );
+    fs.mkdirSync(path.dirname(otherSettingsPath), { recursive: true });
+    fs.writeFileSync(
+      otherSettingsPath,
+      JSON.stringify({ $version: 4, serve: { channels: ['ghost'] } }),
+    );
+    writeWorkspaceSettings(
+      JSON.stringify({ $version: 4, serve: { channels: ['ghost'] } }),
+    );
+    const otherBefore = fs.readFileSync(otherSettingsPath, 'utf8');
+    const store = new WorkspaceChannelSettingsStore(workspace);
+
+    const next = await store.remove('ghost', {
+      expectedRevision: store.snapshot().revision,
+    });
+
+    expect(next.startupNames).toEqual([]);
+    expect(readWorkspaceSettings()['serve']).toEqual({ channels: [] });
+    expect(fs.readFileSync(otherSettingsPath, 'utf8')).toBe(otherBefore);
+  });
+
   it('leaves the settings file byte-identical when deleting a channel that was never persisted', async () => {
     writeWorkspaceSettings(`{
   "$version": 4,
@@ -3172,6 +3199,30 @@ describe('WorkspaceChannelSettingsStore', () => {
         // Written to the workspace scope instead, the toggle is a silent no-op:
         // nothing reads that file in this layout.
         expect(readWorkspaceSettings()['serve']).not.toHaveProperty('channels');
+      } finally {
+        resetHomeEnvBootstrapForTesting();
+      }
+    });
+
+    it('removes a stale startup name from the user scope without touching the workspace file', async () => {
+      // The missing-config branch writes only the resolved scope: with the
+      // workspace collapsed onto the shared user file, the stale startup name
+      // leaves the user file and the unread workspace file stays as it was.
+      const workspaceBefore = fs.readFileSync(settingsPath, 'utf8');
+      const userSettingsPath = useRedirectedUserScope({
+        $version: 4,
+        serve: { channels: ['ghost'] },
+      });
+      try {
+        const store = new WorkspaceChannelSettingsStore(workspace);
+
+        const next = await store.remove('ghost', {
+          expectedRevision: store.snapshot().revision,
+        });
+
+        expect(next.startupNames).toEqual([]);
+        expect(readUserSettings(userSettingsPath).serve?.channels).toEqual([]);
+        expect(fs.readFileSync(settingsPath, 'utf8')).toBe(workspaceBefore);
       } finally {
         resetHomeEnvBootstrapForTesting();
       }

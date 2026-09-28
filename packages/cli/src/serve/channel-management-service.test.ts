@@ -10,7 +10,12 @@ import * as path from 'node:path';
 import { PairingStore } from '@qwen-code/channel-base';
 import type { CreatePairingRequestResult } from '@qwen-code/channel-base';
 import { describe, expect, it, vi } from 'vitest';
+import {
+  loadSettings,
+  resetHomeEnvBootstrapForTesting,
+} from '../config/settings.js';
 import type { ChannelSettingsSnapshot } from './channel-settings-store.js';
+import { WorkspaceChannelSettingsStore } from './channel-settings-store.js';
 import {
   createChannelManagementService,
   type ChannelManagementWorkerManager,
@@ -19,6 +24,22 @@ import {
   createChannelRestoreFailures,
   type ChannelRestoreFailures,
 } from './channel-restore-failures.js';
+
+// The home-directory scope-collapse test redirects the settings loader's home
+// directory; every other consumer keeps the real one.
+const mockHome = vi.hoisted(() => ({ dir: '' }));
+vi.mock('node:os', async (importOriginal) => {
+  const actualOs = await importOriginal<typeof import('node:os')>();
+  // Mock both the named and the default export: consumers that do
+  // `import os from 'node:os'` would otherwise resolve the real home
+  // directory while the test believes it was redirected.
+  const homedir = () => mockHome.dir || actualOs.homedir();
+  return {
+    ...actualOs,
+    homedir,
+    default: { ...actualOs, homedir },
+  };
+});
 
 const WORKSPACE = '/ws/primary';
 
@@ -831,8 +852,9 @@ describe('createChannelManagementService', () => {
       ),
     });
     expect(manager.setChannelEnabled).not.toHaveBeenCalled();
+    expect(manager.reload).not.toHaveBeenCalled();
+    expect(manager.reloadWorkspace).not.toHaveBeenCalled();
     expect(store.remove).not.toHaveBeenCalled();
-    expect(manager.state().workers).toHaveLength(1);
   });
 
   it('rejects stale missing-config deletion before stopping its worker', async () => {
@@ -974,6 +996,144 @@ describe('createChannelManagementService', () => {
     expect(persisted().startupNames).toEqual([]);
     expect(manager.setChannelEnabled).toHaveBeenCalledTimes(1);
     expect(manager.state().workers).toEqual([]);
+  });
+
+  it('rejects a missing-config deletion while the worker runtime is mid-transition', async () => {
+    // A mid-transition manager reports the candidate selection as no workers
+    // and nothing committed, which reads as the silent shape; the delete must
+    // wait for the manager to settle rather than report a false convergence.
+    const { service, store, manager } = setup({
+      snapshot: settingsSnapshot({ channels: {}, startupNames: ['bot'] }),
+      committedNames: [],
+    });
+    const state = manager.state();
+    vi.mocked(manager.state).mockReturnValue({
+      ...state,
+      transition: 'starting',
+      workers: [],
+    });
+
+    await expect(
+      service.remove('bot', { expectedRevision: 'rev-1' }),
+    ).rejects.toMatchObject({
+      code: 'channel_runtime_owner_mismatch',
+      message: expect.stringContaining('mid-transition'),
+    });
+    expect(manager.setChannelEnabled).not.toHaveBeenCalled();
+    expect(store.remove).not.toHaveBeenCalled();
+  });
+
+  it('rejects a missing-config deletion when the configuration reappears during the worker stop', async () => {
+    // The revision token covers only this scope's files, so a configuration
+    // written back to another scope while the worker stop is in flight must
+    // fail closed instead of converging.
+    const { service, store, manager, loadChannelsConfig } = setup({
+      snapshot: settingsSnapshot({ channels: {}, startupNames: ['bot'] }),
+      committedNames: ['bot'],
+    });
+    loadChannelsConfig
+      .mockReturnValueOnce({})
+      .mockReturnValue({ bot: { type: 'telegram' } });
+
+    await expect(
+      service.remove('bot', { expectedRevision: 'rev-1' }),
+    ).rejects.toMatchObject({ code: 'channel_settings_conflict' });
+    expect(manager.setChannelEnabled).toHaveBeenCalledWith(
+      { name: 'bot', workspaceCwd: WORKSPACE },
+      false,
+    );
+    expect(store.remove).not.toHaveBeenCalled();
+  });
+
+  it('converges a stale startup selection when the merged view holds only a filtered entry', async () => {
+    // A legacy scalar entry is visible in the raw merged map but in no read
+    // view: it runs nothing, so the delete clears the stale startup
+    // selection instead of blaming another scope.
+    const { service, store, manager, persisted } = setup({
+      snapshot: settingsSnapshot({ channels: {}, startupNames: ['legacy'] }),
+      committedNames: [],
+      mergedChannels: { legacy: 'telegram' },
+    });
+
+    await expect(
+      service.remove('legacy', { expectedRevision: 'rev-1' }),
+    ).resolves.toMatchObject({ snapshot: { instances: {} } });
+    expect(manager.setChannelEnabled).not.toHaveBeenCalled();
+    expect(store.remove).toHaveBeenCalledOnce();
+    expect(persisted().startupNames).toEqual([]);
+  });
+
+  it('deletes a user-scope channel when the workspace is the home directory', async () => {
+    // A home-directory workspace resolves its channel settings scope to the
+    // shared user file, so a user-scope channel is configured there and an
+    // explicit delete removes it: the missing-config gate must not fire.
+    const home = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'channel-management-home-'),
+    );
+    await fs.mkdir(path.join(home, '.qwen'), { recursive: true });
+    const userSettingsPath = path.join(home, '.qwen', 'settings.json');
+    await fs.writeFile(
+      userSettingsPath,
+      JSON.stringify({
+        $version: 4,
+        channels: { 'team-bot': { type: 'telegram', token: '$T' } },
+        serve: { channels: ['team-bot'] },
+      }),
+    );
+    const savedQwenHome = process.env['QWEN_HOME'];
+    delete process.env['QWEN_HOME'];
+    mockHome.dir = home;
+    resetHomeEnvBootstrapForTesting();
+    try {
+      expect(os.homedir()).toBe(home);
+      // Pin the branch under test: the loader has to attribute the shared
+      // settings file to the user scope, or this test silently exercises the
+      // workspace-scope branch instead.
+      expect(
+        loadSettings(home, { skipLoadEnvironment: true })
+          .workspaceSettingsActive,
+      ).toBe(false);
+      const store = new WorkspaceChannelSettingsStore(home);
+      const manager: ChannelManagementWorkerManager = {
+        committedChannelNames: () => [],
+        state: () => ({
+          enabled: false,
+          selection: null,
+          transition: 'idle',
+          workers: [],
+        }),
+        setChannelEnabled: vi.fn(async () => undefined),
+        reloadWorkspace: vi.fn(async () => {
+          throw new Error('not used');
+        }),
+      };
+      const loadChannelsConfig = vi.fn(() => ({
+        'team-bot': { type: 'telegram', token: '$T' },
+      }));
+      const service = createChannelManagementService({
+        workspaceCwd: home,
+        store,
+        manager,
+        loadChannelsConfig,
+      });
+
+      const result = await service.remove('team-bot', {
+        expectedRevision: store.snapshot().revision,
+      });
+
+      expect(result.snapshot.instances).toEqual({});
+      // The configured path never consults the merged view.
+      expect(loadChannelsConfig).not.toHaveBeenCalled();
+      expect(
+        JSON.parse(await fs.readFile(userSettingsPath, 'utf8')),
+      ).toMatchObject({ channels: {}, serve: { channels: [] } });
+    } finally {
+      mockHome.dir = '';
+      if (savedQwenHome === undefined) delete process.env['QWEN_HOME'];
+      else process.env['QWEN_HOME'] = savedQwenHome;
+      resetHomeEnvBootstrapForTesting();
+      await fs.rm(home, { recursive: true, force: true });
+    }
   });
 
   it('delegates starts and stops to the manager atomic mutation lane', async () => {

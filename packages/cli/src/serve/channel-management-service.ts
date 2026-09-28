@@ -159,9 +159,12 @@ export interface CreateChannelManagementServiceOptions {
   manager: ChannelManagementWorkerManager | ChannelWorkerManager;
   /**
    * A workspace's merged channel config map (system + user + workspace
-   * scopes) — the same view the worker resolves, injected the way
-   * `resolveChannelWorkspaceGroups` receives it. `remove` consults it to
+   * scopes) — the same view the worker resolves. `remove` consults it to
    * distinguish a configuration that is lost from one this scope never held.
+   * It must read settings from disk at call time with environment loading
+   * skipped, the way the `resolveChannelWorkspaceGroups` injections receive
+   * it: the default `loadSettings(cwd)` would write the target workspace's
+   * `.env` into the daemon's process-global environment.
    */
   loadChannelsConfig: (workspaceCwd: string) => Record<string, unknown>;
   /**
@@ -262,15 +265,24 @@ export function createChannelManagementService(
     }
   };
 
-  const assertConvergeableRuntimeOwner = (name: string): void => {
+  // Returns whether exactly one committed worker owned by this workspace was
+  // confirmed, so `remove` can stop it without re-deriving ownership.
+  const assertConvergeableRuntimeOwner = (name: string): boolean => {
+    // A mid-transition manager reports the candidate selection as no workers
+    // and nothing committed, which reads as silent without being it; the
+    // caller retries once the manager settles.
+    if (opts.manager.state().transition !== 'idle') {
+      throw runtimeOwnerMismatch(
+        name,
+        'The channel runtime is mid-transition.',
+      );
+    }
     const workers = workerFor(name);
     const committed = opts.manager.committedChannelNames().includes(name);
-    if (!committed && workers.length === 0) return;
-    const owned =
-      committed &&
-      workers.length === 1 &&
-      workers[0]!.workspaceCwd === opts.workspaceCwd;
-    if (owned) return;
+    if (!committed && workers.length === 0) return false;
+    if (committed && workers.length === 1 && ownedWorkers(name).length === 1) {
+      return true;
+    }
     const reason = !committed
       ? 'A worker exists but the channel is not committed.'
       : workers.length === 0
@@ -504,7 +516,19 @@ export function createChannelManagementService(
       if (configured) assertWorkspaceConfig(current.channels[name]!);
       assertExpectedRevision(current, request.expectedRevision);
       if (!configured) {
-        if (Object.hasOwn(opts.loadChannelsConfig(opts.workspaceCwd), name)) {
+        // Only a record-valued merged entry proves the channel lives in
+        // another scope: every other reader of the merged map filters
+        // non-record values, so a legacy scalar entry runs nothing and its
+        // stale startup selection is exactly what this branch converges.
+        const mergedHoldsConfig = (): boolean => {
+          const merged = opts.loadChannelsConfig(opts.workspaceCwd);
+          if (!Object.hasOwn(merged, name)) return false;
+          const entry = merged[name];
+          return (
+            typeof entry === 'object' && entry !== null && !Array.isArray(entry)
+          );
+        };
+        if (mergedHoldsConfig()) {
           // The worker resolves the merged system + user + workspace view, so
           // a channel configured outside this scope still runs here. Its
           // configuration is not lost — this scope never held it — and
@@ -516,9 +540,20 @@ export function createChannelManagementService(
             `Channel "${name}" is not configured in this workspace's settings scope, but its runtime is resolved from another scope (user or system settings); it cannot be deleted from here.`,
           );
         }
-        assertConvergeableRuntimeOwner(name);
-      }
-      if (workspaceCommittedNames().includes(name)) {
+        if (assertConvergeableRuntimeOwner(name)) {
+          await stopChannel(name);
+        }
+        // The revision token covers only this scope's files, so the merged
+        // view is re-read after the stop window: a configuration that
+        // reappeared at another scope mid-delete must fail closed rather
+        // than converge.
+        if (mergedHoldsConfig()) {
+          throw new ChannelManagementError(
+            'channel_settings_conflict',
+            'Channel settings changed; reload before trying again.',
+          );
+        }
+      } else if (workspaceCommittedNames().includes(name)) {
         assertOwnedRuntime(name);
         await stopChannel(name);
       }
