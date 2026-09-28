@@ -76,6 +76,7 @@ import {
   extractParentToolNames,
 } from './runtime/agent-core.js';
 import { toolConfigAllowsSkill } from './runtime/subagent-plan-tool-policy.js';
+import { ToolMode } from '../tools/code-mode.js';
 import { ToolNames } from '../tools/tool-names.js';
 import type {
   AgentExternalInput,
@@ -131,6 +132,7 @@ const CONTAINER_EXECUTION_BLOCKED_REASON =
  */
 function subagentWillHaveSkillTool(
   subagentConfig: SubagentConfig | undefined,
+  codeModeOnly = false,
 ): boolean {
   const tools = subagentConfig?.tools;
   // Nullish has to stay on the wildcard path: launch reads `config.tools?.length`,
@@ -138,10 +140,13 @@ function subagentWillHaveSkillTool(
   if (tools != null && !Array.isArray(tools)) {
     return false;
   }
-  return toolConfigAllowsSkill({
-    tools: tools?.length ? tools : ['*'],
-    disallowedTools: subagentConfig?.disallowedTools,
-  });
+  return toolConfigAllowsSkill(
+    {
+      tools: tools?.length ? tools : ['*'],
+      disallowedTools: subagentConfig?.disallowedTools,
+    },
+    codeModeOnly,
+  );
 }
 
 interface TranscriptRecovery {
@@ -988,6 +993,7 @@ export class BackgroundAgentResumeService {
                 includeDeferredToolsReminder: false,
                 includeAvailableSkillsReminder: subagentWillHaveSkillTool(
                   target.subagentConfig,
+                  activeAgentConfig.getToolMode?.() === ToolMode.CodeModeOnly,
                 ),
               })
             )[0],

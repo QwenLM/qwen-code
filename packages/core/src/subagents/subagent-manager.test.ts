@@ -4284,6 +4284,31 @@ bad`);
         );
       });
 
+      // Under CodeModeOnly an explicit list naming `exec` inherits every
+      // code-mode-callable binding, `skill` included, so the agent can load
+      // skills through the exec gateway and must keep its manager. The parent
+      // is a real CodeModeOnly Config: dropping the tool-mode argument at the
+      // createAgentHeadless call site turns this case red.
+      it('keeps the manager for an exec-only agent under CodeModeOnly', async () => {
+        const codeModeParent = makeFakeConfig({ codeModeOnly: true });
+        vi.spyOn(codeModeParent, 'getSkillManager').mockReturnValue(
+          sessionManager,
+        );
+        vi.spyOn(codeModeParent, 'getSubagentManager').mockReturnValue(manager);
+        vi.spyOn(codeModeParent, 'getToolRegistry').mockReturnValue(
+          mockToolRegistry,
+        );
+
+        const context = await launch(
+          { tools: [ToolNames.EXEC] },
+          codeModeParent,
+        );
+        expect(context.getSkillManager()).toBe(sessionManager);
+        expect(context.getToolRegistry().getAllToolNames()).toContain(
+          ToolNames.SKILL,
+        );
+      });
+
       // The rebuilt registry's tools are per-subagent instances: the nested
       // Agent tool subscribes to the *shared session* SubagentManager in its
       // constructor and releases only in dispose(), which is what

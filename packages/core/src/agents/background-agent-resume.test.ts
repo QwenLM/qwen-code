@@ -21,6 +21,7 @@ import {
   readAgentMeta,
   writeAgentMeta,
 } from './agent-transcript.js';
+import { ToolMode } from '../tools/code-mode.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { AgentTerminateMode } from './runtime/agent-types.js';
 import { SubagentError, SubagentErrorCode } from '../subagents/types.js';
@@ -78,6 +79,7 @@ describe('BackgroundAgentResumeService', () => {
         serverName?: string;
       }>;
       skillManager?: unknown;
+      toolMode?: ToolMode;
       hookSystem?:
         | {
             fireSubagentStartEvent: ReturnType<typeof vi.fn>;
@@ -176,6 +178,7 @@ describe('BackgroundAgentResumeService', () => {
       getHookSystem: () => hookSystem,
       getStopHookBlockingCap: () => options.stopHookBlockingCap ?? 8,
       getApprovalMode: () => 'default',
+      getToolMode: () => options.toolMode,
       getModel: () => 'parent-model',
       getBareMode: () => false,
       getSandbox: () => undefined,
@@ -1306,6 +1309,7 @@ describe('BackgroundAgentResumeService', () => {
       string,
       { tools?: string[] | string | null; disallowedTools?: string[] },
       boolean,
+      ToolMode?,
     ]
   >([
     ['inherits every tool', {}, true],
@@ -1324,9 +1328,26 @@ describe('BackgroundAgentResumeService', () => {
     // Only unvalidated SDK `initialize.agents` JSON produces this. Launch
     // resolves it to zero tools, so resume must neither throw nor list.
     ['declares a non-array tools value', { tools: 'read_file' }, false],
+    // Under CodeModeOnly a finite list naming `exec` reaches `skill` through
+    // the code-mode gateway, so launch keeps the manager and resume must keep
+    // the listing. Dropping the tool-mode argument at the resume call site —
+    // the parent Config here reports CodeModeOnly — turns this row red.
+    [
+      'names exec without skill under CodeModeOnly',
+      { tools: [ToolNames.EXEC] },
+      true,
+      ToolMode.CodeModeOnly,
+    ],
+    // Same definition, Direct mode: no gateway, so no listing. Pins that the
+    // row above is the tool mode and not the `exec` name doing the work.
+    [
+      'names exec without skill under Direct',
+      { tools: [ToolNames.EXEC] },
+      false,
+    ],
   ])(
     'matches the launch-time skill listing when the definition %s',
-    async (_label, toolFields, expectListing) => {
+    async (_label, toolFields, expectListing, toolMode) => {
       const sessionId = 'session-skill-listing';
       const agentId = 'agent-skill-listing';
       const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
@@ -1381,6 +1402,7 @@ describe('BackgroundAgentResumeService', () => {
         getFinalText: () => 'done',
       };
       const { service, subagentManager } = createService({
+        toolMode,
         skillManager: {
           listSkills: vi.fn().mockResolvedValue([
             {

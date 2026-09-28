@@ -251,5 +251,19 @@ describe('subagent plan tool policy', () => {
     ])('withholds skills for %s', (_label, toolConfig) => {
       expect(toolConfigAllowsSkill(toolConfig)).toBe(false);
     });
+
+    it('credits the exec gateway only under CodeModeOnly', () => {
+      const execList = { tools: [ToolNames.EXEC, ToolNames.READ_FILE] };
+      expect(toolConfigAllowsSkill(execList, true)).toBe(true);
+      expect(toolConfigAllowsSkill(execList, false)).toBe(false);
+      expect(toolConfigAllowsSkill(execList)).toBe(false);
+      expect(
+        toolConfigAllowsSkill(
+          { ...execList, disallowedTools: [ToolNames.SKILL] },
+          true,
+        ),
+      ).toBe(false);
+      expect(toolConfigAllowsSkill({ tools: [] }, true)).toBe(false);
+    });
   });
 });

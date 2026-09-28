@@ -93,39 +93,37 @@ export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
  * listing and the pointer cannot disagree about whether a skill can actually
  * be loaded — the disagreement #12424 reports.
  *
- * Tool mode and registry state are deliberately not this predicate's input: a
+ * Tool mode is an input; registry state deliberately is not. A
  * `permissions.deny` or `excludeTools` entry is a registry property, and
  * `resolveBundledReferenceRoute` answers the route from it. The per-agent
  * policy is the one input that resolver cannot see (#12424).
  *
- * Two `ToolMode.CodeModeOnly` arms are therefore NOT covered here. Both are
- * open on this PR's review thread, not settled behaviour — recorded so the
- * next reader does not mistake the omission for a verified answer:
- * - `prepareTools()` additionally admits every `code-mode-callable` registry
- *   tool when the configured names include `exec` (`inheritsCodeModeBindings`,
- *   `agent-core.ts`), and `getToolExposure(SKILL)` is `code-mode-callable`
- *   because SKILL is in neither `HIDDEN_TOOLS` nor `DIRECT_ONLY_TOOLS`. On
- *   `main` an agent whose finite list names `exec` but not `skill` therefore
- *   still reaches the Skill tool through that gateway; here this predicate
- *   answers `false` for it, which withholds the manager and — through the
- *   `config.ts` registration guard — the Skill tool itself, so the agent
- *   loses that route.
- * - A `tools.eager` allowlist omitting `skill` defers the schema, but the
- *   resolver's CodeModeOnly branch short-circuits
- *   `isToolDeferredBehindToolSearch` to `false` and still answers `pointer`,
- *   handing the agent a route it cannot follow. That cell is byte-identical
- *   to `main`: it predates this PR and is not fixed here.
+ * Of the two `ToolMode.CodeModeOnly` arms, this predicate covers the `exec`
+ * gateway: `prepareTools()` additionally admits every `code-mode-callable`
+ * registry tool when the configured names include `exec`
+ * (`inheritsCodeModeBindings`, `agent-core.ts`), and `getToolExposure(SKILL)`
+ * is `code-mode-callable` because SKILL is in neither `HIDDEN_TOOLS` nor
+ * `DIRECT_ONLY_TOOLS`. So an agent whose finite list names `exec` but not
+ * `skill` does reach the Skill tool, and callers must pass the mode — with it
+ * omitted this answers `false` for that shape, which would withhold the manager
+ * and, through the `config.ts` registration guard, the Skill tool itself.
+ *
+ * The arm it does not cover: a `tools.eager` allowlist omitting `skill` defers
+ * the schema, but the resolver's CodeModeOnly branch short-circuits
+ * `isToolDeferredBehindToolSearch` to `false` and still answers `pointer`,
+ * handing the agent a route it cannot follow. That cell is byte-identical to
+ * `main`: it predates this PR, is not fixed here, and is tracked in #12809.
  *
  * Matching is exact, as `prepareTools()`'s is: `SubagentManager` resolves
  * configured names to canonical tool names before they reach a `ToolConfig`.
  *
  * Where this cannot tell, it answers true: a wrong `true` costs a pointer the
  * agent cannot follow, a wrong `false` takes skills away from an agent that
- * could load them. The `exec`-gateway arm above is the one known place this
- * rule currently goes the unsafe way.
+ * could load them.
  */
 export function toolConfigAllowsSkill(
   toolConfig: ToolConfig | undefined,
+  codeModeOnly = false,
 ): boolean {
   if (EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.SKILL)) {
     return false;
@@ -145,7 +143,12 @@ export function toolConfigAllowsSkill(
   // list holding only inline declarations inherits: both take the explicit
   // branch there, which declares no registry tool.
   const inheritsRegistry = names.includes('*');
-  return inheritsRegistry || names.includes(ToolNames.SKILL);
+  // Under CodeModeOnly, naming `exec` inherits every code-mode-callable
+  // binding (`prepareTools()`), and `skill` is one of them.
+  const reachesThroughExec = codeModeOnly && names.includes(ToolNames.EXEC);
+  return (
+    inheritsRegistry || names.includes(ToolNames.SKILL) || reachesThroughExec
+  );
 }
 
 /**

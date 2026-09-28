@@ -226,6 +226,21 @@ describe('AgentCore skill-gate inputs', () => {
       );
     }
 
+    it('announces the listing for an exec-only agent under CodeModeOnly', () => {
+      // `prepareTools()` admits every code-mode-callable binding when the
+      // configured names include `exec`, and SKILL is one of them, so this
+      // agent can load skills and must be told they exist. Dropping the
+      // tool-mode argument at the `willHaveSkillTool()` call site turns this
+      // red while `SubagentManager` still keeps the SkillManager — the
+      // listing-versus-pointer disagreement #12424 exists to remove.
+      const core = makeCodeModeCore({ tools: [ToolNames.EXEC] });
+      expect(
+        (
+          core as unknown as { willHaveSkillTool: () => boolean }
+        ).willHaveSkillTool.call(core),
+      ).toBe(true);
+    });
+
     it.each([
       { tools: ['*'] },
       { tools: [ToolNames.SKILL] },
