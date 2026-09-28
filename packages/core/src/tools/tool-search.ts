@@ -362,7 +362,9 @@ class ToolSearchInvocation extends BaseToolInvocation<
     // Resolve across all known names (instance names + factory names) with
     // the rule tool_call applies, so the schema reviewed here is the tool
     // that call invokes. Preserve the user-supplied casing in the error list
-    // so the response matches what the model asked for.
+    // so the response matches what the model asked for. In Code Mode the
+    // binding names are the only resolvable names, which is what keeps lookup
+    // inside the current agent's allowed tools.
     const knownNames = bindings
       ? [...bindings.keys()]
       : registry.getAllToolNames();
@@ -385,10 +387,6 @@ class ToolSearchInvocation extends BaseToolInvocation<
         continue;
       }
       if (!canonical) {
-        missing.push(requested);
-        continue;
-      }
-      if (bindings && !bindings.has(canonical)) {
         missing.push(requested);
         continue;
       }
