@@ -116,7 +116,12 @@ final class LocalRuntimeStore {
 
     static boolean linuxProcessAbsent(Path stat, String expected) {
         try {
-            return !expected.equals(linuxStartIdentity(Files.readString(stat)));
+            String text = Files.readString(stat);
+            if (!expected.equals(linuxStartIdentity(text))) {
+                return true;
+            }
+            char state = text.substring(text.lastIndexOf(')') + 1).strip().charAt(0);
+            return state == 'Z' || state == 'X' || state == 'x';
         } catch (java.nio.file.NoSuchFileException absent) {
             return true;
         } catch (IOException | IllegalArgumentException uncertain) {

@@ -148,6 +148,24 @@ class DurableLocalProcessRuntimeProvisionerTest {
     }
 
     @Test
+    void deadWorkerBeforeLeasePublicationIsTerminalWithoutLossEvidence() throws Exception {
+        var request = request(true);
+        var store = store();
+        try (var first = provisioner(store); var restored = provisioner(store())) {
+            var handle = await(first.ensureResource(request, SEED, null));
+            launch(first, store, request);
+            var worker = workers.getFirst();
+            worker.destroyForcibly();
+            worker.onExit().get(5, TimeUnit.SECONDS);
+            var observation = await(restored.reconcile(request, SEED, handle, null));
+            assertEquals(RuntimeObservation.Outcome.CONFLICT, observation.getOutcome());
+            assertNull(observation.getLossEvidence());
+            assertEquals(LocalRuntimeStore.State.RETIRED,
+                    registration(store, request, handle).state());
+        }
+    }
+
+    @Test
     void pidReuseDoesNotKillTheUnrelatedProcessOrProveWritersStopped() throws Exception {
         var request = request(false);
         var store = store();
@@ -197,7 +215,7 @@ class DurableLocalProcessRuntimeProvisionerTest {
     }
 
     @Test
-    void interruptedLaunchingAndBusyLocksProveNothing() throws Exception {
+    void interruptedLaunchingIsTerminalButBusyLocksProveNothing() throws Exception {
         var request = request(false);
         var store = store();
         try (var provisioner = provisioner(store)) {
@@ -207,7 +225,7 @@ class DurableLocalProcessRuntimeProvisionerTest {
                 return null;
             });
             assertBlocked(provisioner.provision(request, SEED));
-            assertEquals(RuntimeObservation.Outcome.UNKNOWN,
+            assertEquals(RuntimeObservation.Outcome.CONFLICT,
                     await(provisioner.reconcile(request, SEED, handle, null)).getOutcome());
             CountDownLatch locked = new CountDownLatch(1);
             CountDownLatch unlock = new CountDownLatch(1);
@@ -229,6 +247,58 @@ class DurableLocalProcessRuntimeProvisionerTest {
                 held.get(5, TimeUnit.SECONDS);
             }
             assertTrue(workers.isEmpty());
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"INTENT", "RETIRED"})
+    void unstartedRegistrationWithoutLeaseIsTerminal(String state) throws Exception {
+        var request = request(false);
+        var store = store();
+        try (var provisioner = provisioner(store)) {
+            var handle = await(provisioner.ensureResource(request, SEED, null));
+            store.locked(request, SEED, handle, false, (resource, record) -> {
+                resource.save(record.withState(LocalRuntimeStore.State.valueOf(state)));
+                return null;
+            });
+            var observation = await(provisioner.reconcile(request, SEED, handle, null));
+            assertEquals(RuntimeObservation.Outcome.CONFLICT, observation.getOutcome());
+            assertNull(observation.getLossEvidence());
+            assertTrue(workers.isEmpty());
+        }
+    }
+
+    @Test
+    void failedSpawnDoesNotRetryReconciliationForever() throws Exception {
+        var scope = new RuntimeScope("tenant", "workspace", "1",
+                directory.toAbsolutePath().toString(), WorkspaceExecutionProfile.CAPABILITY_DIGEST,
+                "session");
+        var store = store();
+        var bindings = new InMemoryRuntimeBindingRepository();
+        try (var provisioner = new LocalProcessRuntimeProvisioner(
+                List.of(directory.resolve("missing-worker").toString()), directory,
+                TRANSPORT, ignored -> "storage:a", store);
+                var service = new RuntimeBrokerService(
+                        ignored -> CompletableFuture.completedFuture(scope),
+                        provisioner, TRANSPORT, bindings,
+                        new InMemoryRuntimeSessionRepository(),
+                        new InMemoryToolExecutionRepository(), "broker",
+                        Duration.ofMillis(300), Duration.ofMillis(300))) {
+            assertThrows(java.util.concurrent.ExecutionException.class,
+                    () -> await(service.warm("harness")));
+            var request = provisioner.createRequest(scope, "harness");
+            var blocked = bindings.findActive(request);
+            assertEquals(RuntimeBindingRecord.State.RECOVERY_BLOCKED, blocked.getState());
+            assertNull(blocked.getLease());
+            assertEquals(LocalRuntimeStore.State.LAUNCHING,
+                    store.locked(request, blocked.getProvisionSeed(), blocked.getResourceHandle(),
+                            false, (resource, record) -> record.state()));
+            var failure = assertThrows(java.util.concurrent.ExecutionException.class,
+                    () -> await(service.warm("harness")));
+            assertTrue(failure.getCause() instanceof RuntimeBrokerException);
+            assertEquals("runtime_broker_resource_conflict",
+                    ((RuntimeBrokerException) failure.getCause()).getCode());
+            assertFalse(((RuntimeBrokerException) failure.getCause()).isRetryable());
         }
     }
 
@@ -302,6 +372,11 @@ class DurableLocalProcessRuntimeProvisionerTest {
         Files.writeString(stat, "123 (worker) " + fields);
         assertFalse(LocalRuntimeStore.linuxProcessAbsent(stat, "ticks:987654321"));
         assertTrue(LocalRuntimeStore.linuxProcessAbsent(stat, "ticks:987654320"));
+        for (String state : List.of("Z", "X", "x")) {
+            Files.writeString(stat, "123 (worker) " + fields.replaceFirst("S", state));
+            assertTrue(LocalRuntimeStore.linuxProcessAbsent(stat, "ticks:987654321"),
+                    state + " has exited even though its PID and start ticks remain");
+        }
         Files.writeString(stat, "unparseable");
         assertFalse(LocalRuntimeStore.linuxProcessAbsent(stat, "ticks:987654321"));
         assertFalse(LocalRuntimeStore.linuxProcessAbsent(directory, "ticks:987654321"),

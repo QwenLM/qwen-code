@@ -429,7 +429,7 @@ public final class LocalProcessRuntimeProvisioner
                         resource.save(registration.withState(LocalRuntimeStore.State.RETIRED));
                     }
                     if (lastLease == null) {
-                        return RuntimeObservation.unknown(handle);
+                        return RuntimeObservation.conflict(handle);
                     }
                     String domain = handle.getValue().get("hostId") + ":" + handle.getValue().get("bootId")
                             + ":" + handle.getValue().get("resourceId");
@@ -438,6 +438,10 @@ public final class LocalProcessRuntimeProvisioner
                             "registered-process-exit", Instant.now(), domain, seed.getProvisionRequestId(),
                             seed.getProvisionalRuntimeId(), seed.getGatewayIncarnation(), seed.getLeaseId(),
                             seed.getEpoch(), handle), null);
+                }
+                if (registration.state() == LocalRuntimeStore.State.INTENT
+                        || registration.state() == LocalRuntimeStore.State.LAUNCHING) {
+                    return RuntimeObservation.conflict(handle);
                 }
                 if (registration.state() != LocalRuntimeStore.State.REGISTERED
                         && registration.state() != LocalRuntimeStore.State.READY) {
