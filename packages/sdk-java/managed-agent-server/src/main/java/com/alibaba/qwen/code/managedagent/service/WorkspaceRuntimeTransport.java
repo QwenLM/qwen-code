@@ -121,14 +121,14 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
     public CompletionStage<Map<String, Object>> statusV3(RuntimeLease lease,
             RuntimeSession session, Map<String, Object> reference,
             long afterSequence) {
-        requireOwnedWorkspace(lease, session);
+        requireOriginalRuntime(lease, session);
         return delegate.statusV3(lease, session, reference, afterSequence);
     }
 
     @Override
     public CompletionStage<Map<String, Object>> cancelV3(RuntimeLease lease,
             RuntimeSession session, Map<String, Object> reference) {
-        requireOwnedWorkspace(lease, session);
+        requireOriginalRuntime(lease, session);
         return delegate.cancelV3(lease, session, reference);
     }
 
@@ -136,7 +136,7 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
     public CompletionStage<Map<String, Object>> acknowledgeV3(RuntimeLease lease,
             RuntimeSession session, Map<String, Object> reference,
             Map<String, Object> receipt) {
-        requireOwnedWorkspace(lease, session);
+        requireOriginalRuntime(lease, session);
         return delegate.acknowledgeV3(lease, session, reference, receipt);
     }
 
@@ -146,6 +146,13 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
         }
         Context context = context(lease, session, true);
         ownership.assertHeld(context.binding(), context.session());
+    }
+
+    private void requireOriginalRuntime(RuntimeLease lease, RuntimeSession session) {
+        if (!managed(session)) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+        context(lease, session, false);
     }
 
     @Override

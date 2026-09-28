@@ -134,6 +134,7 @@ async function boundedJson(
 class PublicationClient {
   private readonly base: URL;
   private readonly key: Record<string, unknown>;
+  private tail: Promise<void> = Promise.resolve();
 
   constructor(private readonly installed: InstalledPublication) {
     this.base = endpoint(installed.serviceBaseUrl);
@@ -179,27 +180,58 @@ class PublicationClient {
     body: Buffer,
     headers?: Record<string, string>,
   ): Promise<Record<string, unknown>> {
-    let initial: Record<string, unknown>;
+    const previous = this.tail;
+    let release!: () => void;
+    this.tail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
     try {
-      initial = await this.request(suffix, operationId, body, headers);
-    } catch (failure) {
-      const status = await this.request(
-        `/operations/${encodeURIComponent(operationId)}`,
-        operationId,
-      ).catch(() => null);
-      if (
-        status === null ||
-        (failure instanceof PublicationRejection &&
-          failure.status >= 400 &&
-          failure.status < 500 &&
-          failure.status !== 429 &&
-          status['state'] !== 'SUCCEEDED')
-      )
-        throw failure;
-      initial = status;
+      return await this.performOperation(suffix, operationId, body, headers);
+    } finally {
+      release();
+    }
+  }
+
+  private async performOperation(
+    suffix: string,
+    operationId: string,
+    body: Buffer,
+    headers?: Record<string, string>,
+  ): Promise<Record<string, unknown>> {
+    const deadline = Date.now() + 30 * 60_000;
+    let initial: Record<string, unknown>;
+    while (true) {
+      try {
+        initial = await this.request(suffix, operationId, body, headers);
+        break;
+      } catch (failure) {
+        const status = await this.request(
+          `/operations/${encodeURIComponent(operationId)}`,
+          operationId,
+        ).catch(() => null);
+        if (status !== null) {
+          if (
+            failure instanceof PublicationRejection &&
+            failure.status >= 400 &&
+            failure.status < 500 &&
+            failure.status !== 429 &&
+            status['state'] !== 'SUCCEEDED'
+          )
+            throw failure;
+          initial = status;
+          break;
+        }
+        if (
+          !(failure instanceof PublicationRejection) ||
+          failure.status !== 429 ||
+          Date.now() >= deadline
+        )
+          throw failure;
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
     }
     if (initial['state'] === undefined) return initial;
-    const deadline = Date.now() + 30 * 60_000;
     let status = initial;
     while (Date.now() < deadline) {
       if (status['state'] === 'SUCCEEDED') return record(status['receipt']);
@@ -220,6 +252,7 @@ class PublicationClient {
 /** The selected worker receives one token, never the Session writer token. */
 export class RemoteShellResultPublisher {
   private readonly grants = new Map<string, InstalledPublication>();
+  private readonly clients = new Map<string, PublicationClient>();
 
   install(value: unknown, boot: ManagedContextBoot): void {
     const body = record(value);
@@ -264,6 +297,11 @@ export class RemoteShellResultPublisher {
     if (prior && !same(prior, grant))
       throw new Error('Original publication installation conflicts.');
     this.grants.set(binding['executionCallId'], grant);
+    if (!prior)
+      this.clients.set(
+        binding['executionCallId'],
+        new PublicationClient(grant),
+      );
   }
 
   prepare(request: LocalShellCaptureRequest): Promise<{
@@ -298,7 +336,8 @@ export class RemoteShellResultPublisher {
       captureId: String(binding['captureId']),
       revision: 1,
     };
-    const client = new PublicationClient(grant);
+    const client = this.clients.get(request.capture.executionCallId);
+    if (!client) throw new Error('Original publication client is missing.');
     const store: ToolResultSegmentStore = {
       publish: async (raw) => {
         let item;
@@ -497,12 +536,11 @@ export class RemoteShellResultPublisher {
     if (!grant || grant.binding['captureId'] !== identity.captureId)
       throw new Error('Original publication grant changed.');
     const bytes = Buffer.from(JSON.stringify(envelope));
-    const receipt = await new PublicationClient(grant).operation(
-      '/finish',
-      'finish',
-      bytes,
-      { 'Content-Type': 'application/json' },
-    );
+    const client = this.clients.get(identity.executionCallId);
+    if (!client) throw new Error('Original publication client is missing.');
+    const receipt = await client.operation('/finish', 'finish', bytes, {
+      'Content-Type': 'application/json',
+    });
     const terminal = record(receipt['terminal']);
     if (
       receipt['producerPhase'] !== 'FINISHED' ||

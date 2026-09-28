@@ -275,15 +275,28 @@ class WorkspaceRuntimeTest {
     }
 
     @Test
-    void v3StatusDoesNotQueryWorkerAfterWorkspaceOwnershipChanges() throws Exception {
+    void v3OriginalControlSurvivesWorkspaceAuthorizationLossWithoutNewDispatch() throws Exception {
         SessionRecord session = createSession("storage", ".");
         var fixture = transport(session);
         var runtimeSession = fixture.record().getSession();
         authority.claim(session.workspace(), fixture.record());
         jdbc.update("UPDATE managed_workspace_access SET can_read = FALSE WHERE tenant_id = ?", session.tenantId());
-        assertUnavailable(() -> fixture.transport().statusV3(fixture.lease(), runtimeSession,
-                Map.of("callId", "original"), 0));
-        verify(fixture.http(), never()).statusV3(any(), any(), any(), eq(0L));
+        Map<String, Object> original = Map.of("callId", "original");
+        when(fixture.http().statusV3(any(), any(), any(), eq(0L)))
+                .thenReturn(CompletableFuture.completedFuture(Map.of("state", "executing")));
+        when(fixture.http().cancelV3(any(), any(), any()))
+                .thenReturn(CompletableFuture.completedFuture(Map.of("state", "cancel_requested")));
+        when(fixture.http().acknowledgeV3(any(), any(), any(), any()))
+                .thenReturn(CompletableFuture.completedFuture(Map.of("state", "settled")));
+        assertThat(fixture.transport().statusV3(fixture.lease(), runtimeSession, original, 0)
+                .toCompletableFuture().join()).containsEntry("state", "executing");
+        assertThat(fixture.transport().cancelV3(fixture.lease(), runtimeSession, original)
+                .toCompletableFuture().join()).containsEntry("state", "cancel_requested");
+        assertThat(fixture.transport().acknowledgeV3(fixture.lease(), runtimeSession, original, Map.of())
+                .toCompletableFuture().join()).containsEntry("state", "settled");
+        assertUnavailable(() -> fixture.transport().executeV3(fixture.lease(), runtimeSession,
+                original, Map.of(), Map.of()));
+        verify(fixture.http(), never()).executeV3(any(), any(), any(), any(), any());
     }
 
     private TransportFixture transport(SessionRecord session) throws Exception {

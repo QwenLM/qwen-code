@@ -196,6 +196,148 @@ describe('remote Shell result publication', () => {
     ).rejects.toThrow('Publication finish was not confirmed.');
   });
 
+  it('serializes concurrent stdout and stderr operations for one publication', async () => {
+    let active = false;
+    let busy = 0;
+    let resources = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: URL, init: RequestInit) => {
+        if (active) {
+          busy++;
+          return new Response(
+            JSON.stringify({
+              error: { code: 'managed_tool_publication_busy' },
+            }),
+            { status: 429 },
+          );
+        }
+        active = true;
+        try {
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          const route = decodeURIComponent(input.pathname);
+          const bytes = Buffer.from(init.body as Buffer);
+          let receipt: Record<string, unknown>;
+          if (route.includes('/segments/')) {
+            const [, streamId, ordinal] =
+              route.match(/\/segments\/(stdout|stderr)\/(\d+)$/u) ?? [];
+            receipt = {
+              captureId: 'capture-a',
+              streamId,
+              ordinal: Number(ordinal),
+              byteLength: bytes.length,
+              digest: digest(bytes),
+            };
+          } else if (route.endsWith('/seal')) {
+            receipt = JSON.parse(bytes.toString('utf8')) as Record<
+              string,
+              unknown
+            >;
+          } else if (route.includes('/resources/')) {
+            resources++;
+            receipt = {
+              resourceId: `resource-${resources}`,
+              kind: route.split('/resources/')[1]!.split('/')[0],
+              schemaVersion: 1,
+              byteLength: bytes.length,
+              digest: digest(bytes),
+            };
+          } else if (route.endsWith('/finish')) {
+            receipt = {
+              producerPhase: 'FINISHED',
+              terminal: { byteLength: bytes.length, digest: digest(bytes) },
+            };
+          } else {
+            throw new Error(`Unexpected publication route ${route}`);
+          }
+          return new Response(JSON.stringify(receipt), { status: 200 });
+        } finally {
+          active = false;
+        }
+      }),
+    );
+    const publisher = new RemoteShellResultPublisher();
+    publisher.install(installation, boot);
+    const { identity, sink } = await publisher.prepare(request);
+    sink.setStarted(42);
+    await Promise.all([
+      sink.write('stdout', Buffer.alloc(1024 * 1024, 1)),
+      sink.write('stderr', Buffer.alloc(1024 * 1024, 2)),
+    ]);
+    await Promise.all([
+      sink.finish('stdout', true),
+      sink.finish('stderr', true),
+    ]);
+    sink.setProcessResult({
+      rawOutput: Buffer.alloc(0),
+      output: '',
+      exitCode: 0,
+      signal: null,
+      error: null,
+      aborted: false,
+      pid: 42,
+      executionMethod: 'child_process',
+    });
+    const envelope = await sink.finalize('success', []);
+    expect(envelope.capture?.captureStatus).toBe('complete');
+    await publisher.finish(identity, envelope);
+    expect(busy).toBe(0);
+    expect(resources).toBe(3);
+  });
+
+  it('retries a busy publication with the original operation identity', async () => {
+    let attempts = 0;
+    const operationIds: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: URL, init: RequestInit) => {
+        if (input.pathname.includes('/operations/'))
+          return new Response(
+            JSON.stringify({
+              error: { code: 'managed_tool_publication_unknown' },
+            }),
+            { status: 404 },
+          );
+        attempts++;
+        operationIds.push(
+          (init.headers as Record<string, string>)[
+            'X-Qwen-Tool-Publication-Operation'
+          ],
+        );
+        if (attempts === 1)
+          return new Response(
+            JSON.stringify({
+              error: { code: 'managed_tool_publication_busy' },
+            }),
+            { status: 429 },
+          );
+        const bytes = Buffer.from(init.body as Buffer);
+        return new Response(
+          JSON.stringify({
+            captureId: 'capture-a',
+            streamId: 'stdout',
+            ordinal: 0,
+            byteLength: bytes.length,
+            digest: digest(bytes),
+          }),
+        );
+      }),
+    );
+    const publisher = new RemoteShellResultPublisher();
+    publisher.install(installation, boot);
+    const { sink } = await publisher.prepare(request);
+    const store = Reflect.get(sink, 'store') as ToolResultSegmentStore;
+    expect(
+      await store.publish({
+        captureId: 'capture-a',
+        streamId: 'stdout',
+        ordinal: 0,
+        bytes: Buffer.from('x'),
+      }),
+    ).toMatchObject({ status: 'ok' });
+    expect(operationIds).toEqual(['seg-stdout-0', 'seg-stdout-0']);
+  });
+
   it('rejects a grant for another Workspace before recording it', () => {
     const publisher = new RemoteShellResultPublisher();
     expect(() =>

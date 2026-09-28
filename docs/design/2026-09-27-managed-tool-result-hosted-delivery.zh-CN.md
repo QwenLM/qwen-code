@@ -145,7 +145,7 @@ seal/finish 可能超过普通 HTTP 请求时限。每个 publication 同时仅�
 
 ## 7. 容量与背压
 
-保持 O1c 默认 1 MiB 分段、每条流最多一个 publish 在途、总计 64 KiB 原始预览。保留每流写入队列，包括 Node 在进程退出时恢复 pipe 的情况。网络重试只保留当前不可变分段，并在该操作内进行；存储慢时不继续排队新的 chunk Promise。
+保持 O1c 默认 1 MiB 分段、每条流最多一个 publish 在途、总计 64 KiB 原始预览。保留每流写入队列，包括 Node 在进程退出时恢复 pipe 的情况。worker 还会将同一 publication 的双流生产操作串行化，包括 seal、元数据和 finish，避免正常并发 pipe 撞上 catalog 的单一活跃槽位。可重试 busy 在固定客户端期限内复用原 operation ID 和字节；存储慢时不继续排队新的 chunk Promise。
 
 副作用前预留明确的最大捕获容量，以及独立的生产方 finalization 和 Session admission 额度。O2a 原分配保持不变用于重放比较，另行核算实际保留字节、不确定候选和剩余预留。进入 `FINISHED` 时，只释放已证明未使用的捕获/生产方额度与活跃生产槽位；admission 容量保留到 `REFERENCED`。执行、Session、tenant、活跃 capture 与 gateway 限制均使用必填部署策略值。上线配置须容纳 100 MiB 验收；1 GiB 测试使用单独显式配额。
 
@@ -159,7 +159,7 @@ seal/finish 可能超过普通 HTTP 请求时限。每个 publication 同时仅�
 
 Hosted worker finalize 并持久 finish 原始 envelope，然后报告 Tool v3 `settled`，其中 `deliveryStatus: pending`。worker 不能提交 Session receipt。本地同进程路径可保留注入式接纳；使用显式适配器，不通过方法缺失推断模式。Broker 状态分别记录物理结束和 Session 接纳。只有准入捕获的调用才在生产 transport 接口中增加明确 v3 选择/status/cancel/ACK。
 
-Broker prepare 持久保存显式 v3 选择，并返回原 Runtime binding ID/generation。原执行 reference 保留精确 payload 摘要；v3 请求使用已验证 O2a binding 中的规范化 reference。grant 安装是 start 前独立、已认证的 selected Runtime 操作。缺少或不匹配的预留一律拒绝。现有 dispatch 任务在一次异步 v3 execute 和有界 status 查询期间保持原 claim 与续租。execute 回应丢失只查询 status，不再执行一次；超时或失去 claim 保持 `UNKNOWN`。旧 worker 不能回答时，原身份匹配的持久 `FINISHED` publication 可用于对账 Broker 记录。已 claim 但 HTTP dispatch 前取消的调用持久记录为 `not_started`；worker 仍处于 prepared 时取消也如此，之后不得再启动。
+Broker prepare 持久保存显式 v3 选择，并返回原 Runtime binding ID/generation。原执行 reference 保留精确 payload 摘要；v3 请求使用已验证 O2a binding 中的规范化 reference。grant 安装是 start 前独立、已认证的 selected Runtime 操作。缺少或不匹配的预留一律拒绝。现有 dispatch 任务在一次异步 v3 execute 和有界 status 查询期间保持原 claim 与续租。execute 回应丢失只查询 status，不再执行一次；超时或失去 claim 保持 `UNKNOWN`。旧 worker 不能回答时，原身份匹配的持久 `FINISHED` publication 可用于对账 Broker 记录。已 claim 但 HTTP dispatch 前取消的调用持久记录为 `not_started`；worker 仍处于 prepared 时取消也如此，之后不得再启动。安装新 grant 和新执行要求当前 Workspace 授权；已绑定原调用的 status、cancel 与 ACK 在实时 Workspace 授权或 mount 不可用时可使用保存的 binding 和精确原 Runtime lease，不选择其他 Runtime。
 
 Session owner 首先查询已有原始 `tool.receipt`。若不存在，则加载 durable finished publication，验证原 intent/checkpoint/参数绑定、完整身份、物理 envelope、所有元数据摘要和完整 verified 引用关系。不能把 `isToolResultEnvelopeOf()` 的部分状态比较当作完整接纳校验。存储独立验证字节，TypeScript authority 继续负责完整性策略决定。
 
@@ -172,6 +172,8 @@ Hosted Shell 在接纳原 outcome 的同时冻结有界模型历史投影，包�
 私有 Hosted Shell load 仅在一个已接纳 turn 尚未结算、最新 checkpoint 中该批工具全部结算且处于 results_ready，并且当前 turn 以原始冻结的工具结果消息结束、其后没有 assistant 消息时，才可继续模型推理。若最终 assistant 消息已持久保存而只缺 turn 结算，则只补结算，不再调用模型。检查任一边界前先根据回执补齐缺失历史；后续重开也重试原 ACK，包括 turn 已结算的情况。其他未完成状态继续阻断恢复。
 
 未启动调用的 capture 为空，走现有无 capture 结果路径，并由 owner 幂等关闭其 publication 预留为 `NOT_STARTED`。要求原执行的权威证据，fence grant，核算已接收操作，再释放未用额度和活跃 capture 槽位。存在矛盾的 start/publication 证据时拒绝关闭。prepared cancellation 和明确的调度前拒绝可以提供证据；超时、lease 到期或查不到 status 均不能提供。该路径不能发送 Tool v3 capture ACK。
+
+批次中后续预留失败时，先停止 grant 续约，取消所有已 prepare 的 Broker 调用，再请求 owner 关闭每个已确认但未使用的预留。关闭仍须通过服务端权威未启动证明；状态未知的执行保留容量，并使该轮保持恢复阻断。
 
 append 异常后，当前 TypeScript authority 已进入 write-failed。通过受支持的归属路径关闭/重开并读取原 journal，不在同一对象上盲目追加。替代 writer 不能用新 token 重放旧事务：当前 Java duplicate-commit 规则要求原 writer 和 record identity。先读取并使用已有 receipt；仍需新增 receipt 时，由新的合法 owner 对同一 durable finished publication 做新的 fenced admission，通过唯一性约束避免重复回执。
 

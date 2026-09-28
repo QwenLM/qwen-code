@@ -275,6 +275,7 @@ export class HostedWorkspaceToolTurn {
       }
     }
     const reserved: string[] = [];
+    const confirmedPublications = new Set<string>();
     const shellBindings = new Map<
       string,
       {
@@ -447,6 +448,7 @@ export class HostedWorkspaceToolTurn {
             (grant as Record<string, unknown>)['state'] !== 'OPEN'
           )
             throw new Error('Tool publication reservation was not confirmed.');
+          confirmedPublications.add(executionCallId);
         }
         renewGrants = () => {
           if (renewInFlight) return renewInFlight;
@@ -494,7 +496,6 @@ export class HostedWorkspaceToolTurn {
             saved.publicationToken,
             signal,
           );
-          shellBindings.delete(executionCallId);
           responses.push(
             ...(await this.acceptShell(
               request.call,
@@ -505,6 +506,7 @@ export class HostedWorkspaceToolTurn {
               model,
             )),
           );
+          shellBindings.delete(executionCallId);
           continue;
         }
         const result = await this.broker.execute(
@@ -586,8 +588,42 @@ export class HostedWorkspaceToolTurn {
       this.uncertain = false;
       return responses;
     } catch (cause) {
-      // Best-effort stop requests do not settle or release unknown effects.
+      if (renewTimer) {
+        clearInterval(renewTimer);
+        renewTimer = undefined;
+      }
+      const activeRenewal = renewInFlight as Promise<void> | null;
+      await activeRenewal?.catch(() => undefined);
       await Promise.allSettled(reserved.map((id) => this.broker.cancel(id)));
+      for (const executionCallId of confirmedPublications) {
+        const saved = shellBindings.get(executionCallId);
+        if (!saved) continue;
+        try {
+          const owner = this.publication!.owner;
+          const closed = await owner.request(
+            '/grants',
+            {
+              publication: 'managed-tool-publication/1',
+              operation: 'close_not_started',
+              sessionKey: this.session.authority.sessionHeader.sessionKey,
+              owner: await owner.owner(),
+              publicationId: saved.publicationId,
+            },
+            saved.publicationToken,
+          );
+          if (
+            typeof closed !== 'object' ||
+            closed === null ||
+            (closed as Record<string, unknown>)['state'] !== 'NOT_STARTED'
+          )
+            throw new Error('Original execution was not proven unstarted.');
+        } catch (closeCause) {
+          writeStderrLineSafe(
+            'qwen serve: Tool publication close was not confirmed: ' +
+              String(closeCause),
+          );
+        }
+      }
       throw new HostedToolRecoveryRequiredError(cause);
     } finally {
       if (renewTimer) clearInterval(renewTimer);

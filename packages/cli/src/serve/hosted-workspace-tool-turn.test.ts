@@ -354,6 +354,86 @@ it('commits the original Shell receipt before history, checkpoint and ACK', asyn
   ).toHaveLength(1);
 });
 
+it('closes proven unstarted reservations after a later batch reservation fails', async () => {
+  const shellCalls = [0, 1].map((index) => ({
+    ...calls[index],
+    name: 'run_shell_command',
+    args: { command: `printf ${index}` },
+  }));
+  const shellParts: Part[] = shellCalls.map((call) => ({
+    functionCall: { id: call.callId, name: call.name, args: call.args },
+  }));
+  broker.prepareV3.mockImplementation(async () => ({
+    executionCallId: `shell-execution-${broker.prepareV3.mock.calls.length}`,
+    runtimeBindingId: 'binding-1',
+    bindingGeneration: '1',
+  }));
+  const events: string[] = [];
+  const request = vi.fn(async (route: string, body: unknown) => {
+    expect(route).toBe('/grants');
+    const operation = (body as { operation: string }).operation;
+    events.push(operation);
+    if (
+      operation === 'reserve' &&
+      events.filter((e) => e === 'reserve').length === 2
+    )
+      throw new Error('Publication capacity exhausted');
+    return {
+      state: operation === 'close_not_started' ? 'NOT_STARTED' : 'OPEN',
+    };
+  });
+  broker.cancel.mockImplementation(async () => {
+    events.push('cancel');
+  });
+  const owner = {
+    owner: async () => ({ writerId: 'worker', writerGeneration: 1 }),
+    request,
+  } as unknown as HttpToolPublicationOwner;
+  const shellTurn = new HostedWorkspaceToolTurn(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    harness,
+    'prompt',
+    async (type, messageParts) => {
+      const uuid = randomUUID();
+      await session.sink.write({
+        uuid,
+        parentUuid: null,
+        sessionId: session.authority.sessionHeader.sessionKey.sessionId,
+        timestamp: new Date().toISOString(),
+        type,
+        cwd: root,
+        version: 'test',
+        daemonPromptId: 'prompt',
+        message: { role: 'model', parts: messageParts },
+      });
+      return uuid;
+    },
+    () => true,
+    { owner, captureBytes: 1024 * 1024 },
+  );
+  await expect(
+    shellTurn.execute(
+      shellCalls,
+      shellParts,
+      'model',
+      new AbortController().signal,
+    ),
+  ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+  expect(events).toEqual([
+    'reserve',
+    'reserve',
+    'cancel',
+    'cancel',
+    'close_not_started',
+  ]);
+  expect(request.mock.calls.at(-1)?.[1]).toMatchObject({
+    operation: 'close_not_started',
+    publicationId: broker.prepareV3.mock.calls[0]?.[3],
+  });
+  expect(broker.executeV3).not.toHaveBeenCalled();
+});
+
 it.each(['input', 'intent', 'wait', 'result'] as const)(
   'blocks without inventing settlement after %s persistence failure',
   async (point) => {
