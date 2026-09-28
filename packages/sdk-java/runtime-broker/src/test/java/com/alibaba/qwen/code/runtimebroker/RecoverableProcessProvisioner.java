@@ -186,7 +186,11 @@ final class RecoverableProcessProvisioner implements RuntimeProvisioner {
             return unknown;
         }
         if (alive(lastLease) == null) {
-            return RuntimeObservation.notFound();
+            return RuntimeObservation.notFound(new RuntimeRecoveryEvidence(
+                    seed.getProvisionRequestId() + ":journal-lost", RuntimeRecoveryEvidence.Fact.JOURNAL_LOST,
+                    "test-recorded-worker-exit", Instant.now(), records.toAbsolutePath().toString(),
+                    seed.getProvisionRequestId(), seed.getProvisionalRuntimeId(), seed.getGatewayIncarnation(),
+                    seed.getLeaseId(), seed.getEpoch(), handle), null);
         }
         try {
             attest(request, seed, lastLease);

@@ -92,6 +92,74 @@ class ManagedContextRecoveryTest {
     }
 
     @Test
+    void unadmittedManagedStartupDoesNotBlockAnotherWorkspaceSession() {
+        RuntimeScope base = REQUEST.getScope();
+        RuntimeScope scope = new RuntimeScope(base.getTenantId(), base.getWorkspaceId(),
+                base.getWorkspaceGeneration(), base.getCanonicalCwd(),
+                base.getCapabilityDigest(), "session");
+        RuntimeProvisionRequest first = new RuntimeProvisionRequest(scope, "harness-1",
+                "local-process", REQUEST.getStorageId());
+        RuntimeProvisionRequest second = new RuntimeProvisionRequest(scope, "harness-2",
+                "local-process", REQUEST.getStorageId());
+        RuntimeProvisionRequest third = new RuntimeProvisionRequest(scope, "harness-3",
+                "local-process", REQUEST.getStorageId());
+        RuntimeProvisionRequest fourth = new RuntimeProvisionRequest(scope, "harness-4",
+                "local-process", REQUEST.getStorageId());
+        RuntimeScope customScope = new RuntimeScope("tenant-b", base.getWorkspaceId(),
+                base.getWorkspaceGeneration(), base.getCanonicalCwd(),
+                base.getCapabilityDigest(), "session");
+        RuntimeProvisionRequest customFirst = new RuntimeProvisionRequest(customScope,
+                "harness-1", "custom", REQUEST.getStorageId());
+        RuntimeProvisionRequest customSecond = new RuntimeProvisionRequest(customScope,
+                "harness-2", "custom", REQUEST.getStorageId());
+        DataSource source = database();
+        JdbcRuntimeBrokerSchema.initialize(source);
+        for (RuntimeBindingRepository bindings : List.of(
+                new InMemoryRuntimeBindingRepository(), repository(source))) {
+            RuntimeBindingRecord initial = bindings.findOrCreate(first);
+            RuntimeBindingRecord claimed = bindings.claimOperation(initial.getBindingId(),
+                    "owner", Duration.ofMinutes(1));
+            RuntimeBindingRecord handle = bindings.compareAndSet(claimed,
+                    claimed.withResourceHandle(HANDLE, Instant.now()));
+            RuntimeBindingRecord blocked = bindings.compareAndSet(handle,
+                    handle.withState(RuntimeBindingRecord.State.RECOVERY_BLOCKED,
+                            null, Instant.now()));
+
+            assertEquals(blocked.getBindingId(), bindings.findOrCreate(first).getBindingId());
+            RuntimeBindingRecord next = bindings.findOrCreate(second);
+            assertNotEquals(blocked.getBindingId(), next.getBindingId());
+
+            RuntimeBindingRecord nextClaim = bindings.claimOperation(next.getBindingId(),
+                    "owner", Duration.ofMinutes(1));
+            RuntimeProvisionSeed seed = nextClaim.getProvisionSeed();
+            RuntimeLease lease = new RuntimeLease(seed.getProvisionalRuntimeId(),
+                    URI.create("http://127.0.0.1:12345"), seed.getToken(),
+                    seed.getLeaseId(), seed.getEpoch());
+            RuntimeBindingRecord ready = bindings.compareAndSet(nextClaim,
+                    nextClaim.withAttestation(lease, HANDLE, Instant.now(), Instant.now()));
+            RuntimeBindingRecord blockedReady = bindings.compareAndSet(ready, ready.withState(
+                    RuntimeBindingRecord.State.RECOVERY_BLOCKED, lease, Instant.now()));
+            RuntimeBrokerException refusal = assertThrows(RuntimeBrokerException.class,
+                    () -> bindings.findOrCreate(third));
+            assertEquals("runtime_placement_recovery_required", refusal.getCode());
+            bindings.compareAndSet(blockedReady, blockedReady.withState(
+                    RuntimeBindingRecord.State.RECOVERY_BLOCKED, null, Instant.now()));
+            RuntimeBrokerException missingLease = assertThrows(RuntimeBrokerException.class,
+                    () -> bindings.findOrCreate(fourth));
+            assertEquals("runtime_placement_recovery_required", missingLease.getCode());
+
+            RuntimeBindingRecord custom = bindings.findOrCreate(customFirst);
+            RuntimeBindingRecord customClaim = bindings.claimOperation(custom.getBindingId(),
+                    "owner", Duration.ofMinutes(1));
+            bindings.compareAndSet(customClaim, customClaim.withState(
+                    RuntimeBindingRecord.State.RECOVERY_BLOCKED, null, Instant.now()));
+            RuntimeBrokerException unknownProvisioner = assertThrows(RuntimeBrokerException.class,
+                    () -> bindings.findOrCreate(customSecond));
+            assertEquals("runtime_placement_recovery_required", unknownProvisioner.getCode());
+        }
+    }
+
+    @Test
     void persistedMarkerBeforeSpawnBlocksTheFirstCallAfterRestart() throws Exception {
         DataSource source = database();
         JdbcRuntimeBrokerSchema.initialize(source);
@@ -114,8 +182,7 @@ class ManagedContextRecoveryTest {
         JdbcRuntimeBrokerSchema.initialize(source);
         FailingProvisioner provisioner = new FailingProvisioner(true);
         try (RuntimeBrokerService service = service(repository(source), provisioner)) {
-            assertThrows(ExecutionException.class,
-                    () -> service.warm("harness").toCompletableFuture().get(8, TimeUnit.SECONDS));
+            assertBlocked(service);
             assertBlocked(service);
             RuntimeProvisionSeed seed = repository(source).findActive(REQUEST).getProvisionSeed();
             HttpServer worker = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
@@ -428,7 +495,7 @@ class ManagedContextRecoveryTest {
         return new RuntimeBrokerService(ignored -> CompletableFuture.completedFuture(REQUEST.getScope()),
                 provisioner, new HttpRuntimeTransport(), bindings,
                 new InMemoryRuntimeSessionRepository(), new InMemoryToolExecutionRepository(),
-                UUID.randomUUID().toString(), Duration.ofSeconds(1), Duration.ofSeconds(1));
+                UUID.randomUUID().toString(), Duration.ofMillis(1500), Duration.ofMillis(1500));
     }
 
     private static JdbcRuntimeBindingRepository repository(DataSource source) {

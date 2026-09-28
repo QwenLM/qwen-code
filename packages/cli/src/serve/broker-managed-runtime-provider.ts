@@ -18,7 +18,9 @@ import {
   managedToolDigest,
   type ManagedToolInvocationReference,
 } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
-import { isLoopbackBind } from './loopback-binds.js';
+import { resolveManagedRuntimeBrokerBaseUrl } from './managed-runtime-broker-url.js';
+
+export { resolveManagedRuntimeBrokerBaseUrl } from './managed-runtime-broker-url.js';
 import {
   ManagedRuntimeProviderError,
   type ManagedRuntimeExecutionIdentity,
@@ -91,6 +93,7 @@ class BrokerResponseError extends Error {
     readonly status: number,
     readonly code?: string,
     readonly retryable?: boolean,
+    readonly abandoned = false,
   ) {
     super(`Managed Runtime Broker returned HTTP ${status}.`);
     this.name = 'BrokerResponseError';
@@ -101,32 +104,6 @@ export interface ManagedRuntimeBrokerClientOptions {
   readonly baseUrl: string;
   readonly token: string;
   readonly fetch?: typeof fetch;
-}
-
-export function resolveManagedRuntimeBrokerBaseUrl(raw: string): URL {
-  let url: URL;
-  try {
-    url = new URL(raw);
-  } catch {
-    throw new Error('Managed Runtime Broker URL is invalid.');
-  }
-  if (
-    (url.protocol !== 'http:' && url.protocol !== 'https:') ||
-    url.username ||
-    url.password ||
-    url.search ||
-    url.hash ||
-    (url.pathname !== '/' && url.pathname !== '')
-  ) {
-    throw new Error('Managed Runtime Broker URL must be an HTTP(S) origin.');
-  }
-  if (url.protocol === 'http:' && !isLoopbackBind(url.hostname)) {
-    throw new Error(
-      'Managed Runtime Broker URL must use HTTPS outside the loopback interface.',
-    );
-  }
-  url.pathname = '/';
-  return url;
 }
 
 async function readBoundedResponseText(
@@ -558,6 +535,7 @@ export class ManagedRuntimeBrokerClient {
     if (!response.ok) {
       let code: string | undefined;
       let retryable: boolean | undefined;
+      let abandoned = false;
       try {
         const text = await readBoundedResponseText(
           response,
@@ -575,10 +553,22 @@ export class ManagedRuntimeBrokerClient {
         if (typeof body['retryable'] === 'boolean') {
           retryable = body['retryable'];
         }
+        if (body['details'] !== undefined) {
+          const details = record(body['details']);
+          abandoned =
+            code === 'runtime_broker_execution_unknown' &&
+            details['terminal'] === true &&
+            details['reason'] === 'runtime_lost';
+        }
       } catch {
         await response.body?.cancel().catch(() => undefined);
       }
-      throw new BrokerResponseError(response.status, code, retryable);
+      throw new BrokerResponseError(
+        response.status,
+        code,
+        retryable,
+        abandoned,
+      );
     }
     const contentLength = Number(response.headers.get('content-length'));
     if (
@@ -719,7 +709,9 @@ export class BrokerManagedRuntimeProvider implements ManagedRuntimeProvider {
         error instanceof BrokerResponseError &&
         error.code === 'runtime_broker_execution_unknown'
       ) {
-        return { outcome: 'unknown' };
+        return error.abandoned
+          ? { outcome: 'unknown', terminal: true, reason: 'runtime_lost' }
+          : { outcome: 'unknown' };
       }
       throw error;
     }
@@ -765,7 +757,9 @@ export class BrokerManagedRuntimeProvider implements ManagedRuntimeProvider {
         error instanceof BrokerResponseError &&
         error.code === 'runtime_broker_execution_unknown'
       ) {
-        return { outcome: 'unknown' };
+        return error.abandoned
+          ? { outcome: 'unknown', terminal: true, reason: 'runtime_lost' }
+          : { outcome: 'unknown' };
       }
       throw error;
     }
@@ -811,7 +805,9 @@ export class BrokerManagedRuntimeProvider implements ManagedRuntimeProvider {
         error instanceof BrokerResponseError &&
         error.code === 'runtime_broker_execution_unknown'
       ) {
-        return { outcome: 'unknown' };
+        return error.abandoned
+          ? { outcome: 'unknown', terminal: true, reason: 'runtime_lost' }
+          : { outcome: 'unknown' };
       }
       throw error;
     }

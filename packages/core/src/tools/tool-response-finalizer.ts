@@ -21,6 +21,7 @@ import {
   normalizeToolResultCallId,
   persistAndTruncateToolResult,
 } from './truncation.js';
+import { canonicalToolName, ToolNames } from './tool-names.js';
 
 const debugLogger = createDebugLogger('TOOL_RESPONSE_FINALIZER');
 
@@ -109,6 +110,7 @@ function collectTextSlots(
   const slots: TextSlot[] = [];
   for (let entryIndex = 0; entryIndex < entries.length; entryIndex++) {
     const entry = entries[entryIndex];
+    if (canonicalToolName(entry.toolName) === ToolNames.SEARCH_MEMORY) continue;
     const parts = entry.responseParts;
     for (let partIndex = 0; partIndex < parts.length; partIndex++) {
       const part = parts[partIndex];
@@ -123,7 +125,11 @@ function collectTextSlots(
       const response = part.functionResponse?.response;
       const output = response?.['output'];
       const error = response?.['error'];
-      if (typeof output === 'string') {
+      const budgetExemptOutput =
+        excludeBudgetExemptOutput &&
+        canonicalToolName(part.functionResponse?.name ?? entry.toolName) ===
+          ToolNames.SEARCH_MEMORY;
+      if (typeof output === 'string' && !budgetExemptOutput) {
         const protectedPrefix = excludeBudgetExemptOutput
           ? getPlanModeLifecyclePrefix(
               part.functionResponse?.name ?? entry.toolName,

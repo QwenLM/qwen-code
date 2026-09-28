@@ -1145,6 +1145,139 @@ describe('standalone-update', () => {
       expect(fs.existsSync(`${standaloneDir}.new`)).toBe(true);
       expect(fs.existsSync(`${standaloneDir}.deferred`)).toBe(true);
     });
+
+    it('fails closed when the deferred bat PID cannot be signalled', () => {
+      const standaloneDir = path.join(tempDir, 'qwen-code');
+      const lockPath = path.join(tempDir, '.qwen-update.lock');
+      fs.mkdirSync(`${standaloneDir}.new`, { recursive: true });
+      fs.writeFileSync(`${standaloneDir}.deferred`, '999999998');
+
+      // Same fixture as the dead-bat case above; only the probe's answer
+      // differs. EPERM — an elevated bat seen from an unelevated shell — means
+      // the process exists, so it is not proof of death and the staged swap
+      // must survive rather than be deleted mid-update.
+      const kill = vi.spyOn(process, 'kill').mockImplementation(() => {
+        throw Object.assign(new Error('kill EPERM'), { code: 'EPERM' });
+      });
+      try {
+        expect(() => acquireLock(lockPath, standaloneDir)).toThrow(
+          'A previous update is still being applied',
+        );
+        expect(fs.existsSync(`${standaloneDir}.new`)).toBe(true);
+        expect(fs.existsSync(`${standaloneDir}.deferred`)).toBe(true);
+        // Fast path only: acquireLock wrote this lock itself, so the throw has
+        // to release it. The release is keyed on the thrown message text, so
+        // rewording that literal must not silently start leaking the lock.
+        expect(fs.existsSync(lockPath)).toBe(false);
+      } finally {
+        kill.mockRestore();
+      }
+    });
+
+    it('fails closed on the lock-theft path when the bat PID cannot be signalled', () => {
+      const standaloneDir = path.join(tempDir, 'qwen-code');
+      const lockPath = path.join(tempDir, '.qwen-update.lock');
+      // The shape the fix exists for: a deferred swap keeps the lock (the
+      // finally in performStandaloneUpdate releases it only when the result is
+      // not 'deferred') and the bat deletes marker-then-lock only at its
+      // :cleanup label, so the lock is present holding the exited CLI's PID
+      // while the elevated bat lives. acquireLock therefore reaches the gate
+      // by stealing the lock, not through the fast path.
+      fs.writeFileSync(lockPath, '999999999');
+      fs.mkdirSync(`${standaloneDir}.new`, { recursive: true });
+      fs.writeFileSync(`${standaloneDir}.deferred`, '999999998');
+
+      const kill = vi.spyOn(process, 'kill').mockImplementation(() => {
+        throw Object.assign(new Error('kill EPERM'), { code: 'EPERM' });
+      });
+      try {
+        expect(() => acquireLock(lockPath, standaloneDir)).toThrow(
+          'A previous update is still being applied',
+        );
+        expect(fs.existsSync(`${standaloneDir}.new`)).toBe(true);
+        expect(fs.existsSync(`${standaloneDir}.deferred`)).toBe(true);
+        // Theft path: this process never owned the lock, so it must survive —
+        // the opposite of the fast-path assertion above.
+        expect(fs.readFileSync(lockPath, 'utf-8')).toBe('999999999');
+      } finally {
+        kill.mockRestore();
+      }
+    });
+
+    it('still steals a lock whose holder cannot be signalled', () => {
+      const standaloneDir = path.join(tempDir, 'qwen-code');
+      const lockPath = path.join(tempDir, '.qwen-update.lock');
+      fs.writeFileSync(lockPath, '999999999');
+
+      // Pins the permissive direction the comment on isProcessProvablyGone
+      // declares: the lock-liveness callers keep using isProcessAlive on
+      // purpose. No marker and no .new here, so nothing but the lock check is
+      // under test — treating an unsignalable holder as alive would make the
+      // lock un-stealable and re-block updates forever.
+      const kill = vi.spyOn(process, 'kill').mockImplementation(() => {
+        throw Object.assign(new Error('kill EPERM'), { code: 'EPERM' });
+      });
+      try {
+        expect(acquireLock(lockPath, standaloneDir)).toBe(true);
+        expect(fs.readFileSync(lockPath, 'utf-8')).toBe(String(process.pid));
+      } finally {
+        kill.mockRestore();
+      }
+    });
+
+    it('routes an impossible deferred PID to the remediation message', () => {
+      const standaloneDir = path.join(tempDir, 'qwen-code');
+      const lockPath = path.join(tempDir, '.qwen-update.lock');
+      fs.mkdirSync(`${standaloneDir}.new`, { recursive: true });
+      // Parses as a number but cannot be a PID, so process.kill answers
+      // ERR_INVALID_ARG_TYPE rather than ESRCH and the probe says nothing
+      // about liveness. This is a torn marker, not a live bat, so the user
+      // needs the removal steps instead of being told to wait — and, being a
+      // marker-present branch, the remedy must name the marker itself.
+      fs.writeFileSync(`${standaloneDir}.deferred`, '99999999999999');
+
+      expect(() => acquireLock(lockPath, standaloneDir)).toThrow(
+        `A previous update left a deferred-swap marker at ${standaloneDir}.deferred. ` +
+          'If no qwen-update.bat process is running, remove the marker, ' +
+          `the pending swap at ${standaloneDir}.new, and .qwen-update.lock, then try again.`,
+      );
+      expect(fs.existsSync(`${standaloneDir}.new`)).toBe(true);
+      expect(fs.existsSync(`${standaloneDir}.deferred`)).toBe(true);
+      expect(fs.existsSync(lockPath)).toBe(false);
+    });
+
+    it('routes a non-positive deferred PID to the remediation message even when the probe succeeds', () => {
+      // process.kill(0, 0) signals the caller's own process group and
+      // process.kill(-1, 0) signals every process the user may signal, so both
+      // SUCCEED: a marker of 0 or -1 would probe as a live bat and the user
+      // would be told to wait for a swap that cannot exist. The `<= 0` clause
+      // is what routes it to the error carrying the removal steps instead.
+      for (const marker of ['0', '-1']) {
+        const standaloneDir = path.join(tempDir, `qwen-${marker}`);
+        const lockPath = path.join(tempDir, `lock-${marker}.lock`);
+        fs.mkdirSync(`${standaloneDir}.new`, { recursive: true });
+        fs.writeFileSync(`${standaloneDir}.deferred`, marker);
+
+        // The probe is mocked to look alive, so the clause under test is the
+        // only thing standing between a torn marker and the "please wait"
+        // dead end. This fragment is unique to deferredMarkerError: the
+        // aged-marker escape says "If a qwen-update.bat process is still
+        // running" and the wait branch carries no removal steps at all.
+        const kill = vi.spyOn(process, 'kill').mockImplementation(() => true);
+        try {
+          expect(() => acquireLock(lockPath, standaloneDir)).toThrow(
+            'If no qwen-update.bat process is running, remove the marker',
+          );
+          // Neither the staged swap nor the torn marker may be disturbed.
+          expect(fs.existsSync(`${standaloneDir}.new`)).toBe(true);
+          expect(fs.existsSync(`${standaloneDir}.deferred`)).toBe(true);
+          // Fast path only: the lock acquireLock wrote must be released.
+          expect(fs.existsSync(lockPath)).toBe(false);
+        } finally {
+          kill.mockRestore();
+        }
+      }
+    });
   });
 
   describe.skipIf(process.platform === 'win32')('ensurePathInShellRc', () => {
