@@ -104,22 +104,37 @@ export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
  * (`inheritsCodeModeBindings`, `agent-core.ts`), and `getToolExposure(SKILL)`
  * is `code-mode-callable` because SKILL is in neither `HIDDEN_TOOLS` nor
  * `DIRECT_ONLY_TOOLS`. So an agent whose finite list names `exec` but not
- * `skill` does reach the Skill tool, and callers must pass the mode — with it
+ * `skill` reaches the Skill tool, and callers must pass the mode — with it
  * omitted this answers `false` for that shape, which would withhold the manager
  * and, through the `config.ts` registration guard, the Skill tool itself.
  *
- * The arm it does not cover: a `tools.eager` allowlist omitting `skill` defers
- * the schema, but the resolver's CodeModeOnly branch short-circuits
- * `isToolDeferredBehindToolSearch` to `false` and still answers `pointer`,
- * handing the agent a route it cannot follow. That cell is byte-identical to
- * `main`: it predates this PR, is not fixed here, and is tracked in #12809.
+ * The arm it does not cover: when the registry hides `skill` behind a
+ * `tools.eager` allowlist, `prepareTools()` drops it from the code-mode
+ * allowlist as well (`isHiddenByEagerAllowList`), so that same agent cannot
+ * actually load a skill — yet this predicate, which reads no registry state,
+ * still answers `true` for it through the `exec` arm. Two consequences, and
+ * they are not equally old:
+ * - The dead pointer predates this PR. The resolver's CodeModeOnly branch
+ *   short-circuits `isToolDeferredBehindToolSearch` to `false` and answers
+ *   `pointer` regardless of the per-agent policy, so `main` handed out the same
+ *   unreachable route. Tracked in #12809.
+ * - The `<available_skills>` listing does not. `main`'s
+ *   `AgentCore.willHaveSkillTool()` was positive-list-only and answered `false`
+ *   for a finite `exec`-naming list, so it sent no listing; the `exec` arm makes
+ *   it send one. This cell is therefore *not* byte-identical to `main`.
+ *
+ * Closing it needs exactly the eager/deferred registry state this predicate
+ * deliberately does not read, so it is disclosed here and left to #12809 rather
+ * than patched per case.
  *
  * Matching is exact, as `prepareTools()`'s is: `SubagentManager` resolves
  * configured names to canonical tool names before they reach a `ToolConfig`.
  *
- * Where this cannot tell, it answers true: a wrong `true` costs a pointer the
- * agent cannot follow, a wrong `false` takes skills away from an agent that
- * could load them.
+ * Where this cannot tell, it answers true. A wrong `true` costs a pointer the
+ * agent cannot follow at the `SubagentManager` call site, and at
+ * `AgentCore.willHaveSkillTool()` additionally an `<available_skills>` block in
+ * the cached prompt prefix listing skills the agent cannot load; a wrong `false`
+ * takes skills away from an agent that could load them.
  */
 export function toolConfigAllowsSkill(
   toolConfig: ToolConfig | undefined,
