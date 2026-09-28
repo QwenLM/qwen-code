@@ -27,7 +27,8 @@ export default {
   // ==========================================================================
   // Dialog pengelola ekstensi (tab Terinstal / Temukan / Sumber)
   // ==========================================================================
-  ' · {{marketplace}} (Tab to clear)': ' · {{marketplace}} (Tab untuk menghapus)',
+  ' · {{marketplace}} (Tab to clear)':
+    ' · {{marketplace}} (Tab untuk menghapus)',
   '"{{name}}" {{state}}.': '"{{name}}" {{state}}.',
   '(Tab / ←→ to switch)': '(Tab / ←→ untuk beralih)',
   '+ Add new marketplace': '+ Tambah marketplace baru',
@@ -50,7 +51,8 @@ export default {
   'Uninstalling "{{name}}"...': 'Melepas instalasi "{{name}}"...',
   'Update available for "{{name}}".': 'Pembaruan tersedia untuk "{{name}}".',
   '"{{name}}" is already up to date.': '"{{name}}" sudah mutakhir.',
-  'Checking "{{name}}" for updates...': 'Memeriksa "{{name}}" untuk pembaruan...',
+  'Checking "{{name}}" for updates...':
+    'Memeriksa "{{name}}" untuk pembaruan...',
   '"{{name}}" does not support update checks.':
     '"{{name}}" tidak mendukung pemeriksaan pembaruan.',
   '"{{name}}" cannot be update-checked (Claude marketplace plugins update by reinstalling).':
@@ -105,11 +107,13 @@ export default {
   'Mark for Update': 'Tandai untuk Pembaruan',
   Marketplaces: 'Marketplace',
   'No extensions discovered.': 'Tidak ada ekstensi ditemukan.',
-  'No extensions match your search.': 'Tidak ada ekstensi yang cocok dengan pencarian Anda.',
+  'No extensions match your search.':
+    'Tidak ada ekstensi yang cocok dengan pencarian Anda.',
   'No extensions or marketplaces added yet.':
     'Belum ada ekstensi atau marketplace yang ditambahkan.',
   'No homepage available.': 'Tidak ada beranda yang tersedia.',
-  'No installable extensions selected.': 'Tidak ada ekstensi yang dapat diinstal dipilih.',
+  'No installable extensions selected.':
+    'Tidak ada ekstensi yang dapat diinstal dipilih.',
   'No plugins or MCP servers installed.':
     'Tidak ada plugin atau server MCP yang terinstal.',
   None: 'Tidak ada',
@@ -145,7 +149,8 @@ export default {
   'Would open: {{url}}': 'Akan membuka: {{url}}',
   'Y/Enter to confirm · N/Esc to cancel':
     'Y/Enter untuk mengonfirmasi · N/Esc untuk membatalkan',
-  'Press R to retry · Esc to go back': 'Tekan R untuk mencoba lagi · Esc untuk kembali',
+  'Press R to retry · Esc to go back':
+    'Tekan R untuk mencoba lagi · Esc untuk kembali',
   'Enter to select · R refresh · Esc to go back':
     'Enter untuk memilih · R menyegarkan · Esc untuk kembali',
   'from {{marketplace}}': 'dari {{marketplace}}',
@@ -381,13 +386,16 @@ export default {
     'Semua keterampilan yang tersedia dinonaktifkan. Edit ~/.qwen/settings.json atau .qwen/settings.json (skills.disabled) untuk mengaktifkan kembali.',
   'Press esc to close.': 'Tekan esc untuk menutup.',
   '{{count}} skills · ': '{{count}} keterampilan · ',
-  '{{matched}} / {{total}} skills · ': '{{matched}} / {{total}} keterampilan · ',
+  '{{matched}} / {{total}} skills · ':
+    '{{matched}} / {{total}} keterampilan · ',
   'Space toggle · Enter pick (fill input) · Esc save & exit · workspace scope':
     'Spasi beralih · Enter pilih (isi input) · Esc simpan & keluar · cakupan workspace',
   'Search:': 'Cari:',
   'type to filter…': 'ketik untuk memfilter…',
-  'No skills are currently available.': 'Tidak ada keterampilan yang tersedia saat ini.',
-  'No skills match the search.': 'Tidak ada keterampilan yang cocok dengan pencarian.',
+  'No skills are currently available.':
+    'Tidak ada keterampilan yang tersedia saat ini.',
+  'No skills match the search.':
+    'Tidak ada keterampilan yang cocok dengan pencarian.',
   'Locked by settings entries you cannot toggle here:':
     'Dikunci oleh entri pengaturan yang tidak dapat Anda alihkan di sini:',
   '{{count}} locked not shown': '{{count}} dikunci tidak ditampilkan',
@@ -419,7 +427,8 @@ export default {
   'Rewind conversation to a previous turn':
     'Putar ulang percakapan ke giliran sebelumnya',
   'Rewind Conversation': 'Putar Ulang Percakapan',
-  'No user turns to rewind to.': 'Tidak ada giliran pengguna untuk diputar ulang.',
+  'No user turns to rewind to.':
+    'Tidak ada giliran pengguna untuk diputar ulang.',
   'Rewind to: ': 'Putar ulang ke: ',
   'Restore code and conversation': 'Pulihkan kode dan percakapan',
   'Restore conversation only': 'Pulihkan percakapan saja',
@@ -570,7 +579,8 @@ export default {
   'Enter to select, ↑↓ to navigate, Esc to close':
     'Enter untuk memilih, ↑↓ untuk menavigasi, Esc untuk menutup',
   'Esc to go back': 'Esc untuk kembali',
-  'Enter to confirm, Esc to cancel': 'Enter untuk mengonfirmasi, Esc untuk membatalkan',
+  'Enter to confirm, Esc to cancel':
+    'Enter untuk mengonfirmasi, Esc untuk membatalkan',
   'Enter to select, ↑↓ to navigate, Esc to go back':
     'Enter untuk memilih, ↑↓ untuk menavigasi, Esc untuk kembali',
   'Enter to submit, Esc to go back': 'Enter untuk mengirim, Esc untuk kembali',
@@ -634,10 +644,8 @@ export default {
     'Jelaskan apa yang harus dilakukan subagen ini dan kapan harus digunakan. (Jelaskan secara komprehensif untuk hasil terbaik)',
   'e.g., Expert code reviewer that reviews code based on best practices...':
     'mis., Peninjau kode ahli yang meninjau kode berdasarkan praktik terbaik...',
-  'Generating subagent configuration...':
-    'Membuat konfigurasi subagen...',
-  'Failed to generate subagent: {{error}}':
-    'Gagal membuat subagen: {{error}}',
+  'Generating subagent configuration...': 'Membuat konfigurasi subagen...',
+  'Failed to generate subagent: {{error}}': 'Gagal membuat subagen: {{error}}',
   'Step {{n}}: Describe Your Subagent': 'Langkah {{n}}: Jelaskan Subagen Anda',
   'Step {{n}}: Enter Subagent Name': 'Langkah {{n}}: Masukkan Nama Subagen',
   'Step {{n}}: Enter System Prompt': 'Langkah {{n}}: Masukkan System Prompt',
@@ -671,7 +679,7 @@ export default {
   'e.g., Code Reviewer': 'mis., Peninjau Kode',
   'Name cannot be empty.': 'Nama tidak boleh kosong.',
   "Write the system prompt that defines this subagent's behavior. Be comprehensive for best results.":
-    "Tulis system prompt yang mendefinisikan perilaku subagen ini. Jelaskan secara komprehensif untuk hasil terbaik.",
+    'Tulis system prompt yang mendefinisikan perilaku subagen ini. Jelaskan secara komprehensif untuk hasil terbaik.',
   'e.g., You are an expert code reviewer...':
     'mis., Anda adalah peninjau kode ahli...',
   'System prompt cannot be empty.': 'System prompt tidak boleh kosong.',
@@ -787,8 +795,7 @@ export default {
   'OpenAI Logging Directory': 'Direktori Pencatatan OpenAI',
   Timeout: 'Timeout',
   'Max Retries': 'Maks Percobaan Ulang',
-  'Load Memory From Include Directories':
-    'Muat Memori Dari Direktori Include',
+  'Load Memory From Include Directories': 'Muat Memori Dari Direktori Include',
   'Respect .gitignore': 'Hormati .gitignore',
   'Respect .qwenignore': 'Hormati .qwenignore',
   'Enable Recursive File Search': 'Aktifkan Pencarian File Rekursif',
@@ -814,14 +821,16 @@ export default {
   'Auto Edit': 'Edit Otomatis',
   YOLO: 'YOLO',
   'toggle vim mode on/off': 'aktifkan/nonaktifkan mode vim',
-  'Show usage statistics dashboard.': 'Tampilkan dashboard statistik penggunaan.',
+  'Show usage statistics dashboard.':
+    'Tampilkan dashboard statistik penggunaan.',
   'Show model-specific usage statistics.':
     'Tampilkan statistik penggunaan spesifik model.',
   'Show tool-specific usage statistics.':
     'Tampilkan statistik penggunaan spesifik alat.',
   'Show skill-specific usage statistics.':
     'Tampilkan statistik penggunaan spesifik skill.',
-  'Show daily token usage statistics.': 'Tampilkan statistik penggunaan token harian.',
+  'Show daily token usage statistics.':
+    'Tampilkan statistik penggunaan token harian.',
   'Show monthly token usage statistics.':
     'Tampilkan statistik penggunaan token bulanan.',
   'Export token usage statistics to CSV or JSON.':
@@ -830,7 +839,8 @@ export default {
   '{{label}}: {{tokens}} tokens ({{requests}} requests)':
     '{{label}}: {{tokens}} token ({{requests}} permintaan)',
   'Daily token usage for {{value}}': 'Penggunaan token harian untuk {{value}}',
-  'Monthly token usage for {{value}}': 'Penggunaan token bulanan untuk {{value}}',
+  'Monthly token usage for {{value}}':
+    'Penggunaan token bulanan untuk {{value}}',
   'Total: {{tokens}} tokens': 'Total: {{tokens}} token',
   'Requests: {{requests}}': 'Permintaan: {{requests}}',
   'Breakdown:': 'Rincian:',
@@ -854,8 +864,7 @@ export default {
     'Penggunaan: /stats export <daily|monthly> [YYYY-MM-DD|YYYY-MM] [--format csv|json] [--output path]',
   'Token usage export path must be within the project working directory.':
     'Path ekspor penggunaan token harus berada dalam direktori kerja proyek.',
-  'Export target does not exist: {{path}}':
-    'Target ekspor tidak ada: {{path}}',
+  'Export target does not exist: {{path}}': 'Target ekspor tidak ada: {{path}}',
   'Cannot resolve export path within the working directory.':
     'Tidak dapat menyelesaikan path ekspor dalam direktori kerja.',
   'Could not create a temporary export file.':
@@ -892,16 +901,17 @@ export default {
     'Cakupan untuk memasang ekstensi: "user" (global, default) atau "project" (hanya workspace saat ini).',
   'Extension "{{name}}" installed successfully and enabled for the current workspace.':
     'Ekstensi "{{name}}" berhasil dipasang dan diaktifkan untuk workspace saat ini.',
-  'Marketplace "{{name}}" not found.': 'Marketplace "{{name}}" tidak ditemukan.',
-  'No marketplace sources added yet.': 'Belum ada sumber marketplace ditambahkan.',
+  'Marketplace "{{name}}" not found.':
+    'Marketplace "{{name}}" tidak ditemukan.',
+  'No marketplace sources added yet.':
+    'Belum ada sumber marketplace ditambahkan.',
   'No marketplaces added yet.': 'Belum ada marketplace ditambahkan.',
   'Adds a marketplace source (Claude format).':
     'Menambahkan sumber marketplace (format Claude).',
   'The marketplace source to add: owner/repo (GitHub), a git or https URL, or a local path.':
     'Sumber marketplace untuk ditambahkan: owner/repo (GitHub), URL git atau https, atau path lokal.',
   'Removes a marketplace source.': 'Menghapus sumber marketplace.',
-  'The name of the marketplace to remove.':
-    'Nama marketplace untuk dihapus.',
+  'The name of the marketplace to remove.': 'Nama marketplace untuk dihapus.',
   'Lists configured marketplace sources.':
     'Mendaftar sumber marketplace yang dikonfigurasi.',
   'Re-fetches a marketplace source and its plugin listing.':
@@ -913,7 +923,8 @@ export default {
   'You need at least one command before continuing.':
     'Anda memerlukan setidaknya satu perintah sebelum melanjutkan.',
   'No extensions to update.': 'Tidak ada ekstensi untuk diperbarui.',
-  'Usage: /extensions install <source>': 'Penggunaan: /extensions install <source>',
+  'Usage: /extensions install <source>':
+    'Penggunaan: /extensions install <source>',
   'Installing extension from "{{source}}"...':
     'Memasang ekstensi dari "{{source}}"...',
   'Extension "{{name}}" installed successfully.':
@@ -968,8 +979,7 @@ export default {
     'Aktifkan versi pre-release untuk ekstensi ini.',
   'Acknowledge the security risks of installing an extension and skip the confirmation prompt.':
     'Akui risiko keamanan pemasangan ekstensi dan lewati prompt konfirmasi.',
-  'The source argument must be provided.':
-    'Argumen sumber harus disediakan.',
+  'The source argument must be provided.': 'Argumen sumber harus disediakan.',
   'Extension "{{name}}" successfully uninstalled.':
     'Ekstensi "{{name}}" berhasil dihapus.',
   'Uninstalls an extension.': 'Menghapus ekstensi.',
@@ -978,8 +988,7 @@ export default {
   'Please include the name of the extension to uninstall as a positional argument.':
     'Sertakan nama ekstensi untuk dihapus sebagai argumen posisional.',
   'Enables an extension.': 'Mengaktifkan ekstensi.',
-  'The name of the extension to enable.':
-    'Nama ekstensi untuk diaktifkan.',
+  'The name of the extension to enable.': 'Nama ekstensi untuk diaktifkan.',
   'The scope to enable the extension in. If not set, will be enabled in all scopes.':
     'Cakupan untuk mengaktifkan ekstensi. Jika tidak diatur, akan diaktifkan di semua cakupan.',
   'Extension "{{name}}" successfully enabled for scope "{{scope}}".':
@@ -989,8 +998,7 @@ export default {
   'Invalid scope: {{scope}}. Please use one of {{scopes}}.':
     'Cakupan tidak valid: {{scope}}. Gunakan salah satu dari {{scopes}}.',
   'Disables an extension.': 'Menonaktifkan ekstensi.',
-  'The name of the extension to disable.':
-    'Nama ekstensi untuk dinonaktifkan.',
+  'The name of the extension to disable.': 'Nama ekstensi untuk dinonaktifkan.',
   'The scope to disable the extension in.':
     'Cakupan untuk menonaktifkan ekstensi.',
   'Extension "{{name}}" successfully disabled for scope "{{scope}}".':
@@ -1030,11 +1038,13 @@ export default {
   'The name of the extension to link.': 'Nama extension yang akan ditautkan.',
   'Set a specific setting for an extension.':
     'Atur pengaturan tertentu untuk sebuah extension.',
-  'Name of the extension to configure.': 'Nama extension yang akan dikonfigurasi.',
+  'Name of the extension to configure.':
+    'Nama extension yang akan dikonfigurasi.',
   'The setting to configure (name or env var).':
     'Pengaturan yang akan dikonfigurasi (nama atau env var).',
   'The scope to set the setting in.': 'Cakupan tempat pengaturan ditetapkan.',
-  'List all settings for an extension.': 'Tampilkan semua pengaturan untuk sebuah extension.',
+  'List all settings for an extension.':
+    'Tampilkan semua pengaturan untuk sebuah extension.',
   'Name of the extension.': 'Nama extension.',
   'Extension "{{name}}" has no settings to configure.':
     'Extension "{{name}}" tidak memiliki pengaturan untuk dikonfigurasi.',
@@ -1118,7 +1128,8 @@ export default {
   'Retrying in {{seconds}} seconds… (attempt {{attempt}}/{{maxRetries}})':
     'Mencoba lagi dalam {{seconds}} detik… (percobaan {{attempt}}/{{maxRetries}})',
   'Press Ctrl+Y to retry': 'Tekan Ctrl+Y untuk mencoba lagi',
-  'No failed request to retry.': 'Tidak ada permintaan gagal untuk dicoba lagi.',
+  'No failed request to retry.':
+    'Tidak ada permintaan gagal untuk dicoba lagi.',
   'to retry last request': 'untuk mencoba lagi permintaan terakhir',
   'to queue for the next turn': 'untuk antri di giliran berikutnya',
 
@@ -1149,11 +1160,13 @@ export default {
     'Kontrol hook dan pengaturan keamanan HTTP memerlukan mulai ulang.',
   'Failed to reload hook definitions: {{error}}':
     'Gagal memuat ulang definisi hook: {{error}}',
-  'Enter to select · Esc to cancel': 'Enter untuk memilih · Esc untuk membatalkan',
+  'Enter to select · Esc to cancel':
+    'Enter untuk memilih · Esc untuk membatalkan',
   // Hooks - Detail Step
   'Exit codes:': 'Kode keluar:',
   'Configured hooks:': 'Hook yang dikonfigurasi:',
-  'No hooks configured for this event.': 'Tidak ada hook yang dikonfigurasi untuk event ini.',
+  'No hooks configured for this event.':
+    'Tidak ada hook yang dikonfigurasi untuk event ini.',
   'To add hooks, edit settings.json directly or ask Qwen.':
     'Untuk menambah hook, edit settings.json secara langsung atau tanyakan ke Qwen.',
   'Enter to select · Esc to go back': 'Enter untuk memilih · Esc untuk kembali',
@@ -1186,7 +1199,8 @@ export default {
   '{{count}} configured hook': '{{count}} hook dikonfigurasi',
   '{{count}} configured hooks': '{{count}} hook dikonfigurasi',
   'When hooks are disabled:': 'Ketika hook dinonaktifkan:',
-  'No hook commands will execute': 'Tidak ada perintah hook yang akan dieksekusi',
+  'No hook commands will execute':
+    'Tidak ada perintah hook yang akan dieksekusi',
   'StatusLine will not be displayed': 'StatusLine tidak akan ditampilkan',
   'Tool operations will proceed without hook validation':
     'Operasi tool akan berlanjut tanpa validasi hook',
@@ -1220,8 +1234,7 @@ export default {
     'Tepat sebelum subagent menyelesaikan responsnya',
   'Before conversation compaction': 'Sebelum kompaksi percakapan',
   'When a session is ending': 'Ketika sesi berakhir',
-  'When a permission dialog is displayed':
-    'Ketika dialog izin ditampilkan',
+  'When a permission dialog is displayed': 'Ketika dialog izin ditampilkan',
   'When a new todo item is created': 'Ketika item todo baru dibuat',
   'When a todo item is marked as completed':
     'Ketika item todo ditandai selesai',
@@ -1374,7 +1387,8 @@ export default {
   'Set UI language': 'Atur bahasa UI',
   'Set LLM output language': 'Atur bahasa output LLM',
   'Usage: /language ui [{{options}}]': 'Penggunaan: /language ui [{{options}}]',
-  'Usage: /language output <language>': 'Penggunaan: /language output <language>',
+  'Usage: /language output <language>':
+    'Penggunaan: /language output <language>',
   'Example: /language output 中文': 'Contoh: /language output 中文',
   'Example: /language output English': 'Contoh: /language output English',
   'Example: /language output 日本語': 'Contoh: /language output 日本語',
@@ -1492,7 +1506,8 @@ export default {
   servers: 'server',
   'Add MCP servers to your settings to get started.':
     'Tambahkan server MCP ke pengaturan Anda untuk memulai.',
-  'Run qwen --debug to see error logs': 'Jalankan qwen --debug untuk melihat log kesalahan',
+  'Run qwen --debug to see error logs':
+    'Jalankan qwen --debug untuk melihat log kesalahan',
 
   // MCP OAuth Authentication
   'OAuth Authentication': 'Autentikasi OAuth',
@@ -1505,7 +1520,8 @@ export default {
   'Cannot write to terminal — copy the URL above manually.':
     'Tidak dapat menulis ke terminal — salin URL di atas secara manual.',
   // MCP Tool List
-  'No tools available for this server.': 'Tidak ada tool yang tersedia untuk server ini.',
+  'No tools available for this server.':
+    'Tidak ada tool yang tersedia untuk server ini.',
   destructive: 'destruktif',
   'read-only': 'hanya-baca',
   'open-world': 'open-world',
@@ -1554,7 +1570,8 @@ export default {
     'Tidak ada klien chat yang tersedia untuk membuat ringkasan.',
   'Already generating summary, wait for previous request to complete':
     'Sedang membuat ringkasan, tunggu permintaan sebelumnya selesai',
-  'No conversation found to summarize.': 'Tidak ada percakapan ditemukan untuk diringkas.',
+  'No conversation found to summarize.':
+    'Tidak ada percakapan ditemukan untuk diringkas.',
   'Summary path already exists and is not a generated summary: {{path}}':
     'Jalur ringkasan sudah ada dan bukan ringkasan yang dibuat: {{path}}',
   'Summary path must be within the project root.':
@@ -1637,7 +1654,8 @@ export default {
   'model: {{voiceModel}}': 'model: {{voiceModel}}',
   'no voice model selected': 'tidak ada model suara yang dipilih',
   'Voice dictation disabled.': 'Dikte suara dinonaktifkan.',
-  'Usage: /voice [hold|tap|off|status]': 'Penggunaan: /voice [hold|tap|off|status]',
+  'Usage: /voice [hold|tap|off|status]':
+    'Penggunaan: /voice [hold|tap|off|status]',
   'No voice model selected. Run /model --voice to choose one before enabling voice dictation.':
     'Tidak ada model suara yang dipilih. Jalankan /model --voice untuk memilih satu sebelum mengaktifkan dikte suara.',
   'Voice dictation enabled (tap mode). Tap Space at an empty prompt to start, tap again or pause to stop and submit, using {{voiceModel}}.':
@@ -1683,8 +1701,7 @@ export default {
   // ============================================================================
   'Starting a new session, resetting chat, and clearing terminal.':
     'Memulai sesi baru, mengatur ulang chat, dan membersihkan terminal.',
-  'Starting a new session and clearing.':
-    'Memulai sesi baru dan membersihkan.',
+  'Starting a new session and clearing.': 'Memulai sesi baru dan membersihkan.',
 
   // ============================================================================
   // Perintah - Kompres
@@ -1717,10 +1734,12 @@ export default {
     'Berikan setidaknya satu jalur untuk ditambahkan.',
   'The /directory add command is not supported in restrictive sandbox profiles. Please use --include-directories when starting the session instead.':
     'Perintah /directory add tidak didukung dalam profil sandbox yang ketat. Gunakan --include-directories saat memulai sesi.',
-  "Error adding '{{path}}': {{error}}": "Kesalahan menambahkan '{{path}}': {{error}}",
+  "Error adding '{{path}}': {{error}}":
+    "Kesalahan menambahkan '{{path}}': {{error}}",
   'Successfully added QWEN.md files from the following directories if there are:\n- {{directories}}':
     'Berhasil menambahkan file QWEN.md dari direktori berikut jika ada:\n- {{directories}}',
-  'Error refreshing memory: {{error}}': 'Kesalahan menyegarkan memori: {{error}}',
+  'Error refreshing memory: {{error}}':
+    'Kesalahan menyegarkan memori: {{error}}',
   'Successfully added directories:\n- {{directories}}':
     'Berhasil menambahkan direktori:\n- {{directories}}',
   'Current workspace directories:\n{{directories}}':
@@ -1828,7 +1847,8 @@ export default {
   'Authentication is enforced to be {{enforcedType}}, but you are currently using {{currentType}}.':
     'Autentikasi ditegakkan sebagai {{enforcedType}}, tetapi Anda saat ini menggunakan {{currentType}}.',
   'Qwen OAuth Authentication': 'Autentikasi Qwen OAuth',
-  'Please visit this URL to authorize:': 'Kunjungi URL berikut untuk mengotorisasi:',
+  'Please visit this URL to authorize:':
+    'Kunjungi URL berikut untuk mengotorisasi:',
   'Waiting for authorization': 'Menunggu otorisasi',
   'Time remaining:': 'Waktu tersisa:',
   'Qwen OAuth Authentication Timeout': 'Timeout Autentikasi Qwen OAuth',
@@ -1854,7 +1874,8 @@ export default {
     'Provider Anthropic tidak memiliki baseUrl yang diperlukan di modelProviders[].baseUrl.',
   'ANTHROPIC_BASE_URL environment variable not found.':
     'Variabel lingkungan ANTHROPIC_BASE_URL tidak ditemukan.',
-  'Invalid auth method selected.': 'Metode autentikasi yang dipilih tidak valid.',
+  'Invalid auth method selected.':
+    'Metode autentikasi yang dipilih tidak valid.',
   'Failed to authenticate. Message: {{message}}':
     'Gagal mengautentikasi. Pesan: {{message}}',
   'Authenticated successfully with {{authType}} credentials.':
@@ -1905,7 +1926,7 @@ export default {
   Deny: 'Tolak',
   Workspace: 'Workspace',
   "Qwen Code won't ask before using allowed tools.":
-    "Qwen Code tidak akan bertanya sebelum menggunakan tool yang diizinkan.",
+    'Qwen Code tidak akan bertanya sebelum menggunakan tool yang diizinkan.',
   'Qwen Code will ask before using these tools.':
     'Qwen Code akan bertanya sebelum menggunakan tool ini.',
   'Qwen Code is not allowed to use denied tools.':
@@ -1929,9 +1950,11 @@ export default {
   'e.g.,': 'mis.,',
   or: 'atau',
   'Enter permission rule…': 'Masukkan aturan izin…',
-  'Enter to submit · Esc to cancel': 'Enter untuk mengirim · Esc untuk membatalkan',
+  'Enter to submit · Esc to cancel':
+    'Enter untuk mengirim · Esc untuk membatalkan',
   'Where should this rule be saved?': 'Di mana aturan ini harus disimpan?',
-  'Enter to confirm · Esc to cancel': 'Enter untuk mengonfirmasi · Esc untuk membatalkan',
+  'Enter to confirm · Esc to cancel':
+    'Enter untuk mengonfirmasi · Esc untuk membatalkan',
   'Delete {{type}} rule?': 'Hapus aturan {{type}}?',
   'Are you sure you want to delete this permission rule?':
     'Apakah Anda yakin ingin menghapus aturan izin ini?',
@@ -1982,7 +2005,8 @@ export default {
   'Press Esc again to clear.': 'Tekan Esc lagi untuk membersihkan.',
   'Ctrl+Q to queue · ↑ to edit queued messages':
     'Ctrl+Q untuk antri · ↑ untuk mengedit pesan antri',
-  'Enter to steer · Ctrl+Q to queue': 'Enter untuk mengarahkan · Ctrl+Q untuk antri',
+  'Enter to steer · Ctrl+Q to queue':
+    'Enter untuk mengarahkan · Ctrl+Q untuk antri',
   '{{count}} queued': '{{count}} antri',
   'Queue message for the next turn': 'Antrikan pesan untuk giliran berikutnya',
 
@@ -2019,15 +2043,13 @@ export default {
   Use: 'Gunakan',
   'to show server and tool descriptions':
     'untuk menampilkan deskripsi server dan tool',
-  'to show tool parameter schemas':
-    'untuk menampilkan skema parameter tool',
+  'to show tool parameter schemas': 'untuk menampilkan skema parameter tool',
   'to hide descriptions': 'untuk menyembunyikan deskripsi',
   'to authenticate with OAuth-enabled servers':
     'untuk mengautentikasi dengan server yang mengaktifkan OAuth',
-  'to authenticate with OAuth-enabled servers':
-    'untuk mengautentikasi dengan server yang mendukung OAuth',
   Press: 'Tekan',
-  'to toggle tool descriptions on/off': 'untuk menampilkan/menyembunyikan deskripsi alat',
+  'to toggle tool descriptions on/off':
+    'untuk menampilkan/menyembunyikan deskripsi alat',
   "Starting OAuth authentication for MCP server '{{name}}'...":
     "Memulai autentikasi OAuth untuk server MCP '{{name}}'...",
   // ============================================================================
@@ -2131,8 +2153,10 @@ export default {
   // Migrasi Format Perintah
   // ============================================================================
   'Command Format Migration': 'Migrasi Format Perintah',
-  'Found {{count}} TOML command file:': 'Ditemukan {{count}} file perintah TOML:',
-  'Found {{count}} TOML command files:': 'Ditemukan {{count}} file perintah TOML:',
+  'Found {{count}} TOML command file:':
+    'Ditemukan {{count}} file perintah TOML:',
+  'Found {{count}} TOML command files:':
+    'Ditemukan {{count}} file perintah TOML:',
   'Current tasks': 'Tugas saat ini',
   'Background tasks': 'Tugas latar belakang',
   'No tasks currently running': 'Tidak ada tugas yang sedang berjalan',
@@ -2145,7 +2169,8 @@ export default {
     'Alur kerja besar: ~{{tokens}} token keluaran diproyeksikan (ambang peringatan {{cap}}).',
   'rejected — edit config to re-approve':
     'ditolak — edit konfigurasi untuk menyetujui kembali',
-  'Background agent needs approval': 'Agen latar belakang membutuhkan persetujuan',
+  'Background agent needs approval':
+    'Agen latar belakang membutuhkan persetujuan',
   'Approve or deny the request above': 'Setujui atau tolak permintaan di atas',
   'from nested agent': 'dari agen bersarang',
   Running: 'Berjalan',
@@ -2193,9 +2218,9 @@ export default {
   'Lock release warning': 'Peringatan pelepasan kunci',
   'Metadata write warning': 'Peringatan penulisan metadata',
   "Subsequent dreams may be skipped as locked until the next session's staleness sweep cleans the file.":
-    "Dream berikutnya mungkin dilewati karena terkunci hingga pembersihan usang pada sesi berikutnya membersihkan file.",
+    'Dream berikutnya mungkin dilewati karena terkunci hingga pembersihan usang pada sesi berikutnya membersihkan file.',
   "The scheduler gate did not see this dream's timestamp; the next dream cycle may re-fire sooner than usual.":
-    "Gerbang penjadwal tidak melihat stempel waktu dream ini; siklus dream berikutnya mungkin terpicu lebih cepat dari biasanya.",
+    'Gerbang penjadwal tidak melihat stempel waktu dream ini; siklus dream berikutnya mungkin terpicu lebih cepat dari biasanya.',
   '... and {{count}} more': '... dan {{count}} lagi',
   'The TOML format is deprecated. Would you like to migrate them to Markdown format?':
     'Format TOML sudah tidak didukung. Apakah Anda ingin memigrasikannya ke format Markdown?',
@@ -2299,24 +2324,24 @@ export default {
     'Hmm... biarkan saya pikir...',
     'Apa sebutan ikan tanpa mata? Fsh...',
     'Kenapa komputer pergi ke terapi? Karena terlalu banyak byte...',
-    "Kenapa programmer tidak suka alam? Karena terlalu banyak bug...",
+    'Kenapa programmer tidak suka alam? Karena terlalu banyak bug...',
     'Kenapa programmer lebih suka mode gelap? Karena cahaya menarik bug...',
     'Kenapa pengembang bangkrut? Karena mereka menghabiskan semua cache...',
-    "Apa yang bisa Anda lakukan dengan pensil rusak? Tidak ada, tidak ada gunanya...",
+    'Apa yang bisa Anda lakukan dengan pensil rusak? Tidak ada, tidak ada gunanya...',
     'Menerapkan pemeliharaan perkusi...',
     'Mencari orientasi USB yang benar...',
     'Memastikan asap sihir tetap di dalam kabel...',
     'Mencoba keluar dari Vim...',
     'Memutar roda hamster...',
-    "Itu bukan bug, itu fitur yang tidak terdokumentasi...",
+    'Itu bukan bug, itu fitur yang tidak terdokumentasi...',
     'Aktifkan.',
-    "Saya akan kembali... dengan jawaban.",
+    'Saya akan kembali... dengan jawaban.',
     'Proses saya yang lain adalah TARDIS...',
     'Berkomunikasi dengan roh mesin...',
     'Membiarkan pikiran meresap...',
     'Baru ingat di mana saya menaruh kunci...',
     'Merenungkan orb...',
-    "Saya telah melihat hal-hal yang tidak akan Anda percayai... seperti pengguna yang membaca pesan pemuatan.",
+    'Saya telah melihat hal-hal yang tidak akan Anda percayai... seperti pengguna yang membaca pesan pemuatan.',
     'Memulai pandangan penuh pemikiran...',
     'Camilan favorit komputer? Mikrochip.',
     'Kenapa pengembang Java memakai kacamata? Karena mereka tidak bisa C#.',
@@ -2332,9 +2357,9 @@ export default {
     'Menunggu nada dial-up selesai...',
     'Mengkalibrasi humor-o-meter.',
     'Layar muat saya yang lain lebih lucu.',
-    "Yakin ada kucing berjalan di keyboard di suatu tempat...",
+    'Yakin ada kucing berjalan di keyboard di suatu tempat...',
     'Meningkatkan... Meningkatkan... Masih memuat.',
-    "Itu bukan bug, itu fitur... dari layar muat ini.",
+    'Itu bukan bug, itu fitur... dari layar muat ini.',
     'Sudah coba matikan dan nyalakan lagi? (Layar muatnya, bukan saya.)',
     'Membangun pilon tambahan...',
   ],
@@ -2365,12 +2390,12 @@ export default {
   'Or manually convert each file:': 'Atau konversi manual setiap file:',
   'TOML: prompt = "..." / description = "..."':
     'TOML: prompt = "..." / description = "..."',
-  'Markdown: YAML frontmatter + content':
-    'Markdown: YAML frontmatter + konten',
+  'Markdown: YAML frontmatter + content': 'Markdown: YAML frontmatter + konten',
   'The migration tool will:': 'Alat migrasi akan:',
   'Convert TOML files to Markdown': 'Mengonversi file TOML ke Markdown',
   'Create backups of original files': 'Membuat cadangan file asli',
-  'Preserve all command functionality': 'Mempertahankan semua fungsionalitas perintah',
+  'Preserve all command functionality':
+    'Mempertahankan semua fungsionalitas perintah',
   'TOML format will continue to work for now, but migration is recommended.':
     'Format TOML akan terus berfungsi untuk saat ini, tetapi migrasi disarankan.',
 
@@ -2435,7 +2460,8 @@ export default {
     'Perkiraan penggunaan, termasuk percakapan',
   'No provider usage yet. These are local estimates, including the conversation.':
     'Belum ada penggunaan penyedia. Ini adalah perkiraan lokal, termasuk percakapan.',
-  'Estimated pre-conversation overhead': 'Perkiraan overhead sebelum percakapan',
+  'Estimated pre-conversation overhead':
+    'Perkiraan overhead sebelum percakapan',
   'Context window': 'Jendela konteks',
   tokens: 'token',
   Used: 'Terpakai',
@@ -2483,8 +2509,7 @@ export default {
   'Show current authentication status': 'Tampilkan status autentikasi saat ini',
   'Authentication completed successfully.':
     'Autentikasi berhasil diselesaikan.',
-  'Starting Qwen OAuth authentication...':
-    'Memulai autentikasi Qwen OAuth...',
+  'Starting Qwen OAuth authentication...': 'Memulai autentikasi Qwen OAuth...',
   'Successfully authenticated with Qwen OAuth.':
     'Berhasil mengautentikasi dengan Qwen OAuth.',
   'Failed to authenticate with Qwen OAuth: {{error}}':
@@ -2588,7 +2613,7 @@ export default {
     'Sudah dalam mode plan. Gunakan "/plan exit" untuk keluar dari mode plan.',
   'Not in plan mode. Use "/plan" to enter plan mode first.':
     'Tidak dalam mode plan. Gunakan "/plan" untuk masuk ke mode plan terlebih dahulu.',
-  "Set up Qwen Code's status line UI": "Set up Qwen Code's status line UI",
+  "Set up Qwen Code's status line UI": 'Siapkan UI status line Qwen Code',
 
   // === Core: ditambahkan dari PR #3328 ===
   'Open the memory manager.': 'Buka memory manager.',
@@ -2626,7 +2651,8 @@ export default {
   'Advisor review failed: {{error}}': 'Tinjauan Advisor gagal: {{error}}',
   'No conversation context available for /advisor':
     'Tidak ada konteks percakapan yang tersedia untuk /advisor',
-  'Focus too long (max {{max}} chars)': 'Fokus terlalu panjang (maks {{max}} karakter)',
+  'Focus too long (max {{max}} chars)':
+    'Fokus terlalu panjang (maks {{max}} karakter)',
   'Another operation is in progress, wait for it to complete before running /advisor':
     'Operasi lain sedang berjalan, tunggu hingga selesai sebelum menjalankan /advisor',
   'No response received.': 'Tidak ada respons diterima.',
@@ -2639,14 +2665,16 @@ export default {
     'Tampilkan status sesi Arena saat ini',
   'Select a model result and merge its diff into the current workspace':
     'Pilih hasil model dan gabungkan diff-nya ke workspace saat ini',
-  'No running Arena session found.': 'Tidak ditemukan sesi Arena yang berjalan.',
+  'No running Arena session found.':
+    'Tidak ditemukan sesi Arena yang berjalan.',
   'No Arena session found. Start one with /arena start.':
     'Tidak ditemukan sesi Arena. Mulai dengan /arena start.',
   'Arena session is still running. Wait for it to complete or use /arena stop first.':
     'Sesi Arena masih berjalan. Tunggu hingga selesai atau gunakan /arena stop terlebih dahulu.',
   'No successful agent results to select from. All agents failed or were cancelled.':
     'Tidak ada hasil agent yang berhasil untuk dipilih. Semua agent gagal atau dibatalkan.',
-  'Use /arena stop to end the session.': 'Gunakan /arena stop untuk mengakhiri sesi.',
+  'Use /arena stop to end the session.':
+    'Gunakan /arena stop untuk mengakhiri sesi.',
   'No idle agent found matching "{{name}}".':
     'Tidak ditemukan agent idle yang cocok dengan "{{name}}".',
   'Failed to apply changes from {{label}}: {{error}}':
@@ -2741,8 +2769,8 @@ export default {
   Efficiency: 'Efisiensi',
   Success: 'Sukses',
   Today: 'Hari Ini',
-  'Cache Hit Rate': 'Cache Hit Rate',
-  'Tool Success': 'Tool Success',
+  'Cache Hit Rate': 'Tingkat Hit Cache',
+  'Tool Success': 'Keberhasilan Tool',
   'Tool Leaderboard': 'Papan Peringkat Tool',
   Time: 'Waktu',
   Cache: 'Cache',
@@ -2751,10 +2779,10 @@ export default {
   'Failed to load stats. Press r to retry.':
     'Gagal memuat statistik. Tekan r untuk mencoba lagi.',
   net: 'net',
-  streak: 'streak',
+  streak: 'beruntun',
   best: 'terbaik',
   'Token Trend': 'Tren Token',
-  'In/Out': 'In/Out',
+  'In/Out': 'Masuk/Keluar',
   'API Requests': 'Permintaan API',
   'Tool Calls': 'Panggilan Tool',
   'Success rate': 'Tingkat keberhasilan',
@@ -2806,7 +2834,7 @@ export default {
   'Installed via Homebrew. Please update with "brew upgrade".':
     'Diinstal via Homebrew. Perbarui dengan "brew upgrade".',
   "Locally installed. Please update via your project's package.json.":
-    "Diinstal secara lokal. Perbarui melalui package.json proyek Anda.",
+    'Diinstal secara lokal. Perbarui melalui package.json proyek Anda.',
   'Update requires sudo. Please run:': 'Update memerlukan sudo. Jalankan:',
   'Standalone install detected. Attempting to automatically update now...':
     'Instalasi standalone terdeteksi. Mencoba memperbarui secara otomatis sekarang...',
@@ -2825,7 +2853,8 @@ export default {
     'Update akan diinstal setelah Anda keluar dari sesi ini.',
   'Run /update to install the update on the host.':
     'Jalankan /update untuk menginstal update di host.',
-  'Run /update to install the update.': 'Jalankan /update untuk menginstal update.',
+  'Run /update to install the update.':
+    'Jalankan /update untuk menginstal update.',
   '⚠️ History gap: earlier conversation was lost before this point (storage interruption) and could not be recovered.':
     '⚠️ Celah riwayat: percakapan sebelumnya hilang sebelum titik ini (interupsi penyimpanan) dan tidak dapat dipulihkan.',
 
@@ -2848,7 +2877,8 @@ export default {
   '{{count}} extension MCP servers': '{{count}} extension MCP servers',
   '{{count}} extension LSP server': '{{count}} extension LSP server',
   '{{count}} extension LSP servers': '{{count}} extension LSP servers',
-  'Reload extension changes from disk': 'Muat ulang perubahan extension dari disk',
+  'Reload extension changes from disk':
+    'Muat ulang perubahan extension dari disk',
   'Reloaded extensions: {{summary}}': 'Extension dimuat ulang: {{summary}}',
   'Reload failed: {{message}}': 'Pemuatan ulang gagal: {{message}}',
   'Reload failed.': 'Pemuatan ulang gagal.',
@@ -2907,7 +2937,8 @@ export default {
     'Lewati arsip yang bertabrakan: {{count}}',
   'Archive candidates:': 'Kandidat arsip:',
   'Skipped archive collisions:': 'Arsip yang dilewati karena bertabrakan:',
-  'Skipped rename errors: {{count}}': 'Lewati kesalahan penggantian nama: {{count}}',
+  'Skipped rename errors: {{count}}':
+    'Lewati kesalahan penggantian nama: {{count}}',
   'Skipped rename errors:': 'Kesalahan penggantian nama yang dilewati:',
   '{{verb}}: {{count}}': '{{verb}}: {{count}}',
   'Would archive': 'Akan diarsipkan',
@@ -2917,7 +2948,8 @@ export default {
   'Usage: /curator run [--dry-run]': 'Penggunaan: /curator run [--dry-run]',
   'Failed to run auto-skill curator: {{message}}':
     'Gagal menjalankan auto-skill curator: {{message}}',
-  'Usage: /curator restore <directory>': 'Penggunaan: /curator restore <directory>',
+  'Usage: /curator restore <directory>':
+    'Penggunaan: /curator restore <directory>',
   'Restored auto-skill: {{name}}': 'Auto-skill dipulihkan: {{name}}',
   'Failed to restore auto-skill: {{message}}':
     'Gagal memulihkan auto-skill: {{message}}',
