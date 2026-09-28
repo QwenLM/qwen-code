@@ -21,6 +21,7 @@ import {
 import {
   dispatchOnce,
   queuedAhead,
+  TOKEN_BUDGET_EXHAUSTED,
   selectCandidates,
   type AgentBodyState,
   type AgentDispatchPort,
@@ -33,6 +34,7 @@ import {
   HUMAN_AUTHOR_ID,
   AGENTS_SCHEMA_VERSION,
   DEFAULT_THREAD_PRIORITY,
+  DEFAULT_THREAD_TOKEN_BUDGET,
   THREAD_PRIORITY_ORDER,
   threadPriorityRank,
   type WorkspaceAgent,
@@ -630,6 +632,70 @@ describe('dispatchOnce', () => {
     const stopped = (await readThread(PROJECT_ROOT, thread.id))!.runs[0]!;
     expect(stopped.status).toBe('cancelled');
     expect(stopped.usageByRound[0]?.tokens).toBe(25);
+  });
+
+  it('stops an agent-triggered run once its tree reaches the token budget', async () => {
+    const thread = await seedQueued({
+      runs: [run({ status: 'running', attempts: 1, usageBaselineTokens: 0 })],
+    });
+    const driver = port({
+      state: {
+        kind: 'running',
+        threadId: thread.id,
+        runId: 'rn_1',
+        attempt: 1,
+      },
+      totalTokens: async () => DEFAULT_THREAD_TOKEN_BUDGET,
+    });
+
+    const records = await dispatchOnce(PROJECT_ROOT, driver);
+
+    expect(records).toContainEqual({
+      agentId: ALICE.id,
+      threadId: thread.id,
+      runId: 'rn_1',
+      kind: 'cancelling',
+      detail: TOKEN_BUDGET_EXHAUSTED,
+    });
+    const stopped = (await readThread(PROJECT_ROOT, thread.id))!.runs[0]!;
+    expect(stopped.status).toBe('cancelling');
+    expect(stopped.error).toBe(TOKEN_BUDGET_EXHAUSTED);
+    expect(stopped.usageByRound).toEqual([
+      { attempt: 1, round: 1, tokens: DEFAULT_THREAD_TOKEN_BUDGET },
+    ]);
+  });
+
+  it('leaves a person-triggered run running past the budget', async () => {
+    const thread = await seedQueued();
+    const posted = await postMessage(PROJECT_ROOT, thread.id, {
+      from: HUMAN_AUTHOR_ID,
+      text: 'keep going',
+    });
+    await writeThread(PROJECT_ROOT, {
+      ...posted.thread,
+      runs: [
+        run({
+          status: 'running',
+          attempts: 1,
+          usageBaselineTokens: 0,
+          triggerMessageIds: [posted.message.id],
+        }),
+      ],
+    });
+    const driver = port({
+      state: {
+        kind: 'running',
+        threadId: thread.id,
+        runId: 'rn_1',
+        attempt: 1,
+      },
+      totalTokens: async () => DEFAULT_THREAD_TOKEN_BUDGET,
+    });
+
+    await dispatchOnce(PROJECT_ROOT, driver);
+
+    const kept = (await readThread(PROJECT_ROOT, thread.id))!.runs[0]!;
+    expect(kept.status).toBe('running');
   });
 
   it('charges an interrupted attempt before replacing its usage baseline', async () => {

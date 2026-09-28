@@ -12,6 +12,7 @@ import {
   type AgentStoreTransaction,
   isAgentAddressable,
   maxConcurrentRunsFor,
+  threadTokens,
 } from './store.js';
 import { mentionToken, parseMentions } from './mentions.js';
 import { applyAggregateStatus } from './run-lifecycle.js';
@@ -210,20 +211,7 @@ export async function postMessageInTransaction(
   }
   const treeTokens = threads
     .filter((thread) => thread.rootThreadId === root.id)
-    .reduce(
-      (total, thread) =>
-        total +
-        thread.runs.reduce(
-          (runTotal, run) =>
-            runTotal +
-            run.usageByRound.reduce(
-              (usageTotal, usage) => usageTotal + usage.tokens,
-              0,
-            ),
-          0,
-        ),
-      0,
-    );
+    .reduce((total, thread) => total + threadTokens(thread), 0);
   const parsed = parseMentions(input.text, agents);
   const now = options.now ?? Date.now();
   const message: ThreadMessage = {
