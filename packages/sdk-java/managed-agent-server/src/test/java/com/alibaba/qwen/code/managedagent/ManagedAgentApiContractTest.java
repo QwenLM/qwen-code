@@ -25,6 +25,7 @@ import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicTurn;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicWorkspace;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.SessionCapabilities;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.SessionEventRequest;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.SessionResyncRequired;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.UpdateSessionRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellAdmission;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellCancelRequest;
@@ -33,6 +34,7 @@ import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellCreateRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellEvent;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellItem;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellListRequest;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellResyncRequired;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellPage;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSession;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSessionRequest;
@@ -45,6 +47,7 @@ import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellWorkspace;
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.api.RequestIdFilter;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
+import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.introspect.BeanPropertyDefinition;
@@ -55,6 +58,7 @@ import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Arrays;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -93,11 +97,12 @@ class ManagedAgentApiContractTest {
     private static final String KNOWN_GAPS = "openapi/contract-known-gaps.txt";
     private static final List<String> GAP_CATEGORIES = List.of("route",
             "record", "request", "response");
-    private static final List<String> API_PREFIXES = List.of("/v1/agents",
+    private static final List<String> API_PREFIXES = List.of("/v1/agent",
             "/api/agent/web-shell/v1");
     private static final String WEB_SHELL = "/api/agent/web-shell/v1";
     private static final String TENANT = TenantContextFilter.HEADER;
     private static final String IDEMPOTENCY_KEY = "Idempotency-Key";
+    private static final String RESYNC = "agent.session.resync_required";
     private static final OpenApiContract CONTRACT = OpenApiContract.load();
     private static final Map<Class<?>, List<String>> RECORD_SCHEMAS =
             Map.ofEntries(
@@ -119,6 +124,8 @@ class ManagedAgentApiContractTest {
                     entry(PublicList.class,
                             List.of("PublicSessionList", "PublicEventList")),
                     entry(PublicEvent.class, List.of("PublicEvent")),
+                    entry(SessionResyncRequired.class,
+                            List.of("SessionResyncRequired")),
                     entry(PublicContentPart.class,
                             List.of("PublicContentPart")),
                     entry(PublicItem.class, List.of("PublicItem")),
@@ -144,6 +151,8 @@ class ManagedAgentApiContractTest {
                     entry(WebShellPage.class,
                             List.of("WebShellSessionPage")),
                     entry(WebShellEvent.class, List.of("WebShellEvent")),
+                    entry(WebShellResyncRequired.class,
+                            List.of("WebShellResyncRequired")),
                     entry(WebShellContentPart.class,
                             List.of("WebShellContentPart")),
                     entry(WebShellItem.class, List.of("WebShellItem")),
@@ -163,6 +172,9 @@ class ManagedAgentApiContractTest {
 
     @Autowired
     private JdbcTemplate jdbc;
+
+    @Autowired
+    private ManagedAgentStore store;
 
     @Autowired
     @Qualifier("requestMappingHandlerMapping")
@@ -336,6 +348,7 @@ class ManagedAgentApiContractTest {
         exchange(drift, "listItems", 400,
                 get("/v1/agents/sessions/{id}/items", sessionId)
                         .param("limit", "0").header(TENANT, tenant), null);
+        checkReplayFloor(drift, tenant);
         exchange(drift, "updateSession", 200,
                 patch("/v1/agents/sessions/{id}", sessionId)
                         .header(TENANT, tenant)
@@ -654,18 +667,44 @@ class ManagedAgentApiContractTest {
                 "{\"sessionId\":\"%s\"}".formatted(sessionId)));
         JsonNode webShellListed = json(webShell(tenant, "/sessions/query",
                 "{}")).get("data").get(0);
-        long snapshotThrough = json(mvc.perform(
+        JsonNode items = json(mvc.perform(
                         get("/v1/agents/sessions/{id}/items", sessionId)
-                                .header(TENANT, tenant))
+                                .param("limit", "100").header(TENANT, tenant))
                 .andReturn().getResponse()
-                .getContentAsString(StandardCharsets.UTF_8))
-                .get("snapshot_through_sequence").asLong();
+                .getContentAsString(StandardCharsets.UTF_8));
+        long snapshotThrough = items.get("snapshot_through_sequence").asLong();
+        // Events name the Items and Parts that the Snapshot holds.
+        Map<String, Set<String>> parts = new TreeMap<>();
+        items.get("data").forEach(item -> {
+            Set<String> ids = parts.computeIfAbsent(item.get("id").asText(),
+                    ignored -> new TreeSet<>());
+            item.get("content").forEach(part ->
+                    ids.add(part.get("part_id").asText()));
+        });
+        JsonNode events = json(mvc.perform(
+                        get("/v1/agents/sessions/{id}/events", sessionId)
+                                .param("limit", "1000").header(TENANT, tenant)
+                                .accept(MediaType.APPLICATION_JSON))
+                .andReturn().getResponse()
+                .getContentAsString(StandardCharsets.UTF_8)).get("data");
+        List<String> named = new ArrayList<>();
+        events.forEach(event -> {
+            if (event.hasNonNull("content_part_id")) {
+                named.add(event.get("content_part_id").asText());
+                assertThat(parts.get(event.get("item_id").asText()))
+                        .as("parts of %s", event.get("item_id"))
+                        .contains(event.get("content_part_id").asText());
+            } else if (event.hasNonNull("item_id")) {
+                assertThat(parts).containsKey(event.get("item_id").asText());
+            }
+        });
+        assertThat(named).isNotEmpty();
         for (JsonNode session : List.of(publicSession, publicListed)) {
             assertThat(session.get("id").asText()).isEqualTo(sessionId);
             assertThat(session.get("agent_revision").asText()).isEqualTo("1");
             assertThat(session.get("capabilities")).isEqualTo(json("""
-                    {"items":true,"snapshots":false,"artifacts":false,
-                     "resync":false}
+                    {"items":true,"snapshots":true,"artifacts":false,
+                     "resync":true}
                     """));
             assertThat(session.get("replay_floor_sequence").asLong()).isZero();
             assertThat(session.get("snapshot_through_sequence").asLong())
@@ -863,6 +902,24 @@ class ManagedAgentApiContractTest {
         await().atMost(Duration.ofSeconds(5)).until(() -> response
                 .getContentAsString(StandardCharsets.UTF_8)
                 .contains("event:session.deleted"));
+        assertThat(checkFrames(drift, operationId, eventSchema, response))
+                .as("%s frames", operationId).isGreaterThan(3);
+    }
+
+    // An expired cursor gets one resync frame, after which the stream ends.
+    private void checkResync(Map<String, String> drift, String operationId,
+            String eventSchema, MockHttpServletResponse response)
+            throws Exception {
+        await().atMost(Duration.ofSeconds(5)).until(() -> response
+                .getContentAsString(StandardCharsets.UTF_8)
+                .contains("event:" + RESYNC));
+        assertThat(checkFrames(drift, operationId, eventSchema, response))
+                .as("%s frames", operationId).isEqualTo(1);
+    }
+
+    private int checkFrames(Map<String, String> drift, String operationId,
+            String eventSchema, MockHttpServletResponse response)
+            throws Exception {
         assertThat(response.getContentType())
                 .startsWith(MediaType.TEXT_EVENT_STREAM_VALUE);
         exercised.add(operationId);
@@ -870,6 +927,8 @@ class ManagedAgentApiContractTest {
         if (response.getHeader(RequestIdFilter.HEADER) == null) {
             drift.put(label + ": no " + RequestIdFilter.HEADER, "");
         }
+        String media = CONTRACT.responsePointer(CONTRACT.operation(
+                operationId), 200) + "/content/text~1event-stream";
         String[] frames = response.getContentAsString(StandardCharsets.UTF_8)
                 .split("\n\n");
         int events = 0;
@@ -887,6 +946,14 @@ class ManagedAgentApiContractTest {
             }
             events++;
             JsonNode event = objectMapper.readTree(fields.get("data"));
+            if (RESYNC.equals(fields.get("event"))) {
+                if (fields.containsKey("id")) {
+                    drift.put(label + ": resync frame has an id", frame);
+                }
+                collect(drift, label, CONTRACT.validate(
+                        media + "/x-qwen-resync-frame", event));
+                continue;
+            }
             if (!event.path("sequence").asText().equals(fields.get("id"))) {
                 drift.put(label + ": id is not the event sequence", frame);
             }
@@ -896,7 +963,50 @@ class ManagedAgentApiContractTest {
             collect(drift, label, CONTRACT.validate(
                     "/components/schemas/" + eventSchema, event));
         }
-        assertThat(events).as("%s frames", operationId).isGreaterThan(3);
+        return events;
+    }
+
+    // Raises the floor of a fresh Session to its Snapshot and reads below it.
+    private void checkReplayFloor(Map<String, String> drift, String tenant)
+            throws Exception {
+        String sessionId = json(exchange(drift, "createSession", 202,
+                post("/v1/agents/sessions").header(TENANT, tenant)
+                        .header(IDEMPOTENCY_KEY, "contract-floor"),
+                """
+                {"agent_id":"qwen-code",
+                 "input":[{"type":"input_text","text":"hello"}]}
+                """)).get("id").asText();
+        awaitMaterialized(tenant, sessionId);
+        long floor = store.advanceReplayFloor(tenant, sessionId,
+                Long.MAX_VALUE).floorSequence();
+        assertThat(floor).isPositive();
+        JsonNode expired = json(exchange(drift, "getSessionEvents", 409,
+                get("/v1/agents/sessions/{id}/events", sessionId)
+                        .param("after", Long.toString(floor - 1))
+                        .header(TENANT, tenant)
+                        .accept(MediaType.APPLICATION_JSON), null));
+        assertThat(expired.at("/error/code").asText())
+                .isEqualTo("cursor_expired");
+        assertThat(expired.at("/error/replay_floor_sequence").asLong())
+                .isEqualTo(floor);
+        assertThat(expired.at("/error/snapshot_through_sequence").asLong())
+                .isEqualTo(floor);
+        exchange(drift, "getSessionEvents", 200,
+                get("/v1/agents/sessions/{id}/events", sessionId)
+                        .param("after", Long.toString(floor))
+                        .header(TENANT, tenant)
+                        .accept(MediaType.APPLICATION_JSON), null);
+        checkResync(drift, "getSessionEvents", "PublicEvent", stream(drift,
+                "getSessionEvents",
+                get("/v1/agents/sessions/{id}/events", sessionId)
+                        .param("stream", "true").header(TENANT, tenant),
+                null));
+        checkResync(drift, "webShellStreamEvents", "WebShellEvent",
+                stream(drift, "webShellStreamEvents",
+                        post(WEB_SHELL + "/events/stream")
+                                .header(TENANT, tenant),
+                        "{\"sessionId\":\"%s\",\"afterSequence\":0}"
+                                .formatted(sessionId)));
     }
 
     private int awaitHeldTurn() {

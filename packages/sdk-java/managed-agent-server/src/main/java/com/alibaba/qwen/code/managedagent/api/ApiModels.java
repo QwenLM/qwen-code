@@ -98,14 +98,27 @@ public final class ApiModels {
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
-    public record PublicEvent(@JsonProperty("sequence") long sequence,
+    public record PublicEvent(
+            @JsonProperty("schema_version") int schemaVersion,
+            @JsonProperty("projection_version") int projectionVersion,
+            @JsonProperty("sequence") long sequence,
             @JsonProperty("event_id") String eventId,
             @JsonProperty("session_id") String sessionId,
             @JsonProperty("turn_id") String turnId,
+            @JsonProperty("item_id") String itemId,
+            @JsonProperty("content_part_id") String contentPartId,
             String type,
             @JsonProperty("created_at") long createdAt,
             Map<String, Object> data,
             boolean terminal) {
+    }
+
+    public record SessionResyncRequired(String type,
+            @JsonProperty("session_id") String sessionId,
+            @JsonProperty("replay_floor_sequence") long replayFloorSequence,
+            @JsonProperty("snapshot_through_sequence")
+                    long snapshotThroughSequence,
+            String action) {
     }
 
     public record PublicContentPart(@JsonProperty("part_id") String partId,
@@ -190,9 +203,15 @@ public final class ApiModels {
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
-    public record WebShellEvent(long sequence, String eventId,
-            String sessionId, String turnId, String type, long createdAt,
+    public record WebShellEvent(int schemaVersion, int projectionVersion,
+            long sequence, String eventId, String sessionId, String turnId,
+            String itemId, String contentPartId, String type, long createdAt,
             Map<String, Object> data, boolean terminal) {
+    }
+
+    public record WebShellResyncRequired(String type, String sessionId,
+            long replayFloorSequence, long snapshotThroughSequence,
+            String action) {
     }
 
     public record WebShellContentPart(String partId, String type, String text,
