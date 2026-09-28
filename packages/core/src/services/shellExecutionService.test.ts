@@ -3174,6 +3174,50 @@ describe('ShellExecutionService child_process fallback', () => {
     expect(result.output).not.toContain('x'.repeat(100));
   });
 
+  it('keeps recent stderr visible after later stdout fills the preview tail', async () => {
+    Object.assign(mockChildProcess.stdout!, {
+      pause: vi.fn(),
+      resume: vi.fn(),
+    });
+    Object.assign(mockChildProcess.stderr!, {
+      pause: vi.fn(),
+      resume: vi.fn(),
+    });
+    const capture = {
+      write: vi.fn(async () => {}),
+      finish: vi.fn(async () => {}),
+      setStarted: vi.fn(),
+      setProcessResult: vi.fn(),
+    };
+    const handle = await ShellExecutionService.execute(
+      'failing build',
+      '/test/dir',
+      onOutputEventMock,
+      new AbortController().signal,
+      true,
+      { ...shellExecutionConfig, maxBufferedOutputBytes: 64 },
+      { rawCapture: capture },
+    );
+    mockChildProcess.stdout!.emit('data', Buffer.from('HEAD' + 'x'.repeat(80)));
+    mockChildProcess.stderr!.emit('data', Buffer.from('ERR: 42\n'));
+    mockChildProcess.stdout!.emit(
+      'data',
+      Buffer.from('y'.repeat(100) + 'TAIL'),
+    );
+    mockChildProcess.stdout!.emit('end');
+    mockChildProcess.stderr!.emit('end');
+    mockChildProcess.emit('exit', 3, null);
+    mockChildProcess.emit('close', 3, null);
+    const result = await handle.result;
+    expect(result.output).toContain('HEAD');
+    expect(result.output).toContain('TAIL');
+    expect(result.output).toContain('[Recent stderr]\nERR: 42');
+    expect(capture.write).toHaveBeenCalledWith(
+      'stderr',
+      Buffer.from('ERR: 42\n'),
+    );
+  });
+
   describe('child environment sanitization (#6601)', () => {
     it('strips Qwen-internal daemon secrets from the child_process env while keeping user vars and third-party credentials', async () => {
       // Replace (not mutate in place): this file restores process.env by

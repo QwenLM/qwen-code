@@ -177,6 +177,8 @@ Hosted Shell 在接纳原 outcome 的同时冻结有界模型历史投影，包�
 
 append 异常后，当前 TypeScript authority 已进入 write-failed。通过受支持的归属路径关闭/重开并读取原 journal，不在同一对象上盲目追加。替代 writer 不能用新 token 重放旧事务：当前 Java duplicate-commit 规则要求原 writer 和 record identity。先读取并使用已有 receipt；仍需新增 receipt 时，由新的合法 owner 对同一 durable finished publication 做新的 fenced admission，通过唯一性约束避免重复回执。
 
+当前 cold-load 入口尚不会执行这次新接纳。如第 10 节所述，在实现并验证专门的恢复入口之前，Session 继续保持恢复阻断。
+
 只依据保存的 committed 决定推进 `results_ready`。重放原 manifest、outcome reference 和 receipt sequence，不能恢复时生成新 UUID 资源。相同 ACK 仅发送给原来的活跃 Runtime generation。替代 generation 从 Session 读取结果，不接收或重执行旧调用。取消、进程排空与 Workspace release 条件独立于回执交付。仍运行孤立进程的通用接管不属于本轮 O2。
 
 W0e 将 Broker 执行标记为 `ABANDONED` 后，其 ledger 保持终态，不伪造物理结果。若原 publication 独立达到 `FINISHED`，Hosted 可在当前 Session writer 授权下读取它，逐项对比完整的原预留 binding，然后沿现有 Session 接纳与回执路径推进。完成数据缺失、损坏或身份不符时继续阻断。此路径不重新启动执行、不向替代 Runtime generation 发送 ACK，也不释放 W0e 的物理 writer pin。
@@ -256,12 +258,13 @@ W0e 将 Broker 执行标记为 `ABANDONED` 后，其 ledger 保持终态，不�
 
 ### 12.3 评审反馈加固
 
-producer 在状态查询显示原操作未知后，使用相同 operation ID 和字节重试；明确的存储 `AccessDenied` 或配额拒绝立即失败。服务端对终态请求的原始字节计算摘要，并拒绝非整数或溢出的范围坐标。admission 与回执响应丢失时均有界重放完全相同的请求；Hosted admission 的历史 ID 和时间取自原始持久 intent，使重复接纳具有稳定内容。显式 fence 及后续 reserve 对过期 grant 的扫描只释放未用的 capture 与 producer 额度，已用和不确定的候选字节继续计费，已完成 publication 的 admission 额度仍保留。私有 Shell 预览有界保留开头与末尾，并在写入模型历史前移除 worker 本地 spill 文件指令。如第 10 节所述，本切片仍不包括“admission 已准备、receipt 尚未提交”后的自动 cold-load 续跑；该 Session 保持恢复阻断，不能伪造回执。
+producer 在状态查询显示原操作未知后，使用相同 operation ID 和字节重试；明确的存储 `AccessDenied` 或配额拒绝立即失败。服务端对终态请求的原始字节计算摘要，并拒绝非整数或溢出的范围坐标。admission 与回执响应丢失时均有界重放完全相同的请求；Hosted admission 的历史 ID 和时间取自原始持久 intent，使重复接纳具有稳定内容。显式 fence 及后续 reserve 对过期 grant 的扫描只释放未用的 capture 与 producer 额度，已用和不确定的候选字节继续计费，已完成 publication 的 admission 额度仍保留。私有 Shell 预览有界保留开头与末尾，从默认 64 KiB 预算中预留 8 KiB 保存最近的 stderr，避免后续 stdout 挤掉错误行，并在写入模型历史前移除 worker 本地 spill 文件指令。如第 10 节所述，本切片仍不包括“admission 已准备、receipt 尚未提交”后的自动 cold-load 续跑；该 Session 保持恢复阻断，不能伪造回执。
 
 ## 13. 启用前的部署决定
 
 - 确认私有 OSS region、endpoint、从未启用 versioning 的 bucket 和加密身份。若环境要求 bucket versioning 或禁止 worker 访问 Java，启用前修改存储/传输配置，不隐式降低保证。
 - 提供测量后的字节/并发限制、publication/verification deadline 和保留运维方式。没有 GC 时已用及隔离字节继续占额，运维必须能观察容量；自动回收后续设计。
 - 启用前确认 Hosted file/Shell bridge 依赖及其 payload/reference schema。通用 W0e 接管和自动 cold-load continuation 保持独立门禁。
+- 启用私有 Shell profile 前，对传给 `read_file` 的 Workspace 绝对路径返回有界函数错误，或在验证归属后映射成 Workspace 相对路径；沿用的文件工具 profile 目前会因该输入终止整个回合。
 
 这些部署选择未满足前，不能宣称已部署跨宿主保证或开放公开 Shell 能力。
