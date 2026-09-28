@@ -656,8 +656,10 @@ describePOSIX('qwen serve — child-crash recovery (real SIGKILL)', () => {
     const ac = new AbortController();
     const collected: DaemonEvent[] = [];
     let resolveSseOpen!: () => void;
-    const sseOpen = new Promise<void>((resolve) => {
+    let rejectSseOpen!: (err: unknown) => void;
+    const sseOpen = new Promise<void>((resolve, reject) => {
       resolveSseOpen = resolve;
+      rejectSseOpen = reject;
     });
     const consumer = (async () => {
       try {
@@ -668,8 +670,12 @@ describePOSIX('qwen serve — child-crash recovery (real SIGKILL)', () => {
           collected.push(e);
           if (e.type === 'session_died') break;
         }
-      } catch {
-        /* aborted */
+      } catch (err) {
+        // Before the stream opens this surfaces the real failure (e.g. a
+        // 404 for a dead session) through `await sseOpen` instead of
+        // hanging until the test timeout; once the promise has settled
+        // the reject is a no-op, so the abort path lands here harmlessly.
+        rejectSseOpen(err);
       }
     })();
 
