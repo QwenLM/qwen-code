@@ -30,7 +30,8 @@ class ManagedExtensionExecutionContractTest {
                     .valueOf(each.required("state").textValue());
             covered.add(state);
             JsonNode inspection = each.required("inspection");
-            if (state == ToolExecutionRecord.State.UNKNOWN) {
+            if (state == ToolExecutionRecord.State.UNKNOWN
+                    || state == ToolExecutionRecord.State.ABANDONED) {
                 // The Broker answers runtime_broker_execution_unknown
                 // instead of a status; RuntimeBrokerHttpServerTest pins it.
                 assertEquals("unknown",

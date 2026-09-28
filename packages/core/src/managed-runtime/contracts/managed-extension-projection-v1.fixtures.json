@@ -2391,6 +2391,63 @@
       }
     },
     {
+      "id": "h0b-lost-watch-proven-ended",
+      "valid": false,
+      "monitorRun": {
+        "monitorId": "monitor-1",
+        "ownerScopeId": "scope-main",
+        "commandRef": {
+          "resourceId": "args-monitor-1",
+          "kind": "managed-tool-args",
+          "schemaVersion": 1,
+          "byteLength": 96,
+          "digest": "340601d2ac8c6a56866fb7076a83f265768be2cf64a2d70f0b1b1fad691b64b1"
+        },
+        "maxEvents": 1000,
+        "idleTimeoutMs": 300000,
+        "debounceMs": 1000,
+        "startReceiptRef": {
+          "resourceId": "receipt-monitor-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 256,
+          "digest": "4c2fe853769a82b46c5c3e2b2370649bda66720666cfdee0ef0731b8fa787de2"
+        },
+        "observationSequence": 3,
+        "lastObservationRef": {
+          "resourceId": "observation-3",
+          "kind": "managed-monitor-observation",
+          "schemaVersion": 1,
+          "byteLength": 64,
+          "digest": "c91f51d309736c5ecef334c5eddc761d26fab848df0a5df1acfdeb9813d1d8be"
+        },
+        "notifiedThrough": 2,
+        "stopReason": null,
+        "outputRef": {
+          "resourceId": "output-manifest-1",
+          "kind": "managed-tool-result-manifest",
+          "schemaVersion": 1,
+          "byteLength": 2048,
+          "digest": "8c8d256872adf1e2d71cee1bf8c90b006ec2a311e03044c683893a02dec80938"
+        },
+        "run": {
+          "state": "recovery_blocked",
+          "reason": "runtime_lost",
+          "definition": null,
+          "executionCallId": "call-monitor-1",
+          "effectId": null,
+          "dispatchId": null,
+          "deliveryId": null,
+          "execution": "settled",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          },
+          "delivery": null
+        }
+      }
+    },
+    {
       "id": "h0b-monitor-id-exactly-512-bytes",
       "valid": false,
       "monitorRun": {
@@ -7729,6 +7786,16 @@
     {
       "id": "unknown",
       "state": "UNKNOWN",
+      "executionStatus": null,
+      "execution": "outcome_unknown",
+      "inspection": {
+        "outcome": "unknown"
+      },
+      "harnessExecution": "outcome_unknown"
+    },
+    {
+      "id": "abandoned",
+      "state": "ABANDONED",
       "executionStatus": null,
       "execution": "outcome_unknown",
       "inspection": {

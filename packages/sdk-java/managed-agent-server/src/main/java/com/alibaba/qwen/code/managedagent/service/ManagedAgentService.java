@@ -4,7 +4,6 @@ import com.alibaba.qwen.code.daemon.SubmitHarnessTurn;
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.CommandAdmission;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.DeletedSession;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.InputBlock;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicEvent;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicContentPart;
@@ -58,15 +57,11 @@ public class ManagedAgentService {
     private static final String SUBMIT = "SUBMIT_TURN";
     private static final String CANCEL = "CANCEL_TURN";
     private static final String RENAME = "RENAME_SESSION";
-    private static final String ARCHIVE = "ARCHIVE_SESSION";
     private static final String UNARCHIVE = "UNARCHIVE_SESSION";
-    private static final String DELETE = "DELETE_SESSION";
     private static final Pattern IDEMPOTENCY_KEY = Pattern.compile(
             "^[\\x21-\\x7e]{1,128}$");
     // Every Session serves its task list and detail; the tasks come from the
     // Stage H records its Session store holds (H0c).
-    private static final SessionCapabilities CAPABILITIES =
-            new SessionCapabilities(true, true, false, true, true);
     private static final WebShellSessionCapabilities WEB_SHELL_CAPABILITIES =
             new WebShellSessionCapabilities(true);
     // Catch-up reads of a stream use pages of this size.
@@ -81,18 +76,15 @@ public class ManagedAgentService {
     private final RequestDigests digests;
     private final HarnessCoordinator coordinator;
     private final HarnessConnector harness;
-    private final RuntimeWarmer runtimeWarmer;
 
     public ManagedAgentService(AgentStateStore store,
             RequestDigests digests, HarnessCoordinator coordinator,
-            HarnessConnector harness, RuntimeWarmer runtimeWarmer,
-            ManagedWorkspaceRegistry workspaces) {
+            HarnessConnector harness, ManagedWorkspaceRegistry workspaces) {
         this.store = store;
         this.workspaces = workspaces;
         this.digests = digests;
         this.coordinator = coordinator;
         this.harness = harness;
-        this.runtimeWarmer = runtimeWarmer;
     }
 
     public CommandAdmission createSession(String tenantId,
@@ -269,12 +261,8 @@ public class ManagedAgentService {
                 sessionId), true);
     }
 
-    public SessionMutationResult<PublicSession> archiveSession(
-            String tenantId, String actorId, String idempotencyKey, String sessionId) {
-        return lifecycleMutation(tenantId, actorId, idempotencyKey, sessionId,
-                ARCHIVE, SessionMutationKind.ARCHIVE);
-    }
-
+    // An archived Session stays closed, so unarchive needs neither the
+    // Harness nor the Runtime.
     public SessionMutationResult<PublicSession> unarchiveSession(
             String tenantId, String actorId, String idempotencyKey, String sessionId) {
         validateIdempotencyKey(idempotencyKey);
@@ -284,12 +272,6 @@ public class ManagedAgentService {
                 UNARCHIVE, idempotencyKey, requestDigest, sessionId,
                 SessionMutationKind.UNARCHIVE);
         if (!"COMPLETED".equals(command.status())) {
-            try {
-                runtimeWarmer.resume(sessionId);
-            } catch (RuntimeException error) {
-                throw dependencyUnavailable("runtime_broker_unavailable",
-                        "The Runtime Broker could not resume the Session.");
-            }
             SessionRecord session = store.completeSessionMutation(tenantId,
                     UNARCHIVE, idempotencyKey, sessionId,
                     SessionMutationKind.UNARCHIVE, null, null);
@@ -298,24 +280,6 @@ public class ManagedAgentService {
         }
         return new SessionMutationResult<>(getPublicSession(tenantId,
                 sessionId), true);
-    }
-
-    public SessionMutationResult<DeletedSession> deleteSession(
-            String tenantId, String actorId, String idempotencyKey, String sessionId) {
-        validateIdempotencyKey(idempotencyKey);
-        requireLegacyWorkspace(tenantId, actorId, sessionId);
-        String requestDigest = lifecycleDigest(sessionId, DELETE);
-        SessionMutationCommand command = store.beginSessionMutation(tenantId,
-                DELETE, idempotencyKey, requestDigest, sessionId,
-                SessionMutationKind.DELETE);
-        if (!"COMPLETED".equals(command.status())) {
-            SessionRecord session = store.requireSession(tenantId, sessionId);
-            closeAndDrain(session, command.sessionStatusBefore());
-            store.completeSessionMutation(tenantId, DELETE, idempotencyKey,
-                    sessionId, SessionMutationKind.DELETE, null, null);
-        }
-        return new SessionMutationResult<>(new DeletedSession(sessionId,
-                "agent.session.deleted", true), command.replayed());
     }
 
     private PublicSession getPublicSession(String tenantId,
@@ -474,7 +438,11 @@ public class ManagedAgentService {
                 session.lastSequence(), session.replayFloorSequence(),
                 store.findSnapshotCoveredSequence(session.tenantId(),
                         session.sessionId()),
-                CAPABILITIES, publicWorkspace(session));
+                // A Workspace-bound Session has no lifecycle operations yet;
+                // every Session serves its task list and detail (H0c).
+                new SessionCapabilities(true, true, false, true,
+                        session.workspace() == null, true),
+                publicWorkspace(session));
     }
 
     private WebShellSession webShellSession(SessionRecord session) {
@@ -620,56 +588,12 @@ public class ManagedAgentService {
         }
     }
 
-    private SessionMutationResult<PublicSession> lifecycleMutation(
-            String tenantId, String actorId, String idempotencyKey, String sessionId,
-            String operation, SessionMutationKind kind) {
-        validateIdempotencyKey(idempotencyKey);
-        requireLegacyWorkspace(tenantId, actorId, sessionId);
-        String requestDigest = lifecycleDigest(sessionId, operation);
-        SessionMutationCommand command = store.beginSessionMutation(tenantId,
-                operation, idempotencyKey, requestDigest, sessionId, kind);
-        if (!"COMPLETED".equals(command.status())) {
-            SessionRecord session = store.requireSession(tenantId, sessionId);
-            closeAndDrain(session, command.sessionStatusBefore());
-            session = store.completeSessionMutation(tenantId, operation,
-                    idempotencyKey, sessionId, kind, null, null);
-            return new SessionMutationResult<>(publicSession(session),
-                    command.replayed());
-        }
-        return new SessionMutationResult<>(getPublicSession(tenantId,
-                sessionId), true);
-    }
-
-    private void closeAndDrain(SessionRecord session,
-            String sessionStatusBefore) {
-        boolean alreadyClosed = "ARCHIVED".equals(sessionStatusBefore);
-        if (!alreadyClosed && harness.isAvailable()) {
-            try {
-                harness.closeSession(session.tenantId(),
-                        session.sessionId());
-            } catch (RuntimeException error) {
-                throw dependencyUnavailable("hosted_harness_unavailable",
-                        "The Hosted Harness could not close the Session.");
-            }
-        } else if (!alreadyClosed && session.harnessBootId() != null) {
-            throw dependencyUnavailable("hosted_harness_unavailable",
-                    "The Hosted Harness is required to close the Session.");
-        }
-        try {
-            runtimeWarmer.drain(session.sessionId()).toCompletableFuture()
-                    .join();
-        } catch (RuntimeException error) {
-            throw dependencyUnavailable("runtime_broker_unavailable",
-                    "The Runtime Broker could not drain the Session.");
-        }
-    }
-
-    private String lifecycleDigest(String sessionId, String operation) {
+    String lifecycleDigest(String sessionId, String operation) {
         return digests.digest(Map.of(
                 "sessionId", sessionId, "operation", operation));
     }
 
-    private void requireLegacyWorkspace(String tenantId, String actorId,
+    void requireLegacyWorkspace(String tenantId, String actorId,
             String sessionId) {
         SessionRecord session = store.requireSession(tenantId, sessionId);
         if (session.workspace() != null) {
@@ -810,7 +734,7 @@ public class ManagedAgentService {
         return title;
     }
 
-    private static void validateIdempotencyKey(String key) {
+    static void validateIdempotencyKey(String key) {
         if (key == null || !IDEMPOTENCY_KEY.matcher(key).matches()) {
             throw new ApiException(HttpStatus.BAD_REQUEST,
                     "invalid_idempotency_key",

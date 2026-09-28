@@ -860,6 +860,23 @@ public class ManagedSessionStore {
                 row.byteLength(), row.recordDigest());
     }
 
+    /**
+     * Whether a writer still holds the Session's journal under a lease that
+     * has not expired by database time. A Harness renews that lease while it
+     * holds the Session and seals the writer when it closes the Session.
+     */
+    @Transactional(readOnly = true)
+    public boolean hasLiveWriter(String tenantId, String sessionId) {
+        List<Timestamp> leases = jdbc.query("SELECT writer_lease_until FROM"
+                        + " qwen_managed_session_journal_head WHERE"
+                        + " tenant_id = ? AND session_id = ? AND state ="
+                        + " 'ACTIVE'",
+                (result, row) -> result.getTimestamp("writer_lease_until"),
+                tenantId, sessionId);
+        return !leases.isEmpty() && leases.getFirst() != null
+                && leases.getFirst().after(databaseNow());
+    }
+
     private Timestamp databaseNow() {
         Timestamp now = jdbc.queryForObject("SELECT CURRENT_TIMESTAMP(6)",
                 Timestamp.class);

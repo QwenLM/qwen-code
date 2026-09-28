@@ -16,6 +16,7 @@ import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitTransactionRequest;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.EventRecord;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.nio.charset.StandardCharsets;
@@ -365,7 +366,8 @@ class ManagedExtensionRecordStoreTest {
     }
 
     @Test
-    void announcesNothingOnceThePublicSessionIsDeleted() throws Exception {
+    void announcesNothingOnceThePublicSessionIsBeingDeleted()
+            throws Exception {
         String sessionId = agents.createSession(TENANT, "deleted-"
                 + UUID.randomUUID(), "qwen-code", null, "tasks", Map.of(),
                 List.of()).sessionId();
@@ -374,7 +376,10 @@ class ManagedExtensionRecordStoreTest {
         journal.commitMonitor("deleted-0", chain.get(0).required(
                 "monitorRun"), chain.get(0).required("occurredAt")
                         .longValue());
-        agents.deleteSession(TENANT, null, "delete-" + sessionId, sessionId);
+        // The delete stays pending while this journal's writer holds the
+        // Session, so the Session is being deleted when the revision lands.
+        state.beginOperation(TENANT, sessionId, OperationKind.DELETE,
+                "sha256:" + "d".repeat(64), "delete", "digest-delete");
         // The next revision changes the view, which a live Session would
         // hear about.
         assertThat(ManagedExtensionProjectionContractTest.view(chain.get(1)
@@ -388,7 +393,7 @@ class ManagedExtensionRecordStoreTest {
                 100);
         assertThat(events).extracting(EventRecord::type)
                 .containsOnlyOnce("task.updated")
-                .endsWith("session.deleted");
+                .endsWith("session.delete.requested");
         assertThat(revisions(sessionId)).isEqualTo(2);
     }
 

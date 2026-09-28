@@ -124,6 +124,8 @@ public final class ManagedExtensionProjection {
      * The physical execution state a Broker execution record proves. A
      * claimed dispatch that was not sent yet is still an intent: the Broker
      * grants it again at the next generation instead of calling it unknown.
+     * Only the Runtime's own not_started answer proves a call unsent, and an
+     * abandoned record's outcome stays unknown for good.
      */
     public static String executionOf(ToolExecutionRecord.State state,
             String executionStatus) {
@@ -132,7 +134,7 @@ public final class ManagedExtensionProjection {
             case EXECUTING, CANCEL_REQUESTED -> "dispatch_started";
             case SETTLED -> "not_started".equals(executionStatus)
                     ? "not_started_proven" : "settled";
-            case UNKNOWN -> "outcome_unknown";
+            case UNKNOWN, ABANDONED -> "outcome_unknown";
         };
     }
 

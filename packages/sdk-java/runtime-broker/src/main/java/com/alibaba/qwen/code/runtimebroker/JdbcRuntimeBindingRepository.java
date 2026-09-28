@@ -31,7 +31,7 @@ public final class JdbcRuntimeBindingRepository
             "attestation_generation", "drain_requested", "operation_owner",
             "operation_lease_until", "operation_generation",
             "record_version", "last_health_at", "last_reconciled_at",
-            "last_active_at", "storage_id");
+            "last_active_at", "storage_id", "loss_evidence_json", "stop_evidence_json");
 
     private final DataSource dataSource;
     private final SecretProtector secretProtector;
@@ -56,10 +56,162 @@ public final class JdbcRuntimeBindingRepository
     }
 
     @Override
+    public RuntimeSessionRecord completeSessionRelease(RuntimeSessionRepository sessions,
+            RuntimeSessionRecord expected) {
+        if (!(sessions instanceof JdbcRuntimeSessionRepository jdbcSessions)
+                || !jdbcSessions.usesDataSource(dataSource)) {
+            throw new IllegalArgumentException("Release requires the same DataSource");
+        }
+        return JdbcRepositorySupport.transaction(dataSource, connection -> {
+            RuntimeBindingRecord binding = selectById(connection, expected.getBindingId(), true);
+            RuntimeAdmission.requireRelease(binding, expected);
+            return JdbcRuntimeSessionRepository.compareAndSet(connection, expected,
+                    expected.withState(RuntimeSessionRecord.State.RELEASED,
+                            JdbcRepositorySupport.databaseNow(connection)));
+        });
+    }
+
+    @Override
+    public RuntimeBindingRecord recoverLost(RuntimeSessionRepository sessions,
+            ToolExecutionRepository executions, RuntimeBindingRecord expected) {
+        if (!(sessions instanceof JdbcRuntimeSessionRepository jdbcSessions)
+                || !jdbcSessions.usesDataSource(dataSource)
+                || !(executions instanceof JdbcToolExecutionRepository jdbcExecutions)
+                || !jdbcExecutions.usesDataSource(dataSource)) {
+            throw new IllegalArgumentException("Recovery requires the same DataSource");
+        }
+        return JdbcRepositorySupport.transaction(dataSource, connection -> {
+            lockPlacementDomain(connection, expected.getRequest().getScope().getTenantId());
+            String key = JdbcRepositorySupport.requestKey(expected.getRequest());
+            Slot slot = selectSlot(connection, key, true);
+            if (slot == null) {
+                return null;
+            }
+            requireSlotIdentity(slot, expected.getRequest());
+            RuntimeBindingRecord current = selectById(connection,
+                    expected.getBindingId(), true);
+            if (current == null || !current.sameIdentity(expected)
+                    || current.getVersion() != expected.getVersion()
+                    || !current.sameOperation(expected)
+                    || !current.hasLiveOperationAt(JdbcRepositorySupport.databaseNowPrecise(connection))
+                    || current.getState() != RuntimeBindingRecord.State.LOST
+                    || !current.getBindingId().equals(slot.activeBindingId)) {
+                return null;
+            }
+            if (current.getLossEvidence() == null) {
+                return current;
+            }
+            List<RuntimeSessionRecord> batch = JdbcRuntimeSessionRepository.lockActiveSessions(
+                    connection, current);
+            JdbcToolExecutionRepository.abandonByBinding(connection, current);
+            if (!current.hasStoppedWriters()
+                    || JdbcToolExecutionRepository.hasActiveByBinding(connection,
+                            current.getBindingId(), current.getGeneration())) {
+                return current;
+            }
+            Instant now = JdbcRepositorySupport.databaseNow(connection);
+            JdbcRuntimeSessionRepository.releaseLost(connection, batch, now);
+            if (JdbcRuntimeSessionRepository.hasActiveByBinding(connection, current)) {
+                return current;
+            }
+            if (!current.hasLiveOperationAt(JdbcRepositorySupport.databaseNowPrecise(connection))) {
+                throw new RuntimeBrokerException(409, "runtime_provision_fenced",
+                        "Runtime recovery claim expired", false);
+            }
+            RuntimeBindingRecord released = current.withState(RuntimeBindingRecord.State.RELEASED,
+                    current.getLease(), now).withVersion(current.getVersion() + 1);
+            updateBinding(connection, released);
+            try (PreparedStatement statement = connection.prepareStatement(
+                    "UPDATE qwen_runtime_binding_slot SET active_binding_id = NULL "
+                            + "WHERE request_key = ? AND active_binding_id = ?")) {
+                statement.setString(1, key);
+                statement.setString(2, current.getBindingId());
+                if (statement.executeUpdate() != 1) {
+                    throw new SQLException("Lost binding retirement failed");
+                }
+            }
+            return released;
+        });
+    }
+
+    @Override
+    public RuntimeSessionRecord admitSession(RuntimeSessionRepository sessions,
+            RuntimeSessionRecord candidate) {
+        if (!(sessions instanceof JdbcRuntimeSessionRepository jdbcSessions)
+                || !jdbcSessions.usesDataSource(dataSource)) {
+            throw new IllegalArgumentException("Admission requires the same DataSource");
+        }
+        JdbcRuntimeSessionRepository.requireCandidate(candidate);
+        return JdbcRepositorySupport.transaction(dataSource, connection -> {
+            RuntimeBindingRecord binding = selectById(connection,
+                    candidate.getBindingId(), true);
+            RuntimeAdmission.requireReady(binding, candidate.getRuntimeGeneration());
+            RuntimeScope scope = candidate.getSession().getScope();
+            if (!binding.getRequest().getScope().equals(scope)) {
+                throw new IllegalArgumentException("Session scope differs from binding");
+            }
+            RuntimeSessionRecord existing = JdbcRuntimeSessionRepository.selectSession(
+                    connection, scope, candidate.getRuntimeSessionId(), true);
+            if (existing != null) {
+                if (!existing.sameIdentity(candidate)) {
+                    throw new IllegalArgumentException("Session identity differs");
+                }
+                return existing;
+            }
+            JdbcRuntimeSessionRepository.insertSession(connection, candidate);
+            return candidate;
+        });
+    }
+
+    @Override
+    public ToolExecutionRecord admitExecution(RuntimeSessionRepository sessions,
+            ToolExecutionRepository executions, ToolExecutionRecord candidate) {
+        if (!(sessions instanceof JdbcRuntimeSessionRepository jdbcSessions)
+                || !jdbcSessions.usesDataSource(dataSource)
+                || !(executions instanceof JdbcToolExecutionRepository jdbcExecutions)
+                || !jdbcExecutions.usesDataSource(dataSource)) {
+            throw new IllegalArgumentException("Admission requires the same DataSource");
+        }
+        JdbcToolExecutionRepository.requireCandidate(candidate);
+        ToolExecutionRecord existing = executions.findByIdempotencyKey(
+                candidate.getIdempotencyKey());
+        if (existing != null) {
+            return existing;
+        }
+        try {
+            return JdbcRepositorySupport.transaction(dataSource, connection -> {
+                RuntimeBindingRecord binding = selectById(connection,
+                        candidate.getBindingId(), true);
+                RuntimeAdmission.requireReady(binding, candidate.getRuntimeGeneration());
+                RuntimeAdmission.requireSession(JdbcRuntimeSessionRepository.selectSession(
+                        connection, binding.getRequest().getScope(),
+                        candidate.getRuntimeSessionId(), true), candidate);
+                ToolExecutionRecord receipt = JdbcToolExecutionRepository.selectByIdempotencyKey(
+                        connection, candidate.getIdempotencyKey());
+                if (receipt != null) {
+                    return receipt;
+                }
+                JdbcToolExecutionRepository.insertExecution(connection, candidate);
+                return candidate;
+            });
+        } catch (IllegalStateException failure) {
+            if (JdbcRepositorySupport.isConstraintViolation(failure)) {
+                ToolExecutionRecord winner = executions.findByIdempotencyKey(
+                        candidate.getIdempotencyKey());
+                if (winner != null) {
+                    return winner;
+                }
+            }
+            throw failure;
+        }
+    }
+
+    @Override
     public RuntimeBindingRecord findOrCreate(
             RuntimeProvisionRequest request) {
         requireRequest(request);
         return JdbcRepositorySupport.transaction(dataSource, connection -> {
+            lockPlacementDomain(connection, request.getScope().getTenantId());
             String key = JdbcRepositorySupport.requestKey(request);
             ensureSlot(connection, key, request);
             Slot slot = selectSlot(connection, key, true);
@@ -75,6 +227,7 @@ public final class JdbcRuntimeBindingRepository
                 return active;
             }
 
+            requireRecoverablePlacement(connection, request);
             long generation = slot.lastGeneration + 1;
             String bindingId = BrokerValues.requireId(idSupplier.get(),
                     "bindingId");
@@ -180,6 +333,7 @@ public final class JdbcRuntimeBindingRepository
             RuntimeBindingRecord replacement) {
         requireReplacement(expected, replacement);
         return JdbcRepositorySupport.transaction(dataSource, connection -> {
+            lockPlacementDomain(connection, expected.getRequest().getScope().getTenantId());
             String key = JdbcRepositorySupport.requestKey(
                     expected.getRequest());
             Slot slot = selectSlot(connection, key, true);
@@ -206,6 +360,7 @@ public final class JdbcRuntimeBindingRepository
                 throw new IllegalStateException(
                         "Runtime binding slot is inconsistent");
             }
+            current.requireSafeReplacement(replacement);
             RuntimeBindingRecord updated = replacement.withVersion(
                     expected.getVersion() + 1);
             updateBinding(connection, updated);
@@ -376,11 +531,49 @@ public final class JdbcRuntimeBindingRepository
         }
     }
 
+    private static void lockPlacementDomain(Connection connection, String tenantId)
+            throws SQLException {
+        String key = JdbcRepositorySupport.valueKey(tenantId);
+        try (PreparedStatement insert = connection.prepareStatement(
+                "INSERT INTO qwen_runtime_placement_guard (tenant_key, tenant_id) VALUES (?, ?) "
+                        + "ON DUPLICATE KEY UPDATE tenant_key = tenant_key")) {
+            insert.setString(1, key);
+            insert.setString(2, tenantId);
+            insert.executeUpdate();
+        }
+        try (PreparedStatement lock = connection.prepareStatement(
+                "SELECT tenant_id FROM qwen_runtime_placement_guard WHERE tenant_key = ? FOR UPDATE")) {
+            lock.setString(1, key);
+            try (ResultSet result = lock.executeQuery()) {
+                if (!result.next() || !tenantId.equals(result.getString("tenant_id"))) {
+                    throw new IllegalStateException("Runtime placement tenant hash collision");
+                }
+            }
+        }
+    }
+
+    private void requireRecoverablePlacement(Connection connection, RuntimeProvisionRequest request)
+            throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement(
+                "SELECT " + BINDING_COLUMNS + " FROM qwen_runtime_binding WHERE tenant_id = ? "
+                        + "AND binding_state IN ('LOST', 'RECOVERY_BLOCKED', 'FAILED')")) {
+            statement.setString(1, request.getScope().getTenantId());
+            try (ResultSet result = statement.executeQuery()) {
+                while (result.next()) {
+                    if (mapBinding(result).blocksPlacement(request)) {
+                        throw new RuntimeBrokerException(409, "runtime_placement_recovery_required",
+                                "An earlier runtime placement still requires physical recovery", false);
+                    }
+                }
+            }
+        }
+    }
+
     private void insertBinding(Connection connection,
             RuntimeBindingRecord record) throws SQLException {
         String sql = "INSERT INTO qwen_runtime_binding (" + BINDING_COLUMNS
                 + ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
-                + "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+                + "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
         try (PreparedStatement statement = connection.prepareStatement(sql)) {
             setBinding(statement, record);
             statement.executeUpdate();
@@ -402,7 +595,8 @@ public final class JdbcRuntimeBindingRepository
                 + "operation_owner = ?, operation_lease_until = ?, "
                 + "operation_generation = ?, record_version = ?, "
                 + "last_health_at = ?, last_reconciled_at = ?, "
-                + "last_active_at = ? WHERE binding_id = ?";
+                + "last_active_at = ?, loss_evidence_json = ?, stop_evidence_json = ? "
+                + "WHERE binding_id = ?";
         try (PreparedStatement statement = connection.prepareStatement(sql)) {
             statement.setString(1, record.getState().name());
             setHandleColumns(statement, 2, record);
@@ -436,7 +630,9 @@ public final class JdbcRuntimeBindingRepository
                     record.getLastReconciledAt());
             JdbcRepositorySupport.setInstant(statement, 18,
                     record.getLastActiveAt());
-            statement.setString(19, record.getBindingId());
+            statement.setString(19, evidenceJson(record.getLossEvidence()));
+            statement.setString(20, evidenceJson(record.getStopEvidence()));
+            statement.setString(21, record.getBindingId());
             if (statement.executeUpdate() != 1) {
                 throw new SQLException("Runtime binding update failed");
             }
@@ -487,6 +683,8 @@ public final class JdbcRuntimeBindingRepository
         JdbcRepositorySupport.setInstant(statement, 33,
                 record.getLastActiveAt());
         statement.setString(34, request.getStorageId());
+        statement.setString(35, evidenceJson(record.getLossEvidence()));
+        statement.setString(36, evidenceJson(record.getStopEvidence()));
     }
 
     private void setSeedColumns(PreparedStatement statement, int start,
@@ -566,7 +764,13 @@ public final class JdbcRuntimeBindingRepository
                 JdbcRepositorySupport.getInstant(result, "last_health_at"),
                 JdbcRepositorySupport.getInstant(result,
                         "last_reconciled_at"),
-                JdbcRepositorySupport.getInstant(result, "last_active_at"));
+                JdbcRepositorySupport.getInstant(result, "last_active_at"),
+                RuntimeRecoveryEvidence.fromJson(result.getString("loss_evidence_json")),
+                RuntimeRecoveryEvidence.fromJson(result.getString("stop_evidence_json")));
+    }
+
+    private static String evidenceJson(RuntimeRecoveryEvidence evidence) {
+        return evidence == null ? null : evidence.toJson();
     }
 
     private RuntimeProvisionSeed mapSeed(ResultSet result, String bindingId)
