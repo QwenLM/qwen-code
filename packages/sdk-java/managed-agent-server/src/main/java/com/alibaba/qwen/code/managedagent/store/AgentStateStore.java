@@ -9,6 +9,11 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.EventRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.HarnessEvent;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.MaterializationResult;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.MaterializationTarget;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationAdmission;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationTarget;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.ReplayWindow;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionPage;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutationCommand;
@@ -23,13 +28,14 @@ import java.util.Optional;
 public interface AgentStateStore {
     Admission insertSessionCommand(String tenantId, String operation,
             String idempotencyKey, String requestDigest, String agentId,
-            String title, List<Map<String, Object>> input,
-            String payloadDigest);
+            String requestedRevision, String title,
+            List<Map<String, Object>> input, String payloadDigest);
 
     Admission insertWorkspaceSessionCommand(String tenantId, String actorId,
             String idempotencyKey, String requestDigest, String agentId,
-            String title, List<Map<String, Object>> input,
-            String payloadDigest, WorkspaceSelection selection);
+            String requestedRevision, String title,
+            List<Map<String, Object>> input, String payloadDigest,
+            WorkspaceSelection selection);
 
     Admission replayWorkspaceSessionCommand(String tenantId, String actorId,
             String idempotencyKey, String requestDigest);
@@ -49,6 +55,37 @@ public interface AgentStateStore {
     SessionRecord completeSessionMutation(String tenantId, String operation,
             String idempotencyKey, String sessionId,
             SessionMutationKind kind, String title, String harnessBootId);
+
+    /**
+     * Admits a close, archive or delete, or returns the operation that the
+     * same actor already admitted under the key. An archive completes here;
+     * a close or delete waits for {@link #completeOperation}.
+     */
+    OperationAdmission beginOperation(String tenantId, String sessionId,
+            OperationKind kind, String actorDigest, String idempotencyKey,
+            String requestDigest);
+
+    Optional<OperationRecord> findOperation(String tenantId,
+            String sessionId, String operationId);
+
+    List<OperationTarget> findDeliverableOperations(long now, int limit);
+
+    Optional<OperationRecord> claimOperation(String tenantId,
+            String sessionId, String operationId, String owner,
+            Duration leaseDuration);
+
+    /**
+     * Completes a claimed operation unless another worker claimed it since.
+     *
+     * @return false when the claim is no longer current
+     */
+    boolean completeOperation(String tenantId, String sessionId,
+            String operationId, String owner, long claimGeneration,
+            boolean harnessConfirmed);
+
+    void retryOperation(String tenantId, String sessionId,
+            String operationId, String owner, long claimGeneration,
+            long availableAt);
 
     Admission replayCommand(String tenantId, String operation,
             String idempotencyKey, String requestDigest);
@@ -83,6 +120,10 @@ public interface AgentStateStore {
 
     Optional<SnapshotRecord> findSnapshot(String tenantId,
             String sessionId);
+
+    long findSnapshotCoveredSequence(String tenantId, String sessionId);
+
+    ReplayWindow findReplayWindow(String tenantId, String sessionId);
 
     List<MaterializationTarget> findMaterializationTargets(int limit);
 

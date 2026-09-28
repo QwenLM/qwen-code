@@ -155,13 +155,14 @@ export {
 function createSendIndex(
   webShellDir: string,
   frameAncestors: readonly string[] = [],
+  desktopRelayEnabled = false,
 ): (req: Request, res: Response) => void {
   const indexPath = path.join(webShellDir, 'index.html');
   return (req: Request, res: Response): void => {
-    const csp = buildWebShellCsp(
-      frameAncestors,
-      remoteDaemonConnectOrigins(requestedDaemonParam(req.originalUrl)),
-    );
+    const csp = buildWebShellCsp(frameAncestors, [
+      ...remoteDaemonConnectOrigins(requestedDaemonParam(req.originalUrl)),
+      ...(desktopRelayEnabled ? ['http://127.0.0.1:47821'] : []),
+    ]);
     res
       .status(200)
       .set('Content-Security-Policy', csp)
@@ -240,8 +241,13 @@ export function mountWebShellAssets(
   app: Application,
   webShellDir: string,
   frameAncestors: readonly string[] = [],
+  desktopRelayEnabled = false,
 ): void {
-  const sendIndex = createSendIndex(webShellDir, frameAncestors);
+  const sendIndex = createSendIndex(
+    webShellDir,
+    frameAncestors,
+    desktopRelayEnabled,
+  );
   app.use(
     '/assets',
     express.static(path.join(webShellDir, 'assets'), {
@@ -348,8 +354,13 @@ export function mountWebShellSpaFallback(
   app: Application,
   webShellDir: string,
   frameAncestors: readonly string[] = [],
+  desktopRelayEnabled = false,
 ): void {
-  const sendIndex = createSendIndex(webShellDir, frameAncestors);
+  const sendIndex = createSendIndex(
+    webShellDir,
+    frameAncestors,
+    desktopRelayEnabled,
+  );
   app.use((req: Request, res: Response, next: NextFunction) => {
     if (req.method !== 'GET' && req.method !== 'HEAD') return next();
     if (!isDocumentNavigation(req)) return next();
