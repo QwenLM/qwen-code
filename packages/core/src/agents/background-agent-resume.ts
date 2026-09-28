@@ -122,7 +122,9 @@ const CONTAINER_EXECUTION_BLOCKED_REASON =
  *
  * An empty list is normalized the way the launch path normalizes it: `tools: []`
  * is the definition layer's "inherit everything" marker, while the `ToolConfig`
- * layer reads it as deny-all. Names are otherwise matched as written — the
+ * layer reads it as deny-all. A non-array value, which only unvalidated SDK
+ * `initialize.agents` JSON can produce, resolves to zero tools at launch, so it
+ * has no Skill tool here either. Names are otherwise matched as written — the
  * launch path also resolves display names through `convertToRuntimeConfig` and
  * this helper does not, so a definition that uses one can still drift.
  * Pre-existing, and outside #12424's measured scope.
@@ -131,6 +133,11 @@ function subagentWillHaveSkillTool(
   subagentConfig: SubagentConfig | undefined,
 ): boolean {
   const tools = subagentConfig?.tools;
+  // Nullish has to stay on the wildcard path: launch reads `config.tools?.length`,
+  // which is falsy for both `undefined` and `null`.
+  if (tools != null && !Array.isArray(tools)) {
+    return false;
+  }
   return toolConfigAllowsSkill({
     tools: tools?.length ? tools : ['*'],
     disallowedTools: subagentConfig?.disallowedTools,

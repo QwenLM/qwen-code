@@ -1301,7 +1301,13 @@ describe('BackgroundAgentResumeService', () => {
 
   // #12424: the resumed agent is shown the skill listing exactly when
   // createAgentHeadless leaves its Config a SkillManager.
-  it.each<[string, { tools?: string[]; disallowedTools?: string[] }, boolean]>([
+  it.each<
+    [
+      string,
+      { tools?: string[] | string | null; disallowedTools?: string[] },
+      boolean,
+    ]
+  >([
     ['inherits every tool', {}, true],
     [
       'disallows the Skill tool',
@@ -1312,6 +1318,12 @@ describe('BackgroundAgentResumeService', () => {
     // `tools: []` means "inherit everything" at the definition layer, so the
     // launch keeps the SkillManager and the resume must keep the listing.
     ['declares an empty tools list', { tools: [] }, true],
+    // Launch reads `config.tools?.length`, which is falsy for `null` too, so
+    // `null` is the wildcard and not the malformed case below.
+    ['declares a null tools value', { tools: null }, true],
+    // Only unvalidated SDK `initialize.agents` JSON produces this. Launch
+    // resolves it to zero tools, so resume must neither throw nor list.
+    ['declares a non-array tools value', { tools: 'read_file' }, false],
   ])(
     'matches the launch-time skill listing when the definition %s',
     async (_label, toolFields, expectListing) => {
