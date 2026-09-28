@@ -1157,9 +1157,17 @@ describe('onResponseComplete', () => {
     // The final segment stays under A's msg_id and continues its seq counter.
     expect(body['msg_id']).toBe('msg-A');
     expect(body['msg_seq']).toBe(3);
-    // The anchor is released after the final segment goes out — and with the
-    // chat entry already moved to msg-B, msg-A's counter is cascaded away.
+    // The anchor is released after the final segment goes out. The counter is
+    // NOT cascaded away: replyContextByMessageId still names msg-A, so a send
+    // could still resolve it (R12-1b). The retention is bounded — evicting
+    // that routing entry reclaims the counter.
     expect(sessionAnchors.has('sess-A')).toBe(false);
+    expect(seqMap.get('msg-A')).toBe(3);
+    (chp['deleteReplyContext'] as (c: unknown) => void).call(ch, {
+      chatId: 'test-chat',
+      msgId: 'msg-A',
+      timestamp: Date.now(),
+    });
     expect(seqMap.has('msg-A')).toBe(false);
   });
 
@@ -1778,7 +1786,7 @@ describe('error recovery paths', () => {
     expect(st!.buffer).toContain(' fresh');
   });
 
-  it("a superseded turn's permanent failure still cascades its msg_seq", async () => {
+  it("a superseded turn's permanent failure keeps the successor anchor and does not orphan its msg_seq", async () => {
     const ch = makeChannel();
     let rejectSend: (err: Error) => void;
     const sendPromise = new Promise<MockResponse>((_r, rej) => {
@@ -1843,7 +1851,15 @@ describe('error recovery paths', () => {
     expect(streamState(ch).get('sess-1')!.turn).toBe(2);
     expect(streamState(ch).get('sess-1')!.msgId).toBe('msg-B');
     expect(sessionAnchors.get('sess-1')!.msgId).toBe('msg-B');
-    // ...but the superseded turn's counter is no longer orphaned.
+    // ...but the superseded turn's counter is not orphaned either: the release
+    // ran and the counter is retained because replyContextByMessageId still
+    // names msg-A (R12-1b). Evicting that routing entry reclaims it.
+    expect(seqMap.has('msg-A')).toBe(true);
+    (chp['deleteReplyContext'] as (c: unknown) => void).call(ch, {
+      chatId: 'test-chat',
+      msgId: 'msg-A',
+      timestamp: Date.now(),
+    });
     expect(seqMap.has('msg-A')).toBe(false);
     // The permanent failure sent exactly once (the superseded 'part1'); the
     // replacement entry's 'turn-2' buffer is never sent before teardown.
@@ -3007,7 +3023,7 @@ describe('cancel/flush coordination', () => {
     expect(pendingStreamDelete.has('sess-1')).toBe(false);
   });
 
-  it('release while a tail flush is in flight keeps msg-A seq instead of resetting it to 1, then reclaims it at settle', async () => {
+  it('release while a tail flush is in flight keeps msg-A seq instead of resetting it to 1, then reclaims it once the routing entry is evicted', async () => {
     const ch = makeChannel();
     let resolveTailSend: (v: MockResponse) => void;
     const tailSendPromise = new Promise<MockResponse>((r) => {
@@ -3066,11 +3082,19 @@ describe('cancel/flush coordination', () => {
     expect(seqMap.get('msg-A')).toBe(2);
 
     // The tail send settles; the chain's terminal release is deferred to its
-    // .finally(), after the in-flight marker is cleared, so the counter is
-    // reclaimed instead of being stranded under the marker.
+    // .finally(), after the in-flight marker is cleared. The counter is then
+    // retained because replyContextByMessageId still names msg-A (R12-1b) —
+    // a later send could still resolve it — and is reclaimed once that routing
+    // entry is evicted.
     resolveTailSend!(mockResponse(true));
     await drain();
 
+    expect(seqMap.get('msg-A')).toBe(2);
+    (chp['deleteReplyContext'] as (c: unknown) => void).call(ch, {
+      chatId: 'test-chat',
+      msgId: 'msg-A',
+      timestamp: Date.now(),
+    });
     expect(seqMap.has('msg-A')).toBe(false);
     expect(streamState(ch).has('s1')).toBe(false);
     expect(flushingSessions.has('s1')).toBe(false);
@@ -4047,7 +4071,7 @@ describe('stash ownership regressions', () => {
     ).toBe(true);
   });
 
-  it('hands off the sealed head when a superseded turn drops its entry (self-review D2)', async () => {
+  it("keeps the superseded turn's sealed head with its in-flight flush owner (self-review D2, R12-2)", async () => {
     const ch = makeChannel();
     const chp = ch as unknown as Record<string, unknown>;
     const orphanBuffer = chp['streamOrphanBuffer'] as Map<
@@ -4057,7 +4081,8 @@ describe('stash ownership regressions', () => {
     await reachStashedOrphan(ch);
 
     // Seal turn 2's head and drain it into a fresh entry whose send is still
-    // in flight, so the entry holds the seal with an empty buffer.
+    // in flight, so the entry holds the seal with an empty buffer — and the
+    // in-flight payload already carries the sealed head.
     onResponseBoundary(ch, 'test-chat', 's1');
     let settleDrain!: (v: MockResponse) => void;
     const drainPromise = new Promise<MockResponse>((r) => {
@@ -4072,25 +4097,24 @@ describe('stash ownership regressions', () => {
     ).get('s1')!;
     expect(drained.sealedPre).toBe('T2-HEAD ');
     expect(drained.buffer).toBe('');
+    expect(sentContents().at(-1)).toContain('T2-HEAD ');
 
-    // Turn 3 starts and its first chunk finds turn 2's entry superseded, so
-    // the branch drops the entry — the seal must be handed off, not dropped
-    // with it, or the reply's opening is lost with no other copy.
+    // Turn 3 starts and its first chunk finds turn 2's entry superseded. That
+    // entry is the session's in-flight flush owner, so the branch must NOT
+    // hand the head off again (R12-2): the flush chain's settle arms decide —
+    // its success path clears the seal, its permanent-failure arm re-stashes
+    // it — and a second copy in the successor would deliver the head twice.
     setReplyMsgId(ch, 'test-chat', 'msg-C');
     onPromptStart(ch, 'test-chat', 's1', 'msg-C');
     onResponseChunk(ch, 'test-chat', 'T3-HEAD', 's1');
 
-    // The handoff re-stashes the seal and this same call's drain immediately
-    // consumes it into turn 3's fresh entry — the head is preserved rather
-    // than dropped with the superseded entry.
     const successor = (
       chp['streamState'] as Map<string, { buffer: string; sealedPre?: string }>
     ).get('s1')!;
-    expect(successor.buffer).toBe('T2-HEAD T3-HEAD');
-    expect(successor.sealedPre).toBe('T2-HEAD ');
+    expect(successor.buffer).toBe('T3-HEAD');
+    expect(successor.sealedPre).toBeUndefined();
     expect(orphanBuffer.has('s1')).toBe(false);
 
-    const before = sentContents().length;
     mockSendQQMessage.mockResolvedValue(mockResponse(true));
     settleDrain(mockResponse(true));
     await drain();
@@ -4099,11 +4123,264 @@ describe('stash ownership regressions', () => {
     await drain();
     await vi.advanceTimersByTimeAsync(20_000);
     await drain();
+
+    // Single delivery end-to-end: the in-flight turn-2 payload was the one
+    // send that carried the head, and the successor must not re-carry it.
+    expect(sentContents().filter((c) => c.includes('T2-HEAD '))).toHaveLength(
+      1,
+    );
+  });
+
+  it('re-stashes the sealed head when a superseded in-flight send fails permanently (R12-2b)', async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const orphanBuffer = chp['streamOrphanBuffer'] as Map<
+      string,
+      { turn: number; text: string; pre?: string }
+    >;
+    await reachStashedOrphan(ch);
+
+    // Same shape as the R12-2 duplicate case: the drained send is in flight
+    // with the sealed head in its payload.
+    onResponseBoundary(ch, 'test-chat', 's1');
+    let rejectDrain!: (e: unknown) => void;
+    const drainPromise = new Promise<MockResponse>((_r, rej) => {
+      rejectDrain = rej;
+    });
+    mockSendQQMessage.mockReturnValueOnce(drainPromise);
+    onResponseChunk(ch, 'test-chat', 'T2-REST', 's1');
+    vi.advanceTimersByTime(2000);
+    await drain();
+
+    // Turn 3 supersedes turn 2 while its flush is in flight, so the superseded
+    // branch leaves the head with that chain (R12-2) and the successor starts
+    // without it.
+    setReplyMsgId(ch, 'test-chat', 'msg-C');
+    onPromptStart(ch, 'test-chat', 's1', 'msg-C');
+    onResponseChunk(ch, 'test-chat', 'T3-HEAD', 's1');
+    expect(streamState(ch).get('s1')!.buffer).toBe('T3-HEAD');
+
+    // The in-flight send then fails permanently, so the head never went out.
+    // The permanent-failure arm must hand it off even though this state is no
+    // longer the session's current entry (R12-2b): the guard alone would leave
+    // the head to a chain that can no longer deliver it, and it is lost.
+    rejectDrain(new DeliveryError('FALLBACK_FAILED', 'permanent failure'));
+    await drain();
+    expect(orphanBuffer.get('s1')).toEqual({
+      turn: 3,
+      text: 'T2-HEAD ',
+      pre: 'T2-HEAD ',
+    });
+
+    // The successor consumes the re-stash and delivers the head exactly once.
+    const failedAttempts = mockSendQQMessage.mock.calls.length;
+    mockSendQQMessage.mockResolvedValue(mockResponse(true));
+    await onResponseComplete(ch, 'test-chat', 'T3-HEADT3-REST', 's1');
+    onPromptEnd(ch, 'test-chat', 's1');
+    await drain();
+    await vi.advanceTimersByTimeAsync(20_000);
+    await drain();
+
     expect(
       sentContents()
-        .slice(before)
-        .some((c) => c.includes('T2-HEAD ')),
-    ).toBe(true);
+        .slice(failedAttempts)
+        .filter((c) => c.includes('T2-HEAD ')),
+    ).toHaveLength(1);
+  });
+
+  it('re-stashes the sealed head when a superseded in-flight send fails transiently (R12-2c)', async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const orphanBuffer = chp['streamOrphanBuffer'] as Map<
+      string,
+      { turn: number; text: string; pre?: string }
+    >;
+    await reachStashedOrphan(ch);
+
+    // Same shape as the R12-2b permanent case: the drained send is in flight
+    // carrying the sealed head in its payload.
+    onResponseBoundary(ch, 'test-chat', 's1');
+    let rejectDrain!: (e: unknown) => void;
+    const drainPromise = new Promise<MockResponse>((_r, rej) => {
+      rejectDrain = rej;
+    });
+    mockSendQQMessage.mockReturnValueOnce(drainPromise);
+    onResponseChunk(ch, 'test-chat', 'T2-REST', 's1');
+    vi.advanceTimersByTime(2000);
+    await drain();
+
+    // Turn 3 supersedes turn 2 while its flush is in flight, so the superseded
+    // branch leaves the head with that chain (R12-2) and the successor starts
+    // without it.
+    setReplyMsgId(ch, 'test-chat', 'msg-C');
+    onPromptStart(ch, 'test-chat', 's1', 'msg-C');
+    onResponseChunk(ch, 'test-chat', 'T3-HEAD', 's1');
+    expect(streamState(ch).get('s1')!.buffer).toBe('T3-HEAD');
+
+    // The in-flight send then fails TRANSIENTLY, so it takes the retry arm's
+    // superseded branch rather than the permanent arm: no retry is scheduled
+    // for turn 2's state and nothing will ever settle for it, so that branch
+    // must hand the sealed head off (R12-2c) or it is silently lost.
+    rejectDrain(new Error('transient'));
+    await drain();
+    expect(orphanBuffer.get('s1')).toEqual({
+      turn: 3,
+      text: 'T2-HEAD ',
+      pre: 'T2-HEAD ',
+    });
+
+    // The successor consumes the re-stash and delivers the head exactly once.
+    const failedAttempts = mockSendQQMessage.mock.calls.length;
+    mockSendQQMessage.mockResolvedValue(mockResponse(true));
+    await onResponseComplete(ch, 'test-chat', 'T3-HEADT3-REST', 's1');
+    onPromptEnd(ch, 'test-chat', 's1');
+    await drain();
+    await vi.advanceTimersByTimeAsync(20_000);
+    await drain();
+
+    expect(
+      sentContents()
+        .slice(failedAttempts)
+        .filter((c) => c.includes('T2-HEAD ')),
+    ).toHaveLength(1);
+  });
+
+  it('re-stashes the sealed head when a superseded in-flight state has no msgId (R12-2d)', async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const orphanBuffer = chp['streamOrphanBuffer'] as Map<
+      string,
+      { turn: number; text: string; pre?: string }
+    >;
+    await reachStashedOrphan(ch);
+
+    // Turn 2's session anchor ages past its 5-minute TTL while the turn is
+    // parked, so the fresh entry that drains the sealed head is built without
+    // one (createStreamState's TTL fallback); a proactive turn reaches the
+    // same shape. The head is still sealed on that entry.
+    const ttl = (QQChannel as unknown as { REPLY_MSG_ID_TTL_MS: number })
+      .REPLY_MSG_ID_TTL_MS;
+    const anchors = chp['sessionReplyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+    anchors.get('s1')!.timestamp = Date.now() - ttl - 1000;
+
+    onResponseBoundary(ch, 'test-chat', 's1');
+    let rejectDrain!: (e: unknown) => void;
+    const drainPromise = new Promise<MockResponse>((_r, rej) => {
+      rejectDrain = rej;
+    });
+    mockSendQQMessage.mockReturnValueOnce(drainPromise);
+    onResponseChunk(ch, 'test-chat', 'T2-REST', 's1');
+    vi.advanceTimersByTime(2000);
+    await drain();
+    const drained = (
+      chp['streamState'] as Map<
+        string,
+        { sealedPre?: string; msgId?: string; buffer: string }
+      >
+    ).get('s1')!;
+    expect(drained.sealedPre).toBe('T2-HEAD ');
+    expect(drained.msgId).toBeUndefined();
+    expect(sentContents().at(-1)).toContain('T2-HEAD ');
+
+    // Turn 3 supersedes turn 2 while that send is in flight, so the superseded
+    // branch leaves the head with its in-flight owner (R12-2).
+    setReplyMsgId(ch, 'test-chat', 'msg-C');
+    onPromptStart(ch, 'test-chat', 's1', 'msg-C');
+    onResponseChunk(ch, 'test-chat', 'T3-HEAD', 's1');
+    expect(streamState(ch).get('s1')!.buffer).toBe('T3-HEAD');
+
+    // The send then fails transiently with no retry scheduled for turn 2's
+    // state. The head must still be handed off even though that state carries
+    // no msgId (R12-2d): gating the handoff on msgId drops it silently.
+    rejectDrain(new Error('transient'));
+    await drain();
+    expect(orphanBuffer.get('s1')).toEqual({
+      turn: 3,
+      text: 'T2-HEAD ',
+      pre: 'T2-HEAD ',
+    });
+
+    // The successor consumes the re-stash and delivers the head exactly once.
+    const failedAttempts = mockSendQQMessage.mock.calls.length;
+    mockSendQQMessage.mockResolvedValue(mockResponse(true));
+    await onResponseComplete(ch, 'test-chat', 'T3-HEADT3-REST', 's1');
+    onPromptEnd(ch, 'test-chat', 's1');
+    await drain();
+    await vi.advanceTimersByTimeAsync(20_000);
+    await drain();
+
+    expect(
+      sentContents()
+        .slice(failedAttempts)
+        .filter((c) => c.includes('T2-HEAD ')),
+    ).toHaveLength(1);
+  });
+
+  it('re-stashes the sealed head when a parked superseded in-flight send fails transiently (R12-2e)', async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const orphanBuffer = chp['streamOrphanBuffer'] as Map<
+      string,
+      { turn: number; text: string; pre?: string }
+    >;
+    const pendingStreamDelete = chp['pendingStreamDelete'] as Set<string>;
+    await reachStashedOrphan(ch);
+
+    // Turn 2's drained send is in flight carrying the sealed head.
+    onResponseBoundary(ch, 'test-chat', 's1');
+    let rejectDrain!: (e: unknown) => void;
+    const drainPromise = new Promise<MockResponse>((_r, rej) => {
+      rejectDrain = rej;
+    });
+    mockSendQQMessage.mockReturnValueOnce(drainPromise);
+    onResponseChunk(ch, 'test-chat', 'T2-REST', 's1');
+    vi.advanceTimersByTime(2000);
+    await drain();
+
+    // Turn 3 supersedes turn 2 while that send is in flight, so the superseded
+    // branch leaves the head with its in-flight owner (R12-2).
+    setReplyMsgId(ch, 'test-chat', 'msg-C');
+    onPromptStart(ch, 'test-chat', 's1', 'msg-C');
+    onResponseChunk(ch, 'test-chat', 'T3-HEAD', 's1');
+    expect(streamState(ch).get('s1')!.buffer).toBe('T3-HEAD');
+
+    // Turn 3 then ends while turn 2's send is still marked in flight, so
+    // onPromptEnd parks the session: pendingStreamDelete is set even though the
+    // streamState entry now belongs to turn 3.
+    onPromptEnd(ch, 'test-chat', 's1');
+    expect(pendingStreamDelete.has('s1')).toBe(true);
+    expect(streamState(ch).get('s1')!.turn).toBe(3);
+
+    // The in-flight send now fails TRANSIENTLY. The park flag is set AND the
+    // captured state is no longer the session's entry, so no branch schedules a
+    // retry for it; the sealed head must still be handed off (R12-2e) or it is
+    // silently lost — the first implementation had no arm for this shape at
+    // all, so it neither retried nor re-stashed.
+    rejectDrain(new Error('transient'));
+    await drain();
+    expect(orphanBuffer.get('s1')).toEqual({
+      turn: 3,
+      text: 'T2-HEAD ',
+      pre: 'T2-HEAD ',
+    });
+
+    // The successor consumes the re-stash and delivers the head exactly once.
+    const failedAttempts = mockSendQQMessage.mock.calls.length;
+    mockSendQQMessage.mockResolvedValue(mockResponse(true));
+    await onResponseComplete(ch, 'test-chat', 'T3-HEADT3-REST', 's1');
+    onPromptEnd(ch, 'test-chat', 's1');
+    await drain();
+    await vi.advanceTimersByTimeAsync(20_000);
+    await drain();
+
+    expect(
+      sentContents()
+        .slice(failedAttempts)
+        .filter((c) => c.includes('T2-HEAD ')),
+    ).toHaveLength(1);
   });
 
   it('does not re-deliver a sealed head a successful flush already carried (R11-3)', async () => {

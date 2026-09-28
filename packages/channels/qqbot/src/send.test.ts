@@ -2969,6 +2969,181 @@ describe('replyMsgId cleanup timer', () => {
     ch.disconnect();
   });
 
+  it('reclaims a msg_seq counter orphaned by a vetoed release on the next tick (R12-1)', () => {
+    vi.useFakeTimers();
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const replyMsgId = chp['replyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+    const sessionAnchors = chp['sessionReplyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+    const streamState = chp['streamState'] as Map<
+      string,
+      {
+        chatId: string;
+        buffer: string;
+        timer: ReturnType<typeof setTimeout> | null;
+        retryCount: number;
+        msgId?: string;
+        turn: number;
+      }
+    >;
+    const msgSeqMap = chp['msgSeqMap'] as Map<string, number>;
+    const ttl = (QQChannel as unknown as { REPLY_MSG_ID_TTL_MS: number })
+      .REPLY_MSG_ID_TTL_MS;
+    const stale = Date.now() - ttl - 1000;
+
+    // Both naming entries are past the TTL, but the stream entry still holds a
+    // residual, so the sweep's release is vetoed: the session anchor entry
+    // disappears while the counter survives with nothing left to name it.
+    sessionAnchors.set('sess-1', { msgId: 'msg-A', timestamp: stale });
+    replyMsgId.set('test-chat', { msgId: 'msg-A', timestamp: stale });
+    streamState.set('sess-1', {
+      chatId: 'test-chat',
+      buffer: 'T1-resid',
+      timer: null,
+      retryCount: 0,
+      msgId: 'msg-A',
+      turn: 1,
+    });
+    msgSeqMap.set('msg-A', 5);
+
+    (chp['startReplyMsgIdCleanup'] as () => void).call(ch);
+    vi.advanceTimersByTime(60_000);
+
+    // Tick 1: the naming entries are gone and the live residual legitimately
+    // keeps the counter.
+    expect(sessionAnchors.has('sess-1')).toBe(false);
+    expect(replyMsgId.has('test-chat')).toBe(false);
+    expect(msgSeqMap.get('msg-A')).toBe(5);
+
+    // The last holder disappears. No naming entry is left that could reach the
+    // counter — exactly the orphan shape R12-1 describes.
+    streamState.delete('sess-1');
+
+    // Tick 2: the sweep iterates the counter map itself, so the orphan is
+    // visited and reclaimed.
+    vi.advanceTimersByTime(60_000);
+    expect(msgSeqMap.has('msg-A')).toBe(false);
+
+    ch.disconnect();
+  });
+
+  it('keeps a msg_seq counter named only by replyContextByMessageId (R12-1b)', () => {
+    vi.useFakeTimers();
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const replyMsgId = chp['replyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+    const replyContexts = chp['replyContextByMessageId'] as Map<
+      string,
+      { chatId: string; msgId: string; timestamp: number }
+    >;
+    const sessionAnchors = chp['sessionReplyMsgId'] as Map<string, unknown>;
+    const streamState = chp['streamState'] as Map<string, unknown>;
+    const flushingSessions = chp['flushingSessions'] as Map<string, unknown>;
+    const msgSeqMap = chp['msgSeqMap'] as Map<string, number>;
+
+    // The chat anchor has moved on to a newer message, and there is no session
+    // anchor, stream entry or in-flight send. But the routing map still names
+    // msg-A (fresh, so the sweep's TTL loop keeps it), and a send resolves its
+    // outgoing msg_id out of that map — so its counter still has a holder.
+    replyMsgId.set('test-chat', { msgId: 'msg-NEW', timestamp: Date.now() });
+    replyContexts.set('msg-A', {
+      chatId: 'test-chat',
+      msgId: 'msg-A',
+      timestamp: Date.now(),
+    });
+    msgSeqMap.set('msg-A', 5);
+
+    expect(sessionAnchors.size).toBe(0);
+    expect(streamState.size).toBe(0);
+    expect(flushingSessions.size).toBe(0);
+
+    (chp['startReplyMsgIdCleanup'] as () => void).call(ch);
+    vi.advanceTimersByTime(60_000);
+
+    // Without the routing-map holder the orphan pass reclaims msg-A on this
+    // tick, and a send resumed under it restarts msg_seq at 1 — colliding with
+    // an already-accepted (msg-A, 1) that QQ dedupes and silently drops.
+    expect(replyContexts.has('msg-A')).toBe(true);
+    expect(msgSeqMap.get('msg-A')).toBe(5);
+
+    ch.disconnect();
+  });
+
+  it('reclaims a msg_seq counter orphaned by group removal on the next tick (R12-3)', () => {
+    vi.useFakeTimers();
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const replyMsgId = chp['replyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+    const sessionAnchors = chp['sessionReplyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+    const streamState = chp['streamState'] as Map<string, unknown>;
+    const flushingSessions = chp['flushingSessions'] as Map<string, unknown>;
+    const msgSeqMap = chp['msgSeqMap'] as Map<string, number>;
+    const groupId = 'group-1';
+    const state = {
+      chatId: groupId,
+      buffer: '',
+      timer: null as ReturnType<typeof setTimeout> | null,
+      retryCount: 0,
+      msgId: 'msg-X',
+      turn: 1,
+    };
+    streamState.set('sess-1', state);
+    // A genuine in-flight send owns the counter: it is what vetoes the release
+    // the teardown performs before destroying the entry.
+    flushingSessions.set('sess-1', state);
+    sessionAnchors.set('sess-1', { msgId: 'msg-X', timestamp: Date.now() });
+    replyMsgId.set(groupId, { msgId: 'msg-X', timestamp: Date.now() });
+    msgSeqMap.set('msg-X', 2);
+
+    // The mock ChannelBase has no onSessionDied; it is irrelevant here anyway
+    // (the entry is already destroyed), so stub it out to isolate the
+    // group-removal teardown under test.
+    const onSessionDiedSpy = vi
+      .spyOn(ch, 'onSessionDied')
+      .mockImplementation(() => {});
+
+    (chp['handleGroupDelRobot'] as (e: Record<string, unknown>) => void).call(
+      ch,
+      {
+        group_openid: groupId,
+        op_member_openid: 'admin-1',
+        timestamp: Date.now(),
+      },
+    );
+
+    // Every holder is destroyed, but the release ran first and was vetoed by
+    // the in-flight marker, and the naming entries are gone — so the counter
+    // is orphaned with nothing left that could name it (R12-3).
+    expect(sessionAnchors.has('sess-1')).toBe(false);
+    expect(streamState.has('sess-1')).toBe(false);
+    expect(flushingSessions.has('sess-1')).toBe(false);
+    expect(replyMsgId.has(groupId)).toBe(false);
+    expect(msgSeqMap.get('msg-X')).toBe(2);
+
+    // One tick of the safety net reclaims it.
+    (chp['startReplyMsgIdCleanup'] as () => void).call(ch);
+    vi.advanceTimersByTime(60_000);
+    expect(msgSeqMap.has('msg-X')).toBe(false);
+
+    onSessionDiedSpy.mockRestore();
+    ch.disconnect();
+  });
+
   it('calls reconnectWithRetry after 10 consecutive token refresh failures', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
