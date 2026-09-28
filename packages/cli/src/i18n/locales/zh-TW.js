@@ -183,6 +183,8 @@ export default {
   'toolDisplayName.UpdateGoal': '更新目標',
   'toolDisplayName.ProposeGoal': '提議目標',
   'toolDisplayName.SaveMemory': '儲存記憶',
+  'toolDisplayName.ManageMemory': '管理記憶',
+  'toolDisplayName.SearchMemory': '搜尋記憶',
   'toolDisplayName.Agent': 'Agent',
   'toolDisplayName.Advisor': '審查模型',
   'toolDisplayName.Artifact': '製品',
