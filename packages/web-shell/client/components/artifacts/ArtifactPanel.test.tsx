@@ -404,7 +404,7 @@ afterEach(() => {
   };
 });
 
-it('does not mount restored agent activity when collaboration is disabled', () => {
+it('does not mount restored agent activity when collaboration is disabled', async () => {
   const node = document.createElement('div');
   document.body.appendChild(node);
   const root = createRoot(node);
@@ -440,6 +440,9 @@ it('does not mount restored agent activity when collaboration is disabled', () =
 
   mockWorkspace.capabilities.features = ['agent_collaboration_v1'];
   act(() => root.render(render()));
+  await act(async () => {
+    await Promise.resolve();
+  });
   expect(
     node.querySelector('[data-testid="workspace-agent-thread-route"]'),
   ).not.toBeNull();

@@ -4,7 +4,7 @@ import { createRoot } from 'react-dom/client';
 import { afterEach, expect, it, vi } from 'vitest';
 
 const createThreadsHttpApi = vi.hoisted(() => vi.fn());
-vi.mock('./ThreadsRoute', () => ({ createThreadsHttpApi }));
+vi.mock('./threads-api', () => ({ createThreadsHttpApi }));
 
 const { useAgentChatEntry } = await import('./useAgentChatEntry');
 

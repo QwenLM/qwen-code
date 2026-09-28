@@ -38,7 +38,7 @@ import {
   NetworkIcon,
 } from 'lucide-react';
 import { Skeleton } from '../ui/skeleton';
-import { ThreadsRoute } from '../workspace-agents/ThreadsRoute';
+import { LazyThreadsRoute } from '../workspace-agents/LazyThreadsRoute';
 import { Button } from '../ui/button';
 import {
   useCallback,
@@ -518,7 +518,7 @@ function AgentActivityTab({
     return null;
   }
   return (
-    <ThreadsRoute
+    <LazyThreadsRoute
       chat
       activityOnly
       initialThreadId={threadId}
