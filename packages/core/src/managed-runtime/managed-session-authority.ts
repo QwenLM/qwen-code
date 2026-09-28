@@ -1703,6 +1703,13 @@ export class LocalManagedSessionAuthority {
           `${event.payload['domain']} records commit only through commitExtensionRecord.`,
         );
       }
+      // Only an enabled domain commits records, whatever the path: the
+      // generic appends would otherwise take any name in the index.
+      if (event.kind === 'domain.committed') {
+        assertManagedSessionDomainEnabled(
+          event.payload['domain'] as ManagedSessionDomain,
+        );
+      }
       if (
         event.eventId !== extension?.eventId &&
         EXTENSION_EVENT_ID.test(event.eventId)

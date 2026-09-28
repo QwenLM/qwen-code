@@ -48,7 +48,7 @@ H0b 定下了 Stage H 各项能力共用的记录，但还没有组件提交它�
 7. **grant 由已提交的事实导出。** authority 为一条已提交的记录签发 grant：其 operation 是开启该记录的命令，因此一个命令至多开启一条记录；其修订号是该记录当前的修订号；其计划是该修订的资源。owner、Workspace 代数与阶段由调用方提供，生命周期、信任与阶段的检查由登记阶段的切片加入。grant 不需要自己的日志条目，重启后的 authority 会再签发相同的修订。Runtime 的 gate 按 H0b 的替换规则安装它，因此再次签发即为续期，而更换 owner 或范围需要该记录的新修订。gate 绝不重新开启已撤销的修订，被撤销的 grant 仍约束下一个 grant。格式错误的撤销会被拒绝，而不是悄悄错过它指向的 grant。gate 保存在 Runtime 的内存中：重启后的 Runtime 从空的 gate 开始，因此撤销只在收到它的进程存活期间有效；接入 gate 的 H1 负责决定撤销是否必须成为已提交的事实。
 8. **任务身份是两侧都能计算的哈希。** 记录键是对 Session ID、domain 与记录身份以 NUL 连接后求 SHA-256，任务 ID 为 `task_` 加上该键。该 ID 满足公开接口 128 字符的上限，且不暴露任何内部标识。
 9. **提供列表与详情，不提供事件与取消。** 四条读取路由改为 `partial`，每个 Session 都报告 `capabilities.tasks`，因为每个 Session 都提供这些路由。任务事件保持 `planned`，直到有任务产生输出；取消保持 `planned`，直到有 owner 能停止任务；`PublicCommandOperation.task_id` 与 `WebShellCommandOperation.taskId` 随取消保持 `planned`。因此 H0c 的任务不宣告任何操作，也不带 Artifact。
-10. **Runtime 的报告映射到执行状态线。** Broker 记录处于 `PREPARED` 或 `DISPATCHING` 时为 `intent`，`EXECUTING` 或 `CANCEL_REQUESTED` 为 `dispatch_started`，`UNKNOWN` 为 `outcome_unknown`；`SETTLED` 在状态为 `not_started` 时为 `not_started_proven`，否则为 `settled`。Harness 按同样的方式读取线上状态，唯一的区别是把 `executing` 视为已派发：线上无法区分尚未发送的认领和已发送的调用，而把可能已发送的调用当作未发送，可能导致它被执行两次。
+10. **Runtime 的报告映射到执行状态线。** Broker 记录处于 `PREPARED` 或 `DISPATCHING` 时为 `intent`，`EXECUTING` 或 `CANCEL_REQUESTED` 为 `dispatch_started`，`UNKNOWN` 为 `outcome_unknown`；`SETTLED` 在状态为 `not_started` 时为 `not_started_proven`，否则为 `settled`。Harness 按同样的方式读取线上状态，唯一的区别是把 `executing` 视为已派发：线上无法区分尚未发送的认领和已发送的调用，而把可能已发送的调用当作未发送，可能导致它被执行两次。只有 Runtime 自己给出的 `not_started` 回答能证明调用未发送；Broker 从不推导出它。结算为 `cancelled` 的调用可能在发送之前或之后被取消，记录中没有任何字段能区分这两种情况（见 H0b），因此两种读法都把它当作 `settled`，绝不当作 `not_started_proven`。要区分从未发送就被取消的调用，需要结算记录之外的证据，这由接入该映射的切片提供。
 
 ## 提交记录
 
@@ -61,7 +61,7 @@ H0b 定下了 Stage H 各项能力共用的记录，但还没有组件提交它�
 5. 命令必须可写：日志没有因先前的写入失败而停止，命令指向本 Session，且给定的预期序号等于已提交的序号。提交时还会再做这些检查，但先行检查可以保证被拒绝的重试不会发布任何正文。
 6. 解析后的正文作为资源发布；`domain.committed` 事件与给定的输入及其唤醒在一个事务中提交。authority 与该事务的其余状态一同应用这条修订，因此任何读取方都不会看到事件已提交而记录尚未生效的状态。
 
-其他任何路径若试图为有正文的 domain 提交 `domain.committed` 事件，例如 `appendExecution` 或 `commitDomainRecord`，都会被拒绝，因此没有修订能绕过它的修订链。其他任何 ID 形如 Stage H 记录事件所用 `<domain>:<n>` 的事件也会被拒绝，因此没有事件能占用后续修订所需的 ID。
+其他任何路径若试图为有正文的 domain 提交 `domain.committed` 事件，例如 `appendExecution` 或 `commitDomainRecord`，都会被拒绝，因此没有修订能绕过它的修订链。其他任何 ID 形如 Stage H 记录事件所用 `<domain>:<n>` 的事件也会被拒绝，因此没有事件能占用后续修订所需的 ID。按照 H0b 的要求，每条路径还会拒绝未开放提交的 domain 的 `domain.committed` 事件，否则通用的追加路径会接受索引中的任何名称。
 
 authority 打开时，会按同样的规则重放日志中的每条 Stage H 修订，并从资源存储读取每个正文。若某个正文无法读取或无法接上修订链，说明日志或其资源已损坏，打开失败。由于重新打开的 authority 使用当时生效的规则，收紧其中任何一条都意味着契约版本的变更：旧规则接受过的日志将无法再打开。本变更收紧的唯一一条 H0b 规则——`running` 或 `waiting` 的运行不能建立在从未开始的执行之上——落地时尚未开放任何带正文的 domain，因此没有日志包含这样的记录。`extensionRecord` 与 `taskViews` 暴露重建后的状态，`issueOperationGrant` 依据它签发 grant。outbox 就是每条记录的交付状态线，由 `isExtensionDeliveryPending` 判定；H4 之前没有任何读取方。HTTP 存储现在也会像处理检查点一样，提交 Stage H 正文中引用的资源，因此正文绝不会引用只有写入者持有的资源。
 

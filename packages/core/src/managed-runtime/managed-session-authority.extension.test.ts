@@ -738,6 +738,40 @@ describe('managed session authority Stage H records', () => {
     });
   });
 
+  it('refuses a record of a disabled domain on the generic paths', async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      const recordRef = await harness.store.publish(
+        'managed-hook_execution',
+        Buffer.from('{}', 'utf8'),
+      );
+      const sequence = authority.committedSequence;
+      await expect(
+        authority.appendExecution(
+          command('raw-hook'),
+          [
+            {
+              v: 1,
+              sequence: sequence + 1,
+              eventId: 'hook-execution-1',
+              sessionKey,
+              kind: 'domain.committed',
+              occurredAt: harness.now,
+              payload: {
+                domain: 'hook_execution',
+                version: 1,
+                operationId: 'raw-hook',
+                recordRef,
+              },
+            },
+          ],
+          TRUSTED,
+        ),
+      ).rejects.toThrow(/not enabled for submission/);
+      expect(authority.committedSequence).toBe(sequence);
+    });
+  });
+
   it('refuses domains without a body and disabled domains', async () => {
     const harness = await createHarness();
     await withAuthority(harness, async (authority) => {
