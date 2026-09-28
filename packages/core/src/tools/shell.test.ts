@@ -97,6 +97,7 @@ import {
 import {
   type ShellExecutionResult,
   type ShellOutputEvent,
+  type ShellRawCaptureSink,
 } from '../services/shellExecutionService.js';
 import * as fs from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -4136,6 +4137,55 @@ describe('ShellTool', () => {
           'Tool output was too large and has been truncated',
         );
         expect(result.persistedOutputFiles).toBeUndefined();
+      });
+
+      it('does not persist a raw capture preview as full output', async () => {
+        const truncationModule = await import('./truncation.js');
+        const spy = vi
+          .spyOn(truncationModule, 'truncateToolOutput')
+          .mockResolvedValue({
+            content: 'Full output saved to /tmp/preview.output; use read_file.',
+            outputFile: '/tmp/preview.output',
+          });
+        const capture: ShellRawCaptureSink = {
+          write: vi.fn().mockResolvedValue(undefined),
+          finish: vi.fn().mockResolvedValue(undefined),
+          setStarted: vi.fn(),
+          setProcessResult: vi.fn(),
+        };
+        const output = 'x'.repeat(64 * 1024);
+        try {
+          const invocation = shellTool.build({
+            command: 'large-output-cmd',
+            is_background: false,
+          }) as ShellToolInvocation;
+          const pending = invocation.execute(
+            mockAbortSignal,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            capture,
+          );
+          resolveShellExecution({ output, exitCode: 0 });
+          const result = await pending;
+
+          expect(spy).not.toHaveBeenCalled();
+          expect(result.llmContent).toContain(output);
+          expect(result.llmContent).not.toContain('/tmp/preview.output');
+          expect(result.llmContent).not.toContain('read_file');
+          expect(result.persistedOutputFiles).toBeUndefined();
+          expect(result.returnDisplay).toMatchObject({ outputFiles: [] });
+          expect(mockShellExecutionService.mock.calls[0][5]).toMatchObject({
+            maxBufferedOutputBytes: 64 * 1024,
+          });
+          expect(capture.setProcessResult).toHaveBeenCalledWith(
+            expect.objectContaining({ output, exitCode: 0 }),
+          );
+        } finally {
+          spy.mockRestore();
+        }
       });
 
       it('passes an explicit low threshold to output truncation', async () => {

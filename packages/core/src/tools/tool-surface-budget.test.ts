@@ -29,6 +29,7 @@ import { ListAgentsTool } from './list-agents.js';
 import { LoopWakeupTool } from './loop-wakeup.js';
 import { LSTool } from './ls.js';
 import { LspTool } from './lsp.js';
+import { ManageMemoryTool } from './manage-memory.js';
 import { MonitorTool } from './monitor.js';
 import { NotebookEditTool } from './notebook-edit.js';
 import { ReadFileTool } from './read-file.js';
@@ -38,6 +39,7 @@ import { RecordSourceTool } from './record-source.js';
 import { ReportFindingsTool } from './report-findings.js';
 import { RequestShutdownTool } from './request-shutdown.js';
 import { RipGrepTool } from './ripGrep.js';
+import { SearchMemoryTool } from './search-memory.js';
 import { SendMessageTool } from './send-message.js';
 import { SkillTool } from './skill.js';
 import { TaskCreateTool } from './task-create.js';
@@ -139,6 +141,7 @@ const RESIDENT: ReadonlyArray<[name: string, build: Build, budget: number]> = [
   ['team_create', (c) => new TeamCreateTool(c), 7_800],
   ['ask_user_question', (c) => new AskUserQuestionTool(c), 3_100],
   ['read_file', (c) => new ReadFileTool(c), 2_650],
+  ['search_memory', (c) => new SearchMemoryTool(c), 2_600],
   ['exit_plan_mode', (c) => new ExitPlanModeTool(c), 2_450],
   ['skill', (c) => new SkillTool(c), 2_400],
   ['edit', (c) => new EditTool(c), 2_400],
@@ -164,6 +167,7 @@ const RESIDENT: ReadonlyArray<[name: string, build: Build, budget: number]> = [
   ['tool_call', () => new ToolCallTool(), 650],
   ['team_plan_approval', (c) => new TeamPlanApprovalTool(c), 600],
   ['image_gen', (c) => new ImageGenTool(c), 600],
+  ['manage_memory', (c) => new ManageMemoryTool(c), 600],
   ['display_image', (c) => new DisplayImageTool(c), 550],
   ['get_goal', (c) => new GetGoalTool(c), 550],
   ['task_list', (c) => new TaskListTool(c), 500],

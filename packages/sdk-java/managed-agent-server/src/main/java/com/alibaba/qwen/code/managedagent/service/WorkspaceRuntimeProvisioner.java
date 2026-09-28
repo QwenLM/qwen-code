@@ -65,6 +65,11 @@ final class WorkspaceRuntimeProvisioner implements RuntimeProvisioner {
     }
 
     @Override
+    public boolean canRetryFailedConfirm(RuntimeLease lease) {
+        return delegate.canRetryFailedConfirm(lease);
+    }
+
+    @Override
     public CompletionStage<Void> release(RuntimeProvisionRequest request, RuntimeLease lease) {
         return delegate.release(request, lease);
     }

@@ -49,6 +49,9 @@ Legacy host 回执、owner 持久化和冷恢复选择器见 B2a 后续设计
 [双引擎 owner 选择与类型化拒绝](./2026-09-26-paired-engine-owner-selection.zh-CN.md)。
 宿主接线与新会话的选择规则见 B2d 设计
 [双引擎宿主接线](./2026-09-26-paired-engine-host-wiring.zh-CN.md)。
+[普通宿主的 Managed 引擎](./2026-09-27-ordinary-host-managed-engine.zh-CN.md)
+设计确定了二者的关系：Managed 会话是一份 Managed Session log，其第一个事务先记录
+owner，再记录 header。
 
 ### 通道与准入
 

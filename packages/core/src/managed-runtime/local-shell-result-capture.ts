@@ -109,6 +109,10 @@ export class LocalShellResultCapture implements ShellRawCaptureSink {
     this.processResult = result;
   }
 
+  failCapture(): void {
+    this.fail(new Error('Capture transport failed.'));
+  }
+
   write(id: StreamId, chunk: Buffer): Promise<void> {
     const state = this.streams[id];
     state.observed += chunk.byteLength;

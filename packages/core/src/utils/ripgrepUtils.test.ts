@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
 import {
   _resetRipgrepUtilsCachesForTest,
@@ -25,6 +25,26 @@ const childProcessMock = vi.hoisted(() => ({
 vi.mock('node:child_process', () => ({
   execFile: childProcessMock.execFile,
 }));
+
+const fsPromisesMock = vi.hoisted(() => ({
+  stat: vi.fn(),
+  chmod: vi.fn(),
+}));
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return {
+    ...actual,
+    stat: fsPromisesMock.stat,
+    chmod: fsPromisesMock.chmod,
+    // The module under test uses the default import shape.
+    default: {
+      ...actual,
+      stat: fsPromisesMock.stat,
+      chmod: fsPromisesMock.chmod,
+    },
+  };
+});
 
 type RipgrepTestError = Error & {
   code?: string | number | undefined | null;
@@ -91,6 +111,12 @@ describe('ripgrepUtils', () => {
     vi.mocked(execCommand).mockReset();
     vi.mocked(isCommandAvailable).mockReset();
     childProcessMock.execFile.mockReset();
+    fsPromisesMock.stat.mockReset();
+    fsPromisesMock.chmod.mockReset();
+    // Default to the source-tree state (0755) so tests that are not about the
+    // exec-bit heal keep selecting the bundled binary as before.
+    fsPromisesMock.stat.mockResolvedValue({ mode: 0o100755 });
+    fsPromisesMock.chmod.mockResolvedValue(undefined);
     vi.mocked(execCommand).mockResolvedValue({
       stdout: 'ripgrep 14.1.0\n',
       stderr: '',
@@ -250,6 +276,93 @@ describe('ripgrepUtils', () => {
         mode: 'system',
         command: 'rg',
       });
+    });
+  });
+
+  // A published tarball ships every `vendor/ripgrep/*/rg` as 0644 (#12679),
+  // so the bundled binary cannot be spawned until something restores the bit.
+  describe('bundled ripgrep exec bit', () => {
+    const originalPlatform = process.platform;
+    const originalArch = process.arch;
+
+    function stubPlatform(platform: string, arch: string): void {
+      Object.defineProperty(process, 'platform', { value: platform });
+      Object.defineProperty(process, 'arch', { value: arch });
+    }
+
+    afterEach(() => {
+      stubPlatform(originalPlatform, originalArch);
+    });
+
+    it('restores a missing exec bit before selecting the bundled binary', async () => {
+      stubPlatform('linux', 'x64');
+      vi.mocked(fileExists).mockResolvedValue(true);
+      fsPromisesMock.stat.mockResolvedValue({ mode: 0o100644 });
+
+      const bundledPath = getBuiltinRipgrep();
+      await expect(resolveRipgrep(true)).resolves.toEqual({
+        mode: 'builtin',
+        command: bundledPath,
+      });
+
+      expect(fsPromisesMock.stat).toHaveBeenCalledWith(bundledPath);
+      expect(fsPromisesMock.chmod).toHaveBeenCalledWith(bundledPath, 0o755);
+    });
+
+    it('leaves an already executable bundled binary alone', async () => {
+      stubPlatform('linux', 'x64');
+      vi.mocked(fileExists).mockResolvedValue(true);
+
+      await expect(resolveRipgrep(true)).resolves.toMatchObject({
+        mode: 'builtin',
+      });
+
+      expect(fsPromisesMock.chmod).not.toHaveBeenCalled();
+    });
+
+    it('probes the bundled binary once, not on every search', async () => {
+      stubPlatform('linux', 'x64');
+      vi.mocked(fileExists).mockResolvedValue(true);
+      fsPromisesMock.stat.mockResolvedValue({ mode: 0o100644 });
+
+      await resolveRipgrep(true);
+      await resolveRipgrep(true);
+
+      expect(fsPromisesMock.stat).toHaveBeenCalledTimes(1);
+      expect(fsPromisesMock.chmod).toHaveBeenCalledTimes(1);
+    });
+
+    it('still falls back to system rg when the install cannot be healed', async () => {
+      stubPlatform('linux', 'x64');
+      vi.mocked(fileExists).mockResolvedValue(true);
+      fsPromisesMock.stat.mockResolvedValue({ mode: 0o100644 });
+      fsPromisesMock.chmod.mockRejectedValue(
+        createExecError('chmod EPERM', { code: 'EPERM' }),
+      );
+      vi.mocked(isCommandAvailable).mockReturnValue({
+        available: true,
+        error: undefined,
+      });
+      vi.mocked(execCommand).mockImplementation(async (command: string) => {
+        if (command !== 'rg') {
+          throw createExecError(`spawn ${command} EACCES`, { code: 'EACCES' });
+        }
+        return { stdout: 'ripgrep 14.1.1', stderr: '', code: 0 };
+      });
+
+      await expect(canUseRipgrep(true)).resolves.toBe(true);
+    });
+
+    it('skips the heal on Windows, where mode bits are synthesized', async () => {
+      stubPlatform('win32', 'x64');
+      vi.mocked(fileExists).mockResolvedValue(true);
+
+      await expect(resolveRipgrep(true)).resolves.toMatchObject({
+        mode: 'builtin',
+      });
+
+      expect(fsPromisesMock.stat).not.toHaveBeenCalled();
+      expect(fsPromisesMock.chmod).not.toHaveBeenCalled();
     });
   });
 

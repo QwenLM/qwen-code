@@ -17,6 +17,8 @@ import {
 import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
 import type { ManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
+import { HostedShellPublisher } from './hosted-shell-publisher.js';
+import { boundedShellPreview } from './managed-shell-publisher.js';
 import { HostedWorkspaceBrokerRejection } from './hosted-workspace-broker.js';
 import {
   HostedWorkspaceToolTurn,
@@ -30,6 +32,8 @@ const broker = vi.hoisted(() => ({
   execute: vi.fn(),
   cancel: vi.fn(),
   release: vi.fn(),
+  registerPublisher: vi.fn(),
+  acknowledge: vi.fn(),
 }));
 vi.mock('./hosted-workspace-broker.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./hosted-workspace-broker.js')>()),
@@ -40,12 +44,29 @@ vi.mock('./hosted-workspace-broker.js', async (importOriginal) => ({
     execute = broker.execute;
     cancel = broker.cancel;
     release = broker.release;
+    registerPublisher = broker.registerPublisher;
+    acknowledge = broker.acknowledge;
   },
 }));
 let root: string;
 let session: ManagedSession;
 let harness: ReturnType<typeof createManagedHarnessHandle>;
 let turn: HostedWorkspaceToolTurn;
+let commit: ConstructorParameters<typeof HostedWorkspaceToolTurn>[4];
+const messageFitsInline = vi.fn(() => true);
+function createTurn(shell = false) {
+  return new HostedWorkspaceToolTurn(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    harness,
+    'prompt',
+    commit,
+    messageFitsInline,
+    shell
+      ? { resources: session.resources, assertWritable: async () => undefined }
+      : undefined,
+  );
+}
 const calls = ['read_file', 'edit'].map((name, index) => ({
   name,
   callId: `call-${index}`,
@@ -105,33 +126,31 @@ beforeEach(async () => {
     executionStatus: 'success',
     responseParts: [{ text: 'original result' }],
   });
-  turn = new HostedWorkspaceToolTurn(
-    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
-    session,
-    harness,
-    'prompt',
-    async (type, messageParts) => {
-      const uuid = randomUUID();
-      await session.sink.write({
-        uuid,
-        parentUuid: null,
-        sessionId: sessionKey.sessionId,
-        timestamp: new Date().toISOString(),
-        type,
-        cwd: root,
-        version: 'test',
-        daemonPromptId: 'prompt',
-        message: {
-          role: type === 'assistant' ? 'model' : 'user',
-          parts: messageParts,
-        },
-      });
-      return uuid;
-    },
-    () => true,
-  );
+  commit = async (type, messageParts) => {
+    const uuid = randomUUID();
+    await session.sink.write({
+      uuid,
+      parentUuid: null,
+      sessionId: sessionKey.sessionId,
+      timestamp: new Date().toISOString(),
+      type,
+      cwd: root,
+      version: 'test',
+      daemonPromptId: 'prompt',
+      message: {
+        role: type === 'assistant' ? 'model' : 'user',
+        parts: messageParts,
+      },
+    });
+    return uuid;
+  };
+  messageFitsInline.mockReturnValue(true);
+  broker.registerPublisher.mockResolvedValue('1');
+  broker.acknowledge.mockResolvedValue(undefined);
+  turn = createTurn();
 });
 afterEach(async () => {
+  await turn?.close();
   vi.restoreAllMocks();
   await session?.close();
   await rm(root, { recursive: true, force: true });
@@ -153,6 +172,10 @@ it('commits the whole batch before the first dispatch and each receipt before re
     const authorization = await session.authority.harnessRunAuthorization();
     expect(authorization.status).toBe('runnable');
     if (authorization.status !== 'runnable') throw new Error('No checkpoint');
+    expect(authorization.checkpoint.identity).toMatchObject({
+      turnId: 'prompt',
+      promptId: 'prompt',
+    });
     expect(authorization.checkpoint.continuation.phase).toBe('await_runtime');
     expect(authorization.checkpoint.tools?.items).toHaveLength(2);
     expect((await session.sink.project())[0]?.message?.parts).toEqual(parts);
@@ -435,5 +458,242 @@ it.each(['x'.repeat(70 * 1024), '中'.repeat(23 * 1024), '"'.repeat(17 * 1024)])
     await expect(turn.finish()).resolves.toBeUndefined();
     expect(broker.acquire).not.toHaveBeenCalled();
     expect(broker.prepare).not.toHaveBeenCalled();
+  },
+);
+
+it('returns durable errors for a refused Shell batch and permits a corrected call', async () => {
+  turn = createTurn(true);
+  const shell = {
+    ...calls[0],
+    callId: 'background',
+    name: 'run_shell_command',
+    args: { command: 'sleep 2', is_background: true },
+  };
+  const batch = [calls[0], shell];
+  const responses = await turn.execute(
+    batch,
+    batch.map((call) => ({
+      functionCall: { id: call.callId, name: call.name, args: call.args },
+    })),
+    'model',
+    new AbortController().signal,
+  );
+  expect(responses.map((part) => part.functionResponse?.id)).toEqual([
+    calls[0].callId,
+    shell.callId,
+  ]);
+  expect(responses[0].functionResponse?.response?.['error']).toContain(
+    'not executed',
+  );
+  expect(responses[1].functionResponse?.response?.['error']).toContain(
+    'foreground',
+  );
+  expect((await session.sink.project()).map((record) => record.type)).toEqual([
+    'assistant',
+    'tool_result',
+  ]);
+  expect((await session.sink.project()).at(-1)?.message?.parts).toEqual(
+    responses,
+  );
+  expect(broker.acquire).not.toHaveBeenCalled();
+  expect(broker.prepare).not.toHaveBeenCalled();
+  expect(broker.execute).not.toHaveBeenCalled();
+  expect(broker.registerPublisher).not.toHaveBeenCalled();
+  await turn.consumeResults();
+  const corrected = { ...shell, args: { command: 'printf hello' } };
+  broker.execute.mockResolvedValue({
+    executionStatus: 'not_started',
+    responseParts: [],
+    error: { message: 'command validation failed' },
+    capture: null,
+  });
+  await turn.execute(
+    [corrected],
+    [
+      {
+        functionCall: {
+          id: corrected.callId,
+          name: corrected.name,
+          args: corrected.args,
+        },
+      },
+    ],
+    'model',
+    new AbortController().signal,
+  );
+  await turn.consumeResults();
+  await turn.finish();
+  expect(broker.execute).toHaveBeenCalledOnce();
+  expect(JSON.parse(broker.execute.mock.calls[0][1]).input).toEqual({
+    command: 'printf hello',
+    is_background: false,
+  });
+  expect(broker.release).toHaveBeenCalledOnce();
+});
+
+it.each([
+  [{ command: '' }, 'nonempty command'],
+  [{ command: 'pwd', extra: true }, 'unsupported argument "extra"'],
+  [{ command: 'pwd', description: 7 }, 'description must be a string'],
+  [{ command: 'pwd', timeout: 0 }, 'timeout must be an integer'],
+])('reports the invalid Shell argument %j', async (args, message) => {
+  turn = createTurn(true);
+  const call = { ...calls[0], name: 'run_shell_command', args };
+  const responses = await turn.execute(
+    [call],
+    [{ functionCall: { id: call.callId, name: call.name, args } }],
+    'model',
+    new AbortController().signal,
+  );
+  expect(responses[0].functionResponse?.response?.['error']).toContain(message);
+  expect(broker.acquire).not.toHaveBeenCalled();
+});
+
+it('accepts the runtime foreground spelling is_background false', async () => {
+  turn = createTurn(true);
+  broker.execute.mockResolvedValue({
+    executionStatus: 'not_started',
+    responseParts: [],
+    error: { message: 'command validation failed' },
+    capture: null,
+  });
+  const args = { command: 'pwd', is_background: 'FaLsE' };
+  const call = { ...calls[0], name: 'run_shell_command', args };
+  await turn.execute(
+    [call],
+    [{ functionCall: { id: call.callId, name: call.name, args } }],
+    'model',
+    new AbortController().signal,
+  );
+  expect(broker.prepare).toHaveBeenCalledOnce();
+  expect(JSON.parse(broker.execute.mock.calls[0][1])).toEqual({
+    toolName: 'run_shell_command',
+    input: { command: 'pwd', is_background: false },
+  });
+});
+
+it('blocks recovery if the durable refusal cannot be committed', async () => {
+  const original = commit;
+  commit = async (...args) => {
+    if (args[0] === 'tool_result') throw new Error('history write failed');
+    return original(...args);
+  };
+  turn = createTurn(true);
+  const call = {
+    ...calls[0],
+    name: 'run_shell_command',
+    args: { command: 'x', is_background: true },
+  };
+  await expect(
+    turn.execute(
+      [call],
+      [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
+      'model',
+      new AbortController().signal,
+    ),
+  ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+  await expect(turn.finish()).rejects.toBeInstanceOf(
+    HostedToolRecoveryRequiredError,
+  );
+  expect(broker.acquire).not.toHaveBeenCalled();
+});
+
+it.each([false, true])(
+  'preserves the admitted Shell outcome when history rejects it: %s',
+  async (rejectHistory) => {
+    turn = createTurn(true);
+    broker.prepare.mockResolvedValue('execution-shell');
+    const manifest = await session.resources.publish(
+      'managed-tool-result-manifest',
+      Buffer.from('{}'),
+    );
+    const envelope = {
+      executionStatus: 'error',
+      responseParts: boundedShellPreview([
+        { text: '\u0001'.repeat(70_000) + '\nBUILD FAILED\nExit Code: 3' },
+      ]),
+      error: { message: 'exit 3' },
+      capture: {
+        captureStatus: 'complete',
+        captureReason: null,
+        manifest,
+        previewTruncated: true,
+        deliveryStatus: 'committed',
+      },
+    };
+    const outcomeRef = await session.resources.publish(
+      'managed-tool-outcome',
+      Buffer.from(JSON.stringify({ envelope })),
+    );
+    const receipt = {
+      executionCallId: 'execution-shell',
+      manifest,
+      deliveryStatus: 'committed' as const,
+      historyRevision: 1,
+      outcomeRef,
+    };
+    vi.spyOn(HostedShellPublisher.prototype, 'receipt').mockResolvedValue(
+      receipt,
+    );
+    broker.execute.mockResolvedValue(envelope);
+    const resolve = vi.spyOn(harness, 'resolveAwaitRuntime');
+    const publish = vi.spyOn(session.resources, 'publish');
+    messageFitsInline.mockImplementation(
+      (...args: unknown[]) => args[0] !== 'tool_result' || !rejectHistory,
+    );
+    const call = {
+      ...calls[0],
+      name: 'run_shell_command',
+      args: { command: 'sh build.sh' },
+    };
+    const result = turn.execute(
+      [call],
+      [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
+      'model',
+      new AbortController().signal,
+    );
+    if (rejectHistory) {
+      await expect(result).rejects.toMatchObject({
+        cause: {
+          message:
+            'Admitted Shell result exceeds the inline Session Store limit.',
+        },
+      });
+      expect(resolve).not.toHaveBeenCalled();
+      expect(broker.acknowledge).not.toHaveBeenCalled();
+      expect(
+        (await session.sink.project()).filter(
+          (record) => record.type === 'tool_result',
+        ),
+      ).toEqual([]);
+      await expect(turn.finish()).rejects.toBeInstanceOf(
+        HostedToolRecoveryRequiredError,
+      );
+    } else {
+      const responses = await result;
+      expect(JSON.stringify(responses)).toContain('BUILD FAILED');
+      expect(JSON.stringify(responses)).toContain('Exit Code: 3');
+      expect(responses[0].functionResponse?.response?.['capture']).toEqual(
+        envelope.capture,
+      );
+      expect(responses[0].functionResponse?.response).not.toHaveProperty(
+        'outputOmitted',
+      );
+      expect(
+        Buffer.byteLength(
+          JSON.stringify((await session.sink.project()).at(-1)),
+        ),
+      ).toBeLessThan(64 * 1024);
+      expect(resolve).toHaveBeenCalledWith('execution-shell', outcomeRef);
+      expect(broker.acknowledge).toHaveBeenCalledWith(
+        'execution-shell',
+        receipt,
+      );
+      await turn.consumeResults();
+      await turn.finish();
+    }
+    expect(
+      publish.mock.calls.some(([kind]) => kind === 'managed-tool-outcome'),
+    ).toBe(false);
   },
 );
