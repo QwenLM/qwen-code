@@ -196,6 +196,34 @@ describe('bundled Mem0 settings', () => {
     });
   });
 
+  it('pins the spawn interpreter and the timeout slack to the runtime contract', () => {
+    const server = createBundledMem0Server(
+      { baseUrl: 'https://mem0.example' },
+      process.cwd(),
+    );
+    // `command` is the interpreter a packaged or GUI-launched install actually
+    // has. A bare `node` is frequently absent from PATH there, the server then
+    // fails to spawn and Mem0 search disappears with no settings error — and
+    // the same value gates bundledMem0Hooks and is interpolated as the hook
+    // interpreter, so the write-confirmation gate goes with it.
+    expect(server.command).toBe(process.execPath);
+    // The MCP-level timeout keeps 5s of slack over the request timeout, so a
+    // call at the documented ceiling is not declared failed while its own
+    // request is still legitimately in flight.
+    expect(JSON.parse(server.env!['QWEN_BUNDLED_MEM0_CONFIG']).timeoutMs).toBe(
+      5000,
+    );
+    expect(server.timeout).toBe(10_000);
+    const maxed = createBundledMem0Server(
+      { baseUrl: 'https://mem0.example', timeoutMs: 30_000 },
+      process.cwd(),
+    );
+    expect(JSON.parse(maxed.env!['QWEN_BUNDLED_MEM0_CONFIG']).timeoutMs).toBe(
+      30_000,
+    );
+    expect(maxed.timeout).toBe(35_000);
+  });
+
   it.each([
     { baseUrl: 'http://mem0.example' },
     { baseUrl: 'https://secret@mem0.example' },
@@ -215,6 +243,12 @@ describe('bundled Mem0 settings', () => {
       scope: { userId: 'wrong-field' },
     },
     { baseUrl: 'https://mem0.example', scope: { appId: 'wrong-field' } },
+    // timeoutMs bounds are declared twice — here (zod, the runtime contract)
+    // and in settingsSchema.ts (the settings-dialog/JSON-schema copy, pinned by
+    // settingsSchema.test.ts). Both must match docs/users/features/mem0.md.
+    { baseUrl: 'https://mem0.example', timeoutMs: 0 },
+    { baseUrl: 'https://mem0.example', timeoutMs: 30_001 },
+    { baseUrl: 'https://mem0.example', timeoutMs: 1.5 },
   ])('rejects unsupported or unsafe configuration %j', (settings) => {
     expect(() => createBundledMem0Server(settings, process.cwd())).toThrow();
   });
