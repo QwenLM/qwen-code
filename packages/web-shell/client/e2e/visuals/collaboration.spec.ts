@@ -273,8 +273,11 @@ async function openConversation(
     { id: 'th_main', cwd },
   );
   await gotoNewSession(page, theme);
+  // The approval is the one card only this fixture's docs run produces.
   await expect(
-    page.getByText('WriteFile: docs/testing.md').first(),
+    page.locator('[data-web-shell-permission-panel]').filter({
+      hasText: 'docs/testing.md',
+    }),
   ).toBeVisible();
 }
 
@@ -300,17 +303,6 @@ for (const theme of THEMES) {
     await captureScreenshot(page, `collab-team-panel-${theme}`);
   });
 
-  test(`collaboration details (${theme})`, async ({ page }, testInfo) => {
-    const cwd = await setup(page, resolveBaseURL(testInfo));
-    await openConversation(page, theme, cwd);
-    await page
-      .getByRole('button', { name: 'Task details', exact: true })
-      .click();
-    await expect(page.getByRole('heading', { name: 'Runs' })).toBeVisible();
-    await clearFocus(page);
-    await captureScreenshot(page, `collab-details-${theme}`);
-  });
-
   test(`collaboration mention picker (${theme})`, async ({
     page,
   }, testInfo) => {
@@ -333,7 +325,7 @@ for (const theme of THEMES) {
     await captureScreenshot(page, `collab-agents-${theme}`);
 
     await page
-      .getByRole('button', { name: 'Conversations', exact: true })
+      .getByRole('radio', { name: 'Conversations', exact: true })
       .click();
     await expect(page.getByText('3 working, 1 queued')).toBeVisible();
     await clearFocus(page);
@@ -447,7 +439,7 @@ for (const theme of THEMES) {
       .getByRole('button', { name: 'Agents', exact: true })
       .first()
       .click();
-    await page.getByRole('button', { name: 'Runtimes', exact: true }).click();
+    await page.getByRole('radio', { name: 'Runtimes', exact: true }).click();
     await expect(page.getByText('mac-mini', { exact: true })).toBeVisible();
     await clearFocus(page);
     await captureScreenshot(page, `collab-runtimes-${theme}`);

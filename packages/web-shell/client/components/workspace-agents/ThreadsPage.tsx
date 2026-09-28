@@ -12,9 +12,26 @@ import {
   type AgentShareSummary,
 } from './share-agent-dialog';
 import { useMemo, useState, type FormEvent } from 'react';
-import { MoreHorizontalIcon, PlusIcon } from 'lucide-react';
+import {
+  ChevronRightIcon,
+  MessagesSquareIcon,
+  MoreHorizontalIcon,
+  PlusIcon,
+  ServerIcon,
+} from 'lucide-react';
 
+import { AuthorAvatar } from '../messages/author-avatar';
+import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
+import { Card, CardDescription, CardTitle } from '../ui/card';
+import {
+  Empty,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from '../ui/empty';
+import { ToggleGroup, ToggleGroupItem } from '../ui/toggle-group';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -202,20 +219,20 @@ function ThreadRow({
   return (
     <button
       type="button"
-      className={
-        needsAttention(thread)
-          ? `${styles.row} ${styles.attention}`
-          : styles.row
-      }
+      className={styles.row}
+      data-attention={needsAttention(thread) || undefined}
       onClick={() => onOpen(thread.id)}
     >
-      <span className={styles.rowTitle}>{thread.title}</span>
-      {/* The status sentence comes from the server's resolver. The UI only
-          translates it one for one; it must not derive a second, shorter
-          vocabulary, which would win because it is the one on screen. */}
-      <span className={styles.rowReason}>
-        {statusReasonLabel(thread.reason, t)}
+      <span className={styles.rowText}>
+        <span className={styles.rowTitle}>{thread.title}</span>
+        {/* The status sentence comes from the server's resolver. The UI only
+            translates it one for one; it must not derive a second, shorter
+            vocabulary, which would win because it is the one on screen. */}
+        <span className={styles.rowReason}>
+          {statusReasonLabel(thread.reason, t)}
+        </span>
       </span>
+      <ChevronRightIcon aria-hidden="true" className={styles.rowChevron} />
     </button>
   );
 }
@@ -248,10 +265,13 @@ function Group({
         {t(`collab.group.${group.key}`)}
         <span className={styles.groupCount}>{group.threads.length}</span>
       </button>
-      {!collapsed &&
-        group.threads.map((thread) => (
-          <ThreadRow key={thread.id} thread={thread} onOpen={onOpenThread} />
-        ))}
+      {!collapsed && (
+        <div className={styles.list}>
+          {group.threads.map((thread) => (
+            <ThreadRow key={thread.id} thread={thread} onOpen={onOpenThread} />
+          ))}
+        </div>
+      )}
     </section>
   );
 }
@@ -395,34 +415,27 @@ export function ThreadsPage({
     onPreviewThread?.(undefined);
   };
 
+  // Laid out as the role templates view it swaps with: title and actions,
+  // the view switch where that page has its filter, then the list.
   return (
-    <div className={styles.page}>
-      <header className={styles.pageHeader}>
-        <nav className={styles.viewTabs} aria-label={t('agents.title')}>
-          {(['agents', 'tasks', 'runtime'] as const).map((item) => (
-            <Button
-              key={item}
-              variant={view === item ? 'secondary' : 'ghost'}
-              size="sm"
-              aria-pressed={view === item}
-              onClick={() => openView(item)}
-            >
-              {t(`collab.tabs.${item}`)}
-            </Button>
-          ))}
-        </nav>
-        <div className={styles.headerActions}>
+    <div className="flex w-full flex-col gap-6">
+      <div className="flex items-start justify-between gap-4">
+        <div className="min-w-0">
+          <h1 className="text-xl font-semibold text-balance">
+            {t('agents.title')}
+          </h1>
+          <p className="mt-1 text-sm text-muted-foreground">
+            {t(`collab.tabs.${view}Hint`)}
+          </p>
+        </div>
+        <div className="flex shrink-0 gap-2">
           {view === 'agents' && onOpenDefinitions ? (
-            <Button variant="ghost" size="sm" onClick={onOpenDefinitions}>
+            <Button variant="outline" onClick={onOpenDefinitions}>
               {t('collab.agent.roles')}
             </Button>
           ) : null}
           {view === 'agents' && onOpenAgentBuilder ? (
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => onOpenAgentBuilder()}
-            >
+            <Button onClick={() => onOpenAgentBuilder()}>
               <PlusIcon data-icon="inline-start" />
               {t('collab.agent.new')}
             </Button>
@@ -430,7 +443,6 @@ export function ThreadsPage({
           {view === 'runtime' && onCreateJoinToken ? (
             <Button
               variant="outline"
-              size="sm"
               disabled={pending}
               onClick={() => setAddingRuntime(true)}
             >
@@ -440,7 +452,6 @@ export function ThreadsPage({
           ) : null}
           {view === 'tasks' ? (
             <Button
-              size="sm"
               onClick={() => {
                 setCreating('thread');
                 setTaskAssignee('');
@@ -452,11 +463,24 @@ export function ThreadsPage({
             </Button>
           ) : null}
         </div>
-      </header>
-      <div className={styles.pageBody}>
-        <p className="mb-5 text-sm text-muted-foreground">
-          {t(`collab.tabs.${view}Hint`)}
-        </p>
+      </div>
+      <ToggleGroup
+        type="single"
+        value={view}
+        onValueChange={(value) => {
+          if (value) openView(value as AgentWorkspaceView);
+        }}
+        variant="outline"
+        size="sm"
+        aria-label={t('agents.title')}
+      >
+        {(['agents', 'tasks', 'runtime'] as const).map((item) => (
+          <ToggleGroupItem key={item} value={item}>
+            {t(`collab.tabs.${item}`)}
+          </ToggleGroupItem>
+        ))}
+      </ToggleGroup>
+      <div className="contents">
         <Dialog
           open={view === 'tasks' && creating === 'thread'}
           onOpenChange={(open) => {
@@ -621,145 +645,168 @@ export function ThreadsPage({
         </Dialog>
 
         <section className={styles.roster} hidden={view !== 'agents'}>
-          <h2 className={styles.sectionTitle}>{t('collab.tabs.agents')}</h2>
           {agents.length === 0 ? (
-            <p className={styles.emptyRoster}>{t('collab.agent.empty')}</p>
+            <Empty className="border">
+              <EmptyHeader>
+                <EmptyMedia variant="icon">
+                  <PlusIcon />
+                </EmptyMedia>
+                <EmptyTitle>{t('collab.agent.empty')}</EmptyTitle>
+              </EmptyHeader>
+            </Empty>
           ) : (
             agents.map((agent) => (
-              <div
+              <Card
                 key={agent.id}
+                size="sm"
                 className={
                   agent.enabled && !agent.retiredAt
-                    ? styles.agentRow
-                    : `${styles.agentRow} ${styles.agentRowDisabled}`
+                    ? styles.agentCard
+                    : `${styles.agentCard} ${styles.agentRowDisabled}`
                 }
               >
-                <span
-                  className={
-                    agent.enabled && !agent.retiredAt
-                      ? styles.agentDot
-                      : styles.agentDotDisabled
-                  }
-                  style={agent.color ? { color: agent.color } : undefined}
-                  aria-hidden="true"
-                />
-                <button
-                  type="button"
-                  className={styles.agentName}
-                  aria-expanded={openAgentId === agent.id}
-                  onClick={() =>
-                    setOpenAgentId(
-                      openAgentId === agent.id ? undefined : agent.id,
-                    )
-                  }
-                >
-                  {agent.name}
-                </button>
-                <span className={styles.agentDescription}>
-                  {agent.description}
-                  <span className="block text-xs text-muted-foreground">
-                    {agentPlace(agent)}
-                  </span>
-                </span>
-                {agent.workingOn ? (
-                  <button
-                    type="button"
-                    className={`${styles.agentActivity} ${styles.agentActivityLink}`}
-                    onClick={() => onOpenThread(agent.workingOn!.id)}
-                  >
-                    {statusLabel(agent.workingOn.state)} ·{' '}
-                    {agent.workingOn.title}
-                  </button>
-                ) : (
-                  <span className={styles.agentActivity}>
-                    {agent.retiredAt
-                      ? t('collab.agentStatus.retired')
-                      : !agent.enabled
-                        ? t('collab.agentStatus.paused')
-                        : statusLabel(agent.status)}
-                  </span>
-                )}
-                <span className={styles.agentWaiting}>
-                  {agent.waiting
-                    ? t('collab.agent.waiting', { count: agent.waiting })
-                    : '—'}
-                </span>
-                {agent.retiredAt ? null : (
-                  <>
-                    <button
-                      type="button"
-                      className={styles.agentAction}
-                      disabled={!agent.enabled || pending}
-                      onClick={() => {
-                        openView('tasks');
-                        setTaskAssignee(agent.name);
-                        setCreating('thread');
-                        onPreviewThread?.(agent.name);
-                      }}
-                    >
-                      {t('collab.agent.mentionIt')}
-                    </button>
-                    <DropdownMenu>
-                      <DropdownMenuTrigger asChild>
+                <div className={styles.agentRow}>
+                  <AuthorAvatar
+                    name={agent.name}
+                    color={agent.color}
+                    size="md"
+                  />
+                  <div className={styles.agentMain}>
+                    <div className={styles.agentTitleLine}>
+                      <CardTitle className="min-w-0 truncate">
                         <button
                           type="button"
-                          className={styles.agentAction}
-                          aria-label={t('collab.agent.more', {
-                            name: agent.name,
-                          })}
-                        >
-                          <MoreHorizontalIcon size={16} aria-hidden="true" />
-                        </button>
-                      </DropdownMenuTrigger>
-                      <DropdownMenuContent align="end" className="min-w-40">
-                        {onUpdateAgent ? (
-                          <DropdownMenuItem
-                            onSelect={() => setConfiguring(agent.id)}
-                          >
-                            {t('collab.agent.configure')}
-                          </DropdownMenuItem>
-                        ) : null}
-                        {shares ? (
-                          <DropdownMenuItem
-                            onSelect={() =>
-                              setSharing({ id: agent.id, name: agent.name })
-                            }
-                          >
-                            {t('collab.agent.share')}
-                          </DropdownMenuItem>
-                        ) : null}
-                        <DropdownMenuItem
-                          disabled={pending}
-                          onSelect={() =>
-                            onSetAgentEnabled(agent.id, !agent.enabled)
+                          className={styles.agentName}
+                          aria-expanded={openAgentId === agent.id}
+                          onClick={() =>
+                            setOpenAgentId(
+                              openAgentId === agent.id ? undefined : agent.id,
+                            )
                           }
                         >
-                          {agent.enabled
-                            ? t('collab.agent.pause')
-                            : t('collab.agent.resume')}
-                        </DropdownMenuItem>
-                        <DropdownMenuSeparator />
-                        <DropdownMenuItem
-                          variant="destructive"
-                          disabled={Boolean(agent.workingOn || agent.waiting)}
-                          onSelect={() => {
-                            if (
-                              window.confirm(
-                                t('collab.agent.retireConfirm', {
-                                  name: agent.name,
-                                }),
-                              )
-                            ) {
-                              onDeleteAgent(agent.id);
+                          {agent.name}
+                        </button>
+                      </CardTitle>
+                      <Badge
+                        variant="secondary"
+                        className={styles.statusBadge}
+                        data-status={
+                          agent.retiredAt || !agent.enabled
+                            ? 'off'
+                            : agent.workingOn
+                              ? 'working'
+                              : agent.status
+                        }
+                      >
+                        {agent.retiredAt
+                          ? t('collab.agentStatus.retired')
+                          : !agent.enabled
+                            ? t('collab.agentStatus.paused')
+                            : agent.workingOn
+                              ? statusLabel(agent.workingOn.state)
+                              : statusLabel(agent.status)}
+                      </Badge>
+                      {agent.waiting ? (
+                        <Badge variant="outline" className="text-[10px]">
+                          {t('collab.agent.waiting', { count: agent.waiting })}
+                        </Badge>
+                      ) : null}
+                    </div>
+                    <CardDescription className="truncate text-xs">
+                      {agent.description || '—'}
+                    </CardDescription>
+                    <span className="truncate text-xs text-muted-foreground">
+                      {agentPlace(agent)}
+                    </span>
+                    {agent.workingOn ? (
+                      <button
+                        type="button"
+                        className={styles.agentActivityLink}
+                        onClick={() => onOpenThread(agent.workingOn!.id)}
+                      >
+                        {t('collab.agent.workingOn', {
+                          title: agent.workingOn.title,
+                        })}
+                      </button>
+                    ) : null}
+                  </div>
+                  {agent.retiredAt ? null : (
+                    <div className={styles.agentActions}>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        disabled={!agent.enabled || pending}
+                        onClick={() => {
+                          openView('tasks');
+                          setTaskAssignee(agent.name);
+                          setCreating('thread');
+                          onPreviewThread?.(agent.name);
+                        }}
+                      >
+                        {t('collab.agent.mentionIt')}
+                      </Button>
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <Button
+                            variant="ghost"
+                            size="icon-sm"
+                            aria-label={t('collab.agent.more', {
+                              name: agent.name,
+                            })}
+                          >
+                            <MoreHorizontalIcon aria-hidden="true" />
+                          </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end" className="min-w-40">
+                          {onUpdateAgent ? (
+                            <DropdownMenuItem
+                              onSelect={() => setConfiguring(agent.id)}
+                            >
+                              {t('collab.agent.configure')}
+                            </DropdownMenuItem>
+                          ) : null}
+                          {shares ? (
+                            <DropdownMenuItem
+                              onSelect={() =>
+                                setSharing({ id: agent.id, name: agent.name })
+                              }
+                            >
+                              {t('collab.agent.share')}
+                            </DropdownMenuItem>
+                          ) : null}
+                          <DropdownMenuItem
+                            disabled={pending}
+                            onSelect={() =>
+                              onSetAgentEnabled(agent.id, !agent.enabled)
                             }
-                          }}
-                        >
-                          {t('collab.agent.retire')}
-                        </DropdownMenuItem>
-                      </DropdownMenuContent>
-                    </DropdownMenu>
-                  </>
-                )}
+                          >
+                            {agent.enabled
+                              ? t('collab.agent.pause')
+                              : t('collab.agent.resume')}
+                          </DropdownMenuItem>
+                          <DropdownMenuSeparator />
+                          <DropdownMenuItem
+                            variant="destructive"
+                            disabled={Boolean(agent.workingOn || agent.waiting)}
+                            onSelect={() => {
+                              if (
+                                window.confirm(
+                                  t('collab.agent.retireConfirm', {
+                                    name: agent.name,
+                                  }),
+                                )
+                              ) {
+                                onDeleteAgent(agent.id);
+                              }
+                            }}
+                          >
+                            {t('collab.agent.retire')}
+                          </DropdownMenuItem>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+                    </div>
+                  )}
+                </div>
                 {configuring === agent.id && onUpdateAgent ? (
                   <form
                     className={styles.agentConfig}
@@ -886,7 +933,7 @@ export function ThreadsPage({
                     )}
                   </section>
                 ) : null}
-              </div>
+              </Card>
             ))
           )}
           {capabilities ? (
@@ -912,11 +959,16 @@ export function ThreadsPage({
         </section>
 
         {groups.length === 0 ? (
-          <div className={styles.emptyState} hidden={view !== 'tasks'}>
+          <Empty className="border" hidden={view !== 'tasks'}>
             {/* An empty screen is an invitation, not a shrug. */}
-            <p className={styles.emptyLead}>{t('collab.empty.lead')}</p>
-            <p>{t('collab.empty.hint')}</p>
-          </div>
+            <EmptyHeader>
+              <EmptyMedia variant="icon">
+                <MessagesSquareIcon />
+              </EmptyMedia>
+              <EmptyTitle>{t('collab.empty.lead')}</EmptyTitle>
+              <EmptyDescription>{t('collab.empty.hint')}</EmptyDescription>
+            </EmptyHeader>
+          </Empty>
         ) : (
           groups.map((group) => (
             <Group
@@ -1025,10 +1077,17 @@ export function ThreadsPage({
             </section>
           ))
         ) : view === 'runtime' ? (
-          <div className={styles.emptyState}>
-            <p className={styles.emptyLead}>{t('collab.runtime.empty')}</p>
-            <p>{t('collab.runtime.emptyHint')}</p>
-          </div>
+          <Empty className="border">
+            <EmptyHeader>
+              <EmptyMedia variant="icon">
+                <ServerIcon />
+              </EmptyMedia>
+              <EmptyTitle>{t('collab.runtime.empty')}</EmptyTitle>
+              <EmptyDescription>
+                {t('collab.runtime.emptyHint')}
+              </EmptyDescription>
+            </EmptyHeader>
+          </Empty>
         ) : null}
       </div>
       {onCreateJoinToken && (

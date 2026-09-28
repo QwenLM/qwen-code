@@ -1,21 +1,42 @@
-import { useEffect, useMemo, useState } from 'react';
 import {
-  Activity,
+  createContext,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
+  type ReactNode,
+} from 'react';
+import {
+  ArrowLeftIcon,
   Check,
-  ListTodo,
+  ChevronRightIcon,
   LoaderCircle,
-  ShieldQuestion,
+  MoreHorizontalIcon,
+  UsersRound,
   X,
 } from 'lucide-react';
 import { createPortal } from 'react-dom';
 import { MessageList } from '../MessageList';
 import { ChatEditor } from '../ChatEditor';
 import { Button } from '../ui/button';
-import type { Message } from '../../adapters/types';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '../ui/dropdown-menu';
+import { parseTitle, ToolApproval } from '../messages/ToolApproval';
+import { AuthorAvatar } from '../messages/author-avatar';
+import type {
+  Message,
+  PermissionOption,
+  PermissionRequest,
+} from '../../adapters/types';
 import { RunRowView, type ThreadDetailView } from './ThreadView';
 import {
   buildRunRows,
   CONVERSATION_CONTEXT_PREFIX,
+  formatBudget,
   formatElapsed,
   statusReasonLabel,
   type RoutingPreviewTarget,
@@ -26,6 +47,10 @@ import {
 } from '../../customization';
 import { useI18n } from '../../i18n';
 import type { RunView } from './agents-view-logic';
+// The live-work strip is the transcript's own "Parallel agents" group with
+// agents in it, so it borrows that group's classes rather than restating them.
+import group from '../messages/tools/ParallelAgentsGroup.module.css';
+import styles from './thread-chat.module.css';
 
 /** No agent activity for this long: say it may be stuck and offer Stop. */
 const STALL_NOTICE_MS = 5 * 60_000;
@@ -130,6 +155,10 @@ const SKIP_REASONS = new Set([
   'self_trigger',
 ]);
 
+const LIVE_STATUSES = new Set(['queued', 'running', 'finishing', 'cancelling']);
+const isLive = (run?: RunView) =>
+  run !== undefined && LIVE_STATUSES.has(run.status);
+
 /**
  * Who a reply will reach, said before it is sent. Naming who is left out
  * matters as much: an @ to one member must not read like a broadcast.
@@ -152,7 +181,7 @@ function describePreview(
 /** Everyone who has worked on or been handed this thread, lead first. */
 function teamMembers(
   thread: ThreadDetailView,
-  agents: readonly { id: string; name: string }[],
+  agents: readonly AgentEntry[],
 ): TeamMember[] {
   const byName = new Map<string, TeamMember>();
   const add = (name: string, patch: Partial<TeamMember> = {}) => {
@@ -165,13 +194,10 @@ function teamMembers(
   }
   for (const run of thread.runs) {
     const current = byName.get(run.agentName)?.run;
-    const live = (r?: RunView) =>
-      r !== undefined &&
-      ['queued', 'running', 'finishing', 'cancelling'].includes(r.status);
     const newer =
       !current ||
-      (live(run) && !live(current)) ||
-      (live(run) === live(current) &&
+      (isLive(run) && !isLive(current)) ||
+      (isLive(run) === isLive(current) &&
         (run.startedAt ?? 0) >= (current.startedAt ?? 0));
     add(run.agentName, {
       agentId: run.agentId,
@@ -180,7 +206,9 @@ function teamMembers(
     });
   }
   for (const member of byName.values()) {
-    member.agentId ??= agents.find((agent) => agent.name === member.name)?.id;
+    const entry = agents.find((agent) => agent.name === member.name);
+    member.agentId ??= entry?.id;
+    member.color ??= entry?.color;
   }
   return [...byName.values()].sort((a, b) => Number(b.lead) - Number(a.lead));
 }
@@ -188,7 +216,7 @@ function teamMembers(
 /** A member's one-word state, for the team list. */
 function memberStatus(
   member: TeamMember,
-  agents: readonly { id: string; runtime?: { status: string } }[],
+  agents: readonly AgentEntry[],
   now: number,
   t: (key: string, vars?: Record<string, string | number>) => string,
 ): { text: string; tone: string } {
@@ -222,6 +250,8 @@ function memberStatus(
         return { text: t('collab.member.responding'), tone: running };
       return { text: t('collab.member.starting'), tone: running };
     }
+    case 'cancelled':
+      return { text: t('collab.member.cancelled'), tone: attention };
     case 'failed':
       return {
         text:
@@ -235,6 +265,274 @@ function memberStatus(
   }
 }
 
+interface AgentEntry {
+  id: string;
+  name: string;
+  color?: string;
+  enabled: boolean;
+  retiredAt?: number;
+  status?: string;
+  runtime?: { label: string; status: string };
+}
+
+/**
+ * The composer toolbar is a component type, not an element, so what it shows
+ * travels through context: a new renderer per keystroke would remount it.
+ */
+const ComposerHintContext = createContext<ReactNode>(null);
+
+function ComposerHint() {
+  const hint = useContext(ComposerHintContext);
+  return hint ? <span className={styles.composerHint}>{hint}</span> : null;
+}
+
+function toApprovalRequest(
+  permission: NonNullable<NonNullable<RunView['progress']>['permission']>,
+  agent: string,
+  t: ReturnType<typeof useI18n>['t'],
+): PermissionRequest {
+  // "WriteFile: docs/testing.md" heads the card as the tool with its target
+  // under it, as the main chat's approval shows it.
+  const { description } = parseTitle(permission.title);
+  return {
+    id: permission.requestId,
+    title: permission.title || t('collab.approval.title', { agent }),
+    content: [],
+    ...(description ? { rawInput: { description } } : {}),
+    options: permission.options.map(
+      (option): PermissionOption => ({
+        id: option.optionId,
+        label: option.name,
+        ...(option.kind
+          ? { kind: option.kind as PermissionOption['kind'] }
+          : {}),
+      }),
+    ),
+  };
+}
+
+/**
+ * The Team panel: who is in this conversation and what each of them is doing,
+ * with the run detail one click under each name rather than in a second list.
+ */
+function TeamPanel({
+  thread,
+  agents,
+  pending,
+  onOpenAgentSession,
+  onCancelRun,
+  onOpenThread,
+  onAssign,
+}: {
+  thread: ThreadDetailView;
+  agents: readonly AgentEntry[];
+  pending: boolean;
+  onOpenAgentSession?: (sessionId: string) => void;
+  onCancelRun: (runId: string) => void;
+  onOpenThread: (threadId: string) => void;
+  onAssign?: (assignee: string) => void;
+}) {
+  const { t } = useI18n();
+  const { live, past } = buildRunRows(thread.runs, t);
+  const now = useNow(live.length > 0);
+  const members = teamMembers(thread, agents);
+  // Working members open by default; a click overrides either way.
+  const [toggled, setToggled] = useState<Record<string, boolean>>({});
+  const budget = formatBudget(thread.budget, t);
+  const closed = thread.status === 'done' || thread.status === 'cancelled';
+  return (
+    <section className={styles.team} aria-label={t('collab.team.title')}>
+      <header className={styles.teamHeader}>
+        <h2 className={styles.teamTitle}>{thread.title}</h2>
+        <p className={styles.teamReason}>
+          {statusReasonLabel(thread.reason, t)}
+        </p>
+        {thread.parent && (
+          <button
+            type="button"
+            className={styles.teamLink}
+            onClick={() => onOpenThread(thread.parent!.id)}
+          >
+            {t('collab.team.parent', { title: thread.parent.title })}
+          </button>
+        )}
+      </header>
+      {thread.acceptanceCriteria ? (
+        <div className={styles.criteria}>
+          <h3 className={styles.sectionTitle}>{t('collab.detail.doneWhen')}</h3>
+          <p className={styles.criteriaText}>{thread.acceptanceCriteria}</p>
+        </div>
+      ) : null}
+
+      <h3 className={styles.sectionTitle}>
+        {t('collab.team.members', { count: members.length })}
+      </h3>
+      {members.length === 0 && (
+        <p className={styles.muted}>{t('collab.team.empty')}</p>
+      )}
+      <ul className={styles.memberList}>
+        {members.map((member) => {
+          const { text, tone } = memberStatus(member, agents, now, t);
+          const runs = live.filter((row) => row.run.agentName === member.name);
+          const expandable = runs.length > 0 || member.run !== undefined;
+          const open = expandable && (toggled[member.name] ?? runs.length > 0);
+          const sessionId = member.run?.sessionId;
+          const rosterEntry = agents.find(
+            (agent) => agent.name === member.name,
+          );
+          const canLead = Boolean(
+            onAssign &&
+              !member.lead &&
+              !closed &&
+              rosterEntry?.enabled &&
+              !rosterEntry.retiredAt,
+          );
+          return (
+            <li key={member.name} className={styles.member}>
+              <div className={styles.memberHead}>
+                <button
+                  type="button"
+                  className={styles.memberToggle}
+                  aria-expanded={expandable ? open : undefined}
+                  disabled={!expandable}
+                  onClick={() =>
+                    setToggled((current) => ({
+                      ...current,
+                      [member.name]: !open,
+                    }))
+                  }
+                >
+                  <AuthorAvatar name={member.name} color={member.color} />
+                  <span className={styles.memberText}>
+                    <span className={styles.memberName}>
+                      {member.name}
+                      {member.lead && (
+                        <span className={styles.leadBadge}>
+                          {t('collab.team.lead')}
+                        </span>
+                      )}
+                    </span>
+                    <span className={`${styles.memberStatus} ${tone}`}>
+                      {text}
+                    </span>
+                  </span>
+                  {expandable && (
+                    <ChevronRightIcon
+                      aria-hidden="true"
+                      className={styles.memberChevron}
+                    />
+                  )}
+                </button>
+                {(sessionId && onOpenAgentSession) || canLead ? (
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button
+                        variant="ghost"
+                        size="icon-xs"
+                        aria-label={t('collab.agent.more', {
+                          name: member.name,
+                        })}
+                      >
+                        <MoreHorizontalIcon />
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end" className="min-w-40">
+                      {sessionId && onOpenAgentSession ? (
+                        <DropdownMenuItem
+                          onSelect={() => onOpenAgentSession(sessionId)}
+                        >
+                          {t('collab.runRow.openSession', {
+                            agent: member.name,
+                          })}
+                        </DropdownMenuItem>
+                      ) : null}
+                      {canLead ? (
+                        <DropdownMenuItem
+                          disabled={pending}
+                          onSelect={() => onAssign?.(member.name)}
+                        >
+                          {t('collab.team.makeLead')}
+                        </DropdownMenuItem>
+                      ) : null}
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                ) : null}
+              </div>
+              {open && (
+                <div className={styles.memberDetail}>
+                  {(runs.length > 0
+                    ? runs
+                    : buildRunRows([member.run!], t).past
+                  ).map((row) => (
+                    <RunRowView
+                      key={row.run.id}
+                      row={row}
+                      agent={agents.find(
+                        (agent) => agent.id === row.run.agentId,
+                      )}
+                      hideAgent
+                      onOpenAgentSession={onOpenAgentSession}
+                      onCancelRun={pending ? undefined : onCancelRun}
+                    />
+                  ))}
+                </div>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+
+      {!!thread.children?.length && (
+        <>
+          <h3 className={styles.sectionTitle}>
+            {t('collab.team.tasks', { count: thread.children.length })}
+          </h3>
+          <ul className={styles.memberList}>
+            {thread.children.map((child) => (
+              <li key={child.id}>
+                <button
+                  type="button"
+                  className={styles.childRow}
+                  onClick={() => onOpenThread(child.id)}
+                >
+                  <span className={styles.memberName}>{child.title}</span>
+                  <span className={styles.memberStatus}>
+                    {[child.assigneeName, statusReasonLabel(child.reason, t)]
+                      .filter(Boolean)
+                      .join(' · ')}
+                  </span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+
+      {past.length > 0 && (
+        <details className={styles.history}>
+          <summary className={styles.sectionTitle}>
+            {t('collab.team.history', { count: past.length })}
+          </summary>
+          {past.map((row) => (
+            <RunRowView
+              key={row.run.id}
+              row={row}
+              agent={agents.find((agent) => agent.id === row.run.agentId)}
+              onOpenAgentSession={onOpenAgentSession}
+            />
+          ))}
+        </details>
+      )}
+
+      <footer className={styles.budget}>
+        <span>{budget.turns}</span>
+        <span>{budget.tokens}</span>
+        <span>{budget.scope}</span>
+      </footer>
+    </section>
+  );
+}
+
 export function ThreadChat({
   thread,
   agents,
@@ -242,12 +540,13 @@ export function ThreadChat({
   pending,
   onSend,
   onDraftChange,
-  onDetails,
   onOpenAgentSession,
   onCancelRun,
   onMarkDone,
   onOpenThread,
   onRespondPermission,
+  onAssign,
+  onBack,
   activityOnly = false,
   onOpenActivity,
   headerActionsContainer,
@@ -256,19 +555,11 @@ export function ThreadChat({
   activityOnly?: boolean;
   onOpenActivity?: () => void;
   preview?: readonly RoutingPreviewTarget[];
-  agents: readonly {
-    id: string;
-    name: string;
-    enabled: boolean;
-    retiredAt?: number;
-    status?: string;
-    runtime?: { label: string; status: string };
-  }[];
+  agents: readonly AgentEntry[];
   thread: ThreadDetailView;
   pending: boolean;
   onSend: (text: string) => Promise<boolean>;
   onDraftChange: (text: string) => void;
-  onDetails: () => void;
   onOpenAgentSession?: (sessionId: string) => void;
   onCancelRun: (runId: string) => void;
   onMarkDone: () => void;
@@ -278,14 +569,20 @@ export function ThreadChat({
     requestId: string,
     optionId: string,
   ) => Promise<unknown>;
+  /** Hands the conversation to another agent. */
+  onAssign?: (assignee: string) => void;
+  /** Shown when the conversation is not in the shell's own chat column. */
+  onBack?: () => void;
 }) {
   const customization = useWebShellCustomization();
   const { t } = useI18n();
   const [sending, setSending] = useState(false);
   const [answered, setAnswered] = useState<ReadonlySet<string>>(new Set());
+  const [contextOpen, setContextOpen] = useState(false);
+  const [liveOpen, setLiveOpen] = useState(true);
   // "Keep waiting" on a quiet run hides the stall warning for a while.
   const [snoozedUntil, setSnoozedUntil] = useState<Record<string, number>>({});
-  const { live, past } = buildRunRows(thread.runs, t);
+  const { live } = buildRunRows(thread.runs, t);
   const now = useNow(live.length > 0);
   // Offer a retry for an agent whose latest run failed and that is not
   // already working again on this thread.
@@ -326,198 +623,110 @@ export function ThreadChat({
       );
     });
   }, [thread.runs, thread.status, live, agents]);
-  const messages = useMemo<Message[]>(
-    () =>
-      [
-        ...(thread.body && !thread.body.startsWith(CONVERSATION_CONTEXT_PREFIX)
-          ? [
-              {
-                id: `${thread.id}:description`,
-                role: 'user' as const,
-                content: thread.body,
+  const colorOf = useMemo(() => {
+    const colors = new Map<string, string>();
+    for (const agent of agents)
+      if (agent.color) colors.set(agent.name, agent.color);
+    for (const run of thread.runs)
+      if (run.agentColor) colors.set(run.agentName, run.agentColor);
+    return (name: string) => colors.get(name);
+  }, [agents, thread.runs]);
+  const messages = useMemo<Message[]>(() => {
+    const author = (name: string) => {
+      const color = colorOf(name);
+      return { name, ...(color ? { color } : {}) };
+    };
+    return [
+      ...(thread.body && !thread.body.startsWith(CONVERSATION_CONTEXT_PREFIX)
+        ? [
+            {
+              id: `${thread.id}:description`,
+              role: 'user' as const,
+              content: thread.body,
+            },
+          ]
+        : []),
+      ...thread.posts.map(
+        (post): Message =>
+          post.authorKind === 'human'
+            ? {
+                id: post.id,
+                role: 'user',
+                content: post.text,
+                timestamp: post.at,
+              }
+            : {
+                id: post.id,
+                role: 'assistant',
+                content: post.text,
+                author: author(post.authorName),
+                timestamp: post.at,
               },
-            ]
-          : []),
-        ...thread.posts.map(
-          (post): Message => ({
-            id: post.id,
-            role: post.authorKind === 'human' ? 'user' : 'assistant',
-            content:
-              post.authorKind === 'human'
-                ? post.text
-                : `**${post.authorName}**\n\n${post.text}`,
-            timestamp: post.at,
+      ),
+      ...thread.runs
+        .filter((run) => run.progress?.thoughtText)
+        .map(
+          (run): Message => ({
+            id: `${run.id}:thought`,
+            role: 'thinking',
+            content: run.progress!.thoughtText!,
+            author: author(run.agentName),
+            // Last update, not start: text being written now belongs
+            // after anything the run posted along the way.
+            timestamp: run.progress?.receivedAt ?? run.startedAt,
+            isStreaming:
+              run.status === 'running' && run.progress?.stage === 'thinking',
           }),
         ),
-        ...thread.runs
-          .filter((run) => run.progress?.thoughtText)
-          .map(
-            (run): Message => ({
-              id: `${run.id}:thought`,
-              role: 'thinking',
-              content: `${run.agentName}\n\n${run.progress!.thoughtText}`,
-              // Last update, not start: text being written now belongs
-              // after anything the run posted along the way.
-              timestamp: run.progress?.receivedAt ?? run.startedAt,
-              isStreaming:
-                run.status === 'running' && run.progress?.stage === 'thinking',
-            }),
-          ),
-        ...thread.runs
-          // Once the run's answer is a post, the post is the record; the live
-          // preview is only for text still being written. A status post the
-          // run made along the way is not its answer.
-          .filter(
-            (run) =>
-              run.progress?.outputText &&
-              !thread.posts.some(
-                (post) =>
-                  post.sourceRunId === run.id &&
-                  (run.status !== 'running' ||
-                    post.text.trim() === run.progress?.outputText?.trim()),
-              ),
-          )
-          .map(
-            (run): Message => ({
-              id: `${run.id}:output`,
-              role: 'assistant',
-              content: `**${run.agentName}**\n\n${run.progress?.outputText}`,
-              // Last update, not start: text being written now belongs
-              // after anything the run posted along the way.
-              timestamp: run.progress?.receivedAt ?? run.startedAt,
-              isStreaming: run.status === 'running',
-            }),
-          ),
-      ].sort(
-        (a: Message, b: Message) => (a.timestamp ?? 0) - (b.timestamp ?? 0),
-      ),
-    [thread.id, thread.body, thread.posts, thread.runs],
+      ...thread.runs
+        // Once the run's answer is a post, the post is the record; the live
+        // preview is only for text still being written. A status post the
+        // run made along the way is not its answer.
+        .filter(
+          (run) =>
+            run.progress?.outputText &&
+            !thread.posts.some(
+              (post) =>
+                post.sourceRunId === run.id &&
+                (run.status !== 'running' ||
+                  post.text.trim() === run.progress?.outputText?.trim()),
+            ),
+        )
+        .map(
+          (run): Message => ({
+            id: `${run.id}:output`,
+            role: 'assistant',
+            content: run.progress!.outputText!,
+            author: author(run.agentName),
+            // Last update, not start: text being written now belongs
+            // after anything the run posted along the way.
+            timestamp: run.progress?.receivedAt ?? run.startedAt,
+            isStreaming: run.status === 'running',
+          }),
+        ),
+    ].sort((a: Message, b: Message) => (a.timestamp ?? 0) - (b.timestamp ?? 0));
+  }, [thread.id, thread.body, thread.posts, thread.runs, colorOf]);
+
+  const members = useMemo(() => teamMembers(thread, agents), [thread, agents]);
+  const composerCustomization = useMemo(
+    () => ({ ...customization, renderComposerToolbarStart: ComposerHint }),
+    [customization],
   );
+
   if (activityOnly) {
-    const members = teamMembers(thread, agents);
     return (
-      <section
-        className="h-full overflow-y-auto p-4"
-        aria-label={t('collab.team.title')}
-      >
-        <h2 className="mb-1 text-sm font-medium">{t('collab.team.title')}</h2>
-        <p className="mb-4 truncate text-xs text-muted-foreground">
-          {thread.title}
-        </p>
-        <h3 className="mb-1 text-xs text-muted-foreground">
-          {t('collab.team.members', { count: members.length })}
-        </h3>
-        {members.length === 0 && (
-          <p className="mb-3 text-xs text-muted-foreground">
-            {t('collab.team.empty')}
-          </p>
-        )}
-        <ul className="mb-4">
-          {members.map((member) => {
-            const { text, tone } = memberStatus(member, agents, now, t);
-            const sessionId = member.run?.sessionId;
-            return (
-              <li key={member.name}>
-                <button
-                  type="button"
-                  disabled={!sessionId || !onOpenAgentSession}
-                  onClick={() => sessionId && onOpenAgentSession?.(sessionId)}
-                  className="flex w-full items-start gap-2 rounded-md px-2 py-1.5 text-left enabled:hover:bg-muted disabled:cursor-default"
-                >
-                  <span
-                    aria-hidden="true"
-                    className="mt-1.5 size-2 shrink-0 rounded-full bg-muted-foreground"
-                    style={
-                      member.color ? { background: member.color } : undefined
-                    }
-                  />
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate text-sm">
-                      {member.name}
-                      {member.lead && (
-                        <span className="ml-1.5 text-xs text-muted-foreground">
-                          {t('collab.team.lead')}
-                        </span>
-                      )}
-                    </span>
-                    <span className={`block truncate text-xs ${tone}`}>
-                      {text}
-                    </span>
-                  </span>
-                </button>
-              </li>
-            );
-          })}
-        </ul>
-        {live.length > 0 && (
-          <>
-            <h3 className="mb-1 text-xs text-muted-foreground">
-              {t('collab.team.live')}
-            </h3>
-            <div className="mb-4">
-              {live.map((row) => (
-                <RunRowView
-                  key={row.run.id}
-                  row={row}
-                  agent={agents.find((agent) => agent.id === row.run.agentId)}
-                  onOpenAgentSession={onOpenAgentSession}
-                  onCancelRun={pending ? undefined : onCancelRun}
-                />
-              ))}
-            </div>
-          </>
-        )}
-        {!!thread.children?.length && (
-          <>
-            <h3 className="mb-1 text-xs text-muted-foreground">
-              {t('collab.team.tasks', { count: thread.children.length })}
-            </h3>
-            <ul className="mb-4">
-              {thread.children.map((child) => (
-                <li key={child.id}>
-                  <button
-                    type="button"
-                    className="block w-full rounded-md px-2 py-1.5 text-left text-sm hover:bg-muted"
-                    onClick={() => onOpenThread(child.id)}
-                  >
-                    <span className="block truncate">{child.title}</span>
-                    <span className="block truncate text-xs text-muted-foreground">
-                      {[child.assigneeName, statusReasonLabel(child.reason, t)]
-                        .filter(Boolean)
-                        .join(' · ')}
-                    </span>
-                  </button>
-                </li>
-              ))}
-            </ul>
-          </>
-        )}
-        {thread.parent && (
-          <Button
-            variant="link"
-            className="mb-3 h-auto p-0"
-            onClick={() => onOpenThread(thread.parent!.id)}
-          >
-            {t('collab.team.parent', { title: thread.parent.title })}
-          </Button>
-        )}
-        {past.length > 0 && (
-          <details>
-            <summary className="cursor-pointer text-xs text-muted-foreground">
-              {t('collab.team.history', { count: past.length })}
-            </summary>
-            {past.map((row) => (
-              <RunRowView
-                key={row.run.id}
-                row={row}
-                onOpenAgentSession={onOpenAgentSession}
-              />
-            ))}
-          </details>
-        )}
-      </section>
+      <TeamPanel
+        thread={thread}
+        agents={agents}
+        pending={pending}
+        onOpenAgentSession={onOpenAgentSession}
+        onCancelRun={onCancelRun}
+        onOpenThread={onOpenThread}
+        {...(onAssign ? { onAssign } : {})}
+      />
     );
   }
+
   const actions = (
     <div className="flex shrink-0 items-center gap-1">
       {thread.status === 'in_review' && (
@@ -532,15 +741,6 @@ export function ThreadChat({
           <Check className="size-4" />
         </Button>
       )}
-      <Button
-        variant="ghost"
-        size="icon"
-        title={t('collab.details')}
-        aria-label={t('collab.details')}
-        onClick={onDetails}
-      >
-        <ListTodo className="size-4" />
-      </Button>
       {onOpenActivity && (
         <Button
           variant="ghost"
@@ -549,277 +749,338 @@ export function ThreadChat({
           aria-label={t('collab.team.title')}
           onClick={onOpenActivity}
         >
-          <Activity className="size-4" />
+          <UsersRound className="size-4" />
         </Button>
       )}
     </div>
   );
+
+  const approvals = live.flatMap(({ run }) => {
+    const permission = run.progress?.permission;
+    if (
+      !permission ||
+      !run.sessionId ||
+      !onRespondPermission ||
+      answered.has(permission.requestId)
+    )
+      return [];
+    const sessionId = run.sessionId;
+    return [
+      <div
+        key={run.id}
+        role="group"
+        aria-label={t('collab.approval.title', { agent: run.agentName })}
+        className={styles.approval}
+      >
+        <div className={styles.approvalCaption}>
+          <AuthorAvatar name={run.agentName} color={colorOf(run.agentName)} />
+          {t('collab.approval.title', { agent: run.agentName })}
+        </div>
+        <ToolApproval
+          request={toApprovalRequest(permission, run.agentName, t)}
+          keyboardActive={false}
+          onConfirm={(requestId, optionId) => {
+            setAnswered((current) => new Set([...current, requestId]));
+            const reopen = () =>
+              setAnswered((current) => {
+                const next = new Set(current);
+                next.delete(requestId);
+                return next;
+              });
+            void onRespondPermission(sessionId, requestId, optionId).then(
+              (ok) => ok === false && reopen(),
+              reopen,
+            );
+          }}
+        />
+      </div>,
+    ];
+  });
+  const working = live.filter(
+    ({ run }) =>
+      !(
+        run.progress?.permission &&
+        run.sessionId &&
+        onRespondPermission &&
+        !answered.has(run.progress.permission.requestId)
+      ),
+  );
+  // The status sentence always shows: when nothing is running it is the one
+  // place that says why the conversation stopped and what it waits on.
+  const hasRows = working.length > 0 || retryable.length > 0;
+  const waitsOnYou =
+    thread.status === 'blocked' || thread.status === 'in_review';
+  const skipped = preview?.filter((target) => !target.willWake) ?? [];
+  const hint = preview
+    ? describePreview(preview, members, t)
+    : thread.assigneeName
+      ? t('collab.composer.hint', { name: thread.assigneeName })
+      : null;
+
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
       {headerActionsContainer ? (
         createPortal(actions, headerActionsContainer)
       ) : (
         <header className="flex items-center gap-2 border-b border-border px-4 py-2">
-          <div className="min-w-0 flex-1">
-            <h1 className="truncate text-base font-semibold">{thread.title}</h1>
-          </div>
+          {onBack && (
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              aria-label={t('collab.thread.back')}
+              onClick={onBack}
+            >
+              <ArrowLeftIcon />
+            </Button>
+          )}
+          <h1 className="min-w-0 flex-1 truncate text-sm font-semibold">
+            {thread.title}
+          </h1>
           {actions}
         </header>
       )}
-      <p className="px-4 py-2 text-xs text-muted-foreground">
-        {statusReasonLabel(thread.reason, t)}
-      </p>
-      <div className="flex min-h-0 flex-1">
-        <div className="flex min-w-0 flex-1 flex-col">
-          {thread.body.startsWith(CONVERSATION_CONTEXT_PREFIX) && (
-            <details className="mx-4 mb-2 rounded-md border border-border px-3 py-2 text-xs text-muted-foreground">
-              <summary className="cursor-pointer">
-                {t('collab.thread.context')}
-              </summary>
-              <div className="mt-2 max-h-48 overflow-y-auto whitespace-pre-wrap break-words">
-                {thread.body.slice(CONVERSATION_CONTEXT_PREFIX.length)}
-              </div>
-            </details>
+      {thread.body.startsWith(CONVERSATION_CONTEXT_PREFIX) && (
+        <div className={styles.context}>
+          <button
+            type="button"
+            className={group.summary}
+            aria-expanded={contextOpen}
+            onClick={() => setContextOpen((open) => !open)}
+          >
+            <span className={group.summaryText}>
+              {t('collab.thread.context')}
+            </span>
+            <span
+              className={`${
+                contextOpen ? group.chevronDown : group.chevronRight
+              } ${styles.chevronShown}`}
+              aria-hidden="true"
+            />
+          </button>
+          {contextOpen && (
+            <div className={`${group.group} ${styles.contextBody}`}>
+              {thread.body.slice(CONVERSATION_CONTEXT_PREFIX.length)}
+            </div>
           )}
-          <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-            <WebShellCustomizationProvider
-              value={{ ...customization, collapseCompletedTurns: false }}
-            >
-              <MessageList
-                messages={messages}
-                pendingApproval={null}
-                sessionKey={thread.id}
-                hideSessionTimeline
-              />
-            </WebShellCustomizationProvider>
-          </div>
-          <div className="p-4">
-            {sending && (
-              <div
-                role="status"
-                className="mb-2 flex items-center gap-2 text-sm text-muted-foreground"
-              >
-                <LoaderCircle
-                  aria-hidden="true"
-                  className="size-4 animate-spin motion-reduce:animate-none"
-                />
-                {t('collab.sending')}
-              </div>
-            )}
-            {live.map(({ run }) => {
-              const permission = run.progress?.permission;
-              if (
-                permission &&
-                run.sessionId &&
-                onRespondPermission &&
-                !answered.has(permission.requestId)
-              ) {
-                const sessionId = run.sessionId;
-                return (
-                  <div
-                    key={run.id}
-                    role="group"
-                    aria-label={t('collab.approval.title', {
-                      agent: run.agentName,
-                    })}
-                    className="mb-2 rounded-md border border-border bg-[var(--status-attention-bg)] p-3 text-sm"
-                  >
-                    <div className="mb-2 flex items-center gap-2 font-medium">
-                      <ShieldQuestion
-                        aria-hidden="true"
-                        className="size-4 shrink-0 text-[var(--status-attention-fg)]"
-                      />
-                      {t('collab.approval.title', { agent: run.agentName })}
-                    </div>
-                    {permission.title && (
-                      <code className="mb-2 block truncate rounded bg-muted px-2 py-1 text-xs">
-                        {permission.title}
-                      </code>
-                    )}
-                    <div className="flex flex-wrap gap-2">
-                      {permission.options.map((option) => (
-                        <Button
-                          key={option.optionId}
-                          size="sm"
-                          variant={
-                            option.kind?.startsWith('allow')
-                              ? 'default'
-                              : 'outline'
-                          }
-                          onClick={() => {
-                            setAnswered(
-                              (current) =>
-                                new Set([...current, permission.requestId]),
-                            );
-                            const reopen = () =>
-                              setAnswered((current) => {
-                                const next = new Set(current);
-                                next.delete(permission.requestId);
-                                return next;
-                              });
-                            void onRespondPermission(
-                              sessionId,
-                              permission.requestId,
-                              option.optionId,
-                            ).then((ok) => ok === false && reopen(), reopen);
-                          }}
-                        >
-                          {/* The agent names its options in English; the
-                              common ones read as the main approval card does. */}
-                          {option.kind === 'allow_once'
-                            ? t('approval.option.allowOnce')
-                            : option.kind === 'reject_once'
-                              ? t('approval.option.rejectOnce')
-                              : option.name}
-                        </Button>
-                      ))}
-                    </div>
-                  </div>
-                );
+        </div>
+      )}
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+        <WebShellCustomizationProvider
+          value={{ ...customization, collapseCompletedTurns: false }}
+        >
+          <MessageList
+            messages={messages}
+            pendingApproval={null}
+            sessionKey={thread.id}
+            hideSessionTimeline
+          />
+        </WebShellCustomizationProvider>
+      </div>
+      <div className={styles.dock}>
+        <div className={group.wrap}>
+          <button
+            type="button"
+            className={group.summary}
+            aria-expanded={hasRows ? liveOpen : undefined}
+            aria-disabled={hasRows ? undefined : true}
+            onClick={hasRows ? () => setLiveOpen((open) => !open) : undefined}
+          >
+            <span className={group.summaryIcon} aria-hidden="true">
+              <UsersRound className="size-3.5" />
+            </span>
+            <span
+              className={
+                working.length > 0
+                  ? `${group.summaryText} ${group.summaryTextActive}`
+                  : waitsOnYou
+                    ? `${group.summaryText} ${styles.attention}`
+                    : group.summaryText
               }
-              const hostOffline =
-                agents.find((agent) => agent.id === run.agentId)?.runtime
-                  ?.status === 'offline';
-              const described = describeLiveRun(run, hostOffline, now, t);
-              const stalled =
-                described.stalled && now >= (snoozedUntil[run.id] ?? 0);
-              const text = stalled
-                ? described.text
-                : described.stalled
-                  ? t('collab.run.working', {
-                      agent: run.agentName,
-                      elapsed: formatElapsed(now - (run.startedAt ?? now), t),
-                    })
-                  : described.text;
-              const steps = run.progress?.steps ?? [];
-              return (
-                <div key={run.id} className="mb-2">
-                  <div
-                    role="status"
-                    className={`flex items-center gap-2 text-sm ${
-                      stalled
-                        ? 'text-[var(--status-attention-fg)]'
-                        : 'text-muted-foreground'
-                    }`}
-                  >
-                    <LoaderCircle
-                      aria-hidden="true"
-                      className={`size-4 shrink-0 ${
-                        stalled ? '' : 'animate-spin motion-reduce:animate-none'
-                      }`}
-                    />
-                    <span className="min-w-0 flex-1 truncate">{text}</span>
-                    {stalled && (
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        onClick={() =>
-                          setSnoozedUntil((current) => ({
-                            ...current,
-                            [run.id]: now + STALL_NOTICE_MS,
-                          }))
-                        }
+            >
+              {statusReasonLabel(thread.reason, t)}
+            </span>
+            <span
+              className={liveOpen ? group.chevronDown : group.chevronRight}
+              aria-hidden="true"
+            />
+          </button>
+          {hasRows && liveOpen && (
+            <div className={group.group}>
+              <div className={group.list}>
+                {working.map(({ run }) => {
+                  const hostOffline =
+                    agents.find((agent) => agent.id === run.agentId)?.runtime
+                      ?.status === 'offline';
+                  const described = describeLiveRun(run, hostOffline, now, t);
+                  const stalled =
+                    described.stalled && now >= (snoozedUntil[run.id] ?? 0);
+                  const text = stalled
+                    ? described.text
+                    : described.stalled
+                      ? t('collab.run.working', {
+                          agent: run.agentName,
+                          elapsed: formatElapsed(
+                            now - (run.startedAt ?? now),
+                            t,
+                          ),
+                        })
+                      : described.text;
+                  const steps = run.progress?.steps ?? [];
+                  return (
+                    <div key={run.id}>
+                      <div
+                        role="status"
+                        className={`${group.row} ${styles.row}`}
+                        data-agent-status={stalled ? 'failed' : 'active'}
                       >
-                        {t('collab.run.keepWaiting')}
-                      </Button>
-                    )}
-                    {(stalled || run.status === 'queued') && !pending && (
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        onClick={() => onCancelRun(run.id)}
-                      >
-                        {t('collab.run.stop')}
-                      </Button>
-                    )}
-                  </div>
-                  {steps.length > 0 && (
-                    // One line per tool call, like a CI job's step list.
-                    <ol
-                      aria-label={t('collab.run.steps', {
-                        agent: run.agentName,
-                      })}
-                      className="mt-1 ml-6 flex flex-col gap-0.5 text-xs text-muted-foreground"
-                    >
-                      {steps.map((step) => (
-                        <li key={step.id} className="flex items-center gap-1.5">
-                          {step.status === 'running' ? (
-                            <LoaderCircle
-                              aria-label={t('collab.step.running')}
-                              className="size-3 shrink-0 animate-spin motion-reduce:animate-none"
-                            />
-                          ) : step.status === 'done' ? (
-                            <Check
-                              aria-label={t('collab.step.done')}
-                              className="size-3 shrink-0"
-                            />
-                          ) : (
-                            <X
-                              aria-label={t('collab.step.failed')}
-                              className="size-3 shrink-0 text-destructive"
-                            />
-                          )}
+                        <AuthorAvatar
+                          name={run.agentName}
+                          color={colorOf(run.agentName)}
+                        />
+                        <span className={group.rowText}>
                           <span
-                            className={`min-w-0 truncate ${
-                              step.status === 'running' ? 'text-foreground' : ''
+                            className={`${group.rowActivity} ${
+                              stalled ? styles.attention : styles.rowText
                             }`}
                           >
-                            {step.title || t('collab.step.untitled')}
+                            {text}
                           </span>
-                        </li>
-                      ))}
-                    </ol>
-                  )}
-                </div>
-              );
-            })}
-            {retryable.map((run) => (
-              <div
-                key={run.id}
-                role="status"
-                className="mb-2 flex items-center gap-2 text-sm text-[var(--status-attention-fg)]"
-              >
-                <span className="min-w-0 flex-1 truncate">
-                  {run.error === 'agent_run_stalled'
-                    ? t('collab.run.timedOut', { agent: run.agentName })
-                    : run.error === 'agent_program_unavailable'
-                      ? t('collab.run.programUnavailable', {
-                          agent: run.agentName,
-                        })
-                      : t('collab.run.failed', { agent: run.agentName })}
-                </span>
-                {!pending && (
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={() =>
-                      void onSend(
-                        `@${run.agentName} ${t('collab.run.retryPrompt')}`,
-                      )
-                    }
-                  >
-                    {t('collab.run.retry')}
-                  </Button>
-                )}
-              </div>
-            ))}
-            {preview && (
-              <div role="status" className="mb-2 text-xs text-muted-foreground">
-                {describePreview(preview, teamMembers(thread, agents), t)}
-                {preview
-                  .filter((target) => !target.willWake)
-                  .map((target) => (
-                    <p key={`${target.agentName}:${target.reason}`}>
-                      {t(
-                        SKIP_REASONS.has(target.reason ?? '')
-                          ? `collab.skip.${target.reason}`
-                          : 'collab.skip.other',
-                        { name: target.agentName },
+                        </span>
+                        {stalled && (
+                          <Button
+                            size="xs"
+                            variant="ghost"
+                            onClick={() =>
+                              setSnoozedUntil((current) => ({
+                                ...current,
+                                [run.id]: now + STALL_NOTICE_MS,
+                              }))
+                            }
+                          >
+                            {t('collab.run.keepWaiting')}
+                          </Button>
+                        )}
+                        {(stalled || run.status === 'queued') && !pending && (
+                          <Button
+                            size="xs"
+                            variant="ghost"
+                            onClick={() => onCancelRun(run.id)}
+                          >
+                            {t('collab.run.stop')}
+                          </Button>
+                        )}
+                      </div>
+                      {steps.length > 0 && (
+                        // One line per tool call, like a CI job's step list.
+                        <ol
+                          aria-label={t('collab.run.steps', {
+                            agent: run.agentName,
+                          })}
+                          className={styles.steps}
+                        >
+                          {steps.map((step) => (
+                            <li key={step.id} className={styles.step}>
+                              {step.status === 'running' ? (
+                                <LoaderCircle
+                                  aria-label={t('collab.step.running')}
+                                  className="size-3 shrink-0 animate-spin motion-reduce:animate-none"
+                                />
+                              ) : step.status === 'done' ? (
+                                <Check
+                                  aria-label={t('collab.step.done')}
+                                  className="size-3 shrink-0 text-[var(--success-color)]"
+                                />
+                              ) : (
+                                <X
+                                  aria-label={t('collab.step.failed')}
+                                  className="size-3 shrink-0 text-destructive"
+                                />
+                              )}
+                              <span
+                                className={
+                                  step.status === 'running'
+                                    ? `${styles.stepText} text-foreground`
+                                    : styles.stepText
+                                }
+                              >
+                                {step.title || t('collab.step.untitled')}
+                              </span>
+                            </li>
+                          ))}
+                        </ol>
                       )}
-                    </p>
-                  ))}
+                    </div>
+                  );
+                })}
+                {retryable.map((run) => (
+                  <div
+                    key={run.id}
+                    role="status"
+                    className={`${group.row} ${styles.row}`}
+                    data-agent-status="failed"
+                  >
+                    <AuthorAvatar
+                      name={run.agentName}
+                      color={colorOf(run.agentName)}
+                    />
+                    <span className={group.rowText}>
+                      <span
+                        className={`${group.rowActivity} ${styles.attention}`}
+                      >
+                        {run.error === 'agent_run_stalled'
+                          ? t('collab.run.timedOut', { agent: run.agentName })
+                          : run.error === 'agent_program_unavailable'
+                            ? t('collab.run.programUnavailable', {
+                                agent: run.agentName,
+                              })
+                            : t('collab.run.failed', { agent: run.agentName })}
+                      </span>
+                    </span>
+                    {!pending && (
+                      <Button
+                        size="xs"
+                        variant="ghost"
+                        onClick={() =>
+                          void onSend(
+                            `@${run.agentName} ${t('collab.run.retryPrompt')}`,
+                          )
+                        }
+                      >
+                        {t('collab.run.retry')}
+                      </Button>
+                    )}
+                  </div>
+                ))}
               </div>
-            )}
+            </div>
+          )}
+        </div>
+        {approvals}
+        {sending && (
+          <div role="status" className={styles.note}>
+            <LoaderCircle
+              aria-hidden="true"
+              className="size-3.5 animate-spin motion-reduce:animate-none"
+            />
+            {t('collab.sending')}
+          </div>
+        )}
+        {skipped.length > 0 && (
+          <div role="status" className={styles.note}>
+            {skipped.map((target) => (
+              <p key={`${target.agentName}:${target.reason}`}>
+                {t(
+                  SKIP_REASONS.has(target.reason ?? '')
+                    ? `collab.skip.${target.reason}`
+                    : 'collab.skip.other',
+                  { name: target.agentName },
+                )}
+              </p>
+            ))}
+          </div>
+        )}
+        <ComposerHintContext.Provider value={hint}>
+          <WebShellCustomizationProvider value={composerCustomization}>
             <ChatEditor
               commands={[]}
               builtinAtProviders={false}
@@ -864,8 +1125,8 @@ export function ThreadChat({
                 return false;
               }}
             />
-          </div>
-        </div>
+          </WebShellCustomizationProvider>
+        </ComposerHintContext.Provider>
       </div>
     </div>
   );

@@ -5,6 +5,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { ArrowLeftIcon } from 'lucide-react';
 import {
   useConnection,
   useWorkspace,
@@ -17,8 +18,9 @@ import {
   type AgentWorkspaceView,
   type AgentCapabilitiesView,
 } from './ThreadsPage';
-import { ThreadView, type ThreadDetailView } from './ThreadView';
+import type { ThreadDetailView } from './ThreadView';
 import { ThreadChat } from './ThreadChat';
+import { Button } from '../ui/button';
 import { AgentCreatePage } from '../agents/AgentCreatePage';
 import { useI18n } from '../../i18n';
 import type {
@@ -121,7 +123,6 @@ export function ThreadsRoute({
   const [capabilities, setCapabilities] = useState<AgentCapabilitiesView>();
   const [threads, setThreads] = useState<ThreadSummaryView[]>([]);
   const [openId, setOpenId] = useState<string | undefined>(initialThreadId);
-  const [showDetails, setShowDetails] = useState(false);
   const [detail, setDetail] = useState<ThreadDetailView | undefined>();
   useEffect(() => {
     if (chat && !activityOnly && detail)
@@ -337,11 +338,16 @@ export function ThreadsRoute({
 
   if (openId && detail?.id !== openId) {
     return (
-      <div>
-        <button type="button" onClick={() => openThread()}>
-          {t('collab.thread.back')}
-        </button>
-        <p role="status">{error ?? t('collab.thread.loading')}</p>
+      <div className="flex flex-col items-start gap-2 p-4">
+        {chat ? null : (
+          <Button variant="ghost" size="sm" onClick={() => openThread()}>
+            <ArrowLeftIcon data-icon="inline-start" />
+            {t('collab.thread.back')}
+          </Button>
+        )}
+        <p role="status" className="text-sm text-muted-foreground">
+          {error ?? t('collab.thread.loading')}
+        </p>
       </div>
     );
   }
@@ -356,118 +362,64 @@ export function ThreadsRoute({
         }
       : undefined;
 
+  // Outside the shell's chat column (an embedded Agents page with no chat to
+  // switch to) the same conversation opens in place, with a way back.
   if (openId && detail) {
-    if (chat && !showDetails) {
-      return (
-        <>
-          {error && (
-            <p role="alert" className="text-destructive">
-              {error}
-            </p>
-          )}
-          <ThreadChat
-            key={detail.id}
-            activityOnly={activityOnly}
-            headerActionsContainer={headerActionsContainer}
-            onOpenActivity={
-              onOpenActivity && workspaceCwd
-                ? () => onOpenActivity(detail.id, workspaceCwd)
-                : undefined
-            }
-            thread={detail}
-            agents={agents}
-            preview={preview}
-            pending={pending}
-            onDraftChange={setDraft}
-            onDetails={() => setShowDetails(true)}
-            onOpenAgentSession={onOpenAgentSession}
-            onCancelRun={(runId) =>
-              void mutate(() => client.cancelRun(openId, runId))
-            }
-            onMarkDone={() => void mutate(() => client.markDone(openId))}
-            {...(client.respondToPermission
-              ? {
-                  onRespondPermission: (
-                    sessionId: string,
-                    requestId: string,
-                    optionId: string,
-                  ) =>
-                    mutate(() =>
-                      client.respondToPermission!(
-                        sessionId,
-                        requestId,
-                        optionId,
-                      ),
-                    ),
-                }
-              : {})}
-            onOpenThread={(id) => {
-              if (workspaceCwd && onOpenThreadChat)
-                onOpenThreadChat(id, workspaceCwd);
-              else openThread(id);
-            }}
-            onSend={(text) =>
-              mutate(async () => {
-                const result = await client.postReply(openId, text);
-                setDraft('');
-                setPreview(undefined);
-                return result;
-              })
-            }
-          />
-        </>
-      );
-    }
     return (
       <>
-        {error ? (
-          <p role="alert" className="mb-3 text-sm text-destructive">
+        {error && (
+          <p role="alert" className="px-4 py-2 text-sm text-destructive">
             {error}
           </p>
-        ) : null}
-        <ThreadView
-          key={openId}
+        )}
+        <ThreadChat
+          key={detail.id}
+          activityOnly={activityOnly}
+          headerActionsContainer={headerActionsContainer}
+          {...(chat ? {} : { onBack: () => openThread() })}
+          onOpenActivity={
+            onOpenActivity && workspaceCwd
+              ? () => onOpenActivity(detail.id, workspaceCwd)
+              : undefined
+          }
           thread={detail}
-          {...(chat || (onOpenThreadChat && workspaceCwd)
-            ? {
-                onOpenConversation: () => {
-                  if (chat) setShowDetails(false);
-                  else if (workspaceCwd)
-                    onOpenThreadChat?.(openId, workspaceCwd);
-                },
-              }
-            : {})}
           agents={agents}
-          draft={draft}
+          preview={preview}
+          pending={pending}
           onDraftChange={setDraft}
-          onReply={() =>
-            void mutate(async () => {
-              if (!draft.trim()) return;
-              const result = await client.postReply(openId, draft);
-              if (activeScope.current === scope && draftRef.current === draft) {
-                setDraft('');
-                setPreview(undefined);
-              }
-              return result;
-            })
-          }
-          onBack={() => openThread()}
-          onOpenThread={openThread}
-          {...(onOpenAgentSession ? { onOpenAgentSession } : {})}
-          onCancelRun={(runId) =>
-            void mutate(() => client.cancelRun(openId, runId))
-          }
-          onMarkDone={() =>
-            void mutate(async () => {
-              const result = await client.markDone(openId);
-              return result;
-            })
-          }
           onAssign={(assignee) =>
             void mutate(() => client.assignThread(openId, assignee))
           }
-          replyPending={pending}
-          {...(preview ? { preview } : {})}
+          onOpenAgentSession={onOpenAgentSession}
+          onCancelRun={(runId) =>
+            void mutate(() => client.cancelRun(openId, runId))
+          }
+          onMarkDone={() => void mutate(() => client.markDone(openId))}
+          {...(client.respondToPermission
+            ? {
+                onRespondPermission: (
+                  sessionId: string,
+                  requestId: string,
+                  optionId: string,
+                ) =>
+                  mutate(() =>
+                    client.respondToPermission!(sessionId, requestId, optionId),
+                  ),
+              }
+            : {})}
+          onOpenThread={(id) => {
+            if (workspaceCwd && onOpenThreadChat)
+              onOpenThreadChat(id, workspaceCwd);
+            else openThread(id);
+          }}
+          onSend={(text) =>
+            mutate(async () => {
+              const result = await client.postReply(openId, text);
+              setDraft('');
+              setPreview(undefined);
+              return result;
+            })
+          }
         />
       </>
     );
@@ -493,7 +445,12 @@ export function ThreadsRoute({
         }
         createPreview={createPreview}
         pending={pending}
-        onOpenThread={openThread}
+        onOpenThread={(id) => {
+          // A conversation has one form, the chat; the list only leads to it.
+          if (workspaceCwd && onOpenThreadChat)
+            onOpenThreadChat(id, workspaceCwd);
+          else openThread(id);
+        }}
         onDeleteAgent={(id) => void mutate(() => client.deleteAgent(id))}
         onSetAgentEnabled={(id, enabled) =>
           void mutate(() => client.setAgentEnabled(id, enabled))
