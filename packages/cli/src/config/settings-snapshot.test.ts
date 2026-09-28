@@ -615,6 +615,20 @@ describe('readSettingsSnapshot', () => {
     expect(describeTree()).toEqual(treeBefore);
   });
 
+  // The evaluation checks this first, through the same resolveHomeDirectory.
+  it('throws when the home directory cannot be resolved', () => {
+    // node:os is a file-level mock here, so the rebinding-and-sync mechanism
+    // cannot reach the settings module; drive the mocked homedir itself.
+    const mocked = vi.mocked(os.homedir);
+    const original = mocked.getMockImplementation();
+    mocked.mockReturnValue(path.join(root, 'missing-home'));
+    try {
+      expect(() => read()).toThrow(/ENOENT/);
+    } finally {
+      if (original) mocked.mockImplementation(original);
+    }
+  });
+
   it('reads and writes nothing without an environment', () => {
     // The process points at the same tree, so a read through process-level
     // paths would migrate the user file and reset the workspace file.
