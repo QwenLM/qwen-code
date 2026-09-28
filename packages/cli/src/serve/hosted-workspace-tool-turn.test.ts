@@ -531,6 +531,47 @@ it('returns durable errors for a refused Shell batch and permits a corrected cal
   expect(broker.release).toHaveBeenCalledOnce();
 });
 
+it.each([
+  [{ command: '' }, 'nonempty command'],
+  [{ command: 'pwd', extra: true }, 'unsupported argument "extra"'],
+  [{ command: 'pwd', description: 7 }, 'description must be a string'],
+  [{ command: 'pwd', timeout: 0 }, 'timeout must be an integer'],
+])('reports the invalid Shell argument %j', async (args, message) => {
+  turn = createTurn(true);
+  const call = { ...calls[0], name: 'run_shell_command', args };
+  const responses = await turn.execute(
+    [call],
+    [{ functionCall: { id: call.callId, name: call.name, args } }],
+    'model',
+    new AbortController().signal,
+  );
+  expect(responses[0].functionResponse?.response?.['error']).toContain(message);
+  expect(broker.acquire).not.toHaveBeenCalled();
+});
+
+it('accepts the runtime foreground spelling is_background false', async () => {
+  turn = createTurn(true);
+  broker.execute.mockResolvedValue({
+    executionStatus: 'not_started',
+    responseParts: [],
+    error: { message: 'command validation failed' },
+    capture: null,
+  });
+  const args = { command: 'pwd', is_background: 'FaLsE' };
+  const call = { ...calls[0], name: 'run_shell_command', args };
+  await turn.execute(
+    [call],
+    [{ functionCall: { id: call.callId, name: call.name, args } }],
+    'model',
+    new AbortController().signal,
+  );
+  expect(broker.prepare).toHaveBeenCalledOnce();
+  expect(JSON.parse(broker.execute.mock.calls[0][1])).toEqual({
+    toolName: 'run_shell_command',
+    input: { command: 'pwd', is_background: false },
+  });
+});
+
 it('blocks recovery if the durable refusal cannot be committed', async () => {
   const original = commit;
   commit = async (...args) => {

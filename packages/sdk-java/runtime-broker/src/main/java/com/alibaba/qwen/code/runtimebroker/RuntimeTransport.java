@@ -59,7 +59,7 @@ public interface RuntimeTransport {
             RuntimeSession session, Map<String, Object> reference,
             Map<String, Object> receipt) {
         return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
-                "managed_tool_publisher_unavailable",
+                "managed_tool_result_acknowledge_unsupported",
                 "Runtime transport does not support result acknowledgement.", false));
     }
 

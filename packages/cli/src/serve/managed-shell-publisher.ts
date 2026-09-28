@@ -135,7 +135,10 @@ const PREVIEW_HEAD_BYTES = 2 * 1024;
 const PREVIEW_GAP =
   '\n[... preview truncated; end of buffered output follows ...]\n';
 
-export function boundedShellPreview(parts: readonly unknown[]): unknown[] {
+function shellPreview(parts: readonly unknown[]): {
+  parts: unknown[];
+  truncated: boolean;
+} {
   const text = parts
     .map((part) =>
       part &&
@@ -147,7 +150,8 @@ export function boundedShellPreview(parts: readonly unknown[]): unknown[] {
     )
     .join('');
   const bytes = Buffer.from(text);
-  if (bytes.byteLength <= PREVIEW_BYTES) return text ? [{ text }] : [];
+  if (bytes.byteLength <= PREVIEW_BYTES)
+    return { parts: text ? [{ text }] : [], truncated: false };
   // Shell failures and the exit status are reported last: keep both ends.
   const head = new TextDecoder().decode(bytes.subarray(0, PREVIEW_HEAD_BYTES), {
     stream: true,
@@ -156,9 +160,16 @@ export function boundedShellPreview(parts: readonly unknown[]): unknown[] {
     bytes.byteLength -
     (PREVIEW_BYTES - PREVIEW_HEAD_BYTES - Buffer.byteLength(PREVIEW_GAP));
   while (start < bytes.byteLength && (bytes[start]! & 0xc0) === 0x80) start++;
-  return [
-    { text: head + PREVIEW_GAP + bytes.subarray(start).toString('utf8') },
-  ];
+  return {
+    parts: [
+      { text: head + PREVIEW_GAP + bytes.subarray(start).toString('utf8') },
+    ],
+    truncated: true,
+  };
+}
+
+export function boundedShellPreview(parts: readonly unknown[]): unknown[] {
+  return shellPreview(parts).parts;
 }
 
 class RemoteShellCapture implements ManagedShellCaptureSink {
@@ -166,6 +177,7 @@ class RemoteShellCapture implements ManagedShellCaptureSink {
   private processResult: ShellExecutionResult | null = null;
   private failed = false;
   private readonly offsets = { stdout: 0, stderr: 0 };
+  private readonly ended = { stdout: false, stderr: false };
   // Node may resume paused pipes on exit before prior write ACKs arrive.
   private readonly queues = {
     stdout: Promise.resolve(),
@@ -196,7 +208,7 @@ class RemoteShellCapture implements ManagedShellCaptureSink {
     stream: 'stdout' | 'stderr',
     chunk: Buffer,
   ): Promise<void> {
-    if (this.failed) return;
+    if (this.failed || this.ended[stream]) return;
     try {
       for (let offset = 0; offset < chunk.byteLength; offset += CHUNK_BYTES) {
         if (this.failed) return;
@@ -227,6 +239,8 @@ class RemoteShellCapture implements ManagedShellCaptureSink {
     stream: 'stdout' | 'stderr',
     complete: boolean,
   ): Promise<void> {
+    if (this.ended[stream]) return;
+    this.ended[stream] = true;
     try {
       const reply = await rpc(this.descriptor, {
         operation: 'finish',
@@ -246,36 +260,26 @@ class RemoteShellCapture implements ManagedShellCaptureSink {
     responseParts: readonly unknown[],
     error?: { readonly message: string; readonly type?: string },
   ): Promise<ToolResultEnvelope> {
+    await Promise.all(Object.values(this.queues));
     const physical = this.processResult;
-    const preview = boundedShellPreview(responseParts);
+    const preview = shellPreview(responseParts);
     return parseToolResultEnvelope(
       await rpc(this.descriptor, {
         operation: 'finalize',
         executionCallId: this.identity.executionCallId,
         started: this.started,
         failed: this.failed,
-        process: physical
-          ? {
-              exitCode: physical.exitCode,
-              signal: physical.signal,
-              previewBytes: physical.rawOutput.byteLength,
-            }
-          : null,
-        executionStatus,
-        responseParts: preview,
-        previewTruncated:
-          responseParts.reduce<number>(
-            (total, part) =>
-              total +
-              (part &&
-              typeof part === 'object' &&
-              'text' in part &&
-              typeof part.text === 'string'
-                ? Buffer.byteLength(part.text)
-                : 0),
-            0,
-          ) >
-          8 * 1024,
+        process:
+          this.started && physical
+            ? {
+                exitCode: physical.exitCode,
+                signal: physical.signal,
+                previewBytes: physical.rawOutput.byteLength,
+              }
+            : null,
+        executionStatus: this.started ? executionStatus : 'not_started',
+        responseParts: preview.parts,
+        previewTruncated: preview.truncated,
         error: error
           ? {
               message: Buffer.from(error.message)

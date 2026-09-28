@@ -25,7 +25,7 @@ Hosted Session owner 在
 只接收规范的 loopback URL、拒绝重定向，capability 只保存在内存；journal 引用和
 模型参数均不包含它。SQL writer token 不会传给 worker。
 
-worker 的原始管道 sink 将有界 write/finish/finalize 请求转发给 owner。每条流的
+worker 先通过私有 owner listener 准备捕获。其原始管道 sink 将有界 write/finish/finalize 请求转发给 owner。每条流的
 write 和 finish 串行处理，包括 Node 在进程退出时恢复暂停管道而产生的重叠回调。owner
 复用 `LocalShellResultCapture` 的 1 MiB 分段、有界 page、双流背压与最终 manifest。
 原始 write 回复确认有界捕获缓冲，只有 segment publication 回复确认持久字节。
@@ -43,6 +43,7 @@ write 和 finish 串行处理，包括 Node 在进程退出时恢复暂停管道
 | -------------------------------------- | -------------------------------------------------------------------------------------------------- |
 | Broker publisher 注册                  | 原选定 Runtime Session、binding、lease 和 Workspace 所有权                                         |
 | worker publisher 注册                  | 已认证的选定运行时；具名 Runtime Session 的不可变注册                                              |
+| publisher prepare                      | 活跃 Session owner；读取 checkpoint 和参数后重新检查 writer 与 activation，并核验原始执行映射      |
 | publisher write/finish/finalize/accept | 活跃 Session owner；capability、activation、已注册原始执行、运行时/模型调用映射和 capture identity |
 | 持久输出发布                           | 持久 Session；tenant、Workspace、writer token、writer generation 和未过期租约                      |
 | Broker start/status/cancel/ACK         | 原始执行与保存的协议选择；不回退 v2                                                                |

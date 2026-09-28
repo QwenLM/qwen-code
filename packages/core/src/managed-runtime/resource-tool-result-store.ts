@@ -197,7 +197,7 @@ export class ResourceToolResultSegmentStore implements ToolResultSegmentStore {
         input.byteLength !== receipt.byteLength ||
         input.digest !== receipt.digest
       )
-        return corrupt;
+        return stream.sealed ? conflict : corrupt;
       const seal = {
         segmentCount: input.segmentCount,
         byteLength: input.byteLength,

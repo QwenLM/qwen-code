@@ -174,6 +174,15 @@ it('does not advance its prefix on a lost publication reply and safely retries t
       digest: hash(request.bytes),
     }),
   ).toMatchObject({ status: 'ok' });
+  expect(
+    await store.seal({
+      captureId: 'capture',
+      streamId: 'stdout',
+      segmentCount: 1,
+      byteLength: 3,
+      digest: hash(Buffer.from('changed')),
+    }),
+  ).toMatchObject({ status: 'refused', code: 'managed_tool_result_conflict' });
   expect(await store.publish({ ...request, ordinal: 1 })).toMatchObject({
     status: 'refused',
   });

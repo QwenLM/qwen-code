@@ -31,8 +31,7 @@ The worker accepts only a canonical loopback URL, rejects redirects, and stores
 the capability in memory; neither journal references nor model arguments contain
 it. No SQL writer token crosses into the worker.
 
-The worker's raw pipe sink forwards bounded write/finish/finalize requests to
-the owner. Writes and finish are serialized per stream, including pipe callbacks
+The worker prepares each capture through the private owner listener. Its raw pipe sink forwards bounded write/finish/finalize requests to the owner. Writes and finish are serialized per stream, including pipe callbacks
 that overlap when Node resumes a paused stream during process exit. The owner reuses `LocalShellResultCapture`, including its 1 MiB
 segments, bounded pages, two-stream backpressure and final manifest. A raw write
 reply acknowledges bounded capture buffering; only segment publication replies
@@ -55,6 +54,7 @@ recommending an inaccessible worker path.
 | -------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
 | Broker publisher registration          | Original selected Runtime Session, binding, lease and Workspace ownership                                                  |
 | Worker publisher registration          | Authenticated selected runtime; immutable registration for the named Runtime Session                                       |
+| Publisher prepare                      | Live Session owner; writer and activation rechecked after checkpoint and argument reads, original execution mapping        |
 | Publisher write/finish/finalize/accept | Live Session owner; capability, activation, registered original execution, runtime/model call mapping and capture identity |
 | Durable output publication             | Persisted Session; tenant, Workspace, writer token, writer generation and unexpired lease                                  |
 | Broker start/status/cancel/ACK         | Original execution and saved protocol selection; no v2 fallback                                                            |

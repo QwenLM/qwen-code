@@ -348,6 +348,45 @@ it('serializes overlapping writes and finish for each process pipe', async () =>
   await reader.close();
 });
 
+it('ignores a write delivered after its stream has finished', async () => {
+  const { registry, request } = await fixture();
+  const { sink, identity } = await registry.prepare(request);
+  physical(sink);
+  await sink.write('stdout', Buffer.from('captured'));
+  await sink.finish('stdout', true);
+  await sink.write('stdout', Buffer.from('late'));
+  await sink.finish('stderr', true);
+
+  const envelope = await sink.finalize('success', [{ text: 'preview' }]);
+  expect(envelope.capture?.captureStatus).toBe('complete');
+  expect((await registry.accept(identity, envelope)).deliveryStatus).toBe(
+    'committed',
+  );
+});
+
+it('reports an unstarted process result as not_started', async () => {
+  const { registry, request } = await fixture();
+  const { sink } = await registry.prepare(request);
+  sink.setProcessResult({
+    rawOutput: Buffer.alloc(0),
+    output: '',
+    exitCode: 1,
+    signal: null,
+    error: new Error('spawn failed'),
+    aborted: false,
+    pid: undefined,
+    executionMethod: 'child_process',
+  });
+
+  const envelope = await sink.finalize('cancelled', [], {
+    message: 'spawn failed',
+  });
+  expect(envelope).toMatchObject({
+    executionStatus: 'not_started',
+    capture: null,
+  });
+});
+
 it('irreversibly blocks capture after a lost raw write acknowledgement', async () => {
   const { registry, request } = await fixture();
   const { sink, identity } = await registry.prepare(request);
@@ -541,6 +580,20 @@ it('never splits a UTF-8 character at either cut', () => {
   }>;
   expect(part.text).not.toContain('\uFFFD');
   expect(Buffer.byteLength(part.text)).toBeLessThanOrEqual(8 * 1024);
+});
+
+it('uses the joined UTF-8 preview to decide whether capture text was truncated', async () => {
+  const { registry, request } = await fixture();
+  const { sink } = await registry.prepare(request);
+  physical(sink);
+  await Promise.all([sink.finish('stdout', true), sink.finish('stderr', true)]);
+  const parts = [{ text: `${'x'.repeat(8188)}\ud83d` }, { text: '\ude00' }];
+  const envelope = await sink.finalize('success', parts);
+  expect(envelope.capture).toMatchObject({
+    captureStatus: 'complete',
+    previewTruncated: false,
+  });
+  expect(envelope.responseParts).toEqual([{ text: `${'x'.repeat(8188)}😀` }]);
 });
 
 it('requires the publisher capability and stops listening once closed', async () => {

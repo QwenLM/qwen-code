@@ -174,26 +174,39 @@ export class HostedWorkspaceToolTurn {
       let input: Record<string, unknown>;
       if (isShell) {
         const args = call.args;
-        if (
-          typeof args['command'] !== 'string' ||
-          !args['command'].trim() ||
-          Object.keys(args).some(
-            (key) =>
-              !['command', 'timeout', 'description', 'is_background'].includes(
-                key,
-              ),
-          ) ||
-          (args['is_background'] !== undefined &&
-            args['is_background'] !== false) ||
-          (args['description'] !== undefined &&
-            typeof args['description'] !== 'string') ||
-          (args['timeout'] !== undefined &&
-            (!Number.isSafeInteger(args['timeout']) ||
-              (args['timeout'] as number) < 1 ||
-              (args['timeout'] as number) > 600000))
+        const unsupportedKey = Object.keys(args).find(
+          (key) =>
+            !['command', 'timeout', 'description', 'is_background'].includes(
+              key,
+            ),
+        );
+        if (typeof args['command'] !== 'string' || !args['command'].trim()) {
+          validationError = 'Hosted Shell requires a nonempty command.';
+        } else if (unsupportedKey !== undefined) {
+          validationError = `Hosted Shell received unsupported argument ${JSON.stringify(unsupportedKey)}.`;
+        } else if (
+          args['is_background'] !== undefined &&
+          args['is_background'] !== false &&
+          !(
+            typeof args['is_background'] === 'string' &&
+            args['is_background'].toLowerCase() === 'false'
+          )
         ) {
           validationError =
             'Hosted Shell requires a foreground command in the saved directory. Background jobs and Monitor are unavailable; correct the arguments before retrying.';
+        } else if (
+          args['description'] !== undefined &&
+          typeof args['description'] !== 'string'
+        ) {
+          validationError = 'Hosted Shell description must be a string.';
+        } else if (
+          args['timeout'] !== undefined &&
+          (!Number.isSafeInteger(args['timeout']) ||
+            (args['timeout'] as number) < 1 ||
+            (args['timeout'] as number) > 600000)
+        ) {
+          validationError =
+            'Hosted Shell timeout must be an integer from 1 to 600000 ms.';
         }
         input = { ...args, is_background: false };
       } else {
