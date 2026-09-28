@@ -18,10 +18,14 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Config } from '../config/config.js';
 import { Storage } from '../config/storage.js';
+import { LocalManagedSessionAuthority } from '../managed-runtime/managed-session-authority.js';
 import { ChatRecordingService } from './chatRecordingService.js';
 import { SessionExecutionEngineError } from './session-execution-engine.js';
+import { readSessionTranscriptSnapshot } from './session-transcript-reader.js';
+import { SessionWriterLease } from './session-writer-lease.js';
 import {
   isManagedExecutionTranscriptSync,
+  isManagedOwnerRecord,
   isManagedSessionTranscriptSync,
 } from '../utils/sessionStorageUtils.js';
 
@@ -36,7 +40,7 @@ beforeEach(async () => {
   root = await mkdtemp(path.join(os.tmpdir(), 'qwen-legacy-refusal-'));
   projectDir = path.join(root, 'project');
   await mkdir(projectDir, { recursive: true });
-  Storage.setRuntimeBaseDir(path.join(root, 'runtime'));
+  Storage.setRuntimeBaseDir(runtimeDir());
   config = new Config({
     sessionId: SESSION_ID,
     cwd: projectDir,
@@ -53,6 +57,10 @@ afterEach(async () => {
   Storage.setRuntimeBaseDir(null);
   await rm(root, { recursive: true, force: true });
 });
+
+function runtimeDir(): string {
+  return path.join(root, 'runtime');
+}
 
 function line(fields: Record<string, unknown>): string {
   return JSON.stringify({
@@ -78,6 +86,16 @@ function userMessage(text: string): string {
   return line({ type: 'user', message: { role: 'user', parts: [{ text }] } });
 }
 
+function durableRef(kind: string) {
+  return {
+    resourceId: kind,
+    kind,
+    schemaVersion: 1,
+    byteLength: 4,
+    digest: 'b'.repeat(64),
+  };
+}
+
 async function writeTranscript(content: string): Promise<string> {
   const transcriptPath = config
     .getSessionService()
@@ -88,7 +106,7 @@ async function writeTranscript(content: string): Promise<string> {
 }
 
 describe('Legacy refusal of Managed-owned transcripts', () => {
-  it('refuses to execute, fork or record a transcript whose only Managed evidence is its owner record', async () => {
+  it('refuses to execute, fork, record or rename a transcript whose only Managed evidence is its owner record', async () => {
     const transcriptPath = await writeTranscript(
       `${owner('managed')}\n${userMessage('hello')}\n`,
     );
@@ -119,7 +137,62 @@ describe('Legacy refusal of Managed-owned transcripts', () => {
       'belongs to managed, cannot record with legacy',
     );
 
+    await expect(
+      service.renameSession(SESSION_ID, 'renamed on Legacy'),
+    ).rejects.toThrow(
+      'belongs to managed, rename must go through its session authority',
+    );
+    await expect(
+      service.renameSessionForLifecycle(
+        SESSION_ID,
+        'renamed on Legacy',
+        'manual',
+        'active',
+      ),
+    ).rejects.toThrow(
+      'belongs to managed, rename must go through its session authority',
+    );
+
     expect(await readFile(transcriptPath, 'utf8')).toBe(before);
+  });
+
+  it('keeps a Managed create that stopped before its header completable', async () => {
+    // What a Managed create leaves when it stops between its owner record and
+    // its header.
+    const transcriptPath = await writeTranscript(`${owner('managed')}\n`);
+
+    await expect(
+      config.getSessionService().renameSession(SESSION_ID, 'renamed on Legacy'),
+    ).rejects.toThrow(SessionExecutionEngineError);
+
+    // A Legacy record after the owner would make the next Managed open refuse
+    // the transcript as history it cannot import.
+    const lease = await SessionWriterLease.acquire({
+      runtimeBaseDir: runtimeDir(),
+      sessionId: SESSION_ID,
+      transcriptPath,
+    });
+    try {
+      const authority = await LocalManagedSessionAuthority.open({
+        lease,
+        sessionKey: {
+          tenantId: 'local',
+          workspaceId: 'workspace',
+          sessionId: SESSION_ID,
+        },
+        cwd: projectDir,
+        version: 'test',
+        create: {
+          definitionRef: durableRef('managed-definition'),
+          rootSnapshotRef: durableRef('managed-root'),
+          createdBy: 'test',
+        },
+      });
+      expect(authority.sessionHeader.engine).toBe('managed');
+    } finally {
+      await lease.release();
+    }
+    expect(isManagedSessionTranscriptSync(transcriptPath)).toBe(true);
   });
 
   it('still refuses a transcript that carries only the Managed Session header', async () => {
@@ -143,6 +216,12 @@ describe('Legacy refusal of Managed-owned transcripts', () => {
     [
       'a line that does not parse whole',
       () => `${userMessage('hello')}\n{"type":"assistant","mess`,
+    ],
+    [
+      'an owner record that does not parse whole',
+      // Cut just before its closing braces, so the line still names the
+      // Managed engine.
+      () => `${userMessage('hello')}\n${owner('managed').slice(0, -2)}`,
     ],
     [
       'an owner record quoted in message text',
@@ -171,7 +250,7 @@ describe('Legacy refusal of Managed-owned transcripts', () => {
         })}\n${userMessage('hello')}\n`,
     ],
   ])(
-    'keeps executing a transcript with %s on Legacy',
+    'keeps executing and renaming a transcript with %s on Legacy',
     async (_name, content) => {
       const transcriptPath = await writeTranscript(content());
       const service = config.getSessionService();
@@ -180,6 +259,9 @@ describe('Legacy refusal of Managed-owned transcripts', () => {
       expect(() =>
         service.assertLegacySessionExecution(SESSION_ID),
       ).not.toThrow();
+      await expect(
+        service.renameSession(SESSION_ID, 'renamed on Legacy'),
+      ).resolves.toBe(true);
     },
   );
 
@@ -190,4 +272,127 @@ describe('Legacy refusal of Managed-owned transcripts', () => {
       config.getSessionService().forkSession(SESSION_ID, FORK_ID),
     ).resolves.toMatchObject({ copiedCount: expect.any(Number) });
   });
+});
+
+describe('Managed owner evidence', () => {
+  const ownerRecord = (fields: Record<string, unknown>) =>
+    JSON.parse(
+      line({ type: 'system', subtype: 'session_execution_engine', ...fields }),
+    ) as Record<string, unknown>;
+
+  // The owner reader decides which engine may open a session; the evidence
+  // decides what Legacy refuses. Within the head window, a record the reader
+  // verifies as Managed must be evidence, and evidence the reader rejects must
+  // leave the owner unavailable, never Legacy.
+  it.each<[string, Record<string, unknown>, boolean, string]>([
+    [
+      'the owner record a Managed create writes',
+      { systemPayload: { version: 1, engine: 'managed' } },
+      true,
+      'managed',
+    ],
+    [
+      'a Managed owner without a version',
+      { systemPayload: { engine: 'managed' } },
+      true,
+      'unavailable',
+    ],
+    [
+      'a Managed owner of another version',
+      { systemPayload: { version: 2, engine: 'managed' } },
+      true,
+      'unavailable',
+    ],
+    [
+      'a Legacy owner',
+      { systemPayload: { version: 1, engine: 'legacy' } },
+      false,
+      'legacy',
+    ],
+    [
+      'an owner-shaped record that is not a system record',
+      {
+        type: 'user',
+        systemPayload: { version: 1, engine: 'managed' },
+      },
+      false,
+      'unavailable',
+    ],
+    [
+      'an owner record without a payload',
+      { engine: 'managed' },
+      false,
+      'unavailable',
+    ],
+  ])(
+    'agrees with the owner reader on %s',
+    async (_name, fields, evidence, readOwner) => {
+      // Built here, after beforeEach, so the record carries the project
+      // directory as a real one does.
+      const record = ownerRecord(fields);
+      expect(isManagedOwnerRecord(record)).toBe(evidence);
+
+      const transcriptPath = await writeTranscript(
+        `${JSON.stringify(record)}\n${userMessage('hello')}\n`,
+      );
+      expect(isManagedExecutionTranscriptSync(transcriptPath)).toBe(evidence);
+      const snapshot = await readSessionTranscriptSnapshot(
+        transcriptPath,
+        SESSION_ID,
+      );
+      const state = snapshot!.executionEngine;
+      expect(state.status === 'verified' ? state.engine : state.status).toBe(
+        readOwner,
+      );
+    },
+  );
+
+  // The owner reader parses each line tolerantly: objects written back to back
+  // on one line count separately, a leading byte-order mark is skipped, and
+  // JSON escapes decode. Legacy reads the head lines the same way.
+  it.each<[string, (ownerLine: string) => string]>([
+    [
+      'on a line of its own',
+      (ownerLine) => `${ownerLine}\n${userMessage('hello')}\n`,
+    ],
+    [
+      'followed by another record on its line',
+      (ownerLine) => `${ownerLine}${userMessage('hello')}\n`,
+    ],
+    [
+      'after a byte-order mark',
+      (ownerLine) => `\uFEFF${ownerLine}\n${userMessage('hello')}\n`,
+    ],
+    [
+      'whose subtype is written with JSON escapes',
+      (ownerLine) =>
+        `${ownerLine.replace(
+          '"session_execution_engine"',
+          '"session\\u005fexecution\\u005fengine"',
+        )}\n${userMessage('hello')}\n`,
+    ],
+  ])(
+    'agrees with the owner reader on a Managed owner record %s',
+    async (_name, layout) => {
+      const transcriptPath = await writeTranscript(layout(owner('managed')));
+      const snapshot = await readSessionTranscriptSnapshot(
+        transcriptPath,
+        SESSION_ID,
+      );
+      expect(snapshot!.executionEngine).toMatchObject({
+        status: 'verified',
+        engine: 'managed',
+      });
+
+      expect(isManagedExecutionTranscriptSync(transcriptPath)).toBe(true);
+      expect(() =>
+        config.getSessionService().assertLegacySessionExecution(SESSION_ID),
+      ).toThrow(SessionExecutionEngineError);
+      await expect(
+        config
+          .getSessionService()
+          .renameSession(SESSION_ID, 'renamed on Legacy'),
+      ).rejects.toThrow(SessionExecutionEngineError);
+    },
+  );
 });

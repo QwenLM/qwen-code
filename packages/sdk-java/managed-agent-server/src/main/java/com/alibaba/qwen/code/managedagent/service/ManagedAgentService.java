@@ -20,6 +20,7 @@ import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellEvent;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellItem;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellPage;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSession;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSessionCapabilities;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTranscript;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTurn;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
@@ -59,6 +60,10 @@ public class ManagedAgentService {
     private static final String UNARCHIVE = "UNARCHIVE_SESSION";
     private static final Pattern IDEMPOTENCY_KEY = Pattern.compile(
             "^[\\x21-\\x7e]{1,128}$");
+    // Every Session serves its task list and detail; the tasks come from the
+    // Stage H records its Session store holds (H0c).
+    private static final WebShellSessionCapabilities WEB_SHELL_CAPABILITIES =
+            new WebShellSessionCapabilities(true);
     // Catch-up reads of a stream use pages of this size.
     static final int STREAM_PAGE = 100;
     // A context stays ready until cwd changes arrive (W2).
@@ -433,9 +438,10 @@ public class ManagedAgentService {
                 session.lastSequence(), session.replayFloorSequence(),
                 store.findSnapshotCoveredSequence(session.tenantId(),
                         session.sessionId()),
-                // A Workspace-bound Session has no lifecycle operations yet.
+                // A Workspace-bound Session has no lifecycle operations yet;
+                // every Session serves its task list and detail (H0c).
                 new SessionCapabilities(true, true, false, true,
-                        session.workspace() == null),
+                        session.workspace() == null, true),
                 publicWorkspace(session));
     }
 
@@ -449,7 +455,8 @@ public class ManagedAgentService {
                 session.createdAt(), session.updatedAt(),
                 latestTurn == null ? null : webShellTurn(latestTurn),
                 webShellEnvironment(environmentEvent),
-                session.lastSequence(), webShellWorkspace(session));
+                session.lastSequence(), webShellWorkspace(session),
+                WEB_SHELL_CAPABILITIES);
     }
 
     private static WebShellWorkspace webShellWorkspace(SessionRecord session) {
