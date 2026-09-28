@@ -1946,7 +1946,7 @@ public class ManagedAgentStore implements AgentStateStore {
         }
     }
 
-    // ARCHIVING remains only for an archive admitted before V16, which closes
+    // ARCHIVING remains only for an archive admitted before V17, which closes
     // the Harness as archive used to.
     private static String pendingStatus(OperationKind kind) {
         return switch (kind) {

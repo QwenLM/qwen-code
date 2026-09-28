@@ -11,9 +11,11 @@ the M3 update is based on `3f5ae3ffeb`. It implements the "Managed engine
 seam" and the "Configuration compatibility contract" of the B2d design and
 splits the work into slices M1 to M6. Slice M1, the preconditions the B2d
 design requires before any Managed session exists (Legacy refusal and purpose
-marking), is implemented (#12861). Slice M3, the configuration snapshot and
-the compatibility evaluation, is implemented with the M3 update. M2 and M4 to
-M6 are proposals; each lands with its own design update.
+marking), is implemented (#12861); an M1 follow-up extends the refusal to
+renaming and aligns the owner evidence with the owner reader. Slice M3, the
+configuration snapshot and the compatibility evaluation, is implemented with
+the M3 update. M2 and M4 to M6 are proposals; each lands with its own design
+update.
 
 The reference implementation is the branch
 `doudouOUC/qwen-code:feature/managed-agents-p0-p8` at `032392a673`. This
@@ -202,15 +204,23 @@ them and is the only slice that can make a session select Managed.
 #### Legacy refusal
 
 Positive Managed evidence is the Managed Session header, as before, or a
-complete transcript line whose record is `type: "system"` with `subtype:
-"session_execution_engine"` and `systemPayload.engine: "managed"`. Text inside
-a message does not count. A Managed owner is written before anything else, so
-the check reads the same 64 KiB head window as the header check. It fails
-open on a read error, like the header check: an unreadable transcript fails
-later on its own.
+`type: "system"` record with `subtype: "session_execution_engine"` and
+`systemPayload.engine: "managed"` that the owner reader's line parser recovers
+from a head line. When a line does not parse whole, that parser still
+recovers the complete records it can delimit, so such a record counts even
+when another record shares its line; a line cut inside the record yields none.
+Text inside a message does not count. A
+Managed owner is written before anything else, so the check reads the same
+64 KiB head window as the header check. It fails open on a read error, like
+the header check; the risks below record where that lets a Managed transcript
+through. One predicate, `isManagedOwnerRecord`, defines the owner
+evidence for this check and for the listing's Managed detection. The owner
+reader validates owner records more strictly (for example, it requires
+`version: 1`) and reports a record it rejects as unavailable, never as Legacy.
 
-The three existing refusal points take the new check. Every Legacy entry that
-executes, records or forks a transcript reaches one of them:
+The three existing refusal points and a rename without a live recorder take
+the new check. Every Legacy entry that executes, records, renames or forks a
+transcript reaches one of them:
 
 | Entry                                                                                                                          | Refusal point                                                                                                       |
 | ------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------- |
@@ -221,14 +231,23 @@ executes, records or forks a transcript reaches one of them:
 | TUI `/resume` (Ink and OpenTUI)                                                                                                | `assertLegacySessionExecution`                                                                                      |
 | TUI `/branch`, ACP branch and side task                                                                                        | `SessionService.forkSession`                                                                                        |
 | A recorder writing without the writer lease                                                                                    | the conversation file check in `ChatRecordingService`                                                               |
+| Rename without a live recorder: daemon metadata routes (standalone included), ACP, TUI `/rename`, branch, unarchive            | `SessionService.renameSession` or `renameSessionForLifecycle`                                                       |
 
 A hot attach or live load reuses a live session, which a Legacy child only
 holds for Legacy sessions. Read-only transcript reads, replay and listing stay
-available. Renaming and the sealed maintenance lease keep the header-only
-check, as does the reader's choice of the Managed projection: they depend on
-the Managed Session log format (a Managed title is a committed domain record),
-which an owner record alone does not have. Paired hosts are unchanged; their
-selector already refuses a Managed owner that no engine can run.
+available. The sealed maintenance lease keeps the header-only check, as does
+the reader's choice of the Managed projection: they depend on the Managed
+Session log format, which an owner record alone does not have. The refusals
+that gate executing, recording and forking leave paired hosts unchanged:
+their selector already refuses a Managed owner that no engine can run.
+
+A rename refuses either evidence on every host, paired or not, because a
+rename without a live recorder appends to the transcript directly. A Managed
+create that stops between its owner record and its header leaves only the
+owner record, and the next Managed open completes that create only while the
+transcript holds nothing but owner records. Before the follow-up, a Legacy
+rename appended its title there and left a transcript that neither engine
+could open.
 
 #### Purpose marking
 
@@ -409,14 +428,19 @@ selector and the Managed host start calling the evaluation in M6.
 
 M1:
 
-1. An unpaired Legacy host refuses to execute, fork or record a transcript
-   whose only Managed evidence is its `managed` owner record, with the
-   existing classification; the transcript bytes are unchanged and no fork
-   target is created.
-2. Transcripts with a Legacy owner, no owner record, a line that does not
-   parse whole, or owner-record text inside a message or another record are
-   not treated as Managed: unpaired Legacy hosts keep executing them, and a
-   Legacy-owned transcript still forks.
+1. An unpaired Legacy host refuses to execute, fork, record or rename a
+   transcript whose only Managed evidence is its `managed` owner record, with
+   the existing classification; the transcript bytes are unchanged and no fork
+   target is created. A Managed create that stopped before its header stays
+   completable by the next Managed open.
+2. Only the header, or a Managed owner record that the owner reader's line
+   parser recovers from a head line, makes a transcript Managed. A Legacy
+   owner, no owner record, a line cut inside an owner record, or owner-record
+   text inside a message or inside another record on a line that parses whole
+   does not: unpaired Legacy hosts keep executing and renaming such
+   transcripts, and a Legacy-owned transcript still forks. Within the head
+   window, a record the owner reader verifies as Managed is owner evidence, and
+   owner evidence the reader rejects leaves the owner unavailable.
 3. Transcripts that carry the Managed Session header behave as before,
    including the rename refusal.
 4. A worktree reset spawns its replacement with the worktree metadata, which
@@ -482,3 +506,16 @@ nor a durably owned session.
   process in the host when a user invokes the command. They are not an input
   of the contract; M5 or M6 decides whether a Managed session refuses them or
   the evaluation defers them.
+- Unarchiving a Managed session fails when its title collides with the title
+  of an active session: the collision retitle is a Legacy rename, which
+  refuses a Managed transcript. Local Managed logs first appear with M4, so M4
+  or M6 must retitle through the session authority or skip the retitle.
+- The head read behind the owner and header checks opens the transcript
+  without following links. On Windows, which has no such open, it proves the
+  file's identity instead and refuses every file on a volume without inode
+  numbers (FAT, exFAT, some SMB shares). The checks then find no evidence and
+  let the operation through, while the offline rename follows links and
+  appends. A linked Managed transcript, and on Windows any Managed transcript
+  on such a volume, therefore escapes the Legacy refusal. The header check had
+  the same gap before M1. A later change should read the head for evidence the
+  way the guarded operation opens the file.

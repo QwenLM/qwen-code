@@ -1344,6 +1344,7 @@ describe('loadCliConfig', () => {
         enableManagedAutoDream: false,
         enableTeamMemory: false,
         enableTeamMemorySync: false,
+        enableStructuredMemoryRecall: false,
         enableAutoSkill: false,
         fileCheckpointingEnabled: false,
         artifactEnabled: false,
