@@ -27,6 +27,7 @@ import { normalizeLanguage, type WebShellLanguage } from './i18n';
 import { WebShellThemeId, type WebShellTheme } from './themeContext';
 import { DEFAULT_BRAND_NAME, type WebShellResolvedBrand } from './brandContext';
 import { inferStandaloneBasePath } from './utils/sessionPath';
+import { isDesktopShell } from './utils/externalOpen';
 
 import 'katex/dist/katex.min.css';
 import './styles/standalone.css';
@@ -340,7 +341,35 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
                 onLanguageResolved: handleLanguageResolved,
                 onBrandResolved: handleBrandResolved,
                 managedAgentProvider,
-                sidebar: { enabled: true, showLive: true },
+                sidebar: {
+                  enabled: true,
+                  showLive: true,
+                  primaryNav: {
+                    items: [
+                      'newTask',
+                      'plugins',
+                      'channels',
+                      'live',
+                      'scheduledTasks',
+                      'workflows',
+                      'goals',
+                      'managed',
+                    ],
+                  },
+                  footer: {
+                    items: [
+                      'settings',
+                      'update',
+                      'version',
+                      'theme',
+                      'sessionsOverview',
+                      'splitView',
+                      'daemonStatus',
+                      ...(isDesktopShell() ? [] : ['localFiles' as const]),
+                      'collapse',
+                    ],
+                  },
+                },
                 showToolCalls: true,
                 className: macosOverlayTitlebar
                   ? MACOS_TITLEBAR_CLASS

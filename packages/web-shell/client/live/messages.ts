@@ -83,6 +83,8 @@ export const LIVE_MESSAGES_EN: Record<string, LiveMessage> = {
   'settings.liveSetup.apiKey': 'DashScope Realtime API key',
   'settings.liveSetup.apiKeyPlaceholder': 'Enter a DashScope API key',
   'settings.liveSetup.apiKeyReplace': 'Enter a new key to replace it',
+  'settings.liveSetup.keyFromModel':
+    'The selected model uses the API key from its model provider configuration.',
   'settings.liveSetup.keyFromEnv': (v) =>
     `Read from the ${v?.env ?? ''} environment variable of the selected model.`,
   'settings.liveSetup.keyFromEnvMissing': (v) =>
@@ -92,8 +94,9 @@ export const LIVE_MESSAGES_EN: Record<string, LiveMessage> = {
     'Pick “Other model id…” to use any Realtime model.',
   'settings.liveSetup.modelCustom': 'Other model id…',
   'settings.liveSetup.endpoint': 'Realtime endpoint',
+  'settings.liveSetup.endpointUnchanged': 'Unchanged — keep the saved endpoint',
   'settings.liveSetup.endpointHint':
-    'The OpenAI-compatible base URL of your key’s region or dedicated domain. Leave empty for the default (Beijing).',
+    'The OpenAI-compatible base URL of your key’s region or dedicated domain. Clear the field to use the default (Beijing).',
   'settings.liveSetup.endpointFromRoute':
     "Follows the base URL of the selected model's modelProviders route.",
   'settings.liveSetup.voice': 'Voice',
@@ -225,6 +228,7 @@ export const LIVE_MESSAGES_ZH: Record<string, LiveMessage> = {
   'settings.liveSetup.apiKey': 'DashScope Realtime API Key',
   'settings.liveSetup.apiKeyPlaceholder': '输入 DashScope API Key',
   'settings.liveSetup.apiKeyReplace': '输入新 Key 以替换当前配置',
+  'settings.liveSetup.keyFromModel': '所选模型使用模型提供商配置中的 API Key。',
   'settings.liveSetup.keyFromEnv': (v) =>
     `从所选模型的环境变量 ${v?.env ?? ''} 读取。`,
   'settings.liveSetup.keyFromEnvMissing': (v) =>
@@ -233,8 +237,9 @@ export const LIVE_MESSAGES_ZH: Record<string, LiveMessage> = {
   'settings.liveSetup.modelHint': '选“其他模型 id…”可填写任意 Realtime 模型。',
   'settings.liveSetup.modelCustom': '其他模型 id…',
   'settings.liveSetup.endpoint': 'Realtime 接入地址',
+  'settings.liveSetup.endpointUnchanged': '未修改，保留已保存的接入地址',
   'settings.liveSetup.endpointHint':
-    '填写 Key 所属地域或专属域名的 OpenAI 兼容 baseUrl，留空使用默认地址（北京）。',
+    '填写 Key 所属地域或专属域名的 OpenAI 兼容 baseUrl，清空后使用默认地址（北京）。',
   'settings.liveSetup.endpointFromRoute':
     '跟随所选模型在 modelProviders 中路由的 baseUrl。',
   'settings.liveSetup.voice': '音色',

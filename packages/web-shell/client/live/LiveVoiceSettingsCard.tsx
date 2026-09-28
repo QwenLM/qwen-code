@@ -6,7 +6,10 @@
 
 import { useEffect, useState } from 'react';
 import { FlaskConicalIcon } from 'lucide-react';
-import type { DaemonLiveRequirementState } from '@qwen-code/sdk';
+import type {
+  DaemonLiveRequirementState,
+  DaemonLiveSetupUpdate,
+} from '@qwen-code/sdk';
 import { useI18n } from '../i18n';
 import {
   AlertDialog,
@@ -73,147 +76,109 @@ export function LiveVoiceSettingsCard({
   setup: UseLiveVoiceSetupResult;
 }) {
   const { t } = useI18n();
-  const [apiKey, setApiKey] = useState('');
+  const [draft, setDraft] = useState<DaemonLiveSetupUpdate>({});
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const [customModel, setCustomModel] = useState(false);
+  const [saving, setSaving] = useState(false);
   const status = setup.status;
-  const enabled = status?.enabled === true;
-  const busy = setup.mutating || setup.loading;
+  const savedEnabled = status?.enabled === true;
+  const enabled = draft.enabled ?? savedEnabled;
+  const busy = saving || setup.mutating || (setup.loading && !status);
   const installBusy =
     status !== undefined && INSTALLING_STATES.has(status.install.state);
   const requirements = status?.live.requirements;
-  // A `realtimeOnly` route reads its key from an environment variable; the
-  // daemon refuses to store one for it, so there is nothing to type here.
-  const keyFromRoute = status?.keySource === 'route';
-  // Until the first status arrives the key's source is unknown, so the
-  // input stays hidden rather than invite a write the daemon may refuse.
-  // While the model does not resolve, the daemon refuses `apiKey: replace`
-  // as well; the modelError alert carries the remediation on its own.
-  const keyEditable =
-    status !== undefined && !keyFromRoute && !status.modelError;
-  // Absent `models` marks a daemon that predates selectable models, which
-  // refuses a model update, so the model stays read-only there.
+  const savedModel = status?.model ?? '';
+  const model = draft.model ?? savedModel;
+  const modelChanged = model.trim() !== savedModel;
+  // Older daemons omit these fields and refuse updates to them.
   const modelChoices =
     status?.models !== undefined ? liveModelOptions(status) : undefined;
-  const savedModel = status?.model ?? '';
-  const [model, setModel] = useState(savedModel);
-  const [customModel, setCustomModel] = useState(false);
-  useEffect(() => {
-    setModel(savedModel);
-    setCustomModel(false);
-  }, [savedModel]);
-  // Absent on daemons that predate a configurable endpoint; empty while the
-  // default is in use.
+  const candidateModel =
+    status && liveModelOptions({ ...status, model: model.trim() });
+  const keyFromRoute = modelChanged
+    ? candidateModel?.options.find(
+        (option) => option.value === candidateModel.selected,
+      )?.route === true
+    : status?.keySource === 'route';
+  const modelError = !modelChanged && status?.modelError;
+  const keyEditable = status !== undefined && !keyFromRoute && !modelError;
   const savedEndpoint = status?.endpoint;
-  const [endpointDraft, setEndpointDraft] = useState(savedEndpoint ?? '');
-  useEffect(() => {
-    setEndpointDraft(savedEndpoint ?? '');
-  }, [savedEndpoint]);
+  const endpointDraft =
+    draft.endpoint ??
+    (status?.keySource === 'route' && !keyFromRoute
+      ? ''
+      : (savedEndpoint ?? ''));
   const savedVoice = status?.voice ?? '';
-  // Absent on daemons that predate selectable voices; an update there is
-  // refused with empty_live_setup_update, so the control stays read-only.
-  const voiceSelectable = status?.voice !== undefined;
-  // Every voice change is refused with invalid_live_model while the model
-  // does not resolve; the model picker is the only in-UI recovery.
-  const voiceEditable = voiceSelectable && status?.modelError === undefined;
-  const [voice, setVoice] = useState(savedVoice);
-  useEffect(() => {
-    setVoice(savedVoice);
-  }, [savedVoice]);
-  // Absent on daemons that predate the browser Host: those are macOS-only.
+  const voice = draft.voice ?? savedVoice;
+  const voiceEditable = status?.voice !== undefined && !modelError;
+  const apiKey =
+    draft.apiKey?.operation === 'replace' ? draft.apiKey.value : '';
+  const keyCleared = draft.apiKey?.operation === 'clear';
+  const keyRequired =
+    keyEditable &&
+    (!status?.keyConfigured || keyCleared || status.keySource === 'route');
   const nativeHost = status?.nativeHost !== false;
+  const shortcut = draft.shortcut ?? status?.shortcut ?? 'Command+E';
 
-  const saveKey = async () => {
-    const value = apiKey.trim();
-    if (!value) return;
+  useEffect(() => {
+    if (!status) {
+      setDraft({});
+      setCustomModel(false);
+      setConfirmOpen(false);
+    }
+  }, [status]);
+
+  const update: DaemonLiveSetupUpdate = {};
+  if (enabled !== savedEnabled) update.enabled = enabled;
+  if (modelChoices && modelChanged) update.model = model.trim();
+  if (voiceEditable && voice.trim() !== savedVoice) update.voice = voice.trim();
+  if (
+    savedEndpoint !== undefined &&
+    keyEditable &&
+    draft.endpoint !== undefined &&
+    // Route status exposes its URL, not the saved independent endpoint.
+    (endpointDraft.trim() !== savedEndpoint || status?.keySource === 'route')
+  ) {
+    update.endpoint = endpointDraft.trim();
+  }
+  if (keyCleared) update.apiKey = { operation: 'clear' };
+  else if (keyEditable && apiKey.trim()) {
+    update.apiKey = { operation: 'replace', value: apiKey.trim() };
+  }
+  if (
+    nativeHost &&
+    draft.shortcut !== undefined &&
+    shortcut !== status?.shortcut
+  )
+    update.shortcut = shortcut;
+  const dirty = Object.keys(update).length > 0;
+  const invalid = update.model === '' || update.voice === '';
+
+  // Validate the entire candidate configuration in one daemon request; retain
+  // the draft on failure so a rejected field can be corrected and retried.
+  const save = async () => {
+    if (busy || !status || !dirty || invalid) return;
+    setSaving(true);
     try {
-      await setup.update({
-        apiKey: { operation: 'replace', value },
-      });
-      setApiKey('');
+      await setup.update(update);
+      setDraft({});
+      setCustomModel(false);
     } catch {
       // The hook exposes the sanitized daemon error in the card.
+    } finally {
+      setSaving(false);
     }
   };
-
-  // Changing any of these while Live Voice is on makes the daemon open a
-  // validation session first, so a wrong id, voice or endpoint fails here,
-  // not mid-call.
-  const saveModel = async (value: string) => {
-    const next = value.trim();
-    if (!status || !next || next === savedModel) return;
-    try {
-      await setup.update({ model: next });
-    } catch {
-      // The hook exposes the sanitized daemon error in the card.
-    }
+  const requestSave = () => {
+    if (busy || !status || !dirty || invalid) return;
+    if (enabled && !savedEnabled && nativeHost) setConfirmOpen(true);
+    else void save();
   };
-
   const chooseModel = (value: string) => {
-    if (value === CUSTOM_MODEL) {
-      setCustomModel(true);
-      return;
+    setCustomModel(value === CUSTOM_MODEL);
+    if (value !== CUSTOM_MODEL) {
+      setDraft((current) => ({ ...current, model: value }));
     }
-    setCustomModel(false);
-    void saveModel(value);
-  };
-
-  // A key typed for the new endpoint goes in the same request: validating
-  // the new endpoint with the old key, or the new key against the old
-  // endpoint, would fail for a key bound to one region or domain.
-  const saveEndpoint = async () => {
-    const endpoint = endpointDraft.trim();
-    if (savedEndpoint === undefined || endpoint === savedEndpoint) return;
-    const key = apiKey.trim();
-    try {
-      await setup.update({
-        endpoint,
-        ...(key ? { apiKey: { operation: 'replace', value: key } } : {}),
-      });
-      if (key) setApiKey('');
-    } catch {
-      // The hook exposes the sanitized daemon error in the card.
-    }
-  };
-
-  const saveVoice = async () => {
-    const value = voice.trim();
-    if (!value || value === savedVoice) return;
-    try {
-      await setup.update({ voice: value });
-    } catch {
-      setVoice(savedVoice);
-    }
-  };
-
-  const clearKey = async () => {
-    try {
-      await setup.update({ apiKey: { operation: 'clear' } });
-      setApiKey('');
-    } catch {
-      // The hook exposes the sanitized daemon error in the card.
-    }
-  };
-
-  const setEnabled = async (next: boolean) => {
-    // The confirmation is about downloading and installing the native Host;
-    // with no native Host on this platform there is nothing to confirm.
-    if (next && nativeHost) {
-      setConfirmOpen(true);
-      return;
-    }
-    if (next) {
-      confirmEnable();
-      return;
-    }
-    try {
-      await setup.update({ enabled: false });
-    } catch {
-      // The hook exposes the sanitized daemon error in the card.
-    }
-  };
-
-  const confirmEnable = () => {
-    void setup.update({ enabled: true }).catch(() => undefined);
   };
 
   const launchOrRetry = () => {
@@ -225,7 +190,7 @@ export function LiveVoiceSettingsCard({
   };
 
   return (
-    <div className="space-y-5 p-5 max-md:p-4">
+    <div className="w-full max-w-3xl space-y-6 p-5 max-md:p-4">
       <div className="flex items-start justify-between gap-6">
         <div className="min-w-0 space-y-1">
           <div className="flex flex-wrap items-center gap-2">
@@ -247,28 +212,30 @@ export function LiveVoiceSettingsCard({
         ) : (
           <Switch
             checked={enabled}
-            disabled={busy || (!enabled && status?.keyConfigured !== true)}
+            disabled={busy || !status}
             aria-label={t('settings.liveSetup.enable')}
-            onCheckedChange={(next) => void setEnabled(next)}
+            onCheckedChange={(enabled) =>
+              setDraft((current) => ({ ...current, enabled }))
+            }
           />
         )}
       </div>
 
       <Separator />
 
-      <div className="grid gap-4 lg:grid-cols-2">
+      <div className="grid gap-6">
         {savedEndpoint !== undefined ? (
           <div className="space-y-2" data-live-endpoint>
             <label
               htmlFor="live-realtime-endpoint"
-              className="text-sm font-medium"
+              className="block text-sm font-medium"
             >
               {t('settings.liveSetup.endpoint')}
             </label>
             {keyFromRoute ? (
               <>
                 <p className="break-all text-sm" id="live-realtime-endpoint">
-                  {savedEndpoint}
+                  {modelChanged ? null : savedEndpoint}
                 </p>
                 <p className="text-xs text-muted-foreground">
                   {t('settings.liveSetup.endpointFromRoute')}
@@ -276,32 +243,28 @@ export function LiveVoiceSettingsCard({
               </>
             ) : (
               <>
-                <div className="flex gap-2">
+                <div className="flex items-center gap-2">
                   <Input
                     id="live-realtime-endpoint"
                     autoComplete="off"
                     value={endpointDraft}
-                    disabled={setup.mutating || !keyEditable}
-                    placeholder={DEFAULT_BASE_URL}
-                    onChange={(event) => setEndpointDraft(event.target.value)}
+                    disabled={busy || !keyEditable}
+                    placeholder={
+                      status?.keySource === 'route' &&
+                      draft.endpoint === undefined
+                        ? t('settings.liveSetup.endpointUnchanged')
+                        : DEFAULT_BASE_URL
+                    }
+                    onChange={(event) =>
+                      setDraft((current) => ({
+                        ...current,
+                        endpoint: event.target.value,
+                      }))
+                    }
                     onKeyDown={(event) => {
-                      if (event.key === 'Enter') void saveEndpoint();
+                      if (event.key === 'Enter') requestSave();
                     }}
                   />
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="outline"
-                    data-live-endpoint-save
-                    disabled={
-                      endpointDraft.trim() === savedEndpoint ||
-                      setup.mutating ||
-                      !keyEditable
-                    }
-                    onClick={() => void saveEndpoint()}
-                  >
-                    {t('settings.liveSetup.save')}
-                  </Button>
                 </div>
                 {status?.endpointError ? (
                   <p
@@ -321,18 +284,24 @@ export function LiveVoiceSettingsCard({
         ) : null}
 
         <div className="space-y-2">
-          <div className="flex items-center justify-between gap-3">
-            <label htmlFor="live-realtime-key" className="text-sm font-medium">
+          <div className="flex min-h-6 items-center justify-between gap-3">
+            <label
+              htmlFor="live-realtime-key"
+              className="block text-sm font-medium"
+            >
               {t('settings.liveSetup.apiKey')}
+              {keyRequired && (
+                <span className="ml-1 text-destructive" aria-hidden="true">
+                  *
+                </span>
+              )}
             </label>
             <div className="flex items-center gap-1">
-              <Badge variant={status?.keyConfigured ? 'secondary' : 'outline'}>
-                {t(
-                  status?.keyConfigured
-                    ? 'settings.liveSetup.configured'
-                    : 'settings.liveSetup.notConfigured',
-                )}
-              </Badge>
+              {status?.keyConfigured && !keyCleared && !modelChanged && (
+                <span className="text-xs text-muted-foreground">
+                  {t('settings.liveSetup.configured')}
+                </span>
+              )}
               {!enabled &&
               (status?.storedKey === true ||
                 (status?.keyConfigured === true && !keyFromRoute)) ? (
@@ -340,8 +309,13 @@ export function LiveVoiceSettingsCard({
                   type="button"
                   size="xs"
                   variant="ghost"
-                  disabled={setup.mutating}
-                  onClick={() => void clearKey()}
+                  disabled={busy || keyCleared}
+                  onClick={() =>
+                    setDraft((current) => ({
+                      ...current,
+                      apiKey: { operation: 'clear' },
+                    }))
+                  }
                 >
                   {t('settings.liveSetup.removeKey')}
                 </Button>
@@ -349,7 +323,11 @@ export function LiveVoiceSettingsCard({
             </div>
           </div>
           {keyFromRoute ? (
-            status?.keyError ? (
+            modelChanged ? (
+              <p className="text-xs text-muted-foreground" data-live-key-route>
+                {t('settings.liveSetup.keyFromModel')}
+              </p>
+            ) : status?.keyError ? (
               <p
                 className="text-xs text-destructive"
                 role="alert"
@@ -368,44 +346,48 @@ export function LiveVoiceSettingsCard({
               </p>
             )
           ) : keyEditable ? (
-            <div className="flex gap-2">
+            <div className="flex items-center gap-2">
               <Input
                 id="live-realtime-key"
+                aria-required={keyRequired}
                 type="password"
                 autoComplete="off"
                 value={apiKey}
-                disabled={setup.mutating}
+                disabled={busy}
                 placeholder={
-                  status?.keyConfigured
+                  status?.keyConfigured && !keyCleared
                     ? t('settings.liveSetup.apiKeyReplace')
                     : t('settings.liveSetup.apiKeyPlaceholder')
                 }
-                onChange={(event) => setApiKey(event.target.value)}
+                onChange={(event) =>
+                  setDraft((current) => ({
+                    ...current,
+                    apiKey: { operation: 'replace', value: event.target.value },
+                  }))
+                }
                 onKeyDown={(event) => {
-                  if (event.key === 'Enter') void saveKey();
+                  if (event.key === 'Enter') requestSave();
                 }}
               />
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                disabled={!apiKey.trim() || setup.mutating}
-                onClick={() => void saveKey()}
-              >
-                {setup.mutating ? <Spinner /> : t('settings.liveSetup.save')}
-              </Button>
             </div>
           ) : null}
         </div>
 
         <div className="space-y-2">
-          <label htmlFor="live-realtime-model" className="text-sm font-medium">
+          <label
+            htmlFor="live-realtime-model"
+            className="block text-sm font-medium"
+          >
             {t('settings.liveSetup.model')}
           </label>
           {modelChoices ? (
             <Select
-              value={customModel ? CUSTOM_MODEL : modelChoices.selected}
-              disabled={setup.mutating}
+              value={
+                customModel
+                  ? CUSTOM_MODEL
+                  : (draft.model ?? modelChoices.selected)
+              }
+              disabled={busy}
               onValueChange={chooseModel}
             >
               <SelectTrigger id="live-realtime-model" className="w-full">
@@ -428,35 +410,28 @@ export function LiveVoiceSettingsCard({
             </p>
           )}
           {customModel ? (
-            <div className="flex gap-2">
+            <div className="flex items-center gap-2">
               <Input
                 autoComplete="off"
                 aria-label={t('settings.liveSetup.model')}
                 data-live-model-input
                 value={model}
-                disabled={setup.mutating}
-                onChange={(event) => setModel(event.target.value)}
+                disabled={busy}
+                onChange={(event) =>
+                  setDraft((current) => ({
+                    ...current,
+                    model: event.target.value,
+                  }))
+                }
                 onKeyDown={(event) => {
-                  if (event.key === 'Enter') void saveModel(model);
+                  if (event.key === 'Enter') requestSave();
                 }}
               />
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                data-live-model-save
-                disabled={
-                  !model.trim() || model.trim() === savedModel || setup.mutating
-                }
-                onClick={() => void saveModel(model)}
-              >
-                {t('settings.liveSetup.save')}
-              </Button>
             </div>
           ) : null}
-          {status?.modelError ? (
+          {modelError ? (
             <p className="text-xs text-destructive" role="alert">
-              {status.modelError}
+              {modelError}
             </p>
           ) : null}
           {modelChoices ? (
@@ -470,34 +445,28 @@ export function LiveVoiceSettingsCard({
         </div>
 
         <div className="space-y-2">
-          <label htmlFor="live-realtime-voice" className="text-sm font-medium">
+          <label
+            htmlFor="live-realtime-voice"
+            className="block text-sm font-medium"
+          >
             {t('settings.liveSetup.voice')}
           </label>
-          <div className="flex gap-2">
+          <div className="flex items-center gap-2">
             <Input
               id="live-realtime-voice"
               autoComplete="off"
               value={voice}
-              disabled={setup.mutating || !voiceEditable}
-              onChange={(event) => setVoice(event.target.value)}
+              disabled={busy || !voiceEditable}
+              onChange={(event) =>
+                setDraft((current) => ({
+                  ...current,
+                  voice: event.target.value,
+                }))
+              }
               onKeyDown={(event) => {
-                if (event.key === 'Enter') void saveVoice();
+                if (event.key === 'Enter') requestSave();
               }}
             />
-            {voiceEditable ? (
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                data-live-voice-save
-                disabled={
-                  !voice.trim() || voice.trim() === savedVoice || setup.mutating
-                }
-                onClick={() => void saveVoice()}
-              >
-                {t('settings.liveSetup.save')}
-              </Button>
-            ) : null}
           </div>
           <p className="text-xs text-muted-foreground">
             {t('settings.liveSetup.voiceHint')}
@@ -508,27 +477,42 @@ export function LiveVoiceSettingsCard({
         </div>
 
         <div className="space-y-2" hidden={!nativeHost}>
-          <div className="text-sm font-medium">
+          <div className="block text-sm font-medium">
             {t('settings.liveSetup.shortcut')}
           </div>
           <HotkeySetter
-            accelerator={status?.shortcut ?? 'Command+E'}
-            disabled={setup.mutating}
+            accelerator={shortcut}
+            disabled={busy}
             captureLabel={t('settings.liveShortcut.capture')}
             clearLabel={t('settings.liveShortcut.clear')}
             offLabel={t('settings.liveShortcut.off')}
-            onChange={async (shortcut) => setup.update({ shortcut })}
+            onChange={async (shortcut) =>
+              setDraft((current) => ({ ...current, shortcut }))
+            }
           />
         </div>
       </div>
 
-      {enabled && status && nativeHost ? (
+      <div className="flex justify-end">
+        <Button
+          type="button"
+          data-live-settings-save
+          className="transition-none"
+          disabled={busy || !status || !dirty || invalid}
+          onClick={requestSave}
+        >
+          {saving || setup.mutating ? <Spinner /> : null}
+          {t('settings.liveSetup.save')}
+        </Button>
+      </div>
+
+      {savedEnabled && status && nativeHost ? (
         <>
           <Separator />
           <div className="space-y-3">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
-                <div className="text-sm font-medium">
+                <div className="block text-sm font-medium">
                   {t('settings.liveSetup.host')}
                 </div>
                 <div className="text-xs text-muted-foreground">
@@ -543,9 +527,9 @@ export function LiveVoiceSettingsCard({
                   requirements?.host !== 'ready') ? (
                 <Button
                   type="button"
-                  size="sm"
+                  size="default"
                   variant="outline"
-                  disabled={setup.mutating}
+                  disabled={busy}
                   onClick={launchOrRetry}
                 >
                   {status.install.state === 'error'
@@ -592,7 +576,8 @@ export function LiveVoiceSettingsCard({
         </>
       ) : null}
 
-      {(setup.error || (enabled && nativeHost && status?.install.message)) && (
+      {(setup.error ||
+        (savedEnabled && nativeHost && status?.install.message)) && (
         <p className="text-sm text-destructive" role="alert">
           {setup.error?.message ?? status?.install.message}
         </p>
@@ -615,7 +600,7 @@ export function LiveVoiceSettingsCard({
             <AlertDialogCancel>
               {t('settings.liveSetup.cancel')}
             </AlertDialogCancel>
-            <AlertDialogAction onClick={confirmEnable}>
+            <AlertDialogAction onClick={() => void save()}>
               {t('settings.liveSetup.confirm')}
             </AlertDialogAction>
           </AlertDialogFooter>

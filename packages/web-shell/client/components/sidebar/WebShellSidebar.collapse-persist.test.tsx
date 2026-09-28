@@ -191,6 +191,9 @@ function renderSidebar(
   collapsed = false,
   props: {
     onSelectCurrentSession?: () => void;
+    layout?: 'single' | 'rail';
+    activePage?: string;
+    onOpenHome?: () => void;
     onCollapsedChange?: (collapsed: boolean) => void;
     mobileOpen?: boolean;
     onMobileClose?: () => void;
@@ -202,6 +205,9 @@ function renderSidebar(
   const sidebar = (
     <WebShellSidebar
       collapsed={collapsed}
+      layout={props.layout}
+      activePage={props.activePage}
+      onOpenHome={props.onOpenHome}
       onCollapsedChange={props.onCollapsedChange ?? (() => {})}
       onOpenSettings={() => {}}
       onOpenDaemonStatus={() => {}}
@@ -284,6 +290,29 @@ afterEach(() => {
 });
 
 describe('WebShellSidebar collapsed session group persistence', () => {
+  it.each([220, 260, 400])(
+    'keeps at least 220px for the secondary column with saved total width %s',
+    async (savedWidth) => {
+      window.localStorage.setItem(
+        'qwen-code-web-shell-sidebar-width',
+        String(savedWidth),
+      );
+      renderSidebar(false, { layout: 'rail' });
+      await flushSidebar();
+      const sidebar = container.querySelector<HTMLElement>('aside')!;
+      expect(sidebar.style.getPropertyValue('--web-shell-sidebar-width')).toBe(
+        `${Math.max(savedWidth, 276)}px`,
+      );
+      expect(
+        sidebar.style.getPropertyValue('--web-shell-sidebar-min-width'),
+      ).toBe('276px');
+      renderSidebar(false, { layout: 'single' });
+      await flushSidebar();
+      expect(sidebar.style.getPropertyValue('--web-shell-sidebar-width')).toBe(
+        `${savedWidth}px`,
+      );
+    },
+  );
   it('uses drawer constraints and closes mobile without persisting desktop collapse', async () => {
     const onCollapsedChange = vi.fn();
     const onMobileClose = vi.fn();
@@ -1648,5 +1677,68 @@ describe('WebShellSidebar collapsed session group persistence', () => {
         'input[aria-label="Rename: API review"]',
       ),
     ).not.toBeNull();
+  });
+  it('keeps the Home tree mounted and opens only on click', async () => {
+    const onCollapsedChange = vi.fn();
+    const onOpenHome = vi.fn();
+    renderSidebar(false, { layout: 'rail' });
+    await flushSidebar();
+    const column = container.querySelector<HTMLElement>(
+      '[data-web-shell-home-column]',
+    )!;
+    const section = groupHeader('Backend');
+    act(() => click(section));
+    expect(section.getAttribute('aria-expanded')).toBe('false');
+    renderSidebar(true, { layout: 'rail', onCollapsedChange, onOpenHome });
+    await flushSidebar();
+    expect(column.hidden).toBe(true);
+    expect(groupHeader('Backend')).toBe(section);
+    const home = container.querySelector<HTMLElement>(
+      '[data-web-shell-home-trigger]',
+    )!;
+    act(() =>
+      home.dispatchEvent(new MouseEvent('pointerover', { bubbles: true })),
+    );
+    expect(onCollapsedChange).not.toHaveBeenCalled();
+    act(() => click(home));
+    expect(onCollapsedChange).toHaveBeenCalledWith(false);
+    expect(onOpenHome).toHaveBeenCalledOnce();
+    renderSidebar(false, { layout: 'rail' });
+    await flushSidebar();
+    expect(column.hidden).toBe(false);
+    expect(groupHeader('Backend').getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('keeps functional navigation selected while Home is hidden', async () => {
+    const onCollapsedChange = vi.fn();
+    renderSidebar(true, {
+      layout: 'rail',
+      activePage: 'settings',
+      onCollapsedChange,
+    });
+    await flushSidebar();
+    expect(
+      container.querySelector<HTMLElement>('[data-web-shell-home-column]')!
+        .hidden,
+    ).toBe(true);
+    act(() =>
+      click(
+        container.querySelector<HTMLButtonElement>(
+          'button[aria-label="More"]',
+        )!,
+      ),
+    );
+    await flushSidebar();
+    expect(
+      document
+        .querySelector('button[aria-label="Settings"]')
+        ?.getAttribute('aria-current'),
+    ).toBe('page');
+    click(
+      container.querySelector<HTMLButtonElement>(
+        'button[aria-label="Expand"]',
+      )!,
+    );
+    expect(onCollapsedChange).toHaveBeenCalledWith(false);
   });
 });

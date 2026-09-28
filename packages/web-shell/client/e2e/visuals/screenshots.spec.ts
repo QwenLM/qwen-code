@@ -597,6 +597,7 @@ for (const theme of THEMES) {
         resolveBaseURL(testInfo),
       );
       await gotoSession(page, scenario, daemon, theme);
+      await page.getByRole('button', { name: 'More', exact: true }).click();
       await page
         .getByRole('button', { name: 'Session Overview', exact: true })
         .click();

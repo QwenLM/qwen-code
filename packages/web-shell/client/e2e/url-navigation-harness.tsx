@@ -7,7 +7,13 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <WebShellWithProviders
       urlNavigation={{ basePath: '/agentic-code' }}
-      sidebar={{ enabled: true, footer: { items: ['settings'] } }}
+      sidebar={{
+        enabled: true,
+        primaryNav: {
+          items: ['plugins', 'channels', 'scheduledTasks', 'goals'],
+        },
+        footer: { items: ['settings'] },
+      }}
       language="en-US"
     />
   </React.StrictMode>,
