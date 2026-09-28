@@ -2346,10 +2346,19 @@ const SETTINGS_SCHEMA = {
           required: ['baseUrl'],
           properties: {
             baseUrl: { type: 'string', format: 'uri' },
-            credentialEnv: {
+            envKey: {
               type: 'string',
               pattern: '^[A-Za-z_][A-Za-z0-9_]*$',
               default: 'MEM0_API_KEY',
+              description:
+                'Credential environment variable name. Its value may come from the process environment, .env, or the top-level settings env field.',
+            },
+            credentialEnv: {
+              type: 'string',
+              pattern: '^[A-Za-z_][A-Za-z0-9_]*$',
+              deprecated: true,
+              description:
+                'Legacy alias for envKey. If both are set, their values must match.',
             },
             protocol: {
               type: 'string',

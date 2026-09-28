@@ -1094,10 +1094,17 @@
               "type": "string",
               "format": "uri"
             },
+            "envKey": {
+              "type": "string",
+              "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+              "default": "MEM0_API_KEY",
+              "description": "Credential environment variable name. Its value may come from the process environment, .env, or the top-level settings env field."
+            },
             "credentialEnv": {
               "type": "string",
               "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
-              "default": "MEM0_API_KEY"
+              "deprecated": true,
+              "description": "Legacy alias for envKey. If both are set, their values must match."
             },
             "protocol": {
               "type": "string",

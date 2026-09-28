@@ -24,14 +24,13 @@ const protocolIds = [
 ] as const;
 
 const scopeValue = z.string().trim().min(1).max(256);
+const credentialEnvName = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/u);
 const mem0SettingsSchema = z
   .object({
     baseUrl: z.string().url(),
     protocol: z.enum(protocolIds).default('mem0-v2'),
-    credentialEnv: z
-      .string()
-      .regex(/^[A-Za-z_][A-Za-z0-9_]*$/u)
-      .default('MEM0_API_KEY'),
+    envKey: credentialEnvName.optional(),
+    credentialEnv: credentialEnvName.optional(),
     scope: z
       .object({
         userId: scopeValue.optional(),
@@ -60,14 +59,19 @@ export function createBundledMem0Server(
     );
   }
   const settings = parsed.data;
-  const enableWrites = settings.enableWrites && allowWrites;
   if (
-    settings.credentialEnv === 'QWEN_BUNDLED_MEM0_CONFIG' ||
-    isInternalSecretEnvVar(settings.credentialEnv)
+    settings.envKey !== undefined &&
+    settings.credentialEnv !== undefined &&
+    settings.envKey !== settings.credentialEnv
   ) {
     throw new Error(
-      'memory.mem0.credentialEnv must refer to a Mem0 credential.',
+      'memory.mem0.envKey and credentialEnv must match when both are set.',
     );
+  }
+  const envKey = settings.envKey ?? settings.credentialEnv ?? 'MEM0_API_KEY';
+  const enableWrites = settings.enableWrites && allowWrites;
+  if (envKey === 'QWEN_BUNDLED_MEM0_CONFIG' || isInternalSecretEnvVar(envKey)) {
+    throw new Error('memory.mem0.envKey must refer to a Mem0 credential.');
   }
   if (
     [...settings.baseUrl].some(
@@ -126,7 +130,7 @@ export function createBundledMem0Server(
         basePath: url.pathname === '/' ? '' : url.pathname.replace(/\/$/u, ''),
         allowInsecureHttp: settings.allowInsecureHttp,
       },
-      credentialEnv: settings.credentialEnv,
+      credentialEnv: envKey,
       scope,
     },
     ...(enableWrites ? { write: { enabled: true } } : {}),

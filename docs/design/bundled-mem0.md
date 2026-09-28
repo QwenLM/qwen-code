@@ -12,20 +12,26 @@ Deliver configurable search and opt-in writes with the main CLI. Do not implemen
 
 ## Configuration and contract
 
-Export `MEM0_API_KEY` in the shell launching Qwen Code, then add to user settings (`~/.qwen/settings.json`):
+Add to user settings (`~/.qwen/settings.json`), then restart Qwen Code. As with `modelProviders`, the top-level `env` field can define the credential value and `envKey` selects its name:
 
 ```json
 {
+  "env": {
+    "MEM0_API_KEY": "<your-provider-key>"
+  },
   "memory": {
     "mem0": {
       "baseUrl": "https://your-mem0-endpoint.example",
-      "protocol": "mem0-v2"
+      "protocol": "mem0-v2",
+      "envKey": "MEM0_API_KEY"
     }
   }
 }
 ```
 
-`credentialEnv` selects another environment variable. Generated configuration never contains credential values. `baseUrl` is an origin plus optional reverse-proxy prefix, not a full operation URL. Credentials, query, fragment, whitespace and backslashes are rejected. HTTPS is required except loopback HTTP; a trusted plain-HTTP PolarDB endpoint requires `"allowInsecureHttp": true`. This does not bypass routing or provider whitelists.
+`envKey` defaults to `MEM0_API_KEY`. The historical `credentialEnv` remains an alias; unequal names supplied together are rejected. Neither field contains a key value. Reuse the existing environment loader: nonempty process values take precedence over `.env`, then `settings.env`. The MCP process inherits the resolved environment; generated binding configuration contains only the variable reference, not the credential. No new credential store or loader is introduced. The single-file setup needs no shell export, but JSON stores plaintext credentials; use user settings and never commit or publish them. Shell exports and `~/.qwen/.env` remain alternatives.
+
+`baseUrl` is an origin plus optional reverse-proxy prefix, not a full operation URL. Credentials, query, fragment, whitespace and backslashes are rejected. HTTPS is required except loopback HTTP; a trusted plain-HTTP PolarDB endpoint requires `"allowInsecureHttp": true`. This does not bypass routing or provider whitelists.
 
 `protocol` selects a complete contract, not just a version number appended to a URL:
 
@@ -65,9 +71,9 @@ The generic dialect integration remains an advanced path. This change does not m
 
 ## Validation and acceptance
 
-1. Unit checks: generated endpoint/protocol/scope, credential nonserialization, read-only defaults, interactive-only writes, Hook composition and workspace isolation.
+1. Unit checks: generated endpoint/protocol/scope, `envKey`/legacy-alias compatibility and conflicts, credential nonserialization, read-only defaults, interactive-only writes, Hook composition and workspace isolation.
 2. Packaging: both runtime files required for npm/standalone; a packaged stdio client discovers tools and searches without a separately published package.
-3. Controlled-provider interactive checks: V3/OSS approval, cancellation with no HTTP write, YOLO content confirmation. OSS uses `memory.mem0`, not hand-authored MCP/Hook configuration.
+3. Controlled-provider interactive checks: V3/OSS approval, cancellation with no HTTP write, YOLO content confirmation. OSS uses `memory.mem0.envKey` with its credential defined only in `settings.env`, not a shell export or hand-authored MCP/Hook configuration.
 4. Separate live PolarDB acceptance: auth, slash behavior, `limit`, approved write IDs, restart/search with identical scope, targeted cleanup. Never print or commit credentials.
 
 Until step 4 succeeds, report packaged/controlled-provider validation, not real PolarDB end-to-end validation. External gates are credentials, reachable/whitelisted access, and inclusion in a released main CLI version; no standalone Mem0 npm release is needed.

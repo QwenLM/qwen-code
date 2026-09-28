@@ -12,20 +12,26 @@
 
 ## 配置与协议合同
 
-在启动 Qwen Code 的 shell 导出 `MEM0_API_KEY`，然后在用户设置（`~/.qwen/settings.json`）中加入：
+在用户设置（`~/.qwen/settings.json`）中加入并重启 Qwen Code。与 `modelProviders` 一样，顶层 `env` 字段可定义凭证值，`envKey` 选择变量名：
 
 ```json
 {
+  "env": {
+    "MEM0_API_KEY": "<your-provider-key>"
+  },
   "memory": {
     "mem0": {
       "baseUrl": "https://your-mem0-endpoint.example",
-      "protocol": "mem0-v2"
+      "protocol": "mem0-v2",
+      "envKey": "MEM0_API_KEY"
     }
   }
 }
 ```
 
-`credentialEnv` 可选其他环境变量。生成配置不包含凭证值。`baseUrl` 是 origin 加可选的反向代理前缀，不是完整操作地址。不允许凭证、query、fragment、空白和反斜杠。除回环 HTTP 外必须使用 HTTPS；可信的纯 HTTP PolarDB 地址需要 `"allowInsecureHttp": true`。该开关不绕过网络路由或服务白名单。
+`envKey` 默认为 `MEM0_API_KEY`。历史字段 `credentialEnv` 保留为别名；两者同时指定不同变量名时报错。两个字段都不存储密钥值。复用现有环境加载器：非空进程环境优先于 `.env`，再优先于 `settings.env`。MCP 子进程继承解析后的环境；生成的绑定配置仅包含变量引用，不含凭证值。不新增凭证存储或加载器。单文件配置无需 shell export，但 JSON 会明文存储凭证，应使用用户设置且不能提交或公开。shell export 和 `~/.qwen/.env` 仍可使用。
+
+`baseUrl` 是 origin 加可选的反向代理前缀，不是完整操作地址。不允许凭证、query、fragment、空白和反斜杠。除回环 HTTP 外必须使用 HTTPS；可信的纯 HTTP PolarDB 地址需要 `"allowInsecureHttp": true`。该开关不绕过网络路由或服务白名单。
 
 `protocol` 选择完整协议合同，不是简单往 URL 拼一个版本号：
 
@@ -65,9 +71,9 @@ bare、safe、不可信、临时和 SSH 工作区会话不启用此本地绑定�
 
 ## 验证与验收
 
-1. 单元检查：生成的 endpoint/protocol/scope、不序列化凭证、默认只读、仅交互写入、Hook 组合和工作区隔离。
+1. 单元检查：生成的 endpoint/protocol/scope、`envKey`/历史别名兼容和冲突、不序列化凭证、默认只读、仅交互写入、Hook 组合和工作区隔离。
 2. 打包：npm/standalone 都要求两个运行文件；打包后的 stdio 客户端可发现工具并搜索，不依赖单独发布的包。
-3. 受控服务交互检查：V3/OSS 批准、取消且无 HTTP 写入、YOLO 内容确认。OSS 使用 `memory.mem0`，不手工注册 MCP/Hook。
+3. 受控服务交互检查：V3/OSS 批准、取消且无 HTTP 写入、YOLO 内容确认。OSS 使用 `memory.mem0.envKey`，凭证仅在 `settings.env` 中定义，无需 shell export 或手工注册 MCP/Hook。
 4. 真实 PolarDB 独立验收：认证、斜杠行为、`limit`、批准写入 ID、相同 scope 重启后搜索、定向清理。不打印或提交凭证。
 
 第 4 项完成前只报告打包/受控服务验证，不报告真实 PolarDB 端到端验证。外部门槛是有效凭证、可达且已加白名单的服务，以及进入主 CLI 发布版本；不需要单独发布 Mem0 npm 包。

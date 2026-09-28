@@ -30,6 +30,7 @@ const IS_SANDBOX = Boolean(
   SANDBOX_MODE && SANDBOX_MODE !== 'false' && SANDBOX_MODE !== '0',
 );
 const EVENT_ID = '123e4567-e89b-12d3-a456-426614174000';
+const SETTINGS_MEM0_ENV_KEY = 'QWEN_E2E_MEM0_TOKEN';
 const LONG_CONFIRMATION_CONTENT = [
   'CONFIRM_TOP [visible](https://hidden.example/target) **bold** `code` <u>under</u>',
   ...Array.from(
@@ -46,6 +47,7 @@ const ENVIRONMENT_KEYS = [
   'QWEN_CODE_LEGACY_MCP_BLOCKING',
   'QWEN_EXTERNAL_CONTEXT_CONFIG',
   'MEM0_API_KEY',
+  SETTINGS_MEM0_ENV_KEY,
   'FAKE_MEM0_BASE_URL',
   'NO_PROXY',
   'no_proxy',
@@ -117,7 +119,7 @@ const WRITE_SCENARIOS: WriteScenario[] = [
     verifiesLongConfirmation: true,
   },
   {
-    name: 'uses two confirmations for the OSS REST provider',
+    name: 'uses two confirmations for the OSS REST provider with its credential from settings.env',
     provider: 'oss-rest',
     approvalMode: 'default',
     approveWrite: true,
@@ -540,10 +542,12 @@ async function configureOssManagedWrite(
   rig.createFile(
     '.qwen-home/settings.json',
     JSON.stringify({
+      env: { [SETTINGS_MEM0_ENV_KEY]: 'bound-mem0-project-key' },
       memory: {
         mem0: {
           baseUrl: providerOrigin,
           protocol: 'mem0-oss-2026-08',
+          envKey: SETTINGS_MEM0_ENV_KEY,
           scope: { userId: 'fixed-repository' },
           enableWrites: true,
         },
@@ -570,7 +574,8 @@ async function configureOssManagedWrite(
   delete process.env['QWEN_CODE_MCP_APPROVALS_PATH'];
   process.env['QWEN_CODE_LEGACY_MCP_BLOCKING'] = '1';
   delete process.env['QWEN_EXTERNAL_CONTEXT_CONFIG'];
-  process.env['MEM0_API_KEY'] = 'bound-mem0-project-key';
+  delete process.env['MEM0_API_KEY'];
+  delete process.env[SETTINGS_MEM0_ENV_KEY];
   delete process.env['FAKE_MEM0_BASE_URL'];
   process.env['NO_PROXY'] = '127.0.0.1,localhost';
   process.env['no_proxy'] = '127.0.0.1,localhost';

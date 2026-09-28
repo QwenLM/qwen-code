@@ -65,6 +65,42 @@ describe('bundled Mem0 settings', () => {
     );
   });
 
+  it.each([
+    { envKey: 'POLARDB_MEM0_TOKEN' },
+    { credentialEnv: 'POLARDB_MEM0_TOKEN' },
+    {
+      envKey: 'POLARDB_MEM0_TOKEN',
+      credentialEnv: 'POLARDB_MEM0_TOKEN',
+    },
+  ])(
+    'uses the selected credential reference without serializing its value: %j',
+    (credential) => {
+      vi.stubEnv('POLARDB_MEM0_TOKEN', 'must-not-be-serialized');
+      const server = createBundledMem0Server(
+        { baseUrl: 'https://mem0.example', ...credential },
+        process.cwd(),
+      );
+      expect(
+        JSON.parse(server.env!['QWEN_BUNDLED_MEM0_CONFIG']).provider
+          .credentialEnv,
+      ).toBe('POLARDB_MEM0_TOKEN');
+      expect(JSON.stringify(server)).not.toContain('must-not-be-serialized');
+    },
+  );
+
+  it('rejects conflicting credential references instead of silently choosing a key', () => {
+    expect(() =>
+      createBundledMem0Server(
+        {
+          baseUrl: 'https://mem0.example',
+          envKey: 'POLARDB_MEM0_TOKEN',
+          credentialEnv: 'OTHER_MEM0_TOKEN',
+        },
+        process.cwd(),
+      ),
+    ).toThrow('memory.mem0.envKey and credentialEnv must match');
+  });
+
   it('binds Platform V3 app scope and keeps exact-content confirmation on hook reload', () => {
     const server = createBundledMem0Server(
       {
@@ -118,6 +154,8 @@ describe('bundled Mem0 settings', () => {
     { baseUrl: 'https://secret@mem0.example' },
     { baseUrl: 'https://mem0.example?key=secret' },
     { baseUrl: 'https://mem0.example', protocol: 'mem0-v4' },
+    { baseUrl: 'https://mem0.example', envKey: 'KEY=bad' },
+    { baseUrl: 'https://mem0.example', envKey: 'QWEN_SERVER_TOKEN' },
     { baseUrl: 'https://mem0.example', credentialEnv: 'KEY=bad' },
     {
       baseUrl: 'https://mem0.example',

@@ -4,24 +4,24 @@ Mem0 connects Qwen Code to an external memory service. It is included in the mai
 
 ## Connect
 
-Set the provider credential in the shell that starts Qwen Code:
-
-```sh
-export MEM0_API_KEY='<your-provider-key>'
-```
-
-Merge this into user settings (`~/.qwen/settings.json`), then restart Qwen Code in a trusted project:
+Merge this into user settings (`~/.qwen/settings.json`), then restart Qwen Code in a trusted project. Like `modelProviders`, `envKey` names the credential variable and the top-level `env` field can supply its value:
 
 ```json
 {
+  "env": {
+    "MEM0_API_KEY": "<your-provider-key>"
+  },
   "memory": {
     "mem0": {
       "baseUrl": "https://your-mem0-endpoint.example",
-      "protocol": "mem0-v2"
+      "protocol": "mem0-v2",
+      "envKey": "MEM0_API_KEY"
     }
   }
 }
 ```
+
+This single-file setup does not require a shell export. Credentials in JSON are plaintext: keep them in user settings, do not commit them to a repository, and avoid sharing the file in reports. Alternatively, omit the top-level `env` entry and set the key in the launching shell or `~/.qwen/.env`. Nonempty process environment values take precedence over `.env` values, which take precedence over `settings.env`.
 
 Use the endpoint origin, optionally with a reverse-proxy prefix; do not append `/v2/memories/search` or another operation path. Choose the contract your service actually implements:
 
@@ -47,7 +47,7 @@ Noninteractive/ACP sessions and sessions with Hooks disabled keep search only. B
 
 ## Options and troubleshooting
 
-`credentialEnv` defaults to `MEM0_API_KEY`; use it to reference another exported variable. `timeoutMs` defaults to 5000, between 1 and 30000.
+`envKey` defaults to `MEM0_API_KEY`; use it to reference another credential variable and define that value through any of the sources above. The historical `credentialEnv` field remains a compatible alias. If both fields are set, their names must match; conflicting names produce an error rather than silently selecting a credential. `timeoutMs` defaults to 5000, between 1 and 30000.
 
 Check the MCP connection status for missing credentials and provider errors. A timeout requires checking endpoint routing, source-IP whitelists and service availability. A 401/403 requires checking the credential and selected protocol. Do not paste credentials into logs or issue reports.
 
