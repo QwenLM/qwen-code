@@ -224,6 +224,17 @@ class ManagedTurnQueryTest {
                 .hasSize(1);
         assertThat(list(tenant, sessionId, cursor("1000:turn_a1"), null)
                 .get("data")).isEmpty();
+        // Cursors that the server accepts though it would not write them:
+        // with base64 padding, and with a Turn ID of the full 64 characters.
+        // "999:turn_a1" is 11 bytes, so its encoding needs padding.
+        String padded = Base64.getUrlEncoder().encodeToString(
+                "999:turn_a1".getBytes(StandardCharsets.UTF_8));
+        assertThat(padded).endsWith("=");
+        assertThat(list(tenant, sessionId, padded, null).get("data"))
+                .isEmpty();
+        // Older than the only Turn, so an ignored cursor would list it.
+        assertThat(list(tenant, sessionId, cursor("999:" + "t".repeat(64)),
+                null).get("data")).isEmpty();
     }
 
     @Test

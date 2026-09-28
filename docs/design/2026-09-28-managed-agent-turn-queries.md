@@ -141,7 +141,8 @@ migration once Sessions hold enough Turns for the sort to matter.
   Turn whose stored input is not JSON; limit and cursor validation, also on an
   unknown Session to show that a request is validated first, including limits
   that are not 32-bit integers, an overflowing creation time, a cursor beyond
-  every Turn and one at the oldest Turn; the Session checks (another Session's
+  every Turn, one at the oldest Turn, one with base64 padding and one with a
+  64-character Turn ID; the Session checks (another Session's
   Turn, 64- and 65-character IDs, 33 and 65 characters outside the Basic
   Multilingual Plane, an ID with a trailing space, an unknown Session, another
   tenant, an archived and a deleted Session); and a bound Session read with and
@@ -166,15 +167,16 @@ migration once Sessions hold enough Turns for the sort to matter.
   uses, and against `mysql:8.4`. With the exact Turn ID comparison removed it
   fails on both.
 - Regenerating the managed API types leaves them unchanged.
-- Each of 21 mutations fails a test: an oldest-first order; no Turn ID
+- Each of 24 mutations fails a test: an oldest-first order; no Turn ID
   tie-break; a cursor that repeats its Turn or skips a Turn created at the same
   time; a keyset that ignores creation time; a full last page that reports
   more; an unchecked limit; cursors with leading zeros; an overflowing creation
   time answered with another error; the list or the detail skipping the
   Session check, or checking it before the request; a default limit of 100;
   the detail ignoring the Session or reading the input; an overlong ID looked
-  up; an ID length counted in UTF-16 units; a cursor on the
-  last page; and an empty or a blank cursor rejected.
+  up; an ID length counted in UTF-16 units; a cursor on the last page; an empty
+  or a blank cursor rejected; a cursor rejected for its padding or for a Turn
+  ID longer than the server issues; and a cursor with such an ID ignored.
 
 ## 8. Follow-up
 
@@ -182,6 +184,16 @@ migration once Sessions hold enough Turns for the sort to matter.
 - An index for Turn pages, with a later migration, if Sessions grow long.
 - A WebShell Turn read, if a WebShell view needs one.
 - Role checks once Q4 is answered; reads need only read access.
+- One keyset cursor codec for the Session, Task and Turn lists, at the latest
+  before another resource, such as the planned Artifact or Action lists, adds a
+  fourth copy; the Workspace list already pages with a cursor of its own. The
+  three encode alike but decode differently: the Session list accepts any long
+  and any non-empty ID, and the Task list rejects a blank cursor and checks the
+  Session first. A shared codec has to decide on purpose whether the Session
+  list keeps its lenient grammar, which it ships although the contract does not
+  describe it, and whether the Task list reads a blank cursor as the first page,
+  as the Session and Turn lists do, and validates a request before it checks
+  the Session, as the Turn list does.
 - Exact path IDs on every Session route. The binary collation also ignores
   trailing spaces in a Session ID, which then reaches the same Session, and
   Spring removes `;` path parameters from every path segment before binding
