@@ -605,15 +605,17 @@ describe('dispatchOnce', () => {
     const thread = await seedQueued({
       runs: [run({ status: 'running', attempts: 1, usageBaselineTokens: 0 })],
     });
-    const driver = port({
-      state: {
-        kind: 'running',
-        threadId: thread.id,
-        runId: 'rn_1',
-        attempt: 1,
-      },
+    const driver = {
+      ...port({
+        state: {
+          kind: 'running',
+          threadId: thread.id,
+          runId: 'rn_1',
+          attempt: 1,
+        },
+      }),
       totalTokens: async () => DEFAULT_THREAD_TOKEN_BUDGET,
-    });
+    };
 
     const records = await dispatchOnce(PROJECT_ROOT, driver);
 
@@ -649,15 +651,17 @@ describe('dispatchOnce', () => {
         }),
       ],
     });
-    const driver = port({
-      state: {
-        kind: 'running',
-        threadId: thread.id,
-        runId: 'rn_1',
-        attempt: 1,
-      },
+    const driver = {
+      ...port({
+        state: {
+          kind: 'running',
+          threadId: thread.id,
+          runId: 'rn_1',
+          attempt: 1,
+        },
+      }),
       totalTokens: async () => DEFAULT_THREAD_TOKEN_BUDGET,
-    });
+    };
 
     await dispatchOnce(PROJECT_ROOT, driver);
 

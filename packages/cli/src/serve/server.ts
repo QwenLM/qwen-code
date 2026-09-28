@@ -353,6 +353,7 @@ import { loadChannelsConfig } from '../commands/channel/runtime.js';
 import { writeStderrLine, writeStderrLineSafe } from '../utils/stdioHelpers.js';
 import { loadSettings, SettingScope } from '../config/settings.js';
 import { loadSettingsCached } from '../config/settings-cache.js';
+import { runWithoutDebugLogSession } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { getModelProvidersOwnerScope } from '../config/modelProvidersScope.js';
 import { registerLiveRoutes } from './routes/live.js';
 import { registerLiveSetupRoutes } from './routes/live-setup.js';
@@ -1593,9 +1594,13 @@ export function createServeApp(
     if (process.env['QWEN_CODE_ENABLE_AGENT_COLLABORATION'] === '1')
       return true;
     try {
-      const enabled =
-        loadSettingsCached(workspaceCwd).merged.experimental
-          ?.agentCollaboration === true;
+      // A daemon-level probe, evaluated at boot and per request: its settings
+      // cache hit/miss lines belong to no session, and writing them into
+      // whichever one is ambient breaks untrusted-read log isolation.
+      const settings = runWithoutDebugLogSession(() =>
+        loadSettingsCached(workspaceCwd),
+      );
+      const enabled = settings.merged.experimental?.agentCollaboration === true;
       lastAgentCollaborationSetting.set(workspaceCwd, enabled);
       return enabled;
     } catch {
