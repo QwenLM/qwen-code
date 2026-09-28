@@ -2,7 +2,7 @@
 
 [English](2026-09-27-managed-extension-record-contract.md) | [简体中文](2026-09-27-managed-extension-record-contract.zh-CN.md)
 
-状态:契约已定义;自 H0c 起由 Session authority 提交这些记录([设计](2026-09-27-managed-extension-authority.zh-CN.md)),目前尚无 Stage H domain 开放提交。H0c 在尚无任何生产方之前补充了一条规则:`running` 或 `waiting` 的运行不能建立在从未开始的执行之上。更新日期:2026-09-28。本文是 [#12827](https://github.com/QwenLM/qwen-code/issues/12827) 的 H0b 切片,属于 Managed Agent 提案 [#12380](https://github.com/QwenLM/qwen-code/issues/12380) 的 H 阶段。下文的"参考设计"指该提案[扩展运行时设计](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-extension-runtime.md)的第 3、10、12、13 节,并包括其[私有控制协议](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-control-protocol.md)中的 `OperationGrant` 与[Session 存储设计](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-session-storage.md)中的 domain 索引,版本为 #12827 固定的提交。
+状态:契约已定义;自 H0c 起由 Session authority 提交这些记录([设计](2026-09-27-managed-extension-authority.zh-CN.md)),目前尚无 Stage H domain 开放提交。H0c 在尚无任何生产方之前补充了一条规则:`running` 或 `waiting` 的运行不能建立在从未开始的执行之上,并附带四个手工标注的拒绝用例。更新日期:2026-09-28。本文是 [#12827](https://github.com/QwenLM/qwen-code/issues/12827) 的 H0b 切片,属于 Managed Agent 提案 [#12380](https://github.com/QwenLM/qwen-code/issues/12380) 的 H 阶段。下文的"参考设计"指该提案[扩展运行时设计](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-extension-runtime.md)的第 3、10、12、13 节,并包括其[私有控制协议](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-control-protocol.md)中的 `OperationGrant` 与[Session 存储设计](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-session-storage.md)中的 domain 索引,版本为 #12827 固定的提交。
 
 ## 问题
 
@@ -17,7 +17,7 @@ H 阶段把七项能力接入 Managed 路径:MCP、Hooks、后台 Shell 与 Moni
 - **domain 索引。** `packages/core/src/managed-runtime/managed-session-records.ts` 有一份包含 32 个名称的封闭 domain 索引。`domain.committed` 携带 kind 为 `managed-<domain>`、schema 版本为 1 的 `recordRef`。只有 `goal_state`、`session_metadata`、`file_history`、`session_source` 开放提交。存储设计的 v1 列出了 33 个名称,缺少的是 `monitor_run`,其 validator 被划给 H0。
 - **domain 记录。** `LocalManagedSessionAuthority.commitDomainRecord` 发布记录正文时在调用方内容外加上 `operationId`、`revision` 和 `previousRecordRef`,并且每个 domain 只保留一条修订链。
 - **fence。** `ManagedActivationFence` 已存在于 activation store、Session inbox 和内嵌 Harness 调度器中。代码中没有 `OperationGrant`、`WakeIntent`、outbox 或 `SessionTaskView`。
-- **Java。** 控制面的 Session Store 把 authority 日志作为不透明的事务记录保存,没有 domain 记录。在 Runtime Broker 中,每个 `RuntimeBindingRecord` 对应一个物理 Runtime 代:替换时获得新的 binding ID 和下一代 generation。Broker 的工具执行账本有一条同类的状态线:`PREPARED`、`DISPATCHING`、`EXECUTING`、`CANCEL_REQUESTED`、`SETTLED` 和 `UNKNOWN`,但并非逐步对应:被取消的 `PREPARED` 调用不经派发即以 `not_started` settled,而 `EXECUTING` 在 Runtime 收到调用之前就已进入,因此它对应 `dispatch_started`。
+- **Java。** 控制面的 Session Store 把 authority 日志作为不透明的事务记录保存,没有 domain 记录。在 Runtime Broker 中,每个 `RuntimeBindingRecord` 对应一个物理 Runtime 代:替换时获得新的 binding ID 和下一代 generation。Broker 的工具执行账本有一条同类的状态线:`PREPARED`、`DISPATCHING`、`EXECUTING`、`CANCEL_REQUESTED`、`SETTLED` 和 `UNKNOWN`,但并非逐步对应。`EXECUTING` 在 Runtime 收到调用之前就已进入,因此它对应 `dispatch_started`。被取消的 `PREPARED` 调用,以及在发送前就看到取消请求的 `DISPATCHING` 调用,都未经发送即以 `cancelled` settled;发送后才被取消的调用也可能依据 Runtime 自己的结果以 `cancelled` settled。因此,`SETTLED` 且为 `cancelled` 的记录既可能是从未发送的调用(对应 `not_started_proven`),也可能是已发送后被取消的调用(对应 `settled`)。记录中没有专门用来区分两者的字段:`dispatchGeneration` 为 0 表明调用从未被认领,但没有字段记录已认领的调用是否进入过 `EXECUTING`。H0c 映射 Broker 记录时必须依据 settled 记录之外的证据区分两者,并且不能把无法证明未发送的调用映射为 `not_started_proven`:契约会拒绝 `intent → settled`,却发现不了这种映射,而它会把可能已经执行的工作说成从未开始。
 - **Legacy Monitor。** `MonitorRegistry` 在内存中保存 monitor,状态为 `running`、`completed`、`failed`、`cancelled`。`MonitorTool` 把 `max_events` 上限定为 10,000、`idle_timeout_ms` 上限定为 600,000,并记录 monitor 停止的原因:spawn 错误;启动之后的非零退出码、信号、二进制输出或流错误,这些同样以 `failed` 结束;自然退出、达到最大事件数或空闲超时;或被请求停止。
 
 ## 目标
@@ -40,7 +40,7 @@ H 阶段把七项能力接入 Managed 路径:MCP、Hooks、后台 Shell 与 Moni
 
 ## 决策
 
-1. **`monitor_run` 加入封闭的 v1 索引**(#12827 的问题 1)。在固定提交的存储设计中,它是 33 个 v1 名称之一,只把它的 validator 留给 H0。由于该 domain 仍不开放提交,任何 v1 reader 目前都不会遇到 `monitor_run` 记录,因此索引保持原版本。本变更之前的 reader 会拒绝这个名称,因此 H3 开放该 domain 时,含有这类记录的 Session 必须把这些 reader 挡在外面,例如提高其 `minimumReader`。该名称按设计中的顺序放在 `memory_job` 之后。
+1. **`monitor_run` 加入封闭的 v1 索引**(#12827 的问题 1)。在固定提交的存储设计中,它是 33 个 v1 名称之一,只把它的 validator 留给 H0。由于该 domain 仍不开放提交,也没有代码写入它,任何 v1 reader 目前都不会遇到 `monitor_run` 记录,因此索引保持原版本。不过只有 `commitDomainRecord` 检查 domain 是否开放:authority 通用的 `appendExecution` 与 `appendExecutionEvent` 接受 `trusted_entry` actor 提交的、索引中任何名称的 `domain.committed` 事件,因此 H0c 必须在提交 domain 记录的每条路径上执行这项检查。本变更之前的 reader 会拒绝这个名称,因此 H3 开放该 domain 时,含有这类记录的 Session 必须把这些 reader 挡在外面,例如提高其 `minimumReader`。该名称按设计中的顺序放在 `memory_job` 之后。
 2. **一个运行块,由每条记录内嵌。** 共用的状态线、原因、身份、绑定和固定组成每条 domain 记录内的一个封闭 `run` 对象,而不是单独的 domain。H0c 据这些运行块重建 `SessionTaskView`。
 3. **Java 消费方位于控制面。** 参考设计第 1 节把产品级记录和任务投影交给 Java。无论由哪一侧提交记录(问题 2),Java 都要读取它们来构建投影,因此 `ManagedExtensionRecords` 放在 `managed-agent-server` 中,并像该模块其他代码一样读取 Jackson 树。
 4. **每次修订每条线最多前进一步。** 后一次修订可以让每条状态线保持不变,或前进一个允许的单步;执行线从 `intent` 进入,交付线从 `planned` 进入。这样每一步及其依据的证据都在下一步行动前已经提交。若接受任何可达状态,`unknown → sending` 就能以 `unknown → partial → sending` 的名义通过,而部分交付从未被记录,这正是参考设计禁止的重发。
@@ -85,6 +85,8 @@ H 阶段把七项能力接入 Managed 路径:MCP、Hooks、后台 Shell 与 Moni
   - `b` 是更晚的修订,其 `workspaceGeneration` 不比 `a` 的旧。更晚的修订可以更换 owner、范围和租约。
 
   更早的修订已经过期,没有延长租约的续租同样无效。完全相同的 grant 不替换任何东西:在门禁上重复安装是幂等的,门禁给出与之前相同的回答。
+
+  该规则只比较两个 grant,看不到门禁的历史,因此撤销是保存在该规则之外的门禁状态。按照控制协议的要求,门禁永远不会重开已撤销的修订:它拒绝该修订的续租,重新安装同一 grant 后该修订仍处于撤销状态;只有更晚的修订才能重开该操作。H0c 把这一状态与门禁保存在一起。
 
 ## 状态线
 
@@ -204,28 +206,30 @@ Runtime 在任何副作用之前拒绝的派发,证明没有开始执行。未�
 
 `monitor_run` 记录正文的 kind 为 `managed-monitor_run`、schema 版本为 1,恰好包含下列键,覆盖参考设计第 10 节列出的内容。这是 domain 记录携带的内容;`commitDomainRecord` 目前会在内容外加上 `operationId`、`revision` 和 `previousRecordRef`,由 H0c 决定如何把这层封装与内容分开。
 
-| 键                    | 规则                                                                               |
-| --------------------- | ---------------------------------------------------------------------------------- |
-| `monitorId`           | id                                                                                 |
-| `ownerScopeId`        | id:拥有该 monitor 并接收其通知的 activation 作用域                                 |
-| `commandRef`          | durable ref:启动调用的 `argsRef`,其中保存命令及其目录;其 digest 即命令/目标 digest |
-| `maxEvents`           | 1 到 10,000                                                                        |
-| `idleTimeoutMs`       | 1 到 600,000                                                                       |
-| `debounceMs`          | 0 到 600,000:Runtime 聚合观测的时间窗口;过滤逻辑属于 `commandRef` 指向的命令       |
-| `startReceiptRef`     | null 或 durable ref:当前 watch 的物理启动回执                                      |
-| `observationSequence` | 不超过 `maxEvents` 的 count:已接受的有意义观测数,而不是原始行数                    |
-| `lastObservationRef`  | null 或 durable ref:最后一次观测的摘要                                             |
-| `notifiedThrough`     | 不超过 `observationSequence` 的 count:通知水位                                     |
-| `stopReason`          | null,或 monitor 结束的原因                                                         |
-| `outputRef`           | null,或 `managed-tool-result-manifest` 版本 1 的引用:输出 Artifact                 |
-| `run`                 | 运行块                                                                             |
+| 键                    | 规则                                                                                     |
+| --------------------- | ---------------------------------------------------------------------------------------- |
+| `monitorId`           | id                                                                                       |
+| `ownerScopeId`        | id:拥有该 monitor 并接收其通知的 activation 作用域                                       |
+| `commandRef`          | durable ref:启动调用的 `argsRef`,其中保存命令及其目录;其 digest 即命令/目标 digest       |
+| `maxEvents`           | 1 到 10,000                                                                              |
+| `idleTimeoutMs`       | 1 到 600,000                                                                             |
+| `debounceMs`          | 0 到 600,000:Runtime 把输出聚合为一个观测的时间窗口;过滤逻辑属于 `commandRef` 指向的命令 |
+| `startReceiptRef`     | null 或 durable ref:当前 watch 的物理启动回执                                            |
+| `observationSequence` | 不超过 `maxEvents` 的 count:已接受的有意义观测数,而不是原始行数                          |
+| `lastObservationRef`  | null 或 durable ref:最后一次观测的摘要                                                   |
+| `notifiedThrough`     | 不超过 `observationSequence` 的 count:通知水位                                           |
+| `stopReason`          | null,或 monitor 结束的原因                                                               |
+| `outputRef`           | null,或 `managed-tool-result-manifest` 版本 1 的引用:输出 Artifact                       |
+| `run`                 | 运行块                                                                                   |
 
 - **运行。** 运行只指明启动调用的 `executionCallId`:没有 `effectId`、`dispatchId`、`deliveryId`、`delivery` 或 `definition`。Monitor 通过其水位通知,而不是通过交付。
 - **观测。** `lastObservationRef` 恰好在 `observationSequence` 大于 0 时设置。
+- **通知。** v1 的通知策略是固定的,因此不需要自己的字段:每个已接受的观测都应被通知,一条通知可以覆盖其中多个观测。可以设置的只有进入接受之前的环节:命令中的过滤,以及 `debounceMs`。Legacy Monitor 工具同样没有策略参数:通过其固定节流(一次至多 5 行,之后每秒 1 行)的每一行都会被通知,并报告丢弃了多少行。`debounceMs` 内的聚合取代了节流,一个观测聚合了什么属于其摘要;规划中的 `SessionTaskView` 没有丢弃行数。只通知部分已接受观测的策略,例如每 n 个观测通知一次,会改变记录正文,因此需要新的记录版本。
 - **启动回执。** watch 启动后即设置:只要有观测,或执行处于 `running_attached`。执行为 null、`intent`、`dispatch_started` 或 `not_started_proven` 时,它为 null。启动回执需要签发它的运行 Runtime 绑定。
 - **停止原因。** 恰好在运行结束时设置,并且必须与状态相符:`settled` 对应 `exited`、`max_events` 或 `idle_timeout`;`failed` 对应 `start_failed`、`watch_failed` 或 `quota_exceeded`;`cancelled` 对应 `stop_requested`。`settled` 的 monitor,其执行为 `settled` 且有启动回执,因为它的每个停止原因都需要一个运行过的 watch。`max_events` 要求 `observationSequence` 等于 `maxEvents`。`start_failed` 要求执行已被尝试且没有启动回执;`watch_failed` 表示 watch 运行后失败,要求有启动回执。停止原因恰好在运行原因是配额原因时为 `quota_exceeded`。
 - **修订。** 后一次修订保持 `monitorId`、`ownerScopeId`、`commandRef`、`maxEvents`、`idleTimeoutMs` 和 `debounceMs` 不变;其运行块是前一个的后继;`observationSequence` 与 `notifiedThrough` 从不减少;只有当前后任一修订的执行为 `running_attached` 时 `observationSequence` 才能增长,因为丢失或已结束的 watch 不会产生观测;`lastObservationRef` 只随新观测改变;`outputRef` 可以随 manifest 的新修订改变,但从不被移除;`startReceiptRef` 只设置一次,新的 Runtime 绑定必须带来新的启动回执,除此之外它不会改变。monitor 结束后只有 `notifiedThrough` 还能前进,以便最后一条待发通知仍能送达。
-- **重建。** Runtime 丢失的 watch 处于 `recovery_blocked`,原因为 `runtime_lost`,执行为 `outcome_unknown`。能够从持久定义重建的目标会在更晚的 generation 下回到 `running` 与 `running_attached`,获得新的启动回执,并从已提交的水位继续;运行可以保留 `runtime_lost` 作为原因,表明间隔期间的观测可能缺失。无法重建的目标保持阻塞。重建是 `OperationGrant` 下的维护 phase:其 intent 与派发提交在该 phase 的物理账本中,以 Session、效果、phase 和效果修订为键,monitor 记录只提交结果,即在新 generation 下的 attach。如果重建的结果未知,monitor 保持阻塞,也不会再启动另一个 watch。
+- **重建。** Runtime 丢失的 watch 处于 `recovery_blocked`,原因为 `runtime_lost`,执行为 `outcome_unknown`。纯观察、且能够从持久定义重建的目标会在更晚的 generation 下回到 `running` 与 `running_attached`,获得新的启动回执,并从已提交的水位继续;运行可以保留 `runtime_lost` 作为原因,表明间隔期间的观测可能缺失。其他目标都不能重建,因为再次运行其命令可能重复结果未知的副作用:它们保持阻塞,要再次观察只能启动新的 Monitor。只有已知为只读的命令才算纯观察。重建是 `OperationGrant` 下的维护 phase:其 intent 与派发提交在该 phase 的物理账本中,以 Session、效果、phase 和效果修订为键,monitor 记录只提交结果,即在新 generation 下的 attach。如果重建的结果未知,monitor 保持阻塞,也不会再启动另一个 watch。重建只从 `outcome_unknown` 开始,从不从已 settled 的执行开始。Monitor 的执行描述的是它的 watch,重建会在更晚的 generation 下延续这个 watch,而不是旧 generation 的那个进程;因此得知该进程随 Runtime 一起丢失,不会排除重建:在目标仍可重建时,H3 不会依据这一证明 settle 执行。执行在 watch 本身结束时 settle,例如命令自行退出或失败、达到限额或被请求停止;或者在无法重建的目标被证明已不存在时 settle。此后这样的目标保持 `recovery_blocked`,直到 monitor 结束;H3 永远不会把它改回 `running` 或 `waiting`,尽管记录契约并不拒绝这一步(开放问题 5)。已结束的 monitor 永远不会被重建。
+- **重建与新 Monitor。** 重建在 grant 下继续同一个 monitor,不需要模型 activation:它保留 `monitorId`、启动调用、命令与限额,从已提交的水位继续,只替换 Runtime 绑定和启动回执。新 Monitor 是 activation 下的一次新的启动调用,有自己的身份、限额与水位,也要经过自己的准入、审批和配额。
 
 ## 共享 schema 与 fixtures
 
@@ -233,7 +237,7 @@ Runtime 在任何副作用之前拒绝的派发,证明没有开始执行。未�
 
 - domain 索引、限额、kind、状态线、交付目标、原因和 Monitor 停止原因,作为常量。
 - 一个规范的 grant、定义固定、运行块和 monitor 运行。
-- 524 个用例:grant(121,其中每个 domain 各有一个有效 grant)、grant 替换(21)、定义固定(25)、定义固定对(7)、运行块(146)、运行修订(57)、monitor 运行(108)和 monitor 修订(39)。每个无效用例都针对一条规则。
+- 558 个用例:grant(135,其中每个 domain 各有一个有效 grant)、grant 替换(21)、定义固定(25)、定义固定对(7)、运行块(151)、运行修订(61)、monitor 运行(115)和 monitor 修订(43)。每个无效用例都针对一条规则。
 
 schema 固定每条记录的结构,以及它能清晰表达的所有规则,包括全部状态、原因和停止原因规则。它无法表达 UTF-8 字节上限、NFC、格式良好的 UTF-16、可读的 2^63−1 上界、由另一字段推导出的记录 kind,或依赖另一字段的上界;TypeScript 测试列出 schema 与模块结论不同的用例。它的正则表达式遵循 ECMA-262,这是 draft 2020-12 的规定;采用其他正则语义的 validator(例如 Java 的默认实现)可能接受末尾的换行,而两个模块都会拒绝。一个依据本文编写、独立于两种语言的 Python 实现为每个用例标注了结论,它与 `managed-tool-result/1` 的做法一样放在仓库之外,生成器在它与标注不一致时停止。
 
@@ -254,14 +258,14 @@ authority、存储、Harness、Broker、worker、路由和 CI workflow 均无改
 
 - **TypeScript:** 用严格模式的 Ajv 按 schema 校验 fixtures;每个用例通过模块回放;每条线上的每一对状态都与 fixture 中的迁移表比对;schema 与每个记录用例比对。
 - **Java:** 每个用例通过 `ManagedExtensionRecords` 回放;检查每一对状态;固定常量;用 networknt validator 按 schema 校验 fixtures。
-- **变异检查:** 依次变异 TypeScript 模块中的每项检查并重跑测试。
+- **变异检查:** 依次变异 TypeScript 模块中的每个失败分支、提前返回、比较与逻辑运算符,Java 类中的每个 `require` 与提前返回,以及两者中每个检查单个字段的调用,并重跑同一语言的测试。
 
 ## 验收标准
 
 - 在两种语言中,fixtures 里的每种畸形结构和每个非法迁移都被拒绝,每个有效用例都被接受。
 - schema 与模块只在列出的、JSON Schema 无法表达的规则上结论不同。
 - `monitor_run` 位于 v1 domain 索引中,且提交时仍被拒绝。
-- 现有的记录、authority 与存储行为都不变。
+- 现有行为除一处解析变化外都不变:`parseManagedSessionEvent` 以及基于它的每条路径(例如 authority 的 `open` 与 `appendExecution`,以及存储扫描)现在都接受 domain 为 `monitor_run` 的 `domain.committed` 事件,而之前会拒绝它。`commitDomainRecord` 提交该 domain 时仍会拒绝。
 
 ## 开放问题
 
@@ -269,6 +273,8 @@ authority、存储、Harness、Broker、worker、路由和 CI workflow 均无改
 2. **降级。** `SessionTaskView` 有 `degraded` 状态。本契约允许运行中或等待中的运行携带恢复原因;H0c 是否应恰好把这种情况投影为 `degraded`?
 3. **修订链。** `commitDomainRecord` 每个 domain 只保留一条修订链,而 `monitor_run` 每个 monitor 一条记录。H0c 需要按记录维护修订链,Monitor 按 `monitorId` 区分,并且要把它加上的封装与封闭的记录正文分开。
 4. **损坏的执行。** 执行为 `corrupt` 的运行保持 `recovery_blocked`。后续切片是否应增加一个显式的运维命令来关闭这类运行,它又应记录什么证据?
+5. **不经重新 attach 离开阻塞。** 执行在 `recovery_blocked` 期间已 settled 的运行,按契约仍可迁移到 `running` 或 `waiting`,尽管没有任何东西在运行。契约是否应拒绝这一步?在任何 H 阶段 domain 开放之前这样做,不需要升级记录版本。
+6. **通知内容。** 正文只保存最后一个观测的摘要,因此覆盖多个观测的通知无法指向其他观测的摘要。H3 应从 `outputRef` 指向的输出中获取它们,还是每次修订只提交一个观测?两者都不需要新字段。
 
 ## 后续工作
 
