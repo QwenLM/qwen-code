@@ -183,6 +183,33 @@ describe('computeApiTruncationIndex', () => {
     ).toBe(-1);
   });
 
+  it('resolves an identified turn whose twin was absorbed by compression', () => {
+    const absorbedTwin = {
+      ...userItem(1, 'absorbed twin'),
+      promptId: 'session########1',
+    } as HistoryItem;
+    const target = {
+      ...userItem(4, 'post-compression'),
+      promptId: 'session########1',
+    } as HistoryItem;
+    const targetContent = userContent('post-compression');
+    markApiHistoryPrompt(targetContent, 'session########1');
+
+    expect(
+      computeApiTruncationIndex(
+        [absorbedTwin, llmItem(2), compressionItem(3), target, llmItem(5)],
+        4,
+        [
+          startupEntry(),
+          userContent('<state_snapshot>summary\n\nResume the prior task...'),
+          modelContent('Got it. Thanks for the additional context!'),
+          targetContent,
+          modelContent('response'),
+        ],
+      ),
+    ).toBe(3);
+  });
+
   it('returns 0 for empty API history', () => {
     const ui: HistoryItem[] = [userItem(1)];
     const api: Content[] = [];

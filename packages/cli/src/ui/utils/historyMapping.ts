@@ -85,8 +85,9 @@ function findLastSuccessfulCompressionIndex(history: HistoryItem[]): number {
  * Computes the number of API Content[] entries to keep when rewinding
  * to a specific user turn in the UI history.
  *
- * Identified turns require one exact match in each history. Legacy turns with
- * no identity use positional mapping.
+ * Identified turns require exactly one matching entry in the retained region
+ * of each history; a missing or ambiguous identity returns -1. Legacy turns
+ * with no identity use positional mapping.
  *
  * Note: In IDE mode, additional user Content entries may be injected for
  * IDE context. This function does not account for those and will produce
@@ -112,13 +113,11 @@ export function computeApiTruncationIndex(
   const compressionIndex = findLastSuccessfulCompressionIndex(uiHistory);
   if (compressionIndex !== -1 && targetIndex <= compressionIndex) return -1;
 
+  const retainedStart = compressionIndex === -1 ? 0 : compressionIndex + 1;
+
   // Count visible user turns before the target for legacy positional mapping.
   let uiUserTurnCount = 0;
-  for (
-    let index = compressionIndex === -1 ? 0 : compressionIndex + 1;
-    index < targetIndex;
-    index++
-  ) {
+  for (let index = retainedStart; index < targetIndex; index++) {
     if (isRealUserTurn(uiHistory[index]!)) uiUserTurnCount++;
   }
 
@@ -140,10 +139,14 @@ export function computeApiTruncationIndex(
 
   const target = uiHistory[targetIndex]!;
   if (isRealUserTurn(target) && target.promptId) {
+    // Only the retained region is resolvable: a twin above the compression
+    // boundary is already unmappable, and refusing the turn that *can* be
+    // resolved uniquely would widen the refusal past the ambiguous pair.
     if (
       uiHistory.some(
         (item, index) =>
           index !== targetIndex &&
+          index >= retainedStart &&
           isRealUserTurn(item) &&
           item.promptId === target.promptId,
       )
