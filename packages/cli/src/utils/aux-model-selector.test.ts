@@ -76,6 +76,17 @@ describe('publicAuxModelSelectorValue', () => {
     );
   });
 
+  it('renders a non-string value instead of throwing', () => {
+    // `loadSettings` applies no type validation, so a workspace-scope
+    // `settings.json` can hand a wire site `fastModel: 42`. The scrub's first
+    // statement is `value.indexOf('\0')`; throwing there takes out the whole
+    // enclosing status cell, not just this field.
+    expect(publicAuxModelSelectorValue(42)).toBe('42');
+    expect(publicAuxModelSelectorValue(true)).toBe('true');
+    expect(publicAuxModelSelectorValue({ a: 1 })).toBe('[object Object]');
+    expect(publicAuxModelSelectorValue(undefined)).toBe('');
+  });
+
   it('scrubs the suffix even when the selector itself is empty', () => {
     // Malformed value (no selector): readers drop it, but the credential must
     // still not pass through.
@@ -110,6 +121,15 @@ describe('formatAuxModelSelectorForDisplay', () => {
     expect(formatAuxModelSelectorForDisplay('openai:gpt-x\0not-a-url')).toBe(
       'openai:gpt-x',
     );
+  });
+
+  it('renders a non-string setting instead of throwing', () => {
+    // Settings are not type-validated on load, and `getExtendedSystemInfo`
+    // has no enclosing try: a non-string `fastModel` must render, not reject.
+    expect(formatAuxModelSelectorForDisplay(42)).toBe('42');
+    expect(formatAuxModelSelectorForDisplay(true)).toBe('true');
+    expect(formatAuxModelSelectorForDisplay({ a: 1 })).toBe('[object Object]');
+    expect(formatAuxModelSelectorForDisplay(undefined)).toBe('');
   });
 
   it('keeps the NUL-escaped rendering for unparseable values', () => {
@@ -188,6 +208,7 @@ describe('stripAuxSelectorBaseUrlCredential', () => {
       stripAuxSelectorBaseUrlCredential('https://user:sk@host:99999/v1?x=1'),
     ).toBe('https://host:99999/v1?x=1');
   });
+
 });
 
 describe('formatSettingRowValue', () => {

@@ -294,6 +294,25 @@ describe('systemInfo', () => {
       expect(JSON.stringify(extendedInfo)).not.toContain('sk-secret');
     });
 
+    it('should resolve a non-string fast model setting instead of rejecting', async () => {
+      vi.mocked(IdeClient.getInstance).mockResolvedValue({
+        getDetectedIdeDisplayName: vi.fn().mockReturnValue(''),
+      } as unknown as IdeClient);
+      setExecFileStdout('10.0.0');
+
+      // Settings get no type validation on load, so a workspace-scope
+      // settings.json can carry a number here. `getExtendedSystemInfo` has no
+      // enclosing try, so this used to reject the whole promise — taking out
+      // `/status`, `/about`, `/bug` and both `/settings` Status tabs.
+      (mockContext.services.settings.merged as Record<string, unknown>)[
+        'fastModel'
+      ] = 42;
+
+      const extendedInfo = await getExtendedSystemInfo(mockContext);
+
+      expect(extendedInfo.fastModel).toBe('42');
+    });
+
     it('should include memory usage and base URL', async () => {
       vi.mocked(IdeClient.getInstance).mockResolvedValue({
         getDetectedIdeDisplayName: vi.fn().mockReturnValue('test-ide'),

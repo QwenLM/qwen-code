@@ -61,8 +61,14 @@ function publishableSelectorBaseUrl(baseUrl: string): string | undefined {
  * query, and hash are stripped from the baseUrl suffix, and an unpublishable
  * suffix is dropped outright. Values without a credential-bearing suffix
  * pass through unchanged.
+ *
+ * Accepts `unknown` because the persisted setting is not type-validated on
+ * load — a workspace-scope `settings.json` can carry `fastModel: 42`. A
+ * non-string is not a selector, so it keeps the legacy `String(value)`
+ * rendering rather than throwing inside the scrub.
  */
-export function publicAuxModelSelectorValue(value: string): string {
+export function publicAuxModelSelectorValue(value: unknown): string {
+  if (typeof value !== 'string') return String(value ?? '');
   const nul = value.indexOf('\0');
   if (nul < 0) return value;
   const selector = value.slice(0, nul);
@@ -79,8 +85,13 @@ export function publicAuxModelSelectorValue(value: string): string {
  * `selector (baseUrl)` with the publishable baseUrl, or just the selector
  * when the suffix is absent or unpublishable. Values that don't parse as a
  * selector keep the legacy NUL-escaped rendering.
+ *
+ * Accepts `unknown` for the same reason as `publicAuxModelSelectorValue`: the
+ * display callers gate on truthiness only, and `getExtendedSystemInfo` has no
+ * enclosing try, so a non-string setting must render rather than reject.
  */
-export function formatAuxModelSelectorForDisplay(setting: string): string {
+export function formatAuxModelSelectorForDisplay(setting: unknown): string {
+  if (typeof setting !== 'string') return String(setting ?? '');
   const nul = setting.indexOf('\0');
   if (nul < 0) return setting;
   const selector = setting.slice(0, nul);
