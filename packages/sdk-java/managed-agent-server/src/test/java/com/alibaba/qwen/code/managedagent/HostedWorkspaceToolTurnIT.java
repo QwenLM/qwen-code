@@ -202,6 +202,9 @@ class HostedWorkspaceToolTurnIT {
                         "directory", workspaces.get(index).resolve("child").toString(), "fault", cases.get(index)));
                 if (faults) Files.writeString(workspaces.get(index).resolve("child/proof.txt"), "x");
             }
+            String secondarySessionId = faults || latency ? "" : store.insertWorkspaceSessionCommand(tenant, "actor", "create-secondary",
+                    "sha256:" + "a".repeat(64), "qwen-code", null, null, List.of(), null,
+                    new WorkspaceSelection(sessions.getFirst().get("workspaceId").toString(), "child")).sessionId();
             Path config = temporary.resolve("driver.json");
             Path resultFile = temporary.resolve("shell-output.json");
             EmbeddedRuntimeBroker broker = spring.getBean(EmbeddedRuntimeBroker.class);
@@ -250,6 +253,7 @@ class HostedWorkspaceToolTurnIT {
                 }
                 new ObjectMapper().writeValue(config.toFile(), Map.of("tenantId", tenant, "sessions", sessions,
                         "database", database, "runtimeProvisioningDelayMs", runtimeProvisioningDelayMs,
+                        "secondarySessionId", secondarySessionId,
                         "resultFile", resultFile.toString(),
                         "storeUrl", "http://127.0.0.1:" + spring.getWebServer().getPort(),
                         "brokerUrl", broker.getBaseUri().toString(),
