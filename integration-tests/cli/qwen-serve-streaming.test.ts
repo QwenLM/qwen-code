@@ -428,11 +428,7 @@ afterAll(async () => {
 /** Open an authenticated SSE stream and yield parsed frames. */
 async function* sseFrames(
   sessionId: string,
-  opts: {
-    signal?: AbortSignal;
-    lastEventId?: number;
-    onOpen?: () => void;
-  } = {},
+  opts: { signal?: AbortSignal; lastEventId?: number } = {},
 ): AsyncGenerator<DaemonEvent> {
   const headers: Record<string, string> = {
     Authorization: `Bearer ${TOKEN}`,
@@ -446,12 +442,6 @@ async function* sseFrames(
     signal: opts.signal,
   });
   if (!res.ok) throw new Error(`SSE open failed: ${res.status}`);
-  // The daemon registers the bus subscription synchronously in the route
-  // handler before flushing the response headers, so once `fetch` resolves
-  // the subscriber is guaranteed to observe events published afterwards.
-  // Tests that must not miss an event fired right after connect (the
-  // SIGKILL `session_died` flow below) await this hook before proceeding.
-  opts.onOpen?.();
   // Forward the abort signal into parseSseStream so a post-connect
   // abort stops iteration immediately. Without this, the parser
   // stays parked on `reader.read()` until the upstream actually
@@ -671,9 +661,9 @@ describePOSIX('qwen serve — child-crash recovery (real SIGKILL)', () => {
     });
     const consumer = (async () => {
       try {
-        for await (const e of sseFrames(session.sessionId, {
+        for await (const e of client.subscribeEvents(session.sessionId, {
           signal: ac.signal,
-          onOpen: resolveSseOpen,
+          onSseStreamAccepted: () => resolveSseOpen(),
         })) {
           collected.push(e);
           if (e.type === 'session_died') break;
