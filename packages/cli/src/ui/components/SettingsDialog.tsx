@@ -11,10 +11,7 @@ import { theme } from '../semantic-colors.js';
 import type { LoadedSettings, Settings } from '../../config/settings.js';
 import { SettingScope } from '../../config/settings.js';
 import { getScopeMessageForSetting } from '../../config/dialogScopeUtils.js';
-import {
-  formatAuxModelSelectorForDisplay,
-  isAuxModelSelectorSettingKey,
-} from '../../utils/aux-model-selector.js';
+import { formatSettingRowValue } from '../../utils/aux-model-selector.js';
 import { ScopeSelector } from './shared/ScopeSelector.js';
 import { t } from '../../i18n/index.js';
 import { ICON } from '../constants.js';
@@ -1305,13 +1302,13 @@ export function SettingsDialog({
                 effectiveCurrentValue !== null
               ) {
                 // Aux-model selectors persist as `authType:id\0baseUrl`; the
-                // suffix can embed userinfo credentials, so render the
-                // scrubbed display form rather than the raw string.
-                displayValue =
-                  typeof effectiveCurrentValue === 'string' &&
-                  isAuxModelSelectorSettingKey(item.value)
-                    ? formatAuxModelSelectorForDisplay(effectiveCurrentValue)
-                    : String(effectiveCurrentValue);
+                // suffix can embed userinfo credentials, so the row value goes
+                // through the shared scrub-aware formatter instead of a
+                // dialog-local copy of the rule.
+                displayValue = formatSettingRowValue(
+                  item.value,
+                  effectiveCurrentValue,
+                );
               } else {
                 displayValue = '';
               }

@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest';
 import {
   AUX_MODEL_SELECTOR_SETTING_KEYS,
   formatAuxModelSelectorForDisplay,
+  formatSettingRowValue,
   isAuxModelSelectorSettingKey,
   publicAuxModelSelectorValue,
   stripAuxSelectorBaseUrlCredential,
@@ -186,5 +187,32 @@ describe('stripAuxSelectorBaseUrlCredential', () => {
     expect(
       stripAuxSelectorBaseUrlCredential('https://user:sk@host:99999/v1?x=1'),
     ).toBe('https://host:99999/v1?x=1');
+  });
+});
+
+describe('formatSettingRowValue', () => {
+  // Both `/settings` renderers route their inline rows through this one copy,
+  // so neither dialog can re-render a credential-bearing suffix raw.
+  const credentialSelector = 'o:f\0https://user:sk-secret@h.example/v1';
+
+  it('redacts userinfo from every aux-model selector row', () => {
+    for (const key of AUX_MODEL_SELECTOR_SETTING_KEYS) {
+      expect(formatSettingRowValue(key, credentialSelector)).toBe(
+        'o:f (https://h.example/v1)',
+      );
+    }
+  });
+
+  it('drops an unpublishable suffix instead of echoing it', () => {
+    expect(formatSettingRowValue('fastModel', 'o:f\0not-a-url')).toBe('o:f');
+  });
+
+  it('keeps non-aux keys and non-string values on the legacy String() path', () => {
+    expect(formatSettingRowValue('general.preferredEditor', 'nvim')).toBe(
+      'nvim',
+    );
+    // An aux key with a non-string value is not a selector, so the suffix
+    // branch must not fire; a plain number still renders as before.
+    expect(formatSettingRowValue('fastModel', 42)).toBe('42');
   });
 });

@@ -120,3 +120,16 @@ export function stripAuxSelectorBaseUrlCredential(baseUrl: string): string {
     return sanitizeProviderBaseUrl(baseUrl);
   }
 }
+
+/**
+ * Row value for an inline number/string `/settings` row. Shared by the ink
+ * SettingsDialog and the OpenTUI settings dialog so the credential-scrub rule
+ * has one owner: aux-model selectors persist as `authType:id\0baseUrl` and
+ * that suffix can embed userinfo, so those rows render the scrubbed display
+ * form; every other row keeps the legacy `String(value)` rendering.
+ */
+export function formatSettingRowValue(key: string, value: unknown): string {
+  return typeof value === 'string' && isAuxModelSelectorSettingKey(key)
+    ? formatAuxModelSelectorForDisplay(value)
+    : String(value);
+}
