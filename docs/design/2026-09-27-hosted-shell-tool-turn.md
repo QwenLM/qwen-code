@@ -88,7 +88,8 @@ Persist the model call ID, unique worker call ID, execution ID, input digest and
 the explicit v3 selection. Shell `tool.intent.argsRef` holds the actual input;
 its route resource retains the Broker payload. The owner verifies this mapping
 against the covered `await_runtime` checkpoint before the first side effect.
-Hosted explicitly binds that checkpoint to the current turn and prompt; an
+Hosted explicitly binds that checkpoint to the current turn, prompt and
+committing activation, including after detach/load or a Harness restart. An
 unfinished turn cannot be relabeled. Each runtime binding stores the worker
 call ID in `invocationBindingId`, while its tool item keeps the model call ID. Preparation
 rechecks the writer and activation after asynchronous checkpoint/argument reads;

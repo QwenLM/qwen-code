@@ -385,6 +385,36 @@ describe('managed harness factory', () => {
     await session.close();
   });
 
+  it('binds a new Runtime turn to the activation after reopening the Session', async () => {
+    const workspace = await createWorkspace();
+    let session = await open(workspace);
+    const previous = createManagedHarnessHandle(session);
+    await previous.ensureRunnable();
+    await settleTurnComplete(session);
+    const previousActivation = session.activation.activationId;
+    await previous.detach();
+    await session.close();
+    session = await open(workspace);
+    try {
+      expect(session.activation.activationId).not.toBe(previousActivation);
+      const next = createManagedHarnessHandle(session);
+      await next.commitAwaitRuntimeBatch([await runtimeCommit(session)], {
+        turnId: 'reopened-turn',
+        promptId: 'reopened-prompt',
+      });
+      const checkpoint = parseHarnessCheckpointV1(
+        (await session.authority.readCheckpointState())!,
+      );
+      expect(checkpoint.identity).toMatchObject({
+        activationId: session.activation.activationId,
+        turnId: 'reopened-turn',
+        promptId: 'reopened-prompt',
+      });
+    } finally {
+      await session.close();
+    }
+  });
+
   it('refuses new Runtime work in an unfinished turn from another activation', async () => {
     const session = await open(await createWorkspace());
     const previous = createManagedHarnessHandle(session);

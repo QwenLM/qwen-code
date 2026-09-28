@@ -246,11 +246,15 @@ const modelReply: FakeOpenAIHandler = ({ body }) => {
     .slice(lastPrompt + 1)
     .filter((message) => message.role === 'tool');
   if (current.startsWith('SHELL_') && current !== 'SHELL_REFUSAL') {
+    const callId =
+      current === 'SHELL_RELOADED' ? 'shell-reloaded-proof' : 'shell-proof';
     if (!receipts.length) {
       const producer =
-        current === 'SHELL_CANCEL'
-          ? "require('fs').appendFileSync('shell-once.txt','x'); setInterval(()=>process.stdout.write('running\\n'),20);"
-          : "require('fs').appendFileSync('shell-once.txt','x'); (async()=>{await new Promise(r=>process.stdout.write(process.cwd()+'\\n',r)); const b=Buffer.alloc(1024*1024,0x91); for(let i=0;i<100;i++) await new Promise(r=>process.stdout.write(b,r)); await new Promise(r=>process.stdout.write('stdout-tail\\0',r)); process.stderr.write('stderr-tail\\0');})().catch(e=>{console.error(e);process.exitCode=1});";
+        current === 'SHELL_RELOADED'
+          ? "require('fs').appendFileSync('shell-reloaded.txt','x'); console.log('RELOADED_OK');"
+          : current === 'SHELL_CANCEL'
+            ? "require('fs').appendFileSync('shell-once.txt','x'); setInterval(()=>process.stdout.write('running\\n'),20);"
+            : "require('fs').appendFileSync('shell-once.txt','x'); (async()=>{await new Promise(r=>process.stdout.write(process.cwd()+'\\n',r)); const b=Buffer.alloc(1024*1024,0x91); for(let i=0;i<100;i++) await new Promise(r=>process.stdout.write(b,r)); await new Promise(r=>process.stdout.write('stdout-tail\\0',r)); process.stderr.write('stderr-tail\\0');})().catch(e=>{console.error(e);process.exitCode=1});";
       const quote = (text: string) =>
         "'" + text.replaceAll("'", "'\"'\"'") + "'";
       return {
@@ -261,14 +265,13 @@ const modelReply: FakeOpenAIHandler = ({ body }) => {
               command: `${quote(process.execPath)} -e ${quote(producer)}`,
               timeout: 180000,
             },
-            'shell-proof',
+            callId,
           ),
         ],
       };
     }
-    assert.equal(
-      current,
-      'SHELL_LARGE',
+    assert(
+      current === 'SHELL_LARGE' || current === 'SHELL_RELOADED',
       'A failed/cancelled Shell started another inference',
     );
     assert.equal(receipts.length, 1);
@@ -281,7 +284,11 @@ const modelReply: FakeOpenAIHandler = ({ body }) => {
       ),
       'Inference preceded durable admission',
     );
-    assert.equal(receipts[0].tool_call_id, 'shell-proof');
+    assert.equal(receipts[0].tool_call_id, callId);
+    if (current === 'SHELL_RELOADED') {
+      assert.match(JSON.stringify(receipts[0].content), /RELOADED_OK/);
+      return { content: 'SHELL_DONE' };
+    }
     assert.match(
       JSON.stringify(receipts[0].content),
       /Shell execution: success.*Output preview is truncated/s,
@@ -489,6 +496,15 @@ try {
     clientId = created.clientId;
     if (shellProfile) {
       loseStatus = false;
+      if (index === 2) {
+        await prompt('TEXT_BEFORE_SHELL_RELOAD');
+        await json(`/session/${sessionId}/detach`, {}, 204);
+        const loaded = await json(`/session/${sessionId}/load`, {
+          managedSessionStore: connection,
+          toolProfile: session.toolProfile,
+        });
+        clientId = loaded.clientId;
+      }
       const scenario =
         index === 2
           ? 'SHELL_LARGE'
@@ -533,8 +549,9 @@ try {
           executionCallId: (receipt['payload'] as Record<string, unknown>)[
             'executionCallId'
           ],
-          turnId: shellEvents.find((event) => event.type === 'turn_complete')
-            ?.promptId,
+          turnId: shellEvents.findLast(
+            (event) => event.type === 'turn_complete',
+          )?.promptId,
           manifestRef: (receipt['payload'] as Record<string, unknown>)[
             'resultRef'
           ],
@@ -547,6 +564,21 @@ try {
             .update('stderr-tail\0')
             .digest('hex'),
         });
+        await json(`/session/${sessionId}/detach`, {}, 204);
+        const loaded = await json(`/session/${sessionId}/load`, {
+          managedSessionStore: connection,
+          toolProfile: session.toolProfile,
+        });
+        clientId = loaded.clientId;
+        await prompt('SHELL_RELOADED');
+        assert.equal(
+          await readFile(
+            path.join(session.directory, 'shell-reloaded.txt'),
+            'utf8',
+          ),
+          'x',
+        );
+        await prompt('TEXT_AFTER_SHELL_RELOAD');
       }
       if (index === 4) {
         assert(rawReplyDropped);
@@ -630,7 +662,7 @@ try {
     } else await json(`/session/${sessionId}/detach`, {}, 204);
   }
   assert(droppedStart);
-  assert.equal(starts.size, 11);
+  assert.equal(starts.size, 12);
   assert.equal(shellExpected.length, 1);
   await writeFile(
     config.resultFile,
@@ -638,7 +670,7 @@ try {
   );
   assert([...starts.values()].every((count) => count === 1));
   console.log(
-    'HOSTED_WORKSPACE_TOOLS_OK: six Workspaces, parallel warmup, file replay, 100 MiB Shell, lost start ACK, publication faults, cancellation, at-most-once effects',
+    'HOSTED_WORKSPACE_TOOLS_OK: six Workspaces, parallel warmup, file replay, 100 MiB Shell, Shell after text/Shell reload, lost start ACK, publication faults, cancellation, at-most-once effects',
   );
 } catch (cause) {
   console.error(cli.output);

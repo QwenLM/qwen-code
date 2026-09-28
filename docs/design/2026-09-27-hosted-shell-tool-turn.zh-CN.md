@@ -69,7 +69,8 @@ producer 适配器，不是任意乱序 O1a 上传实现；只接受 stdout/stde
 调用 ID、执行 ID、input digest 和显式 v3 选择。Shell 的 `tool.intent.argsRef`
 保存真实 input；route 资源保留 Broker payload。owner 在首次副作用之前，对照已
 覆盖的 `await_runtime` checkpoint 核验此映射。Hosted 显式将 checkpoint 绑定到
-当前 turn 和 prompt；尚未结束的回合不能改名。runtime binding 的
+当前 turn、prompt 和提交 checkpoint 的 activation，包括 detach/load 或 Harness
+重启之后；尚未结束的回合不能改名。runtime binding 的
 `invocationBindingId` 保存 worker 调用 ID，tool item 保留模型调用 ID。异步读取
 checkpoint/参数后，prepare 再次检查 writer 和 activation；writer 检查在 await
 返回后也重新核验 activation。
