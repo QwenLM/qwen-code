@@ -168,18 +168,9 @@ export function encodeAuxModelSelector(selected: string): string {
   return selected;
 }
 
-/**
- * Parity of `encodeVisionModelSelector` in ModelDialog.tsx: keep the selected
- * row's baseUrl when present (so same-provider same-id endpoints stay
- * distinct), otherwise fall back to the aux encoding.
- */
+/** Keep the existing vision/image export while sharing aux-selector encoding. */
 export function encodeVisionModelSelector(selected: string): string {
-  if (!selected.includes('::')) {
-    return encodeAuxModelSelector(selected);
-  }
-  const parsed = parseModelSelectionKey(selected);
-  const selector = `${parsed.authType}:${parsed.modelId}`;
-  return parsed.baseUrl ? `${selector}\0${parsed.baseUrl}` : selector;
+  return encodeAuxModelSelector(selected);
 }
 
 /** Parity of the ModelDialog title line. */

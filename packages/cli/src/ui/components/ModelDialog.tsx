@@ -115,15 +115,6 @@ export function encodeAuxModelSelector(selected: string): string {
   return selected;
 }
 
-function encodeVisionModelSelector(selected: string): string {
-  if (!selected.includes('::')) {
-    return encodeAuxModelSelector(selected);
-  }
-  const parsed = parseModelSelectionKey(selected);
-  const selector = `${parsed.authType}:${parsed.modelId}`;
-  return parsed.baseUrl ? `${selector}\0${parsed.baseUrl}` : selector;
-}
-
 interface ModelDialogProps {
   onClose: () => void;
   isFastModelMode?: boolean;
@@ -354,7 +345,7 @@ export function ModelDialog({
               isAdvisorModelEligible(m, allowAdvisorFastOnly)),
         );
     const registryModels = allModels.filter((m) => {
-      const imageModelSelector = encodeVisionModelSelector(
+      const imageModelSelector = encodeAuxModelSelector(
         buildModelSelectionKey(m.authType, m.id, m.baseUrl),
       );
       const advisorModelSelector = `${m.authType}:${m.id}\0${m.registryBaseUrl ?? ''}`;
@@ -1019,7 +1010,7 @@ export function ModelDialog({
       // Vision model mode: keep the selected row's baseUrl when present so
       // same-provider OpenAI-compatible endpoints with the same id stay distinct.
       if (isVisionModelMode) {
-        const visionModel = encodeVisionModelSelector(selected);
+        const visionModel = encodeAuxModelSelector(selected);
         const visionModelDisplay =
           parseVisionModelSetting(visionModel)?.selector ?? visionModel;
         // Pinning the primary itself is ignored by the bridge at runtime, so
@@ -1090,7 +1081,7 @@ export function ModelDialog({
           setErrorMessage(t('Selected image model is unavailable.'));
           return;
         }
-        const imageModel = encodeVisionModelSelector(selected);
+        const imageModel = encodeAuxModelSelector(selected);
         const imageModelDisplay =
           parseVisionModelSetting(imageModel)?.selector ?? imageModel;
         if (!config.resolveImageGenerationModel(imageModel)) {
