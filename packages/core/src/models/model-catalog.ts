@@ -29,6 +29,9 @@ export interface ModelCatalog {
 
 /** `QWEN_CODE_MODELS_DEV=off` restores the regex-only model tables. */
 export const MODEL_CATALOG_ENV = 'QWEN_CODE_MODELS_DEV';
+export const MODELS_DEV_URL = 'https://models.dev/api.json';
+/** Replaces the models.dev URL, e.g. with a corporate mirror. */
+export const MODEL_CATALOG_URL_ENV = 'QWEN_CODE_MODELS_DEV_URL';
 
 export function isModelCatalogDisabled(): boolean {
   return process.env[MODEL_CATALOG_ENV] === 'off';
@@ -96,6 +99,7 @@ export function loadModelCatalog(): ModelCatalog {
   if (!loaded) {
     const bundled = bundledCatalog as ModelCatalog;
     const cached = readCache(getModelCatalogCachePath());
+    const source = process.env[MODEL_CATALOG_URL_ENV] || MODELS_DEV_URL;
     // A cache written before the projection's guards can hold keys no
     // normalized spelling reaches (deepseek-v3 did) or no usable entries at
     // all; neither may displace the bundled snapshot.
@@ -103,7 +107,7 @@ export function loadModelCatalog(): ModelCatalog {
       ([key]) => normalize(key) === key,
     );
     const usable =
-      cached && usableEntries.length > 0
+      cached && cached.source === source && usableEntries.length > 0
         ? { ...cached, models: Object.fromEntries(usableEntries) }
         : undefined;
     let base =

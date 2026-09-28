@@ -25,6 +25,8 @@ import {
   invalidateModelCatalog,
   loadModelCatalog,
   lookupModelCatalog,
+  MODEL_CATALOG_URL_ENV,
+  MODELS_DEV_URL,
   parseModelCatalog,
 } from './model-catalog.js';
 
@@ -51,6 +53,7 @@ describe('model catalog', () => {
   let tempDir: string;
   let previousHome: string | undefined;
   let previousSwitch: string | undefined;
+  let previousUrl: string | undefined;
   const [bundledId, bundledEntry] = Object.entries(bundled.models)[0] as [
     string,
     Record<string, unknown>,
@@ -60,14 +63,17 @@ describe('model catalog', () => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'model-catalog-'));
     previousHome = process.env['QWEN_HOME'];
     previousSwitch = process.env['QWEN_CODE_MODELS_DEV'];
+    previousUrl = process.env[MODEL_CATALOG_URL_ENV];
     process.env['QWEN_HOME'] = path.join(tempDir, '.qwen');
     delete process.env['QWEN_CODE_MODELS_DEV'];
+    delete process.env[MODEL_CATALOG_URL_ENV];
     invalidateModelCatalog();
   });
 
   afterEach(() => {
     restoreEnv('QWEN_HOME', previousHome);
     restoreEnv('QWEN_CODE_MODELS_DEV', previousSwitch);
+    restoreEnv(MODEL_CATALOG_URL_ENV, previousUrl);
     invalidateModelCatalog();
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
@@ -88,7 +94,7 @@ describe('model catalog', () => {
 
   it('prefers a cache newer than the bundled snapshot', () => {
     writeJson(getModelCatalogCachePath(), {
-      source: 'test',
+      source: MODELS_DEV_URL,
       fetchedAt: FAR_FUTURE,
       models: { 'cached-model': { context: 123, output: 45 } },
     });
@@ -97,6 +103,19 @@ describe('model catalog', () => {
       output: 45,
     });
     expect(lookupModelCatalog(bundledId)).toBeUndefined();
+  });
+
+  it('ignores a newer cache from a different configured source', () => {
+    process.env[MODEL_CATALOG_URL_ENV] = 'https://mirror.example/api.json';
+    writeJson(getModelCatalogCachePath(), {
+      source: MODELS_DEV_URL,
+      fetchedAt: FAR_FUTURE,
+      models: { 'cached-model': { context: 123 } },
+    });
+    invalidateModelCatalog();
+
+    expect(lookupModelCatalog('cached-model')).toBeUndefined();
+    expect(loadModelCatalog().fetchedAt).toBe(bundled.fetchedAt);
   });
 
   it('ignores a cache older than the bundled snapshot', () => {
@@ -152,6 +171,22 @@ describe('model catalog', () => {
     });
     process.env['QWEN_CODE_MODELS_DEV'] = 'off';
     expect(resolveModelConfig(sources).config.contextWindowSize).toBe(262144);
+  });
+
+  it('uses the bundled gpt-4o limit on the env-only configuration path', () => {
+    const result = resolveModelConfig({
+      authType: AuthType.USE_OPENAI,
+      cli: {},
+      settings: {},
+      env: {
+        OPENAI_API_KEY: 'test-key',
+        OPENAI_BASE_URL: 'http://localhost:8000/v1',
+        OPENAI_MODEL: 'gpt-4o',
+      },
+    });
+
+    expect(result.config.contextWindowSize).toBe(128_000);
+    expect(result.sources['contextWindowSize'].kind).toBe('computed');
   });
 
   it('preserves existing output limits across the entire bundled snapshot', () => {

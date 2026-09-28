@@ -14,6 +14,8 @@ import {
   getModelCatalogCachePath,
   invalidateModelCatalog,
   isModelCatalogDisabled,
+  MODEL_CATALOG_URL_ENV,
+  MODELS_DEV_URL,
   parseModelCatalog,
   type ModelCatalog,
   type ModelCatalogEntry,
@@ -21,11 +23,9 @@ import {
 
 const debugLogger = createDebugLogger('MODEL_CATALOG');
 
-export const MODELS_DEV_URL = 'https://models.dev/api.json';
+export { MODEL_CATALOG_URL_ENV, MODELS_DEV_URL } from './model-catalog.js';
 /** `QWEN_CODE_MODELS_DEV_REFRESH=off` stops the once-a-day download; a downloaded cache still serves while it is newer than the bundled snapshot. */
 export const MODEL_CATALOG_REFRESH_ENV = 'QWEN_CODE_MODELS_DEV_REFRESH';
-/** Replaces the models.dev URL, e.g. with a corporate mirror. */
-export const MODEL_CATALOG_URL_ENV = 'QWEN_CODE_MODELS_DEV_URL';
 
 const REFRESH_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 10_000;
