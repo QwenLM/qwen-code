@@ -9,6 +9,7 @@ import {
   APPROVAL_MODES,
   createDebugLogger,
   ModelsConfig,
+  parseVisionModelSetting,
   tokenLimit,
 } from '@qwen-code/qwen-code-core';
 import { resolveReasoningCapabilities } from '@qwen-code/qwen-code-core/core/reasoning-overrides.js';
@@ -139,9 +140,13 @@ function buildWorkspaceProvidersStatus(
           currentRegistryBaseUrl,
         )
       : undefined;
+    // The picker may persist `authType:id\0<baseUrl>` (#12760); the status
+    // payload ships the selector half only, never the raw NUL byte or the
+    // provider endpoint.
     const fastModelId =
       typeof settings.fastModel === 'string' && settings.fastModel.length > 0
-        ? settings.fastModel
+        ? (parseVisionModelSetting(settings.fastModel)?.selector ??
+          settings.fastModel)
         : undefined;
     const visionModelId =
       typeof settings.visionModel === 'string' &&

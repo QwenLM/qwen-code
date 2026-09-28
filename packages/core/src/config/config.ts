@@ -6198,6 +6198,15 @@ export class Config {
    * declares no endpoint needs no suffix — a bare selector resolves to it —
    * and an endpoint matching no configured entry is dropped, which keeps the
    * pre-existing first-match behaviour instead of unconfiguring the model.
+   *
+   * Matching is on the effective baseUrl (what the picker persists), which is
+   * not unique across same-id entries: a row declaring no baseUrl shares the
+   * auth type's default URL with a row that declares that same URL. When
+   * several rows match, prefer the one that declared the endpoint
+   * (`registryBaseUrl` set) so the pin deterministically re-attaches instead
+   * of collapsing to whichever entry the config listed first. Residual
+   * ambiguity: a pin on the no-declared-baseUrl row cannot be told apart from
+   * a pin on the declaring row and resolves to the declaring one.
    */
   private pinnedAuxEndpoint(
     persisted: string | undefined,
@@ -6206,9 +6215,18 @@ export class Config {
   ): string | undefined {
     const endpoint = persisted?.trim().split('\0')[1];
     if (!endpoint) return undefined;
-    return available.find(
+    const hits = available.filter(
       (model) => model.id === modelId && model.baseUrl === endpoint,
-    )?.registryBaseUrl;
+    );
+    const matched =
+      hits.find((model) => model.registryBaseUrl !== undefined) ?? hits[0];
+    if (!matched) {
+      this.debugLogger.warn(
+        `Aux endpoint pin dropped for "${modelId}": no configured entry at ${formatVisionModelSettingForLog(endpoint)}; falling back to the first same-id match.`,
+      );
+      return undefined;
+    }
+    return matched.registryBaseUrl;
   }
 
   /**

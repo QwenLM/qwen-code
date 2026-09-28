@@ -82,6 +82,7 @@ import {
   createDebugLogger,
   resetDebugLoggingState,
   setDebugLogSession,
+  type DebugLogger,
 } from '../utils/debugLogger.js';
 import { logGoalState, logRipgrepFallback } from '../telemetry/loggers.js';
 import { RipgrepFallbackEvent } from '../telemetry/types.js';
@@ -9106,6 +9107,63 @@ describe('Server Config (config.ts)', () => {
         expect(read()).toBe('openai:shared');
       },
     );
+
+    it.each(['fastModel', 'compactionModel'] as const)(
+      'warns when a stale auxiliary endpoint pin is dropped (%s)',
+      (key) => {
+        const config = new Config({
+          ...baseParams,
+          authType: AuthType.USE_OPENAI,
+          model: 'main',
+          [key]: 'openai:shared\0https://removed.example/v1',
+          modelProvidersConfig: {
+            openai: [{ id: 'shared', baseUrl: 'https://moved.example/v1' }],
+          },
+        });
+        const warn = vi.spyOn(
+          (config as unknown as { debugLogger: DebugLogger }).debugLogger,
+          'warn',
+        );
+        const read = () =>
+          key === 'fastModel'
+            ? config.getFastModel()
+            : config.getCompactionModel();
+        expect(read()).toBe('openai:shared');
+        expect(warn).toHaveBeenCalledWith(
+          expect.stringContaining('Aux endpoint pin dropped for "shared"'),
+        );
+        // The escaped form must reach the log, never a raw NUL byte.
+        expect(warn).not.toHaveBeenCalledWith(expect.stringContaining('\0'));
+      },
+    );
+
+    it('keeps the pin when a same-id sibling declares the colliding default URL (#12760)', () => {
+      // The first row declares no baseUrl, so its effective URL is the
+      // provider default — the same URL the second row declares. Matching the
+      // pin on effective baseUrl with first-hit semantics would return the
+      // first row's undefined registryBaseUrl and silently drop the pin,
+      // rebinding every fast-model call to the personal key.
+      const config = new Config({
+        ...baseParams,
+        authType: AuthType.USE_OPENAI,
+        model: 'main',
+        fastModel: 'openai:gpt-4o\0https://api.openai.com/v1',
+        modelProvidersConfig: {
+          openai: [
+            { id: 'gpt-4o', envKey: 'OPENAI_API_KEY_PERSONAL' },
+            {
+              id: 'gpt-4o',
+              baseUrl: 'https://api.openai.com/v1',
+              envKey: 'OPENAI_API_KEY_WORK',
+            },
+          ],
+        },
+      });
+
+      expect(config.getFastModel()).toBe(
+        'openai:gpt-4o\0https://api.openai.com/v1',
+      );
+    });
 
     it.each(['fastModel', 'compactionModel'] as const)(
       'keeps %s bare when the pinned entry declares no endpoint of its own',

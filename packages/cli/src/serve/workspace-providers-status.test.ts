@@ -871,6 +871,23 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     expect(withEmptyFastModel.current).not.toHaveProperty('fastModelId');
   });
 
+  it('strips the endpoint disambiguator from a pinned fast model (#12760)', async () => {
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    // What the CLI picker persists for a same-id endpoint pin; the status
+    // payload must carry the selector only, not the NUL byte or endpoint.
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      model: { name: 'main-model' },
+      fastModel: 'openai:shared-fast\0https://free-quota.example.com/v1',
+      modelProviders: {
+        openai: [{ id: 'main-model', name: 'Main Model' }],
+      },
+    });
+
+    const result = await provider(workspace, false);
+    expect(result.current?.fastModelId).toBe('openai:shared-fast');
+  });
+
   it('includes only non-empty vision model settings in current selection', async () => {
     const provider = createWorkspaceProvidersStatusProvider({ env: {} });
     await writeUserSettings({

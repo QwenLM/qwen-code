@@ -173,6 +173,7 @@ import {
   getLastPeerInboxFailure,
   SessionSourceService,
   SessionSourceError,
+  parseVisionModelSetting,
 } from '@qwen-code/qwen-code-core';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
@@ -8306,7 +8307,15 @@ class QwenAgent implements Agent {
 
       const cgConfig = config.getContentGeneratorConfig?.();
       const baseUrl = cgConfig?.baseUrl || undefined;
-      const fastModelId = this.settings.merged?.fastModel || undefined;
+      // The picker may persist `authType:id\0<baseUrl>` (#12760); the ACP
+      // status payload ships the selector half only, never the raw NUL byte
+      // or the provider endpoint.
+      const rawFastModelId = this.settings.merged?.fastModel;
+      const fastModelId =
+        (typeof rawFastModelId === 'string'
+          ? (parseVisionModelSetting(rawFastModelId)?.selector ??
+            rawFastModelId)
+          : rawFastModelId) || undefined;
 
       return {
         v: STATUS_SCHEMA_VERSION,

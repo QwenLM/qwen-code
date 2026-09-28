@@ -39,6 +39,7 @@ import {
   useVimModeActions,
 } from '../contexts/VimModeContext.js';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
+import { parseVisionModelSetting } from '@qwen-code/qwen-code-core/config/config.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import {
@@ -1300,7 +1301,16 @@ export function SettingsDialog({
                 effectiveCurrentValue !== undefined &&
                 effectiveCurrentValue !== null
               ) {
-                displayValue = String(effectiveCurrentValue);
+                // Aux model selectors may persist as `authType:id\0<baseUrl>`
+                // (#12760); display the selector half only, never the raw NUL
+                // byte or the provider endpoint.
+                displayValue =
+                  (item.value === 'fastModel' ||
+                    item.value === 'compactionModel') &&
+                  typeof effectiveCurrentValue === 'string'
+                    ? (parseVisionModelSetting(effectiveCurrentValue)
+                        ?.selector ?? effectiveCurrentValue)
+                    : String(effectiveCurrentValue);
               } else {
                 displayValue = '';
               }

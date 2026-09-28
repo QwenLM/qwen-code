@@ -1809,7 +1809,7 @@ describe('<ModelDialog />', () => {
     expect(mockedSelect.mock.calls[0][0].initialIndex).toBe(visionIndex);
   });
 
-  it.each(['fast', 'compaction'] as const)(
+  it.each(['fast', 'compaction', 'vision', 'image'] as const)(
     'highlights the matching baseUrl for duplicate %s-model settings',
     (mode) => {
       const selectedBaseUrl = 'https://token-plan.example.com/v1';
@@ -1819,12 +1819,17 @@ describe('<ModelDialog />', () => {
           label: '[Free Quota] shared-fast',
           authType: AuthType.USE_OPENAI,
           baseUrl: 'https://free-quota.example.com/v1',
+          // Image mode lists only rows with image-generation capability.
+          envKey: 'IMAGE_API_KEY',
+          supportsImageGeneration: true,
         },
         {
           id: 'shared-fast',
           label: '[Token Plan] shared-fast',
           authType: AuthType.USE_OPENAI,
           baseUrl: selectedBaseUrl,
+          envKey: 'IMAGE_API_KEY',
+          supportsImageGeneration: true,
         },
       ];
 
@@ -1832,6 +1837,8 @@ describe('<ModelDialog />', () => {
         {
           isFastModelMode: mode === 'fast',
           isCompactionModelMode: mode === 'compaction',
+          isVisionModelMode: mode === 'vision',
+          isImageModelMode: mode === 'image',
         },
         {
           getModel: () => 'qwen3.7-max',
@@ -1841,6 +1848,11 @@ describe('<ModelDialog />', () => {
             authType: AuthType.USE_OPENAI,
             model: 'qwen3.7-max',
             baseUrl: 'https://free-quota.example.com/v1',
+          }),
+          resolveImageGenerationModel: (selector: string) => ({
+            model: selector,
+            baseUrl: 'https://images.example.com/v1',
+            apiKeyEnv: 'IMAGE_API_KEY',
           }),
         } as unknown as Partial<Config>,
         {
@@ -1861,87 +1873,157 @@ describe('<ModelDialog />', () => {
     },
   );
 
-  it('falls back to the same-id row when the pinned endpoint matches none (#12760)', () => {
-    // A project that declares its own `modelProviders` replaces the user's, so
-    // a globally pinned endpoint can match no row here. Without a same-id
-    // fallback the dialog highlights the current auth's first row and Enter
-    // silently overwrites the fast-model setting.
-    const mockSettings = {
-      isTrusted: true,
-      user: { settings: {} },
-      workspace: { settings: {} },
-      merged: {
-        fastModel:
-          'openai:shared-fast\0https://removed-provider.example.com/v1',
-      },
-      setValue: vi.fn(),
-    } as unknown as LoadedSettings;
-
+  it('highlights the pinned row for a whitespace-padded compaction setting (#12760)', () => {
+    // Hand-edited or CRLF-synced settings can carry trailing whitespace; core
+    // trims before routing, so the dialog must trim before matching or it
+    // highlights a different provider than the one in use.
+    const selectedBaseUrl = 'https://token-plan.example.com/v1';
     const allModels = [
-      {
-        id: 'qwen3.7-max',
-        label: 'qwen3.7-max',
-        description: '',
-        authType: AuthType.USE_OPENAI,
-        baseUrl: 'https://free-quota.example.com/v1',
-      },
       {
         id: 'shared-fast',
         label: '[Free Quota] shared-fast',
-        description: '',
         authType: AuthType.USE_OPENAI,
         baseUrl: 'https://free-quota.example.com/v1',
       },
       {
         id: 'shared-fast',
         label: '[Token Plan] shared-fast',
-        description: '',
         authType: AuthType.USE_OPENAI,
-        baseUrl: 'https://token-plan.example.com/v1',
+        baseUrl: selectedBaseUrl,
       },
     ];
 
-    render(
-      <SettingsContext.Provider value={mockSettings}>
-        <ConfigContext.Provider
-          value={
-            {
-              getModel: vi.fn(() => 'qwen3.7-max'),
-              getAuthType: vi.fn(() => AuthType.USE_OPENAI),
-              getAllConfiguredModels: vi.fn(() => allModels),
-              getContentGeneratorConfig: vi.fn(() => ({
-                authType: AuthType.USE_OPENAI,
-                model: 'qwen3.7-max',
-                // The primary's own endpoint owns no same-id row, so the
-                // documented fall-through key cannot resolve either.
-                baseUrl: 'https://primary-endpoint.example.com/v1',
-              })),
-              getModelsConfig: vi.fn(() => ({
-                getGenerationConfig: vi.fn(() => ({
-                  baseUrl: 'https://primary-endpoint.example.com/v1',
-                })),
-              })),
-              getActiveRuntimeModelSnapshot: vi.fn(() => undefined),
-              getUsageStatisticsEnabled: vi.fn(() => false),
-              getSessionId: vi.fn(() => 'session'),
-              getDebugMode: vi.fn(() => false),
-              getUseModelRouter: vi.fn(() => false),
-              getProxy: vi.fn(() => undefined),
-            } as unknown as Config
-          }
-        >
-          <ModelDialog onClose={vi.fn()} isFastModelMode={true} />
-        </ConfigContext.Provider>
-      </SettingsContext.Provider>,
+    renderComponent(
+      { isCompactionModelMode: true },
+      {
+        getModel: () => 'qwen3.7-max',
+        getAuthType: () => AuthType.USE_OPENAI,
+        getAllConfiguredModels: () => allModels,
+        getContentGeneratorConfig: () => ({
+          authType: AuthType.USE_OPENAI,
+          model: 'qwen3.7-max',
+          baseUrl: 'https://free-quota.example.com/v1',
+        }),
+      } as unknown as Partial<Config>,
+      {
+        merged: {
+          compactionModel: `openai:shared-fast\0${selectedBaseUrl} `,
+        },
+      } as unknown as Partial<LoadedSettings>,
     );
 
-    const items = mockedSelect.mock.calls[0][0].items;
-    const sameIdIndex = items.findIndex((item) =>
-      String(item.value).includes('shared-fast'),
+    const select = mockedSelect.mock.calls[0][0];
+    const selectedIndex = select.items.findIndex(
+      (item) =>
+        String(item.value).includes('shared-fast') &&
+        String(item.value).includes(selectedBaseUrl),
     );
-    expect(sameIdIndex).toBeGreaterThan(0);
-    expect(mockedSelect.mock.calls[0][0].initialIndex).toBe(sameIdIndex);
+    expect(selectedIndex).toBeGreaterThan(0);
+    expect(select.initialIndex).toBe(selectedIndex);
   });
+
+  it.each(['fast', 'compaction', 'vision', 'image'] as const)(
+    'falls back to the same-id row when the pinned endpoint matches none (%s, #12760)',
+    (mode) => {
+      // A project that declares its own `modelProviders` replaces the user's, so
+      // a globally pinned endpoint can match no row here. Without a same-id
+      // fallback the dialog highlights the current auth's first row and Enter
+      // silently overwrites the setting.
+      const mockSettings = {
+        isTrusted: true,
+        user: { settings: {} },
+        workspace: { settings: {} },
+        merged: {
+          [`${mode}Model`]:
+            'openai:shared-fast\0https://removed-provider.example.com/v1',
+        },
+        setValue: vi.fn(),
+      } as unknown as LoadedSettings;
+
+      const allModels = [
+        {
+          id: 'qwen3.7-max',
+          label: 'qwen3.7-max',
+          description: '',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://free-quota.example.com/v1',
+          envKey: 'IMAGE_API_KEY',
+          supportsImageGeneration: true,
+        },
+        {
+          id: 'shared-fast',
+          label: '[Free Quota] shared-fast',
+          description: '',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://free-quota.example.com/v1',
+          envKey: 'IMAGE_API_KEY',
+          supportsImageGeneration: true,
+        },
+        {
+          id: 'shared-fast',
+          label: '[Token Plan] shared-fast',
+          description: '',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://token-plan.example.com/v1',
+          envKey: 'IMAGE_API_KEY',
+          supportsImageGeneration: true,
+        },
+      ];
+
+      render(
+        <SettingsContext.Provider value={mockSettings}>
+          <ConfigContext.Provider
+            value={
+              {
+                getModel: vi.fn(() => 'qwen3.7-max'),
+                getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+                getAllConfiguredModels: vi.fn(() => allModels),
+                getContentGeneratorConfig: vi.fn(() => ({
+                  authType: AuthType.USE_OPENAI,
+                  model: 'qwen3.7-max',
+                  // The primary's own endpoint owns no same-id row, so the
+                  // documented fall-through key cannot resolve either.
+                  baseUrl: 'https://primary-endpoint.example.com/v1',
+                })),
+                getModelsConfig: vi.fn(() => ({
+                  getGenerationConfig: vi.fn(() => ({
+                    baseUrl: 'https://primary-endpoint.example.com/v1',
+                  })),
+                })),
+                // Image mode lists only rows with a resolvable image route.
+                resolveImageGenerationModel: vi.fn((selector: string) => ({
+                  model: selector,
+                  baseUrl: 'https://images.example.com/v1',
+                  apiKeyEnv: 'IMAGE_API_KEY',
+                })),
+                getActiveRuntimeModelSnapshot: vi.fn(() => undefined),
+                getUsageStatisticsEnabled: vi.fn(() => false),
+                getSessionId: vi.fn(() => 'session'),
+                getDebugMode: vi.fn(() => false),
+                getUseModelRouter: vi.fn(() => false),
+                getProxy: vi.fn(() => undefined),
+              } as unknown as Config
+            }
+          >
+            <ModelDialog
+              onClose={vi.fn()}
+              isFastModelMode={mode === 'fast'}
+              isCompactionModelMode={mode === 'compaction'}
+              isVisionModelMode={mode === 'vision'}
+              isImageModelMode={mode === 'image'}
+            />
+          </ConfigContext.Provider>
+        </SettingsContext.Provider>,
+      );
+
+      const items = mockedSelect.mock.calls[0][0].items;
+      const sameIdIndex = items.findIndex((item) =>
+        String(item.value).includes('shared-fast'),
+      );
+      expect(sameIdIndex).toBeGreaterThan(0);
+      expect(mockedSelect.mock.calls[0][0].initialIndex).toBe(sameIdIndex);
+    },
+  );
 
   it('passes onHighlight to DescriptiveRadioButtonSelect', () => {
     renderComponent();

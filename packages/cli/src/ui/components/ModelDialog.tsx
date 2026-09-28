@@ -636,7 +636,10 @@ export function ModelDialog({
     }: (typeof availableModelEntries)[number]) =>
       (!setting.authType || entryAuthType === setting.authType) &&
       model.id === setting.modelId;
-    const endpoint = persisted?.split('\0')[1];
+    // Trim before slicing: Config.pinnedAuxEndpoint and the sibling parse
+    // paths trim first, so a whitespace-padded setting must highlight the
+    // same row the runtime routes to.
+    const endpoint = persisted?.trim().split('\0')[1];
     return (
       (endpoint
         ? availableModelEntries.find(
@@ -671,43 +674,17 @@ export function ModelDialog({
           ({ model }) => model.id === voiceModelSetting,
         )
       : undefined;
-  // Like fast mode, the vision setting may persist as a bare id (cross-provider)
-  // or an authType:modelId selector — highlight whichever row owns it.
-  const matchesVisionModelBaseUrl = (model: CoreAvailableModel): boolean =>
-    !parsedVisionModelValue?.baseUrl ||
-    model.baseUrl === parsedVisionModelValue.baseUrl;
-  const preferredVisionModelEntry =
-    isVisionModelMode && parsedVisionModelSetting
-      ? parsedVisionModelSetting.authType
-        ? availableModelEntries.find(
-            ({ authType: t2, model }) =>
-              t2 === parsedVisionModelSetting.authType &&
-              model.id === parsedVisionModelSetting.modelId &&
-              matchesVisionModelBaseUrl(model),
-          )
-        : availableModelEntries.find(
-            ({ model }) =>
-              model.id === parsedVisionModelSetting.modelId &&
-              matchesVisionModelBaseUrl(model),
-          )
-      : undefined;
-  const preferredImageModelEntry =
-    isImageModelMode && parsedImageModelSetting
-      ? parsedImageModelSetting.authType
-        ? availableModelEntries.find(
-            ({ authType: t2, model }) =>
-              t2 === parsedImageModelSetting.authType &&
-              model.id === parsedImageModelSetting.modelId &&
-              (!parsedImageModelValue?.baseUrl ||
-                model.baseUrl === parsedImageModelValue.baseUrl),
-          )
-        : availableModelEntries.find(
-            ({ model }) =>
-              model.id === parsedImageModelSetting.modelId &&
-              (!parsedImageModelValue?.baseUrl ||
-                model.baseUrl === parsedImageModelValue.baseUrl),
-          )
-      : undefined;
+  // Like fast mode, the vision/image settings may persist as a bare id
+  // (cross-provider) or an `authType:modelId\0baseUrl` selector — highlight
+  // whichever row owns it, keeping the same-id fallback when the pinned
+  // endpoint matches no configured row (otherwise Enter silently re-pins an
+  // unrelated row).
+  const preferredVisionModelEntry = isVisionModelMode
+    ? findPreferredAuxEntry(parsedVisionModelSetting, visionModelSetting)
+    : undefined;
+  const preferredImageModelEntry = isImageModelMode
+    ? findPreferredAuxEntry(parsedImageModelSetting, imageModelSetting)
+    : undefined;
   const parsedCompactionSetting = useMemo(() => {
     if (!isCompactionModelMode) return undefined;
     const raw = settings?.merged?.compactionModel?.trim();

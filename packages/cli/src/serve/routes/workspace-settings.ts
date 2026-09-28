@@ -6,6 +6,7 @@
 
 import type { Application, Request, Response } from 'express';
 import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
+import { parseVisionModelSetting } from '@qwen-code/qwen-code-core/config/config.js';
 import { loadSettings, SettingScope } from '../../config/settings.js';
 import {
   redactMcpServersSetting,
@@ -193,8 +194,19 @@ function buildSettingsResponse(
       key,
     );
 
-    const publicValue = (value: unknown) =>
-      key === 'mcpServers' ? redactMcpServersSetting(value) : value;
+    // Aux model selectors may persist as `authType:id\0<baseUrl>` (#12760);
+    // the response ships the selector half only, never the raw NUL byte or
+    // the provider endpoint.
+    const publicValue = (value: unknown) => {
+      if (key === 'mcpServers') return redactMcpServersSetting(value);
+      if (
+        (key === 'fastModel' || key === 'compactionModel') &&
+        typeof value === 'string'
+      ) {
+        return parseVisionModelSetting(value)?.selector ?? value;
+      }
+      return value;
+    };
     const effective = LIVE_MANAGED_SETTINGS.has(key)
       ? (userVal ?? def.default)
       : (mergedEffective ?? def.default);

@@ -119,6 +119,42 @@ function formatVisionModelSettingForDisplay(setting: string): string {
     : parsed.selector;
 }
 
+/**
+ * `/model --fast <id>` prints and accepts the selector half of a persisted
+ * `authType:id\0<baseUrl>` pin; re-entering that printed value must not
+ * silently drop the live endpoint pin and rebind the first same-id registry
+ * entry (#12760). Keep the pinned setting when it names the same model; an
+ * argument carrying its own `\0` endpoint, or naming a different model, is
+ * persisted as given.
+ */
+function preservedAuxModelSetting(
+  persisted: unknown,
+  modelName: string,
+  selector: { authType?: AuthType; modelId: string },
+): string {
+  if (
+    typeof persisted !== 'string' ||
+    !persisted.includes('\0') ||
+    modelName.includes('\0')
+  ) {
+    return modelName;
+  }
+  try {
+    const pinned = resolveModelId(persisted.trim().split('\0', 1)[0]);
+    if (
+      pinned?.modelId === selector.modelId &&
+      (!selector.authType ||
+        !pinned?.authType ||
+        pinned.authType === selector.authType)
+    ) {
+      return persisted;
+    }
+  } catch {
+    // An unparseable pin is not preserved.
+  }
+  return modelName;
+}
+
 function persistSetting(
   settings: LoadedSettings,
   path: string,
@@ -620,9 +656,14 @@ export const modelCommand: SlashCommand = {
         // Open model dialog in fast-model mode (interactive) or return current fast model (non-interactive)
         if (context.executionMode !== 'interactive') {
           // The picker persists `authType:id\0<baseUrl>`; report the selector.
+          // A hand-edited settings.json can hold a non-string value (the
+          // workspace-models routes test that shape) — report "not set"
+          // instead of throwing on `.split`.
+          const rawFastModel = context.services.settings?.merged?.fastModel;
           const fastModel =
-            context.services.settings?.merged?.fastModel?.split('\0', 1)[0] ||
-            'not set';
+            (typeof rawFastModel === 'string'
+              ? rawFastModel.trim().split('\0', 1)[0]
+              : '') || 'not set';
           return {
             type: 'message',
             messageType: 'info',
@@ -689,10 +730,15 @@ export const modelCommand: SlashCommand = {
         };
       }
 
-      persistSetting(settings, 'fastModel', modelName, scopeOverride);
+      const fastModelToPersist = preservedAuxModelSetting(
+        settings.merged?.fastModel,
+        modelName,
+        selector,
+      );
+      persistSetting(settings, 'fastModel', fastModelToPersist, scopeOverride);
       // Sync the runtime Config so forked agents pick up the change immediately
       // without requiring a restart.
-      config.setFastModel(modelName);
+      config.setFastModel(fastModelToPersist);
       return {
         type: 'message',
         messageType: 'info',
@@ -841,10 +887,15 @@ export const modelCommand: SlashCommand = {
           };
         }
         if (context.executionMode !== 'interactive') {
+          // The picker persists `authType:id\0<baseUrl>`; report the selector.
+          // A hand-edited settings.json can hold a non-string value — report
+          // "not set" instead of throwing on `.trim`.
+          const rawCompactionModel =
+            context.services.settings?.merged?.compactionModel;
           const compactionModel =
-            context.services.settings?.merged?.compactionModel
-              ?.trim()
-              .split('\0', 1)[0] || t('not set (falls back to the main model)');
+            (typeof rawCompactionModel === 'string'
+              ? rawCompactionModel.trim().split('\0', 1)[0]
+              : '') || t('not set (falls back to the main model)');
           return {
             type: 'message',
             messageType: 'info',
@@ -908,9 +959,19 @@ export const modelCommand: SlashCommand = {
         };
       }
 
-      persistSetting(settings, 'compactionModel', modelName, scopeOverride);
+      const compactionModelToPersist = preservedAuxModelSetting(
+        settings.merged?.compactionModel,
+        modelName,
+        selector,
+      );
+      persistSetting(
+        settings,
+        'compactionModel',
+        compactionModelToPersist,
+        scopeOverride,
+      );
       // Sync runtime Config so the compression service picks it up immediately.
-      config.setCompactionModel(modelName);
+      config.setCompactionModel(compactionModelToPersist);
       return {
         type: 'message',
         messageType: 'info',

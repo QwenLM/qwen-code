@@ -15,6 +15,7 @@ import {
   AuthType,
   createDebugLogger,
   formatMemoryUsage,
+  parseVisionModelSetting,
   type LspStatusSnapshot,
 } from '@qwen-code/qwen-code-core';
 import { GIT_COMMIT_INFO } from '../generated/git-commit.js';
@@ -233,8 +234,15 @@ export async function getExtendedSystemInfo(
       ? GIT_COMMIT_INFO
       : undefined;
 
-  // Get fast model from settings
-  const fastModel = context.services.settings?.merged?.fastModel || undefined;
+  // Get fast model from settings. The picker may persist
+  // `authType:id\0<baseUrl>` (#12760); report the selector half only — the
+  // persisted value keeps the endpoint, but status display must not emit the
+  // raw NUL byte or the provider endpoint.
+  const rawFastModel = context.services.settings?.merged?.fastModel;
+  const fastModel =
+    (typeof rawFastModel === 'string'
+      ? (parseVisionModelSetting(rawFastModel)?.selector ?? rawFastModel)
+      : rawFastModel) || undefined;
   const lspStatus = getLspStatus(context);
 
   return {
