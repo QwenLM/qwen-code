@@ -28,13 +28,11 @@ export interface AgentShare {
   callerId: string;
   agentId: string;
   secret: string;
-  scope: 'analysis';
   expiresAt?: number;
 }
 
 export interface AgentShareSummary {
   callerId: string;
-  scope: 'analysis';
   createdAt: number;
   expiresAt?: number;
 }
@@ -165,7 +163,7 @@ export function ShareAgentDialog({
           <DialogDescription>{t('collab.share.description')}</DialogDescription>
         </DialogHeader>
 
-        {share ? (
+        {share && (
           <div className="flex flex-col gap-3">
             <Copyable
               label={t('collab.share.endpoint')}
@@ -182,15 +180,6 @@ export function ShareAgentDialog({
               </p>
             )}
           </div>
-        ) : (
-          <div className="rounded-md border border-border p-3 text-sm">
-            <span className="block font-medium">
-              {t('collab.share.scope.analysis')}
-            </span>
-            <span className="block text-xs text-muted-foreground">
-              {t('collab.share.scope.analysisHint')}
-            </span>
-          </div>
         )}
 
         {shares.length > 0 && (
@@ -204,7 +193,7 @@ export function ShareAgentDialog({
                 className="flex items-center gap-2 rounded-md px-2 py-1 hover:bg-muted"
               >
                 <span className="min-w-0 flex-1 truncate">
-                  {t(`collab.share.scope.${entry.scope}`)}
+                  {entry.callerId}
                   <span className="ml-2 text-xs text-muted-foreground">
                     {entry.expiresAt
                       ? t('collab.share.until', {

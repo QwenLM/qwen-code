@@ -1356,9 +1356,8 @@ export function registerWorkspaceAgentRoutes(
             grant.agentId === agentId &&
             (grant.expiresAt === undefined || grant.expiresAt > now),
         )
-        .map(({ callerId, scope, createdAt, expiresAt }) => ({
+        .map(({ callerId, createdAt, expiresAt }) => ({
           callerId,
-          scope,
           createdAt,
           ...(expiresAt !== undefined ? { expiresAt } : {}),
         }));
@@ -1393,7 +1392,6 @@ export function registerWorkspaceAgentRoutes(
           callerId,
           agentId,
           secret,
-          scope: 'analysis',
           expiresAt,
         });
       } catch (error) {

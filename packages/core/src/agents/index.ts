@@ -48,7 +48,7 @@ export type {
   A2ACaller,
   A2AFailure,
 } from './workspace-agents/a2a-server.js';
-export type { A2AGrant, A2AGrantScope } from './workspace-agents/types.js';
+export type { A2AGrant } from './workspace-agents/types.js';
 export { strandLocalRuns } from './workspace-agents/stranded-runs.js';
 export type { AgentRunContext } from './workspace-agents/run-context.js';
 export {

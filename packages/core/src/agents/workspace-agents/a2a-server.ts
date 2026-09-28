@@ -140,9 +140,6 @@ export async function a2aSendMessage(
       detail: 'messageId and body required',
     };
   }
-  // Submitting work is `analysis` scope: it is the least a caller can be
-  // granted and still be useful, so a read-only grant can do it. What the
-  // agent is then allowed to *do* is the agent's own tool policy, not this.
   const auth = await authorize(projectRoot, caller, request.agentId);
   if (!auth.ok) return { ok: false, kind: 'refused' };
   try {

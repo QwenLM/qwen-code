@@ -19,15 +19,6 @@ export const HUMAN_AUTHOR_ID = 'user';
 export const AGENTS_SCHEMA_VERSION = 1;
 
 /**
- * How much an external caller may ask of one agent.
- *
- * `analysis` is read-only work, which is what the plan opens first; `full`
- * is everything that agent can do. Coarse on purpose — a scope nobody can
- * read is a scope nobody enforces correctly.
- */
-export type A2AGrantScope = 'analysis';
-
-/**
  * One external caller's permission to call one agent.
  *
  * Per agent, never per daemon: opening agent A says nothing about agent B, and
@@ -38,7 +29,6 @@ export type A2AGrantScope = 'analysis';
 export interface A2AGrant {
   callerId: string;
   agentId: string;
-  scope: A2AGrantScope;
   secretHash: string;
   createdAt: number;
   /** Absent means it does not expire on its own; revocation still applies. */

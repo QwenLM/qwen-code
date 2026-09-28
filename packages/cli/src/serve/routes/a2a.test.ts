@@ -10,7 +10,11 @@ import * as path from 'node:path';
 import express from 'express';
 import request from 'supertest';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { issueA2AGrant } from '@qwen-code/qwen-code-core/agents/workspace-agents/a2a-grants.js';
+import {
+  issueA2AGrant,
+  revokeA2AGrant,
+} from '@qwen-code/qwen-code-core/agents/workspace-agents/a2a-grants.js';
+import { updateWorkspaceAgents } from '@qwen-code/qwen-code-core/agents/workspace-agents/store.js';
 import { Storage } from '@qwen-code/qwen-code-core';
 import {
   createWorkspaceRegistry,
@@ -31,6 +35,9 @@ let runtimeDir: string;
 beforeEach(async () => {
   runtimeDir = await fs.mkdtemp(path.join(os.tmpdir(), 'a2a-route-test-'));
   Storage.setRuntimeBaseDir(runtimeDir);
+  await updateWorkspaceAgents(PROJECT_ROOT, () => [
+    { id: 'ag_lead', name: 'lead', createdAt: 1 },
+  ]);
 });
 
 afterEach(async () => {
@@ -55,7 +62,99 @@ function appFor(trusted: boolean, checkRate: ReturnType<typeof vi.fn>) {
   return app;
 }
 
-describe('A2A transport admission', () => {
+describe('A2A transport', () => {
+  it('serves the task lifecycle and enforces isolation and revocation', async () => {
+    const first = await issueA2AGrant(PROJECT_ROOT, {
+      callerId: 'share_1',
+      agentId: 'ag_lead',
+    });
+    const second = await issueA2AGrant(PROJECT_ROOT, {
+      callerId: 'share_2',
+      agentId: 'ag_lead',
+    });
+    const app = appFor(
+      true,
+      vi.fn(() => true),
+    );
+
+    const card = await request(app).get('/.well-known/agent-card.json');
+    expect(card.body).toMatchObject({
+      name: 'Qwen Code workspace agents',
+      supportedInterfaces: [
+        expect.objectContaining({
+          protocolBinding: 'JSONRPC',
+          protocolVersion: '1.0',
+        }),
+      ],
+      capabilities: { streaming: false, pushNotifications: false },
+    });
+
+    const call = (
+      callerId: string,
+      secret: string,
+      method: string,
+      params: unknown,
+    ) =>
+      request(app)
+        .post('/a2a/v1')
+        .set({
+          ...headers,
+          authorization: `Bearer ${secret}`,
+          'x-qwen-caller-id': callerId,
+          'A2A-Version': '1.0',
+        })
+        .send({ jsonrpc: '2.0', id: 1, method, params });
+
+    const sent = await call('share_1', first.secret, 'SendMessage', {
+      message: {
+        role: 'ROLE_USER',
+        messageId: 'msg-1',
+        parts: [{ text: 'Inspect the cache.' }],
+      },
+    });
+    expect(sent.body.error).toBeUndefined();
+    const taskId = sent.body.result.task.id as string;
+
+    const polled = await call('share_1', first.secret, 'GetTask', {
+      id: taskId,
+    });
+    expect(polled.body.result).toMatchObject({ id: taskId });
+
+    const listed = await call('share_1', first.secret, 'ListTasks', {});
+    expect(listed.body.result).toMatchObject({
+      tasks: [expect.objectContaining({ id: taskId })],
+      totalSize: 1,
+    });
+
+    const privatePoll = await call('share_2', second.secret, 'GetTask', {
+      id: taskId,
+    });
+    expect(privatePoll.body.error).toMatchObject({
+      code: -32001,
+      message: 'Task not found.',
+    });
+
+    const cancelled = await call('share_1', first.secret, 'CancelTask', {
+      id: taskId,
+    });
+    expect(cancelled.body.result).toMatchObject({
+      id: taskId,
+      status: { state: 'TASK_STATE_CANCELED' },
+    });
+
+    await revokeA2AGrant(PROJECT_ROOT, {
+      callerId: 'share_1',
+      agentId: 'ag_lead',
+    });
+    const revokedPoll = await call('share_1', first.secret, 'GetTask', {
+      id: taskId,
+    });
+    expect(revokedPoll.body.error).toMatchObject({
+      code: -32010,
+      message: 'Request refused.',
+    });
+  });
+
   it('rejects an untrusted primary workspace', async () => {
     const checkRate = vi.fn(() => true);
     const response = await request(appFor(false, checkRate))
