@@ -24,6 +24,7 @@
  *    the shell; there is no field they can set to claim otherwise.
  */
 
+import { stat } from 'node:fs/promises';
 import type { Application, Request, RequestHandler, Response } from 'express';
 import type {
   ThreadPriority,
@@ -40,6 +41,7 @@ import {
   createThread,
   generateAgentId,
   generateEventId,
+  getAgentsDir,
   isValidAgentName,
   listThreads,
   readWorkspaceAgents,
@@ -53,6 +55,7 @@ import {
   updateWorkspaceAgents,
   withAgentStoreTransaction,
 } from '@qwen-code/qwen-code-core/agents/workspace-agents/store.js';
+import { strandLocalRuns } from '@qwen-code/qwen-code-core/agents/workspace-agents/stranded-runs.js';
 import {
   THREAD_PRIORITY_ORDER,
   DEFAULT_THREAD_PRIORITY,
@@ -65,7 +68,10 @@ import {
   decideDispatch,
   resolveTargets,
 } from '@qwen-code/qwen-code-core/agents/workspace-agents/dispatch-policy.js';
-import { queuedAhead } from '@qwen-code/qwen-code-core/agents/workspace-agents/dispatcher.js';
+import {
+  deliverParentReports,
+  queuedAhead,
+} from '@qwen-code/qwen-code-core/agents/workspace-agents/dispatcher.js';
 import {
   finishRunInTransaction,
   hasLiveDescendant,
@@ -95,6 +101,14 @@ import type {
 export interface RegisterWorkspaceAgentRoutesDeps {
   workspaceRegistry: WorkspaceRegistry;
   mutate: (opts?: { strict?: boolean }) => RequestHandler;
+  /**
+   * Per-workspace opt-in check, resolved from the same settings merge a
+   * hosted session sees (workspace scope wins), with the env var as the
+   * operator's process-wide override. Consulted per request and per recovery
+   * tick, never snapshotted, so a workspace can flip the feature off without
+   * a daemon restart.
+   */
+  isAgentCollaborationEnabledFor: (workspaceCwd: string) => boolean;
 }
 
 const LIVE_RUN_STATUSES = new Set([
@@ -305,7 +319,15 @@ export function registerWorkspaceAgentRoutes(
       req,
       res,
     );
-    if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
+    if (!runtime) return;
+    if (!requireTrustedWorkspaceRuntime(runtime, res)) return;
+    // The opt-in is per workspace: a workspace whose settings never enabled
+    // collaboration answers exactly like an unmounted route, so clients read
+    // "absent" the same way on either side of the flag.
+    if (!deps.isAgentCollaborationEnabledFor(runtime.workspaceCwd)) {
+      res.status(404).json({ error: 'agent_collaboration_disabled' });
+      return undefined;
+    }
     return runtime;
   };
 
@@ -317,7 +339,7 @@ export function registerWorkspaceAgentRoutes(
       current.bridge !== runtime.bridge ||
       current.generationGuard !== runtime.generationGuard
     ) {
-      current?.owner.stop();
+      await current?.owner.stop();
       const owner = startAgentHostSessionOwner({
         bridge: runtime.bridge,
         workspaceCwd: runtime.workspaceCwd,
@@ -371,6 +393,28 @@ export function registerWorkspaceAgentRoutes(
 
   let recovering = false;
   let recoveryStopped = false;
+
+  // Shared by the no-addressable-agents path and the opted-out path: deliver
+  // what needs no agent, stop the owner (draining its in-flight tick first),
+  // then release and close the claimed host session.
+  const teardownWorkspaceOwner = async (
+    runtime: WorkspaceRuntime,
+  ): Promise<void> => {
+    await deliverParentReports(runtime.workspaceCwd);
+    await owners.get(runtime.workspaceCwd)?.owner.stop();
+    owners.delete(runtime.workspaceCwd);
+    const workspace = await readAgentWorkspace(runtime.workspaceCwd);
+    if (workspace.hostSessionId) {
+      await releaseAgentHostSession(
+        runtime.workspaceCwd,
+        workspace.hostSessionId,
+      );
+      await runtime.bridge
+        .closeSession(workspace.hostSessionId)
+        .catch(() => {});
+    }
+  };
+
   const recover = async (): Promise<void> => {
     if (recovering || recoveryStopped) return;
     recovering = true;
@@ -379,24 +423,54 @@ export function registerWorkspaceAgentRoutes(
         if (recoveryStopped) return;
         if (!runtime.trusted || runtime.generationGuard?.closed) continue;
         try {
+          if (!deps.isAgentCollaborationEnabledFor(runtime.workspaceCwd)) {
+            // The workspace never opted in or flipped the flag off. Recovery
+            // cannot tell "turned off" from "crashed", so strand any live
+            // runs an earlier opt-in left behind — a person decides their
+            // fate — then leave nothing running. A workspace that never had a
+            // store is skipped outright: teardown reads the store, and reading
+            // it creates it.
+            if (
+              !owners.has(runtime.workspaceCwd) &&
+              !(await stat(getAgentsDir(runtime.workspaceCwd)).then(
+                () => true,
+                () => false,
+              ))
+            ) {
+              continue;
+            }
+            await strandLocalRuns(runtime.workspaceCwd);
+            await teardownWorkspaceOwner(runtime);
+            continue;
+          }
           const [agents, { threads }] = await Promise.all([
             readWorkspaceAgents(runtime.workspaceCwd),
             listThreads(runtime.workspaceCwd),
           ]);
-          const hasRoster = agents.some(
-            (agent) => agent.retiredAt === undefined,
+          // "Can anyone take work" is the addressability question the DELETE
+          // teardown asks, not just "is anyone unretired" — a workspace whose
+          // agents are all disabled must not keep a host session heartbeat
+          // alive.
+          const hasRoster = agents.some(isAgentAddressable);
+          const hasLiveRuns = threads.some((thread) =>
+            thread.runs.some((run) => LIVE_RUN_STATUSES.has(run.status)),
           );
-          const hasWork = threads.some(
-            (thread) =>
-              thread.runs.some((run) => LIVE_RUN_STATUSES.has(run.status)) ||
-              // Only parent reports are still delivered; a leftover event of a
-              // retired kind must not keep waking recovery every five seconds.
-              thread.outbox.some(
-                (event) =>
-                  event.status === 'pending' && event.kind === 'parent_report',
-              ),
+          const hasPendingReports = threads.some((thread) =>
+            // Only parent reports are still delivered; a leftover event of a
+            // retired kind must not keep waking recovery every five seconds.
+            thread.outbox.some(
+              (event) =>
+                event.status === 'pending' && event.kind === 'parent_report',
+            ),
           );
+          const hasWork = hasLiveRuns || hasPendingReports;
           if (!hasRoster && !hasWork) continue;
+          if (!hasRoster && !hasLiveRuns) {
+            // Nobody here can take work anymore. Deliver what needs no agent,
+            // then tear the owner down exactly as the DELETE route does.
+            await teardownWorkspaceOwner(runtime);
+            continue;
+          }
           const owner = owners.get(runtime.workspaceCwd);
           if (
             !hasWork &&
@@ -428,7 +502,7 @@ export function registerWorkspaceAgentRoutes(
   app.locals['stopWorkspaceAgentRecovery'] = () => {
     recoveryStopped = true;
     clearInterval(recoveryTimer);
-    for (const { owner } of owners.values()) owner.stop();
+    for (const { owner } of owners.values()) void owner.stop();
   };
 
   /**
@@ -1222,7 +1296,10 @@ export function registerWorkspaceAgentRoutes(
             ? await startBookedRuns(runtime)
             : undefined;
         if (remainingAgents.length === 0) {
-          owners.get(runtime.workspaceCwd)?.owner.stop();
+          // Drain the owner's in-flight tick before releasing the host
+          // session, or a concurrent ensure() can spawn a replacement that
+          // nothing heartbeats or closes.
+          await owners.get(runtime.workspaceCwd)?.owner.stop();
           owners.delete(runtime.workspaceCwd);
           const workspace = await readAgentWorkspace(runtime.workspaceCwd);
           if (workspace.hostSessionId) {

@@ -6594,7 +6594,10 @@ class QwenAgent implements Agent {
       return sessionService.listSessions({
         cursor: numericCursor,
         size,
-        excludeSourceType: AGENT_HOST_SESSION_SOURCE_TYPE,
+        excludeSourceTypes: [
+          AGENT_HOST_SESSION_SOURCE_TYPE,
+          AGENT_SESSION_SOURCE_TYPE,
+        ],
       });
     });
 

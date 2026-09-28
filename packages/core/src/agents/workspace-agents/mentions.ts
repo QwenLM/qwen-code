@@ -51,6 +51,30 @@ function agentForToken(
   return best;
 }
 
+/**
+ * Whether `token` is a typo of `name` rather than unrelated prose. Bounded
+ * Levenshtein: the only question asked is "distance ≤ 2", so the computation
+ * bails as soon as no row cell can still come back under the limit.
+ */
+function nearMissOf(name: string, token: string): boolean {
+  const a = name.toLowerCase();
+  const b = token.toLowerCase();
+  if (Math.abs(a.length - b.length) > 2) return false;
+  let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    const curr = [i];
+    let rowMin = i;
+    for (let j = 1; j <= b.length; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      curr[j] = Math.min(prev[j]! + 1, curr[j - 1]! + 1, prev[j - 1]! + cost);
+      rowMin = Math.min(rowMin, curr[j]!);
+    }
+    if (rowMin > 2) return false;
+    prev = curr;
+  }
+  return prev[b.length]! <= 2;
+}
+
 export interface ParsedMentions {
   /** Agent ids, in first-appearance order, deduplicated. */
   ids: string[];
@@ -85,6 +109,13 @@ export function parseMentions(
     }
     const agent = agentForToken(agents, name);
     if (!agent) {
+      // Only a near-miss of a roster name is an unknown mention. Any other
+      // unmatched `@word` is prose (@media, @param, @Override) and carries no
+      // routing authority — recording it would suppress the assignee fallback
+      // for a string nobody addressed.
+      if (!agents.some((candidate) => nearMissOf(candidate.name, name))) {
+        continue;
+      }
       const lowered = name.toLowerCase();
       if (!seenUnknown.has(lowered)) {
         seenUnknown.add(lowered);
@@ -102,9 +133,7 @@ export function parseMentions(
 
 /**
  * The exact token an agent should paste to address another agent. Handed to
- * the model in the thread prompt so it never has to guess the spelling — the
- * same reason Multica gives its squad leader ready-made mention markdown
- * rather than a bare name.
+ * the model in the thread prompt so it never has to guess the spelling.
  */
 export function mentionToken(agent: WorkspaceAgent): string {
   return `@${agent.name}`;

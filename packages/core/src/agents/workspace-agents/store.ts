@@ -13,6 +13,7 @@ import lockfile from 'proper-lockfile';
 
 import { Storage } from '../../config/storage.js';
 import { atomicWriteJSON } from '../../utils/atomicFileWrite.js';
+import { createDebugLogger } from '../../utils/debugLogger.js';
 import { isNodeError } from '../../utils/errors.js';
 import { getProjectHash } from '../../utils/paths.js';
 import { outstandingCloseObligations } from './thread-status.js';
@@ -40,6 +41,8 @@ import {
   DEFAULT_THREAD_PRIORITY,
 } from './types.js';
 
+const debug = createDebugLogger('WORKSPACE_AGENTS_STORE');
+
 const AGENTS_DIRNAME = 'agent-host';
 const WORKSPACE_FILENAME = 'workspace.json';
 const AGENTS_FILENAME = 'agents.json';
@@ -55,6 +58,10 @@ const LOCK_OPTIONS: lockfile.LockOptions = {
     randomize: true,
   },
   stale: 10_000,
+  // A daemon and a crashed or suspended holder can meet on the same workspace;
+  // without a handler the compromise throws from proper-lockfile's timer as
+  // an uncaught exception.
+  onCompromised: (err) => debug.warn('workspace lock compromised:', err),
 };
 
 // Thread files hold full transcripts and the roster holds persona prompts.
@@ -294,9 +301,59 @@ function isValidUsageRound(value: unknown): value is RunUsageRound {
   );
 }
 
+const STEP_STATUSES: ReadonlySet<unknown> = new Set([
+  'running',
+  'done',
+  'failed',
+]);
+
+// `progress` is a display snapshot, but `outputText` decides whether a
+// completed run closes as `unclosed`, so its shape is checked like the rest.
+function isValidProgress(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!isRecord(value)) return false;
+  const permission = value['permission'];
+  const steps = value['steps'];
+  return (
+    isNonNegativeInteger(value['attempt']) &&
+    isNonNegativeInteger(value['sequence']) &&
+    isFiniteTimestamp(value['receivedAt']) &&
+    isFiniteTimestamp(value['activityAt']) &&
+    typeof value['stage'] === 'string' &&
+    typeof value['detail'] === 'string' &&
+    (value['outputText'] === undefined ||
+      typeof value['outputText'] === 'string') &&
+    (value['thoughtText'] === undefined ||
+      typeof value['thoughtText'] === 'string') &&
+    (permission === undefined ||
+      (isRecord(permission) &&
+        typeof permission['requestId'] === 'string' &&
+        typeof permission['title'] === 'string' &&
+        Array.isArray(permission['options']) &&
+        permission['options'].every(
+          (option) =>
+            isRecord(option) &&
+            typeof option['optionId'] === 'string' &&
+            typeof option['name'] === 'string' &&
+            (option['kind'] === undefined ||
+              typeof option['kind'] === 'string'),
+        ))) &&
+    (steps === undefined ||
+      (Array.isArray(steps) &&
+        steps.every(
+          (step) =>
+            isRecord(step) &&
+            typeof step['id'] === 'string' &&
+            typeof step['title'] === 'string' &&
+            STEP_STATUSES.has(step['status']),
+        )))
+  );
+}
+
 function isValidRun(value: unknown): value is ThreadRun {
   if (!isRecord(value)) return false;
   const valid =
+    isValidProgress(value['progress']) &&
     isValidId(value['id']) &&
     isValidId(value['agentId']) &&
     RUN_STATUSES.has(value['status'] as ThreadRunStatus) &&
@@ -461,14 +518,6 @@ async function readJsonFile(filePath: string): Promise<unknown | undefined> {
   }
 }
 
-function workspaceMutex(agentsDir: string): Mutex {
-  let mutex = workspaceMutexes.get(agentsDir);
-  if (!mutex) {
-    mutex = new Mutex();
-    workspaceMutexes.set(agentsDir, mutex);
-  }
-  return mutex;
-}
 
 async function withWorkspaceLock<T>(
   projectRoot: string,
@@ -478,18 +527,36 @@ async function withWorkspaceLock<T>(
     throw new Error('Nested agent workspace transactions are not allowed.');
   }
   const agentsDir = getAgentsDir(projectRoot);
-  return workspaceMutex(agentsDir).runExclusive(async () => {
-    await fs.mkdir(agentsDir, { recursive: true, mode: STORE_DIR_MODE });
-    const release = await lockfile.lock(
-      getWorkspaceFilePath(projectRoot),
-      LOCK_OPTIONS,
-    );
-    try {
-      return await workspaceTransaction.run(true, run);
-    } finally {
-      await release();
-    }
-  });
+  let mutex = workspaceMutexes.get(agentsDir);
+  if (!mutex) {
+    mutex = new Mutex();
+    workspaceMutexes.set(agentsDir, mutex);
+  }
+  return mutex
+    .runExclusive(async () => {
+      await fs.mkdir(agentsDir, { recursive: true, mode: STORE_DIR_MODE });
+      const release = await lockfile.lock(
+        getWorkspaceFilePath(projectRoot),
+        LOCK_OPTIONS,
+      );
+      try {
+        return await workspaceTransaction.run(true, run);
+      } finally {
+        try {
+          await release();
+        } catch (err) {
+          // After a compromise the lock is already released (ERELEASED); the
+          // transaction's own result still stands.
+          debug.warn('failed to release workspace lock:', err);
+        }
+      }
+    })
+    .finally(() => {
+      // runExclusive releases before this callback; keep the mutex while a
+      // queued caller has already acquired it.
+      const held = workspaceMutexes.get(agentsDir);
+      if (held && !held.isLocked()) workspaceMutexes.delete(agentsDir);
+    });
 }
 
 function backupPath(filePath: string): string {

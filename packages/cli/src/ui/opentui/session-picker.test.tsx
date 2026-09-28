@@ -359,12 +359,12 @@ describe('OpenTuiSessionPicker', () => {
     });
     expect(listSessions).toHaveBeenNthCalledWith(1, {
       size: 20,
-      excludeSourceType: 'agent-host',
+      excludeSourceTypes: ['agent-host', 'agent'],
     });
     expect(listSessions).toHaveBeenNthCalledWith(2, {
       size: 20,
       cursor: 3,
-      excludeSourceType: 'agent-host',
+      excludeSourceTypes: ['agent-host', 'agent'],
     });
     expect(titles()).toHaveLength(5);
   });

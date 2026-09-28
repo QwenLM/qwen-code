@@ -205,6 +205,16 @@ export function assembleAgentPrompt(
     );
   }
 
+  // A first delivery shows only the recent window, but the watermark commits
+  // past everything retained — disclose the hidden prefix or those posts are
+  // lost silently.
+  if (committed === undefined && recent.length < messages.length) {
+    lines.push('');
+    lines.push(
+      `EARLIER POSTS — ${messages.length - recent.length} retained post(s) before sequence ${windowFrom} are not restated here; use thread_read if they matter.`,
+    );
+  }
+
   if (committed !== undefined) {
     lines.push('');
     lines.push(`DELTA AFTER LAST COMMITTED DELIVERY (sequence > ${committed})`);
@@ -212,11 +222,20 @@ export function assembleAgentPrompt(
       lines.push('  (nothing new since your last committed delivery)');
     } else {
       const shownIds = new Set(recent.map((message) => message.id));
-      for (const message of delta) {
+      // The delta is unbounded above the watermark; a busy thread would dump
+      // its entire history into one envelope. Show the newest posts and
+      // disclose the omission — the rest remain readable via thread_read.
+      const shownDelta = delta.slice(-recentCount);
+      for (const message of shownDelta) {
         lines.push(
           shownIds.has(message.id)
             ? `  [${message.sequence}] (shown above)`
             : renderPost(message, charBudget),
+        );
+      }
+      if (delta.length > shownDelta.length) {
+        lines.push(
+          `  … ${delta.length - shownDelta.length} earlier new post(s) omitted; use thread_read to see them.`,
         );
       }
     }

@@ -196,6 +196,8 @@ const DEFERRED: ReadonlyArray<[name: string, build: Build]> = [
 ];
 
 /** Built-in tool names that are measured elsewhere, or not measurable here. */
+const COLLABORATION_ONLY =
+  'agent-collaboration runs only (config.ts gates on the flag plus session sourceType); never on the general request surface';
 const NOT_BUDGETED_HERE: Readonly<Record<string, string>> = {
   [ToolNames.AGENT]: 'agent-description-budget.test.ts',
   [ToolNames.SHELL]: 'shell.test.ts, per shell shape',
@@ -204,6 +206,15 @@ const NOT_BUDGETED_HERE: Readonly<Record<string, string>> = {
     'code mode declares exec with every bound tool folded into its description (tool-registry.ts), not this class schema',
   [ToolNames.STRUCTURED_OUTPUT]: 'its schema is the user-supplied JSON Schema',
   [ToolNames.MEMORY]: 'legacy name, no longer registered as a tool',
+  // The six thread tools exist only inside agent-collaboration runs — the
+  // config.ts gate requires the opt-in flag AND session sourceType 'agent' —
+  // so they never join the general request surface this file budgets.
+  [ToolNames.THREAD_POST]: COLLABORATION_ONLY,
+  [ToolNames.THREAD_WAIT]: COLLABORATION_ONLY,
+  [ToolNames.THREAD_BLOCK]: COLLABORATION_ONLY,
+  [ToolNames.THREAD_REVIEW]: COLLABORATION_ONLY,
+  [ToolNames.THREAD_CREATE]: COLLABORATION_ONLY,
+  [ToolNames.THREAD_READ]: COLLABORATION_ONLY,
 };
 
 /** Media-policy tools are generated from settings, so their size is not fixed. */

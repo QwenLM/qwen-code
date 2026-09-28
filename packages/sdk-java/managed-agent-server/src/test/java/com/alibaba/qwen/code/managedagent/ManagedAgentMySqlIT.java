@@ -17,6 +17,7 @@ import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.RenewW
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.SealWriterRequest;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.WriterGrant;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.Admission;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.ReplayWindow;
 import com.alibaba.qwen.code.runtimebroker.JdbcRepositoryContract;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
@@ -66,8 +67,11 @@ class ManagedAgentMySqlIT {
                 + " idempotency_key, request_digest, session_id, created_at)"
                 + " VALUES ('mysql-upgrade', 'CREATE_SESSION', 'legacy-key',"
                 + " 'legacy-digest', 'session_upgrade', 1)");
+        LegacyEvents.insert(jdbc, "mysql-upgrade", "session_upgrade");
         Flyway.configure().dataSource(dataSource)
                 .locations("classpath:db/migration").load().migrate();
+        LegacyEvents.assertBackfilled(jdbc, "mysql-upgrade",
+                "session_upgrade");
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
                         + " managed_agent_consumer_progress WHERE tenant_id = ?"
                         + " AND session_id = ? AND consumer_name = ?",
@@ -113,6 +117,10 @@ class ManagedAgentMySqlIT {
 
         assertThat(store.materializeNextBatch(tenant, admission.sessionId(),
                 200).advanced()).isTrue();
+        assertThat(store.advanceReplayFloor(tenant, admission.sessionId(),
+                Long.MAX_VALUE)).isEqualTo(new ReplayWindow(6, 6));
+        assertThat(store.findReplayWindow(tenant, admission.sessionId()))
+                .isEqualTo(new ReplayWindow(6, 6));
         assertThat(store.findSnapshot(tenant, admission.sessionId()))
                 .get().satisfies(snapshot -> {
                     assertThat(snapshot.coveredSequence()).isEqualTo(6);
