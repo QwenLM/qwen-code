@@ -40,6 +40,11 @@ import { computeManagedContextDigest } from './managed-workspace-binding.js';
 import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import { getShellConfiguration } from '@qwen-code/qwen-code-core/utils/shell-utils.js';
 import {
+  ManagedShellPublisherRegistry,
+  MANAGED_SHELL_PUBLISHER_ROUTE,
+} from './managed-shell-publisher.js';
+import { PUBLICATION_INSTALL_ROUTE } from './remote-shell-result-publication.js';
+import {
   WORKSPACE_ACTIVATION_ROUTE,
   WORKSPACE_CAPABILITY_DIGEST,
   WORKSPACE_CONTEXT_CONFIG_REF,
@@ -342,7 +347,7 @@ describe('Managed context worker boot', () => {
     expect(toolStatuses).toEqual([400, 400, 400]);
   });
 
-  it('mounts Tool v3 only when a local publisher is injected', async () => {
+  it('mounts Tool v3 when a local publisher is injected', async () => {
     const worker = await startManagedRuntimeAttestationWorker(BOOT, {
       prepare: async () => {
         throw new Error('unexpected capture');
@@ -374,6 +379,22 @@ describe('Managed context worker boot', () => {
       toolResult: 'managed-tool-result/1',
       state: 'unknown',
     });
+  });
+
+  it('keeps both publication install routes on the standalone worker', async () => {
+    const worker = await startManagedRuntimeAttestationWorker(
+      { ...BOOT, capabilityDigest: WORKSPACE_CAPABILITY_DIGEST },
+      undefined,
+      new ManagedShellPublisherRegistry(),
+    );
+    openWorkers.add(worker);
+    for (const route of [
+      MANAGED_SHELL_PUBLISHER_ROUTE,
+      PUBLICATION_INSTALL_ROUTE,
+    ]) {
+      const response = await post(worker.ready.url, route.path, {});
+      expect([400, 409]).toContain(response.status);
+    }
   });
 
   it('answers 404 to the v3 routes under boot v1', async () => {

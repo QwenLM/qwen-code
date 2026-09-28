@@ -6,6 +6,8 @@ import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.BlockR
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitReceipt;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitResource;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitTransactionRequest;
+import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.PublishToolResultRequest;
+import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.ToolResultResourceRef;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.RenewWriterRequest;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.RecoveryStateReceipt;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.RestoreHead;
@@ -503,6 +505,65 @@ public class ManagedSessionStore {
                 resource.digest(), bytes);
     }
 
+    @Transactional
+    public ToolResultResourceRef publishToolResult(String tenantId, String sessionId,
+            String writerToken, PublishToolResultRequest request) {
+        validateScope(tenantId, request.workspaceId(), sessionId);
+        validateStableId(request.writerId(), "writerId");
+        validateCounter(request.writerGeneration(), "writerGeneration", 1);
+        validateStableId(request.resourceId(), "resourceId");
+        validateDigest(request.digest(), "resource digest", false);
+        int limit = toolResultLimit(request.kind());
+        if (limit == 0 || request.schemaVersion() != 1 || request.byteLength() < 1) {
+            throw invalid("Tool result resource kind, version or length is invalid.");
+        }
+        if (request.byteLength() > limit || request.bytesBase64() != null
+                && request.bytesBase64().length() > 4 * ((limit + 2) / 3)) {
+            throw payloadTooLarge("Tool result resource exceeds its byte limit.");
+        }
+        byte[] bytes = decodeBase64(request.bytesBase64(), limit, "resource bytesBase64");
+        if (bytes.length != request.byteLength() || !sha256(bytes).equals(request.digest())) {
+            throw invalid("Tool result bytes do not match their length or digest.");
+        }
+        HeadRow head = requireHeadForUpdate(tenantId, sessionId);
+        requireHeadScope(head, tenantId, request.workspaceId(), sessionId);
+        Timestamp now = databaseNow();
+        requireWriter(head, request.writerId(), request.writerGeneration(), writerToken, now, true);
+        String scopeKey = sessionScopeKey(tenantId, sessionId);
+        ResourceRow existing = findResource(scopeKey, request.resourceId());
+        if (existing == null) {
+            jdbc.update("INSERT INTO qwen_managed_session_resource"
+                            + " (session_scope_key, tenant_id, workspace_id, session_id, resource_id,"
+                            + " kind, schema_version, byte_length, sha256, storage_kind, inline_bytes,"
+                            + " publish_command_id, state, created_at, last_verified_at)"
+                            + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'MYSQL_INLINE', ?, ?, 'PUBLISHED', ?, ?)",
+                    scopeKey, tenantId, request.workspaceId(), sessionId, request.resourceId(),
+                    request.kind(), request.schemaVersion(), request.byteLength(), request.digest(),
+                    bytes, request.resourceId(), now, now);
+        } else {
+            requireResourceScope(existing, tenantId, request.workspaceId(), sessionId, request.resourceId());
+            verifyStoredResource(existing);
+            if (!request.kind().equals(existing.kind()) || request.schemaVersion() != existing.schemaVersion()
+                    || request.byteLength() != existing.byteLength() || !request.digest().equals(existing.digest())) {
+                throw conflict("managed_session_resource_conflict", "A resourceId was reused with different content metadata.");
+            }
+        }
+        return new ToolResultResourceRef(request.resourceId(), request.kind(), request.schemaVersion(),
+                request.byteLength(), request.digest());
+    }
+
+    private static int toolResultLimit(String kind) {
+        if (kind == null) {
+            return 0;
+        }
+        return switch (kind) {
+            case "managed-tool-result-content" -> 1024 * 1024;
+            case "managed-tool-result-page" -> 256 * 1024;
+            case "managed-tool-result-manifest" -> 64 * 1024;
+            default -> 0;
+        };
+    }
+
     /** A committed resource of this transaction's Session, verified. */
     private StoredResource storedResource(String scopeKey, String tenantId,
             String workspaceId, String sessionId, String resourceId) {
@@ -513,6 +574,10 @@ public class ManagedSessionStore {
         }
         requireResourceScope(resource, tenantId, workspaceId, sessionId,
                 resourceId);
+        if (!"REFERENCED".equals(resource.state())) {
+            throw conflict(ManagedSessionStoreModels.ERROR_RESOURCE_MISSING,
+                    "A referenced Managed Session resource is missing.");
+        }
         verifyStoredResource(resource);
         return new StoredResource(resource.resourceId(), resource.kind(),
                 resource.schemaVersion(), resource.byteLength(),
@@ -1029,7 +1094,9 @@ public class ManagedSessionStore {
             return;
         }
         if (!"MYSQL_INLINE".equals(resource.storageKind())
-                || !"REFERENCED".equals(resource.state())
+                || !("REFERENCED".equals(resource.state())
+                    || "PUBLISHED".equals(resource.state()) && resource.schemaVersion() == 1
+                        && resource.byteLength() > 0 && resource.byteLength() <= toolResultLimit(resource.kind()))
                 || resource.bytes() == null
                 || resource.objectKey() != null
                 || resource.objectVersionId() != null

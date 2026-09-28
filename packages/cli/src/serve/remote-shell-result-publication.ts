@@ -282,6 +282,10 @@ export class RemoteShellResultPublisher {
   private readonly grants = new Map<string, InstalledPublication>();
   private readonly clients = new Map<string, PublicationClient>();
 
+  hasExecution(executionCallId: string): boolean {
+    return this.grants.has(executionCallId);
+  }
+
   install(value: unknown, boot: ManagedContextBoot): void {
     const body = record(value);
     if (

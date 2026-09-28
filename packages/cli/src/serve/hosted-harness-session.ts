@@ -41,6 +41,8 @@ import {
   HOSTED_WORKSPACE_SHELL_PROFILE,
   HostedToolRecoveryRequiredError,
   HostedWorkspaceToolTurn,
+  type HostedWorkspaceToolProfile,
+  type HostedShellTurnOptions,
 } from './hosted-workspace-tool-turn.js';
 import type { HostedHarnessContract } from './hosted-harness-contract.js';
 
@@ -57,10 +59,9 @@ interface HostedSession {
   active?: { promptId: string; digest: string; abort: AbortController };
   admissions: Map<string, { digest: string; lastEventId: number }>;
   blocked: boolean;
-  toolProfile?:
-    | typeof HOSTED_WORKSPACE_FILE_PROFILE
-    | typeof HOSTED_WORKSPACE_SHELL_PROFILE;
+  toolProfile?: HostedWorkspaceToolProfile;
   publication?: { owner: HttpToolPublicationOwner; captureBytes: number };
+  shell?: HostedShellTurnOptions;
 }
 
 function object(value: unknown): Record<string, unknown> | null {
@@ -367,7 +368,8 @@ async function executeHostedTurn(
   const authority = session.managed.authority;
   const harness = createManagedHarnessHandle(session.managed);
   let turnResult: ChatRecord | undefined;
-  await harness.run(async () => {
+  let toolTurn: HostedWorkspaceToolTurn | undefined;
+  const running = harness.run(async () => {
     const projected = await session.managed.sink.project();
     const settledPrompts = new Set(
       authority
@@ -414,7 +416,7 @@ async function executeHostedTurn(
       parentUuid = message.uuid;
       return message.uuid;
     };
-    const toolTurn =
+    toolTurn =
       session.toolProfile && brokerOptions
         ? new HostedWorkspaceToolTurn(
             brokerOptions,
@@ -427,6 +429,7 @@ async function executeHostedTurn(
                 JSON.stringify(messageRecord(type, parts, model)),
               ) <= HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes,
             session.publication,
+            session.shell,
           )
         : undefined;
     if (resumeFromToolResults) {
@@ -477,6 +480,7 @@ async function executeHostedTurn(
     onTurnResult?.(turnResult);
     await session.managed.sink.write(turnResult);
   });
+  await running.finally(() => toolTurn?.close());
   if (!turnResult) throw new Error('Hosted turn did not settle.');
   return turnResult;
 }
@@ -502,10 +506,8 @@ export function registerHostedHarnessSessionRoutes(
     const captureBytes = body?.['captureBytes'];
     if (
       toolProfile !== undefined &&
-      (![
-        HOSTED_WORKSPACE_FILE_PROFILE,
-        HOSTED_WORKSPACE_SHELL_PROFILE,
-      ].includes(toolProfile as string) ||
+      ((toolProfile !== HOSTED_WORKSPACE_FILE_PROFILE &&
+        toolProfile !== HOSTED_WORKSPACE_SHELL_PROFILE) ||
         !brokerOptions)
     ) {
       error(res, 400, 'hosted_tool_profile_unavailable');
@@ -513,6 +515,7 @@ export function registerHostedHarnessSessionRoutes(
     }
     if (
       toolProfile === HOSTED_WORKSPACE_SHELL_PROFILE &&
+      captureBytes !== undefined &&
       (!Number.isSafeInteger(captureBytes) ||
         (captureBytes as number) < 1 ||
         (captureBytes as number) > 2 ** 41)
@@ -599,18 +602,22 @@ export function registerHostedHarnessSessionRoutes(
         streams: new Set(),
         admissions: new Map(),
         blocked: false,
-        ...(toolProfile
-          ? {
-              toolProfile: toolProfile as
-                | typeof HOSTED_WORKSPACE_FILE_PROFILE
-                | typeof HOSTED_WORKSPACE_SHELL_PROFILE,
-            }
-          : {}),
-        ...(toolProfile === HOSTED_WORKSPACE_SHELL_PROFILE
+        ...(toolProfile ? { toolProfile } : {}),
+        ...(toolProfile === HOSTED_WORKSPACE_SHELL_PROFILE &&
+        captureBytes !== undefined
           ? {
               publication: {
                 owner: stores.publication,
                 captureBytes: captureBytes as number,
+              },
+            }
+          : {}),
+        ...(toolProfile === HOSTED_WORKSPACE_SHELL_PROFILE &&
+        captureBytes === undefined
+          ? {
+              shell: {
+                resources: stores.toolResultResources,
+                assertWritable: stores.assertWritable,
               },
             }
           : {}),
@@ -638,7 +645,7 @@ export function registerHostedHarnessSessionRoutes(
       let settlePromptId: string | undefined;
       if (
         restore.recoveryStatus === 'ok' &&
-        session.toolProfile === HOSTED_WORKSPACE_SHELL_PROFILE &&
+        session.publication &&
         brokerOptions
       ) {
         const promptId = await recoverShellReceipts(session, brokerOptions);

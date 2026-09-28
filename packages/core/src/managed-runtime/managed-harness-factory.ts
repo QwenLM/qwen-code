@@ -523,6 +523,17 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
         );
       }
 
+      if (
+        turn &&
+        (turn.turnId !== previous.identity.turnId ||
+          turn.promptId !== previous.identity.promptId) &&
+        previous.continuation.phase !== 'before_model' &&
+        previous.continuation.phase !== 'turn_settled'
+      ) {
+        throw new ManagedSessionConflictError(
+          'Runtime work cannot change the current unfinished turn.',
+        );
+      }
       const priorItems = previous.tools?.items ?? [];
       const pending = requests.filter(
         (request) =>
@@ -540,6 +551,16 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
         gate.claim(requests[0].executionCallId);
         throw new ManagedSessionConflictError(
           'Runtime execution was already recorded without an active wait.',
+        );
+      }
+      if (
+        turn &&
+        previous.identity.activationId !== this.activation.activationId &&
+        previous.continuation.phase !== 'before_model' &&
+        previous.continuation.phase !== 'turn_settled'
+      ) {
+        throw new ManagedSessionConflictError(
+          'Runtime work cannot continue a prior activation.',
         );
       }
 

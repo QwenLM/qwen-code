@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { ServerResponse } from 'node:http';
 import { tmpdir } from 'node:os';
@@ -25,6 +25,8 @@ import {
   HostedWorkspaceBroker,
   HostedWorkspaceBrokerRejection,
 } from './hosted-workspace-broker.js';
+import { HostedShellPublisher } from './hosted-shell-publisher.js';
+import type { ShellPublisherDescriptor } from './managed-shell-publisher.js';
 import type { HostedWorkspaceToolTurn } from './hosted-workspace-tool-turn.js';
 import * as stdio from '../utils/stdioHelpers.js';
 
@@ -130,6 +132,179 @@ describe('Hosted Harness no-tool session', () => {
     vi.restoreAllMocks();
     await rm(state.root, { recursive: true, force: true });
   });
+
+  it('requires the saved explicit Shell profile and advertises it only with a Broker', async () => {
+    const body = {
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+      toolProfile: 'hosted-workspace-shell/1',
+    };
+    expect(
+      (await headers(supertest(app()).post('/session')).send(body)).status,
+    ).toBe(400);
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+    const acquire = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'acquire')
+      .mockResolvedValue();
+    const server = app(true);
+    const created = await headers(supertest(server).post('/session')).send(
+      body,
+    );
+    expect(created.status).toBe(200);
+    state.model.mockImplementationOnce(async ({ toolTurn }) => {
+      expect(toolTurn!.declarations.map((tool) => tool.name)).toEqual([
+        'read_file',
+        'write_file',
+        'edit',
+        'run_shell_command',
+      ]);
+      return { text: 'text without side effects', model: 'test-model' };
+    });
+    const prompt = [{ type: 'text', text: 'hello' }];
+    const clientId = created.body.clientId as string;
+    expect(
+      (
+        await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+          .set('X-Qwen-Client-Id', clientId)
+          .send({
+            prompt,
+            promptId: PROMPT_ID,
+            payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+          })
+      ).status,
+    ).toBe(202);
+    await vi.waitFor(async () => {
+      const status = await headers(
+        supertest(server).get(`/session/${SESSION_ID}/status`),
+      ).set('X-Qwen-Client-Id', clientId);
+      expect(status.body.hasActivePrompt).toBe(false);
+    });
+    expect(acquire).not.toHaveBeenCalled();
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
+      'X-Qwen-Client-Id',
+      clientId,
+    );
+    expect(
+      (
+        await headers(
+          supertest(server).post(`/session/${SESSION_ID}/load`),
+        ).send({
+          managedSessionStore: store(),
+          toolProfile: 'hosted-workspace-files/1',
+        })
+      ).status,
+    ).toBe(409);
+  });
+
+  it.each(['completed', 'model-error', 'execution-error'])(
+    'closes the Shell publisher after a %s turn',
+    async (ending) => {
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockResolvedValue();
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'prepare').mockResolvedValue(
+        randomUUID(),
+      );
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'cancel').mockResolvedValue();
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'release').mockResolvedValue();
+      const execute = vi
+        .spyOn(HostedWorkspaceBroker.prototype, 'execute')
+        .mockResolvedValue({
+          executionStatus: 'not_started',
+          responseParts: [],
+          capture: null,
+          error: { message: 'command validation failed' },
+        });
+      if (ending === 'execution-error')
+        execute.mockRejectedValue(new Error('lost execution reply'));
+      let descriptor: ShellPublisherDescriptor | undefined;
+      vi.spyOn(
+        HostedWorkspaceBroker.prototype,
+        'registerPublisher',
+      ).mockImplementation(async (value) => {
+        descriptor = value;
+        return '1';
+      });
+      const close = vi.spyOn(HostedShellPublisher.prototype, 'close');
+      const start = vi.spyOn(HostedShellPublisher.prototype, 'start');
+      const server = app(true);
+      const created = await headers(supertest(server).post('/session'))
+        .send({
+          sessionId: SESSION_ID,
+          sessionScope: 'thread',
+          managedSessionStore: store(),
+          toolProfile: 'hosted-workspace-shell/1',
+        })
+        .expect(200);
+      const clientId = created.body.clientId as string;
+      state.model.mockImplementationOnce(async ({ toolTurn, signal }) => {
+        const call = {
+          name: 'run_shell_command',
+          callId: 'shell',
+          args: { command: 'printf hello' },
+          isClientInitiated: false,
+          prompt_id: PROMPT_ID,
+        };
+        await toolTurn!.execute(
+          [call],
+          [
+            {
+              functionCall: {
+                id: call.callId,
+                name: call.name,
+                args: call.args,
+              },
+            },
+          ],
+          'test-model',
+          signal,
+        );
+        await toolTurn!.consumeResults();
+        if (ending === 'model-error') throw new Error('model failed');
+        return { text: 'done', model: 'test-model' };
+      });
+      const prompt = [{ type: 'text', text: 'run command' }];
+      await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+        .set('X-Qwen-Client-Id', clientId)
+        .send({
+          prompt,
+          promptId: PROMPT_ID,
+          payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+        })
+        .expect(202);
+      await vi.waitFor(
+        async () => {
+          const status = await headers(
+            supertest(server).get(`/session/${SESSION_ID}/status`),
+          ).set('X-Qwen-Client-Id', clientId);
+          expect(status.body.hasActivePrompt).toBe(false);
+          expect(status.body.recoveryBlocked).toBe(
+            ending === 'execution-error',
+          );
+        },
+        { timeout: 10_000 },
+      );
+      try {
+        expect(descriptor).toBeDefined();
+        expect(execute).toHaveBeenCalledOnce();
+        expect(close).toHaveBeenCalledOnce();
+        await expect(
+          fetch(descriptor!.url, {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${descriptor!.token}` },
+          }),
+        ).rejects.toThrow();
+      } finally {
+        // Also release the real listener if the lifecycle regression fails.
+        for (const publisher of start.mock.contexts)
+          await (publisher as HostedShellPublisher).close();
+        await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
+          'X-Qwen-Client-Id',
+          clientId,
+        );
+      }
+    },
+  );
 
   it('distinguishes strict create and load outcomes', async () => {
     const server = app();
@@ -471,13 +646,18 @@ describe('Hosted Harness no-tool session', () => {
       .set('X-Qwen-Client-Id', clientId)
       .send({ prompt, promptId: PROMPT_ID, payloadDigest })
       .expect(202);
-    await vi.waitFor(async () => {
-      const status = await headers(
-        supertest(server).get(`/session/${SESSION_ID}/status`),
-      ).set('X-Qwen-Client-Id', clientId);
-      expect(status.body.hasActivePrompt).toBe(false);
-      expect(status.body.recoveryBlocked).toBe(false);
-    });
+    // The default 1s waitFor timeout races this turn's durable writes on
+    // contended CI runners; the assertions are unchanged.
+    await vi.waitFor(
+      async () => {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', clientId);
+        expect(status.body.hasActivePrompt).toBe(false);
+        expect(status.body.recoveryBlocked).toBe(false);
+      },
+      { timeout: 10_000 },
+    );
     expect(response?.['outputOmitted']).toBe(true);
     expect(response?.['executionStatus']).toBe('success');
     expect(release).toHaveBeenCalledOnce();

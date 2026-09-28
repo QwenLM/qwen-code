@@ -294,9 +294,7 @@ public final class JdbcToolExecutionRepository
                     true);
             if (current.getState() == ToolExecutionRecord.State.PREPARED) {
                 requested = requested.withResult(
-                        "deferred_v3".equals(current.getReference().get("dispatchMode"))
-                                ? ToolExecutionRecord.cancelledBeforeV3Start()
-                                : Map.of("executionStatus", "cancelled"),
+                        current.cancellationBeforeDispatch(),
                         current.getLastSequence(),
                         JdbcRepositorySupport.databaseNow(connection));
             }

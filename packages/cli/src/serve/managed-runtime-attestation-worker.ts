@@ -27,10 +27,14 @@ import {
 } from './managed-context-worker.js';
 import {
   ManagedToolExecutor,
-  type ShellCapturePublisher,
+  type ManagedShellCapturePublisher,
 } from './managed-runtime-tool-executor.js';
 import { PUBLICATION_INSTALL_ROUTE } from './remote-shell-result-publication.js';
 import { WORKSPACE_CAPABILITY_DIGEST } from './managed-workspace-activation.js';
+import {
+  ManagedShellPublisherRegistry,
+  MANAGED_SHELL_PUBLISHER_ROUTE,
+} from './managed-shell-publisher.js';
 import { registerManagedRuntimeToolRoutes } from './managed-runtime-tool-routes.js';
 
 const MANAGED_RUNTIME_WORKER_BOOT_LIMIT_BYTES = 32 * 1024;
@@ -143,13 +147,19 @@ export async function readManagedRuntimeWorkerBoot(
 
 export async function startManagedRuntimeAttestationWorker(
   boot: ManagedRuntimeWorkerBoot | ManagedContextBoot,
-  capturePublisher?: ShellCapturePublisher,
+  capturePublisher?: ManagedShellCapturePublisher,
+  remotePublishers?: ManagedShellPublisherRegistry,
 ): Promise<ManagedRuntimeAttestationWorkerHandle> {
   const app = express();
   app.disable('x-powered-by');
   let executor: ManagedToolExecutor;
   if (boot.version === 2) {
-    executor = registerManagedContextRoutes(app, boot, capturePublisher);
+    executor = registerManagedContextRoutes(
+      app,
+      boot,
+      capturePublisher,
+      remotePublishers,
+    );
   } else {
     registerManagedRuntimeAttestationRoute(app, boot);
     executor = ManagedToolExecutor.forWorkspace(
@@ -163,11 +173,16 @@ export async function startManagedRuntimeAttestationWorker(
       app,
       boot.version === 2
         ? capturePublisher ||
+          remotePublishers ||
           boot.capabilityDigest === WORKSPACE_CAPABILITY_DIGEST
           ? [
               ...MANAGED_CONTEXT_WORKER_ROUTES,
               ...MANAGED_TOOL_RESULT_ROUTES,
-              ...(capturePublisher ? [] : [PUBLICATION_INSTALL_ROUTE]),
+              ...(remotePublishers ? [MANAGED_SHELL_PUBLISHER_ROUTE] : []),
+              ...(!capturePublisher &&
+              boot.capabilityDigest === WORKSPACE_CAPABILITY_DIGEST
+                ? [PUBLICATION_INSTALL_ROUTE]
+                : []),
             ]
           : MANAGED_CONTEXT_WORKER_ROUTES
         : OWNED_MANAGED_RUNTIME_ROUTES,
@@ -228,7 +243,13 @@ export async function startManagedRuntimeAttestationWorker(
 
 export async function runManagedRuntimeAttestationWorker(): Promise<void> {
   const boot = await readManagedRuntimeWorkerBoot(process.stdin);
-  const worker = await startManagedRuntimeAttestationWorker(boot);
+  const worker = await startManagedRuntimeAttestationWorker(
+    boot,
+    undefined,
+    boot.version === 2 && boot.capabilityDigest === WORKSPACE_CAPABILITY_DIGEST
+      ? new ManagedShellPublisherRegistry()
+      : undefined,
+  );
 
   await new Promise<void>((resolve, reject) => {
     let closing = false;

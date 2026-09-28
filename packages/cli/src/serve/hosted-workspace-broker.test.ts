@@ -75,6 +75,102 @@ it.each(['tenantId', 'workspaceId', 'capabilityDigest'])(
   },
 );
 
+it('preserves payload identity separately from the explicitly selected v3 input digest', async () => {
+  const requests: Array<Record<string, unknown>> = [];
+  const broker = await fixture((path, body) => {
+    requests.push(body);
+    return {
+      body: {
+        ...identity,
+        ...(path.endsWith(':publisher')
+          ? { installed: true, bindingGeneration: '7' }
+          : {
+              executionCallId: 'execution',
+              status: { state: 'prepared' },
+            }),
+      },
+    };
+  });
+  expect(
+    await broker.registerPublisher({
+      url: 'http://127.0.0.1:99/internal/hosted-shell-publisher/v1',
+      token: 'x'.repeat(43),
+    }),
+  ).toBe('7');
+  await broker.prepare(
+    'runtime-call',
+    `sha256:${'a'.repeat(64)}`,
+    'b'.repeat(64),
+  );
+  expect(requests[1]).toMatchObject({
+    requestDigest: `sha256:${'a'.repeat(64)}`,
+    reference: {
+      sessionId: 'turn',
+      promptId: 'turn',
+      callId: 'runtime-call',
+      argsDigest: `sha256:${'a'.repeat(64)}`,
+      runtimeProtocol: 3,
+      inputDigest: 'b'.repeat(64),
+    },
+  });
+});
+
+it('requires confirmation for the exact Shell receipt acknowledgement', async () => {
+  const broker = await fixture((_path, body) => {
+    expect(body['receipt']).toMatchObject({
+      executionCallId: 'execution',
+      deliveryStatus: 'blocked',
+      historyRevision: null,
+    });
+    expect(body['receipt']).not.toHaveProperty('outcomeRef');
+    return {
+      body: { ...identity, executionCallId: 'other', acknowledged: true },
+    };
+  });
+  await expect(
+    broker.acknowledge('execution', {
+      executionCallId: 'execution',
+      manifest: null,
+      deliveryStatus: 'blocked',
+      historyRevision: null,
+      outcomeRef: {
+        resourceId: 'outcome',
+        kind: 'managed-tool-outcome',
+        schemaVersion: 1,
+        byteLength: 0,
+        digest: 'a'.repeat(64),
+      },
+    }),
+  ).rejects.toThrow('acknowledge');
+});
+
+it('accepts the Broker acknowledgement envelope for a remote v3 receipt', async () => {
+  const broker = await fixture((_path, body) => {
+    expect(body['receipt']).toEqual({
+      executionCallId: 'execution',
+      manifest: null,
+      deliveryStatus: 'blocked',
+      historyRevision: null,
+    });
+    return {
+      body: {
+        ...identity,
+        executionCallId: 'execution',
+        acknowledged: true,
+        status: { state: 'settled' },
+      },
+    };
+  });
+  await expect(
+    broker.acknowledgeV3('execution', {
+      executionCallId: 'execution',
+      manifest: null,
+      deliveryStatus: 'blocked',
+      historyRevision: null,
+    }),
+  ).resolves.toBeUndefined();
+});
+
 it('waits for original terminal evidence after a cancellation request', async () => {
   let cancelled = false;
   let stopped = false;

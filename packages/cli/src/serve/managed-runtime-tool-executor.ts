@@ -16,8 +16,8 @@ import type { ShellToolInvocation } from '@qwen-code/qwen-code-core/tools/shell.
 import type { ToolResultEnvelope } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
 import type {
   LocalShellCaptureRequest,
-  LocalShellResultSession,
-} from '@qwen-code/qwen-code-core/managed-runtime/local-shell-result-session.js';
+  LocalShellReceipt,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-shell-result-session.js';
 import type { LocalShellResultCapture } from '@qwen-code/qwen-code-core/managed-runtime/local-shell-result-capture.js';
 import type { ToolResultExpectedIdentity } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result-store.js';
 import { MANAGED_TOOL_RESULT_PROTOCOL } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
@@ -115,7 +115,8 @@ interface JournalEntry {
   result?: ManagedToolResultPayload;
   v3Result?: ToolResultEnvelope;
   readonly v3Capture?: LocalShellCaptureRequest['capture'];
-  readonly captureSink?: LocalShellResultCapture;
+  readonly captureSink?: ManagedShellCaptureSink;
+  readonly capturePublisher?: ManagedShellCapturePublisher;
   acknowledgement?: ToolResultAcknowledgement;
   readonly controller: AbortController;
   promise?: Promise<void>;
@@ -134,16 +135,25 @@ export interface ManagedToolV3View {
   readonly result?: ToolResultEnvelope;
 }
 
-export interface ShellCapturePublisher {
+export type ManagedShellCaptureSink = Pick<
+  LocalShellResultCapture,
+  keyof LocalShellResultCapture
+>;
+
+export interface ManagedShellCapturePublisher {
   prepare(request: LocalShellCaptureRequest): Promise<{
     identity: ToolResultExpectedIdentity;
-    sink: LocalShellResultCapture;
+    sink: ManagedShellCaptureSink;
+    publisher?: ManagedShellCapturePublisher;
   }>;
-  accept?: LocalShellResultSession['accept'];
-  finish?: (
+  accept?(
+    identity: ToolResultExpectedIdentity,
+    envelope: ToolResultEnvelope,
+  ): Promise<LocalShellReceipt>;
+  finish?(
     identity: ToolResultExpectedIdentity,
     result: ToolResultEnvelope,
-  ) => Promise<void>;
+  ): Promise<void>;
 }
 
 /**
@@ -160,7 +170,7 @@ export class ManagedToolExecutor {
 
   constructor(
     private readonly toolsFor: ManagedToolSetResolver,
-    private readonly capturePublisher?: ShellCapturePublisher,
+    private readonly capturePublisher?: ManagedShellCapturePublisher,
   ) {}
 
   static forWorkspace(workspaceCwd: string, runtimeInstanceId: string) {
@@ -299,7 +309,7 @@ export class ManagedToolExecutor {
           'Managed Runtime invocation identity conflicts.',
         );
       }
-      if (!this.capturePublisher?.finish) await existing.promise;
+      if (!existing.capturePublisher?.finish) await existing.promise;
       return v3View(existing);
     }
     if (!this.capturePublisher || toolName !== ShellTool.Name) {
@@ -327,7 +337,7 @@ export class ManagedToolExecutor {
         'Background Shell capture is unavailable.',
       );
     }
-    let prepared: Awaited<ReturnType<LocalShellResultSession['prepare']>>;
+    let prepared: Awaited<ReturnType<ManagedShellCapturePublisher['prepare']>>;
     try {
       prepared = await this.capturePublisher.prepare({ reference, capture });
     } catch (cause) {
@@ -349,13 +359,14 @@ export class ManagedToolExecutor {
       inputJson,
       v3Capture: capture,
       captureSink: prepared.sink,
+      capturePublisher: prepared.publisher ?? this.capturePublisher,
       state: 'prepared',
       lastSequence: 0,
       controller: new AbortController(),
     };
     this.entries.set(reference.callId, entry);
     entry.promise = this.run(entry, tool, tools.sessionId);
-    if (!this.capturePublisher.finish) await entry.promise;
+    if (!entry.capturePublisher?.finish) await entry.promise;
     return v3View(entry);
   }
 
@@ -579,13 +590,13 @@ export class ManagedToolExecutor {
           };
         }
         if (entry.v3Result.capture) {
-          if (this.capturePublisher!.finish) {
-            await this.capturePublisher!.finish(
+          if (entry.capturePublisher!.finish) {
+            await entry.capturePublisher!.finish(
               entry.captureSink!.identity,
               entry.v3Result,
             );
-          } else if (this.capturePublisher!.accept) {
-            const receipt = await this.capturePublisher!.accept(
+          } else if (entry.capturePublisher!.accept) {
+            const receipt = await entry.capturePublisher!.accept(
               entry.captureSink!.identity,
               entry.v3Result,
             );

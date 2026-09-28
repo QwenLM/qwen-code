@@ -13,7 +13,7 @@ import { loadCliConfig, type CliArgs } from '../config/config.js';
 import { loadSettings } from '../config/settings.js';
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 
-import { type HostedWorkspaceToolTurn } from './hosted-workspace-tool-turn.js';
+import type { HostedWorkspaceToolTurn } from './hosted-workspace-tool-turn.js';
 
 export interface HostedHarnessModelResult {
   text: string;

@@ -10,6 +10,14 @@ public final class ToolExecutionRecord {
     private static final Set<String> EXECUTION_STATUSES = Set.of(
             "not_started", "success", "error", "cancelled");
 
+    Map<String, Object> cancellationBeforeDispatch() {
+        if (!Integer.valueOf(3).equals(reference.get("runtimeProtocol"))
+                && !"deferred_v3".equals(reference.get("dispatchMode"))) {
+            return Map.of("executionStatus", "cancelled");
+        }
+        return cancelledBeforeV3Start();
+    }
+
     public enum State {
         PREPARED,
         DISPATCHING,

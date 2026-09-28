@@ -28,9 +28,10 @@ import {
 import {
   createManagedToolSet,
   ManagedToolExecutor,
-  type ShellCapturePublisher,
+  type ManagedShellCapturePublisher,
 } from './managed-runtime-tool-executor.js';
 import { RemoteShellResultPublisher } from './remote-shell-result-publication.js';
+import type { ManagedShellPublisherRegistry } from './managed-shell-publisher.js';
 import { registerManagedRuntimeToolRoutes } from './managed-runtime-tool-routes.js';
 import { registerManagedRuntimeToolV3Routes } from './managed-runtime-tool-v3-routes.js';
 import {
@@ -127,7 +128,8 @@ function isHostAbsolute(mountRoot: string): boolean {
 export function registerManagedContextRoutes(
   app: Application,
   bootDocument: ManagedContextBoot,
-  capturePublisher?: ShellCapturePublisher,
+  capturePublisher?: ManagedShellCapturePublisher,
+  remotePublishers?: ManagedShellPublisherRegistry,
 ): ManagedToolExecutor {
   const boot = parseManagedContextBoot(bootDocument);
   const installations = new ManagedContextInstallations(boot);
@@ -139,7 +141,27 @@ export function registerManagedContextRoutes(
     !capturePublisher && requiresActivation
       ? new RemoteShellResultPublisher()
       : undefined;
-  const publisher = capturePublisher ?? remotePublisher;
+  const publisher: ManagedShellCapturePublisher | undefined =
+    capturePublisher ??
+    (remotePublishers && remotePublisher
+      ? {
+          async prepare(request) {
+            const local = remotePublishers.hasSession(
+              request.reference.sessionId,
+            );
+            const remote = remotePublisher.hasExecution(
+              request.capture.executionCallId,
+            );
+            if (local && remote)
+              throw new Error('Shell publication modes conflict.');
+            const selected = local ? remotePublishers : remotePublisher;
+            return {
+              ...(await selected.prepare(request)),
+              publisher: selected,
+            };
+          },
+        }
+      : (remotePublishers ?? remotePublisher));
   remotePublisher?.registerInstallRoute(app, boot);
   const [attestRoute, contextRoute] = MANAGED_CONTEXT_ROUTES;
 
@@ -205,6 +227,14 @@ export function registerManagedContextRoutes(
   if (publisher) {
     registerManagedRuntimeToolV3Routes(app, boot, executor);
   }
+  remotePublishers?.register(
+    app,
+    boot,
+    (sessionId) =>
+      requiresActivation &&
+      activations.isActive(sessionId) &&
+      installations.installed(sessionId) !== undefined,
+  );
   return executor;
 }
 
