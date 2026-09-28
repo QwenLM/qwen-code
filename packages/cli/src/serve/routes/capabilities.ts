@@ -188,6 +188,7 @@ export function registerCapabilitiesRoutes(
           ...(entry.current?.runtime.provenance === 'live-conversation'
             ? { kind: 'live' as const }
             : {}),
+          registrationIds: entry.registrationIds,
           isPinned: pinnedAt !== undefined,
           ...(pinnedAt !== undefined ? { pinnedAt } : {}),
         };

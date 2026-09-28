@@ -264,6 +264,8 @@ Success includes `modelApplied: true` and `startupConfigApplied: { modelServiceI
 
 `persistent_workspace_registration` advertises durable registration for workspaces added at runtime. `POST /workspaces` accepts `{ "cwd": "/absolute/path", "persist": true }`; success includes `persisted: true`. Registrations are scoped to the daemon's canonical primary workspace under the user's Qwen home and are restored on the next daemon start. Omitting `persist` preserves process-local registration. `GET /workspace-registrations` lists the stored desired set, and `DELETE /workspace-registrations/:id` forgets an entry for the next restart without hot-removing an active runtime.
 
+`workspace_pinning` advertises pin state management for persisted registrations. `PATCH /workspace-registrations/:id/pin` sets or clears pin state; `/capabilities` workspaces entries include `isPinned: true` and `pinnedAt: "<ISO-8601>"` when pinned, or omit both fields when unpinned. Pinned workspaces sort above all others in Web Shell sidebar.
+
 `workspace_display_name` advertises optional `displayName` input on `POST /workspaces`, workspace metadata updates through `PATCH /workspaces/:workspace`, and optional display-name fields in workspace projections. Names do not participate in lookup or routing: `id` and canonical `cwd` remain the only selectors, and duplicate names are allowed.
 
 `workspace_runtime_removal` advertises synchronous hot removal through `DELETE /workspaces/:workspace`. Capability workspace entries add optional `removable`; only rows with `removable: true` may be removed. Removal also forgets every persistent registration alias for the runtime, but never deletes files, settings, transcripts, or archives.
@@ -1289,7 +1291,7 @@ Stable contract: when `v` increments the frame layout has changed in a backwards
 
 > **`workspaceCwd`** is the canonical absolute path for the daemon's primary workspace. Use it to omit `cwd` on `POST /session` (the route falls back to this primary path) and to keep old single-workspace clients compatible. Additive to v=1: pre-§02 v=1 daemons omit the field — clients that target older builds should null-check before consuming it.
 
-> **`workspaces[]`** lists every registered runtime. Newer single-workspace daemons include the primary runtime even when `multi_workspace_sessions` is absent so clients can discover the stable id required by workspace-qualified routes; older daemons may omit the array. Each entry is `{ id, cwd, displayName?, primary, trusted, removable? }`. `displayName` is presentation-only and omitted when unset. The first/primary workspace remains mirrored by `workspaceCwd`; new clients choose a non-primary runtime by passing that entry's `cwd` to `POST /session`. Untrusted workspaces are advertised for diagnostics but reject fresh session creation with `403 untrusted_workspace` until trust changes. `removable` is present on daemons that support runtime removal and is true only for process-dynamic or persistence-restored secondary runtimes.
+> **`workspaces[]`** lists every registered runtime. Newer single-workspace daemons include the primary runtime even when `multi_workspace_sessions` is absent so clients can discover the stable id required by workspace-qualified routes; older daemons may omit the array. Each entry is `{ id, cwd, displayName?, primary, trusted, removable?, isPinned?, pinnedAt? }`. `displayName` is presentation-only and omitted when unset. The first/primary workspace remains mirrored by `workspaceCwd`; new clients choose a non-primary runtime by passing that entry's `cwd` to `POST /session`. Untrusted workspaces are advertised for diagnostics but reject fresh session creation with `403 untrusted_workspace` until trust changes. `removable` is present on daemons that support runtime removal and is true only for process-dynamic or persistence-restored secondary runtimes. When `workspace_pinning` is advertised, pinned entries include `isPinned: true` and `pinnedAt: "<ISO-8601>"`; unpinned entries omit both fields entirely.
 
 > **`session_worktree_persistence_v1`** means the daemon can persist and verify Part 4A worktree ownership. Successful worktree creation responses, and restore responses whose child is either relocated while idle or already reports the verified worktree cwd, carry `worktree` metadata plus `worktreeState: "persisted-v1"`. A legacy best-effort restore, or a cold restore whose restore-prompt was fired rather than parked (`suppressWorktreeContextRestore` off, so the route asked the bridge for no deferral) and which therefore reports an active prompt with no current cwd, may still return `worktree` without that attestation. Clients requesting isolation must pre-flight this tag and verify each response; the `worktree` object alone is not durable-ownership proof.
 
@@ -1419,6 +1421,40 @@ Forget one persisted registration. This does not unload an active runtime or ter
 ```
 
 Returns `404 workspace_registration_not_found`, `500 workspace_registration_store_error`, or `501 persistence_not_available`. Like other mutation routes, this endpoint requires mutation authentication when daemon authentication is enabled.
+
+### `PATCH /workspace-registrations/:id/pin`
+
+Set or clear pin state for one persisted registration. Pinned workspaces appear at the top of the Web Shell sidebar. The route accepts an optional JSON body `{ isPinned?: boolean }`; omitting the body toggles current state. Success returns the updated entry with `isPinned: true` and `pinnedAt: "<ISO-8601>"` when pinned, or neither field when unpinned.
+
+```json
+// Request (toggle)
+PATCH /workspace-registrations/abc123 HTTP/1.1
+Content-Type: application/json
+
+{}
+
+// Response (now pinned)
+{
+  "id": "abc123",
+  "cwd": "/path/to/workspace",
+  "displayName": "Payments Production",
+  "active": true,
+  "persisted": true,
+  "isPinned": true,
+  "pinnedAt": "2026-09-28T10:30:00.000Z"
+}
+
+// Response (now unpinned)
+{
+  "id": "abc123",
+  "cwd": "/path/to/workspace",
+  "displayName": "Payments Production",
+  "active": true,
+  "persisted": true
+}
+```
+
+Returns `404 workspace_registration_not_found`, `500 workspace_registration_store_error`, or `501 persistence_not_available`. Requires mutation authentication when daemon auth is enabled. Capability tag: `workspace_pinning`.
 
 ### Read-only runtime status routes
 

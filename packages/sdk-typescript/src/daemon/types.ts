@@ -185,6 +185,8 @@ export interface DaemonWorkspaceCapability {
   removable?: boolean;
   /** Daemon-owned Live conversation runtime. */
   kind?: 'live';
+  /** Stable registration IDs for this workspace (may contain multiple entries when alias paths exist, e.g. macOS /var → /private/var). */
+  registrationIds?: string[];
   /** Whether this workspace is pinned to the top of the sidebar. */
   isPinned?: boolean;
   /** ISO-8601 timestamp of when the workspace was pinned. */
