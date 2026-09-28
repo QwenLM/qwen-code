@@ -43,18 +43,23 @@ export function isAuxModelSelectorSettingKey(key: string): boolean {
 }
 
 /**
- * A control character in the suffix — a second NUL in practice — makes the
- * parsed `URL` fields this module inspects useless: WHATWG percent-encodes the
- * NUL into the pathname, so `username`, `password`, `search` and `hash` all
- * read empty while the credential text after it is still in the string. Every
- * "already clean" shortcut here compares parsed fields but returns the
- * UNPARSED input, so such a suffix would be served and rendered verbatim.
- * Fail closed on the text instead.
+ * Characters that make the parsed `URL` fields this module inspects unusable.
+ *
+ * WHATWG folds every one of them into the pathname — a control character
+ * (C0 + DEL + C1) and interior whitespace are percent-encoded, and in a
+ * special scheme `\` is treated as `/` — so `username`, `password`, `search`
+ * and `hash` all read empty while a second authority joined behind them is
+ * still in the string. `\s` with the `u` flag covers the whitespace the C0
+ * class does not: NBSP, BOM, U+2028, and the ideographic and figure spaces a
+ * baseUrl pasted from a web page, chat client or BOM-producing pipeline
+ * carries. Every "already clean" shortcut here compares parsed fields but
+ * returns the UNPARSED input, so such a suffix would be served and rendered
+ * verbatim. Fail closed on the text instead.
  */
-function hasControlCharacter(baseUrl: string): boolean {
-  // `\p{Cc}` (C0 + DEL + C1) matches the repo's existing control-character
-  // check in `standalone-session-service.ts` and needs no lint suppression.
-  return /\p{Cc}/u.test(baseUrl);
+function hasFoldedCharacter(baseUrl: string): boolean {
+  // `\p{Cc}` matches the repo's existing control-character check in
+  // `standalone-session-service.ts` and needs no lint suppression.
+  return /[\p{Cc}\s"<>`|\\]/u.test(baseUrl);
 }
 
 /**
@@ -62,11 +67,11 @@ function hasControlCharacter(baseUrl: string): boolean {
  * http(s) URLs are publishable once userinfo, query, and hash are stripped;
  * an already-clean URL returns verbatim so republishing never rewrites a
  * clean persisted value. Anything else (scheme-less, non-http(s),
- * unparseable, or carrying a control character) is not publishable, and the
+ * unparseable, or carrying a folded character) is not publishable, and the
  * caller must drop the suffix rather than emit it.
  */
 function publishableSelectorBaseUrl(baseUrl: string): string | undefined {
-  if (hasControlCharacter(baseUrl)) return undefined;
+  if (hasFoldedCharacter(baseUrl)) return undefined;
   if (!/^https?:\/\//i.test(baseUrl.trim())) return undefined;
   try {
     const url = new URL(baseUrl);

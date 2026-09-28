@@ -79,16 +79,24 @@ describe('publicAuxModelSelectorValue', () => {
     ['a second NUL (C0)', '\0'],
     ['DEL', '\u007f'],
     ['the C1 range', '\u009f'],
-  ])('drops a suffix whose credential hides behind %s', (_label, control) => {
-    // `new URL()` succeeds here with the control character percent-encoded
-    // into the pathname, so username/password/search/hash all read empty while
-    // the credential text after it is still in the string. The "already clean"
-    // shortcut inspects parsed fields but returns the UNPARSED input, so it
-    // must not fire on any of these shapes. Narrowing the `\p{Cc}` guard back
-    // to a C0-only class must red the DEL and C1 rows.
-    const hidden = `openai:gpt-x\0https://gw.example/v1${control}https://user:sk-secret@other.example/v1`;
+    ['an ASCII space', ' '],
+    ['a backslash', '\\'],
+    ['NBSP', '\u00a0'],
+    ['U+2028', '\u2028'],
+    ['an ideographic space', '\u3000'],
+    ['a pipe', '|'],
+    ['a double quote', '"'],
+    ['a backtick', '`'],
+    ['an angle bracket', '<'],
+  ])('drops a suffix whose credential hides behind %s', (_label, folded) => {
+    // `new URL()` succeeds on every one of these with the joining character
+    // folded into the pathname, so username/password/search/hash all read
+    // empty while the credential text after it is still in the string. The
+    // "already clean" shortcut inspects parsed fields but returns the
+    // UNPARSED input, so it must not fire on any of them. Narrowing the
+    // guard back to `\p{Cc}` alone must red every non-control row.
+    const hidden = `openai:gpt-x\0https://gw.example/v1${folded}https://user:sk-secret@other.example/v1`;
     expect(publicAuxModelSelectorValue(hidden)).toBe('openai:gpt-x');
-    expect(publicAuxModelSelectorValue(hidden)).not.toContain('sk-secret');
   });
 
   it('renders a non-string value instead of throwing', () => {
