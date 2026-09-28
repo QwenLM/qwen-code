@@ -18692,8 +18692,11 @@ export function App({
     },
   });
   const composerAtProviders = useMemo(
-    () => [...(atProviders ?? []), ...agentChatEntry.providers],
-    [atProviders, agentChatEntry.providers],
+    () =>
+      collaborationAvailable
+        ? [...(atProviders ?? []), ...agentChatEntry.providers]
+        : atProviders,
+    [atProviders, collaborationAvailable, agentChatEntry.providers],
   );
   const visibleComposerToolbarActions = useMemo<
     readonly ComposerToolbarAction[]
@@ -19857,12 +19860,19 @@ export function App({
                     closeMobileDrawer();
                     openPanel('settings');
                   }}
-                  onOpenAgents={(view = 'agents') => {
-                    setAgentsNav(current => ({view, request: current.request + 1}));
-                    closeMobileDrawer();
-                    setAgentsCreateScope(null);
-                    openPanel('agents');
-                  }}
+                  onOpenAgents={
+                    collaborationAvailable
+                      ? (view = 'agents') => {
+                          setAgentsNav((current) => ({
+                            view,
+                            request: current.request + 1,
+                          }));
+                          closeMobileDrawer();
+                          setAgentsCreateScope(null);
+                          openPanel('agents');
+                        }
+                      : undefined
+                  }
                   onOpenPlugins={() => {
                     closeMobileDrawer();
                     openPanel('plugins');
@@ -21697,7 +21707,11 @@ export function App({
                         <ChatEditor
                           ref={setEditorHandle}
                           compactOverlays={compactComposerOverlays}
-                          onSubmit={agentChatEntry.submit}
+                          onSubmit={
+                            collaborationAvailable
+                              ? agentChatEntry.submit
+                              : handleEditorSubmit
+                          }
                           onInputTextChange={handleComposerTextChange}
                           onAttachmentsChange={
                             handleComposerAttachmentsChange
@@ -21722,7 +21736,8 @@ export function App({
                           }
                           cancelArmed={cancelArmed}
                           disabled={
-                            agentChatEntry.pending || isDisabled ||
+                            (collaborationAvailable && agentChatEntry.pending) ||
+                            isDisabled ||
                             isStartingNewSessionSuggestion ||
                             interactionBlocked ||
                             approvalOverlayActive ||

@@ -48,6 +48,20 @@ afterEach(() => {
   createThreadsHttpApi.mockReset();
   mockWorkspace.baseUrl = 'server-a';
   mockWorkspace.token = 'token-a';
+  mockWorkspace.capabilities = { features: ['agent_collaboration_v1'] };
+});
+
+it('does not create an API or stream when the capability is absent', async () => {
+  mockWorkspace.capabilities = { features: [] };
+  const node = document.createElement('div');
+  const root = createRoot(node);
+  mounted.push({ root, node });
+
+  act(() => root.render(<Probe />));
+  await flush();
+
+  expect(latest).toEqual({ sessions: [], error: undefined });
+  expect(createThreadsHttpApi).not.toHaveBeenCalled();
 });
 
 it('does not reuse conversations across daemon credentials', async () => {

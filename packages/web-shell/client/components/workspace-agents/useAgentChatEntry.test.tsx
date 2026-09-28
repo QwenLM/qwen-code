@@ -12,7 +12,7 @@ const { useAgentChatEntry } = await import('./useAgentChatEntry');
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
 ).IS_REACT_ACT_ENVIRONMENT = true;
 
-let latestSubmit: ReturnType<typeof useAgentChatEntry>['submit'];
+let latestEntry: ReturnType<typeof useAgentChatEntry>;
 const mounted: Array<{
   root: ReturnType<typeof createRoot>;
   node: HTMLElement;
@@ -30,13 +30,15 @@ function Probe({
   baseUrl,
   getContext,
   onSubmit = vi.fn(),
+  enabled = true,
 }: {
   baseUrl: string;
   getContext: () => string;
   onSubmit?: () => void;
+  enabled?: boolean;
 }) {
-  latestSubmit = useAgentChatEntry({
-    enabled: true,
+  latestEntry = useAgentChatEntry({
+    enabled,
     cwd: '/repo',
     baseUrl,
     onSubmit,
@@ -44,7 +46,7 @@ function Probe({
     onError: vi.fn(),
     getContext,
     t: ((key: string) => key) as never,
-  }).submit;
+  });
   return null;
 }
 
@@ -55,6 +57,36 @@ afterEach(() => {
   }
   mounted.length = 0;
   createThreadsHttpApi.mockReset();
+});
+
+it('is inert and delegates ordinary chat when collaboration is disabled', () => {
+  const onSubmit = vi.fn(() => true);
+  const node = document.createElement('div');
+  const root = createRoot(node);
+  mounted.push({ root, node });
+
+  act(() =>
+    root.render(
+      <Probe
+        baseUrl="server-a"
+        enabled={false}
+        getContext={() => 'existing conversation'}
+        onSubmit={onSubmit}
+      />,
+    ),
+  );
+
+  expect(latestEntry.providers).toEqual([]);
+  expect(latestEntry.pending).toBe(false);
+  expect(latestEntry.submit('@alice keep this as ordinary chat')).toBe(true);
+  expect(createThreadsHttpApi).not.toHaveBeenCalled();
+  expect(onSubmit).toHaveBeenCalledWith(
+    '@alice keep this as ordinary chat',
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+  );
 });
 
 it('does not submit captured mentions after the workspace API changes', async () => {
@@ -85,7 +117,7 @@ it('does not submit captured mentions after the workspace API changes', async ()
 
   act(() => root.render(<Probe baseUrl="old" getContext={oldContext} />));
   act(() => {
-    expect(latestSubmit('@lead investigate')).toBe(false);
+    expect(latestEntry.submit('@lead investigate')).toBe(false);
   });
   expect(oldContext).toHaveBeenCalledOnce();
 
@@ -121,7 +153,7 @@ it('sends an @ message as ordinary chat when the roster cannot be read', async (
     ),
   );
   await act(async () => {
-    expect(latestSubmit('see @README.md')).toBe(false);
+    expect(latestEntry.submit('see @README.md')).toBe(false);
     await new Promise((resolve) => setTimeout(resolve, 0));
   });
 

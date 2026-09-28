@@ -1554,6 +1554,7 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
     WebShellSidebar: (props: {
       collapsed?: boolean;
       onOpenSettings?: () => void;
+      onOpenAgents?: (view?: 'agents' | 'tasks') => void;
       onOpenPlugins?: () => void;
       onOpenChannels?: () => void;
       onOpenDaemonStatus?: () => void;
@@ -1595,6 +1596,7 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
           ),
           'data-show-live': String(props.showLive),
           'data-project-features-enabled': String(props.projectFeaturesEnabled),
+          'data-has-open-agents': String(Boolean(props.onOpenAgents)),
           'data-has-git-diff': String(Boolean(props.onOpenGitDiff)),
           'data-has-commit': String(Boolean(props.onOpenCommit)),
           'data-can-open-sessions-overview': String(
@@ -43782,6 +43784,11 @@ it('does not restore a workspace-agent thread when collaboration is disabled', a
   expect(
     container.querySelector('[data-testid="workspace-agent-thread-route"]'),
   ).toBeNull();
+  expect(
+    container
+      .querySelector('[data-testid="sidebar"]')
+      ?.getAttribute('data-has-open-agents'),
+  ).toBe('false');
 
   mockWorkspace.capabilities = {
     ...mockWorkspace.capabilities,
@@ -43793,6 +43800,11 @@ it('does not restore a workspace-agent thread when collaboration is disabled', a
   expect(
     container.querySelector('[data-testid="workspace-agent-thread-route"]'),
   ).not.toBeNull();
+  expect(
+    container
+      .querySelector('[data-testid="sidebar"]')
+      ?.getAttribute('data-has-open-agents'),
+  ).toBe('true');
 });
 
 function mockRuntimeStopChoice() {
