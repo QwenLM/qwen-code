@@ -4,6 +4,7 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.HashMap;
+import java.util.Comparator;
 import java.util.Map;
 
 /** Process-local execution ledger for tests and single-node use. */
@@ -23,6 +24,17 @@ public final class InMemoryToolExecutionRepository
             throw new IllegalArgumentException("clock is required");
         }
         this.clock = clock;
+    }
+
+    synchronized void abandonByBinding(RuntimeBindingRecord binding) {
+        recordsById.values().stream()
+                .filter(record -> !record.isTerminal())
+                .filter(record -> record.getBindingId().equals(binding.getBindingId())
+                        && record.getRuntimeGeneration() == binding.getGeneration())
+                .sorted(Comparator.comparing(ToolExecutionRecord::getExecutionCallId))
+                .limit(100).toList().forEach(record -> recordsById.put(
+                        record.getExecutionCallId(), record.abandon(binding, clock.instant())
+                                .withVersion(record.getVersion() + 1)));
     }
 
     @Override
@@ -74,7 +86,7 @@ public final class InMemoryToolExecutionRepository
         if (current == null
                 || !current.sameIdentity(expected)
                 || current.getVersion() != expected.getVersion()
-                || current.isSettled()
+                || current.isTerminal()
                 || current.getState() == ToolExecutionRecord.State.UNKNOWN
                 || !current.sameDispatch(expected)
                 || !current.hasLiveDispatchAt(clock.instant())
@@ -83,7 +95,8 @@ public final class InMemoryToolExecutionRepository
             return null;
         }
         ToolExecutionRecord.State to = replacement.getState();
-        if (to == ToolExecutionRecord.State.PREPARED
+        if (to == ToolExecutionRecord.State.ABANDONED
+                || to == ToolExecutionRecord.State.PREPARED
                 || to == ToolExecutionRecord.State.DISPATCHING
                         && current.getState()
                                 != ToolExecutionRecord.State.DISPATCHING) {
@@ -105,7 +118,7 @@ public final class InMemoryToolExecutionRepository
     public synchronized ToolExecutionRecord claimDispatch(
             String executionCallId, String owner, Duration leaseDuration) {
         ToolExecutionRecord current = requireRecord(executionCallId);
-        if (current == null || current.isSettled()
+        if (current == null || current.isTerminal()
                 || current.getState() == ToolExecutionRecord.State.UNKNOWN) {
             return null;
         }
@@ -143,7 +156,7 @@ public final class InMemoryToolExecutionRepository
             String executionCallId, String owner, long dispatchGeneration,
             Duration leaseDuration) {
         ToolExecutionRecord current = requireRecord(executionCallId);
-        if (current == null || current.isSettled()
+        if (current == null || current.isTerminal()
                 || current.getState() == ToolExecutionRecord.State.UNKNOWN) {
             return null;
         }
@@ -166,7 +179,7 @@ public final class InMemoryToolExecutionRepository
     public synchronized ToolExecutionRecord requestCancel(
             String executionCallId, long expectedVersion) {
         ToolExecutionRecord current = requireRecord(executionCallId);
-        if (current == null || current.isSettled()
+        if (current == null || current.isTerminal()
                 || current.getVersion() != expectedVersion) {
             return null;
         }
@@ -222,7 +235,16 @@ public final class InMemoryToolExecutionRepository
                 "runtimeSessionId");
         return recordsById.values().stream()
                 .anyMatch(record -> id.equals(record.getRuntimeSessionId())
-                        && !record.isSettled());
+                        && !record.isTerminal());
+    }
+
+    @Override
+    public synchronized boolean hasActiveByRuntimeSession(String bindingId,
+            long runtimeGeneration, String runtimeSessionId) {
+        return recordsById.values().stream().anyMatch(record -> !record.isTerminal()
+                && record.getBindingId().equals(bindingId)
+                && record.getRuntimeGeneration() == runtimeGeneration
+                && record.getRuntimeSessionId().equals(runtimeSessionId));
     }
 
     @Override
@@ -236,7 +258,7 @@ public final class InMemoryToolExecutionRepository
         return recordsById.values().stream()
                 .anyMatch(record -> id.equals(record.getBindingId())
                         && record.getRuntimeGeneration() == runtimeGeneration
-                        && !record.isSettled());
+                        && !record.isTerminal());
     }
 
     private ToolExecutionRecord requireRecord(String executionCallId) {

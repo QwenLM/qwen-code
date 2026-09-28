@@ -447,6 +447,12 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
     private static Map<String, Object> executionEnvelope(
             String harnessSessionId, String runtimeSessionId,
             ToolExecutionRecord record) {
+        if (record.getState() == ToolExecutionRecord.State.ABANDONED) {
+            throw new RuntimeBrokerException(409, "runtime_broker_execution_unknown",
+                    "Runtime execution outcome is permanently unknown.", false, null,
+                    Map.of("terminal", true, "reason", record.getAbandonmentReason(),
+                            "executionCallId", record.getExecutionCallId()));
+        }
         if (record.getState() == ToolExecutionRecord.State.UNKNOWN) {
             throw new RuntimeBrokerException(409,
                     "runtime_broker_execution_unknown",
@@ -532,6 +538,9 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
         body.put("error", failure.getMessage());
         body.put("code", failure.getCode());
         body.put("retryable", failure.isRetryable());
+        if (!failure.getDetails().isEmpty()) {
+            body.put("details", failure.getDetails());
+        }
         try {
             sendJson(exchange, failure.getStatusCode(), body);
         } catch (IOException ignored) {
