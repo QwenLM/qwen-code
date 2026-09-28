@@ -177,11 +177,13 @@ class DownloadsDeviceTest {
                 fixture.downloads.result(Activity.RESULT_OK, Intent().setData(uri).addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION))
             }
             awaitProvider { it.getInt("count") > 0 }
+            var cancelledState = ""
             instrumentation.runOnMainSync {
                 fixture.downloads.cancel()
-                assertEquals("cancelled", fixture.state())
+                cancelledState = fixture.state()
                 fixture.current = false
             }
+            assertEquals("cancelled", cancelledState)
             provider("resume")
             val state = awaitProvider { it.getBoolean("done") }
             assertNull("Provider must finish without I/O errors", state.getString("error"))
@@ -199,10 +201,12 @@ class DownloadsDeviceTest {
                 if (!ready) Thread.sleep(20)
             }
             assertTrue("Writer must release its slot", ready)
+            var saved = false
             instrumentation.runOnMainSync {
-                assertFalse("A cancelled transfer must not report success", fixture.replies.any { it.getString("state") == "saved" })
+                saved = fixture.replies.any { it.getString("state") == "saved" }
                 fixture.downloads.cancel()
             }
+            assertFalse("A cancelled transfer must not report success", saved)
         } finally {
             provider("resume")
             instrumentation.runOnMainSync { fixture.downloads.cancel() }
