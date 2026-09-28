@@ -3113,4 +3113,11 @@ describe('rebuilt edit diff annotation', () => {
       'Diff rebuilt from the tool call arguments',
     );
   });
+
+  it('does not annotate an in-flight edit preview', () => {
+    const container = expandCompletedEdit({ status: 'in_progress' });
+    expect(container.textContent).not.toContain(
+      'Diff rebuilt from the tool call arguments',
+    );
+  });
 });

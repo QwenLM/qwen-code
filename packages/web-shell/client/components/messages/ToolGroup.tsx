@@ -223,12 +223,14 @@ function isTruncatedSessionDiff(raw: Record<string, unknown>): boolean {
  * recorded fileDiff survived session-history truncation. Such a rebuild
  * only spans the edit snippet: line numbers are snippet-relative and a
  * replace_all edit renders as a single occurrence, so the card must say
- * the diff was reconstructed rather than recorded.
+ * the diff was reconstructed rather than recorded. Approval-time and
+ * in-flight previews legitimately come from the arguments, so only
+ * completed calls are annotated.
  */
 export function isDiffRebuiltFromArgs(tool: ACPToolCall): boolean {
+  if (tool.status !== 'completed' || tool.wasCancelled) return false;
   if (getRawFileDiff(tool)) return false;
   if (tool.content?.some((b) => b.type === 'diff')) return false;
-  if (tool.status === 'failed' || tool.wasCancelled) return false;
   // A `patch` argument is the real unified diff the tool was given, not a
   // snippet rebuild, so it needs no reconstruction note.
   if (typeof tool.args?.patch === 'string' && tool.args.patch) return false;
