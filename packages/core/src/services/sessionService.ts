@@ -46,10 +46,12 @@ import { hasVerifiableInode } from '../utils/file-identity.js';
 import { readRuntimeStatus } from '../utils/runtimeStatus.js';
 import {
   LITE_READ_BUF_SIZE,
-  readLastJsonStringFieldSync,
+  isManagedExecutionTranscriptSync,
+  isManagedOwnerRecord,
   isManagedSessionTranscriptSync,
   localManagedSessionKey,
   managedSessionResourceRoot,
+  readLastJsonStringFieldSync,
   readLastMatchingLineFieldSync,
   readManagedSessionSourceSync,
   readManagedSessionTitleInfoSync,
@@ -122,9 +124,7 @@ function isManagedFirstRecord(record: ChatRecord): boolean {
   // New Managed logs write the execution-engine marker before the header.
   return (
     record.subtype === 'managed_session_header_v1' ||
-    (record.subtype === 'session_execution_engine' &&
-      (record.systemPayload as { engine?: unknown } | undefined)?.engine ===
-        'managed')
+    isManagedOwnerRecord(record)
   );
 }
 
@@ -1093,7 +1093,7 @@ export class SessionService {
 
   assertLegacySessionExecution(sessionId: string): void {
     if (
-      isManagedSessionTranscriptSync(this.getSessionTranscriptPath(sessionId))
+      isManagedExecutionTranscriptSync(this.getSessionTranscriptPath(sessionId))
     ) {
       throw new SessionExecutionEngineError(
         sessionId,
@@ -3954,14 +3954,10 @@ export class SessionService {
         return false;
       }
 
-      // Appending a custom_title record to a Managed session would stand up a
-      // second title authority beside its committed session_metadata record and
-      // would touch the transcript outside its writer. Managed renames go
-      // through the authority, so refuse here and say why. Identified from the
-      // header rather than the execution-engine reader, which reports
-      // `unavailable` for any transcript with a completeness diagnostic and
-      // would therefore also reject legacy sessions that rename fine today.
-      if (isManagedSessionTranscriptSync(filePath)) {
+      // An owner record alone refuses too: a Managed create that stops before
+      // its header leaves one, and the next Managed open completes that
+      // create only while the transcript holds nothing but owner records.
+      if (isManagedExecutionTranscriptSync(filePath)) {
         throw new SessionExecutionEngineError(
           sessionId,
           'belongs to managed, rename must go through its session authority',
@@ -4040,7 +4036,7 @@ export class SessionService {
     const sourcePath = path.join(chatsDir, `${sourceSessionId}.jsonl`);
     const targetPath = path.join(chatsDir, `${newSessionId}.jsonl`);
 
-    if (isManagedSessionTranscriptSync(sourcePath)) {
+    if (isManagedExecutionTranscriptSync(sourcePath)) {
       throw new SessionExecutionEngineError(
         sourceSessionId,
         'belongs to managed, cannot fork with the legacy session service',

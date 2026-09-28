@@ -36,10 +36,12 @@ export interface LoadProjectMcpServersResult {
  * `scope: 'project'` so the discovery layer can gate it behind approval. It
  * never spawns a process, opens a transport, or runs a health check. A missing
  * file is normal (returns empty); a malformed file is reported via `errors` and
- * otherwise ignored so it can never crash startup.
+ * otherwise ignored so it can never crash startup. With `strict`, only a truly
+ * absent file counts as none: an unreadable file is reported via `errors` too.
  */
 export function loadProjectMcpServers(
   projectRoot: string,
+  _options: { strict?: boolean } = {},
 ): LoadProjectMcpServersResult {
   const filePath = path.join(projectRoot, PROJECT_MCP_FILENAME);
 

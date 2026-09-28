@@ -6,6 +6,21 @@
 
 import { isInternalSecretEnvVar } from './sanitize-child-env.js';
 
+export interface ResolveEnvVarsOptions {
+  /**
+   * Whether a variable that `customEnv` does not define is taken from
+   * `process.env`. Defaults to true.
+   */
+  readonly processEnvFallback?: boolean;
+  /**
+   * The base environment to resolve from instead of `process.env` — a
+   * session host spawned with a managed runtime's environment resolves its
+   * settings against that environment. When set, `process.env` is not
+   * consulted unless `processEnvFallback` is explicitly true.
+   */
+  readonly environment?: Readonly<NodeJS.ProcessEnv>;
+}
+
 /**
  * Resolves environment variables in a string.
  * Replaces $VAR_NAME and ${VAR_NAME} with their corresponding environment variable values.
@@ -21,6 +36,9 @@ import { isInternalSecretEnvVar } from './sanitize-child-env.js';
  * expansion, including bare, braced, and case-insensitive spellings.
  *
  * @param value - The string that may contain environment variable placeholders
+ * @param customEnv - Variables consulted before `process.env`
+ * @param options - Whether `process.env` is consulted at all, and the base
+ * environment a managed host resolves through instead of it
  * @returns The string with environment variables resolved
  *
  * @example
@@ -31,7 +49,7 @@ import { isInternalSecretEnvVar } from './sanitize-child-env.js';
 export function resolveEnvVarsInString(
   value: string,
   customEnv?: Record<string, string>,
-  environment: Readonly<NodeJS.ProcessEnv> = process.env,
+  options: ResolveEnvVarsOptions = {},
 ): string {
   const envVarRegex = /\$(?:(\w+)|{([^}]+)})/g; // Find $VAR_NAME or ${VAR_NAME}
   return value.replace(envVarRegex, (match, varName1, varName2) => {
@@ -47,8 +65,22 @@ export function resolveEnvVarsInString(
     if (customEnv && typeof customEnv[varName] === 'string') {
       return customEnv[varName];
     }
-    if (typeof environment[varName] === 'string') {
-      return environment[varName]!;
+    const environment = options.environment;
+    if (environment !== undefined) {
+      if (typeof environment[varName] === 'string') {
+        return environment[varName]!;
+      }
+      if (options.processEnvFallback !== true) {
+        return match;
+      }
+    }
+    if (
+      options.processEnvFallback !== false &&
+      process &&
+      process.env &&
+      typeof process.env[varName] === 'string'
+    ) {
+      return process.env[varName]!;
     }
     return match;
   });
@@ -76,14 +108,9 @@ export function resolveEnvVarsInString(
 export function resolveEnvVarsInObject<T>(
   obj: T,
   customEnv?: Record<string, string>,
-  environment: Readonly<NodeJS.ProcessEnv> = process.env,
+  options: ResolveEnvVarsOptions = {},
 ): T {
-  return resolveEnvVarsInObjectInternal(
-    obj,
-    new WeakSet(),
-    customEnv,
-    environment,
-  );
+  return resolveEnvVarsInObjectInternal(obj, new WeakSet(), customEnv, options);
 }
 
 /**
@@ -97,7 +124,7 @@ function resolveEnvVarsInObjectInternal<T>(
   obj: T,
   visited: WeakSet<object>,
   customEnv: Record<string, string> | undefined,
-  environment: Readonly<NodeJS.ProcessEnv>,
+  options: ResolveEnvVarsOptions,
 ): T {
   if (
     obj === null ||
@@ -109,7 +136,7 @@ function resolveEnvVarsInObjectInternal<T>(
   }
 
   if (typeof obj === 'string') {
-    return resolveEnvVarsInString(obj, customEnv, environment) as unknown as T;
+    return resolveEnvVarsInString(obj, customEnv, options) as unknown as T;
   }
 
   if (Array.isArray(obj)) {
@@ -121,7 +148,7 @@ function resolveEnvVarsInObjectInternal<T>(
 
     visited.add(obj);
     const result = obj.map((item) =>
-      resolveEnvVarsInObjectInternal(item, visited, customEnv, environment),
+      resolveEnvVarsInObjectInternal(item, visited, customEnv, options),
     ) as unknown as T;
     visited.delete(obj);
     return result;
@@ -142,7 +169,7 @@ function resolveEnvVarsInObjectInternal<T>(
           newObj[key],
           visited,
           customEnv,
-          environment,
+          options,
         );
       }
     }

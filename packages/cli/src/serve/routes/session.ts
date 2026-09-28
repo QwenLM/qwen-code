@@ -5647,8 +5647,9 @@ export function registerSessionRoutes(
               try {
                 assertRuntimeGenerationOpen?.();
                 // 1. The replacement spawns in the root workspace with the
-                // same thread-scope and source metadata conventions as a
-                // fresh worktree creation, minus worktree creation.
+                // same thread-scope, source and worktree metadata conventions
+                // as a fresh worktree creation, minus worktree creation. The
+                // worktree metadata also keeps it on the Legacy engine.
                 const spawned = await runtime.bridge.spawnOrAttach({
                   workspaceCwd,
                   modelServiceId,
@@ -5660,6 +5661,11 @@ export function registerSessionRoutes(
                   ...(source.sourceId !== undefined
                     ? { sourceId: source.sourceId }
                     : {}),
+                  worktree: {
+                    slug: effectiveOldSidecar.slug,
+                    path: realTarget,
+                    branch: effectiveOldSidecar.worktreeBranch,
+                  },
                 });
                 spawnedNew = { sessionId: spawned.sessionId };
                 // 2. Relocate into the checkout.

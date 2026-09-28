@@ -22,7 +22,7 @@ import {
 import { getCurrentAgentId } from '../agents/runtime/agent-context.js';
 import path from 'node:path';
 import fs from 'node:fs';
-import { isManagedSessionTranscriptSync } from '../utils/sessionStorageUtils.js';
+import { isManagedExecutionTranscriptSync } from '../utils/sessionStorageUtils.js';
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type {
@@ -1194,7 +1194,7 @@ export class ChatRecordingService {
         );
       }
     }
-    if (isManagedSessionTranscriptSync(conversationFile)) {
+    if (isManagedExecutionTranscriptSync(conversationFile)) {
       throw new SessionExecutionEngineError(
         this.getSessionId(),
         'belongs to managed, cannot record with legacy',

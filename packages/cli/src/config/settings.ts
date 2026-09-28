@@ -38,7 +38,10 @@ import {
   type SettingDefinition,
   getSettingsSchema,
 } from './settingsSchema.js';
-import { resolveEnvVarsInObject } from '@qwen-code/qwen-code-core/envVarResolver';
+import {
+  resolveEnvVarsInObject,
+  type ResolveEnvVarsOptions,
+} from '@qwen-code/qwen-code-core/envVarResolver';
 import {
   setNestedPropertySafe,
   WORKSPACE_NON_OVERRIDING_SETTINGS,
@@ -65,8 +68,10 @@ import {
   DEFAULT_LIGHT_THEME_NAME,
 } from './default-theme-names.js';
 import {
+  getGlobalQwenDirLite,
   getSystemDefaultsPath,
   getSystemSettingsPath,
+  readEnvironmentVariable,
 } from './storage-paths-lite.js';
 
 export {
@@ -864,7 +869,9 @@ export class LoadedSettings {
           this.runtimeEnvironment === undefined
             ? getHomeEnvFallbackVars((message) => debugLogger.warn(message))
             : undefined,
-          this.runtimeEnvironment,
+          this.runtimeEnvironment === undefined
+            ? {}
+            : { environment: this.runtimeEnvironment },
         );
         file.settings = resolved;
         file.originalSettings = structuredClone(parsed) as Settings;
@@ -1057,6 +1064,15 @@ export function loadSettings(
   return loadSettingsInternal(workspaceDir, opts, false);
 }
 
+/**
+ * Reads every settings layer with the merge, migration, trust and variable
+ * rules of `loadSettings`, but writes nothing: no migration, version
+ * normalization, backup, corruption recovery or environment change. A layer
+ * that cannot be read whole, is not a JSON object or carries a version this
+ * build cannot migrate throws, where `loadSettings` repairs, skips or accepts
+ * some of these. `runtimeEnvironment` locates the user and system files and
+ * is the only source for `${VAR}` placeholders; without one, nothing is read.
+ */
 export function readSettingsSnapshot(
   workspaceDir: string,
   options: {
@@ -1064,6 +1080,10 @@ export function readSettingsSnapshot(
     workspaceTrusted: boolean;
   },
 ): LoadedSettings {
+  const { runtimeEnvironment } = options;
+  if (typeof runtimeEnvironment !== 'object' || runtimeEnvironment === null) {
+    throw new TypeError('A settings snapshot needs an environment.');
+  }
   return loadSettingsInternal(
     workspaceDir,
     {
@@ -1074,6 +1094,22 @@ export function readSettingsSnapshot(
     },
     true,
   );
+}
+
+/**
+ * The variables a session host spawned with `environment` sees, for
+ * placeholders, when the environment holds string values: on Windows, names
+ * are case-insensitive and only one spelling of each is passed on.
+ */
+function spawnedEnvironmentView(
+  environment: Readonly<NodeJS.ProcessEnv>,
+): Record<string, string> {
+  return new Proxy({} as Record<string, string>, {
+    get: (_target, name) =>
+      typeof name === 'string'
+        ? readEnvironmentVariable(environment, name)
+        : undefined,
+  });
 }
 
 function loadSettingsInternal(
@@ -1092,7 +1128,13 @@ function loadSettingsInternal(
     opts.runtimeEnvironment === undefined
       ? readOperatorSandboxSettings().tools?.executionSandbox
       : undefined;
-  const userSettingsPath = getUserSettingsPath();
+  const pathEnvironment: Readonly<NodeJS.ProcessEnv> | undefined =
+    snapshotOnly && opts.runtimeEnvironment !== undefined
+      ? { ...process.env, ...opts.runtimeEnvironment }
+      : undefined;
+  const userSettingsPath = pathEnvironment
+    ? path.join(getGlobalQwenDirLite(pathEnvironment), 'settings.json')
+    : getUserSettingsPath();
   const qwenHomeRedirectWarning =
     opts.runtimeEnvironment === undefined
       ? detectQwenHomeRedirectWithoutMigration(userSettingsPath)
@@ -1103,8 +1145,8 @@ function loadSettingsInternal(
   let userSettings: Settings = {};
   let workspaceSettings: Settings = {};
   const settingsErrors: SettingsError[] = [];
-  const systemSettingsPath = getSystemSettingsPath();
-  const systemDefaultsPath = getSystemDefaultsPath();
+  const systemSettingsPath = getSystemSettingsPath(pathEnvironment);
+  const systemDefaultsPath = getSystemDefaultsPath(pathEnvironment);
   const migratedInMemoryScopes = new Set<SettingScope>();
 
   // Resolve paths to their canonical representation to handle symlinks
@@ -1137,11 +1179,12 @@ function loadSettingsInternal(
     wasRecovered?: boolean;
   } => {
     try {
-      if (snapshotOnly || fs.existsSync(filePath)) {
-        const content = snapshotOnly
-          ? readConfigFile(filePath)
-          : fs.readFileSync(filePath, 'utf-8');
-        if (content === undefined) return { settings: {} };
+      const content = snapshotOnly
+        ? readConfigFile(filePath)
+        : fs.existsSync(filePath)
+          ? fs.readFileSync(filePath, 'utf-8')
+          : undefined;
+      if (content !== undefined) {
         let rawSettings: unknown;
         // Carry corruption state through to the final return so it
         // can be attached after the migration pipeline runs.
@@ -1325,7 +1368,6 @@ function loadSettingsInternal(
           settingsObject[SETTINGS_VERSION_KEY] = SETTINGS_VERSION;
           persistSettingsObject('Error normalizing settings version on disk');
         }
-
         if (
           snapshotOnly &&
           settingsObject[SETTINGS_VERSION_KEY] !== SETTINGS_VERSION
@@ -1390,29 +1432,42 @@ function loadSettingsInternal(
   // effective precedence is: process.env > home .env > unresolved placeholder.
   // The resolver checks customEnv before process.env, but since customEnv
   // never contains a process.env key, process.env always wins.
+  // A snapshot resolves only through the injected environment, read as a
+  // host spawned with it sees it (case-insensitive on Windows); a live load
+  // with an injected environment resolves through it as the base.
   const homeEnvFallback =
     opts.runtimeEnvironment === undefined
       ? getHomeEnvFallbackVars((message) => debugLogger.warn(message))
       : undefined;
+  const customEnv =
+    snapshotOnly && opts.runtimeEnvironment !== undefined
+      ? spawnedEnvironmentView(opts.runtimeEnvironment)
+      : homeEnvFallback;
+  const resolveEnv: ResolveEnvVarsOptions =
+    opts.runtimeEnvironment === undefined
+      ? {}
+      : snapshotOnly
+        ? { processEnvFallback: false }
+        : { environment: opts.runtimeEnvironment };
   systemSettings = resolveEnvVarsInObject(
     systemResult.settings,
-    homeEnvFallback,
-    opts.runtimeEnvironment,
+    customEnv,
+    resolveEnv,
   );
   systemDefaultSettings = resolveEnvVarsInObject(
     systemDefaultsResult.settings,
-    homeEnvFallback,
-    opts.runtimeEnvironment,
+    customEnv,
+    resolveEnv,
   );
   userSettings = resolveEnvVarsInObject(
     userResult.settings,
-    homeEnvFallback,
-    opts.runtimeEnvironment,
+    customEnv,
+    resolveEnv,
   );
   workspaceSettings = resolveEnvVarsInObject(
     workspaceResult.settings,
-    homeEnvFallback,
-    opts.runtimeEnvironment,
+    customEnv,
+    resolveEnv,
   );
 
   // Support legacy theme names

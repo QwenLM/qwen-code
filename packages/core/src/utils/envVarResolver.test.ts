@@ -124,6 +124,19 @@ describe('resolveEnvVarsInString', () => {
 
     expect(result).toBe('value and $UNDEFINED mixed');
   });
+
+  it('resolves only from customEnv without the process.env fallback', () => {
+    process.env['FROM_PROCESS'] = 'process-value';
+    process.env['FROM_BOTH'] = 'process-value';
+
+    const result = resolveEnvVarsInString(
+      '$FROM_PROCESS ${FROM_PROCESS} $FROM_BOTH',
+      { FROM_BOTH: 'custom-value' },
+      { processEnvFallback: false },
+    );
+
+    expect(result).toBe('$FROM_PROCESS ${FROM_PROCESS} custom-value');
+  });
 });
 
 describe('resolveEnvVarsInObject', () => {
@@ -140,10 +153,12 @@ describe('resolveEnvVarsInObject', () => {
   it('uses an explicit environment without ambient fallback, including nested values', () => {
     process.env['MANAGED_TEST_KEY'] = 'ambient';
     const input = { nested: ['$MANAGED_TEST_KEY', '${MANAGED_TEST_KEY}'] };
-    expect(resolveEnvVarsInObject(input, undefined, {})).toEqual(input);
+    expect(
+      resolveEnvVarsInObject(input, undefined, { environment: {} }),
+    ).toEqual(input);
     expect(
       resolveEnvVarsInObject(input, undefined, {
-        MANAGED_TEST_KEY: 'workspace',
+        environment: { MANAGED_TEST_KEY: 'workspace' },
       }),
     ).toEqual({
       nested: ['workspace', 'workspace'],
@@ -152,9 +167,24 @@ describe('resolveEnvVarsInObject', () => {
       resolveEnvVarsInString(
         '$MANAGED_TEST_KEY',
         { MANAGED_TEST_KEY: 'override' },
-        {},
+        { environment: {} },
       ),
     ).toBe('override');
+  });
+
+  it('passes the process.env fallback option to nested values', () => {
+    process.env['FROM_PROCESS'] = 'process-value';
+
+    const result = resolveEnvVarsInObject(
+      { list: ['$FROM_PROCESS'], nested: { value: '$FROM_CUSTOM' } },
+      { FROM_CUSTOM: 'custom-value' },
+      { processEnvFallback: false },
+    );
+
+    expect(result).toEqual({
+      list: ['$FROM_PROCESS'],
+      nested: { value: 'custom-value' },
+    });
   });
 
   it('should resolve variables in nested objects', () => {
