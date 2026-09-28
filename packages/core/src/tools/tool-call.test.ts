@@ -719,4 +719,88 @@ describe('ToolCallTool', () => {
       );
     }
   });
+
+  describe('target-schema pre-validation (#12889)', () => {
+    // Mirrors the issue's web_fetch: both fields required, so `{}` must not
+    // be accepted just because the bridge envelope types arguments as a
+    // bare object.
+    const makeWebFetchLike = () =>
+      new MockTool({
+        name: 'web_fetch',
+        shouldDefer: true,
+        params: {
+          type: 'object',
+          properties: {
+            url: { type: 'string' },
+            prompt: { type: 'string' },
+          },
+          required: ['url', 'prompt'],
+          additionalProperties: false,
+        },
+      });
+
+    it('resolves a call whose arguments satisfy the target schema', async () => {
+      const target = makeWebFetchLike();
+      const result = await resolveDeferredToolCall(
+        makeRegistry([target], new Set([target.name])),
+        {
+          name: 'web_fetch',
+          arguments: { url: 'https://example.com', prompt: 'summarize' },
+        },
+      );
+
+      expect(result).toMatchObject({
+        tool: expect.objectContaining({ name: 'web_fetch' }),
+        arguments: { url: 'https://example.com', prompt: 'summarize' },
+      });
+    });
+
+    it('refuses an empty arguments object that misses required target fields', async () => {
+      // #12889: the bridge validated only its own envelope, so `{}` passed
+      // and the target's required-field error surfaced post-unwrap as a bare
+      // Ajv message the model could not act on. The refusal must name the
+      // target and the missing field. Mutation check: dropping the
+      // pre-validation in resolveDeferredToolCall turns this red.
+      const target = makeWebFetchLike();
+      const result = await resolveDeferredToolCall(
+        makeRegistry([target], new Set([target.name])),
+        { name: 'web_fetch', arguments: {} },
+      );
+
+      expect(result).toMatchObject({
+        errorType: ToolErrorType.INVALID_TOOL_PARAMS,
+        targetName: 'web_fetch',
+      });
+      expect(result).not.toHaveProperty('tool');
+      if ('error' in result) {
+        expect(
+          result.error.message.startsWith(DEFERRED_TOOL_CALL_REFUSAL_PREFIX),
+        ).toBe(true);
+        expect(result.error.message).toContain('"web_fetch"');
+        expect(result.error.message).toContain("'url'");
+      }
+    });
+
+    it('returns the model-sent arguments even when validation coerces a clone', async () => {
+      // SchemaValidator.validate coerces values in place (numeric strings →
+      // numbers, etc.). The pre-check must run on a clone: the resolved
+      // arguments stay exactly what the model sent, and the scheduler
+      // re-validates them at build time.
+      const target = new MockTool({
+        name: 'counter',
+        shouldDefer: true,
+        params: {
+          type: 'object',
+          properties: { count: { type: 'integer' } },
+          required: ['count'],
+        },
+      });
+      const result = await resolveDeferredToolCall(
+        makeRegistry([target], new Set([target.name])),
+        { name: 'counter', arguments: { count: '3' } },
+      );
+
+      expect(result).toMatchObject({ arguments: { count: '3' } });
+    });
+  });
 });

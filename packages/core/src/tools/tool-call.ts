@@ -231,6 +231,34 @@ export async function resolveDeferredToolCall(
     };
   }
 
+  // The bridge envelope deliberately types `arguments` as a bare object (the
+  // declaration must stay byte-stable across catalog changes), so `{}` is
+  // envelope-valid even when the target requires fields. Pre-validate against
+  // the target's own schema so the refusal names the target and the missing
+  // field, instead of surfacing a bare Ajv message after the call has been
+  // unwrapped (#12889). Validate a clone: SchemaValidator coerces values in
+  // place, and the scheduler re-validates the returned arguments at build
+  // time.
+  let paramsError: string | null = null;
+  try {
+    paramsError = target.validateToolParams(
+      structuredClone(invocation.params.arguments),
+    );
+  } catch {
+    // A target whose validation throws under this pre-check must not become
+    // a new bridge failure mode: the scheduler's build() reports the same
+    // throw as before.
+  }
+  if (paramsError) {
+    return {
+      error: bridgeRefusal(
+        `Deferred tool "${target.name}" rejected the arguments: ${paramsError}. Pass arguments matching the schema returned by tool_search for "${target.name}".`,
+      ),
+      errorType: ToolErrorType.INVALID_TOOL_PARAMS,
+      targetName: target.name,
+    };
+  }
+
   return {
     tool: target,
     arguments: structuredClone(invocation.params.arguments),
