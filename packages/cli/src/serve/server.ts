@@ -2364,7 +2364,12 @@ export function createServeApp(
       rateLimiter,
       isAgentCollaborationEnabledFor,
     );
-    registerAgentHostTransportRoutes(app, workspaceRegistry, rateLimiter);
+    registerAgentHostTransportRoutes(
+      app,
+      workspaceRegistry,
+      rateLimiter,
+      isAgentCollaborationEnabledFor,
+    );
   }
 
   // Credentials are a listener-scoped set, not one token: while Local Control

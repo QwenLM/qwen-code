@@ -40,7 +40,7 @@ beforeEach(() => {
   pickup.mockReset();
 });
 
-function setup() {
+function setup(initiallyEnabled = true) {
   const runtime = {
     workspaceId: 'workspace',
     workspaceCwd: '/work/selected',
@@ -48,12 +48,16 @@ function setup() {
     trusted: true,
   } as WorkspaceRuntime;
   let active = true;
+  let enabled = initiallyEnabled;
   const registry = {
     listAll: () => (active ? [runtime] : []),
   } as unknown as WorkspaceRegistry;
   const app = express();
-  registerAgentHostTransportRoutes(app, registry);
+  registerAgentHostTransportRoutes(app, registry, undefined, () => enabled);
   return {
+    disable: () => {
+      enabled = false;
+    },
     remove: () => {
       active = false;
     },
@@ -65,6 +69,26 @@ function setup() {
         .then((response) => response),
   };
 }
+
+it('does not expose host work for a collaboration-disabled workspace', async () => {
+  const response = await setup(false).poll();
+
+  expect(response.status).toBe(404);
+  expect(pickup).not.toHaveBeenCalled();
+});
+
+it('stops polling when collaboration is disabled', async () => {
+  const { poll, disable } = setup();
+  pickup
+    .mockResolvedValueOnce(undefined)
+    .mockResolvedValue({ prompt: 'private' });
+  const response = poll();
+  await vi.waitFor(() => expect(pickup).toHaveBeenCalledOnce());
+  disable();
+
+  expect((await response).status).toBe(404);
+  expect(pickup).toHaveBeenCalledOnce();
+});
 
 it('stops polling when the selected workspace becomes unavailable', async () => {
   const { poll, remove } = setup();

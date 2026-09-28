@@ -111,9 +111,15 @@ function readHostResult(
 export function registerAgentHostTransportRoutes(
   app: Application,
   workspaceRegistry: WorkspaceRegistry,
-  rateLimiter?: Pick<RateLimiterInstance, 'checkRate'>,
+  rateLimiter: Pick<RateLimiterInstance, 'checkRate'> | undefined,
+  isEnabledFor: (workspaceCwd: string) => boolean,
 ): void {
   const json = express.json({ limit: '16kb' });
+  const requireEnabled = (workspaceCwd: string, res: Response): boolean => {
+    if (isEnabledFor(workspaceCwd)) return true;
+    res.status(404).json({ error: 'Workspace not found.' });
+    return false;
+  };
   // Runs before the large-body routes parse anything, so a request with a
   // wrong secret never gets 2 MB read on its behalf.
   const authenticated: RequestHandler = async (req, res, next) => {
@@ -125,6 +131,7 @@ export function registerAgentHostTransportRoutes(
       res.status(404).json({ error: 'Workspace not found.' });
       return;
     }
+    if (!requireEnabled(runtime.workspaceCwd, res)) return;
     if (!requireTrustedWorkspaceRuntime(runtime, res)) return;
     const secret = hostSecret(req);
     if (
@@ -176,6 +183,7 @@ export function registerAgentHostTransportRoutes(
         res.status(404).json({ error: 'Workspace not found.' });
         return;
       }
+      if (!requireEnabled(runtime.workspaceCwd, res)) return;
       if (!requireTrustedWorkspaceRuntime(runtime, res)) return;
       if (
         !secret ||
@@ -267,6 +275,7 @@ export function registerAgentHostTransportRoutes(
       res.status(404).json({ error: 'Workspace not found.' });
       return;
     }
+    if (!requireEnabled(runtime.workspaceCwd, res)) return;
     if (!requireTrustedWorkspaceRuntime(runtime, res)) return;
     try {
       const enrolled = await enrollAgentHost(runtime.workspaceCwd, {
@@ -308,6 +317,7 @@ export function registerAgentHostTransportRoutes(
         res.status(404).json({ error: 'Workspace not found.' });
         return;
       }
+      if (!requireEnabled(runtime.workspaceCwd, res)) return;
       if (!requireTrustedWorkspaceRuntime(runtime, res)) return;
       try {
         const host = await heartbeatAgentHost(
@@ -385,6 +395,7 @@ export function registerAgentHostTransportRoutes(
         res.status(404).json({ error: 'Workspace not found.' });
         return;
       }
+      if (!requireEnabled(runtime.workspaceCwd, res)) return;
       if (!requireTrustedWorkspaceRuntime(runtime, res)) return;
       if (
         !(await authenticateAgentHost(runtime.workspaceCwd, hostId, secret))
@@ -401,6 +412,7 @@ export function registerAgentHostTransportRoutes(
             res.status(404).json({ error: 'Workspace not found.' });
             return;
           }
+          if (!requireEnabled(runtime.workspaceCwd, res)) return;
           const assignment = await pickupRunForHost(
             runtime.workspaceCwd,
             hostId,
@@ -446,6 +458,7 @@ export function registerAgentHostTransportRoutes(
         res.status(404).json({ error: 'Workspace not found.' });
         return;
       }
+      if (!requireEnabled(runtime.workspaceCwd, res)) return;
       if (!requireTrustedWorkspaceRuntime(runtime, res)) return;
       if (
         !(await authenticateAgentHost(runtime.workspaceCwd, hostId, secret))
