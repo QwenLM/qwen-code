@@ -423,6 +423,47 @@ class RuntimeBrokerServiceTest {
     }
 
     @Test
+    void mcpControlsStayWithTheAcquiredSessionAndNeverProvisionForLookup() {
+        try (Fixture fixture = new Fixture(SESSION_SCOPE)) {
+            RuntimeSessionRecord session = join(fixture.service.acquire("harness", "runtime", "bootstrap"));
+            for (String kind : List.of("mcp-configure", "mcp-discover", "mcp-status", "mcp-cancel", "mcp-release")) {
+                Map<String, Object> operation = Map.of("kind", kind, "operationId", "operation",
+                        "sessionKey", Map.of("tenantId", "tenant", "workspaceId", "workspace", "sessionId", "harness"));
+                assertEquals("ok", join(fixture.service.control("harness", "runtime", operation)));
+                assertEquals(operation, fixture.transport.lastControl);
+            }
+            Map<String, Object> foreign = Map.of("kind", "mcp-status", "operationId", "lookup",
+                    "sessionKey", Map.of("tenantId", "tenant", "workspaceId", "foreign", "sessionId", "harness"));
+            assertEquals("runtime_control_operation_invalid", failure(fixture.service.control("harness", "runtime", foreign)).getCode());
+            assertEquals("runtime_session_not_found", failure(fixture.service.control("harness", "new-runtime", foreign)).getCode());
+            assertEquals(1, fixture.provisioner.calls.get());
+            assertEquals(session.getSession(), fixture.transport.lastSession);
+        }
+    }
+
+    @Test
+    void observesTheOriginalOwnerAfterNewAdmissionIsRevoked() {
+        try (Fixture fixture = new Fixture(SESSION_SCOPE)) {
+            RuntimeSessionRecord original = join(fixture.service.acquire("harness", "runtime", "bootstrap"));
+            fixture.resolver.result = CompletableFuture.failedFuture(
+                    new RuntimeBrokerException(403, "workspace_access_denied", "Access revoked", false));
+            assertEquals(original, join(fixture.service.acquire("harness", "runtime", "bootstrap")));
+            Map<String, Object> lookup = Map.of("kind", "mcp-status", "operationId", "lookup",
+                    "targetOperationId", "original-operation",
+                    "sessionKey", Map.of("tenantId", "tenant", "workspaceId", "workspace", "sessionId", "harness"));
+            assertEquals("ok", join(fixture.service.control("harness", "runtime", lookup)));
+            assertEquals("workspace_access_denied", failure(fixture.service.acquire("harness", "new-runtime", "bootstrap")).getCode());
+            assertEquals("runtime_session_conflict", failure(fixture.service.acquire("other", "runtime", "bootstrap")).getCode());
+            assertEquals("runtime_session_conflict", failure(fixture.service.acquire("harness", "runtime", "continuation")).getCode());
+            RuntimeBindingRecord binding = fixture.bindingRepository.findById(original.getBindingId());
+            fixture.bindingRepository.compareAndSet(binding, binding.withState(RuntimeBindingRecord.State.LOST, binding.getLease(), START));
+            assertEquals("runtime_admission_closed", failure(fixture.service.acquire("harness", "runtime", "bootstrap")).getCode());
+            assertEquals(1, fixture.provisioner.calls.get());
+            assertEquals(1, fixture.transport.acquireCalls.get());
+        }
+    }
+
+    @Test
     void settledCancellationWinsOverLateExecutionCompletion() {
         try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
             CompletableFuture<Map<String, Object>> execution =

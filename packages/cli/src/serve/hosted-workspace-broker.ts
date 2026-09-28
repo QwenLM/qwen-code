@@ -10,6 +10,10 @@ import type { ManagedSessionKey } from '@qwen-code/qwen-code-core/managed-runtim
 import type { ManagedToolResultPayload } from './managed-runtime-tool-executor.js';
 import { resolveManagedRuntimeBrokerBaseUrl } from './managed-runtime-broker-url.js';
 import { WORKSPACE_CAPABILITY_DIGEST } from './managed-workspace-activation.js';
+import type {
+  ManagedMcpControl,
+  ManagedMcpOperationView,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-mcp-protocol.js';
 
 export interface HostedWorkspaceBrokerOptions {
   baseUrl: string;
@@ -37,6 +41,15 @@ export class HostedWorkspaceBroker {
     harnessSessionId: string;
     runtimeSessionId: string;
   };
+  runtime?: {
+    bindingId: string;
+    generation: string;
+    workspaceGeneration: string;
+  };
+
+  get runtimeSessionId(): string {
+    return this.identity.runtimeSessionId;
+  }
 
   constructor(
     private readonly options: HostedWorkspaceBrokerOptions,
@@ -65,17 +78,38 @@ export class HostedWorkspaceBroker {
       throw new Error(
         'Hosted Workspace Broker scope does not match the saved Session.',
       );
+    const runtime = response['runtime'];
+    if (runtime !== undefined) {
+      const binding = object(runtime);
+      const generation = String(binding['generation']);
+      const workspaceGeneration = String(scope['workspaceGeneration']);
+      if (
+        typeof binding['bindingId'] !== 'string' ||
+        !/^[1-9][0-9]{0,18}$/u.test(generation) ||
+        !/^[1-9][0-9]{0,18}$/u.test(workspaceGeneration)
+      )
+        throw new Error('Runtime Broker binding is invalid.');
+      this.runtime = {
+        bindingId: binding['bindingId'],
+        generation,
+        workspaceGeneration,
+      };
+    }
   }
 
-  async prepare(callId: string, digest: string): Promise<string> {
+  async prepare(
+    callId: string,
+    digest: string,
+    turnId = this.identity.runtimeSessionId,
+  ): Promise<string> {
     const reservation = {
       idempotencyKey: `${this.identity.runtimeSessionId}:${callId}`,
-      turnId: this.identity.runtimeSessionId,
+      turnId,
       toolCallId: callId,
       requestDigest: digest,
       reference: {
         sessionId: this.identity.runtimeSessionId,
-        promptId: this.identity.runtimeSessionId,
+        promptId: turnId,
         callId,
         argsDigest: digest,
       },
@@ -168,6 +202,27 @@ export class HostedWorkspaceBroker {
 
   async cancel(id: string): Promise<void> {
     await this.request(`/executions/${encodeURIComponent(id)}:cancel`, {});
+  }
+
+  async control(
+    operation: ManagedMcpControl,
+  ): Promise<ManagedMcpOperationView> {
+    const envelope = await this.request(
+      `/tool-sessions/${encodeURIComponent(this.identity.runtimeSessionId)}/control`,
+      { operation },
+    );
+    const result = object(envelope['result']);
+    if (
+      result['operationId'] !==
+        (operation.kind === 'mcp-status' || operation.kind === 'mcp-cancel'
+          ? operation.targetOperationId
+          : operation.operationId) ||
+      !['running', 'settled', 'outcome_unknown'].includes(
+        String(result['state']),
+      )
+    )
+      throw new Error('Runtime MCP response identity is invalid.');
+    return result as unknown as ManagedMcpOperationView;
   }
 
   async release(): Promise<void> {

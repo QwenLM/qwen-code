@@ -28,8 +28,8 @@ import java.util.concurrent.TimeUnit;
  *
  * <p>Attestation plus the tool operations execute, status, and cancel, keyed
  * by the original call reference. Status and cancel answers are projected to
- * the Broker's closed state and result. Acquire, control, and release are
- * not part of the v2 tool contract and fail closed.
+ * the Broker's closed state and result. MCP controls have their own bounded
+ * envelope. Generic acquire, control, and release remain unsupported.
  */
 public final class HttpRuntimeTransport implements RuntimeTransport {
     static final int BODY_LIMIT_BYTES = 16 * 1024;
@@ -553,7 +553,15 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
     @Override
     public CompletionStage<Object> control(RuntimeLease lease,
             RuntimeSession session, Map<String, Object> operation) {
-        return unsupportedSessionVerb();
+        if (!ManagedMcpProtocol.isOperation(operation)) {
+            return unsupportedSessionVerb();
+        }
+        ManagedMcpProtocol.validateSession(session, operation);
+        Map<String, Object> body = Map.of("protocolVersion", 1,
+                "runtimeSessionId", session.getRuntimeSessionId(), "operation", operation);
+        return post(lease, ManagedMcpProtocol.PATH,
+                encodeToolRequest(body, TOOL_REQUEST_LIMIT_BYTES), TOOL_RESULT_LIMIT_BYTES)
+                .thenApply(bytes -> ManagedMcpProtocol.response(bytes, session, operation));
     }
 
     @Override

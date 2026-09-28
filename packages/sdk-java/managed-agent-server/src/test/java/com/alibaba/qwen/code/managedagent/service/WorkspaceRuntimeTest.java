@@ -277,6 +277,53 @@ class WorkspaceRuntimeTest {
     }
 
     @Test
+    void mcpAdmissionRequiresOwnershipAndRecoveryUsesTheOriginalOwnerAfterRevocation() throws Exception {
+        SessionRecord session = createSession("storage", ".");
+        var fixture = transport(session);
+        var runtimeSession = fixture.record().getSession();
+        Map<String, Object> configure = mcpControl(session, "mcp-configure");
+        assertBusy(() -> fixture.transport().control(fixture.lease(), runtimeSession, configure));
+        verify(fixture.http(), never()).control(any(), any(), any());
+        authority.claim(session.workspace(), fixture.record());
+        when(fixture.http().control(any(), any(), any())).thenReturn(CompletableFuture.completedFuture(Map.of("state", "running")));
+        assertThat(fixture.transport().control(fixture.lease(), runtimeSession, configure).toCompletableFuture().join())
+                .isEqualTo(Map.of("state", "running"));
+        jdbc.update("UPDATE managed_workspace_access SET can_read = FALSE WHERE tenant_id = ?", session.tenantId());
+        for (String kind : List.of("mcp-configure", "mcp-discover")) {
+            assertUnavailable(() -> fixture.transport().control(fixture.lease(), runtimeSession, mcpControl(session, kind)));
+        }
+        for (String kind : List.of("mcp-status", "mcp-cancel", "mcp-release")) {
+            Map<String, Object> operation = mcpControl(session, kind);
+            fixture.transport().control(fixture.lease(), runtimeSession, operation).toCompletableFuture().join();
+            verify(fixture.http()).control(fixture.lease(), runtimeSession, operation);
+        }
+        authority.assertHeld(session.workspace(), fixture.record());
+    }
+
+    @Test
+    void mcpLookupCannotUseAReplacedLeaseOrLostRuntime() throws Exception {
+        SessionRecord session = createSession("storage", ".");
+        var fixture = transport(session);
+        var runtimeSession = fixture.record().getSession();
+        authority.claim(session.workspace(), fixture.record());
+        Map<String, Object> lookup = mcpControl(session, "mcp-status");
+        RuntimeLease changed = new RuntimeLease("replacement", fixture.lease().getEndpoint(), fixture.lease().getToken(),
+                fixture.lease().getLeaseId(), fixture.lease().getEpoch() + 1);
+        assertUnavailable(() -> fixture.transport().control(changed, runtimeSession, lookup));
+        assertThat(fixture.bindings().compareAndSet(fixture.runtime(),
+                fixture.runtime().withState(RuntimeBindingRecord.State.LOST, fixture.lease(), Instant.now()))).isNotNull();
+        assertUnavailable(() -> fixture.transport().control(fixture.lease(), runtimeSession, lookup));
+        verify(fixture.http(), never()).control(any(), any(), any());
+        authority.assertHeld(session.workspace(), fixture.record());
+    }
+
+    private static Map<String, Object> mcpControl(SessionRecord session, String kind) {
+        return Map.of("kind", kind, "operationId", kind,
+                "sessionKey", Map.of("tenantId", session.tenantId(),
+                        "workspaceId", session.workspace().getWorkspaceId(), "sessionId", session.sessionId()));
+    }
+
+    @Test
     void lateDeactivationCannotClearAHolderAfterTheLossFence() throws Exception {
         SessionRecord session = createSession("storage", ".");
         var fixture = transport(session);

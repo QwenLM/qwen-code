@@ -794,6 +794,84 @@ class HttpRuntimeTransportTest {
     }
 
     @Test
+    void forwardsMcpDataWithoutInventingAToolResult() throws Exception {
+        RuntimeSession session = toolSession();
+        Map<String, Object> operation = mcpOperation(session, "mcp-invoke");
+        Map<String, Object> data = Map.of("contents", List.of(Map.of("uri", "test:blob",
+                "blob", "AAE=", "mimeType", "application/octet-stream")));
+        Map<String, Object> view = Map.of("operationId", "mcp-operation", "state", "settled", "response", data);
+        reply.set(json(200, JsonCodec.encode(Map.of("protocolVersion", 1,
+                "runtimeSessionId", session.getRuntimeSessionId(), "operation", view))));
+        assertEquals(view, transport.control(toolLease(server.getAddress().getPort()), session, operation)
+                .toCompletableFuture().get(2, TimeUnit.SECONDS));
+        assertEquals(ManagedMcpProtocol.PATH, capturedPath.get());
+        assertEquals(JSON.valueToTree(Map.of("protocolVersion", 1,
+                "runtimeSessionId", session.getRuntimeSessionId(), "operation", operation)), JSON.readTree(captured.get()));
+        assertEquals("Bearer " + toolSuite.required("identity").required("token").textValue(), capturedAuthorization.get());
+        assertEquals("no-store", capturedCacheControl.get());
+    }
+
+    @Test
+    void mcpRecoveryKeepsTheOriginalOperationIdentityAndRejectsMalformedReceipts() throws Exception {
+        RuntimeSession session = toolSession();
+        Map<String, Object> operation = mcpOperation(session, "mcp-status");
+        Map<String, Object> view = Map.of("operationId", "original-operation", "state", "outcome_unknown");
+        Map<String, Object> envelope = Map.of("protocolVersion", 1,
+                "runtimeSessionId", session.getRuntimeSessionId(), "operation", view);
+        reply.set(json(200, JsonCodec.encode(envelope)));
+        assertEquals(view, transport.control(toolLease(server.getAddress().getPort()), session, operation)
+                .toCompletableFuture().get(2, TimeUnit.SECONDS));
+        for (Map<String, Object> invalid : List.<Map<String, Object>>of(
+                Map.of("operationId", "mcp-operation", "state", "settled"),
+                Map.of("operationId", "original-operation", "state", "unknown"),
+                Map.of("operationId", "original-operation", "state", "outcome_unknown", "response", Map.of()),
+                Map.of("operationId", "original-operation", "state", "settled", "toolResult", Map.of()),
+                Map.of("operationId", "original-operation", "state", "settled", "error", Map.of("code", "failed", "message", "secret")))) {
+            reply.set(json(200, JsonCodec.encode(Map.of("protocolVersion", 1,
+                    "runtimeSessionId", session.getRuntimeSessionId(), "operation", invalid))));
+            assertThrows(ExecutionException.class, () -> transport.control(toolLease(server.getAddress().getPort()), session, operation)
+                    .toCompletableFuture().get(2, TimeUnit.SECONDS));
+        }
+        reply.set(json(200, JsonCodec.encode(Map.of("protocolVersion", 1,
+                "runtimeSessionId", "different-session", "operation", view))));
+        assertThrows(ExecutionException.class, () -> transport.control(toolLease(server.getAddress().getPort()), session, operation)
+                .toCompletableFuture().get(2, TimeUnit.SECONDS));
+        reply.set(json(200, new byte[HttpRuntimeTransport.TOOL_RESULT_LIMIT_BYTES + 1]));
+        assertThrows(ExecutionException.class, () -> transport.control(toolLease(server.getAddress().getPort()), session, operation)
+                .toCompletableFuture().get(2, TimeUnit.SECONDS));
+    }
+
+    @Test
+    void rejectsForeignMcpSessionsAndToolCallsBeforeSending() {
+        RuntimeSession session = toolSession();
+        for (String field : List.of("tenantId", "workspaceId", "sessionId")) {
+            Map<String, Object> operation = new LinkedHashMap<>(mcpOperation(session, "mcp-status"));
+            Map<String, Object> key = new LinkedHashMap<>(Map.of("tenantId", session.getScope().getTenantId(),
+                    "workspaceId", session.getScope().getWorkspaceId(), "sessionId", session.getHarnessSessionId()));
+            key.put(field, "foreign");
+            operation.put("sessionKey", key);
+            assertThrows(RuntimeBrokerException.class, () -> transport.control(toolLease(server.getAddress().getPort()), session, operation));
+        }
+        Map<String, Object> tool = new LinkedHashMap<>(mcpOperation(session, "mcp-invoke"));
+        tool.put("request", Map.of("kind", "tool_call", "name", "effect", "arguments", Map.of()));
+        assertThrows(RuntimeBrokerException.class, () -> transport.control(toolLease(server.getAddress().getPort()), session, tool));
+        assertNull(captured.get());
+    }
+
+    private static Map<String, Object> mcpOperation(RuntimeSession session, String kind) {
+        Map<String, Object> operation = new LinkedHashMap<>(Map.of("kind", kind,
+                "sessionKey", Map.of("tenantId", session.getScope().getTenantId(),
+                        "workspaceId", session.getScope().getWorkspaceId(), "sessionId", session.getHarnessSessionId()),
+                "operationId", "mcp-operation"));
+        if ("mcp-invoke".equals(kind)) {
+            operation.put("request", Map.of("kind", "resource_read", "uri", "test:blob"));
+        } else {
+            operation.put("targetOperationId", "original-operation");
+        }
+        return operation;
+    }
+
+    @Test
     void sessionVerbsFailClosed() {
         assertTrue(transport instanceof RuntimeTransport);
         CompletionException thrown = assertThrows(CompletionException.class,

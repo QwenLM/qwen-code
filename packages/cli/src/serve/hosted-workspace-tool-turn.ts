@@ -21,6 +21,7 @@ import {
   HostedWorkspaceBrokerRejection,
   type HostedWorkspaceBrokerOptions,
 } from './hosted-workspace-broker.js';
+import type { HostedMcpSession } from './hosted-mcp-session.js';
 
 export const HOSTED_WORKSPACE_FILE_PROFILE = 'hosted-workspace-files/1';
 
@@ -88,6 +89,7 @@ export class HostedWorkspaceToolTurn {
   private readonly warmed: Promise<void>;
   private acquired = false;
   private uncertain = false;
+  private advertised?: FunctionDeclaration[];
 
   constructor(
     options: HostedWorkspaceBrokerOptions,
@@ -104,15 +106,27 @@ export class HostedWorkspaceToolTurn {
       parts: Part[],
       model: string,
     ) => boolean,
+    private readonly mcp?: HostedMcpSession,
   ) {
-    this.broker = new HostedWorkspaceBroker(
-      options,
-      session.authority.sessionHeader.sessionKey,
-      promptId,
-    );
-    this.warmed = this.broker.warm();
+    this.broker =
+      mcp?.broker ??
+      new HostedWorkspaceBroker(
+        options,
+        session.authority.sessionHeader.sessionKey,
+        promptId,
+      );
+    this.warmed = mcp ? mcp.ensureReady() : this.broker.warm();
     // Warmup runs alongside inference; a text-only answer need not wait for it.
     void this.warmed.catch(() => undefined);
+  }
+
+  async declarations(): Promise<FunctionDeclaration[]> {
+    if (this.mcp) await this.warmed;
+    this.advertised ??= [
+      ...HOSTED_WORKSPACE_FILE_TOOLS,
+      ...(this.mcp?.tools() ?? []),
+    ];
+    return this.advertised;
   }
 
   async execute(
@@ -121,28 +135,36 @@ export class HostedWorkspaceToolTurn {
     model: string,
     signal: AbortSignal,
   ): Promise<Part[]> {
+    if (this.mcp) await this.warmed;
+    const declarations = await this.declarations();
     const ids = new Set<string>();
     const requests = calls.map((call) => {
+      const callId = randomUUID();
+      const mcpInput = this.mcp?.toolInput(call.name, call.args, callId);
       if (
-        !HOSTED_WORKSPACE_FILE_TOOLS.some((tool) => tool.name === call.name) ||
+        !declarations.some((tool) => tool.name === call.name) ||
         ids.has(call.callId) ||
         call.wasOutputTruncated === true
       )
         throw new Error('Hosted Workspace profile refused a tool call.');
       ids.add(call.callId);
       const file = call.args['file_path'];
-      if (typeof file !== 'string')
+      if (!mcpInput && typeof file !== 'string')
         throw new Error('Hosted file tools require a relative file_path.');
-      const relativeFile = normalizeWorkspaceRelativePath(file.trim());
-      const payloadJson = JSON.stringify({
-        toolName: call.name,
-        input: { ...call.args, file_path: relativeFile },
-      });
+      const payloadJson = JSON.stringify(
+        mcpInput ?? {
+          toolName: call.name,
+          input: {
+            ...call.args,
+            file_path: normalizeWorkspaceRelativePath((file as string).trim()),
+          },
+        },
+      );
       const inputBytes = Buffer.from(
         JSON.stringify({
           harnessSessionId:
             this.session.authority.sessionHeader.sessionKey.sessionId,
-          runtimeSessionId: this.promptId,
+          runtimeSessionId: this.broker.runtimeSessionId,
           payloadJson,
         }),
       );
@@ -155,6 +177,7 @@ export class HostedWorkspaceToolTurn {
         );
       return {
         call,
+        callId,
         payloadJson,
         inputBytes,
         digest: `sha256:${createHash('sha256').update(payloadJson).digest('hex')}`,
@@ -208,17 +231,16 @@ export class HostedWorkspaceToolTurn {
           request.inputBytes,
         );
         const executionCallId = await this.broker.prepare(
-          randomUUID(),
+          request.callId,
           request.digest,
+          this.promptId,
         );
         reserved.push(executionCallId);
         const toolDefinitionRef = await this.session.resources.publish(
           'managed-tool-definition',
           Buffer.from(
             JSON.stringify(
-              HOSTED_WORKSPACE_FILE_TOOLS.find(
-                (tool) => tool.name === request.call.name,
-              ),
+              declarations.find((tool) => tool.name === request.call.name),
             ),
           ),
         );
@@ -377,7 +399,7 @@ export class HostedWorkspaceToolTurn {
     if (!this.acquired) return;
     try {
       await this.harness.settleConsumedRuntimeContinuation();
-      await this.broker.release();
+      if (!this.mcp) await this.broker.release();
       this.acquired = false;
     } catch (cause) {
       this.uncertain = true;

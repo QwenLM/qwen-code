@@ -864,6 +864,21 @@ class ManagedAgentApiContractTest {
         assertThat(webBound.at("/workspace/state").asText())
                 .isEqualTo("ready");
         exchangeTasks(drift, tenant, otherTenant);
+        String mcpCatalog = exchange(drift, "getSessionMcpCatalog", 200,
+                get("/v1/agents/sessions/{id}/mcp-catalog", publicBoundId)
+                        .header(TENANT, workspaceTenant).principal(actor), null);
+        assertThat(json(mcpCatalog).path("servers")).isEmpty();
+        exchange(drift, "getSessionMcpCatalog", 404,
+                get("/v1/agents/sessions/{id}/mcp-catalog", publicBoundId)
+                        .header(TENANT, otherTenant), null);
+        exchange(drift, "getSessionMcpCatalog", 404,
+                get("/v1/agents/sessions/{id}/mcp-catalog", publicBoundId)
+                        .header(TENANT, workspaceTenant), null);
+        exchange(drift, "getSessionMcpCatalog", 403,
+                get("/v1/agents/sessions/{id}/mcp-catalog", publicBoundId)
+                        .header(TENANT, workspaceTenant).principal(actor(otherTenant)), null);
+        exchange(drift, "getSessionMcpCatalog", 400,
+                get("/v1/agents/sessions/{id}/mcp-catalog", publicBoundId), null);
         assertThat(exercised).containsExactlyInAnyOrderElementsOf(
                 CONTRACT.operations().stream()
                         .filter(operation -> !"planned".equals(

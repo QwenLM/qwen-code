@@ -17,6 +17,7 @@ import {
 import type { ManagedSessionStoreHttpError } from './http-managed-session-store.js';
 import { createHttpManagedSessionStores } from './http-managed-session-store.js';
 import type { ManagedSessionKey } from './managed-session-records.js';
+import type { McpConfiguration } from './managed-mcp-record.js';
 import {
   createInitialHarnessCheckpoint,
   encodeHarnessCheckpointV1,
@@ -653,12 +654,72 @@ describe('HTTP Managed Session store', () => {
         }),
       ]),
     );
+    const mcpTemplate = JSON.parse(
+      readFileSync(
+        new URL(
+          './contracts/managed-mcp-record-v1.fixtures.json',
+          import.meta.url,
+        ),
+        'utf8',
+      ),
+    ).templates.mcp_configuration as McpConfiguration;
+    const commitMcp = (commandId: string, record: unknown) =>
+      first.authority.commitExtensionRecord(
+        {
+          operation: 'commitMcpConfiguration',
+          commandId,
+          sessionKey: SESSION_KEY,
+          contentDigest: 'a'.repeat(64),
+        },
+        { domain: 'mcp_configuration', record },
+        { class: 'trusted_entry' },
+      );
+    await commitMcp('configure-1', mcpTemplate);
+    const dispatched = {
+      ...mcpTemplate,
+      run: {
+        ...mcpTemplate.run,
+        state: 'running',
+        execution: 'dispatch_started',
+        runtime: { runtimeBindingId: 'binding', generation: '1' },
+      },
+    };
+    await commitMcp('configure-dispatch', dispatched);
+    const catalogRef = await first.resources.publish(
+      'mcp-catalog',
+      Buffer.from('{"tools":[]}'),
+    );
+    const configured = {
+      ...dispatched,
+      catalogRef,
+      catalogRevision: 1,
+      connectionGeneration: 1,
+      run: { ...dispatched.run, state: 'settled', execution: 'settled' },
+    };
+    await commitMcp('configure-settled', configured);
+    expect(server.commits.at(-1)?.['resources']).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          resourceId: catalogRef.resourceId,
+          bytesBase64: Buffer.from('{"tools":[]}').toString('base64'),
+        }),
+      ]),
+    );
     const views = first.authority.taskViews();
     expect(views).toHaveLength(1);
     await first.close();
 
     const restored = await open('harness-b', TOKEN_B);
     expect(restored.authority.taskViews()).toEqual(views);
+    expect(
+      restored.authority.extensionRecordsInDomain('mcp_configuration')[0],
+    ).toMatchObject({
+      task: null,
+      record: configured,
+    });
+    expect(await restored.resources.read(catalogRef)).toEqual(
+      Buffer.from('{"tools":[]}'),
+    );
     expect(
       restored.authority.extensionRecord('monitor_run', 'monitor-1'),
     ).toMatchObject({ revision: 1, recordRef: committed.recordRef });

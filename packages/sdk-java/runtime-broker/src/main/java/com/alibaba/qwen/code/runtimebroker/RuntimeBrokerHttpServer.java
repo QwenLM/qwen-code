@@ -137,7 +137,10 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
                             runtimeSessionId, "acquired", true));
                     RuntimeScope scope = record.getSession().getScope();
                     response.put("scope", Map.of("tenantId", scope.getTenantId(),
-                            "workspaceId", scope.getWorkspaceId(), "capabilityDigest", scope.getCapabilityDigest()));
+                            "workspaceId", scope.getWorkspaceId(), "workspaceGeneration", scope.getWorkspaceGeneration(),
+                            "capabilityDigest", scope.getCapabilityDigest()));
+                    response.put("runtime", Map.of("bindingId", record.getBindingId(),
+                            "generation", Long.toString(record.getRuntimeGeneration())));
                     return response;
                 });
     }

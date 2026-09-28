@@ -162,6 +162,16 @@ public final class RuntimeBrokerService implements AutoCloseable {
         String runtimeId = BrokerValues.requireWellFormed(
                 BrokerValues.requireId(runtimeSessionId, "runtimeSessionId"),
                 "runtimeSessionId");
+        CompletableFuture<SessionContext> current = sessions.get(runtimeId);
+        if (current != null) {
+            return current.thenApply(context -> {
+                synchronized (context) {
+                    requireSameSession(context.session(), new RuntimeSession(harnessId,
+                            runtimeId, turnKind, context.session().getScope()));
+                    return requireReadySessionRecord(context);
+                }
+            });
+        }
         return resolveScope(harnessId).thenCompose(scope -> {
             RuntimeSession session = new RuntimeSession(harnessId,
                     runtimeId, turnKind, scope);
@@ -176,12 +186,15 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 "operation");
         Object kind = immutable.get("kind");
         if (!(kind instanceof String)
-                || !CONTROL_OPERATIONS.contains(kind)) {
+                || !CONTROL_OPERATIONS.contains(kind) && !ManagedMcpProtocol.isOperation(immutable)) {
             throw invalid("runtime_control_operation_invalid",
                     "unsupported Runtime control operation");
         }
         return requireReadySession(harnessSessionId, runtimeSessionId)
                 .thenCompose(context -> {
+                    if (ManagedMcpProtocol.isOperation(immutable)) {
+                        ManagedMcpProtocol.validateSession(context.session(), immutable);
+                    }
                     synchronized (context) {
                         requireReadySessionRecord(context);
                         context.beginControl();

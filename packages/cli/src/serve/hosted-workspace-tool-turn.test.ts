@@ -437,3 +437,44 @@ it.each(['x'.repeat(70 * 1024), '中'.repeat(23 * 1024), '"'.repeat(17 * 1024)])
     expect(broker.prepare).not.toHaveBeenCalled();
   },
 );
+
+it('executes against the declarations actually advertised before a catalog replacement', async () => {
+  let name = 'mcp_old';
+  const input = { toolName: 'managed_mcp_call', input: { pinned: 'original' } };
+  const mcp = {
+    broker: { ...broker, runtimeSessionId: 'mcp:session' },
+    ensureReady: async () => undefined,
+    tools: () => [{ name, parametersJsonSchema: { type: 'object' } }],
+    toolInput: vi.fn(() => input),
+  };
+  const mcpTurn = new HostedWorkspaceToolTurn(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    harness,
+    'prompt',
+    async () => randomUUID(),
+    () => true,
+    mcp as unknown as import('./hosted-mcp-session.js').HostedMcpSession,
+  );
+  expect((await mcpTurn.declarations()).at(-1)?.name).toBe('mcp_old');
+  name = 'mcp_new';
+  const call = { ...calls[0], name: 'mcp_old', args: { text: 'hello' } };
+  await mcpTurn.execute(
+    [call],
+    [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
+    'model',
+    new AbortController().signal,
+  );
+  expect(broker.execute).toHaveBeenCalledWith(
+    expect.any(String),
+    JSON.stringify(input),
+    expect.any(AbortSignal),
+  );
+  const intent = session.authority
+    .eventsInSequenceRange(1, session.authority.committedSequence)
+    .find((event) => event.kind === 'tool.intent');
+  const saved = await session.resources.read(
+    intent!.payload['toolDefinitionRef'] as unknown as ManagedSessionDurableRef,
+  );
+  expect(JSON.parse(saved.toString()).name).toBe('mcp_old');
+});

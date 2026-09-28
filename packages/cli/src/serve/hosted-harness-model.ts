@@ -13,10 +13,7 @@ import { loadCliConfig, type CliArgs } from '../config/config.js';
 import { loadSettings } from '../config/settings.js';
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 
-import {
-  HOSTED_WORKSPACE_FILE_TOOLS,
-  type HostedWorkspaceToolTurn,
-} from './hosted-workspace-tool-turn.js';
+import type { HostedWorkspaceToolTurn } from './hosted-workspace-tool-turn.js';
 
 export interface HostedHarnessModelResult {
   text: string;
@@ -31,7 +28,10 @@ export async function runHostedHarnessTextTurn(input: {
   prompt: string;
   promptId: string;
   signal: AbortSignal;
-  toolTurn?: Pick<HostedWorkspaceToolTurn, 'execute' | 'consumeResults'>;
+  toolTurn?: Pick<
+    HostedWorkspaceToolTurn,
+    'execute' | 'consumeResults' | 'declarations'
+  >;
 }): Promise<HostedHarnessModelResult> {
   const settings = loadSettings(input.cwd, {
     skipLoadEnvironment: true,
@@ -114,9 +114,11 @@ export async function runHostedHarnessTextTurn(input: {
     for (let round = 0; round < 16; round++) {
       input.signal.throwIfAborted();
       if (input.toolTurn)
-        client
-          .getChat()
-          .setTools([{ functionDeclarations: HOSTED_WORKSPACE_FILE_TOOLS }]);
+        client.getChat().setTools([
+          {
+            functionDeclarations: await input.toolTurn.declarations(),
+          },
+        ]);
       let calls: ToolCallRequestInfo[] = [];
       let text = '';
       let finished = false;

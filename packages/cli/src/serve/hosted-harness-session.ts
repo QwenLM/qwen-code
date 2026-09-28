@@ -35,6 +35,13 @@ import {
   HostedWorkspaceToolTurn,
 } from './hosted-workspace-tool-turn.js';
 import type { HostedHarnessContract } from './hosted-harness-contract.js';
+import {
+  HOSTED_MCP_PROFILE,
+  HostedMcpSession,
+  HostedMcpRecoveryRequiredError,
+  parseHostedMcpServers,
+  type HostedMcpServerPin,
+} from './hosted-mcp-session.js';
 
 const UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
@@ -49,7 +56,11 @@ interface HostedSession {
   active?: { promptId: string; digest: string; abort: AbortController };
   admissions: Map<string, { digest: string; lastEventId: number }>;
   blocked: boolean;
-  toolProfile?: typeof HOSTED_WORKSPACE_FILE_PROFILE;
+  toolProfile?:
+    | typeof HOSTED_WORKSPACE_FILE_PROFILE
+    | typeof HOSTED_MCP_PROFILE;
+  mcp?: HostedMcpSession;
+  mcpBusy?: boolean;
 }
 
 function object(value: unknown): Record<string, unknown> | null {
@@ -239,9 +250,22 @@ export function registerHostedHarnessSessionRoutes(
     const toolProfile = body?.['toolProfile'];
     if (
       toolProfile !== undefined &&
-      (toolProfile !== HOSTED_WORKSPACE_FILE_PROFILE || !brokerOptions)
+      (![HOSTED_WORKSPACE_FILE_PROFILE, HOSTED_MCP_PROFILE].includes(
+        String(toolProfile),
+      ) ||
+        !brokerOptions)
     ) {
       error(res, 400, 'hosted_tool_profile_unavailable');
+      return;
+    }
+    let mcpServers: readonly HostedMcpServerPin[] | undefined;
+    try {
+      if (toolProfile === HOSTED_MCP_PROFILE)
+        mcpServers = parseHostedMcpServers(body?.['mcpServers']);
+      else if (body?.['mcpServers'] !== undefined)
+        throw new Error('MCP requires its explicit profile.');
+    } catch {
+      error(res, 400, 'invalid_hosted_mcp_servers');
       return;
     }
     if (
@@ -290,6 +314,7 @@ export function registerHostedHarnessSessionRoutes(
                   engine: 'managed',
                   sessionId,
                   ...(toolProfile ? { toolProfile } : {}),
+                  ...(mcpServers ? { mcpServers } : {}),
                 }),
               ),
             ),
@@ -320,7 +345,9 @@ export function registerHostedHarnessSessionRoutes(
         streams: new Set(),
         admissions: new Map(),
         blocked: false,
-        ...(toolProfile ? { toolProfile } : {}),
+        ...(toolProfile
+          ? { toolProfile: toolProfile as HostedSession['toolProfile'] }
+          : {}),
       };
       const definition = object(
         JSON.parse(
@@ -331,11 +358,17 @@ export function registerHostedHarnessSessionRoutes(
           ).toString('utf8'),
         ),
       );
-      if (definition?.['toolProfile'] !== toolProfile) {
+      if (
+        definition?.['toolProfile'] !== toolProfile ||
+        JSON.stringify(definition?.['mcpServers']) !==
+          JSON.stringify(mcpServers)
+      ) {
         await managed.close();
         error(res, 409, 'hosted_tool_profile_conflict');
         return;
       }
+      if (mcpServers && brokerOptions)
+        session.mcp = new HostedMcpSession(brokerOptions, managed, mcpServers);
       const restore = await managed.authority.restoreBundle();
       if (restore.recoveryStatus !== 'ok' || hasUnsettledInput(session)) {
         await managed.close();
@@ -375,6 +408,7 @@ export function registerHostedHarnessSessionRoutes(
   app.post('/session/:id/prompt', (req, res) => {
     const session = identity(req, sessions);
     if (!session) return error(res, 404, 'hosted_session_not_found');
+    if (session.mcpBusy) return error(res, 409, 'hosted_mcp_operation_active');
     const body = object(req.body);
     const promptId = body?.['promptId'];
     const prompt = body?.['prompt'];
@@ -431,7 +465,7 @@ export function registerHostedHarnessSessionRoutes(
       return;
     }
     if (session.active) return error(res, 409, 'hosted_turn_active');
-    if (session.blocked)
+    if (session.blocked || session.mcp?.hasPendingOperations())
       return error(res, 409, 'hosted_turn_recovery_required');
     if (hasAcceptedInput(session, promptId)) {
       return error(res, 409, 'hosted_prompt_recovery_required');
@@ -458,6 +492,7 @@ export function registerHostedHarnessSessionRoutes(
           systemPayload: { promptId, state, stopReason, endedAt: Date.now() },
         });
       try {
+        await session.mcp?.ensureReady();
         const authority = session.managed.authority;
         const contentRef = await session.managed.resources.publish(
           'managed-input',
@@ -542,6 +577,7 @@ export function registerHostedHarnessSessionRoutes(
                       JSON.stringify(messageRecord(type, parts, model)),
                     ) <=
                     HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes,
+                  session.mcp,
                 )
               : undefined;
           let state: 'completed' | 'cancelled' | 'error' = 'completed';
@@ -562,7 +598,11 @@ export function registerHostedHarnessSessionRoutes(
               result.model,
             );
           } catch (cause) {
-            if (cause instanceof HostedToolRecoveryRequiredError) throw cause;
+            if (
+              cause instanceof HostedToolRecoveryRequiredError ||
+              cause instanceof HostedMcpRecoveryRequiredError
+            )
+              throw cause;
             state = abort.signal.aborted ? 'cancelled' : 'error';
             stopReason = state;
             if (state === 'error') {
@@ -577,8 +617,13 @@ export function registerHostedHarnessSessionRoutes(
           settled = true;
         });
       } catch (cause) {
-        if (cause instanceof HostedToolRecoveryRequiredError) {
-          session.blocked = true;
+        if (
+          cause instanceof HostedToolRecoveryRequiredError ||
+          cause instanceof HostedMcpRecoveryRequiredError
+        ) {
+          if (admitted) session.blocked = true;
+          else if (!res.headersSent)
+            error(res, 503, 'hosted_mcp_recovery_required');
           writeStderrLineSafe(
             `qwen serve: Hosted Harness turn ${promptId} is recovery blocked: ${String(cause.cause)}`,
           );
@@ -606,6 +651,131 @@ export function registerHostedHarnessSessionRoutes(
         session.active = undefined;
       }
     })();
+  });
+
+  app.get('/session/:id/mcp-catalog', (req, res) => {
+    const session = identity(req, sessions);
+    if (!session) return error(res, 404, 'hosted_session_not_found');
+    if (!session.mcp) return error(res, 409, 'hosted_mcp_unavailable');
+    res.json({ catalogs: session.mcp.getCatalogs() });
+  });
+
+  app.post('/session/:id/mcp/configurations', (req, res) => {
+    const session = identity(req, sessions);
+    if (!session) return error(res, 404, 'hosted_session_not_found');
+    if (!session.mcp) return error(res, 409, 'hosted_mcp_unavailable');
+    if (session.mcpBusy || session.blocked)
+      return error(res, 409, 'hosted_mcp_operation_active');
+    const body = object(req.body);
+    const operationId = body?.['operationId'];
+    const expectedRevision = body?.['expectedRevision'];
+    let pin: HostedMcpServerPin;
+    try {
+      if (
+        typeof operationId !== 'string' ||
+        !UUID.test(operationId) ||
+        !Number.isSafeInteger(expectedRevision) ||
+        Number(expectedRevision) < 1
+      )
+        throw new Error('Invalid configuration command.');
+      [pin] = parseHostedMcpServers([body?.['server']]);
+    } catch {
+      return error(res, 400, 'invalid_mcp_configuration');
+    }
+    session.mcpBusy = true;
+    void session.mcp
+      .configure(operationId as string, pin, Number(expectedRevision))
+      .then(
+        () => res.status(202).json({ operationId, state: 'settled' }),
+        () => {
+          error(res, 409, 'hosted_mcp_configuration_failed');
+        },
+      )
+      .finally(() => {
+        session.mcpBusy = false;
+      });
+  });
+
+  app.post('/session/:id/mcp/operations', (req, res) => {
+    const session = identity(req, sessions);
+    if (!session) return error(res, 404, 'hosted_session_not_found');
+    if (!session.mcp) return error(res, 409, 'hosted_mcp_unavailable');
+    if (session.active || session.mcpBusy)
+      return error(res, 409, 'hosted_turn_active');
+    const body = object(req.body);
+    const operationId = body?.['operationId'];
+    const serverId = body?.['serverId'];
+    const request = object(body?.['request']);
+    if (
+      typeof operationId !== 'string' ||
+      !UUID.test(operationId) ||
+      typeof serverId !== 'string' ||
+      !request
+    )
+      return error(res, 400, 'invalid_mcp_operation');
+    let invocation: Parameters<HostedMcpSession['invoke']>[2];
+    if (
+      request['kind'] === 'resource_read' &&
+      Object.keys(request).sort().join(',') === 'kind,uri' &&
+      typeof request['uri'] === 'string' &&
+      request['uri'].trim().length > 0
+    ) {
+      invocation = { kind: 'resource_read', uri: request['uri'] };
+    } else if (
+      request['kind'] === 'prompt_get' &&
+      Object.keys(request).sort().join(',') === 'arguments,kind,name' &&
+      typeof request['name'] === 'string' &&
+      request['name'].trim().length > 0 &&
+      object(request['arguments']) &&
+      Object.values(request['arguments'] as object).every(
+        (value) => typeof value === 'string',
+      )
+    ) {
+      invocation = {
+        kind: 'prompt_get',
+        name: request['name'],
+        arguments: request['arguments'] as Record<string, string>,
+      };
+    } else return error(res, 400, 'invalid_mcp_operation');
+    if (
+      (session.blocked || session.mcp.hasPendingOperations()) &&
+      !session.managed.authority.extensionRecord('mcp_operation', operationId)
+    )
+      return error(res, 409, 'hosted_turn_recovery_required');
+    session.mcpBusy = true;
+    void session.mcp
+      .invoke(operationId, serverId, invocation)
+      .then(
+        (response) => {
+          res.status(202).json(response);
+        },
+        () => {
+          error(res, 503, 'hosted_mcp_operation_failed');
+        },
+      )
+      .finally(() => {
+        session.mcpBusy = false;
+      });
+  });
+
+  app.post('/session/:id/mcp/operations/:operationId/cancel', (req, res) => {
+    const session = identity(req, sessions);
+    if (!session) return error(res, 404, 'hosted_session_not_found');
+    if (!session.mcp) return error(res, 409, 'hosted_mcp_unavailable');
+    void session.mcp.cancel(req.params['operationId']).then(
+      (response) => res.status(202).json(response),
+      () => error(res, 503, 'hosted_mcp_cancel_failed'),
+    );
+  });
+
+  app.get('/session/:id/mcp/operations/:operationId', (req, res) => {
+    const session = identity(req, sessions);
+    if (!session) return error(res, 404, 'hosted_session_not_found');
+    if (!session.mcp) return error(res, 409, 'hosted_mcp_unavailable');
+    void session.mcp.status(req.params['operationId']).then(
+      (response) => res.json(response),
+      () => error(res, 503, 'hosted_mcp_status_failed'),
+    );
   });
 
   app.get('/session/:id/events', (req, res) => {
@@ -680,7 +850,8 @@ export function registerHostedHarnessSessionRoutes(
     res.json({
       sessionId: req.params['id'],
       hasActivePrompt: !!session.active,
-      recoveryBlocked: session.blocked,
+      recoveryBlocked:
+        session.blocked || (session.mcp?.recoveryBlocked ?? false),
     });
   });
   app.get('/session/:id/transcript', (req, res) => {
@@ -760,14 +931,19 @@ export function registerHostedHarnessSessionRoutes(
   ): Promise<void> => {
     const session = identity(req, sessions, allowMissingClientId);
     if (!session) return error(res, 404, 'hosted_session_not_found');
-    if (session.active) return error(res, 409, 'hosted_turn_active');
+    if (session.active || session.mcpBusy)
+      return error(res, 409, 'hosted_turn_active');
+    session.mcpBusy = true;
     try {
+      await session.mcp?.close();
       await session.managed.close();
       for (const stop of session.streams) stop();
       sessions.delete(req.params['id']);
       res.sendStatus(204);
     } catch {
       error(res, 503, 'managed_session_close_failed');
+    } finally {
+      session.mcpBusy = false;
     }
   };
   app.post('/session/:id/detach', (req, res) => {

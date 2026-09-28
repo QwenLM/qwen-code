@@ -24,10 +24,15 @@ class RuntimeBrokerHttpServerTest {
     @Test
     void unsupportedOperationsNeverDispatchOrClaimResolution() throws Exception {
         try (Fixture fixture = new Fixture()) {
-            assertEquals(200, fixture.post("/tool-sessions:acquire", Map.of(
+            HttpResponse<String> acquired = fixture.post("/tool-sessions:acquire", Map.of(
                     "protocolVersion", 1, "requestId", "acquire",
                     "harnessSessionId", "harness", "runtimeSessionId", "runtime",
-                    "turnKind", "bootstrap")).statusCode());
+                    "turnKind", "bootstrap"));
+            assertEquals(200, acquired.statusCode());
+            var body = JSON.parseObject(acquired.body());
+            assertEquals("generation", body.getJSONObject("scope").getString("workspaceGeneration"));
+            assertEquals("1", body.getJSONObject("runtime").getString("generation"));
+            assertTrue(!body.getJSONObject("runtime").getString("bindingId").isEmpty());
             for (String path : new String[] {"/executions/call:resolve"}) {
                 HttpResponse<String> response = fixture.post(path, Map.of(
                         "protocolVersion", 1, "requestId", "request",

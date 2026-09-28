@@ -37,6 +37,14 @@ import {
   WORKSPACE_ACTIVATION_ROUTE,
   WORKSPACE_CAPABILITY_DIGEST,
 } from './managed-workspace-activation.js';
+import {
+  ManagedMcpRuntime,
+  loadManagedMcpManifest,
+} from './managed-mcp-runtime.js';
+import {
+  MANAGED_MCP_WORKER_ROUTE,
+  registerManagedMcpRoutes,
+} from './managed-mcp-routes.js';
 
 /**
  * The routes of a worker booted with v2. Attestation v2 is not among them,
@@ -45,6 +53,7 @@ import {
 export const MANAGED_CONTEXT_WORKER_ROUTES = Object.freeze([
   ...MANAGED_CONTEXT_ROUTES,
   WORKSPACE_ACTIVATION_ROUTE,
+  MANAGED_MCP_WORKER_ROUTE,
   ...OWNED_MANAGED_RUNTIME_ROUTES.filter((route) => route.key !== 'attest'),
 ]);
 
@@ -164,35 +173,51 @@ export function registerManagedContextRoutes(
     handleManagedRuntimeJsonError,
   );
 
-  const executor = new ManagedToolExecutor(async (reference) => {
-    const isActive = () =>
-      !requiresActivation || activations.isActive(reference.sessionId);
-    if (!isActive()) {
-      return undefined;
-    }
-    const binding = installations.installed(reference.sessionId);
-    const directory = binding && (await mount.resolve(binding.cwdRelative));
-    if (directory === undefined) {
-      return undefined;
-    }
-    // Built for each call, so the tools see the directory just verified. Built
-    // in the Session's context, so core does not hold the configuration as
-    // the process's debug log session.
-    const sessionId = runtimeSessionKey(
-      boot.runtimeInstanceId,
-      reference.sessionId,
-    );
-    return {
-      ...sessionIdContext.run(sessionId, () =>
-        createManagedToolSet(
-          directory,
-          sessionId,
-          requiresActivation ? boot.mountRoot : directory,
+  const mcp = new ManagedMcpRuntime(
+    boot,
+    async (runtimeSessionId) => {
+      if (!requiresActivation || !activations.isActive(runtimeSessionId))
+        return undefined;
+      const binding = installations.installed(runtimeSessionId);
+      const directory = binding && (await mount.resolve(binding.cwdRelative));
+      return activations.isActive(runtimeSessionId) ? directory : undefined;
+    },
+    loadManagedMcpManifest(process.env['QWEN_MANAGED_MCP_CONFIG']),
+  );
+  registerManagedMcpRoutes(app, boot, mcp);
+  const executor = new ManagedToolExecutor(
+    async (reference) => {
+      const isActive = () =>
+        !requiresActivation || activations.isActive(reference.sessionId);
+      if (!isActive()) {
+        return undefined;
+      }
+      const binding = installations.installed(reference.sessionId);
+      const directory = binding && (await mount.resolve(binding.cwdRelative));
+      if (directory === undefined) {
+        return undefined;
+      }
+      // Built for each call, so the tools see the directory just verified. Built
+      // in the Session's context, so core does not hold the configuration as
+      // the process's debug log session.
+      const sessionId = runtimeSessionKey(
+        boot.runtimeInstanceId,
+        reference.sessionId,
+      );
+      return {
+        ...sessionIdContext.run(sessionId, () =>
+          createManagedToolSet(
+            directory,
+            sessionId,
+            requiresActivation ? boot.mountRoot : directory,
+          ),
         ),
-      ),
-      isActive,
-    };
-  }, capturePublisher);
+        isActive,
+      };
+    },
+    capturePublisher,
+    mcp,
+  );
   activations.register(app, boot, installations, executor);
   registerManagedRuntimeToolRoutes(app, boot, executor);
   if (capturePublisher) {
