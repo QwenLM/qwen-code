@@ -59,6 +59,7 @@ turn's spend. That would contradict the "bounded by one pass" claim in
 ---
 
 中文摘要：本文是 #11206 预算契约的验收交接说明，以上内容均未实际运行。在本地构建里把 `DEFAULT_THREAD_TOKEN_BUDGET` 临时调低到 20k（不要提交），然后按矩阵逐行验证：
+
 - 运行中超预算时，由 agent 触发的 run 会在一个周期内被取消；
 - 由人触发的 run 不会被预算截断；
 - 崩溃重放的用量会被计入；
