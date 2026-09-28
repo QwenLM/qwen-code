@@ -3,8 +3,11 @@ package com.alibaba.qwen.code.managedagent.api;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.CommandAdmission;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellAdmission;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellCancelRequest;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellCommandOperation;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellCreateRequest;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellLifecycleRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellListRequest;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellOperationRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellPage;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSession;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSessionRequest;
@@ -14,6 +17,10 @@ import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTranscript;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTranscriptRequest;
 import com.alibaba.qwen.code.managedagent.service.ManagedAgentService;
 import com.alibaba.qwen.code.managedagent.service.ManagedEventStreamService;
+import com.alibaba.qwen.code.managedagent.service.SessionLifecycleService;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
 import jakarta.validation.Valid;
 import java.util.Map;
 import org.springframework.http.HttpStatus;
@@ -30,11 +37,14 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 public class WebShellAgentController {
     private final ManagedAgentService service;
     private final ManagedEventStreamService streams;
+    private final SessionLifecycleService lifecycle;
 
     public WebShellAgentController(ManagedAgentService service,
-            ManagedEventStreamService streams) {
+            ManagedEventStreamService streams,
+            SessionLifecycleService lifecycle) {
         this.service = service;
         this.streams = streams;
+        this.lifecycle = lifecycle;
     }
 
     @PostMapping("/sessions/query")
@@ -75,7 +85,10 @@ public class WebShellAgentController {
 
     @PostMapping("/sessions/create")
     public ResponseEntity<WebShellAdmission> create(TenantContext tenant,
-            @Valid @RequestBody WebShellCreateRequest request) {
+            @Valid @RequestBody WebShellCreateRequest request,
+            HttpServletRequest httpRequest, HttpServletResponse httpResponse) {
+        RequestIdFilter.useClientId(httpRequest, httpResponse,
+                request.requestId());
         WorkspaceSelection selection = null;
         if (request.workspace() != null) {
             if (request.workspace().isNull()) {
@@ -94,18 +107,21 @@ public class WebShellAgentController {
         validateTraceMetadata(request.metadata());
         WebShellAdmission admission = webShell(selection == null
                 ? service.createSession(tenant.tenantId(),
-                        request.idempotencyKey(), request.agentId(),
+                        request.idempotencyKey(), request.agentId(), null,
                         request.title(), null, request.input())
                 : service.createWorkspaceSession(tenant.tenantId(),
                         tenant.requireActorId(), request.idempotencyKey(),
-                        request.agentId(), request.title(), null,
+                        request.agentId(), null, request.title(), null,
                         request.input(), selection));
         return ResponseEntity.accepted().body(admission);
     }
 
     @PostMapping("/turns/submit")
     public ResponseEntity<WebShellAdmission> submit(TenantContext tenant,
-            @Valid @RequestBody WebShellSubmitRequest request) {
+            @Valid @RequestBody WebShellSubmitRequest request,
+            HttpServletRequest httpRequest, HttpServletResponse httpResponse) {
+        RequestIdFilter.useClientId(httpRequest, httpResponse,
+                request.requestId());
         validateTraceMetadata(request.metadata());
         WebShellAdmission admission = webShell(service.submitTurn(
                 tenant.tenantId(), tenant.actorId(),
@@ -116,12 +132,51 @@ public class WebShellAgentController {
 
     @PostMapping("/turns/cancel")
     public ResponseEntity<WebShellAdmission> cancel(TenantContext tenant,
-            @Valid @RequestBody WebShellCancelRequest request) {
+            @Valid @RequestBody WebShellCancelRequest request,
+            HttpServletRequest httpRequest, HttpServletResponse httpResponse) {
+        RequestIdFilter.useClientId(httpRequest, httpResponse,
+                request.requestId());
         WebShellAdmission admission = webShell(service.cancelTurn(
                 tenant.tenantId(), tenant.actorId(),
                 request.idempotencyKey(), request.sessionId(),
                 request.turnId()));
         return ResponseEntity.accepted().body(admission);
+    }
+
+    @PostMapping("/sessions/close")
+    public ResponseEntity<WebShellCommandOperation> close(
+            TenantContext tenant,
+            @Valid @RequestBody WebShellLifecycleRequest request) {
+        return operation(tenant, request, OperationKind.CLOSE);
+    }
+
+    @PostMapping("/sessions/archive")
+    public ResponseEntity<WebShellCommandOperation> archive(
+            TenantContext tenant,
+            @Valid @RequestBody WebShellLifecycleRequest request) {
+        return operation(tenant, request, OperationKind.ARCHIVE);
+    }
+
+    @PostMapping("/sessions/delete")
+    public ResponseEntity<WebShellCommandOperation> delete(
+            TenantContext tenant,
+            @Valid @RequestBody WebShellLifecycleRequest request) {
+        return operation(tenant, request, OperationKind.DELETE);
+    }
+
+    @PostMapping("/operations/query")
+    public WebShellCommandOperation queryOperation(TenantContext tenant,
+            @Valid @RequestBody WebShellOperationRequest request) {
+        return lifecycle.getWebShell(tenant.tenantId(), tenant.actorId(),
+                request.sessionId(), request.operationId());
+    }
+
+    private ResponseEntity<WebShellCommandOperation> operation(
+            TenantContext tenant, WebShellLifecycleRequest request,
+            OperationKind kind) {
+        return ResponseEntity.accepted().body(lifecycle.admitWebShell(
+                tenant.tenantId(), tenant.actorId(),
+                request.idempotencyKey(), request.sessionId(), kind));
     }
 
     private static void validateTraceMetadata(Map<String, Object> metadata) {

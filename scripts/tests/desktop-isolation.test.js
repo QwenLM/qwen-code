@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// Two agreements nothing else in the suite reads, both of which fail green.
+// Three agreements nothing else in the suite reads, all of which fail green.
 //
 // 1. `scripts/check-desktop-isolation.js` keeps a `nativePrefixes` list, and
 //    the root workspace manifests keep a `!packages/*` negation per native
@@ -22,6 +22,13 @@
 //    `working-directory:` values. They have to name the same directory as each
 //    other and a directory that exists, or the job skips and reports success
 //    having compiled nothing.
+//
+// 3. That job's changed-files filter lists both updater-feed scripts.
+//    `packages/desktop/scripts/test-release.js` is the only test either of them
+//    has and it runs in this job, so a filter naming one script and not the
+//    other lets a PR that edits only the unlisted one skip its own test and
+//    still report green. The filter is only worth pinning together with the
+//    lane it gates, so the same test asserts that lane still runs the script.
 //
 // The npm/pnpm mirror of the negation list is already pinned by
 // `package-scripts.test.js` ("mirrors the npm workspace boundaries in
@@ -209,5 +216,47 @@ describe('desktop_shell CI job — the crate path agrees with itself', () => {
       filterAlternative.endsWith('/'),
       `the filter alternative ${filterAlternative} has no trailing slash, so the changed-files filter also matches sibling paths that merely start with it`,
     ).toBe(true);
+  });
+
+  it('lists both updater-feed scripts, so either one triggers the lane that tests them', () => {
+    // Read the alternatives out of the `grep -Eq '^(...)'` call instead of
+    // searching the whole run script. A substring match cannot tell an
+    // alternative of the anchored ERE from the same text in one of that step's
+    // comment lines, and it does not pin the `-E` mode the pattern's `\.`, `|`
+    // and `^(…)` depend on: under `grep -Fq` they are literals, the group
+    // never matches, every PR gets changed=false, and the job reports success
+    // having compiled nothing.
+    const pattern = /grep -Eq '\^\((.*)\)'/u.exec(filterRun)?.[1];
+    expect(
+      pattern,
+      "the changed-files filter is no longer an anchored `grep -Eq '^(...)'` alternation, so its `\\.` escapes and `|` separators are literals and no changed file ever matches",
+    ).toBeDefined();
+    const alternatives = pattern.split('|');
+    for (const script of [
+      'create-desktop-update-manifest',
+      'create-electron-bridge-manifest',
+    ]) {
+      expect(
+        alternatives,
+        `the changed-files filter does not list ${script}.mjs as an alternative, so a PR touching only that script skips 'Run desktop release tests' and reports green having tested nothing`,
+      ).toContain(`\\.github/scripts/${script}\\.mjs`);
+    }
+
+    // The filter is only the first link: the mechanism that closes #12806 is
+    // filter matches -> desktop_shell runs -> `Run desktop release tests`
+    // executes test-release.js -> the matrix/feed parity assert fires. Pin the
+    // last two links as well, or the filter can gate a lane that tests nothing.
+    // `toContain` on the changed-files conjunct, not equality on the whole
+    // `if:` -- that gate also carries `runner.os == 'Linux'`, which the
+    // windows-2022 leg of the job matrix legitimately does not satisfy.
+    const lane = stepNamed('Run desktop release tests');
+    expect(
+      String(lane?.run ?? ''),
+      'desktop_shell no longer runs test-release.js, so the changed-files filter gates a lane that tests nothing',
+    ).toContain('node scripts/test-release.js');
+    expect(
+      String(lane?.if ?? ''),
+      'the test-release.js lane is no longer gated by the filter this test pins, so the two can drift apart silently',
+    ).toContain("steps.filter.outputs.changed == 'true'");
   });
 });

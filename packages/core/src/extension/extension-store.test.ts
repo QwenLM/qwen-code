@@ -2860,3 +2860,360 @@ describe('ExtensionStore', () => {
     );
   });
 });
+
+describe('ExtensionStore.inspectEmptiness', () => {
+  let root: string;
+  let extensionsDir: string;
+  let storeDir: string;
+  const identity = { id: 'a'.repeat(64), name: 'demo' };
+
+  beforeEach(async () => {
+    root = await fsp.mkdtemp(path.join(os.tmpdir(), 'qwen-extension-empty-'));
+    extensionsDir = path.join(root, 'extensions');
+    storeDir = path.join(root, 'extension-store');
+  });
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    await fsp.rm(root, { recursive: true, force: true });
+  });
+
+  const makeStore = () =>
+    new ExtensionStore({
+      extensionsDir,
+      storeDir,
+      enablementPath: path.join(extensionsDir, 'extension-enablement.json'),
+    });
+
+  // Every entry under the root with its bytes and identity, to prove a read
+  // leaves the tree exactly as it found it.
+  const describeTree = async (): Promise<string[]> => {
+    const lines: string[] = [];
+    const walk = async (directory: string) => {
+      for (const entry of (await fsp.readdir(directory)).sort()) {
+        const entryPath = path.join(directory, entry);
+        const stats = await fsp.lstat(entryPath, { bigint: true });
+        const identityText = `${stats.ino}:${stats.mtimeNs}:${stats.ctimeNs}`;
+        if (stats.isDirectory()) {
+          lines.push(`${path.relative(root, entryPath)}/ ${identityText}`);
+          await walk(entryPath);
+        } else if (stats.isFile()) {
+          lines.push(
+            `${path.relative(root, entryPath)} ${identityText} ${await fsp.readFile(entryPath, 'utf8')}`,
+          );
+        } else {
+          lines.push(`${path.relative(root, entryPath)} link ${identityText}`);
+        }
+      }
+    };
+    await walk(root);
+    return lines;
+  };
+
+  const inspectReadOnly = async () => {
+    const before = await describeTree();
+    const result = await makeStore().inspectEmptiness();
+    expect(await describeTree()).toEqual(before);
+    return result;
+  };
+
+  it('proves an absent store empty', async () => {
+    await expect(inspectReadOnly()).resolves.toEqual({ status: 'empty' });
+  });
+
+  it('proves an initialized empty store empty', async () => {
+    await makeStore().ensureInitialized([]);
+
+    await expect(inspectReadOnly()).resolves.toEqual({ status: 'empty' });
+  });
+
+  it('accepts the files an idle reader and extension control files leave', async () => {
+    // A locked read of an absent state prepares the lock file and the
+    // transaction directories without writing a state.
+    await makeStore().readSnapshot();
+    await fsp.writeFile(
+      path.join(extensionsDir, 'extension-preferences.json'),
+      '{}',
+    );
+    await fsp.writeFile(path.join(extensionsDir, 'marketplaces.json'), '{}');
+    await fsp.mkdir(path.join(storeDir, 'plugin-data'));
+    expect(await fsp.readdir(storeDir)).not.toContain('state.json');
+
+    await expect(inspectReadOnly()).resolves.toEqual({ status: 'empty' });
+  });
+
+  it('accepts journals recovery quarantined and leftovers of interrupted state writes', async () => {
+    await makeStore().ensureInitialized([]);
+    await fsp.writeFile(path.join(storeDir, 'transactions', 'torn.json'), '{');
+    // The next store operation quarantines the torn journal for good.
+    await makeStore().ensureInitialized([]);
+    expect(await fsp.readdir(path.join(storeDir, 'transactions'))).toEqual([
+      expect.stringMatching(/^torn\.json\.corrupt-/),
+    ]);
+    await fsp.writeFile(
+      path.join(storeDir, 'state.json.0123456789ab.tmp'),
+      '{',
+    );
+    await fsp.writeFile(
+      path.join(storeDir, 'transactions', 'journal.json.0123456789ab.tmp'),
+      '{',
+    );
+
+    await expect(inspectReadOnly()).resolves.toEqual({ status: 'empty' });
+  });
+
+  it('reports an enablement file that is not a regular file as unknown', async () => {
+    // A FIFO would block the read, and a device's times change whenever any
+    // process writes to it. A directory shows the same check, placed outside
+    // the extensions directory, where it would count as an extension.
+    const enablementPath = path.join(root, 'enablement.json');
+    const store = new ExtensionStore({
+      extensionsDir,
+      storeDir,
+      enablementPath,
+    });
+    await store.ensureInitialized([]);
+    await fsp.rm(enablementPath, { force: true });
+    await fsp.mkdir(enablementPath);
+    const before = await describeTree();
+
+    await expect(store.inspectEmptiness()).resolves.toEqual({
+      status: 'unknown',
+      reason: 'the extension enablement file is not a regular file',
+    });
+    expect(await describeTree()).toEqual(before);
+  });
+
+  it('ignores entries the file system adds, such as .DS_Store', async () => {
+    await makeStore().ensureInitialized([]);
+    for (const directory of [
+      storeDir,
+      path.join(storeDir, 'staging'),
+      path.join(storeDir, 'rollback'),
+    ]) {
+      await fsp.writeFile(path.join(directory, '.DS_Store'), '');
+    }
+
+    await expect(inspectReadOnly()).resolves.toEqual({ status: 'empty' });
+  });
+
+  it('proves a store that keeps legacy rules for absent extensions empty', async () => {
+    await fsp.mkdir(extensionsDir, { recursive: true });
+    await fsp.writeFile(
+      path.join(extensionsDir, 'extension-enablement.json'),
+      JSON.stringify({ demo: { overrides: ['/w/'] } }),
+    );
+    // Every later initialization keeps the rules until "demo" is installed.
+    await makeStore().ensureInitialized([]);
+    await makeStore().ensureInitialized([]);
+    const state = JSON.parse(
+      await fsp.readFile(path.join(storeDir, 'state.json'), 'utf8'),
+    );
+    expect(state.extensions).toEqual({});
+    expect(Object.keys(state.legacyProjectionRemainder)).toEqual(['demo']);
+
+    await expect(inspectReadOnly()).resolves.toEqual({ status: 'empty' });
+  });
+
+  it.each([
+    [
+      'an extension directory',
+      async () => {
+        await fsp.mkdir(path.join(extensionsDir, 'demo'), { recursive: true });
+      },
+      'an extension directory is present',
+    ],
+    [
+      'a link to an extension directory',
+      async () => {
+        await fsp.mkdir(path.join(root, 'elsewhere'));
+        await fsp.mkdir(extensionsDir, { recursive: true });
+        await fsp.symlink(
+          path.join(root, 'elsewhere'),
+          path.join(extensionsDir, 'demo'),
+          'dir',
+        );
+      },
+      'an extension directory is present',
+    ],
+    [
+      'an extension recorded by the store',
+      async () => {
+        await makeStore().ensureInitialized([identity]);
+      },
+      'the extension store records extensions',
+    ],
+  ])('reports %s as installed', async (_name, arrange, reason) => {
+    await arrange();
+
+    await expect(inspectReadOnly()).resolves.toEqual({
+      status: 'installed',
+      reason,
+    });
+  });
+
+  it.each([
+    [
+      'a held lock',
+      async () => {
+        await makeStore().ensureInitialized([]);
+        await fsp.mkdir(path.join(storeDir, 'lock.lock'));
+      },
+      'the extension store is locked',
+    ],
+    [
+      'a transaction in progress',
+      async () => {
+        await makeStore().ensureInitialized([]);
+        await fsp.writeFile(
+          path.join(storeDir, 'transactions', 'journal.json'),
+          '{}',
+        );
+      },
+      'an extension store transaction is in progress or awaits recovery',
+    ],
+    [
+      'an interrupted install',
+      async () => {
+        const staging = await makeStore().createStagingDirectory();
+        await fsp.writeFile(path.join(staging, 'qwen-extension.json'), '{}');
+      },
+      'an extension install or removal is in progress or was interrupted',
+    ],
+    [
+      'a corrupt enablement file',
+      async () => {
+        await makeStore().ensureInitialized([]);
+        await fsp.writeFile(
+          path.join(extensionsDir, 'extension-enablement.json'),
+          '{',
+        );
+      },
+      'the extension enablement file is corrupt',
+    ],
+    [
+      'a previous state without a current one',
+      async () => {
+        await makeStore().ensureInitialized([]);
+        await fsp.rename(
+          path.join(storeDir, 'state.json'),
+          path.join(storeDir, 'state.previous.json'),
+        );
+      },
+      'the extension store state was replaced incompletely',
+    ],
+    [
+      'a corrupt state',
+      async () => {
+        await makeStore().ensureInitialized([]);
+        await fsp.writeFile(path.join(storeDir, 'state.json'), '{');
+      },
+      'the extension store state is corrupt',
+    ],
+    [
+      'a projection that disagrees with the state',
+      async () => {
+        await makeStore().ensureInitialized([]);
+        await fsp.writeFile(
+          path.join(extensionsDir, 'extension-enablement.json'),
+          JSON.stringify({ demo: { overrides: [] } }),
+        );
+      },
+      'the extension enablement projection needs reconciliation',
+    ],
+    [
+      'enablement records without a state',
+      async () => {
+        await fsp.mkdir(extensionsDir, { recursive: true });
+        await fsp.writeFile(
+          path.join(extensionsDir, 'extension-enablement.json'),
+          JSON.stringify({ demo: { overrides: [] } }),
+        );
+      },
+      'extension enablement exists without a store state',
+    ],
+    [
+      'an unexpected store entry',
+      async () => {
+        await makeStore().ensureInitialized([]);
+        await fsp.writeFile(path.join(storeDir, 'staging-note'), '');
+      },
+      'the extension store holds an unexpected entry',
+    ],
+    [
+      'a file named like the state that the store never writes',
+      async () => {
+        await makeStore().ensureInitialized([]);
+        await fsp.writeFile(path.join(storeDir, 'state.json.bak'), '{}');
+      },
+      'the extension store holds an unexpected entry',
+    ],
+    [
+      'a link in place of a transaction directory',
+      async () => {
+        await makeStore().ensureInitialized([]);
+        await fsp.mkdir(path.join(root, 'elsewhere'));
+        await fsp.rm(path.join(storeDir, 'rollback'), { recursive: true });
+        await fsp.symlink(
+          path.join(root, 'elsewhere'),
+          path.join(storeDir, 'rollback'),
+          'dir',
+        );
+      },
+      'the extension store holds an unexpected entry',
+    ],
+    [
+      'a dangling link in the extensions directory',
+      async () => {
+        await fsp.mkdir(extensionsDir, { recursive: true });
+        await fsp.symlink(
+          path.join(root, 'gone'),
+          path.join(extensionsDir, 'demo'),
+          'dir',
+        );
+      },
+      'the extension store could not be read (ENOENT)',
+    ],
+    [
+      'a transaction name that is not a directory',
+      async () => {
+        await makeStore().ensureInitialized([]);
+        await fsp.rm(path.join(storeDir, 'rollback'), { recursive: true });
+        await fsp.writeFile(path.join(storeDir, 'rollback'), '');
+      },
+      'the extension store could not be read (ENOTDIR)',
+    ],
+    [
+      'an extensions path that is not a directory',
+      async () => {
+        await fsp.writeFile(extensionsDir, '');
+      },
+      'the extension store could not be read (ENOTDIR)',
+    ],
+  ])('reports %s as unknown', async (_name, arrange, reason) => {
+    await arrange();
+
+    await expect(inspectReadOnly()).resolves.toEqual({
+      status: 'unknown',
+      reason,
+    });
+  });
+
+  it('reports a store that changes while it is read as unknown', async () => {
+    const store = makeStore();
+    await store.ensureInitialized([]);
+    const readFile = fsp.readFile.bind(fsp);
+    vi.spyOn(fsp, 'readFile').mockImplementationOnce(async (...args) => {
+      await fsp.writeFile(
+        path.join(storeDir, 'transactions', 'journal.json'),
+        '{}',
+      );
+      return await readFile(...(args as Parameters<typeof readFile>));
+    });
+
+    await expect(store.inspectEmptiness()).resolves.toEqual({
+      status: 'unknown',
+      reason: 'the extension store changed while it was read',
+    });
+  });
+});
