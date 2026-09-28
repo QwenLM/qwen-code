@@ -959,6 +959,8 @@ export class MemoryManager {
         new MemoryMigrationEvent({
           scope: params.scope,
           status: failed ? 'failed' : 'completed',
+          failure_reason:
+            result.indexRebuildError ?? (stalled ? 'stalled' : undefined),
           files_scanned: result.filesScanned,
           legacy_files: result.legacyFiles,
           remaining_legacy_files: result.remainingLegacyFiles,

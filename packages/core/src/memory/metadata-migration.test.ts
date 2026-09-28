@@ -32,6 +32,18 @@ import { parseAutoMemoryTopicDocument } from './structured-scan.js';
 
 vi.mock('../agents/forkedAgent.js', () => ({ runForkedAgent: vi.fn() }));
 
+const debugLogger = vi.hoisted(() => ({
+  debug: vi.fn(),
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+}));
+
+vi.mock('../utils/debugLogger.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../utils/debugLogger.js')>()),
+  createDebugLogger: () => debugLogger,
+}));
+
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
   return { ...actual };
@@ -1297,6 +1309,12 @@ describe('memory metadata migration', () => {
       remainingLegacyFiles: 0,
       indexRebuildError: expect.any(String),
     });
+    // The swallowed rebuild failure must still reach the debug channel —
+    // the in-memory record is gone at process exit.
+    expect(debugLogger.error).toHaveBeenCalledWith(
+      'Memory index rebuild failed:',
+      expect.any(Error),
+    );
     await fs.rmdir(index);
     const repaired = await runMemoryMetadataMigration(params);
     expect(repaired).toMatchObject({

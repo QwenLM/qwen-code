@@ -762,6 +762,7 @@ export async function runMemoryMetadataMigration(params: {
   try {
     await rebuildIndexes(roots);
   } catch (error) {
+    debugLogger.error('Memory index rebuild failed:', error);
     result.indexRebuildError =
       error instanceof Error ? error.message : String(error);
   }

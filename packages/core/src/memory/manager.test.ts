@@ -30,11 +30,13 @@ import { ToolNames } from '../tools/tool-names.js';
 
 const telemetryMocks = vi.hoisted(() => ({
   logMemoryExtract: vi.fn(),
+  logMemoryMigration: vi.fn(),
 }));
 
 vi.mock('../telemetry/index.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../telemetry/index.js')>()),
   logMemoryExtract: telemetryMocks.logMemoryExtract,
+  logMemoryMigration: telemetryMocks.logMemoryMigration,
 }));
 
 vi.mock('./extract.js', () => ({
@@ -829,6 +831,7 @@ describe('MemoryManager', () => {
     });
 
     it('preserves committed counts when the index rebuild fails', async () => {
+      telemetryMocks.logMemoryMigration.mockClear();
       await writeLegacy(getAutoMemoryRoot(projectRoot), 'project.md');
       vi.spyOn(
         metadataMigration,
@@ -867,6 +870,18 @@ describe('MemoryManager', () => {
           remainingLegacyFiles: 0,
           indexRebuildError: 'Index rebuild failed',
         },
+      });
+      // The telemetry event must agree with the task record: a failed run
+      // with the committed counts intact and the reason attached.
+      expect(telemetryMocks.logMemoryMigration).toHaveBeenCalledTimes(1);
+      expect(
+        telemetryMocks.logMemoryMigration.mock.calls[0]?.[1],
+      ).toMatchObject({
+        status: 'failed',
+        failure_reason: 'Index rebuild failed',
+        committed: 1,
+        failed: 0,
+        remaining_legacy_files: 0,
       });
       for (let attempt = 1; attempt < 3; attempt++) {
         const retry = await manager.scheduleMetadataMigration(params);
