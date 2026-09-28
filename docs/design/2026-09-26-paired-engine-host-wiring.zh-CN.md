@@ -13,6 +13,9 @@
 （B2a）。#12737 要求在普通宿主配对之前完成的切片均已合入：工作区契约（B2b，#12776
 与 #12807）和按引擎的运维行为（B2c，#12795），它们落实了
 [Q2/Q3 决定](https://github.com/QwenLM/qwen-code/issues/12737#issuecomment-5846370487)。
+Managed 引擎本身的设计见[普通宿主的 Managed 引擎](./2026-09-27-ordinary-host-managed-engine.zh-CN.md)。
+其 M1 切片完成下文 Managed 引擎接口中的 Legacy 拒绝与用途标记两项，该设计也确定了
+该接口的待解问题。
 
 ## 问题与当前行为
 
@@ -161,10 +164,10 @@ Bridge；Java 承载的 Managed WebShell 产品链路；Managed 分支（仍保�
 - Legacy 拒绝：在创建任何会话之前，确保每个未配对的、会恢复或 fork transcript 的
   Legacy 入口都拒绝它的会话——要么它的 transcript 带有这些入口已经拒绝的 Managed
   Session header，要么把拒绝扩展到它的 owner 记录。否则关闭开关会让 Managed 会话在
-  Legacy 上运行；
+  Legacy 上运行。引擎设计的 M1 把拒绝扩展到了 owner 记录；
 - 工作区控制：权限规则与 Skills 变更需要 Legacy 工作区控制通道（B2b），因此只有
   Managed 存活时无法应用。由引擎切片决定宿主是否为这些路由启动工作区控制；B2d 中
-  不会启动 Managed 通道，所以不会出现这种情况；
+  不会启动 Managed 通道，所以不会出现这种情况。引擎设计决定启动它（决定 3）；
 - 有界的评估：Bridge 以其 initialize 超时限制每次选择（包括 owner 读取），超时的
   选择会使创建或恢复失败，而不是选择 Legacy。因此评估必须在该预算内充分提前完成。
   抛出异常或 reject 的评估按 `unknown` 处理；选择器不保留失败细节，因此由引擎按兼容
@@ -172,7 +175,9 @@ Bridge；Java 承载的 Managed WebShell 产品链路；Managed 分支（仍保�
 - 用途标记：在注册引擎之前，每个延期用途的内部创建方都要标记其会话，或以其他方式
   保持 Legacy。worktree 重置产生的替代会话目前没有标记：它创建时不带 `worktree`，
   之后才移入 checkout。Live 对话在项目中启动的任务也以无来源的方式创建线程，由引擎
-  切片决定该线程是否属于 Live 用途。按上述规则，二者都是普通创建。
+  切片决定该线程是否属于 Live 用途。按上述规则，二者都是普通创建。引擎设计的 M1
+  用 worktree 元数据标记 reset 的替代会话，引擎设计把 Live 线程保留为普通创建
+  （决定 6）。
 
 B2d 不注册任何引擎。此时双引擎的 `managed` factory 以“不可用”错误拒绝。没有注册引擎
 时选择器永远不会返回 `managed`，因此不会走到这个 factory；它存在只是因为双引擎 Bridge
@@ -290,8 +295,10 @@ runtime 的作用域，其错误分类沿用 B2a。
   宿主上累积（B2a）。默认启用之前需要给出处理方案。
 - 用途规则依赖创建方标注的来源，而这些来源只能让会话失去资格。不标记其会话的延期
   用途内部创建方，在引擎出现后其会话就会变得有资格；Managed 引擎接口的用途标记一项
-  列出了已知情况，引擎切片还要重新审计其余创建方。
-- 目前未配对的 Legacy 宿主不识别 Managed owner 记录。在没有普通宿主创建 Managed 会话
-  时这没有影响；Managed 引擎接口把补上这一点列为引擎切片的前置条件，该切片也会确定
-  `session_execution_engine` 与 Managed Session header 的关系。
-- 引擎如何把评估所用的输入交给其宿主做重新核验，与引擎一起决定。
+  列出了已知情况，引擎切片还要重新审计其余创建方。引擎设计的 M1 记录了这次审计。
+- 在引擎设计的 M1 之前，未配对的 Legacy 宿主不识别 Managed owner 记录。在没有普通
+  宿主创建 Managed 会话时这没有影响；Managed 引擎接口把补上这一点列为引擎切片的前置
+  条件，该切片也确定 `session_execution_engine` 与 Managed Session header 的关系
+  （引擎设计，决定 1）。
+- 引擎如何把评估所用的输入交给其宿主做重新核验，与引擎一起决定：宿主重新读取并重新
+  评估同一份严格快照（引擎设计，决定 5）。

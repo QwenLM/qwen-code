@@ -28,7 +28,7 @@ public class ApiExceptionHandler {
     public ResponseEntity<Map<String, Object>> api(ApiException error,
             HttpServletRequest request, HttpServletResponse response) {
         return response(request, response, error.getStatus(), error.getCode(),
-                error.getMessage());
+                error.getMessage(), error.getDetails());
     }
 
     @ExceptionHandler(AsyncRequestNotUsableException.class)
@@ -71,16 +71,29 @@ public class ApiExceptionHandler {
 
     public static Map<String, Object> envelope(HttpServletRequest request,
             String code, String message) {
+        return envelope(request, code, message, Map.of());
+    }
+
+    private static Map<String, Object> envelope(HttpServletRequest request,
+            String code, String message, Map<String, Object> details) {
         Map<String, Object> error = new LinkedHashMap<>();
         error.put("code", code);
         error.put("message", message);
         error.put("request_id", RequestIdFilter.current(request));
+        error.putAll(details);
         return Map.of("error", error);
     }
 
     private static ResponseEntity<Map<String, Object>> response(
             HttpServletRequest request, HttpServletResponse response,
             HttpStatus status, String code, String message) {
+        return response(request, response, status, code, message, Map.of());
+    }
+
+    private static ResponseEntity<Map<String, Object>> response(
+            HttpServletRequest request, HttpServletResponse response,
+            HttpStatus status, String code, String message,
+            Map<String, Object> details) {
         // An SSE stream that already started cannot switch to an envelope.
         if (response.isCommitted()) {
             return null;
@@ -88,6 +101,6 @@ public class ApiExceptionHandler {
         // Preset so that an SSE-only Accept header still gets the envelope.
         return ResponseEntity.status(status)
                 .contentType(MediaType.APPLICATION_JSON)
-                .body(envelope(request, code, message));
+                .body(envelope(request, code, message, details));
     }
 }
