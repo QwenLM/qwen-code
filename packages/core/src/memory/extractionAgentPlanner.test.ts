@@ -106,14 +106,7 @@ describe('runAutoMemoryExtractionByAgent', () => {
         systemPrompt: expect.stringMatching(
           /category[\s\S]*usage_scenarios[\s\S]*discriminative retrieval terms or short phrases/,
         ),
-        tools: [
-          'read_file',
-          'grep_search',
-          'glob',
-          'run_shell_command',
-          'write_file',
-          'edit',
-        ],
+        tools: ['read_file', 'grep_search', 'glob', 'write_file', 'edit'],
         maxTurns: 5,
         maxTimeMinutes: 2,
       }),
@@ -124,6 +117,75 @@ describe('runAutoMemoryExtractionByAgent', () => {
       expect(systemPrompt).toContain(category);
     }
     expect(systemPrompt).toContain('at most 64 characters');
+  });
+
+  it('strips runtime reminders and hidden reasoning from inherited history', async () => {
+    vi.mocked(getCacheSafeParams).mockReturnValue({
+      generationConfig: {},
+      history: [
+        {
+          role: 'user',
+          parts: [
+            {
+              text: '<system-reminder>skill catalog</system-reminder>\n\nRemember that I prefer concise replies.',
+            },
+          ],
+        },
+        {
+          role: 'model',
+          parts: [
+            { thought: true, text: 'hidden reasoning' },
+            { functionCall: { name: 'read_file', args: { path: '/tmp/a' } } },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                name: 'read_file',
+                response: { output: 'large tool result' },
+              },
+            },
+          ],
+        },
+        { role: 'model', parts: [{ text: 'Understood.' }] },
+      ],
+      model: 'qwen3-coder-plus',
+      version: 1,
+    });
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      filesTouched: [],
+      filesWritten: [],
+    });
+
+    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp');
+
+    expect(vi.mocked(runForkedAgent).mock.calls[0]?.[0].extraHistory).toEqual([
+      {
+        role: 'user',
+        parts: [{ text: 'Remember that I prefer concise replies.' }],
+      },
+      {
+        role: 'model',
+        parts: [
+          { functionCall: { name: 'read_file', args: { path: '/tmp/a' } } },
+        ],
+      },
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              name: 'read_file',
+              response: { output: 'large tool result' },
+            },
+          },
+        ],
+      },
+      { role: 'model', parts: [{ text: 'Understood.' }] },
+    ]);
   });
 
   it('does not inherit the session auto-memory routing contract', async () => {
@@ -228,7 +290,7 @@ describe('runAutoMemoryExtractionByAgent', () => {
     });
   });
 
-  it('uses a scoped config that allows shell and denies outside writes', async () => {
+  it('uses a scoped config that denies shell and outside writes', async () => {
     vi.mocked(runForkedAgent).mockResolvedValue({
       status: 'completed',
       finalText: '',
@@ -240,7 +302,7 @@ describe('runAutoMemoryExtractionByAgent', () => {
     const call = vi.mocked(runForkedAgent).mock.calls[0]?.[0];
     const permissionManager = call?.config.getPermissionManager?.();
     expect(permissionManager).toBeDefined();
-    expect(await permissionManager!.isToolEnabled(ToolNames.SHELL)).toBe(true);
+    expect(await permissionManager!.isToolEnabled(ToolNames.SHELL)).toBe(false);
     expect(
       permissionManager!.findMatchingDenyRule({
         toolName: ToolNames.WRITE_FILE,
