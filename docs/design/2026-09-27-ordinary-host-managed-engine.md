@@ -6,11 +6,13 @@
 
 Design for the Managed execution engine of ordinary `qwen serve` hosts, the
 part of #12737 that [paired engine host wiring](./2026-09-26-paired-engine-host-wiring.md)
-(B2d, #12828) left out of scope, for #12380. Based on upstream `302e7d88ef`.
-It implements the "Managed engine seam" and the "Configuration compatibility
-contract" of the B2d design and splits the work into slices M1 to M6. Slice M1,
-the preconditions the B2d design requires before any Managed session exists
-(Legacy refusal and purpose marking), is implemented with this document. M2 to
+(B2d, #12828) left out of scope, for #12380. Based on upstream `302e7d88ef`;
+the M3 update is based on `3f5ae3ffeb`. It implements the "Managed engine
+seam" and the "Configuration compatibility contract" of the B2d design and
+splits the work into slices M1 to M6. Slice M1, the preconditions the B2d
+design requires before any Managed session exists (Legacy refusal and purpose
+marking), is implemented (#12861). Slice M3, the configuration snapshot and
+the compatibility evaluation, is implemented with the M3 update. M2 and M4 to
 M6 are proposals; each lands with its own design update.
 
 The reference implementation is the branch
@@ -70,7 +72,7 @@ In scope:
   workspace-control case with only Managed live, the bounded evaluation, the
   revalidation inputs and the purpose marking.
 - The slice plan M1 to M6 with their exit checks.
-- The implementation of M1.
+- The implementation of M1 and M3.
 
 Out of scope: default enablement; Hosted sessions on a paired Bridge; Managed
 branching, which stays rejected; Stage G takeover; Stage H extensions (MCP,
@@ -183,14 +185,14 @@ The B2d invariants hold. In addition:
 
 ### Slice plan
 
-| Slice                                  | Deliverable                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               | Exit check                                                                                                                                                                                                                                                                                                                                                                           | Reference                                             |
-| -------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------- |
-| **M1 — preconditions** (this change)   | Legacy refusal of a `managed` owner record; worktree reset purpose marking; the Live task decision; this design.                                                                                                                                                                                                                                                                                                                                                                                          | See the M1 acceptance criteria.                                                                                                                                                                                                                                                                                                                                                      | `2f00ac26e3` (refusal, reworked to positive evidence) |
-| **M2 — in-process ACP host**           | Split `runAcpAgent` into the process owner (stdio, environment deletion, console redirection, event-loop monitor, exit) and a host that serves `QwenAgent` on any ACP stream and releases everything it owns on disposal without exiting the process. `runAcpAgent` uses the host.                                                                                                                                                                                                                        | ACP suites unchanged; a host on `createInMemoryChannel` creates, prompts and closes a session, then disposes with no leaked handles, timers, MCP clients or environment changes.                                                                                                                                                                                                     | `bf06117511`, `d63eec71a1`                            |
-| **M3 — strict configuration snapshot** | A read-only snapshot of every configuration input in the compatibility contract: settings layers read without migration writes, backups or resets (in-memory migration only; missing, unreadable, corrupt and unknown-version layers kept distinct), `.mcp.json` with its errors, Hooks from every source, a lock-free proof that the extension store is empty, forwarded argv, trust and cwd, and request options; plus the evaluation that returns `compatible`, `deferred` or `unknown` with a reason. | Reading leaves every byte and every metadata file unchanged; each input source alone makes a configuration `deferred` or `unknown`; an evaluation of an empty trusted workspace is `compatible`.                                                                                                                                                                                     | `a836081466`, `306cf17546`, `d48161bc4a`              |
-| **M4 — Managed Session log recording** | The host's recorder writes through the authority's record sink under the certified writer lease; restore reads the log's projection; the log is sealed on close.                                                                                                                                                                                                                                                                                                                                          | A session recorded this way restores with the same history; Legacy entries refuse it by its header; a crash before the first commit leaves no Managed session that Legacy can run.                                                                                                                                                                                                   | `e98cda5c95`, `1ed806ca85`, `f501d9694d`              |
-| **M5 — Runtime-backed tools**          | A session-exclusive local Runtime worker launched lazily at the first tool call and bound to the session's directory; Read, Write, Edit and foreground Shell declared without waiting for the worker, prepared and permission-checked in the host, executed in the worker; cancellation that reaches the worker's processes; results durable in the log before the model continues; an unknown outcome blocks instead of replaying.                                                                       | The host performs no file write or process spawn for a tool call; cancellation has physical-stop evidence; a lost result blocks the session.                                                                                                                                                                                                                                         | `7786edd123`, `5dde5c8dd7`, `174e072ac4`              |
-| **M6 — the engine**                    | The Managed channel factory (M2 host, M4 recording, M5 tools, M3 revalidation, owner and receipt), the extension methods the Bridge calls on a Managed channel (session close, workspace-change acknowledgement, user language, resource snapshot), the workspace-control decision, registration at the three daemon sites and the embedded default behind `--experimental-paired-engines`, and lifecycle (shutdown, drain, revoke, generation and environment reload).                                   | On a paired daemon, an ordinary new session in a trusted workspace with an empty configuration runs on Managed through the real routes: create, prompt, tool call, cancel, close, and a cold restore after a daemon restart. A deferred configuration stays on Legacy, a new deny rule reaches the live Managed session, and with the opt-in off Legacy refuses the Managed session. | `824e92d84f`, `306cf17546`                            |
+| Slice                                              | Deliverable                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | Exit check                                                                                                                                                                                                                                                                                                                                                                           | Reference                                             |
+| -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------- |
+| **M1 — preconditions** (#12861)                    | Legacy refusal of a `managed` owner record; worktree reset purpose marking; the Live task decision; this design.                                                                                                                                                                                                                                                                                                                                                                                                                                             | See the M1 acceptance criteria.                                                                                                                                                                                                                                                                                                                                                      | `2f00ac26e3` (refusal, reworked to positive evidence) |
+| **M2 — in-process ACP host**                       | Split `runAcpAgent` into the process owner (stdio, environment deletion, console redirection, event-loop monitor, exit) and a host that serves `QwenAgent` on any ACP stream and releases everything it owns on disposal without exiting the process. `runAcpAgent` uses the host.                                                                                                                                                                                                                                                                           | ACP suites unchanged; a host on `createInMemoryChannel` creates, prompts and closes a session, then disposes with no leaked handles, timers, MCP clients or environment changes.                                                                                                                                                                                                     | `bf06117511`, `d63eec71a1`                            |
+| **M3 — strict configuration snapshot** (M3 update) | A read-only snapshot of the configuration inputs of the compatibility contract, as the M3 section refines them: settings layers read without migration writes, backups or resets (in-memory migration only; missing, unreadable, corrupt and unknown-version layers kept distinct), `.mcp.json` with its errors, Hooks from every settings layer, a lock-free proof that the extension store is empty, forwarded argv, trust and cwd, and the requested approval mode; plus the evaluation that returns `compatible`, `deferred` or `unknown` with a reason. | Reading leaves every byte and every metadata file unchanged; each input source alone makes a configuration `deferred` or `unknown`; an evaluation of an empty trusted workspace is `compatible`.                                                                                                                                                                                     | `a836081466`, `306cf17546`, `d48161bc4a`              |
+| **M4 — Managed Session log recording**             | The host's recorder writes through the authority's record sink under the certified writer lease; restore reads the log's projection; the log is sealed on close.                                                                                                                                                                                                                                                                                                                                                                                             | A session recorded this way restores with the same history; Legacy entries refuse it by its header; a crash before the first commit leaves no Managed session that Legacy can run.                                                                                                                                                                                                   | `e98cda5c95`, `1ed806ca85`, `f501d9694d`              |
+| **M5 — Runtime-backed tools**                      | A session-exclusive local Runtime worker launched lazily at the first tool call and bound to the session's directory; Read, Write, Edit and foreground Shell declared without waiting for the worker, prepared and permission-checked in the host, executed in the worker; cancellation that reaches the worker's processes; results durable in the log before the model continues; an unknown outcome blocks instead of replaying.                                                                                                                          | The host performs no file write or process spawn for a tool call; cancellation has physical-stop evidence; a lost result blocks the session.                                                                                                                                                                                                                                         | `7786edd123`, `5dde5c8dd7`, `174e072ac4`              |
+| **M6 — the engine**                                | The Managed channel factory (M2 host, M4 recording, M5 tools, M3 revalidation, owner and receipt), the extension methods the Bridge calls on a Managed channel (session close, workspace-change acknowledgement, user language, resource snapshot), the workspace-control decision, registration at the three daemon sites and the embedded default behind `--experimental-paired-engines`, and lifecycle (shutdown, drain, revoke, generation and environment reload).                                                                                      | On a paired daemon, an ordinary new session in a trusted workspace with an empty configuration runs on Managed through the real routes: create, prompt, tool call, cancel, close, and a cold restore after a daemon restart. A deferred configuration stays on Legacy, a new deny rule reaches the live Managed session, and with the opt-in off Legacy refuses the Managed session. | `824e92d84f`, `306cf17546`                            |
 
 M2 and M3 are independent of each other. M4 and M5 need M2. M6 needs all of
 them and is the only slice that can make a session select Managed.
@@ -252,20 +254,156 @@ The other internal creators already mark their sessions:
 | Branch and side task               | restore of a verified Legacy source; a Managed source rejects            |
 | Live task thread in a project      | ordinary creation (Decision 6)                                           |
 
+### M3: configuration snapshot and compatibility evaluation
+
+M3 implements the configuration compatibility contract of the B2d design as
+one function in the CLI configuration layer, `evaluateManagedCompatibility`.
+In M6, the daemon's selector and the Managed host's revalidation call the
+same function with their own inputs, so it lives where both can import it.
+Nothing in production calls it before then.
+
+#### Inputs
+
+The request carries the session's workspace directory and its requested
+approval mode. The runtime carries:
+
+- its canonical workspace directory and its trust;
+- the effective environment it gives its session hosts;
+- the arguments the daemon forwards to every session host;
+- whether the running workspace holds MCP servers outside its files, added at
+  runtime or registered by a client. Only the daemon knows this, and M6
+  supplies it.
+
+#### Reading without side effects
+
+- **Settings.** `readSettingsSnapshot` applies the merge, migration, trust and
+  `${VAR}` rules of `loadSettings` to every layer. It skips each step of
+  `loadSettings` that writes:
+  - pre-resolving home `.env` values into `process.env`;
+  - the operator sandbox pre-read, which copies a corrupt user file to
+    `.corrupted`;
+  - the temporary `QWEN_HOME` swap of the redirect warning;
+  - corruption recovery, and consuming the corruption markers a relaunch
+    leaves in `process.env`;
+  - persisting migrations and version normalization;
+  - loading the environment.
+
+  A strict reader tells an absent file apart from a dangling link, a
+  non-regular file, a read failure and a file that changes while it is read.
+  Those throw, as do invalid JSON, a value that is not an object, and a
+  version that is not an integer from 1 or that stays above the current
+  version after migration.
+
+- **Environment.** The given environment is the environment of the runtime's
+  session hosts. Its `QWEN_HOME` and two system settings paths locate the user
+  and system settings files and the extension store; without `QWEN_HOME`, the
+  user directory is under the process's home directory. It is the only source
+  for placeholders, and it already carries the user-level `.env` values the
+  runtime applied. In the daemon, the locating variables and `HOME` are
+  excluded from workspace overlays, so they equal the daemon's own; in a
+  session host, they are its own environment.
+- **Project MCP file.** In strict mode, a read failure of `.mcp.json` is kept as
+  an error instead of counting as an absent file. In both modes, a file that
+  does not parse, has no `mcpServers` object or holds an entry that is not an
+  object is an error.
+- **Extensions.** `ExtensionStore.inspectEmptiness` proves the installed set
+  empty without the store's lock, recovery or initialization.
+  - An extension directory, or a link to one, is `installed`. So is a store
+    that records an extension, but the store's entries are checked before its
+    state is read: a store in doubt is `unknown` whatever its state records.
+  - These are `unknown`: a held lock, a journal in the `transactions`
+    directory, content in the `staging` or `rollback` directory, an unexpected
+    store entry, a previous state without a current one, a corrupt state, an
+    enablement file that is corrupt or not a regular file, a projection that
+    disagrees with the state, enablement records without a state, a read
+    failure, and a change to the store's listings or state files while it is
+    read.
+  - Files in the extensions directory are control files and never count. What
+    an idle daemon or an initialized empty store leaves is accepted too: the
+    `lock` file, a state that records no extension and its previous copy, empty
+    `staging` and `rollback` directories, a `transactions` directory without
+    journals, `plugin-data`, and the legacy enablement rules a state keeps for
+    extensions that are not installed. So are the files the store leaves for
+    good and never reads again: journals its recovery quarantined, and the
+    temporary files of interrupted state and journal writes. Entries whose names
+    start with a dot, which the store never creates, such as `.DS_Store`, are
+    ignored in the store and its `staging` and `rollback` directories.
+
+#### Rules
+
+The first condition that applies decides the result:
+
+| Condition                                                 | Result     |
+| --------------------------------------------------------- | ---------- |
+| The workspace is not trusted                              | deferred   |
+| The session or workspace directory cannot be resolved     | unknown    |
+| The session directory is not the runtime workspace        | deferred   |
+| `--experimental-lsp` is forwarded                         | deferred   |
+| `--restore-ask-user-question` is forwarded                | deferred   |
+| Another argument is forwarded                             | unknown    |
+| The running workspace holds MCP servers outside its files | deferred   |
+| A settings layer cannot be read                           | unknown    |
+| MCP servers in any settings layer, or `mcp.serverCommand` | deferred   |
+| `tools.discoveryCommand` or `tools.callCommand`           | deferred   |
+| Hooks in the system, user or trusted project layer        | deferred   |
+| The approval mode in settings is not valid                | unknown    |
+| Approval mode `plan`, requested or from settings          | deferred   |
+| `.mcp.json` cannot be read or is malformed                | unknown    |
+| Servers in `.mcp.json`                                    | deferred   |
+| Extensions are installed                                  | deferred   |
+| The extension store cannot be proven empty                | unknown    |
+| Otherwise                                                 | compatible |
+
+A hooks entry counts unless it is an empty list or one of the configuration
+fields `enabled`, `disabled` and `notifications`, which the hook registry
+skips. The settings approval mode is normalized as session creation normalizes
+it, and a requested mode replaces it; session creation still parses the
+settings value first, so a value it rejects is `unknown` either way. Reasons
+name the source and never configuration values.
+
+#### Contract refinements
+
+M3 settles these details of the contract:
+
+- **Skill and agent definitions are not read.** Their hooks and MCP servers
+  register only through the Skill and Agent tools, skill commands and agent
+  orchestration. The first-phase engine provides none of these, and M6
+  registers none of them for Managed sessions. A later phase that adds them
+  extends this evaluation.
+- **Only the approval mode is evaluated among the request options.** The
+  Managed host is the same `QwenAgent`, so it binds the requested model
+  service and startup configuration exactly as a Legacy host does. The `plan`
+  approval mode needs plan-mode tools the engine does not provide.
+- **Tool discovery and call commands count like MCP.** They add tools that run
+  commands in the host.
+- **Servers injected into a session are not an input.** The Bridge creates and
+  restores every session with an empty `mcpServers` list, so no session starts
+  with injected servers. Servers added to a running workspace are the runtime
+  input above.
+- **An argument the evaluation does not know is `unknown`.** The arguments the
+  daemon forwards today each enable a deferred capability. A new forwarded
+  argument keeps sessions on Legacy until the evaluation learns what it
+  enables.
+
+Settings that only enable further built-in tools or background features, such
+as cron, artifacts or automatic memory, are not inputs. The first-phase engine
+does not register or run them, which M5 and M6 enforce.
+
 ## Files and consumers
 
-| Slice | Files                                                                                                                                |
-| ----- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| M1    | core `utils/sessionStorageUtils.ts`, `services/sessionService.ts`, `services/chatRecordingService.ts`; CLI `serve/routes/session.ts` |
-| M2    | CLI `acp-integration/acpAgent.ts`; acp-bridge `inMemoryChannel.ts`                                                                   |
-| M3    | CLI `config/settings.ts`, `config/mcpJson.ts`; core extension store; a new CLI serve evaluation module                               |
-| M4    | core `config/config.ts`, `services/chatRecordingService.ts`, `managed-runtime/*`                                                     |
-| M5    | core tools and scheduler; CLI `serve/managed-runtime-*`                                                                              |
-| M6    | CLI `serve/session-execution-engine-selector.ts`, `serve/run-qwen-serve.ts`, `serve/server.ts`; a new Managed channel module         |
+| Slice | Files                                                                                                                                                                                                                                                                                 |
+| ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| M1    | core `utils/sessionStorageUtils.ts`, `services/sessionService.ts`, `services/chatRecordingService.ts`; CLI `serve/routes/session.ts`                                                                                                                                                  |
+| M2    | CLI `acp-integration/acpAgent.ts`; acp-bridge `inMemoryChannel.ts`                                                                                                                                                                                                                    |
+| M3    | CLI `config/settings.ts`, `config/mcpJson.ts`, `config/storage-paths-lite.ts`, `config/config.ts`, and the new `config/read-config-file.ts`, `config/approval-mode-value.ts` and `config/managed-compatibility.ts`; core `extension/extension-store.ts` and `utils/envVarResolver.ts` |
+| M4    | core `config/config.ts`, `services/chatRecordingService.ts`, `managed-runtime/*`                                                                                                                                                                                                      |
+| M5    | core tools and scheduler; CLI `serve/managed-runtime-*`                                                                                                                                                                                                                               |
+| M6    | CLI `serve/session-execution-engine-selector.ts`, `serve/run-qwen-serve.ts`, `serve/server.ts`; a new Managed channel module                                                                                                                                                          |
 
 No daemon route or REST shape changes in any slice. M1 changes no public
 classification: its refusals use the existing
-`session_execution_engine_unavailable`.
+`session_execution_engine_unavailable`. M3 adds no production caller: the
+selector and the Managed host start calling the evaluation in M6.
 
 ## Validation and acceptance criteria
 
@@ -285,6 +423,19 @@ M1:
    the paired selector treats as a deferred purpose.
 5. Build, typecheck and focused tests pass, and mutating each refusal point or
    the reset's metadata fails a test.
+
+M3:
+
+1. An empty trusted workspace is `compatible`. So is ordinary configuration,
+   including files that need migration and the files an idle daemon or an
+   initialized empty store leave. Afterwards every file's bytes, inode,
+   modification time and change time, and the process environment, are
+   unchanged.
+2. Each condition of the rules, arranged alone, yields its result and reason.
+3. The strict settings read, the strict `.mcp.json` read and the extension
+   store inspection leave the tree unchanged on every failure they report.
+4. Build, typecheck and focused tests pass, and mutating each rule or each
+   refusal of the strict reads fails a test.
 
 The engine as a whole is accepted by M6's exit check, together with the B2d
 criteria that apply once an engine is registered: deferred purposes stay on
@@ -310,3 +461,24 @@ nor a durably owned session.
   may need further slicing in its own design update.
 - Whether a Managed channel should answer preheat and keepalive stays with
   B2c's rule for now: both remain Legacy-only.
+- The host shape of Decision 2 is under review in #12737, with a proposal to
+  run the daemon's Managed host in a child process. M3 does not depend on it:
+  the evaluation runs wherever the selector and the host run.
+- The evaluation reads the settings layers, `.mcp.json` and the extension store
+  for every new session. The settings and `.mcp.json` reads are synchronous and
+  block the daemon's event loop while they run. The reads are local and small,
+  but a slow file system delays session creation, and a selection that exceeds
+  the Bridge's budget fails the creation.
+- The store never removes a staging directory that an install leaves when it
+  stops before it commits, nor what a transaction leaves in `staging` or
+  `rollback` when recovery quarantined its journal; recovery clears the rest at
+  the next store operation. Such a leftover keeps sessions on Legacy until it
+  is removed.
+- Lookups in the given environment are case-sensitive, as in the daemon's
+  runtime environment today. On Windows, a locating variable spelled in another
+  case, such as `qwen_home`, is not found, although a session host's own
+  `process.env` finds it.
+- File-based custom commands can inject shell output (`!{…}`), which runs a
+  process in the host when a user invokes the command. They are not an input
+  of the contract; M5 or M6 decides whether a Managed session refuses them or
+  the evaluation defers them.

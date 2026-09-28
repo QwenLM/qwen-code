@@ -33,8 +33,10 @@ export function resolveConfigPathLite(dir: string, cwd?: string): string {
   return resolved;
 }
 
-export function getGlobalQwenDirLite(): string {
-  const envDir = process.env['QWEN_HOME'];
+export function getGlobalQwenDirLite(
+  env: Readonly<NodeJS.ProcessEnv> = process.env,
+): string {
+  const envDir = env['QWEN_HOME'];
   if (envDir) {
     return resolveConfigPathLite(envDir);
   }
@@ -45,9 +47,11 @@ export function getGlobalQwenDirLite(): string {
   return path.join(homeDir, SETTINGS_DIRECTORY_NAME);
 }
 
-export function getSystemSettingsPath(): string {
-  if (process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH']) {
-    return process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'];
+export function getSystemSettingsPath(
+  env: Readonly<NodeJS.ProcessEnv> = process.env,
+): string {
+  if (env['QWEN_CODE_SYSTEM_SETTINGS_PATH']) {
+    return env['QWEN_CODE_SYSTEM_SETTINGS_PATH'];
   }
   if (os.platform() === 'darwin') {
     return '/Library/Application Support/QwenCode/settings.json';
@@ -58,12 +62,14 @@ export function getSystemSettingsPath(): string {
   return '/etc/qwen-code/settings.json';
 }
 
-export function getSystemDefaultsPath(): string {
-  if (process.env['QWEN_CODE_SYSTEM_DEFAULTS_PATH']) {
-    return process.env['QWEN_CODE_SYSTEM_DEFAULTS_PATH'];
+export function getSystemDefaultsPath(
+  env: Readonly<NodeJS.ProcessEnv> = process.env,
+): string {
+  if (env['QWEN_CODE_SYSTEM_DEFAULTS_PATH']) {
+    return env['QWEN_CODE_SYSTEM_DEFAULTS_PATH'];
   }
   return path.join(
-    path.dirname(getSystemSettingsPath()),
+    path.dirname(getSystemSettingsPath(env)),
     'system-defaults.json',
   );
 }
