@@ -129,6 +129,10 @@ export function renderWriterKeywordVocabularySnapshot(
       stats: collectKeywordStats(docs.filter((doc) => doc.scope === scope)),
     }))
     .filter(({ stats }) => stats.length > 0);
+  // Worst-case cost of the per-scope frame the loop below emits: every label
+  // present and `omitted` at its widest. This literal must mirror that frame —
+  // if the wording below drifts, the budget stops covering the render and the
+  // snapshot falls back to the raw slice at the end, cutting a scope mid-token.
   const structuralOverhead = scopedStats.reduce(
     (total, { scope, stats }) =>
       total +
