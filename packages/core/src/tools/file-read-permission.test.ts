@@ -262,6 +262,25 @@ describe('getFileReadDefaultPermission', () => {
       expect(getFileReadDefaultPermission(config, file)).toBe('allow');
     });
 
+    it('asks after a configured managed root becomes unavailable', () => {
+      const managedRoot = path.join(layout.base, 'managed-unavailable');
+      fs.mkdirSync(managedRoot);
+      const file = path.join(managedRoot, 'SKILL.md');
+      const config = makeConfig({ managedExtensionsDir: managedRoot });
+      expect(getFileReadDefaultPermission(config, file)).toBe('allow');
+
+      fs.rmSync(managedRoot, { recursive: true });
+      expect(getFileReadDefaultPermission(config, file)).toBe('ask');
+      expect(config.getManagedExtensionsDir()).toBe(managedRoot);
+    });
+
+    it('asks when the configured managed root is a regular file', () => {
+      const managedRoot = path.join(layout.base, 'managed-file');
+      fs.writeFileSync(managedRoot, 'private data');
+      const config = makeConfig({ managedExtensionsDir: managedRoot });
+      expect(getFileReadDefaultPermission(config, managedRoot)).toBe('ask');
+    });
+
     it('asks when the managed root itself is a symlink', () => {
       // The boundary must stay where the process boundary pinned it: a
       // link-valued root (pre-planted, or swapped in mid-session) must not

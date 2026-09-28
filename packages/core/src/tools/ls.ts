@@ -23,6 +23,7 @@ import { ToolErrorType } from './tool-error.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { Storage } from '../config/storage.js';
+import { getVerifiedManagedExtensionsDir } from '../extension/managed-extension-dir.js';
 import { getMemoryBaseDir } from '../memory/paths.js';
 
 const debugLogger = createDebugLogger('LS');
@@ -135,7 +136,9 @@ class LSToolInvocation extends BaseToolInvocation<LSToolParams, ToolResult> {
     const workspaceContext = this.config.getWorkspaceContext();
     const userSkillsDirs = this.config.storage.getUserSkillsDirs();
     const userExtensionsDir = Storage.getUserExtensionsDir();
-    const managedExtensionsDir = this.config.getManagedExtensionsDir();
+    const managedExtensionsDir = getVerifiedManagedExtensionsDir(
+      this.config.getManagedExtensionsDir(),
+    );
 
     if (
       workspaceContext.isPathWithinWorkspace(dirPath) ||

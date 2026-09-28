@@ -143,9 +143,7 @@ def _is_reserved_arg(arg: str) -> bool:
         return "-" in key and _yargs_camel_case(top_level) in _RESERVED_KEYS
     flag = arg.split("=")[0]
     if flag.startswith("-") and len(flag) > 1:
-        return any(
-            f"-{char.lower()}" in _RESERVED_CLI_FLAGS for char in flag[1:]
-        )
+        return any(f"-{char.lower()}" in _RESERVED_CLI_FLAGS for char in flag[1:])
     return False
 
 

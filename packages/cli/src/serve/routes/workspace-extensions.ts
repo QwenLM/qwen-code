@@ -1416,7 +1416,7 @@ export function registerWorkspaceExtensionRoutes(
           let rejectRefreshOnAbort: (() => void) | undefined;
           try {
             await Promise.race([
-              extensionManager.refreshCache(),
+              extensionManager.refreshCache({ allowManagedHandBack: false }),
               new Promise<never>((_resolve, reject) => {
                 rejectRefreshOnAbort = () => reject(deadline.signal.reason);
                 deadline.signal.addEventListener(
@@ -2495,7 +2495,9 @@ export function registerWorkspaceExtensionRoutes(
             runtime.workspaceCwd,
             runtime.trusted,
           );
-          const snapshot = await manager.refreshCacheWithSnapshot();
+          const snapshot = await manager.refreshCacheWithSnapshot({
+            allowManagedHandBack: false,
+          });
           runtime.generationGuard?.assertOpen();
           const extension = extensionById(manager, extensionId);
           if (!extension) {

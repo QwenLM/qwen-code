@@ -9,6 +9,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Config } from '../config/config.js';
+import { KeychainTokenStorage } from '../mcp/token-storage/keychain-token-storage.js';
 import {
   ExtensionManager,
   ManagedExtensionReadOnlyError,
@@ -100,6 +101,10 @@ describe('managed extension activation migration', () => {
     vi.stubEnv('HOME', home);
     vi.stubEnv('USERPROFILE', home);
     vi.stubEnv('QWEN_HOME', path.join(home, '.qwen'));
+    // These fixtures use temporary file storage, never the host keychain.
+    vi.spyOn(KeychainTokenStorage.prototype, 'isAvailable').mockResolvedValue(
+      false,
+    );
     vi.stubEnv('QWEN_CODE_FORCE_FILE_STORAGE', 'true');
     vi.spyOn(process.stderr, 'write').mockReturnValue(true);
     configurations = [];

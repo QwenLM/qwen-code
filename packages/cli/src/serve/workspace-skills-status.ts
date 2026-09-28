@@ -225,6 +225,7 @@ async function buildWorkspaceSkillsStatus(
             // create plugin data directories for agent-plugins packages.
             const snapshot = await extensionManager.refreshCacheWithSnapshot({
               createDataDir: false,
+              allowManagedHandBack: false,
             });
             extensions = extensionManager.getLoadedExtensions();
             applySnapshotOverrides(snapshot);

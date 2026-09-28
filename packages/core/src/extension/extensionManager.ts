@@ -1431,13 +1431,18 @@ export class ExtensionManager {
   /**
    * Refreshes the extension cache from disk.
    */
-  async refreshCache(options?: { names?: string[] }): Promise<void> {
+  async refreshCache(options?: {
+    names?: string[];
+    allowManagedHandBack?: boolean;
+  }): Promise<void> {
     await this.refreshCacheWithSnapshot(options);
   }
 
   async refreshCacheWithSnapshot(options?: {
     names?: string[];
     createDataDir?: boolean;
+    /** Read-only callers must retain managed ownership and stored secrets. */
+    allowManagedHandBack?: boolean;
   }): Promise<ExtensionStoreSnapshot> {
     const requestedNames = options?.names?.filter(Boolean) ?? [];
     // Captured before the load, not after: an install landing mid-refresh must
@@ -1446,12 +1451,13 @@ export class ExtensionManager {
     const dirFingerprintBeforeLoad =
       requestedNames.length === 0 ? this.extensionDirFingerprint() : undefined;
     const handedBackManagedNames: string[] = [];
+    let managedAbsenceProven = false;
+    const unprovenManagedNames = new Set<string>();
     const { value: extensions, snapshot } =
       await this.extensionStore.readConsistent(
         async () => {
           let managedListFailed = false;
           let unnamedManagedFailure = false;
-          const manifestlessManagedDirs = new Set<string>();
           const discovered = await this.loadDiscoveredExtensions(
             this.workspaceDir,
             {
@@ -1468,7 +1474,7 @@ export class ExtensionManager {
               onManagedEntrySkipped: (directory) => {
                 // A present entry whose manifest is momentarily missing (a
                 // non-atomic deploy) cannot prove its own package withdrawn.
-                manifestlessManagedDirs.add(
+                unprovenManagedNames.add(
                   path.basename(directory).toLowerCase(),
                 );
               },
@@ -1483,6 +1489,10 @@ export class ExtensionManager {
                   requested.has(extension.name.toLowerCase()),
                 )
               : discovered;
+          managedAbsenceProven =
+            this.managedExtensionsDir !== undefined &&
+            !managedListFailed &&
+            !unnamedManagedFailure;
           return {
             value: loaded,
             extensions: loaded.map((extension) => ({
@@ -1495,10 +1505,8 @@ export class ExtensionManager {
             // unlistable root makes the managed set unknown, not empty — as
             // does an entry that failed before its name could be read.
             managedAbsenceProven:
-              this.managedExtensionsDir !== undefined &&
-              !managedListFailed &&
-              !unnamedManagedFailure,
-            unprovenManagedNames: manifestlessManagedDirs,
+              options?.allowManagedHandBack !== false && managedAbsenceProven,
+            unprovenManagedNames,
           };
         },
         {
@@ -1513,7 +1521,15 @@ export class ExtensionManager {
       nextCache.set(extension.name, extension);
     });
     this.extensionCache = nextCache;
-    this.applyStoreActivation(snapshot);
+    const activationSnapshot =
+      options?.allowManagedHandBack === false
+        ? this.extensionStore.projectManagedHandBackSnapshot(
+            snapshot,
+            extensions,
+            { managedAbsenceProven, unprovenManagedNames },
+          )
+        : snapshot;
+    this.applyStoreActivation(activationSnapshot);
     // Only a full refresh establishes a baseline. A name-filtered refresh leaves
     // the cache partial, so claiming the whole directory is up to date would let
     // `refreshCacheIfSourcesChanged` report "unchanged" over a partial set.
@@ -1522,7 +1538,7 @@ export class ExtensionManager {
         dirFingerprintBeforeLoad,
       );
     }
-    return snapshot;
+    return activationSnapshot;
   }
 
   /**
@@ -1549,61 +1565,58 @@ export class ExtensionManager {
     names?: string[];
   }): Promise<{ snapshot: ExtensionStoreSnapshot; extensions: Extension[] }> {
     const requestedNames = options?.names?.filter(Boolean) ?? [];
-    const handedBackManagedNames: string[] = [];
+    let managedAbsenceProven = false;
+    const unprovenManagedNames = new Set<string>();
     const { value: extensions, snapshot } =
-      await this.extensionStore.readConsistent(
-        async () => {
-          let managedListFailed = false;
-          let unnamedManagedFailure = false;
-          const manifestlessManagedDirs = new Set<string>();
-          const loadedAll = await this.loadDiscoveredExtensions(
-            this.workspaceDir,
-            {
-              manifestOnly: true,
-              onManagedListFailure: () => {
-                managedListFailed = true;
-              },
-              onManagedLoadFailure: (failure) => {
-                if (failure.name === undefined) unnamedManagedFailure = true;
-              },
-              onManagedEntrySkipped: (directory) => {
-                manifestlessManagedDirs.add(
-                  path.basename(directory).toLowerCase(),
-                );
-              },
+      await this.extensionStore.readConsistent(async () => {
+        let managedListFailed = false;
+        let unnamedManagedFailure = false;
+        const loadedAll = await this.loadDiscoveredExtensions(
+          this.workspaceDir,
+          {
+            manifestOnly: true,
+            onManagedListFailure: () => {
+              managedListFailed = true;
             },
-          );
-          const loaded =
-            requestedNames.length > 0
-              ? loadedAll.filter((extension) =>
-                  requestedNames.some(
-                    (name) =>
-                      name.toLowerCase() === extension.name.toLowerCase(),
-                  ),
-                )
-              : loadedAll;
-          return {
-            value: loaded,
-            extensions: loaded.map((extension) => ({
-              id: extension.id,
-              name: extension.name,
-              source: extension.source,
-            })),
-            managedAbsenceProven:
-              this.managedExtensionsDir !== undefined &&
-              !managedListFailed &&
-              !unnamedManagedFailure,
-            unprovenManagedNames: manifestlessManagedDirs,
-          };
-        },
-        {
-          onManagedHandBack: (name) => {
-            handedBackManagedNames.push(name);
+            onManagedLoadFailure: (failure) => {
+              if (failure.name === undefined) unnamedManagedFailure = true;
+            },
+            onManagedEntrySkipped: (directory) => {
+              unprovenManagedNames.add(path.basename(directory).toLowerCase());
+            },
           },
-        },
-      );
-    await this.clearHandedBackManagedSecrets(handedBackManagedNames);
-    return { snapshot, extensions };
+        );
+        const extensions =
+          requestedNames.length > 0
+            ? loadedAll.filter((extension) =>
+                requestedNames.some(
+                  (name) => name.toLowerCase() === extension.name.toLowerCase(),
+                ),
+              )
+            : loadedAll;
+        managedAbsenceProven =
+          this.managedExtensionsDir !== undefined &&
+          !managedListFailed &&
+          !unnamedManagedFailure;
+        // Catalog reads may discover identities, but must not release managed
+        // ownership or delete secrets when a deployment has withdrawn a package.
+        return {
+          value: extensions,
+          extensions: extensions.map((extension) => ({
+            id: extension.id,
+            name: extension.name,
+            source: extension.source,
+          })),
+        };
+      });
+    return {
+      snapshot: this.extensionStore.projectManagedHandBackSnapshot(
+        snapshot,
+        extensions,
+        { managedAbsenceProven, unprovenManagedNames },
+      ),
+      extensions,
+    };
   }
 
   // The refresh-time hand-back deletes the managed marker every secret
@@ -1785,7 +1798,7 @@ export class ExtensionManager {
       // `refreshCache` commits the new baseline itself, from its pre-load
       // fingerprint. A throw leaves the old baseline in place so the next call
       // retries rather than assuming the refresh landed.
-      await this.refreshCache();
+      await this.refreshCache({ allowManagedHandBack: false });
       return true;
     })();
     this.inFlightSourceRevalidation = revalidation;

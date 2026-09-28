@@ -31,7 +31,7 @@ Managed describes package ownership, not Qwen authorship or execution isolation.
 The CLI resolves the root against its startup cwd once. A missing, non-directory,
 unreadable, or symbolic-link explicit root is a configuration error; an empty root
 is valid. The accepted root is pinned to its canonical path at startup so later
-relinking cannot move the boundary consumers validated.
+relinking cannot move the boundary consumers validated. A root that later becomes unavailable remains configured for ownership and state-separation checks, but grants no read-permission exemption until its pinned directory is verified as accessible again.
 ExtensionManager receives `managedExtensionsDir` separately from the writable
 ExtensionStore. A container sandbox (docker/podman) mounts the resolved root
 read-only at its translated container path and forwards the flag unchanged —
@@ -134,6 +134,8 @@ inherits those preferences. Deployment owners should keep names stable and avoid
 reusing them for unrelated extensions.
 
 After a managed package is removed from its source, an explicit user installation of the same name can adopt its retained activation and resource preferences when no user package is already installed. Installation checks the managed source again immediately before commit, including for a prepared installation; a filtered discovery result does not establish removal. The store transfers the policy atomically to the user identity and removes the managed marker. A previously installed shadowed user package is rediscovered normally. An obsolete managed identity cannot uninstall the replacement user package. A settings-only directory at the installation destination can be adopted when it is empty or contains only a regular `.env` file. Existing values are retained and explicitly prepared values take precedence. Unknown contents, symlinks, existing packages and secret-selector metadata remain conflicts; failed commits restore the original directory and policy.
+
+Daemon catalog, extension-state and skill/status queries retain the managed marker, preserved preferences and managed secrets after a deployment withdraws a package. These request-scoped reads do not perform the automatic hand-back. A returning user package is shown with its preserved activation and skill preferences without consuming them. An explicit release operation or the normal runtime refresh completes that transition; reading a page alone cannot delete credentials. Secret probes and cleanup cover both supplied workspace paths and their resolved filesystem paths without changing the names of previously stored credentials.
 
 Read-only loading does not make deployment changes atomic, and no watcher is
 added. Deployment tooling remains responsible for publishing complete package

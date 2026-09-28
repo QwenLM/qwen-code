@@ -1529,6 +1529,35 @@ export class ExtensionStore {
     return await this.readSnapshotUnlocked();
   }
 
+  projectManagedHandBackSnapshot(
+    snapshot: ExtensionStoreSnapshot,
+    extensions: readonly ExtensionIdentity[],
+    options: ManagedHandBackOptions,
+  ): ExtensionStoreSnapshot {
+    if (!options.managedAbsenceProven) return snapshot;
+    let projected: ExtensionStoreSnapshot | undefined;
+    for (const identity of extensions) {
+      const policy = snapshot.extensions[identity.id];
+      if (
+        identity.source !== 'user' ||
+        !policy?.managed ||
+        options.unprovenManagedNames?.has(identity.name.toLowerCase())
+      ) {
+        continue;
+      }
+      projected ??= {
+        ...snapshot,
+        extensions: { ...snapshot.extensions },
+      };
+      // Reads show the returning user's activation without consuming the
+      // persisted managed marker, preserved preferences, or credentials.
+      const activationView = { ...policy };
+      restorePreservedActivationSurface(activationView);
+      projected.extensions[identity.id] = activationView;
+    }
+    return projected ?? snapshot;
+  }
+
   getActivation(
     snapshot: ExtensionStoreSnapshot,
     extensionId: string,

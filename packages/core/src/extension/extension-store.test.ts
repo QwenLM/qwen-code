@@ -55,9 +55,13 @@ describe('ExtensionStore', () => {
     // file backend inside the test root so no real keychain is touched.
     vi.stubEnv('QWEN_HOME', path.join(root, 'qwen-home'));
     vi.stubEnv('QWEN_CODE_FORCE_FILE_STORAGE', 'true');
+    vi.spyOn(KeychainTokenStorage.prototype, 'isAvailable').mockResolvedValue(
+      false,
+    );
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     vi.unstubAllEnvs();
   });
 

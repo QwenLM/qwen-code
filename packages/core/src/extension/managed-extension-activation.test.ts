@@ -9,6 +9,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Config } from '../config/config.js';
+import { KeychainTokenStorage } from '../mcp/token-storage/keychain-token-storage.js';
 import { SettingScope } from './extensionManager.js';
 import { ExtensionStore } from './extension-store.js';
 
@@ -58,6 +59,11 @@ describe('managed user activation outside the home directory', () => {
     vi.stubEnv('HOME', home);
     vi.stubEnv('USERPROFILE', home);
     vi.stubEnv('QWEN_HOME', path.join(home, '.qwen'));
+    vi.stubEnv('QWEN_CODE_FORCE_FILE_STORAGE', 'true');
+    // These fixtures use temporary file storage, never the host keychain.
+    vi.spyOn(KeychainTokenStorage.prototype, 'isAvailable').mockResolvedValue(
+      false,
+    );
     vi.spyOn(process.stderr, 'write').mockReturnValue(true);
   });
 

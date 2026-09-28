@@ -2606,6 +2606,9 @@ describe('extension management v2 REST', () => {
         request(h.app).post('/workspace/extensions/check-updates'),
       ).then((result) => result);
       await vi.waitFor(() => expect(refreshCache).toHaveBeenCalledOnce());
+      expect(refreshCache).toHaveBeenCalledWith({
+        allowManagedHandBack: false,
+      });
 
       await vi.advanceTimersByTimeAsync(2 * 60_000);
 

@@ -7,9 +7,10 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   assertManagedExtensionStateSeparation,
+  getVerifiedManagedExtensionsDir,
   resolveManagedExtensionsDir,
 } from './managed-extension-dir.js';
 
@@ -257,3 +258,64 @@ it.skipIf(process.platform === 'win32')(
     ).toThrow(/Invalid --managed-extensions/);
   },
 );
+
+describe('getVerifiedManagedExtensionsDir', () => {
+  let temporary: string;
+  let managed: string;
+
+  beforeEach(() => {
+    temporary = fs.realpathSync.native(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-verified-managed-')),
+    );
+    managed = path.join(temporary, 'managed');
+    fs.mkdirSync(managed);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    fs.rmSync(temporary, { recursive: true, force: true });
+  });
+
+  it('returns only the live pinned directory', () => {
+    expect(getVerifiedManagedExtensionsDir(undefined)).toBeUndefined();
+    expect(getVerifiedManagedExtensionsDir(managed)).toBe(managed);
+    fs.rmSync(managed, { recursive: true });
+    expect(getVerifiedManagedExtensionsDir(managed)).toBeUndefined();
+    fs.writeFileSync(managed, 'not a directory');
+    expect(getVerifiedManagedExtensionsDir(managed)).toBeUndefined();
+  });
+
+  it.each(['accessSync', 'readdirSync'] as const)(
+    'does not authorize a root when %s fails',
+    (operation) => {
+      vi.spyOn(fs, operation).mockImplementation(() => {
+        throw Object.assign(new Error('unavailable'), { code: 'EACCES' });
+      });
+      expect(getVerifiedManagedExtensionsDir(managed)).toBeUndefined();
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'does not authorize a root replaced by a symlink',
+    () => {
+      const replacement = path.join(temporary, 'replacement');
+      fs.renameSync(managed, replacement);
+      fs.symlinkSync(replacement, managed, 'dir');
+      expect(getVerifiedManagedExtensionsDir(managed)).toBeUndefined();
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'does not relocate the pinned root through a relinked parent',
+    () => {
+      const parent = path.join(temporary, 'parent');
+      const pinned = path.join(parent, 'managed');
+      fs.mkdirSync(pinned, { recursive: true });
+      expect(getVerifiedManagedExtensionsDir(pinned)).toBe(pinned);
+      const replacement = path.join(temporary, 'replacement');
+      fs.renameSync(parent, replacement);
+      fs.symlinkSync(replacement, parent, 'dir');
+      expect(getVerifiedManagedExtensionsDir(pinned)).toBeUndefined();
+    },
+  );
+});

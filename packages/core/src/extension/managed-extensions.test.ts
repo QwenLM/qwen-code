@@ -38,6 +38,7 @@ import {
 } from './extensionManager.js';
 import { ExtensionStore } from './extension-store.js';
 import { Config } from '../config/config.js';
+import { KeychainTokenStorage } from '../mcp/token-storage/keychain-token-storage.js';
 import { loadSubagentFromDir } from '../subagents/subagent-manager.js';
 import type { SubagentConfig, SubagentError } from '../subagents/types.js';
 import { resolveManagedExtensionsDir } from './managed-extension-dir.js';
@@ -116,6 +117,10 @@ describe('managed extensions', () => {
     fs.mkdirSync(workspace);
     vi.stubEnv('QWEN_HOME', path.join(temporary, 'home'));
     vi.stubEnv('QWEN_CODE_FORCE_FILE_STORAGE', 'true');
+    // These fixtures use temporary file storage, never the host keychain.
+    vi.spyOn(KeychainTokenStorage.prototype, 'isAvailable').mockResolvedValue(
+      false,
+    );
     store = new ExtensionStore({
       extensionsDir: user,
       storeDir: path.join(temporary, 'home', 'extension-store'),

@@ -7,6 +7,7 @@
 import path from 'node:path';
 import type { Config } from '../config/config.js';
 import { Storage } from '../config/storage.js';
+import { getVerifiedManagedExtensionsDir } from '../extension/managed-extension-dir.js';
 import { isAnyAutoMemPath } from '../memory/paths.js';
 import type { PermissionDecision } from '../permissions/types.js';
 import {
@@ -26,7 +27,9 @@ export function getFileReadDefaultPermission(
   // the decision and the open agree on which bytes are meant.
   const filePath = realpathNearestExisting(path.resolve(requestedPath));
   const workspaceContext = config.getWorkspaceContext();
-  const managedExtensionsDir = config.getManagedExtensionsDir();
+  const managedExtensionsDir = getVerifiedManagedExtensionsDir(
+    config.getManagedExtensionsDir(),
+  );
 
   // SYNC: Keep these base roots and the auto-memory check below aligned with
   // AcpAgent.buildAcpLocalReadRoots' mirrored ReadFileTool group. ACP may
@@ -62,13 +65,10 @@ export function getFileReadDefaultPermission(
   if (
     workspaceContext.isPathWithinWorkspace(filePath) ||
     isSubpaths(allowedRoots, filePath) ||
-    // A deployment-managed root is read-only by design, so no symlink can be
-    // planted in it, and a link shipped inside it still canonicalizes outside
-    // via the candidate realpath above. Unlike the other roots it is matched
-    // LEXICALLY: resolveManagedExtensionsDir already rejected a link-valued
-    // root and pinned the canonical path at the process boundary, and
-    // re-resolving the root here would let a mid-session relink relocate the
-    // boundary — the same failure mode the auto-mem asymmetry below guards.
+    // The managed root must still be live at its pinned canonical path.
+    // Match it lexically so a relink cannot relocate the read boundary;
+    // the candidate realpath also refuses links shipped inside the root
+    // that point outside it.
     (managedExtensionsDir !== undefined &&
       isSubpath(managedExtensionsDir, filePath)) ||
     // isAnyAutoMemPath narrows to the managed auto-memory roots

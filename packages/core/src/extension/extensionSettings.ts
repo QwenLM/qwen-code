@@ -533,6 +533,23 @@ export async function updateSetting(
   await atomicWriteFile(envFilePath, newEnvContent, { noFollow: true });
 }
 
+async function getSecretWorkspaceCwds(
+  workspaceCwds: readonly string[],
+): Promise<Set<string>> {
+  const cwds = new Set([process.cwd(), ...workspaceCwds]);
+  for (const cwd of [...cwds]) {
+    try {
+      // Keep existing service names while covering the cwd a process started
+      // through a workspace symlink actually uses when writing secrets.
+      cwds.add(await fs.realpath(cwd));
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT' && code !== 'ENOTDIR') throw error;
+    }
+  }
+  return cwds;
+}
+
 /**
  * Whether the secret backend holds any values for the given extension
  * identity, in either scope. The adoption gate in the extension store uses
@@ -552,13 +569,14 @@ export async function hasStoredExtensionSecrets(
   extensionId: string,
   workspaceCwds: readonly string[] = [],
 ): Promise<boolean> {
+  const workspaceDirectories = await getSecretWorkspaceCwds(workspaceCwds);
   for (const scope of [
     ExtensionSettingScope.USER,
     ExtensionSettingScope.WORKSPACE,
   ]) {
     const cwds =
       scope === ExtensionSettingScope.WORKSPACE
-        ? new Set([process.cwd(), ...workspaceCwds])
+        ? workspaceDirectories
         : new Set<string>([process.cwd()]);
     for (const cwd of cwds) {
       const serviceName = getKeychainStorageName(
@@ -605,6 +623,7 @@ export async function clearStoredExtensionSecrets(
   extensionId: string,
   workspaceCwds: readonly string[] = [],
 ): Promise<void> {
+  const workspaceDirectories = await getSecretWorkspaceCwds(workspaceCwds);
   for (const scope of [
     ExtensionSettingScope.USER,
     ExtensionSettingScope.WORKSPACE,
@@ -614,7 +633,7 @@ export async function clearStoredExtensionSecrets(
     // every workspace spelling the caller can name.
     const cwds =
       scope === ExtensionSettingScope.WORKSPACE
-        ? new Set([process.cwd(), ...workspaceCwds])
+        ? workspaceDirectories
         : new Set<string>([process.cwd()]);
     for (const cwd of cwds) {
       const serviceName = getKeychainStorageName(

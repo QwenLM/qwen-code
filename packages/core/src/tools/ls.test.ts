@@ -124,6 +124,28 @@ describe('LSTool', () => {
       }
     });
 
+    it('should return ask after the managed root becomes unavailable', async () => {
+      const managedRoot = await fs.realpath(
+        await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-ls-managed-missing-')),
+      );
+      try {
+        const managedTool = new LSTool({
+          ...mockConfig,
+          getManagedExtensionsDir: () => managedRoot,
+        } as unknown as Config);
+        const invocation = managedTool.build({
+          path: path.join(managedRoot, 'demo'),
+        });
+        expect(await invocation.getDefaultPermission()).toBe('allow');
+        await fs.rm(managedRoot, { recursive: true });
+        expect(await invocation.getDefaultPermission()).toBe('ask');
+        await fs.writeFile(managedRoot, 'not a directory');
+        expect(await invocation.getDefaultPermission()).toBe('ask');
+      } finally {
+        await fs.rm(managedRoot, { recursive: true, force: true });
+      }
+    });
+
     // Windows cannot create directory symlinks without extra privileges.
     it.skipIf(process.platform === 'win32')(
       'should return ask for a symlink inside the managed extensions directory that points outside',

@@ -96,6 +96,27 @@ export function resolveManagedExtensionsDir(
   );
 }
 
+// Configuration survives an unavailable deployment so policy and state
+// separation guards still apply. Only a live, pinned root grants local reads.
+export function getVerifiedManagedExtensionsDir(
+  directory: string | undefined,
+): string | undefined {
+  if (directory === undefined) return undefined;
+  try {
+    if (
+      !fs.lstatSync(directory).isDirectory() ||
+      fs.realpathSync.native(directory) !== directory
+    ) {
+      return undefined;
+    }
+    fs.accessSync(directory, fs.constants.R_OK | fs.constants.X_OK);
+    fs.readdirSync(directory);
+    return directory;
+  } catch {
+    return undefined;
+  }
+}
+
 // Mirror of the translation a container sandbox applies to host paths
 // (getContainerPath in packages/cli/src/serve/sandbox.ts): inside the Linux
 // container a Windows drive-letter root lands at /<drive>/<rest>.

@@ -1034,7 +1034,7 @@ export function createExtensionsController(
     trusted: boolean,
   ): Promise<ServeWorkspaceExtensionsStatus> => {
     const extensionManager = createExtensionManager(boundWorkspace, trusted);
-    await extensionManager.refreshCache();
+    await extensionManager.refreshCache({ allowManagedHandBack: false });
     const entries: ServeExtensionEntry[] = extensionManager
       .getLoadedExtensions()
       .map((ext): ServeExtensionEntry => {

@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { getVerifiedManagedExtensionsDir } from '@qwen-code/qwen-code-core/extension/managed-extension-dir.js';
 import { prepareFileWatchersForProcessExit } from '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js';
 import {
   buildHooksListing,
@@ -973,7 +974,9 @@ function buildAcpLocalReadRoots(config: Config): string[] {
 }
 
 function buildAcpLexicalLocalReadRoots(config: Config): string[] {
-  const managedExtensionsDir = config.getManagedExtensionsDir();
+  const managedExtensionsDir = getVerifiedManagedExtensionsDir(
+    config.getManagedExtensionsDir(),
+  );
   return managedExtensionsDir ? [managedExtensionsDir] : [];
 }
 
@@ -7111,7 +7114,7 @@ class QwenAgent implements Agent {
         isWorkspaceTrusted: settings.isTrusted,
         locale: getCurrentLanguage(),
       });
-      await extensionManager.refreshCache();
+      await extensionManager.refreshCache({ allowManagedHandBack: false });
       extensions = extensionManager.getLoadedExtensions();
     } catch (error) {
       debugLogger.warn(
