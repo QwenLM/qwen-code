@@ -22,9 +22,13 @@ The Landlock policy probe executes `/usr/bin/true` inside the boundary. Hosts wi
 
 Inspection and UI surfaces show requested and effective backends. Landlock is rendered with `partial` and its probed ABI. The documentation states the uncovered metadata and process/IPC boundaries. This visibility is required because `auto` may move from full bwrap enforcement to partial Landlock enforcement on a host where user namespaces or mounts are unavailable.
 
+The model prompt uses the effective backend: Landlock describes partial content-write restrictions and EACCES refusals, including metadata and namespace limits; bwrap retains its read-only mount guidance.
+
 ## Bundled helper
 
 Qwen Code ships `qwen-landlock-run` for Linux x64 and arm64 under `packages/core/vendor/landlock-run/<arch>-linux/`. The Apache-2.0 C11 source uses the stable raw Landlock UAPI and has no runtime library dependency because release binaries are statically linked with musl.
+
+Before probing or launching the bundled helper, the host restores its mode to 0755 if packaging removed all executable bits. This applies to fresh and managed installs without a postinstall script. A read-only or permission-restricted install that cannot restore the mode fails before the payload starts; it never substitutes a host command. Explicit helper-path overrides are not chmod'ed. Helper lookup distinguishes source layout from the bundle directory by its trailing path components, so installation ancestor names do not change asset resolution.
 
 The command contract is:
 

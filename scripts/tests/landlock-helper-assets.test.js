@@ -30,6 +30,8 @@ describe('bundled Landlock helpers', () => {
     expect(header[4]).toBe(2);
     expect(header[5]).toBe(1);
     expect(header.readUInt16LE(18)).toBe(machine);
-    expect(statSync(binary).mode & 0o111).not.toBe(0);
+    if (process.platform !== 'win32') {
+      expect(statSync(binary).mode & 0o111).not.toBe(0);
+    }
   });
 });

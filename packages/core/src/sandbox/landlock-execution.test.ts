@@ -4,18 +4,27 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import * as fs from 'node:fs';
 import {
+  chmodSync,
+  existsSync,
   mkdtempSync,
   mkdirSync,
   realpathSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ShellExecutionService } from '../services/shellExecutionService.js';
 import type { ProcessLaunch } from '../services/shellExecutionService.js';
+
+vi.mock('node:fs', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('node:fs')>()),
+}));
 
 const executeSandboxRelay = vi.hoisted(() => vi.fn());
 vi.mock('./sandbox-execution.js', async (importOriginal) => ({
@@ -39,7 +48,7 @@ describe('Landlock execution adapter', () => {
     state: string;
     filesystem: 'workspace-write';
     network: 'open';
-    landlockPath: string;
+    landlockPath?: string;
   };
 
   beforeEach(() => {
@@ -65,16 +74,93 @@ describe('Landlock execution adapter', () => {
   });
 
   it('resolves source and packaged helper locations by target architecture', () => {
-    expect(landlockRunnerPath('linux', 'x64')).toMatch(
-      /vendor\/landlock-run\/x64-linux\/qwen-landlock-run$/,
-    );
-    expect(landlockRunnerPath('linux', 'arm64')).toMatch(
-      /vendor\/landlock-run\/arm64-linux\/qwen-landlock-run$/,
-    );
+    const coreRoot = fileURLToPath(new URL('../../', import.meta.url));
+    for (const arch of ['x64', 'arm64'] as const) {
+      const runnerPath = landlockRunnerPath('linux', arch);
+      expect(runnerPath).toBe(
+        path.join(
+          coreRoot,
+          'vendor',
+          'landlock-run',
+          `${arch}-linux`,
+          'qwen-landlock-run',
+        ),
+      );
+      expect(existsSync(runnerPath)).toBe(true);
+    }
     expect(() => landlockRunnerPath('darwin', 'arm64')).toThrow(
       'does not support darwin/arm64',
     );
   });
+
+  it('does not treat an installation ancestor as the source sandbox directory', async () => {
+    const bundleRoot = path.join(root, 'src', 'sandbox-review', 'dist');
+    vi.resetModules();
+    vi.doMock('../utils/bundlePaths.js', () => ({
+      resolveBundleDir: () => bundleRoot,
+    }));
+    try {
+      const bundled = await import('./landlock-execution.js');
+      expect(bundled.landlockRunnerPath('linux', 'arm64')).toBe(
+        path.join(
+          bundleRoot,
+          'vendor',
+          'landlock-run',
+          'arm64-linux',
+          'qwen-landlock-run',
+        ),
+      );
+    } finally {
+      vi.doUnmock('../utils/bundlePaths.js');
+      vi.resetModules();
+    }
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'restores missing executable bits only on the bundled helper',
+    async () => {
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
+      vi.spyOn(fs, 'realpathSync').mockReturnValue(runner);
+      chmodSync(runner, 0o644);
+      const launch = vi
+        .spyOn(ShellExecutionService, 'executeLaunch')
+        .mockRejectedValue(new Error('probe reached'));
+      await expect(
+        probeLandlock(policy, new AbortController().signal),
+      ).rejects.toThrow('probe reached');
+      expect(statSync(runner).mode & 0o777).toBe(0o644);
+      await expect(
+        probeLandlock(
+          { ...policy, landlockPath: undefined },
+          new AbortController().signal,
+        ),
+      ).rejects.toThrow('probe reached');
+      expect(statSync(runner).mode & 0o777).toBe(0o755);
+      expect(launch).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'fails before probing when the bundled helper cannot be made executable',
+    async () => {
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
+      vi.spyOn(fs, 'realpathSync').mockReturnValue(runner);
+      chmodSync(runner, 0o644);
+      vi.spyOn(fs, 'chmodSync').mockImplementation(() => {
+        throw new Error('EROFS');
+      });
+      const launch = vi.spyOn(ShellExecutionService, 'executeLaunch');
+      await expect(
+        probeLandlock(
+          { ...policy, landlockPath: undefined },
+          new AbortController().signal,
+        ),
+      ).rejects.toThrow('EROFS');
+      expect(statSync(runner).mode & 0o777).toBe(0o644);
+      expect(launch).not.toHaveBeenCalled();
+      expect(executeSandboxRelay).not.toHaveBeenCalled();
+    },
+  );
 
   it('accepts only the helper capability report and requires open networking', async () => {
     executeSandboxRelay.mockResolvedValue({

@@ -22,9 +22,13 @@ Landlock 策略探测会在边界内执行 `/usr/bin/true`。缺少该可执行�
 
 检查命令和 UI 会同时展示请求后端与实际后端。Landlock 会显示 `partial` 和已探测的 ABI。文档明确列出未覆盖的元数据及进程/IPC 边界。因为 `auto` 可能在用户 namespace 或 mount 不可用的主机上从完整的 bwrap 执行切换到部分 Landlock 执行，这种可见性是必要条件。
 
+模型提示词使用实际生效的后端：Landlock 描述 partial 内容写入限制和 EACCES 拒绝，并说明元数据与 namespace 限制；bwrap 保留只读挂载指引。
+
 ## 随包 helper
 
 Qwen Code 在 `packages/core/vendor/landlock-run/<arch>-linux/` 中为 Linux x64 和 arm64 发布 `qwen-landlock-run`。Apache-2.0 的 C11 源码直接使用稳定的 Landlock 原始 UAPI；发布二进制使用 musl 静态链接，因此没有运行时库依赖。
+
+在探测或启动内置 helper 前，如果打包移除了全部执行权限位，宿主会将其权限恢复为 0755。这适用于全新安装和托管更新，无需 postinstall 脚本。只读或权限受限的安装若无法恢复权限，会在 payload 启动前失败，绝不替换为宿主命令。显式 helper 路径覆盖不会被 chmod。Helper 查找通过目录末尾的路径分量区分源码布局与 bundle 目录，因此安装位置的祖先目录名不会改变资源解析。
 
 命令契约为：
 

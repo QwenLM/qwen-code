@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { existsSync, realpathSync } from 'node:fs';
+import { chmodSync, existsSync, realpathSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type {
@@ -32,7 +32,10 @@ export function landlockRunnerPath(
   if (platform !== 'linux' || !['x64', 'arm64'].includes(arch)) {
     throw new Error(`Landlock does not support ${platform}/${arch}.`);
   }
-  const inSourceSandbox = moduleFile.includes(path.join('src', 'sandbox'));
+  const inSourceSandbox =
+    ['landlock-execution.ts', 'landlock-execution.js'].includes(
+      path.basename(moduleFile),
+    ) && moduleDirectory.endsWith(`${path.sep}src${path.sep}sandbox`);
   const levelsUp = !inSourceSandbox ? 0 : moduleFile.endsWith('.ts') ? 2 : 3;
   return path.join(
     moduleDirectory,
@@ -50,7 +53,14 @@ function resolveRunner(policy: ExecutionSandboxPolicy): string {
     throw new Error('Landlock helper path must be absolute.');
   if (!existsSync(requested))
     throw new Error(`Landlock helper is missing: ${requested}`);
-  return realpathSync(requested);
+  const runner = realpathSync(requested);
+  // npm archives strip executable bits from files outside the bin entries.
+  if (
+    policy.landlockPath === undefined &&
+    (statSync(runner).mode & 0o111) === 0
+  )
+    chmodSync(runner, 0o755);
+  return runner;
 }
 
 export async function probeLandlock(
