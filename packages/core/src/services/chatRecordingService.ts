@@ -3138,6 +3138,12 @@ export class ChatRecordingService {
     if (!isValidSessionApprovalModePayload(payload)) {
       return false;
     }
+    // A Managed session pins its approval mode in the session definition, and
+    // the record sink refuses subtypes the authoritative log has no mapping
+    // for — appending would only poison this recorder with a write failure.
+    if (this.managedSink) {
+      return true;
+    }
     const normalized = normalizeSessionApprovalModePayload(payload);
     if (
       this.currentSessionApprovalMode &&

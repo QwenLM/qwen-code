@@ -3538,6 +3538,23 @@ describe('ChatRecordingService', () => {
       const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
       expect(record.systemPayload).toEqual({ mode: ApprovalMode.YOLO });
     });
+
+    it('skips the record on a Managed session without poisoning the recorder', async () => {
+      const sink = { write: vi.fn() };
+      chatRecordingService.bindManagedSink(sink);
+
+      await expect(
+        chatRecordingService.recordSessionApprovalMode({
+          mode: ApprovalMode.YOLO,
+        }),
+      ).resolves.toBe(true);
+      expect(sink.write).not.toHaveBeenCalled();
+      expect(jsonl.writeLine).not.toHaveBeenCalled();
+
+      chatRecordingService.recordUserMessage([{ text: 'hello' }]);
+      await chatRecordingService.flush();
+      expect(sink.write).toHaveBeenCalledOnce();
+    });
   });
 
   describe('legacy recorder', () => {
