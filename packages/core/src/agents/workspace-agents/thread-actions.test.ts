@@ -26,6 +26,8 @@ import {
   HUMAN_AUTHOR_ID,
   AGENTS_SCHEMA_VERSION,
   DEFAULT_THREAD_AUTO_TURN_BUDGET,
+  MAX_THREAD_MESSAGES,
+  MAX_THREAD_RUNS,
   type WorkspaceAgent,
   type Thread,
   type ThreadRun,
@@ -99,7 +101,11 @@ describe('agent thread actions', () => {
   });
 
   it('retains durable usage, idempotency keys, and active references past history bounds', async () => {
-    const messages = Array.from({ length: 502 }, (_, index) => ({
+    // Derived from the bounds so every retention clause stays load-bearing
+    // if either bound moves: two messages over, and a full run window of
+    // references behind the retained usage and active runs.
+    const messageCount = MAX_THREAD_MESSAGES + 2;
+    const messages = Array.from({ length: messageCount }, (_, index) => ({
       id: `ms_${index}`,
       sequence: index + 1,
       authorKind: 'human' as const,
@@ -119,7 +125,7 @@ describe('agent thread actions', () => {
         usageByRound: [{ attempt: 1, round: 1, tokens: 7 }],
       }),
       run({ id: 'rn_active', queueSequence: 2, triggerMessageIds: ['ms_1'] }),
-      ...Array.from({ length: 200 }, (_, index) =>
+      ...Array.from({ length: MAX_THREAD_RUNS }, (_, index) =>
         run({
           id: `rn_${index + 3}`,
           status: 'completed',
@@ -130,7 +136,7 @@ describe('agent thread actions', () => {
     ];
     await writeThread(
       PROJECT_ROOT,
-      thread({ messages, runs, nextMessageSequence: 503 }),
+      thread({ messages, runs, nextMessageSequence: messageCount + 1 }),
     );
 
     const stored = await readThread(PROJECT_ROOT, 'th_root');
@@ -138,8 +144,8 @@ describe('agent thread actions', () => {
     expect(stored?.messages[1]?.id).toBe('ms_1');
     expect(stored?.runs[0]?.id).toBe('rn_usage');
     expect(stored?.runs[1]?.id).toBe('rn_active');
-    expect(stored?.messages).toHaveLength(502);
-    expect(stored?.runs).toHaveLength(202);
+    expect(stored?.messages).toHaveLength(messageCount);
+    expect(stored?.runs).toHaveLength(MAX_THREAD_RUNS + 2);
     expect(stored?.tokensUsed).toBe(7);
   });
 
