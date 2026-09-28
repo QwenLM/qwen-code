@@ -67,4 +67,58 @@ class BrokerValuesTest {
         assertTrue(exception.getMessage().contains(
                 "Number literal too long"));
     }
+
+    @Test
+    void acceptsValuesWhosePlainFormFitsTheReaderDigitBudget() {
+        assertDoesNotThrow(() -> BrokerValues.immutableMap(Map.of(
+                "integer", BigInteger.TEN.pow(9999).negate(),
+                "wide", new BigDecimal(new BigInteger("9".repeat(7952)), -2048),
+                "mixed", new BigDecimal(new BigInteger("9".repeat(10000)), 2048))));
+    }
+
+    @Test
+    void rejectsValuesWhosePlainFormExceedsTheReaderDigitBudget() {
+        // Each clears the ±2048 scale bound but writes more than 10000
+        // digits, which the JDBC codec then refuses to read back.
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.immutableMap(Map.of("integer",
+                        BigInteger.TEN.pow(10000))));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.immutableMap(Map.of("integer",
+                        BigInteger.TEN.pow(10000).negate())));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.immutableMap(Map.of("wide",
+                        new BigDecimal(new BigInteger("9".repeat(7953)), -2048))));
+        // The v2 wire literal "9{8000}E+2047" parses under
+        // UseBigDecimalForDoubles to precision 8000, scale -2047.
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.immutableMap(Map.of("wire",
+                        new BigDecimal(new BigInteger("9".repeat(8000)), -2047))));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.immutableMap(Map.of("mixed",
+                        new BigDecimal(new BigInteger("9".repeat(10001)), 2048))));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.immutableMap(Map.of("list", List.of(
+                        new BigDecimal(BigInteger.TEN.pow(10000))))));
+    }
+
+    @Test
+    void digitBudgetMatchesTheCodecReader() {
+        for (Object value : List.of(BigInteger.TEN.pow(9999).negate(),
+                new BigDecimal(new BigInteger("9".repeat(7952)), -2048),
+                new BigDecimal(new BigInteger("9".repeat(10000)), 2048))) {
+            String json = JSON.toJSONString(Map.of("v", value),
+                    JSONWriter.Feature.WriteBigDecimalAsPlain);
+            assertDoesNotThrow(() -> JSON.parseObject(json,
+                    JSONReader.Feature.DisableReferenceDetect));
+        }
+        for (Object value : List.of(BigInteger.TEN.pow(10000),
+                new BigDecimal(new BigInteger("9".repeat(7953)), -2048),
+                new BigDecimal(new BigInteger("9".repeat(10001)), 2048))) {
+            String json = JSON.toJSONString(Map.of("v", value),
+                    JSONWriter.Feature.WriteBigDecimalAsPlain);
+            assertThrows(Exception.class, () -> JSON.parseObject(json,
+                    JSONReader.Feature.DisableReferenceDetect));
+        }
+    }
 }
