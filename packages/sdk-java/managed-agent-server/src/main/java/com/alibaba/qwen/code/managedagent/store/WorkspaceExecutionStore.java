@@ -118,10 +118,22 @@ public class WorkspaceExecutionStore {
     }
 
     public void release(ContextBinding binding, RuntimeSessionRecord session) {
-        jdbc.update("UPDATE managed_workspace_execution_lease SET holder_key = NULL,"
-                + " binding_id = NULL, runtime_generation = NULL, runtime_session_id = NULL"
-                + " WHERE storage_key = ? AND holder_key = ?",
-                storageKey(binding), holderKey(session));
+        transaction.executeWithoutResult(status -> {
+            List<Boolean> live = jdbc.query("SELECT binding_id, runtime_generation, binding_state"
+                    + " FROM qwen_runtime_binding WHERE binding_id = ? FOR UPDATE",
+                    (row, index) -> session.getBindingId().equals(row.getString("binding_id"))
+                            && session.getRuntimeGeneration() == row.getLong("runtime_generation")
+                            && ("READY".equals(row.getString("binding_state"))
+                                    || "DRAINING".equals(row.getString("binding_state"))),
+                    session.getBindingId());
+            if (live.size() != 1 || !live.getFirst()) {
+                throw unavailable();
+            }
+            jdbc.update("UPDATE managed_workspace_execution_lease SET holder_key = NULL,"
+                    + " binding_id = NULL, runtime_generation = NULL, runtime_session_id = NULL"
+                    + " WHERE storage_key = ? AND holder_key = ?",
+                    storageKey(binding), holderKey(session));
+        });
     }
 
     public static RuntimeBrokerException unavailable() {
