@@ -40,7 +40,9 @@ export function isAuxModelSelectorSettingKey(key: string): boolean {
  * verbatim. Fail closed on the text instead.
  */
 function hasControlCharacter(baseUrl: string): boolean {
-  return /[\u0000-\u001f\u007f]/.test(baseUrl);
+  // `\p{Cc}` (C0 + DEL + C1) matches the repo's existing control-character
+  // check in `standalone-session-service.ts` and needs no lint suppression.
+  return /\p{Cc}/u.test(baseUrl);
 }
 
 /**

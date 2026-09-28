@@ -246,6 +246,21 @@ describe('stripAuxSelectorBaseUrlCredential', () => {
     expect(persisted).not.toContain('user:');
   });
 
+  it('fails closed on the C1 control range too, not just C0', () => {
+    // The guard is `\p{Cc}`, which covers C0 + DEL + C1. Narrowing it back to
+    // a C0-only class must red this row.
+    expect(
+      stripAuxSelectorBaseUrlCredential(
+        'https://gw.example/v1\u009fhttps://user:sk-secret@other.example/v1',
+      ),
+    ).toBe('');
+    expect(
+      publicAuxModelSelectorValue(
+        'openai:gpt-x\0https://gw.example/v1\u009fhttps://user:sk-secret@o.e/v1',
+      ),
+    ).toBe('openai:gpt-x');
+  });
+
   it('keeps a control-character-free clean URL byte-identical', () => {
     // Guard against the control-character check widening normalization for
     // the shapes the runtime compares by exact equality.
