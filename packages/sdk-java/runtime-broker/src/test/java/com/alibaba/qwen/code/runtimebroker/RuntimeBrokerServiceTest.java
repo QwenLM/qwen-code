@@ -393,12 +393,16 @@ class RuntimeBrokerServiceTest {
             ToolExecutionRecord prepared = join(fixture.service.prepareExecution(
                     "harness", PROVIDER_SESSION, "key", providerReference()));
             fixture.transport.cancelResult = CompletableFuture.completedFuture(Map.of("state", "unknown"));
-            assertEquals("runtime_execution_cancel_failed", failure(fixture.service.cancelExecution(
-                    "harness", PROVIDER_SESSION, prepared.getExecutionCallId())).getCode());
+            RuntimeBrokerException unknown = failure(fixture.service.cancelExecution(
+                    "harness", PROVIDER_SESSION, prepared.getExecutionCallId()));
+            assertEquals("runtime_execution_cancel_unconfirmed", unknown.getCode());
+            assertFalse(unknown.isRetryable());
             fixture.transport.cancelResult = CompletableFuture.completedFuture(Map.of("state", "settled",
                     "result", Map.of("executionStatus", "success")));
-            assertEquals("runtime_execution_cancel_failed", failure(fixture.service.cancelExecution(
-                    "harness", PROVIDER_SESSION, prepared.getExecutionCallId())).getCode());
+            RuntimeBrokerException executed = failure(fixture.service.cancelExecution(
+                    "harness", PROVIDER_SESSION, prepared.getExecutionCallId()));
+            assertEquals("runtime_execution_cancel_unconfirmed", executed.getCode());
+            assertFalse(executed.isRetryable());
             // Neither failed observation rewrote the cancelled receipt.
             assertEquals("cancelled", fixture.executionRepository
                     .findByExecutionCallId(prepared.getExecutionCallId()).getResult().get("executionStatus"));

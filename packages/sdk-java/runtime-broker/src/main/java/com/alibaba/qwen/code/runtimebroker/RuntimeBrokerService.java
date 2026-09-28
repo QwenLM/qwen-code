@@ -496,8 +496,17 @@ public final class RuntimeBrokerService implements AutoCloseable {
                         }
                     }, 25, TimeUnit.MILLISECONDS);
                 } else {
-                    throw unavailable("runtime_execution_cancel_failed",
-                            "Runtime did not confirm prepared invocation cancellation");
+                    // unknown or an unexpected terminal answer can never
+                    // become the confirmation, so a retry cannot converge;
+                    // fail non-retryably rather than loop the same round
+                    // trip. unknown never becomes not_started evidence.
+                    Object state = status == null ? null : status.get("state");
+                    throw new RuntimeBrokerException(409,
+                            "runtime_execution_cancel_unconfirmed",
+                            "unknown".equals(state)
+                                    ? "Runtime no longer retains the prepared invocation"
+                                    : "Runtime did not confirm prepared invocation cancellation",
+                            false);
                 }
             } catch (RuntimeException failure) {
                 completion.completeExceptionally(failure);
