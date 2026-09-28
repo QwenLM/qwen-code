@@ -10,6 +10,7 @@ import type {
   WorkflowAuthoringSurface,
 } from '@qwen-code/qwen-code-core';
 import {
+  ToolMode,
   ToolNames,
   WORKFLOW_AUTHORING_SKILL_NAME,
 } from '@qwen-code/qwen-code-core';
@@ -31,6 +32,7 @@ interface StubOptions {
   nameOnlyNow?: boolean;
   /** Make reading the tool registry throw. */
   registryThrows?: boolean;
+  toolMode?: ToolMode;
 }
 
 function stubConfig(options: StubOptions = {}): Config {
@@ -41,6 +43,7 @@ function stubConfig(options: StubOptions = {}): Config {
     skillEnabledNow = true,
     nameOnlyNow = false,
     registryThrows = false,
+    toolMode = ToolMode.Direct,
   } = options;
   const registry = {
     getAllToolNames: () => toolNames,
@@ -53,6 +56,7 @@ function stubConfig(options: StubOptions = {}): Config {
   };
   return {
     isWorkflowNameOnly: () => nameOnlyNow,
+    getToolMode: () => toolMode,
     getSkillManager: () => ({}),
     getDisabledSkillLevels: () => new Set(),
     isSkillEnabled: () => skillEnabledNow,
@@ -173,6 +177,24 @@ describe('buildWorkflowKeywordPrefix', () => {
     expect(prefix).toContain(
       'If the Workflow tool is not in your tool list, review its schema with `tool_search` and then invoke it with `tool_call`.',
     );
+  });
+
+  it('does not name the hidden bridge for a deferred Workflow tool in CodeModeOnly', () => {
+    const prefix = buildWorkflowKeywordPrefix(
+      stubConfig({
+        toolNames: [
+          ToolNames.SKILL,
+          ToolNames.WORKFLOW,
+          ToolNames.TOOL_SEARCH,
+          ToolNames.TOOL_CALL,
+        ],
+        deferred: [ToolNames.WORKFLOW],
+        toolMode: ToolMode.CodeModeOnly,
+      }),
+      'build me a workflow',
+    );
+
+    expect(prefix).not.toContain('review its schema with `tool_search`');
   });
 
   // tool_search alone can review the schema but never invoke it: with the

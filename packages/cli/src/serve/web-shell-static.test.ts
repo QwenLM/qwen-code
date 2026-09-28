@@ -222,6 +222,10 @@ describe('public PWA HTTP routes', () => {
     await writeFile(path.join(directory, 'assets', 'icon-192.png'), 'icon');
     await writeFile(path.join(directory, 'assets', 'icon.svg'), '<svg/>');
     await writeFile(path.join(directory, 'assets', 'future-config.json'), '{}');
+    await writeFile(
+      path.join(directory, 'index.html'),
+      '<!doctype html><title>Shell</title>',
+    );
     app = express();
     mountWebShellAssets(app, directory);
     app.use((_req, res) => {
@@ -329,6 +333,30 @@ describe('public PWA HTTP routes', () => {
       expect.stringContaining('EACCES: permission denied'),
     );
   });
+
+  it.each(['/plugins', '/channels', '/scheduled-tasks', '/goals', '/settings'])(
+    'serves public document %s but leaves API requests protected',
+    async (route) => {
+      await request(app)
+        .get(route)
+        .set('Accept', 'text/html')
+        .expect(200)
+        .expect(/<title>Shell/);
+      await request(app)
+        .head(`${route}/`)
+        .set('Accept', 'text/html')
+        .expect(200);
+      await request(app)
+        .get(route)
+        .set('Accept', 'application/json')
+        .expect(401);
+      await request(app).post(route).set('Accept', 'text/html').expect(401);
+      await request(app)
+        .get(`${route}/data`)
+        .set('Accept', 'text/html')
+        .expect(401);
+    },
+  );
 
   it('retains authentication for API requests and writes', async () => {
     await request(app).get('/capabilities').expect(401);

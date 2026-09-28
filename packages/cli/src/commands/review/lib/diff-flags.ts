@@ -35,6 +35,28 @@ export const PINNED_DIFF_CONFIG: readonly string[] = [
   'diff.suppressBlankEmpty=false',
   '-c',
   'core.quotePath=false',
+  // The HUNK SHAPE, which the flags above do not pin: `diff.algorithm` and
+  // `diff.indentHeuristic` move where a hunk starts and ends with the blobs,
+  // the mode and the attributes all standing still. Pinned to git's own
+  // defaults so two checkouts render one diff the same way.
+  //
+  // These two are NOT the boundary of the per-file verdict identity, and
+  // that identity is not a class to be closed one knob at a time. It
+  // certifies CONTENT: the `<mode> <oid>` pair, plus the attributes that
+  // decide whether the content is rendered at all (`binary`, `-diff`,
+  // `text`, a driver's `binary`) — and the knobs that could HIDE content
+  // from a reviewer are pinned by the flags below (`--no-ext-diff`,
+  // `--no-textconv`, `--ignore-submodules=none`). Every remaining diff knob
+  // — inter-hunk context, an order file, function-name headers, a
+  // driver-scoped algorithm, the rename limit — changes how the same changed
+  // lines are grouped, ordered or labelled, never which lines changed (a
+  // rename the limit demotes to delete+add shows MORE of the file, and the
+  // added side's absent base never transfers, per `changedPairs`).
+  // Presentation is not certified, so it is not recorded.
+  '-c',
+  'diff.algorithm=myers',
+  '-c',
+  'diff.indentHeuristic=true',
 ];
 
 /**

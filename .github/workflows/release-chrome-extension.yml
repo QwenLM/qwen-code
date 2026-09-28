@@ -129,7 +129,7 @@ jobs:
           release_version=$(node -p "JSON.parse(process.argv[1]).version_name" "${manifest}")
 
           # The store rejects an upload whose manifest pins an extension id.
-          if node -p "JSON.parse(process.argv[1]).key ?? ''" "${manifest}" | grep -q .; then
+          if [[ "$(node -p '"key" in JSON.parse(process.argv[1])' "${manifest}")" == 'true' ]]; then
             echo "::error::The packaged manifest still carries a key; the store would reject it."
             exit 1
           fi
@@ -186,13 +186,44 @@ jobs:
 
           # --fail would discard the body, and the store explains a refusal
           # there: an expired refresh token, an item that cannot be updated.
+          # The store's own workflows retry; a 5xx here after a successful
+          # upload would otherwise fail the release with the package already in.
+          # --retry 5 allows six attempts; --retry-max-time bounds when a new
+          # one may START, so one call can run to roughly that plus --max-time.
+          # $1 names the endpoint; $2 says whether its body is safe to print.
+          # The token response is not: a transfer that dies after the body has
+          # landed would otherwise write a live access token to the log, before
+          # anything has had the chance to mask it.
           call() {
-            local status
+            local what=$1 body=$2 status
+            shift 2
+            # curl leaves --output untouched when a transfer dies before the
+            # first byte, so without this a failing call would print whatever
+            # the previous one left behind — including the token response.
+            rm -f response.json
             status=$(curl --silent --show-error --output response.json \
-              --write-out '%{http_code}' "$@") || return 1
+              --retry 5 --retry-delay 10 --retry-all-errors --retry-max-time 300 \
+              --max-time 120 --write-out '%{http_code}' "$@") || {
+              # Retries exhausted at the transport layer: curl printed its own
+              # reason to stderr, but say which endpoint it was talking to.
+              echo "::error::Could not reach ${what}."
+              [[ "${body}" == 'show-body' ]] && cat response.json 2>/dev/null
+              return 1
+            }
             if [[ "${status}" != 2?? ]]; then
-              echo "::error::HTTP ${status} from the Chrome Web Store:"
-              cat response.json
+              # Naming the endpoint matters: an expired refresh token fails at
+              # Google's OAuth service, not at the store's dashboard.
+              echo "::error::HTTP ${status} from ${what}:"
+              if [[ "${body}" == 'show-body' ]]; then
+                cat response.json
+              else
+                # A refusal here is an OAuth error object, which is safe to
+                # print. A 2xx body on this endpoint carries the token, so
+                # anything of another shape is described rather than printed —
+                # without asserting a token was in it, which is unknowable.
+                node -p 'const v=JSON.parse(require("fs").readFileSync("response.json","utf8"));if(typeof v.error!=="string")throw 0;JSON.stringify({error:v.error,error_description:v.error_description})' 2>/dev/null ||
+                  echo "(no OAuth error object; $(wc -c < response.json) bytes not printed, since this endpoint can return the access token)"
+              fi
               return 1
             fi
           }
@@ -202,7 +233,8 @@ jobs:
 
           # The refresh token is long-lived; the access token it mints lasts an
           # hour, which covers an upload and a publish.
-          call --data-urlencode "client_id=${CLIENT_ID}" \
+          call 'Google OAuth (refresh token)' 'hide-body' \
+            --data-urlencode "client_id=${CLIENT_ID}" \
             --data-urlencode "client_secret=${CLIENT_SECRET}" \
             --data-urlencode "refresh_token=${REFRESH_TOKEN}" \
             --data-urlencode 'grant_type=refresh_token' \
@@ -214,7 +246,8 @@ jobs:
           fi
           echo "::add-mask::${token}"
 
-          call --request PUT \
+          call 'the Chrome Web Store upload API' 'show-body' \
+            --request PUT \
             --header "Authorization: Bearer ${token}" \
             --header 'x-goog-api-version: 2' \
             --upload-file 'chrome-extension-store.zip' \
@@ -236,13 +269,22 @@ jobs:
           ITEM_ID: '${{ secrets.CHROME_WEBSTORE_ITEM_ID }}'
           RELEASE_VERSION: '${{ needs.build.outputs.release_version }}'
         run: |-
+          # Not retried at all, unlike the calls above. Every status plain
+          # --retry treats as transient (408, 429, 5xx) is one where the store
+          # may already have taken the submission, so a repeat could fail a
+          # release that worked. A transient failure here leaves the package
+          # uploaded: dispatch again to submit it.
+          rm -f response.json
           status_code=$(curl --silent --show-error --output response.json \
-            --write-out '%{http_code}' \
+            --max-time 120 --write-out '%{http_code}' \
             --request POST \
             --header "Authorization: Bearer ${QWEN_CHROME_TOKEN}" \
             --header 'x-goog-api-version: 2' \
             --header 'Content-Length: 0' \
-            "https://www.googleapis.com/chromewebstore/v1.1/items/${ITEM_ID}/publish")
+            "https://www.googleapis.com/chromewebstore/v1.1/items/${ITEM_ID}/publish") || {
+            echo "::error::Could not reach the Chrome Web Store publish API. The package is uploaded; dispatch again to submit it."
+            exit 1
+          }
           cat response.json
           if [[ "${status_code}" != 2?? ]]; then
             echo "::error::HTTP ${status_code} while publishing ${RELEASE_VERSION}."

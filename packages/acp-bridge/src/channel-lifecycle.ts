@@ -8,9 +8,13 @@ import type { ClientSideConnection } from '@agentclientprotocol/sdk';
 import type { ActiveWorkHoldCategory, ChildHeapReport } from './bridgeTypes.js';
 import type { AcpChannel } from './channel.js';
 import type { ChannelLivenessMonitor } from './channel-liveness.js';
+import type { BridgeExecutionEngine } from './bridgeOptions.js';
 
 export interface HarnessChannel {
   readonly id: string;
+  readonly executionEngine?: BridgeExecutionEngine;
+  /** Epoch allocated when the handshake completed; 0 until then. */
+  runtimeEpoch: number;
   lastUsedAt: number;
   readonly channel: AcpChannel;
   readonly connection: ClientSideConnection;
@@ -112,17 +116,27 @@ export interface ChannelLifecycle {
   readonly current: HarnessChannel | undefined;
   readonly starting: Promise<HarnessChannel> | undefined;
   readonly size: number;
+  currentFor(engine?: BridgeExecutionEngine): HarnessChannel | undefined;
+  startingFor(
+    engine?: BridgeExecutionEngine,
+  ): Promise<HarnessChannel> | undefined;
+  startups(): IterableIterator<Promise<HarnessChannel>>;
   has(info: HarnessChannel): boolean;
   values(): IterableIterator<HarnessChannel>;
   track(info: HarnessChannel): void;
   publish(info: HarnessChannel): void;
   remove(info: HarnessChannel): void;
-  startSpawn(spawn: () => Promise<HarnessChannel>): Promise<HarnessChannel>;
-  finishSpawn(): void;
+  startSpawn(
+    spawn: () => Promise<HarnessChannel>,
+    engine?: BridgeExecutionEngine,
+  ): Promise<HarnessChannel>;
+  finishSpawn(engine?: BridgeExecutionEngine): void;
 }
 
-export function createChannelLifecycle(): ChannelLifecycle {
-  // `channelInfo` is the SINGLE attach-available channel. Cleared
+export function createChannelLifecycle(
+  defaultEngine?: BridgeExecutionEngine,
+): ChannelLifecycle {
+  // Each engine slot has one attach-available channel. Cleared
   // ONLY by the `channel.exited` handler in channel-harness.ts when the OS
   // reaps the underlying child process. Teardown initiators
   // (`killSession` last-session-leaving — via `startIdleTimer` ->
@@ -138,7 +152,7 @@ export function createChannelLifecycle(): ChannelLifecycle {
   // handshake completes). Race-aware code paths (`ensureChannel`,
   // `killAllSync`) gate on `isDying` rather than presence; see
   // `HarnessChannel.isDying` for the per-set-site rationale.
-  let channelInfo: HarnessChannel | undefined;
+  const channels = new Map<BridgeExecutionEngine | undefined, HarnessChannel>();
   // BkUyD: superset of `channelInfo` covering channels
   // that are dying but not yet OS-reaped. `killSession` /
   // `doSpawn`-newSession-failure / `shutdown` mark a channel as
@@ -156,16 +170,22 @@ export function createChannelLifecycle(): ChannelLifecycle {
   const aliveChannels = new Set<HarnessChannel>();
   // Coalesces a concurrent second `ensureChannel()` call onto the
   // first one's spawn so we never create two children for the same
-  // daemon. Cleared in the `finally` of the creator.
-  let inFlightChannelSpawn: Promise<HarnessChannel> | undefined;
+  // engine. Cleared in the `finally` of the creator.
+  const starting = new Map<
+    BridgeExecutionEngine | undefined,
+    Promise<HarnessChannel>
+  >();
 
   return {
     get current() {
-      return channelInfo;
+      return channels.get(defaultEngine);
     },
     get starting() {
-      return inFlightChannelSpawn;
+      return starting.get(defaultEngine);
     },
+    currentFor: (engine = defaultEngine) => channels.get(engine),
+    startingFor: (engine = defaultEngine) => starting.get(engine),
+    startups: () => starting.values(),
     get size() {
       return aliveChannels.size;
     },
@@ -179,17 +199,23 @@ export function createChannelLifecycle(): ChannelLifecycle {
       aliveChannels.add(info);
     },
     publish(info) {
-      channelInfo = info;
+      channels.set(info.executionEngine, info);
     },
     remove(info) {
       aliveChannels.delete(info);
-      if (channelInfo === info) channelInfo = undefined;
+      if (channels.get(info.executionEngine) === info)
+        channels.delete(info.executionEngine);
     },
-    startSpawn(spawn) {
-      return (inFlightChannelSpawn ??= spawn());
+    startSpawn(spawn, engine = defaultEngine) {
+      let promise = starting.get(engine);
+      if (!promise) {
+        promise = spawn();
+        starting.set(engine, promise);
+      }
+      return promise;
     },
-    finishSpawn() {
-      inFlightChannelSpawn = undefined;
+    finishSpawn(engine = defaultEngine) {
+      starting.delete(engine);
     },
   };
 }

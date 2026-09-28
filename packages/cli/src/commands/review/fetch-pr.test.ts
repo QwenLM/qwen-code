@@ -365,13 +365,13 @@ vi.mock('../../services/review-worktree-lease.js', () => {
       return lease
         ? {
             lease,
-            path: `${repositoryRoot}/.qwen/review-leases/qwen-review-lease-${target}.json`,
+            path: `/qwen-home/review-state/repository-hash/qwen-review-lease-${target}.json`,
           }
         : null;
     },
     reviewLeaseHeldByAnotherSession: vi.fn((): boolean => false),
-    reviewLeasePath: (repositoryRoot: string, target: string) =>
-      `${repositoryRoot}/.qwen/review-leases/qwen-review-lease-${target}.json`,
+    reviewLeasePath: (_repositoryRoot: string, target: string) =>
+      `/qwen-home/review-state/repository-hash/qwen-review-lease-${target}.json`,
   };
 });
 
@@ -634,6 +634,113 @@ describe('fetch-pr report assembly', () => {
   it('carries --host into the report for the cleanup audit to reuse', async () => {
     const report = await reportFor({ host: 'ghe.example.com' });
     expect(report.host).toBe('ghe.example.com');
+  });
+
+  it('refuses a symlinked .qwen/tmp before the lease, the worktree or the diff', async () => {
+    // The entry guard runs first: a redirected scratch directory must not
+    // cost a lease write, a `cleanStale`, a worktree, or a diff — every one
+    // of them lands under it. The suite's fs is a mock, so the link is what
+    // `lstat` reports for the two in-repo components.
+    producerMocks.lstatSync.mockImplementation((path?: unknown) => {
+      const p = String(path);
+      if (p === join('.qwen', 'tmp')) {
+        return { isSymbolicLink: () => true } as unknown as ReturnType<
+          typeof producerMocks.lstatSync
+        >;
+      }
+      if (p === '.qwen') {
+        return { isSymbolicLink: () => false } as unknown as ReturnType<
+          typeof producerMocks.lstatSync
+        >;
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    const { createReviewWorktreeLease } = await import(
+      '../../services/review-worktree-lease.js'
+    );
+    vi.mocked(createReviewWorktreeLease).mockClear();
+    producerMocks.git.mockClear();
+    await expect(reportFor({})).rejects.toThrow(
+      /^fetch-pr: .*tmp is a symbolic link/s,
+    );
+    expect(vi.mocked(createReviewWorktreeLease)).not.toHaveBeenCalled();
+    expect(
+      producerMocks.git.mock.calls.some((c) => c.includes('worktree')),
+    ).toBe(false);
+    expect(
+      producerMocks.writeFileSync.mock.calls.some(([path]) =>
+        String(path).endsWith('diff.txt'),
+      ),
+    ).toBe(false);
+  });
+
+  it('withholds the cache candidate when the runtime published no identity', async () => {
+    // A merge base, so the candidate block runs at all (the suite's default
+    // is a base-less fetch, which never records pairs).
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: 'b'.repeat(40),
+      baseFetchFailed: false,
+    });
+    const said = () =>
+      producerMocks.writeStderrLine.mock.calls
+        .map((c) => String(c[0]))
+        .join('\n');
+    // Control first: under the fixture identity the block RUNS — it writes
+    // the candidate, or names the write it could not make (this suite's fs
+    // is a mock, so the real atomic write may have no directory to land in)
+    // — and never withholds for the identity. The absence below is then the
+    // guard's doing and not the fixture's.
+    producerMocks.writeStderrLine.mockClear();
+    const control = await reportFor({});
+    expect(
+      control.cacheCandidatePath !== undefined ||
+        /could not write the cache candidate/.test(said()),
+    ).toBe(true);
+    expect(said()).not.toContain('published no model identity');
+    // An empty identity never compares equal — the gate reads it as a
+    // mismatch and `cache-commit` refuses it — so announcing the candidate
+    // would send Step 8 into a refusal with no branch, losing the round's
+    // ledger with it. Withheld at the source, the absent field routes the
+    // round to the hand-written fallback, which omits `lastModelId`.
+    const savedModel = process.env['QWEN_CODE_MODEL'];
+    process.env['QWEN_CODE_MODEL'] = '';
+    try {
+      producerMocks.writeStderrLine.mockClear();
+      const handler = fetchPrCommand.handler;
+      if (!handler) throw new Error('fetch-pr handler missing');
+      const savedIdentity = process.env['QWEN_CODE_MODEL_IDENTITY'];
+      process.env['QWEN_CODE_MODEL_IDENTITY'] = '';
+      try {
+        await handler({
+          _: [],
+          $0: 'qwen',
+          pr_number: '42',
+          owner_repo: 'acme/widgets',
+          remote: 'origin',
+          out: '/tmp/fetch-report.json',
+          maxChunkLines: 400,
+        } as unknown as Parameters<typeof handler>[0]);
+      } finally {
+        if (savedIdentity === undefined) {
+          delete process.env['QWEN_CODE_MODEL_IDENTITY'];
+        } else {
+          process.env['QWEN_CODE_MODEL_IDENTITY'] = savedIdentity;
+        }
+      }
+      const call = producerMocks.writeFileSync.mock.calls.findLast(
+        ([path]: unknown[]) => path === '/tmp/fetch-report.json',
+      );
+      if (!call) throw new Error('report was not written');
+      const report = JSON.parse(String(call[1])) as Record<string, unknown>;
+      expect('cacheCandidatePath' in report).toBe(false);
+      expect('reviewModelId' in report).toBe(false);
+      expect(said()).toContain('published no model identity');
+      // …and nothing was attempted: the withholding is at the source.
+      expect(said()).not.toContain('could not write the cache candidate');
+    } finally {
+      if (savedModel === undefined) delete process.env['QWEN_CODE_MODEL'];
+      else process.env['QWEN_CODE_MODEL'] = savedModel;
+    }
   });
 
   it('refuses a dash-leading baseRefName from the platform metadata', async () => {
@@ -1315,6 +1422,13 @@ describe('fetch-pr report assembly', () => {
       );
       expect(producerMocks.releaseWorktree).not.toHaveBeenCalled();
       expect(producerMocks.git).not.toHaveBeenCalled();
+      // `gitRaw` is a git call too, and the scratch-directory guard makes one
+      // (`ls-files -s -z`) and then creates `.qwen/tmp`. It answers an empty
+      // listing under this suite's mock, so a guard placed ahead of the gate
+      // runs silently and the refusal below it still fires — the message
+      // assertion alone cannot see the order.
+      expect(producerMocks.gitRaw).not.toHaveBeenCalled();
+      expect(producerMocks.mkdirSync).not.toHaveBeenCalled();
       expect(producerMocks.execFileSync).not.toHaveBeenCalled();
       expect(vi.mocked(readReviewWorktreeLease)).not.toHaveBeenCalled();
       expect(vi.mocked(createReviewWorktreeLease)).not.toHaveBeenCalled();
@@ -1501,7 +1615,14 @@ describe('fetch-pr report assembly', () => {
       // Nothing was created through the link — no mkdir, no worktree add —
       // and the fetched ref survives the refusal for the next run's
       // cleanStale to sweep (the arm sits outside the rollback try).
-      expect(producerMocks.mkdirSync).not.toHaveBeenCalled();
+      //
+      // ONE mkdir, not none: the entry guard creates `.qwen/tmp` before any
+      // of this, while the mock still answers ENOENT for the relative
+      // spelling it asks about — the link this test plants is the one that
+      // appears afterwards. Step 4's `mkdirSync(dirname(wt))` takes the very
+      // same arguments, so the count is what tells them apart: a second call
+      // is the create through the link.
+      expect(producerMocks.mkdirSync).toHaveBeenCalledTimes(1);
       expect(producerMocks.git).not.toHaveBeenCalledWith(
         'worktree',
         'add',
@@ -1538,7 +1659,8 @@ describe('fetch-pr report assembly', () => {
       await expect(reportFor({})).rejects.toThrow(
         /refusing to create a review worktree at .*is a symlink/,
       );
-      expect(producerMocks.mkdirSync).not.toHaveBeenCalled();
+      // The entry guard's mkdir only — see the ancestor test above.
+      expect(producerMocks.mkdirSync).toHaveBeenCalledTimes(1);
       expect(producerMocks.git).not.toHaveBeenCalledWith(
         'worktree',
         'add',
@@ -4654,6 +4776,8 @@ function resumePlanFields(diffBytes: string): Record<string, unknown> {
   ) as unknown as Record<string, unknown>;
 }
 
+const RESUME_MODEL = 'resume-model@1a2b3c4d';
+
 describe('fetch-pr --resume', () => {
   const OUT = '/tmp/fetch-report.json';
   const DIFF_BYTES = 'diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n+x\n';
@@ -4679,6 +4803,7 @@ describe('fetch-pr --resume', () => {
       prDescriptionHasHan: false,
       isCrossRepository: false,
       diffStat: { files: 1, additions: 1, deletions: 0 },
+      reviewModelId: RESUME_MODEL,
       ...resumePlanFields(DIFF_BYTES),
       ...over,
     });
@@ -4770,6 +4895,9 @@ describe('fetch-pr --resume', () => {
     // BOTH ids before any step runs.
     vi.stubEnv('QWEN_CODE_SESSION_ID', 'S-test');
     vi.stubEnv('QWEN_CODE_PROMPT_ID', 'P-test');
+    // The identity the interrupted attempt recorded (`prevReport`), running
+    // again — the precondition every continuation below assumes.
+    vi.stubEnv('QWEN_CODE_MODEL_IDENTITY', RESUME_MODEL);
   });
 
   async function run(extraArgs: Record<string, unknown> = {}) {
@@ -5255,6 +5383,28 @@ describe('fetch-pr --resume', () => {
     ]);
   });
 
+  it('refuses a continuation under another identity, and the fresh report names the running one (R26-1)', async () => {
+    // The continuation would republish the interrupted attempt's report and
+    // cache candidate verbatim, both certifying RESUME_MODEL over a review
+    // another model performed.
+    vi.stubEnv('QWEN_CODE_MODEL_IDENTITY', 'other-model@9f8e7d6c');
+    await run();
+    const lines = await stdoutJsonLines();
+    expect(lines[0]).toEqual({
+      resumed: false,
+      resumeRefused: 'model-mismatch',
+    });
+    const written = producerMocks.writeFileSync.mock.calls.find(
+      ([path]) => path === OUT,
+    );
+    expect(written).toBeDefined();
+    expect(
+      (JSON.parse(String(written![1])) as Record<string, unknown>)[
+        'reviewModelId'
+      ],
+    ).toBe('other-model@9f8e7d6c');
+  });
+
   it('resumes at the recorded effort when none is passed, and says so', async () => {
     producerMocks.readFileSync.mockImplementation((path?: unknown) => {
       if (path === OUT) return prevReport({ effort: 'medium' });
@@ -5419,6 +5569,7 @@ describe('fetch-pr --resume bookkeeping is counted, not merely called', () => {
       prDescriptionHasHan: false,
       isCrossRepository: false,
       diffStat: { files: 1, additions: 1, deletions: 0 },
+      reviewModelId: RESUME_MODEL,
       ...resumePlanFields(DIFF_BYTES),
       ...over,
     });
@@ -5502,6 +5653,9 @@ describe('fetch-pr --resume bookkeeping is counted, not merely called', () => {
     // BOTH ids before any step runs.
     vi.stubEnv('QWEN_CODE_SESSION_ID', 'S-test');
     vi.stubEnv('QWEN_CODE_PROMPT_ID', 'P-test');
+    // The identity the interrupted attempt recorded (`prevReport`), running
+    // again — the precondition every continuation below assumes.
+    vi.stubEnv('QWEN_CODE_MODEL_IDENTITY', RESUME_MODEL);
   });
 
   async function run(extra: Record<string, unknown> = {}) {

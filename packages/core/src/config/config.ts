@@ -153,6 +153,7 @@ import {
   resetDenialState,
 } from '../permissions/denialTracking.js';
 import { parseRule } from '../permissions/rule-parser.js';
+import { clearSessionCommits } from '../permissions/destructive-commands.js';
 import { SubagentManager } from '../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../subagents/types.js';
 import { BackgroundTaskRegistry } from '../agents/background-tasks.js';
@@ -310,6 +311,10 @@ import type {
   SessionRuntimeResumeState,
 } from '../services/session-transcript-reader.js';
 import {
+  assertSessionExecutionEngine,
+  type SessionExecutionEngine,
+} from '../services/session-execution-engine.js';
+import {
   SessionTranscriptChangedError,
   SessionWriterError,
   SessionWriterLease,
@@ -401,6 +406,16 @@ export function parseVisionModelSetting(setting: string | undefined):
 
 function formatVisionModelSettingForLog(setting: string): string {
   return setting.replace(/\0/g, '\\0');
+}
+
+export function isValidAdvisorMaxUses(value: unknown): value is number {
+  return Number.isSafeInteger(value) && (value as number) >= 0;
+}
+
+function normalizeAdvisorModel(model: string | undefined): string | undefined {
+  const trimmed = model?.trim();
+  if (!trimmed || trimmed.toLowerCase() === 'off') return undefined;
+  return trimmed;
 }
 
 // Re-export types
@@ -958,12 +973,19 @@ export type ModelProposedGoalsMode = 'alwaysAsk' | 'disabled';
 export interface ConfigParameters {
   agentExecutionBackend?: 'container';
   executionEnvironmentFactory?: ExecutionEnvironmentFactory;
+  executionEnvironment?: ExecutionEnvironment;
   sessionId?: string;
   sessionData?: ResumedSessionData;
   sessionRestoreProjection?: SessionRestoreProjection;
   sessionRestoreProjectionSource?: () => Promise<
     SessionRestoreProjection | undefined
   >;
+  /**
+   * Engine a paired host selected for this session. Initialization records it
+   * as the owner of a new transcript, or requires the restored transcript to
+   * prove it, before hooks, MCP or tools start.
+   */
+  sessionExecutionEngine?: SessionExecutionEngine;
   embeddingModel?: string;
   sandbox?: SandboxConfig;
   targetDir: string;
@@ -1082,7 +1104,7 @@ export interface ConfigParameters {
    */
   toolInvocationGuard?: ToolInvocationGuard;
   /** Internal trusted-host integration; never loaded from workspace settings. */
-  shellExecutionSandbox?: Readonly<BwrapPolicy>;
+  shellExecutionSandbox?: Readonly<ShellExecutionSandboxPolicy>;
   toolDiscoveryCommand?: string;
   toolCallCommand?: string;
   mcpServerCommand?: string;
@@ -1436,6 +1458,12 @@ export interface ConfigParameters {
    */
   fastModel?: string;
   /**
+   * Explicit model selector for the native Advisor tool. Empty, whitespace,
+   * and "off" disable Advisor and do not fall back to the primary model.
+   */
+  advisorModel?: string;
+  advisorMaxUses?: number;
+  /**
    * Built-in WebSearch settings. `enabled: false` disables the tool; when the
    * setting is omitted, the tool may derive a backend from the active provider
    * at startup. An explicit model or env-declared backend takes precedence.
@@ -1537,6 +1565,10 @@ export interface ConfigParameters {
   ) => Promise<void>;
   /** Lifecycle handle for an external settings file watcher. Stopped during shutdown. */
   settingsWatcher?: { stopWatching(): void };
+}
+
+export interface ShellExecutionSandboxPolicy extends BwrapPolicy {
+  requestedBackend?: 'auto' | 'bwrap';
 }
 
 export type TerminalImageRenderSupport =
@@ -2249,6 +2281,8 @@ export type DerivedConfigOverrides = Partial<
     | 'getPlanFilePath'
     | 'getWorkspaceContext'
     | 'getFileService'
+    | 'getEffectiveInputModalities'
+    | 'getFileReadCache'
     | 'getToolRegistry'
     | 'getPermissionManager'
     | 'getApprovalMode'
@@ -2538,7 +2572,9 @@ export function deriveConfig(
 }
 
 export class Config {
-  private readonly shellExecutionSandbox: Readonly<BwrapPolicy> | undefined;
+  private readonly shellExecutionSandbox:
+    | Readonly<ShellExecutionSandboxPolicy>
+    | undefined;
   private sessionId: string;
   private sessionSourceType?: string;
   private sessionSourceId?: string;
@@ -2548,6 +2584,7 @@ export class Config {
   private readonly sessionRestoreProjectionSource?: () => Promise<
     SessionRestoreProjection | undefined
   >;
+  private readonly sessionExecutionEngine?: SessionExecutionEngine;
   private restoredFileHistory = false;
   private goalRestoreActivation?: () => Promise<void>;
   private rejectGoalRestoreActivation?: (reason?: unknown) => void;
@@ -2920,6 +2957,7 @@ export class Config {
   private externalAgentExecutor?: ExternalAgentExecutor;
   private readonly agentExecutionBackend?: 'container';
   private readonly executionEnvironmentFactory?: ExecutionEnvironmentFactory;
+  private readonly executionEnvironment?: ExecutionEnvironment;
   private executionEnvironments?: Set<Promise<ExecutionEnvironment>>;
   private readonly executionShutdown = new AbortController();
   private executionCleanupPromise?: Promise<void>;
@@ -3015,6 +3053,9 @@ export class Config {
   private readonly memoryAgentTimeoutMinutes: number | undefined;
   private readonly memoryAgentMaxTurns: number | undefined;
   private fastModel?: string;
+  private advisorModel?: string;
+  private readonly advisorMaxUses: number;
+  private readonly advisorUsage = { calls: 0 };
   private readonly webSearchSettings?: WebSearchSettings;
   private webSearchNoticeEmitted = false;
   /**
@@ -3053,6 +3094,12 @@ export class Config {
   private readonly settingsWatcher?: { stopWatching(): void };
 
   constructor(params: ConfigParameters) {
+    this.executionEnvironment = params.executionEnvironment;
+    if (params.executionEnvironment) {
+      this.executionEnvironments = new Set([
+        Promise.resolve(params.executionEnvironment),
+      ]);
+    }
     this.agentExecutionBackend = params.agentExecutionBackend;
     const executionFactory = params.executionEnvironmentFactory;
     this.executionEnvironmentFactory = executionFactory
@@ -3082,6 +3129,7 @@ export class Config {
     }
     this.sessionData = params.sessionData;
     this.sessionRestoreProjectionSource = params.sessionRestoreProjectionSource;
+    this.sessionExecutionEngine = params.sessionExecutionEngine;
     this.setSessionRestoreProjection(params.sessionRestoreProjection);
     // Daemon Configs use sessionIdContext and must not replace the
     // single-session CLI fallback with whichever session was created last.
@@ -3605,6 +3653,14 @@ export class Config {
         ? params.memoryAgentMaxTurns
         : undefined;
     this.fastModel = params.fastModel || undefined;
+    this.advisorModel = normalizeAdvisorModel(params.advisorModel);
+    // Nothing validates settings.json on the load path, so a hand-edited
+    // -1, 1.5 or "5" reaches this constructor. Fall back to the default
+    // (unlimited) like the neighbouring numeric settings instead of refusing
+    // to start; the CLI surfaces a settings warning for the ignored value.
+    this.advisorMaxUses = isValidAdvisorMaxUses(params.advisorMaxUses)
+      ? params.advisorMaxUses
+      : 0;
     this.webSearchSettings = params.webSearch;
     this.visionModel = params.visionModel || undefined;
     this.compactionModel = params.compactionModel || undefined;
@@ -3646,6 +3702,15 @@ export class Config {
    * @param options Optional initialization options including sendSdkMcpMessage callback
    */
   async initialize(options?: ConfigInitializeOptions): Promise<void> {
+    if (this.executionEnvironment) {
+      options = {
+        ...options,
+        skipHooks: true,
+        skipMcpDiscovery: true,
+        skipSkillManager: true,
+        skipFileCheckpointing: true,
+      };
+    }
     if (isDerivedConfig(this)) {
       throw new Error('Derived Configs cannot be initialized');
     }
@@ -3757,6 +3822,7 @@ export class Config {
         }
       }
       options?.signal?.throwIfAborted();
+      await this.bindSessionExecutionEngine();
       registerSessionProjectDir(this.sessionId, this.storage.getProjectDir());
       this.sessionProjectDirRegistered = true;
       await this.initializeInternal(options);
@@ -3791,6 +3857,25 @@ export class Config {
       }
       throw error;
     }
+  }
+
+  /**
+   * Runs after the writer can take records and before any initialization side
+   * effect. A restore is checked against the owner read from its own snapshot;
+   * without chat recording there is no durable session to own.
+   */
+  private async bindSessionExecutionEngine(): Promise<void> {
+    const engine = this.sessionExecutionEngine;
+    if (engine === undefined) return;
+    if (this.sessionRestoreProjectionSource || this.sessionData) {
+      assertSessionExecutionEngine(
+        this.pendingSessionRestoreProjection?.executionEngine,
+        this.sessionId,
+        engine,
+      );
+      return;
+    }
+    await this.chatRecordingService?.recordExecutionEngine(engine);
   }
 
   private async initializeInternal(
@@ -3838,12 +3923,14 @@ export class Config {
         );
     recordStartupEvent('config_initialize_extensions_initial_start');
     if (
+      !this.executionEnvironment &&
       !this.shellExecutionSandbox &&
       !this.isSafeMode() &&
       !this.getBareMode()
     ) {
       await this.extensionManager.refreshCache();
     } else if (
+      !this.executionEnvironment &&
       !this.shellExecutionSandbox &&
       !this.isSafeMode() &&
       explicitExtensionNames.length > 0
@@ -4281,6 +4368,7 @@ export class Config {
 
     recordStartupEvent('config_initialize_extensions_final_start');
     if (
+      !this.executionEnvironment &&
       !this.shellExecutionSandbox &&
       !this.getBareMode() &&
       !this.isSafeMode()
@@ -4767,6 +4855,7 @@ export class Config {
     loadReason: Exclude<InstructionLoadReason, 'include'> = 'refresh',
     signal?: AbortSignal,
   ): Promise<void> {
+    if (this.executionEnvironment) return;
     // Safe mode: skip all context file loading (QWEN.md, AGENTS.md, rules)
     if (this.isSafeMode()) {
       this.setUserMemory('');
@@ -5486,6 +5575,10 @@ export class Config {
       this.permissionManager?.clearSessionAllowRules();
       // The web search budget belongs to the session, like the grants above.
       this.webSearchSessionUsage.calls = 0;
+      // So does the Advisor budget, reset in place for the same reason the
+      // counter is an object: a derived Config must mutate this one, not
+      // shadow it with an own property.
+      this.advisorUsage.calls = 0;
     }
     this.clearSessionRestoreProjection();
     this.pendingRecoveredAgentsNotice = null;
@@ -6072,6 +6165,44 @@ export class Config {
    */
   setFastModel(model: string | undefined): void {
     this.fastModel = model || undefined;
+  }
+
+  getAdvisorMaxUses(): number {
+    return this.advisorMaxUses;
+  }
+
+  getAdvisorUseCount(): number {
+    return this.advisorUsage.calls;
+  }
+
+  tryConsumeAdvisorUse(): boolean {
+    if (
+      this.advisorMaxUses > 0 &&
+      this.advisorUsage.calls >= this.advisorMaxUses
+    )
+      return false;
+    this.advisorUsage.calls += 1;
+    return true;
+  }
+
+  getAdvisorModel(): string | undefined {
+    return this.advisorModel;
+  }
+
+  async setAdvisorModel(model: string | undefined): Promise<boolean> {
+    const normalizedModel = normalizeAdvisorModel(model);
+    if (normalizedModel && this.getDisabledTools().has(ToolNames.ADVISOR)) {
+      return false;
+    }
+
+    this.advisorModel = normalizedModel;
+    if (!this.initialized || !this.toolRegistry) {
+      return true;
+    }
+
+    await this.syncAdvisorToolRegistration(this.toolRegistry);
+    await this.llmClient?.setTools();
+    return true;
   }
 
   /**
@@ -7525,7 +7656,7 @@ export class Config {
   }
 
   getMcpServers(): Record<string, MCPServerConfig> | undefined {
-    if (this.shellExecutionSandbox) return {};
+    if (this.executionEnvironment || this.shellExecutionSandbox) return {};
     // Safe mode distrusts LOCAL/ambient state (settings.json, extensions,
     // project `.mcp.json`) — not the caller's own explicit, per-invocation
     // request. `topTierMcpServers` (ACP `session/new`'s `mcpServers` field,
@@ -8376,6 +8507,31 @@ export class Config {
     // Any deliberate mode change invalidates the AUTO denialTracking signal.
     if (fromMode !== mode) {
       this.autoModeDenialState = resetDenialState();
+      // ...and the session-commit registry behind the AUTO-mode
+      // `git commit --amend` exemption, per its contract ("cleared on session
+      // end or mode switch"): exemptions must not carry across a boundary
+      // where the user re-decides how much the agent may do unattended.
+      // Clearing is fail-closed. Gated on a real transition so a no-op re-set,
+      // which several callers do, cannot drop registrations still in use.
+      // Root Config only, like the workflow-revision stamp above: a derived
+      // overlay's `setApprovalMode` delegates here, and a subagent flipping
+      // its own mode is child-local, not a decision about the root session's
+      // autonomy. Clearing there cost the root a false "not made by the agent
+      // in this session" block on its own commit.
+      //
+      // PLAN is excluded on both legs for the same reason. `enter_plan_mode`
+      // is model-callable from AUTO and `exit_plan_mode` restores it, so the
+      // round trip is two real transitions that end in the posture it started
+      // in — and PLAN cannot execute a commit, so the excursion cannot add an
+      // exemption either. Clearing on it bought nothing and cost the agent a
+      // false block on its own commit, with no escape from inside AUTO.
+      if (
+        !isDerivedConfig(this) &&
+        mode !== ApprovalMode.PLAN &&
+        fromMode !== ApprovalMode.PLAN
+      ) {
+        clearSessionCommits();
+      }
     }
     this.approvalMode = mode;
     if (mode !== ApprovalMode.PLAN) this.planExecutionMode = undefined;
@@ -9304,7 +9460,7 @@ export class Config {
   }
 
   getExecutionEnvironment(): ExecutionEnvironment | undefined {
-    return undefined;
+    return this.executionEnvironment;
   }
 
   shutdownExecutionEnvironments(): Promise<void> {
@@ -11034,7 +11190,9 @@ export class Config {
     return this.toolInvocationGuard;
   }
 
-  getShellExecutionSandbox(): Readonly<BwrapPolicy> | undefined {
+  getShellExecutionSandbox():
+    | Readonly<ShellExecutionSandboxPolicy>
+    | undefined {
     return this.shellExecutionSandbox;
   }
 
@@ -11142,6 +11300,25 @@ export class Config {
     }
   }
 
+  private async syncAdvisorToolRegistration(
+    registry: ToolRegistry,
+  ): Promise<void> {
+    if (!this.getAdvisorModel() || this.getBareMode() || this.isSafeMode()) {
+      registry.unregisterTool(ToolNames.ADVISOR);
+      return;
+    }
+
+    if (this.getDisabledTools().has(ToolNames.ADVISOR)) return;
+
+    registry.unregisterTool(ToolNames.ADVISOR);
+    await this.registerLazyTool(registry, ToolNames.ADVISOR, async () => {
+      const { AdvisorTool } = await import('../tools/advisor.js');
+      return new AdvisorTool(this);
+    });
+    // Consume the factory so disabling Advisor removes its registration completely.
+    await registry.ensureTool(ToolNames.ADVISOR);
+  }
+
   async registerSessionSourceTool(
     registry: ToolRegistry = this.toolRegistry,
   ): Promise<void> {
@@ -11197,35 +11374,6 @@ export class Config {
       toolName: ToolName,
       factory: ToolFactory,
     ): Promise<void> => this.registerLazyTool(registry, toolName, factory);
-
-    const environment = this.getExecutionEnvironment();
-    if (environment) {
-      if (this.getCodeModeOnly()) {
-        throw new Error(
-          'Container execution cannot be combined with tools.codeModeOnly.',
-        );
-      }
-      const [{ createExecutionTools }, { wrapExecutionTool }] =
-        await Promise.all([
-          import('../services/local-execution-environment.js'),
-          import('../tools/execution-tool.js'),
-        ]);
-      for (const [name, tool] of createExecutionTools(this)) {
-        if (name === ToolNames.LS && !this.isLsToolEnabled()) continue;
-        await registerLazy(name as ToolName, async () =>
-          wrapExecutionTool(tool, environment, this),
-        );
-      }
-      await registerLazy(ToolNames.TOOL_CALL, async () => {
-        const { ToolCallTool } = await import('../tools/tool-call.js');
-        return new ToolCallTool(registry);
-      });
-      await registerLazy(ToolNames.TOOL_SEARCH, async () => {
-        const { ToolSearchTool } = await import('../tools/tool-search.js');
-        return new ToolSearchTool(this);
-      });
-      return registry;
-    }
 
     // The synthetic structured_output tool is the terminal contract for
     // --json-schema runs. It must be registered in BOTH the bare-mode
@@ -11288,6 +11436,89 @@ export class Config {
         return new ExecTool(this);
       });
     };
+
+    const registerHostSessionTools = async (): Promise<void> => {
+      if (this.isTodoWriteEnabled()) {
+        await registerLazy(ToolNames.TODO_WRITE, async () => {
+          const { TodoWriteTool } = await import('../tools/todoWrite.js');
+          return new TodoWriteTool(this);
+        });
+      }
+      await registerLazy(ToolNames.WEB_FETCH, async () => {
+        const { WebFetchTool } = await import('../tools/web-fetch.js');
+        return new WebFetchTool(this);
+      });
+      // WebSearch is opt-out: it registers whenever the gate can resolve a
+      // usable backend — either configured explicitly, or derived from the
+      // provider the main model runs on. `enabled: false` turns it off without
+      // importing anything. A gate failure surfaces a one-time startup notice
+      // only when the tool was actually asked for; a provider with no search
+      // backend fails silently (`gate.silent`), since warning about a feature
+      // the user never configured is noise.
+      const hasExplicitWebSearchBackend =
+        !!this.webSearchSettings?.model?.trim() ||
+        !!this.webSearchSettings?.baseUrl;
+      if (
+        !this.getBareMode() &&
+        !this.isSafeMode() &&
+        this.webSearchSettings?.enabled !== false &&
+        (this.webSearchSettings?.enabled === true ||
+          !hasExplicitWebSearchBackend)
+      ) {
+        const { evaluateWebSearchGate } = await import(
+          '../tools/web-search.js'
+        );
+        const gate = evaluateWebSearchGate(this);
+        if (gate.ok) {
+          await registerLazy(ToolNames.WEB_SEARCH, async () => {
+            const { WebSearchTool } = await import('../tools/web-search.js');
+            return new WebSearchTool(this);
+          });
+        } else if (
+          !gate.silent &&
+          !this.webSearchNoticeEmitted &&
+          !options?.forSubAgent
+        ) {
+          this.webSearchNoticeEmitted = true;
+          this.warnings.push(gate.notice);
+        }
+      }
+    };
+
+    const environment = this.getExecutionEnvironment();
+    if (environment) {
+      if (this.getCodeModeOnly()) {
+        throw new Error(
+          'Container execution cannot be combined with tools.codeModeOnly.',
+        );
+      }
+      const [{ createExecutionTools }, { wrapExecutionTool }] =
+        await Promise.all([
+          import('../services/local-execution-environment.js'),
+          import('../tools/execution-tool.js'),
+        ]);
+      for (const [name, tool] of createExecutionTools(this)) {
+        if (environment.toolNames && !environment.toolNames.has(name)) continue;
+        if (name === ToolNames.LS && !this.isLsToolEnabled()) continue;
+        await registerLazy(name as ToolName, async () =>
+          wrapExecutionTool(tool, environment, this),
+        );
+      }
+      await registerLazy(ToolNames.TOOL_CALL, async () => {
+        const { ToolCallTool } = await import('../tools/tool-call.js');
+        return new ToolCallTool(registry);
+      });
+      await registerLazy(ToolNames.TOOL_SEARCH, async () => {
+        const { ToolSearchTool } = await import('../tools/tool-search.js');
+        return new ToolSearchTool(this);
+      });
+      if (this.executionEnvironment && !options?.forSubAgent) {
+        await registerStructuredOutputIfRequested();
+        await registerGoalWorkerTools();
+        if (!this.getBareMode()) await registerHostSessionTools();
+      }
+      return registry;
+    }
 
     if (this.shellExecutionSandbox) {
       await registerLazy(ToolNames.SHELL, async () => {
@@ -11366,8 +11597,10 @@ export class Config {
     }
 
     // --- Core tools (always registered) ---
+    await registerHostSessionTools();
     await registerExecIfEnabled();
     await registerGoalWorkerTools();
+    await this.syncAdvisorToolRegistration(registry);
     await registerLazy(ToolNames.TOOL_CALL, async () => {
       const { ToolCallTool } = await import('../tools/tool-call.js');
       return new ToolCallTool(registry);
@@ -11479,12 +11712,6 @@ export class Config {
       const { ShellTool } = await import('../tools/shell.js');
       return new ShellTool(this);
     });
-    if (this.isTodoWriteEnabled()) {
-      await registerLazy(ToolNames.TODO_WRITE, async () => {
-        const { TodoWriteTool } = await import('../tools/todoWrite.js');
-        return new TodoWriteTool(this);
-      });
-    }
     await registerLazy(ToolNames.REPORT_FINDINGS, async () => {
       const { ReportFindingsTool } = await import(
         '../tools/report-findings.js'
@@ -11520,10 +11747,6 @@ export class Config {
       const { ExitWorktreeTool } = await import('../tools/exit-worktree.js');
       return new ExitWorktreeTool(this);
     });
-    await registerLazy(ToolNames.WEB_FETCH, async () => {
-      const { WebFetchTool } = await import('../tools/web-fetch.js');
-      return new WebFetchTool(this);
-    });
     if (
       resolveInteractionMode(this) === 'interactive' &&
       !this.sdkMode &&
@@ -11534,38 +11757,6 @@ export class Config {
         const { DisplayImageTool } = await import('../tools/display-image.js');
         return new DisplayImageTool(this);
       });
-    }
-    // WebSearch is opt-out: it registers whenever the gate can resolve a
-    // usable backend — either configured explicitly, or derived from the
-    // provider the main model runs on. `enabled: false` turns it off without
-    // importing anything. A gate failure surfaces a one-time startup notice
-    // only when the tool was actually asked for; a provider with no search
-    // backend fails silently (`gate.silent`), since warning about a feature
-    // the user never configured is noise.
-    const hasExplicitWebSearchBackend =
-      !!this.webSearchSettings?.model?.trim() ||
-      !!this.webSearchSettings?.baseUrl;
-    if (
-      !this.getBareMode() &&
-      !this.isSafeMode() &&
-      this.webSearchSettings?.enabled !== false &&
-      (this.webSearchSettings?.enabled === true || !hasExplicitWebSearchBackend)
-    ) {
-      const { evaluateWebSearchGate } = await import('../tools/web-search.js');
-      const gate = evaluateWebSearchGate(this);
-      if (gate.ok) {
-        await registerLazy(ToolNames.WEB_SEARCH, async () => {
-          const { WebSearchTool } = await import('../tools/web-search.js');
-          return new WebSearchTool(this);
-        });
-      } else if (
-        !gate.silent &&
-        !this.webSearchNoticeEmitted &&
-        !options?.forSubAgent
-      ) {
-        this.webSearchNoticeEmitted = true;
-        this.warnings.push(gate.notice);
-      }
     }
     await this.registerImageGenerationTool(registry);
     if (this.isArtifactEnabled()) {

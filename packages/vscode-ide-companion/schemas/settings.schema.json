@@ -24,6 +24,11 @@
             "type": "string"
           }
         },
+        "tokenQr": {
+          "description": "Print the token-bearing QR even when stdout is captured and the bearer is an operator-supplied (stable) token. Honored from user, system, and system-defaults settings only — a workspace settings file must not be able to push the operator's credential into logs; qwen serve --no-token-qr suppresses the QR for that run. Same effect as qwen serve --token-qr.",
+          "type": "boolean",
+          "default": false
+        },
         "maxConcurrentSubSessionsPerCaller": {
           "description": "Per-session ceiling on concurrent in-flight sub-sessions spawned via the create_sub_session tool.",
           "type": "integer",
@@ -115,6 +120,11 @@
         },
         "enableAutoUpdate": {
           "description": "Enable automatic update checks and installations on startup.",
+          "type": "boolean",
+          "default": true
+        },
+        "batchAutoCollect": {
+          "description": "Collect this project's /batch-api tasks in interactive sessions when their batch finishes (also at startup) and write the results. Polls the provider over HTTP; never calls the model and never retries failed items.",
           "type": "boolean",
           "default": true
         },
@@ -674,8 +684,32 @@
       "type": "string",
       "default": ""
     },
+    "batch": {
+      "description": "Independent model selection for /batch-api and qwen batch. Unset to reuse the main model configuration.",
+      "type": "object",
+      "properties": {
+        "model": {
+          "description": "Model ID in modelProviders. The selected entry supplies the endpoint, envKey and generationConfig.",
+          "type": "string"
+        },
+        "authType": {
+          "description": "Batch protocol. Defaults to openai; only OpenAI-compatible chat-completions is supported.",
+          "type": "string"
+        },
+        "baseUrl": {
+          "description": "Optional exact modelProviders baseUrl to distinguish entries with the same model ID.",
+          "type": "string"
+        }
+      }
+    },
+    "advisorMaxUses": {
+      "description": "Maximum native Advisor requests per session, shared by the executor and its subagents. Failed requests count. 0 means unlimited. Each request sends the conversation to the selected provider and consumes additional tokens. Only user and system settings apply.",
+      "type": "integer",
+      "default": 0,
+      "minimum": 0
+    },
     "advisorModel": {
-      "description": "Model used by /advisor for second-opinion reviews of the conversation. Leave empty to use the main model. A model at least as capable as the main model is recommended. Setting this sends the recent conversation transcript to that model, even when it uses another provider.",
+      "description": "Model selector for the Advisor tool. Leave empty to disable Advisor. Enabling it sends the active conversation to that model, even when it uses another provider.",
       "type": "string",
       "default": ""
     },
@@ -1276,6 +1310,38 @@
       "description": "Settings for built-in and custom tools.",
       "type": "object",
       "properties": {
+        "executionSandbox": {
+          "type": "object",
+          "required": [
+            "filesystem",
+            "network"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "backend": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "bwrap"
+              ]
+            },
+            "filesystem": {
+              "type": "string",
+              "enum": [
+                "read-only",
+                "workspace-write"
+              ]
+            },
+            "network": {
+              "type": "string",
+              "enum": [
+                "open",
+                "closed"
+              ]
+            }
+          },
+          "description": "Linux tool execution confinement. Operator scopes only; workspace settings cannot override it. Model/auth/session traffic stays on the host."
+        },
         "codeModeOnly": {
           "description": "Expose ordinary tools to the model only through the isolated exec JavaScript tool. Direct control tools remain available. Ignored in safe and bare modes.",
           "type": "boolean",
@@ -4291,7 +4357,7 @@
               "default": "qwen3.5-omni-plus-realtime"
             },
             "endpoint": {
-              "description": "Advanced override for the DashScope Realtime WebSocket endpoint.",
+              "description": "Base URL of the DashScope Realtime service, such as https://dashscope.aliyuncs.com/compatible-mode/v1; a Realtime WebSocket URL is also accepted.",
               "type": "string",
               "default": "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
             },

@@ -101,7 +101,7 @@ export function sanitizeOperationError(
   return new BrowserRuntimeError('OPERATION_FAILED', message);
 }
 
-function operationErrorMessage(error: unknown): string {
+export function operationErrorMessage(error: unknown): string {
   const message =
     error instanceof Error
       ? error.message

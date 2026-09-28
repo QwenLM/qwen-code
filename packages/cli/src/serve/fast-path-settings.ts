@@ -4,6 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  readOperatorSandboxSettings,
+  stripUtf8Bom,
+} from '../config/execution-sandbox-settings.js';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -48,7 +52,16 @@ export type ServeFastPathSettings = Pick<
 > & {
   general?: Pick<NonNullable<Settings['general']>, 'chatRecording'>;
   policy?: ServeFastPathPolicyInput;
-  serve?: { channels?: unknown };
+  serve?: { channels?: unknown; tokenQr?: unknown };
+  /**
+   * Report-only: keys a workspace settings file set that only
+   * operator-owned scopes may set (today only `serve.tokenQr` can produce
+   * an entry — it is the one restricted key this reader would otherwise
+   * honor). The values never enter the summary; the serve boot names the
+   * drop on stderr, matching the warning the interactive CLI raises through
+   * getSettingsWarnings.
+   */
+  ignoredWorkspaceKeys?: string[];
 };
 const V2_SETTINGS_VERSION = 2;
 type CachedTrustRule = TrustPrecedenceRule<string>;
@@ -427,12 +440,16 @@ function isWorkspaceTrustedFastPath(
 function readSettingsSummary(
   filePath: string,
   includeServe = false,
+  includeTokenQr = false,
+  ignoredKeys?: string[],
 ): ServeFastPathSettings {
   if (!fs.existsSync(filePath)) return {};
 
   let parsed: unknown;
   try {
-    parsed = JSON.parse(stripJsonComments(fs.readFileSync(filePath, 'utf8')));
+    parsed = JSON.parse(
+      stripJsonComments(stripUtf8Bom(fs.readFileSync(filePath, 'utf8'))),
+    );
   } catch (err) {
     throw new Error(
       `Failed to read serve fast path settings from ${filePath}: ${
@@ -445,7 +462,19 @@ function readSettingsSummary(
       `Serve fast path settings file ${filePath} must be a JSON object.`,
     );
   }
-  return pickFastPathSettings(parsed, includeServe);
+  // serve.tokenQr is honored from operator-owned scopes only (see
+  // pickFastPathSettings); a workspace file that sets it gets the drop
+  // reported, never the value.
+  const serveSection = parsed['serve'];
+  if (
+    ignoredKeys !== undefined &&
+    !includeTokenQr &&
+    isPlainObject(serveSection) &&
+    serveSection['tokenQr'] !== undefined
+  ) {
+    ignoredKeys.push('serve.tokenQr');
+  }
+  return pickFastPathSettings(parsed, includeServe, includeTokenQr);
 }
 
 function shouldUseLegacyFastPathKeys(value: Record<string, unknown>): boolean {
@@ -463,6 +492,7 @@ function shouldUseLegacyFastPathKeys(value: Record<string, unknown>): boolean {
 function pickFastPathSettings(
   value: Record<string, unknown>,
   includeServe = false,
+  includeTokenQr = false,
 ): ServeFastPathSettings {
   const out: ServeFastPathSettings = {};
   const useLegacyKeys = shouldUseLegacyFastPathKeys(value);
@@ -656,10 +686,21 @@ function pickFastPathSettings(
   }
 
   const serve = value['serve'];
-  if (includeServe && isPlainObject(serve)) {
-    const channels = serve['channels'];
-    if (channels !== undefined) {
-      out.serve = { channels };
+  if (isPlainObject(serve)) {
+    const channels = includeServe ? serve['channels'] : undefined;
+    // serve.tokenQr pushes the operator's stable bearer into captured
+    // stdout, so only operator-owned scopes (user/system/system-defaults)
+    // may set it — never a workspace file, trusted or not. The value is
+    // passed through untyped on purpose: this reader is shared with
+    // policy.* and serve.channels, and throwing here would discard the
+    // whole summary — downgrading permission mediation to its default —
+    // because of a display knob. The consumer validates and warns.
+    const tokenQr = includeTokenQr ? serve['tokenQr'] : undefined;
+    if (channels !== undefined || tokenQr !== undefined) {
+      out.serve = {
+        ...(channels !== undefined ? { channels } : {}),
+        ...(tokenQr !== undefined ? { tokenQr } : {}),
+      };
     }
   }
 
@@ -721,6 +762,12 @@ function mergeFastPathSettings(
     if (source.policy) {
       merged.policy = { ...(merged.policy ?? {}), ...source.policy };
     }
+    if (source.serve?.tokenQr !== undefined) {
+      merged.serve = {
+        ...(merged.serve ?? {}),
+        tokenQr: source.serve.tokenQr,
+      };
+    }
   }
   return merged;
 }
@@ -729,6 +776,7 @@ export function loadServeFastPathSettings(
   workspaceDir: string,
 ): ServeFastPathSettings {
   preResolveServeFastPathHomeEnvOverrides();
+  const operator = readOperatorSandboxSettings();
   const resolvedWorkspaceDir = path.resolve(workspaceDir);
   const resolvedHomeDir = path.resolve(os.homedir());
   let realWorkspaceDir = resolvedWorkspaceDir;
@@ -738,10 +786,16 @@ export function loadServeFastPathSettings(
     // Match loadSettings(): use the resolved path when realpath is unavailable.
   }
 
-  const system = readSettingsSummary(getSystemSettingsPath());
-  const systemDefaults = readSettingsSummary(getSystemDefaultsPath());
+  const system = readSettingsSummary(getSystemSettingsPath(), false, true);
+  const systemDefaults = readSettingsSummary(
+    getSystemDefaultsPath(),
+    false,
+    true,
+  );
   const user = readSettingsSummary(
     path.join(getGlobalQwenDirLite(), 'settings.json'),
+    false,
+    true,
   );
   // `system-defaults` participates so an operator enabling
   // `security.folderTrust` there reaches the same answer the merged settings
@@ -775,21 +829,40 @@ export function loadServeFastPathSettings(
     'settings.json',
   );
   const workspaceSettingsActive = realWorkspaceDir !== realHomeDir;
+  const ignoredWorkspaceKeys: string[] = [];
   const workspaceFromDisk = workspaceSettingsActive
-    ? readSettingsSummary(workspaceSettingsPath, startupChannelsTrusted)
+    ? readSettingsSummary(
+        workspaceSettingsPath,
+        startupChannelsTrusted,
+        false,
+        ignoredWorkspaceKeys,
+      )
     : {};
   const workspace = isTrusted ? workspaceFromDisk : {};
 
   const merged = mergeFastPathSettings(systemDefaults, user, workspace, system);
+  if (operator.tools?.executionSandbox !== undefined) {
+    merged.tools = {
+      ...merged.tools,
+      executionSandbox: operator.tools.executionSandbox as NonNullable<
+        Settings['tools']
+      >['executionSandbox'],
+    };
+  }
   if (startupChannelsTrusted && workspaceFromDisk.serve) {
     merged.serve = {
+      ...(merged.serve ?? {}),
       channels: workspaceFromDisk.serve.channels,
     };
   }
-  return resolveEnvVarsInObject(
+  const resolved = resolveEnvVarsInObject(
     merged as Settings,
     getHomeEnvFallbackVarsFastPath(),
   ) as ServeFastPathSettings;
+  if (ignoredWorkspaceKeys.length > 0) {
+    resolved.ignoredWorkspaceKeys = ignoredWorkspaceKeys;
+  }
+  return resolved;
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

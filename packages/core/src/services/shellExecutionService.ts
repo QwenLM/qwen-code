@@ -181,6 +181,7 @@ export interface ProcessLaunch {
   cwd: string;
   env: Readonly<Record<string, string>>;
   stdin?: string | Buffer;
+  inheritStdin?: boolean;
 }
 
 function launchCommand(input: string | ProcessLaunch) {
@@ -382,6 +383,9 @@ export interface ShellPostPromoteSettleInfo {
  */
 export interface ShellExecuteOptions {
   streamStdout?: boolean;
+  /** Stream byte-exact child output without text decoding or binary sniffing. */
+  streamRawOutput?: boolean;
+  rawCapture?: ShellRawCaptureSink;
   /**
    * Post-promote callback hooks. See {@link ShellPostPromoteHandlers}.
    * Optional; omit to preserve the caller-visible PR-2 detach-everything
@@ -390,10 +394,23 @@ export interface ShellExecuteOptions {
   postPromote?: ShellPostPromoteHandlers;
 }
 
+export interface ShellRawCaptureSink {
+  write(stream: 'stdout' | 'stderr', chunk: Buffer): Promise<void>;
+  finish(stream: 'stdout' | 'stderr', complete: boolean): Promise<void>;
+  setStarted(pid: number): void;
+  setProcessResult(result: ShellExecutionResult): void;
+}
+
 /**
  * Describes a structured event emitted during shell command execution.
  */
 export type ShellOutputEvent =
+  | {
+      /** The event contains a byte-exact output chunk. */
+      type: 'raw_data';
+      chunk: Buffer;
+      stream: 'stdout' | 'stderr';
+    }
   | {
       /** The event contains a chunk of output data. */
       type: 'data';
@@ -778,6 +795,7 @@ export class ShellExecutionService {
       stdin: Buffer.isBuffer(launch.stdin)
         ? Buffer.from(launch.stdin)
         : launch.stdin,
+      inheritStdin: launch.inheritStdin,
     };
     if (
       !path.isAbsolute(snapshot.executable) ||
@@ -798,7 +816,13 @@ export class ShellExecutionService {
     ) {
       throw new Error('Invalid process launch argument or environment.');
     }
-    if (shouldUseNodePty && snapshot.stdin !== undefined) {
+    if (snapshot.stdin !== undefined && snapshot.inheritStdin) {
+      throw new Error('Process stdin cannot be both piped and inherited.');
+    }
+    if (
+      shouldUseNodePty &&
+      (snapshot.stdin !== undefined || snapshot.inheritStdin)
+    ) {
       throw new Error('Process stdin requires pipe execution.');
     }
     if (shouldUseNodePty && !snapshot.env['TERM']) {
@@ -893,10 +917,12 @@ export class ShellExecutionService {
       onOutputEvent,
       abortSignal,
       options.streamStdout ?? false,
+      options.streamRawOutput ?? false,
       getMaxBufferedOutputBytes(shellExecutionConfig),
       shellExecutionConfig.pager,
       options.postPromote,
       shellExecutionConfig.streamBufferedOutput,
+      options.rawCapture,
     );
   }
 
@@ -906,10 +932,12 @@ export class ShellExecutionService {
     onOutputEvent: (event: ShellOutputEvent) => void,
     abortSignal: AbortSignal,
     streamStdout: boolean,
+    streamRawOutput: boolean,
     maxBufferedOutputBytes: number,
     pager: string | undefined,
     postPromote?: ShellPostPromoteHandlers,
     streamBufferedOutput = false,
+    rawCapture?: ShellRawCaptureSink,
   ): ShellExecutionHandle {
     try {
       const isWindows = os.platform() === 'win32';
@@ -931,7 +959,11 @@ export class ShellExecutionService {
       const child = cpSpawn(executable, shellArgs, {
         cwd,
         stdio: [
-          launch?.stdin === undefined ? 'ignore' : 'pipe',
+          launch?.inheritStdin
+            ? 'inherit'
+            : launch?.stdin === undefined
+              ? 'ignore'
+              : 'pipe',
           'pipe',
           'pipe',
         ],
@@ -984,6 +1016,36 @@ export class ShellExecutionService {
           signal: NodeJS.Signals | null;
         } | null = null;
         let drainTimer: NodeJS.Timeout | null = null;
+        let remainingDrainMs = POST_EXIT_STREAM_DRAIN_MS;
+        let drainStartedAt = 0;
+        let pendingCaptureWrites = 0;
+        let stdoutEnded = false;
+        let stderrEnded = false;
+        let stdoutWrite: Promise<void> = Promise.resolve();
+        let stderrWrite: Promise<void> = Promise.resolve();
+
+        const pauseDrain = () => {
+          if (!drainTimer) return;
+          clearTimeout(drainTimer);
+          drainTimer = null;
+          remainingDrainMs -= performance.now() - drainStartedAt;
+        };
+        const resumeDrain = () => {
+          if (!recordedExit || drainTimer || settled || pendingCaptureWrites) {
+            return;
+          }
+          if (remainingDrainMs <= 0) {
+            void handleExit(recordedExit.code, recordedExit.signal);
+            return;
+          }
+          drainStartedAt = performance.now();
+          drainTimer = setTimeout(() => {
+            drainTimer = null;
+            const recorded = recordedExit;
+            if (recorded) void handleExit(recorded.code, recorded.signal);
+          }, remainingDrainMs);
+          drainTimer.unref?.();
+        };
 
         let isStreamingRawContent = true;
         const MAX_SNIFF_SIZE = 4096;
@@ -1031,6 +1093,17 @@ export class ShellExecutionService {
         };
 
         const handleOutput = (data: Buffer, stream: 'stdout' | 'stderr') => {
+          totalOutputBytes += data.length;
+          const capturedData = captureOutputData(data);
+          if (streamRawOutput) {
+            onOutputEvent({
+              type: 'raw_data',
+              chunk: Buffer.from(data),
+              stream,
+            });
+            return;
+          }
+
           if (!stdoutDecoder || !stderrDecoder) {
             const encoding = getCachedEncodingForBuffer(data);
             try {
@@ -1075,9 +1148,6 @@ export class ShellExecutionService {
               sniffChunks.length = 0;
             }
           }
-
-          totalOutputBytes += data.length;
-          const capturedData = captureOutputData(data);
 
           if (!isStreamingRawContent) {
             // Binary mode: drop further data. Foreground emits the
@@ -1131,7 +1201,7 @@ export class ShellExecutionService {
           }
         };
 
-        const handleExit = (
+        const handleExit = async (
           code: number | null,
           signal: NodeJS.Signals | null,
         ) => {
@@ -1140,6 +1210,21 @@ export class ShellExecutionService {
           if (drainTimer) {
             clearTimeout(drainTimer);
             drainTimer = null;
+          }
+          if (rawCapture) {
+            await Promise.all([stdoutWrite, stderrWrite]);
+            const finished = await Promise.allSettled([
+              rawCapture.finish('stdout', stdoutEnded),
+              rawCapture.finish('stderr', stderrEnded),
+            ]);
+            for (const result of finished) {
+              if (result.status === 'rejected') {
+                debugLogger.warn(
+                  'Shell raw capture finish failed',
+                  result.reason,
+                );
+              }
+            }
           }
           const { finalBuffer } = cleanup();
           // Ensure we don't add an extra newline if stdout already ends with one.
@@ -1183,11 +1268,34 @@ export class ShellExecutionService {
         // caller. Anonymous arrows here would leak: the still-running child
         // would keep firing into our handlers (using a finalized decoder →
         // TypeError, or duplicating events the caller now also receives).
-        const stdoutHandler = (data: Buffer) => handleOutput(data, 'stdout');
-        const stderrHandler = (data: Buffer) => handleOutput(data, 'stderr');
+        const captureData = (data: Buffer, stream: 'stdout' | 'stderr') => {
+          if (!rawCapture) {
+            handleOutput(data, stream);
+            return;
+          }
+          const pipe = stream === 'stdout' ? child.stdout : child.stderr;
+          pipe?.pause();
+          pendingCaptureWrites++;
+          pauseDrain();
+          const written = Promise.resolve()
+            .then(() => rawCapture.write(stream, data))
+            .catch((cause: unknown) => {
+              debugLogger.warn('Shell raw capture write failed', cause);
+            })
+            .then(() => {
+              handleOutput(data, stream);
+              pendingCaptureWrites--;
+              if (!settled) pipe?.resume();
+              resumeDrain();
+            });
+          if (stream === 'stdout') stdoutWrite = written;
+          else stderrWrite = written;
+        };
+        const stdoutHandler = (data: Buffer) => captureData(data, 'stdout');
+        const stderrHandler = (data: Buffer) => captureData(data, 'stderr');
         const errorHandler = (err: Error) => {
           error = err;
-          handleExit(1, null);
+          void handleExit(1, null);
         };
         const exitHandler = (
           code: number | null,
@@ -1196,8 +1304,8 @@ export class ShellExecutionService {
           if (child.pid) {
             this.activeChildProcesses.delete(child.pid);
           }
-          if (!streamStdout) {
-            handleExit(code, signal);
+          if (!streamStdout && !rawCapture) {
+            void handleExit(code, signal);
             return;
           }
           // streamStdout: don't settle on 'exit' — trailing stdio written
@@ -1209,13 +1317,7 @@ export class ShellExecutionService {
           if (recordedExit) return;
           recordedExit = { code, signal };
           exited = true;
-          drainTimer = setTimeout(() => {
-            drainTimer = null;
-            const recorded = recordedExit;
-            if (recorded) handleExit(recorded.code, recorded.signal);
-          }, POST_EXIT_STREAM_DRAIN_MS);
-          // The fence must not hold the event loop open on process exit.
-          drainTimer.unref?.();
+          resumeDrain();
         };
 
         // 'close' carries the same (code, signal) as 'exit'; the recorded
@@ -1226,11 +1328,19 @@ export class ShellExecutionService {
           signal: NodeJS.Signals | null,
         ) => {
           const recorded = recordedExit ?? { code, signal };
-          handleExit(recorded.code, recorded.signal);
+          void handleExit(recorded.code, recorded.signal);
         };
 
         child.stdout?.on('data', stdoutHandler);
         child.stderr?.on('data', stderrHandler);
+        if (rawCapture) {
+          child.stdout?.on('end', () => {
+            stdoutEnded = true;
+          });
+          child.stderr?.on('end', () => {
+            stderrEnded = true;
+          });
+        }
         child.on('error', errorHandler);
 
         const detachServiceListeners = () => {
@@ -1642,7 +1752,7 @@ export class ShellExecutionService {
         }
 
         child.on('exit', exitHandler);
-        if (streamStdout) {
+        if (streamStdout || rawCapture) {
           child.once('close', closeHandler);
         }
         if (launch?.stdin !== undefined && child.stdin) {

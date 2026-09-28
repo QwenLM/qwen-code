@@ -95,7 +95,9 @@ export async function executeBwrap(
   }
   if (!path.isAbsolute(payload.executable) || !path.isAbsolute(payload.cwd))
     throw new Error('Payload paths must be absolute.');
-  if (usePty && payload.stdin !== undefined)
+  if (payload.stdin !== undefined && payload.inheritStdin)
+    throw new Error('Process stdin cannot be both piped and inherited.');
+  if (usePty && (payload.stdin !== undefined || payload.inheritStdin))
     throw new Error('Process stdin requires pipe execution.');
   const workspace = directory(policy.workspace);
   const state = directory(policy.state);
@@ -157,6 +159,7 @@ export async function executeBwrap(
   const stdin = Buffer.isBuffer(payload.stdin)
     ? Buffer.from(payload.stdin)
     : payload.stdin;
+  const inheritStdin = payload.inheritStdin;
   const filesystem = policy.filesystem;
   const network = policy.network;
   const control = await mkdtemp(path.join(state, 'sandbox-control-'));
@@ -349,6 +352,7 @@ export async function executeBwrap(
           PWD: cwd,
         },
         stdin,
+        inheritStdin,
       },
       onOutput,
       signal,
