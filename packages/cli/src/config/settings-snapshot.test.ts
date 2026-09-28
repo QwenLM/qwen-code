@@ -5,7 +5,9 @@
  */
 
 import * as fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import * as os from 'node:os';
+import nodeOs from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { describeTree as describeTreeUnder } from '../test-utils/describe-tree.js';
@@ -197,6 +199,20 @@ describe('readSettingsSnapshot', () => {
     expect(version(settings.user)).toBe(4);
     expect(version(settings.workspace)).toBe(4);
     expect(describeTree()).toEqual(treeBefore);
+  });
+
+  // The evaluation checks this first, through the same resolveHomeDirectory.
+  it('throws when the home directory cannot be resolved', () => {
+    // Builtin named exports follow the module object only after a sync.
+    const homedir = nodeOs.homedir;
+    nodeOs.homedir = () => path.join(root, 'missing-home');
+    syncBuiltinESMExports();
+    try {
+      expect(() => read()).toThrow(/ENOENT/);
+    } finally {
+      nodeOs.homedir = homedir;
+      syncBuiltinESMExports();
+    }
   });
 
   it('reads and writes nothing without an environment', () => {

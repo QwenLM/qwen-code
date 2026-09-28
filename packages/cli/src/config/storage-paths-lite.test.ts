@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { spawnSync } from 'node:child_process';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -115,6 +116,67 @@ describe('settings locations in a given environment', () => {
       );
     },
   );
+
+  it('names the variable it refuses, and not its value', () => {
+    runOn('linux');
+    const unreadable = Object.defineProperty({}, 'MODE', {
+      enumerable: true,
+      get() {
+        throw new Error('unreadable');
+      },
+    }) as NodeJS.ProcessEnv;
+
+    expect(() => passedEnvironment({ 'MODE=alt': 'secret' })).toThrow(
+      /^The environment variable "MODE=alt" cannot be passed on as it is\.$/,
+    );
+    expect(() => passedEnvironment({ MODE: 'sec\0ret' })).toThrow(
+      /^The environment variable "MODE" cannot be passed on as it is\.$/,
+    );
+    expect(() => passedEnvironment(unreadable)).toThrow(
+      /^The environment variable "MODE" cannot be read: unreadable$/,
+    );
+  });
+
+  // The oracle for the model: what a real child process reads.
+  it('agrees with what a spawned process reads from its process.env', () => {
+    const names = [
+      'INHERITED',
+      'NUMBER',
+      'NULL',
+      'EMPTY',
+      'UNSET',
+      'MODE',
+      'mode',
+      '0',
+      '01',
+    ];
+    const environment = Object.assign(
+      Object.create({ INHERITED: 'from the prototype' }),
+      {
+        NUMBER: 123,
+        NULL: null,
+        EMPTY: '',
+        UNSET: undefined,
+        MODE: 'plan',
+        mode: 'default',
+        '0': 'an index',
+        '01': 'padded',
+      },
+    ) as NodeJS.ProcessEnv;
+    const child = spawnSync(
+      process.execPath,
+      [
+        '-e',
+        `process.stdout.write(JSON.stringify(${JSON.stringify(names)}.map((name) => process.env[name] ?? null)))`,
+      ],
+      { env: environment, encoding: 'utf8' },
+    );
+    const view = spawnedEnvironmentView(environment);
+
+    expect(JSON.parse(child.stdout)).toEqual(
+      names.map((name) => view[name] ?? null),
+    );
+  });
 
   it('passes on a Windows name that starts with =, but not one split by =', () => {
     runOn('win32');

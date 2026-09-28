@@ -49,7 +49,8 @@ export function resolveConfigPathLite(dir: string, cwd?: string): string {
  * variable that cannot be read, a Symbol value, or a NUL byte in a string,
  * which spawn refuses; a NUL byte in another value, which cuts the variable
  * short; and a name that contains `=`, which the process receives as another
- * name, except at the start of a Windows name such as `=C:`.
+ * name, except at the start of a Windows name such as `=C:`. An error about a
+ * variable names it and leaves its value out.
  */
 export function passedEnvironment(
   env: Readonly<NodeJS.ProcessEnv>,
@@ -66,17 +67,29 @@ export function passedEnvironment(
       if (spellings.has(upperKey)) continue;
       spellings.add(upperKey);
     }
-    const value = env[key];
-    if (value === undefined) continue;
-    // A template literal throws for a Symbol, as spawn does.
-    const text = `${value}`;
+    let text: string;
+    try {
+      const value = env[key];
+      if (value === undefined) continue;
+      // A template literal throws for a Symbol, as spawn does.
+      text = `${value}`;
+    } catch (error) {
+      throw new TypeError(
+        `The environment variable ${JSON.stringify(key)} cannot be read: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+        { cause: error },
+      );
+    }
     // Windows names such as `=C:` start with `=`.
     if (
       key.indexOf('=', windows ? 1 : 0) !== -1 ||
       key.includes('\0') ||
       text.includes('\0')
     ) {
-      throw new TypeError('The environment cannot be passed on as it is.');
+      throw new TypeError(
+        `The environment variable ${JSON.stringify(key)} cannot be passed on as it is.`,
+      );
     }
     passed[key] = text;
   }
@@ -86,9 +99,11 @@ export function passedEnvironment(
 /**
  * Reads a variable from `env` as a process spawned with it sees the variable
  * in its own `process.env`, which on Windows looks names up
- * case-insensitively. Given an environment other than `process.env`, it
- * throws where `passedEnvironment` does, even for another variable, and so
- * do the path helpers below.
+ * case-insensitively. For `process.env` itself, it reads the current
+ * process's own value, which differs from what a spawned process sees only for
+ * a name like an array index, such as `0`. Given another environment, it
+ * throws where `passedEnvironment` does, even for another variable, and so do
+ * the path helpers below.
  */
 export function readEnvironmentVariable(
   env: Readonly<NodeJS.ProcessEnv>,

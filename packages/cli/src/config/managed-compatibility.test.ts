@@ -18,6 +18,24 @@ import {
   type ManagedCompatibilityRuntime,
 } from './managed-compatibility.js';
 
+const compatibilityLog = vi.hoisted(() => ({ warn: vi.fn() }));
+vi.mock(
+  '@qwen-code/qwen-code-core/utils/debugLogger.js',
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import('@qwen-code/qwen-code-core/utils/debugLogger.js')
+      >();
+    return {
+      ...actual,
+      createDebugLogger: (tag?: string) =>
+        tag === 'MANAGED_COMPATIBILITY'
+          ? { ...actual.createDebugLogger(tag), warn: compatibilityLog.warn }
+          : actual.createDebugLogger(tag),
+    };
+  },
+);
+
 describe('evaluateManagedCompatibility', () => {
   let root: string;
   let workspace: string;
@@ -31,6 +49,7 @@ describe('evaluateManagedCompatibility', () => {
   };
 
   beforeEach(() => {
+    compatibilityLog.warn.mockClear();
     root = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-managed-compat-')),
     );
@@ -641,6 +660,29 @@ describe('evaluateManagedCompatibility', () => {
           ? 'the home directory or the environment could not be read'
           : 'a settings location in the environment depends on the working directory',
     });
+  });
+
+  it('logs why the home directory or the environment could not be read', async () => {
+    const environment = { ...runtime.environment };
+    Object.defineProperty(environment, 'QWEN_HOME', {
+      enumerable: true,
+      get() {
+        throw new Error('unreadable');
+      },
+    });
+    runtime = { ...runtime, environment };
+
+    await expect(evaluate()).resolves.toEqual({
+      status: 'unknown',
+      reason: 'the home directory or the environment could not be read',
+    });
+    expect(compatibilityLog.warn).toHaveBeenCalledWith(
+      'The home directory or the environment could not be read:',
+      expect.objectContaining({
+        message:
+          'The environment variable "QWEN_HOME" cannot be read: unreadable',
+      }),
+    );
   });
 
   it('reads the environment once', async () => {

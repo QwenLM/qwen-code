@@ -4,16 +4,20 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { realpathSync } from 'node:fs';
 import { realpath } from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { ApprovalMode } from '@qwen-code/qwen-code-core/config/approval-mode.js';
 import { ExtensionStore } from '@qwen-code/qwen-code-core/extension/extension-store.js';
 import { HOOKS_CONFIG_FIELDS } from '@qwen-code/qwen-code-core/hooks/types.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { parseApprovalModeValue } from './approval-mode-value.js';
 import { loadProjectMcpServers } from './mcpJson.js';
-import { readSettingsSnapshot, type LoadedSettings } from './settings.js';
+import {
+  readSettingsSnapshot,
+  resolveHomeDirectory,
+  type LoadedSettings,
+} from './settings.js';
 import {
   expandsAgainstHome,
   getGlobalQwenDirLite,
@@ -21,6 +25,8 @@ import {
   passedEnvironment,
   spawnedEnvironmentView,
 } from './storage-paths-lite.js';
+
+const debugLogger = createDebugLogger('MANAGED_COMPATIBILITY');
 
 export type ManagedCompatibility =
   | { readonly status: 'compatible' }
@@ -104,7 +110,12 @@ export async function evaluateManagedCompatibility(
     environment = passedEnvironment(runtime.environment);
     locationDependsOnWorkingDirectory =
       hasWorkingDirectoryLocation(environment);
-  } catch {
+  } catch (error) {
+    // The reason names no variable or path; the log line says which failed.
+    debugLogger.warn(
+      'The home directory or the environment could not be read:',
+      error,
+    );
     return unknownResult(
       'the home directory or the environment could not be read',
     );
@@ -190,8 +201,9 @@ export async function evaluateManagedCompatibility(
  * for the user directory and to tell whether the workspace is the home
  * directory, so an empty or relative one counts too. A `QWEN_HOME` that
  * expands against the home directory is under it; the system settings paths
- * are used as they are. Throws when the home directory cannot be looked up or
- * resolved, as when it does not exist, which makes settings loading throw too.
+ * are used as they are. Throws when the home directory cannot be looked up,
+ * or cannot be resolved as settings loading resolves it, for example because
+ * it does not exist.
  */
 function hasWorkingDirectoryLocation(
   environment: Readonly<Record<string, string>>,
@@ -200,7 +212,7 @@ function hasWorkingDirectoryLocation(
   const home = os.homedir();
   // An empty home directory is not fully qualified either.
   if (!isFullyQualifiedPath(home)) return true;
-  realpathSync(path.resolve(home));
+  resolveHomeDirectory(home);
   const qwenHome = variables['QWEN_HOME'];
   if (
     qwenHome &&
