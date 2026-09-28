@@ -63,7 +63,7 @@ H0b 定下了 Stage H 各项能力共用的记录，但还没有组件提交它�
 
 其他任何路径若试图为有正文的 domain 提交 `domain.committed` 事件，例如 `appendExecution` 或 `commitDomainRecord`，都会被拒绝，因此没有修订能绕过它的修订链。其他任何 ID 形如 Stage H 记录事件所用 `<domain>:<n>` 的事件也会被拒绝，因此没有事件能占用后续修订所需的 ID。
 
-authority 打开时，会按同样的规则重放日志中的每条 Stage H 修订，并从资源存储读取每个正文。若某个正文无法读取或无法接上修订链，说明日志或其资源已损坏，打开失败。由于重新打开的 authority 使用当时生效的规则，收紧其中任何一条都意味着契约版本的变更：旧规则接受过的日志将无法再打开。`extensionRecord` 与 `taskViews` 暴露重建后的状态，`issueOperationGrant` 依据它签发 grant。outbox 就是每条记录的交付状态线，由 `isExtensionDeliveryPending` 判定；H4 之前没有任何读取方。HTTP 存储现在也会像处理检查点一样，提交 Stage H 正文中引用的资源，因此正文绝不会引用只有写入者持有的资源。
+authority 打开时，会按同样的规则重放日志中的每条 Stage H 修订，并从资源存储读取每个正文。若某个正文无法读取或无法接上修订链，说明日志或其资源已损坏，打开失败。由于重新打开的 authority 使用当时生效的规则，收紧其中任何一条都意味着契约版本的变更：旧规则接受过的日志将无法再打开。本变更收紧的唯一一条 H0b 规则——`running` 或 `waiting` 的运行不能建立在从未开始的执行之上——落地时尚未开放任何带正文的 domain，因此没有日志包含这样的记录。`extensionRecord` 与 `taskViews` 暴露重建后的状态，`issueOperationGrant` 依据它签发 grant。outbox 就是每条记录的交付状态线，由 `isExtensionDeliveryPending` 判定；H4 之前没有任何读取方。HTTP 存储现在也会像处理检查点一样，提交 Stage H 正文中引用的资源，因此正文绝不会引用只有写入者持有的资源。
 
 ## 任务投影
 
@@ -95,11 +95,11 @@ authority 打开时，会按同样的规则重放日志中的每条 Stage H 修�
 - `definitionRevision` 是运行所固定的定义修订号。
 - 列表按创建时间从新到旧排列，再按任务 ID，两者均为降序。
 
-这些时间取自 authority 在每条修订上记录的 `occurredAt`，而不是服务端时钟，因此从日志重建能得到相同的视图；上述下限约束用于应对写入者的时钟比前一个写入者慢的情况。它们按 H0a 契约的规定为 epoch 毫秒；已提供的 Session 与事件资源报告的是秒，见未决问题 2。
+这些时间取自 authority 在每条修订上记录的 `occurredAt`，而不是服务端时钟，因此从日志重建能得到相同的视图；上述下限约束用于应对写入者的时钟比前一个写入者慢的情况。它们按 H0a 契约的规定为 epoch 毫秒，任务的 schema 也写明了这一点；公开接口中的 Session、turn、事件与 item 资源报告的是秒，见未决问题 2。
 
 ## Java Session 存储
 
-Flyway `V16` 新增 `qwen_managed_session_extension_record`：每条记录一行，以 Session 范围键和记录键为主键，保存记录身份、最新修订及其资源、任务投影与交付状态线。`ManagedExtensionRecordStore` 在 `ManagedSessionStore.commit` 中写入它，时机在事务的资源存入之后，并处于同一个 SQL 事务内：
+Flyway `V16` 新增 `qwen_managed_session_extension_record`：每条记录一行，以 Session 范围键和记录键为主键，保存记录身份、开启它的命令的哈希、最新修订及其资源、任务投影与交付状态线。一个索引服务任务列表，另一个服务开启命令的检查。`ManagedExtensionRecordStore` 在 `ManagedSessionStore.commit` 中写入它，时机在事务的资源存入之后，并处于同一个 SQL 事务内：
 
 1. 以与 authority 读取器同样严格的方式解析事务的每一行记录：不允许重复键或尾随内容，嵌套不超过 64 层（由共享的存储契约固定），数字必须有限。然后挑出有正文的 domain 的 `domain.committed` 事件。
 2. 按 authority 读取器的方式检查每个这样的事件：事件封闭且没有 subject（authority 从不为它设置 subject）；版本为 1；序号与它在事务事件中的位置相符，因此它既不会占据提交标记所在的行，也不会属于 genesis；键封闭且属于本 Session；payload 封闭且其引用指向该 domain 的版本 1 记录。携带这类事件的事务只能依次包含它的事件和提交标记。然后从校验过的资源读取正文，检查它与引用一致，并用 `ManagedExtensionRecords` 检查正文。
@@ -113,7 +113,8 @@ Flyway `V16` 新增 `qwen_managed_session_extension_record`：每条记录一行
 OpenAPI 版本升为 `1.18.0`，排在事件重放（#12840）的 `1.17.0` 之后。
 
 - `listSessionTasks`、`getSessionTask`、`queryWebShellTasks` 与 `getWebShellTask` 改为 `partial` 并已映射，它们返回的任务 schema 与枚举也一样。
-- 提供 `SessionCapabilities.tasks`。`WebShellSession.capabilities` 改为命名 schema `WebShellSessionCapabilities`，其中 `tasks` 已提供，其余标志仍为 `planned`。
+- 提供 `SessionCapabilities.tasks`，并与其他已提供的标志一样列为必填。`WebShellSession.capabilities` 改为命名 schema `WebShellSessionCapabilities`，其中 `tasks` 已提供且必填，其余标志仍为 `planned`。
+- 任务时间戳注明为 epoch 毫秒。
 - 列表路由说明了 `task.updated` 事件；事件类型是开放字符串，因此无需改动 schema。
 - 列表游标错误为 `400 invalid_cursor`，limit 不在 1 到 100 之间为 `400 invalid_limit`，任务不存在为 `404 task_not_found`。
 - `output_cursor` 与 `outputCursor` 随它所指向的任务事件路由保持 `planned`。`TaskActionCapability` 的取值会进入生成类型，尽管 H0c 的任务不宣告其中任何一个，因为枚举值无法带上标记，这一点 H0a 已就 `task_cancel` 说明过。
@@ -138,7 +139,7 @@ OpenAPI 版本升为 `1.18.0`，排在事件重放（#12840）的 `1.17.0` 之�
 ## 涉及文件
 
 - `packages/core/src/managed-runtime/managed-extension-projection.ts` 及其测试，`managed-operation-grant-gate.ts` 及其测试（新增）。
-- `packages/core/src/managed-runtime/managed-extension-record.ts`：起始规则。
+- `packages/core/src/managed-runtime/managed-extension-record.ts`：起始规则，以及 `running` 或 `waiting` 的运行不能建立在从未开始的执行之上这条规则；H0b 的 schema、fixture 与设计也随之补充。
 - `packages/core/src/managed-runtime/managed-session-authority.ts` 与新增的 `managed-session-authority.extension.test.ts`。
 - `packages/core/src/managed-runtime/http-managed-session-store.ts` 及其测试，以及 `managed-session-store-contract.test.ts`。
 - 上述两个 fixture 文件（新增），以及 `managed-session-store-v1.fixtures.json` 中的 `maxJsonDepth`。
@@ -167,7 +168,7 @@ OpenAPI 版本升为 `1.18.0`，排在事件重放（#12840）的 `1.17.0` 之�
 ## 未决问题
 
 1. **重建开销。** 重新打开的 authority 会读取每条 Stage H 修订的正文。一个 Monitor 最多可提交 10,000 次观测，因此 H3 在开放它之前应当限制这部分开销，例如让 authority 的视图挂在检查点上。
-2. **时间戳的单位与来源。** H0a 契约规定任务使用 epoch 毫秒，本变更也照此执行；但已提供的 Session 与事件资源报告的是秒。后续的 D 切片应统一公开接口。H0a 还说服务端用自己的时钟填写任务时间；H0c 改为取自日志，原因见“任务投影”一节。
+2. **时间戳的单位与来源。** H0a 契约规定任务使用 epoch 毫秒，本变更照此执行，并把单位写进任务的 schema。WebShell 接口全部使用毫秒，但公开接口中的 Session、turn、事件与 item 资源报告的是秒，因此公开接口混用了两种单位。统一单位属于契约决策；在任务路由仍为 `partial`、尚无 domain 产生任务时调整，代价最低。H0a 还说服务端用自己的时钟填写任务时间；H0c 改为取自日志，原因见“任务投影”一节。
 3. **嵌套资源。** HTTP 存储会把 Stage H 正文引用的每一个资源随提交一并列出，因此若正文引用了 Session 并未持有的资源，例如只保存在 Runtime 或工具结果存储中的启动回执或输出清单，Java 存储的资源检查会拒绝它；Java 存储本身并不遍历正文。H3 要么把这些资源发布为 Session 资源，要么让它们的 kind 不进入闭包。若引用的资源与已暂存资源的元数据不一致，提交会在发送之前失败，并且与事件 payload 中引用不一致时一样，会使写入者停止；H3 应在发布正文之前检查这些引用。
 4. **逻辑启动与物理启动。** H0b 允许运行在执行已处于 `running_attached` 时仍停在 `admitted`，此时任务显示为 `pending`，Runtime 状态为 `ready`，且没有启动时间。收紧这条规则属于对 H0b 契约的修改。
 5. **重放的 domain 记录。** `commitDomainRecord` 会在发现命令是重放之前就发布新的正文，并返回这个正文的引用，而不是已提交的那个。`commitExtensionRecord` 先检查重放；旧方法留待单独修复。

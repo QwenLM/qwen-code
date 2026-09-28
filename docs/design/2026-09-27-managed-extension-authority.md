@@ -63,7 +63,7 @@ The facts below are from `main` at `848cf5e6c4`.
 
 Any other path that tries to commit a `domain.committed` event for a domain with a body, such as `appendExecution` or `commitDomainRecord`, is refused, so no revision bypasses its chain. So is any other event whose ID has the form `<domain>:<n>` that Stage H record events use, so no event can take the ID a later revision needs.
 
-When an authority opens, it replays every Stage H revision in the journal through the same rules, reading each body from the resource store. A body that no longer reads or chains means the log or its resources are corrupt, and opening fails. Because a reopened authority applies the rules in force, tightening one of them changes the contract version: a log that the older rules accepted would no longer open. `extensionRecord` and `taskViews` expose the rebuilt state, and `issueOperationGrant` issues grants from it. The outbox is each record's delivery line, which `isExtensionDeliveryPending` tests; nothing reads it before H4. The HTTP store now also commits the resources a Stage H body names, as it does for a checkpoint, so the body never references a resource that only the writer holds.
+When an authority opens, it replays every Stage H revision in the journal through the same rules, reading each body from the resource store. A body that no longer reads or chains means the log or its resources are corrupt, and opening fails. Because a reopened authority applies the rules in force, tightening one of them changes the contract version: a log that the older rules accepted would no longer open. The one H0b rule this change tightens, that a running or waiting run cannot rest on an execution that never started, lands before any domain with a body is enabled, so no log holds such a record. `extensionRecord` and `taskViews` expose the rebuilt state, and `issueOperationGrant` issues grants from it. The outbox is each record's delivery line, which `isExtensionDeliveryPending` tests; nothing reads it before H4. The HTTP store now also commits the resources a Stage H body names, as it does for a checkpoint, so the body never references a resource that only the writer holds.
 
 ## Task projection
 
@@ -95,11 +95,11 @@ The rows apply in order. `draining` needs a stop request, which the run block do
 - `definitionRevision` is the run's pinned definition revision.
 - The list is newest first by creation, then by task ID, both descending.
 
-The times are the `occurredAt` the authority records on each revision, not the server's clock, so a rebuild from the journal yields the same view; the clamping covers a writer whose clock runs behind the one before it. They are epoch milliseconds, as the H0a contract states; the served Session and event resources report seconds, see open question 2.
+The times are the `occurredAt` the authority records on each revision, not the server's clock, so a rebuild from the journal yields the same view; the clamping covers a writer whose clock runs behind the one before it. They are epoch milliseconds, as the H0a contract states, and the task schemas say so; the public Session, turn, event and item resources report seconds, see open question 2.
 
 ## Java Session store
 
-Flyway `V16` adds `qwen_managed_session_extension_record`: one row per record, keyed by the Session scope key and the record key, holding the record's identity, its latest revision and resource, the task projection and the delivery line. `ManagedExtensionRecordStore` writes it from `ManagedSessionStore.commit`, after the transaction's resources are stored and in the same SQL transaction:
+Flyway `V16` adds `qwen_managed_session_extension_record`: one row per record, keyed by the Session scope key and the record key, holding the record's identity, the hash of the command that opened it, its latest revision and resource, the task projection and the delivery line. One index serves the task list and another the check of the opening command. `ManagedExtensionRecordStore` writes it from `ManagedSessionStore.commit`, after the transaction's resources are stored and in the same SQL transaction:
 
 1. It parses each record line of the transaction as strictly as the authority's reader: no duplicate keys or trailing content, at most 64 levels deep, as the shared store contract pins, and only finite numbers. It then picks the `domain.committed` events of domains with a body.
 2. It checks each such event as the authority's reader does: a closed event with no subject, which the authority never gives one; version 1; the sequence of its place among the transaction's events, so it is never the marker's line or part of the genesis; a closed key of this Session; and a closed payload whose reference names a version 1 record of the domain. A transaction that carries one must hold only its events and then its commit marker. It then reads the body from the verified resource, checks that it matches the reference, and checks the body with `ManagedExtensionRecords`.
@@ -113,7 +113,8 @@ A revision that these rules refuse answers `409 managed_session_extension_record
 The OpenAPI version becomes `1.18.0`, after the `1.17.0` of event replay (#12840).
 
 - `listSessionTasks`, `getSessionTask`, `queryWebShellTasks` and `getWebShellTask` are `partial` and mapped, and so are the task schemas and enums they return.
-- `SessionCapabilities.tasks` is served. `WebShellSession.capabilities` becomes the named schema `WebShellSessionCapabilities`, whose `tasks` is served while the other flags stay `planned`.
+- `SessionCapabilities.tasks` is served and required, like the other served flags. `WebShellSession.capabilities` becomes the named schema `WebShellSessionCapabilities`, whose `tasks` is served and required while the other flags stay `planned`.
+- The task timestamps say that they are epoch milliseconds.
 - The list route documents the `task.updated` event; the event type is an open string, so no schema changes.
 - A bad list cursor is `400 invalid_cursor`, a limit outside 1 to 100 is `400 invalid_limit`, and an unknown task is `404 task_not_found`.
 - `output_cursor` and `outputCursor` stay `planned` with the task events route they point to. The values of `TaskActionCapability` reach the generated types although no H0c task advertises one, since an enum value cannot carry the marker, as H0a noted for `task_cancel`.
@@ -138,7 +139,7 @@ A Python labeler written from this document, independent of both languages and k
 ## Files affected
 
 - `packages/core/src/managed-runtime/managed-extension-projection.ts` and its test, and `managed-operation-grant-gate.ts` and its test (new).
-- `packages/core/src/managed-runtime/managed-extension-record.ts`: the start rules.
+- `packages/core/src/managed-runtime/managed-extension-record.ts`: the start rules, and the rule that a running or waiting run cannot rest on an execution that never started, which the H0b schema, fixtures and design gain too.
 - `packages/core/src/managed-runtime/managed-session-authority.ts` and the new `managed-session-authority.extension.test.ts`.
 - `packages/core/src/managed-runtime/http-managed-session-store.ts` and its test, and `managed-session-store-contract.test.ts`.
 - The two fixture files above (new), and `maxJsonDepth` in `managed-session-store-v1.fixtures.json`.
@@ -167,7 +168,7 @@ A Python labeler written from this document, independent of both languages and k
 ## Open questions
 
 1. **Rebuild cost.** A reopened authority reads every Stage H revision body. A Monitor may commit up to 10,000 observations, so H3 should bound this before enabling it, for example by chaining the authority's view to a checkpoint.
-2. **Timestamp units and source.** The H0a contract gives tasks epoch milliseconds, and this change follows it, but the served Session and event resources report seconds. A later D slice should make the public surface consistent. H0a also says that the server fills task times from its clock; H0c takes them from the journal instead, for the reason given under Task projection.
+2. **Timestamp units and source.** The H0a contract gives tasks epoch milliseconds, and this change follows it and writes the unit into the task schemas. The WebShell surface reports milliseconds throughout, but the public Session, turn, event and item resources report seconds, so the public surface mixes units. Aligning them is a contract decision, and it is cheapest while the task routes are `partial` and no domain produces tasks. H0a also says that the server fills task times from its clock; H0c takes them from the journal instead, for the reason given under Task projection.
 3. **Nested resources.** The HTTP store lists every resource a Stage H body names with the commit, so the Java store's resource check refuses a body that names a resource the Session does not hold, such as a start receipt or an output manifest kept only in the Runtime or the tool result store; the Java store does not walk the body itself. H3 must either publish those as Session resources or exempt their kinds from the closure. A named resource whose metadata disagrees with a staged one fails the commit before it is sent and, as for a mismatched reference in an event payload, stops the writer; H3 should check the references before it publishes the body.
 4. **Logical and physical start.** H0b lets a run stay `admitted` while its execution is already `running_attached`, so such a task shows `pending` with the Runtime state `ready` and no start time. Tightening that rule is a change to the H0b contract.
 5. **Replayed domain records.** `commitDomainRecord` publishes a new body before it detects a replayed command, and returns that body's reference instead of the committed one. `commitExtensionRecord` checks for the replay first; the older method is left for a separate fix.

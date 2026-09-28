@@ -2,7 +2,7 @@
 
 [English](2026-09-27-managed-extension-record-contract.md) | [简体中文](2026-09-27-managed-extension-record-contract.zh-CN.md)
 
-Status: contract defined; the Session authority commits these records since H0c ([design](2026-09-27-managed-extension-authority.md)), and no Stage H domain is enabled for submission yet. Updated: 2026-09-27. This is slice H0b of [#12827](https://github.com/QwenLM/qwen-code/issues/12827), stage H of the Managed Agent proposal [#12380](https://github.com/QwenLM/qwen-code/issues/12380). Below, "the reference design" is sections 3, 10, 12 and 13 of the proposal's [extension runtime design](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-extension-runtime.md), with the `OperationGrant` of its [private control protocol](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-control-protocol.md) and the domain index of its [Session storage design](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-session-storage.md), at the commit that #12827 pins.
+Status: contract defined; the Session authority commits these records since H0c ([design](2026-09-27-managed-extension-authority.md)), and no Stage H domain is enabled for submission yet. H0c added the rule that a running or waiting run cannot rest on an execution that never started, before any producer existed. Updated: 2026-09-28. This is slice H0b of [#12827](https://github.com/QwenLM/qwen-code/issues/12827), stage H of the Managed Agent proposal [#12380](https://github.com/QwenLM/qwen-code/issues/12380). Below, "the reference design" is sections 3, 10, 12 and 13 of the proposal's [extension runtime design](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-extension-runtime.md), with the `OperationGrant` of its [private control protocol](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-control-protocol.md) and the domain index of its [Session storage design](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-session-storage.md), at the commit that #12827 pins.
 
 ## Problem
 
@@ -154,7 +154,7 @@ Every Stage H record embeds one closed `run` object.
 
 - A `reserved` run has no execution and no delivery: nothing is dispatched before admission.
 - While the execution is `outcome_unknown` or `corrupt`, the run is `recovery_blocked`, so an outcome that nobody can prove never passes for a result.
-- A `settled`, `failed` or `cancelled` run has no execution, or one proven to have ended: `settled` or `not_started_proven`. A `settled` run's execution cannot be `not_started_proven`.
+- A `settled`, `failed` or `cancelled` run has no execution, or one proven to have ended: `settled` or `not_started_proven`. A `settled` run's execution cannot be `not_started_proven`, and neither can a `running` or `waiting` run's, since nothing is left to run.
 - A `session` delivery beyond `planned` or `cancelled` needs a run that ended: a parent accepts a result only after it exists.
 
 **Reasons.**
@@ -233,7 +233,7 @@ A `monitor_run` record body, kind `managed-monitor_run` and schema version 1, ho
 
 - The domain index, limits, kinds, state lines, delivery targets, reasons and Monitor stop reasons, as constants.
 - A canonical grant, pin, run block and monitor run.
-- 520 cases: grants (121, one valid grant per domain among them), grant replacements (21), pins (25), pin pairs (7), run blocks (144), run revisions (57), monitor runs (107) and monitor revisions (38). Each invalid case is aimed at one rule.
+- 524 cases: grants (121, one valid grant per domain among them), grant replacements (21), pins (25), pin pairs (7), run blocks (146), run revisions (57), monitor runs (108) and monitor revisions (39). Each invalid case is aimed at one rule.
 
 The schema fixes each record's shape and every rule it can state readably, including all the state, reason and stop-reason rules. It cannot state UTF-8 byte limits, NFC, well-formed UTF-16, the 2^63−1 bound readably, a record kind derived from another field, or a bound that depends on another field; the TypeScript test lists the cases on which the schema and the module disagree. Its patterns follow ECMA-262, as draft 2020-12 specifies; a validator with other regular expression semantics, such as Java's default, may accept a trailing newline that both modules refuse. A Python implementation written from this document, independent of both languages and kept outside the repository as for `managed-tool-result/1`, labeled every case, and the generator stops when it disagrees with a label.
 

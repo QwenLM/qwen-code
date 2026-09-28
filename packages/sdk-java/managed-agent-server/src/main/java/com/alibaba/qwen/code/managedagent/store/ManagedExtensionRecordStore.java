@@ -13,7 +13,6 @@ import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
-import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -51,7 +50,6 @@ public class ManagedExtensionRecordStore {
             "eventId", "sessionKey", "kind", "occurredAt", "payload");
     private static final Pattern TASK_ID = Pattern.compile(
             "^task_([0-9a-f]{64})$");
-    private static final long MAX_TIME = 8_640_000_000_000_000L;
     private static final Set<String> SESSION_KEY_FIELDS = Set.of("tenantId",
             "workspaceId", "sessionId");
     private static final Set<String> PAYLOAD_FIELDS = Set.of("domain",
@@ -130,12 +128,12 @@ public class ManagedExtensionRecordStore {
             if (body != null) {
                 require(index < eventCount, "The Stage H record event is not"
                         + " one of the transaction's events.");
-                requireEnvelope(event, domain, tenantId, workspaceId,
-                        sessionId, firstSequence + index);
+                long occurredAt = requireEnvelope(event, domain, tenantId,
+                        workspaceId, sessionId, firstSequence + index);
                 applyRevision(tenantId, workspaceId, sessionId, domain, body,
                         payload.get("operationId").textValue(),
                         payload.get("recordRef"),
-                        time(event.path("occurredAt")), resources);
+                        occurredAt, resources);
                 applied = true;
             }
         }
@@ -160,8 +158,7 @@ public class ManagedExtensionRecordStore {
         arguments.add(limit + 1);
         List<TaskRow> rows = jdbc.query("SELECT * FROM"
                         + " qwen_managed_session_extension_record WHERE"
-                        + " session_scope_key = ? AND task_kind IS NOT NULL"
-                        + cursor + " ORDER BY created_at DESC,"
+                        + " session_scope_key = ?" + cursor + " ORDER BY created_at DESC,"
                         + " record_key DESC LIMIT ?",
                 (result, row) -> taskRow(result, tenantId, sessionId),
                 arguments.toArray());
@@ -177,8 +174,7 @@ public class ManagedExtensionRecordStore {
         }
         return jdbc.query("SELECT * FROM"
                         + " qwen_managed_session_extension_record WHERE"
-                        + " session_scope_key = ? AND record_key = ?"
-                        + " AND task_kind IS NOT NULL",
+                        + " session_scope_key = ? AND record_key = ?",
                 (result, row) -> taskRow(result, tenantId, sessionId),
                 ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
                 recordKey).stream().findFirst();
@@ -187,19 +183,23 @@ public class ManagedExtensionRecordStore {
     /**
      * Checks the domain.committed event of a Stage H record as the Session
      * authority's reader does: a closed event at its sequence, its version,
-     * its Session, and a closed payload whose reference names a version 1
-     * record of the domain. The authority never gives such an event a
-     * subject.
+     * its time, its Session, and a closed payload whose reference names a
+     * version 1 record of the domain. The authority never gives such an
+     * event a subject. Returns the time the revision occurred.
      */
-    private static void requireEnvelope(JsonNode event, String domain,
+    private static long requireEnvelope(JsonNode event, String domain,
             String tenantId, String workspaceId, String sessionId,
             long sequence) {
+        long occurredAt;
         try {
             ManagedExtensionRecords.closed(event, EVENT_FIELDS, "event");
             ManagedExtensionRecords.count(event.get("v"), 1, 1, "event.v");
             ManagedExtensionRecords.count(event.get("sequence"), sequence,
                     sequence, "event.sequence");
             ManagedExtensionRecords.id(event.get("eventId"), "event.eventId");
+            occurredAt = ManagedExtensionRecords.count(event.get(
+                    "occurredAt"), 0, ManagedExtensionRecords.MAX_TIME,
+                    "event.occurredAt");
             ManagedExtensionRecords.closed(event.get("sessionKey"),
                     SESSION_KEY_FIELDS, "event.sessionKey");
             JsonNode payload = event.get("payload");
@@ -225,6 +225,7 @@ public class ManagedExtensionRecordStore {
                         .longValue() == 1,
                 "The Stage H record must reference managed-" + domain
                         + " version 1.");
+        return occurredAt;
     }
 
     private void applyRevision(String tenantId, String workspaceId,
@@ -406,16 +407,6 @@ public class ManagedExtensionRecordStore {
             }
         }
         return true;
-    }
-
-    private static long time(JsonNode node) {
-        BigDecimal value = node.isNumber() && Double.isFinite(
-                node.doubleValue()) ? node.decimalValue() : null;
-        require(value != null && value.stripTrailingZeros().scale() <= 0
-                && value.signum() >= 0
-                && value.compareTo(BigDecimal.valueOf(MAX_TIME)) <= 0,
-                "The Stage H record event has no valid time.");
-        return value.longValueExact();
     }
 
     private static String sha256(String value) {

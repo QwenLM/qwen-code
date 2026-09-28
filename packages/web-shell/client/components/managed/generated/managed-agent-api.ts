@@ -290,8 +290,7 @@ export interface components {
             capabilities?: components["schemas"]["WebShellSessionCapabilities"];
         };
         WebShellSessionCapabilities: {
-            /** @default false */
-            tasks?: boolean;
+            tasks: boolean;
         };
         WebShellSessionPage: {
             data: components["schemas"]["WebShellSession"][];
@@ -470,11 +469,20 @@ export interface components {
              */
             definitionRevision?: number;
             runtimeState?: components["schemas"]["TaskRuntimeState"];
-            /** Format: int64 */
+            /**
+             * Format: int64
+             * @description Unix epoch milliseconds.
+             */
             createdAt: number;
-            /** Format: int64 */
+            /**
+             * Format: int64
+             * @description Unix epoch milliseconds.
+             */
             startedAt?: number;
-            /** Format: int64 */
+            /**
+             * Format: int64
+             * @description Unix epoch milliseconds.
+             */
             settledAt?: number;
             /** @description The newest Artifacts that hold durable task output, at most 100, oldest first; older Artifacts stay readable through the Session artifact routes. */
             artifactRefs: string[];

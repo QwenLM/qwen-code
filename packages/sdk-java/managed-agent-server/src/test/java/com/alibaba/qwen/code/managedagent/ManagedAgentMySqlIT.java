@@ -44,6 +44,7 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
+import java.util.stream.IntStream;
 import org.flywaydb.core.Flyway;
 import org.flywaydb.core.api.MigrationVersion;
 import org.junit.jupiter.api.MethodOrderer;
@@ -635,6 +636,7 @@ class ManagedAgentMySqlIT {
                 new ManagedExtensionRecordStore(jdbc, null);
         TaskProjection before = records.listTasks(tenant, session, null,
                 null, 10).tasks().get(0).projection();
+
         assertThat(before).isEqualTo(ManagedExtensionProjectionContractTest
                 .view(chain.get(chain.size() - 2).required("view")));
 
@@ -664,6 +666,33 @@ class ManagedAgentMySqlIT {
                 session)).isZero();
         assertThat(records.listTasks(tenant, session, null, null, 10).tasks()
                 .get(0).projection()).isEqualTo(before);
+
+        // A first revision checks its opening command through an index, not
+        // by reading every record of its Session. The plan is asked of a
+        // Session with enough records for the choice to matter.
+        String scopeKey = sha256("explain-" + session);
+        jdbc.batchUpdate("INSERT INTO qwen_managed_session_extension_record"
+                        + " (session_scope_key, record_key, tenant_id,"
+                        + " workspace_id, session_id, domain, record_id,"
+                        + " operation_hash, revision, record_resource_id,"
+                        + " task_kind, task_state, created_at) VALUES (?, ?,"
+                        + " ?, ?, ?, 'monitor_run', ?, ?, 1, ?, 'monitor',"
+                        + " 'pending', ?)",
+                IntStream.range(0, 500)
+                        .mapToObj(index -> new Object[] {scopeKey,
+                                sha256("record-" + index), tenant,
+                                "mysql-extension-workspace", "explain",
+                                "monitor-" + index, sha256("command-" + index),
+                                "resource-" + index, 1_000L + index})
+                        .toList());
+        jdbc.queryForList("ANALYZE TABLE"
+                + " qwen_managed_session_extension_record");
+        assertThat(jdbc.queryForList("EXPLAIN SELECT COUNT(*) FROM"
+                        + " qwen_managed_session_extension_record WHERE"
+                        + " session_scope_key = ? AND operation_hash = ?",
+                scopeKey, sha256("command-7")))
+                .extracting(row -> row.get("key"))
+                .containsExactly("idx_managed_session_extension_operation");
     }
 
     @Test

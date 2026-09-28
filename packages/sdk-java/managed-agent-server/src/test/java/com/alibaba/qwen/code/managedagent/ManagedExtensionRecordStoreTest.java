@@ -31,6 +31,7 @@ import org.assertj.core.api.ThrowableAssert.ThrowingCallable;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 @SpringBootTest(properties = {
@@ -179,6 +180,18 @@ class ManagedExtensionRecordStoreTest {
                                 "/payload/recordRef")).put("digest",
                                         ExtensionRecordJournal.sha256(
                                                 "another body")))),
+                Map.entry("a length of another body", new Refusal(
+                        "does not match its resource",
+                        event -> ((ObjectNode) event.at(
+                                "/payload/recordRef")).put("byteLength",
+                                        start.length + 1))),
+                Map.entry("a time between two milliseconds", new Refusal(
+                        "event.occurredAt is out of range",
+                        event -> event.put("occurredAt", 1_000.5))),
+                Map.entry("a time past the contract's range", new Refusal(
+                        "event.occurredAt is out of range",
+                        event -> event.put("occurredAt",
+                                8_640_000_000_000_001L))),
                 Map.entry("a reference of another domain", new Refusal(
                         "must reference managed-monitor_run version 1",
                         event -> ((ObjectNode) event.at(
@@ -299,6 +312,12 @@ class ManagedExtensionRecordStoreTest {
         assertThatThrownBy(commit).as(label)
                 .isInstanceOfSatisfying(ApiException.class, error -> {
                     assertThat(error.getCode()).as(label).isEqualTo(code);
+                    // A line the authority cannot read is a bad request; a
+                    // Stage H rule that refuses a revision is a conflict.
+                    assertThat(error.getStatus()).as(label).isEqualTo(
+                            ManagedSessionStoreModels.ERROR_INVALID_REQUEST
+                                    .equals(code) ? HttpStatus.BAD_REQUEST
+                                    : HttpStatus.CONFLICT);
                     if (message != null) {
                         assertThat(error.getMessage()).as(label)
                                 .contains(message);
@@ -386,23 +405,41 @@ class ManagedExtensionRecordStoreTest {
                     .deepCopy()).put("monitorId", "monitor-" + index),
                     createdAt[index]);
         }
-        List<String> seen = new ArrayList<>();
-        String cursor = null;
-        do {
-            PublicList<PublicTask> page = tasks.listPublicTasks(TENANT, null,
-                    sessionId, cursor, 1);
-            page.data().forEach(task -> seen.add(task.createdAt() + " "
-                    + task.id()));
-            assertThat(page.hasMore()).isEqualTo(seen.size() < 3);
-            cursor = page.nextCursor();
-        } while (cursor != null);
-        assertThat(seen).hasSize(3)
-                .isSortedAccordingTo((left, right) -> right.compareTo(left));
+        // A page of two ends inside the tie, so its cursor must name the
+        // last row it returned.
+        List<String> first = null;
+        for (int limit : new int[] {1, 2, 3}) {
+            List<String> seen = new ArrayList<>();
+            String cursor = null;
+            do {
+                PublicList<PublicTask> page = tasks.listPublicTasks(TENANT,
+                        null, sessionId, cursor, limit);
+                page.data().forEach(task -> seen.add(task.createdAt() + " "
+                        + task.id()));
+                assertThat(page.hasMore()).as("limit %d", limit)
+                        .isEqualTo(seen.size() < 3);
+                cursor = page.nextCursor();
+            } while (cursor != null);
+            assertThat(seen).as("limit %d", limit).hasSize(3)
+                    .doesNotHaveDuplicates()
+                    .isSortedAccordingTo((left, right) -> right.compareTo(
+                            left));
+            if (first == null) {
+                first = seen;
+            } else {
+                assertThat(seen).as("limit %d", limit).isEqualTo(first);
+            }
+        }
         assertThat(tasks.getPublicTask(TENANT, null, sessionId,
-                seen.get(0).substring(5)).kind()).isEqualTo("monitor");
+                first.get(0).substring(5)).kind()).isEqualTo("monitor");
         assertThatThrownBy(() -> tasks.listPublicTasks(TENANT, null,
                 sessionId, "not-a-cursor", 1))
                 .hasFieldOrPropertyWithValue("code", "invalid_cursor");
+        for (int limit : new int[] {0, 101}) {
+            assertThatThrownBy(() -> tasks.listPublicTasks(TENANT, null,
+                    sessionId, null, limit))
+                    .hasFieldOrPropertyWithValue("code", "invalid_limit");
+        }
         assertThatThrownBy(() -> tasks.getPublicTask(TENANT, null, sessionId,
                 "task_" + "0".repeat(64)))
                 .hasFieldOrPropertyWithValue("code", "task_not_found");

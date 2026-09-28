@@ -13,7 +13,7 @@ CREATE TABLE qwen_managed_session_extension_record (
     operation_hash CHAR(64) NOT NULL,
     revision BIGINT NOT NULL,
     record_resource_id VARCHAR(512) NOT NULL,
-    task_kind VARCHAR(32),
+    task_kind VARCHAR(32) NOT NULL,
     task_state VARCHAR(32) NOT NULL,
     runtime_state VARCHAR(32),
     definition_revision BIGINT,
@@ -28,4 +28,10 @@ CREATE TABLE qwen_managed_session_extension_record (
 CREATE INDEX idx_managed_session_extension_task
     ON qwen_managed_session_extension_record (
         session_scope_key, created_at, record_key
+    );
+
+-- A first revision checks that its command opened no other record.
+CREATE INDEX idx_managed_session_extension_operation
+    ON qwen_managed_session_extension_record (
+        session_scope_key, operation_hash
     );

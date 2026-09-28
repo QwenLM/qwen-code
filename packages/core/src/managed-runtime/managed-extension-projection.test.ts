@@ -68,6 +68,12 @@ interface FixtureSuite {
     readonly kind: string;
     readonly revisions: readonly Revision[];
   }>;
+  readonly brokerExecutionCases: ReadonlyArray<{
+    readonly id: string;
+    readonly execution: string;
+    readonly inspection: ManagedRuntimeExecutionView;
+    readonly harnessExecution: string;
+  }>;
   readonly inspectionExecutionCases: ReadonlyArray<{
     readonly id: string;
     readonly inspection: ManagedRuntimeExecutionView;
@@ -187,4 +193,22 @@ describe('managed-extension-projection/1 fixtures', () => {
       expect(extensionExecutionOf(each.inspection)).toBe(each.execution);
     },
   );
+
+  // Java maps the Broker state; the Harness sees only what the Broker's HTTP
+  // API reports for it, which the Broker's own contract test pins to these
+  // cases.
+  it.each(fixtures.brokerExecutionCases)(
+    'reads what the Broker reports for a $id execution',
+    (each) => {
+      expect(extensionExecutionOf(each.inspection)).toBe(each.harnessExecution);
+    },
+  );
+
+  it('reads the Broker as Java does except where the wire hides a claim', () => {
+    expect(
+      fixtures.brokerExecutionCases
+        .filter((each) => each.harnessExecution !== each.execution)
+        .map((each) => each.id),
+    ).toEqual(['dispatching']);
+  });
 });

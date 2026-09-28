@@ -2711,7 +2711,7 @@
       "SessionCapabilities": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["items", "snapshots", "artifacts", "resync"],
+        "required": ["items", "snapshots", "artifacts", "resync", "tasks"],
         "properties": {
           "items": {
             "type": "boolean"
@@ -2751,8 +2751,7 @@
             "x-qwen-implementation-status": "planned"
           },
           "tasks": {
-            "type": "boolean",
-            "default": false
+            "type": "boolean"
           }
         }
       },
@@ -3624,6 +3623,7 @@
       },
       "WebShellSessionCapabilities": {
         "type": "object",
+        "required": ["tasks"],
         "properties": {
           "workspaceContext": {
             "type": "boolean",
@@ -3651,8 +3651,7 @@
             "x-qwen-implementation-status": "planned"
           },
           "tasks": {
-            "type": "boolean",
-            "default": false
+            "type": "boolean"
           }
         }
       },
@@ -5862,15 +5861,18 @@
           },
           "created_at": {
             "type": "integer",
-            "format": "int64"
+            "format": "int64",
+            "description": "Unix epoch milliseconds, unlike the seconds that the public Session, turn, event and item resources report."
           },
           "started_at": {
             "type": "integer",
-            "format": "int64"
+            "format": "int64",
+            "description": "Unix epoch milliseconds, unlike the seconds that the public Session, turn, event and item resources report."
           },
           "settled_at": {
             "type": "integer",
-            "format": "int64"
+            "format": "int64",
+            "description": "Unix epoch milliseconds, unlike the seconds that the public Session, turn, event and item resources report."
           },
           "output_cursor": {
             "type": "string",
@@ -6215,15 +6217,18 @@
           },
           "createdAt": {
             "type": "integer",
-            "format": "int64"
+            "format": "int64",
+            "description": "Unix epoch milliseconds."
           },
           "startedAt": {
             "type": "integer",
-            "format": "int64"
+            "format": "int64",
+            "description": "Unix epoch milliseconds."
           },
           "settledAt": {
             "type": "integer",
-            "format": "int64"
+            "format": "int64",
+            "description": "Unix epoch milliseconds."
           },
           "outputCursor": {
             "type": "string",

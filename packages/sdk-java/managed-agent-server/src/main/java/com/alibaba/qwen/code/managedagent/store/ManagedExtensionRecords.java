@@ -117,7 +117,7 @@ public final class ManagedExtensionRecords {
                     && left.decimalValue().compareTo(right.decimalValue()) == 0
                     ? 0 : 1;
     private static final long MAX_COUNT = 9_007_199_254_740_990L;
-    private static final long MAX_TIME = 8_640_000_000_000_000L;
+    static final long MAX_TIME = 8_640_000_000_000_000L;
     private static final BigInteger MAX_GENERATION =
             BigInteger.valueOf(Long.MAX_VALUE);
     private static final Pattern GENERATION = Pattern.compile(
@@ -324,6 +324,9 @@ public final class ManagedExtensionRecords {
         require(!"settled".equals(state)
                 || !"not_started_proven".equals(execution),
                 "run cannot settle an execution that never started");
+        require(!"running".equals(state) && !"waiting".equals(state)
+                || !"not_started_proven".equals(execution),
+                "run cannot run on an execution that never started");
         require(!"session".equals(target) || "planned".equals(deliveryState)
                 || "cancelled".equals(deliveryState)
                 || TERMINAL.contains(state),

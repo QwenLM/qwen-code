@@ -2,7 +2,7 @@
 
 [English](2026-09-27-managed-extension-record-contract.md) | [简体中文](2026-09-27-managed-extension-record-contract.zh-CN.md)
 
-状态:契约已定义;自 H0c 起由 Session authority 提交这些记录([设计](2026-09-27-managed-extension-authority.zh-CN.md)),目前尚无 Stage H domain 开放提交。更新日期:2026-09-27。本文是 [#12827](https://github.com/QwenLM/qwen-code/issues/12827) 的 H0b 切片,属于 Managed Agent 提案 [#12380](https://github.com/QwenLM/qwen-code/issues/12380) 的 H 阶段。下文的"参考设计"指该提案[扩展运行时设计](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-extension-runtime.md)的第 3、10、12、13 节,并包括其[私有控制协议](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-control-protocol.md)中的 `OperationGrant` 与[Session 存储设计](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-session-storage.md)中的 domain 索引,版本为 #12827 固定的提交。
+状态:契约已定义;自 H0c 起由 Session authority 提交这些记录([设计](2026-09-27-managed-extension-authority.zh-CN.md)),目前尚无 Stage H domain 开放提交。H0c 在尚无任何生产方之前补充了一条规则:`running` 或 `waiting` 的运行不能建立在从未开始的执行之上。更新日期:2026-09-28。本文是 [#12827](https://github.com/QwenLM/qwen-code/issues/12827) 的 H0b 切片,属于 Managed Agent 提案 [#12380](https://github.com/QwenLM/qwen-code/issues/12380) 的 H 阶段。下文的"参考设计"指该提案[扩展运行时设计](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-extension-runtime.md)的第 3、10、12、13 节,并包括其[私有控制协议](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-control-protocol.md)中的 `OperationGrant` 与[Session 存储设计](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-session-storage.md)中的 domain 索引,版本为 #12827 固定的提交。
 
 ## 问题
 
@@ -154,7 +154,7 @@ Runtime 在任何副作用之前拒绝的派发,证明没有开始执行。未�
 
 - `reserved` 的运行没有执行也没有交付:准入之前不派发任何东西。
 - 执行处于 `outcome_unknown` 或 `corrupt` 时,运行必须是 `recovery_blocked`,因此无法证明的结果永远不会被当作结果。
-- `settled`、`failed` 或 `cancelled` 的运行没有执行,或其执行已被证明结束:`settled` 或 `not_started_proven`。`settled` 的运行,其执行不能是 `not_started_proven`。
+- `settled`、`failed` 或 `cancelled` 的运行没有执行,或其执行已被证明结束:`settled` 或 `not_started_proven`。`settled` 的运行,其执行不能是 `not_started_proven`;`running` 或 `waiting` 的运行也不能,因为已经没有可运行的内容。
 - `session` 交付一旦越过 `planned` 或 `cancelled`,运行就必须已经结束:父方只有在结果存在之后才能接收它。
 
 **原因。**
@@ -233,7 +233,7 @@ Runtime 在任何副作用之前拒绝的派发,证明没有开始执行。未�
 
 - domain 索引、限额、kind、状态线、交付目标、原因和 Monitor 停止原因,作为常量。
 - 一个规范的 grant、定义固定、运行块和 monitor 运行。
-- 520 个用例:grant(121,其中每个 domain 各有一个有效 grant)、grant 替换(21)、定义固定(25)、定义固定对(7)、运行块(144)、运行修订(57)、monitor 运行(107)和 monitor 修订(38)。每个无效用例都针对一条规则。
+- 524 个用例:grant(121,其中每个 domain 各有一个有效 grant)、grant 替换(21)、定义固定(25)、定义固定对(7)、运行块(146)、运行修订(57)、monitor 运行(108)和 monitor 修订(39)。每个无效用例都针对一条规则。
 
 schema 固定每条记录的结构,以及它能清晰表达的所有规则,包括全部状态、原因和停止原因规则。它无法表达 UTF-8 字节上限、NFC、格式良好的 UTF-16、可读的 2^63−1 上界、由另一字段推导出的记录 kind,或依赖另一字段的上界;TypeScript 测试列出 schema 与模块结论不同的用例。它的正则表达式遵循 ECMA-262,这是 draft 2020-12 的规定;采用其他正则语义的 validator(例如 Java 的默认实现)可能接受末尾的换行,而两个模块都会拒绝。一个依据本文编写、独立于两种语言的 Python 实现为每个用例标注了结论,它与 `managed-tool-result/1` 的做法一样放在仓库之外,生成器在它与标注不一致时停止。
 

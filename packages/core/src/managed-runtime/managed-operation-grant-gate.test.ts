@@ -72,11 +72,23 @@ describe('managed operation grant gate', () => {
         // Another Session or operation has a gate of its own.
         expect(gate.install(each.next)).toBe('installed');
       } else {
-        expect(() => gate.install(each.next)).toThrow(
-          each.id === 'invalid-next' || each.id === 'next-past-double-range'
-            ? ManagedSessionRecordError
-            : ManagedSessionConflictError,
-        );
+        let thrown: unknown;
+        try {
+          gate.install(each.next);
+        } catch (error) {
+          thrown = error;
+        }
+        if (
+          each.id === 'invalid-next' ||
+          each.id === 'next-past-double-range'
+        ) {
+          // A malformed grant is refused as malformed, not as a conflict,
+          // which is a subclass of the record error.
+          expect(thrown).toBeInstanceOf(ManagedSessionRecordError);
+          expect(thrown).not.toBeInstanceOf(ManagedSessionConflictError);
+        } else {
+          expect(thrown).toBeInstanceOf(ManagedSessionConflictError);
+        }
       }
     },
   );

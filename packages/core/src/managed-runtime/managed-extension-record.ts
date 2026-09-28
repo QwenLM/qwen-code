@@ -786,6 +786,14 @@ export function parseExtensionRun(value: unknown, label = 'run'): ExtensionRun {
   if (state === 'settled' && execution === 'not_started_proven') {
     fail(`${label} cannot settle an execution that never started.`);
   }
+  // Nor go on: the execution line has ended, so the run could only fail or
+  // be cancelled, and its task would show a run that is not happening.
+  if (
+    (state === 'running' || state === 'waiting') &&
+    execution === 'not_started_proven'
+  ) {
+    fail(`${label} cannot run on an execution that never started.`);
+  }
   if (
     delivery?.target === 'session' &&
     delivery.state !== 'planned' &&
