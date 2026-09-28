@@ -316,10 +316,20 @@ approval mode. The runtime carries:
 - **Environment.** The given environment is the environment of the runtime's
   session hosts. Its `QWEN_HOME` and two system settings paths locate the user
   and system settings files and the extension store; without `QWEN_HOME`, the
-  user directory is under the process's home directory. It is the only source
-  for placeholders, and it already carries the user-level `.env` values the
-  runtime applied. In the daemon, the locating variables and `HOME` are
-  excluded from workspace overlays, so they equal the daemon's own; in a
+  user directory is under the process's home directory. It is also the only
+  source for placeholders, and it already carries the user-level `.env` values
+  the runtime applied. On Windows, the locating names and the placeholders are
+  read as a spawned session host sees them: case-insensitively, and of several
+  spellings the first in sorted order. A location that depends on the working
+  directory is `unknown`, because a session host resolves it against its own:
+  a relative path, on Windows also a path without a drive root or a UNC server
+  and share, and a value that is not a string. So is an empty or relative home
+  directory, which settings loading resolves both for the user directory and
+  to tell whether the workspace is the home directory. `QWEN_HOME` may be `~`
+  or start with `~/` or `~\`, which expands against the home directory. In the
+  daemon, the locating variables and `HOME` are excluded from workspace
+  overlays, and on Windows an overlay does not replace the `USERPROFILE` that
+  gives the home directory once it is set, so they equal the daemon's own; in a
   session host, they are its own environment.
 - **Project MCP file.** In strict mode, a read failure of `.mcp.json` is kept as
   an error instead of counting as an absent file. In both modes, a file that
@@ -352,26 +362,27 @@ approval mode. The runtime carries:
 
 The first condition that applies decides the result:
 
-| Condition                                                 | Result     |
-| --------------------------------------------------------- | ---------- |
-| The workspace is not trusted                              | deferred   |
-| The session or workspace directory cannot be resolved     | unknown    |
-| The session directory is not the runtime workspace        | deferred   |
-| `--experimental-lsp` is forwarded                         | deferred   |
-| `--restore-ask-user-question` is forwarded                | deferred   |
-| Another argument is forwarded                             | unknown    |
-| The running workspace holds MCP servers outside its files | deferred   |
-| A settings layer cannot be read                           | unknown    |
-| MCP servers in any settings layer, or `mcp.serverCommand` | deferred   |
-| `tools.discoveryCommand` or `tools.callCommand`           | deferred   |
-| Hooks in the system, user or trusted project layer        | deferred   |
-| The approval mode in settings is not valid                | unknown    |
-| Approval mode `plan`, requested or from settings          | deferred   |
-| `.mcp.json` cannot be read or is malformed                | unknown    |
-| Servers in `.mcp.json`                                    | deferred   |
-| Extensions are installed                                  | deferred   |
-| The extension store cannot be proven empty                | unknown    |
-| Otherwise                                                 | compatible |
+| Condition                                                               | Result     |
+| ----------------------------------------------------------------------- | ---------- |
+| The workspace is not trusted                                            | deferred   |
+| The session or workspace directory cannot be resolved                   | unknown    |
+| The session directory is not the runtime workspace                      | deferred   |
+| `--experimental-lsp` is forwarded                                       | deferred   |
+| `--restore-ask-user-question` is forwarded                              | deferred   |
+| Another argument is forwarded                                           | unknown    |
+| The running workspace holds MCP servers outside its files               | deferred   |
+| A settings location in the environment depends on the working directory | unknown    |
+| A settings layer cannot be read                                         | unknown    |
+| MCP servers in any settings layer, or `mcp.serverCommand`               | deferred   |
+| `tools.discoveryCommand` or `tools.callCommand`                         | deferred   |
+| Hooks in the system, user or trusted project layer                      | deferred   |
+| The approval mode in settings is not valid                              | unknown    |
+| Approval mode `plan`, requested or from settings                        | deferred   |
+| `.mcp.json` cannot be read or is malformed                              | unknown    |
+| Servers in `.mcp.json`                                                  | deferred   |
+| Extensions are installed                                                | deferred   |
+| The extension store cannot be proven empty                              | unknown    |
+| Otherwise                                                               | compatible |
 
 A hooks entry counts unless it is an empty list or one of the configuration
 fields `enabled`, `disabled` and `notifications`, which the hook registry
@@ -492,16 +503,23 @@ nor a durably owned session.
   for every new session. The settings and `.mcp.json` reads are synchronous and
   block the daemon's event loop while they run. The reads are local and small,
   but a slow file system delays session creation, and a selection that exceeds
-  the Bridge's budget fails the creation.
+  the Bridge's budget fails the creation. M6 must move these reads off the
+  event loop, or bound how long they take, before it calls the evaluation when
+  a session is created.
 - The store never removes a staging directory that an install leaves when it
   stops before it commits, nor what a transaction leaves in `staging` or
   `rollback` when recovery quarantined its journal; recovery clears the rest at
-  the next store operation. Such a leftover keeps sessions on Legacy until it
-  is removed.
-- Lookups in the given environment are case-sensitive, as in the daemon's
-  runtime environment today. On Windows, a locating variable spelled in another
-  case, such as `qwen_home`, is not found, although a session host's own
-  `process.env` finds it.
+  the next store operation. A Ctrl-C during `qwen extensions install` is
+  enough to leave one. Such a leftover keeps sessions on Legacy until it is
+  removed. Before it relies on the evaluation, M6 must either remove such a
+  staging directory once it can tell the directory is abandoned, or tell the
+  user why sessions stay on Legacy. The store lock alone cannot tell: an
+  install creates and fills its staging directory before it takes the lock, so
+  a sweep under the lock can delete the staging directory of an install that
+  is still running.
+- Any other opening of the extension store at the same moment, by another qwen
+  process or by the daemon itself, can make a single evaluation `unknown`. M6
+  must retry rather than fail a Managed restore on it.
 - File-based custom commands can inject shell output (`!{…}`), which runs a
   process in the host when a user invokes the command. They are not an input
   of the contract; M5 or M6 decides whether a Managed session refuses them or

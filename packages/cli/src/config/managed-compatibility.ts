@@ -5,6 +5,7 @@
  */
 
 import { realpath } from 'node:fs/promises';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { ApprovalMode } from '@qwen-code/qwen-code-core/config/approval-mode.js';
 import { ExtensionStore } from '@qwen-code/qwen-code-core/extension/extension-store.js';
@@ -12,7 +13,11 @@ import { HOOKS_CONFIG_FIELDS } from '@qwen-code/qwen-code-core/hooks/types.js';
 import { parseApprovalModeValue } from './approval-mode-value.js';
 import { loadProjectMcpServers } from './mcpJson.js';
 import { readSettingsSnapshot, type LoadedSettings } from './settings.js';
-import { getGlobalQwenDirLite } from './storage-paths-lite.js';
+import {
+  getGlobalQwenDirLite,
+  isFullyQualifiedPath,
+  readEnvironmentVariable,
+} from './storage-paths-lite.js';
 
 export type ManagedCompatibility =
   | { readonly status: 'compatible' }
@@ -51,7 +56,7 @@ export async function evaluateManagedCompatibility(
   runtime: ManagedCompatibilityRuntime,
 ): Promise<ManagedCompatibility> {
   if (!runtime.workspaceTrusted) {
-    return deferred('the workspace is not trusted');
+    return deferredResult('the workspace is not trusted');
   }
   let sameWorkspace: boolean;
   try {
@@ -61,24 +66,42 @@ export async function evaluateManagedCompatibility(
     ]);
     sameWorkspace = requested === workspace;
   } catch {
-    return unknown('the session or workspace directory could not be resolved');
+    return unknownResult(
+      'the session or workspace directory could not be resolved',
+    );
   }
   if (!sameWorkspace) {
-    return deferred('the session directory is not the runtime workspace');
+    return deferredResult('the session directory is not the runtime workspace');
   }
   if (runtime.forwardedArgs.includes('--experimental-lsp')) {
-    return deferred('the daemon enables LSP for its sessions');
+    return deferredResult('the daemon enables LSP for its sessions');
   }
   if (runtime.forwardedArgs.includes('--restore-ask-user-question')) {
-    return deferred('the daemon restores unanswered user questions');
+    return deferredResult('the daemon restores unanswered user questions');
   }
   if (runtime.forwardedArgs.length > 0) {
-    return unknown(
+    return unknownResult(
       'the daemon forwards an argument the evaluation does not know',
     );
   }
   if (runtime.hasLiveMcpServers()) {
-    return deferred('MCP servers were added to the running workspace');
+    return deferredResult('MCP servers were added to the running workspace');
+  }
+  // A session host resolves such a location against its own working
+  // directory, which the evaluation cannot know.
+  let locationDependsOnWorkingDirectory: boolean;
+  try {
+    locationDependsOnWorkingDirectory = hasWorkingDirectoryLocation(
+      runtime.environment,
+    );
+  } catch {
+    // The home directory or the environment could not be read.
+    return unknownResult('the settings could not be read');
+  }
+  if (locationDependsOnWorkingDirectory) {
+    return unknownResult(
+      'a settings location in the environment depends on the working directory',
+    );
   }
 
   let settings: LoadedSettings;
@@ -88,17 +111,17 @@ export async function evaluateManagedCompatibility(
       workspaceTrusted: true,
     });
   } catch {
-    return unknown('the settings could not be read');
+    return unknownResult('the settings could not be read');
   }
   const merged = settings.merged;
   if (Object.keys(merged.mcpServers ?? {}).length > 0) {
-    return deferred('MCP servers are configured in settings');
+    return deferredResult('MCP servers are configured in settings');
   }
   if (merged.mcp?.serverCommand) {
-    return deferred('an MCP server command is configured');
+    return deferredResult('an MCP server command is configured');
   }
   if (merged.tools?.discoveryCommand || merged.tools?.callCommand) {
-    return deferred('a tool discovery or call command is configured');
+    return deferredResult('a tool discovery or call command is configured');
   }
   if (
     [
@@ -107,7 +130,7 @@ export async function evaluateManagedCompatibility(
       settings.getProjectHooks(),
     ].some(hasHooks)
   ) {
-    return deferred('hooks are configured in settings');
+    return deferredResult('hooks are configured in settings');
   }
   // Session creation parses the settings value, as boot does, before a
   // requested mode replaces it; a value it rejects fails every session.
@@ -116,21 +139,23 @@ export async function evaluateManagedCompatibility(
     try {
       settingsApprovalMode = parseApprovalModeValue(merged.tools.approvalMode);
     } catch {
-      return unknown('the approval mode in settings is not valid');
+      return unknownResult('the approval mode in settings is not valid');
     }
   }
   if ((request.approvalMode ?? settingsApprovalMode) === ApprovalMode.PLAN) {
-    return deferred('plan mode needs tools the engine does not provide');
+    return deferredResult('plan mode needs tools the engine does not provide');
   }
 
   const projectMcp = loadProjectMcpServers(runtime.workspaceCwd, {
     strict: true,
   });
   if (projectMcp.errors.length > 0) {
-    return unknown('the project MCP file could not be read or is malformed');
+    return unknownResult(
+      'the project MCP file could not be read or is malformed',
+    );
   }
   if (Object.keys(projectMcp.servers).length > 0) {
-    return deferred('MCP servers are configured in the project MCP file');
+    return deferredResult('MCP servers are configured in the project MCP file');
   }
 
   const qwenDir = getGlobalQwenDirLite(runtime.environment);
@@ -139,12 +164,49 @@ export async function evaluateManagedCompatibility(
     storeDir: path.join(qwenDir, 'extension-store'),
   }).inspectEmptiness();
   if (extensions.status === 'installed') {
-    return deferred('extensions are installed');
+    return deferredResult('extensions are installed');
   }
   if (extensions.status === 'unknown') {
-    return unknown(extensions.reason);
+    return unknownResult(extensions.reason);
   }
   return { status: 'compatible' };
+}
+
+/**
+ * Whether a variable that locates settings or the extension store gives a
+ * location that depends on the working directory. Settings loading resolves
+ * the home directory for the user directory and to tell whether the workspace
+ * is the home directory, so an empty or relative one counts too. `QWEN_HOME`
+ * may be `~` or start with `~/` or `~\`, which expands against the home
+ * directory; the system settings paths are used as they are. A value that is
+ * not a string reaches a session host only as its string form, which the
+ * evaluation does not predict.
+ */
+function hasWorkingDirectoryLocation(
+  environment: Readonly<NodeJS.ProcessEnv>,
+): boolean {
+  // An empty home directory is not fully qualified either.
+  if (!isFullyQualifiedPath(os.homedir())) return true;
+  const qwenHome: unknown = readEnvironmentVariable(environment, 'QWEN_HOME');
+  const underHome =
+    qwenHome === undefined ||
+    qwenHome === '' ||
+    qwenHome === '~' ||
+    (typeof qwenHome === 'string' && /^~[/\\]/.test(qwenHome));
+  if (
+    !underHome &&
+    (typeof qwenHome !== 'string' || !isFullyQualifiedPath(qwenHome))
+  ) {
+    return true;
+  }
+  return [
+    'QWEN_CODE_SYSTEM_SETTINGS_PATH',
+    'QWEN_CODE_SYSTEM_DEFAULTS_PATH',
+  ].some((name) => {
+    const location: unknown = readEnvironmentVariable(environment, name);
+    if (location === undefined || location === '') return false;
+    return typeof location !== 'string' || !isFullyQualifiedPath(location);
+  });
 }
 
 /**
@@ -159,10 +221,10 @@ function hasHooks(hooks: Record<string, unknown> | undefined): boolean {
   );
 }
 
-function deferred(reason: string): ManagedCompatibility {
+function deferredResult(reason: string): ManagedCompatibility {
   return { status: 'deferred', reason };
 }
 
-function unknown(reason: string): ManagedCompatibility {
+function unknownResult(reason: string): ManagedCompatibility {
   return { status: 'unknown', reason };
 }
