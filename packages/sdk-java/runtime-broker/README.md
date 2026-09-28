@@ -42,7 +42,7 @@ mvn checkstyle:check
 
 `JdbcRuntimeBrokerSchema.initialize(DataSource)` installs the four private
 Broker tables. The JDBC implementations use `javax.sql.DataSource` for
-database access and fastjson2 (2.0.60) as the `reference_json`/`result_json`
+database access and fastjson2 (2.0.65) as the `reference_json`/`result_json`
 codec; the embedding service owns the connection pool and schema lifecycle.
 `JdbcRuntimeBindingRepository` additionally requires a `SecretProtector`
 (`AesGcmSecretProtector` is included): the provision seed of a durable binding

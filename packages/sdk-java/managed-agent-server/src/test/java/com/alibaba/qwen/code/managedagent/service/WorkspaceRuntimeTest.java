@@ -208,6 +208,38 @@ class WorkspaceRuntimeTest {
     }
 
     @Test
+    void postClaimAuthorityRefusalIsNotReportedAsAnUnclaimedWorkspace() throws Exception {
+        SessionRecord session = createSession("storage", ".");
+        var fixture = transport(session);
+        when(fixture.http().installContext(any(), any(), any(), any()))
+                .thenReturn(CompletableFuture.completedFuture(Map.of()));
+        when(fixture.http().activateWorkspace(any(), any(), any(), eq(true))).thenAnswer(ignored -> {
+            jdbc.update("UPDATE managed_workspace_access SET can_read = FALSE WHERE tenant_id = ?", session.tenantId());
+            return CompletableFuture.completedFuture(null);
+        });
+        assertThatThrownBy(() -> fixture.transport().acquire(fixture.lease(), fixture.record().getSession())
+                .toCompletableFuture().join())
+                .cause().isInstanceOfSatisfying(RuntimeBrokerException.class, error -> {
+                    assertThat(error.getCode()).isEqualTo("runtime_session_acquire_failed");
+                    assertThat(error.getStatusCode()).isEqualTo(503);
+                });
+        authority.assertHeld(session.workspace(), fixture.record());
+        assertBusy(() -> authority.claim(session.workspace(), holder(session, "rival")));
+    }
+
+    @Test
+    void synchronousPostClaimFailureRemainsUncertain() throws Exception {
+        SessionRecord session = createSession("storage", ".");
+        var fixture = transport(session);
+        when(fixture.http().installContext(any(), any(), any(), any()))
+                .thenThrow(WorkspaceExecutionStore.unavailable());
+        assertThatThrownBy(() -> fixture.transport().acquire(fixture.lease(), fixture.record().getSession()))
+                .isInstanceOfSatisfying(RuntimeBrokerException.class, error ->
+                        assertThat(error.getCode()).isEqualTo("runtime_session_acquire_failed"));
+        authority.assertHeld(session.workspace(), fixture.record());
+    }
+
+    @Test
     void refusesMissingOrLinkedSessionDirectoryBeforeClaimingStorage() throws Exception {
         for (String cwd : List.of("missing", "link")) {
             SessionRecord session = createSession("storage", cwd);
@@ -286,7 +318,7 @@ class WorkspaceRuntimeTest {
         jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, can_read, can_create)"
                 + " VALUES (?, 'workspace', ?, TRUE, TRUE)", tenant, "actor".getBytes(StandardCharsets.UTF_8));
         var created = sessions.insertWorkspaceSessionCommand(tenant, "actor", "create", "sha256:" + "a".repeat(64),
-                "qwen-code", null, List.of(), null, new WorkspaceSelection("workspace", cwd));
+                "qwen-code", null, null, List.of(), null, new WorkspaceSelection("workspace", cwd));
         return sessions.findSessionById(created.sessionId()).orElseThrow();
     }
 

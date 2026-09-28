@@ -13,6 +13,7 @@ public class ManagedAgentProperties {
     private final Dispatch dispatch = new Dispatch();
     private final Events events = new Events();
     private final RuntimeBroker runtimeBroker = new RuntimeBroker();
+    private String agentRevision = "1";
 
     public Harness getHarness() {
         return harness;
@@ -32,6 +33,14 @@ public class ManagedAgentProperties {
 
     public RuntimeBroker getRuntimeBroker() {
         return runtimeBroker;
+    }
+
+    public String getAgentRevision() {
+        return agentRevision;
+    }
+
+    public void setAgentRevision(String agentRevision) {
+        this.agentRevision = agentRevision;
     }
 
     public static class Harness {
