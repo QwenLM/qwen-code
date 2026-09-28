@@ -28,6 +28,7 @@ vi.mock('./user-dream-agent-planner.js', () => ({
 }));
 
 import { planUserAutoMemoryDreamByAgent } from './user-dream-agent-planner.js';
+import * as memoryScan from './scan.js';
 import { AUTO_MEMORY_SCHEMA_VERSION } from './types.js';
 import { DREAM_OPERATIONS_FILENAME } from './dream-operations.js';
 
@@ -105,6 +106,33 @@ describe('User Memory dream', () => {
     expect(
       getUserAutoMemoryMetadataPath().startsWith(getUserAutoMemoryRoot()),
     ).toBe(false);
+  });
+
+  it('still records a mutation when the document count scan fails', async () => {
+    // One unreadable subdirectory makes the scan reject. Every sibling caller
+    // fails soft; if the counter did not, the mutation write path would throw
+    // on every user memory write, and the completion path would lose the
+    // throttle timestamp so the next dream would not be throttled either.
+    const now = new Date('2026-08-01T00:00:00.000Z');
+    const scan = vi
+      .spyOn(memoryScan, 'scanUserAutoMemoryTopicDocuments')
+      .mockRejectedValue(
+        new Error(
+          'memory scan is incomplete: a subdirectory could not be read',
+        ),
+      );
+    try {
+      await expect(recordUserAutoMemoryMutation(now)).resolves.toMatchObject({
+        documentCount: 0,
+      });
+      // The mutation was recorded despite the unreadable corpus, and an
+      // unmeasured count must not claim a document_limit.
+      const metadata = await readUserAutoMemoryMetadata(now);
+      expect(metadata).toMatchObject({ dirtyMutations: 1, status: 'idle' });
+      expect(metadata.pendingReason).toBeUndefined();
+    } finally {
+      scan.mockRestore();
+    }
   });
 
   it('preserves mutations that arrive while a dream is running', async () => {

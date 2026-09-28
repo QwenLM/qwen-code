@@ -9,6 +9,7 @@ import * as path from 'node:path';
 import lockfile from 'proper-lockfile';
 import type { Config } from '../config/config.js';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   diffDreamSnapshots,
   dreamRelativePaths,
@@ -36,6 +37,8 @@ import {
   type UserAutoMemoryMetadata,
 } from './types.js';
 import { planUserAutoMemoryDreamByAgent } from './user-dream-agent-planner.js';
+
+const debugLogger = createDebugLogger('AUTO_MEMORY_USER_DREAM');
 
 const DEFAULT_USER_DREAM_DIRTY_MUTATIONS = 10;
 export const DEFAULT_USER_DREAM_MIN_HOURS = 24;
@@ -156,7 +159,20 @@ async function mutateUserMetadata(
 }
 
 async function countUserDocuments(): Promise<number> {
-  return (await scanUserAutoMemoryTopicDocuments()).length;
+  // Fail soft like every other caller of this scan. Both callers sit on paths
+  // that must not throw: recordUserAutoMemoryMutation runs on every user
+  // memory write, and completeUserAutoMemoryDream persists the throttle
+  // timestamp — an unreadable subdirectory would break the write path and lose
+  // the timestamp, so the next dream would not be throttled either. A count of
+  // 0 is the conservative reading: it cannot claim a document_limit that was
+  // never measured. Logged because the 0 is otherwise indistinguishable from
+  // an empty corpus.
+  return (
+    await scanUserAutoMemoryTopicDocuments().catch((error: unknown) => {
+      debugLogger.error('User memory document count scan failed:', error);
+      return [];
+    })
+  ).length;
 }
 
 function pendingReason(
