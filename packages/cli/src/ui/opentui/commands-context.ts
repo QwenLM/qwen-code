@@ -67,7 +67,7 @@ export interface OpenTuiCommandHost {
   setMemoryFileCount(count: number): void;
   reloadCommands(): void | Promise<void>;
   setSessionName(name: string | null): void;
-  /** Parity of `isIdleRef.current` — no model turn in flight. */
+  /** No command dispatch or model turn in flight; sampled before dispatch. */
   isIdle(): boolean;
   /** A model turn is streaming; ignores slash-command processing. */
   isStreaming(): boolean;
@@ -100,6 +100,15 @@ export interface OpenTuiCommandServices {
   extensionRefreshState?: ExtensionRefreshState;
 }
 
+/** State the dispatcher samples before it runs the command. */
+export interface OpenTuiCommandDispatchState {
+  /**
+   * `host.isIdle()` read before `setIsProcessing(true)`. Read after it, the
+   * command's own dispatch always counts as busy.
+   */
+  wasIdleBeforeDispatch: boolean;
+}
+
 /**
  * Builds the `CommandContext` exactly like the ink processor's
  * `commandContext` useMemo (slashCommandProcessor.ts):
@@ -109,11 +118,13 @@ export interface OpenTuiCommandServices {
  *    `clearItems` already performs the renderer-level clear (writing raw
  *    ANSI here would fight the cell-diff painter — audit 01 G-20).
  *  - a live `history` getter backed by the host
+ *  - a live `isIdleRef` from the pre-dispatch idle state plus streaming
  *  - a fallback `ExtensionRefreshState` when the backend has none
  */
 export function createOpenTuiCommandContext(
   host: OpenTuiCommandHost,
   services: OpenTuiCommandServices,
+  dispatch: OpenTuiCommandDispatchState,
 ): CommandContext {
   const extensionRefreshState =
     services.extensionRefreshState ?? new ExtensionRefreshState();
@@ -147,9 +158,11 @@ export function createOpenTuiCommandContext(
       setBtwItem: (item) => host.setBtwItem(item),
       cancelBtw: () => host.cancelBtw(),
       btwAbortControllerRef: host.btwAbortControllerRef,
+      // host.isIdle() would read the command's own dispatch as busy.
+      // Streaming stays live, so a turn that starts mid-command reads busy.
       isIdleRef: {
         get current() {
-          return host.isIdle();
+          return dispatch.wasIdleBeforeDispatch && !host.isStreaming();
         },
       },
       toggleVimEnabled: () => host.toggleVimEnabled(),

@@ -102,10 +102,11 @@ describe('createOpenTuiCommandContext (ink commandContext parity)', () => {
     settings: {} as LoadedSettings,
     logger: null,
   };
+  const idle = { wasIdleBeforeDispatch: true };
 
   it('clear() runs the ink sequence minus clearScreen, ending with setSessionName(null)', () => {
     const host = createFakeHost();
-    const context = createOpenTuiCommandContext(host, services);
+    const context = createOpenTuiCommandContext(host, services, idle);
     context.ui.clear();
     // Ink: cancelBtw → clearPendingState → clearItems → clearScreen →
     // refreshStatic → setSessionName(null). The clearScreen step is skipped:
@@ -124,7 +125,7 @@ describe('createOpenTuiCommandContext (ink commandContext parity)', () => {
 
   it('keeps the host receiver on session.startNewSession', () => {
     const host = createFakeHost();
-    const context = createOpenTuiCommandContext(host, services);
+    const context = createOpenTuiCommandContext(host, services, idle);
     // `/clear` calls this before `ui.clear()`; a reference detached from the
     // host threw here and left the transcript standing.
     context.session.startNewSession?.('sess-9');
@@ -133,39 +134,64 @@ describe('createOpenTuiCommandContext (ink commandContext parity)', () => {
 
   it('exposes a live history getter backed by the host', () => {
     const host = createFakeHost();
-    const context = createOpenTuiCommandContext(host, services);
+    const context = createOpenTuiCommandContext(host, services, idle);
     expect(context.ui.history).toEqual([
       { id: 1, type: 'info', text: 'existing' },
     ]);
   });
 
-  it('isIdleRef reflects the host idle state live', () => {
-    const host = createFakeHost();
-    let idle = true;
-    host.isIdle = () => idle;
-    const context = createOpenTuiCommandContext(host, services);
-    expect(context.ui.isIdleRef.current).toBe(true);
-    idle = false;
-    expect(context.ui.isIdleRef.current).toBe(false);
+  describe('isIdleRef', () => {
+    // The dispatcher sets processing before it builds the context, so the
+    // live host.isIdle() always reads false here.
+    function busyHost() {
+      const host = createFakeHost();
+      host.isIdle = () => false;
+      return host;
+    }
+
+    it('is idle when idle before dispatch and not streaming', () => {
+      const context = createOpenTuiCommandContext(busyHost(), services, idle);
+      expect(context.ui.isIdleRef.current).toBe(true);
+    });
+
+    it('is busy when the host was busy before dispatch', () => {
+      const host = createFakeHost();
+      host.isIdle = () => true;
+      const context = createOpenTuiCommandContext(host, services, {
+        wasIdleBeforeDispatch: false,
+      });
+      expect(context.ui.isIdleRef.current).toBe(false);
+    });
+
+    it('is busy while a turn streams, read live', () => {
+      let streaming = false;
+      const host = busyHost();
+      host.isStreaming = () => streaming;
+      const context = createOpenTuiCommandContext(host, services, idle);
+      expect(context.ui.isIdleRef.current).toBe(true);
+      streaming = true;
+      expect(context.ui.isIdleRef.current).toBe(false);
+    });
   });
 
   it('falls back to a fresh ExtensionRefreshState like the ink useRef', () => {
     const host = createFakeHost();
-    const context = createOpenTuiCommandContext(host, services);
+    const context = createOpenTuiCommandContext(host, services, idle);
     expect(context.services.extensionRefreshState).toBeInstanceOf(
       ExtensionRefreshState,
     );
     const provided = new ExtensionRefreshState();
-    const withProvided = createOpenTuiCommandContext(host, {
-      ...services,
-      extensionRefreshState: provided,
-    });
+    const withProvided = createOpenTuiCommandContext(
+      host,
+      { ...services, extensionRefreshState: provided },
+      idle,
+    );
     expect(withProvided.services.extensionRefreshState).toBe(provided);
   });
 
   it('wires services and session state like the ink context', () => {
     const host = createFakeHost();
-    const context = createOpenTuiCommandContext(host, services);
+    const context = createOpenTuiCommandContext(host, services, idle);
     expect(context.executionMode).toBe('interactive');
     expect(context.services.config).toBeNull();
     expect(context.services.settings).toBe(services.settings);
@@ -176,7 +202,7 @@ describe('createOpenTuiCommandContext (ink commandContext parity)', () => {
 
   it('routes ui primitives through the host', async () => {
     const host = createFakeHost();
-    const context = createOpenTuiCommandContext(host, services);
+    const context = createOpenTuiCommandContext(host, services, idle);
     expect(await context.ui.toggleVimEnabled()).toBe(true);
     context.ui.setDebugMessage('dbg');
     context.ui.refreshStatic();

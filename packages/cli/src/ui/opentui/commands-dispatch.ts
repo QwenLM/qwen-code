@@ -668,20 +668,14 @@ export class OpenTuiSlashDispatcher {
           const baseContext = createOpenTuiCommandContext(
             this.host,
             this.services,
+            { wasIdleBeforeDispatch },
           );
-          const host = this.host;
           const fullCommandContext: CommandContext = {
             ...baseContext,
             ui: {
               ...baseContext.ui,
               addItem: (item, timestamp) =>
                 addItemWithRecording(item, timestamp),
-              // Live, so a stream that starts mid-command still reads busy.
-              isIdleRef: {
-                get current() {
-                  return wasIdleBeforeDispatch && !host.isStreaming();
-                },
-              },
             },
             invocation: {
               raw: trimmed,
