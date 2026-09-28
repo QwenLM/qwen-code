@@ -1060,6 +1060,10 @@ describe('MemoryManager', () => {
         getMemoryRecallMode: vi.fn().mockReturnValue('structured'),
       });
       telemetryMocks.logMemoryDream.mockClear();
+      const dateNow = vi
+        .spyOn(Date, 'now')
+        .mockReturnValueOnce(1_000)
+        .mockReturnValue(1_025);
 
       const result = await manager.scheduleUserDream({
         projectRoot,
@@ -1067,6 +1071,7 @@ describe('MemoryManager', () => {
         now,
       });
       await result.promise;
+      dateNow.mockRestore();
 
       expect(manager.getTask(result.taskId!)).toMatchObject({
         status: 'completed',
@@ -1088,7 +1093,7 @@ describe('MemoryManager', () => {
           scheduling_reason: 'dirty_mutations',
           touched_topics: 'user,feedback',
           touched_topics_count: 2,
-          duration_ms: expect.any(Number),
+          duration_ms: 25,
         }),
       );
       expect(telemetryMocks.logMemoryDream).toHaveBeenCalledTimes(1);
@@ -1207,6 +1212,7 @@ describe('MemoryManager', () => {
         config,
         expect.objectContaining({ scope: 'user', status: 'cancelled' }),
       );
+      expect(telemetryMocks.logMemoryDream).toHaveBeenCalledTimes(1);
       // The cancelled run must not bump lastDreamAt — that would suppress
       // the next legitimate dream for DEFAULT_USER_DREAM_MIN_HOURS.
       // (lastAttemptAt *is* set for 'cancelled' too, so this case says

@@ -345,4 +345,42 @@ describe('User Memory dream', () => {
       code: 'ENOENT',
     });
   });
+
+  it('does not rebuild the user index after cancellation', async () => {
+    const memoryRoot = getUserAutoMemoryRoot();
+    const memoryFile = path.join(memoryRoot, 'user', 'keep.md');
+    await fs.mkdir(path.dirname(memoryFile), { recursive: true });
+    await fs.writeFile(
+      memoryFile,
+      '---\ntype: user\nname: Keep\ndescription: Keep\nkeywords:\n  - keep preference\n---\n\nKeep this preference.\n',
+    );
+    const indexPath = path.join(memoryRoot, 'MEMORY.md');
+    await fs.writeFile(indexPath, 'SENTINEL-INDEX-DO-NOT-OVERWRITE');
+    const controller = new AbortController();
+    const applyDreamOperations = dreamOperations.applyDreamOperations;
+    vi.spyOn(dreamOperations, 'applyDreamOperations').mockImplementationOnce(
+      async (...args) => {
+        const result = await applyDreamOperations(...args);
+        controller.abort();
+        return result;
+      },
+    );
+    vi.mocked(planUserAutoMemoryDreamByAgent).mockImplementation(async () => {
+      await fs.writeFile(
+        path.join(memoryRoot, DREAM_OPERATIONS_FILENAME),
+        JSON.stringify({ version: 1, delete: [], operations: [] }),
+      );
+      return {
+        status: 'completed',
+        finalText: 'No changes.',
+        filesTouched: [],
+      };
+    });
+
+    await runManagedUserAutoMemoryDream(projectRoot, config, controller.signal);
+
+    await expect(fs.readFile(indexPath, 'utf-8')).resolves.toBe(
+      'SENTINEL-INDEX-DO-NOT-OVERWRITE',
+    );
+  });
 });
