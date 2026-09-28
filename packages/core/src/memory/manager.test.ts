@@ -847,11 +847,13 @@ describe('MemoryManager', () => {
         totalTokens: 2,
         indexRebuildError: 'Index rebuild failed',
       });
-      const scheduled = await new MemoryManager().scheduleMetadataMigration({
+      const manager = new MemoryManager();
+      const params = {
         projectRoot,
-        scope: 'project',
+        scope: 'project' as const,
         config: makeMockConfig(),
-      });
+      };
+      const scheduled = await manager.scheduleMetadataMigration(params);
 
       expect(scheduled.status).toBe('scheduled');
       if (scheduled.status !== 'scheduled') return;
@@ -866,6 +868,18 @@ describe('MemoryManager', () => {
           indexRebuildError: 'Index rebuild failed',
         },
       });
+      for (let attempt = 1; attempt < 3; attempt++) {
+        const retry = await manager.scheduleMetadataMigration(params);
+        expect(retry.status).toBe('scheduled');
+        await retry.promise;
+      }
+      await expect(manager.scheduleMetadataMigration(params)).resolves.toEqual({
+        status: 'skipped',
+        skippedReason: 'stalled',
+      });
+      expect(
+        metadataMigration.runMemoryMetadataMigration,
+      ).toHaveBeenCalledTimes(3);
     });
 
     it('tells the manual dream gate that the migration has stalled', async () => {
