@@ -26,6 +26,7 @@ import {
   HUMAN_AUTHOR_ID,
   AGENTS_SCHEMA_VERSION,
   DEFAULT_THREAD_AUTO_TURN_BUDGET,
+  MAX_ACKNOWLEDGED_OUTBOX,
   MAX_THREAD_MESSAGES,
   MAX_THREAD_RUNS,
   type WorkspaceAgent,
@@ -94,13 +95,37 @@ describe('agent thread actions', () => {
     });
   });
 
+  it('keeps pending outbox events and only recent acknowledged ones', async () => {
+    const event = (index: number, status: 'pending' | 'acknowledged') => ({
+      id: `ev_${index}`,
+      kind: 'parent_report' as const,
+      payload: {},
+      status,
+      attempts: 1,
+      createdAt: index,
+    });
+    const outbox = [
+      event(0, 'pending'),
+      ...Array.from({ length: MAX_ACKNOWLEDGED_OUTBOX + 10 }, (_, index) =>
+        event(index + 1, 'acknowledged'),
+      ),
+    ];
+    await writeThread(PROJECT_ROOT, thread({ outbox }));
+
+    const stored = await readThread(PROJECT_ROOT, 'th_root');
+    expect(stored?.outbox).toHaveLength(MAX_ACKNOWLEDGED_OUTBOX + 1);
+    expect(stored?.outbox[0]?.id).toBe('ev_0');
+    const newest = `ev_${MAX_ACKNOWLEDGED_OUTBOX + 10}`;
+    expect(stored?.outbox.at(-1)?.id).toBe(newest);
+  });
+
   it('rejects negative budget counters', async () => {
     await expect(
       writeThread(PROJECT_ROOT, thread({ autoTurnsUsed: -1 })),
     ).rejects.toThrow(/Refusing to write malformed thread record/);
   });
 
-  it('retains durable usage, idempotency keys, and active references past history bounds', async () => {
+  it('keeps usage, idempotency keys, and active references past history bounds', async () => {
     // Derived from the bounds so every retention clause stays load-bearing
     // if either bound moves: two messages over, and a full run window of
     // references behind the retained usage and active runs.
@@ -142,11 +167,12 @@ describe('agent thread actions', () => {
     const stored = await readThread(PROJECT_ROOT, 'th_root');
     expect(stored?.messages[0]?.id).toBe('ms_0');
     expect(stored?.messages[1]?.id).toBe('ms_1');
-    expect(stored?.runs[0]?.id).toBe('rn_usage');
-    expect(stored?.runs[1]?.id).toBe('rn_active');
+    // The old run that spent tokens is dropped; its spend is not.
+    expect(stored?.runs[0]?.id).toBe('rn_active');
     expect(stored?.messages).toHaveLength(messageCount);
-    expect(stored?.runs).toHaveLength(MAX_THREAD_RUNS + 2);
+    expect(stored?.runs).toHaveLength(MAX_THREAD_RUNS + 1);
     expect(stored?.tokensUsed).toBe(7);
+    expect(stored?.trimmedTokens).toBe(7);
   });
 
   it('reports an unknown mention without waking the assignee', async () => {
