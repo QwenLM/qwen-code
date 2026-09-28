@@ -7,6 +7,9 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { FunctionDeclaration, Part } from '@google/genai';
 import type { ToolCallRequestInfo } from '@qwen-code/qwen-code-core/core/turn.js';
+import { managedToolDigest } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
+import { parseToolResultEnvelope } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
+import type { DurableToolResultResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/resource-tool-result-store.js';
 import {
   convertToFunctionResponse,
   convertToFunctionErrorResponse,
@@ -21,9 +24,19 @@ import {
   HostedWorkspaceBrokerRejection,
   type HostedWorkspaceBrokerOptions,
 } from './hosted-workspace-broker.js';
+import { HostedShellPublisher } from './hosted-shell-publisher.js';
 import type { HostedMcpSession } from './hosted-mcp-session.js';
 
 export const HOSTED_WORKSPACE_FILE_PROFILE = 'hosted-workspace-files/1';
+export const HOSTED_WORKSPACE_SHELL_PROFILE = 'hosted-workspace-shell/1';
+export type HostedWorkspaceToolProfile =
+  | typeof HOSTED_WORKSPACE_FILE_PROFILE
+  | typeof HOSTED_WORKSPACE_SHELL_PROFILE;
+
+export interface HostedShellTurnOptions {
+  resources: DurableToolResultResourceStore;
+  assertWritable(): Promise<void>;
+}
 
 const pathProperty = {
   type: 'string',
@@ -75,6 +88,25 @@ export const HOSTED_WORKSPACE_FILE_TOOLS: FunctionDeclaration[] = [
   },
 ];
 
+export const HOSTED_WORKSPACE_SHELL_TOOLS: FunctionDeclaration[] = [
+  ...HOSTED_WORKSPACE_FILE_TOOLS,
+  {
+    name: 'run_shell_command',
+    description:
+      'Run a foreground command in the saved Workspace working directory. Complete stdout and stderr are retained; the model receives a bounded preview. Background jobs are unavailable.',
+    parametersJsonSchema: {
+      type: 'object',
+      properties: {
+        command: { type: 'string' },
+        timeout: { type: 'integer', minimum: 1, maximum: 600000 },
+        description: { type: 'string' },
+      },
+      required: ['command'],
+      additionalProperties: false,
+    },
+  },
+];
+
 export class HostedToolRecoveryRequiredError extends Error {
   constructor(cause: unknown) {
     super(
@@ -89,6 +121,8 @@ export class HostedWorkspaceToolTurn {
   private readonly warmed: Promise<void>;
   private acquired = false;
   private uncertain = false;
+  private publisher?: HostedShellPublisher;
+  private bindingGeneration?: string;
   private advertised?: FunctionDeclaration[];
 
   constructor(
@@ -106,6 +140,7 @@ export class HostedWorkspaceToolTurn {
       parts: Part[],
       model: string,
     ) => boolean,
+    private readonly shell?: HostedShellTurnOptions,
     private readonly mcp?: HostedMcpSession,
   ) {
     this.broker =
@@ -123,7 +158,9 @@ export class HostedWorkspaceToolTurn {
   async declarations(): Promise<FunctionDeclaration[]> {
     if (this.mcp) await this.warmed;
     this.advertised ??= [
-      ...HOSTED_WORKSPACE_FILE_TOOLS,
+      ...(this.shell
+        ? HOSTED_WORKSPACE_SHELL_TOOLS
+        : HOSTED_WORKSPACE_FILE_TOOLS),
       ...(this.mcp?.tools() ?? []),
     ];
     return this.advertised;
@@ -139,8 +176,8 @@ export class HostedWorkspaceToolTurn {
     const declarations = await this.declarations();
     const ids = new Set<string>();
     const requests = calls.map((call) => {
-      const callId = randomUUID();
-      const mcpInput = this.mcp?.toolInput(call.name, call.args, callId);
+      const runtimeCallId = randomUUID();
+      const mcpInput = this.mcp?.toolInput(call.name, call.args, runtimeCallId);
       if (
         !declarations.some((tool) => tool.name === call.name) ||
         ids.has(call.callId) ||
@@ -148,16 +185,61 @@ export class HostedWorkspaceToolTurn {
       )
         throw new Error('Hosted Workspace profile refused a tool call.');
       ids.add(call.callId);
-      const file = call.args['file_path'];
-      if (!mcpInput && typeof file !== 'string')
-        throw new Error('Hosted file tools require a relative file_path.');
+      const isShell = call.name === 'run_shell_command';
+      let validationError: string | undefined;
+      let input: Record<string, unknown>;
+      if (mcpInput) {
+        input = { ...mcpInput.input };
+      } else if (isShell) {
+        const args = call.args;
+        const unsupportedKey = Object.keys(args).find(
+          (key) =>
+            !['command', 'timeout', 'description', 'is_background'].includes(
+              key,
+            ),
+        );
+        if (typeof args['command'] !== 'string' || !args['command'].trim()) {
+          validationError = 'Hosted Shell requires a nonempty command.';
+        } else if (unsupportedKey !== undefined) {
+          validationError = `Hosted Shell received unsupported argument ${JSON.stringify(unsupportedKey)}.`;
+        } else if (
+          args['is_background'] !== undefined &&
+          args['is_background'] !== false &&
+          !(
+            typeof args['is_background'] === 'string' &&
+            args['is_background'].toLowerCase() === 'false'
+          )
+        ) {
+          validationError =
+            'Hosted Shell requires a foreground command in the saved directory. Background jobs and Monitor are unavailable; correct the arguments before retrying.';
+        } else if (
+          args['description'] !== undefined &&
+          typeof args['description'] !== 'string'
+        ) {
+          validationError = 'Hosted Shell description must be a string.';
+        } else if (
+          args['timeout'] !== undefined &&
+          (!Number.isSafeInteger(args['timeout']) ||
+            (args['timeout'] as number) < 1 ||
+            (args['timeout'] as number) > 600000)
+        ) {
+          validationError =
+            'Hosted Shell timeout must be an integer from 1 to 600000 ms.';
+        }
+        input = { ...args, is_background: false };
+      } else {
+        const file = call.args['file_path'];
+        if (typeof file !== 'string')
+          throw new Error('Hosted file tools require a relative file_path.');
+        input = {
+          ...call.args,
+          file_path: normalizeWorkspaceRelativePath(file.trim()),
+        };
+      }
       const payloadJson = JSON.stringify(
         mcpInput ?? {
           toolName: call.name,
-          input: {
-            ...call.args,
-            file_path: normalizeWorkspaceRelativePath((file as string).trim()),
-          },
+          input,
         },
       );
       const inputBytes = Buffer.from(
@@ -177,7 +259,11 @@ export class HostedWorkspaceToolTurn {
         );
       return {
         call,
-        callId,
+        validationError,
+        runtimeCallId,
+        input,
+        isShell,
+        inputDigest: isShell ? managedToolDigest(input) : undefined,
         payloadJson,
         inputBytes,
         digest: `sha256:${createHash('sha256').update(payloadJson).digest('hex')}`,
@@ -188,6 +274,30 @@ export class HostedWorkspaceToolTurn {
         'Hosted assistant record exceeds the inline Session Store limit.',
       );
     signal.throwIfAborted();
+    if (requests.some((request) => request.validationError)) {
+      const responses = requests.flatMap((request) =>
+        convertToFunctionErrorResponse(
+          request.call.name,
+          request.call.callId,
+          [],
+          request.validationError ??
+            'This tool was not executed because another call in the batch has invalid Shell arguments. Retry the batch with corrected arguments.',
+        ),
+      );
+      if (!this.messageFitsInline('tool_result', responses, model))
+        throw new Error(
+          'Hosted tool refusal exceeds the inline Session Store limit.',
+        );
+      this.uncertain = true;
+      try {
+        await this.commit('assistant', parts, model);
+        await this.commit('tool_result', responses, model);
+        this.uncertain = false;
+        return responses;
+      } catch (cause) {
+        throw new HostedToolRecoveryRequiredError(cause);
+      }
+    }
     let onAbort: () => void = () => undefined;
     try {
       await Promise.race([
@@ -223,6 +333,17 @@ export class HostedWorkspaceToolTurn {
     const reserved: string[] = [];
     try {
       this.uncertain = true;
+      if (requests.some((request) => request.isShell) && !this.publisher) {
+        this.publisher = new HostedShellPublisher(
+          this.session,
+          this.shell!.resources,
+          this.shell!.assertWritable,
+          this.promptId,
+        );
+        this.bindingGeneration = await this.broker.registerPublisher(
+          await this.publisher.start(),
+        );
+      }
       const messageId = await this.commit('assistant', parts, model);
       const bindings = [];
       for (const [ordinal, request] of requests.entries()) {
@@ -230,9 +351,11 @@ export class HostedWorkspaceToolTurn {
           'managed-tool-input',
           request.inputBytes,
         );
+        const runtimeCallId = request.runtimeCallId;
         const executionCallId = await this.broker.prepare(
-          request.callId,
+          runtimeCallId,
           request.digest,
+          request.inputDigest,
           this.promptId,
         );
         reserved.push(executionCallId);
@@ -246,6 +369,12 @@ export class HostedWorkspaceToolTurn {
         );
         const authority = this.session.authority;
         const activation = this.session.activation;
+        const argsRef = request.isShell
+          ? await this.session.resources.publish(
+              'managed-tool-args',
+              Buffer.from(JSON.stringify(request.input)),
+            )
+          : routeRef;
         await authority.appendExecutionEvent(
           {
             operation: 'toolIntent',
@@ -270,7 +399,7 @@ export class HostedWorkspaceToolTurn {
               batchId: messageId,
               ordinal,
               toolDefinitionRef,
-              argsRef: routeRef,
+              argsRef,
               outcomeSource: 'runtime',
             },
           }),
@@ -280,7 +409,9 @@ export class HostedWorkspaceToolTurn {
           functionCallId: request.call.callId,
           toolName: request.call.name,
           executionCallId,
-          invocationBindingId: executionCallId,
+          invocationBindingId: request.isShell
+            ? runtimeCallId
+            : executionCallId,
           capabilityVersion: WORKSPACE_CAPABILITY_DIGEST,
           policyVersion: 'preapproved-workspace-tools/1',
           mediaVersion: null,
@@ -289,13 +420,37 @@ export class HostedWorkspaceToolTurn {
             (part) => part.functionCall?.id === request.call.callId,
           ),
           ordinal,
-          inputDigest: request.digest.slice(7),
+          inputDigest: request.inputDigest ?? request.digest.slice(7),
           progressCursor: null,
           attemptId: messageId,
           routeRef,
         });
+        if (request.isShell) {
+          this.publisher!.register(
+            {
+              reference: {
+                sessionId: this.promptId,
+                promptId: this.promptId,
+                callId: runtimeCallId,
+                argsDigest: request.inputDigest!,
+              },
+              capture: {
+                tenantId: authority.sessionHeader.sessionKey.tenantId,
+                sessionId: authority.sessionHeader.sessionKey.sessionId,
+                turnId: this.promptId,
+                executionCallId,
+                bindingGeneration: this.bindingGeneration!,
+                capturePolicy: 'complete_required',
+              },
+            },
+            request.call.callId,
+          );
+        }
       }
-      await this.harness.commitAwaitRuntimeBatch(bindings);
+      await this.harness.commitAwaitRuntimeBatch(bindings, {
+        turnId: this.promptId,
+        promptId: this.promptId,
+      });
       const responses: Part[] = [];
       for (const [index, request] of requests.entries()) {
         const executionCallId = reserved[index];
@@ -303,7 +458,20 @@ export class HostedWorkspaceToolTurn {
           executionCallId,
           request.payloadJson,
           signal,
+          request.isShell
+            ? Number(request.input['timeout'] ?? 120000) + 60000
+            : undefined,
         );
+        const shellResult = request.isShell
+          ? parseToolResultEnvelope(result)
+          : undefined;
+        const receipt = shellResult?.capture
+          ? await this.publisher!.receipt(executionCallId, shellResult)
+          : undefined;
+        if (receipt?.deliveryStatus === 'blocked') {
+          await this.broker.acknowledge(executionCallId, receipt);
+          throw new Error('Complete Shell output was not admitted.');
+        }
         const responseParts = result.responseParts as Part[];
         if (
           responseParts.some(
@@ -316,17 +484,25 @@ export class HostedWorkspaceToolTurn {
           )
         )
           throw new Error('Runtime returned an unsupported tool result.');
+        const modelParts = shellResult?.capture?.previewTruncated
+          ? [
+              {
+                text: `Shell execution: ${shellResult.executionStatus}. Output preview is truncated. Complete stdout and stderr are retained in the Session result.`,
+              },
+              ...responseParts,
+            ]
+          : responseParts;
         let converted =
           result.executionStatus === 'success'
             ? convertToFunctionResponse(
                 request.call.name,
                 request.call.callId,
-                responseParts,
+                modelParts,
               )
             : convertToFunctionErrorResponse(
                 request.call.name,
                 request.call.callId,
-                responseParts,
+                modelParts,
                 result.error?.message ??
                   `Runtime tool ${result.executionStatus}.`,
               );
@@ -337,6 +513,7 @@ export class HostedWorkspaceToolTurn {
           ...response.response,
           executionStatus: result.executionStatus,
           ...(result.error ? { runtimeError: result.error } : {}),
+          ...(shellResult ? { capture: shellResult.capture } : {}),
         };
         let outcome = Buffer.from(
           JSON.stringify({ executionCallId, ...converted[0] }),
@@ -346,6 +523,10 @@ export class HostedWorkspaceToolTurn {
             HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes ||
           !this.messageFitsInline('tool_result', converted, model)
         ) {
+          if (receipt)
+            throw new Error(
+              'Admitted Shell result exceeds the inline Session Store limit.',
+            );
           converted = [
             {
               functionResponse: {
@@ -367,12 +548,15 @@ export class HostedWorkspaceToolTurn {
             JSON.stringify({ executionCallId, ...converted[0] }),
           );
         }
-        const outcomeRef = await this.session.resources.publish(
-          'managed-tool-outcome',
-          outcome,
-        );
+        const outcomeRef =
+          receipt?.outcomeRef ??
+          (await this.session.resources.publish(
+            'managed-tool-outcome',
+            outcome,
+          ));
         await this.commit('tool_result', converted, model);
         await this.harness.resolveAwaitRuntime(executionCallId, outcomeRef);
+        if (receipt) await this.broker.acknowledge(executionCallId, receipt);
         responses.push(...converted);
       }
       this.uncertain = false;
@@ -405,5 +589,9 @@ export class HostedWorkspaceToolTurn {
       this.uncertain = true;
       throw new HostedToolRecoveryRequiredError(cause);
     }
+  }
+
+  async close(): Promise<void> {
+    await this.publisher?.close();
   }
 }

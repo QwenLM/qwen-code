@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.service.EmbeddedRuntimeBroker;
+import com.alibaba.qwen.code.managedagent.service.HarnessEventProjector;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
@@ -26,6 +27,7 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -43,9 +45,10 @@ class HostedWorkspaceToolTurnIT {
     private Path temporary;
 
     @Test
-    @Timeout(180)
+    @Timeout(360)
     void packagedHarnessUsesSavedWorkspacesThroughRealBrokerWorkerAndSqlStore() throws Exception {
-        runDriver(List.of("alpha", "beta"), "workspace-tool-turn");
+        runDriver(List.of("alpha", "beta", "shell", "storage-failure", "raw-reply-loss", "cancel"),
+                "workspace-tool-turn");
     }
 
     @Test
@@ -97,10 +100,20 @@ class HostedWorkspaceToolTurnIT {
         runDriver(cases, "cancellation");
     }
 
+    @Test
+    @Timeout(180)
+    void disconnectedObserversResumeWithoutReplayingTheToolOnMySql() throws Exception {
+        assertThat(System.getProperty("mysql.url")).as("FG6e requires -Dmysql.url").startsWith("jdbc:mysql:");
+        assertThat(System.getProperty("mysql.user")).as("FG6e requires -Dmysql.user").isNotBlank();
+        assertThat(System.getProperty("os.name").toLowerCase()).doesNotContain("windows");
+        runDriver(List.of("sse-gap"), "sse-gap");
+    }
+
     private void runDriver(List<String> cases, String driverName) throws Exception {
         boolean faults = !driverName.equals("workspace-tool-turn");
         boolean storeFaults = driverName.equals("store-failure");
         boolean cancellations = driverName.equals("cancellation");
+        boolean sseGaps = driverName.equals("sse-gap");
         Path cli = Path.of(System.getProperty("qwen.cli.entry", "../../../dist/cli.js")).toAbsolutePath().normalize();
         assertThat(cli).isRegularFile();
         String node = System.getProperty("node.executable");
@@ -139,12 +152,19 @@ class HostedWorkspaceToolTurnIT {
             arguments.add(prefix + "root=" + workspaces.get(index));
             Files.createDirectory(workspaces.get(index).resolve("child"));
         }
-        try (var spring = (ServletWebServerApplicationContext) new SpringApplicationBuilder(
-                ManagedAgentServerApplication.class).run(arguments.toArray(String[]::new))) {
+        var application = new SpringApplicationBuilder(ManagedAgentServerApplication.class);
+        if (sseGaps) {
+            // Keep SQL polling outside the 10s receive window to require live hub delivery.
+            arguments.add("--qwen.managed-agent.events.poll-interval=60s");
+            arguments.add("--qwen.managed-agent.events.heartbeat-interval=60s");
+            application.initializers(context -> context.getBeanFactory().registerSingleton(
+                    "fg6eAuthentication", HostedSseGapProbe.authentication(tenant)));
+        }
+        try (var spring = (ServletWebServerApplicationContext) application.run(arguments.toArray(String[]::new))) {
             JdbcTemplate jdbc = spring.getBean(JdbcTemplate.class);
             if (faults) {
                 var metadata = jdbc.queryForMap("SELECT VERSION() AS version, @@version_comment AS engine");
-                System.out.println((cancellations ? "FG6D_DATABASE " : storeFaults ? "FG6B_DATABASE " : "FG6A_DATABASE ") + metadata);
+                System.out.println((sseGaps ? "FG6E_DATABASE " : cancellations ? "FG6D_DATABASE " : storeFaults ? "FG6B_DATABASE " : "FG6A_DATABASE ") + metadata);
                 assertThat(metadata.toString().toLowerCase()).containsAnyOf("mysql", "mariadb");
             }
             ManagedAgentStore store = spring.getBean(ManagedAgentStore.class);
@@ -161,10 +181,12 @@ class HostedWorkspaceToolTurnIT {
                         "sha256:" + "a".repeat(64), "qwen-code", null, null, List.of(), null,
                         new WorkspaceSelection(workspaceId, "child"));
                 sessions.add(Map.of("sessionId", created.sessionId(), "workspaceId", workspaceId,
+                        "toolProfile", faults || index < 2 ? "hosted-workspace-files/1" : "hosted-workspace-shell/1",
                         "directory", workspaces.get(index).resolve("child").toString(), "fault", cases.get(index)));
                 if (faults) Files.writeString(workspaces.get(index).resolve("child/proof.txt"), "x");
             }
             Path config = temporary.resolve("driver.json");
+            Path resultFile = temporary.resolve("shell-output.json");
             EmbeddedRuntimeBroker broker = spring.getBean(EmbeddedRuntimeBroker.class);
             CompletableFuture<Void> statusGate = new CompletableFuture<>();
             HttpServer gateServer = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
@@ -190,6 +212,8 @@ class HostedWorkspaceToolTurnIT {
             }
             HostedCancellationProbe cancellationProbe = cancellations
                     ? new HostedCancellationProbe(jdbc, tenant, sessions, broker, gateServer) : null;
+            HostedSseGapProbe sseProbe = sseGaps ? new HostedSseGapProbe(jdbc, tenant, sessions.getFirst(), broker,
+                    store, spring.getBean(HarnessEventProjector.class), gateServer) : null;
             gateServer.start();
             List<String> triggers = new ArrayList<>();
             try {
@@ -203,6 +227,7 @@ class HostedWorkspaceToolTurnIT {
                     }
                 }
                 new ObjectMapper().writeValue(config.toFile(), Map.of("tenantId", tenant, "sessions", sessions,
+                        "resultFile", resultFile.toString(),
                         "storeUrl", "http://127.0.0.1:" + spring.getWebServer().getPort(),
                         "brokerUrl", broker.getBaseUri().toString(),
                         "statusGateUrl", "http://127.0.0.1:" + gateServer.getAddress().getPort() + "/release"));
@@ -211,10 +236,10 @@ class HostedWorkspaceToolTurnIT {
                         "integration-tests/helpers/hosted-" + driverName + "-driver.ts", config.toString())
                         .directory(root.toFile()).redirectErrorStream(true).redirectOutput(log.toFile()).start();
                 try {
-                    assertThat(driver.waitFor(130, TimeUnit.SECONDS)).as("Driver timeout: %s", Files.readString(log)).isTrue();
+                    assertThat(driver.waitFor(faults ? 130 : 270, TimeUnit.SECONDS)).as("Driver timeout: %s", Files.readString(log)).isTrue();
                     assertThat(driver.exitValue()).as("Driver output: %s", Files.readString(log)).isZero();
                     System.out.println(Files.readString(log));
-                    assertThat(Files.readString(log)).contains(cancellations ? "HOSTED_CANCELLATION_OK"
+                    assertThat(Files.readString(log)).contains(sseGaps ? "HOSTED_SSE_GAP_OK" : cancellations ? "HOSTED_CANCELLATION_OK"
                             : storeFaults ? "HOSTED_STORE_FAILURES_OK"
                             : faults ? "HOSTED_REPLY_LOSS_OK" : "HOSTED_WORKSPACE_TOOLS_OK");
                     JsonNode reports = faults ? new ObjectMapper().readTree(
@@ -222,19 +247,44 @@ class HostedWorkspaceToolTurnIT {
                     if (faults && cases.contains("status")) assertThat(statusGate.isDone()).isTrue();
                     for (int index = 0; index < workspaces.size(); index++) {
                         Path workspace = workspaces.get(index);
-                        if (cancellations) cancellationProbe.assertReport(sessions.get(index), reports.get(index));
+                        if (sseGaps) sseProbe.assertReport(reports.get(index));
+                        else if (cancellations) cancellationProbe.assertReport(sessions.get(index), reports.get(index));
                         else if (faults) assertFaultLedger(jdbc, tenant, sessions.get(index), index, reports.get(index), storeFaults);
-                        else assertThat(Files.readString(workspace.resolve("child/proof.txt"))).isEqualTo("after");
+                        else if (index < 2) assertThat(Files.readString(workspace.resolve("child/proof.txt"))).isEqualTo("after");
                         assertThat(workspace.resolve("proof.txt")).doesNotExist();
                     }
                 } finally {
                     driver.descendants().forEach(process -> process.destroyForcibly());
                     if (driver.isAlive()) driver.destroyForcibly();
                 }
+                if (!faults) {
+                    List<ProcessHandle> producers = ProcessHandle.current().descendants().toList();
+                    assertThat(producers).as("Runtime producers before Broker shutdown").isNotEmpty();
+                    broker.close();
+                    for (ProcessHandle producer : producers) {
+                        producer.onExit().get(10, TimeUnit.SECONDS);
+                        assertThat(producer.isAlive()).as("Producer %s before retained read", producer.pid()).isFalse();
+                    }
+                    System.out.println("HOSTED_SHELL_PRODUCERS_EXITED: " + producers.size());
+                    Path readerLog = temporary.resolve("reader.log");
+                    Process reader = new ProcessBuilder(node, "--import", "tsx",
+                            "integration-tests/helpers/hosted-shell-result-reader.ts", resultFile.toString())
+                            .directory(root.toFile()).redirectErrorStream(true).redirectOutput(readerLog.toFile()).start();
+                    try {
+                        assertThat(reader.waitFor(60, TimeUnit.SECONDS)).as("Reader timeout: %s", Files.readString(readerLog)).isTrue();
+                        assertThat(reader.exitValue()).as("Reader output: %s", Files.readString(readerLog)).isZero();
+                        assertThat(Files.readString(readerLog)).contains("HOSTED_SHELL_RETAINED_OUTPUT_OK");
+                    } finally {
+                        if (reader.isAlive()) reader.destroyForcibly();
+                    }
+                }
             } finally {
                 statusGate.complete(null);
                 gateServer.stop(0);
                 if (cancellationProbe != null) cancellationProbe.close();
+                // Interrupt parked streams before Spring closes the executor and waits out the 60s poll.
+                if (sseGaps) spring.getBean(ExecutorService.class).shutdownNow();
+                if (sseProbe != null) sseProbe.close();
                 RuntimeException cleanupFailure = null;
                 for (String trigger : triggers) {
                     try {

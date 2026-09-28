@@ -75,6 +75,106 @@ it.each(['tenantId', 'workspaceId', 'capabilityDigest'])(
   },
 );
 
+it('preserves payload identity separately from the explicitly selected v3 input digest', async () => {
+  const requests: Array<Record<string, unknown>> = [];
+  const broker = await fixture((path, body) => {
+    requests.push(body);
+    return {
+      body: {
+        ...identity,
+        ...(path.endsWith(':publisher')
+          ? { installed: true, bindingGeneration: '7' }
+          : {
+              executionCallId: 'execution',
+              status: { state: 'prepared' },
+            }),
+      },
+    };
+  });
+  expect(
+    await broker.registerPublisher({
+      url: 'http://127.0.0.1:99/internal/hosted-shell-publisher/v1',
+      token: 'x'.repeat(43),
+    }),
+  ).toBe('7');
+  await broker.prepare(
+    'runtime-call',
+    `sha256:${'a'.repeat(64)}`,
+    'b'.repeat(64),
+  );
+  expect(requests[1]).toMatchObject({
+    requestDigest: `sha256:${'a'.repeat(64)}`,
+    reference: {
+      sessionId: 'turn',
+      promptId: 'turn',
+      callId: 'runtime-call',
+      argsDigest: `sha256:${'a'.repeat(64)}`,
+      runtimeProtocol: 3,
+      inputDigest: 'b'.repeat(64),
+    },
+  });
+});
+
+it.each([undefined, 'b'.repeat(64)])(
+  'keeps the original Runtime owner separate from the prompt and input digest (%s)',
+  async (inputDigest) => {
+    const requests: Array<Record<string, unknown>> = [];
+    const broker = await fixture((_path, body) => {
+      requests.push(body);
+      return {
+        body: {
+          ...identity,
+          executionCallId: 'execution',
+          status: { state: 'prepared' },
+        },
+      };
+    });
+    await broker.prepare('call', 'sha256:payload', inputDigest, 'next-prompt');
+    expect(requests[0]).toMatchObject({
+      runtimeSessionId: 'turn',
+      turnId: 'next-prompt',
+      idempotencyKey: 'turn:call',
+      requestDigest: 'sha256:payload',
+    });
+    expect(requests[0]['reference']).toEqual({
+      sessionId: 'turn',
+      promptId: 'next-prompt',
+      callId: 'call',
+      argsDigest: 'sha256:payload',
+      ...(inputDigest ? { runtimeProtocol: 3, inputDigest } : {}),
+    });
+  },
+);
+
+it('requires confirmation for the exact Shell receipt acknowledgement', async () => {
+  const broker = await fixture((_path, body) => {
+    expect(body['receipt']).toMatchObject({
+      executionCallId: 'execution',
+      deliveryStatus: 'blocked',
+      historyRevision: null,
+    });
+    expect(body['receipt']).not.toHaveProperty('outcomeRef');
+    return {
+      body: { ...identity, executionCallId: 'other', acknowledged: true },
+    };
+  });
+  await expect(
+    broker.acknowledge('execution', {
+      executionCallId: 'execution',
+      manifest: null,
+      deliveryStatus: 'blocked',
+      historyRevision: null,
+      outcomeRef: {
+        resourceId: 'outcome',
+        kind: 'managed-tool-outcome',
+        schemaVersion: 1,
+        byteLength: 0,
+        digest: 'a'.repeat(64),
+      },
+    }),
+  ).rejects.toThrow('acknowledge');
+});
+
 it('waits for original terminal evidence after a cancellation request', async () => {
   let cancelled = false;
   let stopped = false;

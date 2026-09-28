@@ -16,8 +16,9 @@ import type { ShellToolInvocation } from '@qwen-code/qwen-code-core/tools/shell.
 import type { ToolResultEnvelope } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
 import type {
   LocalShellCaptureRequest,
-  LocalShellResultSession,
-} from '@qwen-code/qwen-code-core/managed-runtime/local-shell-result-session.js';
+  LocalShellReceipt,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-shell-result-session.js';
+import type { ToolResultExpectedIdentity } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result-store.js';
 import type { LocalShellResultCapture } from '@qwen-code/qwen-code-core/managed-runtime/local-shell-result-capture.js';
 import { MANAGED_TOOL_RESULT_PROTOCOL } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
 import type { ManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
@@ -123,7 +124,7 @@ interface JournalEntry {
   result?: ManagedToolResultPayload;
   v3Result?: ToolResultEnvelope;
   readonly v3Capture?: LocalShellCaptureRequest['capture'];
-  readonly captureSink?: LocalShellResultCapture;
+  readonly captureSink?: ManagedShellCaptureSink;
   acknowledgement?: ToolResultAcknowledgement;
   readonly controller: AbortController;
   promise?: Promise<void>;
@@ -140,6 +141,22 @@ export interface ManagedToolV3View {
   readonly state: ManagedToolExecutionState | 'unknown';
   readonly lastSequence?: number;
   readonly result?: ToolResultEnvelope;
+}
+
+export type ManagedShellCaptureSink = Pick<
+  LocalShellResultCapture,
+  keyof LocalShellResultCapture
+>;
+
+export interface ManagedShellCapturePublisher {
+  prepare(request: LocalShellCaptureRequest): Promise<{
+    identity: ToolResultExpectedIdentity;
+    sink: ManagedShellCaptureSink;
+  }>;
+  accept(
+    identity: ToolResultExpectedIdentity,
+    envelope: ToolResultEnvelope,
+  ): Promise<LocalShellReceipt>;
 }
 
 /**
@@ -165,10 +182,7 @@ export class ManagedToolExecutor {
 
   constructor(
     private readonly toolsFor: ManagedToolSetResolver,
-    private readonly capturePublisher?: Pick<
-      LocalShellResultSession,
-      'prepare' | 'accept'
-    >,
+    private readonly capturePublisher?: ManagedShellCapturePublisher,
     private readonly mcp?: ManagedMcpRuntime,
   ) {}
 
@@ -396,7 +410,7 @@ export class ManagedToolExecutor {
         'Background Shell capture is unavailable.',
       );
     }
-    let prepared: Awaited<ReturnType<LocalShellResultSession['prepare']>>;
+    let prepared: Awaited<ReturnType<ManagedShellCapturePublisher['prepare']>>;
     try {
       prepared = await this.capturePublisher.prepare({ reference, capture });
     } catch (cause) {

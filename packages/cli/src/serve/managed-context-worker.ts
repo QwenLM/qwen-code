@@ -8,7 +8,6 @@ import { createHash } from 'node:crypto';
 import { constants, promises as fs, type BigIntStats } from 'node:fs';
 import path from 'node:path';
 import { sessionIdContext } from '@qwen-code/qwen-code-core/utils/sessionIdContext.js';
-import type { LocalShellResultSession } from '@qwen-code/qwen-code-core/managed-runtime/local-shell-result-session.js';
 import type express from 'express';
 import type { Application, Response } from 'express';
 import {
@@ -29,7 +28,9 @@ import {
 import {
   createManagedToolSet,
   ManagedToolExecutor,
+  type ManagedShellCapturePublisher,
 } from './managed-runtime-tool-executor.js';
+import type { ManagedShellPublisherRegistry } from './managed-shell-publisher.js';
 import { registerManagedRuntimeToolRoutes } from './managed-runtime-tool-routes.js';
 import { registerManagedRuntimeToolV3Routes } from './managed-runtime-tool-v3-routes.js';
 import {
@@ -135,7 +136,8 @@ function isHostAbsolute(mountRoot: string): boolean {
 export function registerManagedContextRoutes(
   app: Application,
   bootDocument: ManagedContextBoot,
-  capturePublisher?: Pick<LocalShellResultSession, 'prepare' | 'accept'>,
+  capturePublisher?: ManagedShellCapturePublisher,
+  remotePublishers?: ManagedShellPublisherRegistry,
 ): ManagedToolExecutor {
   const boot = parseManagedContextBoot(bootDocument);
   const installations = new ManagedContextInstallations(boot);
@@ -215,14 +217,22 @@ export function registerManagedContextRoutes(
         isActive,
       };
     },
-    capturePublisher,
+    capturePublisher ?? remotePublishers,
     mcp,
   );
   activations.register(app, boot, installations, executor);
   registerManagedRuntimeToolRoutes(app, boot, executor);
-  if (capturePublisher) {
+  if (capturePublisher || remotePublishers) {
     registerManagedRuntimeToolV3Routes(app, boot, executor);
   }
+  remotePublishers?.register(
+    app,
+    boot,
+    (sessionId) =>
+      requiresActivation &&
+      activations.isActive(sessionId) &&
+      installations.installed(sessionId) !== undefined,
+  );
   return executor;
 }
 
