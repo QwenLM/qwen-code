@@ -375,6 +375,101 @@ describe('cross-server forgery witnesses', () => {
       ),
     ).toBe(true);
   });
+
+  // Deny mirrors of the two witnesses above, pinning the cost side of the
+  // #10199 fix (R3-3): a forged registration that advertises no alias is out
+  // of reach of a legacy-spelled `permissions.deny` — the match is fail-open
+  // on the restrictive side. The mitigation is to write the deny in the
+  // registered spelling, which the control rows assert still bites.
+  it('pins the deny posture: a legacy-spelled deny does not reach a forged verbatim registration', async () => {
+    const attacker = prodTool('foo_bar', 'evil_1oxrpi0');
+    expect(attacker.permissionAliases).toEqual([]);
+
+    const pm = new PermissionManager(
+      makeConfig({ permissionsDeny: ['mcp__foo.bar__evil'] }),
+    );
+    pm.initialize();
+    expect(
+      await pm.evaluate({
+        toolName: attacker.name,
+        toolAliases: attacker.permissionAliases,
+      }),
+    ).toBe('default');
+    expect(
+      await pm.getToolRegistrationStatus(
+        attacker.name,
+        attacker.permissionAliases,
+      ),
+    ).toBe('registered');
+
+    // Control: the same deny in the registered spelling still blocks it.
+    const registeredPm = new PermissionManager(
+      makeConfig({ permissionsDeny: [attacker.name] }),
+    );
+    registeredPm.initialize();
+    expect(
+      await registeredPm.evaluate({
+        toolName: attacker.name,
+        toolAliases: attacker.permissionAliases,
+      }),
+    ).toBe('deny');
+  });
+
+  it('pins the deny posture: a legacy-spelled server deny does not reach a colon-keyed forgery', async () => {
+    const attacker = prodTool('foo:bar', 'evil[a b#c#d"e~f|x');
+
+    const pm = new PermissionManager(
+      makeConfig({ permissionsDeny: ['mcp__foo.bar'] }),
+    );
+    pm.initialize();
+    expect(
+      await pm.evaluate({
+        toolName: attacker.name,
+        toolAliases: attacker.permissionAliases,
+      }),
+    ).toBe('default');
+
+    // Control: the deny written against the attacker's own raw identity
+    // spelling still blocks it.
+    const rawPm = new PermissionManager(
+      makeConfig({ permissionsDeny: ['mcp__foo:bar'] }),
+    );
+    rawPm.initialize();
+    expect(
+      await rawPm.evaluate({
+        toolName: attacker.name,
+        toolAliases: attacker.permissionAliases,
+      }),
+    ).toBe('deny');
+  });
+
+  // Known residual (variant 2, R2-6): a length-preserving legacy alias that
+  // reduces onto a DIFFERENT server's spelling still satisfies an exact
+  // 3-part entry. `foo:bar`'s tool registers with a hash suffix, but its
+  // advertised legacy spelling `mcp__foo_bar__evil_a_b_c_d_e_f_x` is the
+  // verbatim registered name of server `foo_bar`'s same-named tool — an
+  // entry naming that spelling matches both. The exact arm accepts any
+  // advertised alias; only the truncation gate (R12-1) restricts
+  // publication, and this reduction is lossless. Documented as accepted in
+  // the design doc's Rule-matching section; this row must go red if the arm
+  // is ever removed.
+  it('pins the lossy exact-alias cross-server match as a known residual (variant 2)', () => {
+    const attacker = prodTool('foo:bar', 'evil[a b#c#d"e~f|x');
+    const sharedLegacySpelling = 'mcp__foo_bar__evil_a_b_c_d_e_f_x';
+    expect(attacker.permissionAliases).toContain(sharedLegacySpelling);
+    // The cross-server part: the same string IS the verbatim registration of
+    // another server's tool.
+    expect(prodTool('foo_bar', 'evil_a_b_c_d_e_f_x').name).toBe(
+      sharedLegacySpelling,
+    );
+    expect(
+      matchesToolPattern(
+        sharedLegacySpelling,
+        attacker.name,
+        attacker.permissionAliases,
+      ),
+    ).toBe(true);
+  });
 });
 
 // Legacy-spelled rules keep covering the tool they name at any raw length and
@@ -1157,5 +1252,231 @@ describe('exact entries in a truncated legacy spelling shared by two servers', (
         }),
       ).toBe('default');
     }
+  });
+});
+
+// The truncation gate in `permissionAliases` is what stands between two
+// SHORT provider-safe keys and one shared reduction: `slice(0, 28)` keeps
+// `mcp__` + the first 23 key characters, and `_` is legal in both segments,
+// so keys that differ only around the separator — `x` vs `x_`, `foo` vs
+// `foo__bar` — used to publish one byte-identical legacy alias that
+// `matchesAdvertisedExactName` then accepted for BOTH tools: one allow/deny
+// entry decided two servers (R12-1). Each construction below is pinned at
+// the producer: at most one side may advertise the shared spelling.
+describe('a truncated legacy reduction is attributable to exactly one server (R12-1)', () => {
+  // Both reductions are still computable and still byte-identical…
+  const expectSharedReduction = (
+    own: DiscoveredMCPTool,
+    sibling: DiscoveredMCPTool,
+    ownRaw: string,
+    siblingRaw: string,
+  ): string => {
+    const shared = generateLegacyMcpToolName(ownRaw);
+    expect(shared).toBe(generateLegacyMcpToolName(siblingRaw));
+    expect(own.name).not.toBe(sibling.name);
+    // …but only the own server may advertise it.
+    expect(own.permissionAliases).toContain(shared);
+    expect(sibling.permissionAliases).not.toContain(shared);
+    // The arrays share no element at all.
+    expect(
+      own.permissionAliases.some((a) => sibling.permissionAliases.includes(a)),
+    ).toBe(false);
+    return shared;
+  };
+
+  const expectSiblingImmune = async (
+    shared: string,
+    sibling: DiscoveredMCPTool,
+  ) => {
+    expect(
+      matchesToolPattern(shared, sibling.name, sibling.permissionAliases),
+    ).toBe(false);
+    for (const lists of [
+      { permissionsAllow: [shared] },
+      { permissionsDeny: [shared] },
+    ]) {
+      const pm = new PermissionManager(makeConfig(lists));
+      pm.initialize();
+      expect(
+        await pm.evaluate({
+          toolName: sibling.name,
+          toolAliases: sibling.permissionAliases,
+        }),
+      ).toBe('default');
+    }
+  };
+
+  it('separates keys one underscore apart (acme-weather-forecast vs acme-weather-forecast_)', async () => {
+    // The sibling's key ends where the first server's separator lives: the
+    // 28-character window cuts through `___` and cannot say which `_` is the
+    // boundary. Pre-fix both tools advertised the shared reduction.
+    const sharedTool = 'get_extended_weather_forecast_for_week';
+    const own = prodTool('acme-weather-forecast', sharedTool);
+    const sibling = prodTool('acme-weather-forecast_', sharedTool);
+    const shared = expectSharedReduction(
+      own,
+      sibling,
+      `mcp__acme-weather-forecast__${sharedTool}`,
+      `mcp__acme-weather-forecast___${sharedTool}`,
+    );
+
+    await expectSiblingImmune(shared, sibling);
+    // The own server keeps its persisted legacy coverage (deny stays deny).
+    expect(matchesToolPattern(shared, own.name, own.permissionAliases)).toBe(
+      true,
+    );
+    const pm = new PermissionManager(makeConfig({ permissionsDeny: [shared] }));
+    pm.initialize();
+    expect(
+      await pm.evaluate({
+        toolName: own.name,
+        toolAliases: own.permissionAliases,
+      }),
+    ).toBe('deny');
+  });
+
+  it('separates a short key from a key that contains the separator (github vs github__create_reposito)', async () => {
+    // `github__create_reposito` is 23 characters and fits the window, so
+    // length alone could not refuse it; its key materializes the boundary
+    // the reduction pretends to have.
+    const toolA = `create_repositoabcdssue_with_attachments_and_labels`;
+    const toolB = `efghijklmnssue_with_attachments_and_labels`;
+    const own = prodTool('github', toolA);
+    const sibling = prodTool('github__create_reposito', toolB);
+    const shared = expectSharedReduction(
+      own,
+      sibling,
+      `mcp__github__${toolA}`,
+      `mcp__github__create_reposito__${toolB}`,
+    );
+    expect(shared).toBe(
+      'mcp__github__create_reposito___ssue_with_attachments_and_labels',
+    );
+
+    await expectSiblingImmune(shared, sibling);
+    expect(matchesToolPattern(shared, own.name, own.permissionAliases)).toBe(
+      true,
+    );
+  });
+
+  it('separates a key from its underscore extension (foo vs foo_)', async () => {
+    // Same underscore-run ambiguity without any `__` inside a key: the
+    // sibling's key ends with the very character the separator is made of.
+    const ownTool = `_${'a'.repeat(17)}${'X'.repeat(10)}${'b'.repeat(32)}`;
+    const siblingTool = `${'a'.repeat(17)}${'Y'.repeat(11)}${'b'.repeat(32)}`;
+    const own = prodTool('foo', ownTool);
+    const sibling = prodTool('foo_', siblingTool);
+    const shared = expectSharedReduction(
+      own,
+      sibling,
+      `mcp__foo__${ownTool}`,
+      `mcp__foo___${siblingTool}`,
+    );
+
+    await expectSiblingImmune(shared, sibling);
+    expect(matchesToolPattern(shared, own.name, own.permissionAliases)).toBe(
+      true,
+    );
+  });
+});
+
+// A middle-truncated reduction is `slice(0, 28) + '___' + slice(-32)`: the
+// injected `___` sits where a prefix comparison cannot tell it apart from a
+// real `__` separator. Before the boundary was enforced, a whole-server rule
+// written for one key (`mcp__weather-forecast-serve_`,
+// `mcp__weather-forecast-serve___*`) matched a DIFFERENT server's tool
+// through that fabricated boundary (R12-2). Two postures are pinned:
+// a key the window cuts mid-separator publishes no reduction at all, and a
+// published reduction vouches for prefix matching only inside its head
+// window — the exact arm still reads the whole spelling.
+describe('a truncated legacy reduction cannot fabricate a server boundary (R12-2)', () => {
+  const toolName = 't'.repeat(40);
+
+  it('publishes no reduction when the window cuts through the separator, and foreign rules refuse', async () => {
+    const tool = prodTool('weather-forecast-serve', toolName);
+    // The window ends one character into this key's `__` separator, so the
+    // tool advertises only its exact raw identity.
+    expect(tool.permissionAliases).toEqual([
+      `mcp__weather-forecast-serve__${toolName}`,
+    ]);
+
+    for (const foreign of [
+      'mcp__weather-forecast-serve_',
+      'mcp__weather-forecast-serve___*',
+    ]) {
+      expect(
+        matchesToolPattern(foreign, tool.name, tool.permissionAliases),
+      ).toBe(false);
+      for (const lists of [
+        { permissionsAllow: [foreign] },
+        { permissionsDeny: [foreign] },
+      ]) {
+        const pm = new PermissionManager(makeConfig(lists));
+        pm.initialize();
+        expect(
+          await pm.evaluate({
+            toolName: tool.name,
+            toolAliases: tool.permissionAliases,
+          }),
+        ).toBe('default');
+      }
+    }
+
+    // Positive control: the tool's OWN whole-server rules still match.
+    for (const own of [
+      'mcp__weather-forecast-serve',
+      'mcp__weather-forecast-serve__*',
+    ]) {
+      expect(matchesToolPattern(own, tool.name, tool.permissionAliases)).toBe(
+        true,
+      );
+    }
+  });
+
+  it('bounds prefix matching to the head window of a published reduction', async () => {
+    // This key ends exactly at the window edge, so the reduction IS
+    // published — and must still refuse any prefix whose match rests on the
+    // injected `___`. Dropping the head-window bound in the matcher reds
+    // this row.
+    const tool = prodTool('weather-forecast-server', toolName);
+    const legacy = generateLegacyMcpToolName(
+      `mcp__weather-forecast-server__${toolName}`,
+    );
+    expect(tool.permissionAliases).toContain(legacy);
+
+    for (const foreign of [
+      'mcp__weather-forecast-server_',
+      'mcp__weather-forecast-server___*',
+    ]) {
+      expect(
+        matchesToolPattern(foreign, tool.name, tool.permissionAliases),
+      ).toBe(false);
+      for (const lists of [
+        { permissionsAllow: [foreign] },
+        { permissionsDeny: [foreign] },
+      ]) {
+        const pm = new PermissionManager(makeConfig(lists));
+        pm.initialize();
+        expect(
+          await pm.evaluate({
+            toolName: tool.name,
+            toolAliases: tool.permissionAliases,
+          }),
+        ).toBe('default');
+      }
+    }
+
+    // Positive controls: the own whole-server rule matches through the
+    // registered name, and the exact legacy entry still matches whole.
+    expect(
+      matchesToolPattern(
+        'mcp__weather-forecast-server',
+        tool.name,
+        tool.permissionAliases,
+      ),
+    ).toBe(true);
+    expect(matchesToolPattern(legacy, tool.name, tool.permissionAliases)).toBe(
+      true,
+    );
   });
 });

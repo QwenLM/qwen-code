@@ -12,6 +12,7 @@ import { parse } from 'shell-quote';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   generateLegacyMcpToolName,
+  LEGACY_REDUCTION_HEAD_LENGTH,
   normalizeMcpToolName,
 } from '../utils/tool-name-utils.js';
 import { isNodeError } from '../utils/errors.js';
@@ -1652,7 +1653,9 @@ export function matchesDomainPattern(
  * Prefix patterns additionally read the legacy reduction of the raw
  * identity, admitted by `resolveLegacyMcpSpelling` only when `toolAliases`
  * advertises it, because a persisted rule was copied from the spelling
- * settings showed when it was written.
+ * settings showed when it was written. A middle-truncated reduction vouches
+ * only for its 28-character head window: the `___` it injects is not a
+ * separator, so prefix arms never read past it (R12-2).
  *
  * A rule written provider-safe (`mcp__foo_bar`) still matches any server
  * whose name sanitizes under it (`foo.bar`, `foo:bar`, `foo/bar`): the
@@ -1696,8 +1699,31 @@ export function matchesMcpPattern(
   if (legacySpelling !== undefined && !spellings.includes(legacySpelling)) {
     spellings.push(legacySpelling);
   }
+  // A middle-truncated reduction is `slice(0, 28) + '___' + slice(-32)`: only
+  // its head window is positionally faithful to the raw identity — the
+  // injected `___` is not a separator, but a `startsWith` comparison cannot
+  // tell, so both prefix arms would read a fabricated boundary as a real one
+  // and a whole-server rule written for one key (`mcp__X_`, `mcp__X___*`)
+  // would match a DIFFERENT server's tool (R12-2). Prefix matching therefore
+  // reads only the head window of a truncated reduction; prefixes that stay
+  // inside it compare the raw identity's own (character-substituted)
+  // characters, and anything longer is refused. Exact entries are
+  // unaffected: they compare the whole spelling. The truncation test is the
+  // producer's own (`legacyName.length === rawName.length` in
+  // `DiscoveredMCPTool.permissionAliases`).
+  const legacyTruncated =
+    legacySpelling !== undefined &&
+    rawToolName !== undefined &&
+    legacySpelling.length !== rawToolName.length;
+  const prefixSpellings = legacyTruncated
+    ? spellings.map((spelling) =>
+        spelling === legacySpelling
+          ? spelling.slice(0, LEGACY_REDUCTION_HEAD_LENGTH)
+          : spelling,
+      )
+    : spellings;
   const matchesPrefixLiterally = (prefix: string): boolean =>
-    spellings.some((spelling) => spelling.startsWith(prefix));
+    prefixSpellings.some((spelling) => spelling.startsWith(prefix));
 
   // Wildcard: patterns ending with "*" match by prefix.
   // e.g. "mcp__server__*" matches all tools from that server,
@@ -1743,8 +1769,15 @@ export function matchesMcpPattern(
  * alias vouches for the registered name only when its own normalization IS
  * that name — the exact raw spelling's always is, while a legacy spelling
  * that lost characters (an unsafe server segment, a middle-truncated long
- * name) is not — so a different server's tool can never supply the identity
- * a rule is matched against (#10199).
+ * name) is not — so a different server's tool can never supply the raw
+ * identity a rule is matched against (#10199). Note the vouch covers only
+ * the identity THIS resolver returns: exact 3-part entries additionally
+ * match the advertised legacy reduction through `matchesAdvertisedExactName`
+ * without this normalization check, so a length-preserving legacy alias that
+ * reduces onto another server's spelling still satisfies such an entry (the
+ * disclosed variant-2 residual; publication gating in
+ * `DiscoveredMCPTool.permissionAliases` is what keeps a *truncated*
+ * reduction attributable to one server, R12-1).
  */
 function resolveRawMcpIdentity(
   canonicalCtxToolName: string,
@@ -1768,12 +1801,16 @@ function resolveRawMcpIdentity(
  * reached the server segment keeps only its first 23 characters *and*
  * injects the very `__` separator a prefix match needs: two different long
  * keys land in one byte-identical window, so that reduction vouches for no
- * server and is never advertised. Publication is the only provenance
- * available here — `__` is reserved in neither segment of
- * `mcp__<server>__<tool>` and the reduction rewrites characters, so the
- * server boundary cannot be re-derived from the flattened spelling: a gate
- * that tried vouched for two servers at once while refusing a rewritten key
- * its own tool (R6-1).
+ * server and is never advertised. Short keys are gated too: the window must
+ * pin down where the key ends (contain the whole `__` separator or end
+ * exactly at the key, whose legacy image must not contain `__` or end with
+ * `_`), or two keys that differ only around the separator flatten to one
+ * byte-identical reduction both sides would advertise (R12-1). Publication
+ * is the only provenance available here — `__` is reserved in neither
+ * segment of `mcp__<server>__<tool>` and the reduction rewrites characters,
+ * so the server boundary cannot be re-derived from the flattened spelling: a
+ * gate that tried vouched for two servers at once while refusing a rewritten
+ * key its own tool (R6-1).
  */
 function resolveLegacyMcpSpelling(
   rawToolName: string | undefined,
@@ -1793,9 +1830,11 @@ function resolveLegacyMcpSpelling(
  * Whether a 3-part entry names the tool in the legacy spelling, so an exact
  * rule persisted before provider-safe names still covers the tool. The entry
  * is compared against the advertised legacy reduction of the tool's vouched
- * raw identity: publication is the provenance, because two different long
- * server keys reduce to one byte-identical middle-truncated spelling, and a
- * reduction whose cut reached the server segment is never advertised.
+ * raw identity: publication is the provenance, because two different server
+ * keys can reduce to one byte-identical spelling — a middle-truncated
+ * reduction whose head window does not pin down the key boundary is never
+ * advertised (R12-1), and a length-preserving reduction shared by keys that
+ * substitute onto each other is the disclosed variant-2 residual (R2-6).
  */
 function matchesAdvertisedExactName(
   pattern: string,
