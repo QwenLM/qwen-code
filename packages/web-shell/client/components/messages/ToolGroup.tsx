@@ -217,6 +217,26 @@ function isTruncatedSessionDiff(raw: Record<string, unknown>): boolean {
   );
 }
 
+/**
+ * True when the diff a completed edit card shows was rebuilt by
+ * extractDiff from the call's own old/new text arguments because no
+ * recorded fileDiff survived session-history truncation. Such a rebuild
+ * only spans the edit snippet: line numbers are snippet-relative and a
+ * replace_all edit renders as a single occurrence, so the card must say
+ * the diff was reconstructed rather than recorded.
+ */
+export function isDiffRebuiltFromArgs(tool: ACPToolCall): boolean {
+  if (getRawFileDiff(tool)) return false;
+  if (tool.content?.some((b) => b.type === 'diff')) return false;
+  if (tool.status === 'failed' || tool.wasCancelled) return false;
+  // A `patch` argument is the real unified diff the tool was given, not a
+  // snippet rebuild, so it needs no reconstruction note.
+  if (typeof tool.args?.patch === 'string' && tool.args.patch) return false;
+  const newText = tool.args?.newText ?? tool.args?.new_string;
+  const oldText = tool.args?.oldText ?? tool.args?.old_string;
+  return typeof newText === 'string' || typeof oldText === 'string';
+}
+
 // A description longer than this is likely ellipsised on a normal-width row, so
 // the row becomes expandable to re-flow the full text into a wrapped block.
 const DESCRIPTION_EXPAND_THRESHOLD = 60;
@@ -289,6 +309,7 @@ export function fencedCodeBlock(language: string, code: string): string {
 }
 
 function ExpandedEditContent({ tool }: { tool: ACPToolCall }) {
+  const { t } = useI18n();
   const diff = useMemo(() => extractDiff(tool), [tool]);
   const text = useMemo(
     () => (tool.content ? extractText(tool) || '' : ''),
@@ -298,7 +319,14 @@ function ExpandedEditContent({ tool }: { tool: ACPToolCall }) {
   return (
     <div className={styles.expandedEdit}>
       {diff ? (
-        <DiffView diff={diff} />
+        <>
+          <DiffView diff={diff} />
+          {isDiffRebuiltFromArgs(tool) && (
+            <p className={styles.expandedCardDetail}>
+              {t('toolGroup.diffRebuiltFromArgs')}
+            </p>
+          )}
+        </>
       ) : (
         <pre className={styles.expandedOutput}>{text}</pre>
       )}

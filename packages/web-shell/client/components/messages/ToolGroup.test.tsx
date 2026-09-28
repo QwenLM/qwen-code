@@ -3044,3 +3044,73 @@ describe('pending edit approval rows', () => {
     expect(handedBack.textContent).toContain('handed back content');
   });
 });
+
+describe('rebuilt edit diff annotation', () => {
+  const editArgs = {
+    file_path: '/repo/app.ts',
+    old_string: 'const a = 1;\n',
+    new_string: 'const a = 2;\nconst b = 3;\n',
+  };
+
+  function expandCompletedEdit(overrides: Partial<ACPToolCall> = {}) {
+    const container = renderToolLine(
+      makeTool({
+        callId: 'edit-1',
+        toolName: 'Edit',
+        status: 'completed',
+        args: editArgs,
+        ...overrides,
+      }),
+      { summaryOnly: true },
+    );
+    const row = container.querySelector(
+      '[class*="lineExpandable"]',
+    ) as HTMLElement;
+    act(() => row.click());
+    return container;
+  }
+
+  it('annotates a completed edit whose diff was rebuilt from its arguments', () => {
+    const container = expandCompletedEdit();
+    expect(container.querySelector('[class*="expandedCard"]')).not.toBeNull();
+    expect(container.textContent).toContain(
+      'Diff rebuilt from the tool call arguments',
+    );
+  });
+
+  it('does not annotate a recorded fileDiff', () => {
+    const container = expandCompletedEdit({
+      rawOutput: { fileDiff: 'diff --git a/app.ts b/app.ts\n' },
+    });
+    expect(container.textContent).not.toContain(
+      'Diff rebuilt from the tool call arguments',
+    );
+  });
+
+  it('does not annotate a tool-provided diff content block', () => {
+    const container = expandCompletedEdit({
+      content: [
+        { type: 'diff', oldText: 'const a = 1;\n', newText: 'const a = 2;\n' },
+      ],
+    });
+    expect(container.textContent).not.toContain(
+      'Diff rebuilt from the tool call arguments',
+    );
+  });
+
+  it('does not annotate a patch argument', () => {
+    const container = expandCompletedEdit({
+      args: { ...editArgs, patch: '--- a/app.ts\n+++ b/app.ts\n' },
+    });
+    expect(container.textContent).not.toContain(
+      'Diff rebuilt from the tool call arguments',
+    );
+  });
+
+  it('renders no annotation when a failed edit has no diff', () => {
+    const container = expandCompletedEdit({ status: 'failed' });
+    expect(container.textContent).not.toContain(
+      'Diff rebuilt from the tool call arguments',
+    );
+  });
+});
