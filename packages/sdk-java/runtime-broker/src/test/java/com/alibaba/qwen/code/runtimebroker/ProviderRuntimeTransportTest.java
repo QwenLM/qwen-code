@@ -32,6 +32,10 @@ class ProviderRuntimeTransportTest {
     private final List<Map<String, Object>> requests = new CopyOnWriteArrayList<>();
     private HttpServer server;
     private RuntimeLease lease;
+    private volatile int status = 200;
+    private volatile String contentType = "application/json";
+    private volatile String cacheControl = "no-store";
+    private volatile String contentEncoding;
     private volatile Object result = Map.of();
     private volatile UnaryOperator<Map<String, Object>> response = body -> body;
 
@@ -53,9 +57,12 @@ class ProviderRuntimeTransportTest {
             answer.put("session", request.get("session"));
             answer.put("result", value);
             byte[] encoded = JsonCodec.encode(response.apply(answer));
-            exchange.getResponseHeaders().set("Content-Type", "application/json");
-            exchange.getResponseHeaders().set("Cache-Control", "no-store");
-            exchange.sendResponseHeaders(200, encoded.length);
+            exchange.getResponseHeaders().set("Content-Type", contentType);
+            exchange.getResponseHeaders().set("Cache-Control", cacheControl);
+            if (contentEncoding != null) {
+                exchange.getResponseHeaders().set("Content-Encoding", contentEncoding);
+            }
+            exchange.sendResponseHeaders(status, encoded.length);
             exchange.getResponseBody().write(encoded);
             exchange.close();
         });
@@ -67,6 +74,62 @@ class ProviderRuntimeTransportTest {
     @AfterEach
     void stop() {
         server.stop(0);
+    }
+
+    @Test
+    void preservesRecognizedProviderErrorReasonsAndStatusWithoutTreatingRefusalAsNotStarted() {
+        for (Map.Entry<String, Integer> failure : Map.of(
+                "managed_runtime_tool_invalid", 400,
+                "managed_runtime_provider_invalid", 400,
+                "managed_runtime_identity_conflict", 409,
+                "managed_context_unavailable", 409,
+                "managed_runtime_provider_operation_failed", 409,
+                "managed_runtime_provider_too_large", 413,
+                "managed_runtime_provider_unsupported", 501).entrySet()) {
+            status = failure.getValue();
+            response = body -> Map.of("code", failure.getKey(), "error", "Specific provider reason.");
+            CompletionException exception = assertThrows(CompletionException.class,
+                    () -> transport.execute(lease, session, reference()).toCompletableFuture().join());
+            RuntimeBrokerException error = (RuntimeBrokerException) exception.getCause();
+            assertEquals(status, error.getStatusCode());
+            assertEquals(failure.getKey(), error.getCode());
+            assertEquals("Specific provider reason.", error.getMessage());
+            assertEquals(false, error.isRetryable());
+        }
+    }
+
+    @Test
+    void doesNotForwardUnrecognizedOrUntrustedErrorBodies() {
+        status = 409;
+        for (Map<String, Object> invalid : List.<Map<String, Object>>of(
+                Map.of("code", "unknown_code", "error", "private reason"),
+                Map.of("code", "managed_runtime_tool_invalid", "error", "wrong status"),
+                Map.of("code", "managed_runtime_identity_conflict", "error", "private reason", "extra", true),
+                Map.of("code", "managed_runtime_identity_conflict", "error", ""),
+                Map.of("code", "managed_runtime_identity_conflict", "error", "x".repeat(4097)),
+                Map.of("code", "managed_runtime_identity_conflict", "error", "invalid\0reason"),
+                Map.of("code", "managed_runtime_identity_conflict", "error", 123))) {
+            response = body -> invalid;
+            assertGenericProviderError();
+        }
+        response = body -> Map.of("code", "managed_runtime_identity_conflict", "error", "private reason");
+        contentType = "text/html";
+        assertGenericProviderError();
+        contentType = "application/json";
+        cacheControl = "public";
+        assertGenericProviderError();
+        cacheControl = "no-store";
+        contentEncoding = "gzip";
+        assertGenericProviderError();
+    }
+
+    private void assertGenericProviderError() {
+        CompletionException failure = assertThrows(CompletionException.class,
+                () -> transport.release(lease, session).toCompletableFuture().join());
+        RuntimeBrokerException error = (RuntimeBrokerException) failure.getCause();
+        assertEquals(409, error.getStatusCode());
+        assertEquals("managed_runtime_identity_conflict", error.getCode());
+        assertEquals("Managed Runtime control request failed (HTTP 409).", error.getMessage());
     }
 
     @Test

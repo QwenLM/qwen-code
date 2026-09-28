@@ -99,8 +99,11 @@ class BrokerResponseError extends Error {
     readonly status: number,
     readonly code?: string,
     readonly retryable?: boolean,
+    reason?: string,
   ) {
-    super(`Managed Runtime Broker returned HTTP ${status}.`);
+    super(
+      `Managed Runtime Broker returned HTTP ${status}.${reason ? ` ${reason}` : ''}`,
+    );
     this.name = 'BrokerResponseError';
   }
 }
@@ -542,6 +545,7 @@ export class ManagedRuntimeBrokerClient {
     if (!response.ok) {
       let code: string | undefined;
       let retryable: boolean | undefined;
+      let reason: string | undefined;
       try {
         const text = await readBoundedResponseText(
           response,
@@ -556,13 +560,29 @@ export class ManagedRuntimeBrokerClient {
         ) {
           code = body['code'];
         }
+        if (
+          code !== undefined &&
+          typeof body['retryable'] === 'boolean' &&
+          Object.keys(body).length === 3 &&
+          response.headers
+            .get('content-type')
+            ?.split(';')[0]
+            .trim()
+            .toLowerCase() === 'application/json' &&
+          typeof body['error'] === 'string' &&
+          body['error'].length > 0 &&
+          body['error'].length <= 4096 &&
+          !body['error'].includes('\0')
+        ) {
+          reason = body['error'];
+        }
         if (typeof body['retryable'] === 'boolean') {
           retryable = body['retryable'];
         }
       } catch {
         await response.body?.cancel().catch(() => undefined);
       }
-      throw new BrokerResponseError(response.status, code, retryable);
+      throw new BrokerResponseError(response.status, code, retryable, reason);
     }
     const contentLength = Number(response.headers.get('content-length'));
     if (

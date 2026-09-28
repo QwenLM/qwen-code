@@ -20,6 +20,7 @@ import {
 } from './tools.js';
 import {
   ManagedToolRuntime,
+  ManagedToolPreparationError,
   createBuiltinManagedToolRuntime,
   type ManagedToolExecutionResult,
   type ManagedToolRuntimeFileHistory,
@@ -194,6 +195,23 @@ describe('ManagedToolRuntime', () => {
       history,
     );
   }
+
+  it('classifies unknown tools and invalid input without poisoning a corrected prepare', async () => {
+    await runtime.beginTurn(identity);
+    await expect(
+      runtime.prepare(identity, 'missing', input),
+    ).rejects.toBeInstanceOf(ManagedToolPreparationError);
+    await expect(
+      runtime.prepare(identity, tool.name, {}),
+    ).rejects.toBeInstanceOf(ManagedToolPreparationError);
+    expect(tool.invocations).toHaveLength(0);
+    await expect(
+      runtime.prepare(identity, tool.name, input),
+    ).resolves.toMatchObject({
+      params: input,
+    });
+    expect(tool.invocations).toHaveLength(1);
+  });
 
   it('waits for the shared parent history without creating child snapshots', async () => {
     const ready = deferred<void>();

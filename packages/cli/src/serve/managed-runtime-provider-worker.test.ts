@@ -188,6 +188,48 @@ describe('Managed Runtime provider worker', () => {
     return control({ kind: 'execute', reference: ref });
   }
 
+  it('reports input errors separately from identity conflicts and permits corrected preparation', async () => {
+    await begin();
+    for (const [toolName, input, reason] of [
+      [
+        'write_file',
+        { file_path: 'relative.txt', content: 'value' },
+        'File path must be absolute',
+      ],
+      ['missing_tool', {}, 'Managed Runtime tool is unavailable.'],
+    ] as const) {
+      const response = await post({
+        kind: 'prepare',
+        identity,
+        toolName,
+        input,
+      });
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({
+        code: 'managed_runtime_tool_invalid',
+        error: expect.stringContaining(reason),
+      });
+    }
+    const oversized = await post({
+      kind: 'prepare',
+      identity,
+      toolName: 'write_file',
+      input: {
+        file_path: path.join(workspace, 'output.txt'),
+        content: 'x'.repeat(256 * 1024),
+      },
+    });
+    expect(oversized.status).toBe(400);
+    expect(await oversized.json()).toMatchObject({
+      code: 'managed_runtime_provider_invalid',
+    });
+    await prepare('write_file', {
+      file_path: path.join(workspace, 'output.txt'),
+      content: 'value',
+    });
+    expect(fs.existsSync(path.join(workspace, 'output.txt'))).toBe(false);
+  });
+
   it('executes the four admitted tools with real approval, preflight and file history', async () => {
     await begin();
     const read = reference(
@@ -591,8 +633,9 @@ describe('Managed Runtime provider worker', () => {
       ).status,
     ).toBe(200);
     const unsupported = await post({ kind: 'acquire' }, unsupportedSession);
-    expect(unsupported.status).toBe(409);
+    expect(unsupported.status).toBe(501);
     expect(await unsupported.json()).toMatchObject({
+      code: 'managed_runtime_provider_unsupported',
       error: 'Managed Runtime provider configuration is unsupported.',
     });
     expect((await post({ kind: 'acquire' })).status).toBe(409);
@@ -679,8 +722,9 @@ describe('Managed Runtime provider worker', () => {
       mountRoot: workspace,
     });
     const refused = await post({ kind: 'acquire' });
-    expect(refused.status).toBe(409);
+    expect(refused.status).toBe(501);
     expect(await refused.json()).toMatchObject({
+      code: 'managed_runtime_provider_unsupported',
       error: 'Managed Runtime provider configuration is unsupported.',
     });
   });

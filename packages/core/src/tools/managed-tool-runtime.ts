@@ -55,6 +55,8 @@ function invocationParams(params: unknown): Record<string, unknown> {
   return projected;
 }
 
+export class ManagedToolPreparationError extends Error {}
+
 export type ManagedToolConfirmationPhase = 'permission' | 'preflight';
 
 export type ManagedToolV2Client = {
@@ -387,7 +389,10 @@ export class ManagedToolRuntime {
     mediaContext?: ManagedToolMediaContext,
   ): Promise<Entry> {
     let tool = this.tools().find((candidate) => candidate.name === toolName);
-    if (!tool) throw new Error('Managed Runtime tool is unavailable.');
+    if (!tool)
+      throw new ManagedToolPreparationError(
+        'Managed Runtime tool is unavailable.',
+      );
     if (mediaContext !== undefined) {
       if (!this.bindMediaTool)
         throw new Error('Managed Runtime tool does not support media context.');
@@ -422,7 +427,16 @@ export class ManagedToolRuntime {
           source.invocation.params,
         ) as Record<string, unknown>;
     }
-    const invocation = tool.build(input);
+    let invocation: AnyToolInvocation;
+    try {
+      invocation = tool.build(input);
+    } catch (error) {
+      throw new ManagedToolPreparationError(
+        error instanceof Error
+          ? error.message
+          : 'Managed Runtime tool input is invalid.',
+      );
+    }
     const aware = invocation as {
       setCallId?: (id: string) => void;
       setPromptId?: (id: string) => void;

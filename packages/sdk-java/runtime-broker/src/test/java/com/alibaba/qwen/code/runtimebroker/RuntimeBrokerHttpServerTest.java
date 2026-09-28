@@ -1,6 +1,9 @@
 package com.alibaba.qwen.code.runtimebroker;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.alibaba.fastjson2.JSON;
@@ -198,6 +201,88 @@ class RuntimeBrokerHttpServerTest {
         }
     }
 
+    @Test
+    void rejectsExtraReserveFieldsBeforeWritingAReservation() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            fixture.service.acquire("harness", "runtime", "bootstrap").toCompletableFuture().join();
+            String digest = "sha256:" + "a".repeat(64);
+            HttpResponse<String> response = fixture.post("/executions:prepare", Map.of(
+                    "protocolVersion", 1, "requestId", "prepare", "idempotencyKey", "key",
+                    "harnessSessionId", "harness", "runtimeSessionId", "runtime", "turnId", "turn",
+                    "toolCallId", "call", "requestDigest", digest,
+                    "reference", Map.of("sessionId", "runtime", "promptId", "turn",
+                            "callId", "call", "argsDigest", digest), "extra", true));
+            assertEquals(400, response.statusCode(), response.body());
+            assertTrue(response.body().contains("runtime_reference_invalid"), response.body());
+            assertNull(fixture.executions.findByIdempotencyKey("key"));
+            assertFalse(fixture.executions.hasActiveByRuntimeSession("runtime"));
+            assertEquals(0, fixture.transport.controls.get());
+            assertEquals(0, fixture.transport.executions.get());
+        }
+    }
+
+    @Test
+    void rejectsExtraStartFieldsBeforeChangingTheReservationOrDispatching() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            fixture.transport.fail = false;
+            fixture.service.acquire("harness", "runtime", "bootstrap").toCompletableFuture().join();
+            String payload = "{\"toolName\":\"write_file\",\"input\":{}}";
+            String digest = "sha256:" + HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
+                    .digest(payload.getBytes(StandardCharsets.UTF_8)));
+            ToolExecutionRecord reserved = fixture.service.prepareExecution("harness", "runtime", "key",
+                    Map.of("sessionId", "runtime", "promptId", "turn", "callId", "call", "argsDigest", digest))
+                    .toCompletableFuture().join();
+            HttpResponse<String> response = fixture.post("/executions/" + reserved.getExecutionCallId() + ":start",
+                    Map.of("protocolVersion", 1, "requestId", "start", "harnessSessionId", "harness",
+                            "runtimeSessionId", "runtime", "payloadJson", payload, "extra", true));
+            assertEquals(400, response.statusCode(), response.body());
+            assertTrue(response.body().contains("runtime_broker_invalid_request"), response.body());
+            assertSame(reserved, fixture.executions.findByExecutionCallId(reserved.getExecutionCallId()));
+            assertEquals(ToolExecutionRecord.State.PREPARED, reserved.getState());
+            assertEquals(0, reserved.getDispatchGeneration());
+            assertEquals(0, fixture.transport.controls.get());
+            assertEquals(0, fixture.transport.executions.get());
+        }
+    }
+
+    @Test
+    void rejectsUnknownControlFieldsBeforeCallingTheTransport() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            fixture.service.acquire("harness", "runtime", "bootstrap").toCompletableFuture().join();
+            HttpResponse<String> response = fixture.post("/tool-sessions/runtime/control", Map.of(
+                    "protocolVersion", 1, "requestId", "control", "harnessSessionId", "harness",
+                    "operation", Map.of("kind", "manifest", "extra", true)));
+            assertEquals(400, response.statusCode(), response.body());
+            assertTrue(response.body().contains("runtime_control_operation_invalid"), response.body());
+            assertFalse(fixture.executions.hasActiveByRuntimeSession("runtime"));
+            assertEquals(0, fixture.transport.controls.get());
+            assertEquals(0, fixture.transport.executions.get());
+        }
+    }
+
+    @Test
+    void rejectsForeignHistoryOwnersBeforeCallingTheTransport() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            String harness = "550e8400-e29b-41d4-a716-446655440301";
+            String runtime = "550e8400-e29b-41d4-a716-446655440302";
+            fixture.service.acquire(harness, runtime, "bootstrap").toCompletableFuture().join();
+            for (String owner : new String[] {"ownerSessionId", "ownerRuntimeSessionId"}) {
+                Map<String, Object> binding = new java.util.LinkedHashMap<>(Map.of(
+                        "ownerSessionId", harness, "ownerRuntimeSessionId", runtime,
+                        "executionCwd", "/workspace", "snapshots", java.util.List.of()));
+                binding.put(owner, "550e8400-e29b-41d4-a716-446655440303");
+                HttpResponse<String> response = fixture.post("/tool-sessions/" + runtime + "/control", Map.of(
+                        "protocolVersion", 1, "requestId", "control", "harnessSessionId", harness,
+                        "operation", Map.of("kind", "bind-history", "binding", binding)));
+                assertEquals(400, response.statusCode(), response.body());
+                assertTrue(response.body().contains("runtime_control_operation_invalid"), response.body());
+                assertFalse(fixture.executions.hasActiveByRuntimeSession(runtime));
+                assertEquals(0, fixture.transport.controls.get());
+                assertEquals(0, fixture.transport.executions.get());
+            }
+        }
+    }
+
     private static Map<String, Object> reference() {
         return Map.of("sessionId", "runtime", "promptId", "turn",
                 "callId", "call", "argsDigest", "digest");
@@ -206,6 +291,7 @@ class RuntimeBrokerHttpServerTest {
     private static final class Fixture implements AutoCloseable {
         private final FailingTransport transport = new FailingTransport();
         private final HttpClient client = HttpClient.newHttpClient();
+        private final InMemoryToolExecutionRepository executions = new InMemoryToolExecutionRepository(Clock.systemUTC());
         private final RuntimeBrokerService service;
         private final RuntimeBrokerHttpServer server;
 
@@ -218,7 +304,7 @@ class RuntimeBrokerHttpServerTest {
                             URI.create("http://127.0.0.1:1234"), "token", "lease", 1)),
                     transport, new InMemoryRuntimeBindingRepository(),
                     new InMemoryRuntimeSessionRepository(),
-                    new InMemoryToolExecutionRepository(Clock.systemUTC()),
+                    executions,
                     "broker", Duration.ofMinutes(1), Duration.ofMinutes(1));
             server = new RuntimeBrokerHttpServer(new InetSocketAddress("127.0.0.1", 0),
                     "secret", service);
@@ -246,6 +332,7 @@ class RuntimeBrokerHttpServerTest {
 
     private static final class FailingTransport implements RuntimeTransport {
         private final AtomicInteger executions = new AtomicInteger();
+        private final AtomicInteger controls = new AtomicInteger();
         private boolean fail = true;
         private Map<String, Object> lastReference;
 
@@ -257,6 +344,7 @@ class RuntimeBrokerHttpServerTest {
         @Override
         public CompletionStage<Object> control(RuntimeLease lease, RuntimeSession session,
                 Map<String, Object> operation) {
+            controls.incrementAndGet();
             return CompletableFuture.completedFuture(null);
         }
 

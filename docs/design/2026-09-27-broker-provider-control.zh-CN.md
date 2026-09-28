@@ -32,7 +32,13 @@ operation 是封闭的判别联合。公开 Broker 控制为 `manifest`、`begin
 修改、媒体、确认和历史数据复用既有 Managed Tool 契约。派发前拒绝外来 Session
 reference 和未知字段。不支持的版本与操作明确失败，不回退到旧路由。
 
-历史控制请求与响应限制为 8 MiB，其他操作为 1 MiB。相同完整 Session 身份的获取
+工具选择或构建失败返回 `400 managed_runtime_tool_invalid`；不支持的 provider profile
+返回 `501 managed_runtime_provider_unsupported`。Broker 仅从封闭 JSON 错误响应中保留
+已知 provider 状态码/错误码组合及最多 4096 字符的原因，并要求 no-store 响应头且无
+Content-Encoding。TypeScript 客户端保留限长原因。这些诊断信息不能证明执行是否已开始。
+
+历史控制请求与响应限制为 8 MiB，其他操作为 1 MiB。工具参数还受 core 既有的
+256 KiB 规范化 JSON 限制；满足外层信封限制并不绕过参数限制。相同完整 Session 身份的获取
 与释放幂等。同一 Runtime Session 换用 Harness 或 turn kind 会产生冲突。释放拒绝
 运行中的工作，取消尚未预留的准备调用，并永久关闭新操作准入，不清除当前回合的
 状态/取消证据。开始新回合仍遵循 runtime 既有清理策略；较早已派发的调用仍保留在
@@ -52,7 +58,8 @@ manifest、准备、审批和 preflight 语义。参数保留在 worker 已准�
 重开 Session。释放需要真实 worker 回执，包括仅使用原始工具的 Session。Workspace
 释放先关闭 provider 准入，再停用激活并释放存储持有。
 
-Boot v1 使用 worker 固定四工具配置与 DEFAULT 审批。Boot v2 provider 控制必须满足
+Boot v1 使用 worker 固定四工具配置与 DEFAULT 审批。调用方必须在执行前落实确认决策；
+DEFAULT 不代表私有 worker 会拒绝跳过确认的执行。Boot v2 provider 控制必须满足
 既有精确 Workspace capability 和配置 profile、上下文已安装及激活条件，并保留其
 预批准策略。其他不透明上下文配置引用不能启用 provider 控制。显式文件历史绑定为
 这个协议启用历史跟踪；既有原始工具 profile 保持原行为。
@@ -65,7 +72,9 @@ provider 的 reserve/start 路径需要 Broker 持久预留。预留创建 PREPA
 派发；start 驱动现有派发租约与同 reference 幂等性。开始前取消必须无工具副作用地
 结算。worker 取消可能先返回 `cancel_requested`；Broker 在操作截止时间内等待原调用的
 `not_started` 或 `cancelled` 结果，再确认已准备调用的取消。UNKNOWN 只能观察，不能
-变成重放许可。现有即时 Tool v2 行为独立保留。
+变成重放许可。这包括继承的派发期间 HTTP 拒绝保守处理：没有权威执行证据时，即使
+worker 的原因描述为拒绝，仍保持 UNKNOWN。该状态阻止释放，并可能继续持有 Workspace
+存储。仅凭错误码不能证明执行从未开始。现有即时 Tool v2 行为独立保留。
 
 #12831 的原始 reserve/start 路径继续使用同一组 Broker 路由：预留四字段 reference，
 仅在 start 时提供精确的 `payloadJson`。provider 预留使用七字段 reference 并拒绝
@@ -95,3 +104,9 @@ HTTP 操作解析持久化 Harness Session。消费者为 `BrokerManagedRuntimeP
 worker 日志仅属于当前代际。重启 worker 不能从 Broker reference 行恢复准备参数或
 审批。恢复保持失败关闭。私有契约测试成功不代表公开 Workspace 回合启用，也不宣称
 完整 Hosted 产品已就绪。
+
+释放后，私有 worker 路由保留当前回合的状态/取消证据及已绑定的文件历史状态；较早回合的
+调用条目仍可能被清理。Broker HTTP 接口与 provider 客户端不向已释放的 Session 提供
+这些观察。worker 当前保留 Session 的 Config、工具与 runtime，直到 worker 关闭，因此
+内存可能随已释放的 provider Session 数量增长。在保留私有观察语义的前提下减少这部分
+保留是后续工作。

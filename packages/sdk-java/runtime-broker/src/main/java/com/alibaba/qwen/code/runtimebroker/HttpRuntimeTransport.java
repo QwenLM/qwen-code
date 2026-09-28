@@ -873,6 +873,13 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
             BoundedBody responseBody = response.body();
             String operation = path.substring(path.lastIndexOf('/') + 1);
             if (response.statusCode() != 200) {
+                RuntimeBrokerException providerError =
+                        ProviderRuntimeProtocol.PATH.equals(path)
+                                ? providerFailure(response, responseBody) : null;
+                if (providerError != null) {
+                    result.completeExceptionally(providerError);
+                    return;
+                }
                 RuntimeBrokerException classified =
                         contextFailure(response, responseBody, path);
                 result.completeExceptionally(error(classified.getStatusCode(),
@@ -923,6 +930,41 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
             }
         });
         return returned;
+    }
+
+    private static RuntimeBrokerException providerFailure(
+            HttpResponse<BoundedBody> response, BoundedBody body) {
+        if (body.overflow()
+                || !"no-store".equals(response.headers().firstValue("Cache-Control").orElse(""))
+                || !jsonContentType(response.headers().firstValue("Content-Type").orElse(""))
+                || response.headers().firstValue("Content-Encoding").isPresent()) {
+            return null;
+        }
+        try {
+            Map<String, Object> fields = ManagedContextProtocol.parse(body.bytes());
+            if (!fields.keySet().equals(Set.of("code", "error"))
+                    || !(fields.get("code") instanceof String code)
+                    || !(fields.get("error") instanceof String message)
+                    || message.isEmpty() || message.length() > 4096 || message.indexOf('\0') >= 0) {
+                return null;
+            }
+            int expectedStatus = switch (code) {
+                case "managed_runtime_provider_invalid", "managed_runtime_tool_invalid" -> 400;
+                case "managed_runtime_identity_conflict", "managed_context_unavailable",
+                        "managed_context_conflict", "managed_runtime_provider_operation_failed",
+                        "managed_runtime_provider_incompatible" -> 409;
+                case "managed_runtime_provider_too_large" -> 413;
+                case "managed_runtime_provider_unsupported" -> 501;
+                default -> 0;
+            };
+            if (response.statusCode() == expectedStatus) {
+                return error(expectedStatus, code,
+                        BrokerValues.requireWellFormed(message, "provider error"), false);
+            }
+        } catch (RuntimeBrokerException | IllegalArgumentException ignored) {
+            // Unrecognized responses supply no provider-specific error evidence.
+        }
+        return null;
     }
 
     private static RuntimeBrokerException contextFailure(

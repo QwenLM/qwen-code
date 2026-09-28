@@ -11,7 +11,10 @@ import {
   deriveConfig,
 } from '@qwen-code/qwen-code-core/config/config.js';
 import { ApprovalMode } from '@qwen-code/qwen-code-core/config/approval-mode.js';
-import { ManagedToolRuntime } from '@qwen-code/qwen-code-core/tools/managed-tool-runtime.js';
+import {
+  ManagedToolPreparationError,
+  ManagedToolRuntime,
+} from '@qwen-code/qwen-code-core/tools/managed-tool-runtime.js';
 import { ManagedToolFileHistory } from '@qwen-code/qwen-code-core/tools/managed-tool-file-history.js';
 import {
   captureManagedToolExecutionContext,
@@ -451,6 +454,11 @@ export function registerManagedRuntimeProviderRoute(
           res
             .status(error.status)
             .json({ code: error.code, error: error.message });
+        } else if (error instanceof ManagedToolPreparationError) {
+          res.status(400).json({
+            code: 'managed_runtime_tool_invalid',
+            error: error.message,
+          });
         } else if (error instanceof ManagedToolProtocolError) {
           res.status(400).json({
             code: 'managed_runtime_provider_invalid',
@@ -459,9 +467,10 @@ export function registerManagedRuntimeProviderRoute(
         } else {
           res.status(409).json({
             code:
-              error instanceof ManagedToolUnavailableError
+              error instanceof ManagedToolUnavailableError ||
+              error instanceof ManagedToolConflictError
                 ? error.code
-                : 'managed_runtime_identity_conflict',
+                : 'managed_runtime_provider_operation_failed',
             error:
               error instanceof Error
                 ? error.message

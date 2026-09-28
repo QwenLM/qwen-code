@@ -39,8 +39,17 @@ reuse the existing Managed Tool contracts. Foreign Session references and
 unknown fields are refused before dispatch. Unsupported versions and operations
 fail explicitly; there is no legacy-route fallback.
 
+Tool selection or construction failures return `400 managed_runtime_tool_invalid`;
+unsupported provider profiles return `501 managed_runtime_provider_unsupported`.
+The Broker preserves known provider error status/code pairs and reasons up to
+4096 characters only from a closed JSON error response with no-store headers
+and no content encoding. The TypeScript client retains the bounded reason.
+This diagnostic evidence does not establish whether execution started.
+
 Control requests and responses are bounded at 8 MiB for history and 1 MiB for
-other operations. Acquisition and release are idempotent for the same complete
+other operations. Tool arguments also have the existing core limit of 256 KiB
+of canonical JSON; fitting the outer envelope does not bypass that limit.
+Acquisition and release are idempotent for the same complete
 Session identity. Reusing a Runtime Session for another Harness or turn kind
 is a conflict. Release refuses running work, cancels preparations that have not
 been reserved, and permanently closes admission without clearing the current
@@ -70,6 +79,8 @@ release closes provider admission before deactivating and dropping storage
 ownership.
 
 Boot v1 uses the worker's fixed four-tool configuration with DEFAULT approval.
+The caller must enforce the confirmation decision before execution; DEFAULT
+does not make the private worker reject an execution that skips confirmation.
 Boot v2 provider controls require the existing exact Workspace capability and
 configuration profile, an installed context and activation. They preserve its
 preapproved policy. Other opaque context configuration references cannot opt
@@ -89,8 +100,12 @@ start must settle without tool effects. Worker cancellation may first answer
 `cancel_requested`; the Broker waits within its operation deadline for the
 original invocation's `not_started` or `cancelled` result before acknowledging
 prepared cancellation. UNKNOWN remains observation-only and
-never becomes permission to replay. Existing immediate Tool v2 behavior stays
-available independently.
+never becomes permission to replay. This includes the inherited conservative
+handling of an HTTP rejection during dispatch: without authoritative execution
+evidence it remains UNKNOWN, even when the worker's reason describes a refusal.
+That state blocks release and can retain Workspace storage ownership. Error
+codes alone do not prove that execution never started. Existing immediate Tool
+v2 behavior stays available independently.
 
 The raw reserve/start path from #12831 remains available on the same Broker
 routes. It reserves a four-field reference and supplies the exact `payloadJson`
@@ -126,3 +141,11 @@ The worker journal is generation-local. A restarted worker cannot recover
 prepared inputs or approvals from Broker reference rows. Recovery stays fail
 closed. A successful private contract test does not enable public Workspace
 turns or claim complete Hosted product readiness.
+
+After release, the private worker route retains status/cancellation evidence
+for the current turn and any bound file-history state; earlier turns' invocation
+entries remain subject to eviction. The Broker HTTP surface and provider client
+do not expose these observations for a released Session. The worker currently
+retains the Session's Config, tools and runtime until worker shutdown, so memory
+can grow with released provider Sessions. Reducing that retention while
+preserving private observation semantics is follow-up work.

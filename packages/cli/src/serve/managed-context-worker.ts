@@ -32,7 +32,10 @@ import {
 } from './managed-runtime-tool-executor.js';
 import { registerManagedRuntimeToolRoutes } from './managed-runtime-tool-routes.js';
 import { registerManagedRuntimeToolV3Routes } from './managed-runtime-tool-v3-routes.js';
-import { MANAGED_RUNTIME_PROVIDER_ROUTE } from './managed-runtime-provider-protocol.js';
+import {
+  MANAGED_RUNTIME_PROVIDER_ROUTE,
+  ManagedRuntimeProviderProtocolError,
+} from './managed-runtime-provider-protocol.js';
 import { registerManagedRuntimeProviderRoute } from './managed-runtime-provider-worker.js';
 import {
   WorkspaceActivations,
@@ -208,8 +211,10 @@ export function registerManagedContextRoutes(
         (binding !== undefined &&
           binding.contextConfigRef !== WORKSPACE_CONTEXT_CONFIG_REF)
       ) {
-        throw new Error(
+        throw new ManagedRuntimeProviderProtocolError(
           'Managed Runtime provider configuration is unsupported.',
+          501,
+          'managed_runtime_provider_unsupported',
         );
       }
       const isActive = () => activations.isActive(sessionId);
