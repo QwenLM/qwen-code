@@ -12,12 +12,13 @@ import {
   deferredDeclarationFingerprint,
   type ToolRegistry,
 } from './tool-registry.js';
-import type { AnyDeclarativeTool } from './tools.js';
+import type { AnyDeclarativeTool, MediaPolicyToolDescriptor } from './tools.js';
 import {
   DEFERRED_TOOL_CALL_REFUSAL_PREFIX,
   resolveDeferredToolCall,
   ToolCallTool,
 } from './tool-call.js';
+import { SchemaValidator } from '../utils/schemaValidator.js';
 import { ToolErrorType } from './tool-error.js';
 import { ToolNames } from './tool-names.js';
 import { DEFAULT_MAX_SUBAGENT_DEPTH } from '../config/config.js';
@@ -801,6 +802,86 @@ describe('ToolCallTool', () => {
       );
 
       expect(result).toMatchObject({ arguments: { count: '3' } });
+    });
+
+    it('resolves a media-policy target whose arguments the policy gate completes', async () => {
+      // The projection split a media-policy tool creates: `schema` is the
+      // model-visible declaration (an operator `modelAccess.lockedArguments`
+      // key stripped from BOTH properties and required), while
+      // `validateToolParams` keeps checking the NATIVE schema
+      // (omni/policy/tools/media-policy-tool.ts). The model is therefore
+      // correct to omit `outputDir`, and the modelAccess gate — which both
+      // frontends run AFTER bridge resolution — merges it back in. Running the
+      // pre-check on these raw arguments refuses a call the next stage accepts,
+      // and sending the locked key instead makes the gate refuse it: unwinnable
+      // both ways. Mutation check: dropping the media-policy exemption in
+      // resolveDeferredToolCall turns this red.
+      const nativeSchema = {
+        type: 'object',
+        properties: {
+          inputPath: { type: 'string' },
+          outputDir: { type: 'string' },
+        },
+        required: ['inputPath', 'outputDir'],
+        additionalProperties: false,
+      };
+      const projectedSchema = {
+        type: 'object',
+        properties: { inputPath: { type: 'string' } },
+        required: [],
+        additionalProperties: false,
+      };
+
+      class MockLockedMediaPolicyTool extends MockTool {
+        override get mediaPolicyDescriptor(): MediaPolicyToolDescriptor {
+          return {
+            kind: 'media_policy',
+            inputMediaTypes: ['audio'],
+            outputs: [{ kind: 'media', required: true }],
+          };
+        }
+
+        override get schema() {
+          return {
+            name: this.name,
+            description: this.description,
+            parametersJsonSchema: projectedSchema,
+          };
+        }
+
+        override validateToolParams(params: {
+          [key: string]: unknown;
+        }): string | null {
+          return SchemaValidator.validate(nativeSchema, params);
+        }
+      }
+
+      const target = new MockLockedMediaPolicyTool({
+        name: 'omni_transcribe_audio',
+        shouldDefer: true,
+        params: nativeSchema,
+      });
+      // The mock really carries the split the defect needs: the model-visible
+      // schema omits `outputDir`, native validation still requires it.
+      expect(target.schema.parametersJsonSchema).toEqual(projectedSchema);
+      expect(target.validateToolParams({ inputPath: '/tmp/in.wav' })).toContain(
+        "'outputDir'",
+      );
+
+      const result = await resolveDeferredToolCall(
+        makeRegistry([target], new Set([target.name])),
+        {
+          name: 'omni_transcribe_audio',
+          arguments: { inputPath: '/tmp/in.wav' },
+        },
+      );
+
+      expect(result).not.toHaveProperty('error');
+      expect(result).not.toHaveProperty('errorType');
+      expect(result).toMatchObject({
+        tool: expect.objectContaining({ name: 'omni_transcribe_audio' }),
+        arguments: { inputPath: '/tmp/in.wav' },
+      });
     });
   });
 });

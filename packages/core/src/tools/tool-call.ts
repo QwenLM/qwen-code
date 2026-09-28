@@ -239,15 +239,35 @@ export async function resolveDeferredToolCall(
   // unwrapped (#12889). Validate a clone: SchemaValidator coerces values in
   // place, and the scheduler re-validates the returned arguments at build
   // time.
+  //
+  // Omni media-policy targets are exempt: their arguments are not final here.
+  // Both frontends run the modelAccess gate AFTER bridge resolution
+  // (coreToolScheduler's `evaluateMediaPolicyToolCall`, before buildInvocation;
+  // ACP Session.runTool), and that gate resolves `resourceId` → `inputPath`
+  // and merges `defaultArguments`/`lockedArguments`. Their `validateToolParams`
+  // deliberately checks the NATIVE schema rather than the model-visible
+  // projection `tool_search` returned, so pre-checking the raw bridged
+  // arguments refuses calls the very next stage accepts — and for an operator
+  // locked key the refusal is unwinnable both ways (omitting it fails here,
+  // sending it fails the gate). `mediaPolicyDescriptor` is the code-level fact
+  // the gate itself keys off (it passes every non-policy tool through
+  // untouched), so the exemption covers exactly the tools whose arguments a
+  // downstream stage completes. Nothing fails open: the gate still emits named
+  // `invalid_params` refusals, and build() re-validates the merged arguments.
+  const argsCompletedByPolicyGate =
+    (target as { mediaPolicyDescriptor?: unknown }).mediaPolicyDescriptor !==
+    undefined;
   let paramsError: string | null = null;
-  try {
-    paramsError = target.validateToolParams(
-      structuredClone(invocation.params.arguments),
-    );
-  } catch {
-    // A target whose validation throws under this pre-check must not become
-    // a new bridge failure mode: the scheduler's build() reports the same
-    // throw as before.
+  if (!argsCompletedByPolicyGate) {
+    try {
+      paramsError = target.validateToolParams(
+        structuredClone(invocation.params.arguments),
+      );
+    } catch {
+      // A target whose validation throws under this pre-check must not become
+      // a new bridge failure mode: the scheduler's build() reports the same
+      // throw as before.
+    }
   }
   if (paramsError) {
     return {
