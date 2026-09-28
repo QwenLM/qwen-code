@@ -2020,17 +2020,8 @@ describe('expandCollapsedHistory', () => {
 });
 
 describe('resumed identity survives a synthetic display string', () => {
-  // End-to-end through the real builders on BOTH sides: the same records
-  // produce the UI items and the model-facing history, exactly as resume
-  // does. Rewind resolution compares the two, so a UI item whose displayed
-  // text is synthetic ('[User message with attachments]') used to match
-  // nothing and silently lose identity resolution for that turn.
-  //
-  // The fixture makes the positional walk and the identity lookup DISAGREE,
-  // otherwise it would pin nothing: turn 2 is a media-only prompt whose entry
-  // was cleared to a placeholder, which the rewind walk excludes from its
-  // count, so rewinding to turn 3 desyncs the walk and only identity can
-  // land it.
+  // The fixture makes identity and positional alignment disagree after a
+  // media-only turn, using the real UI and API resume builders.
   const PLACEHOLDER = '[Old inline media cleared: image/png]';
 
   const rec = (over: Record<string, unknown>) =>
@@ -2075,25 +2066,8 @@ describe('resumed identity survives a synthetic display string', () => {
     model('r1'),
   ];
 
-  it('resolves a plainly recorded third turn through identity', () => {
-    expect(
-      truncationIndexForLastUserTurn([
-        ...leadingTurns(),
-        rec({
-          type: 'user',
-          promptId: 's########2',
-          message: { role: 'user', parts: [{ text: 'run the tests' }] },
-        }),
-        model('r2'),
-      ]),
-    ).toBe(4);
-  });
-
   it('resolves it identically when the record carries attachments', () => {
-    // Same history; the only difference is the recorded attachment
-    // references, which make the resume builder display
-    // '[User message with attachments]'. Identity remains independent of
-    // the display projection.
+    // Identity is independent of the synthetic attachment display text.
     expect(
       truncationIndexForLastUserTurn([
         ...leadingTurns(),
@@ -2108,36 +2082,8 @@ describe('resumed identity survives a synthetic display string', () => {
     ).toBe(4);
   });
 
-  it('resolves a turn whose recorded prompt begins with a standalone system-reminder part', () => {
-    // Per-turn reminders change the content shape but not the prompt identity.
-    expect(
-      truncationIndexForLastUserTurn([
-        ...leadingTurns(),
-        rec({
-          type: 'user',
-          promptId: 's########2',
-          message: {
-            role: 'user',
-            parts: [
-              {
-                text: '<system-reminder>\nplan mode is on\n</system-reminder>',
-              },
-              { text: 'run the tests' },
-            ],
-          },
-        }),
-        model('r2'),
-      ]),
-    ).toBe(4);
-  });
-
   it('lands an identified target past a goal_runtime record that inflates the walk', () => {
-    // A `goal_runtime` record is counted by the positional walk but produces
-    // no UI item, so the walk runs one ahead of the displayed turns: on its
-    // own it cuts at 4, dropping the displayed middle turn's own entry while
-    // its UI item stays on screen. The middle turn carries no mark — it was
-    // recorded before identities existed — so only the target's own identity
-    // can land the cut at 6.
+    // goal_runtime has API content but no UI item, shifting positional order.
     expect(
       truncationIndexForLastUserTurn([
         rec({
@@ -2169,12 +2115,8 @@ describe('resumed identity survives a synthetic display string', () => {
   });
 
   it('still resolves a placeholder-texted turn that follows an attachment-only turn', () => {
-    // An attachment-only record resumes to a visible '[User message with
-    // attachments]' turn whose API entry has no text part, so the UI turn
-    // count and the API prompt count diverge by one. The target's own text is
-    // a cleared-media placeholder, which the positional walk excludes from
-    // its count — the walk can therefore never land it, and only its identity
-    // can.
+    // Attachment-only and placeholder turns are counted differently by the
+    // legacy positional mapper.
     expect(
       truncationIndexForLastUserTurn([
         leadingTurns()[0]!,

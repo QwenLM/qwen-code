@@ -42,10 +42,6 @@ export interface UseResumeCommandOptions {
    */
   loadHistory?: UseHistoryManagerReturn['loadHistory'];
   startNewSession: (sessionId: string) => void;
-  /**
-   * Seeds the UI prompt counter past the ids the resumed transcript claims.
-   * Must run AFTER startNewSession (the reset would erase an earlier seed).
-   */
   seedPromptCount: (count: number) => void;
   clearPendingState?: () => void;
   setSessionName?: (name: string | null) => void;
@@ -241,10 +237,7 @@ export function useResumeCommand(
         //    The remaining steps (name, history items, notice) are display
         //    state for a swap that has already committed.
         startNewSession(sessionId);
-        // Seed the prompt counter past the ids the resumed transcript
-        // claims before any new prompt can mint one (R38-1): the reset
-        // above reinstalls promptCount 0, and the seed is monotonic (0 is
-        // a no-op), so this ordering is load-bearing.
+        // startNewSession resets the counter, so seed afterward.
         seedPromptCount(
           computeResumedPromptCountSeed(
             sessionData.conversation.messages,

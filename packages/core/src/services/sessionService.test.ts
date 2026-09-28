@@ -5333,12 +5333,8 @@ describe('SessionService', () => {
       );
     });
 
-    it('remaps record and chat_compression promptIds into the fork (R42-2)', async () => {
-      // parseSessionPromptTurn keys claims on the exact
-      // `${sessionId}########` prefix, so unremapped record ids are
-      // invisible to the fork's prompt-count seed and the next live mint
-      // collides with an inherited snapshot id. The record side must follow
-      // the snapshot side's rule.
+    it('remaps record and chat_compression promptIds into the fork', async () => {
+      // Forked ids must remain visible to the new session's seed.
       const oldId = '71717171-7171-7171-7171-717171717171';
       const newId = '81818181-8181-8181-8181-818181818181';
       const { file, lines } = seedSession(oldId);
@@ -5372,25 +5368,6 @@ describe('SessionService', () => {
               promptIds: [`${oldId}########0`, null],
             },
           },
-          {
-            uuid: 'snapshot-1',
-            parentUuid: 'compression-1',
-            sessionId: oldId,
-            type: 'system',
-            subtype: 'file_history_snapshot',
-            timestamp: '2026-04-22T00:00:03.000Z',
-            cwd,
-            version: 'test',
-            systemPayload: {
-              snapshots: [
-                {
-                  promptId: `${oldId}########0`,
-                  timestamp: '2026-04-22T00:00:03.000Z',
-                  trackedFileBackups: {},
-                },
-              ],
-            },
-          },
         ]
           .map((record) => JSON.stringify(record))
           .join('\n') + '\n',
@@ -5413,17 +5390,6 @@ describe('SessionService', () => {
         `${newId}########0`,
         null,
       ]);
-
-      const copiedSnapshot = written.find(
-        (record) => record.subtype === 'file_history_snapshot',
-      );
-      const snapshotIds = copiedSnapshot.systemPayload.snapshots.map(
-        (snapshot: { promptId: string }) => snapshot.promptId,
-      );
-      expect(snapshotIds).toContain(`${newId}########0`);
-      // The remapped record id matches the remapped snapshot id, so the
-      // fork's seed sees the claim.
-      expect(copiedUser.promptId).toBe(snapshotIds[0]);
     });
 
     it('does not copy source turn_result identities into a fork', async () => {

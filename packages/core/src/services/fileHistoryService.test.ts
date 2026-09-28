@@ -569,10 +569,7 @@ describe('FileHistoryService', () => {
       );
     });
 
-    // Prompt ids are minted per entrance with counters that restart on
-    // resume, so one id can land on two snapshots. Resolving by last
-    // occurrence and pruning the newer turn's backups would silently
-    // rewind to a turn the caller may not have meant — refuse loudly.
+    // A shared id must not select and truncate an arbitrary snapshot.
     it('should refuse to rewind a promptId shared by two snapshots', async () => {
       const file = join(projectDir, 'a.txt');
       await writeFile(file, 'original');

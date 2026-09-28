@@ -2739,13 +2739,8 @@ export class LlmChat {
       // explicit authoritative `false`.
       info.newTokenCountIsEstimated ??= true;
       if (!options?.deferChatCompressionRecord) {
-        // The in-send call site compresses BEFORE the turn's user content is
-        // pushed, and the resume side replaces history wholesale at the
-        // compression record: a snapshot without the pending turn resurrects
-        // the model's answer with its question gone. Append the pending turn
-        // to a fresh array — never re-share the live one setHistory installs
-        // (the send's tail push and the orphan-repair splices still mutate
-        // it later in this turn; R38-2).
+        // Resume replaces history with this snapshot, so include the pending
+        // question and do not share the live array mutated later in the turn.
         this.chatRecordingService?.recordChatCompression({
           info,
           compressedHistory: options?.pendingUserMessage
@@ -3192,9 +3187,7 @@ export class LlmChat {
         );
       }
 
-      // Mark before the compaction block: the in-send compression record
-      // snapshots the pending turn and derives its promptIds eagerly, so the
-      // identity must be on userContent before tryCompress runs.
+      // Compression derives prompt ids before the user content is pushed.
       markApiHistoryPrompt(userContent, options?.promptId);
       if (exactRoute || (isHardTier && !shouldForceFromHard)) {
         compressionInfo = {
@@ -3309,9 +3302,7 @@ export class LlmChat {
         shouldForceFromHard &&
         compressionInfo.compressionStatus === CompressionStatus.COMPRESSED
       ) {
-        // Same snapshot contract as the in-send record inside tryCompress:
-        // include the pending turn (already marked above) so resume keeps
-        // the question with its answer.
+        // Keep the pending question with the compressed answer on resume.
         this.chatRecordingService?.recordChatCompression({
           info: compressionInfo,
           compressedHistory: [...this.getHistoryShallow(), userContent],
@@ -3350,9 +3341,8 @@ export class LlmChat {
           userContentPushSnapshotKey
         ] = this.userContentPushCount;
       }
-      // Add user content to history ONCE before any attempts. The mark was
-      // applied before the compaction block above; spreading userContent
-      // since (the manual-plan-exit notice path) carries the symbol along.
+      // Add user content to history ONCE before any attempts. Later object
+      // spreads preserve the identity marked before compression.
       this.history.push(userContent);
       currentUserContent = userContent;
       userContentAdded = true;

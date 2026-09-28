@@ -739,18 +739,7 @@ export function stripSuppressOnRestore(item: HistoryItem): HistoryItem {
   };
 }
 
-/**
- * Prompt-counter seed for an entrance that just loaded resumed or restored
- * history (startup --resume, in-session /resume, /branch). The counter must
- * restart past every identity the transcript claims — re-minting an id a
- * surviving resumed turn still wears collapses the rewind identity resolution
- * to a duplicate. ACP and headless mint `sessionId########<n>` 1-based and
- * skip turns that write no record, so the highest claimed turn sits above the
- * record count; the TUI mints pre-increment, hence the +1. Never below the
- * user-turn count, for transcripts whose records predate claims. Returns 0
- * when the transcript holds no user turns — a no-op for the monotonic seed
- * consumers, so callers pass the result through unconditionally.
- */
+/** Seeds a resumed prompt counter past both recorded turns and claimed ids. */
 export function computeResumedPromptCountSeed(
   records: readonly ChatRecord[],
   sessionId: string,

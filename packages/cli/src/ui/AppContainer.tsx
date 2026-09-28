@@ -1222,10 +1222,7 @@ export const AppContainer = (props: AppContainerProps) => {
         );
         loadHistoryWithLatchReconciliation(historyItems);
 
-        // Seed the prompt counter from the resumed conversation so new
-        // promptIds don't collide with restored file history snapshots
-        // (R37-31). The same seed runs on the in-session /resume and
-        // /branch entrances (R38-1); monotonic, so 0 is a no-op.
+        // Seed past identities already claimed by the resumed transcript.
         seedPromptCount(
           computeResumedPromptCountSeed(
             resumedSessionData.conversation.messages,

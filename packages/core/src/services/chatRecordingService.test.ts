@@ -336,14 +336,8 @@ describe('ChatRecordingService', () => {
       expect(record.systemPayload).toMatchObject({ promptIds: ['prompt-1'] });
     });
 
-    it('freezes the compression snapshot array against later live-history mutation (R38-2)', async () => {
-      // Two of the three recordChatCompression call sites pass the array
-      // that setHistory then installs as the live, in-place-mutated chat
-      // history, while the record is serialized later by the deferred
-      // writer. A mid-array splice (the orphaned-tool-use repair) or a tail
-      // push (the same turn's send) must not shift the persisted array away
-      // from the eagerly derived promptIds — the resume side re-attaches
-      // identities positionally, so order must be frozen, null slots kept.
+    it('freezes the compression snapshot array against later live-history mutation', async () => {
+      // Deferred serialization must keep entries aligned with promptIds.
       const first: Content = { role: 'user', parts: [{ text: 'A' }] };
       const second: Content = { role: 'user', parts: [{ text: 'B' }] };
       markApiHistoryPrompt(first, 'prompt-1');

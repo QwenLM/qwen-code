@@ -1945,12 +1945,8 @@ export class ChatRecordingService {
    * @param message The raw PartListUnion object as used with the API
    * @param goalContext Goal identity and turn that own this message
    * @param promptPayload User-authored display text and hook-context provenance
-   * @param promptId Identity of the turn this message opens. Rewind anchors
-   *   API-history entries to it (see `session-api-history.ts`), so it is the
-   *   caller's own prompt id rather than anything a transport supplied.
-   * @param daemonPromptId The daemon's prompt id from the invocation context,
-   *   which transcript replay hands back to it as `extra.promptId`. A daemon
-   *   turn carries both, and the two values are not the same.
+   * @param promptId Identity shared with this turn's API-history entry
+   * @param daemonPromptId Transport identity replayed to the daemon
    */
   recordUserMessage(
     message: PartListUnion,
@@ -2551,14 +2547,8 @@ export class ChatRecordingService {
    */
   recordChatCompression(payload: ChatCompressionRecordPayload): void {
     try {
-      // Freeze the array: two of the three call sites hand over the array
-      // that setHistory installs as the live, in-place-mutated chat
-      // history, while the deferred writer serializes the record only after
-      // later same-turn mutations (the send's tail push, the
-      // orphaned-tool-use repair's mid-array splices). The resume side
-      // re-attaches identities positionally, so the persisted array's order
-      // must stay paired with the eagerly derived promptIds — keep null
-      // slots, copy the container.
+      // Freeze the array so later live-history mutations cannot desynchronize
+      // entries from the parallel promptIds array.
       const compressedHistory = [...payload.compressedHistory];
       const promptIds = compressedHistory.map(
         (content) => getApiHistoryPromptId(content) ?? null,

@@ -831,11 +831,7 @@ export class FileHistoryService {
   ): Promise<RewindResult> {
     if (!this.enabled) return { filesChanged: [], filesFailed: [] };
 
-    // Prompt ids are minted by entrances whose counters restart
-    // independently (resume, headless chains), so two snapshots can wear
-    // one id. `findSnapshotIndex` would resolve the LAST occurrence and
-    // truncation would prune the newer turn's backups for a target the
-    // caller may not have meant — refuse a shared key loudly instead.
+    // Refuse a shared key before truncation can prune the wrong backups.
     let matches = 0;
     for (const snapshot of this.state.snapshots) {
       if (snapshot.promptId === promptId) matches++;

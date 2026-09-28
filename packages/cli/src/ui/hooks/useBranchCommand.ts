@@ -71,10 +71,6 @@ export interface UseBranchCommandOptions {
     'clearItems' | 'loadHistory' | 'addItem'
   >;
   startNewSession: (sessionId: string) => void;
-  /**
-   * Seeds the UI prompt counter past the ids the forked transcript claims.
-   * Must run AFTER startNewSession (the reset would erase an earlier seed).
-   */
   seedPromptCount: (count: number) => void;
   clearPendingState?: () => void;
   setSessionName?: (name: string | null) => void;
@@ -281,12 +277,7 @@ export function useBranchCommand(
           collapsePreviewCount,
         );
         startNewSession(newSessionId);
-        // Seed the prompt counter past the ids the forked transcript
-        // claims before any new prompt can mint one (R38-1): the reset
-        // above reinstalls promptCount 0, and the seed is monotonic (0 is
-        // a no-op), so this ordering is load-bearing. forkSession remaps
-        // record promptIds to the new session id, so the seed keys on
-        // newSessionId.
+        // startNewSession resets the counter, so seed afterward.
         seedPromptCount(
           computeResumedPromptCountSeed(
             resumed.conversation.messages,

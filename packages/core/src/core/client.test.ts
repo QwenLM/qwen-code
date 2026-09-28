@@ -2235,10 +2235,15 @@ describe('Gemini Client (client.ts)', () => {
         role: 'model',
         parts: [{ text: 'Got it. Thanks for the context!' }],
       };
+      const marked: Content = {
+        role: 'user',
+        parts: [{ text: 'hello' }],
+      };
+      markApiHistoryPrompt(marked, 'S########1');
       const currentHistory: Content[] = [
         legacyEnv,
         legacyAck,
-        { role: 'user', parts: [{ text: 'hello' }] },
+        marked,
         { role: 'model', parts: [{ text: 'hi' }] },
       ];
       const newPrelude: Content = {
@@ -2249,7 +2254,8 @@ describe('Gemini Client (client.ts)', () => {
       };
       const mockChat: Partial<LlmChat> = {
         getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
-        getHistory: vi.fn().mockReturnValue(currentHistory),
+        getHistory: vi.fn(() => structuredClone(currentHistory)),
+        getHistoryShallow: vi.fn(() => currentHistory.map((c) => ({ ...c }))),
         setHistory: vi.fn(),
       };
       client['chat'] = mockChat as LlmChat;
@@ -2265,59 +2271,14 @@ describe('Gemini Client (client.ts)', () => {
         [newPrelude, ...currentHistory.slice(2)],
         undefined,
       );
-    });
-
-    it('preserves prompt-identity marks on the surviving history (R38-4)', async () => {
-      // The rewind identity is a Symbol-keyed property that structuredClone
-      // silently drops. A deep getHistory() read whose result is reinstalled
-      // via setHistory strips every mark from the live session while the
-      // transcript keeps its promptIds, so the read must go through the
-      // shallow accessor (spreads preserve symbol keys).
-      const marked: Content = { role: 'user', parts: [{ text: 'hello' }] };
-      markApiHistoryPrompt(marked, 'S########1');
-      const currentHistory: Content[] = [
-        {
-          role: 'user',
-          parts: [
-            {
-              text: '<system-reminder>\nold deferred reminder\n</system-reminder>',
-            },
-          ],
-        },
-        marked,
-        { role: 'model', parts: [{ text: 'hi' }] },
-      ];
-      const mockChat: Partial<LlmChat> = {
-        // Faithful accessors: getHistory deep-clones (drops the symbol
-        // mark), getHistoryShallow spreads (preserves it).
-        getHistory: vi.fn(() => structuredClone(currentHistory)),
-        getHistoryShallow: vi.fn(() => currentHistory.map((c) => ({ ...c }))),
-        getCompletedToolCallIds: vi.fn().mockReturnValue([]),
-        setHistory: vi.fn(),
-      };
-      const newPrelude: Content = {
-        role: 'user',
-        parts: [
-          { text: '<system-reminder>\nfresh prelude\n</system-reminder>' },
-        ],
-      };
-      client['chat'] = mockChat as LlmChat;
-      vi.mocked(getInitialChatHistory).mockResolvedValueOnce([
-        [newPrelude],
-        [],
-      ]);
-
-      await client.refreshStartupContextReminder();
-
       const reinstalled = vi.mocked(mockChat.setHistory!).mock
         .calls[0]![0] as Content[];
-      expect(reinstalled[0]).toEqual(newPrelude);
       expect(findApiHistoryPromptIndex(reinstalled, 'S########1')).toBe(1);
     });
   });
 
   describe('restoreStartupContextAfterCompaction', () => {
-    it('preserves prompt-identity marks when re-prepending the prelude (R38-4)', async () => {
+    it('preserves prompt-identity marks when re-prepending the prelude', async () => {
       // Same symbol-strip hazard as refreshStartupContextReminder: the
       // in-flight turn's entry is the one identity is needed for (every
       // predecessor was absorbed into the compaction summary), and a deep
@@ -12524,11 +12485,6 @@ Other open files:
       });
 
       it('leaves the retried turn unmarked while a user prompt owns its identity', async () => {
-        // Only a first-party user prompt claims an identity in model
-        // history. A retry re-enters unmarked and rewind maps it
-        // positionally, which is what it did before identities existed —
-        // guessing an identity for it from the stripped orphan's content
-        // would be the same content-shape inference this change removes.
         const mockChat: Partial<LlmChat> = {
           addHistory: vi.fn(),
           getHistory: vi.fn().mockReturnValue([]),

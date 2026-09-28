@@ -298,6 +298,7 @@ describe('useResumeCommand', () => {
       loadHistory: vi.fn(),
     };
     const startNewSession = vi.fn();
+    const seedPromptCount = vi.fn();
     const clearPendingState = vi.fn();
     const llmClient = {
       initialize: vi.fn().mockResolvedValue(undefined),
@@ -348,7 +349,7 @@ describe('useResumeCommand', () => {
         settings: mockSettings,
         historyManager,
         startNewSession,
-        seedPromptCount: vi.fn(),
+        seedPromptCount,
         clearPendingState,
       }),
     );
@@ -368,10 +369,20 @@ describe('useResumeCommand', () => {
     expect(result.current.isResumeDialogOpen).toBe(false);
 
     // Now finish the async load and let the handler complete.
+    const baseConversation = resumeMocks.makeConversation([
+      { role: 'user', parts: [{ text: 'hello' }] },
+    ]);
+    const conversation = {
+      ...baseConversation,
+      sessionId: 'session-2',
+      messages: baseConversation.messages.map((message) => ({
+        ...message,
+        sessionId: 'session-2',
+        promptId: 'session-2########2',
+      })),
+    };
     resumeMocks.resolvePendingLoadSession({
-      conversation: resumeMocks.makeConversation([
-        { role: 'user', parts: [{ text: 'hello' }] },
-      ]),
+      conversation,
     });
     await act(async () => {
       await resumePromise;
@@ -384,6 +395,10 @@ describe('useResumeCommand', () => {
       }),
     );
     expect(startNewSession).toHaveBeenCalledWith('session-2');
+    expect(seedPromptCount).toHaveBeenCalledWith(3);
+    expect(startNewSession.mock.invocationCallOrder[0]).toBeLessThan(
+      seedPromptCount.mock.invocationCallOrder[0]!,
+    );
     expect(llmClient.initialize).toHaveBeenCalledTimes(1);
     expect(llmClient.initialize).toHaveBeenCalledWith();
     expect(historyManager.clearItems).toHaveBeenCalledTimes(1);
@@ -394,106 +409,6 @@ describe('useResumeCommand', () => {
     );
     expect(resetMonitorRegistry).toHaveBeenCalledTimes(1);
     expect(config.getGoalRuntimeReady).toHaveBeenCalledTimes(1);
-  });
-
-  it('seeds the prompt counter past claimed turns after the stats reset (R38-1)', async () => {
-    // startNewSession reinstalls promptCount 0; without a seed, the next
-    // pre-increment mint re-uses an id a resumed turn still wears. The seed
-    // is highestClaim + 1 (claims here are 0-based `session-2########0..2`,
-    // so 3 — the 1-based-claims variant pins 4 in AppContainer's R37-31
-    // test) and must land AFTER the reset.
-    resumeMocks.reset();
-    resumeMocks.createPendingLoadSession();
-
-    const historyManager = {
-      addItem: vi.fn(),
-      clearItems: vi.fn(),
-      loadHistory: vi.fn(),
-    };
-    const startNewSession = vi.fn();
-    const seedPromptCount = vi.fn();
-
-    const config = {
-      getSessionId: () => 'old-session-id',
-      getTargetDir: () => '/tmp',
-      getLlmClient: () => ({
-        initialize: vi.fn().mockResolvedValue(undefined),
-      }),
-      startNewSession: vi.fn(),
-      getGoalRuntimeReady: vi.fn().mockResolvedValue({}),
-      getBackgroundTaskRegistry: () => ({
-        hasRunningTasks: vi.fn().mockReturnValue(false),
-        reset: vi.fn(),
-      }),
-      getBackgroundShellRegistry: () => ({
-        getAll: vi.fn().mockReturnValue([]),
-        hasRunningEntries: vi.fn().mockReturnValue(false),
-        reset: vi.fn(),
-      }),
-      getMonitorRegistry: () => ({
-        getRunning: vi.fn().mockReturnValue([]),
-        reset: vi.fn(),
-      }),
-      getWorkflowRunRegistry: () => ({
-        hasRunningEntries: vi.fn().mockReturnValue(false),
-        list: vi.fn().mockReturnValue([]),
-        listStartingRunIds: vi.fn().mockReturnValue([]),
-        reset: vi.fn(),
-        abortAll: vi.fn(),
-      }),
-      loadPausedBackgroundAgents: vi.fn().mockResolvedValue([]),
-      getBackgroundAgentResumeService: () => ({
-        buildRecoveredBackgroundAgentsNotice: vi.fn(),
-      }),
-      getChatRecordingService: () => ({ rebuildTurnBoundaries: vi.fn() }),
-      getDebugLogger: () => ({
-        warn: vi.fn(),
-        debug: vi.fn(),
-        error: vi.fn(),
-      }),
-    } as unknown as import('@qwen-code/qwen-code-core').Config;
-
-    const { result } = renderHook(() =>
-      useResumeCommand({
-        config,
-        settings: mockSettings,
-        historyManager,
-        startNewSession,
-        seedPromptCount,
-      }),
-    );
-
-    let resumePromise: Promise<void> | undefined;
-    act(() => {
-      resumePromise = result.current.handleResume('session-2');
-    });
-    resumeMocks.resolvePendingLoadSession({
-      conversation: {
-        sessionId: 'session-2',
-        projectHash: 'project-1',
-        startTime: '2026-07-11T00:00:00.000Z',
-        lastUpdated: '2026-07-11T00:00:03.000Z',
-        messages: [0, 1, 2].map((turn) => ({
-          uuid: `m-${turn}`,
-          parentUuid: turn === 0 ? null : `m-${turn - 1}`,
-          sessionId: 'session-2',
-          timestamp: '2026-07-11T00:00:00.000Z',
-          type: 'user',
-          cwd: '/tmp/project',
-          version: 'test',
-          message: { role: 'user', parts: [{ text: `turn ${turn}` }] },
-          promptId: `session-2########${turn}`,
-        })),
-      },
-    });
-    await act(async () => {
-      await resumePromise;
-    });
-
-    expect(seedPromptCount).toHaveBeenCalledWith(3);
-    expect(startNewSession.mock.invocationCallOrder[0]).toBeLessThan(
-      seedPromptCount.mock.invocationCallOrder[0]!,
-    );
   });
 
   it('handleResume routes history replacement through the loadHistory override', async () => {

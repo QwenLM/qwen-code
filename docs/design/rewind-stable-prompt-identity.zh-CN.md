@@ -14,21 +14,18 @@ TUI 回退（rewind）此前通过统计两套互相独立的表示，来对齐�
 - 把该 id 持久化在用户 `ChatRecord` 上。
 - 以 Symbol 元数据的形式挂到对应的内存态 API `Content` 上，因此不会被发送给模型提供方。
 - 在记录、压缩、resume 与 branch 各条路径上保留该元数据。
-- 当恰好只有一条模型历史条目携带该 id 时，通过精确的 id 查找来解析被标识的回退目标。
-- 当任意一侧出现重复 id 时返回 `-1`：存在两个声明者意味着位置映射只能在它们之间靠猜。
-- 当没有任何模型历史条目携带该 id 时，回落到位置映射。只有第一方用户 prompt 会被打标记——
-  retry、continuation、tool result 与 cron 发送都刻意不打——因此"没有标记"是预期状态，而不是歧义。
-- 对没有 id 的历史轮次，以及 id 仅为 file-history key 的已恢复 checkpoint 条目，保留既有的位置映射。
+- 被标识的回退目标只通过精确 id 查找解析，并要求该 id 在两侧都唯一。
+- 任意一侧缺失或重复该 id 时返回 `-1`，不再用位置映射猜测。
+- 只有没有 id 的旧历史轮次保留既有的位置映射。
 
-第一个可见轮次仍然解析到已知的 startup-context 边界。
 既有的压缩守卫继续拒绝那些已被无标记压缩前缀吸收的轮次。
 
 ## 身份生命周期
 
 交互式、headless 与 ACP 三类入口都会铸造形如 `sessionId########<counter>` 的 id。
 resume 与 fork 路径会把计数器播种（seed）到该 transcript 的记录所声明的身份之上，
-使新轮次不会复用已有的 key。所有被播种的入口都以同一种方式推导该值，
-只依据已记录的 prompt id（`computeResumedPromptCountSeed`），因此不存在某个入口比别的入口播得更远的情况。
+使新轮次不会复用已有的 key。startup、resume 与 branch 都通过
+`computeResumedPromptCountSeed` 使用同一条规则。
 
 重复 id 仍然可能出现：本次改动之前写下的 transcript 不带记录级 id；
 而当一次"仅回退对话"的操作把某个轮次从 transcript 中丢掉时，
@@ -41,6 +38,10 @@ file-history snapshot 的 key 可能比声明它的轮次活得更久。
 
 压缩记录会把 prompt id 持久化为一个与其历史快照平行的数组。
 恢复某个压缩 checkpoint 时，会把每个 id 重新挂回同一条目。
+
+`/restore` 创建的 JSON checkpoint 无法保存 Symbol 元数据。
+其中的 file key 仍可用于只恢复文件，但对话回退会显式失败，
+而不会对已带 id 的轮次应用位置映射。
 
 ## 范围
 

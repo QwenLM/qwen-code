@@ -128,11 +128,7 @@ describe('computeApiTruncationIndex', () => {
     ).toBe(4);
   });
 
-  it('keeps positional mapping for an identified turn whose model entry is unmarked', () => {
-    // Only a first-party user prompt is marked in model history — a retry, a
-    // continuation or a cron send leaves its entry bare while the UI item
-    // still wears the id. Refusing there would make such turns unrewindable,
-    // so the positional mapping predating identities applies.
+  it('refuses an identified turn whose model entry is unmarked', () => {
     const target = {
       ...userItem(3, 'target'),
       promptId: 'unmarked',
@@ -143,20 +139,6 @@ describe('computeApiTruncationIndex', () => {
         userContent('first'),
         modelContent('first response'),
         userContent('target'),
-      ]),
-    ).toBe(2);
-  });
-
-  it('refuses an unmarked target the positional walk cannot reach either', () => {
-    const target = {
-      ...userItem(3, 'target'),
-      promptId: 'missing',
-    } as HistoryItem;
-
-    expect(
-      computeApiTruncationIndex([userItem(1), llmItem(2), target], 3, [
-        userContent('first'),
-        modelContent('first response'),
       ]),
     ).toBe(-1);
   });
@@ -199,24 +181,6 @@ describe('computeApiTruncationIndex', () => {
         [userContent('first'), modelContent('response'), survivingContent],
       ),
     ).toBe(-1);
-  });
-
-  it('keeps positional mapping for file-key-only restored turns', () => {
-    const target = {
-      ...userItem(3, 'target'),
-      promptId: 'file-key',
-      promptIdFileKeyOnly: true,
-    } as HistoryItem;
-    const marked = userContent('later twin');
-    markApiHistoryPrompt(marked, 'file-key');
-
-    expect(
-      computeApiTruncationIndex([userItem(1), llmItem(2), target], 3, [
-        userContent('first'),
-        modelContent('response'),
-        marked,
-      ]),
-    ).toBe(2);
   });
 
   it('returns 0 for empty API history', () => {

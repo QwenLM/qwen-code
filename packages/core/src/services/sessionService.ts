@@ -4138,11 +4138,7 @@ export class SessionService {
           sessionId: newSessionId,
           cwd: this.projectRoot,
           systemPayload,
-          // The record-side identity must follow the session id the same
-          // way snapshot ids do: parseSessionPromptTurn keys claims on the
-          // exact `${sessionId}########` prefix, so an unremapped record id
-          // is invisible to the fork's prompt-count seed and the next live
-          // mint can re-mint an id an inherited snapshot already wears.
+          // Keep record identities in the fork's session namespace.
           ...(typeof record.promptId === 'string'
             ? {
                 promptId: remapForkPromptId(

@@ -105,6 +105,7 @@ import {
   describeDeliveryStatus,
   describeDropReason,
   PEER_ADMISSION_LIMITS,
+  markApiHistoryPrompt,
   WorktreeRestoreRefusedError,
   type DropNotice,
   type HeldMessage,
@@ -773,10 +774,14 @@ describe('AppContainer State Management', () => {
     promptId,
   });
 
-  const apiUser = (text: string): Content => ({
-    role: 'user',
-    parts: [{ text }],
-  });
+  const apiUser = (text: string, promptId?: string): Content => {
+    const content: Content = {
+      role: 'user',
+      parts: [{ text }],
+    };
+    markApiHistoryPrompt(content, promptId);
+    return content;
+  };
 
   const apiModel = (text: string): Content => ({
     role: 'model',
@@ -833,9 +838,9 @@ describe('AppContainer State Management', () => {
     });
 
     const apiHistory = options.apiHistory ?? [
-      apiUser('first prompt'),
+      apiUser('first prompt', 'prompt-1'),
       apiModel('first response'),
-      apiUser('second prompt'),
+      apiUser('second prompt', 'prompt-2'),
       apiModel('second response'),
     ];
     const getHistoryShallow = vi.fn(() => apiHistory);
@@ -8123,7 +8128,7 @@ describe('AppContainer State Management', () => {
       expect(announcementCalls(addItem)).toHaveLength(1);
     });
 
-    it('seeds the prompt counter past ACP-minted promptIds on resume (R37-31)', async () => {
+    it('seeds the prompt counter past ACP-minted promptIds on resume', async () => {
       // ACP and headless mint `sessionId########<n>` 1-based and skip
       // turns that write no record, while the TUI mint is pre-increment.
       // Seeding the resume from a bare user-message count therefore

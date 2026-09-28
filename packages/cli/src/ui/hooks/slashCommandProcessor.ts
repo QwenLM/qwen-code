@@ -881,11 +881,7 @@ export const useSlashCommandProcessor = (
       oneTimeShellAllowlist?: Set<string>,
       overwriteConfirmed?: boolean,
       existingInvocationItemId?: number,
-      // The minted id of the turn this invocation's submit_prompt content
-      // will be sent under. Echoed onto the invocation item when the command
-      // submits to the model, so the rendered turn and its marked API entry
-      // share one identity and rewind can resolve the turn by id instead of
-      // falling back to positional order.
+      // Identity shared by the invocation item and submitted prompt.
       invocationPromptId?: string,
     ): Promise<SlashCommandProcessorResult | false> => {
       if (typeof rawQuery !== 'string') {

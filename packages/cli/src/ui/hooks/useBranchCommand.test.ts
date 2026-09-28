@@ -191,7 +191,7 @@ describe('useBranchCommand', () => {
     expect(blockedItem.text).toContain('[bg_ab12cd34]');
   });
 
-  it('seeds the prompt counter past the forked transcript claims (R38-1)', async () => {
+  it('seeds the prompt counter past the forked transcript claims', async () => {
     // The fork's records are remapped to the new session id by forkSession;
     // startNewSession reinstalls promptCount 0, so without a seed the next
     // pre-increment mint re-uses an id the forked transcript still wears.

@@ -552,10 +552,7 @@ describe('LlmChat', async () => {
     });
 
     it('marks the pushed user entry with the send promptId', async () => {
-      // The single hop that makes rewind identity work in a live session:
-      // the mark goes on the entry at push time, and must survive the
-      // accessor the rewind path actually reads (`getHistoryShallow`, see
-      // AppContainer's handleRewindConfirm).
+      // Rewind reads this mark through getHistoryShallow.
       vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
         async () => streamResponse(stopResponse([{ text: 'ok' }])),
       );
@@ -580,8 +577,7 @@ describe('LlmChat', async () => {
       expect(
         getApiHistoryPromptId(await send({ promptId: 'session########7' })),
       ).toBe('session########7');
-      // No identity supplied (retry, continuation, tool result): unmarked, so
-      // rewind stays on the positional path for that turn.
+      // No identity supplied (retry, continuation, tool result): unmarked.
       expect(getApiHistoryPromptId(await send())).toBeUndefined();
     });
 
@@ -5794,19 +5790,13 @@ describe('LlmChat', async () => {
       ).toBe(200);
     });
 
-    it('persists the in-flight user turn in the in-send compression snapshot (R38-2 follow-up)', async () => {
-      // The in-send auto-compaction runs BEFORE the turn's user content is
-      // pushed, and the resume side replaces history wholesale at the
-      // compression record: a snapshot recorded without the pending turn
-      // resurrects the model's answer with its question gone.
+    it('persists the in-flight user turn in the in-send compression snapshot', async () => {
+      // Resume replaces history with this pre-push compression snapshot.
       const compressedHistory: Content[] = [
         { role: 'user', parts: [{ text: 'COMPACTION_SUMMARY' }] },
         { role: 'model', parts: [{ text: 'ACK' }] },
       ];
-      // The real service derives promptIds EAGERLY at record time
-      // (chatRecordingService.recordChatCompression maps the frozen copy
-      // synchronously); derive inside the mock so a mark landing after the
-      // record is not visible to this test.
+      // Derive ids synchronously, as the real recording service does.
       const recordedPromptIds: Array<Array<string | null>> = [];
       const recordChatCompression = vi.fn(
         (payload: { compressedHistory: Content[] }) => {
@@ -5864,15 +5854,11 @@ describe('LlmChat', async () => {
           content.parts?.map((part) => part.text).join(''),
         ),
       ).toEqual(['COMPACTION_SUMMARY', 'ACK', 'QUESTION_P']);
-      // The mark must already be on the recorded copy: the recording
-      // service derives promptIds eagerly at record time and the resume
-      // side re-attaches them positionally.
+      // The mark must already be on the recorded copy.
       const promptIds = recordedPromptIds[0]!;
       expect(promptIds).toEqual([null, null, promptId]);
 
-      // Round-trip the persisted transcript shape — the turn's own user
-      // record, then the compression record, then the model answer —
-      // through the resume builder.
+      // Round-trip the persisted shape through the resume builder.
       const resumed = buildApiHistoryFromConversation({
         messages: [
           {

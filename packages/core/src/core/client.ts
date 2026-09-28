@@ -1687,11 +1687,7 @@ export class LlmClient {
       return;
     }
 
-    // Read through the shallow accessor: getHistory()'s structuredClone
-    // drops the Symbol-keyed prompt identities (R38-4), and the setHistory
-    // below would reinstall the live history unmarked. Both switched sites
-    // only read the container/part structure, honoring getHistoryShallow's
-    // no-leaf-mutation contract.
+    // A deep clone drops Symbol-keyed prompt identities before reinstall.
     const currentHistory =
       this.getChat().getHistoryShallow?.() ?? this.getChat().getHistory();
     const startupLength = getStartupContextLength(currentHistory);
@@ -1735,8 +1731,7 @@ export class LlmClient {
       return;
     }
 
-    // Shallow read for the same reason as refreshStartupContextReminder:
-    // the in-flight turn's prompt identity must survive this reinstall.
+    // Preserve the in-flight turn's Symbol-keyed prompt identity.
     const currentHistory =
       this.getChat().getHistoryShallow?.() ?? this.getChat().getHistory();
     if (getStartupContextLength(currentHistory) !== 0) {
@@ -4057,9 +4052,8 @@ export class LlmClient {
         this.getChat(),
         prompt_id,
         goalPermit,
-        // Only a first-party user prompt owns its identity in model history.
-        // Every other send (retry, continuation, tool result, cron) leaves
-        // the entry unmarked and stays on the positional rewind path.
+        // Only a first-party user prompt opens a rewindable identity. Re-entry
+        // stays unmarked, so a replaced identified turn fails closed.
         messageType === SendMessageType.UserQuery ? prompt_id : undefined,
       );
 
