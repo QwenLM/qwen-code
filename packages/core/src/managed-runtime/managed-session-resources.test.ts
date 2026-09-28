@@ -8,11 +8,39 @@ import { createHash } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { SessionWriterLease } from '../services/session-writer-lease.js';
 import { LocalManagedSessionAuthority } from './managed-session-authority.js';
 import { LocalManagedSessionResourceStore } from './managed-session-resources.js';
 import type { ManagedSessionDurableRef } from './managed-session-records.js';
+
+type DirectorySyncFault = (Error & NodeJS.ErrnoException) | null;
+
+const directorySyncFault = vi.hoisted<{ error: DirectorySyncFault }>(() => ({
+  error: null,
+}));
+
+// Everything stays real except the directory fsync. The store imports `open`
+// by name, so `vi.spyOn` cannot reach it; the seam is the same one
+// `services/sessionService.test.ts` uses for its own directory-sync fault
+// case. `syncDirectory` opens the containing directory read-only purely to
+// fsync it, while `publish` opens the pending file `'wx'` — so fault only the
+// `'r'` handle. The pending-file sync runs earlier and must keep succeeding,
+// or `publish` never reaches the guard these cases pin.
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return {
+    ...actual,
+    open: async (...args: Parameters<typeof actual.open>) => {
+      const handle = await actual.open(...args);
+      const failure = directorySyncFault.error;
+      if (failure !== null && args[1] === 'r') {
+        handle.sync = () => Promise.reject(failure);
+      }
+      return handle;
+    },
+  };
+});
 
 const temporaryDirectories = new Set<string>();
 
@@ -239,5 +267,78 @@ describe('managed session input durability', () => {
     });
     expect(await recoveredStore.read(recoveredRef)).toEqual(prompt);
     await reopenLease.release();
+  });
+});
+
+describe('directory sync refusal', () => {
+  // `syncDirectory` tolerates a refused directory fsync only on win32, and
+  // only for the three codes the sibling stores carrying this identical guard
+  // tolerate (`services/session-writer-lease.ts`, `serve/conversations/
+  // standalone-deletion-journal.ts`). Neither premise was pinned before: a
+  // real directory fsync succeeds on the Linux lane that gates this PR, so the
+  // whole catch body never ran. Widening it is not harmless — `publish` would
+  // resolve a ref whose rename was never persisted, the transaction would
+  // record it, and the loss would surface much later as `read` reporting the
+  // resource absent ("a failure, not a cache miss").
+  async function withDirectorySyncRefusal<T>(
+    platform: NodeJS.Platform,
+    code: string,
+    body: (context: {
+      store: LocalManagedSessionResourceStore;
+      failure: Error & NodeJS.ErrnoException;
+    }) => Promise<T>,
+  ): Promise<T> {
+    const platformStub = vi
+      .spyOn(process, 'platform', 'get')
+      .mockReturnValue(platform);
+    const failure = Object.assign(new Error('directory sync refused'), {
+      code,
+    });
+    directorySyncFault.error = failure;
+    try {
+      const { store } = await createStore();
+      return await body({ store, failure });
+    } finally {
+      // This file's `afterEach` does not restore mocks, so both the fault and
+      // the platform stub are cleared here or they leak into every later case.
+      directorySyncFault.error = null;
+      platformStub.mockRestore();
+    }
+  }
+
+  it.each(['EACCES', 'EINVAL', 'EPERM'] as const)(
+    'tolerates the win32 %s refusal and still round trips the bytes',
+    async (code) => {
+      await withDirectorySyncRefusal('win32', code, async ({ store }) => {
+        const content = Buffer.from('bytes that outlive the refusal', 'utf8');
+        const ref = await store.publish('managed-input', content);
+        expect(ref.byteLength).toBe(content.byteLength);
+        expect(await store.read(ref)).toEqual(content);
+      });
+    },
+  );
+
+  it('rejects a win32 refusal outside the tolerated codes', async () => {
+    await withDirectorySyncRefusal(
+      'win32',
+      'EIO',
+      async ({ store, failure }) => {
+        await expect(
+          store.publish('managed-input', Buffer.from('x', 'utf8')),
+        ).rejects.toBe(failure);
+      },
+    );
+  });
+
+  it('does not swallow the same refusal off win32', async () => {
+    await withDirectorySyncRefusal(
+      'linux',
+      'EPERM',
+      async ({ store, failure }) => {
+        await expect(
+          store.publish('managed-input', Buffer.from('x', 'utf8')),
+        ).rejects.toBe(failure);
+      },
+    );
   });
 });

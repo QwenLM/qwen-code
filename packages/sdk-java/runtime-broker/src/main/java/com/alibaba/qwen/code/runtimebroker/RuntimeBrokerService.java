@@ -3,6 +3,11 @@ package com.alibaba.qwen.code.runtimebroker;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.HexFormat;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -154,7 +159,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
         requireOpen();
         String harnessId = BrokerValues.requireId(harnessSessionId,
                 "harnessSessionId");
-        String runtimeId = BrokerValues.requireId(runtimeSessionId,
+        String runtimeId = BrokerValues.requireWellFormed(
+                BrokerValues.requireId(runtimeSessionId, "runtimeSessionId"),
                 "runtimeSessionId");
         return resolveScope(harnessId).thenCompose(scope -> {
             RuntimeSession session = new RuntimeSession(harnessId,
@@ -203,9 +209,66 @@ public final class RuntimeBrokerService implements AutoCloseable {
         requireOpen();
         String key = BrokerValues.requireId(idempotencyKey,
                 "idempotencyKey");
+        if (reference == null || reference.containsKey("dispatchMode")) {
+            throw invalid("runtime_reference_invalid", "dispatchMode is reserved");
+        }
         return requireReadySession(harnessSessionId, runtimeSessionId)
                 .thenApply(context -> createExecution(context, key,
-                        reference));
+                        reference, true));
+    }
+
+    public CompletionStage<ToolExecutionRecord> prepareExecution(
+            String harnessSessionId, String runtimeSessionId,
+            String idempotencyKey, Map<String, Object> reference) {
+        requireOpen();
+        String key = BrokerValues.requireId(idempotencyKey, "idempotencyKey");
+        if (reference == null || !reference.keySet().equals(Set.of("sessionId", "promptId", "callId", "argsDigest"))
+                || !(reference.get("argsDigest") instanceof String digest)
+                || !digest.matches("sha256:[0-9a-f]{64}")) {
+            throw invalid("runtime_reference_invalid", "Deferred execution reference is invalid");
+        }
+        Map<String, Object> deferred = new LinkedHashMap<>(reference);
+        deferred.put("dispatchMode", "deferred");
+        return requireReadySession(harnessSessionId, runtimeSessionId)
+                .thenApply(context -> createExecution(context, key, deferred, false));
+    }
+
+    public CompletionStage<ToolExecutionRecord> startExecution(
+            String harnessSessionId, String runtimeSessionId,
+            String executionCallId, String payloadJson) {
+        requireOpen();
+        String executionId = BrokerValues.requireId(executionCallId, "executionCallId");
+        return requireReadySession(harnessSessionId, runtimeSessionId).thenApply(context -> {
+            ToolExecutionRecord record = requireExecution(context, executionId);
+            if (!"deferred".equals(record.getReference().get("dispatchMode"))) {
+                throw conflict("runtime_execution_conflict", "Execution was not reserved for deferred dispatch");
+            }
+            byte[] bytes = BrokerValues.requireWellFormed(payloadJson, "payloadJson")
+                    .getBytes(StandardCharsets.UTF_8);
+            if (bytes.length > 256 * 1024) {
+                throw invalid("runtime_payload_invalid", "Tool payload exceeds 256 KiB");
+            }
+            String digest;
+            try {
+                digest = "sha256:" + HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
+            } catch (NoSuchAlgorithmException exception) {
+                throw new IllegalStateException(exception);
+            }
+            if (!digest.equals(record.getRequestDigest())) {
+                throw conflict("runtime_idempotency_conflict", "Tool payload differs from its reserved digest");
+            }
+            Map<String, Object> payload = JsonCodec.parseObject(bytes, "tool payload");
+            if (!payload.keySet().equals(Set.of("toolName", "input"))
+                    || !(payload.get("toolName") instanceof String toolName) || toolName.isEmpty()
+                    || !(payload.get("input") instanceof Map)) {
+                throw invalid("runtime_payload_invalid", "Tool payload is invalid");
+            }
+            if (shouldDriveDispatch(record)) {
+                beginDispatch(context, record, payload);
+            }
+            ToolExecutionRecord latest = executionRepository.findByExecutionCallId(executionId);
+            return latest == null ? record : latest;
+        });
     }
 
     public CompletionStage<ToolExecutionRecord> getExecution(
@@ -513,7 +576,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
     }
 
     private ToolExecutionRecord createExecution(SessionContext context,
-            String idempotencyKey, Map<String, Object> reference) {
+            String idempotencyKey, Map<String, Object> reference, boolean dispatch) {
         ToolExecutionRecord record;
         synchronized (context) {
             requireReadySessionRecord(context);
@@ -548,7 +611,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
                         "idempotency key belongs to another request");
             }
         }
-        if (shouldDriveDispatch(record)) {
+        if (dispatch && shouldDriveDispatch(record)) {
             beginDispatch(context, record);
         }
         ToolExecutionRecord current = executionRepository
@@ -875,7 +938,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
             RuntimeBindingRecord claimed) {
         RuntimeProvisionRequest request = claimed.getRequest();
         RuntimeProvisionSeed seed = claimed.getProvisionSeed();
-        if (seed == null) {
+        if (seed == null || (request.isManagedContext()
+                && claimed.getResourceHandle() != null)) {
             blockRecovery(claimed);
             releaseOperationQuietly(claimed.getBindingId(),
                     claimed.getOperationGeneration());
@@ -895,11 +959,20 @@ public final class RuntimeBrokerService implements AutoCloseable {
         ScheduledFuture<?> deadlineTask;
         try {
             deadlineTask = scheduler.schedule(() -> {
-                renewal.close();
-                releaseOperationQuietly(bindingId, operationGeneration);
-                operation.completeExceptionally(unavailable(
-                        "runtime_broker_provision_timeout",
-                        "Managed Runtime provisioning timed out."));
+                boolean blocked = false;
+                try {
+                    RuntimeBindingRecord timedOut = renewal.stopAndGet();
+                    blocked = request.isManagedContext() && timedOut != null
+                            && blockRecoveryQuietly(timedOut, null);
+                } finally {
+                    releaseOperationQuietly(bindingId, operationGeneration);
+                    // A retry cannot succeed once the binding is blocked.
+                    operation.completeExceptionally(blocked
+                            ? conflict("runtime_broker_recovery_blocked",
+                                    "Managed Runtime recovery is blocked.")
+                            : unavailable("runtime_broker_provision_timeout",
+                                    "Managed Runtime provisioning timed out."));
+                }
             }, operationDeadlineNanos(), TimeUnit.NANOSECONDS);
         } catch (RuntimeException scheduleFailure) {
             renewal.stopAndGet();
@@ -934,11 +1007,19 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     try {
                         if (error != null) {
                             Throwable cause = unwrap(error);
+                            boolean retryable = !(cause instanceof RuntimeBrokerException
+                                    brokerFailure) || brokerFailure.isRetryable();
                             if (currentClaim != null) {
-                                if (cause instanceof RuntimeBrokerException
-                                        brokerFailure
-                                        && !brokerFailure.isRetryable()) {
-                                    blockRecovery(currentClaim);
+                                if (request.isManagedContext() || !retryable) {
+                                    // A retry cannot succeed once the binding
+                                    // is blocked, so say so.
+                                    if (blockRecoveryQuietly(currentClaim, cause)
+                                            && retryable) {
+                                        throw conflict(
+                                                "runtime_broker_recovery_blocked",
+                                                "Managed Runtime recovery is blocked.",
+                                                cause);
+                                    }
                                 } else if (currentClaim
                                         .getResourceHandle() == null) {
                                     failBinding(currentClaim);
@@ -1361,10 +1442,34 @@ public final class RuntimeBrokerService implements AutoCloseable {
         return ensureBinding(request);
     }
 
-    private void blockRecovery(RuntimeBindingRecord claimed) {
-        bindingRepository.compareAndSet(claimed, claimed.withState(
+    private boolean blockRecovery(RuntimeBindingRecord claimed) {
+        return bindingRepository.compareAndSet(claimed, claimed.withState(
                 RuntimeBindingRecord.State.RECOVERY_BLOCKED,
-                claimed.getLease(), clock.instant()));
+                claimed.getLease(), clock.instant())) != null;
+    }
+
+    /**
+     * Blocks recovery and answers whether the binding is now blocked. The
+     * deadline and the failure handler hold the same claim, so the one that
+     * writes second finds the block already there. A write or read that
+     * fails answers false, and the failure is kept on {@code cause}.
+     */
+    private boolean blockRecoveryQuietly(RuntimeBindingRecord claimed,
+            Throwable cause) {
+        try {
+            if (blockRecovery(claimed)) {
+                return true;
+            }
+            RuntimeBindingRecord latest = bindingRepository.findById(
+                    claimed.getBindingId());
+            return latest != null && latest.getState()
+                    == RuntimeBindingRecord.State.RECOVERY_BLOCKED;
+        } catch (RuntimeException failure) {
+            if (cause != null) {
+                cause.addSuppressed(failure);
+            }
+            return false;
+        }
     }
 
     private void blockRecovery(String bindingId, long operationGeneration) {
@@ -1398,6 +1503,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 && lease.getLeaseId().equals(attestation.getLeaseId())
                 && lease.getEpoch() == attestation.getEpoch()
                 && request.getScope().equals(attestation.getScope())
+                && java.util.Objects.equals(request.getStorageId(),
+                        attestation.getStorageId())
                 && seed.getProvisionRequestId().equals(
                         attestation.getProvisionRequestId());
     }
@@ -1500,6 +1607,15 @@ public final class RuntimeBrokerService implements AutoCloseable {
 
     private void beginDispatch(SessionContext context,
             ToolExecutionRecord prepared) {
+        beginDispatch(context, prepared, null);
+    }
+
+    private void beginDispatch(SessionContext context,
+            ToolExecutionRecord prepared, Map<String, Object> payload) {
+        if (payload == null && "deferred".equals(prepared.getReference().get("dispatchMode"))
+                && !prepared.isCancelRequested()) {
+            throw conflict("runtime_execution_conflict", "Deferred execution requires its original payload");
+        }
         CompletableFuture<Void> created = new CompletableFuture<>();
         CompletableFuture<Void> existing = dispatches.putIfAbsent(
                 prepared.getExecutionCallId(), created);
@@ -1508,7 +1624,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
         }
         CompletionStage<Void> operation;
         try {
-            operation = dispatch(context, prepared);
+            operation = dispatch(context, prepared, payload);
         } catch (RuntimeException | Error exception) {
             dispatches.remove(prepared.getExecutionCallId(), created);
             created.completeExceptionally(exception);
@@ -1526,7 +1642,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
     }
 
     private CompletionStage<Void> dispatch(SessionContext context,
-            ToolExecutionRecord prepared) {
+            ToolExecutionRecord prepared, Map<String, Object> payload) {
         ToolExecutionRecord claimed = executionRepository.claimDispatch(
                 prepared.getExecutionCallId(), brokerOwnerId,
                 dispatchLeaseDuration);
@@ -1559,8 +1675,9 @@ public final class RuntimeBrokerService implements AutoCloseable {
             throw exception;
         }
         invocations.add(executing.getExecutionCallId());
-        return safeStage(() -> transport.execute(context.lease(),
-                context.session(), executing.getReference()))
+        return safeStage(() -> payload == null
+                ? transport.execute(context.lease(), context.session(), executing.getReference())
+                : transport.execute(context.lease(), context.session(), executing.getReference(), payload))
                 .<Void>handle((result, error) -> {
                     // Stop counting as running before the outcome is
                     // written, so a cancel that reads that outcome does not
@@ -2048,10 +2165,16 @@ public final class RuntimeBrokerService implements AutoCloseable {
 
     private RuntimeProvisionRequest provisionRequest(
             RuntimeScope scope, String harnessSessionId) {
-        return new RuntimeProvisionRequest(scope,
-                "session".equals(scope.getIsolationClass())
-                        ? harnessSessionId : null,
-                provisioner.kind());
+        try {
+            return provisioner.createRequest(scope,
+                    "session".equals(scope.getIsolationClass())
+                            ? harnessSessionId : null);
+        } catch (IllegalArgumentException exception) {
+            // A managed-context provisioner refuses a scope it cannot place,
+            // such as one without a storage ID, rather than fall back.
+            throw new RuntimeBrokerException(400, "runtime_placement_invalid",
+                    "Runtime placement is invalid", false, exception);
+        }
     }
 
     private static void requireSameSession(RuntimeSession actual,
@@ -2078,7 +2201,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     "reference " + field + " is required");
         }
         try {
-            return BrokerValues.requireId((String) value,
+            return BrokerValues.requireWellFormed(BrokerValues.requireId(
+                    (String) value, "reference." + field),
                     "reference." + field);
         } catch (IllegalArgumentException exception) {
             throw invalid("runtime_reference_invalid",

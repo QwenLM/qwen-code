@@ -79,6 +79,35 @@ describe('AgentCore skill-gate inputs', () => {
   }
 
   describe('declared', () => {
+    it.each([ToolMode.Direct, ToolMode.CodeMode, ToolMode.CodeModeOnly])(
+      'keeps an explicit empty runtime tool list empty in %s',
+      async (toolMode) => {
+        const config = makeFakeConfig({ toolMode });
+        const registry = new ToolRegistry(config);
+        vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+        registry.registerTool(new ExecTool(config));
+        registry.registerTool(new MockTool({ name: ToolNames.READ_FILE }));
+        const core = new AgentCore(
+          'no-tools',
+          config,
+          { systemPrompt: '' },
+          { model: 'test-model' },
+          { max_turns: 1 },
+          { tools: [] },
+        );
+
+        expect(await core.prepareTools()).toEqual([]);
+        expect(executable(core, ToolNames.EXEC)).toBe(false);
+        expect(executable(core, ToolNames.READ_FILE)).toBe(false);
+        const inherited = (
+          core as unknown as {
+            getInheritedToolExecutionAllowlist: () => readonly string[];
+          }
+        ).getInheritedToolExecutionAllowlist();
+        expect(inherited).toEqual([]);
+      },
+    );
+
     it('excludes a tool the disallowedTools blocklist removed', async () => {
       // `tools: ['*']` says "everything", so a `toolConfig`-based read reports
       // SKILL as available; the blocklist is applied after, to the list.
