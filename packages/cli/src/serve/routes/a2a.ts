@@ -105,6 +105,7 @@ function rateLimitExceeded(res: Response): void {
 function authenticateA2A(
   registry: WorkspaceRegistry,
   rateLimiter?: Pick<RateLimiterInstance, 'checkRate'>,
+  isEnabledFor?: (workspaceCwd: string) => boolean,
 ): RequestHandler {
   return async (request, res, next) => {
     const req = request as A2ARequest;
@@ -126,7 +127,15 @@ function authenticateA2A(
     const callerId = req.get(HEADER_CALLER);
     const agentId = req.get(HEADER_AGENT);
     const runtime = workspaceId ? runtimeFor(registry, workspaceId) : undefined;
-    if (!authorization || !callerId || !agentId || !runtime) {
+    // A workspace that has since opted out keeps its grants on disk; they
+    // stop working with the rest of its collaboration surface.
+    if (
+      !authorization ||
+      !callerId ||
+      !agentId ||
+      !runtime ||
+      (isEnabledFor !== undefined && !isEnabledFor(runtime.workspaceCwd))
+    ) {
       next();
       return;
     }
@@ -560,6 +569,7 @@ export function registerA2ATransportRoutes(
   app: Application,
   workspaceRegistry: WorkspaceRegistry,
   rateLimiter?: Pick<RateLimiterInstance, 'checkRate'>,
+  isEnabledFor?: (workspaceCwd: string) => boolean,
 ): void {
   app.get(`/${A2A_AGENT_CARD_PATH}`, (req: Request, res: Response): void => {
     res.setHeader('A2A-Version', A2A_PROTOCOL_VERSION);
@@ -571,7 +581,7 @@ export function registerA2ATransportRoutes(
 
   app.use(
     A2A_PATH,
-    authenticateA2A(workspaceRegistry, rateLimiter),
+    authenticateA2A(workspaceRegistry, rateLimiter, isEnabledFor),
     (req: Request, res: Response, next: NextFunction): void => {
       if (req.is(A2A_CONTENT_TYPE)) {
         req.headers['content-type'] = 'application/json';
