@@ -25,6 +25,7 @@ interface ContractFixture {
     maxResourcesPerTransaction: number;
     maxTransactionBytes: number;
     maxTransactionEvents: number;
+    maxJsonDepth: number;
     minimumWriterTokenLength: number;
     maximumWriterTokenLength: number;
     minimumLeaseDurationMs: number;
@@ -83,6 +84,10 @@ describe('Managed Session store shared contract', () => {
     );
     expect(MANAGED_SESSION_LIMITS.maxTransactionEvents).toBe(
       fixture.limits.maxTransactionEvents,
+    );
+    // The Java store parses record lines no deeper than the reader does.
+    expect(MANAGED_SESSION_LIMITS.maxJsonDepth).toBe(
+      fixture.limits.maxJsonDepth,
     );
 
     for (const resource of fixture.resources) {
