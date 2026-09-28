@@ -616,6 +616,31 @@ class HttpRuntimeTransportTest {
     }
 
     @Test
+    void installsOnlyCanonicalLoopbackPublishersWithAnExactReceipt() throws Exception {
+        RuntimeLease lease = toolLease(server.getAddress().getPort());
+        RuntimeSession session = toolSession();
+        Map<String, Object> publisher = Map.of("url", "http://127.0.0.1:1234/internal/hosted-shell-publisher/v1",
+                "token", "a".repeat(43));
+        Map<String, Object> receipt = Map.of("protocolVersion", 3, "toolResult", "managed-tool-result/1",
+                "sessionId", session.getRuntimeSessionId(), "installed", true);
+        reply.set(json(200, JsonCodec.encode(receipt)));
+        transport.installPublisherV3(lease, session, publisher).toCompletableFuture().get(2, TimeUnit.SECONDS);
+        assertEquals("/internal/managed-runtime/v3/publisher", capturedPath.get());
+        assertEquals(JSON.valueToTree(publisher), JSON.readTree(captured.get()).required("publisher"));
+        for (String url : List.of("http://localhost:1234/internal/hosted-shell-publisher/v1",
+                "http://127.0.0.1:65536/internal/hosted-shell-publisher/v1",
+                "http://127.0.0.1:1234/internal/hosted-shell-publisher/v1?redirect=evil")) {
+            assertThrows(IllegalArgumentException.class, () -> transport.installPublisherV3(lease, session,
+                    Map.of("url", url, "token", "a".repeat(43))));
+        }
+        Map<String, Object> foreign = new LinkedHashMap<>(receipt);
+        foreign.put("sessionId", "another-session");
+        reply.set(json(200, JsonCodec.encode(foreign)));
+        assertThrows(ExecutionException.class,
+                () -> transport.installPublisherV3(lease, session, publisher).toCompletableFuture().get(2, TimeUnit.SECONDS));
+    }
+
+    @Test
     void usesExplicitToolV3RoutesAndRejectsAV2Answer() throws Exception {
         RuntimeLease lease = toolLease(server.getAddress().getPort());
         RuntimeSession session = toolSession();

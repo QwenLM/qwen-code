@@ -9,6 +9,19 @@ import { SessionWriterLease } from '../services/session-writer-lease.js';
 import { managedToolDigest } from '../tools/managed-tool-protocol.js';
 import { LocalJsonlManagedSessionJournalStore } from './local-jsonl-managed-session-journal-store.js';
 import {
+  parseOperationGrant,
+  type ExtensionRun,
+  type OperationGrant,
+} from './managed-extension-record.js';
+import {
+  MANAGED_EXTENSION_RECORD_BODIES,
+  managedExtensionRecordKey,
+  managedTaskId,
+  projectManagedTask,
+  type ManagedExtensionRecordBody,
+  type ManagedSessionTaskView,
+} from './managed-extension-projection.js';
+import {
   authorizeParsedHarnessCheckpoint,
   encodeHarnessCheckpointV1,
   HARNESS_MODEL_START_PHASES,
@@ -32,6 +45,7 @@ import {
   parseManagedSessionCommitMarker,
   parseManagedSessionEvent,
   parseManagedSessionHeader,
+  parseManagedSessionRecordJson,
   type ManagedSessionActorClass,
   type ManagedSessionDomain,
   type ManagedSessionCommitMarker,
@@ -203,6 +217,29 @@ export interface ManagedSessionDomainReceipt {
   readonly revision: number;
 }
 
+/** One committed revision of a Stage H record, as its chain holds it. */
+export interface ManagedSessionExtensionRecord {
+  readonly domain: ManagedSessionDomain;
+  readonly recordId: string;
+  readonly revision: number;
+  /** The command that committed the first revision; stable for the record. */
+  readonly operationId: string;
+  readonly recordRef: ManagedSessionDurableRef;
+  /** The closed record body, parsed and frozen. */
+  readonly record: unknown;
+  readonly run: ExtensionRun;
+  readonly task: ManagedSessionTaskView;
+}
+
+export interface ManagedSessionExtensionReceipt {
+  readonly receipt: ManagedSessionCommitReceipt;
+  readonly domain: ManagedSessionDomain;
+  readonly recordId: string;
+  readonly taskId: string;
+  readonly revision: number;
+  readonly recordRef: ManagedSessionDurableRef;
+}
+
 export interface ManagedSessionInputRequest {
   readonly inputId: string;
   readonly turnId: string;
@@ -326,6 +363,16 @@ export class LocalManagedSessionAuthority {
     { revision: number; recordRef: ManagedSessionDurableRef }
   >();
   private readonly actions = new Map<string, ManagedSessionAction>();
+  /** The latest revision of each Stage H record, by its chain key. */
+  private readonly extensionRecords = new Map<
+    string,
+    ManagedSessionExtensionRecord
+  >();
+  /** Which revision each committed Stage H event carried, by sequence. */
+  private readonly extensionEvents = new Map<
+    number,
+    Omit<ManagedSessionExtensionReceipt, 'receipt'>
+  >();
 
   get committedSequence(): number {
     return this.committed;
@@ -499,6 +546,7 @@ export class LocalManagedSessionAuthority {
       }
       authority.recordRecoveryFacts(event, branches.has(event.eventId));
     }
+    await authority.rebuildExtensionRecords();
     return authority;
   }
 
@@ -620,57 +668,20 @@ export class LocalManagedSessionAuthority {
     return out;
   }
 
-  /**
-   * Persists the accepted input and the wake intent in one transaction. The
-   * wake fact is generated here because an entry may request a wake but must
-   * not author it.
-   */
+  /** Persists the accepted input and the wake intent in one transaction. */
   submitInput(
     command: ManagedSessionCommand,
     input: ManagedSessionInputRequest,
   ): Promise<ManagedSessionCommitReceipt> {
-    return this.runSerial(() => {
+    return this.runSerial(() =>
       // Read inside the lock: the committed sequence moves as other
       // transactions commit.
-      const first = this.committed + 1;
-      const occurredAt = this.now();
-      const accepted = {
-        v: MANAGED_SESSION_FORMAT_VERSION,
-        sequence: first,
-        eventId: `${input.inputId}:accepted`,
-        sessionKey: command.sessionKey,
-        kind: 'input.accepted',
-        occurredAt,
-        payload: {
-          inputId: input.inputId,
-          turnId: input.turnId,
-          source: input.source,
-          contentRef: input.contentRef,
-          deadline: input.deadline,
-          admissionRef: input.admissionRef,
-        },
-      };
-      const wake = {
-        v: MANAGED_SESSION_FORMAT_VERSION,
-        sequence: first + 1,
-        eventId: `${input.inputId}:wake`,
-        sessionKey: command.sessionKey,
-        kind: 'wake.requested',
-        occurredAt,
-        payload: {
-          wakeId: `${input.inputId}:wake`,
-          reason: input.wakeReason,
-          subject: { type: 'turn', turnId: input.turnId },
-          sourceEventId: `${input.inputId}:accepted`,
-          requiredSequence: first,
-        },
-      };
-      return this.commit(
+      this.commit(
         command,
-        [accepted, wake],
-        [{ class: 'trusted_entry' }, { class: 'authority' }],
-      );
-    });
+        inputEvents(command, input, this.committed + 1, this.now()),
+        INPUT_ACTORS,
+      ),
+    );
   }
 
   /**
@@ -1262,6 +1273,345 @@ export class LocalManagedSessionAuthority {
   }
 
   /**
+   * Commits one revision of a Stage H record (managed-extension-record/1).
+   * The resource holds exactly the closed body; its revision chain is keyed
+   * by the record's own identity and follows the journal, so the first
+   * revision must open its run and each later one must be a successor of the
+   * one before. An input commits in the same transaction, together with the
+   * wake the authority generates for it.
+   */
+  async commitExtensionRecord(
+    command: ManagedSessionCommand,
+    request: {
+      readonly domain: ManagedSessionDomain;
+      readonly record: unknown;
+      readonly input?: ManagedSessionInputRequest;
+    },
+    actor: ManagedSessionActor,
+  ): Promise<ManagedSessionExtensionReceipt> {
+    const body = MANAGED_EXTENSION_RECORD_BODIES[request.domain];
+    if (body === undefined) {
+      throw new ManagedSessionRecordError(
+        `domain ${request.domain} has no Stage H record body.`,
+      );
+    }
+    const store = this.resources;
+    if (store === undefined) {
+      throw new ManagedSessionRecordError(
+        'a resource store is required to commit domain records.',
+      );
+    }
+    return this.runSerial(async () => {
+      // A retry returns what it committed even if the domain was disabled
+      // since.
+      const replayed = this.replayedExtension(command);
+      if (replayed !== undefined) return replayed;
+      assertManagedSessionDomainEnabled(request.domain);
+      const parsed = body.parse(request.record);
+      this.assertExtensionRevision(
+        request.domain,
+        body,
+        parsed,
+        command.commandId,
+        (message) => {
+          throw new ManagedSessionConflictError(message);
+        },
+      );
+      // Refused before publishing, so a retry loop leaves no body behind.
+      this.assertCommandWritable(command);
+      this.assertExpectedSequence(command);
+      const recordRef = await store.publish(
+        `managed-${request.domain}`,
+        Buffer.from(JSON.stringify(parsed.record), 'utf8'),
+      );
+      const sequence = this.committed + 1;
+      const occurredAt = this.now();
+      const eventId = `${request.domain}:${
+        (this.domainRecords.get(request.domain)?.revision ?? 0) + 1
+      }`;
+      const values: unknown[] = [
+        {
+          v: MANAGED_SESSION_FORMAT_VERSION,
+          sequence,
+          eventId,
+          sessionKey: command.sessionKey,
+          kind: 'domain.committed',
+          occurredAt,
+          payload: {
+            domain: request.domain,
+            version: MANAGED_SESSION_FORMAT_VERSION,
+            operationId: command.commandId,
+            recordRef,
+          },
+        },
+      ];
+      const actors = [actor];
+      if (request.input !== undefined) {
+        values.push(
+          ...inputEvents(command, request.input, sequence + 1, occurredAt),
+        );
+        actors.push(...INPUT_ACTORS);
+      }
+      let applied = undefined as
+        | Omit<ManagedSessionExtensionReceipt, 'receipt'>
+        | undefined;
+      const receipt = await this.commit(command, values, actors, {
+        eventId,
+        // Applied with the rest of the transaction's state, so no reader
+        // sees the event committed and the record not.
+        apply: () => {
+          applied = this.applyExtensionRevision(
+            sequence,
+            occurredAt,
+            command.commandId,
+            request.domain,
+            parsed,
+            recordRef,
+          );
+        },
+      });
+      if (applied === undefined) {
+        // The command key named another transaction, which the replay
+        // check above refuses before anything is published.
+        throw new ManagedSessionConflictError(
+          `command ${command.commandId} was committed without a Stage H record.`,
+        );
+      }
+      return { receipt, ...applied };
+    });
+  }
+
+  /** The latest committed revision of a Stage H record, if any. */
+  extensionRecord(
+    domain: ManagedSessionDomain,
+    recordId: string,
+  ): ManagedSessionExtensionRecord | undefined {
+    return this.extensionRecords.get(
+      managedExtensionRecordKey(this.sessionKey.sessionId, domain, recordId),
+    );
+  }
+
+  /**
+   * The Session's task list, rebuilt from the committed records: newest
+   * first, then by task ID, both descending.
+   */
+  taskViews(): readonly ManagedSessionTaskView[] {
+    return [...this.extensionRecords.values()]
+      .map((record) => record.task)
+      .sort((left, right) =>
+        left.createdAt !== right.createdAt
+          ? right.createdAt - left.createdAt
+          : left.taskId < right.taskId
+            ? 1
+            : -1,
+      );
+  }
+
+  /**
+   * Issues an OperationGrant for the owner of a committed record, so it can
+   * finish the listed phases without a model activation. The operation, the
+   * revision and the plan come from committed facts: the command that opened
+   * the record, its current revision and that revision's resource. The
+   * owner, the Workspace generation and the phases are the caller's, and the
+   * slices that register phases add their checks. Nothing is journaled, so
+   * issuing again later renews the grant, and the Runtime's gate accepts
+   * another owner or scope only under a new revision of the record.
+   */
+  issueOperationGrant(request: {
+    readonly domain: ManagedSessionDomain;
+    readonly recordId: string;
+    readonly ownerId: string;
+    readonly workspaceGeneration: string;
+    readonly phases: readonly string[];
+    readonly leaseDurationMs: number;
+  }): OperationGrant {
+    const record = this.extensionRecord(request.domain, request.recordId);
+    if (record === undefined) {
+      throw new ManagedSessionConflictError(
+        `no ${request.domain} record ${request.recordId} is committed.`,
+      );
+    }
+    return parseOperationGrant({
+      sessionKey: this.sessionKey,
+      operationId: record.operationId,
+      domain: request.domain,
+      operationRevision: record.revision,
+      ownerId: request.ownerId,
+      workspaceGeneration: request.workspaceGeneration,
+      resourceScope: {
+        recordRef: record.recordRef,
+        phases: [...request.phases],
+      },
+      leaseDurationMs: request.leaseDurationMs,
+      expiresAt: this.now() + request.leaseDurationMs,
+    });
+  }
+
+  /**
+   * A retried command returns what it committed, before anything is
+   * published again.
+   */
+  private replayedExtension(
+    command: ManagedSessionCommand,
+  ): ManagedSessionExtensionReceipt | undefined {
+    const previous = this.transactions.get(
+      managedSessionCommandKey(command.operation, command.commandId),
+    );
+    if (
+      previous === undefined ||
+      !managedSessionKeysEqual(command.sessionKey, this.sessionKey)
+    ) {
+      return undefined;
+    }
+    if (previous.contentDigest !== command.contentDigest) {
+      throw new ManagedSessionConflictError(
+        `command ${command.commandId} was already committed with different content.`,
+      );
+    }
+    for (
+      let sequence = previous.receipt.firstSequence;
+      sequence <= previous.receipt.lastSequence;
+      sequence++
+    ) {
+      const committed = this.extensionEvents.get(sequence);
+      if (committed !== undefined) {
+        return {
+          receipt: {
+            ...previous.receipt,
+            committedSequence: this.committed,
+            replayed: true,
+          },
+          ...committed,
+        };
+      }
+    }
+    throw new ManagedSessionConflictError(
+      `command ${command.commandId} was committed without a Stage H record.`,
+    );
+  }
+
+  /**
+   * `operationId` is the command that commits the revision. The command that
+   * opens a record becomes its operation, so it may open no other record.
+   */
+  private assertExtensionRevision(
+    domain: ManagedSessionDomain,
+    body: ManagedExtensionRecordBody,
+    parsed: ReturnType<ManagedExtensionRecordBody['parse']>,
+    operationId: string,
+    reject: (message: string) => never,
+  ): void {
+    const previous = this.extensionRecord(domain, parsed.recordId);
+    if (previous === undefined) {
+      if (!body.isStart(parsed.record)) {
+        reject(
+          `the first revision of ${domain} record ${parsed.recordId} must open its run.`,
+        );
+      }
+      for (const record of this.extensionRecords.values()) {
+        if (record.operationId === operationId) {
+          reject(
+            `command ${operationId} already opened ${record.domain} record ${record.recordId}.`,
+          );
+        }
+      }
+      return;
+    }
+    if (!body.isSuccessor(previous.record, parsed.record)) {
+      reject(
+        `${domain} record ${parsed.recordId} cannot follow its revision ${previous.revision}.`,
+      );
+    }
+  }
+
+  private applyExtensionRevision(
+    sequence: number,
+    occurredAt: number,
+    operationId: string,
+    domain: ManagedSessionDomain,
+    parsed: ReturnType<ManagedExtensionRecordBody['parse']>,
+    recordRef: ManagedSessionDurableRef,
+  ): Omit<ManagedSessionExtensionReceipt, 'receipt'> {
+    const sessionId = this.sessionKey.sessionId;
+    const key = managedExtensionRecordKey(sessionId, domain, parsed.recordId);
+    const previous = this.extensionRecords.get(key);
+    const taskId = managedTaskId(key);
+    const record: ManagedSessionExtensionRecord = Object.freeze({
+      domain,
+      recordId: parsed.recordId,
+      revision: (previous?.revision ?? 0) + 1,
+      operationId: previous?.operationId ?? operationId,
+      recordRef,
+      record: parsed.record,
+      run: parsed.run,
+      task: Object.freeze({
+        taskId,
+        sessionId,
+        kind: MANAGED_EXTENSION_RECORD_BODIES[domain]!.taskKind,
+        ...projectManagedTask(previous?.task ?? null, parsed.run, occurredAt),
+      }),
+    });
+    this.extensionRecords.set(key, record);
+    const committed = Object.freeze({
+      domain,
+      recordId: record.recordId,
+      taskId,
+      revision: record.revision,
+      recordRef,
+    });
+    this.extensionEvents.set(sequence, committed);
+    return committed;
+  }
+
+  /**
+   * Replays the Stage H records a reopened log holds. Every revision was
+   * checked when it committed, so one that no longer reads or chains means
+   * the log or its resources are corrupt, and opening fails.
+   */
+  private async rebuildExtensionRecords(): Promise<void> {
+    for (const event of this.events) {
+      if (event.kind !== 'domain.committed') continue;
+      const domain = event.payload['domain'] as ManagedSessionDomain;
+      const body = MANAGED_EXTENSION_RECORD_BODIES[domain];
+      if (body === undefined) continue;
+      if (this.resources === undefined) {
+        throw new ManagedSessionRecordError(
+          'a resource store is required to read Stage H records.',
+        );
+      }
+      const recordRef = event.payload[
+        'recordRef'
+      ] as unknown as ManagedSessionDurableRef;
+      const bytes = await this.resources.read(recordRef);
+      const parsed = body.parse(
+        parseManagedSessionRecordJson(
+          bytes.toString('utf8'),
+          MANAGED_SESSION_LIMITS.maxEventBytes,
+        ),
+      );
+      this.assertExtensionRevision(
+        domain,
+        body,
+        parsed,
+        event.payload['operationId'] as string,
+        (message) => {
+          throw new ManagedSessionRecordError(
+            `session log is corrupt: ${message}`,
+          );
+        },
+      );
+      this.applyExtensionRevision(
+        event.sequence,
+        event.occurredAt,
+        event.payload['operationId'] as string,
+        domain,
+        parsed,
+        recordRef,
+      );
+    }
+  }
+
+  /**
    * One transaction at a time. The writer lease serialises individual lines,
    * which is not enough: concurrent transactions would interleave their event
    * records around each other's commit markers.
@@ -1275,11 +1625,7 @@ export class LocalManagedSessionAuthority {
     return pending;
   }
 
-  private async commit(
-    command: ManagedSessionCommand,
-    values: readonly unknown[],
-    actors: readonly ManagedSessionActor[],
-  ): Promise<ManagedSessionCommitReceipt> {
+  private assertCommandWritable(command: ManagedSessionCommand): void {
     if (this.writeFailure !== undefined) {
       throw new ManagedSessionRecordError(
         `session log writes stopped after an earlier failure: ${this.writeFailure.message}`,
@@ -1290,6 +1636,33 @@ export class LocalManagedSessionAuthority {
         'command session key does not match this session.',
       );
     }
+  }
+
+  private assertExpectedSequence(command: ManagedSessionCommand): void {
+    if (
+      command.expectedSequence !== undefined &&
+      command.expectedSequence !== this.committed
+    ) {
+      throw new ManagedSessionConflictError(
+        `expectedSequence ${command.expectedSequence} does not match the committed sequence ${this.committed}; re-read before retrying.`,
+      );
+    }
+  }
+
+  /**
+   * `extension` names the one Stage H record event the caller prepared and
+   * applies its revision once the transaction commits; any other event of a
+   * domain with a record body is refused, so no path commits one around its
+   * revision chain, and so is any other event that takes an ID of the form
+   * those events use, so none can block them.
+   */
+  private async commit(
+    command: ManagedSessionCommand,
+    values: readonly unknown[],
+    actors: readonly ManagedSessionActor[],
+    extension?: { readonly eventId: string; readonly apply: () => void },
+  ): Promise<ManagedSessionCommitReceipt> {
+    this.assertCommandWritable(command);
     const key = managedSessionCommandKey(command.operation, command.commandId);
     const previous = this.transactions.get(key);
     if (previous !== undefined) {
@@ -1304,14 +1677,7 @@ export class LocalManagedSessionAuthority {
         replayed: true,
       };
     }
-    if (
-      command.expectedSequence !== undefined &&
-      command.expectedSequence !== this.committed
-    ) {
-      throw new ManagedSessionConflictError(
-        `expectedSequence ${command.expectedSequence} does not match the committed sequence ${this.committed}; re-read before retrying.`,
-      );
-    }
+    this.assertExpectedSequence(command);
 
     const events = values.map((value, index) => {
       const event = parseManagedSessionEvent(value);
@@ -1325,6 +1691,32 @@ export class LocalManagedSessionAuthority {
       this.assertActorFence(event, actor);
       if (event.kind === 'activation.changed') {
         this.assertActivationEpoch(event);
+      }
+      if (
+        event.kind === 'domain.committed' &&
+        MANAGED_EXTENSION_RECORD_BODIES[
+          event.payload['domain'] as ManagedSessionDomain
+        ] !== undefined &&
+        event.eventId !== extension?.eventId
+      ) {
+        throw new ManagedSessionConflictError(
+          `${event.payload['domain']} records commit only through commitExtensionRecord.`,
+        );
+      }
+      // Only an enabled domain commits records, whatever the path: the
+      // generic appends would otherwise take any name in the index.
+      if (event.kind === 'domain.committed') {
+        assertManagedSessionDomainEnabled(
+          event.payload['domain'] as ManagedSessionDomain,
+        );
+      }
+      if (
+        event.eventId !== extension?.eventId &&
+        EXTENSION_EVENT_ID.test(event.eventId)
+      ) {
+        throw new ManagedSessionConflictError(
+          `event id ${event.eventId} is reserved for Stage H records.`,
+        );
       }
       if (this.eventIds.has(event.eventId)) {
         throw new ManagedSessionConflictError(
@@ -1445,6 +1837,7 @@ export class LocalManagedSessionAuthority {
       receipt,
       contentDigest: command.contentDigest,
     });
+    extension?.apply();
     return receipt;
   }
 
@@ -1829,6 +2222,62 @@ export class LocalManagedSessionAuthority {
       },
     };
   }
+}
+
+/** The event IDs `commitExtensionRecord` assigns, `<domain>:<count>`. */
+const EXTENSION_EVENT_ID = new RegExp(
+  `^(?:${Object.keys(MANAGED_EXTENSION_RECORD_BODIES).join('|')}):[0-9]+$`,
+);
+
+const INPUT_ACTORS: readonly ManagedSessionActor[] = [
+  { class: 'trusted_entry' },
+  { class: 'authority' },
+];
+
+/**
+ * An accepted input and the wake the authority generates for it. The wake
+ * fact is generated here because an entry may request a wake but must not
+ * author it.
+ */
+function inputEvents(
+  command: ManagedSessionCommand,
+  input: ManagedSessionInputRequest,
+  sequence: number,
+  occurredAt: number,
+): readonly unknown[] {
+  return [
+    {
+      v: MANAGED_SESSION_FORMAT_VERSION,
+      sequence,
+      eventId: `${input.inputId}:accepted`,
+      sessionKey: command.sessionKey,
+      kind: 'input.accepted',
+      occurredAt,
+      payload: {
+        inputId: input.inputId,
+        turnId: input.turnId,
+        source: input.source,
+        contentRef: input.contentRef,
+        deadline: input.deadline,
+        admissionRef: input.admissionRef,
+      },
+    },
+    {
+      v: MANAGED_SESSION_FORMAT_VERSION,
+      sequence: sequence + 1,
+      eventId: `${input.inputId}:wake`,
+      sessionKey: command.sessionKey,
+      kind: 'wake.requested',
+      occurredAt,
+      payload: {
+        wakeId: `${input.inputId}:wake`,
+        reason: input.wakeReason,
+        subject: { type: 'turn', turnId: input.turnId },
+        sourceEventId: `${input.inputId}:accepted`,
+        requiredSequence: sequence,
+      },
+    },
+  ];
 }
 
 function actionDecisionsMatch(

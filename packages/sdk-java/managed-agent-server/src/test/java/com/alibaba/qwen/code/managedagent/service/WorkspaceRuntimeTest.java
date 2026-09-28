@@ -48,6 +48,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.junit.jupiter.api.io.TempDir;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -254,6 +255,48 @@ class WorkspaceRuntimeTest {
             verify(fixture.http(), never()).installContext(any(), any(), any(), any());
             authority.claim(session.workspace(), holder(session, "rival"));
         }
+    }
+
+    @Test
+    void routesCapturedShellAndOriginalCleanupThroughV3AfterRevocation() throws Exception {
+        SessionRecord session = createSession("storage", ".");
+        var fixture = transport(session);
+        var runtimeSession = fixture.record().getSession();
+        authority.claim(session.workspace(), fixture.record());
+        Map<String, Object> publisher = Map.of("url", "http://127.0.0.1:1234/internal/hosted-shell-publisher/v1",
+                "token", "a".repeat(43));
+        when(fixture.http().installPublisherV3(any(), any(), any())).thenReturn(CompletableFuture.completedFuture(null));
+        fixture.transport().installPublisher(fixture.lease(), runtimeSession, publisher).toCompletableFuture().join();
+        Map<String, Object> reference = Map.of("sessionId", runtimeSession.getRuntimeSessionId(), "promptId", "turn",
+                "callId", "worker-call", "argsDigest", "sha256:" + "a".repeat(64), "runtimeProtocol", 3,
+                "inputDigest", "b".repeat(64), "executionCallId", "execution", "toolName", "run_shell_command",
+                "input", Map.of("command", "pwd"));
+        Map<String, Object> result = Map.of("executionStatus", "success", "responseParts", List.of());
+        Map<String, Object> response = Map.of("protocolVersion", 3, "toolResult", "managed-tool-result/1",
+                "state", "settled", "lastSequence", 2, "result", result);
+        when(fixture.http().executeV3(any(), any(), any(), any())).thenReturn(CompletableFuture.completedFuture(response));
+        assertThat(fixture.transport().execute(fixture.lease(), runtimeSession, reference).toCompletableFuture().join())
+                .isEqualTo(result);
+        @SuppressWarnings({"rawtypes", "unchecked"})
+        ArgumentCaptor<Map<String, Object>> wire = ArgumentCaptor.forClass((Class) Map.class);
+        @SuppressWarnings({"rawtypes", "unchecked"})
+        ArgumentCaptor<Map<String, Object>> capture = ArgumentCaptor.forClass((Class) Map.class);
+        verify(fixture.http()).executeV3(eq(fixture.lease()), eq(runtimeSession), wire.capture(), capture.capture());
+        assertThat(wire.getValue()).containsEntry("argsDigest", "b".repeat(64))
+                .doesNotContainKeys("runtimeProtocol", "inputDigest", "executionCallId");
+        assertThat(capture.getValue()).containsEntry("sessionId", session.sessionId())
+                .containsEntry("tenantId", session.tenantId()).containsEntry("bindingGeneration", "1")
+                .containsEntry("executionCallId", "execution");
+        verify(fixture.http(), never()).execute(any(), any(), any());
+        jdbc.update("UPDATE managed_workspace_access SET can_read = FALSE WHERE tenant_id = ?", session.tenantId());
+        assertUnavailable(() -> fixture.transport().installPublisher(fixture.lease(), runtimeSession, publisher));
+        when(fixture.http().statusV3(any(), any(), any(), eq(0L))).thenReturn(CompletableFuture.completedFuture(response));
+        when(fixture.http().cancelV3(any(), any(), any())).thenReturn(CompletableFuture.completedFuture(response));
+        when(fixture.http().acknowledgeV3(any(), any(), any(), any())).thenReturn(CompletableFuture.completedFuture(response));
+        Map<String, Object> status = Map.of("state", "settled", "result", result);
+        assertThat(fixture.transport().status(fixture.lease(), runtimeSession, reference, 0).toCompletableFuture().join()).isEqualTo(status);
+        assertThat(fixture.transport().cancel(fixture.lease(), runtimeSession, reference).toCompletableFuture().join()).isEqualTo(status);
+        assertThat(fixture.transport().acknowledge(fixture.lease(), runtimeSession, reference, Map.of()).toCompletableFuture().join()).isEqualTo(status);
     }
 
     @Test

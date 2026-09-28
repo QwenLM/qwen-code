@@ -41,7 +41,7 @@ class ManagedEventStreamServiceTest {
     void rejectsNegativeReconciliationCursorBeforeReadingEvents() {
         AgentStateStore store = mock(AgentStateStore.class);
         ManagedAgentService agentService = new ManagedAgentService(store,
-                null, null, null, null, mock(ManagedWorkspaceRegistry.class));
+                null, null, null, mock(ManagedWorkspaceRegistry.class));
         assertThatThrownBy(() -> agentService.streamEvents(SESSION, -1))
                 .isInstanceOfSatisfying(ApiException.class, error -> {
                     assertThat(error.getStatus()).isEqualTo(HttpStatus.BAD_REQUEST);
@@ -57,7 +57,7 @@ class ManagedEventStreamServiceTest {
         AgentStateStore store = mock(AgentStateStore.class);
         ManagedWorkspaceRegistry registry = mock(ManagedWorkspaceRegistry.class);
         ManagedAgentService agentService = new ManagedAgentService(store,
-                null, null, null, null, registry);
+                null, null, null, registry);
         SessionRecord session = new SessionRecord("tenant", "session", "qwen-code",
                 null, null, "ACTIVE", null, null, 0, 2, 0, 1, 1, null, 1,
                 new ContextBinding("tenant", "ws-a", 1, "storage-a", ".", "config-a", 1));
@@ -124,7 +124,7 @@ class ManagedEventStreamServiceTest {
             boolean reconcile) throws Exception {
         AgentStateStore store = mock(AgentStateStore.class);
         ManagedAgentService agentService = new ManagedAgentService(store,
-                null, null, null, null, mock(ManagedWorkspaceRegistry.class));
+                null, null, null, mock(ManagedWorkspaceRegistry.class));
         when(store.requireSession("tenant", "session")).thenReturn(SESSION);
         List<EventRecord> records = List.of(event(1, false),
                 new EventRecord("tenant", "session", 2, "event-2", "turn",

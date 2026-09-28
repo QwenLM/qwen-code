@@ -345,12 +345,21 @@ import {
   readUserAutoMemoryIndexWithStats,
 } from '../memory/store.js';
 import {
+  rebuildAutoMemoryIndexAtRoot,
+  rebuildManagedAutoMemoryIndex,
   rebuildTeamAutoMemoryIndex,
+  rebuildUserAutoMemoryIndex,
   TeamMemoryRootSecurityError,
 } from '../memory/indexer.js';
 import { syncTeamMemory } from '../memory/team-memory-sync.js';
 import { getTeamMemoryShareabilityWarning } from '../memory/team-memory-git-status.js';
 import { MemoryManager } from '../memory/manager.js';
+import {
+  getProjectMetadataMigrationRoots,
+  scanMemoryMetadataCorpusStatus,
+  type MemoryMetadataCorpusStatus,
+} from '../memory/metadata-migration.js';
+import { buildStructuredAutoMemoryPrompt } from '../memory/prompt.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
 import { isSafeModeEnv } from '../utils/safe-mode.js';
 
@@ -358,6 +367,17 @@ const gitCoAuthorLogger = createDebugLogger('GIT_CO_AUTHOR');
 const memoryPressureConfigLogger = createDebugLogger('MEMORY_PRESSURE');
 
 const MEMORY_CONTEXT_WARNING_RATIO = 0.15;
+
+export type MemoryRecallMode = 'legacy' | 'structured';
+
+export interface PreparedMemoryRecallTransition {
+  from: MemoryRecallMode;
+  to: MemoryRecallMode;
+  revision: string;
+  autoMemoryPrompt: string;
+  previousRevision: string;
+  previousAutoMemoryPrompt: string;
+}
 
 // Absolute ceiling on the same warning: 15% of a 1M window is 150,000 tokens,
 // so the ratio alone means a large-window session can carry an enormous
@@ -1435,6 +1455,15 @@ export interface ConfigParameters {
    */
   enableTeamMemory?: boolean;
   enableTeamMemorySync?: boolean;
+  /**
+   * Enable the structured on-demand memory recall protocol. Defaults to false
+   * (opt-in): while it is off the corpus stays on the legacy flat-MEMORY.md
+   * protocol and the metadata migration that would make it structured-ready is
+   * never scheduled. Overridable at runtime by
+   * `QWEN_CODE_MEMORY_STRUCTURED_RECALL` ('0'/'1') via
+   * {@link Config.getStructuredMemoryRecallEnabled}.
+   */
+  enableStructuredMemoryRecall?: boolean;
   /** Enable automatic project skill review after tool-heavy sessions. Defaults to false. */
   enableAutoSkill?: boolean;
   /** Require user confirmation before persisting an auto-activated skill. Defaults to true. */
@@ -2790,6 +2819,9 @@ export class Config {
    * the shortest possible cached prompt prefix.
    */
   private autoMemoryPrompt = '';
+  private memoryRecallMode: MemoryRecallMode = 'legacy';
+  private memoryCorpusRevision = '';
+  private memoryRecallModeInitialized = false;
   private sdkMode: boolean;
   private memoryFileCount: number;
   private loadedContextFilePaths: string[] = [];
@@ -3044,6 +3076,7 @@ export class Config {
   private readonly enableManagedAutoDream: boolean;
   private readonly enableTeamMemory: boolean;
   private readonly enableTeamMemorySync: boolean;
+  private readonly enableStructuredMemoryRecall: boolean;
   // Latch (keyed by projectRoot) so the "team memory enabled but not shareable"
   // warning is emitted at most once per repo, even though refreshHierarchicalMemory
   // may re-run. Keyed rather than a single boolean so entering a new repo (/cd)
@@ -3637,6 +3670,8 @@ export class Config {
     this.enableManagedAutoDream = params.enableManagedAutoDream ?? true;
     this.enableTeamMemory = params.enableTeamMemory ?? false;
     this.enableTeamMemorySync = params.enableTeamMemorySync ?? false;
+    this.enableStructuredMemoryRecall =
+      params.enableStructuredMemoryRecall ?? false;
     this.enableAutoSkill = params.enableAutoSkill ?? false;
     this.autoSkillConfirm = params.autoSkillConfirm ?? true;
     // Clamp: schema validation only runs on interactive edit paths, so a
@@ -4497,11 +4532,13 @@ export class Config {
     // Fire-and-forget sweep of stale ephemeral worktrees left behind by
     // earlier `agent` runs that exited before their cleanup helper ran
     // (Ctrl-C, process crash, abrupt shutdown). The sweep only touches
-    // `agent-<7hex>` slugs, skips anything newer than 30 days, and
-    // is fail-closed against tracked changes or unpushed commits — so
-    // running it on every startup cannot destroy user work. We do not
-    // await this: it is a hygiene task that must never delay the
-    // first model turn.
+    // `agent-<7hex>` slugs, skips anything newer than 30 days, and gates
+    // removal on worktreeHasWork — tracked, untracked and ignored content
+    // (minus disposable build output, symlinks whose targets live outside
+    // the checkout, and the session marker) all preserve the worktree, and
+    // any probe error fails closed — so running it on every startup cannot
+    // destroy user work in the checkout. We do not await this: it is a
+    // hygiene task that must never delay the first model turn.
     //
     // Anchor the sweep at the repo top-level so it scans the same
     // directory the worktree creators (`enter_worktree` and
@@ -4989,6 +5026,29 @@ export class Config {
           }
         }
       }
+      // The readiness scan walks the frontmatter of every memory file, so run
+      // it only where its result is consumed — once, when the mode is settled.
+      // Skipping it while the structured protocol is opted out keeps a disabled
+      // feature from costing startup I/O; skipping it afterwards keeps an
+      // enabled one from re-walking the whole corpus on every refresh (this
+      // runs per user query) only to discard the result. Leaving corpusStatus
+      // undefined keeps the initialization below on 'legacy'.
+      if (!this.memoryRecallModeInitialized) {
+        const corpusStatus = this.getStructuredMemoryRecallEnabled()
+          ? await this.scanMemoryRecallCorpusStatus().catch(
+              (error: unknown) => {
+                this.debugLogger.warn(
+                  'memory metadata readiness scan failed; preserving the active recall protocol',
+                  error,
+                );
+                return undefined;
+              },
+            )
+          : undefined;
+        this.memoryRecallMode = corpusStatus?.ready ? 'structured' : 'legacy';
+        this.memoryCorpusRevision = corpusStatus?.revision ?? '';
+        this.memoryRecallModeInitialized = true;
+      }
       const [managedAutoMemoryIndexRead, userAutoMemoryIndexRead] =
         await Promise.all([
           readAutoMemoryIndexWithStats(this.getProjectRoot()),
@@ -5011,20 +5071,29 @@ export class Config {
       // empty" placeholder — the same shape the per-project layer has used
       // since day one — so the cost is one extra index header.
       this.setUserMemory(memoryContent);
-      this.autoMemoryPrompt = this.memoryManager.buildAutoMemoryPrompt(
-        getAutoMemoryRoot(this.getProjectRoot()),
-        managedAutoMemoryIndex,
-        {
-          memoryDir: getUserAutoMemoryRoot(),
-          indexContent: userAutoMemoryIndex,
-        },
-        teamMemoryEnabled
-          ? {
-              memoryDir: getTeamAutoMemoryRoot(this.getProjectRoot()),
-              indexContent: teamAutoMemoryIndex,
-            }
-          : undefined,
-      );
+      this.autoMemoryPrompt =
+        this.memoryRecallMode === 'structured'
+          ? buildStructuredAutoMemoryPrompt(
+              getAutoMemoryRoot(this.getProjectRoot()),
+              getUserAutoMemoryRoot(),
+              teamMemoryEnabled
+                ? getTeamAutoMemoryRoot(this.getProjectRoot())
+                : undefined,
+            )
+          : this.memoryManager.buildAutoMemoryPrompt(
+              getAutoMemoryRoot(this.getProjectRoot()),
+              managedAutoMemoryIndex,
+              {
+                memoryDir: getUserAutoMemoryRoot(),
+                indexContent: userAutoMemoryIndex,
+              },
+              teamMemoryEnabled
+                ? {
+                    memoryDir: getTeamAutoMemoryRoot(this.getProjectRoot()),
+                    indexContent: teamAutoMemoryIndex,
+                  }
+                : undefined,
+            );
     } else {
       this.setUserMemory(memoryContent);
       this.autoMemoryPrompt = '';
@@ -7029,6 +7098,14 @@ export class Config {
     }
     this.fileHistoryService = undefined;
     this.getFileReadCache().clear();
+    this.memoryRecallMode = 'legacy';
+    this.memoryCorpusRevision = '';
+    this.memoryRecallModeInitialized = false;
+    // The prompt was built for the previous workspace's roots; when the
+    // refresh below throws (returned as memoryRefreshError), nothing
+    // reassigns it, and the stale text keeps routing to search_memory while
+    // the reset mode leaves that tool undeclared.
+    this.autoMemoryPrompt = '';
 
     let memoryRefreshError: unknown;
     try {
@@ -7201,6 +7278,7 @@ export class Config {
   private async shutdownResourcesOnce(): Promise<void> {
     let resourceError: unknown;
     try {
+      this.memoryManager.cancelMigrations();
       this.clearSessionRestoreProjection();
       // Drop this session's project-dir registry entry. It is registered during
       // initialization, so it is released here whenever that step completed —
@@ -8172,6 +8250,142 @@ export class Config {
    */
   getAutoMemoryPrompt(): string {
     return this.autoMemoryPrompt;
+  }
+
+  getMemoryRecallMode(): MemoryRecallMode {
+    return this.memoryRecallMode;
+  }
+
+  async prepareMemoryRecallTransition(): Promise<
+    PreparedMemoryRecallTransition | undefined
+  > {
+    if (!this.getManagedAutoMemoryEnabled()) return undefined;
+    if (!this.getStructuredMemoryRecallEnabled()) return undefined;
+    if (this.memoryRecallMode === 'structured') return undefined;
+    const status = await this.scanMemoryRecallCorpusStatus();
+    const to: MemoryRecallMode = status.ready ? 'structured' : 'legacy';
+    if (to === this.memoryRecallMode) {
+      this.memoryCorpusRevision = status.revision;
+      return undefined;
+    }
+    const projectRoot = this.getProjectRoot();
+    const configuredProjectRoot = getAutoMemoryRoot(projectRoot);
+    // Index rebuilds refresh the legacy MEMORY.md artifacts; the structured
+    // prompt is built from scans, not these indexes, so a tier that cannot be
+    // read or written (EACCES, a rejected root) must not block the
+    // transition — the failed tier's staleness is visible to the next scan.
+    await Promise.all(
+      [
+        ...getProjectMetadataMigrationRoots(
+          projectRoot,
+          this.isTrustedFolder(),
+        ).map((root) =>
+          root === configuredProjectRoot
+            ? rebuildManagedAutoMemoryIndex(projectRoot)
+            : rebuildAutoMemoryIndexAtRoot(root, 'project'),
+        ),
+        rebuildUserAutoMemoryIndex(),
+        ...(this.getTeamMemoryEnabled() && this.isTrustedFolder()
+          ? [rebuildTeamAutoMemoryIndex(projectRoot)]
+          : []),
+      ].map((pending) =>
+        pending.catch((error: unknown) => {
+          this.debugLogger.debug(
+            `Memory index rebuild failed during recall transition: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }),
+      ),
+    );
+    const autoMemoryPrompt = await this.buildAutoMemoryPromptForMode(to);
+    const confirmed = await this.scanMemoryRecallCorpusStatus();
+    if (confirmed.revision !== status.revision) return undefined;
+    return {
+      from: this.memoryRecallMode,
+      to,
+      revision: confirmed.revision,
+      autoMemoryPrompt,
+      previousRevision: this.memoryCorpusRevision,
+      previousAutoMemoryPrompt: this.autoMemoryPrompt,
+    };
+  }
+
+  async confirmMemoryRecallTransition(
+    transition: PreparedMemoryRecallTransition,
+  ): Promise<boolean> {
+    if (transition.from !== this.memoryRecallMode) return false;
+    const status = await this.scanMemoryRecallCorpusStatus();
+    return (
+      status.revision === transition.revision &&
+      (status.ready ? 'structured' : 'legacy') === transition.to
+    );
+  }
+
+  commitMemoryRecallTransition(
+    transition: PreparedMemoryRecallTransition,
+  ): void {
+    if (transition.from !== this.memoryRecallMode) return;
+    this.memoryRecallMode = transition.to;
+    this.memoryCorpusRevision = transition.revision;
+    this.autoMemoryPrompt = transition.autoMemoryPrompt;
+    this.memoryRecallModeInitialized = true;
+  }
+
+  rollbackMemoryRecallTransition(
+    transition: PreparedMemoryRecallTransition,
+  ): void {
+    if (this.memoryRecallMode !== transition.to) return;
+    this.memoryRecallMode = transition.from;
+    this.memoryCorpusRevision = transition.previousRevision;
+    this.autoMemoryPrompt = transition.previousAutoMemoryPrompt;
+  }
+
+  private scanMemoryRecallCorpusStatus(): Promise<MemoryMetadataCorpusStatus> {
+    return scanMemoryMetadataCorpusStatus({
+      projectRoot: this.getProjectRoot(),
+      teamMemoryEnabled: this.getTeamMemoryEnabled(),
+      trustedProject: this.isTrustedFolder(),
+    });
+  }
+
+  private async buildAutoMemoryPromptForMode(
+    mode: MemoryRecallMode,
+  ): Promise<string> {
+    const projectRoot = this.getProjectRoot();
+    const teamEnabled = this.getTeamMemoryEnabled() && this.isTrustedFolder();
+    if (mode === 'structured') {
+      return buildStructuredAutoMemoryPrompt(
+        getAutoMemoryRoot(projectRoot),
+        getUserAutoMemoryRoot(),
+        teamEnabled ? getTeamAutoMemoryRoot(projectRoot) : undefined,
+      );
+    }
+    const [projectIndex, userIndex, teamIndex] = await Promise.all([
+      readAutoMemoryIndexWithStats(projectRoot).then(
+        (result) => result?.content ?? null,
+      ),
+      readUserAutoMemoryIndexWithStats()
+        .then((result) => result?.content ?? null)
+        .catch(() => null),
+      teamEnabled
+        ? fsPromises
+            .readFile(
+              path.join(getTeamAutoMemoryRoot(projectRoot), 'MEMORY.md'),
+              'utf-8',
+            )
+            .catch(() => null)
+        : Promise.resolve(null),
+    ]);
+    return this.memoryManager.buildAutoMemoryPrompt(
+      getAutoMemoryRoot(projectRoot),
+      projectIndex,
+      { memoryDir: getUserAutoMemoryRoot(), indexContent: userIndex },
+      teamEnabled
+        ? {
+            memoryDir: getTeamAutoMemoryRoot(projectRoot),
+            indexContent: teamIndex,
+          }
+        : undefined,
+    );
   }
 
   getOutputLanguageFilePath(): string | undefined {
@@ -9961,6 +10175,32 @@ export class Config {
     return this.enableTeamMemorySync;
   }
 
+  /**
+   * Whether the structured on-demand memory recall protocol may activate.
+   * Opt-in: off unless the `memory.enableStructuredRecall` setting is on.
+   * `QWEN_CODE_MEMORY_STRUCTURED_RECALL` overrides for tests / power users
+   * ('0' forces off, '1' forces on).
+   *
+   * While this is off the corpus stays on the legacy protocol *and* the
+   * metadata migration that would make it structured-ready is never
+   * scheduled, so a disabled feature costs no forked-agent calls. Callers
+   * that gate on it must not treat "off" as "migration still owed" — see the
+   * `migration_pending` dream gates, which would otherwise suppress
+   * consolidation for the life of the process.
+   */
+  getStructuredMemoryRecallEnabled(): boolean {
+    if (this.shellExecutionSandbox) return false;
+    if (this.getBareMode() || this.isSafeMode()) return false;
+    const override = process.env['QWEN_CODE_MEMORY_STRUCTURED_RECALL'];
+    if (override === '0') {
+      return false;
+    }
+    if (override === '1') {
+      return true;
+    }
+    return this.enableStructuredMemoryRecall;
+  }
+
   isManagedMemoryAvailable(): boolean {
     if (this.shellExecutionSandbox) return false;
     return this.enableManagedAutoMemory && !this.getBareMode();
@@ -11648,6 +11888,14 @@ export class Config {
     await registerLazy(ToolNames.READ_FILE, async () => {
       const { ReadFileTool } = await import('../tools/read-file.js');
       return new ReadFileTool(this);
+    });
+    await registerLazy(ToolNames.MANAGE_MEMORY, async () => {
+      const { ManageMemoryTool } = await import('../tools/manage-memory.js');
+      return new ManageMemoryTool(this);
+    });
+    await registerLazy(ToolNames.SEARCH_MEMORY, async () => {
+      const { SearchMemoryTool } = await import('../tools/search-memory.js');
+      return new SearchMemoryTool(this);
     });
     await registerLazy(ToolNames.ZOOM_IMAGE, async () => {
       const { ZoomImageTool } = await import('../tools/zoom-image.js');

@@ -24,7 +24,6 @@ import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.service.HarnessCoordinator;
 import com.alibaba.qwen.code.managedagent.service.ManagedAgentService;
 import com.alibaba.qwen.code.managedagent.service.RequestDigests;
-import com.alibaba.qwen.code.managedagent.service.RuntimeWarmer;
 import com.alibaba.qwen.code.managedagent.service.SessionEventHub;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
@@ -33,6 +32,7 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.DispatchTarget;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.EventRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.HarnessEvent;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.ItemRecord;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.ProjectedEvent;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutationKind;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -67,6 +67,8 @@ import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
+import org.springframework.test.web.servlet.ResultActions;
+import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
@@ -111,26 +113,35 @@ class ManagedAgentServerIntegrationTest {
     @Test
     void allowsRepeatingLifecycleOperationsWithNewCommandKeys() {
         String tenant = "tenant-repeat-" + UUID.randomUUID();
-        Admission session = store.insertSessionCommand(tenant,
+        String sessionId = store.insertSessionCommand(tenant,
                 "CREATE_SESSION", "create", "digest-create", "qwen-code", null,
-                null, List.of(), null);
+                null, List.of(), null).sessionId();
+        store.beginOperation(tenant, sessionId, OperationKind.CLOSE, "",
+                "close", "digest-close");
+        await().atMost(Duration.ofSeconds(5)).until(() -> "CLOSED".equals(
+                store.requireSession(tenant, sessionId).status()));
         for (int cycle = 0; cycle < 2; cycle++) {
-            for (SessionMutationKind kind : List.of(
-                    SessionMutationKind.ARCHIVE,
-                    SessionMutationKind.UNARCHIVE)) {
-                String operation = kind.name() + "_SESSION";
-                String key = operation + cycle;
-                String digest = "same-content-" + operation;
-                store.beginSessionMutation(tenant, operation, key, digest,
-                        session.sessionId(), kind);
-                store.completeSessionMutation(tenant, operation, key,
-                        session.sessionId(), kind, null, null);
-                assertThat(store.beginSessionMutation(tenant, operation,
-                        key, digest, session.sessionId(), kind).replayed())
-                        .isTrue();
-            }
+            String archive = "archive" + cycle;
+            assertThat(store.beginOperation(tenant, sessionId,
+                    OperationKind.ARCHIVE, "", archive, "digest-archive")
+                    .replayed()).isFalse();
+            assertThat(store.beginOperation(tenant, sessionId,
+                    OperationKind.ARCHIVE, "", archive, "digest-archive")
+                    .replayed()).isTrue();
+            String unarchive = "unarchive" + cycle;
+            store.beginSessionMutation(tenant, "UNARCHIVE_SESSION", unarchive,
+                    "digest-unarchive", sessionId,
+                    SessionMutationKind.UNARCHIVE);
+            store.completeSessionMutation(tenant, "UNARCHIVE_SESSION",
+                    unarchive, sessionId, SessionMutationKind.UNARCHIVE, null,
+                    null);
+            assertThat(store.beginSessionMutation(tenant, "UNARCHIVE_SESSION",
+                    unarchive, "digest-unarchive", sessionId,
+                    SessionMutationKind.UNARCHIVE).replayed()).isTrue();
         }
-        assertThat(store.findEvents(tenant, session.sessionId(), 0, 100))
+        assertThat(store.requireSession(tenant, sessionId).status())
+                .isEqualTo("CLOSED");
+        assertThat(store.findEvents(tenant, sessionId, 0, 100))
                 .filteredOn(event -> "session.archived".equals(event.type()))
                 .hasSize(2);
     }
@@ -152,8 +163,7 @@ class ManagedAgentServerIntegrationTest {
                         }, workspaces, changed),
                 applicationContext.getBean(RequestDigests.class),
                 applicationContext.getBean(HarnessCoordinator.class),
-                harness, applicationContext.getBean(RuntimeWarmer.class),
-                workspaces);
+                harness, workspaces);
 
         CommandAdmission retry = upgraded.createSession(tenant,
                 "revision-create", "qwen-code", "1", null, null, List.of());
@@ -394,30 +404,28 @@ class ManagedAgentServerIntegrationTest {
                         event.get("type").asText()))
                 .hasSize(1);
 
-        int closes = harness.closeCount();
-        harness.setAvailable(false);
-        try {
-            mvc.perform(post("/v1/agents/sessions/{id}/archive", sessionId)
-                            .header(TenantContextFilter.HEADER, tenant)
-                            .header("Idempotency-Key", "lifecycle-archive"))
-                    .andExpect(status().isServiceUnavailable())
-                    .andExpect(jsonPath("$.error.code")
-                            .value("hosted_harness_unavailable"));
-        } finally {
-            harness.setAvailable(true);
-        }
-        mvc.perform(post("/v1/agents/sessions/{id}/archive", sessionId)
-                        .header(TenantContextFilter.HEADER, tenant)
-                        .header("Idempotency-Key", "lifecycle-archive"))
-                .andExpect(status().isOk())
-                .andExpect(header().string("X-Qwen-Idempotent-Replay",
-                        "true"))
-                .andExpect(jsonPath("$.status").value("archived"));
-        assertThat(harness.closeCount()).isEqualTo(closes + 1);
-
+        int closes = harness.closeCount(sessionId);
+        lifecycle(post("/v1/agents/sessions/{id}/archive", sessionId), tenant,
+                "lifecycle-archive-active")
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.error.code")
+                        .value("session_state_conflict"));
+        JsonNode admitted = objectMapper.readTree(lifecycle(
+                        post("/v1/agents/sessions/{id}/close", sessionId),
+                        tenant, "lifecycle-close")
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.session_id").value(sessionId))
+                .andExpect(jsonPath("$.type").value("close"))
+                .andExpect(jsonPath("$.status").value("pending"))
+                .andExpect(jsonPath("$.admission_stage").value("java_durable"))
+                .andExpect(jsonPath("$.delivery_state").value("pending"))
+                .andExpect(jsonPath("$.receipt_id").doesNotExist())
+                .andExpect(jsonPath("$.replayed").value(false))
+                .andReturn().getResponse().getContentAsString());
+        String closeId = admitted.get("id").asText();
         mvc.perform(post("/v1/agents/sessions/{id}/events", sessionId)
                         .header(TenantContextFilter.HEADER, tenant)
-                        .header("Idempotency-Key", "archived-turn")
+                        .header("Idempotency-Key", "closed-turn")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"type\":\"agent.session.input.message\","
                                 + "\"input\":[{\"type\":\"text\","
@@ -425,23 +433,74 @@ class ManagedAgentServerIntegrationTest {
                 .andExpect(status().isConflict())
                 .andExpect(jsonPath("$.error.code")
                         .value("session_not_active"));
+        JsonNode closed = awaitOperation(tenant, sessionId, closeId);
+        assertThat(closed.get("admission_stage").asText())
+                .isEqualTo("harness_confirmed");
+        assertThat(closed.get("delivery_state").asText())
+                .isEqualTo("confirmed");
+        assertThat(closed.get("receipt_id").asText()).startsWith("rcpt_");
+        assertThat(closed.get("replayed").asBoolean()).isFalse();
+        assertThat(harness.closeCount(sessionId)).isEqualTo(closes + 1);
+        mvc.perform(get("/v1/agents/sessions/{id}", sessionId)
+                        .header(TenantContextFilter.HEADER, tenant))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("closed"))
+                .andExpect(jsonPath("$.capabilities.session_lifecycle")
+                        .value(true));
+        lifecycle(post("/v1/agents/sessions/{id}/close", sessionId), tenant,
+                "lifecycle-close")
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.id").value(closeId))
+                .andExpect(jsonPath("$.status").value("completed"))
+                .andExpect(jsonPath("$.receipt_id")
+                        .value(closed.get("receipt_id").asText()))
+                .andExpect(jsonPath("$.replayed").value(true));
+        mvc.perform(patch("/v1/agents/sessions/{id}", sessionId)
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .header("Idempotency-Key", "closed-rename")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"title\":\"too late\"}"))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.error.code")
+                        .value("session_state_conflict"));
 
+        String archiveId = objectMapper.readTree(lifecycle(
+                        post("/v1/agents/sessions/{id}/archive", sessionId),
+                        tenant, "lifecycle-archive")
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.type").value("archive"))
+                .andExpect(jsonPath("$.status").value("completed"))
+                .andExpect(jsonPath("$.admission_stage").value("java_durable"))
+                .andExpect(jsonPath("$.delivery_state").value("confirmed"))
+                .andExpect(jsonPath("$.receipt_id").isNotEmpty())
+                .andReturn().getResponse().getContentAsString())
+                .get("id").asText();
+        mvc.perform(get("/v1/agents/sessions/{id}", sessionId)
+                        .header(TenantContextFilter.HEADER, tenant))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("archived"));
+        lifecycle(post("/v1/agents/sessions/{id}/archive", sessionId), tenant,
+                "lifecycle-archive-again")
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.error.code")
+                        .value("session_state_conflict"));
         mvc.perform(post("/v1/agents/sessions/{id}/unarchive", sessionId)
                         .header(TenantContextFilter.HEADER, tenant)
                         .header("Idempotency-Key", "lifecycle-unarchive"))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.status").value("active"));
+                .andExpect(jsonPath("$.status").value("closed"));
 
-        mvc.perform(delete("/v1/agents/sessions/{id}", sessionId)
-                        .header(TenantContextFilter.HEADER, tenant)
-                        .header("Idempotency-Key", "lifecycle-delete"))
-                .andExpect(status().isOk())
-                .andExpect(header().string("X-Qwen-Idempotent-Replay",
-                        "false"))
-                .andExpect(jsonPath("$.object")
-                        .value("agent.session.deleted"))
-                .andExpect(jsonPath("$.deleted").value(true));
-
+        String deleteId = objectMapper.readTree(lifecycle(
+                        delete("/v1/agents/sessions/{id}", sessionId), tenant,
+                        "lifecycle-delete")
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.type").value("delete"))
+                .andReturn().getResponse().getContentAsString())
+                .get("id").asText();
+        JsonNode deleted = awaitOperation(tenant, sessionId, deleteId);
+        assertThat(deleted.get("admission_stage").asText())
+                .isEqualTo("java_durable");
+        assertThat(harness.closeCount(sessionId)).isEqualTo(closes + 1);
         mvc.perform(get("/v1/agents/sessions/{id}", sessionId)
                         .header(TenantContextFilter.HEADER, tenant))
                 .andExpect(status().isNotFound());
@@ -450,20 +509,41 @@ class ManagedAgentServerIntegrationTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.data[?(@.id == '%s')]"
                         .formatted(sessionId)).isEmpty());
-        mvc.perform(delete("/v1/agents/sessions/{id}", sessionId)
-                        .header(TenantContextFilter.HEADER, tenant)
-                        .header("Idempotency-Key", "lifecycle-delete"))
+        mvc.perform(get("/v1/agents/sessions/{id}/operations/{op}",
+                        sessionId, closeId)
+                        .header(TenantContextFilter.HEADER, tenant))
                 .andExpect(status().isOk())
-                .andExpect(header().string("X-Qwen-Idempotent-Replay",
-                        "true"));
+                .andExpect(jsonPath("$.status").value("completed"));
+        lifecycle(delete("/v1/agents/sessions/{id}", sessionId), tenant,
+                "lifecycle-delete")
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.id").value(deleteId))
+                .andExpect(jsonPath("$.replayed").value(true));
+        lifecycle(delete("/v1/agents/sessions/{id}", sessionId), tenant,
+                "lifecycle-delete-again")
+                .andExpect(status().isNotFound());
+        assertThat(store.findEvents(tenant, sessionId, 0, 100))
+                .filteredOn(event -> event.type().startsWith("session.")
+                        && !"session.created".equals(event.type())
+                        && !event.type().startsWith("session.update"))
+                .extracting(event -> event.type(),
+                        event -> event.data().get("operationId"))
+                .containsExactly(
+                        tuple("session.close.requested", closeId),
+                        tuple("session.closed", closeId),
+                        tuple("session.archived", archiveId),
+                        tuple("session.unarchive.requested", null),
+                        tuple("session.unarchived", null),
+                        tuple("session.delete.requested", deleteId),
+                        tuple("session.deleted", deleteId));
     }
 
     @Test
-    void rejectsArchivalUntilTheActiveTurnSettles() throws Exception {
-        String tenant = "tenant-archive-active-" + UUID.randomUUID();
+    void rejectsCloseUntilTheActiveTurnSettles() throws Exception {
+        String tenant = "tenant-close-active-" + UUID.randomUUID();
         MvcResult created = mvc.perform(post("/v1/agents/sessions")
                         .header(TenantContextFilter.HEADER, tenant)
-                        .header("Idempotency-Key", "archive-active-create")
+                        .header("Idempotency-Key", "close-active-create")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"agent_id\":\"qwen-code\",\"input\":["
                                 + "{\"type\":\"text\",\"text\":\"hold\"}]}"))
@@ -472,16 +552,18 @@ class ManagedAgentServerIntegrationTest {
                 created.getResponse().getContentAsString()).get("id").asText();
         await().atMost(Duration.ofSeconds(2)).untilAsserted(() ->
                 assertThat(harness.hasHeldTurn()).isTrue());
-        int closes = harness.closeCount();
+        int closes = harness.closeCount(sessionId);
 
         try {
-            mvc.perform(post("/v1/agents/sessions/{id}/archive", sessionId)
-                            .header(TenantContextFilter.HEADER, tenant)
-                            .header("Idempotency-Key", "archive-active"))
+            lifecycle(post("/v1/agents/sessions/{id}/close", sessionId),
+                    tenant, "close-active")
                     .andExpect(status().isConflict())
-                    .andExpect(jsonPath("$.error.code")
-                            .value("turn_active"));
-            assertThat(harness.closeCount()).isEqualTo(closes);
+                    .andExpect(jsonPath("$.error.code").value("turn_active"));
+            lifecycle(delete("/v1/agents/sessions/{id}", sessionId), tenant,
+                    "delete-active")
+                    .andExpect(status().isConflict())
+                    .andExpect(jsonPath("$.error.code").value("turn_active"));
+            assertThat(harness.closeCount(sessionId)).isEqualTo(closes);
         } finally {
             harness.releaseHeldTurns();
         }
@@ -489,22 +571,25 @@ class ManagedAgentServerIntegrationTest {
         await().atMost(Duration.ofSeconds(2)).untilAsserted(() ->
                 assertThat(store.findActiveTurn(tenant, sessionId))
                         .isEmpty());
-        mvc.perform(post("/v1/agents/sessions/{id}/archive", sessionId)
-                        .header(TenantContextFilter.HEADER, tenant)
-                        .header("Idempotency-Key", "archive-active"))
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$.status").value("archived"));
+        String closeId = objectMapper.readTree(lifecycle(
+                        post("/v1/agents/sessions/{id}/close", sessionId),
+                        tenant, "close-active")
+                .andExpect(status().isAccepted())
+                .andReturn().getResponse().getContentAsString())
+                .get("id").asText();
+        awaitOperation(tenant, sessionId, closeId);
+        assertThat(harness.closeCount(sessionId)).isEqualTo(closes + 1);
         assertThat(store.requireSession(tenant, sessionId).harnessBootId())
                 .isNotNull();
     }
 
     @Test
-    void deletesAnArchivedSessionWhileTheHarnessIsUnavailable()
+    void deletesAClosedSessionWhileTheHarnessIsUnavailable()
             throws Exception {
-        String tenant = "tenant-archived-delete-" + UUID.randomUUID();
+        String tenant = "tenant-closed-delete-" + UUID.randomUUID();
         MvcResult created = mvc.perform(post("/v1/agents/sessions")
                         .header(TenantContextFilter.HEADER, tenant)
-                        .header("Idempotency-Key", "archived-delete-create")
+                        .header("Idempotency-Key", "closed-delete-create")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"agent_id\":\"qwen-code\",\"input\":["
                                 + "{\"type\":\"text\",\"text\":\"hello\"}]}"))
@@ -516,22 +601,29 @@ class ManagedAgentServerIntegrationTest {
             assertThat(store.requireSession(tenant, sessionId).harnessBootId())
                     .isNotNull();
         });
-        mvc.perform(post("/v1/agents/sessions/{id}/archive", sessionId)
-                        .header(TenantContextFilter.HEADER, tenant)
-                        .header("Idempotency-Key", "archived-delete-archive"))
-                .andExpect(status().isOk());
+        awaitOperation(tenant, sessionId, objectMapper.readTree(lifecycle(
+                        post("/v1/agents/sessions/{id}/close", sessionId),
+                        tenant, "closed-delete-close")
+                .andExpect(status().isAccepted())
+                .andReturn().getResponse().getContentAsString())
+                .get("id").asText());
+        int closes = harness.closeCount(sessionId);
 
         harness.setAvailable(false);
         try {
-            mvc.perform(delete("/v1/agents/sessions/{id}", sessionId)
-                            .header(TenantContextFilter.HEADER, tenant)
-                            .header("Idempotency-Key",
-                                    "archived-delete-delete"))
-                    .andExpect(status().isOk())
-                    .andExpect(jsonPath("$.deleted").value(true));
+            String deleteId = objectMapper.readTree(lifecycle(
+                            delete("/v1/agents/sessions/{id}", sessionId),
+                            tenant, "closed-delete-delete")
+                    .andExpect(status().isAccepted())
+                    .andReturn().getResponse().getContentAsString())
+                    .get("id").asText();
+            awaitOperation(tenant, sessionId, deleteId);
         } finally {
             harness.setAvailable(true);
         }
+        assertThat(harness.closeCount(sessionId)).isEqualTo(closes);
+        assertThat(store.requireSession(tenant, sessionId).status())
+                .isEqualTo("DELETED");
     }
 
     @Test
@@ -1437,6 +1529,28 @@ class ManagedAgentServerIntegrationTest {
                                 + " 'turn.cancelled')]").isNotEmpty()));
     }
 
+    private ResultActions lifecycle(MockHttpServletRequestBuilder request,
+            String tenant, String idempotencyKey) throws Exception {
+        return mvc.perform(request.header(TenantContextFilter.HEADER, tenant)
+                .header("Idempotency-Key", idempotencyKey));
+    }
+
+    private JsonNode awaitOperation(String tenant, String sessionId,
+            String operationId) {
+        JsonNode[] operation = new JsonNode[1];
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> {
+            operation[0] = objectMapper.readTree(mvc.perform(get(
+                            "/v1/agents/sessions/{id}/operations/{op}",
+                            sessionId, operationId)
+                            .header(TenantContextFilter.HEADER, tenant))
+                    .andExpect(status().isOk())
+                    .andReturn().getResponse().getContentAsString());
+            assertThat(operation[0].get("status").asText())
+                    .isEqualTo("completed");
+        });
+        return operation[0];
+    }
+
     private MvcResult events(String tenant, String sessionId)
             throws Exception {
         return mvc.perform(get("/v1/agents/sessions/{id}/events", sessionId)
@@ -1456,13 +1570,17 @@ class ManagedAgentServerIntegrationTest {
     }
 
     static final class FixtureHarness implements HarnessConnector {
+        static final String BOOT_ID = "11111111-1111-4111-8111-111111111111";
         private final Map<String, String> promptIds =
                 new ConcurrentHashMap<>();
         private final AtomicInteger submits = new AtomicInteger();
         private final AtomicInteger cancels = new AtomicInteger();
         private final AtomicInteger renames = new AtomicInteger();
         private final AtomicInteger closes = new AtomicInteger();
+        private final Map<String, AtomicInteger> sessionCloses =
+                new ConcurrentHashMap<>();
         private final AtomicInteger renameFailures = new AtomicInteger();
+        private final AtomicInteger closeFailures = new AtomicInteger();
         private final Map<String, String> titles = new ConcurrentHashMap<>();
         private final Map<String, CountDownLatch> gates =
                 new ConcurrentHashMap<>();
@@ -1476,6 +1594,7 @@ class ManagedAgentServerIntegrationTest {
         private final Set<String> uncertainRetries =
                 ConcurrentHashMap.newKeySet();
         private volatile boolean available = true;
+        private volatile String closeAnswer = BOOT_ID;
         private volatile HarnessRuntimeRecovery runtimeRecovery;
 
         @Override
@@ -1489,8 +1608,7 @@ class ManagedAgentServerIntegrationTest {
             sessions.add(sessionId);
             HarnessRuntimeRecovery recovery = runtimeRecovery;
             runtimeRecovery = null;
-            return new Attachment(
-                    "11111111-1111-4111-8111-111111111111", recovery);
+            return new Attachment(BOOT_ID, recovery);
         }
 
         @Override
@@ -1597,9 +1715,16 @@ class ManagedAgentServerIntegrationTest {
         }
 
         @Override
-        public void closeSession(String tenantId, String sessionId) {
+        public String closeSession(String tenantId, String sessionId) {
             closes.incrementAndGet();
+            sessionCloses.computeIfAbsent(sessionId,
+                    ignored -> new AtomicInteger()).incrementAndGet();
+            if (closeFailures.getAndUpdate(value -> Math.max(0,
+                    value - 1)) > 0) {
+                throw new IllegalStateException("fixture close failure");
+            }
             sessions.remove(sessionId);
+            return closeAnswer;
         }
 
         boolean hasSession(String sessionId) {
@@ -1618,12 +1743,33 @@ class ManagedAgentServerIntegrationTest {
             return closes.get();
         }
 
+        int closeCount(String sessionId) {
+            AtomicInteger count = sessionCloses.get(sessionId);
+            return count == null ? 0 : count.get();
+        }
+
         String title(String sessionId) {
             return titles.get(sessionId);
         }
 
         void failNextRename() {
             renameFailures.incrementAndGet();
+        }
+
+        void failNextClose() {
+            closeFailures.incrementAndGet();
+        }
+
+        // Every close fails while the count lasts, as with an unreachable
+        // Harness.
+        void failCloses(int count) {
+            closeFailures.set(count);
+        }
+
+        // Closes are answered by another boot, as by a restarted Harness;
+        // null restores the boot that attaches Sessions.
+        void answerClosesAs(String bootId) {
+            closeAnswer = bootId == null ? BOOT_ID : bootId;
         }
 
         void setAvailable(boolean value) {
