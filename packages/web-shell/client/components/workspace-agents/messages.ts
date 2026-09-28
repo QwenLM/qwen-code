@@ -390,6 +390,9 @@ export const COLLAB_MESSAGES_EN: Record<string, CollabMessage> = {
   'collab.runtime.hostSession': (v) => `Host session: ${v?.id}`,
   'collab.runtime.sessions': (v) => `Sessions: ${v?.count}`,
   'collab.runtime.lastSeen': (v) => `Last heartbeat: ${v?.time}`,
+  'collab.runtime.remove': 'Remove',
+  'collab.runtime.removeConfirm': (v) =>
+    `Remove “${v?.name}”? Agents assigned only to it will move to this computer, and its active runs will stop.`,
 };
 
 export const COLLAB_MESSAGES_ZH: Record<string, CollabMessage> = {
@@ -736,4 +739,7 @@ export const COLLAB_MESSAGES_ZH: Record<string, CollabMessage> = {
   'collab.runtime.hostSession': (v) => `宿主会话：${v?.id}`,
   'collab.runtime.sessions': (v) => `会话数：${v?.count}`,
   'collab.runtime.lastSeen': (v) => `最近心跳：${v?.time}`,
+  'collab.runtime.remove': '移除',
+  'collab.runtime.removeConfirm': (v) =>
+    `确定移除“${v?.name}”吗？只绑定到它的 Agent 会切回这台电脑，正在执行的任务会停止。`,
 };

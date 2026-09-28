@@ -46,6 +46,7 @@ export interface ThreadsApi {
   }>;
   /** A single-use token for `qwen serve --join` on another machine. */
   createJoinToken?(): Promise<JoinToken>;
+  removeHost?(hostId: string): Promise<unknown>;
   createShare?(agentId: string): Promise<AgentShare>;
   listShares?(agentId: string): Promise<{ shares: AgentShareSummary[] }>;
   revokeShare?(agentId: string, callerId: string): Promise<unknown>;
@@ -113,6 +114,8 @@ export function createThreadsHttpApi(
     connectRemoteHost: (input) => post('/hosts/remote-connect', input),
     listAgents: () => request('/agents'),
     createJoinToken: () => post('/hosts/enrollment', {}),
+    removeHost: (hostId) =>
+      request(`/hosts/${encodeURIComponent(hostId)}`, { method: 'DELETE' }),
     createShare: (agentId) =>
       post(`/agents/${encodeURIComponent(agentId)}/shares`, {}),
     listShares: (agentId) =>

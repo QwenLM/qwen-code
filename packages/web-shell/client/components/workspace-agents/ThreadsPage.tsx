@@ -93,6 +93,7 @@ export interface ThreadsPageProps {
   onOpenDefinitions?: () => void;
   /** Issues a single-use join token for the Add runtime dialog. */
   onCreateJoinToken?: () => Promise<JoinToken>;
+  onRemoveRuntime?: (hostId: string) => void;
   hostServerUrl?: string;
   /** A2A shares of one agent; absent hides Share. */
   shares?: {
@@ -275,6 +276,7 @@ export function ThreadsPage({
   onOpenAgentBuilder,
   onOpenDefinitions,
   onCreateJoinToken,
+  onRemoveRuntime,
   onConnectRemoteHost,
   hostServerUrl,
   shares,
@@ -939,12 +941,34 @@ export function ThreadsPage({
                     : t('collab.runtime.remoteNote')}
                 </p>
               </div>
-              <strong
-                className={styles.runtimeStatus}
-                data-runtime-status={runtimeEntry.status}
-              >
-                {statusLabel(runtimeEntry.status)}
-              </strong>
+              <div className="flex items-center gap-2">
+                <strong
+                  className={styles.runtimeStatus}
+                  data-runtime-status={runtimeEntry.status}
+                >
+                  {statusLabel(runtimeEntry.status)}
+                </strong>
+                {runtimeEntry.kind === 'external' && onRemoveRuntime ? (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    disabled={pending}
+                    onClick={() => {
+                      if (
+                        window.confirm(
+                          t('collab.runtime.removeConfirm', {
+                            name: runtimeEntry.label,
+                          }),
+                        )
+                      ) {
+                        onRemoveRuntime(runtimeEntry.id);
+                      }
+                    }}
+                  >
+                    {t('collab.runtime.remove')}
+                  </Button>
+                ) : null}
+              </div>
               <dl className={styles.runtimeFacts}>
                 <div>
                   <dt>{t('collab.runtime.programs')}</dt>

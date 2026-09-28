@@ -383,6 +383,7 @@ async function setupRuntimes(page: Page, baseURL: string): Promise<void> {
     agentCount: 0,
     lastSeenAt: NOW - 3 * 60 * MIN,
   };
+  let runtimes = [local, buildBox, macMini];
   const remoteAgents = [
     {
       id: 'ag_lead',
@@ -420,11 +421,16 @@ async function setupRuntimes(page: Page, baseURL: string): Promise<void> {
           expiresAt: NOW + 15 * MIN,
         },
       });
+    const removedHost = /\/hosts\/([^/]+)$/.exec(path)?.[1];
+    if (removedHost && method === 'DELETE') {
+      runtimes = runtimes.filter((runtime) => runtime.id !== removedHost);
+      return route.fulfill({ json: { agentsMadeLocal: [], runsEnded: 0 } });
+    }
     if (path.endsWith('/agents') && method === 'GET')
       return route.fulfill({
         json: {
           agents: remoteAgents,
-          runtimes: [local, buildBox, macMini],
+          runtimes,
         },
       });
     if (path.endsWith('/threads'))
@@ -445,6 +451,22 @@ for (const theme of THEMES) {
     await expect(page.getByText('mac-mini', { exact: true })).toBeVisible();
     await clearFocus(page);
     await captureScreenshot(page, `collab-runtimes-${theme}`);
+
+    page.once('dialog', (dialog) => dialog.accept());
+    const removed = page.waitForRequest(
+      (request) =>
+        request.method() === 'DELETE' &&
+        request.url().endsWith('/hosts/host_mac'),
+    );
+    await page
+      .locator('section', {
+        has: page.getByRole('heading', { name: 'mac-mini' }),
+      })
+      .last()
+      .getByRole('button', { name: 'Remove' })
+      .click();
+    await removed;
+    await expect(page.getByText('mac-mini', { exact: true })).toHaveCount(0);
 
     await page.getByRole('button', { name: 'Add a runtime' }).first().click();
     const dialog = page.getByRole('dialog');

@@ -346,7 +346,7 @@ export function ThreadsRoute({
     );
   }
 
-  const { createShare, listShares, revokeShare } = client;
+  const { createShare, listShares, revokeShare, removeHost } = client;
   const shares =
     createShare && listShares && revokeShare
       ? {
@@ -504,6 +504,12 @@ export function ThreadsRoute({
         onOpenAgentBuilder={(hostId) => setCreatingAgent({ hostId })}
         {...(client.createJoinToken
           ? { onCreateJoinToken: client.createJoinToken }
+          : {})}
+        {...(removeHost
+          ? {
+              onRemoveRuntime: (hostId: string) =>
+                void mutate(() => removeHost(hostId)),
+            }
           : {})}
         {...(shares ? { shares } : {})}
         {...(onOpenDefinitions ? { onOpenDefinitions } : {})}
