@@ -337,7 +337,22 @@ try {
     assert.equal((await json(`${route}/status`)).recoveryBlocked, true);
     let cursor = '0';
     while (true) {
-      const page = await json(`${route}/transcript?cursor=${cursor}&limit=256`);
+      const response = await cli.request(
+        `${route}/transcript?cursor=${cursor}&limit=256`,
+        { headers: cli.headers(clientId) },
+      );
+      const text = await response.text();
+      if (proxyFailure) throw proxyFailure;
+      if (response.status === 503) {
+        assert.equal(config.fault, 'spring-kill', text);
+        assert.equal(JSON.parse(text).error, 'managed_transcript_unavailable');
+        console.log(
+          'FG6C spring-kill: live transcript unavailable after restart',
+        );
+        break;
+      }
+      assert.equal(response.status, 200, text + cli.output);
+      const page = JSON.parse(text);
       assert.equal(
         page.events.filter((event: { type: string }) =>
           event.type.startsWith('turn_'),

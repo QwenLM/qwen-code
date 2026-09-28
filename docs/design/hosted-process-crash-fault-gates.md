@@ -51,6 +51,12 @@ leaves it `UNKNOWN` after the real transport failure or timeout. Both states
 retain the original owner and refuse continuation. The SIGSTOP case exercises
 the real 30-second transport timeout.
 
+The Spring case holds the Store down for eight seconds before restarting,
+outlasting the five-second Harness writer lease. Its live transcript may return
+`503 managed_transcript_unavailable`; if it returns `200`, every page must still
+contain no terminal turn events. Worker cases require `200`. This exception
+does not relax the independent SQL ledger or the exact cold-load refusal below.
+
 ## Assertions and recovery boundary
 
 Record process identities and actual signal termination. Restart Harness with a

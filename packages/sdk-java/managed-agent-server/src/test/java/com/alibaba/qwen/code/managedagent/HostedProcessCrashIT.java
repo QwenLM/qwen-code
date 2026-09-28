@@ -184,6 +184,8 @@ class HostedProcessCrashIT {
                 assertThat(spring.waitFor(10, TimeUnit.SECONDS)).isTrue();
                 assertThat(spring.exitValue()).isEqualTo(137);
                 assertThat(running(worker)).as("Spring SIGKILL leaves the real worker alive").isTrue();
+                // Keep the Store down beyond the Harness's five-second writer lease.
+                Thread.sleep(8_000);
                 startSpring();
                 assertThat(spring.children().toList()).as("restart must not spawn a replacement worker").isEmpty();
                 return Map.of("pid", pid, "newPid", spring.pid(), "signal", "SIGKILL",

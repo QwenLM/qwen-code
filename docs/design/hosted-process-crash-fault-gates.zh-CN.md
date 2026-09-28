@@ -44,6 +44,11 @@ Spring 丢失后持久化执行保持 `EXECUTING` 且没有结果；重启后的
 不能接管孤儿。worker 丢失或暂停后，在真实传输失败或超时后变为 `UNKNOWN`。
 两种状态都保留原 owner 并拒绝续跑。SIGSTOP 场景覆盖真实的 30 秒传输超时。
 
+Spring 场景在重启前让 Store 停机八秒，超过 Harness 的五秒 writer 租约。
+它的实时 transcript 可以返回 `503 managed_transcript_unavailable`；若返回 `200`，
+每一页仍必须没有 Turn 终态事件。worker 场景必须返回 `200`。这个例外不放宽
+独立 SQL 台账检查，也不放宽下文要求的准确冷加载拒绝。
+
 ## 断言与恢复边界
 
 记录进程身份和实际信号退出。使用新的 boot 身份重启 Harness，等待短 writer 租约
