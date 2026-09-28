@@ -174,7 +174,8 @@ class ManagedRuntimeProviderWorker {
             return value;
           })
           .catch((error: unknown) => {
-            entry.ready = undefined;
+            this.executor.unclaimProviderSession(identity.runtimeSessionId);
+            this.sessions.delete(identity.runtimeSessionId);
             throw error;
           })
           .finally(() => {
@@ -365,12 +366,15 @@ class ManagedRuntimeProviderWorker {
       case 'execute':
         return runtime.execute(operation.reference);
       case 'status':
-        return runtime.status(operation.reference, operation.afterSequence);
       case 'cancel': {
-        const status = runtime.status(operation.reference);
-        return status.state === 'settled'
-          ? status
-          : runtime.cancel(operation.reference);
+        const status = runtime.findStatus(
+          operation.reference,
+          operation.kind === 'status' ? operation.afterSequence : 0,
+        );
+        if (!status) return { state: 'unknown' };
+        return operation.kind === 'cancel' && status.state !== 'settled'
+          ? runtime.cancel(operation.reference)
+          : status;
       }
       case 'bind-history':
         return this.bindHistory(value, operation.binding);

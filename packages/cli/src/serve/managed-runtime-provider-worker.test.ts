@@ -357,13 +357,11 @@ describe('Managed Runtime provider worker', () => {
       ).status,
     ).toBe(409);
     expect(
-      (
-        await post({
-          kind: 'status',
-          reference: { ...ref, invocationId: 'foreign' },
-        })
-      ).status,
-    ).toBe(409);
+      await control({
+        kind: 'status',
+        reference: { ...ref, invocationId: 'foreign' },
+      }),
+    ).toEqual({ state: 'unknown' });
     expect(
       (
         await post({
@@ -409,6 +407,44 @@ describe('Managed Runtime provider worker', () => {
     expect(await control({ kind: 'cancel', reference: ref })).toMatchObject({
       state: 'settled',
     });
+  });
+
+  it('reports forgotten invocations as unknown without accepting forged references or replaying work', async () => {
+    await begin();
+    const output = path.join(workspace, 'forgotten.txt');
+    const old = reference(
+      await prepare('write_file', { file_path: output, content: 'original' }),
+    );
+    expect(await execute(old)).toMatchObject({ executionStatus: 'success' });
+    fs.writeFileSync(output, 'later');
+    identity = { ...identity, promptId: 'prompt-2' };
+    await control({ kind: 'begin-turn', identity });
+    for (const kind of ['status', 'cancel']) {
+      expect(await control({ kind, reference: old })).toEqual({
+        state: 'unknown',
+      });
+    }
+    expect((await post({ kind: 'execute', reference: old })).status).toBe(409);
+    expect(fs.readFileSync(output, 'utf8')).toBe('later');
+    const current = reference(
+      await prepare('read_file', { file_path: output }),
+    );
+    for (const kind of ['status', 'cancel']) {
+      const forged = await post({
+        kind,
+        reference: { ...current, argsDigest: '0'.repeat(64) },
+      });
+      expect(forged.status).toBe(409);
+      expect(await forged.json()).toMatchObject({
+        code: 'managed_runtime_provider_operation_failed',
+      });
+    }
+    expect(await control({ kind: 'status', reference: current })).toMatchObject(
+      {
+        state: 'prepared',
+        cancelRequested: false,
+      },
+    );
   });
 
   it('requires immutable history binding to its real directory before starting a turn', async () => {
@@ -711,21 +747,92 @@ describe('Managed Runtime provider worker', () => {
     await control({ kind: 'release' });
   });
 
-  it('refuses provider admission for an unsupported boot v2 capability profile', async () => {
-    await worker.close();
-    const { workspaceCwd: _cwd, ...boot } = BOOT;
-    worker = await startManagedRuntimeAttestationWorker({
-      ...boot,
-      version: 2,
-      managedContext: MANAGED_CONTEXT_PROTOCOL,
-      storageId: 'storage://pvc/workspace-a',
-      mountRoot: workspace,
-    });
-    const refused = await post({ kind: 'acquire' });
-    expect(refused.status).toBe(501);
-    expect(await refused.json()).toMatchObject({
-      code: 'managed_runtime_provider_unsupported',
-      error: 'Managed Runtime provider configuration is unsupported.',
-    });
-  });
+  it.each([false, true])(
+    'preserves raw admission after a refused provider acquire (Workspace profile: %s)',
+    async (workspaceProfile) => {
+      await worker.close();
+      const { workspaceCwd: _cwd, ...boot } = BOOT;
+      worker = await startManagedRuntimeAttestationWorker({
+        ...boot,
+        version: 2,
+        managedContext: MANAGED_CONTEXT_PROTOCOL,
+        storageId: 'storage://pvc/workspace-a',
+        mountRoot: workspace,
+        ...(workspaceProfile
+          ? { capabilityDigest: WORKSPACE_CAPABILITY_DIGEST }
+          : {}),
+      });
+      const refused = await post({ kind: 'acquire' });
+      expect(refused.status).toBe(workspaceProfile ? 409 : 501);
+      expect(await refused.json()).toMatchObject({
+        code: workspaceProfile
+          ? 'managed_context_unavailable'
+          : 'managed_runtime_provider_unsupported',
+      });
+      const context = {
+        tenantId: BOOT.tenantId,
+        workspaceId: BOOT.workspaceId,
+        workspaceGeneration: BOOT.workspaceGeneration,
+        storageId: 'storage://pvc/workspace-a',
+        cwdRelative: '.',
+        contextConfigRef: WORKSPACE_CONTEXT_CONFIG_REF,
+        contextRevision: '1',
+      };
+      const contextDigest = computeManagedContextDigest(context);
+      const rawPost = (route: string, body: unknown) =>
+        fetch(`${worker.ready.url}${route}`, {
+          method: 'POST',
+          headers: HEADERS,
+          body: JSON.stringify(body),
+        });
+      expect(
+        (
+          await rawPost('/internal/managed-runtime/v3/context', {
+            protocolVersion: 3,
+            managedContext: MANAGED_CONTEXT_PROTOCOL,
+            operationId: 'install-raw-fallback',
+            sessionId: SESSION.runtimeSessionId,
+            binding: context,
+            contextDigest,
+          })
+        ).status,
+      ).toBe(200);
+      expect((await post({ kind: 'acquire' })).status).toBe(
+        workspaceProfile ? 409 : 501,
+      );
+      if (workspaceProfile) {
+        expect(
+          (
+            await rawPost(WORKSPACE_ACTIVATION_ROUTE.path, {
+              protocolVersion: 1,
+              operation: 'activate',
+              sessionId: SESSION.runtimeSessionId,
+              contextDigest,
+              contextConfigRef: WORKSPACE_CONTEXT_CONFIG_REF,
+              profile: WORKSPACE_EXECUTION_PROFILE,
+            })
+          ).status,
+        ).toBe(200);
+      }
+      const executeRaw = (callId: string) =>
+        rawPost('/internal/managed-runtime/v2/execute', {
+          protocolVersion: 2,
+          reference: {
+            sessionId: SESSION.runtimeSessionId,
+            promptId: 'raw',
+            callId,
+            argsDigest: callId,
+          },
+          toolName: 'read_file',
+          input: { file_path: path.join(workspace, 'input.txt') },
+        });
+      const raw = await executeRaw('fallback');
+      expect(raw.status).toBe(200);
+      expect((await raw.json()).result.executionStatus).toBe('success');
+      expect((await post({ kind: 'acquire' })).status).toBe(409);
+      await control({ kind: 'release' });
+      expect((await executeRaw('after-release')).status).toBe(409);
+      expect((await post({ kind: 'acquire' })).status).toBe(409);
+    },
+  );
 });

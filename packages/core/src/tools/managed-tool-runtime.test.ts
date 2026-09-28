@@ -556,6 +556,7 @@ describe('ManagedToolRuntime', () => {
     expect(tool.invocations[0].execute).toHaveBeenCalledTimes(1);
     const next = { ...identity, promptId: 'prompt-2' };
     await runtime.beginTurn(next);
+    expect(runtime.findStatus(old)).toBeUndefined();
     expect(() => runtime.status(old)).toThrow('identity does not match');
     expect(() => runtime.execute(old)).toThrow('identity does not match');
     await expect(runtime.prepare(prior, tool.name, input)).rejects.toThrow(
@@ -683,6 +684,11 @@ describe('ManagedToolRuntime', () => {
       expect(() => runtime.cancel(forged)).toThrow('identity');
       expect(() => runtime.status(forged)).toThrow('identity');
       expect(() => runtime.execute(forged)).toThrow('identity');
+      if (field === 'invocationId') {
+        expect(runtime.findStatus(forged)).toBeUndefined();
+      } else {
+        expect(() => runtime.findStatus(forged)).toThrow('identity');
+      }
       expect(runtime.status(ref).cancelRequested).toBe(false);
     },
   );

@@ -69,7 +69,12 @@ reference; execution forwards that reference to the original worker. Missing
 prepared state cannot recreate or replay an invocation. New work rechecks the
 resolved Workspace and activation; cleanup and observation use original state.
 Legacy raw-tool calls retain their separate protocol and cannot enter a Session
-owned by the provider protocol.
+owned by the provider protocol. A refused acquisition removes its provisional
+provider claim, so raw admission remains available; explicit release still
+permanently closes admission. Worker status and cancellation return exactly
+`{ state: 'unknown' }` when an invocation is no longer retained. A changed
+reference for a retained invocation remains a conflict, and missing execution
+state never permits replay.
 
 Broker Session acquisition remains local for compatibility with raw Tool v2.
 Before the first generic control, the transport explicitly acquires the worker

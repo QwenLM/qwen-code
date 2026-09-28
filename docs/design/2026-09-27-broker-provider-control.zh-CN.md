@@ -52,7 +52,10 @@ worker 为每个已获取的 provider Session 持有一个 Managed Tool runtime�
 manifest、准备、审批和 preflight 语义。参数保留在 worker 已准备的调用中。Broker
 仅保存已准备 reference，执行时将其交给原 worker。准备状态缺失不能重建或重放
 调用。新操作重新检查解析出的 Workspace 和激活状态；清理与观察使用原状态。
-旧原始工具调用保留独立协议，不能进入由 provider 协议持有的 Session。
+旧原始工具调用保留独立协议，不能进入由 provider 协议持有的 Session。获取被拒时撤销
+临时 provider 登记，保留原始工具准入；显式释放仍永久关闭准入。worker 不再保留某个
+调用时，状态与取消只返回 `{ state: 'unknown' }`。仍保留的调用若引用被改动，继续返回
+冲突；执行状态缺失始终不允许重放。
 
 为兼容原始 Tool v2，Broker Session 获取仍为本地操作。在首次通用控制前，transport
 显式获取 worker provider Session；重复获取幂等。历史观察、状态与取消不会获取或

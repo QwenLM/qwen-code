@@ -746,6 +746,15 @@ export class ManagedToolRuntime {
     return entry.result;
   }
 
+  findStatus(
+    reference: ManagedToolInvocationReference,
+    afterSeq = 0,
+  ): ManagedToolInvocationStatus | undefined {
+    return this.entries.has(reference.invocationId)
+      ? this.status(reference, afterSeq)
+      : undefined;
+  }
+
   status(
     reference: ManagedToolInvocationReference,
     afterSeq = 0,

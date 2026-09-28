@@ -186,6 +186,10 @@ export class ManagedToolExecutor {
     this.providerSessions.add(sessionId);
   }
 
+  unclaimProviderSession(sessionId: string): void {
+    this.providerSessions.delete(sessionId);
+  }
+
   closeSessionAdmission(sessionId: string): void {
     if (this.hasActiveSession(sessionId)) {
       throw new ManagedToolConflictError(
