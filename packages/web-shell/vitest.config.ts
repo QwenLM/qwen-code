@@ -32,7 +32,12 @@ export default defineConfig({
       junit: '../junit.xml',
     },
     // RPC-timeout exemption; see scripts/tests/unit-vitest-configs.test.ts.
-    dangerouslyIgnoreUnhandledErrors: process.platform !== 'linux',
+    // Self-hosted (ECS) runners share CPU with neighbours, so the fixed 60s
+    // worker→main onTaskUpdate budget can expire under contention even when
+    // every test passes (#12902).
+    dangerouslyIgnoreUnhandledErrors:
+      process.platform !== 'linux' ||
+      process.env['RUNNER_ENVIRONMENT'] === 'self-hosted',
     coverage: {
       // Same switch as cli/core: only the post-merge main run collects it.
       enabled: process.env['QWEN_CI_COVERAGE'] === '1',

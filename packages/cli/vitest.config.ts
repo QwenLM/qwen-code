@@ -265,7 +265,12 @@ export default defineConfig({
       '../../scripts/vitest-global-setup.js',
     ),
     // RPC-timeout exemption; see scripts/tests/unit-vitest-configs.test.ts.
-    dangerouslyIgnoreUnhandledErrors: process.platform !== 'linux',
+    // Self-hosted (ECS) runners share CPU with neighbours, so the fixed 60s
+    // worker→main onTaskUpdate budget can expire under contention even when
+    // every test passes (#12902).
+    dangerouslyIgnoreUnhandledErrors:
+      process.platform !== 'linux' ||
+      process.env['RUNNER_ENVIRONMENT'] === 'self-hosted',
     coverage: {
       // CI collects coverage only where something keeps it: the post-merge
       // run on main, which ci.yml marks with QWEN_CI_COVERAGE=1 and whose

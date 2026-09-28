@@ -79,11 +79,14 @@ const configs: Record<string, ExemptionConfig> = {
 
 describe('unhandled-error exemption on the platform lanes', () => {
   for (const [name, config] of Object.entries(configs)) {
-    it(`keeps unhandled errors fatal only on Linux in ${name}`, () => {
+    it(`keeps unhandled errors fatal only on non-self-hosted Linux in ${name}`, () => {
       // toBe, not toBeFalsy: a deleted flag is `undefined` and must fail
-      // this pin on every platform, including Linux where the value is false.
+      // this pin on every platform, including Linux where the value is false
+      // unless the runner is self-hosted (ECS), where CPU contention can
+      // trigger vitest RPC timeouts unrelated to code quality (#12902).
       expect(config.test?.dangerouslyIgnoreUnhandledErrors).toBe(
-        process.platform !== 'linux',
+        process.platform !== 'linux' ||
+          process.env['RUNNER_ENVIRONMENT'] === 'self-hosted',
       );
     });
   }
