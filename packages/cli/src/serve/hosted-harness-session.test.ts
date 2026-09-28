@@ -20,14 +20,21 @@ import {
   installHostedHarnessContractMiddleware,
 } from './hosted-harness-contract.js';
 import { registerHostedHarnessSessionRoutes } from './hosted-harness-session.js';
+import { HostedWorkspaceBroker } from './hosted-workspace-broker.js';
+import type { HostedWorkspaceToolTurn } from './hosted-workspace-tool-turn.js';
 import * as stdio from '../utils/stdioHelpers.js';
 
 const state = vi.hoisted(() => ({
   root: '',
-  model: vi.fn(async (_input: { signal: AbortSignal }) => ({
-    text: 'hello back',
-    model: 'test-model',
-  })),
+  model: vi.fn(
+    async (_input: {
+      signal: AbortSignal;
+      toolTurn?: HostedWorkspaceToolTurn;
+    }) => ({
+      text: 'hello back',
+      model: 'test-model',
+    }),
+  ),
 }));
 
 vi.mock(
@@ -61,7 +68,7 @@ const BOOT_ID = '11111111-1111-4111-8111-111111111111';
 const SESSION_ID = '22222222-2222-4222-8222-222222222222';
 const PROMPT_ID = '33333333-3333-4333-8333-333333333333';
 
-function app() {
+function app(withBroker = false) {
   const result = express();
   result.use(express.json());
   const contract = createHostedHarnessContract(
@@ -69,7 +76,12 @@ function app() {
     BOOT_ID,
   );
   installHostedHarnessContractMiddleware(result, contract);
-  registerHostedHarnessSessionRoutes(result, contract, state.root);
+  registerHostedHarnessSessionRoutes(
+    result,
+    contract,
+    state.root,
+    withBroker ? { baseUrl: 'http://127.0.0.1:1', token: 'test' } : undefined,
+  );
   return result;
 }
 
@@ -307,6 +319,157 @@ describe('Hosted Harness no-tool session', () => {
       'X-Qwen-Client-Id',
       created.body.clientId as string,
     );
+  });
+
+  it('rejects an oversized complete assistant record before acquisition and permits retry and reload', async () => {
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+    const acquire = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'acquire')
+      .mockResolvedValue();
+    const server = app(true);
+    const toolProfile = 'hosted-workspace-files/1';
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+      toolProfile,
+    });
+    expect(created.status).toBe(200);
+    state.model.mockImplementationOnce(async ({ toolTurn, signal }) => {
+      const call = {
+        name: 'read_file',
+        callId: 'call',
+        args: { file_path: 'a' },
+        isClientInitiated: false,
+        prompt_id: PROMPT_ID,
+      };
+      await toolTurn!.execute(
+        [call],
+        [
+          { text: 'x'.repeat(65_100) },
+          {
+            functionCall: { id: call.callId, name: call.name, args: call.args },
+          },
+        ],
+        'test-model',
+        signal,
+      );
+      throw new Error('oversized record was accepted');
+    });
+    const prompt = [{ type: 'text', text: 'read a' }];
+    const payloadDigest = `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`;
+    const clientId = created.body.clientId as string;
+    const send = async (promptId: string) => {
+      const response = await headers(
+        supertest(server).post(`/session/${SESSION_ID}/prompt`),
+      )
+        .set('X-Qwen-Client-Id', clientId)
+        .send({ prompt, promptId, payloadDigest });
+      expect(response.status).toBe(202);
+      await vi.waitFor(async () => {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', clientId);
+        expect(status.body.hasActivePrompt).toBe(false);
+        expect(status.body.recoveryBlocked).toBe(false);
+      });
+    };
+    await send(PROMPT_ID);
+    expect(acquire).not.toHaveBeenCalled();
+    const transcript = await headers(
+      supertest(server).get(`/session/${SESSION_ID}/transcript`),
+    ).set('X-Qwen-Client-Id', clientId);
+    expect(transcript.body.events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: 'turn_error', promptId: PROMPT_ID }),
+      ]),
+    );
+    await send('44444444-4444-4444-8444-444444444444');
+    expect(state.model).toHaveBeenCalledTimes(2);
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
+      'X-Qwen-Client-Id',
+      clientId,
+    );
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({ managedSessionStore: store(), toolProfile });
+    expect(loaded.status).toBe(200);
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
+      'X-Qwen-Client-Id',
+      loaded.body.clientId as string,
+    );
+  });
+
+  it('omits settled output when only the complete tool result record exceeds the limit', async () => {
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'prepare').mockResolvedValue(
+      '55555555-5555-4555-8555-555555555555',
+    );
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'execute').mockResolvedValue({
+      executionStatus: 'success',
+      responseParts: [{ text: 'x'.repeat(65_200) }],
+    });
+    const release = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'release')
+      .mockResolvedValue();
+    const publish = vi.spyOn(
+      LocalManagedSessionResourceStore.prototype,
+      'publish',
+    );
+    const server = app(true);
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+      toolProfile: 'hosted-workspace-files/1',
+    });
+    expect(created.status).toBe(200);
+    const clientId = created.body.clientId as string;
+    let response: Record<string, unknown> | undefined;
+    state.model.mockImplementationOnce(async ({ toolTurn, signal }) => {
+      const call = {
+        name: 'read_file',
+        callId: 'call',
+        args: { file_path: 'a' },
+        isClientInitiated: false,
+        prompt_id: PROMPT_ID,
+      };
+      const parts = await toolTurn!.execute(
+        [call],
+        [
+          {
+            functionCall: { id: call.callId, name: call.name, args: call.args },
+          },
+        ],
+        'test-model',
+        signal,
+      );
+      response = parts[0].functionResponse?.response;
+      await toolTurn!.consumeResults();
+      return { text: 'request a smaller range', model: 'test-model' };
+    });
+    const prompt = [{ type: 'text', text: 'read a' }];
+    const payloadDigest = `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`;
+    await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+      .set('X-Qwen-Client-Id', clientId)
+      .send({ prompt, promptId: PROMPT_ID, payloadDigest })
+      .expect(202);
+    await vi.waitFor(async () => {
+      const status = await headers(
+        supertest(server).get(`/session/${SESSION_ID}/status`),
+      ).set('X-Qwen-Client-Id', clientId);
+      expect(status.body.hasActivePrompt).toBe(false);
+      expect(status.body.recoveryBlocked).toBe(false);
+    });
+    expect(response?.['outputOmitted']).toBe(true);
+    expect(response?.['executionStatus']).toBe('success');
+    expect(release).toHaveBeenCalledOnce();
+    for (const [, bytes] of publish.mock.calls)
+      expect(bytes.byteLength).toBeLessThanOrEqual(64 * 1024);
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`))
+      .set('X-Qwen-Client-Id', clientId)
+      .expect(204);
   });
 
   it('ends an event stream when its attachment closes', async () => {
