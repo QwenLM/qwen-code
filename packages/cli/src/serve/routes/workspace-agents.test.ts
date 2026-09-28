@@ -31,6 +31,50 @@ afterEach(async () => {
   await fs.rm(runtimeDir, { recursive: true, force: true });
 });
 
+it('answers 404 for a workspace whose settings have not opted in', async () => {
+  const on = {
+    workspaceId: 'on',
+    workspaceCwd: path.join(runtimeDir, 'on'),
+    primary: true,
+    trusted: true,
+  } as WorkspaceRuntime;
+  const off = {
+    workspaceId: 'off',
+    workspaceCwd: path.join(runtimeDir, 'off'),
+    primary: false,
+    trusted: true,
+  } as WorkspaceRuntime;
+  const app = express();
+  registerWorkspaceAgentRoutes(app, {
+    workspaceRegistry: createWorkspaceRegistry([on, off]),
+    mutate: () => ((_req, _res, next) => next()) as RequestHandler,
+    isAgentCollaborationEnabledFor: (cwd) => cwd === on.workspaceCwd,
+  });
+  const server = http.createServer(app);
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+
+  try {
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('No TCP port');
+    const disabled = await fetch(
+      `http://127.0.0.1:${address.port}/workspaces/off/agent/events`,
+    );
+    expect(disabled.status).toBe(404);
+    await expect(disabled.json()).resolves.toEqual({
+      error: 'agent_collaboration_disabled',
+    });
+
+    // The enabled workspace answers the same route normally.
+    const enabled = await fetch(
+      `http://127.0.0.1:${address.port}/workspaces/on/agent/events`,
+    );
+    expect(enabled.status).toBe(200);
+    await enabled.body?.cancel();
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
 it('closes an event stream before a replacement runtime can publish to it', async () => {
   const primary = {
     workspaceId: 'primary',
@@ -50,6 +94,7 @@ it('closes an event stream before a replacement runtime can publish to it', asyn
   registerWorkspaceAgentRoutes(app, {
     workspaceRegistry: createWorkspaceRegistry([primary, secondary]),
     mutate: () => ((_req, _res, next) => next()) as RequestHandler,
+    isAgentCollaborationEnabledFor: () => true,
   });
   const server = http.createServer(app);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
