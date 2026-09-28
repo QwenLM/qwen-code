@@ -398,7 +398,10 @@ export class HostedWorkspaceToolTurn {
           routeRef,
         });
       }
-      await this.harness.commitAwaitRuntimeBatch(bindings);
+      await this.harness.commitAwaitRuntimeBatch(bindings, {
+        turnId: this.promptId,
+        promptId: this.promptId,
+      });
       if (shellBindings.size > 0) {
         const owner = await this.publication!.owner.owner();
         const authority = this.session.authority;

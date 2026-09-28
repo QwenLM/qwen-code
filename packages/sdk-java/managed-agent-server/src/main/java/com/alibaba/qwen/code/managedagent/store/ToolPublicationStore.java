@@ -117,7 +117,9 @@ public final class ToolPublicationStore {
                         + " writer_lease_until, recovery_status, activation_epoch, journal_revision"
                         + " FROM qwen_managed_session_journal_head WHERE tenant_id = ? AND session_id = ? FOR UPDATE",
                 row.tenant(), row.session());
-        Timestamp lease = (Timestamp) head.get("writer_lease_until");
+        Object leaseValue = head.get("writer_lease_until");
+        Timestamp lease = leaseValue instanceof java.time.LocalDateTime local
+                ? Timestamp.valueOf(local) : (Timestamp) leaseValue;
         require(row.workspace().equals(head.get("workspace_id")) && "ACTIVE".equals(head.get("state"))
                 && text(binding, "writerId").equals(head.get("writer_id"))
                 && ((Number) head.get("writer_generation")).longValue() == binding.get("writerGeneration").longValue()
@@ -126,8 +128,9 @@ public final class ToolPublicationStore {
                 "Original Session owner is fenced");
         boolean found = false;
         for (long revision = ((Number) head.get("journal_revision")).longValue(); revision > 0 && !found; revision--) {
+            // The locking head read can see a newer revision than this transaction's snapshot.
             byte[] record = jdbc.queryForObject("SELECT record_bytes FROM qwen_managed_session_journal_tx"
-                    + " WHERE tenant_id = ? AND session_id = ? AND journal_revision = ?",
+                    + " WHERE tenant_id = ? AND session_id = ? AND journal_revision = ? FOR UPDATE",
                     byte[].class, row.tenant(), row.session(), revision);
             if (record == null) {
                 continue;

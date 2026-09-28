@@ -197,6 +197,7 @@ export interface ManagedHarnessHandle {
    */
   commitAwaitRuntimeBatch(
     requests: readonly ManagedAwaitRuntimeCommit[],
+    turn?: { readonly turnId: string; readonly promptId: string },
   ): Promise<HarnessDurableWaitBoundary>;
   /**
    * Settles admitted Runtime work so the turn may continue from
@@ -487,6 +488,7 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
 
   async commitAwaitRuntimeBatch(
     requests: readonly ManagedAwaitRuntimeCommit[],
+    turn?: { readonly turnId: string; readonly promptId: string },
   ): Promise<HarnessDurableWaitBoundary> {
     if (requests.length === 0) {
       throw new ManagedSessionConflictError(
@@ -507,6 +509,17 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
       ) {
         throw new ManagedSessionConflictError(
           'approval wait must resolve before Runtime dispatch.',
+        );
+      }
+      if (
+        turn &&
+        (turn.turnId !== previous.identity.turnId ||
+          turn.promptId !== previous.identity.promptId) &&
+        previous.continuation.phase !== 'before_model' &&
+        previous.continuation.phase !== 'turn_settled'
+      ) {
+        throw new ManagedSessionConflictError(
+          'Runtime work cannot change the current unfinished turn.',
         );
       }
 
@@ -559,7 +572,16 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
           };
         });
         const checkpoint = createAwaitRuntimeHarnessCheckpoint({
-          previous,
+          previous: turn
+            ? {
+                ...previous,
+                identity: {
+                  ...previous.identity,
+                  ...turn,
+                  activationId: this.activation.activationId,
+                },
+              }
+            : previous,
           ...identity,
           attempt: previous.attempt ?? {
             attemptId: pending[0].attemptId,

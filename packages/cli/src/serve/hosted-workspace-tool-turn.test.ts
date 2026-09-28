@@ -161,6 +161,10 @@ it('commits the whole batch before the first dispatch and each receipt before re
     expect(authorization.status).toBe('runnable');
     if (authorization.status !== 'runnable') throw new Error('No checkpoint');
     expect(authorization.checkpoint.continuation.phase).toBe('await_runtime');
+    expect(authorization.checkpoint.identity).toMatchObject({
+      turnId: 'prompt',
+      promptId: 'prompt',
+    });
     expect(authorization.checkpoint.tools?.items).toHaveLength(2);
     expect((await session.sink.project())[0]?.message?.parts).toEqual(parts);
     return {
