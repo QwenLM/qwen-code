@@ -663,7 +663,6 @@ async function readJsonFile(filePath: string): Promise<unknown | undefined> {
   }
 }
 
-
 async function withWorkspaceLock<T>(
   projectRoot: string,
   run: () => Promise<T>,

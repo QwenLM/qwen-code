@@ -1608,10 +1608,17 @@ export function createServeApp(
   // Whether the routes and the recovery sweep exist at all. Evaluated at
   // call time over the registry rather than snapshotted at boot.
   let agentCollaborationRoutesMounted = false;
+  // Only trusted workspaces count: an untrusted one cannot use collaboration,
+  // and reading its settings is itself something untrusted access must not do
+  // (the loader writes debug logs).
   const anyAgentCollaborationEnabled = () =>
     workspaceRegistry
       .listAll()
-      .some((runtime) => isAgentCollaborationEnabledFor(runtime.workspaceCwd));
+      .some(
+        (runtime) =>
+          runtime.trusted &&
+          isAgentCollaborationEnabledFor(runtime.workspaceCwd),
+      );
 
   const liveConfigAtBoot = liveSettingsAtBoot
     ? readLiveVoiceConfiguration(liveSettingsAtBoot)
