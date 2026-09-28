@@ -346,6 +346,16 @@ export function ThreadsRoute({
     );
   }
 
+  const { createShare, listShares, revokeShare } = client;
+  const shares =
+    createShare && listShares && revokeShare
+      ? {
+          create: createShare,
+          list: async (agentId: string) => (await listShares(agentId)).shares,
+          revoke: revokeShare,
+        }
+      : undefined;
+
   if (openId && detail) {
     if (chat && !showDetails) {
       return (
@@ -495,16 +505,7 @@ export function ThreadsRoute({
         {...(client.createJoinToken
           ? { onCreateJoinToken: client.createJoinToken }
           : {})}
-        {...(client.createShare && client.listShares && client.revokeShare
-          ? {
-              shares: {
-                create: client.createShare,
-                list: async (agentId: string) =>
-                  (await client.listShares!(agentId)).shares,
-                revoke: client.revokeShare,
-              },
-            }
-          : {})}
+        {...(shares ? { shares } : {})}
         {...(onOpenDefinitions ? { onOpenDefinitions } : {})}
         {...(capabilities ? { capabilities } : {})}
         workspaceCwd={workspaceCwd}
