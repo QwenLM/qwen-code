@@ -3058,15 +3058,14 @@ export class LlmClient {
       }
     }
 
-    // extract and dream keep the original UserQuery-only gate to preserve
-    // the existing "once per user turn" semantics and avoid redundant work.
-    if (messageType !== SendMessageType.UserQuery) {
+    if (
+      messageType !== SendMessageType.UserQuery &&
+      messageType !== SendMessageType.ToolResult
+    ) {
       return;
     }
 
     const projectRoot = this.config.getProjectRoot();
-    const sessionId = this.config.getSessionId();
-    const history = this.getHistoryShallow();
     const mgr = this.config.getMemoryManager();
 
     if (!this.config.getManagedAutoMemoryEnabled()) {
@@ -3088,6 +3087,14 @@ export class LlmClient {
         });
     }
 
+    // Extract and Dream stay once per user query; migration also needs the
+    // completed ToolResult path so tool-using turns can activate recall.
+    if (messageType !== SendMessageType.UserQuery) {
+      return;
+    }
+
+    const sessionId = this.config.getSessionId();
+    const history = this.getHistoryShallow();
     const extractPromise = mgr
       .scheduleExtract({
         projectRoot,

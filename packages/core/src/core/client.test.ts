@@ -11003,6 +11003,22 @@ hello
       finishMigration({ status: 'skipped', skippedReason: 'complete' });
     });
 
+    it('runs only metadata migration after a completed tool-result turn', () => {
+      const runBackgroundTasks = (
+        client as unknown as {
+          runManagedAutoMemoryBackgroundTasks: (type: SendMessageType) => void;
+        }
+      ).runManagedAutoMemoryBackgroundTasks.bind(client);
+
+      runBackgroundTasks(SendMessageType.ToolResult);
+
+      expect(mockMemoryManager.scheduleMetadataMigration).toHaveBeenCalledTimes(
+        2,
+      );
+      expect(mockMemoryManager.scheduleExtract).not.toHaveBeenCalled();
+      expect(mockMemoryManager.scheduleDream).not.toHaveBeenCalled();
+    });
+
     it('activates a prepared memory protocol before starting UserQuery recall', async () => {
       let mode: 'legacy' | 'structured' = 'legacy';
       const setHistory = vi.fn();
