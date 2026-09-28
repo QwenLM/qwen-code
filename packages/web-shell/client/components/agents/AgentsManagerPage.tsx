@@ -170,10 +170,15 @@ export function AgentsManagerPage({
   // absent precisely when the routes are, so this hides the door instead of
   // leaving one that opens onto nothing. Definition CRUD below is unaffected —
   // it is a different, unconditional feature.
+  //
+  // It also needs a chat to open conversations in. The Plugins page embeds
+  // this page without one, and there only the definitions are managed; the
+  // sidebar's Agents entry is where collaboration lives.
   const workspace = useWorkspace();
   const collaborationAvailable =
+    onOpenThreadChat !== undefined &&
     workspace.capabilities?.features.includes(AGENT_COLLABORATION_FEATURE) ===
-    true;
+      true;
   const [agentsOpen, setAgentsOpen] = useState(
     () => !initialCreateScope && collaborationAvailable,
   );
