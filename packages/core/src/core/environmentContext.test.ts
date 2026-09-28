@@ -528,26 +528,35 @@ describe('getInitialChatHistory', () => {
       // listed name with a null from `getTool()` means the warm rejected, which
       // is a different state and must not be modelled as deferral. The listing
       // has to survive the demotion, so this is the case a declarations-based
-      // gate wrongly drops — and the only one in the suite that clears the eager
-      // default declaration list.
+      // gate wrongly drops — and the only one in the suite where the Skill tool
+      // is listed but not declared.
       mockToolRegistry.getAllToolNames.mockReturnValue([
         ToolNames.SKILL,
         ToolNames.TOOL_SEARCH,
         ToolNames.TOOL_CALL,
       ]);
-      mockToolRegistry.getFunctionDeclarations.mockReturnValue([]);
-
-      expect(mockToolRegistry.getAllToolNames()).toEqual([
-        ToolNames.SKILL,
-        ToolNames.TOOL_SEARCH,
-        ToolNames.TOOL_CALL,
+      // Registered bridges stay declared, so an empty list here would model a
+      // state that cannot occur: `isExemptFromEagerAllowList`
+      // (permission-manager.ts) exempts `tool_search` / `tool_call` from the
+      // `tools.eager` allowlist, so `registerLazyTool` (config.ts) routes them
+      // through plain `registerFactory`, they never enter `permissionDeferred`,
+      // and neither is `shouldDefer` — `getFunctionDeclarations()` keeps them
+      // and drops only the demoted Skill tool. `[]` would need the bridges
+      // denied too, i.e. the "no route at all" state ruled out above.
+      mockToolRegistry.getFunctionDeclarations.mockReturnValue([
+        { name: ToolNames.TOOL_SEARCH },
+        { name: ToolNames.TOOL_CALL },
       ]);
-      expect(mockToolRegistry.getFunctionDeclarations()).toEqual([]);
-      expect(mockToolRegistry.getTool(ToolNames.SKILL)).toEqual({});
 
       const [history] = await getInitialChatHistory(mockConfig as Config);
 
       expect(JSON.stringify(history)).toContain('<available_skills>');
+      // Assert the gate consulted the registration union rather than reading
+      // the stubbed values back: Skill is absent from the declaration list
+      // above, so this is what a declarations-based gate drops. `getAllToolNames`
+      // has exactly one caller on this path (the gate in
+      // `getInitialChatHistory`), so the call is attributable to it.
+      expect(mockToolRegistry.getAllToolNames).toHaveBeenCalled();
     });
 
     it('keeps the no-skills fallback when the Skill tool is registered but no skills exist', async () => {
