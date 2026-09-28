@@ -34,11 +34,7 @@ import {
   ExternalIntakeConflictError,
   ExternalIntakeRefusedError,
 } from './external-intake.js';
-import {
-  isAgentAddressable,
-  isValidId,
-  readWorkspaceAgents,
-} from './store.js';
+import { isAgentAddressable, isValidId, readWorkspaceAgents } from './store.js';
 import type { Thread, WorkspaceAgent } from './types.js';
 
 /**
