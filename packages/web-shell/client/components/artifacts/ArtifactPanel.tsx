@@ -496,6 +496,42 @@ interface ArtifactPanelProps {
   onToggleFullscreen?: () => void;
 }
 
+/**
+ * A collaboration thread's activity. Reads the workspace here rather than in
+ * the panel, so hosts that render the panel without a workspace provider (and
+ * never open this tab) do not need one.
+ */
+function AgentActivityTab({
+  threadId,
+  workspaceCwd,
+  onOpenCollaborationSession,
+}: {
+  threadId: string;
+  workspaceCwd: string;
+  onOpenCollaborationSession?: (
+    sessionId: string,
+    workspaceCwd: string,
+  ) => void;
+}) {
+  const workspace = useWorkspace();
+  if (!workspace.capabilities?.features?.includes('agent_collaboration_v1')) {
+    return null;
+  }
+  return (
+    <ThreadsRoute
+      chat
+      activityOnly
+      initialThreadId={threadId}
+      workspaceCwd={workspaceCwd}
+      onOpenAgentSession={
+        onOpenCollaborationSession
+          ? (sessionId) => onOpenCollaborationSession(sessionId, workspaceCwd)
+          : undefined
+      }
+    />
+  );
+}
+
 export function ArtifactPanel({
   contextUsageControls,
   artifacts,
@@ -549,10 +585,6 @@ export function ArtifactPanel({
   onToggleFullscreen,
 }: ArtifactPanelProps) {
   const { t } = useI18n();
-  const workspace = useWorkspace();
-  const collaborationAvailable =
-    workspace.capabilities?.features?.includes('agent_collaboration_v1') ===
-    true;
   const [sideTaskMenuOpen, setSideTaskMenuOpen] = useState(false);
   const [previewAttachmentId, setPreviewAttachmentId] = useState<string>();
   const sideTaskMenuCloseTimerRef = useRef<ReturnType<
@@ -1361,24 +1393,12 @@ export function ArtifactPanel({
             </div>
           )
         ) : activeTab.kind === 'agent_activity' ? (
-          collaborationAvailable ? (
-            <ThreadsRoute
-              key={activeTab.id}
-              chat
-              activityOnly
-              initialThreadId={activeTab.threadId}
-              workspaceCwd={activeTab.workspaceCwd}
-              onOpenAgentSession={
-                onOpenCollaborationSession
-                  ? (sessionId) =>
-                      onOpenCollaborationSession(
-                        sessionId,
-                        activeTab.workspaceCwd,
-                      )
-                  : undefined
-              }
-            />
-          ) : null
+          <AgentActivityTab
+            key={activeTab.id}
+            threadId={activeTab.threadId}
+            workspaceCwd={activeTab.workspaceCwd}
+            onOpenCollaborationSession={onOpenCollaborationSession}
+          />
         ) : activeTab.kind === 'context_usage' ? (
           <ContextUsagePanel
             key={activeTab.id}
