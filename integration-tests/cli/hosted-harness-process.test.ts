@@ -5,12 +5,13 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto';
+import { once } from 'node:events';
 import { existsSync } from 'node:fs';
 import { createServer } from 'node:net';
 import path from 'node:path';
 import WebSocket from 'ws';
 import type { ManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   fakeToolCall,
   startFakeOpenAIServer,
@@ -479,8 +480,8 @@ describe(
       expect(
         (await cli.request('/health', { headers: new Headers() })).status,
       ).toBe(401);
-      // The Hosted gates answer with a bare 404. An ordinary route's own JSON
-      // not-found (the shell route's session_not_found) must not pass.
+      // Only a Hosted gate's bare 404 `Not Found` passes; whatever an ordinary
+      // route answers instead fails, even its own JSON 404.
       const hidden = async (
         method: string,
         route: string,
@@ -548,6 +549,32 @@ describe(
         503,
       );
       expect(model!.requests.length).toBe(0);
+    });
+
+    it("keeps the caller's HOME, QWEN_HOME and environment out of the child", async () => {
+      vi.stubEnv('QWEN_HOME', 'caller-qwen-home');
+      vi.stubEnv('HOSTED_CALLER_ONLY', 'leaked');
+      try {
+        cli = new HostedHarnessProcess();
+        await expect(
+          cli.start('http://127.0.0.1:9/v1', {
+            args: [
+              '-e',
+              'const e = process.env; process.stdout.write(JSON.stringify([e.HOME, e.USERPROFILE, e.QWEN_HOME, e.HOSTED_CALLER_ONLY]))',
+            ],
+          }),
+        ).rejects.toThrow('Hosted CLI exited');
+      } finally {
+        vi.unstubAllEnvs();
+      }
+      const stdout = cli.child!.stdout!;
+      if (!stdout.readableEnded) await once(stdout, 'end');
+      expect(JSON.parse(cli.output)).toEqual([
+        cli.root,
+        cli.root,
+        path.join(cli.root, '.qwen'),
+        null,
+      ]);
     });
 
     it('portable startup: binds loopback and cleans up after an assertion failure', async () => {

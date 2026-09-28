@@ -366,6 +366,37 @@ describe('TaskStopTool', () => {
       expect(result.llmContent).toContain('completed');
     });
 
+    it('cancels a running migration task', async () => {
+      const migrationRecord = {
+        id: 'migration-running-1',
+        taskType: 'migration' as const,
+        projectRoot: '/p',
+        status: 'running' as const,
+        createdAt: '2026-05-04T12:00:00.000Z',
+        updatedAt: '2026-05-04T12:00:00.000Z',
+      };
+      const cancelTask = vi.fn(() => true);
+      const localTool = new TaskStopTool({
+        getBackgroundTaskRegistry: () => registry,
+        abandonBackgroundAgent,
+        getBackgroundShellRegistry: () => shellRegistry,
+        getMonitorRegistry: () => monitorRegistry,
+        getMemoryManager: () => ({
+          getTask: vi.fn(() => migrationRecord),
+          cancelTask,
+        }),
+      } as unknown as Config);
+
+      const result = await localTool.validateBuildAndExecute(
+        { task_id: migrationRecord.id },
+        new AbortController().signal,
+      );
+
+      expect(cancelTask).toHaveBeenCalledWith(migrationRecord.id);
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toContain('migration task');
+    });
+
     it('returns NOT_CANCELLABLE when the task id resolves to an extract record', async () => {
       // Extract is short-lived and runs on the request path; cancelling
       // it would interfere with the user's own turn. The dispatch must

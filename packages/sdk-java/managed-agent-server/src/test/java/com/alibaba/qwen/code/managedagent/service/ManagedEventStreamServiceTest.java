@@ -14,6 +14,7 @@ import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.EventRecord;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.ReplayWindow;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import java.io.IOException;
@@ -40,7 +41,7 @@ class ManagedEventStreamServiceTest {
     void rejectsNegativeReconciliationCursorBeforeReadingEvents() {
         AgentStateStore store = mock(AgentStateStore.class);
         ManagedAgentService agentService = new ManagedAgentService(store,
-                null, null, null, null, mock(ManagedWorkspaceRegistry.class));
+                null, null, null, mock(ManagedWorkspaceRegistry.class));
         assertThatThrownBy(() -> agentService.streamEvents(SESSION, -1))
                 .isInstanceOfSatisfying(ApiException.class, error -> {
                     assertThat(error.getStatus()).isEqualTo(HttpStatus.BAD_REQUEST);
@@ -56,9 +57,9 @@ class ManagedEventStreamServiceTest {
         AgentStateStore store = mock(AgentStateStore.class);
         ManagedWorkspaceRegistry registry = mock(ManagedWorkspaceRegistry.class);
         ManagedAgentService agentService = new ManagedAgentService(store,
-                null, null, null, null, registry);
+                null, null, null, registry);
         SessionRecord session = new SessionRecord("tenant", "session", "qwen-code",
-                null, null, "ACTIVE", null, null, 0, 2, 1, 1, null, 1,
+                null, null, "ACTIVE", null, null, 0, 2, 0, 1, 1, null, 1,
                 new ContextBinding("tenant", "ws-a", 1, "storage-a", ".", "config-a", 1));
         when(store.requireSession("tenant", "session")).thenReturn(session);
         AtomicBoolean revoked = new AtomicBoolean();
@@ -66,6 +67,8 @@ class ManagedEventStreamServiceTest {
                 .thenAnswer(ignored -> !revoked.get());
         List<EventRecord> records = List.of(event(1, false), event(2, true));
         CountDownLatch initialRead = new CountDownLatch(1);
+        when(store.findReplayWindow("tenant", "session"))
+                .thenReturn(new ReplayWindow(0, 0));
         when(store.findEvents("tenant", "session", 0, 100))
                 .thenAnswer(ignored -> {
                     initialRead.countDown();
@@ -121,13 +124,15 @@ class ManagedEventStreamServiceTest {
             boolean reconcile) throws Exception {
         AgentStateStore store = mock(AgentStateStore.class);
         ManagedAgentService agentService = new ManagedAgentService(store,
-                null, null, null, null, mock(ManagedWorkspaceRegistry.class));
+                null, null, null, mock(ManagedWorkspaceRegistry.class));
         when(store.requireSession("tenant", "session")).thenReturn(SESSION);
         List<EventRecord> records = List.of(event(1, false),
                 new EventRecord("tenant", "session", 2, "event-2", "turn",
                         "turn.completed", java.util.Map.of(), true, "source-2", 1),
                 event(3, true));
         CountDownLatch initialRead = new CountDownLatch(1);
+        when(store.findReplayWindow("tenant", "session"))
+                .thenReturn(new ReplayWindow(0, 0));
         when(store.findEvents("tenant", "session", 0, 100)).thenAnswer(ignored -> {
             initialRead.countDown();
             return reconcile ? records : List.of();
@@ -215,8 +220,8 @@ class ManagedEventStreamServiceTest {
         EventRecord record = new EventRecord("tenant", "session", 1,
                 "event-1", "turn-1", "item.output_text.delta",
                 java.util.Map.of("text", "hello"), false, "source-1", 1);
-        WebShellEvent webEvent = new WebShellEvent(1, "event-1", "session",
-                "turn-1", "item.output_text.delta", 1,
+        WebShellEvent webEvent = new WebShellEvent(1, 1, 1, "event-1",
+                "session", "turn-1", null, null, "item.output_text.delta", 1,
                 java.util.Map.of("text", "hello"), false);
         when(agentService.webShellEvent(record)).thenReturn(webEvent);
         ManagedAgentProperties properties = new ManagedAgentProperties();

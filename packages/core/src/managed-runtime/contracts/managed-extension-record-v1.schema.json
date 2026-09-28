@@ -1026,6 +1026,27 @@
           "if": {
             "type": "object",
             "properties": {
+              "state": {
+                "enum": ["running", "waiting"]
+              }
+            },
+            "required": ["state"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "execution": {
+                "not": {
+                  "const": "not_started_proven"
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": {
               "delivery": {
                 "type": "object",
                 "properties": {

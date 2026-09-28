@@ -24,6 +24,7 @@ import {
 } from './managed-session-records.js';
 import type { ManagedSessionJsonValue } from './managed-session-inbox.js';
 import { tryParseHarnessCheckpointV1 } from './managed-harness-checkpoint.js';
+import { MANAGED_EXTENSION_RECORD_BODIES } from './managed-extension-projection.js';
 import {
   scanManagedSessionJournal,
   type ManagedSessionJournalHandle,
@@ -159,6 +160,12 @@ class HttpManagedSessionJournalHandle implements ManagedSessionJournalHandle {
   }
 }
 
+const EXTENSION_RECORD_KINDS = new Set(
+  Object.keys(MANAGED_EXTENSION_RECORD_BODIES).map(
+    (domain) => `managed-${domain}`,
+  ),
+);
+
 class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
   private readonly staged = new Map<
     string,
@@ -238,6 +245,9 @@ class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
         if (ref.kind === 'managed-checkpoint') {
           const parsed = tryParseHarnessCheckpointV1(staged.bytes);
           if (parsed.ok) pending.push(...collectRefs([parsed.checkpoint]));
+        } else if (EXTENSION_RECORD_KINDS.has(ref.kind)) {
+          // A Stage H record commits the resources its closed body names.
+          pending.push(...collectRefs([JSON.parse(staged.bytes.toString())]));
         }
       }
     }
