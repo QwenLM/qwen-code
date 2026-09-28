@@ -50,6 +50,14 @@ describe('publicAuxModelSelectorValue', () => {
     expect(publicAuxModelSelectorValue(value)).toBe(value);
   });
 
+  it('serves a credential-free @ in the path byte-identically', () => {
+    // The fold guard must not degrade into an `includes('@')` test: an `@` in
+    // the path is not userinfo, and blanking the suffix would drop the very
+    // endpoint pin it exists to keep.
+    const value = 'openai:gpt-x\0https://host.example/v1/@org/model';
+    expect(publicAuxModelSelectorValue(value)).toBe(value);
+  });
+
   it('strips userinfo credentials from the suffix', () => {
     expect(
       publicAuxModelSelectorValue(
