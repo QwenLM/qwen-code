@@ -20,6 +20,7 @@ import { outstandingCloseObligations } from './thread-status.js';
 import {
   DEFAULT_QUEUE_LIMIT,
   HUMAN_AUTHOR_ID,
+  MAX_ACKNOWLEDGED_OUTBOX,
   MAX_THREAD_MESSAGES,
   MAX_THREAD_RUNS,
   AGENTS_SCHEMA_VERSION,
@@ -444,6 +445,7 @@ function isValidThread(value: unknown): value is Thread {
     !value['outbox'].every(isValidEvent) ||
     !isNonNegativeInteger(value['autoTurnsUsed']) ||
     !isNonNegativeInteger(value['tokensUsed']) ||
+    !isOptionalNonNegativeInteger(value['trimmedTokens']) ||
     !isValidId(value['rootThreadId']) ||
     (value['parentThreadId'] !== undefined &&
       !isValidId(value['parentThreadId'])) ||
@@ -685,6 +687,11 @@ function sumRunTokens(runs: readonly ThreadRun[]): number {
       total + run.usageByRound.reduce((sum, usage) => sum + usage.tokens, 0),
     0,
   );
+}
+
+/** Everything this thread has spent: its runs, plus runs retention dropped. */
+export function threadTokens(thread: Thread): number {
+  return (thread.trimmedTokens ?? 0) + sumRunTokens(thread.runs);
 }
 
 function migrateThread(
@@ -999,9 +1006,13 @@ async function listThreadsUnlocked(
 }
 
 function trimThread(thread: Thread): Thread {
+  const acknowledged = thread.outbox.filter(
+    (event) => event.status === 'acknowledged',
+  );
   if (
     thread.messages.length <= MAX_THREAD_MESSAGES &&
-    thread.runs.length <= MAX_THREAD_RUNS
+    thread.runs.length <= MAX_THREAD_RUNS &&
+    acknowledged.length <= MAX_ACKNOWLEDGED_OUTBOX
   ) {
     return thread;
   }
@@ -1017,12 +1028,14 @@ function trimThread(thread: Thread): Thread {
     (run, index) =>
       index >= firstRetainedRun ||
       outstandingRunIds.has(run.id) ||
-      run.usageByRound.length > 0 ||
       run.status === 'queued' ||
       run.status === 'running' ||
       run.status === 'finishing' ||
       run.status === 'cancelling',
   );
+  // A dropped run's spend moves into `trimmedTokens`, so the tree budget does
+  // not reset once a thread passes the run bound.
+  const droppedRuns = thread.runs.filter((run) => !retainedRuns.includes(run));
   const referencedMessageIds = new Set(
     retainedRuns.flatMap((run) => [
       ...run.triggerMessageIds,
@@ -1031,6 +1044,10 @@ function trimThread(thread: Thread): Thread {
       ...(run.finalMessageId ? [run.finalMessageId] : []),
     ]),
   );
+  const retainedAcknowledged = new Set(
+    acknowledged.slice(-MAX_ACKNOWLEDGED_OUTBOX),
+  );
+  const trimmedTokens = (thread.trimmedTokens ?? 0) + sumRunTokens(droppedRuns);
   return {
     ...thread,
     messages: thread.messages.filter(
@@ -1040,6 +1057,11 @@ function trimThread(thread: Thread): Thread {
         referencedMessageIds.has(message.id),
     ),
     runs: retainedRuns,
+    outbox: thread.outbox.filter(
+      (event) =>
+        event.status !== 'acknowledged' || retainedAcknowledged.has(event),
+    ),
+    ...(trimmedTokens > 0 ? { trimmedTokens } : {}),
   };
 }
 
@@ -1047,7 +1069,7 @@ async function writeThreadUnlocked(
   projectRoot: string,
   thread: Thread,
 ): Promise<Thread> {
-  const next = trimThread({ ...thread, tokensUsed: sumRunTokens(thread.runs) });
+  const next = trimThread({ ...thread, tokensUsed: threadTokens(thread) });
   if (!isValidThread(next)) {
     throw new Error(
       `Refusing to write malformed thread record "${thread.id}".`,
