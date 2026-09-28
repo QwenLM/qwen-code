@@ -995,14 +995,20 @@ describe('TrajectoryOverview', () => {
       expect(modeSwitch(clock).getAttribute('aria-pressed')).toBe('true');
     });
 
-    it('asks for the other mode, whichever is in force', () => {
+    it('selects either time mode', () => {
       const onModeChange = vi.fn();
       const container = render({ model: MODEL, onModeChange });
       act(() => modeSwitch(container).click());
       expect(onModeChange).toHaveBeenLastCalledWith('clock');
 
       rerender({ model: CLOCK_MODEL, onModeChange });
-      act(() => modeSwitch(container).click());
+      act(() =>
+        container
+          .querySelector<HTMLButtonElement>(
+            '[data-testid="trajectory-mode-active"]',
+          )!
+          .click(),
+      );
       expect(onModeChange).toHaveBeenLastCalledWith('active');
     });
 
