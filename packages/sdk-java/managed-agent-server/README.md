@@ -12,15 +12,14 @@ it. That ingress must authenticate the tenant before setting the header.
 
 ## Integration status
 
-This split is not yet a complete Hosted Harness / Runtime deployment. The
-embedded HTTP transport returns 501 for acquire/control/release. Prepare/start
-and operator resolution also return 501 because the merged Broker lacks their
-durable service APIs.
-Harness-level drain does not tear down workers. The copied real-process E2E
-script requires TypeScript integrations absent from this PR. See the
+The Hosted path supports durable no-tool Sessions and private Workspace tool
+profiles. G0 adds opt-in public creation with an initial file-tool Turn through
+the production Broker. This is not complete Workspace lifecycle, in-flight
+recovery or distributed provisioning support. See the G0 section below for its
+exact deployment and admission boundary, and the historical
 [review corrections](../../../docs/design/2026-09-25-managed-agent-review-corrections.md)
-for the remaining merge gates; earlier preview timing and recovery results
-below are not evidence for this split.
+for the original split's merge gates; earlier preview timing and recovery
+results below do not establish completion of later slices.
 
 ## API contract
 
@@ -268,6 +267,39 @@ Harness or Runtime Broker credentials.
 
 ## Embedded Runtime Broker
 
+### Initial Workspace file Turn (G0)
+
+`QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED=true` opts in to an initial
+Read/Write/Edit Turn supplied with public Session creation. The WebShell creation
+adapter uses the same admission. This requires the Hosted Harness and HTTP
+Session Store, `yolo` approval mode, and a `local-process`, `session`-isolated
+Broker with configured `runtime-broker.workspace-mounts`. Registry entries must
+use `managed-runtime-tools/1` and `preapproved-workspace-tools/1`, and their
+tenant/storage identity must have a deployment mount. The trusted ingress must
+provide an `AuthenticatedTenantActor` principal with read/create grants; a caller
+header alone does not authenticate an actor.
+
+Submit `agent_id: "qwen-code"`, the existing `workspace` selection and `input`
+through `POST /v1/agents/sessions`. The server chooses the fixed
+`hosted-workspace-files/1` private profile and uses the persisted Workspace ID
+for the Session Store. Public callers cannot choose the profile. Configure the
+Harness's deployment-owned `--managed-runtime-broker-url` and
+`--managed-runtime-broker-token` options to reach this Broker. A repeated creation key returns
+the original Session/Turn; changed input conflicts. Disabling the opt-in refuses
+creation with input, including replays, while empty bound creation remains
+available. The directory mounted for a Workspace is trusted deployment data,
+not a filesystem sandbox.
+
+Later submit/cancel/lifecycle/cwd operations and broad Workspace capability
+advertisement remain gated. Shell and in-flight recovery are separate slices.
+The existing `EmbeddedRuntimeBroker` is used through production configuration;
+no direct store admission or test Broker replacement is needed.
+
+Design: [English](../../../docs/design/2026-09-29-hosted-public-workspace-admission.md)
+| [简体中文](../../../docs/design/2026-09-29-hosted-public-workspace-admission.zh-CN.md).
+
+### Broker deployment
+
 The Broker starts before the first Hosted Harness connection, so the supported
 startup order is Spring/Broker first, Hosted Harness second, traffic last. The
 Harness SDK handshake is lazy and occurs on the first admitted Turn.
@@ -291,8 +323,8 @@ When `QWEN_MANAGED_AGENT_WORKSPACE_ID` is omitted, the server derives the same
 workspace path. An explicitly configured ID must match that value or startup
 fails before traffic is accepted.
 
-The reserved Hosted Harness profile cannot yet connect to the Broker at
-`http://127.0.0.1:4182`. When enabled, the embedded
+The Hosted file profile connects through the private Broker endpoint, which
+defaults to `http://127.0.0.1:4182`. When enabled, the embedded
 Broker always uses the Spring `DataSource` and Flyway-managed Runtime tables;
 it does not fall back to in-memory repositories. The credential key must decode
 to exactly 32 bytes and protects persisted Runtime seeds and static Runtime

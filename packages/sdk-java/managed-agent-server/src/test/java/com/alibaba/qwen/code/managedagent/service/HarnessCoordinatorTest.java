@@ -11,6 +11,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 import com.alibaba.qwen.code.daemon.HarnessRuntimeRecovery;
@@ -71,7 +72,9 @@ class HarnessCoordinatorTest {
             }
             verify(store).failTurn(eq(tenantId), eq(sessionId), eq(turnId),
                     anyString(), eq("workspace_unavailable"), anyString());
-            verifyNoInteractions(harness, runtimeWarmer);
+            verify(harness).isWorkspaceFilesAvailable();
+            verifyNoMoreInteractions(harness);
+            verifyNoInteractions(runtimeWarmer);
         }
     }
 
