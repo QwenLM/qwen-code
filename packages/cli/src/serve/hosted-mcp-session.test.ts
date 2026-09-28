@@ -14,6 +14,7 @@ import {
   type ManagedSession,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
+import { ManagedOperationGrantGate } from '@qwen-code/qwen-code-core/managed-runtime/managed-operation-grant-gate.js';
 import {
   parseMcpConfiguration,
   parseMcpOperation,
@@ -22,7 +23,10 @@ import type {
   ManagedMcpControl,
   ManagedMcpOperationView,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-mcp-protocol.js';
-import { HostedWorkspaceBroker } from './hosted-workspace-broker.js';
+import {
+  HostedWorkspaceBroker,
+  HostedWorkspaceBrokerRejection,
+} from './hosted-workspace-broker.js';
 import {
   HostedMcpSession,
   parseHostedMcpServers,
@@ -129,7 +133,8 @@ beforeEach(async () => {
         expect(parseMcpConfiguration(record!.record).releaseState).toBe(
           'releasing',
         );
-      else expect(record!.run.execution).toBe('dispatch_started');
+      else if (operation.kind !== 'mcp-discover')
+        expect(record!.run.execution).toBe('dispatch_started');
       let view: ManagedMcpOperationView;
       if (operation.kind === 'mcp-configure') {
         view = {
@@ -161,6 +166,12 @@ beforeEach(async () => {
               prompts: 'complete',
             },
           },
+        };
+      } else if (operation.kind === 'mcp-discover') {
+        view = {
+          operationId: operation.operationId,
+          state: 'settled',
+          catalog: replies.get(operation.grant.operationId)!.catalog,
         };
       } else if (operation.kind === 'mcp-invoke') {
         view = {
@@ -408,6 +419,129 @@ it('reconciles a temporarily unknown configuration without repeating its effect'
   expect(mcp.getCatalogs()).toHaveLength(1);
   await mcp.close();
 });
+
+it('closes a never-dispatched configuration after workspace admission is refused', async () => {
+  vi.mocked(HostedWorkspaceBroker.prototype.acquire).mockRejectedValueOnce(
+    new HostedWorkspaceBrokerRejection(409, 'workspace_busy'),
+  );
+  await expect(mcp.ensureReady()).rejects.toThrow('workspace_busy');
+  await mcp.close();
+  const configuration = parseMcpConfiguration(
+    session.authority.extensionRecordsInDomain('mcp_configuration')[0].record,
+  );
+  expect(configuration).toMatchObject({
+    releaseState: 'released',
+    run: { state: 'cancelled', execution: 'not_started_proven' },
+  });
+  expect(requests).toEqual([]);
+  expect(HostedWorkspaceBroker.prototype.acquire).toHaveBeenCalledTimes(2);
+  expect(HostedWorkspaceBroker.prototype.release).toHaveBeenCalledOnce();
+});
+
+it('publishes a new immutable configuration after catalog invalidation, without replacing old pins', async () => {
+  await mcp.ensureReady();
+  const original = mcp.getCatalogs()[0];
+  const name = mcp.tools()[0].name!;
+  const physical = vi
+    .mocked(HostedWorkspaceBroker.prototype.control)
+    .getMockImplementation()!;
+  let stale = true;
+  vi.mocked(HostedWorkspaceBroker.prototype.control).mockImplementation(
+    async (operation) => {
+      const response = await physical(operation);
+      if (operation.kind === 'mcp-discover' && stale) {
+        stale = false;
+        return { ...response, catalog: { ...original, catalogRevision: 2 } };
+      }
+      return response;
+    },
+  );
+  await mcp.refresh();
+  expect(mcp.getCatalogs()[0].configRevision).toBe(2);
+  expect(mcp.toolInput(name, {}, 'old-call')?.input.configRevision).toBe(1);
+  await mcp.refresh();
+  expect(mcp.getCatalogs()[0].configRevision).toBe(2);
+  expect(
+    requests.filter((entry) => entry.kind === 'mcp-configure'),
+  ).toHaveLength(2);
+});
+
+it('can replace an initial definition that failed before any catalog was published', async () => {
+  const physical = vi
+    .mocked(HostedWorkspaceBroker.prototype.control)
+    .getMockImplementation()!;
+  vi.mocked(HostedWorkspaceBroker.prototype.control).mockImplementation(
+    async (operation) => {
+      const response = await physical(operation);
+      if (
+        operation.kind === 'mcp-configure' &&
+        operation.serverRevision === 1
+      ) {
+        const failed: ManagedMcpOperationView = {
+          operationId: operation.operationId,
+          state: 'settled',
+          error: { code: 'managed_mcp_connection_failed' },
+        };
+        replies.set(operation.operationId, failed);
+        return failed;
+      }
+      return response;
+    },
+  );
+  await expect(mcp.ensureReady()).rejects.toThrow('configuration failed');
+  await mcp.configure(randomUUID(), { ...pin, serverRevision: 2 }, 1);
+  await mcp.ensureReady();
+  expect(mcp.getCatalogs()[0].serverRevision).toBe(2);
+  expect(
+    requests
+      .filter((entry) => entry.kind === 'mcp-configure')
+      .map((entry) => entry.serverRevision),
+  ).toEqual([1, 2]);
+});
+
+it.each(['refresh', 'close'] as const)(
+  'renews committed grants before %s after an idle Harness restart',
+  async (action) => {
+    const gate = new ManagedOperationGrantGate();
+    const physical = vi
+      .mocked(HostedWorkspaceBroker.prototype.control)
+      .getMockImplementation()!;
+    vi.mocked(HostedWorkspaceBroker.prototype.control).mockImplementation(
+      async (operation) => {
+        if ('grant' in operation) gate.install(operation.grant);
+        return physical(operation);
+      },
+    );
+    await mcp.refresh();
+    const sessionKey = session.authority.sessionHeader.sessionKey;
+    const configuration =
+      session.authority.extensionRecordsInDomain('mcp_configuration')[0];
+    await session.close();
+    session = await openManagedSession({
+      runtimeBaseDir: root,
+      cwd: root,
+      transcriptPath: path.join(root, 'session.jsonl'),
+      sessionId: sessionKey.sessionId,
+      sessionKey,
+      version: 'test',
+      workerId: 'replacement-worker',
+      activationLeaseDurationMs: 60_000,
+    });
+    const restored = new HostedMcpSession(
+      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+      session,
+      [pin],
+    );
+    await restored[action]();
+    expect(
+      session.authority.extensionRecordsInDomain('mcp_configuration')[0]
+        .revision,
+    ).toBeGreaterThan(configuration.revision);
+    expect(
+      requests.filter((entry) => entry.kind === 'mcp-configure'),
+    ).toHaveLength(1);
+  },
+);
 
 it('restores the original owner before close and uses fresh identities after confirmed release', async () => {
   await mcp.ensureReady();

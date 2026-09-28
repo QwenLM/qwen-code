@@ -160,6 +160,11 @@ async function mcpApp(unknownConfigure = false) {
           ? { operationId: operation.operationId, state: 'outcome_unknown' }
           : settled;
       }
+      if (operation.kind === 'mcp-discover')
+        return {
+          ...replies.get(operation.grant.operationId)!,
+          operationId: operation.operationId,
+        };
       return (
         replies.get(operation.operationId) ?? {
           operationId: operation.operationId,
@@ -223,6 +228,19 @@ describe('Hosted Harness no-tool session', () => {
         authorize(supertest(server).get(`/session/${SESSION_ID}/status`));
       expect((await status()).body.recoveryBlocked).toBe(true);
       expect((await send(randomUUID())).status).toBe(409);
+      const prompt = [{ type: 'text', text: 'blocked by raw operation' }];
+      expect(
+        (
+          await authorize(
+            supertest(server).post(`/session/${SESSION_ID}/prompt`),
+          ).send({
+            prompt,
+            promptId: PROMPT_ID,
+            payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+          })
+        ).status,
+      ).toBe(409);
+      expect(state.model).not.toHaveBeenCalled();
 
       const settled: ManagedMcpOperationView = {
         operationId,
@@ -324,6 +342,32 @@ describe('Hosted Harness no-tool session', () => {
     }
     expect((await closed).status).toBe(204);
   });
+
+  it.each(['invoke', 'close'])(
+    'restores the owner before %s after an idle Broker restart',
+    async (next) => {
+      const { server, authorize, brokerOwners } = await mcpApp();
+      const invoke = () =>
+        authorize(
+          supertest(server).post(`/session/${SESSION_ID}/mcp/operations`),
+        ).send({
+          operationId: randomUUID(),
+          serverId: 'demo',
+          request: { kind: 'resource_read', uri: 'memory://note' },
+        });
+      expect((await invoke()).body.state).toBe('settled');
+      brokerOwners.clear();
+      if (next === 'invoke')
+        expect((await invoke()).body.state).toBe('settled');
+      expect(
+        (
+          await authorize(
+            supertest(server).post(`/session/${SESSION_ID}/detach`),
+          )
+        ).status,
+      ).toBe(204);
+    },
+  );
 
   it.each([
     { kind: 'resource_read', uri: '' },

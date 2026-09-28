@@ -40,15 +40,17 @@ MCP 需要独立配置与操作记录、不可变目录修订、由 Runtime 持�
 
 资源或提示 intent 固定参数与 server/catalog/connection 修订。物理请求用稳定 operation ID 标识，原始响应先存为资源再提交结算。重复命令内容加入同一个操作；复用身份但内容不同会被拒绝。工具调用保留普通工具的 intent、permission/preflight 和 receipt 语义，以及原 execution 身份。
 
-网络发送或进程启动前必须已有提交的 intent。尚未进入 `dispatch_started` 的资源/提示 intent 可以保留原 pin 恢复首次派发，也可以在本地取消并证明从未开始；状态查询不能把这种未发送的 intent 变成未知副作用。已提交结果的重放无需重新连接 Runtime。发送后的响应失败为 `outcome_unknown`，恢复只查询原身份，重连路径不能再次发送。超时后的未决请求仍可向原操作发送取消，但不证明远端副作用已取消。可验证的迟到响应可以结算原调用。Runtime 丢失时，未决副作用保持阻塞。
+网络发送或进程启动前必须已有提交的 intent。尚未进入 `dispatch_started` 的资源/提示 intent 可以保留原 pin 恢复首次派发，也可以在本地取消并证明从未开始；状态查询不能把这种未发送的 intent 变成未知副作用。已提交结果的重放无需重新连接 Runtime。发送后的响应失败为 `outcome_unknown`，恢复只查询原身份，重连路径不能再次发送。未发送请求可立即取消；派发后的取消延迟到原响应到达。Runtime 不发送原生取消通知，因为 SDK server 会抑制后续响应，导致结算证据永久丢失。仍记录原响应；取消绝不证明远端副作用未执行。可验证的迟到响应可以结算原调用。Runtime 丢失时，未决副作用保持阻塞。
 
-发现期间收到的列表变更通知会使对应类别保持 stale，并发列表响应不能清除该失效信息。公开目录仍是已提交快照，不是 Runtime 实时健康或可用性检查。
+发现期间收到的列表变更通知会使对应类别保持 stale，并发列表响应不能清除该失效信息。每次模型请求和新资源/提示命令之前，Harness 检查发现状态。未变化且可用的目录保留修订；目录变化或连接退休后，安装新的不可变配置与连接代数。已准入请求保留原 pin，绝不重发。公开目录仍是已提交快照，不是 Runtime 实时健康或可用性检查。
+
+Harness 空闲重载后，先推进现有配置记录的持久修订，再为新 writer 签发 grant；目录和连接 pin 保持不变。Runtime grant gate 仍拒绝同一修订更换 owner。初始发现失败后，显式替换命令可安装允许的新定义，无需先让失败的初始定义恢复。
 
 ## 准入、凭据与清理
 
 Runtime 只允许目标 workspace 已配置的定义，以及 Session 已安装的 server binding。配置凭据留在 Runtime。公开目录不包含连接配方、环境、headers、endpoint、进程标识、grant 或内部 binding ID。错误使用有界稳定代码，不回显可能带凭据的底层连接异常。
 
-每个 Runtime 实例最多允许 16 个连接和 32 个在途请求，包括等待 drain 的旧连接；替换不能临时超额。release 前封闭新准入；活动操作保留原 transport 直到结算。Streamable HTTP 终止与 stdio 关闭有时间上限，不能确认 drain 时不能 ACK release。Runtime/Session release 等待这些 hold。
+每个 Runtime 实例最多允许 16 个连接和 32 个在途请求，包括等待 drain 的旧连接；替换不能临时超额。release 前封闭新准入；活动操作保留原 transport 直到结算。空闲退休连接立即关闭；繁忙退休连接仅在原请求结算后关闭。Streamable HTTP DELETE 采用一秒上限的尽力清理；release 表示全部请求结算后本地 transport 已关闭，不保证远端 server Session 被删除。本地关闭有时间上限，不能确认 drain 时不能 ACK release。Runtime/Session release 等待这些 hold。未进入派发的配置可用 `not_started_proven` 取消；close 随后完成并释放原 Broker 所有权，包括此前因 Workspace busy 留下的未完成 acquire，期间不配置 MCP。
 
 ## 文件与接线点
 
@@ -80,7 +82,7 @@ Runtime 只允许目标 workspace 已配置的定义，以及 Session 已安装�
 }
 ```
 
-`streamable-http` 或 `sse` 使用 `url` 和可选 `headers`，不能同时提供 `command`、`args`、`env`。定义在 Runtime 启动时装载；修改连接配方必须提供新的 `serverRevision` 和对应 digest。替换活动 binding 时应同时保留两个修订。
+`streamable-http` 或 `sse` 使用 `url` 和可选 `headers`，不能同时提供 `command`、`args`、`env`。定义在 Runtime 启动时装载；修改连接配方必须提供新的 `serverRevision` 和对应 digest。替换活动 binding 时应同时保留两个修订。可选 `timeoutMs` 为 1 至 600000 的整数，调用响应默认等待 600000 毫秒；连接和发现仍为 25 秒上限。Hosted 工具观察窗口为 630 秒，在临时 UNKNOWN 后继续查询原 execution；Java 对两种工具协议均持久接受明确的迟到 Runtime 结果。轮询复用已取得的 owner，状态查询失败时仅重建原 owner 路由。
 
 创建或加载私有 Hosted Session 时，在原有 `managedSessionStore` 字段之外提供 `toolProfile: "hosted-workspace-mcp/1"` 和 `mcpServers: [{serverId, serverRevision, definitionDigest}]`。Session 保留初始准入 pin，后续替换单独提交。首个 prompt 或资源/提示操作会先初始化 binding，再受理工作。Hosted 请求沿用现有 Harness protocol/boot 与 client 身份 headers。
 
@@ -96,5 +98,15 @@ Runtime 只允许目标 workspace 已配置的定义，以及 Session 已安装�
 必要检查包括 Session/workspace 隔离、凭据隐藏、成功空目录与发现失败、在途调用期间替换、重复及冲突命令、取消后迟到成功、配额拒绝、丢 ACK 后查询原 owner、活动工作期间 release。按包运行定向测试、Java 契约测试、仓库 build/typecheck 与 bundle，再完整审查 diff 两轮。无法运行的门禁如实记录；目录展示或单元测试不足以证明生产迁移完成。
 
 ## 开放问题与限制
+
+H1 明确保留每个 tenant/storage lease 同时仅一个 attached MCP owner 的限制。同一 Workspace 的其他 Session，以及共享该 storage 的其他 Workspace，即使在两次 turn 之间也不能执行；detach 后释放租约。stdio server 仍能访问 Workspace 时提前释放租约会允许并发写入；连接寿命与存储所有权解耦属于生产启用前的后续工作。
+
+存在未决请求时物理连接丢失仍保持 recovery-blocked。工具在 630 秒 Hosted 观察窗口结束后才结算，或 Harness 在 turn 中途重启，仍需要本私有阶段尚未实现的 checkpoint 恢复。原始资源/提示操作可通过原 ID 的状态接口或 close 接受迟到结果。Runtime 回执历史及已关闭连接的 tombstone 仍保留至进程结束，随历史增长；基于持久 ACK 的回收，以及永久丢失请求的 release 等待者清理，留作后续工作。并发配额不代表历史内存有上限。
+
+模型工具名有意包含目录和连接身份，防止旧广告调用静默使用新 binding；重新加载的历史可能保留旧名字。stdio HOME/USERPROFILE 为 Workspace；会写 HOME 缓存的 server 应通过部署定义显式设置独立 HOME。
+
+Session 存储全局识别这两个记录 domain；实际执行仍由显式私有 profile 和限定范围的 Runtime 定义控制。共享 Broker acquire 有意对原 owner 幂等，并返回 workspace generation 与 Runtime binding/generation；普通文件/Shell prepare 保留实际 prompt 和 call 身份。
+
+尚未发布的 MCP migration 使用 V21，避免与 #12894 的 V19/V20 publication migration 重号。部署应按递增顺序执行，后合并分支必须再次对照 main 检查。#12868 的通用 control 需要语义合并，保留撤权后的 MCP 原 owner 恢复，以及先 drain 再释放存储租约的顺序。
 
 公开配置管理和生产 AgentBundle 能力发布另行部署。没有查询或幂等支持的远端系统不能自动恢复未知副作用。Runtime 的代内回执不能跨物理 Runtime 丢失持久保留；此时已提交的 Session intent 保持阻塞结果。配额按 Runtime 实例计算，不跨独立 Runtime 进程汇总。私有配置沿用现有 inline Session Store：每类发现列表限制为 16 KiB，保留部分条目时标记 partial，无法保留有效条目时标记 failed；原始操作响应限制为 60 KiB，超限以 output-limit 错误结算。本阶段不启用 SDK 反向客户端、生产 profile 公告、跨进程总预算或对象存储结果。

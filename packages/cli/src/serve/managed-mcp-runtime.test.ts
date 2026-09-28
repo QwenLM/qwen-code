@@ -40,6 +40,7 @@ createInterface({input:process.stdin}).on('line', line => {
  if (request.id === undefined) return;
  appendFileSync(process.env.COUNTER, request.method+'\n');
  if (request.method==='initialize') send(request.id,{protocolVersion:'2024-11-05',capabilities:{tools:{},resources:{},prompts:{}},serverInfo:{name:'fixture',version:'1'}});
+ else if (process.env.UNSUPPORTED_LISTS && ['resources/list','prompts/list'].includes(request.method)) process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:request.id,error:{code:-32601,message:'Not supported'}})+'\n');
  else if (request.method==='tools/list') {
    send(request.id,{tools:[...['echo','delayed','drop'].map(name=>({name,inputSchema:{type:'object'}})), ...(process.env.LARGE_CATALOG?[{name:'too-large',description:'x'.repeat(20*1024),inputSchema:{type:'object'}}]:[])]});
    if (process.env.INVALIDATE_DISCOVERY) process.stdout.write(JSON.stringify({jsonrpc:'2.0',method:'notifications/tools/list_changed'})+'\n');
@@ -197,6 +198,30 @@ function invoke(
 }
 
 describe('Managed MCP Runtime', () => {
+  it('treats method-not-found catalogs as authoritative empty lists', async () => {
+    const definition = stdioDefinition();
+    const instance = runtime([
+      { ...definition, env: { ...definition.env, UNSUPPORTED_LISTS: '1' } },
+    ]);
+    const catalog = (await settled(instance, configure())).catalog!;
+    expect(catalog.resources).toEqual([]);
+    expect(catalog.prompts).toEqual([]);
+    expect(catalog.discovery).toEqual({
+      tools: 'complete',
+      resources: 'complete',
+      prompts: 'complete',
+    });
+    const discovery = await settled(instance, {
+      kind: 'mcp-discover',
+      sessionKey,
+      operationId: 'fresh',
+      serverId: 'fixture',
+      serverRevision: 1,
+      connectionGeneration: catalog.connectionGeneration,
+      grant: grant('configuration-1'),
+    });
+    expect(discovery.catalog).toEqual(catalog);
+  });
   it('runs a real stdio server, preserves resource/prompt unions and never inherits ambient secrets', async () => {
     vi.stubEnv('MCP_AMBIENT_SECRET', 'must-not-reach-child');
     vi.stubEnv('LOGNAME', 'private-runtime-user');
@@ -367,8 +392,9 @@ describe('Managed MCP Runtime', () => {
         'running',
       );
       instance.cancelTool(runtimeSessionId, old);
-      expect((await pending).state).toBe('outcome_unknown');
+      expect(instance.toolStatus(runtimeSessionId, old).state).toBe('running');
       await writeFile(releaseFile, 'release');
+      expect((await pending).state).toBe('settled');
       await vi.waitFor(() =>
         expect(instance.toolStatus(runtimeSessionId, old).state).toBe(
           'settled',
@@ -473,8 +499,8 @@ describe('Managed MCP Runtime', () => {
     ).not.toContain('tools/call');
   });
 
-  it('sends cancellation for a timed-out request that still has a physical hold', async () => {
-    const instance = runtime();
+  it('preserves settlement evidence after cancellation and a configured timeout', async () => {
+    const instance = runtime([{ ...stdioDefinition(), timeoutMs: 50 }]);
     const catalog = (await settled(instance, configure())).catalog!;
     const releaseFile = path.join(directory, 'release-timeout');
     const input = invoke(catalog, 'timed-out', {
@@ -482,25 +508,12 @@ describe('Managed MCP Runtime', () => {
       name: 'delayed',
       arguments: { releaseFile },
     });
-    const nativeTimeout = globalThis.setTimeout;
-    const timer = vi
-      .spyOn(globalThis, 'setTimeout')
-      .mockImplementation((handler, timeout, ...args) =>
-        nativeTimeout(handler, timeout === 25_000 ? 50 : timeout, ...args),
-      );
-    let response: ManagedMcpOperationView;
-    try {
-      response = await instance.invokeTool(runtimeSessionId, input);
-    } finally {
-      timer.mockRestore();
-    }
-    expect(response!.state).toBe('outcome_unknown');
+    const response = await instance.invokeTool(runtimeSessionId, input);
+    expect(response.state).toBe('outcome_unknown');
     instance.cancelTool(runtimeSessionId, input);
-    await vi.waitFor(async () =>
-      expect(await readFile(path.join(directory, 'calls-1'), 'utf8')).toContain(
-        'cancel:timed-out',
-      ),
-    );
+    expect(
+      await readFile(path.join(directory, 'calls-1'), 'utf8'),
+    ).not.toContain('cancel:timed-out');
     expect(instance.hasHolds(runtimeSessionId)).toBe(true);
     await writeFile(releaseFile, 'release');
     await vi.waitFor(() =>
@@ -667,6 +680,37 @@ describe('Managed MCP Runtime', () => {
     ).toHaveLength(1);
   });
 
+  it('reclaims idle replaced connections without losing their receipts', async () => {
+    const instance = runtime();
+    const first = await settled(instance, configure());
+    for (let revision = 2; revision <= 18; revision++) {
+      const replacement = await settled(instance, {
+        ...configure(),
+        configRevision: revision,
+        operationId: `configuration-${revision}`,
+        grant: grant(`configuration-${revision}`),
+      });
+      expect(replacement.error).toBeUndefined();
+      expect(replacement.catalog?.configRevision).toBe(revision);
+    }
+    expect(await instance.control(runtimeSessionId, configure())).toEqual(
+      first,
+    );
+    expect(
+      (
+        await settled(instance, {
+          kind: 'mcp-release',
+          sessionKey,
+          operationId: 'release-retired',
+          serverId: 'fixture',
+          serverRevision: 1,
+          connectionGeneration: first.catalog!.connectionGeneration,
+          grant: grant('configuration-1'),
+        })
+      ).response,
+    ).toEqual({ released: true });
+  }, 30_000);
+
   it('rebinds a drained definition with a new generation and keeps the old receipt', async () => {
     const resolveDirectory = vi.fn(async () => directory);
     const instance = new ManagedMcpRuntime(
@@ -747,6 +791,10 @@ describe('Managed MCP Runtime', () => {
         expect(request.headers['authorization']).toBe(
           'Bearer scoped-test-secret',
         );
+        if (request.method === 'DELETE') {
+          response.writeHead(503).end();
+          return;
+        }
         if (request.method === 'GET' && transport === 'sse') {
           events = response;
           response.writeHead(200, { 'content-type': 'text/event-stream' });
@@ -801,7 +849,10 @@ describe('Managed MCP Runtime', () => {
         } else if (body.id === undefined) response.writeHead(202).end();
         else
           response
-            .writeHead(200, { 'content-type': 'application/json' })
+            .writeHead(200, {
+              'content-type': 'application/json',
+              'mcp-session-id': 'test-session',
+            })
             .end(JSON.stringify(answer));
       });
       servers.push(server);
@@ -843,7 +894,20 @@ describe('Managed MCP Runtime', () => {
       expect(
         methods.filter((method) => method === 'resources/read'),
       ).toHaveLength(1);
-      await instance.close();
+      expect(
+        (
+          await settled(instance, {
+            kind: 'mcp-release',
+            sessionKey,
+            operationId: 'release-http',
+            serverId: 'fixture',
+            serverRevision: 1,
+            connectionGeneration: configured.catalog!.connectionGeneration,
+            grant: grant('configuration-1'),
+          })
+        ).response,
+      ).toEqual({ released: true });
+      expect(instance.hasHolds(runtimeSessionId)).toBe(false);
       events?.end();
     },
   );

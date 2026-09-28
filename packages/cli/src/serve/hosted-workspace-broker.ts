@@ -166,6 +166,7 @@ export class HostedWorkspaceBroker {
     payloadJson: string,
     signal: AbortSignal,
     observationMs = 120_000,
+    waitForUnknown = false,
   ): Promise<
     ManagedToolResultPayload & { capture?: ToolResultCapture | null }
   > {
@@ -188,11 +189,28 @@ export class HostedWorkspaceBroker {
     }
     const end = Date.now() + observationMs;
     while (Date.now() < end) {
-      if (signal.aborted && !cancellationSent) {
-        cancellationSent = true;
-        response = await this.request(`${path}:cancel`, {});
+      try {
+        if (signal.aborted && !cancellationSent) {
+          cancellationSent = true;
+          response = await this.request(`${path}:cancel`, {});
+        }
+        response ??= await this.request(path);
+      } catch (cause) {
+        if (
+          !waitForUnknown ||
+          !(
+            (cause instanceof HostedWorkspaceBrokerRejection &&
+              cause.status === 409 &&
+              cause.code === 'runtime_broker_execution_unknown') ||
+            cause instanceof TypeError ||
+            (cause instanceof DOMException && cause.name === 'TimeoutError')
+          )
+        )
+          throw cause;
+        response = undefined;
+        await delay(250);
+        continue;
       }
-      response ??= await this.request(path);
       if (response['executionCallId'] !== id)
         throw new Error('Runtime execution identity changed.');
       const status = object(response['status']);
@@ -214,13 +232,14 @@ export class HostedWorkspaceBroker {
         } as unknown as ManagedToolResultPayload;
       }
       if (
+        !(waitForUnknown && status['state'] === 'unknown') &&
         !['prepared', 'executing', 'cancel_requested'].includes(
           String(status['state']),
         )
       )
         throw new Error('Runtime execution outcome is unknown.');
       response = undefined;
-      await delay(50);
+      await delay(waitForUnknown ? 250 : 50);
     }
     throw new Error(
       'Runtime execution did not settle within its observation window.',

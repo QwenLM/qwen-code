@@ -1182,6 +1182,80 @@
         "releaseState": "released"
       },
       "valid": true
+    },
+    {
+      "id": "configuration-cancel-unsent",
+      "domain": "mcp_configuration",
+      "before": {},
+      "after": {
+        "run": {
+          "state": "cancelled",
+          "execution": "not_started_proven",
+          "reason": null
+        }
+      },
+      "valid": true
+    },
+    {
+      "id": "configuration-release-unsent-intent",
+      "domain": "mcp_configuration",
+      "before": {
+        "run": {
+          "state": "cancelled",
+          "execution": "not_started_proven",
+          "reason": null
+        }
+      },
+      "after": {
+        "run": {
+          "state": "cancelled",
+          "execution": "not_started_proven",
+          "reason": null
+        },
+        "releaseState": "releasing"
+      },
+      "valid": true
+    },
+    {
+      "id": "configuration-release-unsent-receipt",
+      "domain": "mcp_configuration",
+      "before": {
+        "run": {
+          "state": "cancelled",
+          "execution": "not_started_proven",
+          "reason": null
+        },
+        "releaseState": "releasing"
+      },
+      "after": {
+        "run": {
+          "state": "cancelled",
+          "execution": "not_started_proven",
+          "reason": null
+        },
+        "releaseState": "released"
+      },
+      "valid": true
+    },
+    {
+      "id": "configuration-cannot-skip-unsent-release-intent",
+      "domain": "mcp_configuration",
+      "before": {
+        "run": {
+          "state": "cancelled",
+          "execution": "not_started_proven",
+          "reason": null
+        }
+      },
+      "after": {
+        "run": {
+          "state": "cancelled",
+          "execution": "not_started_proven",
+          "reason": null
+        },
+        "releaseState": "released"
+      },
+      "valid": false
     }
   ]
 }

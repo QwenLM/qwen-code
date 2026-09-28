@@ -148,7 +148,9 @@ public final class ManagedMcpRecords {
 
     private static boolean canRelease(JsonNode run) {
         return "settled".equals(text(run, "execution"))
-                && ("settled".equals(text(run, "state")) || "failed".equals(text(run, "state")));
+                && ("settled".equals(text(run, "state")) || "failed".equals(text(run, "state")))
+                || "not_started_proven".equals(text(run, "execution"))
+                        && "cancelled".equals(text(run, "state"));
     }
 
     private static String text(JsonNode record, String key) {

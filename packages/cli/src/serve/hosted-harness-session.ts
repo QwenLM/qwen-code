@@ -42,6 +42,7 @@ import {
   HOSTED_MCP_PROFILE,
   HostedMcpSession,
   HostedMcpRecoveryRequiredError,
+  HostedMcpConflictError,
   parseHostedMcpServers,
   type HostedMcpServerPin,
 } from './hosted-mcp-session.js';
@@ -767,8 +768,12 @@ export function registerHostedHarnessSessionRoutes(
         (response) => {
           res.status(202).json(response);
         },
-        () => {
-          error(res, 503, 'hosted_mcp_operation_failed');
+        (cause: unknown) => {
+          error(
+            res,
+            cause instanceof HostedMcpConflictError ? 409 : 503,
+            'hosted_mcp_operation_failed',
+          );
         },
       )
       .finally(() => {

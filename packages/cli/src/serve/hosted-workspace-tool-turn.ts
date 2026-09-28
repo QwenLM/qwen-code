@@ -156,8 +156,8 @@ export class HostedWorkspaceToolTurn {
   }
 
   async declarations(): Promise<FunctionDeclaration[]> {
-    if (this.mcp) await this.warmed;
-    this.advertised ??= [
+    if (this.mcp) await this.mcp.refresh();
+    this.advertised = [
       ...(this.shell
         ? HOSTED_WORKSPACE_SHELL_TOOLS
         : HOSTED_WORKSPACE_FILE_TOOLS),
@@ -173,7 +173,7 @@ export class HostedWorkspaceToolTurn {
     signal: AbortSignal,
   ): Promise<Part[]> {
     if (this.mcp) await this.warmed;
-    const declarations = await this.declarations();
+    const declarations = this.advertised ?? (await this.declarations());
     const ids = new Set<string>();
     const requests = calls.map((call) => {
       const runtimeCallId = randomUUID();
@@ -460,7 +460,10 @@ export class HostedWorkspaceToolTurn {
           signal,
           request.isShell
             ? Number(request.input['timeout'] ?? 120000) + 60000
-            : undefined,
+            : this.mcp
+              ? 630_000
+              : undefined,
+          this.mcp !== undefined,
         );
         const shellResult = request.isShell
           ? parseToolResultEnvelope(result)

@@ -468,6 +468,7 @@ it('executes against the declarations actually advertised before a catalog repla
   const mcp = {
     broker: { ...broker, runtimeSessionId: 'mcp:session' },
     ensureReady: async () => undefined,
+    refresh: async () => undefined,
     tools: () => [{ name, parametersJsonSchema: { type: 'object' } }],
     toolInput: vi.fn(() => input),
   };
@@ -494,7 +495,8 @@ it('executes against the declarations actually advertised before a catalog repla
     expect.any(String),
     JSON.stringify(input),
     expect.any(AbortSignal),
-    undefined,
+    630_000,
+    true,
   );
   expect(broker.prepare).toHaveBeenCalledWith(
     expect.any(String),
@@ -514,6 +516,7 @@ it('executes against the declarations actually advertised before a catalog repla
     intent!.payload['toolDefinitionRef'] as unknown as ManagedSessionDurableRef,
   );
   expect(JSON.parse(saved.toString()).name).toBe('mcp_old');
+  expect((await mcpTurn.declarations()).at(-1)?.name).toBe('mcp_new');
 });
 it('returns durable errors for a refused Shell batch and permits a corrected call', async () => {
   turn = createTurn(true);

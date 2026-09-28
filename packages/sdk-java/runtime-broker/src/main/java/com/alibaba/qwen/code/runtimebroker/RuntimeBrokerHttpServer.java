@@ -307,7 +307,6 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
     private CompletionStage<ExecutionReconciliation> observe(String harnessSessionId,
             String runtimeSessionId, ToolExecutionRecord record) {
         return record.getState() == ToolExecutionRecord.State.UNKNOWN
-                && Integer.valueOf(3).equals(record.getReference().get("runtimeProtocol"))
                 ? service.reconcileExecution(harnessSessionId, runtimeSessionId, record.getExecutionCallId())
                 : CompletableFuture.completedFuture(new ExecutionReconciliation(record,
                         ExecutionReconciliation.Outcome.IN_FLIGHT, null));

@@ -24,6 +24,7 @@ import {
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-mcp-protocol.js';
 import {
   HostedWorkspaceBroker,
+  HostedWorkspaceBrokerRejection,
   type HostedWorkspaceBrokerOptions,
 } from './hosted-workspace-broker.js';
 
@@ -77,6 +78,8 @@ export class HostedMcpRecoveryRequiredError extends Error {
   }
 }
 
+export class HostedMcpConflictError extends Error {}
+
 type ResourceRequest = Exclude<
   ManagedMcpInvoke['request'],
   { kind: 'tool_call' }
@@ -86,6 +89,8 @@ export class HostedMcpSession {
   readonly broker: HostedWorkspaceBroker;
   private ready?: Promise<void>;
   private acquired = false;
+  private ownerReady = false;
+  private grantsRenewed = false;
   private readonly bindings = new Map<
     string,
     { configuration: McpConfiguration; catalog: ManagedMcpCatalog }
@@ -107,6 +112,7 @@ export class HostedMcpSession {
         .map((entry) => entry.runtimeSessionId),
     );
     if (owners.size > 1) throw new HostedMcpRecoveryRequiredError();
+    this.acquired = owners.size > 0;
     const previous = configurations.length
       ? digest(
           configurations.map((entry) => entry.configurationId).sort(),
@@ -128,6 +134,46 @@ export class HostedMcpSession {
     return this.ready;
   }
 
+  async refresh(): Promise<void> {
+    await this.ensureReady();
+    await this.acquireOwner();
+    for (const { configuration, catalog } of this.catalogs.values()) {
+      const response = await this.dispatch({
+        kind: 'mcp-discover',
+        sessionKey: this.key,
+        operationId: randomUUID(),
+        serverId: catalog.serverId,
+        serverRevision: catalog.serverRevision,
+        connectionGeneration: catalog.connectionGeneration,
+        grant: this.grant('mcp_configuration', configuration.configurationId),
+      });
+      if (response.state !== 'settled')
+        throw new HostedMcpRecoveryRequiredError();
+      if (response.catalog && digest(response.catalog) === digest(catalog))
+        continue;
+      if (
+        response.error &&
+        !['managed_mcp_retiring', 'managed_mcp_binding_conflict'].includes(
+          response.error.code,
+        )
+      )
+        throw new HostedMcpRecoveryRequiredError();
+      await this.configure(
+        randomUUID(),
+        {
+          serverId: catalog.serverId,
+          serverRevision: catalog.serverRevision,
+          definitionDigest: catalog.definitionDigest,
+        },
+        Math.max(
+          ...this.configurations()
+            .filter((entry) => entry.serverId === catalog.serverId)
+            .map((entry) => entry.configRevision),
+        ),
+      );
+    }
+  }
+
   private async initialize(): Promise<void> {
     for (const pin of this.servers) {
       const history = this.session.authority
@@ -136,7 +182,7 @@ export class HostedMcpSession {
         .filter((entry) => entry.serverId === pin.serverId)
         .sort((a, b) => a.configRevision - b.configRevision);
       const latest = history
-        .filter((entry) => entry.run.state !== 'failed')
+        .filter((entry) => !['failed', 'cancelled'].includes(entry.run.state))
         .at(-1);
       const previous = latest?.releaseState === 'released' ? undefined : latest;
       const effective = latest?.run.definition;
@@ -160,7 +206,6 @@ export class HostedMcpSession {
     pin: HostedMcpServerPin,
     expectedRevision: number,
   ): Promise<void> {
-    await this.ensureReady();
     if (!this.servers.some((server) => server.serverId === pin.serverId))
       throw new Error('MCP server is not allowed by this Session.');
     const previous = this.session.authority.extensionRecord(
@@ -175,7 +220,9 @@ export class HostedMcpSession {
         saved.run.definition?.definitionDigest !== pin.definitionDigest ||
         saved.configRevision !== expectedRevision + 1
       )
-        throw new Error('MCP configuration identity conflicts.');
+        throw new HostedMcpConflictError(
+          'MCP configuration identity conflicts.',
+        );
       await this.install(pin, saved);
       return;
     }
@@ -186,7 +233,7 @@ export class HostedMcpSession {
         .map((entry) => entry.configRevision),
     );
     if (currentRevision !== expectedRevision)
-      throw new Error('MCP configuration revision conflicts.');
+      throw new HostedMcpConflictError('MCP configuration revision conflicts.');
     try {
       await this.install(pin, undefined, operationId, expectedRevision + 1);
     } catch (cause) {
@@ -343,7 +390,7 @@ export class HostedMcpSession {
       this.hasPendingOperations() ||
       this.configurations().some(
         (entry) =>
-          !['settled', 'failed'].includes(entry.run.state) ||
+          !['settled', 'failed', 'cancelled'].includes(entry.run.state) ||
           entry.releaseState === 'releasing',
       )
     );
@@ -414,9 +461,9 @@ export class HostedMcpSession {
         record.argsRef.digest !== digest(request) ||
         record.serverId !== serverId
       )
-        throw new Error('MCP operation identity conflicts.');
+        throw new HostedMcpConflictError('MCP operation identity conflicts.');
     } else {
-      await this.ensureReady();
+      await this.refresh();
       const installed = this.catalogs.get(serverId);
       if (!installed)
         throw new Error('MCP server is not bound to this Session.');
@@ -585,7 +632,30 @@ export class HostedMcpSession {
   }
 
   async close(): Promise<void> {
+    for (const entry of this.session.authority.extensionRecordsInDomain(
+      'mcp_operation',
+    )) {
+      if (['settled', 'failed', 'cancelled'].includes(entry.run.state))
+        continue;
+      const operation = parseMcpOperation(entry.record);
+      if (operation.run.execution === 'intent')
+        await this.cancel(operation.operationId);
+      else await this.status(operation.operationId);
+    }
     if (this.hasPendingOperations()) throw new HostedMcpRecoveryRequiredError();
+    for (const configuration of this.configurations()) {
+      if (configuration.run.execution !== 'intent') continue;
+      const cancelled: McpConfiguration = {
+        ...configuration,
+        run: {
+          ...configuration.run,
+          state: 'cancelled',
+          execution: 'not_started_proven',
+          reason: null,
+        },
+      };
+      await this.commitConfiguration(cancelled);
+    }
     const configurations = this.configurations().filter(
       (entry) => entry.releaseState !== 'released',
     );
@@ -607,8 +677,9 @@ export class HostedMcpSession {
     }
     for (let configuration of configurations) {
       if (
-        configuration.run.state === 'failed' &&
-        configuration.run.execution === 'settled'
+        (configuration.run.state === 'failed' &&
+          configuration.run.execution === 'settled') ||
+        configuration.run.execution === 'not_started_proven'
       ) {
         if (configuration.releaseState === 'active')
           await this.commitConfiguration({
@@ -655,6 +726,7 @@ export class HostedMcpSession {
         releaseState: 'released',
       });
     this.acquired = false;
+    this.ownerReady = false;
   }
 
   private configurations(): McpConfiguration[] {
@@ -663,9 +735,17 @@ export class HostedMcpSession {
       .map((entry) => parseMcpConfiguration(entry.record));
   }
 
-  private async acquireOwner(): Promise<void> {
+  private async acquireOwner(reuse = false): Promise<void> {
+    if (reuse && this.ownerReady) return;
+    const previouslyAcquired = this.acquired;
     this.acquired = true;
-    await this.broker.acquire();
+    try {
+      await this.broker.acquire();
+    } catch (cause) {
+      if (cause instanceof HostedWorkspaceBrokerRejection)
+        this.acquired = previouslyAcquired;
+      throw cause;
+    }
     const runtime = this.broker.runtime;
     if (
       !runtime ||
@@ -678,6 +758,18 @@ export class HostedMcpSession {
       )
     )
       throw new HostedMcpRecoveryRequiredError();
+    if (!this.grantsRenewed) {
+      // A restored writer needs a higher durable revision to replace the old grant owner.
+      for (const configuration of this.configurations()) {
+        if (
+          configuration.catalogRef &&
+          configuration.releaseState !== 'released'
+        )
+          await this.commitConfiguration(configuration, true);
+      }
+      this.grantsRenewed = true;
+    }
+    this.ownerReady = true;
   }
 
   private get key() {
@@ -737,8 +829,13 @@ export class HostedMcpSession {
     );
   }
 
-  private commitConfiguration(record: McpConfiguration) {
-    return this.commit('mcp_configuration', record.configurationId, record);
+  private commitConfiguration(record: McpConfiguration, renew = false) {
+    return this.commit(
+      'mcp_configuration',
+      record.configurationId,
+      record,
+      renew,
+    );
   }
   private commitOperation(record: McpOperation) {
     return this.commit('mcp_operation', record.operationId, record);
@@ -748,9 +845,11 @@ export class HostedMcpSession {
     domain: 'mcp_configuration' | 'mcp_operation',
     id: string,
     record: unknown,
+    renew = false,
   ): Promise<void> {
     const previous = this.session.authority.extensionRecord(domain, id);
-    if (previous && digest(previous.record) === digest(record)) return;
+    if (!renew && previous && digest(previous.record) === digest(record))
+      return;
     await this.session.authority.commitExtensionRecord(
       {
         operation: 'commitMcpRecord',
@@ -764,14 +863,21 @@ export class HostedMcpSession {
   }
 
   private async lookup(operationId: string): Promise<ManagedMcpOperationView> {
+    const operation: ManagedMcpControl = {
+      kind: 'mcp-status',
+      sessionKey: this.key,
+      operationId,
+      targetOperationId: operationId,
+    };
     try {
-      await this.acquireOwner();
-      return await this.broker.control({
-        kind: 'mcp-status',
-        sessionKey: this.key,
-        operationId,
-        targetOperationId: operationId,
-      });
+      await this.acquireOwner(true);
+      try {
+        return await this.broker.control(operation);
+      } catch {
+        this.ownerReady = false;
+        await this.acquireOwner();
+        return await this.broker.control(operation);
+      }
     } catch {
       return { operationId, state: 'outcome_unknown' };
     }
@@ -786,9 +892,11 @@ export class HostedMcpSession {
     } catch {
       response = await this.lookup(operation.operationId);
     }
-    const deadline = Date.now() + 120_000;
+    const deadline = Date.now() + 630_000;
+    let interval = 100;
     while (response.state === 'running' && Date.now() < deadline) {
-      await delay(100);
+      await delay(interval);
+      interval = Math.min(interval * 2, 1_000);
       response = await this.lookup(operation.operationId);
     }
     return response;

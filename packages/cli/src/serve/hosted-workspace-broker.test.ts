@@ -330,6 +330,34 @@ it('queries the original identity when start reports an unknown execution', asyn
   ]);
 });
 
+it('observes a late original result after unknown cancellation without starting again', async () => {
+  const paths: string[] = [];
+  let observations = 0;
+  const broker = await fixture((path) => {
+    paths.push(path);
+    if (path.endsWith(':cancel') || observations++ === 0)
+      return { code: 409, body: { code: 'runtime_broker_execution_unknown' } };
+    return {
+      body: {
+        ...identity,
+        executionCallId: 'execution',
+        status: {
+          state: 'settled',
+          result: { executionStatus: 'success', responseParts: [] },
+        },
+      },
+    };
+  });
+  const abort = new AbortController();
+  abort.abort();
+  await expect(
+    broker.execute('execution', '{}', abort.signal, 5000, true),
+  ).resolves.toMatchObject({ executionStatus: 'success' });
+  expect(paths.filter((path) => path.endsWith(':cancel'))).toHaveLength(1);
+  expect(paths.filter((path) => path.endsWith(':start'))).toHaveLength(0);
+  expect(paths.filter((path) => path.endsWith('/execution'))).toHaveLength(2);
+});
+
 it('queries the original identity after an uncertain start failure', async () => {
   const paths: string[] = [];
   const broker = await fixture((path) => {

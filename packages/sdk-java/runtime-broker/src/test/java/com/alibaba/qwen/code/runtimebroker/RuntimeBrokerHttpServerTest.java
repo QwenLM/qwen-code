@@ -66,6 +66,15 @@ class RuntimeBrokerHttpServerTest {
             assertEquals(409, response.statusCode(), response.body());
             assertTrue(response.body().contains("runtime_broker_execution_unknown"));
             assertEquals(1, fixture.transport.executions.get());
+            fixture.transport.runtimeStatus = Map.of("state", "settled", "result",
+                    Map.of("executionStatus", "success", "responseParts", java.util.List.of()));
+            HttpResponse<String> late = fixture.client.send(request, HttpResponse.BodyHandlers.ofString());
+            assertEquals(200, late.statusCode(), late.body());
+            assertEquals("settled", JSON.parseObject(late.body()).getJSONObject("status").getString("state"));
+            assertEquals(ToolExecutionRecord.State.SETTLED,
+                    fixture.service.getExecution("harness", "runtime", created.getExecutionCallId())
+                            .toCompletableFuture().join().getState());
+            assertEquals(1, fixture.transport.executions.get());
         }
     }
 

@@ -128,8 +128,9 @@ function pinnedRun(value: unknown, serverId: string, serverRevision: number) {
 
 function canRelease(run: ExtensionRun): boolean {
   return (
-    run.execution === 'settled' &&
-    (run.state === 'settled' || run.state === 'failed')
+    (run.execution === 'settled' &&
+      (run.state === 'settled' || run.state === 'failed')) ||
+    (run.execution === 'not_started_proven' && run.state === 'cancelled')
   );
 }
 

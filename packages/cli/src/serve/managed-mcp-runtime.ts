@@ -45,6 +45,7 @@ export interface ManagedMcpDefinition {
   readonly env?: Record<string, string>;
   readonly url?: string;
   readonly headers?: Record<string, string>;
+  readonly timeoutMs?: number;
 }
 
 export interface ManagedMcpManifest {
@@ -69,6 +70,7 @@ interface Connection {
   closed: boolean;
   catalog?: ManagedMcpCatalog;
   catalogWork?: Promise<void>;
+  closing?: Promise<void>;
 }
 
 interface Operation {
@@ -94,6 +96,7 @@ const MAX_MANIFEST_BYTES = 1024 * 1024;
 const MAX_RESULT_BYTES = 60 * 1024;
 const MAX_CATALOG_CATEGORY_BYTES = 16 * 1024;
 const TIMEOUT_MS = 25_000;
+const REQUEST_TIMEOUT_MS = 600_000;
 const identifier = /^[A-Za-z0-9._:-]{1,128}$/u;
 
 function object(value: unknown): Record<string, unknown> {
@@ -259,6 +262,7 @@ function parseManifest(value: unknown): ManagedMcpManifest {
       'env',
       'url',
       'headers',
+      'timeoutMs',
     ]);
     if (
       ['tenantId', 'workspaceId', 'serverId'].some(
@@ -269,6 +273,12 @@ function parseManifest(value: unknown): ManagedMcpManifest {
       !positive(definition['serverRevision']) ||
       typeof definition['definitionDigest'] !== 'string' ||
       !/^[a-f0-9]{64}$/u.test(definition['definitionDigest'])
+    )
+      throw new ManagedMcpError('managed_mcp_manifest_invalid');
+    if (
+      definition['timeoutMs'] !== undefined &&
+      (!positive(definition['timeoutMs']) ||
+        Number(definition['timeoutMs']) > REQUEST_TIMEOUT_MS)
     )
       throw new ManagedMcpError('managed_mcp_manifest_invalid');
     const id = `${definition['tenantId']}\0${definition['workspaceId']}\0${definition['serverId']}\0${definition['serverRevision']}`;
@@ -355,22 +365,8 @@ export class ManagedMcpRuntime {
           operationId: control.targetOperationId,
           state: 'outcome_unknown',
         };
-      if (
-        control.kind === 'mcp-cancel' &&
-        existing.connection?.pending.has(existing.control.operationId)
-      ) {
-        this.unknown(existing, 'managed_mcp_cancel_requested');
-        void existing.connection.transport
-          .send({
-            jsonrpc: '2.0',
-            method: 'notifications/cancelled',
-            params: {
-              requestId: existing.control.operationId,
-              reason: 'Operation cancelled.',
-            },
-          })
-          .catch(() => undefined);
-      }
+      // SDK servers suppress replies after native cancellation. Keep observing
+      // the original request so cancellation cannot destroy settlement evidence.
       return structuredClone(existing.view);
     }
     if (!('grant' in control)) throw new ManagedMcpError('managed_mcp_invalid');
@@ -546,7 +542,7 @@ export class ManagedMcpRuntime {
     );
     if (
       !connection ||
-      connection.closed ||
+      (connection.closed && control.kind !== 'mcp-release') ||
       scope(connection.sessionKey) !== scope(control.sessionKey) ||
       !('connectionGeneration' in control) ||
       connection.generation !== control.connectionGeneration
@@ -717,7 +713,10 @@ export class ManagedMcpRuntime {
           onmessage(message);
         };
         await this.discover(connection);
-        for (const sibling of siblings) sibling.retiring = true;
+        for (const sibling of siblings) {
+          sibling.retiring = true;
+          if (sibling.pending.size === 0) await this.closeConnection(sibling);
+        }
         this.settled(operation, { catalog: connection.catalog! });
       } catch {
         try {
@@ -732,7 +731,13 @@ export class ManagedMcpRuntime {
       const connection = this.connection(operation, control);
       if (connection.retiring)
         throw new ManagedMcpError('managed_mcp_retiring');
-      await this.discover(connection);
+      if (
+        !connection.catalog ||
+        Object.values(connection.catalog.discovery).some(
+          (state) => state === 'stale' || state === 'failed',
+        )
+      )
+        await this.discover(connection);
       this.settled(operation, { catalog: connection.catalog! });
     } else if (control.kind === 'mcp-release') {
       const connection = this.connection(operation, control);
@@ -896,7 +901,7 @@ export class ManagedMcpRuntime {
       connection.pending.set(control.operationId, operation);
       operation.timer = setTimeout(
         () => this.unknown(operation, 'managed_mcp_timeout'),
-        TIMEOUT_MS,
+        connection.definition.timeoutMs ?? REQUEST_TIMEOUT_MS,
       );
       const method =
         request.kind === 'tool_call'
@@ -963,6 +968,8 @@ export class ManagedMcpRuntime {
     if (operation.connection?.pending.size === 0) {
       for (const resolve of operation.connection.drained) resolve();
       operation.connection.drained.clear();
+      if (operation.connection.retiring && !operation.connection.closed)
+        void this.closeConnection(operation.connection).catch(() => undefined);
     }
     operation.view = {
       operationId: operation.control.operationId,
@@ -983,14 +990,34 @@ export class ManagedMcpRuntime {
     operation.resolve();
   }
 
-  private async closeConnection(connection: Connection): Promise<void> {
+  private closeConnection(connection: Connection): Promise<void> {
+    if (connection.closed) return Promise.resolve();
+    connection.closing ??= this.drainConnection(connection).finally(() => {
+      connection.closing = undefined;
+    });
+    return connection.closing;
+  }
+
+  private async drainConnection(connection: Connection): Promise<void> {
     connection.retiring = true;
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       await Promise.race([
         (async () => {
-          if (connection.transport instanceof StreamableHTTPClientTransport)
-            await connection.transport.terminateSession();
+          if (connection.transport instanceof StreamableHTTPClientTransport) {
+            let terminationTimer: ReturnType<typeof setTimeout> | undefined;
+            try {
+              // Remote session deletion is advisory once all requests settled.
+              await Promise.race([
+                connection.transport.terminateSession().catch(() => undefined),
+                new Promise<void>((resolve) => {
+                  terminationTimer = setTimeout(resolve, 1_000);
+                }),
+              ]);
+            } finally {
+              if (terminationTimer) clearTimeout(terminationTimer);
+            }
+          }
           await connection.client.close();
           await connection.closeDone;
         })(),
