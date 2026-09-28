@@ -1019,6 +1019,24 @@ describe('executeSearchMemory', () => {
     ]);
   });
 
+  it('bounds window selection work for densely repeated body matches', async () => {
+    const body = '内存'.repeat(10_000);
+    const docs = Array.from({ length: 5 }, (_, index) =>
+      doc(`project/dense-${index}.md`, { body }),
+    );
+
+    const result = await executeSearchMemory(
+      { mode: 'search', keywords: ['内存'], limit: 5 },
+      options(docs),
+    );
+
+    const searchResult = expectContentResult(result, 'search');
+    expect(searchResult.results).toHaveLength(5);
+    expect(
+      searchResult.results.every((item) => item.content?.includes('内存')),
+    ).toBe(true);
+  }, 500);
+
   it('starts the body window on the exact word-boundary character', async () => {
     // Regression: normalization trims a trailing space, so |norm(prefix)|
     // never takes the value of a word-initial offset — the lower-bound
