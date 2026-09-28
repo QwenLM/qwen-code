@@ -8788,7 +8788,9 @@ export class Config {
     if (mode !== ApprovalMode.PLAN) this.planExecutionMode = undefined;
     if (fromMode !== mode) {
       this.approvalModeRevision++;
-      this.notifyApprovalModeChangeListeners();
+      if (!isDerivedConfig(this)) {
+        this.notifyApprovalModeChangeListeners();
+      }
     }
   }
 
