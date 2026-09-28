@@ -67,6 +67,7 @@ import {
   getGlobalQwenDirLite,
   getSystemDefaultsPath,
   getSystemSettingsPath,
+  readEnvironmentVariable,
 } from './storage-paths-lite.js';
 import { readConfigFile } from './read-config-file.js';
 
@@ -1096,12 +1097,30 @@ export function readSettingsSnapshot(
   );
 }
 
+/**
+ * The variables a session host spawned with `environment` sees, for
+ * placeholders, when the environment holds string values: on Windows, names
+ * are case-insensitive and only one spelling of each is passed on.
+ */
+function spawnedEnvironmentView(
+  environment: Readonly<NodeJS.ProcessEnv>,
+): Record<string, string> {
+  return new Proxy({} as Record<string, string>, {
+    get: (_target, name) =>
+      typeof name === 'string'
+        ? readEnvironmentVariable(environment, name)
+        : undefined,
+  });
+}
+
 function readSettingsLayers(
   workspaceDir: string,
   opts: LoadSettingsOptions,
   snapshotOf?: { readonly environment: Readonly<NodeJS.ProcessEnv> },
 ): LoadedSettings {
-  // A snapshot reads through the given environment and writes nothing.
+  // A snapshot reads through the given environment and writes nothing. Every
+  // step below that writes a file or `process.env` must be skipped when
+  // `snapshot` is set; the snapshot tests compare the whole tree to hold it.
   const snapshot = snapshotOf !== undefined;
   const snapshotEnvironment = snapshotOf?.environment;
   // Apply any QWEN_HOME / QWEN_RUNTIME_DIR set in user-level `.env` files
@@ -1410,13 +1429,9 @@ function readSettingsLayers(
   // never contains a process.env key, process.env always wins.
   // A snapshot environment is the environment of the session hosts it
   // describes and carries the user-level `.env` values its runtime applied, so
-  // it is the only source.
+  // it is the only source, read as a host spawned with it sees it.
   const homeEnvFallback = snapshotOf
-    ? Object.fromEntries(
-        Object.entries(snapshotOf.environment).filter(
-          (entry): entry is [string, string] => typeof entry[1] === 'string',
-        ),
-      )
+    ? spawnedEnvironmentView(snapshotOf.environment)
     : getHomeEnvFallbackVars((message) => debugLogger.warn(message));
   const resolveOptions = { processEnvFallback: !snapshot };
   systemSettings = resolveEnvVarsInObject(

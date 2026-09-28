@@ -37,6 +37,10 @@ import * as ServerConfig from '@qwen-code/qwen-code-core';
 import { isWorkspaceTrusted } from './trustedFolders.js';
 import { resetMcpApprovalsForTesting } from './mcpApprovals.js';
 import * as Mem0Settings from './mem0-settings.js';
+import {
+  isCrossSessionMessagingActive,
+  isCrossSessionMessagingEnabled,
+} from '../peerMessaging/enabled.js';
 
 const sshWorkspaceProbe = vi.hoisted(() => vi.fn());
 vi.mock('../serve/ssh-workspace-store.js', () => ({
@@ -1366,6 +1370,7 @@ describe('loadCliConfig', () => {
         enableManagedAutoDream: false,
         enableTeamMemory: false,
         enableTeamMemorySync: false,
+        enableStructuredMemoryRecall: false,
         enableAutoSkill: false,
         fileCheckpointingEnabled: false,
         artifactEnabled: false,
@@ -1950,6 +1955,54 @@ describe('loadCliConfig', () => {
 
     expect(config.getAgentsSettings().maxParallelAgents).toBe(2);
   });
+
+  it('keeps cross-session messaging on when no suppression is in force', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    // An unset key is on, so the off case has to say `false` explicitly.
+    const unset = await loadCliConfig({}, argv);
+    const enabled = await loadCliConfig(
+      { agents: { crossSessionMessaging: true } },
+      argv,
+    );
+    const disabled = await loadCliConfig(
+      { agents: { crossSessionMessaging: false } },
+      argv,
+    );
+
+    expect(isCrossSessionMessagingActive({}, unset)).toBe(true);
+    expect(
+      isCrossSessionMessagingActive(
+        { agents: { crossSessionMessaging: true } },
+        enabled,
+      ),
+    ).toBe(true);
+    expect(
+      isCrossSessionMessagingActive(
+        { agents: { crossSessionMessaging: false } },
+        disabled,
+      ),
+    ).toBe(false);
+  });
+
+  // Both suppressions rather than one: a gate that answered only for
+  // `--safe-mode` would leave `--bare` binding an inbox and publishing its
+  // socket path, in the mode documented as skipping implicit startup work.
+  it.each(['--bare', '--safe-mode'])(
+    'suppresses cross-session messaging in %s mode whatever the setting says',
+    async (flag) => {
+      process.argv = ['node', 'script.js', flag];
+      const argv = await parseArguments();
+      const settings = { agents: { crossSessionMessaging: true } };
+
+      const config = await loadCliConfig(settings, argv);
+
+      // The setting still says on: what turns messaging off is the session,
+      // which only the Config the flag already reaches can see.
+      expect(isCrossSessionMessagingEnabled(settings)).toBe(true);
+      expect(isCrossSessionMessagingActive(settings, config)).toBe(false);
+    },
+  );
 
   it('passes agents.maxParallelAgentsByModel from settings to core config', async () => {
     process.argv = ['node', 'script.js'];
