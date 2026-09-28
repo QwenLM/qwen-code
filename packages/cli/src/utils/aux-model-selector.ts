@@ -10,12 +10,24 @@
  * `authType:<modelId>\0<baseUrl>`, where the NUL-separated suffix pins the
  * provider endpoint. A provider baseUrl can embed userinfo
  * (`https://user:sk-...@host/v1`), which is a credential. This module owns
- * how such a selector is published, displayed, and persisted so the suffix
- * never leaks it; egress surfaces call these helpers instead of hand-rolling
- * their own `split('\0')`.
+ * how such a selector is published and displayed so the suffix never leaks
+ * it; egress surfaces call these helpers instead of hand-rolling their own
+ * `split('\0')`.
+ *
+ * The persisted value is deliberately not rewritten. That suffix is the
+ * routing key: `modelRegistry` copies the configured `baseUrl` verbatim, and
+ * every consumer compares it with `===` — vision and image route resolution,
+ * `advisor-model.ts`, provider-entry pin clearing, and both dialogs'
+ * current-row lookup. Scrubbing it on write makes a pin resolve to nothing
+ * for exactly the credential-bearing endpoints this module exists to protect.
+ * Keeping the stored form registry-exact is also what the primary-model path
+ * already does (`model.baseUrl` is persisted verbatim at the same scope) and
+ * what every aux key did before this change, so it adds no exposure. Whether
+ * a credential-bearing endpoint may be pinned into the committable
+ * workspace-scope file at all is one class-wide decision covering
+ * `model.baseUrl` and all five aux keys (#12856), not something to settle by
+ * silently rewriting one of them.
  */
-
-import { sanitizeProviderBaseUrl } from './acpModelUtils.js';
 
 /** Settings keys that persist an `authType:id\0baseUrl` aux-model selector. */
 export const AUX_MODEL_SELECTOR_SETTING_KEYS: ReadonlySet<string> = new Set([
@@ -36,8 +48,8 @@ export function isAuxModelSelectorSettingKey(key: string): boolean {
  * NUL into the pathname, so `username`, `password`, `search` and `hash` all
  * read empty while the credential text after it is still in the string. Every
  * "already clean" shortcut here compares parsed fields but returns the
- * UNPARSED input, so such a suffix would be served, persisted and rendered
- * verbatim. Fail closed on the text instead.
+ * UNPARSED input, so such a suffix would be served and rendered verbatim.
+ * Fail closed on the text instead.
  */
 function hasControlCharacter(baseUrl: string): boolean {
   // `\p{Cc}` (C0 + DEL + C1) matches the repo's existing control-character
@@ -123,34 +135,6 @@ export function formatAuxModelSelectorForDisplay(setting: unknown): string {
   if (!baseUrl) return selector;
   const publishable = publishableSelectorBaseUrl(baseUrl);
   return publishable ? `${selector} (${publishable})` : selector;
-}
-
-/**
- * Write-path credential strip for picker-persisted selectors: userinfo is
- * removed from an http(s) baseUrl so the selector written to settings.json
- * (potentially the committable workspace-scope file) carries no credential.
- * Clean URLs and scheme-less endpoints are persisted byte-identical. An
- * http(s) endpoint that `new URL()` rejects fails closed through
- * `sanitizeProviderBaseUrl`, which strips the authority userinfo textually,
- * and a suffix carrying a control character fails closed to the empty-suffix
- * form — never verbatim, because the persisted file is the one surface the
- * publish path cannot scrub after the fact.
- */
-export function stripAuxSelectorBaseUrlCredential(baseUrl: string): string {
-  // Fail closed to `''` (the empty-suffix form, which readers already treat as
-  // "no endpoint pinned"): a control character hides whatever follows it from
-  // every parsed field checked below.
-  if (hasControlCharacter(baseUrl)) return '';
-  if (!/^https?:\/\//i.test(baseUrl.trim())) return baseUrl;
-  try {
-    const url = new URL(baseUrl);
-    if (!url.username && !url.password) return baseUrl;
-    url.username = '';
-    url.password = '';
-    return url.href;
-  } catch {
-    return sanitizeProviderBaseUrl(baseUrl);
-  }
 }
 
 /**

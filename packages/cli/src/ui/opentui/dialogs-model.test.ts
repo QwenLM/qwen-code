@@ -105,12 +105,17 @@ describe('encodeVisionModelSelector', () => {
     ).toBe('use-openai:gpt-x\0https://a.example/v1');
   });
 
-  it('strips userinfo credentials from the persisted baseUrl suffix', () => {
+  it('persists a credential-bearing suffix registry-exact so the pin resolves', () => {
+    // The suffix is the routing key: `modelRegistry` copies the configured
+    // baseUrl verbatim and the vision, image and advisor consumers compare it
+    // with `===`. Scrubbing it on write makes the pin resolve to nothing for
+    // exactly the credential-bearing endpoints, so re-adding a write-path
+    // strip must red this row. Egress surfaces scrub on the way out instead.
     expect(
       encodeVisionModelSelector(
         'use-openai::gpt-x\0https://user:sk-secret@a.example/v1',
       ),
-    ).toBe('use-openai:gpt-x\0https://a.example/v1');
+    ).toBe('use-openai:gpt-x\0https://user:sk-secret@a.example/v1');
   });
 });
 

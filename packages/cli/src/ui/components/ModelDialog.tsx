@@ -42,7 +42,6 @@ import {
   checkAdvisorModelAvailability,
   isAdvisorModelEligible,
 } from '../../config/advisor-model.js';
-import { stripAuxSelectorBaseUrlCredential } from '../../utils/aux-model-selector.js';
 
 function formatModalities(modalities?: InputModalities): string {
   if (!modalities) return t('text-only');
@@ -118,11 +117,10 @@ function encodeVisionModelSelector(selected: string): string {
   }
   const parsed = parseModelSelectionKey(selected);
   const selector = `${parsed.authType}:${parsed.modelId}`;
-  // The persisted suffix lands in settings.json (committable at workspace
-  // scope), so it must not carry userinfo credentials.
-  return parsed.baseUrl
-    ? `${selector}\0${stripAuxSelectorBaseUrlCredential(parsed.baseUrl)}`
-    : selector;
+  // The suffix is persisted registry-exact: it is the routing key every
+  // consumer compares with `===`. Egress surfaces scrub it on the way out
+  // through `aux-model-selector.ts`.
+  return parsed.baseUrl ? `${selector}\0${parsed.baseUrl}` : selector;
 }
 
 interface ModelDialogProps {
@@ -908,7 +906,7 @@ export function ModelDialog({
         const advisorSelector = encodeAuxModelSelector(selected);
         const advisorModel = selectedEntry.isRuntime
           ? advisorSelector
-          : `${advisorSelector}\0${stripAuxSelectorBaseUrlCredential(selectedEntry.model.registryBaseUrl ?? '')}`;
+          : `${advisorSelector}\0${selectedEntry.model.registryBaseUrl ?? ''}`;
         if (!checkAdvisorModelAvailability(config, advisorModel).available) {
           setErrorMessage(t('Selected Advisor model is unavailable.'));
           return;
