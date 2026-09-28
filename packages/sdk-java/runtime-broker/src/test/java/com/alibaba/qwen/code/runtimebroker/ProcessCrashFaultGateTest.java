@@ -112,6 +112,7 @@ class ProcessCrashFaultGateTest {
         BrokerProcess second = rig.broker("second", secondProxy,
                 FaultGateRig.Provisioner.RECOVERABLE);
         rig.awaitDispatchLapse(execution);
+        ToolExecutionRecord beforeTakeover = rig.execution(execution);
         second.acquire(HARNESS, SESSION).requireOk();
         // Before reuse, the restarted Broker re-proves the worker's identity:
         // once as the provisioner observes it, once as the service adopts it.
@@ -127,11 +128,18 @@ class ProcessCrashFaultGateTest {
                 adopted.getLease().getEndpoint());
         assertTrue(second.workers().isEmpty());
 
-        // A same-key retry fences the lapsed claim instead of replaying it.
+        ToolExecutionRecord afterTakeover = rig.execution(execution);
+        if (window == Window.BEFORE_COMMIT) {
+            assertEquals(ToolExecutionRecord.State.SETTLED, afterTakeover.getState());
+            assertEquals(beforeTakeover.getVersion() + 1, afterTakeover.getVersion());
+            assertEquals(beforeTakeover.getDispatchOwner(), afterTakeover.getDispatchOwner());
+            assertEquals(beforeTakeover.getDispatchGeneration(), afterTakeover.getDispatchGeneration());
+        }
+        // A retry returns the scan's receipt or fences an unresolved lapsed claim.
         JSONObject retried = second.create(HARNESS, SESSION, "key-1",
                 FaultGateRig.shell("call-1", SLOW)).object();
         assertEquals(execution, retried.getString("executionCallId"));
-        assertEquals("UNKNOWN", retried.getString("state"));
+        assertEquals(afterTakeover.isSettled() ? "SETTLED" : "UNKNOWN", retried.getString("state"));
 
         if (window == Window.AFTER_CLAIM) {
             // The worker never saw the call, so it has no evidence to give.
@@ -145,7 +153,8 @@ class ProcessCrashFaultGateTest {
         } else {
             FaultGateRig.await(() -> second.reconcile(HARNESS, SESSION,
                     execution).object().getString("outcome"),
-                    "RESOLVED"::equals, "reconciliation from evidence");
+                    outcome -> "RESOLVED".equals(outcome) || "ALREADY_SETTLED".equals(outcome),
+                    "reconciliation from evidence");
             ToolExecutionRecord settled = rig.execution(execution);
             assertEquals("success", settled.getExecutionStatus());
             Map<String, Object> status = new HttpRuntimeTransport().status(
