@@ -81,6 +81,7 @@ export interface AutoMemoryExtractionExecutionResult {
 /**
  * Drop runtime reminders and hidden reasoning while preserving tool traffic,
  * which tells the extractor when the turn only read existing memory.
+ * The resulting history must end with a model text message.
  */
 function buildAgentHistory(history: Content[]): Content[] {
   const sanitized = history.flatMap((message) => {

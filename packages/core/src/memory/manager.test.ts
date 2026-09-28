@@ -7,6 +7,7 @@
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import type { Content } from '@google/genai';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   globalMemoryManager,
@@ -1390,42 +1391,58 @@ describe('MemoryManager', () => {
       },
     );
 
-    it('skips extraction after a successful manage_memory call', async () => {
+    it('skips only the turn containing a successful manage_memory call', async () => {
+      vi.mocked(runAutoMemoryExtract).mockResolvedValue({
+        touchedTopics: [],
+        cursor: { sessionId: 'sess-1', updatedAt: new Date().toISOString() },
+      });
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'Remember my unit preference.' }] },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'manage-memory',
+                name: ToolNames.MANAGE_MEMORY,
+                args: { action: 'remember', content: 'Use microseconds.' },
+              },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'manage-memory',
+                name: ToolNames.MANAGE_MEMORY,
+                response: { output: '{"updated":1}' },
+              },
+            },
+          ],
+        },
+        { role: 'model', parts: [{ text: 'Remembered.' }] },
+        { role: 'user', parts: [{ text: 'The release window is Friday.' }] },
+        { role: 'model', parts: [{ text: 'Understood.' }] },
+      ];
       const mgr = new MemoryManager();
-      const result = await mgr.scheduleExtract({
+      const sameTurn = await mgr.scheduleExtract({
         projectRoot,
         sessionId: 'sess-1',
-        history: [
-          { role: 'user', parts: [{ text: 'Remember my unit preference.' }] },
-          {
-            role: 'model',
-            parts: [
-              {
-                functionCall: {
-                  id: 'manage-memory',
-                  name: ToolNames.MANAGE_MEMORY,
-                  args: { action: 'remember', content: 'Use microseconds.' },
-                },
-              },
-            ],
-          },
-          {
-            role: 'user',
-            parts: [
-              {
-                functionResponse: {
-                  id: 'manage-memory',
-                  name: ToolNames.MANAGE_MEMORY,
-                  response: { output: '{"updated":1}' },
-                },
-              },
-            ],
-          },
-        ],
+        history: history.slice(0, 3),
       });
 
-      expect(result.skippedReason).toBe('memory_tool');
+      expect(sameTurn.skippedReason).toBe('memory_tool');
       expect(runAutoMemoryExtract).not.toHaveBeenCalled();
+      const laterTurn = await mgr.scheduleExtract({
+        projectRoot,
+        sessionId: 'sess-1',
+        history: [...history],
+      });
+
+      expect(laterTurn.skippedReason).toBeUndefined();
+      expect(runAutoMemoryExtract).toHaveBeenCalledOnce();
     });
 
     it('does not skip extraction after manage_memory fails', async () => {

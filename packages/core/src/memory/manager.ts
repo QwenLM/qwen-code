@@ -450,7 +450,7 @@ function successfulFunctionCallIds(history: Content[]): Set<string> {
   return ids;
 }
 
-function latestHistoryWritesToUserMemory(history: Content[]): boolean {
+function latestTurnHistory(history: Content[]): Content[] | undefined {
   const queryIndex = history.findLastIndex(
     (message) =>
       message.role === 'user' &&
@@ -459,9 +459,12 @@ function latestHistoryWritesToUserMemory(history: Content[]): boolean {
       ) &&
       !(message.parts ?? []).some((part) => part.functionResponse),
   );
-  if (queryIndex < 0) return false;
+  return queryIndex < 0 ? undefined : history.slice(queryIndex + 1);
+}
 
-  const recentHistory = history.slice(queryIndex + 1);
+function latestHistoryWritesToUserMemory(history: Content[]): boolean {
+  const recentHistory = latestTurnHistory(history);
+  if (!recentHistory) return false;
   const successfulCallIds = successfulFunctionCallIds(recentHistory);
 
   return recentHistory.some((message) =>
@@ -1064,7 +1067,12 @@ export class MemoryManager {
     ReturnType<typeof runAutoMemoryExtract> extends Promise<infer T> ? T : never
   > {
     const wroteUserMemory = latestHistoryWritesToUserMemory(params.history);
-    if (historyWritesToMemory(params.history, params.projectRoot)) {
+    if (
+      historyWritesToMemory(
+        latestTurnHistory(params.history) ?? params.history,
+        params.projectRoot,
+      )
+    ) {
       const record = makeTaskRecord(
         'extract',
         params.projectRoot,
