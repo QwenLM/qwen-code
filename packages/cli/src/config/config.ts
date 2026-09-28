@@ -2719,6 +2719,10 @@ export async function loadCliConfig(
       bareMode || safeMode
         ? false
         : (settings.memory?.enableTeamMemorySync ?? false),
+    enableStructuredMemoryRecall:
+      bareMode || safeMode
+        ? false
+        : (settings.memory?.enableStructuredRecall ?? false),
     enableAutoSkill:
       bareMode || safeMode
         ? false
@@ -2824,6 +2828,7 @@ export async function loadCliConfig(
     configParams.enableManagedAutoDream = false;
     configParams.enableTeamMemory = false;
     configParams.enableTeamMemorySync = false;
+    configParams.enableStructuredMemoryRecall = false;
     configParams.enableAutoSkill = false;
     configParams.fileCheckpointingEnabled = false;
     configParams.artifactEnabled = false;
