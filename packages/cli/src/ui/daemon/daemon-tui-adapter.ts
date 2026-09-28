@@ -17,6 +17,7 @@ import {
   FINDING_SOURCES,
   REPORT_FINDINGS_LEVELS,
 } from '@qwen-code/qwen-code-core/tools/report-findings.js';
+import { isAdvisorDisplay } from '@qwen-code/qwen-code-core/tools/tools.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import {
   ToolCallStatus,
@@ -326,6 +327,11 @@ function formatToolResultDisplay(
     return sanitizeDisplayText(value);
   }
   if (isVisionBridgeNoticeDisplay(value)) {
+    return sanitizeDaemonValue(
+      value,
+    ) as IndividualToolCallDisplay['resultDisplay'];
+  }
+  if (isAdvisorDisplay(value)) {
     return sanitizeDaemonValue(
       value,
     ) as IndividualToolCallDisplay['resultDisplay'];

@@ -101,6 +101,7 @@ describe('IdeClient', () => {
     _resetCachedIdeServerHost();
 
     // Mock environment variables
+    vi.stubEnv('TERM_PROGRAM', 'vscode');
     process.env['QWEN_CODE_IDE_WORKSPACE_PATH'] = '/test/workspace';
     delete process.env['QWEN_CODE_IDE_SERVER_PORT'];
     delete process.env['QWEN_CODE_IDE_SERVER_STDIO_COMMAND'];
@@ -149,6 +150,16 @@ describe('IdeClient', () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+  });
+
+  it('skips the IDE process walk outside VS Code terminals', async () => {
+    vi.stubEnv('TERM_PROGRAM', 'iTerm.app');
+    vi.mocked(getIdeProcessInfo).mockClear();
+
+    await IdeClient.getInstance();
+
+    expect(getIdeProcessInfo).not.toHaveBeenCalled();
   });
 
   describe('createProxyAwareFetch', () => {

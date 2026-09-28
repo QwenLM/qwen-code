@@ -24,6 +24,8 @@ import type {
   ToolRegistry,
 } from '../index.js';
 import type { PermissionDecision } from '../permissions/types.js';
+import { ToolCallEvent } from '../telemetry/types.js';
+import { QwenLogger } from '../telemetry/qwen-logger/qwen-logger.js';
 import { DEFAULT_MAX_SUBAGENT_DEPTH } from '../config/config.js';
 import {
   ApprovalMode,
@@ -1175,6 +1177,77 @@ describe('CoreToolScheduler', () => {
       onToolCallsUpdate,
     };
   }
+
+  it.each(['success', 'error', 'cancelled'] as const)(
+    'preserves each %s call start when telemetry is constructed later',
+    async (status) => {
+      let now = 1_760_000_000_000;
+      const clock = vi.spyOn(Date, 'now').mockImplementation(() => now);
+      const telemetry = vi
+        .spyOn(QwenLogger, 'getInstance')
+        .mockReturnValue(undefined);
+      let controller = new AbortController();
+      const tool = new MockTool({
+        name: 'timed_tool',
+        execute: async () => {
+          now += 4_000;
+          if (status === 'error') throw new Error('execution failed');
+          if (status === 'cancelled') controller.abort();
+          return { llmContent: 'done', returnDisplay: 'done' };
+        },
+      });
+      const { scheduler, onAllToolCallsComplete } =
+        createSchedulerForLegacyToolTests({
+          toolsByName: new Map([[tool.name, tool]]),
+        });
+      const completed: CompletedToolCall[] = [];
+      try {
+        for (const [index, startedAt] of [
+          1_760_000_000_000, 1_760_000_010_000,
+        ].entries()) {
+          now = startedAt;
+          controller = new AbortController();
+          onAllToolCallsComplete.mockClear();
+          await scheduler.schedule(
+            {
+              callId: `timed-${index}`,
+              name: tool.name,
+              args: {},
+              isClientInitiated: false,
+              prompt_id: 'timed-prompt',
+            },
+            controller.signal,
+          );
+          await vi.waitFor(() =>
+            expect(onAllToolCallsComplete).toHaveBeenCalled(),
+          );
+          const call = onAllToolCallsComplete.mock
+            .calls[0][0][0] as CompletedToolCall;
+          expect(call).toMatchObject({
+            status,
+            startTime: startedAt,
+            durationMs: 4_000,
+          });
+          completed.push(call);
+        }
+        now += 60_000;
+        expect(
+          completed.map((call) => {
+            const event = new ToolCallEvent(call);
+            return [event.started_at_ms, event.duration_ms];
+          }),
+        ).toEqual([
+          [1_760_000_000_000, 4_000],
+          [1_760_000_010_000, 4_000],
+        ]);
+        const { startTime: _startTime, ...legacy } = completed[0]!;
+        expect(new ToolCallEvent(legacy).started_at_ms).toBeUndefined();
+      } finally {
+        telemetry.mockRestore();
+        clock.mockRestore();
+      }
+    },
+  );
 
   it('routes tool_call through the underlying tool while preserving the model-facing response name', async () => {
     boundaryDiagnosticsEnabled.value = true;
@@ -8448,6 +8521,45 @@ describe('CoreToolScheduler', () => {
       );
     });
 
+    it('prioritizes a registered prefix of an unknown tool name', () => {
+      const mockToolRegistry = {
+        getAllToolNames: () => [
+          'edit',
+          'write_file',
+          'read_file',
+          'exit_plan_mode',
+        ],
+        getTool: () => undefined,
+        ensureTool: async () => undefined,
+      } as unknown as ToolRegistry;
+      const mockConfig = {
+        getToolRegistry: () => mockToolRegistry,
+        getUseModelRouter: () => false,
+        getLlmClient: () => null,
+        getPermissionsDeny: () => undefined,
+        isInteractive: () => true,
+        getMessageBus: vi.fn().mockReturnValue(undefined),
+        getDisableAllHooks: vi.fn().mockReturnValue(true),
+      } as unknown as Config;
+      const scheduler = new CoreToolScheduler({
+        config: mockConfig,
+        getPreferredEditor: () => 'vscode',
+        onEditorClose: vi.fn(),
+      });
+
+      for (const [unknownName, expected] of [
+        ['edit_file_path', 'edit'],
+        ['edit_file', 'edit'],
+        ['read_file_path', 'read_file'],
+        ['write_file_path', 'write_file'],
+      ]) {
+        // @ts-expect-error accessing private method
+        expect(scheduler.getToolSuggestion(unknownName, 1)).toBe(
+          ` Did you mean "${expected}"?`,
+        );
+      }
+    });
+
     it('should use Levenshtein suggestions for excluded tools (getToolSuggestion only handles non-excluded)', () => {
       // Create mocked tool registry
       const mockToolRegistry = {
@@ -13828,6 +13940,9 @@ describe('CoreToolScheduler telemetry spans', () => {
       throw new Error('expected an errored tool call');
     }
     expect(completedCall.response.resultDisplay).toBe('sensitive /secret/path');
+    expect(completedCall.invocation?.getDescription()).toBe(
+      'A mock tool invocation for mockTool',
+    );
     expectSanitizedFailure(spanRecord, 'Tool execution failed', 'tool_error');
   });
 
@@ -21548,6 +21663,11 @@ describe('CoreToolScheduler prompt_id propagation', () => {
     ToolResult
   > {
     capturedPromptId?: string;
+    notifyOnCompletion = false;
+
+    setCompletionNotificationEnabled(enabled: boolean): void {
+      this.notifyOnCompletion = enabled;
+    }
 
     constructor(params: Record<string, unknown>) {
       super(params);
@@ -21558,7 +21678,7 @@ describe('CoreToolScheduler prompt_id propagation', () => {
     }
 
     override async getDefaultPermission(): Promise<PermissionDecision> {
-      return 'allow';
+      return this.params['needsApproval'] ? 'ask' : 'allow';
     }
 
     getDescription(): string {
@@ -21567,7 +21687,7 @@ describe('CoreToolScheduler prompt_id propagation', () => {
 
     async execute(): Promise<ToolResult> {
       return {
-        llmContent: `captured prompt_id=${this.capturedPromptId ?? '<unset>'}`,
+        llmContent: `captured prompt_id=${this.capturedPromptId ?? '<unset>'}; notify=${this.notifyOnCompletion}; args=${JSON.stringify(this.params)}`,
         returnDisplay: '',
       };
     }
@@ -21598,82 +21718,161 @@ describe('CoreToolScheduler prompt_id propagation', () => {
     }
   }
 
-  it('passes request.prompt_id to invocation.setPromptId via buildInvocation', async () => {
-    const tool = new PromptIdAwareTool();
-    const mockToolRegistry = {
-      getTool: () => tool,
-      ensureTool: async () => tool,
-      getFunctionDeclarations: () => [],
-      tools: new Map(),
-      discovery: {},
-      registerTool: () => {},
-      getToolByName: () => tool,
-      getToolByDisplayName: () => tool,
-      getTools: () => [],
-      discoverTools: async () => {},
-      getAllTools: () => [],
-      getToolsByServer: () => [],
-    } as unknown as ToolRegistry;
-
-    const mockConfig = {
-      getSessionId: () => 'test-session-id',
-      getUsageStatisticsEnabled: () => true,
-      getDebugMode: () => false,
-      getApprovalMode: () => ApprovalMode.DEFAULT,
-      getPermissionsAllow: () => [],
-      getContentGeneratorConfig: () => ({
-        model: 'test-model',
-        authType: 'gemini',
-      }),
-      getShellExecutionConfig: () => ({
-        terminalWidth: 90,
-        terminalHeight: 30,
-      }),
-      storage: {
-        getProjectTempDir: () => '/tmp',
+  it.each(
+    [
+      {
+        isClientInitiated: false,
+        source: undefined,
+        executionOrigin: { kind: 'model' } as const,
+        notify: false,
       },
-      getToolRegistry: () => mockToolRegistry,
-      getUseModelRouter: () => false,
-      getLlmClient: () => null,
-      isInteractive: () => true,
-      getIdeMode: () => false,
-      getExperimentalZedIntegration: () => false,
-      getChatRecordingService: () => undefined,
-      getMessageBus: vi.fn().mockReturnValue(undefined),
-      getDisableAllHooks: vi.fn().mockReturnValue(true),
-    } as unknown as Config;
+      {
+        isClientInitiated: true,
+        source: undefined,
+        executionOrigin: { kind: 'client' } as const,
+        notify: true,
+      },
+      {
+        isClientInitiated: true,
+        source: 'code_mode' as const,
+        executionOrigin: undefined,
+        notify: false,
+      },
+      {
+        isClientInitiated: true,
+        source: undefined,
+        executionOrigin: { kind: 'model' } as const,
+        notify: false,
+      },
+      {
+        isClientInitiated: true,
+        source: undefined,
+        executionOrigin: undefined,
+        notify: false,
+      },
+      {
+        isClientInitiated: false,
+        source: undefined,
+        executionOrigin: { kind: 'client' } as const,
+        notify: true,
+      },
+    ].flatMap((testCase) => [
+      { ...testCase, rebuild: false },
+      { ...testCase, rebuild: true },
+    ]),
+  )(
+    'passes request provenance to the executing invocation: %j',
+    async ({ isClientInitiated, source, executionOrigin, notify, rebuild }) => {
+      const tool = new PromptIdAwareTool();
+      const mockToolRegistry = {
+        getTool: () => tool,
+        ensureTool: async () => tool,
+        getFunctionDeclarations: () => [],
+        tools: new Map(),
+        discovery: {},
+        registerTool: () => {},
+        getToolByName: () => tool,
+        getToolByDisplayName: () => tool,
+        getTools: () => [],
+        discoverTools: async () => {},
+        getAllTools: () => [],
+        getToolsByServer: () => [],
+      } as unknown as ToolRegistry;
 
-    const onAllToolCallsComplete = vi.fn();
-    const scheduler = new CoreToolScheduler({
-      config: mockConfig,
-      onAllToolCallsComplete,
-      onToolCallsUpdate: vi.fn(),
-      getPreferredEditor: () => 'vscode',
-      onEditorClose: vi.fn(),
-    });
-
-    const abortController = new AbortController();
-    await scheduler.schedule(
-      [
-        {
-          callId: 'call-1',
-          name: 'promptIdAwareTool',
-          args: {},
-          isClientInitiated: false,
-          prompt_id: 'expected-prompt-id-xyz',
+      const messageBus = {
+        request: vi.fn().mockImplementation(
+          async (request: {
+            eventName: string;
+          }): Promise<HookExecutionResponse> => ({
+            type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+            correlationId: `${request.eventName}-hook`,
+            success: true,
+            output:
+              request.eventName === 'PermissionRequest'
+                ? {
+                    hookSpecificOutput: {
+                      decision: {
+                        behavior: 'allow',
+                        updatedInput: { updated: true },
+                      },
+                    },
+                  }
+                : {},
+          }),
+        ),
+      };
+      const mockConfig = {
+        getSessionId: () => 'test-session-id',
+        getUsageStatisticsEnabled: () => true,
+        getDebugMode: () => false,
+        getTruncateToolOutputThreshold: () => 100_000,
+        getTruncateToolOutputLines: () => 1_000,
+        getApprovalMode: () => ApprovalMode.DEFAULT,
+        getPermissionsAllow: () => [],
+        getContentGeneratorConfig: () => ({
+          model: 'test-model',
+          authType: 'gemini',
+        }),
+        getShellExecutionConfig: () => ({
+          terminalWidth: 90,
+          terminalHeight: 30,
+        }),
+        storage: {
+          getProjectTempDir: () => '/tmp',
         },
-      ],
-      abortController.signal,
-    );
+        getToolRegistry: () => mockToolRegistry,
+        getUseModelRouter: () => false,
+        getLlmClient: () => null,
+        isInteractive: () => true,
+        getIdeMode: () => false,
+        getExperimentalZedIntegration: () => false,
+        getChatRecordingService: () => undefined,
+        getMessageBus: () => messageBus,
+        getDisableAllHooks: () => !rebuild,
+      } as unknown as Config;
 
-    await vi.waitFor(() => {
-      expect(onAllToolCallsComplete).toHaveBeenCalled();
-    });
+      const onAllToolCallsComplete = vi.fn();
+      const scheduler = new CoreToolScheduler({
+        config: mockConfig,
+        onAllToolCallsComplete,
+        onToolCallsUpdate: vi.fn(),
+        getPreferredEditor: () => 'vscode',
+        onEditorClose: vi.fn(),
+      });
 
-    expect(tool.lastBuiltInvocation?.capturedPromptId).toBe(
-      'expected-prompt-id-xyz',
-    );
-  });
+      const abortController = new AbortController();
+      await scheduler.schedule(
+        [
+          {
+            callId: 'call-1',
+            name: 'promptIdAwareTool',
+            args: { needsApproval: rebuild },
+            isClientInitiated,
+            source,
+            executionOrigin,
+            prompt_id: 'expected-prompt-id-xyz',
+          },
+        ],
+        abortController.signal,
+      );
+
+      await vi.waitFor(() => {
+        expect(onAllToolCallsComplete).toHaveBeenCalled();
+      });
+
+      expect(tool.lastBuiltInvocation?.capturedPromptId).toBe(
+        'expected-prompt-id-xyz',
+      );
+      expect(JSON.stringify(onAllToolCallsComplete.mock.calls[0])).toContain(
+        `notify=${notify}`,
+      );
+      if (rebuild) {
+        expect(JSON.stringify(onAllToolCallsComplete.mock.calls[0])).toContain(
+          'args={\\"updated\\":true}',
+        );
+      }
+    },
+  );
 
   it('buildInvocation calls setPromptId when promptId is provided (covers both setArgs and schedule call sites)', () => {
     // Directly exercises the private buildInvocation method so that both

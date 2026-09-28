@@ -98,8 +98,8 @@ Each adapter implements:
 | **WeChat**   | HTTP long-poll                  | `senderWxid` (+ optional `groupWxid`)                    | Text-only prompts with reply tokens | Same                                              |
 | **Telegram** | Bot API long-poll               | `from.id` (+ optional `chat.id` for groups)              | Inline keyboard buttons             | Same                                              |
 | **Feishu**   | WebSocket stream / HTTP webhook | `sender.open_id` (+ optional `chat_id` for groups)       | Interactive card buttons            | Same                                              |
-| **GitHub**   | Notifications API polling       | Numeric `user.id` (immutable; login resolved at connect) | Error comment + re-mention          | `senderPolicy: 'allowlist' \| 'open'`             |
-| **GitLab**   | Todos API polling               | `author.username` (lowercased)                           | Log + re-mention                    | `senderPolicy: 'allowlist' \| 'open'`             |
+| **GitHub**   | Notifications API polling       | Numeric `user.id` (immutable; login resolved at connect) | Error comment + re-mention          | `groups["*"].senders: 'allowlist' \| 'open'`      |
+| **GitLab**   | Todos API polling               | `author.username` (lowercased)                           | Log + re-mention                    | `groups["*"].senders: 'allowlist' \| 'open'`      |
 
 > **Note:** The "Permission UX" column describes each platform's native affordance, but none is wired up yet — `AcpBridge.requestPermission` currently auto-approves every request (`packages/channels/base/src/AcpBridge.ts`), and `ChannelConfig.approvalMode` is declared but not yet read. Interactive approval is planned (Phase 5).
 

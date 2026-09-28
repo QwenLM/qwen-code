@@ -21,6 +21,7 @@ import { btwCommand } from '../ui/commands/btwCommand.js';
 import { bugCommand } from '../ui/commands/bugCommand.js';
 import { cdCommand } from '../ui/commands/cdCommand.js';
 import { clearCommand } from '../ui/commands/clearCommand.js';
+import { commitCommand } from '../ui/commands/commit-command.js';
 import { configCommand } from '../ui/commands/config-command.js';
 import { deleteCommand } from '../ui/commands/deleteCommand.js';
 import { compressCommand } from '../ui/commands/compressCommand.js';
@@ -101,9 +102,15 @@ export class BuiltinCommandLoader implements ICommandLoader {
     // prevent ALL built-in commands from loading.
     let resolvedIdeCommand: SlashCommand | null = null;
     try {
+      // `/ide` is interactive-only, and building it walks the process tree
+      // with one `ps` per ancestor; headless and ACP runs would filter it out
+      // after paying for that on the way to their first request. This saves
+      // nothing when `ideMode` is on — `connectIdeForStartup` performs the
+      // same walk earlier, on the awaited startup path.
       if (
         !this.config?.getExecutionEnvironment?.() &&
-        !this.config?.getShellExecutionSandbox?.()
+        !this.config?.getShellExecutionSandbox?.() &&
+        this.config?.isInteractive?.() !== false
       ) {
         resolvedIdeCommand = await ideCommand();
       }
@@ -135,6 +142,7 @@ export class BuiltinCommandLoader implements ICommandLoader {
       bugCommand,
       cdCommand,
       clearCommand,
+      commitCommand,
       compressCommand,
       compressFastCommand,
       configCommand,
