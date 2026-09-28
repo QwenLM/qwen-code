@@ -542,6 +542,16 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
           'Runtime execution was already recorded without an active wait.',
         );
       }
+      if (
+        turn &&
+        previous.identity.activationId !== this.activation.activationId &&
+        previous.continuation.phase !== 'before_model' &&
+        previous.continuation.phase !== 'turn_settled'
+      ) {
+        throw new ManagedSessionConflictError(
+          'Runtime work cannot continue a prior activation.',
+        );
+      }
 
       const claimed: string[] = [];
       try {
@@ -573,7 +583,14 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
         });
         const checkpoint = createAwaitRuntimeHarnessCheckpoint({
           previous: turn
-            ? { ...previous, identity: { ...previous.identity, ...turn } }
+            ? {
+                ...previous,
+                identity: {
+                  ...previous.identity,
+                  ...turn,
+                  activationId: this.activation.activationId,
+                },
+              }
             : previous,
           ...identity,
           attempt: previous.attempt ?? {
