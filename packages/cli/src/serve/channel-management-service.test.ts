@@ -1023,6 +1023,40 @@ describe('createChannelManagementService', () => {
     expect(store.remove).not.toHaveBeenCalled();
   });
 
+  it('rejects a configured deletion while the worker runtime is mid-transition', async () => {
+    // The first-start window publishes nothing committed, so the configured
+    // branch would otherwise delete the configuration while a worker for it
+    // is coming up — the same manager state the missing-config branch
+    // already rejects.
+    const { service, store, manager } = setup({ committedNames: [] });
+    const state = manager.state();
+    vi.mocked(manager.state).mockReturnValue({
+      ...state,
+      transition: 'starting',
+      workers: [
+        {
+          enabled: true,
+          state: 'starting' as const,
+          channels: ['bot'],
+          requestedChannels: ['bot'],
+          adapters: [{ name: 'bot', state: 'starting' as const }],
+          workspaceId: 'primary',
+          workspaceCwd: WORKSPACE,
+          primary: true,
+        },
+      ],
+    });
+
+    await expect(
+      service.remove('bot', { expectedRevision: 'rev-1' }),
+    ).rejects.toMatchObject({
+      code: 'channel_runtime_owner_mismatch',
+      message: expect.stringContaining('mid-transition'),
+    });
+    expect(manager.setChannelEnabled).not.toHaveBeenCalled();
+    expect(store.remove).not.toHaveBeenCalled();
+  });
+
   it('rejects a missing-config deletion when the configuration reappears during the worker stop', async () => {
     // The revision token covers only this scope's files, so a configuration
     // written back to another scope while the worker stop is in flight must

@@ -268,15 +268,6 @@ export function createChannelManagementService(
   // Returns whether exactly one committed worker owned by this workspace was
   // confirmed, so `remove` can stop it without re-deriving ownership.
   const assertConvergeableRuntimeOwner = (name: string): boolean => {
-    // A mid-transition manager reports the candidate selection as no workers
-    // and nothing committed, which reads as silent without being it; the
-    // caller retries once the manager settles.
-    if (opts.manager.state().transition !== 'idle') {
-      throw runtimeOwnerMismatch(
-        name,
-        'The channel runtime is mid-transition.',
-      );
-    }
     const workers = workerFor(name);
     const committed = opts.manager.committedChannelNames().includes(name);
     if (!committed && workers.length === 0) return false;
@@ -515,6 +506,17 @@ export function createChannelManagementService(
       const configured = Object.hasOwn(current.channels, name);
       if (configured) assertWorkspaceConfig(current.channels[name]!);
       assertExpectedRevision(current, request.expectedRevision);
+      // A mid-transition manager reports the candidate selection as no
+      // workers and nothing committed, which reads as silent without being
+      // it; the caller retries once the manager settles. Guarded above the
+      // branch split because the configured branch reads the same
+      // mid-transition committed set.
+      if (opts.manager.state().transition !== 'idle') {
+        throw runtimeOwnerMismatch(
+          name,
+          'The channel runtime is mid-transition.',
+        );
+      }
       if (!configured) {
         // Only a record-valued merged entry proves the channel lives in
         // another scope: every other reader of the merged map filters
