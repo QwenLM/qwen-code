@@ -450,7 +450,9 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
         return status;
     }
 
-    private static String wireState(ToolExecutionRecord.State state) {
+    // Package-private for the H0c contract test, which pins this mapping to
+    // the wire statuses the Harness replays.
+    static String wireState(ToolExecutionRecord.State state) {
         switch (state) {
             case PREPARED:
                 return "prepared";
