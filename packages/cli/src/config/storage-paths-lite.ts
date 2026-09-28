@@ -11,13 +11,17 @@ import * as path from 'node:path';
 // import @qwen-code/qwen-code-core because it runs before serve listener ready.
 export const SETTINGS_DIRECTORY_NAME = '.qwen';
 
+/**
+ * Whether a `QWEN_HOME` value expands against the home directory: `~`, or a
+ * path that starts with `~/` or `~\`. Core's `Storage` applies the same rule.
+ */
+export function expandsAgainstHome(dir: string): boolean {
+  return dir === '~' || dir.startsWith('~/') || dir.startsWith('~\\');
+}
+
 export function resolveConfigPathLite(dir: string, cwd?: string): string {
   let resolved = dir;
-  if (
-    resolved === '~' ||
-    resolved.startsWith('~/') ||
-    resolved.startsWith('~\\')
-  ) {
+  if (expandsAgainstHome(resolved)) {
     const relativeSegments =
       resolved === '~'
         ? []
@@ -34,25 +38,94 @@ export function resolveConfigPathLite(dir: string, cwd?: string): string {
 }
 
 /**
- * Reads a variable from `env` as a process spawned with that environment
- * sees it, for an environment of string values. On Windows, names are
- * case-insensitive, and of several spellings of one name only the first in
- * sorted order is passed on, as Node's spawn does.
+ * The variables Node's spawn passes on from `env` to a process, under the
+ * names the process receives them by: every enumerable key, inherited ones
+ * included, whose value is not `undefined`, as a string. On Windows, names
+ * are case-insensitive, and of several spellings of one name only the first
+ * in sorted order is passed on, and only if it has a value. Spawn may add a
+ * few variables of its own, such as `NODE_V8_COVERAGE`, and on Windows the
+ * ones libuv requires. Throws for an environment the process would not
+ * receive as it is: a missing one, for which spawn passes on its own; a
+ * variable that cannot be read, a Symbol value, or a NUL byte in a string,
+ * which spawn refuses; a NUL byte in another value, which cuts the variable
+ * short; and a name that contains `=`, which the process receives as another
+ * name, except at the start of a Windows name such as `=C:`.
+ */
+export function passedEnvironment(
+  env: Readonly<NodeJS.ProcessEnv>,
+): Record<string, string> {
+  if (!env) throw new TypeError('There is no environment to pass on.');
+  const keys: string[] = [];
+  for (const key in env) keys.push(key);
+  const windows = os.platform() === 'win32';
+  const spellings = new Set<string>();
+  const passed: Record<string, string> = Object.create(null);
+  for (const key of windows ? keys.sort() : keys) {
+    if (windows) {
+      const upperKey = key.toUpperCase();
+      if (spellings.has(upperKey)) continue;
+      spellings.add(upperKey);
+    }
+    const value = env[key];
+    if (value === undefined) continue;
+    // A template literal throws for a Symbol, as spawn does.
+    const text = `${value}`;
+    // Windows names such as `=C:` start with `=`.
+    if (
+      key.indexOf('=', windows ? 1 : 0) !== -1 ||
+      key.includes('\0') ||
+      text.includes('\0')
+    ) {
+      throw new TypeError('The environment cannot be passed on as it is.');
+    }
+    passed[key] = text;
+  }
+  return passed;
+}
+
+/**
+ * Reads a variable from `env` as a process spawned with it sees the variable
+ * in its own `process.env`, which on Windows looks names up
+ * case-insensitively. Given an environment other than `process.env`, it
+ * throws where `passedEnvironment` does, even for another variable, and so
+ * do the path helpers below.
  */
 export function readEnvironmentVariable(
   env: Readonly<NodeJS.ProcessEnv>,
   name: string,
 ): string | undefined {
-  if (env === process.env || os.platform() !== 'win32') {
-    return env[name];
+  if (env === process.env) return env[name];
+  return spawnedEnvironmentView(env)[name];
+}
+
+/**
+ * The environment a process spawned with `env` sees in its own
+ * `process.env`, as a record to look names up in. Its keys are the names that
+ * are passed on, except names like an array index, such as `0`, for which
+ * `process.env` returns nothing. On Windows, a lookup or an `in` test by any
+ * spelling finds the variable. Throws where `passedEnvironment` does.
+ */
+export function spawnedEnvironmentView(
+  env: Readonly<NodeJS.ProcessEnv>,
+): Readonly<Record<string, string>> {
+  const passed = passedEnvironment(env);
+  for (const name in passed) {
+    if (/^(?:0|[1-9]\d*)$/.test(name) && Number(name) < 2 ** 32 - 1) {
+      delete passed[name];
+    }
   }
-  const upperName = name.toUpperCase();
-  const keys: string[] = [];
-  for (const key in env) keys.push(key);
-  const passed = keys
-    .sort()
-    .find((candidate) => candidate.toUpperCase() === upperName);
-  return passed === undefined ? undefined : env[passed];
+  if (os.platform() !== 'win32') return passed;
+  const byUpperName = new Map(
+    Object.entries(passed).map(([name, value]) => [name.toUpperCase(), value]),
+  );
+  return new Proxy(passed, {
+    has: (_target, name) =>
+      typeof name === 'string' && byUpperName.has(name.toUpperCase()),
+    get: (_target, name) =>
+      typeof name === 'string'
+        ? byUpperName.get(name.toUpperCase())
+        : undefined,
+  });
 }
 
 /**

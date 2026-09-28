@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { realpathSync } from 'node:fs';
 import { realpath } from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -14,9 +15,11 @@ import { parseApprovalModeValue } from './approval-mode-value.js';
 import { loadProjectMcpServers } from './mcpJson.js';
 import { readSettingsSnapshot, type LoadedSettings } from './settings.js';
 import {
+  expandsAgainstHome,
   getGlobalQwenDirLite,
   isFullyQualifiedPath,
-  readEnvironmentVariable,
+  passedEnvironment,
+  spawnedEnvironmentView,
 } from './storage-paths-lite.js';
 
 export type ManagedCompatibility =
@@ -27,7 +30,11 @@ export type ManagedCompatibility =
 export interface ManagedCompatibilityRuntime {
   readonly workspaceCwd: string;
   readonly workspaceTrusted: boolean;
-  /** The effective environment the runtime gives its session hosts. */
+  /**
+   * The effective environment the runtime gives its session hosts. The
+   * evaluation reads it once, so the hosts must be spawned with the same
+   * variables.
+   */
   readonly environment: Readonly<NodeJS.ProcessEnv>;
   /** Arguments the daemon forwards to every session host. */
   readonly forwardedArgs: readonly string[];
@@ -89,14 +96,18 @@ export async function evaluateManagedCompatibility(
   }
   // A session host resolves such a location against its own working
   // directory, which the evaluation cannot know.
+  let environment: Readonly<Record<string, string>>;
   let locationDependsOnWorkingDirectory: boolean;
   try {
-    locationDependsOnWorkingDirectory = hasWorkingDirectoryLocation(
-      runtime.environment,
-    );
+    // Every rule below reads this one copy, as a spawned session host
+    // receives it.
+    environment = passedEnvironment(runtime.environment);
+    locationDependsOnWorkingDirectory =
+      hasWorkingDirectoryLocation(environment);
   } catch {
-    // The home directory or the environment could not be read.
-    return unknownResult('the settings could not be read');
+    return unknownResult(
+      'the home directory or the environment could not be read',
+    );
   }
   if (locationDependsOnWorkingDirectory) {
     return unknownResult(
@@ -107,7 +118,7 @@ export async function evaluateManagedCompatibility(
   let settings: LoadedSettings;
   try {
     settings = readSettingsSnapshot(runtime.workspaceCwd, {
-      environment: runtime.environment,
+      environment,
       workspaceTrusted: true,
     });
   } catch {
@@ -158,7 +169,7 @@ export async function evaluateManagedCompatibility(
     return deferredResult('MCP servers are configured in the project MCP file');
   }
 
-  const qwenDir = getGlobalQwenDirLite(runtime.environment);
+  const qwenDir = getGlobalQwenDirLite(environment);
   const extensions = await new ExtensionStore({
     extensionsDir: path.join(qwenDir, 'extensions'),
     storeDir: path.join(qwenDir, 'extension-store'),
@@ -174,39 +185,39 @@ export async function evaluateManagedCompatibility(
 
 /**
  * Whether a variable that locates settings or the extension store gives a
- * location that depends on the working directory. Settings loading resolves
- * the home directory for the user directory and to tell whether the workspace
- * is the home directory, so an empty or relative one counts too. `QWEN_HOME`
- * may be `~` or start with `~/` or `~\`, which expands against the home
- * directory; the system settings paths are used as they are. A value that is
- * not a string reaches a session host only as its string form, which the
- * evaluation does not predict.
+ * location that depends on the working directory, among the variables a
+ * spawned session host receives. Settings loading resolves the home directory
+ * for the user directory and to tell whether the workspace is the home
+ * directory, so an empty or relative one counts too. A `QWEN_HOME` that
+ * expands against the home directory is under it; the system settings paths
+ * are used as they are. Throws when the home directory cannot be looked up or
+ * resolved, as when it does not exist, which makes settings loading throw too.
  */
 function hasWorkingDirectoryLocation(
-  environment: Readonly<NodeJS.ProcessEnv>,
+  environment: Readonly<Record<string, string>>,
 ): boolean {
+  const variables = spawnedEnvironmentView(environment);
+  const home = os.homedir();
   // An empty home directory is not fully qualified either.
-  if (!isFullyQualifiedPath(os.homedir())) return true;
-  const qwenHome: unknown = readEnvironmentVariable(environment, 'QWEN_HOME');
-  const underHome =
-    qwenHome === undefined ||
-    qwenHome === '' ||
-    qwenHome === '~' ||
-    (typeof qwenHome === 'string' && /^~[/\\]/.test(qwenHome));
+  if (!isFullyQualifiedPath(home)) return true;
+  realpathSync(path.resolve(home));
+  const qwenHome = variables['QWEN_HOME'];
   if (
-    !underHome &&
-    (typeof qwenHome !== 'string' || !isFullyQualifiedPath(qwenHome))
+    qwenHome &&
+    !expandsAgainstHome(qwenHome) &&
+    !isFullyQualifiedPath(qwenHome)
   ) {
     return true;
   }
   return [
-    'QWEN_CODE_SYSTEM_SETTINGS_PATH',
-    'QWEN_CODE_SYSTEM_DEFAULTS_PATH',
-  ].some((name) => {
-    const location: unknown = readEnvironmentVariable(environment, name);
-    if (location === undefined || location === '') return false;
-    return typeof location !== 'string' || !isFullyQualifiedPath(location);
-  });
+    variables['QWEN_CODE_SYSTEM_SETTINGS_PATH'],
+    variables['QWEN_CODE_SYSTEM_DEFAULTS_PATH'],
+  ].some(
+    (location) =>
+      location !== undefined &&
+      location !== '' &&
+      !isFullyQualifiedPath(location),
+  );
 }
 
 /**

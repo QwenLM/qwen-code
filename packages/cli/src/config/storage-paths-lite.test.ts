@@ -6,12 +6,17 @@
 
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import {
+  expandsAgainstHome,
   getGlobalQwenDirLite,
   getSystemDefaultsPath,
   getSystemSettingsPath,
   isFullyQualifiedPath,
+  passedEnvironment,
+  readEnvironmentVariable,
+  spawnedEnvironmentView,
 } from './storage-paths-lite.js';
 
 describe('settings locations in a given environment', () => {
@@ -24,7 +29,153 @@ describe('settings locations in a given environment', () => {
 
   afterEach(() => {
     Object.defineProperty(process, 'platform', platform);
+    vi.unstubAllEnvs();
   });
+
+  it.each([
+    ['~', true],
+    ['~/qwen', true],
+    ['~\\qwen', true],
+    ['~qwen', false],
+    ['qwen/~', false],
+    ['', false],
+  ])(
+    'treats %j as expanding against the home directory: %s',
+    (dir, expected) => {
+      expect(expandsAgainstHome(dir)).toBe(expected);
+    },
+  );
+
+  // A session host locates its user directory with core's Storage; the
+  // evaluation must locate the same one.
+  it.each(['~', '~/qwen', '~\\qwen', '~qwen', 'qwen', home, '', undefined])(
+    'locates QWEN_HOME=%j where core does',
+    (value) => {
+      vi.stubEnv('QWEN_HOME', value);
+
+      expect(getGlobalQwenDirLite()).toBe(Storage.getGlobalQwenDir());
+      expect(getGlobalQwenDirLite({ QWEN_HOME: value })).toBe(
+        Storage.getGlobalQwenDir(),
+      );
+    },
+  );
+
+  it('passes on what spawn passes on: inherited keys, and every value but undefined as a string', () => {
+    const environment = Object.assign(
+      Object.create({ INHERITED: 'from the prototype' }),
+      {
+        NUMBER: 123,
+        NULL: null,
+        ZERO: 0,
+        FALSE: false,
+        EMPTY: '',
+        UNSET: undefined,
+        'UNSET=': undefined,
+        TEXT: 'text',
+      },
+    ) as NodeJS.ProcessEnv;
+
+    expect({ ...passedEnvironment(environment) }).toStrictEqual({
+      NUMBER: '123',
+      NULL: 'null',
+      ZERO: '0',
+      FALSE: 'false',
+      EMPTY: '',
+      TEXT: 'text',
+      INHERITED: 'from the prototype',
+    });
+    expect(readEnvironmentVariable(environment, 'INHERITED')).toBe(
+      'from the prototype',
+    );
+  });
+
+  it.each([undefined, null, '', 0, false])(
+    'refuses %j for an environment, for which spawn passes on its own',
+    (environment) => {
+      expect(() =>
+        passedEnvironment(environment as unknown as NodeJS.ProcessEnv),
+      ).toThrow(TypeError);
+    },
+  );
+
+  it.each<[string, unknown]>([
+    ['a Symbol value', { MODE: Symbol('plan') }],
+    ['a NUL byte in a name', { 'MO\0DE': 'plan' }],
+    ['a NUL byte in a value', { MODE: 'pl\0an' }],
+    ['a NUL byte in a value that is not a string', { MODE: ['pl\0an'] }],
+    ['a name that contains =', { 'MODE=alt': 'plan' }],
+    ['a name that starts with =', { '=MODE': 'plan' }],
+  ])(
+    'refuses %s, which a process would not receive as it is',
+    (_name, environment) => {
+      runOn('linux');
+
+      expect(() => passedEnvironment(environment as NodeJS.ProcessEnv)).toThrow(
+        TypeError,
+      );
+    },
+  );
+
+  it('passes on a Windows name that starts with =, but not one split by =', () => {
+    runOn('win32');
+
+    // Windows keeps the current directory of each drive under such a name.
+    expect({ ...passedEnvironment({ '=C:': 'C:\\qwen' }) }).toStrictEqual({
+      '=C:': 'C:\\qwen',
+    });
+    expect(() => passedEnvironment({ '=C:=alt': 'C:\\qwen' })).toThrow(
+      TypeError,
+    );
+  });
+
+  it('reads an inherited key on Windows too', () => {
+    runOn('win32');
+
+    expect(
+      readEnvironmentVariable(
+        Object.create({ qwen_home: home }) as NodeJS.ProcessEnv,
+        'QWEN_HOME',
+      ),
+    ).toBe(home);
+  });
+
+  it('enumerates only the names spawn passes on, and on Windows finds any spelling', () => {
+    runOn('win32');
+    const view = spawnedEnvironmentView({
+      MODE: 'plan',
+      mode: 'default',
+      zeta: 'last',
+    });
+
+    expect(Object.keys(view)).toEqual(['MODE', 'zeta']);
+    expect(view['mode']).toBe('plan');
+    expect(view['Mode']).toBe('plan');
+    expect(view['ZETA']).toBe('last');
+    expect('mode' in view).toBe(true);
+    expect('ZETA' in view).toBe(true);
+    expect('other' in view).toBe(false);
+  });
+
+  it.each(['linux', 'win32'])(
+    'leaves out names like an array index, which process.env does not return, on %s',
+    (platformName) => {
+      runOn(platformName);
+      const environment = {
+        '0': 'zero',
+        '4294967294': 'the last index',
+        '4294967295': 'not an index',
+        '01': 'padded',
+        MODE: 'plan',
+      };
+
+      expect({ ...spawnedEnvironmentView(environment) }).toStrictEqual({
+        '4294967295': 'not an index',
+        '01': 'padded',
+        MODE: 'plan',
+      });
+      expect(readEnvironmentVariable(environment, '0')).toBeUndefined();
+    },
+  );
 
   it('finds a name spelled in another case on Windows', () => {
     runOn('win32');
