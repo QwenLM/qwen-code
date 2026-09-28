@@ -22,12 +22,12 @@ import {
 } from './paths.js';
 import { resolveTrustedMemoryRoot } from './trusted-memory-filesystem.js';
 import {
+  scanAllAutoMemoryTopicDocumentsFromRoot,
   scanAutoMemoryTopicDocuments,
   scanTeamAutoMemoryTopicDocuments,
   scanUserAutoMemoryTopicDocuments,
   type ScannedAutoMemoryDocument,
 } from './scan.js';
-import { scanAllAutoMemoryTopicDocumentsFromRoot } from './structured-scan.js';
 import type { AutoMemoryScope } from './types.js';
 import type { AutoMemoryMetadata } from './types.js';
 
@@ -249,6 +249,7 @@ export async function rebuildManagedAutoMemoryIndex(
   const content = buildManagedAutoMemoryIndex(docs, metadata);
   await atomicWriteFile(getAutoMemoryIndexPath(projectRoot), content, {
     encoding: 'utf-8',
+    noFollow: true,
   });
   return content;
 }
@@ -279,6 +280,7 @@ export async function rebuildUserAutoMemoryIndex(): Promise<string> {
   const content = buildManagedAutoMemoryIndex(docs);
   await atomicWriteFile(getUserAutoMemoryIndexPath(), content, {
     encoding: 'utf-8',
+    noFollow: true,
   });
   return content;
 }

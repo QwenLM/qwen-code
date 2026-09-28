@@ -9,8 +9,9 @@
 留在范围之外的部分，服务于 #12380。基于上游 `302e7d88ef`；M3 的更新基于
 `3f5ae3ffeb`。本文实现 B2d 设计中的“Managed 引擎接口”与“配置兼容契约”，并把工作
 拆成 M1 到 M6 六个切片。M1 是 B2d 设计要求在任何 Managed 会话出现之前完成的前置条件
-（Legacy 拒绝与用途标记），已经实现（#12861）。M3 是配置快照与兼容评估，随 M3 的更新
-一同实现。M2 以及 M4 到 M6 仍是提议，各自落地时更新设计。
+（Legacy 拒绝与用途标记），已经实现（#12861）；M1 的后续修改把拒绝扩展到重命名，并让
+owner 证据与 owner 读取器一致。M3 是配置快照与兼容评估，随 M3 的更新一同实现。M2 以及
+M4 到 M6 仍是提议，各自落地时更新设计。
 
 参考实现为分支 `doudouOUC/qwen-code:feature/managed-agents-p0-p8` 的
 `032392a673`。本文记录哪些内容移植到上游、按什么顺序移植，以及上游移植在哪些地方
@@ -156,14 +157,19 @@ Managed 的切片。
 
 #### Legacy 拒绝
 
-明确的 Managed 证据包括原有的 Managed Session header，以及一条完整的 transcript
-行，其记录为 `type: "system"`、`subtype: "session_execution_engine"` 且
-`systemPayload.engine: "managed"`。消息中的文本不算。Managed owner 总是先于其他内容
-写入，因此该检查读取与 header 检查相同的 64 KiB 头部窗口。与 header 检查一样，读取
-出错时它放行：无法读取的 transcript 之后会自行失败。
+明确的 Managed 证据包括原有的 Managed Session header，以及 owner 读取器的行解析器能从
+头部某一行中恢复出的一条记录，其 `type: "system"`、
+`subtype: "session_execution_engine"` 且 `systemPayload.engine: "managed"`。某一行
+无法整体解析时，该解析器仍会恢复它能界定出的完整记录，因此这样的记录即使与另一条记录
+同处一行也算数；在该记录内部被截断的行则恢复不出记录。消息中的文本不算。Managed owner 总是先于其他内容写入，因此该检查读取与 header
+检查相同的 64 KiB 头部窗口。与 header 检查一样，读取出错时它放行；下文的风险记录了这会
+在哪些情况下放过 Managed transcript。owner 证据
+只由一个谓词 `isManagedOwnerRecord` 定义，该检查与会话列表的 Managed 识别都使用它。
+owner 读取器对 owner 记录的校验更严格（例如要求 `version: 1`），它拒绝的记录会被报告
+为 unavailable，而不会被当作 Legacy。
 
-三个现有的拒绝点改用新的检查。每个执行、记录或 fork transcript 的 Legacy 入口都会经过
-其中之一：
+三个现有的拒绝点以及没有存活 recorder 时的重命名改用新的检查。每个执行、记录、重命名
+或 fork transcript 的 Legacy 入口都会经过其中之一：
 
 | 入口                                                                                                          | 拒绝点                                                                                                        |
 | ------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
@@ -174,12 +180,19 @@ Managed 的切片。
 | TUI `/resume`（Ink 与 OpenTUI）                                                                               | `assertLegacySessionExecution`                                                                                |
 | TUI `/branch`、ACP 分支与 side task                                                                           | `SessionService.forkSession`                                                                                  |
 | 不持 writer lease 写入的 recorder                                                                             | `ChatRecordingService` 中的会话文件检查                                                                       |
+| 没有存活 recorder 时的重命名：daemon 元数据路由（含 standalone）、ACP、TUI `/rename`、分支、取消归档          | `SessionService.renameSession` 或 `renameSessionForLifecycle`                                                 |
 
 热 attach 或 live load 复用存活会话，而 Legacy 子进程只会持有 Legacy 会话。只读的
-transcript 读取、重放和列表仍然可用。重命名和封存维护 lease 仍只检查 header，读取器
-选择 Managed projection 时也一样：它们依赖 Managed Session log 格式（Managed 的标题是
-一条已提交的领域记录），而单独一条 owner 记录并不具备这种格式。双引擎宿主不变；
-其选择器已经会拒绝没有引擎能运行的 Managed owner。
+transcript 读取、重放和列表仍然可用。封存维护 lease 仍只检查 header，读取器选择
+Managed projection 时也一样：它们依赖 Managed Session log 格式，而单独一条 owner 记录
+并不具备这种格式。把关执行、记录与 fork 的拒绝不改变双引擎宿主的行为：其选择器已经会
+拒绝没有引擎能运行的 Managed owner。
+
+重命名在所有宿主上（无论是否双引擎）遇到任一种证据都会拒绝，因为没有存活 recorder 时的
+重命名会直接追加写入 transcript。Managed 创建若在 owner 记录与 header 之间中断，只会
+留下 owner 记录；下一次 Managed 打开只有在 transcript 中除 owner 记录外没有别的记录时
+才会补完这次创建。在这次后续修改之前，Legacy 重命名会在这里追加标题，使 transcript
+变得两个引擎都打不开。
 
 #### 用途标记
 
@@ -237,9 +250,16 @@ M3 把 B2d 设计中的配置兼容契约实现为 CLI 配置层中的一个函�
 
 - **环境。** 传入的环境就是该 runtime 的会话宿主所用的环境。其中的 `QWEN_HOME` 与
   两个系统 settings 路径用来定位用户与系统 settings 文件和 extension store；没有
-  `QWEN_HOME` 时，用户目录位于进程的 home 目录下。它是占位符的唯一来源，并且已经包含
-  runtime 应用的用户级 `.env` 值。在 daemon 中，这些定位变量和 `HOME` 不允许被工作区
-  覆盖，所以与 daemon 自己的值相同；在会话宿主中，它们就是宿主自己的环境。
+  `QWEN_HOME` 时，用户目录位于进程的 home 目录下。它也是占位符的唯一来源，并且已经
+  包含 runtime 应用的用户级 `.env` 值。在 Windows 上，定位变量名和占位符按被 spawn 的
+  会话宿主所见的方式读取：不区分大小写，多种拼写并存时取排序最前的一种。依赖工作目录
+  的位置判为 `unknown`，因为会话宿主会按它自己的工作目录解析：相对路径，Windows 上
+  没有盘符根或没有 UNC 服务器与共享名的路径，以及不是字符串的值。为空或为相对路径的
+  home 目录同样如此，settings 加载既用它确定用户目录，也用它判断工作区是否就是 home
+  目录。`QWEN_HOME` 可以是 `~`，或以 `~/`、`~\` 开头，它按 home 目录展开。在
+  daemon 中，这些定位变量和 `HOME` 不允许被工作区覆盖，Windows 上给出 home 目录的
+  `USERPROFILE` 一旦设置也不会被覆盖所替换，所以它们与 daemon 自己的值相同；在会话
+  宿主中，它们就是宿主自己的环境。
 - **项目 MCP 文件。** 严格模式下，`.mcp.json` 的读取失败会作为错误保留，而不是当作
   文件不存在。两种模式下，无法解析、没有 `mcpServers` 对象，或含有不是对象的条目的
   文件都算错误。
@@ -273,6 +293,7 @@ M3 把 B2d 设计中的配置兼容契约实现为 CLI 配置层中的一个函�
 | 转发了 `--restore-ask-user-question`                            | deferred   |
 | 转发了其他参数                                                  | unknown    |
 | 运行中的工作区持有配置文件之外的 MCP 服务器                     | deferred   |
+| 环境中的某个 settings 位置依赖工作目录                          | unknown    |
 | 某一层 settings 无法读取                                        | unknown    |
 | 任何一层 settings 中有 MCP 服务器，或配置了 `mcp.serverCommand` | deferred   |
 | 配置了 `tools.discoveryCommand` 或 `tools.callCommand`          | deferred   |
@@ -329,11 +350,15 @@ M3 确定了契约中的以下细节：
 
 M1：
 
-1. 未配对的 Legacy 宿主拒绝执行、fork 或记录唯一 Managed 证据是 `managed` owner
-   记录的 transcript，并使用已有的分类；transcript 字节不变，也不会创建 fork 目标。
-2. 带 Legacy owner、没有 owner 记录、含有无法完整解析的行，或在消息文本或其他记录中
-   包含 owner 记录内容的 transcript，不会被当作 Managed：未配对的 Legacy 宿主仍能执行
-   它们，带 Legacy owner 的 transcript 仍能 fork。
+1. 未配对的 Legacy 宿主拒绝执行、fork、记录或重命名唯一 Managed 证据是 `managed`
+   owner 记录的 transcript，并使用已有的分类；transcript 字节不变，也不会创建 fork
+   目标。在 header 之前中断的 Managed 创建仍能由下一次 Managed 打开补完。
+2. 只有 header，或 owner 读取器的行解析器能从头部某一行恢复出的 Managed owner 记录，
+   才会让 transcript 成为 Managed。Legacy owner、没有 owner 记录、在 owner 记录内部被
+   截断的行，或在能完整解析的行中位于消息文本或其他记录内部的 owner 记录内容，都不会：
+   未配对的 Legacy 宿主仍能执行和重命名这样的 transcript，带 Legacy owner 的 transcript
+   仍能 fork。在头部窗口内，owner 读取器确认为 Managed 的记录都是 owner 证据；读取器
+   拒绝的 owner 证据会让 owner 成为 unavailable。
 3. 带 Managed Session header 的 transcript 行为不变，包括拒绝重命名。
 4. worktree reset 在 spawn 替代会话时带上 worktree 元数据，双引擎选择器把它视为延期
    用途。
@@ -373,12 +398,25 @@ M3：
 - 每个新会话都会读取 settings 各层、`.mcp.json` 和 extension store。其中 settings
   与 `.mcp.json` 的读取是同步的，读取期间会阻塞 daemon 的事件循环。这些读取都在本地
   且数据量小，但慢速文件系统会拖慢会话创建，超出 Bridge 选择预算的选择会使创建失败。
+  M6 在会话创建时调用该评估之前，必须把这些读取移出事件循环，或者限制它们的耗时。
 - 安装在提交之前中断时留下的 staging 目录，以及日志被恢复隔离的事务在 `staging` 或
   `rollback` 中留下的内容，store 从不清理；其余残留会在下一次 store 操作时由恢复清理。
-  这类残留会让会话一直留在 Legacy，直到它被删除。
-- 在传入的环境中查找变量区分大小写，与 daemon 现在的运行时环境相同。在 Windows 上，
-  以其他大小写拼写的定位变量（例如 `qwen_home`）不会被找到，而会话宿主自己的
-  `process.env` 能找到它。
+  在 `qwen extensions install` 期间按一次 Ctrl-C 就足以留下这类残留。这类残留会让会话
+  一直留在 Legacy，直到它被删除。M6 在依赖该评估之前，必须在能够确认这类 staging
+  目录已被遗弃之后再清理它，或者告诉用户会话为何留在 Legacy。仅凭 store 锁无法确认：
+  安装在取锁之前就会创建并填充它的 staging 目录，所以在锁下清理可能删掉仍在进行的
+  安装的 staging 目录。
+- 另一个 qwen 进程或 daemon 自身同时打开 extension store 时，单次评估可能判为
+  `unknown`。M6 必须重试，而不是让 Managed 恢复因此失败。
 - 基于文件的自定义命令可以注入 shell 输出（`!{…}`），用户调用命令时会在宿主中运行
   进程。它们不是契约的输入；由 M5 或 M6 决定 Managed 会话拒绝它们，还是由评估将其判为
   deferred。
+- Managed 会话的标题与某个活动会话的标题冲突时，取消归档会失败：冲突时的改名是一次
+  Legacy 重命名，而它会拒绝 Managed transcript。本地 Managed 日志从 M4 起才会出现，
+  因此 M4 或 M6 必须通过会话 authority 改名，或者跳过这次改名。
+- owner 检查与 header 检查背后的头部读取以不跟随链接的方式打开 transcript。Windows
+  没有这种打开方式，于是它改为证明文件身份，并拒绝没有 inode 编号的卷（FAT、exFAT、
+  部分 SMB 共享）上的所有文件。此时检查找不到证据并放行操作，而离线重命名会跟随链接并
+  追加写入。因此，经由链接的 Managed transcript，以及 Windows 上位于这类卷上的任何
+  Managed transcript，都会绕过 Legacy 拒绝。header 检查在 M1 之前就有同样的缺口。后续
+  修改应让证据读取与被守护的操作以相同方式打开文件。
