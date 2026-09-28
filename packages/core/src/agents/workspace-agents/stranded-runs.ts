@@ -20,6 +20,8 @@
 
 import * as fsp from 'node:fs/promises';
 
+import { isNodeError } from '../../utils/errors.js';
+import { applyAggregateStatus } from './run-lifecycle.js';
 import { getAgentsDir, withAgentStoreTransaction } from './store.js';
 import type { Thread } from './types.js';
 
@@ -55,8 +57,13 @@ export async function strandLocalRuns(
   // order to find it empty would violate that in the most visible way.
   try {
     await fsp.stat(getAgentsDir(projectRoot));
-  } catch {
-    return { threadsChanged: 0, runsStranded: 0 };
+  } catch (error) {
+    // Only a missing store means "never used". Anything else (EACCES, EIO)
+    // would otherwise look like a clean sweep with live runs left behind.
+    if (isNodeError(error) && error.code === 'ENOENT') {
+      return { threadsChanged: 0, runsStranded: 0 };
+    }
+    throw error;
   }
   return withAgentStoreTransaction(projectRoot, async (transaction) => {
     const { threads } = await transaction.listThreads();
@@ -69,8 +76,12 @@ export async function strandLocalRuns(
       const live = thread.runs.filter(
         (run) => run.status === 'running' || run.status === 'finishing',
       );
-      if (live.length === 0) continue;
-      const next: Thread = {
+      // A run already being cancelled was going to end as `cancelled`; with
+      // its body gone that is simply where it ends. Stranding it instead would
+      // record an operator's cancellation as something a person must decide.
+      const cancelling = thread.runs.some((run) => run.status === 'cancelling');
+      if (live.length === 0 && !cancelling) continue;
+      let next: Thread = {
         ...thread,
         runs: thread.runs.map((run) =>
           run.status === 'running' || run.status === 'finishing'
@@ -81,9 +92,14 @@ export async function strandLocalRuns(
                 closeKind: 'stranded' as const,
                 failureStage: STRANDED_FAILURE_STAGE,
               }
-            : run,
+            : run.status === 'cancelling'
+              ? { ...run, status: 'cancelled' as const, endedAt: now }
+              : run,
         ),
       };
+      // Nothing else will touch this thread while collaboration is off, so
+      // its status is settled here or it keeps claiming work is in progress.
+      next = await applyAggregateStatus(transaction, next, now);
       await transaction.writeThread(next);
       threadsChanged += 1;
       runsStranded += live.length;

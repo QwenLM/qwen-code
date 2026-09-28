@@ -40,7 +40,7 @@ import type {
 import { isThreadTerminal } from './types.js';
 
 /** Run states that keep a thread `in_progress` regardless of any obligation. */
-const LIVE_RUN_STATUSES = new Set([
+export const LIVE_RUN_STATUSES: ReadonlySet<string> = new Set([
   'queued',
   'running',
   'finishing',
