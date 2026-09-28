@@ -575,7 +575,7 @@ export function fitManagedRuntimeProviderResult(
 
   // 1. Evict oldest progress events; they re-derive from the settled result.
   const progress = status?.['progress'];
-  if (Array.isArray(progress) && progress.length > 0) {
+  if (status !== undefined && Array.isArray(progress) && progress.length > 0) {
     const lastSeq =
       typeof status['lastSeq'] === 'number' ? status['lastSeq'] : 0;
     const sizes = progress.map(
