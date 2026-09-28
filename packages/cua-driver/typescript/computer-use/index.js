@@ -963,6 +963,20 @@ export class ComputerUse {
       windowId: target.windowId,
       includeScreenshot,
     };
+    if (options.includeChildWindows !== undefined) {
+      if (typeof options.includeChildWindows !== "boolean") {
+        throw new ComputerUseError("includeChildWindows must be a boolean");
+      }
+      if (
+        options.includeChildWindows &&
+        await this.getPlatform({ signal }) !== "macos"
+      ) {
+        throw new ComputerUseError("includeChildWindows is only supported on macOS", {
+          code: "unsupported_platform",
+        });
+      }
+      input.includeChildWindows = options.includeChildWindows;
+    }
     if (options.appContext) input.appContext = true;
     const projectionVersion = options.appContext ? "app-tree-v1" : ACCESSIBILITY_PROJECTION_VERSION;
     if (screenshotOutFile !== undefined) input.screenshotOutFile = screenshotOutFile;

@@ -65,6 +65,15 @@ diff/no-change does not discard the coordinate frame. The default return omits
 that image; use `getState({ includeScreenshot: true })` when the caller needs to
 inspect it.
 
+On macOS 14.2+, `getState({ includeScreenshot: true, includeChildWindows: true })`
+requests child-window content for that screenshot only. The next observation
+without the option returns to the default capture policy. The option preserves
+the native target, AX controls, keyboard routing and screenshot coordinate frame;
+use coordinates from the current image. It does not enable background popup input.
+Expanded capture is unavailable for attached-window display crops and when its
+native capture fails; existing AX information remains available. Other platforms
+reject true. `observeWindow` accepts the same option.
+
 Native code selects semantic or synthesized input after checking the target.
 App input makes one guarded activation of the exact target, dispatches once and
 restores the prior app. Failed, partial, unverifiable and cancelled

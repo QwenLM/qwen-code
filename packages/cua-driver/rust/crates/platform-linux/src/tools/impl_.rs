@@ -727,6 +727,7 @@ impl Tool for GetWindowStateTool {
                 "window_id":{"type":"integer","description":"X11 XID from list_windows."},
                 "app_context":{"type":"boolean","description":"Use the compact app observation projection."},
                 "capture_mode": cua_driver_core::capture_mode::capture_mode_schema(),
+                "include_child_windows":{"type":"boolean","description":"Child-window capture is macOS-only; true is unsupported on this platform."},
                 "include_screenshot":{"type":"boolean",
                     "description":"Default true — returns a grounding screenshot alongside the tree. Set false to skip the grab and return tree only (the cheap path for re-indexing before an element ax action)."},
                 "screenshot_out_file":{"type":"string",
@@ -753,6 +754,10 @@ impl Tool for GetWindowStateTool {
     }
 
     async fn invoke(&self, args: Value) -> ToolResult {
+        if args.get("include_child_windows").and_then(Value::as_bool) == Some(true) {
+            return ToolResult::error("include_child_windows is only supported on macOS")
+                .with_structured(json!({ "code": "unsupported_platform" }));
+        }
         use cua_driver_core::tool_args::ArgsExt;
         let pid = match args.require_u32("pid") {
             Ok(v) => v,

@@ -219,6 +219,61 @@ test("app observations retain a current screenshot without exposing it by defaul
   );
 });
 
+test("child-window capture is per observation and keeps native targets and input", async () => {
+  const { computer, calls } = fixture();
+  const app = await computer.getApp("Fixture");
+  await app.getState({ includeScreenshot: true });
+  const expanded = await app.getState({
+    includeScreenshot: true,
+    includeChildWindows: true,
+  });
+  assert.equal(expanded.window, "Document");
+  assert.equal(expanded.text, compactState);
+  await app.click(37);
+  assert.equal(calls.at(-1).input.elementToken, "rv1:window_7:25");
+  assert.equal(calls.at(-1).input.deliveryMode, "foreground");
+  await app.click({ x: 12, y: 23 });
+  assert.equal(calls.at(-1).input.windowId, 7n);
+  assert.equal(calls.at(-1).input.x, 12);
+  assert.equal(calls.at(-1).input.y, 23);
+  assert.equal(calls.at(-1).input.deliveryMode, "foreground");
+  await app.getState();
+  await app.getState({ includeChildWindows: false });
+  assert.deepEqual(
+    calls.filter((call) => call.method === "getWindowState")
+      .map((call) => call.input.includeChildWindows),
+    [undefined, true, undefined, false],
+  );
+});
+
+test("invalid child-window options fail before native observation", async () => {
+  const { computer, calls } = fixture();
+  const app = await computer.getApp("Fixture");
+  await assert.rejects(
+    app.getState({ includeChildWindows: "true" }),
+    /must be a boolean/,
+  );
+  assert.equal(calls.filter((call) => call.method === "getWindowState").length, 0);
+});
+
+for (const platform of ["windows", "linux"]) {
+  test(`${platform} rejects expanded capture but preserves default and false`, async () => {
+    const { computer, calls } = fixture({ platform });
+    const app = await computer.getApp("Fixture");
+    await assert.rejects(app.getState({ includeChildWindows: true }), {
+      code: "unsupported_platform",
+    });
+    assert.equal(calls.filter((call) => call.method === "getWindowState").length, 0);
+    await app.getState();
+    await app.getState({ includeChildWindows: false });
+    assert.deepEqual(
+      calls.filter((call) => call.method === "getWindowState")
+        .map((call) => call.input.includeChildWindows),
+      [undefined, false],
+    );
+  });
+}
+
 test("coordinates reject a screenshot frame that native marked invalid", async () => {
   const { computer, calls } = fixture({ observe: (_input, state) => ({
     ...state,

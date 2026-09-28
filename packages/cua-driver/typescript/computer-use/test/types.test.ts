@@ -44,7 +44,7 @@ export async function exerciseComputerUseTypes(
 ): Promise<ActAndVerifyResult> {
   await computer.listApps({ signal });
   const app = await computer.getApp("org.example.fixture", { signal });
-  const appState = await app.getState({ includeScreenshot: true, maxTextChars: 12_000, signal });
+  const appState = await app.getState({ includeScreenshot: true, includeChildWindows: true, maxTextChars: 12_000, signal });
   appState.screenshot?.images.at(0)?.dataBase64;
   await app.click(37, { signal });
   await app.setValue(37, "draft");
