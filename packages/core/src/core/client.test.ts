@@ -11019,6 +11019,42 @@ hello
       expect(mockMemoryManager.scheduleDream).not.toHaveBeenCalled();
     });
 
+    it('runs tool-result migration after a next-speaker continuation', async () => {
+      const { checkNextSpeaker } = await import(
+        '../utils/nextSpeakerChecker.js'
+      );
+      vi.mocked(checkNextSpeaker)
+        .mockResolvedValueOnce({
+          reasoning: 'continue',
+          next_speaker: 'model',
+        })
+        .mockResolvedValue(null);
+      mockTurnRunFn.mockImplementation(() =>
+        (async function* () {
+          yield { type: LlmEventType.Content, value: 'Done' };
+        })(),
+      );
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      } as unknown as LlmChat;
+
+      await fromAsync(
+        client.sendMessageStream(
+          [{ text: 'Tool finished' }],
+          new AbortController().signal,
+          'prompt-id-tool-result-continuation',
+          { type: SendMessageType.ToolResult },
+        ),
+      );
+
+      expect(mockMemoryManager.scheduleMetadataMigration).toHaveBeenCalledTimes(
+        2,
+      );
+      expect(mockMemoryManager.scheduleExtract).not.toHaveBeenCalled();
+      expect(mockMemoryManager.scheduleDream).not.toHaveBeenCalled();
+    });
+
     it('activates a prepared memory protocol before starting UserQuery recall', async () => {
       let mode: 'legacy' | 'structured' = 'legacy';
       const setHistory = vi.fn();

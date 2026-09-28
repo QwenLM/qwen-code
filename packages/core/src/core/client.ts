@@ -3392,6 +3392,8 @@ export class LlmClient {
     prompt_id: string,
     options?: SendMessageOptions,
     turns: number = MAX_TURNS,
+    managedMemoryType: SendMessageType = options?.type ??
+      SendMessageType.UserQuery,
   ): AsyncGenerator<ServerLlmStreamEvent, Turn> {
     const messageType = options?.type ?? SendMessageType.UserQuery;
     const startsInteraction =
@@ -5006,6 +5008,7 @@ export class LlmClient {
                 steerInput,
               },
               steerTurnBudget,
+              managedMemoryType,
             );
           } finally {
             settleSteerInput(steerInput, pushCountBefore);
@@ -5155,6 +5158,7 @@ export class LlmClient {
                   steerInput: pendingSteer,
                 },
                 hookTurnBudget,
+                managedMemoryType,
               );
             } finally {
               settleSteerInput(pendingSteer, pushCountBefore);
@@ -5253,6 +5257,7 @@ export class LlmClient {
                 steerInput: pendingSteer,
               },
               hookTurnBudget,
+              managedMemoryType,
             );
           } finally {
             settleSteerInput(pendingSteer, pushCountBefore);
@@ -5314,7 +5319,7 @@ export class LlmClient {
 
         if (this.config.getSkipNextSpeakerCheck()) {
           if (!isGoalRuntimeTurn) {
-            this.runManagedAutoMemoryBackgroundTasks(messageType);
+            this.runManagedAutoMemoryBackgroundTasks(managedMemoryType);
           }
           if (arenaAgentClient) {
             await arenaAgentClient.reportCompleted();
@@ -5369,6 +5374,7 @@ export class LlmClient {
                 steerInput: pendingSteer,
               },
               continueTurnBudget,
+              managedMemoryType,
             );
           } finally {
             settleSteerInput(pendingSteer, pushCountBefore);
@@ -5396,7 +5402,7 @@ export class LlmClient {
         }
 
         if (!isGoalRuntimeTurn) {
-          this.runManagedAutoMemoryBackgroundTasks(messageType);
+          this.runManagedAutoMemoryBackgroundTasks(managedMemoryType);
         }
 
         if (arenaAgentClient) {
