@@ -6,12 +6,7 @@
 
 import express from 'express';
 import { setTimeout as delay } from 'node:timers/promises';
-import type {
-  Application,
-  Request,
-  RequestHandler,
-  Response,
-} from 'express';
+import type { Application, Request, RequestHandler, Response } from 'express';
 import type { HostRunResult } from '@qwen-code/qwen-code-core';
 import {
   parseHostRunSteps,
