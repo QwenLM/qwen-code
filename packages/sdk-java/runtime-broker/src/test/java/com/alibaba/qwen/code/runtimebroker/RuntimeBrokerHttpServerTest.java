@@ -199,6 +199,48 @@ class RuntimeBrokerHttpServerTest {
     }
 
     @Test
+    void unsupportedV3DispatchOrStatusStopsWithoutRepeatedPolling() throws Exception {
+        for (boolean dispatchUnsupported : new boolean[] {true, false}) {
+            try (Fixture fixture = new Fixture(true)) {
+                fixture.transport.v3Unsupported = dispatchUnsupported;
+                fixture.transport.v3StatusUnsupported = !dispatchUnsupported;
+                fixture.service.acquire("harness", "runtime", "bootstrap").toCompletableFuture().join();
+                String payload = "{\"toolName\":\"run_shell_command\",\"input\":{\"command\":\"printf hi\"}}";
+                String exact = "sha256:" + HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
+                        .digest(payload.getBytes(StandardCharsets.UTF_8)));
+                String canonical = "sha256:" + HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
+                        .digest("{\"command\":\"printf hi\"}".getBytes(StandardCharsets.UTF_8)));
+                HttpResponse<String> reserved = fixture.post("/executions:prepare", Map.ofEntries(
+                        Map.entry("protocolVersion", 1), Map.entry("requestId", "prepare-v3"),
+                        Map.entry("idempotencyKey", "v3-key"), Map.entry("harnessSessionId", "harness"),
+                        Map.entry("runtimeSessionId", "runtime"), Map.entry("turnId", "turn"),
+                        Map.entry("toolCallId", "call"), Map.entry("requestDigest", exact),
+                        Map.entry("toolProtocol", "v3"), Map.entry("publicationId", "pub-1"),
+                        Map.entry("reference", Map.of("sessionId", "runtime", "promptId", "turn",
+                                "callId", "call", "argsDigest", canonical))));
+                assertEquals(200, reserved.statusCode(), reserved.body());
+                String id = JSON.parseObject(reserved.body()).getString("executionCallId");
+                HttpResponse<String> start = fixture.post("/executions/" + id + ":start", Map.of(
+                        "protocolVersion", 1, "requestId", "start-v3", "harnessSessionId", "harness",
+                        "runtimeSessionId", "runtime", "payloadJson", payload,
+                        "publicationId", "pub-1", "publicationToken", "token"));
+                assertEquals(409, start.statusCode(), start.body());
+                assertTrue(start.body().contains("runtime_broker_execution_unknown"), start.body());
+                ToolExecutionRecord execution = fixture.service.getExecution("harness", "runtime", id)
+                        .toCompletableFuture().join();
+                for (int attempt = 0; attempt < 50 && execution.getState() != ToolExecutionRecord.State.UNKNOWN;
+                        attempt++) {
+                    Thread.sleep(20);
+                    execution = fixture.service.getExecution("harness", "runtime", id)
+                            .toCompletableFuture().join();
+                }
+                assertEquals(ToolExecutionRecord.State.UNKNOWN, execution.getState());
+                assertEquals(dispatchUnsupported ? 0 : 1, fixture.transport.v3StatusCalls.get());
+            }
+        }
+    }
+
+    @Test
     void immediateExecutionRejectsDeferredReferencesBeforeDispatch() throws Exception {
         try (Fixture fixture = new Fixture()) {
             fixture.transport.fail = false;
@@ -268,7 +310,7 @@ class RuntimeBrokerHttpServerTest {
 
                 @Override
                 public Map<String, Object> finished(ToolExecutionRecord execution) {
-                    return transport.v3Executions.get() == 0 ? null
+                    return transport.v3Executions.get() == 0 || transport.v3StatusUnsupported ? null
                             : Map.of("executionStatus", "success", "responseParts", java.util.List.of());
                 }
             } : null;
@@ -308,7 +350,10 @@ class RuntimeBrokerHttpServerTest {
         private final AtomicInteger executions = new AtomicInteger();
         private final AtomicInteger installs = new AtomicInteger();
         private final AtomicInteger v3Executions = new AtomicInteger();
+        private final AtomicInteger v3StatusCalls = new AtomicInteger();
         private boolean fail = true;
+        private boolean v3Unsupported;
+        private boolean v3StatusUnsupported;
         private Map<String, Object> lastReference;
 
         @Override
@@ -342,6 +387,10 @@ class RuntimeBrokerHttpServerTest {
         public CompletionStage<Map<String, Object>> executeV3(RuntimeLease lease,
                 RuntimeSession session, Map<String, Object> reference,
                 Map<String, Object> payload, Map<String, Object> capture) {
+            if (v3Unsupported) {
+                return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
+                        "runtime_tool_v3_unsupported", "Tool v3 is unavailable", false));
+            }
             v3Executions.incrementAndGet();
             return CompletableFuture.completedFuture(Map.of("state", "executing"));
         }
@@ -349,6 +398,11 @@ class RuntimeBrokerHttpServerTest {
         @Override
         public CompletionStage<Map<String, Object>> statusV3(RuntimeLease lease,
                 RuntimeSession session, Map<String, Object> reference, long afterSequence) {
+            v3StatusCalls.incrementAndGet();
+            if (v3StatusUnsupported) {
+                return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
+                        "runtime_tool_v3_unsupported", "Tool v3 status is unavailable", false));
+            }
             return CompletableFuture.completedFuture(Map.of("state", "executing"));
         }
 

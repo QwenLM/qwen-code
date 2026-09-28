@@ -21,7 +21,10 @@ import {
   installHostedHarnessContractMiddleware,
 } from './hosted-harness-contract.js';
 import { registerHostedHarnessSessionRoutes } from './hosted-harness-session.js';
-import { HostedWorkspaceBroker } from './hosted-workspace-broker.js';
+import {
+  HostedWorkspaceBroker,
+  HostedWorkspaceBrokerRejection,
+} from './hosted-workspace-broker.js';
 import type { HostedWorkspaceToolTurn } from './hosted-workspace-tool-turn.js';
 import * as stdio from '../utils/stdioHelpers.js';
 
@@ -486,6 +489,9 @@ describe('Hosted Harness no-tool session', () => {
   });
 
   it('recovers a committed Shell receipt after history failed and resumes the model once', async () => {
+    const log = vi
+      .spyOn(stdio, 'writeStderrLineSafe')
+      .mockImplementation(() => {});
     const key = {
       tenantId: 'tenant',
       workspaceId: 'workspace',
@@ -522,7 +528,9 @@ describe('Hosted Harness no-tool session', () => {
     );
     const acknowledge = vi
       .spyOn(HostedWorkspaceBroker.prototype, 'acknowledgeV3')
-      .mockRejectedValueOnce(new Error('lost ACK'))
+      .mockRejectedValueOnce(
+        new HostedWorkspaceBrokerRejection(409, 'runtime_execution_conflict'),
+      )
       .mockResolvedValue();
     vi.spyOn(HostedWorkspaceBroker.prototype, 'release').mockResolvedValue();
     state.publicationRequest.mockImplementation(
@@ -628,6 +636,9 @@ describe('Hosted Harness no-tool session', () => {
     });
     expect(state.model).toHaveBeenCalledTimes(2);
     expect(acknowledge).toHaveBeenCalledOnce();
+    expect(log).toHaveBeenCalledWith(
+      expect.stringContaining('runtime_execution_conflict'),
+    );
     await headers(supertest(second).delete('/session/' + SESSION_ID)).expect(
       204,
     );

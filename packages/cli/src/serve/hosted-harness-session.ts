@@ -34,7 +34,6 @@ import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 import { runHostedHarnessTextTurn } from './hosted-harness-model.js';
 import {
   HostedWorkspaceBroker,
-  HostedWorkspaceBrokerRejection,
   type HostedWorkspaceBrokerOptions,
 } from './hosted-workspace-broker.js';
 import {
@@ -248,14 +247,9 @@ async function recoverShellReceipts(
         historyRevision: decision === 'committed' ? receipt.sequence : null,
       });
     } catch (cause) {
-      if (
-        !(cause instanceof HostedWorkspaceBrokerRejection) ||
-        cause.status !== 409
-      ) {
-        writeStderrLineSafe(
-          'qwen serve: Tool v3 ACK remains retryable: ' + String(cause),
-        );
-      }
+      writeStderrLineSafe(
+        'qwen serve: Tool v3 ACK failed during recovery: ' + String(cause),
+      );
     }
   }
   return promptId && receipts.some((item) => item.promptId === promptId)

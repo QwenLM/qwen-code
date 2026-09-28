@@ -849,6 +849,11 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
 
     private static RuntimeBrokerException contextFailure(
             HttpResponse<BoundedBody> response, BoundedBody body, String path) {
+        if (response.statusCode() == 501
+                && (V3_EXECUTE_PATH.equals(path) || V3_STATUS_PATH.equals(path))) {
+            return error(501, "runtime_tool_v3_unsupported",
+                    "Managed Runtime does not support Tool v3.", false);
+        }
         if (response.statusCode() == 409 && !body.overflow()
                 && !path.endsWith("/attest")
                 && "no-store".equals(response.headers()

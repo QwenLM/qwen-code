@@ -679,6 +679,19 @@ class HttpRuntimeTransportTest {
         assertThrows(ExecutionException.class, () -> transport.statusV3(
                 lease, session, reference, 0).toCompletableFuture()
                 .get(2, TimeUnit.SECONDS));
+
+        reply.set(json(501, JsonCodec.encode(Map.of("code", "unsupported"))));
+        for (CompletionStage<Map<String, Object>> call : List.of(
+                transport.executeV3(lease, session, reference,
+                        Map.of("toolName", "run_shell_command", "input", Map.of("command", "printf hello")),
+                        capture),
+                transport.statusV3(lease, session, reference, 0))) {
+            CompletionException thrown = assertThrows(CompletionException.class,
+                    () -> call.toCompletableFuture().join());
+            RuntimeBrokerException failure = assertInstanceOf(RuntimeBrokerException.class, thrown.getCause());
+            assertEquals(501, failure.getStatusCode());
+            assertEquals("runtime_tool_v3_unsupported", failure.getCode());
+        }
     }
 
     @Test

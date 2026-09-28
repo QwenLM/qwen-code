@@ -1948,7 +1948,12 @@ public final class RuntimeBrokerService implements AutoCloseable {
                         : transport.execute(context.lease(), context.session(), executing.getReference(), payload))
                 : safeStage(() -> transport.executeV3(context.lease(), context.session(),
                         executing.getReference(), payload, capture(grant)))
-                        .handle((ignored, error) -> null)
+                        .handle((ignored, error) -> {
+                            if (unsupportedToolV3(error)) {
+                                throw new CompletionException(unwrap(error));
+                            }
+                            return null;
+                        })
                         .thenCompose(ignored -> awaitV3Result(context, executing,
                                 clock.instant().plus(Duration.ofMinutes(30))));
         return invocation
@@ -2014,6 +2019,10 @@ public final class RuntimeBrokerService implements AutoCloseable {
                         if (answer.isDone()) {
                             return;
                         }
+                        if (unsupportedToolV3(error)) {
+                            answer.completeExceptionally(unwrap(error));
+                            return;
+                        }
                         if (error == null && status != null && "settled".equals(status.get("state"))
                                 && status.get("result") instanceof Map<?, ?> result
                                 && "not_started".equals(result.get("executionStatus"))) {
@@ -2036,6 +2045,12 @@ public final class RuntimeBrokerService implements AutoCloseable {
         } catch (RuntimeException failure) {
             answer.completeExceptionally(failure);
         }
+    }
+
+    private static boolean unsupportedToolV3(Throwable error) {
+        return error != null && unwrap(error) instanceof RuntimeBrokerException failure
+                && failure.getStatusCode() == 501
+                && "runtime_tool_v3_unsupported".equals(failure.getCode());
     }
 
     private ToolExecutionRecord enterExecuting(
