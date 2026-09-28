@@ -23,7 +23,7 @@ import {
   createReplayCumulativeUsage,
 } from './history-replay-page.js';
 import type { SessionContext } from './types.js';
-import { ChatRecordingService } from '@qwen-code/qwen-code-core';
+import { ApprovalMode, ChatRecordingService } from '@qwen-code/qwen-code-core';
 import type {
   Config,
   ChatRecord,
@@ -1191,6 +1191,24 @@ describe('HistoryReplayer', () => {
         cwd: '/test',
         version: '1.0.0',
         systemPayload: { modelId: 'qwen3-coder-plus', authType: 'openai' },
+      };
+
+      await replayer.replay([systemRecord]);
+
+      expect(sendUpdateSpy).not.toHaveBeenCalled();
+    });
+
+    it('skips session_approval_mode system records', async () => {
+      const systemRecord: ChatRecord = {
+        uuid: 'system-uuid',
+        parentUuid: null,
+        sessionId: 'test-session',
+        timestamp: new Date().toISOString(),
+        type: 'system',
+        subtype: 'session_approval_mode',
+        cwd: '/test',
+        version: '1.0.0',
+        systemPayload: { mode: ApprovalMode.YOLO },
       };
 
       await replayer.replay([systemRecord]);

@@ -26,7 +26,7 @@ import {
   DEFAULT_TOKEN_LIMIT,
   ToolNames,
   buildAvailableSkillsReminder,
-  buildSkillLlmContent,
+  isSkillListingReminder,
   computeThresholds,
   getStartupContextLength,
   isMediaPolicyToolHiddenFromModel,
@@ -141,10 +141,6 @@ function unescapeXml(text: string): string {
     .replace(/&amp;/g, '&');
 }
 
-// `buildAvailableSkillsReminder` emits either the listing or, when nothing is
-// available, a fixed notice in the same prelude slot.
-const AVAILABLE_SKILLS_OPEN = '<available_skills>';
-const NO_SKILLS_NOTICE = 'No skills are currently available.';
 const SKILL_LISTING_ENTRY =
   /<skill>\n<name>\n([\s\S]*?)\n<\/name>[\s\S]*?<\/skill>/g;
 
@@ -159,12 +155,6 @@ interface SkillListingCost {
   tokens: number;
   /** Per-entry cost, keyed by lower-cased skill name. */
   byName: Map<string, SkillListingEntryCost>;
-}
-
-function isSkillListingText(text: string): boolean {
-  return (
-    text.includes(AVAILABLE_SKILLS_OPEN) || text.includes(NO_SKILLS_NOTICE)
-  );
 }
 
 // Measured from the rendered text rather than re-derived from skill configs,
@@ -194,15 +184,24 @@ function mergeSkillListing(
 /**
  * Skill-listing reminders that landed *after* the startup prelude. A skill
  * enabled mid-session is announced by a tail `<system-reminder>` carrying an
- * `<available_skills>` block (`buildChangedSkillsReminder`, and the scheduler's
- * equivalent), which `getStartupContextLength` never inspects. Those tokens are
- * listing cost, not conversation, so they are measured here and billed with the
- * startup listing under `skills` — otherwise the entry is billed to `messages`
- * while its detail row prints `0`.
+ * `<available_skills>` block (`buildChangedSkillsReminder`), which
+ * `getStartupContextLength` never inspects. Those tokens are listing cost, not
+ * conversation, so they are measured here and billed with the startup listing
+ * under `skills` — otherwise the entry is billed to `messages` while its
+ * detail row prints `0`.
  *
- * Text that merely mentions `<available_skills>` without a single `<skill>`
- * entry (a pasted example, the fixed "no skills" notice) is left alone: only
- * measured listings are excluded from `messages`.
+ * Only core's own listing reminders qualify (`isSkillListingReminder`); other
+ * text that mentions `<available_skills>` stays in `messages`. A qualifying
+ * reminder with no `<skill>` entry is left there too: only measured listings
+ * are excluded from `messages`.
+ *
+ * The scheduler's path-activation block is deliberately not covered:
+ * `coreToolScheduler` folds that envelope into `functionResponse.response.output`
+ * via `convertToFunctionResponse`, so it never reaches this scan as `part.text`
+ * and is billed with its tool result under `messages`. The activated skill
+ * still has its own detail row, since `listSkills()` returns it whether or
+ * not it is active; that row carries only what a text-part listing billed for
+ * it, which is 0 for a skill that was path-gated at startup (#12540).
  */
 function measureTailSkillListings(conversation: Content[]): {
   listing: SkillListingCost;
@@ -214,7 +213,7 @@ function measureTailSkillListings(conversation: Content[]): {
   for (const content of conversation) {
     for (const part of content.parts ?? []) {
       const text = part.text;
-      if (typeof text !== 'string' || !isSkillListingText(text)) continue;
+      if (typeof text !== 'string' || !isSkillListingReminder(text)) continue;
       const measured = measureSkillListing(text);
       if (measured.byName.size === 0) continue;
       mergeSkillListing(listing, measured);
@@ -236,7 +235,7 @@ function measureStartupPrelude(prelude: Content[]): StartupPreludeCost {
   for (const content of prelude) {
     for (const part of content.parts ?? []) {
       if (typeof part.text !== 'string') continue;
-      if (isSkillListingText(part.text)) {
+      if (isSkillListingReminder(part.text)) {
         mergeSkillListing(skillListing, measureSkillListing(part.text));
       } else {
         startupContextTokens += estimateContextTextTokens(part.text);
@@ -283,7 +282,7 @@ function estimateFunctionResponseTokens(
 }
 
 /**
- * Whether a `skill` response carries a body that `skills` already bills
+ * Consume one `skill` response carrying a body that `skills` already bills
  * (`loadedBodiesTokens`). Membership is by body, not by tool name: the Skill
  * tool also returns raw command output for a same-named non-skill command
  * without tracking it — "the result is raw command text, not a skill body"
@@ -294,18 +293,21 @@ function estimateFunctionResponseTokens(
  * same two shapes when it restores tracking (`restoreLoadedSkillsFromHistory`):
  * the body verbatim, or the body with a suffix appended after a newline.
  */
-function isBilledSkillBody(
+function consumeBilledSkillBody(
   part: Part,
-  billedSkillBodies: ReadonlySet<string>,
+  billedSkillBodies: Set<string>,
 ): boolean {
   if (billedSkillBodies.size === 0) return false;
   const output = (
     part.functionResponse?.response as { output?: unknown } | undefined
   )?.output;
   if (typeof output !== 'string') return false;
-  if (billedSkillBodies.has(output)) return true;
+  if (billedSkillBodies.delete(output)) return true;
   for (const body of billedSkillBodies) {
-    if (output.startsWith(`${body}\n`)) return true;
+    if (output.startsWith(`${body}\n`)) {
+      billedSkillBodies.delete(body);
+      return true;
+    }
   }
   return false;
 }
@@ -331,6 +333,8 @@ function estimateConversationTokens(
   billing: ConversationBilling,
 ): number {
   let tokens = 0;
+  // The historical body map bills each distinct body once under skills.
+  const remainingSkillBodies = new Set(billing.billedSkillBodies);
   for (const content of conversation) {
     for (const part of content.parts ?? []) {
       if (typeof part.text === 'string') {
@@ -343,7 +347,7 @@ function estimateConversationTokens(
       } else if (part.functionResponse) {
         if (
           part.functionResponse.name === ToolNames.SKILL &&
-          isBilledSkillBody(part, billing.billedSkillBodies)
+          consumeBilledSkillBody(part, remainingSkillBodies)
         ) {
           continue;
         }
@@ -471,12 +475,25 @@ export async function collectContextData(
     ? estimateContextTextTokens(JSON.stringify(skillTool.schema))
     : 0;
 
-  const loadedSkillNames: ReadonlySet<string> =
-    skillTool && 'getLoadedSkillNames' in skillTool
+  const loadedContentNames: ReadonlyMap<string, string> =
+    skillTool && 'getLoadedSkillContentNames' in skillTool
       ? (
-          skillTool as { getLoadedSkillNames(): ReadonlySet<string> }
-        ).getLoadedSkillNames()
-      : new Set();
+          skillTool as {
+            getLoadedSkillContentNames(): ReadonlyMap<string, string>;
+          }
+        ).getLoadedSkillContentNames()
+      : new Map();
+  const bodyTokensByName = new Map<string, number>();
+  for (const [content, name] of loadedContentNames) {
+    bodyTokensByName.set(
+      name,
+      (bodyTokensByName.get(name) ?? 0) + estimateContextTextTokens(content),
+    );
+  }
+  const loadedBodiesTokens = [...bodyTokensByName.values()].reduce(
+    (sum, tokens) => sum + tokens,
+    0,
+  );
 
   const skillManager = config.getSkillManager();
   const skillConfigs = skillManager ? await skillManager.listSkills() : [];
@@ -496,26 +513,12 @@ export async function collectContextData(
   }
   mergeSkillListing(skillListing, tailSkillListings.listing);
 
-  let loadedBodiesTokens = 0;
-  // The exact bodies `loadedBodiesTokens` bills below. `estimateConversationTokens`
-  // skips a `skill` response only when this set owns its body, so the skip and
-  // the billing can never disagree.
-  const billedSkillBodies = new Set<string>();
+  const billedSkillBodies = new Set(loadedContentNames.keys());
   const skills: ContextSkillDetail[] = skillConfigs.map((skill) => {
     const listingTokens =
       skillListing.byName.get(skill.name.toLowerCase())?.tokens ?? 0;
-    const isLoaded = loadedSkillNames.has(skill.name);
-    let bodyTokens: number | undefined;
-    if (isLoaded && skill.body) {
-      // Matches every core producer, which renders the body with
-      // `path.dirname` of the platform's own separator; a `/`-only suffix strip
-      // leaves a Windows path intact and bills the body twice.
-      const baseDir = skill.filePath ? path.dirname(skill.filePath) : '';
-      const body = buildSkillLlmContent(baseDir, skill.body);
-      bodyTokens = estimateContextTextTokens(body);
-      loadedBodiesTokens += bodyTokens;
-      billedSkillBodies.add(body);
-    }
+    const bodyTokens = bodyTokensByName.get(skill.name);
+    const isLoaded = bodyTokens !== undefined;
     return {
       name: skill.name,
       tokens: listingTokens,
@@ -524,19 +527,33 @@ export async function collectContextData(
     };
   });
 
+  const discoveredNames = new Set(skillConfigs.map((skill) => skill.name));
+  for (const [name, bodyTokens] of bodyTokensByName) {
+    if (!discoveredNames.has(name)) {
+      skills.push({
+        name,
+        tokens: skillListing.byName.get(name.toLowerCase())?.tokens ?? 0,
+        loaded: true,
+        bodyTokens,
+      });
+    }
+  }
+
   // The listing also carries model-invocable commands — a user's own
   // `.qwen/commands/*.toml`, extension saved workflows with `whenToUse` — which
   // `listSkills()` never returns, while their tokens are inside the measured
   // listing that `skillsTokens` bills. Give each one a row so the rows and the
   // category cover the same set. Rows never feed `skillsTokens`: Built-in tools
   // subtracts the Skill tool definition *because* `skills` carries it.
-  const rowedNames = new Set(skillConfigs.map((s) => s.name.toLowerCase()));
+  const rowedNames = new Set(skills.map((s) => s.name.toLowerCase()));
   for (const [key, entry] of skillListing.byName) {
+    // Rendered into the listing, so model-invocable by definition. That holds
+    // for a skill disabled after the listing went out as well: its entry is
+    // still billed under `skills`, so its row must not be filtered away.
+    enabledSkillNames.add(key);
     if (rowedNames.has(key)) continue;
     rowedNames.add(key);
-    // Rendered into the listing, so model-invocable by definition.
-    enabledSkillNames.add(key);
-    skills.push({ name: entry.name, tokens: entry.tokens });
+    skills.push({ name: entry.name, tokens: entry.tokens, loaded: false });
   }
 
   conversationTokens = estimateConversationTokens(conversationHistory, {
@@ -610,10 +627,11 @@ export async function collectContextData(
     );
     displayMcpTools = mcpToolsTotalTokens;
     displayMemoryFiles = memoryFilesTokens;
-    messagesTokens = 0;
     // Include the conversation: a `/model` switch, `/restore` or a resume
     // zeroes the provider count while leaving `this.history` intact, and such a
-    // session must not report a 100K history as free window.
+    // session must not report a 100K history as free window. The same estimate
+    // drives the tier, so it is reported as `messages` rather than hidden.
+    messagesTokens = conversationTokens;
     freeSpace = Math.max(0, contextWindowSize - rawContent - autocompactBuffer);
     detailBuiltinTools = builtinTools;
     detailMcpTools = mcpTools;
@@ -770,8 +788,9 @@ export async function collectContextData(
     mcpTools: showDetails ? detailMcpTools : [],
     memoryFiles: showDetails ? detailMemoryFiles : [],
     skills: showDetails
-      ? detailSkills.filter((skill) =>
-          enabledSkillNames.has(skill.name.toLowerCase()),
+      ? detailSkills.filter(
+          (skill) =>
+            skill.loaded || enabledSkillNames.has(skill.name.toLowerCase()),
         )
       : [],
     isEstimated,
@@ -838,9 +857,21 @@ export function formatContextUsageText(data: HistoryItemContextUsage): string {
   lines.push('');
 
   if (!hasTokenCount) {
-    lines.push('*No API response yet. Send a message to see actual usage.*');
+    // After /model, /restore or a resume the history is intact while the
+    // provider total is 0; the rows then include the conversation, so the
+    // captions must not call them pre-conversation overhead (#12235).
+    const includesConversation = breakdown.messages > 0;
+    lines.push(
+      includesConversation
+        ? '*No provider usage yet. These are local estimates, including the conversation.*'
+        : '*No API response yet. Send a message to see actual usage.*',
+    );
     lines.push('');
-    lines.push('**Estimated pre-conversation overhead**');
+    lines.push(
+      includesConversation
+        ? '**Estimated usage, including the conversation**'
+        : '**Estimated pre-conversation overhead**',
+    );
     lines.push(
       `Model: ${modelName}  Context window: ${fmtTokens(contextWindowSize)} tokens`,
     );
@@ -905,7 +936,7 @@ export function formatContextUsageText(data: HistoryItemContextUsage): string {
       ),
     );
   }
-  if (hasTokenCount) {
+  if (hasTokenCount || breakdown.messages > 0) {
     lines.push(
       fmtCategoryRow('Messages', breakdown.messages, contextWindowSize),
     );
@@ -925,7 +956,7 @@ export function formatContextUsageText(data: HistoryItemContextUsage): string {
     const sortedMcp = [...mcpTools].sort((a, b) => b.tokens - a.tokens);
     const sortedMemory = [...memoryFiles].sort((a, b) => b.tokens - a.tokens);
     const sortedSkills = [...skills].sort((a, b) => {
-      if (a.loaded !== b.loaded) return a.loaded ? -1 : 1;
+      if (!a.loaded !== !b.loaded) return a.loaded ? -1 : 1;
       return b.tokens + (b.bodyTokens ?? 0) - (a.tokens + (a.bodyTokens ?? 0));
     });
 
@@ -960,9 +991,8 @@ export function formatContextUsageText(data: HistoryItemContextUsage): string {
       lines.push('');
       lines.push('**Skills**');
       for (const skill of sortedSkills) {
-        const label = skill.loaded ? `${skill.name} (active)` : skill.name;
         lines.push(
-          fmtCategoryRow(label, skill.tokens, contextWindowSize, '  └ '),
+          fmtCategoryRow(skill.name, skill.tokens, contextWindowSize, '  └ '),
         );
         if (skill.loaded && skill.bodyTokens && skill.bodyTokens > 0) {
           lines.push(

@@ -17,7 +17,7 @@ export async function exchangePairingCode(
   if (!code) return undefined;
   fragment.delete('pairing');
   url.hash = fragment.toString();
-  window.history.replaceState(null, '', url);
+  window.history.replaceState(window.history.state, '', url);
   if (baseUrl !== window.location.origin) return { failed: true };
   try {
     const response = await fetch(`${baseUrl}/web-shell/pairing/exchange`, {

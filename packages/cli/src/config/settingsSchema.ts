@@ -563,6 +563,16 @@ const SETTINGS_SCHEMA = {
           'Enable automatic update checks and installations on startup.',
         showInDialog: true,
       },
+      batchAutoCollect: {
+        type: 'boolean',
+        label: 'Batch Auto Collect',
+        category: 'General',
+        requiresRestart: true,
+        default: true,
+        description:
+          "Collect this project's /batch-api tasks in interactive sessions when their batch finishes (also at startup) and write the results. Polls the provider over HTTP; never calls the model and never retries failed items.",
+        showInDialog: false,
+      },
       showSessionRecap: {
         type: 'boolean',
         label: 'Show Session Recap',
@@ -1554,15 +1564,70 @@ const SETTINGS_SCHEMA = {
     showInDialog: true,
   },
 
+  batch: {
+    type: 'object',
+    label: 'Batch',
+    category: 'Model',
+    requiresRestart: true,
+    default: {},
+    description:
+      'Independent model selection for /batch-api and qwen batch. Unset to reuse the main model configuration.',
+    showInDialog: false,
+    properties: {
+      model: {
+        type: 'string',
+        label: 'Batch Model',
+        category: 'Model',
+        requiresRestart: true,
+        default: undefined as string | undefined,
+        description:
+          'Model ID in modelProviders. The selected entry supplies the endpoint, envKey and generationConfig.',
+        showInDialog: false,
+      },
+      authType: {
+        type: 'string',
+        label: 'Batch Auth Type',
+        category: 'Model',
+        requiresRestart: true,
+        default: undefined as string | undefined,
+        description:
+          'Batch protocol. Defaults to openai; only OpenAI-compatible chat-completions is supported.',
+        showInDialog: false,
+      },
+      baseUrl: {
+        type: 'string',
+        label: 'Batch Model Base URL',
+        category: 'Model',
+        requiresRestart: true,
+        default: undefined as string | undefined,
+        description:
+          'Optional exact modelProviders baseUrl to distinguish entries with the same model ID.',
+        showInDialog: false,
+      },
+    },
+  },
+
+  advisorMaxUses: {
+    type: 'integer',
+    label: 'Advisor Session Call Limit',
+    category: 'Model',
+    requiresRestart: true,
+    default: 0,
+    minimum: 0,
+    description:
+      'Maximum native Advisor requests per session, shared by the executor and its subagents. Failed requests count. 0 means unlimited. Each request sends the conversation to the selected provider and consumes additional tokens. Only user and system settings apply.',
+    showInDialog: true,
+  },
+
   advisorModel: {
     type: 'string',
     label: 'Advisor Model',
     category: 'Model',
-    requiresRestart: false,
+    requiresRestart: true,
     default: '' as string,
     description:
-      'Model used by /advisor for second-opinion reviews of the conversation. Leave empty to use the main model. A model at least as capable as the main model is recommended. Setting this sends the recent conversation transcript to that model, even when it uses another provider.',
-    showInDialog: true,
+      'Model selector for the Advisor tool. Leave empty to disable Advisor. Enabling it sends the active conversation to that model, even when it uses another provider.',
+    showInDialog: false,
   },
 
   visionModel: {
@@ -2345,6 +2410,16 @@ const SETTINGS_SCHEMA = {
         default: false,
         description:
           'When team memory is enabled, automatically commit, fast-forward-pull, and push the `.qwen/team-memory/` directory at session start so collaborators stay in sync. Off by default; requires a configured git upstream.',
+        showInDialog: false,
+      },
+      enableStructuredRecall: {
+        type: 'boolean',
+        label: 'Enable Structured Memory Recall',
+        category: 'Memory',
+        requiresRestart: true,
+        default: false,
+        description:
+          'Switch memory recall from the flat MEMORY.md listing to the structured protocol: hierarchical memory tree, focused subtree, and the search_memory tool. Off by default — while off, the metadata migration that would make the corpus structured-ready is never scheduled, so the protocol costs no background model calls. Override with QWEN_CODE_MEMORY_STRUCTURED_RECALL=0|1.',
         showInDialog: false,
       },
     },
@@ -4142,7 +4217,7 @@ const SETTINGS_SCHEMA = {
             default:
               'wss://dashscope.aliyuncs.com/api-ws/v1/realtime' as string,
             description:
-              'Advanced override for the DashScope Realtime WebSocket endpoint.',
+              'Base URL of the DashScope Realtime service, such as https://dashscope.aliyuncs.com/compatible-mode/v1; a Realtime WebSocket URL is also accepted.',
             showInDialog: false,
           },
           voice: {

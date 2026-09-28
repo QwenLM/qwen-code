@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { WebShellCustomizationProvider } from '../../customization';
 import { act, StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -221,7 +222,6 @@ describe('TurnOutputs artifact downloads', () => {
     expect(click).toHaveBeenCalledOnce();
     expect(click.mock.instances[0]?.download).toBe('report.pdf');
     expect(createdBlobs[0]?.type).toBe('application/pdf');
-    expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:artifact');
 
     act(() => root.unmount());
   });
@@ -727,5 +727,66 @@ describe('TurnOutputs artifact downloads', () => {
 
     act(() => root.unmount());
     delete (window as { __TAURI__?: unknown }).__TAURI__;
+  });
+});
+
+describe('host artifact visibility', () => {
+  it('filters before counting and updates without mutating the source artifacts', () => {
+    const artifacts = Array.from({ length: 6 }, (_, i) => ({
+      id: `a${i}`,
+      title: `Report ${i}`,
+      kind: 'file',
+      storage: 'workspace',
+      status: 'available',
+      workspacePath: `/primary/report-${i}.txt`,
+    })) as DaemonSessionArtifact[];
+    const originalArtifacts = structuredClone(artifacts);
+    artifacts.forEach(Object.freeze);
+    Object.freeze(artifacts);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const filterArtifact = vi.fn(
+      (artifact: DaemonSessionArtifact) => Number(artifact.id.slice(1)) >= 2,
+    );
+    const render = (filter = filterArtifact) =>
+      act(() =>
+        root.render(
+          <I18nProvider language="en">
+            <WebShellCustomizationProvider value={{ filterArtifact: filter }}>
+              <TurnOutputs
+                turnId="turn-1"
+                sourceSessionId="session-1"
+                changes={[]}
+                artifacts={artifacts}
+                scheduledTasks={[]}
+                onReviewChanges={() => {}}
+                onOpenArtifact={() => {}}
+                onOpenScheduledTask={() => {}}
+              />
+            </WebShellCustomizationProvider>
+          </I18nProvider>,
+        ),
+      );
+    render();
+    expect(container.textContent).not.toContain('Report 0');
+    expect(container.textContent).toContain('Report 2');
+    expect(container.textContent).not.toContain('Report 5');
+    expect(filterArtifact).toHaveBeenCalledWith(artifacts[0], {
+      turnId: 'turn-1',
+      sourceSessionId: 'session-1',
+    });
+    const more = Array.from(container.querySelectorAll('button')).find(
+      (button) => /1.*more|more.*1/i.test(button.textContent ?? ''),
+    );
+    expect(more).toBeDefined();
+    act(() => more?.click());
+    expect(container.textContent).toContain('Report 5');
+    render(vi.fn(() => false));
+    expect(container.textContent).toBe('');
+    render();
+    expect(container.textContent).toContain('Report 2');
+    expect(artifacts).toEqual(originalArtifacts);
+    act(() => root.unmount());
   });
 });

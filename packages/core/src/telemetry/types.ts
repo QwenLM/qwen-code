@@ -188,6 +188,14 @@ export class ToolCallEvent implements BaseTelemetryEvent {
   function_name: string;
   function_args: Record<string, unknown>;
   duration_ms: number;
+  /**
+   * Epoch ms at which `duration_ms` started counting: when the call was
+   * scheduled, before any approval wait. Set only when the producer measured
+   * it. Readers must not derive it from `event.timestamp` instead — that is
+   * when the event was logged, which for a scheduled batch is after every
+   * call in the batch has settled.
+   */
+  started_at_ms?: number;
   status: 'success' | 'error' | 'cancelled';
   execution_status?: ToolExecutionStatus | 'unknown';
   success: boolean; // Keep for backward compatibility
@@ -226,6 +234,7 @@ export class ToolCallEvent implements BaseTelemetryEvent {
         ? { ...STRUCTURED_OUTPUT_REDACTED_ARGS }
         : call.request.args;
     this.duration_ms = call.durationMs ?? 0;
+    if (call.startTime !== undefined) this.started_at_ms = call.startTime;
     this.status = call.status;
     this.execution_status = call.response.executionStatus;
     this.success = call.status === 'success'; // Keep for backward compatibility
@@ -1682,29 +1691,55 @@ export class MemoryDreamEvent implements BaseTelemetryEvent {
   'event.timestamp': string;
   /** 'auto' = scheduler-triggered; 'manual' = user ran /dream */
   trigger: 'auto' | 'manual';
+  scope: 'project' | 'user';
   status: 'updated' | 'noop' | 'failed' | 'cancelled';
+  created_entries: number;
+  updated_entries: number;
+  deleted_entries: number;
   deduped_entries: number;
+  split_entries: number;
+  keyword_backfilled: number;
+  dirty_mutations: number;
+  scheduling_reason: string;
   touched_topics_count: number;
   touched_topics: string;
   duration_ms: number;
 
   constructor(params: {
     trigger: 'auto' | 'manual';
+    scope?: 'project' | 'user';
     status: 'updated' | 'noop' | 'failed' | 'cancelled';
+    created_entries?: number;
+    updated_entries?: number;
+    deleted_entries?: number;
     deduped_entries: number;
+    split_entries?: number;
+    keyword_backfilled?: number;
+    dirty_mutations?: number;
+    scheduling_reason?: string;
     touched_topics: string[];
     duration_ms: number;
   }) {
     this['event.name'] = 'qwen-code.memory.dream';
     this['event.timestamp'] = new Date().toISOString();
     this.trigger = params.trigger;
+    this.scope = params.scope ?? 'project';
     this.status = params.status;
+    this.created_entries = params.created_entries ?? 0;
+    this.updated_entries = params.updated_entries ?? 0;
+    this.deleted_entries = params.deleted_entries ?? 0;
     this.deduped_entries = params.deduped_entries;
+    this.split_entries = params.split_entries ?? 0;
+    this.keyword_backfilled = params.keyword_backfilled ?? 0;
+    this.dirty_mutations = params.dirty_mutations ?? 0;
+    this.scheduling_reason = params.scheduling_reason ?? '';
     this.touched_topics_count = params.touched_topics.length;
     this.touched_topics = params.touched_topics.join(',');
     this.duration_ms = params.duration_ms;
   }
 }
+
+export type MemoryRecallStrategy = 'none' | 'heuristic' | 'model';
 
 export class MemoryRecallEvent implements BaseTelemetryEvent {
   'event.name': 'qwen-code.memory.recall';
@@ -1712,15 +1747,21 @@ export class MemoryRecallEvent implements BaseTelemetryEvent {
   query_length: number;
   docs_scanned: number;
   docs_selected: number;
-  strategy: 'none' | 'heuristic' | 'model';
+  strategy: MemoryRecallStrategy;
   duration_ms: number;
+  scan_duration_ms: number;
+  fast_duration_ms: number;
+  selector_duration_ms: number;
 
   constructor(params: {
     query_length: number;
     docs_scanned: number;
     docs_selected: number;
-    strategy: 'none' | 'heuristic' | 'model';
+    strategy: MemoryRecallStrategy;
     duration_ms: number;
+    scan_duration_ms?: number;
+    fast_duration_ms?: number;
+    selector_duration_ms?: number;
   }) {
     this['event.name'] = 'qwen-code.memory.recall';
     this['event.timestamp'] = new Date().toISOString();
@@ -1729,6 +1770,9 @@ export class MemoryRecallEvent implements BaseTelemetryEvent {
     this.docs_selected = params.docs_selected;
     this.strategy = params.strategy;
     this.duration_ms = params.duration_ms;
+    this.scan_duration_ms = params.scan_duration_ms ?? 0;
+    this.fast_duration_ms = params.fast_duration_ms ?? 0;
+    this.selector_duration_ms = params.selector_duration_ms ?? 0;
   }
 }
 
@@ -1762,6 +1806,7 @@ export class MemoryRecallDeliveryEvent implements BaseTelemetryEvent {
   strategy: 'none' | 'heuristic' | 'model';
   docs_selected: number;
   latency_ms: number;
+  router_delivered: boolean;
 
   constructor(params: {
     phase: MemoryRecallDeliveryPhase;
@@ -1770,6 +1815,7 @@ export class MemoryRecallDeliveryEvent implements BaseTelemetryEvent {
     strategy: 'none' | 'heuristic' | 'model';
     docs_selected: number;
     latency_ms: number;
+    router_delivered?: boolean;
   }) {
     this['event.name'] = 'qwen-code.memory.recall.delivery';
     this['event.timestamp'] = new Date().toISOString();
@@ -1779,5 +1825,92 @@ export class MemoryRecallDeliveryEvent implements BaseTelemetryEvent {
     this.strategy = params.strategy;
     this.docs_selected = params.docs_selected;
     this.latency_ms = params.latency_ms;
+    this.router_delivered = params.router_delivered ?? false;
+  }
+}
+
+export class MemorySearchEvent implements BaseTelemetryEvent {
+  'event.name': 'qwen-code.memory.search';
+  'event.timestamp': string;
+  mode: 'fetch' | 'search' | 'explore';
+  docs_scanned: number;
+  results_returned: number;
+  duration_ms: number;
+
+  constructor(params: {
+    mode: 'fetch' | 'search' | 'explore';
+    docs_scanned: number;
+    results_returned: number;
+    duration_ms: number;
+  }) {
+    this['event.name'] = 'qwen-code.memory.search';
+    this['event.timestamp'] = new Date().toISOString();
+    this.mode = params.mode;
+    this.docs_scanned = params.docs_scanned;
+    this.results_returned = params.results_returned;
+    this.duration_ms = params.duration_ms;
+  }
+}
+
+export class MemoryMigrationEvent implements BaseTelemetryEvent {
+  'event.name': 'qwen-code.memory.migration';
+  'event.timestamp': string;
+  scope: 'project' | 'user' | 'team';
+  status: 'completed' | 'failed' | 'cancelled';
+  files_scanned: number;
+  legacy_files: number;
+  remaining_legacy_files: number;
+  batch_files: number;
+  committed: number;
+  conflicts: number;
+  failed: number;
+  agent_duration_ms: number;
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  duration_ms: number;
+
+  constructor(
+    params: Omit<MemoryMigrationEvent, 'event.name' | 'event.timestamp'>,
+  ) {
+    this['event.name'] = 'qwen-code.memory.migration';
+    this['event.timestamp'] = new Date().toISOString();
+    this.scope = params.scope;
+    this.status = params.status;
+    this.files_scanned = params.files_scanned;
+    this.legacy_files = params.legacy_files;
+    this.remaining_legacy_files = params.remaining_legacy_files;
+    this.batch_files = params.batch_files;
+    this.committed = params.committed;
+    this.conflicts = params.conflicts;
+    this.failed = params.failed;
+    this.agent_duration_ms = params.agent_duration_ms;
+    this.input_tokens = params.input_tokens;
+    this.output_tokens = params.output_tokens;
+    this.total_tokens = params.total_tokens;
+    this.duration_ms = params.duration_ms;
+  }
+}
+
+export class MemoryRecallModeTransitionEvent implements BaseTelemetryEvent {
+  'event.name': 'qwen-code.memory.recall_mode_transition';
+  'event.timestamp': string;
+  from_mode: 'legacy' | 'structured';
+  to_mode: 'legacy' | 'structured';
+  status: 'ready' | 'committed' | 'stale' | 'rollback' | 'recall_exit_timeout';
+  duration_ms: number;
+
+  constructor(
+    params: Omit<
+      MemoryRecallModeTransitionEvent,
+      'event.name' | 'event.timestamp'
+    >,
+  ) {
+    this['event.name'] = 'qwen-code.memory.recall_mode_transition';
+    this['event.timestamp'] = new Date().toISOString();
+    this.from_mode = params.from_mode;
+    this.to_mode = params.to_mode;
+    this.status = params.status;
+    this.duration_ms = params.duration_ms;
   }
 }

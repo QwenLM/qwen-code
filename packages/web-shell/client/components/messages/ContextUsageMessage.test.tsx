@@ -75,6 +75,24 @@ function render(
 
 describe('ContextUsageMessage', () => {
   it.each(['en', 'zh-CN'] as const)(
+    'keeps the skill listing row separate from its loaded body cost (%s)',
+    (language) => {
+      const status = makeStatus(60, false);
+      status.usage.showDetails = true;
+      const name = 'agent-reproduce-feature';
+      status.usage.skills = [{ name, tokens: 2, loaded: true, bodyTokens: 3 }];
+      const container = render(status, false, undefined, language);
+      const label = language === 'en' ? 'body loaded' : '已加载正文';
+      const nameElement = container.querySelector(`[title="${name}"]`)!;
+      expect(nameElement.textContent).toBe(name);
+      expect(nameElement.parentElement?.textContent).toContain('2');
+      const skillBlock = nameElement.parentElement!.parentElement!;
+      expect(skillBlock.textContent?.split(label)).toHaveLength(2);
+      expect(skillBlock.textContent).toContain('+3');
+    },
+  );
+
+  it.each(['en', 'zh-CN'] as const)(
     'toggles only the snapshot body without requesting context (%s)',
     (language) => {
       const read = vi.fn();
@@ -104,6 +122,61 @@ describe('ContextUsageMessage', () => {
       expect(read).not.toHaveBeenCalled();
     },
   );
+
+  it('shows the cached prefix, startup context and unattributed rows only when present (#12235)', () => {
+    const status = makeStatus(60, false);
+    // Rows still sum to the total: 20 + 10 + 5 + 5 + 12 + 8 = 60.
+    Object.assign(status.usage.breakdown, {
+      messages: 0,
+      startupContext: 12,
+      unattributed: 8,
+      cachedTokens: 30,
+    });
+    const text = render(status).textContent;
+    expect(text).toContain('Cached prefix 30 (30.0%)');
+    expect(text).toContain('Startup context 12 (12.0%)');
+    expect(text).toContain('Unattributed 8 (8.0%)');
+
+    const plain = render(makeStatus(60, false)).textContent;
+    expect(plain).not.toContain('Cached prefix');
+    expect(plain).not.toContain('Startup context');
+    expect(plain).not.toContain('Unattributed');
+  });
+
+  it('shows an estimated history as messages when the provider total is gone (#12235)', () => {
+    const status = makeStatus(0, true);
+    status.usage.breakdown.messages = 25;
+    const text = render(status).textContent;
+    expect(text).toContain('Messages 25 (25.0%)');
+    // The captions follow the row. This case renders the EN catalog only:
+    // `render(status)` leaves `language` at its `'en'` default, so the zh-CN
+    // copies of these two captions are not asserted here.
+    expect(text).toContain('The estimates below include the conversation.');
+    expect(text).toContain('Estimated usage, including the conversation');
+    expect(text).not.toContain('excluding conversation messages');
+    expect(render(makeStatus(0, true)).textContent).not.toContain('Messages');
+  });
+
+  it('orders skill rows by size whether `loaded` is false or absent (#12235)', () => {
+    // `loaded?: boolean` is optional on the daemon payload, so an older client
+    // omits it. Absent and `false` are the same state — not loaded — so the
+    // pair must order by token cost, not by payload order.
+    const small = { name: 'small-skill', tokens: 2, loaded: false };
+    const big = { name: 'big-skill', tokens: 5 };
+    for (const skills of [
+      [small, big],
+      [big, small],
+    ]) {
+      const status = makeStatus(60, false);
+      status.usage.showDetails = true;
+      status.usage.skills = skills;
+      const text = render(status).textContent ?? '';
+      expect(text).toContain('big-skill');
+      expect(text.indexOf('big-skill')).toBeLessThan(
+        text.indexOf('small-skill'),
+      );
+    }
+  });
 
   it('separates remaining capacity from free space and clamps exhausted capacity', () => {
     const container = render(makeStatus(60, false));

@@ -91,6 +91,14 @@ function click(element: HTMLElement): void {
   element.dispatchEvent(new MouseEvent('click', { bubbles: true }));
 }
 
+function setInputValue(input: HTMLInputElement, value: string): void {
+  Object.getOwnPropertyDescriptor(
+    HTMLInputElement.prototype,
+    'value',
+  )!.set!.call(input, value);
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
 afterEach(() => {
   for (const { root, container } of mounted.splice(0)) {
     act(() => root.unmount());
@@ -389,18 +397,26 @@ describe('LiveVoiceSettingsCard', () => {
       );
     });
 
-    it('offers a picker once there is more than one model to pick from', () => {
-      const single = mount(
-        setupResult({
-          model: 'omni-realtime',
-          models: [{ id: 'omni-realtime', provider: 'openai' }],
-        }),
-      );
-      expect(single.querySelector('[role="combobox"]')).toBeNull();
-      expect(single.querySelector('#live-realtime-model')?.textContent).toBe(
-        'omni-realtime',
-      );
+    it('offers the configured model and another id even without routes', async () => {
+      const single = mount(setupResult({ model: 'omni-realtime', models: [] }));
+      const trigger = single.querySelector<HTMLElement>('#live-realtime-model');
+      expect(trigger?.getAttribute('role')).toBe('combobox');
+      expect(trigger?.textContent).toContain('omni-realtime');
 
+      await act(async () => {
+        click(trigger!);
+        await Promise.resolve();
+      });
+      const labels = Array.from(
+        document.body.querySelectorAll<HTMLElement>('[role="option"]'),
+      ).map((option) => option.textContent);
+      expect(labels).toEqual([
+        'omni-realtime',
+        'settings.liveSetup.modelCustom',
+      ]);
+    });
+
+    it('lists routes by name in the picker', () => {
       const several = mount(
         setupResult({
           model: 'omni-realtime',
@@ -410,9 +426,41 @@ describe('LiveVoiceSettingsCard', () => {
           ],
         }),
       );
-      const picker = several.querySelector('[role="combobox"]');
-      expect(picker).not.toBeNull();
+      const picker = several.querySelector('#live-realtime-model');
       expect(picker?.textContent).toContain('Omni Realtime');
+    });
+
+    it('saves a typed model id picked through "other model id"', async () => {
+      const setup = setupResult({ models: [] });
+      const container = mount(setup);
+      await act(async () => {
+        click(container.querySelector<HTMLElement>('#live-realtime-model')!);
+        await Promise.resolve();
+      });
+      const other = Array.from(
+        document.body.querySelectorAll<HTMLElement>('[role="option"]'),
+      ).find((option) =>
+        option.textContent?.includes('settings.liveSetup.modelCustom'),
+      );
+      await act(async () => {
+        click(other!);
+        await Promise.resolve();
+      });
+      const input = container.querySelector<HTMLInputElement>(
+        '[data-live-model-input]',
+      );
+      if (!input) throw new Error('custom model input was not rendered');
+      act(() => setInputValue(input, ' qwen3-omni-flash-realtime '));
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>('[data-live-model-save]')!
+          .click();
+        await Promise.resolve();
+      });
+
+      expect(setup.update).toHaveBeenCalledWith({
+        model: 'qwen3-omni-flash-realtime',
+      });
     });
 
     it('saves the qualified model picked from the picker', async () => {
@@ -496,6 +544,119 @@ describe('LiveVoiceSettingsCard', () => {
       );
       expect(container.querySelector('[role="alert"]')?.textContent).toContain(
         'matches more than one realtimeOnly route',
+      );
+    });
+  });
+
+  describe('endpoint', () => {
+    const dedicated =
+      'https://llm-abc.cn-beijing.maas.aliyuncs.com/compatible-mode/v1';
+
+    function endpointInput(container: HTMLElement): HTMLInputElement {
+      const input = container.querySelector<HTMLInputElement>(
+        '#live-realtime-endpoint',
+      );
+      if (!input) throw new Error('endpoint input was not rendered');
+      return input;
+    }
+
+    async function save(container: HTMLElement): Promise<void> {
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>('[data-live-endpoint-save]')!
+          .click();
+        await Promise.resolve();
+      });
+    }
+
+    it('hides the control on daemons that do not report an endpoint', () => {
+      const container = mount(setupResult({}));
+      expect(container.querySelector('[data-live-endpoint]')).toBeNull();
+    });
+
+    it('comes first, next to the key, and starts empty with the default as a hint', () => {
+      const container = mount(setupResult({ endpoint: '' }));
+      const input = endpointInput(container);
+      expect(input.value).toBe('');
+      expect(input.placeholder).toBe(
+        'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      );
+      const fields = Array.from(
+        container.querySelectorAll(
+          '#live-realtime-endpoint, #live-realtime-key, #live-realtime-model, #live-realtime-voice',
+        ),
+      ).map((element) => element.id);
+      expect(fields).toEqual([
+        'live-realtime-endpoint',
+        'live-realtime-key',
+        'live-realtime-model',
+        'live-realtime-voice',
+      ]);
+    });
+
+    it('saves a base URL together with a key typed next to it', async () => {
+      const setup = setupResult({ endpoint: '' });
+      const container = mount(setup);
+      act(() =>
+        setInputValue(
+          container.querySelector<HTMLInputElement>('#live-realtime-key')!,
+          'dedicated-secret',
+        ),
+      );
+      act(() => setInputValue(endpointInput(container), ` ${dedicated} `));
+      await save(container);
+
+      expect(setup.update).toHaveBeenCalledWith({
+        endpoint: dedicated,
+        apiKey: { operation: 'replace', value: 'dedicated-secret' },
+      });
+    });
+
+    it('clears a stored base URL back to the default', async () => {
+      const setup = setupResult({ endpoint: dedicated });
+      const container = mount(setup);
+      const input = endpointInput(container);
+      expect(input.value).toBe(dedicated);
+      const button = container.querySelector<HTMLButtonElement>(
+        '[data-live-endpoint-save]',
+      )!;
+      expect(button.disabled).toBe(true);
+
+      act(() => setInputValue(input, ''));
+      expect(button.disabled).toBe(false);
+      await save(container);
+
+      expect(setup.update).toHaveBeenCalledWith({ endpoint: '' });
+    });
+
+    it('names a stored endpoint a call would refuse', () => {
+      const container = mount(
+        setupResult({
+          endpoint: 'https://example.com/compatible-mode/v1',
+          endpointError:
+            'The endpoint must be a DashScope or Model Studio (*.maas.aliyuncs.com) base URL, such as https://dashscope.aliyuncs.com/compatible-mode/v1.',
+        }),
+      );
+      expect(
+        container.querySelector('[data-live-endpoint-error]')?.textContent,
+      ).toContain('DashScope or Model Studio');
+    });
+
+    it('shows a route base URL read-only', () => {
+      const container = mount(
+        setupResult({
+          endpoint: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+          keySource: 'route',
+          keyEnv: 'DASHSCOPE_API_KEY',
+        }),
+      );
+      const section = container.querySelector('[data-live-endpoint]')!;
+      expect(section.querySelector('input')).toBeNull();
+      expect(section.textContent).toContain(
+        'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      );
+      expect(section.textContent).toContain(
+        'settings.liveSetup.endpointFromRoute',
       );
     });
   });

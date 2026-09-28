@@ -1548,6 +1548,7 @@ describe('WorkflowOrchestrator', () => {
     const entries: Array<import('./workflow-journal.js').JournalEntry> = [];
     const journal = {
       path: 'mem',
+      retainReplayPrefix: async () => {},
       append: (e: import('./workflow-journal.js').JournalEntry) => {
         entries.push(e);
         return Promise.resolve();
@@ -1610,6 +1611,12 @@ describe('WorkflowOrchestrator', () => {
     const entries: Array<import('./workflow-journal.js').JournalEntry> = [];
     const journal = {
       path: 'mem',
+      retainReplayPrefix: async (keys: ReadonlySet<string>) => {
+        const kept = entries.filter(
+          (entry) => entry.type !== 'result' || keys.has(entry.key),
+        );
+        entries.splice(0, entries.length, ...kept);
+      },
       append: async (e: import('./workflow-journal.js').JournalEntry) => {
         entries.push(e);
       },
@@ -1810,6 +1817,7 @@ describe('WorkflowOrchestrator', () => {
     ];
     const journal = {
       path: 'mem',
+      retainReplayPrefix: async () => {},
       append: async () => {},
       drain: () => Promise.resolve(),
     } as unknown as import('./workflow-journal.js').WorkflowJournal;
@@ -1846,6 +1854,7 @@ describe('WorkflowOrchestrator', () => {
     const keyB = deriveAgentKey(keyA, 'b', {});
     const journal = {
       path: 'mem',
+      retainReplayPrefix: async () => {},
       append: async () => {},
       drain: () => Promise.resolve(),
     } as unknown as import('./workflow-journal.js').WorkflowJournal;
@@ -1889,6 +1898,7 @@ describe('WorkflowOrchestrator', () => {
     const key = deriveAgentKey(deriveArgsSeed(undefined), 'x', {});
     const journal = {
       path: 'mem',
+      retainReplayPrefix: async () => {},
       append: async () => {},
       drain: () => Promise.resolve(),
     } as unknown as import('./workflow-journal.js').WorkflowJournal;
@@ -2279,7 +2289,10 @@ describe('WorkflowOrchestrator', () => {
         return saw;
       `,
       args: undefined,
-      journal: { append: () => Promise.resolve() } as never,
+      journal: {
+        retainReplayPrefix: async () => {},
+        append: () => Promise.resolve(),
+      } as never,
       resumeReplay: buildReplay(entries),
       scheduler,
       emitter,
@@ -2365,6 +2378,7 @@ describe('WorkflowOrchestrator', () => {
       return `LIVE:${prompt}`;
     });
     const journal2 = {
+      retainReplayPrefix: async () => {},
       append: () => Promise.resolve(),
     } as unknown as import('./workflow-journal.js').WorkflowJournal;
     const scheduler = new WorkflowDispatchScheduler(1);
@@ -2432,7 +2446,10 @@ describe('WorkflowOrchestrator', () => {
                const c = await agent('c');
                return [a, b, c].join('|');`,
       args: undefined,
-      journal: { append: () => Promise.resolve() } as never,
+      journal: {
+        retainReplayPrefix: async () => {},
+        append: () => Promise.resolve(),
+      } as never,
       resumeReplay: buildReplay(entries),
     });
     // 'a' cached; 'B' and 'c' live.
@@ -2461,7 +2478,10 @@ describe('WorkflowOrchestrator', () => {
     await orch2.run({
       script: `await agent('a'); return 1;`,
       args: undefined,
-      journal: { append: () => Promise.resolve() } as never,
+      journal: {
+        retainReplayPrefix: async () => {},
+        append: () => Promise.resolve(),
+      } as never,
       resumeReplay: buildReplay(entries),
       emitter: {
         agentDispatched: () => events.push('dispatched'),
@@ -2498,7 +2518,10 @@ describe('WorkflowOrchestrator', () => {
       const outcome = await orch2.run({
         script: `await agent('a'); await agent('b'); await agent('c'); return 'ok';`,
         args: undefined,
-        journal: { append: () => Promise.resolve() } as never,
+        journal: {
+          retainReplayPrefix: async () => {},
+          append: () => Promise.resolve(),
+        } as never,
         resumeReplay: buildReplay(entries),
       });
       expect(outcome.result).toBe('ok'); // no cap error despite 3 > 2

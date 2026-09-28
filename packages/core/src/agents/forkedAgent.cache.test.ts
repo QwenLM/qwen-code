@@ -434,7 +434,7 @@ describe('runForkedAgent (cache path)', () => {
     expect(result.model).toBe('test-model');
   });
 
-  it('preserves tools: [] even when jsonSchema is provided', async () => {
+  it('keeps the first structured response when the provider emits another schema call', async () => {
     saveCacheSafeParams(
       {
         tools: [{ functionDeclarations: [{ name: 'edit' }] }],
@@ -456,7 +456,14 @@ describe('runForkedAgent (cache path)', () => {
                 {
                   content: {
                     role: 'model',
-                    parts: [{ text: '{"suggestion":"run tests"}' }],
+                    parts: [
+                      {
+                        functionCall: {
+                          name: 'respond_in_schema',
+                          args: { suggestion: 'run tests' },
+                        },
+                      },
+                    ],
                   },
                 },
               ],
@@ -464,6 +471,23 @@ describe('runForkedAgent (cache path)', () => {
                 promptTokenCount: 5,
                 candidatesTokenCount: 3,
               },
+            },
+          };
+          yield {
+            type: StreamEventType.CHUNK,
+            value: {
+              candidates: [
+                {
+                  content: {
+                    role: 'model',
+                    parts: [
+                      {
+                        functionCall: { name: 'respond_in_schema', args: {} },
+                      },
+                    ],
+                  },
+                },
+              ],
             },
           };
         }
@@ -493,14 +517,26 @@ describe('runForkedAgent (cache path)', () => {
     const sendParams = capturedParams as {
       config?: {
         tools?: unknown;
-        responseMimeType?: string;
-        responseJsonSchema?: unknown;
+        toolConfig?: unknown;
       };
     };
-    // tools: [] must still be present alongside JSON schema options
-    expect(sendParams.config!.tools).toEqual([]);
-    expect(sendParams.config!.responseMimeType).toBe('application/json');
-    expect(sendParams.config!.responseJsonSchema).toBe(schema);
+    expect(sendParams.config!.tools).toEqual([
+      {
+        functionDeclarations: [
+          {
+            name: 'respond_in_schema',
+            description: 'Provide the response in the required schema',
+            parameters: schema,
+          },
+        ],
+      },
+    ]);
+    expect(sendParams.config!.toolConfig).toEqual({
+      functionCallingConfig: {
+        mode: 'ANY',
+        allowedFunctionNames: ['respond_in_schema'],
+      },
+    });
 
     // Verify JSON was parsed correctly
     expect(result.jsonResult).toEqual({ suggestion: 'run tests' });
@@ -1008,7 +1044,7 @@ describe('runForkedAgent (cache path)', () => {
     expect(result.text).toBeNull();
   });
 
-  it('preserves tools and includes jsonSchema fields when both preserveTools and jsonSchema are set', async () => {
+  it('preserves the parent tool prefix for structured suggestions', async () => {
     saveCacheSafeParams(
       {
         systemInstruction: 'You are helpful',
@@ -1038,7 +1074,11 @@ describe('runForkedAgent (cache path)', () => {
                 {
                   content: {
                     role: 'model',
-                    parts: [{ text: '{"suggestion":"run tests"}' }],
+                    parts: [
+                      {
+                        text: '{"suggestion":"run tests"}',
+                      },
+                    ],
                   },
                 },
               ],
@@ -1065,7 +1105,7 @@ describe('runForkedAgent (cache path)', () => {
       properties: { suggestion: { type: 'string' } },
     };
 
-    await runForkedAgent({
+    const result = await runForkedAgent({
       config: {} as Config,
       userMessage: 'suggest something',
       cacheSafeParams: getCacheSafeParams()!,
@@ -1073,16 +1113,12 @@ describe('runForkedAgent (cache path)', () => {
       jsonSchema: schema,
     });
 
-    const sendParams = capturedParams as {
-      config?: {
-        tools?: unknown;
-        responseMimeType?: string;
-        responseJsonSchema?: unknown;
-      };
-    };
-    expect(sendParams.config!.tools).toBeUndefined();
-    expect(sendParams.config!.responseMimeType).toBe('application/json');
-    expect(sendParams.config!.responseJsonSchema).toBe(schema);
+    const sendParams = capturedParams as { config: GenerateContentConfig };
+    expect(sendParams.config.tools).toBeUndefined();
+    expect(sendParams.config.toolConfig).toBeUndefined();
+    expect(sendParams.config.responseMimeType).toBe('application/json');
+    expect(sendParams.config.responseJsonSchema).toEqual(schema);
+    expect(result.jsonResult).toEqual({ suggestion: 'run tests' });
   });
 
   it('throws when CacheSafeParams are not available', async () => {

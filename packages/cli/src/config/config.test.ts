@@ -36,6 +36,10 @@ import type { Settings } from './settings.js';
 import * as ServerConfig from '@qwen-code/qwen-code-core';
 import { isWorkspaceTrusted } from './trustedFolders.js';
 import { resetMcpApprovalsForTesting } from './mcpApprovals.js';
+import {
+  isCrossSessionMessagingActive,
+  isCrossSessionMessagingEnabled,
+} from '../peerMessaging/enabled.js';
 
 const sshWorkspaceProbe = vi.hoisted(() => vi.fn());
 vi.mock('../serve/ssh-workspace-store.js', () => ({
@@ -45,10 +49,12 @@ vi.mock('../serve/ssh-workspace-store.js', () => ({
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
 const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
 const mockUpdateHandler = vi.hoisted(() => vi.fn());
+const mockBatchHandler = vi.hoisted(() => vi.fn());
 const mockSessionServiceInstance = vi.hoisted(() => ({
   loadLastSession: vi.fn(),
   loadSession: vi.fn(),
   forkSession: vi.fn(),
+  assertLegacySessionExecution: vi.fn(),
   sessionExists: vi.fn(),
   sessionExistsInAnyState: vi.fn(),
   findSessionIdIgnoringCase: vi.fn(),
@@ -69,6 +75,19 @@ vi.mock('../commands/update.js', () => ({
     command: 'update',
     describe: 'mock update command',
     handler: mockUpdateHandler,
+  },
+}));
+
+// The real handler resolves credentials and calls the Batch API, so leaving it
+// unmocked would turn the `batch` exit-list case into a live HTTPS request on
+// any machine with OPENAI_API_KEY + model + base URL set.
+vi.mock('../commands/batch.js', () => ({
+  batchCommand: {
+    // Positionals must be declared: parseArguments runs yargs in strict mode,
+    // so a bare `batch` would reject `status batch_x` before the handler runs.
+    command: 'batch <subcommand> [id]',
+    describe: 'mock batch command',
+    handler: mockBatchHandler,
   },
 }));
 
@@ -914,6 +933,30 @@ describe('parseArguments', () => {
     mockExit.mockRestore();
   });
 
+  it('exits after a `batch` subcommand instead of falling through to the main flow', async () => {
+    // Falling through would reach the memory relaunch, whose child parses argv
+    // again and would submit (and bill) a second batch job.
+    process.argv = ['node', 'script.js', 'batch', 'status', 'batch_x'];
+    mockBatchHandler.mockResolvedValue(undefined);
+
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+
+    try {
+      await expect(parseArguments()).rejects.toThrow('process.exit called');
+
+      expect(mockBatchHandler).toHaveBeenCalled();
+      expect(mockExit).toHaveBeenCalledWith(0);
+    } finally {
+      mockExit.mockRestore();
+      mockBatchHandler.mockReset();
+      // `run()` in the batch command assigns this before exiting; a leaked 1
+      // would change the exit code of every later test on this worker.
+      process.exitCode = undefined;
+    }
+  });
+
   it('should reject --json-schema with no prompt source when stdin is a TTY', async () => {
     // True interactive invocation with no prompt anywhere → fail fast.
     process.argv = ['node', 'script.js', '--json-schema', '{"type":"object"}'];
@@ -1305,6 +1348,7 @@ describe('loadCliConfig', () => {
         enableManagedAutoDream: false,
         enableTeamMemory: false,
         enableTeamMemorySync: false,
+        enableStructuredMemoryRecall: false,
         enableAutoSkill: false,
         fileCheckpointingEnabled: false,
         artifactEnabled: false,
@@ -1782,6 +1826,92 @@ describe('loadCliConfig', () => {
     expect(config.getModelFallbacks()).toEqual(['cli-a', 'cli-b']);
   });
 
+  it('uses advisorModel from settings when --advisor is absent', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      {
+        advisorModel: ' advisor-model ',
+        modelProviders: {
+          openai: [
+            {
+              id: 'advisor-model',
+              apiKey: 'test-key',
+              models: [{ id: 'advisor-model' }],
+            },
+          ],
+        },
+      },
+      argv,
+    );
+
+    expect(config.getAdvisorModel()).toBe('advisor-model');
+  });
+
+  it('lets --advisor override the persisted model for one session', async () => {
+    process.argv = ['node', 'script.js', '--advisor', 'cli-advisor'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      {
+        advisorModel: 'settings-advisor',
+        modelProviders: {
+          openai: [
+            {
+              id: 'cli-advisor',
+              apiKey: 'test-key',
+              models: [{ id: 'cli-advisor' }],
+            },
+          ],
+        },
+      },
+      argv,
+    );
+
+    expect(config.getAdvisorModel()).toBe('cli-advisor');
+  });
+
+  it('lets --advisor off disable a persisted model for one session', async () => {
+    process.argv = ['node', 'script.js', '--advisor', 'off'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      { advisorModel: 'settings-advisor' },
+      argv,
+    );
+
+    expect(config.getAdvisorModel()).toBeUndefined();
+  });
+
+  it('allows an Advisor matching the CLI runtime model', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--auth-type',
+      'openai',
+      '--model',
+      'runtime-advisor',
+      '--advisor',
+      'runtime-advisor',
+      '--openai-api-key',
+      'test-key',
+      '--openai-base-url',
+      'https://example.com/v1',
+    ];
+    const argv = await parseArguments();
+
+    const config = await loadCliConfig({}, argv);
+
+    expect(config.getAdvisorModel()).toBe('runtime-advisor');
+  });
+
+  it('rejects an unavailable persisted Advisor model', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    await expect(
+      loadCliConfig({ advisorModel: 'missing-advisor' }, argv),
+    ).rejects.toThrow("Advisor model 'missing-advisor' is not configured.");
+  });
+
   it('should use settings fallback models when the CLI flag is absent', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
@@ -1803,6 +1933,54 @@ describe('loadCliConfig', () => {
 
     expect(config.getAgentsSettings().maxParallelAgents).toBe(2);
   });
+
+  it('keeps cross-session messaging on when no suppression is in force', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    // An unset key is on, so the off case has to say `false` explicitly.
+    const unset = await loadCliConfig({}, argv);
+    const enabled = await loadCliConfig(
+      { agents: { crossSessionMessaging: true } },
+      argv,
+    );
+    const disabled = await loadCliConfig(
+      { agents: { crossSessionMessaging: false } },
+      argv,
+    );
+
+    expect(isCrossSessionMessagingActive({}, unset)).toBe(true);
+    expect(
+      isCrossSessionMessagingActive(
+        { agents: { crossSessionMessaging: true } },
+        enabled,
+      ),
+    ).toBe(true);
+    expect(
+      isCrossSessionMessagingActive(
+        { agents: { crossSessionMessaging: false } },
+        disabled,
+      ),
+    ).toBe(false);
+  });
+
+  // Both suppressions rather than one: a gate that answered only for
+  // `--safe-mode` would leave `--bare` binding an inbox and publishing its
+  // socket path, in the mode documented as skipping implicit startup work.
+  it.each(['--bare', '--safe-mode'])(
+    'suppresses cross-session messaging in %s mode whatever the setting says',
+    async (flag) => {
+      process.argv = ['node', 'script.js', flag];
+      const argv = await parseArguments();
+      const settings = { agents: { crossSessionMessaging: true } };
+
+      const config = await loadCliConfig(settings, argv);
+
+      // The setting still says on: what turns messaging off is the session,
+      // which only the Config the flag already reaches can see.
+      expect(isCrossSessionMessagingEnabled(settings)).toBe(true);
+      expect(isCrossSessionMessagingActive(settings, config)).toBe(false);
+    },
+  );
 
   it('passes agents.maxParallelAgentsByModel from settings to core config', async () => {
     process.argv = ['node', 'script.js'];
@@ -2705,6 +2883,35 @@ describe('loadCliConfig', () => {
     );
   });
 
+  it.each([
+    { resume: '123e4567-e89b-42d3-a456-426614174000' },
+    { continue: true },
+  ])(
+    'rejects a Managed session before binding a legacy recorder for $resume$continue',
+    async (args) => {
+      const sessionId = '123e4567-e89b-42d3-a456-426614174000';
+      mockSessionServiceInstance.loadSession.mockResolvedValue({
+        conversation: { sessionId, messages: [] },
+      });
+      mockSessionServiceInstance.loadLastSession.mockResolvedValue({
+        conversation: { sessionId, messages: [] },
+      });
+      mockSessionServiceInstance.assertLegacySessionExecution.mockImplementation(
+        () => {
+          throw new Error('belongs to managed');
+        },
+      );
+
+      await expect(loadCliConfig({}, args as CliArgs)).rejects.toThrow(
+        'belongs to managed',
+      );
+      expect(
+        mockSessionServiceInstance.assertLegacySessionExecution,
+      ).toHaveBeenCalledWith(sessionId);
+      expect(mockConfigConstructorParams).not.toHaveBeenCalled();
+    },
+  );
+
   it('rebinds a selective restore projection to the forked session', async () => {
     const sourceSessionId = '123e4567-e89b-42d3-a456-426614174000';
     const projectionSource = vi.fn(async (sessionId: string) => ({
@@ -2805,6 +3012,28 @@ describe('loadCliConfig', () => {
       }),
     );
   });
+
+  it.each([undefined, 'legacy'] as const)(
+    'passes the paired host engine %s to the session Config',
+    async (executionEngine) => {
+      await loadCliConfig(
+        {},
+        {} as CliArgs,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        false,
+        executionEngine ? { executionEngine } : undefined,
+      );
+
+      expect(mockConfigConstructorParams).toHaveBeenLastCalledWith(
+        expect.objectContaining({ sessionExecutionEngine: executionEngine }),
+      );
+    },
+  );
 
   it('should explain when --fork-session fails to copy the source session', async () => {
     const sourceSessionId = '123e4567-e89b-42d3-a456-426614174000';
@@ -4936,10 +5165,9 @@ describe('loadCliConfig with includeDirectories', () => {
       ...policy,
       maskedPaths: expect.any(Array),
     });
-    expect(config.getShellExecutionSandbox()?.maskedPaths).toEqual([
-      policy.maskedPaths[0],
-      path.join(policy.workspace, '.qwen', 'review-leases'),
-    ]);
+    expect(config.getShellExecutionSandbox()?.maskedPaths).toEqual(
+      policy.maskedPaths,
+    );
     expect(config.getCoreTools()).toEqual(
       expect.arrayContaining([
         ToolNames.SHELL,

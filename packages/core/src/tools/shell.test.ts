@@ -10,6 +10,8 @@ import {
   describe,
   it,
   expect,
+  beforeAll,
+  afterAll,
   beforeEach,
   afterEach,
   type Mock,
@@ -89,8 +91,10 @@ import {
 import {
   type ShellExecutionResult,
   type ShellOutputEvent,
+  type ShellRawCaptureSink,
 } from '../services/shellExecutionService.js';
 import * as fs from 'node:fs';
+import { mkdtemp, rm } from 'node:fs/promises';
 import * as os from 'node:os';
 import * as crypto from 'node:crypto';
 import path from 'node:path';
@@ -120,6 +124,7 @@ function getCommandParameterDescription(shellTool: ShellTool): string {
 }
 
 describe('ShellTool', () => {
+  let outputDirectory: string;
   let shellTool: ShellTool;
   let mockConfig: Config;
   let mockShellOutputCallback: (event: ShellOutputEvent) => void;
@@ -135,6 +140,17 @@ describe('ShellTool', () => {
     check: ReturnType<typeof vi.fn>;
     recordWrite: ReturnType<typeof vi.fn>;
   };
+
+  beforeAll(async () => {
+    const realOs = await vi.importActual<typeof import('node:os')>('node:os');
+    outputDirectory = await mkdtemp(
+      path.join(realOs.tmpdir(), 'qwen-shell-test-'),
+    );
+  });
+
+  afterAll(async () => {
+    await rm(outputDirectory, { recursive: true, force: true });
+  });
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -187,7 +203,7 @@ describe('ShellTool', () => {
         .mockReturnValue(createMockWorkspaceContext('/test/dir')),
       storage: {
         getUserSkillsDirs: vi.fn().mockReturnValue(['/test/dir/.qwen/skills']),
-        getProjectTempDir: vi.fn().mockReturnValue('/tmp/qwen-temp'),
+        getProjectTempDir: vi.fn().mockReturnValue(outputDirectory),
         getProjectDir: vi.fn().mockReturnValue('/test/proj'),
       },
       getTruncateToolOutputThreshold: vi.fn().mockReturnValue(0),
@@ -4059,6 +4075,55 @@ describe('ShellTool', () => {
           'Tool output was too large and has been truncated',
         );
         expect(result.persistedOutputFiles).toBeUndefined();
+      });
+
+      it('does not persist a raw capture preview as full output', async () => {
+        const truncationModule = await import('./truncation.js');
+        const spy = vi
+          .spyOn(truncationModule, 'truncateToolOutput')
+          .mockResolvedValue({
+            content: 'Full output saved to /tmp/preview.output; use read_file.',
+            outputFile: '/tmp/preview.output',
+          });
+        const capture: ShellRawCaptureSink = {
+          write: vi.fn().mockResolvedValue(undefined),
+          finish: vi.fn().mockResolvedValue(undefined),
+          setStarted: vi.fn(),
+          setProcessResult: vi.fn(),
+        };
+        const output = 'x'.repeat(64 * 1024);
+        try {
+          const invocation = shellTool.build({
+            command: 'large-output-cmd',
+            is_background: false,
+          }) as ShellToolInvocation;
+          const pending = invocation.execute(
+            mockAbortSignal,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            capture,
+          );
+          resolveShellExecution({ output, exitCode: 0 });
+          const result = await pending;
+
+          expect(spy).not.toHaveBeenCalled();
+          expect(result.llmContent).toContain(output);
+          expect(result.llmContent).not.toContain('/tmp/preview.output');
+          expect(result.llmContent).not.toContain('read_file');
+          expect(result.persistedOutputFiles).toBeUndefined();
+          expect(result.returnDisplay).toMatchObject({ outputFiles: [] });
+          expect(mockShellExecutionService.mock.calls[0][5]).toMatchObject({
+            maxBufferedOutputBytes: 64 * 1024,
+          });
+          expect(capture.setProcessResult).toHaveBeenCalledWith(
+            expect.objectContaining({ output, exitCode: 0 }),
+          );
+        } finally {
+          spy.mockRestore();
+        }
       });
 
       it('passes an explicit low threshold to output truncation', async () => {
@@ -9158,8 +9223,8 @@ describe('ShellTool', () => {
      * cheaper than bash, and a change that levels them up should be a
      * deliberate one.
      *
-     * Measured when written: bash/linux 4,946 · Git Bash on win32 4,771 ·
-     * powershell.exe 4,456 · pwsh.exe 4,350 · cmd.exe 4,207. Each budget is
+     * Measured after the #12054 trim: bash/linux 4,315 · Git Bash on win32
+     * 4,140 · powershell.exe 4,040 · pwsh.exe 3,934 · cmd.exe 3,791. Each budget is
      * its measured length plus ~350 — a sentence of headroom, not a
      * paragraph, so that adding a paragraph to the shared prompt reddens
      * all five rows instead of fitting inside them.
@@ -9192,11 +9257,11 @@ describe('ShellTool', () => {
         number,
       ]
     > = [
-      ['bash on linux', 'linux', undefined, undefined, 5_300],
-      ['Git Bash on win32', 'win32', CMD, 'MINGW64', 5_120],
-      ['powershell.exe', 'win32', WIN_PS, undefined, 4_810],
-      ['pwsh.exe', 'win32', PWSH, undefined, 4_700],
-      ['cmd.exe', 'win32', CMD, undefined, 4_560],
+      ['bash on linux', 'linux', undefined, undefined, 4_670],
+      ['Git Bash on win32', 'win32', CMD, 'MINGW64', 4_490],
+      ['powershell.exe', 'win32', WIN_PS, undefined, 4_390],
+      ['pwsh.exe', 'win32', PWSH, undefined, 4_290],
+      ['cmd.exe', 'win32', CMD, undefined, 4_150],
     ];
 
     it.each(SHAPES)(

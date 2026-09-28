@@ -74,6 +74,32 @@ function createTable(options?: { maxPages?: number; maxBytes?: number }) {
 }
 
 describe('HistoricalTranscriptPageTable', () => {
+  it.each([false, true])(
+    'keeps exact anchors connected to live unless a forward page remains (hasMore=%s)',
+    (hasMore) => {
+      const table = createTable();
+      table.setLiveRecordIds(['turn-1', 'a1']);
+      const page = response(['turn-0', 'a0', 'turn-1', 'a1'], {
+        targetRecordId: 'turn-0',
+        hasMore,
+        ...(hasMore ? { nextCursor: 'forward' } : {}),
+      });
+      const target = table.admitAnchor(0, 'turn-0', 's', page, 'a0');
+      expect(table.getSnapshot().ranges[0]?.newer).toEqual(
+        hasMore
+          ? { kind: 'loadable', request: { kind: 'cursor', cursor: 'forward' } }
+          : { kind: 'live' },
+      );
+      expect([
+        ...table.getSnapshot().pages.get(target.pageId)!.recordIds,
+      ]).toEqual(['turn-0', 'a0']);
+      expect(table.admitAnchor(0, 'turn-0', 's', page)).toEqual(target);
+      expect(table.getSnapshot().ranges[0]?.newer.kind).toBe(
+        hasMore ? 'loadable' : 'live',
+      );
+    },
+  );
+
   it('reuses the pinned live join after a fresh snapshot of the same lineage', () => {
     const table = createTable({ maxPages: 1 });
     const first = table.admitBefore('live', 's1', response(['old']))!;

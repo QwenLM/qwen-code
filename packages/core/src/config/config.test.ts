@@ -22,6 +22,7 @@ import {
   APPROVAL_MODE_INFO,
   MCPServerConfig,
   deriveAgentConfig,
+  deriveApprovalModeConfig,
   deriveConfig,
   deriveWorktreeConfig,
   TrustGateError,
@@ -109,6 +110,7 @@ import {
 } from '../memory/paths.js';
 import {
   rebuildTeamAutoMemoryIndex,
+  rebuildUserAutoMemoryIndex,
   TeamMemoryRootSecurityError,
 } from '../memory/indexer.js';
 import { syncTeamMemory } from '../memory/team-memory-sync.js';
@@ -161,6 +163,7 @@ import {
 import * as jsonl from '../utils/jsonl-utils.js';
 import { checkPriorRead } from '../tools/priorReadEnforcement.js';
 import { ToolErrorType } from '../tools/tool-error.js';
+import { scanMemoryMetadataCorpusStatus } from '../memory/metadata-migration.js';
 
 function createToolMock(toolName: string) {
   const ToolMock = vi.fn();
@@ -195,11 +198,37 @@ vi.mock('node:fs', async (importOriginal) => {
   };
 });
 
+vi.mock('../memory/metadata-migration.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../memory/metadata-migration.js')>()),
+  scanMemoryMetadataCorpusStatus: vi.fn().mockResolvedValue({
+    ready: false,
+    revision: 'legacy-revision',
+    files: 1,
+    legacyFiles: 1,
+    legacyByScope: { project: 1, user: 0, team: 0 },
+  }),
+}));
+
+vi.mock('../memory/scan.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../memory/scan.js')>()),
+  scanAutoMemorySnapshot: vi.fn().mockResolvedValue({
+    docs: [],
+    sourceStatus: {
+      requestedScopes: ['project', 'user'],
+      searchedScopes: ['project', 'user'],
+      unavailableScopes: [],
+      complete: true,
+      incompleteScopes: [],
+    },
+  }),
+}));
+
 // Mock dependencies that might be called during Config construction or createServerConfig
 vi.mock('../tools/tool-registry', () => {
   const ToolRegistryMock = vi.fn();
   ToolRegistryMock.prototype.registerTool = vi.fn();
   ToolRegistryMock.prototype.registerFactory = vi.fn();
+  ToolRegistryMock.prototype.unregisterTool = vi.fn();
   ToolRegistryMock.prototype.registerPermissionDeferredFactory = vi.fn();
   ToolRegistryMock.prototype.ensureTool = vi.fn();
   ToolRegistryMock.prototype.warmAll = vi.fn();
@@ -258,7 +287,10 @@ vi.mock('../memory/indexer.js', async (importActual) => ({
   // Keep the real exports (notably TeamMemoryRootSecurityError, which the sync
   // gate distinguishes via instanceof) and override only the rebuild.
   ...(await importActual<typeof import('../memory/indexer.js')>()),
+  rebuildAutoMemoryIndexAtRoot: vi.fn().mockResolvedValue(null),
+  rebuildManagedAutoMemoryIndex: vi.fn().mockResolvedValue(null),
   rebuildTeamAutoMemoryIndex: vi.fn().mockResolvedValue(null),
+  rebuildUserAutoMemoryIndex: vi.fn().mockResolvedValue(null),
 }));
 vi.mock('../memory/team-memory-sync.js', () => ({
   syncTeamMemory: vi
@@ -881,6 +913,13 @@ describe('Server Config (config.ts)', () => {
   beforeEach(() => {
     // Reset mocks if necessary
     vi.clearAllMocks();
+    vi.mocked(scanMemoryMetadataCorpusStatus).mockResolvedValue({
+      ready: false,
+      revision: 'legacy-revision',
+      files: 1,
+      legacyFiles: 1,
+      legacyByScope: { project: 1, user: 0, team: 0 },
+    });
     mockAutoMemoryInode = 1;
     for (const envName of MEMORY_PRESSURE_ENV_KEYS) {
       delete process.env[envName];
@@ -2353,6 +2392,55 @@ describe('Server Config (config.ts)', () => {
           bareMode: true,
           enableTeamMemory: true,
         }).getTeamMemoryEnabled(),
+      ).toBe(false);
+    });
+  });
+
+  describe('getStructuredMemoryRecallEnabled', () => {
+    const prevEnv = process.env['QWEN_CODE_MEMORY_STRUCTURED_RECALL'];
+    afterEach(() => {
+      if (prevEnv === undefined) {
+        delete process.env['QWEN_CODE_MEMORY_STRUCTURED_RECALL'];
+      } else {
+        process.env['QWEN_CODE_MEMORY_STRUCTURED_RECALL'] = prevEnv;
+      }
+    });
+
+    it('is off by default and follows the enableStructuredMemoryRecall setting', () => {
+      delete process.env['QWEN_CODE_MEMORY_STRUCTURED_RECALL'];
+      expect(new Config(baseParams).getStructuredMemoryRecallEnabled()).toBe(
+        false,
+      );
+      expect(
+        new Config({
+          ...baseParams,
+          enableStructuredMemoryRecall: true,
+        }).getStructuredMemoryRecallEnabled(),
+      ).toBe(true);
+    });
+
+    it('QWEN_CODE_MEMORY_STRUCTURED_RECALL overrides the setting', () => {
+      process.env['QWEN_CODE_MEMORY_STRUCTURED_RECALL'] = '1';
+      expect(new Config(baseParams).getStructuredMemoryRecallEnabled()).toBe(
+        true,
+      );
+      process.env['QWEN_CODE_MEMORY_STRUCTURED_RECALL'] = '0';
+      expect(
+        new Config({
+          ...baseParams,
+          enableStructuredMemoryRecall: true,
+        }).getStructuredMemoryRecallEnabled(),
+      ).toBe(false);
+    });
+
+    it('bareMode forces off even with the setting and env both on', () => {
+      process.env['QWEN_CODE_MEMORY_STRUCTURED_RECALL'] = '1';
+      expect(
+        new Config({
+          ...baseParams,
+          bareMode: true,
+          enableStructuredMemoryRecall: true,
+        }).getStructuredMemoryRecallEnabled(),
       ).toBe(false);
     });
   });
@@ -6914,6 +7002,158 @@ describe('Server Config (config.ts)', () => {
       expect(registeredNames).toContain(ToolNames.READ_MCP_RESOURCE);
     });
 
+    it('registers and removes Advisor with the runtime model setting', async () => {
+      const config = new Config({ ...baseParams });
+      await config.initialize();
+      const setTools = vi.fn().mockResolvedValue(undefined);
+      (
+        config as unknown as {
+          llmClient: { setTools: typeof setTools };
+        }
+      ).llmClient = { setTools };
+      const registry = config.getToolRegistry();
+
+      await config.setAdvisorModel('advisor-model');
+
+      expect(config.getAdvisorModel()).toBe('advisor-model');
+      expect(registry.unregisterTool).toHaveBeenCalledWith(ToolNames.ADVISOR);
+      expect(registry.registerFactory).toHaveBeenCalledWith(
+        ToolNames.ADVISOR,
+        expect.any(Function),
+      );
+      expect(setTools).toHaveBeenCalledTimes(1);
+
+      await config.setAdvisorModel('off');
+
+      expect(config.getAdvisorModel()).toBeUndefined();
+      expect(registry.unregisterTool).toHaveBeenLastCalledWith(
+        ToolNames.ADVISOR,
+      );
+      expect(setTools).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not disturb Advisor registration while the tool is disabled', async () => {
+      const config = new Config({
+        ...baseParams,
+        disabledTools: [ToolNames.ADVISOR],
+      });
+      await config.initialize();
+      const registry = config.getToolRegistry();
+      vi.mocked(registry.unregisterTool).mockClear();
+      vi.mocked(registry.registerFactory).mockClear();
+
+      const applied = await config.setAdvisorModel('advisor-model');
+
+      expect(applied).toBe(false);
+      expect(config.getAdvisorModel()).toBeUndefined();
+      expect(registry.unregisterTool).not.toHaveBeenCalled();
+      expect(registry.registerFactory).not.toHaveBeenCalled();
+    });
+
+    it('does not register Advisor in safe mode', async () => {
+      const config = new Config({
+        ...baseParams,
+        advisorModel: 'advisor-model',
+        safeMode: true,
+      });
+
+      await config.initialize();
+
+      expect(ToolRegistry.prototype.registerFactory).not.toHaveBeenCalledWith(
+        ToolNames.ADVISOR,
+        expect.any(Function),
+      );
+    });
+
+    it('shares the Advisor limit across derived configs and does not reset on toggle', async () => {
+      const config = new Config({
+        ...baseParams,
+        advisorModel: 'advisor-model',
+        advisorMaxUses: 1,
+      });
+      const child = Object.create(config) as Config;
+      expect(child.tryConsumeAdvisorUse()).toBe(true);
+      expect(config.tryConsumeAdvisorUse()).toBe(false);
+      await config.setAdvisorModel('off');
+      await config.setAdvisorModel('advisor-model');
+      expect(config.tryConsumeAdvisorUse()).toBe(false);
+      expect(config.getAdvisorUseCount()).toBe(1);
+    });
+
+    it('treats an Advisor limit of 0 as unlimited', () => {
+      const config = new Config({
+        ...baseParams,
+        advisorModel: 'advisor-model',
+        advisorMaxUses: 0,
+      });
+      for (let i = 0; i < 3; i++) {
+        expect(config.tryConsumeAdvisorUse()).toBe(true);
+      }
+      expect(config.getAdvisorUseCount()).toBe(3);
+    });
+
+    it('resets the Advisor count when a new session starts', () => {
+      const config = new Config({
+        ...baseParams,
+        advisorModel: 'advisor-model',
+        advisorMaxUses: 1,
+      });
+      expect(config.tryConsumeAdvisorUse()).toBe(true);
+      expect(config.tryConsumeAdvisorUse()).toBe(false);
+      config.startNewSession('next-advisor-session');
+      expect(config.getAdvisorUseCount()).toBe(0);
+      expect(config.tryConsumeAdvisorUse()).toBe(true);
+    });
+
+    it('registers configured Advisor for ordinary subagent registries', async () => {
+      const config = new Config({
+        ...baseParams,
+        advisorModel: 'advisor-model',
+      });
+      await config.createToolRegistry(undefined, {
+        skipDiscovery: true,
+        forSubAgent: true,
+      });
+      expect(ToolRegistry.prototype.registerFactory).toHaveBeenCalledWith(
+        ToolNames.ADVISOR,
+        expect.any(Function),
+      );
+    });
+
+    it.each([-1, 1.5, NaN, Infinity, '5'])(
+      'falls back to unlimited for invalid Advisor limit %s',
+      (advisorMaxUses) => {
+        const config = new Config({
+          ...baseParams,
+          advisorMaxUses: advisorMaxUses as number,
+        });
+        expect(config.getAdvisorMaxUses()).toBe(0);
+      },
+    );
+
+    it('defers Advisor when tools.eager omits it', async () => {
+      const config = new Config({
+        ...baseParams,
+        advisorModel: 'advisor-model',
+        eagerTools: [],
+      });
+      await config.initialize();
+      const registry = config.getToolRegistry();
+      expect(registry.registerPermissionDeferredFactory).toHaveBeenCalledWith(
+        ToolNames.ADVISOR,
+        expect.any(Function),
+      );
+      expect(registry.registerFactory).not.toHaveBeenCalledWith(
+        ToolNames.ADVISOR,
+        expect.any(Function),
+      );
+      expect(registry.ensureTool).toHaveBeenCalledWith(ToolNames.ADVISOR);
+      await config.setAdvisorModel('off');
+      expect(registry.unregisterTool).toHaveBeenLastCalledWith(
+        ToolNames.ADVISOR,
+      );
+    });
+
     it.each([
       ['interactive', { interactive: true }],
       ['ACP', { experimentalZedIntegration: true }],
@@ -9832,6 +10072,202 @@ describe('Server Config (config.ts)', () => {
     expect(config.getContextFilePaths()).toEqual([]);
   });
 
+  it('guards and rolls back the memory recall mode transition by revision', async () => {
+    const config = Object.create(Config.prototype) as Config;
+    Object.assign(config, {
+      memoryRecallMode: 'legacy',
+      memoryRecallModeInitialized: true,
+      memoryCorpusRevision: 'legacy-revision',
+      autoMemoryPrompt: 'legacy prompt',
+    });
+    vi.spyOn(config, 'isManagedMemoryAvailable').mockReturnValue(true);
+    vi.spyOn(config, 'getManagedAutoMemoryEnabled').mockReturnValue(true);
+    vi.spyOn(config, 'getStructuredMemoryRecallEnabled').mockReturnValue(true);
+    vi.spyOn(config, 'getProjectRoot').mockReturnValue('/tmp/project');
+    vi.spyOn(config, 'getTeamMemoryEnabled').mockReturnValue(false);
+    vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+    const scan = vi
+      .fn()
+      .mockResolvedValue({ ready: true, revision: 'structured-revision' });
+    Object.assign(config, {
+      scanMemoryRecallCorpusStatus: scan,
+      buildAutoMemoryPromptForMode: vi
+        .fn()
+        .mockResolvedValue('structured prompt'),
+    });
+
+    const transition = await config.prepareMemoryRecallTransition();
+    expect(transition).toMatchObject({
+      from: 'legacy',
+      to: 'structured',
+      revision: 'structured-revision',
+      autoMemoryPrompt: 'structured prompt',
+      previousRevision: 'legacy-revision',
+      previousAutoMemoryPrompt: 'legacy prompt',
+    });
+    await expect(
+      config.confirmMemoryRecallTransition(transition!),
+    ).resolves.toBe(true);
+
+    config.commitMemoryRecallTransition(transition!);
+    expect(config.getMemoryRecallMode()).toBe('structured');
+    expect(config.getAutoMemoryPrompt()).toBe('structured prompt');
+
+    config.rollbackMemoryRecallTransition(transition!);
+    expect(config.getMemoryRecallMode()).toBe('legacy');
+    expect(config.getAutoMemoryPrompt()).toBe('legacy prompt');
+
+    scan.mockResolvedValueOnce({ ready: true, revision: 'changed-revision' });
+    await expect(
+      config.confirmMemoryRecallTransition(transition!),
+    ).resolves.toBe(false);
+  });
+
+  it('prepareMemoryRecallTransition tolerates a failed tier index rebuild', async () => {
+    // A tier that cannot be read or written (EACCES, a rejected root) leaves
+    // its legacy MEMORY.md stale, but the structured prompt is built from
+    // scans — the rebuild must not block the protocol transition.
+    const config = Object.create(Config.prototype) as Config;
+    Object.assign(config, {
+      memoryRecallMode: 'legacy',
+      memoryRecallModeInitialized: true,
+      memoryCorpusRevision: 'legacy-revision',
+      autoMemoryPrompt: 'legacy prompt',
+      debugLogger: createDebugLogger('TEST'),
+    });
+    vi.spyOn(config, 'getManagedAutoMemoryEnabled').mockReturnValue(true);
+    vi.spyOn(config, 'getStructuredMemoryRecallEnabled').mockReturnValue(true);
+    vi.spyOn(config, 'getProjectRoot').mockReturnValue('/tmp/project');
+    vi.spyOn(config, 'getTeamMemoryEnabled').mockReturnValue(false);
+    vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+    Object.assign(config, {
+      scanMemoryRecallCorpusStatus: vi
+        .fn()
+        .mockResolvedValue({ ready: true, revision: 'structured-revision' }),
+      buildAutoMemoryPromptForMode: vi
+        .fn()
+        .mockResolvedValue('structured prompt'),
+    });
+    vi.mocked(rebuildUserAutoMemoryIndex).mockRejectedValueOnce(
+      new Error('EACCES: cannot read user root'),
+    );
+
+    const transition = await config.prepareMemoryRecallTransition();
+
+    expect(transition).toMatchObject({
+      from: 'legacy',
+      to: 'structured',
+      revision: 'structured-revision',
+      autoMemoryPrompt: 'structured prompt',
+    });
+  });
+
+  it('prepareMemoryRecallTransition stays inert in safe mode', async () => {
+    const config = Object.create(Config.prototype) as Config;
+    Object.assign(config, {
+      memoryRecallMode: 'legacy',
+      memoryRecallModeInitialized: true,
+      memoryCorpusRevision: 'legacy-revision',
+      autoMemoryPrompt: '',
+    });
+    vi.spyOn(config, 'isManagedMemoryAvailable').mockReturnValue(true);
+    // The production predicate adds `&& !isSafeMode()`; keep the mock pointed
+    // at it so the gate being exercised is the one client.ts relies on.
+    vi.spyOn(config, 'getManagedAutoMemoryEnabled').mockReturnValue(false);
+    vi.spyOn(config, 'getProjectRoot').mockReturnValue('/tmp/project');
+    const scan = vi
+      .fn()
+      .mockResolvedValue({ ready: true, revision: 'structured-revision' });
+    Object.assign(config, {
+      scanMemoryRecallCorpusStatus: scan,
+      buildAutoMemoryPromptForMode: vi
+        .fn()
+        .mockResolvedValue('structured prompt'),
+    });
+
+    await expect(config.prepareMemoryRecallTransition()).resolves.toBe(
+      undefined,
+    );
+    expect(scan).not.toHaveBeenCalled();
+    expect(config.getMemoryRecallMode()).toBe('legacy');
+  });
+
+  it('prepareMemoryRecallTransition stays inert while the structured protocol is opted out', async () => {
+    // A ready corpus must not flip the protocol on by itself: activation is
+    // opt-in, so the readiness scan is never even consulted.
+    const config = Object.create(Config.prototype) as Config;
+    Object.assign(config, {
+      memoryRecallMode: 'legacy',
+      memoryRecallModeInitialized: true,
+      memoryCorpusRevision: 'legacy-revision',
+      autoMemoryPrompt: 'legacy prompt',
+    });
+    vi.spyOn(config, 'getManagedAutoMemoryEnabled').mockReturnValue(true);
+    vi.spyOn(config, 'getStructuredMemoryRecallEnabled').mockReturnValue(false);
+    vi.spyOn(config, 'getProjectRoot').mockReturnValue('/tmp/project');
+    const scan = vi
+      .fn()
+      .mockResolvedValue({ ready: true, revision: 'structured-revision' });
+    Object.assign(config, {
+      scanMemoryRecallCorpusStatus: scan,
+      buildAutoMemoryPromptForMode: vi
+        .fn()
+        .mockResolvedValue('structured prompt'),
+    });
+
+    await expect(config.prepareMemoryRecallTransition()).resolves.toBe(
+      undefined,
+    );
+    expect(scan).not.toHaveBeenCalled();
+    expect(config.getMemoryRecallMode()).toBe('legacy');
+  });
+
+  it('runs the corpus readiness scan once, not on every refresh', async () => {
+    // The scan walks the frontmatter of every memory file, and its result is
+    // consumed only while the mode is still uninitialized. Since
+    // refreshHierarchicalMemory runs per user query, re-walking the whole
+    // corpus after the mode has settled would put a full-corpus read on the
+    // prompt critical path and then throw the result away.
+    const previousEnv = process.env['QWEN_CODE_MEMORY_STRUCTURED_RECALL'];
+    process.env['QWEN_CODE_MEMORY_STRUCTURED_RECALL'] = '1';
+    try {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isManagedMemoryAvailable').mockReturnValue(true);
+      vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
+        memoryContent: '',
+        fileCount: 0,
+        contextFilePaths: [],
+        ruleCount: 0,
+        conditionalRules: [],
+        projectRoot: '/tmp',
+      });
+      vi.mocked(scanMemoryMetadataCorpusStatus).mockResolvedValue({
+        ready: true,
+        revision: 'structured-revision',
+        files: 1,
+        legacyFiles: 0,
+        legacyByScope: { project: 0, user: 0, team: 0 },
+      });
+
+      await config.refreshHierarchicalMemory();
+      expect(config.getMemoryRecallMode()).toBe('structured');
+      expect(scanMemoryMetadataCorpusStatus).toHaveBeenCalledTimes(1);
+
+      await config.refreshHierarchicalMemory();
+      await config.refreshHierarchicalMemory();
+
+      // Settled: the mode is not re-derived, so the scan must not re-run.
+      expect(scanMemoryMetadataCorpusStatus).toHaveBeenCalledTimes(1);
+      expect(config.getMemoryRecallMode()).toBe('structured');
+    } finally {
+      if (previousEnv === undefined) {
+        delete process.env['QWEN_CODE_MEMORY_STRUCTURED_RECALL'];
+      } else {
+        process.env['QWEN_CODE_MEMORY_STRUCTURED_RECALL'] = previousEnv;
+      }
+    }
+  });
+
   it('refreshHierarchicalMemory should include appended auto-memory in the context warning estimate', async () => {
     const config = new Config({
       ...baseParams,
@@ -9952,6 +10388,18 @@ describe('Server Config (config.ts)', () => {
 
   it('relocateWorkingDirectory should update the session working roots', async () => {
     const config = new Config(baseParams);
+    Object.assign(config, {
+      memoryRecallMode: 'structured',
+      memoryRecallModeInitialized: true,
+      memoryCorpusRevision: 'old-project-revision',
+    });
+    vi.mocked(scanMemoryMetadataCorpusStatus).mockResolvedValueOnce({
+      ready: false,
+      revision: 'new-project-revision',
+      files: 1,
+      legacyFiles: 1,
+      legacyByScope: { project: 1, user: 0, team: 0 },
+    });
     const disposeResidentAgents = vi.spyOn(
       config.getBackgroundTaskRegistry(),
       'disposeResidentAgents',
@@ -9972,6 +10420,7 @@ describe('Server Config (config.ts)', () => {
     expect(config.getProjectRoot()).toBe(newDir);
     expect(config.getCwd()).toBe(newDir);
     expect(config.getWorkingDir()).toBe(newDir);
+    expect(config.getMemoryRecallMode()).toBe('legacy');
     expect(config.getWorkspaceContext()).toBe(workspaceContext);
     expect(config.getWorkspaceContext().getDirectories()[0]).toBe(newDir);
     expect(config.storage.getProjectRoot()).toBe(newDir);
@@ -10924,6 +11373,34 @@ describe('Server Config (config.ts)', () => {
 
     expect(config.getTargetDir()).toBe(newDir);
     expect(result.memoryRefreshError).toEqual(new Error('memory failed'));
+
+    chdirSpy.mockRestore();
+    cwdSpy.mockRestore();
+  });
+
+  it('relocateWorkingDirectory should drop the stale structured memory prompt when the refresh fails', async () => {
+    // The reset below clears the recall mode; the prompt paired with it must
+    // go too, or a failed refresh leaves the session routing to search_memory
+    // while the legacy mode leaves that tool undeclared.
+    const config = new Config(baseParams);
+    const newDir = path.resolve('/path/to/other');
+    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
+      // Keep the test process in its original directory.
+    });
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(newDir);
+    Object.assign(config, {
+      autoMemoryPrompt: 'structured prompt naming the old workspace',
+      memoryRecallMode: 'structured',
+    });
+    vi.mocked(loadServerHierarchicalMemory).mockRejectedValueOnce(
+      new Error('memory failed'),
+    );
+
+    const result = await config.relocateWorkingDirectory(newDir);
+
+    expect(result.memoryRefreshError).toEqual(new Error('memory failed'));
+    expect(config.getMemoryRecallMode()).toBe('legacy');
+    expect(config.getAutoMemoryPrompt()).toBe('');
 
     chdirSpy.mockRestore();
     cwdSpy.mockRestore();
@@ -12007,6 +12484,26 @@ describe('Server Config (config.ts)', () => {
         ToolNames.GET_GOAL,
         ToolNames.UPDATE_GOAL,
       ]);
+      expect(
+        (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+      ).not.toContain(ToolNames.SEARCH_MEMORY);
+    });
+
+    it('should register structured memory tools in the normal tool registry', async () => {
+      const config = new Config(baseParams);
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+
+      const registeredNames = (registerToolMock as Mock).mock.calls.map(
+        (call) => call[0],
+      );
+      expect(registeredNames).toContain(ToolNames.SEARCH_MEMORY);
+      expect(registeredNames).toContain(ToolNames.MANAGE_MEMORY);
     });
 
     it('registers structured_output in bare mode when jsonSchema is set', async () => {
@@ -13394,6 +13891,41 @@ describe('setApprovalMode with folder trust', () => {
   });
 
   describe('DAC plan workflow', () => {
+    it('notifies after a Plan execution mode is selected or changed', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+      config.setApprovalMode(ApprovalMode.YOLO);
+      const states: Array<{
+        mode: ApprovalMode;
+        prePlanMode: ApprovalMode;
+        executionMode: ApprovalMode | undefined;
+      }> = [];
+      config.onApprovalModeChange((mode, prePlanMode) => {
+        states.push({
+          mode,
+          prePlanMode: prePlanMode ?? ApprovalMode.DEFAULT,
+          executionMode: config.getPlanExecutionMode(),
+        });
+      });
+
+      config.setPlanMode(true, ApprovalMode.YOLO);
+      config.setPlanMode(true, ApprovalMode.AUTO_EDIT);
+      config.setPlanMode(true, ApprovalMode.AUTO_EDIT);
+
+      expect(states).toEqual([
+        {
+          mode: ApprovalMode.PLAN,
+          prePlanMode: ApprovalMode.YOLO,
+          executionMode: ApprovalMode.YOLO,
+        },
+        {
+          mode: ApprovalMode.PLAN,
+          prePlanMode: ApprovalMode.YOLO,
+          executionMode: ApprovalMode.AUTO_EDIT,
+        },
+      ]);
+    });
+
     it.each([
       ApprovalMode.DEFAULT,
       ApprovalMode.AUTO_EDIT,
@@ -13467,6 +13999,43 @@ describe('setApprovalMode with folder trust', () => {
   });
 
   describe('prePlanMode tracking', () => {
+    it('notifies canonical listeners after approval state changes', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+      const listener = vi.fn();
+      const unsubscribe = config.onApprovalModeChange(listener);
+
+      config.setApprovalMode(ApprovalMode.YOLO);
+      config.setApprovalMode(ApprovalMode.PLAN);
+      config.setApprovalMode(ApprovalMode.PLAN);
+      unsubscribe();
+      config.setApprovalMode(ApprovalMode.DEFAULT);
+
+      expect(listener).toHaveBeenNthCalledWith(1, ApprovalMode.YOLO, undefined);
+      expect(listener).toHaveBeenNthCalledWith(
+        2,
+        ApprovalMode.PLAN,
+        ApprovalMode.YOLO,
+      );
+      expect(listener).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not notify when trust rejects a mode or a derived config changes', () => {
+      const config = new Config(baseParams);
+      const listener = vi.fn();
+      config.onApprovalModeChange(listener);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(false);
+
+      expect(() => config.setApprovalMode(ApprovalMode.YOLO)).toThrow(
+        TrustGateError,
+      );
+      const derived = deriveApprovalModeConfig(config, ApprovalMode.PLAN);
+      derived.config.setApprovalMode(ApprovalMode.DEFAULT);
+
+      expect(listener).not.toHaveBeenCalled();
+      derived.cleanup();
+    });
+
     it('should save pre-plan mode when entering plan mode', () => {
       const config = new Config(baseParams);
       vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
