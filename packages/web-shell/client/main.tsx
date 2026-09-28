@@ -11,6 +11,8 @@ import { useCallback, useEffect, useState } from 'react';
 import { DaemonWorkspaceProvider } from '@qwen-code/web-shell/daemon-react-sdk';
 import { BrowserTurnNotifications } from './browser-turn-notifications';
 import { ErrorBoundary } from './components/ErrorBoundary';
+import { createJavaManagedAgentProvider } from './components/managed/java-managed-agent-provider';
+import type { ManagedAgentProvider } from './components/managed/managed-agent-provider';
 import { StandaloneAuth } from './components/StandaloneAuth';
 import { RootErrorFallback } from './components/RootErrorFallback';
 import { WorkspaceSessionProvider } from './components/WorkspaceSessionProvider';
@@ -171,6 +173,20 @@ function getInitialLanguage(): WebShellLanguage | undefined {
   return readStoredLanguage();
 }
 
+function getDevelopmentManagedAgentProvider():
+  | ManagedAgentProvider
+  | undefined {
+  if (!import.meta.env.DEV) return undefined;
+  const params = new URLSearchParams(window.location.search);
+  if (params.get('managedProvider') !== 'java') return undefined;
+  const tenantId = params.get('tenant')?.trim() || 'local-java-demo';
+  return createJavaManagedAgentProvider({
+    baseUrl: window.location.origin,
+    getHeaders: () => ({ 'X-Qwen-Tenant-Id': tenantId }),
+    productScope: tenantId,
+  });
+}
+
 export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
   const macosOverlayTitlebar = hasMacOSOverlayTitlebar();
   // The entry's own opinion — an explicit URL param or a stored in-app
@@ -195,6 +211,9 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
   );
   const [navigationBasePath] = useState(() =>
     inferStandaloneBasePath(window.location.pathname),
+  );
+  const [managedAgentProvider] = useState(() =>
+    getDevelopmentManagedAgentProvider(),
   );
   const baseUrl = DAEMON_BASE_URL || window.location.origin;
   // One-shot ?theme=/?language=/?lang= params are consumed by the useState
@@ -320,6 +339,7 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
                 onLanguageChange: handleLanguageChange,
                 onLanguageResolved: handleLanguageResolved,
                 onBrandResolved: handleBrandResolved,
+                managedAgentProvider,
                 sidebar: { enabled: true, showLive: true },
                 showToolCalls: true,
                 className: macosOverlayTitlebar

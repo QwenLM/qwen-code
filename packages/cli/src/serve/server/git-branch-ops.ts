@@ -6,7 +6,7 @@
 
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { NO_EXEC_CONFIG } from '@qwen-code/qwen-code-core';
+import { gitEnv, NO_EXEC_CONFIG } from '@qwen-code/qwen-code-core';
 
 const execFileAsync = promisify(execFile);
 
@@ -55,6 +55,7 @@ export async function getHeadCommit(cwd: string): Promise<string | undefined> {
   return execFileAsync('git', [...NO_EXEC_CONFIG, 'rev-parse', 'HEAD'], {
     cwd,
     timeout: GIT_BRANCH_TIMEOUT_MS,
+    env: gitEnv(),
   })
     .then(({ stdout }) => stdout.trim())
     .catch(() => undefined);

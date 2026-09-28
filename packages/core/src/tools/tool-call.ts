@@ -13,10 +13,14 @@ import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolErrorType } from './tool-error.js';
 import {
   canonicalToolName,
+  resolveRegisteredToolName,
   ToolDisplayNames,
   ToolNames,
 } from './tool-names.js';
-import type { ToolRegistry } from './tool-registry.js';
+import {
+  deferredDeclarationFingerprint,
+  type ToolRegistry,
+} from './tool-registry.js';
 import {
   getExcludedToolUnavailableMessage,
   getLeaderOnlyToolUnavailableMessage,
@@ -96,18 +100,22 @@ export async function resolveDeferredToolCall(
   }
 
   let targetName = canonicalToolName(invocation.params.name);
-  // Match tool_search's case-insensitive name resolution. Last match wins,
-  // mirroring its lowercase Map.
-  const lower = targetName.toLowerCase();
-  const registered = registry.getAllToolNames?.() ?? [];
-  let match: string | undefined;
-  for (const name of registered) {
-    if (name.toLowerCase() === lower) {
-      match = name;
-    }
+  // Same resolution as tool_search's select: mode, so the tool invoked is
+  // the tool whose schema was reviewed.
+  const resolved = resolveRegisteredToolName(
+    targetName,
+    registry.getAllToolNames?.() ?? [],
+  );
+  if (Array.isArray(resolved)) {
+    return {
+      error: bridgeRefusal(
+        `"${invocation.params.name}" matches more than one registered tool by case (${resolved.join(', ')}). Call tool_call with the exact name.`,
+      ),
+      errorType: ToolErrorType.INVALID_TOOL_PARAMS,
+    };
   }
-  if (match !== undefined) {
-    targetName = match;
+  if (resolved !== undefined) {
+    targetName = resolved;
   }
   if (
     targetName === ToolNames.TOOL_CALL ||
@@ -205,6 +213,24 @@ export async function resolveDeferredToolCall(
     };
   }
 
+  // A hidden tool whose declaration or MCP server changed since tool_search
+  // returned it would run arguments written against a schema the model no
+  // longer has, possibly on a replacement server. A tool never reviewed in
+  // this session keeps working by name.
+  const reviewed = registry.getReviewedDeclaration?.(target.name);
+  if (
+    reviewed !== undefined &&
+    reviewed !== deferredDeclarationFingerprint(target)
+  ) {
+    return {
+      error: bridgeRefusal(
+        `Deferred tool "${target.name}" changed since tool_search last returned it. Run tool_search with select:${target.name} and call it with the current schema.`,
+      ),
+      errorType: ToolErrorType.INVALID_TOOL_PARAMS,
+      targetName: target.name,
+    };
+  }
+
   return {
     tool: target,
     arguments: structuredClone(invocation.params.arguments),
@@ -281,15 +307,16 @@ export class ToolCallTool extends BaseDeclarativeTool<
     }
     let target = this.registry?.getTool(targetName);
 
-    // Keep classifier projection aligned with deferred-call resolution: the
-    // discovery side resolves names case-insensitively and uses the last
-    // registered match when names collide by case.
+    // Keep classifier projection aligned with deferred-call resolution. A
+    // name that matches several tools by case is refused there, so it
+    // resolves to no target here and projects name-only.
     if (!target && this.registry) {
-      const lower = targetName.toLowerCase();
-      for (const name of this.registry.getAllToolNames?.() ?? []) {
-        if (name.toLowerCase() === lower) {
-          target = this.registry.getTool(name);
-        }
+      const resolved = resolveRegisteredToolName(
+        targetName,
+        this.registry.getAllToolNames?.() ?? [],
+      );
+      if (typeof resolved === 'string') {
+        target = this.registry.getTool(resolved);
       }
     }
 

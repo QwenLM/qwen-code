@@ -38,6 +38,7 @@ import type {
 import {
   ApprovalMode,
   AuthType,
+  ModelsConfig,
   GOAL_PAUSE_REASON_SESSION_TOKEN_LIMIT,
   GOAL_PAUSE_REASON_SESSION_DISPOSED,
   GOAL_PAUSE_REASON_STOP_HOOK_CAP,
@@ -1107,6 +1108,144 @@ describe('Session', () => {
       mockConfig,
       mockClient,
       mockSettings,
+    );
+  });
+
+  describe('MCP App tools', () => {
+    const request = {
+      serverName: 'tableau',
+      resourceUri: 'ui://tableau/app',
+      name: 'get-embed-token',
+      arguments: {},
+    };
+    function installAppTool() {
+      const raw = {
+        content: [{ type: 'text', text: '{"token":"APP_PRIVATE_TOKEN"}' }],
+        _meta: { secret: 'APP_PRIVATE_TOKEN' },
+        structuredContent: { token: 'APP_PRIVATE_TOKEN' },
+      };
+      const callTool = vi.fn().mockResolvedValue(raw);
+      const tool = new core.DiscoveredMCPTool(
+        { tool: async () => ({}), callTool: async () => [] },
+        'tableau',
+        'get-embed-token',
+        'Get embed token',
+        { type: 'object', properties: {} },
+        false,
+        undefined,
+        mockConfig,
+        { callTool },
+      );
+      const registry = Object.assign(mockToolRegistry, {
+        hasMcpAppResource: vi.fn(
+          (server: string, uri: string) =>
+            server === request.serverName && uri === request.resourceUri,
+        ),
+        getMcpAppTool: vi.fn((server: string, name: string) =>
+          server === request.serverName && name === request.name
+            ? tool
+            : undefined,
+        ),
+      });
+      return { raw, callTool, tool, registry };
+    }
+
+    it('requests permission and returns raw data only to the App', async () => {
+      const { raw, callTool, tool } = installAppTool();
+      const buildForApp = vi.spyOn(tool, 'buildForApp');
+      await expect(
+        session.callMcpAppTool('mcp-app-1', request),
+      ).resolves.toEqual(raw);
+      expect(buildForApp).toHaveBeenCalledWith(
+        request.arguments,
+        expect.any(Function),
+        mockConfig,
+      );
+      expect(mockClient.requestPermission).toHaveBeenCalledOnce();
+      expect(callTool).toHaveBeenCalledOnce();
+      expect(
+        JSON.stringify(vi.mocked(mockClient.sessionUpdate).mock.calls),
+      ).not.toContain('APP_PRIVATE_TOKEN');
+      expect(
+        JSON.stringify(mockChatRecordingService.recordToolResult.mock.calls),
+      ).not.toContain('APP_PRIVATE_TOKEN');
+      expect(mockChat.addHistory).not.toHaveBeenCalled();
+    });
+
+    it('does not execute when permission is cancelled', async () => {
+      const { callTool } = installAppTool();
+      vi.mocked(mockClient.requestPermission).mockResolvedValue({
+        outcome: { outcome: 'cancelled' },
+      });
+      expect(await session.callMcpAppTool('mcp-app-2', request)).toMatchObject({
+        isError: true,
+      });
+      expect(callTool).not.toHaveBeenCalled();
+    });
+
+    it('honors explicit permission deny before YOLO and rejects unknown origins and targets', async () => {
+      const { callTool } = installAppTool();
+      vi.mocked(mockConfig.getApprovalMode).mockReturnValue(ApprovalMode.YOLO);
+      vi.mocked(mockConfig.getPermissionManager).mockReturnValue({
+        isToolEnabled: async () => true,
+        hasRelevantRules: () => true,
+        evaluate: async () => 'deny',
+        findMatchingDenyRule: () => 'mcp__tableau__get-embed-token',
+      } as unknown as ReturnType<Config['getPermissionManager']>);
+      expect(
+        await session.callMcpAppTool('mcp-app-deny', request),
+      ).toMatchObject({ isError: true });
+      expect(mockClient.requestPermission).not.toHaveBeenCalled();
+      await expect(
+        session.callMcpAppTool('mcp-app-server', {
+          ...request,
+          serverName: 'other',
+        }),
+      ).rejects.toThrow('resource');
+      await expect(
+        session.callMcpAppTool('mcp-app-resource', {
+          ...request,
+          resourceUri: 'ui://other',
+        }),
+      ).rejects.toThrow('resource');
+      await expect(
+        session.callMcpAppTool('mcp-app-target', { ...request, name: 'shell' }),
+      ).rejects.toThrow('tool');
+      expect(callTool).not.toHaveBeenCalled();
+    });
+
+    it.each(['dispose', 'cancelMcpAppCalls'] as const)(
+      'preserves a pending App across a reversible close gate until %s',
+      async (cancel) => {
+        const { callTool } = installAppTool();
+        vi.mocked(mockClient.requestPermission).mockReturnValue(
+          new Promise(() => {}),
+        );
+        const pending = session.callMcpAppTool('mcp-app-close', request);
+        const rejected = pending.catch((error: unknown) => error);
+        await vi.waitFor(() =>
+          expect(mockClient.requestPermission).toHaveBeenCalledOnce(),
+        );
+        expect(session.isTurnIdle()).toBe(false);
+        expect(session.collectActiveWorkHolds()).toContainEqual({
+          category: 'session',
+          id: 'session:active-turn',
+        });
+        expect(() => session.beginHistoryMutation()).toThrow('busy');
+        let settled = false;
+        void rejected.then(() => {
+          settled = true;
+        });
+        const release = session.beginClose();
+        release();
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(settled).toBe(false);
+        expect(session.isTurnIdle()).toBe(false);
+        session[cancel]();
+        expect(await rejected).toBeInstanceOf(Error);
+        expect(callTool).not.toHaveBeenCalled();
+        expect(session.isTurnIdle()).toBe(cancel === 'cancelMcpAppCalls');
+      },
     );
   });
 
@@ -8081,6 +8220,82 @@ describe('Session', () => {
         'qwen/notify/session/model-update',
         expect.anything(),
       );
+    });
+
+    it.each([
+      "Model 'qwen-typo' not found for authType 'openai'",
+      "Model 'qwen\ntypo' not found for authType 'openai'",
+      "Image-only model 'qwen-image' cannot be used as the primary model",
+      "Voice-only model 'qwen-voice' cannot be used as the primary model",
+      "Realtime-only model 'qwen-realtime' cannot be used as the primary model",
+    ])(
+      'maps the caller-caused switchModel refusal to invalid params: %s',
+      async (message) => {
+        switchModelSpy.mockRejectedValueOnce(new Error(message));
+        const rejection: unknown = await session
+          .setModel({
+            sessionId: 'test-session-id',
+            modelId: `qwen-typo(${AuthType.USE_OPENAI})`,
+          })
+          .then(
+            () => {
+              throw new Error('expected setModel to reject');
+            },
+            (error: unknown) => error,
+          );
+        expect(rejection).toBeInstanceOf(RequestError);
+        expect((rejection as RequestError).code).toBe(-32602);
+        expect((rejection as Error).message).toBe(`Invalid params: ${message}`);
+        expect(mockSettings.setValue).not.toHaveBeenCalled();
+      },
+    );
+
+    it('maps the refusal core actually throws, not a hand-written copy of its message', async () => {
+      // The classifier matches core's human-readable switchModel messages;
+      // driving the real ModelsConfig keeps that string contract honest — a
+      // reworded core message turns this red instead of silently degrading
+      // the definite caller rejection into an internal error.
+      const realModels = new ModelsConfig({
+        modelProvidersConfig: {
+          openai: [
+            { id: 'chat-model' },
+            { id: 'image-model', imageOnly: true },
+          ],
+        },
+      });
+      switchModelSpy.mockImplementation((authType: AuthType, modelId: string) =>
+        realModels.switchModel(authType, modelId),
+      );
+
+      for (const modelId of ['qwen-typo', 'image-model']) {
+        const rejection: unknown = await session
+          .setModel({
+            sessionId: 'test-session-id',
+            modelId: `${modelId}(${AuthType.USE_OPENAI})`,
+          })
+          .then(
+            () => {
+              throw new Error('expected setModel to reject');
+            },
+            (error: unknown) => error,
+          );
+        expect(rejection).toBeInstanceOf(RequestError);
+        expect((rejection as RequestError).code).toBe(-32602);
+      }
+      expect(mockSettings.setValue).not.toHaveBeenCalled();
+    });
+
+    it('keeps daemon-side switchModel faults as internal errors', async () => {
+      const fault = new Error(
+        "Missing API key for openai auth. Current model: 'gpt-5.4'.",
+      );
+      switchModelSpy.mockRejectedValueOnce(fault);
+      await expect(
+        session.setModel({
+          sessionId: 'test-session-id',
+          modelId: `gpt-5.4(${AuthType.USE_OPENAI})`,
+        }),
+      ).rejects.toBe(fault);
     });
 
     it('rejects empty/whitespace model IDs', async () => {

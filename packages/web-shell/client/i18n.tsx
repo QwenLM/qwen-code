@@ -6,6 +6,10 @@ import {
 } from 'react';
 
 import { LIVE_MESSAGES_EN, LIVE_MESSAGES_ZH } from './live/messages.js';
+import {
+  SETTINGS_MESSAGES_EN,
+  SETTINGS_MESSAGES_ZH,
+} from './settings/messages.js';
 
 export const WEB_SHELL_LANGUAGES = ['en', 'zh-CN'] as const;
 
@@ -96,6 +100,75 @@ const EN: Messages = {
     `${v?.count ?? 0} ${v?.count === 1 ? 'citation' : 'citations'}`,
   'daemon.capacity.exhausted':
     'The service has reached its concurrent capacity limit and cannot start this session. Try again later or cancel this operation.',
+  'managed.title': 'Managed Agents',
+  'managed.sessions': 'Managed sessions',
+  'managed.conversation': 'Managed conversation',
+  'managed.new': 'New managed task',
+  'managed.refresh': 'Refresh',
+  'managed.empty': 'No managed tasks yet.',
+  'managed.loading': 'Loading…',
+  'managed.more': 'Load more',
+  'managed.prompt': 'Message the managed agent',
+  'managed.runtime': 'Environment',
+  'managed.unavailable': 'Managed Agents is unavailable on this daemon.',
+  'managed.send': 'Send',
+  'managed.sending': 'Submitting…',
+  'managed.elapsed': (v) => `${v?.seconds ?? 0}s elapsed`,
+  'managed.runningHint':
+    'This turn is running. Sending another message is paused.',
+  'managed.retry': 'Retry the same request',
+  'managed.cancel': 'Cancel turn',
+  'managed.uncertain':
+    'The request outcome is unconfirmed. Retry to check or complete the same submission.',
+  'managed.newRequired': 'Start a new task to send another message.',
+  'managed.truncated': '[Details truncated]',
+  'managed.phase.created': 'Created',
+  'managed.workspaceCreateTitle': 'Create a Workspace session',
+  'managed.workspaceLabel': 'Workspace',
+  'managed.workspaceChoose': 'Choose a Workspace',
+  'managed.workspaceDirectory': 'Relative directory',
+  'managed.workspaceCreate': 'Create session',
+  'managed.workspaceBound': 'Bound Workspace',
+  'managed.workspaceExecutionUnavailable':
+    'Workspace is bound. Message execution is not available in this service yet.',
+  'managed.workspaceSharedFiles':
+    'Sessions in the same Workspace share files. Directory availability is checked before execution.',
+  'managed.workspaceEmpty': 'No readable Workspaces are available.',
+  'managed.workspaceUnsupported':
+    'This service does not support Workspace binding.',
+  'managed.workspacePermission':
+    'You do not have permission to discover Workspaces.',
+  'managed.workspaceLoadFailed': 'Could not load Workspaces.',
+  'managed.workspaceStorageUnavailable':
+    'Browser session storage is unavailable. Creation cannot start safely.',
+  'managed.workspaceUncertain':
+    'Creation is unconfirmed. Retry the saved request or read the saved session.',
+  'managed.workspaceRetryRead': 'Retry reading session',
+  'managed.workspaceSessionId': 'Session ID',
+  'managed.workspaceProtocolError': (v) =>
+    `Session ${v?.sessionId ?? ''} was created, but its Workspace binding could not be confirmed.`,
+  'managed.workspaceAbandon': 'Abandon local confirmation',
+  'managed.workspaceAbandonWarning':
+    'The original empty session may still exist. Abandoning this record does not delete it.',
+  'managed.workspaceSwitchTitle': 'Switch Workspace?',
+  'managed.workspaceSwitchDescription':
+    'Switching resets the relative directory to the Workspace root.',
+  'managed.workspaceKeep': 'Keep selection',
+  'managed.workspaceSwitch': 'Switch',
+  'managed.phase.admitted': 'Accepted',
+  'managed.phase.runtime_starting': 'Preparing environment',
+  'managed.phase.agent_running': 'Thinking / responding',
+  'managed.phase.waiting_runtime': 'Waiting for environment',
+  'managed.phase.tool_running': 'Executing tool',
+  'managed.phase.cancelling': 'Cancelling',
+  'managed.phase.completed': 'Completed',
+  'managed.phase.failed': 'Failed',
+  'managed.phase.cancelled': 'Cancelled',
+  'managed.runtime.unknown': 'Unknown',
+  'managed.runtime.starting': 'Preparing',
+  'managed.runtime.ready': 'Ready',
+  'managed.runtime.failed': 'Preparation failed',
+
   'git.currentBranch': (v) => `Current Git branch: ${v?.branch ?? ''}`,
   'git.detached': 'Detached HEAD',
   'git.clean': 'Working tree clean',
@@ -741,6 +814,9 @@ const EN: Messages = {
   'composerAdd.plan.label': 'Plan mode',
   'composerAdd.plan.description': 'Plan first, run after you approve',
   'composerAdd.plan.busy': 'Switching mode',
+  'composerAdd.btw.label': 'Ask a side question',
+  'composerAdd.btw.description': 'Keep the main task running',
+  'composerAdd.btw.textOnly': 'Remove attachments first',
   'at.category.mcpResources': 'MCP resources',
   'at.category.mcpResources.description': 'Reference MCP server resources',
   'at.menu': 'Reference menu',
@@ -994,6 +1070,9 @@ const EN: Messages = {
   'contextUsage.contextWindow': 'Context window',
   'contextUsage.detailHint': 'Run /context detail for per-item breakdown.',
   'contextUsage.estimatedOverhead': 'Estimated base overhead',
+  'contextUsage.estimatedUsage': 'Estimated usage, including the conversation',
+  'contextUsage.usageEstimatedWithConversation':
+    'No provider usage yet. The estimates below include the conversation.',
   'contextUsage.estimatedUntilProviderUsage':
     'Token usage is estimated until provider usage is received.',
   'contextUsage.free': 'Free',
@@ -1225,7 +1304,8 @@ const EN: Messages = {
   'daemon.usage.dailyTokensSub': 'daily token totals',
   'daemon.usage.dailySessionsTitle': 'sessions',
   'daemon.usage.dailySessionsSub': 'active session counts per day',
-  'delete.cannotCurrent': 'Cannot delete the current active session.',
+  'delete.cannotCurrent':
+    'Cannot delete the current session while it is running.',
   'delete.action': 'Delete',
   'delete.deleted': 'Session deleted.',
   'delete.deletedCount': (v) => `${v?.count ?? 0} session(s) deleted.`,
@@ -1835,6 +1915,12 @@ const EN: Messages = {
   'sidebar.sessionsOverview': 'Session Overview',
   'sidebar.splitView': 'Split View',
   'sidebar.settings': 'Settings',
+  'update.button': 'Update',
+  'update.restarting': 'Restarting…',
+  'update.readyTitle': (v) => `Update to v${v?.version} and restart`,
+  'update.failed':
+    'Update could not finish. Check the service connection and retry.',
+
   'sidebar.daemonStatus': 'Daemon Status',
   'sidebar.scheduledTasks': 'Scheduled Tasks',
   'sidebar.workflows': 'Workflows',
@@ -1873,7 +1959,10 @@ const EN: Messages = {
   'sidebar.deleteFailed': 'Failed to delete session',
   'sidebar.newSessionFailed': 'Failed to create a new chat',
   'sidebar.switchFailed': 'Failed to switch session',
-  'sidebar.currentDeleteDisabled': 'Current session cannot be deleted',
+  'sidebar.currentDeleteDisabled':
+    'The current session is running and cannot be deleted',
+  'sidebar.currentStandaloneDeleteDisabled':
+    'Open another chat first to delete the current no-workspace session',
   'sidebar.deleteConfirmDescription': (v) =>
     `Delete "${v?.name ?? ''}"? This cannot be undone.`,
   'sidebar.clients': (v) => `${v?.count ?? 0} client(s)`,
@@ -2057,6 +2146,18 @@ const EN: Messages = {
     'This response is no longer on the active history path. Branching from this point is not supported by the current session.',
   'branch.success': (v) =>
     `Copied session. New session name: "${v?.name ?? ''}". Switched to the new session.`,
+  'branch.dialog.title': 'Branch session',
+  'branch.dialog.current.title': 'Current workspace',
+  'branch.dialog.current.description':
+    'Copy the conversation and continue using the current checkout.',
+  'branch.dialog.worktree.title': 'New worktree',
+  'branch.dialog.worktree.description':
+    'Create an isolated checkout from the current Git HEAD. Files are not restored to the state of this response.',
+  'branch.dialog.cancel': 'Cancel',
+  'branch.dialog.confirm': 'Branch',
+  'branch.dialog.creating': 'Creating…',
+  'branch.worktreeActivationFailed':
+    'The branched session was created, but its worktree could not be opened automatically. Reopen it from the session list.',
   'fork.empty': 'Please provide a directive. Usage: /fork <directive>',
   'fork.failed': (v) => `Failed to launch fork: ${v?.reason ?? ''}`,
   'fork.notStarted': 'Background agent was not launched.',
@@ -2864,22 +2965,7 @@ const EN: Messages = {
     'Use a DashScope- or MiniMax-compatible HTTPS image-generation endpoint without query or fragment. Adding this model keeps your conversation model.',
   'auth.purpose.voiceHint':
     'Use OpenAI Chat Completions with qwen3-asr-flash, qwen3-asr-flash-realtime, fun-asr-realtime, or paraformer-realtime. Adding this model keeps your conversation model.',
-  'settings.models.editWindow': 'Edit context window',
-  'settings.models.windowHint':
-    'Leave empty to infer the limit from the model ID. Existing sessions need a restart to use the new limit.',
-  'settings.models.windowSaved': 'Saved. Restart existing sessions to apply.',
-  'settings.models.saved': 'Saved',
   'model.setAdvisor': 'Set Advisor Model',
-  'settings.label.advisorModel': 'Advisor Model',
-  'settings.label.imageModel': 'Image Model',
-  'settings.label.voiceModel': 'Voice Model',
-  'settings.description.advisorModel':
-    'Model used to review recent conversation progress. Leave empty to use the main model.',
-  'settings.description.imageModel':
-    'Model used for image generation. Add a custom model with Image generation purpose, then select it here.',
-  'settings.description.voiceModel':
-    'Model used for voice transcription. Add a custom model with Voice transcription purpose, then select it here.',
-
   'model.setImage': 'Set Image Model',
   'model.useMain': 'Use main model',
   'model.disabled': 'Disabled',
@@ -2900,6 +2986,7 @@ const EN: Messages = {
   'parallelAgents.failed': (v) => `${v?.count ?? 0} failed`,
   'skills.actions': 'Skill actions',
   'skills.disable': 'Disable',
+  'skills.disableInWorkspace': 'Disable in this workspace',
   'skills.disabled': 'Skill disabled.',
   'skills.enable': 'Enable',
   'skills.enabled': 'Skill enabled.',
@@ -3673,7 +3760,6 @@ const EN: Messages = {
   'splitView.nextPending': 'Go to the next session awaiting input',
   'splitView.empty': 'No sessions in the split. Add one to get started.',
   'splitView.composerPlaceholder': 'Message this session…',
-  'settings.title': 'Settings',
   'channels.title': 'Channels',
   'channels.description':
     'Connect Qwen Code to the places where your team already works.',
@@ -3975,40 +4061,6 @@ const EN: Messages = {
   'channels.editor.reloadLatest': 'Reload latest',
   'channels.editor.cancel': 'Cancel',
   'channels.editor.save': 'Save',
-  'settings.loading': 'Loading settings...',
-  'settings.empty': 'No settings available.',
-  'settings.footer':
-    '↑↓ Navigate  Enter Toggle  Tab Scope  r Reload  ESC Close',
-  'settings.footer.edit': 'Enter Save  ESC Cancel',
-  'settings.footer.theme': '↑↓ Navigate  Enter Select  ESC Back',
-  'settings.scope.user': 'User',
-  'settings.scope.workspace': 'Workspace',
-  'settings.value.on': 'ON',
-  'settings.value.off': 'OFF',
-  'settings.action.edit': 'Edit',
-  'settings.action.select': 'Select',
-  'settings.action.save': 'Save',
-  'settings.modifiedIn': (v) => `(Modified in ${v?.scope ?? ''})`,
-  'settings.alsoModifiedIn': (v) => `(Also modified in ${v?.scope ?? ''})`,
-  'settings.invalidNumber': 'Invalid number',
-  'settings.requiresRestart': 'This change requires a restart to take effect.',
-  'settings.localControl.title': 'Local Control',
-  'settings.localControl.description':
-    'Continue this Qwen Code session from a phone on the same trusted network.',
-  'settings.localControl.on': 'On',
-  'settings.localControl.off': 'Off',
-  'settings.localControl.network': 'Local network',
-  'settings.localControl.selectNetwork': 'Choose a network',
-  'settings.localControl.qr': 'Local Control QR code',
-  'settings.localControl.enable': 'Turn on Local Control',
-  'settings.localControl.disable': 'Disconnect phone access',
-  'settings.localControl.encrypted': 'Encrypted',
-  'settings.localControl.unencrypted':
-    'Unencrypted — trusted networks only; re-enable after network changes',
-  'settings.localControl.awake': 'This Mac will stay awake',
-  'settings.localControl.maySleep': 'This Mac may sleep',
-  'settings.localControl.urlRedacted':
-    'The pairing URL is not shown here because this daemon has no bearer token. It was printed to the terminal where the daemon is running — pair from there.',
   'localControl.open': 'Mobile access',
   'localControl.expires': (v) =>
     `One-time QR · Expires in ${v?.seconds ?? ''}s · Refreshes automatically`,
@@ -4027,35 +4079,6 @@ const EN: Messages = {
   'localControl.disabledHint':
     'Local Control is off. Turn it on in Settings to pair a phone on the same network.',
   'localControl.openSettings': 'Open Settings',
-  'settings.models.title': 'Models',
-  'settings.models.context': (v) => `Context: ${v?.tokens ?? ''} tokens`,
-  'settings.models.credentialEnv': 'Key environment variable',
-  'settings.models.add': '+ Add Model',
-  'settings.models.addDisabled': 'Adding models is disabled by the host.',
-  'settings.models.setCurrent': 'Set current',
-  'settings.models.current': 'Current',
-  'settings.models.runtime': 'Runtime',
-  'settings.models.savedConfiguration': 'Saved configuration',
-  'settings.models.ambiguousWindow':
-    'Multiple configurations share this route. Its context window cannot be edited here.',
-  'settings.models.delete': 'Delete',
-  'settings.models.confirmDelete': 'Confirm',
-  'settings.models.cancel': 'Cancel',
-  'settings.models.empty': 'No configured models yet.',
-  'settings.models.loading': 'Loading models…',
-  'settings.models.deleteFailed': 'Failed to delete model',
-  'settings.models.runtimeSyncFailed':
-    'The change was saved, but running sessions could not be refreshed. Restart qwen serve before using the updated model list.',
-  'settings.models.fallbacks.title': 'Model Fallbacks',
-  'settings.models.fallbacks.hint': (v) =>
-    `Select up to ${v?.max ?? 3}; tried in order when the main model is at capacity.`,
-  'settings.models.fallbacks.confirm': 'Confirm',
-  'settings.models.fallbacks.empty': 'No selectable models.',
-  'settings.models.fallbacks.saveFailed': 'Failed to save fallback models',
-  'settings.models.fallbacks.limitReached': (v) =>
-    `Maximum of ${v?.max ?? 3} fallback models selected; deselect one to choose another.`,
-  'settings.corrupted': (v) =>
-    `Settings file was corrupted${v?.recovered === 'true' ? ' (recovered from backup)' : ''}`,
   'browserNotifications.label': 'Browser task notifications',
   'browserNotifications.description':
     'Notify when the current chat or a split-view chat finishes or fails while this page is in the background or unfocused. Shows the session title, prompt and reply excerpts. Saved for this browser site only; the page must remain open.',
@@ -4079,17 +4102,6 @@ const EN: Messages = {
     'Unable to enable or show notifications. Check your browser and system settings.',
   'browserNotifications.temporary':
     'This setting is saved for the current page only.',
-  'settings.label.ui.chatWidth': 'Chat width',
-  'settings.description.ui.chatWidth':
-    'Frontend-only chat content width. Stored in this browser.',
-  'settings.label.ui.enableFollowupSuggestions': 'Enable Follow-up Suggestions',
-  'settings.description.ui.enableFollowupSuggestions':
-    'Show context-aware follow-up suggestions after a task completes. Press Tab or Right Arrow to insert, Enter to accept and submit.',
-  'settings.option.ui.chatWidth.1000': 'Regular',
-  'settings.option.ui.chatWidth.wide': 'Ultra wide',
-  'settings.label.visionModel': 'Vision Model',
-  'settings.description.visionModel':
-    'Image-capable model used as the vision bridge. Leave empty to auto-select.',
   'welcome.changeModel': '(/model to change)',
   'welcome.defaultModel': 'unknown model',
   'welcome.modeHint': 'Shift+Tab or /approval-mode',
@@ -4097,6 +4109,7 @@ const EN: Messages = {
   'welcome.titlePrefix': 'Welcome to',
   'welcome.tipLabel': 'Tips:',
   ...LIVE_MESSAGES_EN,
+  ...SETTINGS_MESSAGES_EN,
 };
 
 const ZH: Messages = {
@@ -4162,6 +4175,70 @@ const ZH: Messages = {
   'footnotes.citations': (v) => `${v?.count ?? 0} 个引用`,
   'daemon.capacity.exhausted':
     '已达到当前服务的并发容量上限，暂时无法启动此会话。请稍后重试，或取消本次操作。',
+  'managed.title': '托管 Agent',
+  'managed.sessions': '托管会话',
+  'managed.conversation': '托管会话内容',
+  'managed.new': '新建托管任务',
+  'managed.refresh': '刷新',
+  'managed.empty': '暂无托管任务。',
+  'managed.loading': '加载中…',
+  'managed.more': '加载更多',
+  'managed.prompt': '向托管 Agent 发送消息',
+  'managed.runtime': '执行环境',
+  'managed.unavailable': '当前 daemon 未启用托管 Agent。',
+  'managed.send': '发送',
+  'managed.sending': '提交中…',
+  'managed.elapsed': (v) => `已用时 ${v?.seconds ?? 0} 秒`,
+  'managed.runningHint': '本轮执行中，暂时不能发送新消息。',
+  'managed.retry': '重试同一请求',
+  'managed.cancel': '取消本轮',
+  'managed.uncertain': '请求结果尚未确认。重试会确认或完成同一次提交。',
+  'managed.newRequired': '请新建任务后发送消息。',
+  'managed.truncated': '[详情已截断]',
+  'managed.phase.created': '已创建',
+  'managed.workspaceCreateTitle': '创建工作区会话',
+  'managed.workspaceLabel': '工作区',
+  'managed.workspaceChoose': '选择工作区',
+  'managed.workspaceDirectory': '相对目录',
+  'managed.workspaceCreate': '创建会话',
+  'managed.workspaceBound': '已绑定工作区',
+  'managed.workspaceExecutionUnavailable':
+    '工作区已绑定；当前服务暂未开放消息执行。',
+  'managed.workspaceSharedFiles':
+    '同一工作区的会话共享文件；目录可用性将在执行前验证。',
+  'managed.workspaceEmpty': '没有可读取的工作区。',
+  'managed.workspaceUnsupported': '当前服务不支持工作区绑定。',
+  'managed.workspacePermission': '没有发现工作区的权限。',
+  'managed.workspaceLoadFailed': '加载工作区失败。',
+  'managed.workspaceStorageUnavailable':
+    '浏览器会话存储不可用，无法安全地开始创建。',
+  'managed.workspaceUncertain':
+    '创建结果尚未确认。可重试已保存的请求，或读取已返回的会话。',
+  'managed.workspaceRetryRead': '重试读取会话',
+  'managed.workspaceSessionId': '会话 ID',
+  'managed.workspaceProtocolError': (v) =>
+    `会话 ${v?.sessionId ?? ''} 已创建，但无法确认其工作区绑定。`,
+  'managed.workspaceAbandon': '放弃本地确认记录',
+  'managed.workspaceAbandonWarning':
+    '原空会话可能已经存在；放弃记录不会删除服务端会话。',
+  'managed.workspaceSwitchTitle': '切换工作区？',
+  'managed.workspaceSwitchDescription': '切换后相对目录将重置为工作区根目录。',
+  'managed.workspaceKeep': '保留原选择',
+  'managed.workspaceSwitch': '切换',
+  'managed.phase.admitted': '已接收',
+  'managed.phase.runtime_starting': '环境准备中',
+  'managed.phase.agent_running': '思考／生成中',
+  'managed.phase.waiting_runtime': '等待执行环境',
+  'managed.phase.tool_running': '执行工具中',
+  'managed.phase.cancelling': '取消中',
+  'managed.phase.completed': '已完成',
+  'managed.phase.failed': '失败',
+  'managed.phase.cancelled': '已取消',
+  'managed.runtime.unknown': '未知',
+  'managed.runtime.starting': '准备中',
+  'managed.runtime.ready': '已就绪',
+  'managed.runtime.failed': '准备失败',
+
   'git.currentBranch': (v) => `当前 Git 分支：${v?.branch ?? ''}`,
   'git.detached': '游离 HEAD',
   'git.clean': '工作区干净',
@@ -4417,6 +4494,7 @@ const ZH: Messages = {
   'toolName.propose_goal': '提议目标',
   'toolName.save_memory': '保存记忆',
   'toolName.agent': '智能体',
+  'toolName.advisor': '审查模型',
   'toolName.skill': '查看技能',
   'toolName.enter_plan_mode': '进入计划模式',
   'toolName.exit_plan_mode': '退出计划模式',
@@ -4858,6 +4936,9 @@ const ZH: Messages = {
   'composerAdd.plan.label': '计划模式',
   'composerAdd.plan.description': '先出计划，批准后再执行',
   'composerAdd.plan.busy': '模式切换中',
+  'composerAdd.btw.label': '顺带一问',
+  'composerAdd.btw.description': '临时提问，不打断任务',
+  'composerAdd.btw.textOnly': '请先移除附件',
   'at.category.mcpResources': 'MCP 资源',
   'at.category.mcpResources.description': '引用 MCP server 资源',
   'at.menu': '引用菜单',
@@ -5080,6 +5161,9 @@ const ZH: Messages = {
   'contextUsage.contextWindow': '上下文窗口',
   'contextUsage.detailHint': '运行 /context detail 查看逐项明细。',
   'contextUsage.estimatedOverhead': '基础开销估算',
+  'contextUsage.estimatedUsage': '估算用量（含对话）',
+  'contextUsage.usageEstimatedWithConversation':
+    '尚未收到 provider 用量。下方估算包含对话。',
   'contextUsage.estimatedUntilProviderUsage':
     'Token 使用量为估算值，直到收到服务商返回的使用量。',
   'contextUsage.free': '空闲',
@@ -5307,7 +5391,7 @@ const ZH: Messages = {
   'daemon.usage.dailyTokensSub': '每日 token 总量',
   'daemon.usage.dailySessionsTitle': '会话',
   'daemon.usage.dailySessionsSub': '每日活跃会话数',
-  'delete.cannotCurrent': '无法删除当前活动会话。',
+  'delete.cannotCurrent': '当前会话正在运行，无法删除。',
   'delete.action': '删除',
   'delete.deleted': '会话已删除。',
   'delete.deletedCount': (v) => `已删除 ${v?.count ?? 0} 个会话。`,
@@ -5859,6 +5943,11 @@ const ZH: Messages = {
   'sidebar.sessionsOverview': '会话总览',
   'sidebar.splitView': '分屏',
   'sidebar.settings': '设置',
+  'update.button': '更新',
+  'update.restarting': '重启中…',
+  'update.readyTitle': (v) => `更新至 v${v?.version} 并重启`,
+  'update.failed': '未能完成更新，请检查服务连接后重试。',
+
   'sidebar.daemonStatus': 'Daemon 状态',
   'sidebar.scheduledTasks': '定时任务',
   'sidebar.workflows': '工作流',
@@ -5896,7 +5985,9 @@ const ZH: Messages = {
   'sidebar.deleteFailed': '删除会话失败',
   'sidebar.newSessionFailed': '创建新对话失败',
   'sidebar.switchFailed': '切换会话失败',
-  'sidebar.currentDeleteDisabled': '不能删除当前会话',
+  'sidebar.currentDeleteDisabled': '当前会话正在运行，不能删除',
+  'sidebar.currentStandaloneDeleteDisabled':
+    '请先打开另一个对话，再删除当前无工作区会话',
   'sidebar.deleteConfirmDescription': (v) =>
     `确定删除“${v?.name ?? ''}”吗？删除后不可恢复。`,
   'sidebar.clients': (v) => `${v?.count ?? 0} 个客户端`,
@@ -6060,6 +6151,17 @@ const ZH: Messages = {
     '这条回复已不在当前活跃历史路径中，当前会话不支持从此处分支。',
   'branch.success': (v) =>
     `已复制会话，新会话名称为： "${v?.name ?? ''}"，当前已切换到新的会话。`,
+  'branch.dialog.title': '分支会话',
+  'branch.dialog.current.title': '当前工作区',
+  'branch.dialog.current.description': '复制对话，并继续使用当前检出目录。',
+  'branch.dialog.worktree.title': '新 Worktree',
+  'branch.dialog.worktree.description':
+    '从当前 Git HEAD 创建隔离检出目录；不会把文件恢复到这条回复时的状态。',
+  'branch.dialog.cancel': '取消',
+  'branch.dialog.confirm': '创建分支',
+  'branch.dialog.creating': '正在创建…',
+  'branch.worktreeActivationFailed':
+    '分支会话已创建，但无法自动打开它的 Worktree。请从会话列表重新打开。',
   'fork.empty': '请提供任务指令。用法：/fork <指令>',
   'fork.failed': (v) => `启动后台智能体失败：${v?.reason ?? ''}`,
   'fork.notStarted': '后台智能体未启动。',
@@ -6806,21 +6908,7 @@ const ZH: Messages = {
     '支持 DashScope 或 MiniMax 兼容生图接口，请使用不含查询参数或片段的 HTTPS 地址。添加后保留当前对话模型。',
   'auth.purpose.voiceHint':
     '请选择 OpenAI Chat Completions API，使用 qwen3-asr-flash、qwen3-asr-flash-realtime、fun-asr-realtime 或 paraformer-realtime 等受支持的转写模型。添加后保留当前对话模型。',
-  'settings.models.editWindow': '配置窗口大小',
-  'settings.models.windowHint':
-    '留空根据模型 ID 自动推断。已有会话需重启后使用新窗口大小。',
-  'settings.models.windowSaved': '已保存，重启已有会话后生效。',
-  'settings.models.saved': '已保存',
   'model.setAdvisor': '设置顾问模型',
-  'settings.label.advisorModel': '顾问模型',
-  'settings.label.imageModel': '生图模型',
-  'settings.label.voiceModel': '语音转写模型',
-  'settings.description.advisorModel': '用于复查近期对话进展，默认使用主模型。',
-  'settings.description.imageModel':
-    '用于生成图片。添加自定义模型时选择“生图”用途，再在这里选择。',
-  'settings.description.voiceModel':
-    '用于将语音转成文字。添加自定义模型时选择“语音转写”用途，再在这里选择。',
-
   'model.setImage': '设置生图模型',
   'model.useMain': '使用主模型',
   'model.disabled': '不启用',
@@ -6841,6 +6929,7 @@ const ZH: Messages = {
   'parallelAgents.failed': (v) => `失败 ${v?.count ?? 0} 个`,
   'skills.actions': 'Skill 操作',
   'skills.disable': '禁用',
+  'skills.disableInWorkspace': '在此工作区禁用',
   'skills.disabled': 'Skill 已禁用。',
   'skills.enable': '启用',
   'skills.enabled': 'Skill 已启用。',
@@ -7555,7 +7644,6 @@ const ZH: Messages = {
   'splitView.nextPending': '前往下一个待处理会话',
   'splitView.empty': '分屏中还没有会话，添加一个开始。',
   'splitView.composerPlaceholder': '给这个会话发消息…',
-  'settings.title': '设置',
   'channels.title': '频道',
   'channels.description': '让 Qwen Code 在团队日常使用的平台中收发消息。',
   'channels.summary': (v) =>
@@ -7837,39 +7925,6 @@ const ZH: Messages = {
   'channels.editor.reloadLatest': '加载最新配置',
   'channels.editor.cancel': '取消',
   'channels.editor.save': '保存',
-  'settings.loading': '正在加载设置...',
-  'settings.empty': '暂无可用设置。',
-  'settings.footer': '↑↓ 导航  Enter 切换  Tab 切换作用域  r 刷新  ESC 关闭',
-  'settings.footer.edit': 'Enter 保存  ESC 取消',
-  'settings.footer.theme': '↑↓ 导航  Enter 选择  ESC 返回',
-  'settings.scope.user': '用户',
-  'settings.scope.workspace': '工作区',
-  'settings.value.on': '开',
-  'settings.value.off': '关',
-  'settings.action.edit': '编辑',
-  'settings.action.select': '选择',
-  'settings.action.save': '保存',
-  'settings.modifiedIn': (v) => `（已在${v?.scope ?? ''}中修改）`,
-  'settings.alsoModifiedIn': (v) => `（同时在${v?.scope ?? ''}中修改）`,
-  'settings.invalidNumber': '无效数字',
-  'settings.requiresRestart': '此更改需要重启后才能生效。',
-  'settings.localControl.title': '本地控制',
-  'settings.localControl.description':
-    '通过同一受信任网络中的手机继续当前 Qwen Code 会话。',
-  'settings.localControl.on': '已开启',
-  'settings.localControl.off': '关闭',
-  'settings.localControl.network': '本地网络',
-  'settings.localControl.selectNetwork': '选择网络',
-  'settings.localControl.qr': '本地控制二维码',
-  'settings.localControl.enable': '开启本地控制',
-  'settings.localControl.disable': '断开手机访问',
-  'settings.localControl.encrypted': '已加密',
-  'settings.localControl.unencrypted':
-    '未加密，仅限受信任网络；网络变化后请重新启用',
-  'settings.localControl.awake': '这台 Mac 将保持唤醒',
-  'settings.localControl.maySleep': '这台 Mac 可能进入睡眠',
-  'settings.localControl.urlRedacted':
-    '由于该守护进程未配置 bearer token，配对 URL 不在此显示。它已打印到运行守护进程的终端，请到该终端获取配对 URL 完成配对。',
   'localControl.open': '手机访问',
   'localControl.expires': (v) =>
     `一次性二维码 · ${v?.seconds ?? ''} 秒后过期 · 自动刷新`,
@@ -7887,35 +7942,6 @@ const ZH: Messages = {
   'localControl.disabledHint':
     '本地控制未开启。请在设置中开启后，配对同一网络下的手机。',
   'localControl.openSettings': '打开设置',
-  'settings.models.title': '模型',
-  'settings.models.context': (v) => `上下文：${v?.tokens ?? ''} Token`,
-  'settings.models.credentialEnv': '密钥环境变量',
-  'settings.models.add': '+ 增加模型',
-  'settings.models.addDisabled': '宿主已禁用添加模型。',
-  'settings.models.setCurrent': '设为当前',
-  'settings.models.current': '当前',
-  'settings.models.runtime': '运行时',
-  'settings.models.savedConfiguration': '已保存配置',
-  'settings.models.ambiguousWindow':
-    '多个配置共用此模型端点，无法在此修改窗口大小。',
-  'settings.models.delete': '删除',
-  'settings.models.confirmDelete': '确认删除',
-  'settings.models.cancel': '取消',
-  'settings.models.empty': '暂无配置的模型。',
-  'settings.models.loading': '正在加载模型…',
-  'settings.models.deleteFailed': '删除模型失败',
-  'settings.models.runtimeSyncFailed':
-    '更改已保存，但无法刷新正在运行的会话。请重启 qwen serve 后再使用更新后的模型列表。',
-  'settings.models.fallbacks.title': '模型回退',
-  'settings.models.fallbacks.hint': (v) =>
-    `最多选择 ${v?.max ?? 3} 个；主模型容量不足时按顺序回退。`,
-  'settings.models.fallbacks.confirm': '确认',
-  'settings.models.fallbacks.empty': '暂无可选模型。',
-  'settings.models.fallbacks.saveFailed': '保存回退模型失败',
-  'settings.models.fallbacks.limitReached': (v) =>
-    `最多可选 ${v?.max ?? 3} 个回退模型；请先取消一个再选择其他。`,
-  'settings.corrupted': (v) =>
-    `设置文件已损坏${v?.recovered === 'true' ? '（已从备份恢复）' : ''}`,
   'browserNotifications.label': '浏览器任务通知',
   'browserNotifications.description':
     '页面在后台或窗口失焦时，提醒当前聊天和分屏聊天的回合结束或失败。通知包含会话标题、提问和回复摘录。仅保存在此浏览器站点；网页需保持打开。',
@@ -7933,108 +7959,12 @@ const ZH: Messages = {
   'browserNotifications.requesting': '等待你的授权…',
   'browserNotifications.error': '无法启用或显示通知，请检查浏览器及系统设置。',
   'browserNotifications.temporary': '设置仅在当前页面有效。',
-  'settings.label.ui.chatWidth': '屏宽',
-  'settings.description.ui.chatWidth':
-    '纯前端的聊天内容宽度设置，保存在当前浏览器中。',
-  'settings.option.ui.chatWidth.1000': '常规',
-  'settings.option.ui.chatWidth.wide': '超宽',
-  'settings.category.General': '通用',
-  'settings.category.UI': '界面',
-  'settings.category.Privacy': '隐私',
-  'settings.category.Model': '模型',
-  'settings.category.Context': '上下文',
-  'settings.category.Tools': '工具',
-  'settings.category.Daemon': '守护进程',
-  'settings.category.Connections': '连接',
-  'settings.category.Experimental': '实验性',
-  'settings.category.Advanced': '高级',
-  'settings.label.general.enableAutoUpdate': '启用自动更新',
-  'settings.description.general.enableAutoUpdate': '启动时自动检查并安装更新。',
-  'settings.label.general.showSessionRecap': '显示会话回顾',
-  'settings.description.general.showSessionRecap':
-    '离开终端一段时间后返回时，自动显示一行“上次停在这里”的回顾。默认关闭。也可以随时使用 /recap 手动触发。',
-  'settings.label.general.sessionRecapAwayThresholdMinutes':
-    '会话回顾离开阈值（分钟）',
-  'settings.description.general.sessionRecapAwayThresholdMinutes':
-    '终端失焦多少分钟后，下一次重新聚焦时触发自动回顾。默认与 Claude Code 一致为 5 分钟；如果只是短暂切换窗口，可以调高。',
-  'settings.label.general.cleanupPeriodDays': '清理周期（天）',
-  'settings.description.general.cleanupPeriodDays':
-    '~/.qwen/file-history/ 中用于 /rewind 的会话备份、以及 runtime debug/ 目录下的会话 debug 日志的保留天数。后台清理最多每天运行一次。设为 0 表示最小保留（约 1 小时），仍会保护最近一小时触碰过的会话和当前活动会话。',
-  'settings.label.general.gitCoAuthor.commit': '归因：commit',
-  'settings.description.general.gitCoAuthor.commit':
-    '通过 Qwen Code 创建 commit 时，添加 Co-authored-by trailer，并写入逐文件 AI 归因 git note。关闭后两者都会跳过。',
-  'settings.label.general.gitCoAuthor.pr': '归因：PR',
-  'settings.description.general.gitCoAuthor.pr':
-    '运行 gh pr create 时，在 PR 描述中追加 Qwen Code 归因行。',
-  'settings.label.general.language': '语言：界面',
-  'settings.description.general.language':
-    '用户界面的语言。使用 auto 可根据系统设置自动检测；也可以在 ~/.qwen/locales/ 中放置 JS 语言文件来使用自定义语言代码。',
-  'settings.label.general.preventSystemSleep': '运行时防止系统睡眠',
-  'settings.description.general.preventSystemSleep':
-    '当 Qwen Code 正在流式生成模型回复或执行工具时防止系统睡眠。空闲输入状态和权限确认状态不会阻止睡眠。',
-  'settings.label.ui.theme': '主题',
-  'settings.description.ui.theme': '界面的颜色主题。',
-  'settings.label.ui.hideTips': '隐藏提示',
-  'settings.description.ui.hideTips': '隐藏界面中的帮助提示。',
-  'settings.label.ui.enableWelcomeBack': '显示欢迎回来对话框',
-  'settings.description.ui.enableWelcomeBack':
-    '回到有历史会话的项目时显示欢迎回来对话框。选择“开始新的聊天会话”后，在项目摘要变化前不会再次显示。',
-  'settings.label.ui.enableUserFeedback': '启用用户反馈',
-  'settings.description.ui.enableUserFeedback':
-    '对话结束后显示可选反馈对话框，帮助改进 Qwen 表现。',
-  'settings.label.ui.enableFollowupSuggestions': '启用后续建议',
-  'settings.description.ui.enableFollowupSuggestions':
-    '任务完成后显示上下文相关的后续建议。按 Tab 或右方向键插入，按 Enter 接受并提交。',
-  'settings.label.ui.shellOutputMaxLines': 'Shell 输出最大行数',
-  'settings.description.ui.shellOutputMaxLines':
-    '内联显示的 shell 输出最大行数。设为 0 可取消限制并显示完整输出；隐藏行数仍会通过 +N lines 指示器展示。',
-  'settings.label.privacy.usageStatisticsEnabled': '启用使用统计',
-  'settings.description.privacy.usageStatisticsEnabled': '启用使用统计收集。',
-  'settings.label.fastModel': '快速模型',
-  'settings.description.fastModel':
-    '用于生成提示建议和推测执行的模型。留空则使用主模型。较小/更快的模型（例如 qwen3-coder-flash）可以降低延迟和成本。',
-  'settings.label.visionModel': '视觉模型',
-  'settings.description.visionModel':
-    '用于视觉桥接的图像能力模型。留空则自动选择。',
-  'settings.label.context.fileFiltering.respectGitIgnore': '遵守 .gitignore',
-  'settings.description.context.fileFiltering.respectGitIgnore':
-    '搜索时遵守 .gitignore 文件。',
-  'settings.label.context.fileFiltering.respectQwenIgnore': '遵守 .qwenignore',
-  'settings.description.context.fileFiltering.respectQwenIgnore':
-    '搜索时遵守 .qwenignore 文件。',
-  'settings.label.context.fileFiltering.enableFuzzySearch': '启用模糊搜索',
-  'settings.description.context.fileFiltering.enableFuzzySearch':
-    '搜索文件时启用模糊搜索。',
-  'settings.label.tools.toolSearch.enabled': '启用 ToolSearch',
-  'settings.description.tools.toolSearch.enabled':
-    '启用后，deferred 工具会先通过 ToolSearch 检查 schema，再通过 ToolCall 调用。桥接的查看与调用保持工具声明列表稳定——桥接不会把 reveal 的工具重新声明——从而减少提示词大小且不触碰 prompt-cache 前缀。但声明列表并非不可变：会话仍会在以下情况重新声明——恢复会话时；工具集刷新（MCP 发现、会话中首次进入计划模式、子代理定义变更）在实时历史中发现对某个仍隐藏的 deferred 工具的直接调用时；子代理定义变更改写 agent 工具自身描述时；以及 MCP server 在会话中以 alwaysLoadTools: true 注册时。',
-  'settings.label.tools.shell.enableInteractiveShell': '交互式 Shell（PTY）',
-  'settings.description.tools.shell.enableInteractiveShell':
-    '使用 node-pty 提供交互式 shell 体验。未设置时，明确的单次 prompt 默认使用 child_process；交互式和输入驱动模式默认使用 PTY。',
-  'settings.label.policy.permissionStrategy': '权限协调策略',
-  'settings.description.policy.permissionStrategy':
-    '多个客户端连接时权限请求的决策方式。first-responder 表示任意客户端先响应者生效；designated 表示仅提示发起方决策；consensus 表示需要 N-of-M 投票同意；local-only 表示只有 loopback 客户端可决策。需要重启 daemon 后生效。',
-  'settings.option.policy.permissionStrategy.first-responder': '先响应者',
-  'settings.option.policy.permissionStrategy.designated': '指定发起方',
-  'settings.option.policy.permissionStrategy.consensus': '共识法定人数',
-  'settings.option.policy.permissionStrategy.local-only': '仅本机',
-  'settings.label.experimental.enableCronTools': '启用 Cron/Loop 工具',
-  'settings.description.experimental.enableCronTools':
-    '启用会话内 cron/loop 工具（实验性）。启用后，模型可以用 cron_create、cron_list 和 cron_delete 创建周期性提示。也可通过 QWEN_CODE_ENABLE_CRON=1 环境变量启用。',
-  'settings.label.experimental.sessionWorkflow': 'Session Workflow 计划并审阅',
-  'settings.description.experimental.sessionWorkflow':
-    '显示 Session Workflow DAG，并将 Plan 模式展示为计划并审阅。',
-  'settings.label.experimental.emitToolUseSummaries': '工具使用摘要',
-  'settings.description.experimental.emitToolUseSummaries':
-    '每个工具批次完成后生成一个简短的 LLM 标签。已完成工具组的标签会替代通用的 Tool × N 标题；强制展开的工具组下方显示弱化的 ● <label> 行。需要配置快速模型。',
-  'settings.label.agents.arena.preserveArtifacts': '保留 Arena 产物',
-  'settings.description.agents.arena.preserveArtifacts':
-    '启用后，Arena worktree 和会话状态文件会在会话结束或主智能体退出后保留。',
   'welcome.modeHint': 'Shift+Tab 或 /approval-mode',
   'welcome.prompt': '你想构建什么？',
   'welcome.titlePrefix': '欢迎使用',
   'welcome.tipLabel': '提示：',
   ...LIVE_MESSAGES_ZH,
+  ...SETTINGS_MESSAGES_ZH,
 };
 
 const MESSAGES: Record<WebShellLanguage, Messages> = {

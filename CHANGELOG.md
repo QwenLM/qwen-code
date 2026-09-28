@@ -12,6 +12,70 @@ are listed; nightly and preview pre-releases are intentionally omitted.
 > [GitHub Releases](https://github.com/QwenLM/qwen-code/releases). Do not edit it
 > by hand — run `npm run changelog` to regenerate.
 
+## [0.24.6](https://github.com/QwenLM/qwen-code/releases/tag/v0.24.6) - 2026-09-26
+
+### Highlights
+
+_See the complete change list below._
+
+### Breaking Changes
+
+No known breaking changes.
+
+### Complete Change List
+
+#### Features
+
+- feat(sdk-java): Add the Hosted Harness private client ([#12654](https://github.com/QwenLM/qwen-code/pull/12654)) by @doudouOUC
+- feat(java): Reconcile UNKNOWN tool executions from Runtime evidence ([#12655](https://github.com/QwenLM/qwen-code/pull/12655)) by @wenshao
+- feat(cli): Declare the v2 execute/status/cancel Managed Runtime contract ([#12630](https://github.com/QwenLM/qwen-code/pull/12630)) by @doudouOUC
+- feat(sdk-java): Reconcile and adopt restored Runtime bindings ([#12627](https://github.com/QwenLM/qwen-code/pull/12627)) by @doudouOUC
+- feat(cli): list managed Agent View sessions in qwen sessions ps ([#10942](https://github.com/QwenLM/qwen-code/pull/10942)) by @yiliang114
+- feat(scripts): check in the startup benchmark harness ([#12674](https://github.com/QwenLM/qwen-code/pull/12674)) by @tanzhenxin
+- feat(sdk-java): Add the v2 tool operations to the runtime transport ([#12637](https://github.com/QwenLM/qwen-code/pull/12637)) by @doudouOUC
+- feat: add native advisor tool ([#9636](https://github.com/QwenLM/qwen-code/pull/9636)) by @ZijianZhang989
+- feat(sdk-java): Add the W0a Managed Workspace binding contract ([#12681](https://github.com/QwenLM/qwen-code/pull/12681)) by @wenshao
+- feat(cli): Mount the v2 tool operations on the Managed Runtime worker ([#12671](https://github.com/QwenLM/qwen-code/pull/12671)) by @doudouOUC
+- feat(cli): Define the managed-context/1 envelope contract ([#12700](https://github.com/QwenLM/qwen-code/pull/12700)) by @wenshao
+- feat(serve): add guarded Hosted Runtime foundations ([#12691](https://github.com/QwenLM/qwen-code/pull/12691)) by @doudouOUC
+- feat(managed-agent): Spring control plane and dual-path WebShell ([#12692](https://github.com/QwenLM/qwen-code/pull/12692)) by @doudouOUC
+- feat(serve): support model and reasoning selection at session creation ([#12308](https://github.com/QwenLM/qwen-code/pull/12308)) by @callmeYe
+- feat(core): Durable Managed Session journal and failover ([#12693](https://github.com/QwenLM/qwen-code/pull/12693)) by @doudouOUC
+- feat(cli): agent-prepared Batch API workflow (/batch-api) ([#12492](https://github.com/QwenLM/qwen-code/pull/12492)) by @yiliang114
+- feat: complete Advisor consultation behavior and usage limits ([#12688](https://github.com/QwenLM/qwen-code/pull/12688)) by @yiliang114
+
+#### Bug Fixes
+
+- fix(review): persist the local findings ledger when a round cannot anchor ([#12660](https://github.com/QwenLM/qwen-code/pull/12660)) by @wenshao
+- fix(core): Preserve Claude thinking across tool turns ([#12621](https://github.com/QwenLM/qwen-code/pull/12621)) by @pomelo-nwu
+- fix(cli): keep one-shot system-reminder prefixes out of shell mode ([#12605](https://github.com/QwenLM/qwen-code/pull/12605)) by @yiliang114
+- fix(standalone): pin @lydell/node-pty-linux-arm64 and fail release on missing prebuilds ([#12649](https://github.com/QwenLM/qwen-code/pull/12649)) by @yiliang114
+- fix(web-shell): fall back to a plain draft for New task in a Live chat without a draft target ([#12626](https://github.com/QwenLM/qwen-code/pull/12626)) by @yiliang114
+- fix(cli): resolve npm's global config when npm refuses to print it ([#12675](https://github.com/QwenLM/qwen-code/pull/12675)) by @tanzhenxin
+- fix(web-shell): allow deleting the current session from sidebar and picker ([#12636](https://github.com/QwenLM/qwen-code/pull/12636)) by @yiliang114
+- fix(core): keep the deferred-tool bridge halves on the same tool ([#12539](https://github.com/QwenLM/qwen-code/pull/12539)) by @yiliang114
+- fix(cli): make the Agent Team teammate tab transcript scrollable in VP mode ([#9531](https://github.com/QwenLM/qwen-code/pull/9531)) by @yiliang114
+- fix(cli): restore ripgrep exec bit on managed npm update activation ([#12673](https://github.com/QwenLM/qwen-code/pull/12673)) by @yiliang114
+- fix(cli): notify when the Linux clipboard tool is found but its query fails ([#12666](https://github.com/QwenLM/qwen-code/pull/12666)) by @yiliang114
+- fix(core): rank PreToolUse permissionDecision most-restrictive in hook aggregation ([#12689](https://github.com/QwenLM/qwen-code/pull/12689)) by @yiliang114
+- fix(cli): close the deferred /context accounting follow-ups ([#12540](https://github.com/QwenLM/qwen-code/pull/12540)) by @yiliang114
+- fix(core): deduplicate system prompt guidance in a second pass ([#12546](https://github.com/QwenLM/qwen-code/pull/12546)) by @doudouOUC
+
+#### Performance
+
+- perf(cli): keep running in place when env files only hold model credentials ([#12680](https://github.com/QwenLM/qwen-code/pull/12680)) by @tanzhenxin
+- perf(cli): halve fresh-startup time to typeable and cut RSS by 60% ([#12622](https://github.com/QwenLM/qwen-code/pull/12622)) by @tanzhenxin
+- perf(serve): coalesce in-flight extension status loads ([#12638](https://github.com/QwenLM/qwen-code/pull/12638)) by @callmeYe
+
+#### Internal Changes
+
+- test(java): pin runtime-broker guards left open in earlier reviews ([#12632](https://github.com/QwenLM/qwen-code/pull/12632)) by @wenshao
+- test(cli): pin the managed-runtime worker's boot, bind and shutdown guards ([#12633](https://github.com/QwenLM/qwen-code/pull/12633)) by @wenshao
+- chore(desktop): rename packages/desktop-shell to packages/desktop ([#12653](https://github.com/QwenLM/qwen-code/pull/12653)) by @yiliang114
+- test(java): wait for a renewal at the advanced time in lease renewal tests ([#12656](https://github.com/QwenLM/qwen-code/pull/12656)) by @wenshao
+
+**Full Changelog**: https://github.com/QwenLM/qwen-code/compare/v0.24.5...v0.24.6
+
 ## [0.24.5](https://github.com/QwenLM/qwen-code/releases/tag/v0.24.5) - 2026-09-24
 
 ### Highlights
