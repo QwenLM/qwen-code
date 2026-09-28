@@ -62,7 +62,7 @@ describe('build artifact — package boundary', () => {
   });
 
   it('externalizes react and react-dom', () => {
-    const bundle = readBundle();
+    const bundle = readPackageJavascript();
     expect(bundle).toContain('from "react"');
     expect(bundle).toContain('from "react/jsx-runtime"');
     expect(bundle).not.toContain('react/jsx-dev-runtime');

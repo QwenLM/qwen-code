@@ -258,10 +258,15 @@ test('mesh shows growing replies before completion, survives reload, and replace
   ).toHaveCount(1);
   await expect(page.getByRole('button', { name: '验收并完成' })).toBeVisible();
   await page.reload();
-  await expect(
-    transcript.getByText('First fragment. Second fragment.', { exact: true }),
-  ).toHaveCount(1);
-  await page.screenshot({ path: info.outputPath('02-completed.png') });
+  const completedReply = transcript.getByText(
+    'First fragment. Second fragment.',
+    { exact: true },
+  );
+  await expect(completedReply).toBeVisible();
+  await page.screenshot({
+    path: info.outputPath('02-completed.png'),
+    animations: 'disabled',
+  });
 });
 
 test('mesh shows a reply pushed over the live stream that no REST read carries', async ({
