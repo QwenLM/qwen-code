@@ -5023,3 +5023,56 @@ describe('R13-1 acceptance: boundary seal for buffer-resident text', () => {
     expect(sentContents().at(-1)).toBe('PRE-POST');
   });
 });
+
+describe('R14-1 acceptance: an in-flight flush must not clear a newer seal', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockSendQQMessage.mockResolvedValue(mockResponse(true));
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('re-delivers a boundary seal written while an older flush was in flight', async () => {
+    const ch = makeChannel();
+    setReplyMsgId(ch, 'test-chat', 'msg-A');
+    onPromptStart(ch, 'test-chat', 's1', 'msg-A');
+
+    // HEAD goes out under a send that stays pending.
+    let resolveHead!: (v: MockResponse) => void;
+    mockSendQQMessage.mockReturnValueOnce(
+      new Promise<MockResponse>((resolve) => {
+        resolveHead = resolve;
+      }),
+    );
+    onResponseChunk(ch, 'test-chat', 'HEAD', 's1');
+    vi.advanceTimersByTime(2000);
+    await drain();
+
+    // More text arrives while HEAD is in flight, and a mid-turn boundary seals
+    // it: this seal describes the RESIDUAL, not the payload already in the air.
+    onResponseChunk(ch, 'test-chat', 'B', 's1');
+    onResponseBoundary(ch, 'test-chat', 's1');
+
+    // HEAD succeeds. Its success path may only clear the seal it carried.
+    resolveHead(mockResponse(true));
+    await drain();
+
+    // The residual's own flush now fails permanently. The seal is the only
+    // copy (the boundary cleared the bridge's collection), so it must be
+    // re-stashed and re-delivered rather than dropped with the entry.
+    mockSendQQMessage.mockRejectedValueOnce(
+      new DeliveryError('RETRY_EXHAUSTED', 'permanent failure'),
+    );
+    vi.advanceTimersByTime(2000);
+    await drain();
+    await onResponseComplete(ch, 'test-chat', 'B', 's1');
+    await drain();
+
+    // Three attempts: HEAD, the residual that was rejected, and the re-stash
+    // that delivers it. Two would mean the sealed residual was silently lost.
+    expect(sentContents()).toEqual(['HEAD', 'B', 'B']);
+  });
+});

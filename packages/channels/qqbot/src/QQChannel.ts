@@ -1695,6 +1695,11 @@ export class QQChannel extends ChannelBase {
     logLabel: string,
   ): void {
     this.flushingSessions.set(sessionId, state);
+    // The seal this payload carries, if any. A boundary can seal NEW text while
+    // this send is in flight (chunks keep arriving into state.buffer), and that
+    // seal describes the residual, not this payload — read it once here so the
+    // success path below clears only what this send actually delivered.
+    const carriedSeal = state.sealedPre;
     // Terminal release owed by this chain, performed in .finally() after the
     // ownership-keyed marker is cleared: releasing while the marker is still
     // set makes releaseSessionReplyAnchor's in-flight guard return early, and
@@ -1716,8 +1721,11 @@ export class QQChannel extends ChannelBase {
         // into this buffer), so it must not be re-stashed by a later permanent
         // failure — onResponseComplete would prepend it and deliver a second
         // standalone copy. Clear it on both success paths (state current and
-        // session died) because the head is out either way.
-        state.sealedPre = undefined;
+        // session died) because the head is out either way. Guarded on identity:
+        // a seal a boundary wrote after this send started was never in this
+        // payload and is the residual's only copy, so clearing it here would
+        // drop that text when the residual's own flush fails permanently.
+        if (state.sealedPre === carriedSeal) state.sealedPre = undefined;
         // #3: Guard — if session died during in-flight send, touch nothing
         // of the entry's, but do release the anchor: no later settle can run
         // for this state, so otherwise its msg_seq counter is stranded.
