@@ -5,6 +5,11 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
+import {
+  getHookExecutionOwner,
+  runWithHookExecutionOwner,
+} from '../../hooks/hook-execution-context.js';
+
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -180,6 +185,64 @@ describe('AgentCore.runInAgentFrames', () => {
       subagentId,
     );
   }
+
+  it('pins hook ownership to the core across foreign frames and deferred approval', async () => {
+    let sessionId = 'original-session';
+    const config = {
+      getSessionId: () => sessionId,
+      getHookSystem: () => ({ runtimeId: 'own-runtime' }),
+    } as unknown as Config;
+    const foreign = {
+      runtimeId: 'foreign-runtime',
+      sessionId: 'foreign-session',
+      agentId: 'B',
+    };
+    const core = runWithHookExecutionOwner(
+      foreign,
+      () =>
+        new AgentCore(
+          'A',
+          config,
+          { systemPrompt: '' },
+          { model: 'test' },
+          { max_turns: 1 },
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          'actual-A',
+        ),
+    );
+    const expected = {
+      runtimeId: 'own-runtime',
+      sessionId: 'original-session',
+      agentId: 'actual-A',
+    };
+    sessionId = 'later-session';
+    let resume: (() => Promise<void>) | undefined;
+    await runWithAgentContext('general-parent', () =>
+      runWithHookExecutionOwner(foreign, async () => {
+        const depth = getCurrentAgentDepth();
+        await core.runInHookFrame(async () => {
+          await Promise.resolve();
+          expect(getHookExecutionOwner()).toEqual(expected);
+          expect(getCurrentAgentId()).toBe('general-parent');
+          expect(getCurrentAgentDepth()).toBe(depth);
+          resume = () =>
+            core.runInAgentFrames(async () => {
+              await Promise.resolve();
+              expect(getHookExecutionOwner()).toEqual(expected);
+            });
+        });
+        expect(getHookExecutionOwner()).toEqual(foreign);
+        await resume!();
+        expect(getHookExecutionOwner()).toEqual(foreign);
+        expect(getCurrentAgentDepth()).toBe(depth);
+      }),
+    );
+    expect(getHookExecutionOwner()).toBeUndefined();
+  });
 
   it('binds the running chat for Advisor and restores it during approval continuation', async () => {
     const core = makeCore('child');

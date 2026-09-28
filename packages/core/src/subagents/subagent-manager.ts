@@ -933,6 +933,7 @@ export class SubagentManager {
       subagentId?: string;
     },
   ): Promise<{ subagent: SubagentExecutor; dispose: () => Promise<void> }> {
+    const hookSessionId = runtimeContext.getSessionId();
     if (
       runtimeContext.getShellExecutionSandbox?.() &&
       (config.executor !== undefined ||
@@ -1172,40 +1173,6 @@ export class SubagentManager {
         await this.buildSubagentContextOverride(runtimeContext, config);
       disposeSubagentRegistry = cleanup;
 
-      // Register per-agent frontmatter hooks. The returned unregister callback
-      // is invoked from `dispose` (and from the catch block below on a
-      // constructor failure). v1 limitation: while the entries live in the
-      // registry they fire for every event of their declared type, regardless
-      // of which agent is currently active — proper per-agent scope filtering
-      // is deferred.
-      const hookSystem = runtimeContext.getHookSystem();
-      const hookRegistry = hookSystem?.getRegistry();
-      if (config.hooks && Object.keys(config.hooks).length > 0) {
-        if (config.level === 'project' && !runtimeContext.isTrustedFolder()) {
-          // Project agents load from <repo>/.qwen/agents/ regardless of
-          // trust (read-only use is fine), but their hooks are repo-supplied
-          // code execution — the same gate Config.getProjectHooks() applies
-          // to settings-file hooks.
-          debugLogger.warn(
-            `Subagent "${config.name}" is a project agent in an untrusted folder; ignoring its hooks.`,
-          );
-        } else if (hookRegistry) {
-          const agentScope = `agent:${config.name}:${randomUUID()}`;
-          unregisterAgentHooks = hookRegistry.addAgentHooks(
-            config.hooks as { [K in HookEventName]?: HookDefinition[] },
-            agentScope,
-          );
-        } else {
-          // Single outer guard; nested branch on hookRegistry. The pre-fix
-          // structure repeated the `config.hooks && Object.keys(...).length`
-          // predicate across two `if`/`else if` arms, which made it easy to
-          // drift one side during future edits.
-          debugLogger.warn(
-            `Subagent "${config.name}" declares hooks but the host has no HookSystem; ignoring per-agent hooks.`,
-          );
-        }
-      }
-
       try {
         const subagent = await AgentHeadless.create(
           config.name,
@@ -1220,6 +1187,34 @@ export class SubagentManager {
           options?.taskName,
           options?.subagentId,
         );
+        const hookRegistry = runtimeContext.getHookSystem()?.getRegistry();
+        if (config.hooks && Object.keys(config.hooks).length > 0) {
+          const isSourceTrusted =
+            config.level === 'project'
+              ? () => this.config.isTrustedFolder()
+              : undefined;
+          if (isSourceTrusted && !isSourceTrusted()) {
+            debugLogger.warn(
+              `Subagent "${config.name}" is a project agent in an untrusted folder; ignoring its hooks.`,
+            );
+          } else if (hookRegistry) {
+            unregisterAgentHooks = hookRegistry.addAgentHooks(
+              config.hooks as { [K in HookEventName]?: HookDefinition[] },
+              `agent:${config.name}:${randomUUID()}`,
+              {
+                owner: {
+                  sessionId: hookSessionId,
+                  agentId: subagent.getCore().subagentId,
+                },
+                isSourceTrusted,
+              },
+            );
+          } else {
+            debugLogger.warn(
+              `Subagent "${config.name}" declares hooks but the host has no HookSystem; ignoring per-agent hooks.`,
+            );
+          }
+        }
         return { subagent, dispose: runCleanup };
       } catch (innerError) {
         // The caller never received the return value — `dispose` cannot
