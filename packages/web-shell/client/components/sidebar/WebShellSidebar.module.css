@@ -113,7 +113,7 @@
   display: flex;
   width: 100%;
   flex: 0 0 auto;
-  padding: 12px 0 2px;
+  padding: 12px 0 12px;
   border-bottom: 1px solid transparent;
 }
 
