@@ -76,6 +76,19 @@ describe('publicAuxModelSelectorValue', () => {
     );
   });
 
+  it('drops a suffix whose credential hides behind a second NUL', () => {
+    // `new URL()` succeeds here with the NUL percent-encoded into the
+    // pathname, so username/password/search/hash all read empty while the
+    // credential text after the second NUL is still in the string. The
+    // "already clean" shortcut inspects parsed fields but returns the
+    // UNPARSED input, so it must not fire on this shape.
+    const twoNul =
+      'openai:gpt-x\0https://gw.example/v1\0https://user:sk-secret@other.example/v1';
+    expect(publicAuxModelSelectorValue(twoNul)).toBe('openai:gpt-x');
+    expect(publicAuxModelSelectorValue(twoNul)).not.toContain('sk-secret');
+    expect(publicAuxModelSelectorValue(twoNul)).not.toContain('user:');
+  });
+
   it('renders a non-string value instead of throwing', () => {
     // `loadSettings` applies no type validation, so a workspace-scope
     // `settings.json` can hand a wire site `fastModel: 42`. The scrub's first
@@ -121,6 +134,15 @@ describe('formatAuxModelSelectorForDisplay', () => {
     expect(formatAuxModelSelectorForDisplay('openai:gpt-x\0not-a-url')).toBe(
       'openai:gpt-x',
     );
+  });
+
+  it('emits neither a raw NUL nor the credential for a two-NUL suffix', () => {
+    const twoNul =
+      'openai:gpt-x\0https://gw.example/v1\0https://user:sk-secret@other.example/v1';
+    const rendered = formatAuxModelSelectorForDisplay(twoNul);
+    expect(rendered).toBe('openai:gpt-x');
+    expect(rendered).not.toContain('sk-secret');
+    expect(rendered).not.toContain('\0');
   });
 
   it('renders a non-string setting instead of throwing', () => {
@@ -209,6 +231,31 @@ describe('stripAuxSelectorBaseUrlCredential', () => {
     ).toBe('https://host:99999/v1?x=1');
   });
 
+  it('fails closed on a credential hidden behind a control character', () => {
+    // A provider `baseUrl` is an unvalidated string, so a second NUL segment
+    // reaches here. `new URL()` parses it (the NUL is percent-encoded into the
+    // pathname) with username/password empty, so the "already clean" shortcut
+    // used to persist this verbatim — into the committable workspace file,
+    // which is the one surface the publish path cannot scrub after the fact.
+    const persisted = stripAuxSelectorBaseUrlCredential(
+      'https://gw.example/v1\0https://user:sk-secret@other.example/v1',
+    );
+    // Empty-suffix form: `openai:vis\0` already parses to baseUrl undefined.
+    expect(persisted).toBe('');
+    expect(persisted).not.toContain('sk-secret');
+    expect(persisted).not.toContain('user:');
+  });
+
+  it('keeps a control-character-free clean URL byte-identical', () => {
+    // Guard against the control-character check widening normalization for
+    // the shapes the runtime compares by exact equality.
+    expect(
+      stripAuxSelectorBaseUrlCredential('https://gw.example/v1?api-version=1'),
+    ).toBe('https://gw.example/v1?api-version=1');
+    expect(stripAuxSelectorBaseUrlCredential('localhost:11434')).toBe(
+      'localhost:11434',
+    );
+  });
 });
 
 describe('formatSettingRowValue', () => {

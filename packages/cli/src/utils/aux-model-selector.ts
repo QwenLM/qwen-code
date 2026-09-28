@@ -31,14 +31,28 @@ export function isAuxModelSelectorSettingKey(key: string): boolean {
 }
 
 /**
+ * A control character in the suffix — a second NUL in practice — makes the
+ * parsed `URL` fields this module inspects useless: WHATWG percent-encodes the
+ * NUL into the pathname, so `username`, `password`, `search` and `hash` all
+ * read empty while the credential text after it is still in the string. Every
+ * "already clean" shortcut here compares parsed fields but returns the
+ * UNPARSED input, so such a suffix would be served, persisted and rendered
+ * verbatim. Fail closed on the text instead.
+ */
+function hasControlCharacter(baseUrl: string): boolean {
+  return /[\u0000-\u001f\u007f]/.test(baseUrl);
+}
+
+/**
  * Fail-closed publishability decision for a selector's baseUrl suffix:
  * http(s) URLs are publishable once userinfo, query, and hash are stripped;
  * an already-clean URL returns verbatim so republishing never rewrites a
  * clean persisted value. Anything else (scheme-less, non-http(s),
- * unparseable) is not publishable, and the caller must drop the suffix
- * rather than emit it.
+ * unparseable, or carrying a control character) is not publishable, and the
+ * caller must drop the suffix rather than emit it.
  */
 function publishableSelectorBaseUrl(baseUrl: string): string | undefined {
+  if (hasControlCharacter(baseUrl)) return undefined;
   if (!/^https?:\/\//i.test(baseUrl.trim())) return undefined;
   try {
     const url = new URL(baseUrl);
@@ -115,11 +129,16 @@ export function formatAuxModelSelectorForDisplay(setting: unknown): string {
  * (potentially the committable workspace-scope file) carries no credential.
  * Clean URLs and scheme-less endpoints are persisted byte-identical. An
  * http(s) endpoint that `new URL()` rejects fails closed through
- * `sanitizeProviderBaseUrl`, which strips the authority userinfo textually —
- * never verbatim, because the persisted file is the one surface the publish
- * path cannot scrub after the fact.
+ * `sanitizeProviderBaseUrl`, which strips the authority userinfo textually,
+ * and a suffix carrying a control character fails closed to the empty-suffix
+ * form — never verbatim, because the persisted file is the one surface the
+ * publish path cannot scrub after the fact.
  */
 export function stripAuxSelectorBaseUrlCredential(baseUrl: string): string {
+  // Fail closed to `''` (the empty-suffix form, which readers already treat as
+  // "no endpoint pinned"): a control character hides whatever follows it from
+  // every parsed field checked below.
+  if (hasControlCharacter(baseUrl)) return '';
   if (!/^https?:\/\//i.test(baseUrl.trim())) return baseUrl;
   try {
     const url = new URL(baseUrl);
