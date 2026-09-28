@@ -5,7 +5,7 @@
  */
 
 import type { CSSProperties } from 'react';
-import styles from './author-avatar.module.css';
+import styles from './AuthorAvatar.module.css';
 
 /**
  * The initial of a named assistant voice, tinted with its color when it has

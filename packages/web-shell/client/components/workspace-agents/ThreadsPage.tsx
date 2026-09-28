@@ -18,7 +18,7 @@ import {
   PlusIcon,
 } from 'lucide-react';
 
-import { AuthorAvatar } from '../messages/author-avatar';
+import { AuthorAvatar } from '../messages/AuthorAvatar';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import { Card, CardDescription, CardTitle } from '../ui/card';
