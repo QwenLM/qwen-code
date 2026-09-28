@@ -18,6 +18,8 @@
 
 后端选择在 runtime 初始化期间只执行一次。解析后的后端、执行完整性和 Landlock ABI 会冻结到活动 Config 策略中。命令执行阶段的设置失败不会再切换到另一个后端，也不会在宿主机上重放 payload。
 
+Landlock 策略探测会在边界内执行 `/usr/bin/true`。缺少该可执行文件的主机会探测失败；仅有 helper 能力并不意味着该主机可用。
+
 检查命令和 UI 会同时展示请求后端与实际后端。Landlock 会显示 `partial` 和已探测的 ABI。文档明确列出未覆盖的元数据及进程/IPC 边界。因为 `auto` 可能在用户 namespace 或 mount 不可用的主机上从完整的 bwrap 执行切换到部分 Landlock 执行，这种可见性是必要条件。
 
 ## 随包 helper
@@ -40,6 +42,8 @@ helper 要求 ABI 3。ABI 1 无法授予跨目录重新挂接，ABI 2 无法控�
 ## 文件系统 profile
 
 两个后端都保留广泛的宿主读取能力。Landlock 对 `/` 以下授予读取和执行权限，对 `/dev/null` 与每条命令的私有 scratch 目录授予写权限；仅在 `workspace-write` 下对规范化 workspace 授予写权限。runtime 状态和安装目录保持只读。helper 使用 `O_PATH` 打开规则根目录，因此规则绑定到文件系统对象，而不是信任后续文本路径查找。
+
+Landlock 不创建 bwrap 的私有 `/dev` 和 `/proc` 挂载。其更窄的写授权会拒绝以写入方式打开 `/dev/full`、`/dev/tty` 等其他设备路径，以及在 `/dev/shm` 中创建文件；依赖这些操作的程序可能失败。临时文件应使用 `TMPDIR`、`TMP` 和 `TEMP` 指向的私有 scratch 目录。这项限制针对新的路径访问，不针对调用方提供的已打开标准流。
 
 可信 review 状态按已合并的迁移规则保留在可写 workspace 之外。Landlock 的广泛读取授权无法隐藏路径，因此其 probe 和执行入口都拒绝所有非空 `maskedPaths` 列表。Bubblewrap 继续执行显式 mask。
 

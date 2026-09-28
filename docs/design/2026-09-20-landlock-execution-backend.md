@@ -18,6 +18,8 @@ The first Landlock release is a fallback for Linux hosts where bwrap is missing 
 
 Backend selection happens once during runtime initialization. The resolved backend, enforcement level, and Landlock ABI are frozen into the active Config policy. A command-time setup failure never falls through to another backend and never replays the payload on the host.
 
+The Landlock policy probe executes `/usr/bin/true` inside the boundary. Hosts without that executable fail the probe; helper capability alone does not make such a host usable.
+
 Inspection and UI surfaces show requested and effective backends. Landlock is rendered with `partial` and its probed ABI. The documentation states the uncovered metadata and process/IPC boundaries. This visibility is required because `auto` may move from full bwrap enforcement to partial Landlock enforcement on a host where user namespaces or mounts are unavailable.
 
 ## Bundled helper
@@ -40,6 +42,8 @@ Both relays initialize Node's shared output descriptors before spawning the help
 ## Filesystem profile
 
 Both backends retain broad host reads. Landlock grants read and execute below `/`, write access to `/dev/null` and the per-command scratch directory, and write access to the canonical workspace only for `workspace-write`. Runtime state and installation roots remain read-only. The helper opens rule roots with `O_PATH`, so rules bind to filesystem objects rather than trusting a later textual path lookup.
+
+Landlock does not create bwrap's private `/dev` and `/proc` mounts. Its narrower write grants reject opening other device paths such as `/dev/full` or `/dev/tty` for writing and creating files in `/dev/shm`; programs that require these operations may fail. Use the private scratch directory exposed through `TMPDIR`, `TMP`, and `TEMP` for temporary files. This restriction concerns new pathname access, not the caller-provided standard streams that are already open.
 
 Trusted review state remains outside the writable workspace under the merged migration. Landlock cannot hide paths under its broad read grant: both its probe and execution entrypoints reject every nonempty `maskedPaths` list. Bubblewrap continues to enforce explicit masks.
 
