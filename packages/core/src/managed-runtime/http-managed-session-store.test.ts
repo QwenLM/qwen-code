@@ -71,6 +71,108 @@ describe('HTTP Managed Session store', () => {
     );
   });
 
+  it('publishes bounded tool output immediately under the original writer grant', async () => {
+    const server = new FakeManagedSessionStore();
+    let publication: Record<string, unknown> | undefined;
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://session-store.test',
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn: async (input, init) => {
+        if (!requestUrl(input).endsWith('/tool-results:publish'))
+          return server.fetch(input, init);
+        expect(
+          new Headers(init?.headers).get('X-Qwen-Managed-Writer-Token'),
+        ).toBe(TOKEN_A);
+        publication = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        const { resourceId, kind, schemaVersion, byteLength, digest } =
+          publication;
+        return jsonResponse({
+          resourceId,
+          kind,
+          schemaVersion,
+          byteLength,
+          digest,
+        });
+      },
+    });
+    await stores.journalStore.open({ sessionKey: SESSION_KEY });
+    try {
+      const bytes = Buffer.alloc(1024 * 1024, 0x91);
+      const ref = await stores.toolResultResources.publish(
+        'managed-tool-result-content',
+        bytes,
+        'segment-id',
+      );
+      expect(publication).toMatchObject({
+        resourceId: 'segment-id',
+        workspaceId: SESSION_KEY.workspaceId,
+        writerId: 'harness-a',
+        writerGeneration: 1,
+        byteLength: bytes.length,
+        bytesBase64: bytes.toString('base64'),
+      });
+      expect(ref.byteLength).toBe(bytes.length);
+      expect(server.commits).toHaveLength(0);
+      await expect(
+        stores.resourceStore.publish('ordinary', bytes),
+      ).rejects.toThrow('inline limit');
+      await expect(
+        stores.toolResultResources.publish('ordinary', bytes),
+      ).rejects.toThrow('Unsupported');
+      await expect(
+        stores.toolResultResources.publish(
+          'managed-tool-result-content',
+          Buffer.alloc(bytes.length + 1),
+        ),
+      ).rejects.toThrow('Unsupported');
+      await stores.assertWritable();
+      expect(
+        server.fetch.mock.calls.some(([input]) =>
+          requestUrl(input).endsWith('/writers:renew'),
+        ),
+      ).toBe(true);
+    } finally {
+      await stores.close();
+    }
+  });
+
+  it('refuses a changed durable publication receipt rather than staging it', async () => {
+    const server = new FakeManagedSessionStore();
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://session-store.test',
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn: async (input, init) => {
+        if (!requestUrl(input).endsWith('/tool-results:publish'))
+          return server.fetch(input, init);
+        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return jsonResponse({
+          resourceId: 'other',
+          kind: body['kind'],
+          schemaVersion: 1,
+          byteLength: body['byteLength'],
+          digest: body['digest'],
+        });
+      },
+    });
+    await stores.journalStore.open({ sessionKey: SESSION_KEY });
+    try {
+      await expect(
+        stores.toolResultResources.publish(
+          'managed-tool-result-content',
+          Buffer.from('bytes'),
+          'original',
+        ),
+      ).rejects.toThrow('different metadata');
+      expect(server.commits).toHaveLength(0);
+    } finally {
+      await stores.close();
+    }
+  });
+
   it('commits staged resources and restores without a local transcript', async () => {
     const server = new FakeManagedSessionStore();
     const runtimeBaseDir = await mkdtemp(
