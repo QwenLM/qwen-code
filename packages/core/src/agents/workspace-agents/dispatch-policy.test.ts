@@ -121,6 +121,26 @@ describe('decideDispatch', () => {
     ).toEqual({ kind: 'coalesce', runId: 'rn_1', into: 'running' });
   });
 
+  it('books a new run instead of coalescing into one that is finishing', () => {
+    // A `finishing` run already executed its close tool and only awaits the
+    // terminal write, so it cannot act on this message. This is the wake half
+    // of a discharged wait: `closeRun` mentions every unacknowledged waiter,
+    // including one still `finishing`, and stamps its obligation in the same
+    // transaction. Folding that mention into the dying run would leave the
+    // peer with no obligation and no run — a wakeup nobody receives. Claiming
+    // counts `finishing` against the agent's concurrency limit, so the fresh
+    // run still cannot start before the old one settles.
+    expect(
+      decideDispatch(
+        context({
+          thread: thread({
+            runs: [run({ status: 'finishing', closeKind: 'waiting' })],
+          }),
+        }),
+      ),
+    ).toEqual({ kind: 'dispatch' });
+  });
+
   it('still books when the agent is busy on another thread', () => {
     // Whether a queued run can start now is the dispatcher's call, not a rule.
     expect(decideDispatch(context({ agentQueuedElsewhere: 1 }))).toEqual({
