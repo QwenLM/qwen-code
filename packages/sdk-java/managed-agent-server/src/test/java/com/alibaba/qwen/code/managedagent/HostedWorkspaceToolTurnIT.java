@@ -83,9 +83,25 @@ class HostedWorkspaceToolTurnIT {
         }
     }
 
+    @Test
+    @Timeout(180)
+    void cancellationRequiresPhysicalSettlementOnMySql() throws Exception {
+        assertThat(System.getProperty("mysql.url")).as("FG6d requires -Dmysql.url").startsWith("jdbc:mysql:");
+        assertThat(System.getProperty("mysql.user")).as("FG6d requires -Dmysql.user").isNotBlank();
+        assertThat(System.getProperty("os.name").toLowerCase()).doesNotContain("windows");
+        List<String> cases = List.of("prepared", "running", "status-unavailable", "cancel-reply");
+        String selected = System.getProperty("qwen.fg6d.case");
+        if (selected != null) {
+            assertThat(cases).contains(selected);
+            cases = List.of(selected);
+        }
+        runDriver(cases, "cancellation");
+    }
+
     private void runDriver(List<String> cases, String driverName) throws Exception {
         boolean faults = !driverName.equals("workspace-tool-turn");
         boolean storeFaults = driverName.equals("store-failure");
+        boolean cancellations = driverName.equals("cancellation");
         Path cli = Path.of(System.getProperty("qwen.cli.entry", "../../../dist/cli.js")).toAbsolutePath().normalize();
         assertThat(cli).isRegularFile();
         String node = System.getProperty("node.executable");
@@ -129,7 +145,7 @@ class HostedWorkspaceToolTurnIT {
             JdbcTemplate jdbc = spring.getBean(JdbcTemplate.class);
             if (faults) {
                 var metadata = jdbc.queryForMap("SELECT VERSION() AS version, @@version_comment AS engine");
-                System.out.println((storeFaults ? "FG6B_DATABASE " : "FG6A_DATABASE ") + metadata);
+                System.out.println((cancellations ? "FG6D_DATABASE " : storeFaults ? "FG6B_DATABASE " : "FG6A_DATABASE ") + metadata);
                 assertThat(metadata.toString().toLowerCase()).containsAnyOf("mysql", "mariadb");
             }
             ManagedAgentStore store = spring.getBean(ManagedAgentStore.class);
@@ -175,6 +191,8 @@ class HostedWorkspaceToolTurnIT {
                         });
                 ReflectionTestUtils.setField(service, "transport", gated);
             }
+            HostedCancellationProbe cancellationProbe = cancellations
+                    ? new HostedCancellationProbe(jdbc, tenant, sessions, broker, gateServer) : null;
             gateServer.start();
             List<String> triggers = new ArrayList<>();
             try {
@@ -200,14 +218,16 @@ class HostedWorkspaceToolTurnIT {
                     assertThat(driver.waitFor(faults ? 130 : 270, TimeUnit.SECONDS)).as("Driver timeout: %s", Files.readString(log)).isTrue();
                     assertThat(driver.exitValue()).as("Driver output: %s", Files.readString(log)).isZero();
                     System.out.println(Files.readString(log));
-                    assertThat(Files.readString(log)).contains(storeFaults ? "HOSTED_STORE_FAILURES_OK"
+                    assertThat(Files.readString(log)).contains(cancellations ? "HOSTED_CANCELLATION_OK"
+                            : storeFaults ? "HOSTED_STORE_FAILURES_OK"
                             : faults ? "HOSTED_REPLY_LOSS_OK" : "HOSTED_WORKSPACE_TOOLS_OK");
                     JsonNode reports = faults ? new ObjectMapper().readTree(
                             Files.readString(temporary.resolve("driver.json.results"))) : null;
                     if (faults && cases.contains("status")) assertThat(statusGate.isDone()).isTrue();
                     for (int index = 0; index < workspaces.size(); index++) {
                         Path workspace = workspaces.get(index);
-                        if (faults) assertFaultLedger(jdbc, tenant, sessions.get(index), index, reports.get(index), storeFaults);
+                        if (cancellations) cancellationProbe.assertReport(sessions.get(index), reports.get(index));
+                        else if (faults) assertFaultLedger(jdbc, tenant, sessions.get(index), index, reports.get(index), storeFaults);
                         else if (index < 2) assertThat(Files.readString(workspace.resolve("child/proof.txt"))).isEqualTo("after");
                         assertThat(workspace.resolve("proof.txt")).doesNotExist();
                     }
@@ -239,6 +259,7 @@ class HostedWorkspaceToolTurnIT {
             } finally {
                 statusGate.complete(null);
                 gateServer.stop(0);
+                if (cancellationProbe != null) cancellationProbe.close();
                 RuntimeException cleanupFailure = null;
                 for (String trigger : triggers) {
                     try {

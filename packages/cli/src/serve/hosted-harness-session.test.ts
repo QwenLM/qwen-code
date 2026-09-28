@@ -630,6 +630,8 @@ describe('Hosted Harness no-tool session', () => {
       .set('X-Qwen-Client-Id', clientId)
       .send({ prompt, promptId: PROMPT_ID, payloadDigest })
       .expect(202);
+    // The default 1s waitFor timeout races this turn's durable writes on
+    // contended CI runners; the assertions are unchanged.
     await vi.waitFor(
       async () => {
         const status = await headers(
