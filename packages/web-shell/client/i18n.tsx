@@ -1425,6 +1425,8 @@ const EN: Messages = {
     'This workspace may have been removed or the link is no longer valid.',
   'workspace.loadFailedDescription':
     'The workspace service could not be reached. Check the daemon and try again.',
+  'workspace.loadFailedPreAuthHost':
+    'The daemon rejected the request Host header in a pre-auth security check. If you connect through a forwarded port (for example VS Code Remote-SSH or WSL port forwarding), make sure it forwards to the port the daemon actually listens on. If no port forwarding is involved, this may be a blocked cross-origin probe.',
   // Scheduled tasks page
   'scheduledTasks.title': 'Scheduled Tasks',
   'scheduledTasks.subtitle':
@@ -5495,6 +5497,8 @@ const ZH: Messages = {
   'workspace.notFoundDescription': '此工作区可能已被移除，或链接已经失效。',
   'workspace.loadFailedDescription':
     '无法连接工作区服务，请检查守护进程后重试。',
+  'workspace.loadFailedPreAuthHost':
+    '守护进程在鉴权前的安全检查中拒绝了请求的 Host 头。如果你通过转发端口连接（例如 VS Code Remote-SSH 或 WSL 端口转发），请确认转发目标是守护进程实际监听的端口；若未使用端口转发，这可能是被拦截的跨源探测请求。',
   // 定时任务页面
   'scheduledTasks.title': '定时任务',
   'scheduledTasks.subtitle': '按计划自动执行任务，也可随时手动触发。',

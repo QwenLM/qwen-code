@@ -13,6 +13,7 @@ import {
   type DaemonStandaloneSessionSummary,
   type DaemonWorkspaceCapability,
 } from '@qwen-code/sdk/daemon';
+import { isDaemonPreAuthInvalidHostError } from '../daemon/preAuthHostError.js';
 import { App, type WebShellProps } from '../App';
 import {
   WebShellNavigationBoundary,
@@ -40,6 +41,23 @@ function surfaceLanguage(
   language: WebShellProps['language'],
 ): WebShellLanguage {
   return normalizeLanguage(language);
+}
+
+// The workspace load failure stays generic except for the daemon's pre-auth
+// Host gate rejection (403 + `Invalid Host header`), which port-forwarded
+// windows hit by construction — that one shape gets extra port-forwarding
+// guidance while the original daemon message stays appended for detail.
+function workspaceLoadErrorDescription(
+  error: Error | undefined,
+  t: ReturnType<typeof getTranslator>,
+): string {
+  if (!error?.message) {
+    return t('workspace.loadFailedDescription');
+  }
+  const guidance = isDaemonPreAuthInvalidHostError(error)
+    ? ` ${t('workspace.loadFailedPreAuthHost')}`
+    : '';
+  return `${t('workspace.loadFailedDescription')}${guidance} (${error.message})`;
 }
 
 function withChrome(
@@ -325,11 +343,7 @@ function WorkspaceSessionProviderWorkspace({
     return (
       <WorkspaceUnavailableState
         title={t('workspace.loadFailed')}
-        description={
-          workspace.error?.message
-            ? `${t('workspace.loadFailedDescription')} (${workspace.error.message})`
-            : t('workspace.loadFailedDescription')
-        }
+        description={workspaceLoadErrorDescription(workspace.error, t)}
         actionLabel={t('common.retry')}
         theme={surfaceTheme(webShellProps.theme)}
         icon={<WifiOffIcon />}
