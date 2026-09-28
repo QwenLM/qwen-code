@@ -71,12 +71,13 @@ export type AgentSessionBridge = Pick<
   Partial<
     Pick<
       AcpSessionBridge,
-      | 'updateSessionMetadata'
-      | 'getSessionTurnStatus'
-      | 'subscribeEvents'
-      | 'closeSession'
+      'updateSessionMetadata' | 'getSessionTurnStatus' | 'subscribeEvents'
     >
-  >;
+  > & {
+    // Only awaited, so any settled promise will do; the agent-host bridge
+    // declares `Promise<unknown>`.
+    closeSession?(sessionId: string): Promise<unknown>;
+  };
 
 export interface CreateSessionDispatchPortInput {
   bridge: AgentSessionBridge;
