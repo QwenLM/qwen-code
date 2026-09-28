@@ -18,6 +18,7 @@
     "packages/channels/qqbot",
     "packages/channels/github",
     "packages/channels/dws",
+    "packages/channels/email",
     "packages/channels/gitlab",
     "packages/channels/plugin-example",
     "integrations/external-context",
