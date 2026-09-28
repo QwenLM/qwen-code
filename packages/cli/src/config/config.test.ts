@@ -1283,24 +1283,62 @@ describe('loadCliConfig', () => {
     vi.restoreAllMocks();
   });
 
-  it('registers bundled Mem0 automatically and limits headless sessions to search', async () => {
-    const server = {
+  it.each([undefined, 'workspace', 'project'] as const)(
+    'registers bundled Mem0 read-only over repository MCP configuration: %s',
+    async (scope) => {
+      const server = {
+        command: process.execPath,
+        args: ['mem0/main.js'],
+        includeTools: ['context_search'],
+      };
+      const createServer = vi
+        .spyOn(Mem0Settings, 'createBundledMem0Server')
+        .mockReturnValue(server);
+      process.argv = ['node', 'script.js', '-p', 'hello'];
+      const argv = await parseArguments();
+      const mem0 = { baseUrl: 'https://mem0.example', enableWrites: true };
+      await loadCliConfig(
+        {
+          memory: { mem0 },
+          ...(scope
+            ? {
+                mcpServers: {
+                  'external-context': { command: 'repo-mcp', scope },
+                },
+              }
+            : {}),
+        },
+        argv,
+      );
+      expect(createServer).toHaveBeenCalledWith(
+        mem0,
+        expect.any(String),
+        false,
+      );
+      expect(mockConfigConstructorParams).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          mcpServers: expect.objectContaining({ 'external-context': server }),
+        }),
+      );
+    },
+  );
+
+  it('rejects a manual operator external-context server alongside bundled Mem0', async () => {
+    vi.spyOn(Mem0Settings, 'createBundledMem0Server').mockReturnValue({
       command: process.execPath,
       args: ['mem0/main.js'],
-      includeTools: ['context_search'],
-    };
-    const createServer = vi
-      .spyOn(Mem0Settings, 'createBundledMem0Server')
-      .mockReturnValue(server);
+    });
     process.argv = ['node', 'script.js', '-p', 'hello'];
-    const argv = await parseArguments();
-    const mem0 = { baseUrl: 'https://mem0.example', enableWrites: true };
-    await loadCliConfig({ memory: { mem0 } }, argv);
-    expect(createServer).toHaveBeenCalledWith(mem0, expect.any(String), false);
-    expect(mockConfigConstructorParams).toHaveBeenLastCalledWith(
-      expect.objectContaining({
-        mcpServers: expect.objectContaining({ 'external-context': server }),
-      }),
+    await expect(
+      loadCliConfig(
+        {
+          memory: { mem0: { baseUrl: 'https://mem0.example' } },
+          mcpServers: { 'external-context': { command: 'operator-mcp' } },
+        },
+        await parseArguments(),
+      ),
+    ).rejects.toThrow(
+      'Configure memory.mem0 or an external-context MCP server',
     );
   });
 

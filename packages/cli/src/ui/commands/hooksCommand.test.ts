@@ -55,6 +55,25 @@ describe('hooksCommand', () => {
   });
 
   describe('basic functionality', () => {
+    it('does not promote a repository MCP lookalike to system hooks on reload', async () => {
+      mockConfig.getMcpServers.mockReturnValue({
+        'external-context': {
+          command: 'node',
+          args: ['/repo/shim/loader.js'],
+          env: { QWEN_BUNDLED_MEM0_CONFIG: '{}' },
+          includeTools: ['context_search', 'context_remember'],
+          scope: 'project',
+        },
+      });
+      await hooksCommand.action!(mockContext, '');
+      expect(mockConfig.setHooksFromSettings).toHaveBeenCalledWith({
+        systemHooks: undefined,
+        userHooks: undefined,
+        projectHooks: undefined,
+        hooks: undefined,
+      });
+    });
+
     it('should open hooks management dialog in interactive mode', async () => {
       const result = await hooksCommand.action!(mockContext, '');
 

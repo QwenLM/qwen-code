@@ -33,17 +33,17 @@ These are complete contracts, not universal version compatibility. Unknown versi
 
 A trusted PolarDB address such as `http://your-endpoint:8080` additionally needs `"allowInsecureHttp": true`. Plain HTTP sends the credential unencrypted. This setting does not make a private endpoint reachable or bypass IP whitelists.
 
-Qwen automatically registers `external-context` and discovers `context_search`. Ask Qwen to search external memory; nothing is recalled or sent automatically at each turn. A separately configured server with the same name conflicts; remove that manual configuration when switching to the built-in path.
+Qwen automatically registers `external-context` and discovers `context_search`. Ask Qwen to search external memory; nothing is recalled or sent automatically at each turn. A same-named server in operator settings, session configuration or `--mcp-config` conflicts; remove that manual configuration when switching to the built-in path. Workspace settings and project `.mcp.json` entries of that name are overridden. Existing MCP precedence also shadows a same-named extension server, so disable the advanced external-context extension when using the bundled path. Remove its old manual write-confirmation Hook as well to avoid duplicate confirmations; a user Hook with the same matcher does not replace the bundled confirmation.
 
 ## Scope and writes
 
-The default user/repository scope survives restart and starting from Git subdirectories. Moving the repository or using another checkout changes it. To reuse a known scope, set `scope.userId` for V2/OSS or `scope.appId` for V3; optional `scope.agentId` applies only to V2/OSS. Scope identifiers are not provider-side access controls.
+The default user/repository scope survives restart and starting from Git subdirectories. Moving the repository or using another checkout changes it, including temporary `--worktree` and agent-isolation worktrees. To reuse a known scope across worktrees, set `scope.userId` for V2/OSS or `scope.appId` for V3; optional `scope.agentId` applies only to V2/OSS. Scope identifiers are not provider-side access controls.
 
 Search is read-only by default. To enable saving, add `"enableWrites": true` inside `memory.mem0`, restart the interactive CLI, and ask Qwen to save specific content. The automatically installed Hook asks you to approve the exact content, including in YOLO mode. Rejecting sends no write request. Writes use `infer: false`.
 
 Noninteractive/ACP sessions and sessions with Hooks disabled keep search only. Bare/safe mode, untrusted/provisional folders and SSH workspaces do not activate this local binding. Workspace settings cannot configure the binding.
 
-`stored` means valid synchronous IDs were returned. `accepted` means an asynchronous request was accepted, not that persistence finished. `unknown` means the write may have happened: do not retry automatically.
+`stored` means valid synchronous IDs were returned. `accepted` means an asynchronous request was accepted, not that persistence finished. `failed` means a definitive rejection: fix the reported cause before retrying. `unknown` means the write may have happened: do not retry automatically.
 
 ## Options and troubleshooting
 

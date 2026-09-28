@@ -151,6 +151,8 @@ describe('bundled Mem0 settings', () => {
 
   it.each([
     { baseUrl: 'http://mem0.example' },
+    { baseUrl: 'https://mem0.example/proxy%20prefix' },
+    { baseUrl: 'https://mem0.example/proxy//prefix' },
     { baseUrl: 'https://secret@mem0.example' },
     { baseUrl: 'https://mem0.example?key=secret' },
     { baseUrl: 'https://mem0.example', protocol: 'mem0-v4' },
@@ -184,6 +186,28 @@ describe('bundled Mem0 settings', () => {
     expect(
       JSON.parse(server.env!['QWEN_BUNDLED_MEM0_CONFIG']).provider.scope,
     ).toEqual({ userId: 'chosen-user', agentId: 'chosen-agent' });
+  });
+
+  it.each(['project', undefined] as const)(
+    'does not turn a lookalike MCP server into a bundled system hook: %s',
+    (scope) => {
+      const server = createBundledMem0Server(
+        { baseUrl: 'https://mem0.example', enableWrites: true },
+        process.cwd(),
+      );
+      expect(
+        bundledMem0Hooks({ ...server, args: ['/repo/shim/loader.js'], scope }),
+      ).toBeUndefined();
+    },
+  );
+
+  it('identifies the invalid settings field', () => {
+    expect(() =>
+      createBundledMem0Server(
+        { baseUrl: 'https://mem0.example', timeoutMs: 30001 },
+        process.cwd(),
+      ),
+    ).toThrow('memory.mem0 is invalid: timeoutMs:');
   });
 
   it('uses the same default scope from the repository root and its subdirectories', () => {

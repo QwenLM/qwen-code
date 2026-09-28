@@ -47,11 +47,11 @@ Legacy IDs `mem0-platform-v3` and `mem0-oss-rest-2026-08` remain aliases. `aliyu
 
 ## Binding and lifecycle
 
-Only user and system settings may configure the binding. Workspace settings cannot enable it, redirect its endpoint, change scope, or erase an operator binding by replacing the parent `memory` field.
+Only user, system and system-defaults settings may configure the binding. Workspace settings cannot enable it, redirect its endpoint, change scope, or erase an operator binding by replacing the parent `memory` field.
 
-The CLI creates an `external-context` stdio MCP server running its shipped `mem0/main.js`. It exposes `context_search` by default and installs no auto-recall hooks. Explicit settings/session/CLI servers named `external-context` produce a configuration conflict; the built-in binding takes precedence over a project `.mcp.json` entry.
+The CLI creates an `external-context` stdio MCP server running its shipped `mem0/main.js`. It exposes `context_search` by default and installs no auto-recall hooks. Explicit operator settings/session/CLI servers named `external-context` produce a configuration conflict; the built-in binding takes precedence over workspace settings and project `.mcp.json` entries. Existing MCP precedence also shadows a same-named extension server; disable the advanced external-context extension when selecting the bundled path. Remove its obsolete manual confirmation Hook too, or both confirmations may run. A user Hook with the same matcher does not replace the mandatory bundled confirmation.
 
-Default scope: `qwen-` plus the first 32 hex characters of SHA-256 over local home directory, newline, and canonical Git root (canonical current directory outside Git). Restarts and Git subdirectories retain scope; a different checkout or moved repository gets another. The hash is an identifier, not provider-side authorization. To reuse existing memory or intentionally share scope, set `scope.userId` (V2/OSS) or `scope.appId` (V3), and optional `scope.agentId` where supported.
+Default scope: `qwen-` plus the first 32 hex characters of SHA-256 over local home directory, newline, and canonical Git root (canonical current directory outside Git). Restarts and Git subdirectories retain scope; a different checkout or moved repository gets another, including temporary `--worktree` and agent-isolation worktrees. The hash is an identifier, not provider-side authorization. To reuse existing memory or intentionally share scope across worktrees, set `scope.userId` (V2/OSS) or `scope.appId` (V3), and optional `scope.agentId` where supported.
 
 Bare, safe, untrusted, provisional and SSH-workspace sessions do not activate this local binding. Noninteractive/ACP sessions and sessions with Hooks disabled retain search but omit writes even when enabled in settings. Restart reloads settings; `/hooks` reload retains the active binding's confirmation Hook.
 
@@ -59,7 +59,7 @@ Bare, safe, untrusted, provisional and SSH-workspace sessions do not activate th
 
 `"enableWrites": true` exposes `context_remember` in interactive CLI sessions with Hooks enabled. Qwen installs the existing exact-content confirmation Hook automatically. Normal MCP permissions still apply; YOLO retains content confirmation. Cancellation issues no write request. Writes send `infer: false` and only approved content.
 
-Valid synchronous IDs mean `stored`; a V3 accepted event means `accepted`, not completed persistence. Ambiguous transport/response failures are `unknown` and must not automatically retry. Confirmation is an application UX safeguard, not enforceable isolation against a local operator who can alter Hooks or call the service directly.
+Valid synchronous IDs mean `stored`; a V3 accepted event means `accepted`, not completed persistence. A definitive rejection is `failed`; fix the reported cause before retrying. Ambiguous transport/response failures are `unknown` and must not automatically retry. Confirmation is an application UX safeguard, not enforceable isolation against a local operator who can alter Hooks or call the service directly.
 
 `timeoutMs` defaults to 5000, bounded to 1–30000. Missing credentials/runtime, unsupported configuration and service errors remain visible; no alternate provider is selected.
 
@@ -73,7 +73,7 @@ The generic dialect integration remains an advanced path. This change does not m
 
 1. Unit checks: generated endpoint/protocol/scope, `envKey`/legacy-alias compatibility and conflicts, credential nonserialization, read-only defaults, interactive-only writes, Hook composition and workspace isolation.
 2. Packaging: both runtime files required for npm/standalone; a packaged stdio client discovers tools and searches without a separately published package.
-3. Controlled-provider interactive checks: V3/OSS approval, cancellation with no HTTP write, YOLO content confirmation. OSS uses `memory.mem0.envKey` with its credential defined only in `settings.env`, not a shell export or hand-authored MCP/Hook configuration.
+3. Controlled-provider interactive checks: V3/OSS approval, cancellation with no HTTP write, YOLO content confirmation. OSS uses `memory.mem0.envKey` with its credential defined only in `settings.env`, not a shell export or hand-authored MCP/Hook configuration. These interactive scenarios run locally and in the release lane, not in PR CI; green PR checks alone do not prove this interaction.
 4. Separate live PolarDB acceptance: auth, slash behavior, `limit`, approved write IDs, restart/search with identical scope, targeted cleanup. Never print or commit credentials.
 
 Until step 4 succeeds, report packaged/controlled-provider validation, not real PolarDB end-to-end validation. External gates are credentials, reachable/whitelisted access, and inclusion in a released main CLI version; no standalone Mem0 npm release is needed.

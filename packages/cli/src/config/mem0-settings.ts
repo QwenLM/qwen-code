@@ -24,7 +24,9 @@ const protocolIds = [
 ] as const;
 
 const scopeValue = z.string().trim().min(1).max(256);
-const credentialEnvName = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/u);
+const credentialEnvName = z
+  .string()
+  .regex(/^[A-Za-z_][A-Za-z0-9_]*$/u, 'Must be an environment variable name.');
 const mem0SettingsSchema = z
   .object({
     baseUrl: z.string().url(),
@@ -55,7 +57,10 @@ export function createBundledMem0Server(
   const parsed = mem0SettingsSchema.safeParse(value);
   if (!parsed.success) {
     throw new Error(
-      'memory.mem0 is invalid. Configure baseUrl and a supported protocol.',
+      'memory.mem0 is invalid: ' +
+        parsed.error.issues
+          .map((issue) => `${issue.path.join('.') || 'mem0'}: ${issue.message}`)
+          .join('; '),
     );
   }
   const settings = parsed.data;
@@ -82,6 +87,12 @@ export function createBundledMem0Server(
     throw new Error('memory.mem0.baseUrl is invalid.');
   }
   const url = new URL(settings.baseUrl);
+  const basePath = url.pathname === '/' ? '' : url.pathname.replace(/\/$/u, '');
+  if (basePath.includes('%') || basePath.includes('//')) {
+    throw new Error(
+      'memory.mem0.baseUrl contains an unsupported proxy prefix.',
+    );
+  }
   if (
     url.username ||
     url.password ||
@@ -127,7 +138,7 @@ export function createBundledMem0Server(
       preset: settings.protocol,
       endpoint: {
         origin: url.origin,
-        basePath: url.pathname === '/' ? '' : url.pathname.replace(/\/$/u, ''),
+        basePath,
         allowInsecureHttp: settings.allowInsecureHttp,
       },
       credentialEnv: envKey,
@@ -176,8 +187,11 @@ export function bundledMem0Hooks(
   if (
     !server?.env?.['QWEN_BUNDLED_MEM0_CONFIG'] ||
     !server.includeTools?.includes('context_remember') ||
-    !server.command ||
-    !server.args?.[0]
+    server.scope !== undefined ||
+    server.extensionName !== undefined ||
+    server.command !== process.execPath ||
+    server.args?.length !== 1 ||
+    server.args[0] !== mem0RuntimePath()
   )
     return undefined;
   const hookPath = join(dirname(server.args[0]), 'write-confirmation.js');

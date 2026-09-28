@@ -2375,8 +2375,8 @@ export async function loadCliConfig(
   // and compute which gated (project/workspace) servers are still pending
   // approval (#4615), so the discovery layer can skip them with no connection
   // side effect. Loading `.mcp.json` is a pure read.
-  // Top tier = session-injected (ACP/IDE) servers plus `--mcp-config`; CLI wins
-  // over the session source on a name clash. Both sit above settings/`.mcp.json`
+  // Top tier = bundled Mem0, session-injected (ACP/IDE), and `--mcp-config`.
+  // CLI wins over the session source. All sit above settings/`.mcp.json`
   // and are never gated (#4615).
   const cliMcpServers = parseMcpConfig(argv.mcpConfig);
   const mem0Server =
@@ -2400,9 +2400,12 @@ export async function loadCliConfig(
           ...(cliMcpServers ?? {}),
         }
       : undefined;
+  const configuredExternalContext = settings.mcpServers?.['external-context'];
   if (
     mem0Server &&
-    (settings.mcpServers?.['external-context'] ||
+    ((configuredExternalContext &&
+      configuredExternalContext.scope !== 'workspace' &&
+      configuredExternalContext.scope !== 'project') ||
       sessionMcpServers?.['external-context'] ||
       cliMcpServers?.['external-context'])
   ) {
@@ -2412,8 +2415,9 @@ export async function loadCliConfig(
   }
   // Bare/safe mode still drop settings.mcpServers/`.mcp.json` entirely (local,
   // ambient, file-sourced state they're meant to distrust) — but top-tier
-  // servers are an explicit, per-invocation argument from the caller (ACP
-  // `session/new`, `--mcp-config`), not ambient local state, so they survive.
+  // session/CLI servers are explicit, per-invocation arguments from the caller
+  // (ACP `session/new`, `--mcp-config`), not ambient local state, so they survive.
+  // Bundled Mem0 is excluded from these modes by its gate above.
   const mcpServers =
     bareMode || safeMode
       ? { ...topTierMcpServers }
