@@ -248,8 +248,21 @@ describe('getInitialChatHistory', () => {
             : null,
         ),
       // `getAllToolNames()` unions factory registrations, so the Skill tool is
-      // listed here whether it is eager or demoted behind `tool_search`.
-      getAllToolNames: vi.fn().mockReturnValue([ToolNames.SKILL]),
+      // listed here whether it is eager or demoted behind `tool_search`. It has
+      // to list the two bridge names the `getTool` stub above answers for as
+      // well: `getTool()` reads `this.tools`, whose keys are a subset of the
+      // `this.tools` + `this.factories` union `getAllToolNames()` returns
+      // (tool-registry.ts:1243 vs :1203-1206), so a tool that answers one read
+      // cannot be missing from the other. The deferred-reminder cases below
+      // depend on that bridge presence, which `buildDeferredToolsReminder`
+      // checks through `getTool()`.
+      getAllToolNames: vi
+        .fn()
+        .mockReturnValue([
+          ToolNames.SKILL,
+          ToolNames.TOOL_SEARCH,
+          ToolNames.TOOL_CALL,
+        ]),
     };
     mockConfig = {
       getSkipStartupContext: vi.fn().mockReturnValue(false),
@@ -437,6 +450,15 @@ describe('getInitialChatHistory', () => {
         { name: ToolNames.READ_FILE },
         { name: ToolNames.GREP },
       ]);
+      // ...and absent from `getTool()` too, which reads `this.tools` — a subset
+      // of the union `getAllToolNames()` returns (tool-registry.ts:1243 vs
+      // :1203-1206), so a registry that does not list Skill cannot answer for
+      // it. Dropping the two bridge halves with it changes no reminder here:
+      // `getDeferredToolSummary()` is empty in this fixture, and
+      // `buildDeferredToolsReminder` returns null before it checks them.
+      mockToolRegistry.getTool.mockImplementation((name: string) =>
+        name === ToolNames.READ_FILE || name === ToolNames.GREP ? {} : null,
+      );
 
       const [history, snapshotEntries] = await getInitialChatHistory(
         mockConfig as Config,
@@ -459,6 +481,11 @@ describe('getInitialChatHistory', () => {
         { name: ToolNames.READ_FILE },
         { name: ToolNames.GREP },
       ]);
+      // Same three-read coherence as the case above: excluded means `getTool()`
+      // cannot answer for Skill either.
+      mockToolRegistry.getTool.mockImplementation((name: string) =>
+        name === ToolNames.READ_FILE || name === ToolNames.GREP ? {} : null,
+      );
       vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
         availableSkills: [],
         pendingConditionalSkillNames: new Set(),
@@ -633,7 +660,13 @@ describe('stripStartupContext', () => {
               ? {}
               : null,
           ),
-        getAllToolNames: vi.fn().mockReturnValue([ToolNames.SKILL]),
+        getAllToolNames: vi
+          .fn()
+          .mockReturnValue([
+            ToolNames.SKILL,
+            ToolNames.TOOL_SEARCH,
+            ToolNames.TOOL_CALL,
+          ]),
       }),
       getWorkspaceContext: vi.fn().mockReturnValue({
         getDirectories: vi.fn().mockReturnValue(['/test/dir']),
