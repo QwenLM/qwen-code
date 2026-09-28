@@ -7328,6 +7328,46 @@ hello
       expect(handle.fastDeliveredRefs).toEqual(new Set(['user:pending.md']));
     });
 
+    it('keeps router_delivered true when a prepared delivery is discarded', async () => {
+      // The discard clone re-emits the prepared event under
+      // `no_safe_delivery_point`. Because the router block was prepared but
+      // never committed it will be re-sent next turn, so the clone has to
+      // carry the flag — omitting it lets the constructor's `?? false` report
+      // the opposite of the truth on exactly this path.
+      const fast = {
+        treeSnapshot: fastTreeSnapshot('discarded-router-revision'),
+        focusedPrompt: '## Memory focus for this turn\n\nDiscarded focus',
+        prompt: '## Memory focus for this turn\n\nDiscarded focus',
+        selectedDocs: [fastDoc('/m/discarded.md', '- discarded')],
+        strategy: 'heuristic' as const,
+      };
+      client['pendingMemoryPrefetch'] = {
+        promise: new Promise<never>(() => {}),
+        settledAt: null,
+        result: null,
+        consumed: false,
+        terminalLogged: false,
+        fastResultRef: { current: fast },
+        fastDelivered: false,
+        fastDeliveredRefs: new Set<string>(),
+        firedAt: Date.now(),
+        controller: new AbortController(),
+      };
+      vi.mocked(logMemoryRecallDelivery).mockClear();
+
+      const delivery = await client.consumeManagedAutoMemoryRecall('initial');
+      expect(delivery?.deliveryEvent?.router_delivered).toBe(true);
+
+      client.discardManagedAutoMemoryRecallDelivery(delivery);
+
+      const discarded = vi
+        .mocked(logMemoryRecallDelivery)
+        .mock.calls.map(([, event]) => event)
+        .filter((event) => event.discard_reason === 'no_safe_delivery_point');
+      expect(discarded).toHaveLength(1);
+      expect(discarded[0]?.router_delivered).toBe(true);
+    });
+
     it('re-renders a fast subtree with current body residency', async () => {
       const bodyPresentVersions = new Map([['user:resident.md', 1]]);
       mockMemoryManager.getBodyPresentVersionsInHistory.mockReturnValue(

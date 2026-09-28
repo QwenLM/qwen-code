@@ -618,6 +618,34 @@ describe('managed auto-memory dream', () => {
     expect(result.systemMessage).not.toContain('migration is pending');
   });
 
+  it('runs a manual dream when the metadata migration has stalled', async () => {
+    // A stalled migration never drains its candidates, so a manual gate that
+    // ignores the stall refuses /dream for the life of the process while
+    // pointing the user at a migration that already gave up — the dead end the
+    // gate's own comment says it exists to avoid. The scheduled gates in
+    // MemoryManager carry this exemption; the manual one has to match.
+    const memoryRoot = getAutoMemoryRoot(projectRoot);
+    const memoryFile = path.join(memoryRoot, 'project', 'legacy.md');
+    await fs.mkdir(path.dirname(memoryFile), { recursive: true });
+    await fs.writeFile(memoryFile, '---\ntype: project\n---\nLegacy fact.\n');
+    vi.mocked(planManagedAutoMemoryDreamByAgent).mockResolvedValue({
+      status: 'completed',
+      filesTouched: [],
+      filesWritten: [],
+    });
+
+    const result = await runManagedAutoMemoryDream(
+      projectRoot,
+      new Date('2026-04-02T00:00:00.000Z'),
+      mockConfig,
+      undefined,
+      { trigger: 'manual', recordMetadata: true, migrationStalled: true },
+    );
+
+    expect(planManagedAutoMemoryDreamByAgent).toHaveBeenCalled();
+    expect(result.systemMessage).not.toContain('migration is pending');
+  });
+
   it('records the manual-run session in dream metadata when sessionId is passed', async () => {
     // The manual /dream path passes the session so the scheduler's
     // same-session dedupe suppresses a redundant auto-dream right after.

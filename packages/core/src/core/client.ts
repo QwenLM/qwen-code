@@ -1310,6 +1310,12 @@ export class LlmClient {
         strategy: event.strategy,
         docs_selected: event.docs_selected,
         latency_ms: event.latency_ms,
+        // A discard means the prepared router block never committed and will
+        // be re-sent next turn, so the clone has to carry what the prepared
+        // event measured. Dropping it would let the constructor's `?? false`
+        // record "not router-delivered" on exactly the path this attribute
+        // exists to distinguish.
+        router_delivered: event.router_delivered,
       }),
     );
   }

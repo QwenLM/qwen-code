@@ -1158,6 +1158,21 @@ export class MemoryManager {
     return level === 'hard' || level === 'critical';
   }
 
+  /**
+   * Whether the project-scope metadata migration has given up for this
+   * process. Every gate that pauses consolidation on a pending migration has
+   * to consult this — a stalled migration never drains its candidates, so a
+   * gate that ignores the stall would suppress consolidation forever. Shared
+   * so the scheduled and manual paths cannot disagree on the key or the limit.
+   */
+  private isProjectMigrationStalled(projectRoot: string): boolean {
+    return (
+      (this.migrationStallCountByDomain.get(
+        `project:${getAutoMemoryRoot(projectRoot)}`,
+      ) ?? 0) >= MIGRATION_STALL_LIMIT
+    );
+  }
+
   private async runExtract(
     taskId: string,
     params: ScheduleExtractParams,
@@ -1442,10 +1457,9 @@ export class MemoryManager {
     // scheduled, so its candidates never drain and the stall counter never
     // advances. The enabled check comes first so a disabled feature does not
     // even pay for the candidate scan.
-    const projectMigrationStalled =
-      (this.migrationStallCountByDomain.get(
-        `project:${getAutoMemoryRoot(params.projectRoot)}`,
-      ) ?? 0) >= MIGRATION_STALL_LIMIT;
+    const projectMigrationStalled = this.isProjectMigrationStalled(
+      params.projectRoot,
+    );
     if (
       params.config.getStructuredMemoryRecallEnabled() &&
       !projectMigrationStalled &&
@@ -1458,7 +1472,19 @@ export class MemoryManager {
           ).map((root) =>
             scanMemoryMetadataMigrationCandidates(root, 'project'),
           ),
-        )
+        ).catch((error: unknown) => {
+          // A root that cannot be scanned (a symlinked or unreadable
+          // .qwen/memory, for instance) cannot be migrated either, so fail
+          // open. Rejecting here would propagate before the task record and
+          // telemetry exist, and because the stall counter only advances on a
+          // completed run the gate would re-fire — and re-reject — on every
+          // user turn for the life of the process.
+          debugLogger.warn(
+            'Skipping dream migration gate: candidate scan failed.',
+            error,
+          );
+          return [];
+        })
       ).some((candidates) => candidates.length > 0)
     ) {
       return { status: 'skipped', skippedReason: 'migration_pending' };
@@ -2421,7 +2447,16 @@ export class MemoryManager {
         now,
         config,
         undefined,
-        { trigger: 'manual', recordMetadata: true, sessionId },
+        {
+          trigger: 'manual',
+          recordMetadata: true,
+          sessionId,
+          // The manual gate in dream.ts cannot read the stall counter itself;
+          // without this it would keep refusing /dream for the life of the
+          // process once the migration gave up, while telling the user a
+          // migration is pending.
+          migrationStalled: this.isProjectMigrationStalled(projectRoot),
+        },
       );
     } finally {
       // Mirror runDream's guarded release: letting a release failure

@@ -296,6 +296,11 @@ export async function runManagedAutoMemoryDream(
     // (lastDreamSessionId / recentSessionIdsSinceDream) suppresses a
     // redundant auto-dream right after, matching writeDreamManualRunToMetadata.
     sessionId?: string;
+    // Filled in by MemoryManager, which owns migrationStallCountByDomain. The
+    // manual migration gate below has to honour the same stall exemption the
+    // scheduled gates do, or a migration that gave up for this session would
+    // keep refusing /dream while pointing the user at it.
+    migrationStalled?: boolean;
   } = {},
 ): Promise<AutoMemoryDreamResult> {
   await ensureAutoMemoryScaffold(projectRoot, now);
@@ -309,6 +314,10 @@ export async function runManagedAutoMemoryDream(
 
   if (
     options.trigger === 'manual' &&
+    // A stalled migration (MIGRATION_STALL_LIMIT) never drains its candidates,
+    // so it must not suppress consolidation forever — the same exemption the
+    // scheduled project/user gates in MemoryManager carry.
+    !options.migrationStalled &&
     // In structured mode the migration this message points at can never be
     // scheduled (scheduleMetadataMigration short-circuits 'complete') and
     // the mode cannot regress to legacy inside the process, so the gate's

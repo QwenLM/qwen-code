@@ -128,8 +128,10 @@ describe('managed auto-memory indexer', () => {
   });
 
   it('refuses to persist a partial index when a subdirectory cannot be read', async () => {
-    // chmod 000 does not block root, where this scenario cannot run.
-    if (typeof process.getuid === 'function' && process.getuid() === 0) {
+    // chmod 000 blocks neither root nor Windows, where a directory chmod only
+    // toggles FILE_ATTRIBUTE_READONLY and so cannot make a directory
+    // unreadable — the rebuild would resolve and the rejects assertion red.
+    if (process.platform === 'win32' || process.getuid?.() === 0) {
       return;
     }
     // A partially walked root must fail the rebuild loudly: the index is the

@@ -707,6 +707,54 @@ describe('MemoryManager', () => {
       await user.promise;
     });
 
+    it('still schedules dream when the migration candidate scan fails', async () => {
+      // A trusted repo that ships .qwen/memory as a symlink makes
+      // resolveTrustedMemoryRoot throw inside the scan. The gate has to fail
+      // open — a root that cannot be scanned cannot be migrated either —
+      // because rejecting escapes before the task record and telemetry exist,
+      // and the stall counter only advances on a completed run, so the gate
+      // would re-fire and re-reject on every user turn for the whole process.
+      await writeLegacy(getAutoMemoryRoot(projectRoot), 'project.md');
+      vi.spyOn(
+        metadataMigration,
+        'scanMemoryMetadataMigrationCandidates',
+      ).mockRejectedValue(
+        new Error('Refusing symlinked memory root or non-directory'),
+      );
+      vi.mocked(runManagedAutoMemoryDream).mockResolvedValue({
+        touchedTopics: [],
+        createdEntries: 0,
+        updatedEntries: 0,
+        deletedEntries: 0,
+        dedupedEntries: 0,
+        splitEntries: 0,
+        keywordBackfilled: 0,
+        systemMessage: undefined,
+      });
+      const manager = new MemoryManager(async () => [
+        's1',
+        's2',
+        's3',
+        's4',
+        's5',
+        's6',
+      ]);
+      const config = makeMockConfig();
+
+      const result = await manager.scheduleDream({
+        projectRoot,
+        sessionId: 's6',
+        config,
+        minHoursBetweenDreams: 0,
+        minSessionsBetweenDreams: 1,
+      });
+
+      expect(result.status).toBe('scheduled');
+      if (result.status === 'scheduled') {
+        await result.promise;
+      }
+    });
+
     it('stops rescheduling a migration that never makes progress', async () => {
       // A file the migration agent can never enrich must not spawn a forked
       // agent on every user turn: after a few consecutive non-progressing
@@ -778,6 +826,71 @@ describe('MemoryManager', () => {
       if (dream.status === 'scheduled') {
         await dream.promise;
       }
+    });
+
+    it('tells the manual dream gate that the migration has stalled', async () => {
+      // dream.ts owns the manual migration gate but cannot read the stall
+      // counter, so the manager has to hand it over. Without the flag a
+      // migration that gave up for this session leaves /dream and the daemon's
+      // workspaceMemoryDream RPC refused for the life of the process, while
+      // the skip message points the user at that same abandoned migration.
+      await writeLegacy(getAutoMemoryRoot(projectRoot), 'project.md');
+      const nonProgressing = {
+        filesScanned: 1,
+        legacyFiles: 1,
+        remainingLegacyFiles: 1,
+        attempted: 1,
+        committed: 0,
+        conflicts: 1,
+        failed: 0,
+        agentDurationMs: 1,
+        inputTokens: 1,
+        outputTokens: 1,
+        totalTokens: 2,
+      };
+      vi.spyOn(
+        metadataMigration,
+        'runMemoryMetadataMigration',
+      ).mockResolvedValue(nonProgressing);
+      const manager = new MemoryManager(async () => [
+        's1',
+        's2',
+        's3',
+        's4',
+        's5',
+        's6',
+      ]);
+      const config = makeMockConfig();
+      const params = { projectRoot, scope: 'project' as const, config };
+
+      for (let i = 0; i < 3; i++) {
+        const scheduled = await manager.scheduleMetadataMigration(params);
+        expect(scheduled.status).toBe('scheduled');
+        await scheduled.promise;
+      }
+
+      vi.mocked(runManagedAutoMemoryDream).mockResolvedValue({
+        touchedTopics: [],
+        createdEntries: 0,
+        updatedEntries: 0,
+        deletedEntries: 0,
+        dedupedEntries: 0,
+        splitEntries: 0,
+        keywordBackfilled: 0,
+        systemMessage: undefined,
+      });
+      await manager.runManualDream(projectRoot, config, 's6');
+
+      expect(runManagedAutoMemoryDream).toHaveBeenCalledWith(
+        projectRoot,
+        expect.any(Date),
+        config,
+        undefined,
+        expect.objectContaining({
+          trigger: 'manual',
+          migrationStalled: true,
+        }),
+      );
     });
 
     it('does not pause project dream for user-scope legacy files', async () => {
@@ -2057,7 +2170,12 @@ describe('MemoryManager', () => {
         expect.any(Date),
         config,
         undefined,
-        { trigger: 'manual', recordMetadata: true, sessionId: 'sess-1' },
+        {
+          trigger: 'manual',
+          recordMetadata: true,
+          sessionId: 'sess-1',
+          migrationStalled: false,
+        },
       );
       // The consolidation lock is released after the run.
       await expect(
