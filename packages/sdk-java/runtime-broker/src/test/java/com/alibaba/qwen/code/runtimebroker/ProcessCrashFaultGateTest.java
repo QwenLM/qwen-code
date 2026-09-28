@@ -54,7 +54,7 @@ class ProcessCrashFaultGateTest {
     }
 
     @Test
-    void aWorkerKilledMidExecutionLeavesItUnknownWithoutEvidence()
+    void aWorkerExitEndsUnknownExecutionButKeepsItsWriterDomainPinned()
             throws Exception {
         FaultProxy proxy = rig.proxy();
         BrokerProcess broker = rig.broker("broker", proxy,
@@ -70,18 +70,16 @@ class ProcessCrashFaultGateTest {
                 == ToolExecutionRecord.State.UNKNOWN, "UNKNOWN execution");
         assertEvidenceUnavailable(broker.reconcile(HARNESS, SESSION,
                 execution));
-        // The dead generation is retired, and a new one serves new work.
-        assertEquals(RuntimeBindingRecord.State.FAILED,
+        assertEquals(RuntimeBindingRecord.State.LOST,
                 rig.bindings.findById(bindingId).getState());
-        JSONObject replacement = broker.warm(HARNESS).object();
-        assertEquals("READY", replacement.getString("state"));
-        assertFalse(bindingId.equals(replacement.getString("bindingId")));
-        // Nothing the new generation says can settle the old call.
-        assertEvidenceUnavailable(broker.reconcile(HARNESS, SESSION,
-                execution));
-        ToolExecutionRecord unknown = rig.execution(execution);
-        assertEquals(ToolExecutionRecord.State.UNKNOWN, unknown.getState());
-        assertNull(unknown.getResult());
+        assertEquals("runtime_broker_runtime_lost", broker.warm(HARNESS).code());
+        assertEquals(bindingId, rig.activeBinding().getBindingId());
+        assertEquals("ABANDONED", broker.reconcile(HARNESS, SESSION,
+                execution).object().getString("outcome"));
+        ToolExecutionRecord abandoned = rig.execution(execution);
+        assertEquals(ToolExecutionRecord.State.ABANDONED, abandoned.getState());
+        assertNull(abandoned.getResult());
+        assertNull(rig.activeBinding().getStopEvidence());
         rig.holdMarker("marker", List.of("start"), Duration.ofSeconds(4));
         assertEquals(1, proxy.count("execute"));
     }
@@ -209,13 +207,11 @@ class ProcessCrashFaultGateTest {
     }
 
     /**
-     * Pins today's behaviour for #12670: once a restart proves the worker
-     * gone, the unsettled execution pins the LOST generation, so the
-     * placement can neither be reclaimed nor released. Update this gate when
-     * #12670 is decided.
+     * A test provisioner can prove the old journal gone after a restart.
+     * Process exit alone cannot prove every writer in its domain stopped.
      */
     @Test
-    void aHostCrashPinsTheLostGenerationBehindTheUnsettledCall()
+    void aLostJournalEndsPollingWithoutReleasingTheWriterDomain()
             throws Exception {
         BrokerProcess first = rig.broker("first", rig.proxy(),
                 FaultGateRig.Provisioner.RECOVERABLE);
@@ -240,10 +236,12 @@ class ProcessCrashFaultGateTest {
                 second.warm(HARNESS).code());
         assertEquals("runtime_reconciliation_required",
                 second.release(HARNESS, SESSION).code());
-        assertEquals("IN_FLIGHT", second.reconcile(HARNESS, SESSION,
+        assertEquals("ABANDONED", second.reconcile(HARNESS, SESSION,
                 execution).object().getString("outcome"));
-        assertEquals(ToolExecutionRecord.State.EXECUTING,
+        assertEquals(ToolExecutionRecord.State.ABANDONED,
                 rig.execution(execution).getState());
+        assertTrue(rig.execution(execution).getResult() == null);
+        assertTrue(rig.activeBinding().getStopEvidence() == null);
         assertTrue(second.workers().isEmpty());
         rig.holdMarker("marker", List.of("start"), Duration.ofSeconds(4));
         assertEquals(0, secondProxy.count("execute"));
