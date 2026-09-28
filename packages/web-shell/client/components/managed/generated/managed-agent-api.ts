@@ -133,6 +133,70 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/agent/web-shell/v1/operations/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["webShellQueryCwdOperation"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/sessions/close": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["closeWebShellSession"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/sessions/archive": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["archiveWebShellSession"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/sessions/delete": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["deleteWebShellSession"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/agent/web-shell/v1/workspaces/get": {
         parameters: {
             query?: never;
@@ -394,6 +458,33 @@ export interface components {
                 /** @constant */
                 canCreateSession?: true;
             }) | null;
+        };
+        WebShellOperationRequest: {
+            /** Format: uuid */
+            sessionId: string;
+            operationId: string;
+        };
+        /** @description Receipt IDs are opaque authorized product handles, not private journal or storage refs. Input/cancel completion is command acceptance, not Turn completion or physical stop. Action completion may only record one vote. Lifecycle completion requires its cleanup facts; archive may remain java_durable because Java is its authority. Task cancel completion means that the authority recorded the cancel, not that the task stopped: the task becomes cancelled only after its physical execution settles. */
+        WebShellCommandOperation: {
+            operationId: string;
+            /** Format: uuid */
+            sessionId: string;
+            /** @enum {unknown} */
+            type: "create_session" | "submit_input" | "cancel" | "action_response" | "close" | "archive" | "delete" | "task_cancel";
+            /** @enum {unknown} */
+            status: "pending" | "running" | "completed" | "failed" | "cancelled" | "recovery_blocked";
+            /** @enum {unknown} */
+            admissionStage: "java_durable" | "harness_confirmed";
+            /** @enum {unknown} */
+            deliveryState: "pending" | "leased" | "confirmed" | "blocked";
+            receiptId?: string;
+            replayed: boolean;
+        } & (unknown & unknown & unknown & unknown);
+        WebShellOperation: components["schemas"]["WebShellCommandOperation"];
+        WebShellLifecycleRequest: {
+            /** Format: uuid */
+            sessionId: string;
+            idempotencyKey: string;
         };
         WebShellWorkspaceQueryRequest: {
             cursor?: string | null;
@@ -686,6 +777,118 @@ export interface operations {
             };
             400: components["responses"]["BadRequest"];
             404: components["responses"]["NotFound"];
+        };
+    };
+    webShellQueryCwdOperation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellOperationRequest"];
+            };
+        };
+        responses: {
+            /** @description Same authorized operation semantics as the public API. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellOperation"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    closeWebShellSession: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellLifecycleRequest"];
+            };
+        };
+        responses: {
+            /** @description Same authorized operation semantics as the public API. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellCommandOperation"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    archiveWebShellSession: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellLifecycleRequest"];
+            };
+        };
+        responses: {
+            /** @description Same authorized operation semantics as the public API. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellCommandOperation"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    deleteWebShellSession: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellLifecycleRequest"];
+            };
+        };
+        responses: {
+            /** @description Same authorized operation semantics as the public API. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellCommandOperation"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
         };
     };
     webShellGetWorkspace: {
