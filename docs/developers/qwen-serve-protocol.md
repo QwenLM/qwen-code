@@ -4222,6 +4222,29 @@ Five typed events (workspace-scoped, fanned out to every active session bus):
 
 > **Not MCP-compatible.** The MCP authorization spec (2025-06-18) mandates OAuth 2.1 + PKCE auth-code with a redirect callback, which doesn't work for headless-pod daemons. Mode B's device-flow surface is daemon-private — clients targeting MCP-compliant servers should use a different auth path.
 
+### Session attachment chunk upload
+
+Capability: `session_attachment_chunk_upload`. All four routes below are mutations owned by the live session's runtime. They use the existing bearer and optional `X-Qwen-Client-Id` headers. An upload belongs to its creating session store and exact client identity; an omitted identity is distinct from a named client.
+
+Let `U = /session/:id/attachment-uploads`:
+
+| Request                            | Body                                            | Response                                                                        |
+| ---------------------------------- | ----------------------------------------------- | ------------------------------------------------------------------------------- |
+| `POST U`                           | JSON `{ name, mimeType, size }`, at most 4 KiB  | 201 `{ uploadId }`                                                              |
+| `POST U/:uploadId/chunks?offset=N` | Raw `application/octet-stream`, at most 512 KiB | 200 `{ offset }`, next byte offset                                              |
+| `POST U/:uploadId/complete`        | Empty                                           | 200 existing attachment reference `{ type, attachmentId, mimeType, size }`      |
+| `DELETE U/:uploadId`               | Empty                                           | 204 for receiving, failed, or absent uploads; 409 while completing or completed |
+
+The maximum attachment is still 8 MiB. Metadata follows the existing filename/MIME rules; empty image files are invalid. Send sequential 512 KiB chunks, with an exact remainder for the last chunk. Only the immediately preceding chunk may be retried with identical offset, length, and bytes. Gaps, overlaps, changed retries, or premature completion return 409; malformed input returns 400, oversized input 413, and unsupported chunk media type 415. Unknown, expired, or differently owned upload IDs return 404. Compressed request bodies are not accepted.
+
+Completion validates session/client/runtime ownership before and after storage. Concurrent or repeated completion returns the same result without another write. Receiving uploads expire five minutes after creation. Success/failure receipts expire after five minutes and are capped at 1024 per daemon process. Session close/delete and final client deregistration invalidate unfinished uploads. Only completed attachments can be read, referenced or copied. A DELETE cannot roll back an already finalizing or completed attachment; a completed file can remain after a lost response.
+
+Staging is bounded at 128 MiB and 32 active uploads across all runtimes in a process, with at most eight active uploads per session store. Exhaustion returns `429 attachment_upload_capacity_exceeded`; existing request rate limits also apply. This is a staging-buffer bound, not total process memory. Temporary IDs do not survive a daemon restart.
+
+The TypeScript SDK automatically uses this protocol for attachments larger than 512 KiB when advertised, with two concurrent files per client and sequential chunks. It uses authenticated REST even with ACP transports, caches valid discovery for 60 seconds, and retains the existing raw endpoint for smaller files and older daemons. Append/completion retry at most twice after network errors, request timeouts or 502/503/504; rate-limit retries honor `Retry-After` within a five-minute operation deadline. Ambiguous creation and capacity failures are not retried. Failed uploads get one independent two-second cleanup attempt. `DaemonAttachmentUploadError` preserves the cause and `httpStatus`; its `status` omits upload-internal 404 so consumers do not mistake it for unsupported legacy attachment routing.
+
+See the [complete design](../design/session-attachment-chunk-upload.md) for lifecycle and compatibility details.
+
 ## Streaming wire format
 
 Events are emitted as standard EventSource frames. The daemon writes one `data:` line per frame (the JSON has no embedded newlines after `JSON.stringify`); the SDK parser at `packages/sdk-typescript/src/daemon/sse.ts` handles both that and the spec-allowed multi-`data:` form on the receive side.

@@ -4616,6 +4616,7 @@ export function createSessionControlPlane(
     if (count === undefined) return;
     if (count <= 1) {
       entry.clientIds.delete(clientId);
+      entry.attachments.cancelClientUploads(clientId);
       for (const call of entry.mcpAppCalls?.values() ?? []) {
         if (call.clientId === clientId) call.cancel();
       }
@@ -14569,6 +14570,44 @@ export function createSessionControlPlane(
       return { sessionId, state: 'idle' as const };
     },
 
+    createSessionAttachmentUpload(sessionId, metadata, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const clientId = resolveTrustedClientId(entry, context?.clientId);
+      return entry.attachments.createUpload(metadata, clientId);
+    },
+
+    appendSessionAttachmentUpload(sessionId, uploadId, offset, data, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const clientId = resolveTrustedClientId(entry, context?.clientId);
+      return entry.attachments.appendUpload(uploadId, offset, data, clientId);
+    },
+
+    async completeSessionAttachmentUpload(
+      sessionId,
+      uploadId,
+      context,
+      assertCanCommit,
+    ) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const clientId = resolveTrustedClientId(entry, context?.clientId);
+      return entry.attachments.completeUpload(uploadId, clientId, () => {
+        assertCanCommit?.();
+        if (byId.get(sessionId) !== entry)
+          throw new SessionNotFoundError(sessionId);
+        resolveTrustedClientId(entry, clientId);
+      });
+    },
+
+    cancelSessionAttachmentUpload(sessionId, uploadId, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const clientId = resolveTrustedClientId(entry, context?.clientId);
+      entry.attachments.cancelUpload(uploadId, clientId);
+    },
+
     async storeSessionAttachment(sessionId, data, mimeType, context, name) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
@@ -16234,7 +16273,7 @@ export function createSessionControlPlane(
         );
         const teardownResults = await Promise.allSettled([
           ...channels.map((ci) => harness.terminate(ci)),
-          ...[...byId.values()].map((entry) => entry.attachments.close()),
+          ...entries.map((entry) => entry.attachments.close()),
           ...inFlightSessionAwaits,
           ...inFlightRestoreAwaits,
           ...abandonedNewSessionAwaits,

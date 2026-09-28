@@ -29,6 +29,7 @@ import {
   vi,
 } from 'vitest';
 import supertest from 'supertest';
+import { SessionAttachmentStore } from '@qwen-code/acp-bridge/sessionAttachments';
 import { WebSocket } from 'ws';
 import { trace, type Span } from '@opentelemetry/api';
 import {
@@ -631,6 +632,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_prompt',
   'session_turn_status',
   'session_attachments',
+  'session_attachment_chunk_upload',
   'session_attachment_list',
   'session_mid_turn_message_mutation',
   'session_mid_turn_message_query',
@@ -2827,6 +2829,16 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     async isWorkspaceMemoryRememberAvailable() {
       return true;
     },
+    createSessionAttachmentUpload: vi.fn(() => {
+      throw new Error('Unexpected upload create');
+    }),
+    appendSessionAttachmentUpload: vi.fn(() => {
+      throw new Error('Unexpected upload append');
+    }),
+    completeSessionAttachmentUpload: vi.fn(async () => {
+      throw new Error('Unexpected upload complete');
+    }),
+    cancelSessionAttachmentUpload: vi.fn(),
     async storeSessionAttachment(_sessionId, data, mimeType, _context, name) {
       const attachmentId = name ?? `image-${sessionAttachments.size + 1}.png`;
       sessionAttachments.set(attachmentId, {
@@ -12308,6 +12320,140 @@ describe('createServeApp', () => {
   });
 
   describe('session attachments', () => {
+    it('uploads chunked attachments through owner-bound routes and completes idempotently', async () => {
+      const store = new SessionAttachmentStore();
+      const bridge = fakeBridge();
+      bridge.createSessionAttachmentUpload = vi.fn((_id, metadata, context) =>
+        store.createUpload(metadata, context?.clientId),
+      );
+      bridge.appendSessionAttachmentUpload = vi.fn(
+        (_id, uploadId, offset, data, context) =>
+          store.appendUpload(uploadId, offset, data, context?.clientId),
+      );
+      bridge.completeSessionAttachmentUpload = vi.fn(
+        (_id, uploadId, context, guard) =>
+          store.completeUpload(
+            uploadId,
+            context?.clientId,
+            guard ?? (() => {}),
+          ),
+      );
+      bridge.cancelSessionAttachmentUpload = vi.fn((_id, uploadId, context) =>
+        store.cancelUpload(uploadId, context?.clientId),
+      );
+      const app = createServeApp(
+        { ...baseOpts, token: 'secret', workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      const post = (url: string) =>
+        request(app)
+          .post(url)
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .set('Authorization', 'Bearer secret');
+      try {
+        const created = await post('/session/s-1/attachment-uploads').send({
+          name: 'large.bin',
+          mimeType: 'application/octet-stream',
+          size: 524289,
+        });
+        expect(created.status).toBe(201);
+        const url = `/session/s-1/attachment-uploads/${created.body.uploadId}`;
+        expect(
+          (
+            await post(`${url}/chunks?offset=0`)
+              .set('Content-Type', 'application/octet-stream')
+              .send(Buffer.alloc(524288, 7))
+          ).body,
+        ).toEqual({ offset: 524288 });
+        expect(await store.list()).toEqual([]);
+        const last = await post(`${url}/chunks?offset=524288`)
+          .set('Content-Type', 'application/octet-stream')
+          .send(Buffer.from([8]));
+        expect(last.status).toBe(200);
+        const completed = await post(`${url}/complete`);
+        expect(completed.status).toBe(200);
+        expect((await post(`${url}/complete`)).body).toEqual(completed.body);
+        expect(completed.body.size).toBe(524289);
+        expect((await store.read(completed.body.attachmentId))?.data).toEqual(
+          Buffer.concat([Buffer.alloc(524288, 7), Buffer.from([8])]),
+        );
+        const cancelled = await request(app)
+          .delete(url)
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .set('Authorization', 'Bearer secret');
+        expect(cancelled.status).toBe(409);
+        expect(cancelled.body.code).toBe('attachment_upload_completed');
+        expect(bridge.createSessionAttachmentUpload).toHaveBeenCalledWith(
+          's-1',
+          expect.any(Object),
+          undefined,
+        );
+      } finally {
+        await store.close();
+      }
+    });
+
+    it('bounds chunk and metadata bodies and rejects malformed input before bridge calls', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, token: 'secret', workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      const post = (url: string) =>
+        request(app)
+          .post(url)
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .set('Authorization', 'Bearer secret');
+      const base = '/session/s-1/attachment-uploads';
+      expect(
+        (
+          await post(base).send({
+            name: 'a'.repeat(5000),
+            mimeType: 'text/plain',
+            size: 1,
+          })
+        ).status,
+      ).toBe(413);
+      expect(
+        (await post(base).set('Content-Type', 'application/json').send('{'))
+          .status,
+      ).toBe(400);
+      expect((await post(base).send({ size: 1 })).status).toBe(400);
+      expect(
+        (
+          await post(`${base}/id/chunks?offset=0`)
+            .set('Content-Type', 'application/octet-stream')
+            .send(Buffer.alloc(524289))
+        ).status,
+      ).toBe(413);
+      expect(
+        (
+          await post(`${base}/id/chunks?offset=-1`)
+            .set('Content-Type', 'application/octet-stream')
+            .send(Buffer.from([1]))
+        ).status,
+      ).toBe(400);
+      expect(
+        (
+          await post(`${base}/id/chunks?offset=0`)
+            .set('Content-Type', 'text/plain')
+            .send('a')
+        ).status,
+      ).toBe(415);
+      expect(bridge.createSessionAttachmentUpload).not.toHaveBeenCalled();
+      expect(bridge.appendSessionAttachmentUpload).not.toHaveBeenCalled();
+      expect(
+        (
+          await request(app)
+            .post(base)
+            .set('Host', `127.0.0.1:${baseOpts.port}`)
+            .send({ name: 'a.txt', mimeType: 'text/plain', size: 1 })
+        ).status,
+      ).toBe(401);
+    });
+
     it('uploads session-scoped text attachments', async () => {
       const app = createServeApp(
         { ...baseOpts, token: 'secret', workspace: WS_BOUND },
