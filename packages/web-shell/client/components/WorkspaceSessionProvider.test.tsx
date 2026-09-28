@@ -550,7 +550,9 @@ describe('WorkspaceSessionProvider targets', () => {
     await renderTarget('session-a', '/work/a');
 
     expect(container.textContent).toContain('Failed to load workspace');
-    expect(container.textContent).not.toMatch(/forwarded port|port forwarding/i);
+    expect(container.textContent).not.toMatch(
+      /forwarded port|port forwarding/i,
+    );
     expect(container.textContent).toContain('GET /capabilities: Forbidden');
   });
 
@@ -565,7 +567,9 @@ describe('WorkspaceSessionProvider targets', () => {
     await renderTarget('session-a', '/work/a');
 
     expect(container.textContent).toContain('Failed to load workspace');
-    expect(container.textContent).not.toMatch(/forwarded port|port forwarding/i);
+    expect(container.textContent).not.toMatch(
+      /forwarded port|port forwarding/i,
+    );
     expect(container.textContent).toContain('fetch failed');
   });
 

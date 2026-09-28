@@ -49,7 +49,11 @@ describe('isDaemonPreAuthInvalidHostError', () => {
   });
 
   it('does not match a 403 with an unreadable body', () => {
-    const error = new DaemonHttpError(403, undefined, 'GET /capabilities: HTTP 403');
+    const error = new DaemonHttpError(
+      403,
+      undefined,
+      'GET /capabilities: HTTP 403',
+    );
     expect(isDaemonPreAuthInvalidHostError(error)).toBe(false);
   });
 
