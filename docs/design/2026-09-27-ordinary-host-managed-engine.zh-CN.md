@@ -237,9 +237,16 @@ M3 把 B2d 设计中的配置兼容契约实现为 CLI 配置层中的一个函�
 
 - **环境。** 传入的环境就是该 runtime 的会话宿主所用的环境。其中的 `QWEN_HOME` 与
   两个系统 settings 路径用来定位用户与系统 settings 文件和 extension store；没有
-  `QWEN_HOME` 时，用户目录位于进程的 home 目录下。它是占位符的唯一来源，并且已经包含
-  runtime 应用的用户级 `.env` 值。在 daemon 中，这些定位变量和 `HOME` 不允许被工作区
-  覆盖，所以与 daemon 自己的值相同；在会话宿主中，它们就是宿主自己的环境。
+  `QWEN_HOME` 时，用户目录位于进程的 home 目录下。它也是占位符的唯一来源，并且已经
+  包含 runtime 应用的用户级 `.env` 值。在 Windows 上，定位变量名和占位符按被 spawn 的
+  会话宿主所见的方式读取：不区分大小写，多种拼写并存时取排序最前的一种。依赖工作目录
+  的位置判为 `unknown`，因为会话宿主会按它自己的工作目录解析：相对路径，Windows 上
+  没有盘符根或没有 UNC 服务器与共享名的路径，以及不是字符串的值。为空或为相对路径的
+  home 目录同样如此，settings 加载既用它确定用户目录，也用它判断工作区是否就是 home
+  目录。`QWEN_HOME` 可以是 `~`，或以 `~/`、`~\` 开头，它按 home 目录展开。在
+  daemon 中，这些定位变量和 `HOME` 不允许被工作区覆盖，Windows 上给出 home 目录的
+  `USERPROFILE` 一旦设置也不会被覆盖所替换，所以它们与 daemon 自己的值相同；在会话
+  宿主中，它们就是宿主自己的环境。
 - **项目 MCP 文件。** 严格模式下，`.mcp.json` 的读取失败会作为错误保留，而不是当作
   文件不存在。两种模式下，无法解析、没有 `mcpServers` 对象，或含有不是对象的条目的
   文件都算错误。
@@ -273,6 +280,7 @@ M3 把 B2d 设计中的配置兼容契约实现为 CLI 配置层中的一个函�
 | 转发了 `--restore-ask-user-question`                            | deferred   |
 | 转发了其他参数                                                  | unknown    |
 | 运行中的工作区持有配置文件之外的 MCP 服务器                     | deferred   |
+| 环境中的某个 settings 位置依赖工作目录                          | unknown    |
 | 某一层 settings 无法读取                                        | unknown    |
 | 任何一层 settings 中有 MCP 服务器，或配置了 `mcp.serverCommand` | deferred   |
 | 配置了 `tools.discoveryCommand` 或 `tools.callCommand`          | deferred   |
@@ -373,12 +381,16 @@ M3：
 - 每个新会话都会读取 settings 各层、`.mcp.json` 和 extension store。其中 settings
   与 `.mcp.json` 的读取是同步的，读取期间会阻塞 daemon 的事件循环。这些读取都在本地
   且数据量小，但慢速文件系统会拖慢会话创建，超出 Bridge 选择预算的选择会使创建失败。
+  M6 在会话创建时调用该评估之前，必须把这些读取移出事件循环，或者限制它们的耗时。
 - 安装在提交之前中断时留下的 staging 目录，以及日志被恢复隔离的事务在 `staging` 或
   `rollback` 中留下的内容，store 从不清理；其余残留会在下一次 store 操作时由恢复清理。
-  这类残留会让会话一直留在 Legacy，直到它被删除。
-- 在传入的环境中查找变量区分大小写，与 daemon 现在的运行时环境相同。在 Windows 上，
-  以其他大小写拼写的定位变量（例如 `qwen_home`）不会被找到，而会话宿主自己的
-  `process.env` 能找到它。
+  在 `qwen extensions install` 期间按一次 Ctrl-C 就足以留下这类残留。这类残留会让会话
+  一直留在 Legacy，直到它被删除。M6 在依赖该评估之前，必须在能够确认这类 staging
+  目录已被遗弃之后再清理它，或者告诉用户会话为何留在 Legacy。仅凭 store 锁无法确认：
+  安装在取锁之前就会创建并填充它的 staging 目录，所以在锁下清理可能删掉仍在进行的
+  安装的 staging 目录。
+- 另一个 qwen 进程或 daemon 自身同时打开 extension store 时，单次评估可能判为
+  `unknown`。M6 必须重试，而不是让 Managed 恢复因此失败。
 - 基于文件的自定义命令可以注入 shell 输出（`!{…}`），用户调用命令时会在宿主中运行
   进程。它们不是契约的输入；由 M5 或 M6 决定 Managed 会话拒绝它们，还是由评估将其判为
   deferred。
