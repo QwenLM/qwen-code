@@ -7,15 +7,16 @@
 Design for the Managed execution engine of ordinary `qwen serve` hosts, the
 part of #12737 that [paired engine host wiring](./2026-09-26-paired-engine-host-wiring.md)
 (B2d, #12828) left out of scope, for #12380. Based on upstream `302e7d88ef`;
-the M3 update is based on `3f5ae3ffeb`. It implements the "Managed engine
-seam" and the "Configuration compatibility contract" of the B2d design and
-splits the work into slices M1 to M6. Slice M1, the preconditions the B2d
-design requires before any Managed session exists (Legacy refusal and purpose
-marking), is implemented (#12861); an M1 follow-up extends the refusal to
-renaming and aligns the owner evidence with the owner reader. Slice M3, the
-configuration snapshot and the compatibility evaluation, is implemented with
-the M3 update. M2 and M4 to M6 are proposals; each lands with its own design
-update.
+the M3 update is based on `3f5ae3ffeb` and the M4 update on `610618f196`. It
+implements the "Managed engine seam" and the "Configuration compatibility
+contract" of the B2d design and splits the work into slices M1 to M6. Slice
+M1, the preconditions the B2d design requires before any Managed session
+exists (Legacy refusal and purpose marking), is implemented (#12861); an M1
+follow-up extends the refusal to renaming and aligns the owner evidence with
+the owner reader (#12906). Slice M3, the configuration snapshot and the
+compatibility evaluation, is implemented with the M3 update, and slice M4,
+Managed Session log recording, with the M4 update. M2, M5 and M6 are
+proposals; each lands with its own design update.
 
 The reference implementation is the branch
 `doudouOUC/qwen-code:feature/managed-agents-p0-p8` at `032392a673`. This
@@ -192,12 +193,13 @@ The B2d invariants hold. In addition:
 | **M1 — preconditions** (#12861)                    | Legacy refusal of a `managed` owner record; worktree reset purpose marking; the Live task decision; this design.                                                                                                                                                                                                                                                                                                                                                                                                                                             | See the M1 acceptance criteria.                                                                                                                                                                                                                                                                                                                                                      | `2f00ac26e3` (refusal, reworked to positive evidence) |
 | **M2 — in-process ACP host**                       | Split `runAcpAgent` into the process owner (stdio, environment deletion, console redirection, event-loop monitor, exit) and a host that serves `QwenAgent` on any ACP stream and releases everything it owns on disposal without exiting the process. `runAcpAgent` uses the host.                                                                                                                                                                                                                                                                           | ACP suites unchanged; a host on `createInMemoryChannel` creates, prompts and closes a session, then disposes with no leaked handles, timers, MCP clients or environment changes.                                                                                                                                                                                                     | `bf06117511`, `d63eec71a1`                            |
 | **M3 — strict configuration snapshot** (M3 update) | A read-only snapshot of the configuration inputs of the compatibility contract, as the M3 section refines them: settings layers read without migration writes, backups or resets (in-memory migration only; missing, unreadable, corrupt and unknown-version layers kept distinct), `.mcp.json` with its errors, Hooks from every settings layer, a lock-free proof that the extension store is empty, forwarded argv, trust and cwd, and the requested approval mode; plus the evaluation that returns `compatible`, `deferred` or `unknown` with a reason. | Reading leaves every byte and every metadata file unchanged; each input source alone makes a configuration `deferred` or `unknown`; an evaluation of an empty trusted workspace is `compatible`.                                                                                                                                                                                     | `a836081466`, `306cf17546`, `d48161bc4a`              |
-| **M4 — Managed Session log recording**             | The host's recorder writes through the authority's record sink under the certified writer lease; restore reads the log's projection; the log is sealed on close.                                                                                                                                                                                                                                                                                                                                                                                             | A session recorded this way restores with the same history; Legacy entries refuse it by its header; a crash before the first commit leaves no Managed session that Legacy can run.                                                                                                                                                                                                   | `e98cda5c95`, `1ed806ca85`, `f501d9694d`              |
+| **M4 — Managed Session log recording**             | A `Config` with the `managed` engine records its session as a Managed Session log: the recorder writes through the authority's record sink under a Managed writer lease, a restore reads the log's projection, the log is sealed on close, and a record the format cannot carry is refused without stopping the recorder.                                                                                                                                                                                                                                    | A session recorded this way restores with the same history, except after a rewind, which M6 refuses; Legacy entries refuse it by its header; a crash before the first commit leaves no Managed session that Legacy can run.                                                                                                                                                          | `e98cda5c95`, `1ed806ca85`, `f501d9694d`              |
 | **M5 — Runtime-backed tools**                      | A session-exclusive local Runtime worker launched lazily at the first tool call and bound to the session's directory; Read, Write, Edit and foreground Shell declared without waiting for the worker, prepared and permission-checked in the host, executed in the worker; cancellation that reaches the worker's processes; results durable in the log before the model continues; an unknown outcome blocks instead of replaying.                                                                                                                          | The host performs no file write or process spawn for a tool call; cancellation has physical-stop evidence; a lost result blocks the session.                                                                                                                                                                                                                                         | `7786edd123`, `5dde5c8dd7`, `174e072ac4`              |
 | **M6 — the engine**                                | The Managed channel factory (M2 host, M4 recording, M5 tools, M3 revalidation, owner and receipt), the extension methods the Bridge calls on a Managed channel (session close, workspace-change acknowledgement, user language, resource snapshot), the workspace-control decision, registration at the three daemon sites and the embedded default behind `--experimental-paired-engines`, and lifecycle (shutdown, drain, revoke, generation and environment reload).                                                                                      | On a paired daemon, an ordinary new session in a trusted workspace with an empty configuration runs on Managed through the real routes: create, prompt, tool call, cancel, close, and a cold restore after a daemon restart. A deferred configuration stays on Legacy, a new deny rule reaches the live Managed session, and with the opt-in off Legacy refuses the Managed session. | `824e92d84f`, `306cf17546`                            |
 
-M2 and M3 are independent of each other. M4 and M5 need M2. M6 needs all of
-them and is the only slice that can make a session select Managed.
+M2, M3 and M4 are independent of each other; M4 is exercised through
+`Config`, the way a host uses it. M5 needs M2. M6 needs all of them and is
+the only slice that can make a session select Managed.
 
 ### M1: preconditions
 
@@ -419,6 +421,163 @@ Settings that only enable further built-in tools or background features, such
 as cron, artifacts or automatic memory, are not inputs. The first-phase engine
 does not register or run them, which M5 and M6 enforce.
 
+### M4: Managed Session log recording
+
+M4 records a Managed session as a Managed Session log through the #12693
+authority, with its local JSONL journal and resource stores. It changes core
+`Config`, `ChatRecordingService`, the record sink and the reader's Managed
+restore projection, and adds no production caller: a Managed host starts using
+it in M6. It does not need the M2 host.
+The engine a host selects already reaches `Config` as
+`sessionExecutionEngine`, and the tests drive `Config` as a host will.
+
+#### Trigger
+
+A `Config` whose `sessionExecutionEngine` is `managed` records its session as
+a Managed Session log. Only a host that runs Managed sessions sets that value;
+the ordinary ACP host refuses a `managed` request before a `Config` exists.
+Such a `Config` requires chat recording and the session writer lease, and
+without them initialization fails with `SessionExecutionEngineError`. Before
+M4, a `managed` engine would only have written a `managed` owner record into
+an ordinary transcript, which Decision 1 rules out.
+
+#### Writer and opening
+
+- The recorder's writer lease is acquired as a Managed writer: lock schema 3
+  with the Managed format version, and certified takeover. A binary that does
+  not know schema 3 refuses the lock instead of writing into the log, and a
+  sealed Managed lock is reopened only when the log still matches the commit
+  proof in the seal.
+- After the lease is held and before the recorder accepts a record, `Config`
+  opens the log with `openManagedSession` on that lease. The authority adopts
+  the lease, so the session keeps one writer.
+- When the transcript has no header, `Config` publishes the definition (the
+  engine, model and approval mode, never credentials) and the root snapshot,
+  and the authority writes the owner record and then the header. That covers
+  a new session and a create that stopped after its owner record. Any other
+  record before the header makes the open fail.
+- A restore goes through the reader's restore projection, whose owner must
+  verify as `managed` before the log is opened. The Legacy loader is never
+  used for a Managed log, and a Managed restore without a projection fails.
+- A log whose last transaction has no commit marker, because a crash stopped
+  the write, is repaired when it is opened: the writer holds the lease, so it
+  moves the records after the last commit marker to the diagnostic file
+  beside the transcript and opens the log at that commit. Those records were
+  never committed.
+- A log the authority cannot open, such as one that no longer matches its
+  seal, fails the activation with the authority's own error, not as writer
+  unavailability.
+- The activation names the session as its worker, records a five-minute
+  horizon and is renewed at a third of it while the session is open.
+
+#### Records
+
+- The recorder binds the authority's record sink before activation. Every
+  record it accepts is committed through the sink as a Managed transaction;
+  nothing is appended raw, and the recorder does not write a second owner
+  record.
+- The sink carries messages and tool results, titles, compaction, goal state,
+  file history, turn results, branch checkpoints, the session source, slash
+  and `@` commands, UI telemetry and attribution snapshots, each in the shape
+  its mapping needs: a title that is not empty, a turn result with its prompt
+  id and state, a compaction with its history.
+- The recorder refuses any other record, or a carried kind in another shape,
+  before it is queued, and the session keeps recording. Today any failed
+  write stops the recorder for the rest of the session, so a refusal must not
+  reach the queue. A caller that awaits the write gets
+  `ManagedSessionRecordRefusedError`; a record written without waiting is
+  dropped with a debug log. A write that still fails in the queue, such as a
+  conflict in the authority or a failed append, stops the recorder as before.
+- The sink reads the range a compaction replaces where it numbers the
+  compaction's event. A renewal can commit while the summary is published,
+  and a range read before it would make the compaction conflict and stop the
+  recorder.
+- A Managed title is metadata the log keeps outside the records a reader
+  replays, so it does not become the parent of the next record.
+- The session list finds the title and the source in 64 KiB windows at each
+  end of the log, as on a Legacy transcript, so the recorder re-anchors both.
+  It measures how far the log grew, because a record's own size does not
+  tell: each record is committed inside transaction records, its content goes
+  to a resource, and renewals append between records. A due anchor is written
+  right behind the record that made it due; a close writes the anchors that
+  are due, and `finalize()` the title, also when renewals alone moved the log
+  on. A restored session
+  counts both as due, since it cannot tell how far they are from the end.
+- A restore reads the title from the whole log and the source from the
+  records a reader replays, so a log whose title has left the windows, for
+  example after a crash, does not restore an older title.
+- Goal evidence reads the active chain from the records a reader replays.
+  That chain matches Legacy's, without the owner record and the title.
+
+In the first phase, these records have no mapping, or a shape the format
+does not carry:
+
+- A model switch is not persisted: the daemon ignores the refused write, and
+  a rewind drops the model record it would re-append. A restored session uses
+  the model its configuration selects.
+- Web Shell text elements, session artifacts, source snapshots, the goal
+  runtime's turn-end record and notifications the daemon delivers fail when
+  they are written. Clearing a title fails too.
+- A rewind record is dropped. The live session and its active chain are
+  right, because later records chain past the removed turns, but the Managed
+  restore projection reads the log as linear history. Record A and B, rewind
+  to A and record C: a restored Managed session gives the model A, B and C,
+  where Legacy gives A and C.
+- Background task, cron and omni recall records are dropped. A first-phase
+  Managed session has none of those features.
+- A sub-session's parent record and Live conversation records are refused.
+  Both purposes stay on Legacy.
+
+M6 decides per feature whether a Managed session refuses it or its record
+gets a mapping, which changes the Managed Session format and needs the
+agreement of the format's owners. Rewind must be refused for Managed sessions
+until the projection follows the chain; `Session.rewindToTurn` already
+validates a request before it changes anything.
+
+#### Close
+
+- The recorder flushes and writes the anchors that are due, the authority
+  records that the activation stopped advancing, and the recorder seals the
+  lease with the authority's commit proof instead of releasing it. A handoff
+  closes the same way, although it runs no `finalize()`.
+- A failed write does not change that: the commit proof covers committed
+  transactions only, and the next open repairs the tail.
+- A close during activation does not release a Managed writer early, as it
+  does a Legacy one: the activation ends it when it fails.
+  - A log that was opened is sealed at the authority's commit proof.
+  - A lease that took over a sealed lock gets that seal back. The open checks
+    the log against the seal before it writes anything, and sealing at the
+    position read from the log would accept a log that changed behind the
+    seal.
+  - A transcript that is missing or empty, or whose head shows no Managed
+    evidence, has its lock released: it holds nothing to guard.
+  - Any other log is sealed at the committed position read from it. One whose
+    head or log cannot be read keeps its lock held until the process exits,
+    since nothing tells what it holds or where to seal it. The lease may have
+    reclaimed a crashed Managed writer's lock, which releasing would drop.
+- A Managed session closed without content keeps its sealed log. M6 decides
+  whether to discard it.
+
+#### Risks for later slices
+
+- Each renewal commits an activation event, so an open session's log grows
+  by a transaction of about 2 KB every 100 seconds, idle or not. Renewals
+  alone move the title out of the tail window after 25 to 50 minutes idle,
+  and the session list then shows an older title, or none, until the next
+  record or the close re-anchors it; a restore reads the whole log. M6 may
+  lengthen the horizon for local sessions; liveness of a local session is its
+  writer lock.
+- A renewal appends through the lease outside the recorder's write barrier. A
+  live restore that reads the log under that barrier and then checks its size
+  could see it change. M6 must account for that before it restores Managed
+  sessions live.
+- The repair drops records that were never committed. M5 must keep a Runtime
+  tool's outcome durable on its own, so that a dropped tail cannot hide a side
+  effect that happened.
+- `loadCliConfig` refuses a restore whose owner is `managed`. The M6 host must
+  restore Managed sessions without that Legacy check, and must supply the
+  restore projection.
+
 ## Files and consumers
 
 | Slice | Files                                                                                                                                                                                                                                                                                 |
@@ -426,14 +585,15 @@ does not register or run them, which M5 and M6 enforce.
 | M1    | core `utils/sessionStorageUtils.ts`, `services/sessionService.ts`, `services/chatRecordingService.ts`; CLI `serve/routes/session.ts`                                                                                                                                                  |
 | M2    | CLI `acp-integration/acpAgent.ts`; acp-bridge `inMemoryChannel.ts`                                                                                                                                                                                                                    |
 | M3    | CLI `config/settings.ts`, `config/mcpJson.ts`, `config/storage-paths-lite.ts`, `config/config.ts`, and the new `config/read-config-file.ts`, `config/approval-mode-value.ts` and `config/managed-compatibility.ts`; core `extension/extension-store.ts` and `utils/envVarResolver.ts` |
-| M4    | core `config/config.ts`, `services/chatRecordingService.ts`, `managed-runtime/*`                                                                                                                                                                                                      |
+| M4    | core `config/config.ts`, `services/chatRecordingService.ts`, `services/session-transcript-reader.ts` and `utils/sessionStorageUtils.ts`; `managed-runtime/managed-session-record-sink.ts`, `managed-session-message-projection.ts` and `managed-session-authority.ts` (one export)    |
 | M5    | core tools and scheduler; CLI `serve/managed-runtime-*`                                                                                                                                                                                                                               |
 | M6    | CLI `serve/session-execution-engine-selector.ts`, `serve/run-qwen-serve.ts`, `serve/server.ts`; a new Managed channel module                                                                                                                                                          |
 
 No daemon route or REST shape changes in any slice. M1 changes no public
 classification: its refusals use the existing
 `session_execution_engine_unavailable`. M3 adds no production caller: the
-selector and the Managed host start calling the evaluation in M6.
+selector and the Managed host start calling the evaluation in M6. M4 adds none
+either: a Managed host starts creating `managed` sessions in M6.
 
 ## Validation and acceptance criteria
 
@@ -471,6 +631,42 @@ M3:
    store inspection leave the tree unchanged on every failure they report.
 4. Build, typecheck and focused tests pass, and mutating each rule or each
    refusal of the strict reads fails a test.
+
+M4:
+
+1. A new Managed session writes the owner record, then the header, then only
+   committed Managed transactions: no raw record and no second owner record.
+   Legacy entries refuse it, and its lock uses the Managed schema.
+2. Closing records that the activation stopped and seals the lock with the
+   commit proof. A restore through the projection gives the same active chain
+   and keeps recording, again after each close. The active chain passes
+   through turn results and the session source and matches Legacy's without
+   the owner record and the title.
+3. A create that stopped after its owner record is refused by Legacy and
+   completed by the next Managed restore.
+4. A transaction a crash left without its commit marker is moved to the
+   diagnostic file when the log is next opened; the committed prefix is
+   unchanged.
+5. A record the log cannot carry, or a carried kind in another shape, is
+   refused, with a typed error when the caller awaits it and dropped
+   otherwise, and the session keeps recording. A compaction commits when a
+   renewal commits while its summary is published.
+6. In a long session whose log renewals alone moved on, the session list
+   reads the latest title after a close or a handoff, and a restore reads it
+   after a crash too. A due anchor lands right behind the record that
+   made it due, `finalize()` adds no title right behind one, and a restored
+   rename commits one title record. A restore brings back the session source,
+   and the restored session refuses a different one.
+7. A `managed` session without chat recording or the writer lease fails
+   before anything is written. A Managed restore without a projection fails
+   and leaves the lock sealed, and a Legacy-owned transcript is never opened
+   as a Managed log and gets its lock released. A restore that took over a
+   seal the log does not match fails with the authority's error and leaves
+   that seal in place. A close during a restore or a create leaves the log
+   sealed. A log with Managed evidence that cannot be read keeps its lock
+   held, and so does a reclaimed lock whose log head cannot be read.
+8. Build, typecheck and focused tests pass, and mutating each of these
+   behaviors fails a test.
 
 The engine as a whole is accepted by M6's exit check, together with the B2d
 criteria that apply once an engine is registered: deferred purposes stay on

@@ -182,6 +182,36 @@ export async function readManagedSessionRecords(options: {
   return projectManagedSessionRecords({ scan, resources });
 }
 
+/**
+ * The records a reader replays together with the session's title, from one
+ * read of the log. The title is the last one committed anywhere in the log,
+ * not only in the windows at each end that the session list scans.
+ */
+export async function readManagedSessionRecordsAndTitle(options: {
+  readonly transcriptPath: string;
+  readonly runtimeBaseDir: string;
+  readonly sessionKey: ManagedSessionKey;
+  /** Bounds the projection to a frozen snapshot's byte length. */
+  readonly maxBytes?: number;
+}): Promise<{
+  records: ChatRecord[];
+  titleInfo: { title?: string; source?: 'auto' | 'manual' };
+}> {
+  const scan = await readManagedSessionLog(
+    options.transcriptPath,
+    options.sessionKey,
+    options.maxBytes,
+  );
+  const resources = LocalManagedSessionResourceStore.create({
+    runtimeBaseDir: options.runtimeBaseDir,
+    sessionKey: options.sessionKey,
+  });
+  return {
+    records: await projectManagedSessionRecords({ scan, resources }),
+    titleInfo: await projectManagedSessionTitleInfo({ scan, resources }),
+  };
+}
+
 /** Projects an already-verified durable journal through its resource store. */
 export async function projectManagedSessionRecords(options: {
   readonly scan: ManagedSessionJournalScan;

@@ -21,10 +21,9 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 import { addDaemonRequestAttribute } from '../telemetry/daemon-tracing.js';
 import {
   localManagedSessionKey,
-  readManagedSessionTitleInfoSync,
   readSessionTitleInfoFromFileSync,
 } from '../utils/sessionStorageUtils.js';
-import { readManagedSessionRecords } from '../managed-runtime/managed-session-message-projection.js';
+import { readManagedSessionRecordsAndTitle } from '../managed-runtime/managed-session-message-projection.js';
 import {
   MANAGED_SESSION_HEADER_SUBTYPE,
   ManagedSessionRecordError,
@@ -334,6 +333,7 @@ export function buildManagedSessionRestoreProjection(
   let attributionSnapshot: AttributionSnapshot | undefined;
   let lastAssistantModel: string | undefined;
   let lastTokenCountsRecord: ChatRecord | undefined;
+  let sessionSource: SessionSourceRecordPayload | undefined;
   for (const record of records) {
     if (record.sessionId !== input.sessionId) {
       throw new ManagedSessionRecordError(
@@ -362,6 +362,12 @@ export function buildManagedSessionRestoreProjection(
         attributionSnapshot = snapshot;
       }
     }
+    // The last one, as a Legacy restore reads it.
+    if (record.type === 'system' && record.subtype === 'session_source') {
+      sessionSource = record.systemPayload as
+        | SessionSourceRecordPayload
+        | undefined;
+    }
     if (
       record.type === 'assistant' &&
       typeof record.model === 'string' &&
@@ -389,6 +395,12 @@ export function buildManagedSessionRestoreProjection(
         : {}),
       ...(input.titleSource !== undefined
         ? { titleSource: input.titleSource }
+        : {}),
+      ...(sessionSource?.sourceType !== undefined
+        ? { sourceType: sessionSource.sourceType }
+        : {}),
+      ...(sessionSource?.sourceId !== undefined
+        ? { sourceId: sessionSource.sourceId }
         : {}),
       ...(lastAssistantModel !== undefined ? { lastAssistantModel } : {}),
       ...(input.executionEngine.status === 'verified' &&
@@ -2750,7 +2762,13 @@ function managedNavigationTurns(
  * Weakly keyed so it inherits that cache's invalidation exactly: a new file
  * identity or snapshot size builds a new index, which misses here.
  */
-const managedProjections = new WeakMap<TranscriptIndex, ChatRecord[]>();
+const managedProjections = new WeakMap<
+  TranscriptIndex,
+  {
+    readonly records: ChatRecord[];
+    readonly titleInfo: { title?: string; source?: 'auto' | 'manual' };
+  }
+>();
 
 /**
  * An index over projected records, shaped like the physical one.
@@ -3507,9 +3525,9 @@ export class SessionTranscriptReader {
    * from it would restore the wrapper records. The projected records are the
    * whole history, so the accumulators run over them directly.
    *
-   * Record shapes the sink does not yet admit -- goals, artifacts, file history,
-   * session source and session model -- cannot appear in a Managed log at all,
-   * so they are absent here by construction.
+   * Record shapes the sink does not admit, such as artifacts, the parent
+   * session and the session model, cannot appear in a Managed log at all, so
+   * they are absent here by construction.
    */
   private async readManagedRestoreProjection(
     sessionId: string,
@@ -3522,11 +3540,10 @@ export class SessionTranscriptReader {
       index,
       readOptions,
     );
-    const persistedTitle =
-      readManagedSessionTitleInfoSync(
-        index.filePath,
-        this.storage.getRuntimeBaseDir(),
-      ) ?? {};
+    // Read from the whole log: a session whose title the session list no
+    // longer finds in its windows must not restore, and then re-anchor, an
+    // older one.
+    const persistedTitle = managedProjections.get(index)?.titleInfo ?? {};
     const projection = buildManagedSessionRestoreProjection({
       sessionId,
       records,
@@ -3605,11 +3622,10 @@ export class SessionTranscriptReader {
       // identity and snapshot size: paging a session would otherwise reproject
       // the whole log on every request. The gate above stays outside the cache
       // because it authorises this caller, not the projection.
-      const cached = managedProjections.get(index);
-      let records = cached;
-      if (records === undefined) {
+      let projection = managedProjections.get(index);
+      if (projection === undefined) {
         try {
-          records = await readManagedSessionRecords({
+          projection = await readManagedSessionRecordsAndTitle({
             transcriptPath: index.filePath,
             runtimeBaseDir: this.storage.getRuntimeBaseDir(),
             sessionKey: localManagedSessionKey(
@@ -3629,9 +3645,9 @@ export class SessionTranscriptReader {
           }
           throw error;
         }
-        managedProjections.set(index, records);
+        managedProjections.set(index, projection);
       }
-      return [...records];
+      return [...projection.records];
     } finally {
       recordRestoreStage('selected_record_read', startedAt);
     }

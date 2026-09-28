@@ -63,8 +63,10 @@ import {
   SessionTranscriptChangedError,
   SessionWriterLostError,
   SessionWriterUnavailableError,
+  type SessionWriterCommitProof,
   type SessionWriterLease,
 } from './session-writer-lease.js';
+import { prepareTranscriptRecords } from '../utils/transcript-records.js';
 import type {
   GoalStateRecordPayloadV2,
   GoalTurnPermit,
@@ -287,6 +289,46 @@ function copyGoalContext(goalContext: GoalTurnPermit): GoalTurnPermit {
     revision: goalContext.revision,
     turnId: goalContext.turnId,
   };
+}
+
+/**
+ * Where a Managed session's records go instead of the transcript: the record
+ * sink of its Managed Session authority. Declared structurally so this module
+ * does not depend on the managed runtime.
+ */
+export interface ManagedSessionRecordWriter {
+  /**
+   * Whether the Managed Session format has a mapping for the record and the
+   * record has the shape that mapping takes.
+   */
+  canCarry(record: ChatRecord): boolean;
+  /** Commits the record to the log as a Managed transaction. */
+  write(record: ChatRecord): Promise<void>;
+  /** The reader-facing records rebuilt from the log, in log order. */
+  project(): Promise<ChatRecord[]>;
+  /** Records that this session stopped advancing the log. */
+  stopAdvancing(): Promise<void>;
+  /** The committed position the writer is sealed with. */
+  commitProof(): SessionWriterCommitProof;
+  /** The log's size in bytes, or `undefined` when it cannot be read. */
+  logSize(): number | undefined;
+}
+
+/**
+ * A record the Managed Session format has no mapping for, or a record in a
+ * shape its mapping does not take. It is refused before it is queued, so the
+ * session keeps recording.
+ */
+export class ManagedSessionRecordRefusedError extends Error {
+  readonly code = 'managed_session_record_refused';
+
+  constructor(record: Pick<ChatRecord, 'type' | 'subtype'>) {
+    super(
+      `A Managed session cannot record a ${record.type} record` +
+        `${record.subtype ? ` with subtype ${record.subtype}` : ''}.`,
+    );
+    this.name = 'ManagedSessionRecordRefusedError';
+  }
 }
 
 export interface ChatRecord {
@@ -1414,6 +1456,41 @@ export class ChatRecordingService {
     updatePendingBranchToolCalls(this.pendingBranchToolCalls, record);
   }
 
+  /**
+   * Set for a Managed session: its records go to the authority's record sink
+   * instead of straight into the transcript.
+   */
+  private managedSink?: ManagedSessionRecordWriter;
+
+  /** The Managed log's size when the recorder last measured its growth. */
+  private managedLogSizeSeen = 0;
+
+  /**
+   * Routes every record of a Managed session through its authority. Bound
+   * before activation, so no record of the session reaches the transcript
+   * directly.
+   */
+  bindManagedSink(sink: ManagedSessionRecordWriter): void {
+    if (
+      !this.writerLeaseRequired ||
+      this.state !== 'inactive' ||
+      this.managedSink !== undefined
+    ) {
+      throw new SessionWriterUnavailableError();
+    }
+    this.managedSink = sink;
+    this.managedLogSizeSeen = sink.logSize() ?? 0;
+  }
+
+  /**
+   * Whether a Managed session must refuse the record. The refusal happens
+   * before the record is queued: a failed write would stop the recorder for
+   * the rest of the session.
+   */
+  private refusesManagedRecord(record: ChatRecord): boolean {
+    return this.managedSink !== undefined && !this.managedSink.canCarry(record);
+  }
+
   private enqueueRecordWrite(
     record: ChatRecord,
     legacyConversationFile?: string,
@@ -1421,9 +1498,14 @@ export class ChatRecordingService {
   ): Promise<void> {
     const pendingWrite = this.operationTail.then(async () => {
       if (this.writeFailure) throw this.writeFailure;
+      const managedSink = this.managedSink;
       try {
         const lease = this.binding?.lease;
-        if (lease) {
+        if (managedSink) {
+          // The authority appends through the same lease; writing the record
+          // here as well would leave a raw line in the Managed Session log.
+          await managedSink.write(record);
+        } else if (lease) {
           await lease.appendJsonLine(record);
         } else if (!this.writerLeaseRequired && legacyConversationFile) {
           await jsonl.writeLine(legacyConversationFile, record);
@@ -1436,6 +1518,7 @@ export class ChatRecordingService {
       } catch (error) {
         throw this.enterWriteFailure(error, record.sessionId);
       }
+      if (managedSink) await this.anchorManagedMetadata(managedSink);
     });
     this.operationTail = pendingWrite.then(
       () => undefined,
@@ -1455,6 +1538,14 @@ export class ChatRecordingService {
   ): void {
     if (this.writeFailure || !this.acceptingWrites || this.state !== 'active')
       return;
+    if (this.refusesManagedRecord(record)) {
+      debugLogger.warn(
+        `Managed session ${record.sessionId} dropped a ${record.type} record${
+          record.subtype ? ` with subtype ${record.subtype}` : ''
+        } that its log cannot carry`,
+      );
+      return;
+    }
     if (this.topologyFence) {
       this.topologyFence.buffered.push({ record, options });
       return;
@@ -1478,6 +1569,9 @@ export class ChatRecordingService {
     if (this.writeFailure) throw this.writeFailure;
     if (!this.acceptingWrites || this.state !== 'active')
       throw new SessionWriterUnavailableError();
+    if (this.refusesManagedRecord(record)) {
+      throw new ManagedSessionRecordRefusedError(record);
+    }
     if (this.topologyFence) {
       await new Promise<void>((resolve, reject) => {
         this.topologyFence!.buffered.push({
@@ -1550,6 +1644,9 @@ export class ChatRecordingService {
    * on disk than `.length` reports, and undercounting would let the
    * actual on-disk distance from the last anchor blow past the 64KB
    * tail window before the threshold fires.
+   *
+   * A Managed session only resets its anchor counters here;
+   * {@link anchorManagedMetadata} measures its log once each record lands.
    */
   private updateMetadataAnchorTracking(record: ChatRecord): void {
     const isTitleAnchor =
@@ -1570,6 +1667,7 @@ export class ChatRecordingService {
       !isSourceAnchor &&
       (this.currentSourceType !== undefined || this.pendingSourceWrites > 0);
     if (!trackTitle && !trackSource) return;
+    if (this.managedSink) return;
     let serializedRecord: string;
     try {
       serializedRecord = JSON.stringify(record);
@@ -1601,6 +1699,76 @@ export class ChatRecordingService {
   }
 
   /**
+   * Keeps a Managed session's title and source inside the readers' windows.
+   * The readers scan the same windows as on a Legacy transcript, but a
+   * record's own size does not tell how far the log moved: the record is
+   * committed inside transaction records, its content goes to a resource, and
+   * activation renewals append between records. So once a record lands, the
+   * growth of the log is counted, and a due anchor is written right behind
+   * that record, inside the same queued write: it lands before anything
+   * queued later, and a flush waits for it. Growth of records that were queued
+   * before an anchor still counts against that anchor, so a re-anchor comes
+   * early rather than late.
+   */
+  private async anchorManagedMetadata(
+    sink: ManagedSessionRecordWriter,
+  ): Promise<void> {
+    this.countManagedLogGrowth(sink);
+    const anchors: ChatRecord[] = [];
+    if (
+      this.currentCustomTitle &&
+      this.bytesSinceTitleAnchor >= METADATA_REANCHOR_BYTES &&
+      this.pendingTitleWrites === 0
+    ) {
+      anchors.push(
+        this.titleAnchorRecord(
+          this.currentCustomTitle,
+          this.currentTitleSource,
+        ),
+      );
+    }
+    if (
+      this.currentSourceType &&
+      this.bytesSinceSourceAnchor >= METADATA_REANCHOR_BYTES &&
+      this.pendingSourceWrites === 0
+    ) {
+      anchors.push(
+        this.sourceAnchorRecord(this.currentSourceType, this.currentSourceId),
+      );
+    }
+    for (const anchor of anchors) {
+      // Its parent is the last record in the log, not the last one queued.
+      anchor.parentUuid = this.lastPersistedRecordUuid;
+      try {
+        await sink.write(anchor);
+      } catch (error) {
+        // The record before it was committed; only later writes fail.
+        this.enterWriteFailure(error, anchor.sessionId);
+        return;
+      }
+      this.countManagedLogGrowth(sink);
+      if (anchor.subtype === 'custom_title') {
+        this.bytesSinceTitleAnchor = 0;
+      } else {
+        this.bytesSinceSourceAnchor = 0;
+      }
+    }
+  }
+
+  private countManagedLogGrowth(sink: ManagedSessionRecordWriter): void {
+    const size = sink.logSize();
+    if (size === undefined) return;
+    const growth = Math.max(0, size - this.managedLogSizeSeen);
+    this.managedLogSizeSeen = size;
+    if (this.currentCustomTitle !== undefined || this.pendingTitleWrites > 0) {
+      this.bytesSinceTitleAnchor += growth;
+    }
+    if (this.currentSourceType !== undefined || this.pendingSourceWrites > 0) {
+      this.bytesSinceSourceAnchor += growth;
+    }
+  }
+
+  /**
    * Append a fresh `custom_title` record to EOF using the in-memory
    * cached title. Mirrors {@link finalize}'s record shape — invoked
    * mid-session (every 32KB of other writes) so the picker's
@@ -1616,17 +1784,10 @@ export class ChatRecordingService {
     }
     this.bytesSinceTitleAnchor = 0;
     try {
-      const record: ChatRecord = {
-        ...this.createBaseRecord('system'),
-        type: 'system',
-        subtype: 'custom_title',
-        systemPayload: {
-          customTitle: this.currentCustomTitle,
-          ...(this.currentTitleSource
-            ? { titleSource: this.currentTitleSource }
-            : {}),
-        },
-      };
+      const record = this.titleAnchorRecord(
+        this.currentCustomTitle,
+        this.currentTitleSource,
+      );
       this.appendRecord(record, { updateActiveTail: false });
     } catch (error) {
       // Reset the counter even on failure: otherwise every subsequent
@@ -1648,21 +1809,44 @@ export class ChatRecordingService {
     }
     this.bytesSinceSourceAnchor = 0;
     try {
-      const record: ChatRecord = {
-        ...this.createBaseRecord('system'),
-        type: 'system',
-        subtype: 'session_source',
-        systemPayload: {
-          sourceType: this.currentSourceType,
-          ...(this.currentSourceId !== undefined
-            ? { sourceId: this.currentSourceId }
-            : {}),
-        },
-      };
+      const record = this.sourceAnchorRecord(
+        this.currentSourceType,
+        this.currentSourceId,
+      );
       this.appendRecord(record, { updateActiveTail: false });
     } catch (error) {
       debugLogger.error('Error re-anchoring session source:', error);
     }
+  }
+
+  private titleAnchorRecord(
+    title: string,
+    source: TitleSource | undefined,
+  ): ChatRecord {
+    return {
+      ...this.createBaseRecord('system'),
+      type: 'system',
+      subtype: 'custom_title',
+      systemPayload: {
+        customTitle: title,
+        ...(source ? { titleSource: source } : {}),
+      },
+    };
+  }
+
+  private sourceAnchorRecord(
+    sourceType: string,
+    sourceId: string | undefined,
+  ): ChatRecord {
+    return {
+      ...this.createBaseRecord('system'),
+      type: 'system',
+      subtype: 'session_source',
+      systemPayload: {
+        sourceType,
+        ...(sourceId !== undefined ? { sourceId } : {}),
+      },
+    };
   }
 
   /**
@@ -1676,6 +1860,13 @@ export class ChatRecordingService {
 
   async readActiveTranscriptChain(): Promise<readonly ChatRecord[]> {
     await this.flush();
+    if (this.managedSink) {
+      // A Managed log holds wrapper records; the records a reader sees come
+      // from its projection, and the active chain is rebuilt from them the
+      // same way as from a transcript.
+      return prepareTranscriptRecords(await this.managedSink.project())
+        .records as ChatRecord[];
+    }
     const sessionId = this.getSessionId();
     const session = await this.config
       .getSessionService()
@@ -1778,7 +1969,8 @@ export class ChatRecordingService {
     } catch (error) {
       flushFailure = error;
     }
-    if (this.handoffRequested && flushFailure !== undefined) {
+    const managedSink = this.managedSink;
+    if (this.handoffRequested && flushFailure !== undefined && !managedSink) {
       // Fail closed: a handoff whose final flush did not durably land must
       // neither seal (the proof would be incomplete) nor release (a successor
       // could take over records that were never persisted). Unlike the
@@ -1789,8 +1981,29 @@ export class ChatRecordingService {
       throw flushFailure;
     }
     const lease = this.binding?.lease;
+    let stopFailure: unknown;
     try {
-      if (this.handoffRequested) {
+      if (managedSink) {
+        // A Managed log is only ever sealed: releasing would delete the lock
+        // and leave the log open to any writer. The seal pins the authority's
+        // committed position, which stays exact even after a failed write,
+        // because a record without its commit marker is not part of it.
+        //
+        // Due anchors land first: a close without finalize(), such as a
+        // handoff, still leaves the title and source where the session list
+        // reads them, however far renewals moved the log since the last one.
+        if (flushFailure === undefined && !this.writeFailure) {
+          await this.anchorManagedMetadata(managedSink);
+        }
+        try {
+          // After the last record and before the seal: the authority refuses
+          // a record that names a stopped activation.
+          await managedSink.stopAdvancing();
+        } catch (error) {
+          stopFailure = error;
+        }
+        await lease?.sealForHandoff(managedSink.commitProof());
+      } else if (this.handoffRequested) {
         await lease?.sealForHandoff();
       } else {
         await lease?.release();
@@ -1810,6 +2023,7 @@ export class ChatRecordingService {
       throw error;
     }
     if (flushFailure !== undefined) throw flushFailure;
+    if (stopFailure !== undefined) throw stopFailure;
   }
 
   hasWriteOwnership(): boolean {
@@ -2746,7 +2960,12 @@ export class ChatRecordingService {
         systemPayload: { customTitle, titleSource },
       };
 
-      await this.appendRecordStrict(record);
+      // A Managed log keeps a title as metadata that its projection does not
+      // replay, so the title must not become the parent of the next record.
+      await this.appendRecordStrict(
+        record,
+        this.managedSink ? { updateActiveTail: false } : undefined,
+      );
       this.currentCustomTitle = customTitle;
       this.currentTitleSource = titleSource;
       try {
@@ -2922,7 +3141,10 @@ export class ChatRecordingService {
    * Finalizes the current session by re-appending cached metadata to EOF, but
    * only after this recorder has appended non-title content since the last
    * title anchor. Pure load/resume must remain read-only so session lists do
-   * not treat restored sessions as newly active.
+   * not treat restored sessions as newly active. A Managed session re-appends
+   * it only once its log grew past the re-anchor threshold since the last
+   * anchor, as after each record and on close; its activation writes to the
+   * log on any resume, so there is no read-only resume to keep.
    *
    * Best-effort: errors are logged but never thrown.
    */
@@ -2947,7 +3169,12 @@ export class ChatRecordingService {
     if (!this.currentCustomTitle) {
       return;
     }
-    if (!this.hasNonTitleContentSinceTitleAnchor) {
+    if (this.managedSink) {
+      // Re-anchored by the log's growth alone, which renewals add to while the
+      // session is idle.
+      this.countManagedLogGrowth(this.managedSink);
+      if (this.bytesSinceTitleAnchor < METADATA_REANCHOR_BYTES) return;
+    } else if (!this.hasNonTitleContentSinceTitleAnchor) {
       return;
     }
     try {
@@ -2962,7 +3189,11 @@ export class ChatRecordingService {
             : {}),
         },
       };
-      this.appendRecord(record);
+      // A Managed title is metadata the projection does not replay.
+      this.appendRecord(
+        record,
+        this.managedSink ? { updateActiveTail: false } : undefined,
+      );
     } catch (error) {
       debugLogger.error('Error finalizing session metadata:', error);
     }

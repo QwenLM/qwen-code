@@ -46,6 +46,10 @@ const CARRIED_MESSAGE_SUBTYPES = new Set([
   'mid_turn_user_message',
 ]);
 
+function isNonEmptyString(value: unknown): boolean {
+  return typeof value === 'string' && value.length > 0;
+}
+
 export class ManagedSessionUnmappedRecordError extends Error {
   readonly code = 'managed_session_unmapped_record';
 
@@ -76,19 +80,40 @@ export class ManagedSessionRecordSink {
     this.projection = new ManagedSessionMessageProjection(authority, resources);
   }
 
+  /**
+   * Whether the record has a mapping and the shape that mapping needs. `write`
+   * rejects every record this answers false for before it changes the log, so a
+   * caller can refuse such a record before it queues the write.
+   */
   canCarry(record: ChatRecord): boolean {
     if (record.type === 'system') {
-      if (record.subtype === 'custom_title') return true;
-      if (record.subtype === 'turn_result') return true;
-      if (record.subtype === 'chat_compression') return true;
-      if (record.subtype === 'branch_checkpoint') return true;
-      if (record.subtype === 'goal_state') return true;
-      if (record.subtype === 'file_history_snapshot') return true;
-      if (record.subtype === 'session_source') return true;
-      return (
-        record.subtype !== undefined &&
-        CARRIED_SYSTEM_SUBTYPES.has(record.subtype)
-      );
+      const payload = record.systemPayload as
+        | Record<string, unknown>
+        | undefined;
+      switch (record.subtype) {
+        case 'custom_title':
+          return isNonEmptyString(payload?.['customTitle']);
+        case 'turn_result':
+          return (
+            isNonEmptyString(payload?.['promptId']) &&
+            isNonEmptyString(payload?.['state'])
+          );
+        case 'chat_compression':
+          return Boolean(payload?.['compressedHistory']);
+        case 'branch_checkpoint':
+          return (
+            parseBranchCheckpointPayload(record.systemPayload) !== undefined
+          );
+        case 'goal_state':
+        case 'file_history_snapshot':
+        case 'session_source':
+          return record.systemPayload !== undefined;
+        default:
+          return (
+            record.subtype !== undefined &&
+            CARRIED_SYSTEM_SUBTYPES.has(record.subtype)
+          );
+      }
     }
     if (
       record.type === 'user' ||
@@ -250,9 +275,9 @@ export class ManagedSessionRecordSink {
   /**
    * The source a session was created from is session identity, not message
    * content, so it is committed to its own domain. The recorder re-anchors the
-   * same record periodically so a truncated legacy transcript still carries the
-   * source near its tail; those repeats commit again here, and the reader keeps
-   * the latest, so the anchoring stays a legacy concern rather than a fault.
+   * same record periodically so the session list, which scans the ends of the
+   * log, still finds the source; those repeats commit again here, and the
+   * reader keeps the latest, so a repeat is expected rather than a fault.
    */
   private async commitSessionSource(record: ChatRecord): Promise<void> {
     if (record.systemPayload === undefined) {
@@ -388,29 +413,32 @@ export class ManagedSessionRecordSink {
     if (!payload?.compressedHistory) {
       throw new ManagedSessionUnmappedRecordError(record);
     }
-    const fromSequence = this.authority.compactedThroughSequence + 1;
-    const toSequence = this.authority.committedSequence;
-    const replacedMessageIds = this.authority
-      .eventsInSequenceRange(fromSequence, toSequence)
-      .filter((event) => event.kind === 'message.committed')
-      .map((event) => event.payload['messageId'] as string);
     const summaryRef = await this.resources.publish(
       'managed-compaction-summary',
       Buffer.from(JSON.stringify(record), 'utf8'),
     );
     const actor = this.actor();
     const held = actor.activation;
-    await this.authority.appendExecution(
+    // The range is read where the event is numbered. An activation renewal
+    // can commit while the summary is published, and a range read before it
+    // would leave the event one short of the sequence it must continue.
+    await this.authority.appendExecutionEvent(
       {
         operation: 'compactContext',
         commandId: `recorder:${record.uuid}`,
         sessionKey: this.authority.sessionHeader.sessionKey,
         contentDigest: summaryRef.digest,
       },
-      [
-        {
+      (sequence) => {
+        const fromSequence = this.authority.compactedThroughSequence + 1;
+        const toSequence = sequence - 1;
+        const replacedMessageIds = this.authority
+          .eventsInSequenceRange(fromSequence, toSequence)
+          .filter((event) => event.kind === 'message.committed')
+          .map((event) => event.payload['messageId'] as string);
+        return {
           v: 1,
-          sequence: toSequence + 1,
+          sequence,
           eventId: `compaction:${record.uuid}`,
           sessionKey: this.authority.sessionHeader.sessionKey,
           kind: 'context.compacted',
@@ -433,8 +461,8 @@ export class ManagedSessionRecordSink {
             replacedMessageIds,
             tokenCountsRef: null,
           },
-        },
-      ],
+        };
+      },
       actor,
     );
   }
