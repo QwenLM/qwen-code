@@ -1456,6 +1456,35 @@ describe('AgentTool', () => {
       expect(result).toBeNull();
     });
 
+    it('coalesces a second synchronous refresh kick onto the in-flight refresh', async () => {
+      // An unknown subagent_type kicks refreshSubagents so the cache catches
+      // up — but validation can fire twice for one call (the tool_call
+      // bridge pre-check validates ahead of build(), #12889), and each kick
+      // used to start its own full subagent rescan + llmClient.setTools. A
+      // kick arriving while a refresh is in flight must coalesce onto it.
+      await agentTool.refreshSubagents();
+      const listSpy = vi.mocked(mockSubagentManager.listSubagents);
+      listSpy.mockClear();
+
+      agentTool.validateToolParams({
+        ...validParams,
+        subagent_type: 'missing',
+      });
+      agentTool.validateToolParams({
+        ...validParams,
+        subagent_type: 'missing',
+      });
+      expect(listSpy).toHaveBeenCalledTimes(1);
+
+      // After the in-flight refresh settles, a later kick re-scans.
+      await vi.runAllTimersAsync();
+      agentTool.validateToolParams({
+        ...validParams,
+        subagent_type: 'missing',
+      });
+      expect(listSpy).toHaveBeenCalledTimes(2);
+    });
+
     it('should reject empty description', async () => {
       const result = agentTool.validateToolParams({
         ...validParams,

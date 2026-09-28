@@ -886,7 +886,7 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
     this.delegationSurface = resolveAgentDelegationSurface(config);
     this.subagentManager = config.getSubagentManager();
     this.removeChangeListener = this.subagentManager.addChangeListener(() => {
-      void this.refreshSubagents();
+      this.refreshSubagentsFromListener();
     });
 
     // Initialize the tool asynchronously
@@ -897,11 +897,45 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
     this.removeChangeListener();
   }
 
+  private refreshInFlight: Promise<void> | undefined;
+  private listenerRefreshArmed = false;
+
   /**
    * Asynchronously initializes the tool by loading available subagents
    * and updating the description and schema.
+   *
+   * Concurrent kicks coalesce onto the in-flight refresh: validateToolParams
+   * fires one per validated call (and the bridge argument pre-check doubles
+   * that for a bridged Agent call), and a second scan + setTools mid-turn
+   * buys nothing — the in-flight scan already reads the current state.
    */
-  async refreshSubagents(): Promise<void> {
+  refreshSubagents(): Promise<void> {
+    this.refreshInFlight ??= this.runRefreshSubagents().finally(() => {
+      this.refreshInFlight = undefined;
+    });
+    return this.refreshInFlight;
+  }
+
+  /**
+   * The change listener must not be dropped like a validation kick: a change
+   * landing mid-refresh is not reflected in the in-flight scan, so arm one
+   * follow-up refresh instead of coalescing into the stale read.
+   */
+  private refreshSubagentsFromListener(): void {
+    if (this.refreshInFlight) {
+      if (!this.listenerRefreshArmed) {
+        this.listenerRefreshArmed = true;
+        void this.refreshInFlight.finally(() => {
+          this.listenerRefreshArmed = false;
+          void this.refreshSubagents();
+        });
+      }
+      return;
+    }
+    void this.refreshSubagents();
+  }
+
+  private async runRefreshSubagents(): Promise<void> {
     try {
       this.availableSubagents = await this.subagentManager.listSubagents();
       this.updateDescriptionAndSchema();

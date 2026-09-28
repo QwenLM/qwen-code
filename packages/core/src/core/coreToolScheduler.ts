@@ -1073,6 +1073,12 @@ type SchedulerToolCallRequestInfo = ToolCallRequestInfo & {
   bridgeResolutionError?: {
     error: Error;
     type: ToolErrorType;
+    /**
+     * Validated bridge target for per-tool parameter-error accounting (the
+     * wrapper name `tool_call` cannot distinguish targets). Absent when the
+     * refusal never reached a validated target (e.g. unknown tool).
+     */
+    targetName?: string;
   };
 };
 
@@ -2710,6 +2716,12 @@ export class CoreToolScheduler {
       resolveDeferredToolCall(this.toolRegistry, request.args, {
         // Match prepareTools's depth-gated AgentTool policy.
         maxSubagentDepth: this.config.getMaxSubagentDepth(),
+        // A truncated response's arguments are incomplete for transport
+        // reasons: the pre-check must yield to the truncation guards below.
+        wasOutputTruncated: request.wasOutputTruncated,
+        // The owner policy must win over the argument pre-check so a denied
+        // target keeps its specific EXECUTION_DENIED.
+        isTargetExecutionAllowed: this.isToolExecutionAllowed,
       }),
     );
     if ('error' in resolution) {
@@ -2718,6 +2730,7 @@ export class CoreToolScheduler {
         bridgeResolutionError: {
           error: resolution.error,
           type: resolution.errorType,
+          targetName: resolution.targetName,
         },
       };
     }
@@ -2896,9 +2909,17 @@ export class CoreToolScheduler {
       // present in the current batch. Keeping every tracked tool's counters
       // whenever any current request matched caused stale counts for
       // unrelated tools to survive and fire RETRY LOOP DETECTED prematurely
-      // the next time those tools were used.
+      // the next time those tools were used. A refused bridge request keeps
+      // the wrapper name (`tool_call`), so its validated target name must
+      // join the presence set alongside it.
       if (this.validationRetryCounts.size > 0) {
-        const currentToolNames = new Set(requestsToProcess.map((r) => r.name));
+        const currentToolNames = new Set(
+          requestsToProcess.flatMap((r) =>
+            r.bridgeResolutionError?.targetName !== undefined
+              ? [r.name, r.bridgeResolutionError.targetName]
+              : [r.name],
+          ),
+        );
         for (const key of [...this.validationRetryCounts.keys()]) {
           const sep = key.indexOf(':');
           const toolName = sep === -1 ? key : key.slice(0, sep);
@@ -2978,8 +2999,11 @@ export class CoreToolScheduler {
               reqInfo.bridgeResolutionError.type ===
               ToolErrorType.INVALID_TOOL_PARAMS
             ) {
+              // Key on the validated target, not the `tool_call` wrapper:
+              // alternating failures against distinct targets must accrue
+              // per-target instead of pruning each other's counter.
               const count = recordBatchRetryableToolError(
-                reqInfo.name,
+                reqInfo.bridgeResolutionError.targetName ?? reqInfo.name,
                 bridgeError.message,
               );
               if (count >= VALIDATION_RETRY_LOOP_THRESHOLD) {

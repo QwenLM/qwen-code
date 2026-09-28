@@ -13408,6 +13408,15 @@ export class Session implements SessionContext {
         // all three frontends (wenshao triage follow-up). Omitting it would
         // fail closed, not open, but the corner case should agree everywhere.
         maxSubagentDepth: this.config.getMaxSubagentDepth(),
+        // The L1 enablement gate below runs after resolution; consult the
+        // same policy inside resolution so a denied target keeps its
+        // EXECUTION_DENIED instead of a parameter pre-check refusal.
+        ...(pm
+          ? {
+              isTargetExecutionAllowed: (targetName: string) =>
+                pm.isToolEnabled(targetName),
+            }
+          : {}),
       });
       const bridgeCancellation = cancelBeforeExecutionIfAborted(toolName);
       if (bridgeCancellation) return bridgeCancellation;

@@ -19,6 +19,11 @@ import {
   ToolCallTool,
 } from './tool-call.js';
 import { SchemaValidator } from '../utils/schemaValidator.js';
+import { projectMediaPolicyToolDeclaration } from '../omni/policy/model-access.js';
+import {
+  validateMediaPolicyIoParams,
+  type MediaPolicyIoParams,
+} from '../omni/policy/tools/media-policy-tool.js';
 import { ToolErrorType } from './tool-error.js';
 import { ToolNames } from './tool-names.js';
 import { DEFAULT_MAX_SUBAGENT_DEPTH } from '../config/config.js';
@@ -804,66 +809,98 @@ describe('ToolCallTool', () => {
       expect(result).toMatchObject({ arguments: { count: '3' } });
     });
 
+    // The shared native shape of the omni media-policy family: io params
+    // with `resourceId` as the model-facing `inputPath` alternative, and
+    // only `outputDir` required natively (0 of the 14 shipped tools require
+    // inputPath — the call gate resolves resourceId → inputPath before
+    // build() validates).
+    const mediaPolicyNativeSchema = {
+      type: 'object',
+      properties: {
+        inputPath: { type: 'string' },
+        resourceId: { type: 'string' },
+        outputDir: { type: 'string' },
+      },
+      required: ['outputDir'],
+      additionalProperties: false,
+    };
+
+    // A MockTool carrying the real media-policy split: `schema` is derived
+    // through the production projector (locked keys stripped from properties
+    // AND required) instead of a hand-written literal, while
+    // `validateToolParams` keeps checking the NATIVE schema plus the io
+    // value rule, exactly like BaseMediaPolicyTool
+    // (omni/policy/tools/media-policy-tool.ts).
+    class MockMediaPolicyTool extends MockTool {
+      constructor(private readonly lockedArguments: Record<string, unknown>) {
+        super({
+          name: 'omni_transcribe_audio',
+          shouldDefer: true,
+          params: mediaPolicyNativeSchema,
+        });
+      }
+
+      override get mediaPolicyDescriptor(): MediaPolicyToolDescriptor {
+        return {
+          kind: 'media_policy',
+          inputMediaTypes: ['audio'],
+          outputs: [{ kind: 'media', required: true }],
+        };
+      }
+
+      override get schema() {
+        return projectMediaPolicyToolDeclaration(
+          {
+            getOmniPolicyToolsSettings: () => ({
+              [this.name]: {
+                modelAccess: {
+                  enabled: true,
+                  lockedArguments: this.lockedArguments,
+                },
+              },
+            }),
+          },
+          {
+            name: this.name,
+            description: this.description,
+            parametersJsonSchema: mediaPolicyNativeSchema,
+          },
+        );
+      }
+
+      override validateToolParams(params: {
+        [key: string]: unknown;
+      }): string | null {
+        return (
+          SchemaValidator.validate(mediaPolicyNativeSchema, params) ??
+          validateMediaPolicyIoParams(params as unknown as MediaPolicyIoParams)
+        );
+      }
+    }
+
     it('resolves a media-policy target whose arguments the policy gate completes', async () => {
       // The projection split a media-policy tool creates: `schema` is the
       // model-visible declaration (an operator `modelAccess.lockedArguments`
       // key stripped from BOTH properties and required), while
-      // `validateToolParams` keeps checking the NATIVE schema
-      // (omni/policy/tools/media-policy-tool.ts). The model is therefore
-      // correct to omit `outputDir`, and the modelAccess gate — which both
-      // frontends run AFTER bridge resolution — merges it back in. Running the
-      // pre-check on these raw arguments refuses a call the next stage accepts,
-      // and sending the locked key instead makes the gate refuse it: unwinnable
-      // both ways. Mutation check: dropping the media-policy exemption in
-      // resolveDeferredToolCall turns this red.
-      const nativeSchema = {
-        type: 'object',
-        properties: {
-          inputPath: { type: 'string' },
-          outputDir: { type: 'string' },
-        },
-        required: ['inputPath', 'outputDir'],
-        additionalProperties: false,
+      // `validateToolParams` keeps checking the NATIVE schema. The model is
+      // therefore correct to omit `outputDir`, and the modelAccess gate —
+      // which both frontends run AFTER bridge resolution — merges it back
+      // in. Pre-checking the raw arguments against the native schema refuses
+      // a call the next stage accepts, and sending the locked key instead
+      // makes the gate refuse it: unwinnable both ways. Mutation check:
+      // dropping the media-policy branch in resolveDeferredToolCall turns
+      // this red.
+      const target = new MockMediaPolicyTool({ outputDir: '/locked/out' });
+      // The mock really carries the split the defect needs, derived through
+      // the real projector rather than pinned as a literal: the locked key
+      // leaves properties and required, the rest of the surface stays.
+      const projection = target.schema.parametersJsonSchema as {
+        properties: Record<string, unknown>;
+        required?: string[];
       };
-      const projectedSchema = {
-        type: 'object',
-        properties: { inputPath: { type: 'string' } },
-        required: [],
-        additionalProperties: false,
-      };
-
-      class MockLockedMediaPolicyTool extends MockTool {
-        override get mediaPolicyDescriptor(): MediaPolicyToolDescriptor {
-          return {
-            kind: 'media_policy',
-            inputMediaTypes: ['audio'],
-            outputs: [{ kind: 'media', required: true }],
-          };
-        }
-
-        override get schema() {
-          return {
-            name: this.name,
-            description: this.description,
-            parametersJsonSchema: projectedSchema,
-          };
-        }
-
-        override validateToolParams(params: {
-          [key: string]: unknown;
-        }): string | null {
-          return SchemaValidator.validate(nativeSchema, params);
-        }
-      }
-
-      const target = new MockLockedMediaPolicyTool({
-        name: 'omni_transcribe_audio',
-        shouldDefer: true,
-        params: nativeSchema,
-      });
-      // The mock really carries the split the defect needs: the model-visible
-      // schema omits `outputDir`, native validation still requires it.
-      expect(target.schema.parametersJsonSchema).toEqual(projectedSchema);
+      expect(projection.properties).toHaveProperty('inputPath');
+      expect(projection.properties).not.toHaveProperty('outputDir');
+      expect(projection.required ?? []).not.toContain('outputDir');
       expect(target.validateToolParams({ inputPath: '/tmp/in.wav' })).toContain(
         "'outputDir'",
       );
@@ -881,6 +918,80 @@ describe('ToolCallTool', () => {
       expect(result).toMatchObject({
         tool: expect.objectContaining({ name: 'omni_transcribe_audio' }),
         arguments: { inputPath: '/tmp/in.wav' },
+      });
+    });
+
+    it('resolves a media-policy target called with a resourceId handle and no inputPath', async () => {
+      // The call shape omni/media-guidance.ts instructs the model to send:
+      // an opaque session media handle instead of inputPath (the gate
+      // resolves it to inputPath AFTER bridge resolution), with the locked
+      // outputDir omitted. The bridge must not apply the native schema or
+      // the io value rule here — both demand fields only the gate supplies.
+      // Mutation check: removing the media-policy branch, or pre-checking
+      // the native schema, refuses this on the locked outputDir.
+      const target = new MockMediaPolicyTool({ outputDir: '/locked/out' });
+      const result = await resolveDeferredToolCall(
+        makeRegistry([target], new Set([target.name])),
+        {
+          name: 'omni_transcribe_audio',
+          arguments: { resourceId: 'media-1-abcd' },
+        },
+      );
+
+      expect(result).not.toHaveProperty('error');
+      expect(result).not.toHaveProperty('errorType');
+      expect(result).toMatchObject({
+        tool: expect.objectContaining({ name: 'omni_transcribe_audio' }),
+        arguments: { resourceId: 'media-1-abcd' },
+      });
+    });
+
+    it('refuses a media-policy target whose arguments miss a model-visible required field', async () => {
+      // With no lockedArguments the projection is the native schema, so a
+      // bridged `{}` must still be refused here — naming the target and the
+      // missing field — instead of surfacing a bare Ajv message from build()
+      // under the wrapper name. Mutation check: skipping validation for
+      // media-policy targets turns this red.
+      const target = new MockMediaPolicyTool({});
+      const result = await resolveDeferredToolCall(
+        makeRegistry([target], new Set([target.name])),
+        { name: 'omni_transcribe_audio', arguments: {} },
+      );
+
+      expect(result).toMatchObject({
+        errorType: ToolErrorType.INVALID_TOOL_PARAMS,
+        targetName: 'omni_transcribe_audio',
+      });
+      if ('error' in result) {
+        expect(result.error.message).toContain('"omni_transcribe_audio"');
+        expect(result.error.message).toContain("'outputDir'");
+      }
+    });
+
+    it('resolves a target whose validateToolParams throws, leaving the throw to build()', async () => {
+      // A throwing validator must not become a new bridge failure mode: the
+      // scheduler's build() reports the same throw as before. Mutation
+      // check: dropping the try/catch around the pre-check turns this red.
+      class ThrowingValidatorTool extends MockTool {
+        override validateToolParams(): string | null {
+          throw new Error('boom from validator');
+        }
+      }
+      const target = new ThrowingValidatorTool({
+        name: 'throwing_tool',
+        shouldDefer: true,
+        params: { type: 'object', properties: {} },
+      });
+
+      const result = await resolveDeferredToolCall(
+        makeRegistry([target], new Set([target.name])),
+        { name: 'throwing_tool', arguments: {} },
+      );
+
+      expect(result).not.toHaveProperty('error');
+      expect(result).toMatchObject({
+        tool: expect.objectContaining({ name: 'throwing_tool' }),
+        arguments: {},
       });
     });
   });

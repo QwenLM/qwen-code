@@ -1584,6 +1584,158 @@ describe('CoreToolScheduler', () => {
     }
   });
 
+  it('denies a policy-blocked bridged target before validating its arguments', async () => {
+    // The owner execution allowlist must win over the bridge argument
+    // pre-check: a denied target gets the specific EXECUTION_DENIED naming
+    // the policy, not an INVALID_TOOL_PARAMS parameter error for a call that
+    // could never run (and the denied tool's validator never executes). The
+    // allowlist test above does not discriminate — its MockTool carries no
+    // required schema, so the pre-check passes it. Mutation check: running
+    // the pre-check ahead of the policy gate turns this red with "params
+    // must have required property 'url'".
+    const execute = vi.fn();
+    const bridge = new MockTool({ name: ToolNames.TOOL_CALL });
+    const deferred = new MockTool({
+      name: 'web_fetch',
+      shouldDefer: true,
+      params: {
+        type: 'object',
+        properties: {
+          url: { type: 'string' },
+          prompt: { type: 'string' },
+        },
+        required: ['url', 'prompt'],
+        additionalProperties: false,
+      },
+      execute,
+    });
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName: new Map([
+          [bridge.name, bridge],
+          [deferred.name, deferred],
+        ]),
+        deferredHiddenNames: new Set([deferred.name]),
+        isToolExecutionAllowed: (name: string) => name !== 'web_fetch',
+      });
+
+    await scheduler.schedule(
+      {
+        callId: 'bridge-deny-before-precheck',
+        name: ToolNames.TOOL_CALL,
+        args: { name: deferred.name, arguments: {} },
+        isClientInitiated: false,
+        prompt_id: 'prompt-bridge-deny-before-precheck',
+      },
+      new AbortController().signal,
+    );
+
+    expect(execute).not.toHaveBeenCalled();
+    const completed = onAllToolCallsComplete.mock.calls[0][0][0] as ToolCall;
+    expect(completed.status).toBe('error');
+    if (completed.status === 'error') {
+      expect(completed.response.errorType).toBe(ToolErrorType.EXECUTION_DENIED);
+      expect(completed.response.error?.message).toContain(
+        "is not permitted by this agent's tool policy",
+      );
+      expect(completed.response.error?.message).not.toContain(
+        "required property 'url'",
+      );
+    }
+  });
+
+  it('accrues bridge argument refusals per target for retry-loop detection', async () => {
+    // The refusal carries the validated targetName for exactly this
+    // accounting: alternating broken bridged calls against two distinct
+    // targets must strike per-target counters. Keyed on the wrapper
+    // (`tool_call`) instead, each strike prunes the other target's counter
+    // and neither ever reaches VALIDATION_RETRY_LOOP_THRESHOLD — the loop
+    // this PR exists to stop escapes the early stop directive. Mutation
+    // check: keying the refusal branch on reqInfo.name turns this red.
+    const bridge = new MockTool({ name: ToolNames.TOOL_CALL });
+    const makeDeferred = (name: string, required: string[]) =>
+      new MockTool({
+        name,
+        shouldDefer: true,
+        params: {
+          type: 'object',
+          properties: Object.fromEntries(
+            required.map((key) => [key, { type: 'string' }]),
+          ),
+          required,
+          additionalProperties: false,
+        },
+      });
+    const writeFile = makeDeferred('write_file', ['file_path', 'content']);
+    const webFetch = makeDeferred('web_fetch', ['url', 'prompt']);
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName: new Map([
+          [bridge.name, bridge],
+          [writeFile.name, writeFile],
+          [webFetch.name, webFetch],
+        ]),
+        deferredHiddenNames: new Set([writeFile.name, webFetch.name]),
+      });
+
+    const scheduleAlternatingBatch = async (batchId: number) => {
+      onAllToolCallsComplete.mockClear();
+      await scheduler.schedule(
+        [
+          {
+            callId: `bridge-loop-${batchId}-write`,
+            name: ToolNames.TOOL_CALL,
+            args: { name: 'write_file', arguments: {} },
+            isClientInitiated: false,
+            prompt_id: 'prompt-bridge-loop',
+          },
+          {
+            callId: `bridge-loop-${batchId}-fetch`,
+            name: ToolNames.TOOL_CALL,
+            args: { name: 'web_fetch', arguments: {} },
+            isClientInitiated: false,
+            prompt_id: 'prompt-bridge-loop',
+          },
+        ],
+        new AbortController().signal,
+      );
+      await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+      return onAllToolCallsComplete.mock.calls[0][0] as ToolCall[];
+    };
+
+    for (const batch of [
+      await scheduleAlternatingBatch(1),
+      await scheduleAlternatingBatch(2),
+    ]) {
+      expect(batch).toHaveLength(2);
+      for (const completed of batch) {
+        expect(completed.status).toBe('error');
+        if (completed.status === 'error') {
+          expect(completed.response.errorType).toBe(
+            ToolErrorType.INVALID_TOOL_PARAMS,
+          );
+          expect(completed.response.error?.message).not.toContain(
+            'RETRY LOOP DETECTED',
+          );
+        }
+      }
+    }
+
+    const third = await scheduleAlternatingBatch(3);
+    expect(third).toHaveLength(2);
+    for (const completed of third) {
+      expect(completed.status).toBe('error');
+      if (completed.status === 'error') {
+        expect(completed.response.errorType).toBe(
+          ToolErrorType.INVALID_TOOL_PARAMS,
+        );
+        expect(completed.response.error?.message).toContain(
+          'RETRY LOOP DETECTED',
+        );
+      }
+    }
+  });
+
   it('applies the retry-loop directive to repeated invalid tool_call envelopes', async () => {
     const bridge = new MockTool({ name: ToolNames.TOOL_CALL });
     const { scheduler, onAllToolCallsComplete } =
@@ -11182,16 +11334,29 @@ describe('CoreToolScheduler truncated output protection', () => {
   function createTruncationTestScheduler(
     tool: AnyDeclarativeTool,
     toolNames: string[],
+    options: {
+      extraTools?: AnyDeclarativeTool[];
+      deferredHiddenNames?: ReadonlySet<string>;
+    } = {},
   ) {
     const onAllToolCallsComplete = vi.fn();
     const onToolCallsUpdate = vi.fn();
 
+    const toolsByName = new Map<string, AnyDeclarativeTool>([
+      [tool.name, tool],
+      ...(options.extraTools ?? []).map((extra) => [extra.name, extra] as const),
+    ]);
     const mockToolRegistry = {
-      getTool: () => tool,
-      ensureTool: async () => tool,
-      getAllToolNames: () => toolNames,
+      getTool: (name: string) => toolsByName.get(name) ?? tool,
+      ensureTool: async (name: string) => toolsByName.get(name) ?? tool,
+      getAllToolNames: () => [
+        ...toolNames,
+        ...(options.extraTools ?? []).map((extra) => extra.name),
+      ],
       getFunctionDeclarations: () => [],
       tools: new Map(),
+      isDeferredAndHidden: (name: string) =>
+        options.deferredHiddenNames?.has(name) ?? false,
     } as unknown as ToolRegistry;
 
     const mockConfig = {
@@ -11222,6 +11387,7 @@ describe('CoreToolScheduler truncated output protection', () => {
       isInteractive: () => true,
       getMessageBus: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
+      getMaxSubagentDepth: () => DEFAULT_MAX_SUBAGENT_DEPTH,
     } as unknown as Config;
 
     const scheduler = new CoreToolScheduler({
@@ -11374,6 +11540,76 @@ describe('CoreToolScheduler truncated output protection', () => {
           args: { file_path: '/tmp/test.txt' },
           isClientInitiated: false,
           prompt_id: 'prompt-id-write-file-truncated',
+          wasOutputTruncated: true,
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as ToolCall[];
+    expect(completedCalls).toHaveLength(1);
+    const completedCall = completedCalls[0];
+    expect(completedCall.status).toBe('error');
+
+    if (completedCall.status === 'error') {
+      const errorMessage = completedCall.response.error?.message;
+      expect(errorMessage).toContain('truncated due to max_tokens limit');
+      expect(errorMessage).toContain(
+        'rejected to prevent writing truncated content',
+      );
+      expect(errorMessage).not.toContain(
+        "params must have required property 'content'",
+      );
+    }
+  });
+
+  it('should prefer truncation handling over the bridge argument pre-check for a bridged write_file call', async () => {
+    // Same as the direct-call case above, but reached through the tool_call
+    // bridge (#12889): the bridge pre-check runs ahead of the truncation
+    // guards below, so it must yield when the request is stamped
+    // wasOutputTruncated — otherwise a max_tokens-cut envelope surfaces as a
+    // schema mismatch and the model re-sends the same oversized write.
+    // Mutation check: dropping the wasOutputTruncated condition from the
+    // pre-check turns this red with "params must have required property
+    // 'content'".
+    const writeFileConfig = {
+      getProjectRoot: () => '/tmp',
+      getTargetDir: () => '/tmp',
+      getFileSystemService: () => ({
+        readTextFile: vi.fn(),
+        writeTextFile: vi.fn(),
+      }),
+      getDefaultFileEncoding: () => undefined,
+      setApprovalMode: vi.fn(),
+    } as unknown as Config;
+    const writeFileTool = new WriteFileTool(writeFileConfig);
+    const bridge = new MockTool({ name: ToolNames.TOOL_CALL });
+    const toolSearch = new MockTool({ name: ToolNames.TOOL_SEARCH });
+    const { scheduler, onAllToolCallsComplete } = createTruncationTestScheduler(
+      writeFileTool,
+      [WriteFileTool.Name],
+      {
+        extraTools: [bridge, toolSearch],
+        deferredHiddenNames: new Set([WriteFileTool.Name]),
+      },
+    );
+
+    await scheduler.schedule(
+      [
+        {
+          callId: '1',
+          name: ToolNames.TOOL_CALL,
+          args: {
+            name: WriteFileTool.Name,
+            arguments: { file_path: '/tmp/test.txt' },
+          },
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-bridge-write-file-truncated',
           wasOutputTruncated: true,
         },
       ],

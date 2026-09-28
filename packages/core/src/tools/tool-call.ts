@@ -21,6 +21,7 @@ import {
   deferredDeclarationFingerprint,
   type ToolRegistry,
 } from './tool-registry.js';
+import { SchemaValidator } from '../utils/schemaValidator.js';
 import {
   getExcludedToolUnavailableMessage,
   getLeaderOnlyToolUnavailableMessage,
@@ -51,6 +52,24 @@ export type DeferredToolCallResolution =
 export interface DeferredToolCallOptions {
   /** Omission keeps AgentTool excluded in subagent contexts. */
   maxSubagentDepth?: number;
+  /**
+   * Set when the model's response was cut by max_tokens. The bridged
+   * arguments may be incomplete for transport reasons rather than a schema
+   * misreading, so the argument pre-check must yield to the caller's
+   * truncation-aware handling (the scheduler rejects truncated Edit-kind
+   * calls outright and appends truncation guidance to build-time validation
+   * failures) instead of reporting a schema mismatch.
+   */
+  wasOutputTruncated?: boolean;
+  /**
+   * The caller's per-target execution policy (scheduler execution allowlist
+   * / permission-manager enablement). Consulted before the argument
+   * pre-check so a denied target keeps its specific EXECUTION_DENIED refusal
+   * instead of surfacing a parameter error for a call that could never run.
+   */
+  isTargetExecutionAllowed?: (
+    targetName: string,
+  ) => boolean | Promise<boolean>;
 }
 
 export const DEFERRED_TOOL_CALL_REFUSAL_PREFIX = '[tool_call bridge refused] ';
@@ -180,6 +199,21 @@ export async function resolveDeferredToolCall(
       errorType: ToolErrorType.EXECUTION_DENIED,
     };
   }
+  // The caller's execution policy precedes the hidden-tool gate and the
+  // argument pre-check: a denied target keeps its specific denial rather
+  // than a parameter error for a call that could never run.
+  if (
+    options?.isTargetExecutionAllowed !== undefined &&
+    !(await options.isTargetExecutionAllowed(target.name))
+  ) {
+    return {
+      error: bridgeRefusal(
+        `Tool "${target.name}" is not permitted by this agent's tool policy (execution allowlist or disallowedTools blocklist).`,
+      ),
+      errorType: ToolErrorType.EXECUTION_DENIED,
+      targetName: target.name,
+    };
+  }
 
   if (!registry.isDeferredAndHidden(target.name)) {
     return {
@@ -240,29 +274,34 @@ export async function resolveDeferredToolCall(
   // place, and the scheduler re-validates the returned arguments at build
   // time.
   //
-  // Omni media-policy targets are exempt: their arguments are not final here.
-  // Both frontends run the modelAccess gate AFTER bridge resolution
+  // Omni media-policy targets are pre-checked against the model-visible
+  // projection (their `schema` getter) instead of the native schema: both
+  // frontends run the modelAccess gate AFTER bridge resolution
   // (coreToolScheduler's `evaluateMediaPolicyToolCall`, before buildInvocation;
   // ACP Session.runTool), and that gate resolves `resourceId` → `inputPath`
   // and merges `defaultArguments`/`lockedArguments`. Their `validateToolParams`
-  // deliberately checks the NATIVE schema rather than the model-visible
-  // projection `tool_search` returned, so pre-checking the raw bridged
-  // arguments refuses calls the very next stage accepts — and for an operator
-  // locked key the refusal is unwinnable both ways (omitting it fails here,
-  // sending it fails the gate). `mediaPolicyDescriptor` is the code-level fact
-  // the gate itself keys off (it passes every non-policy tool through
-  // untouched), so the exemption covers exactly the tools whose arguments a
-  // downstream stage completes. Nothing fails open: the gate still emits named
-  // `invalid_params` refusals, and build() re-validates the merged arguments.
-  const argsCompletedByPolicyGate =
-    (target as { mediaPolicyDescriptor?: unknown }).mediaPolicyDescriptor !==
-    undefined;
+  // deliberately checks the NATIVE schema plus io value rules that assume
+  // that completion, so running it here refuses calls the very next stage
+  // accepts — and for an operator locked key the refusal is unwinnable both
+  // ways (omitting it fails natively, sending it fails the gate). The
+  // projection has locked keys stripped from `required`, so validating it
+  // still refuses a missing model-visible required field while never
+  // demanding a key the model is forbidden to send. `mediaPolicyDescriptor`
+  // is the code-level fact the gate itself keys off (it passes every
+  // non-policy tool through untouched), so the narrowed check covers exactly
+  // the tools whose arguments a downstream stage completes. Nothing fails
+  // open: the gate still emits named `invalid_params` refusals, and build()
+  // re-validates the merged arguments against the native schema.
+  const isMediaPolicyTarget = target.mediaPolicyDescriptor !== undefined;
   let paramsError: string | null = null;
-  if (!argsCompletedByPolicyGate) {
+  // A truncated response yields to the caller's truncation handling: the
+  // arguments are incomplete for transport reasons, not a schema misreading.
+  if (!options?.wasOutputTruncated) {
     try {
-      paramsError = target.validateToolParams(
-        structuredClone(invocation.params.arguments),
-      );
+      const argsClone = structuredClone(invocation.params.arguments);
+      paramsError = isMediaPolicyTarget
+        ? SchemaValidator.validate(target.schema.parametersJsonSchema, argsClone)
+        : target.validateToolParams(argsClone);
     } catch {
       // A target whose validation throws under this pre-check must not become
       // a new bridge failure mode: the scheduler's build() reports the same
