@@ -50,6 +50,12 @@ class HostedWorkspaceToolTurnIT {
 
     @Test
     @Timeout(180)
+    void recordsLatencyWithDelayedRuntimeProvisioning() throws Exception {
+        runDriver(List.of("no-tool", "tool"), "latency");
+    }
+
+    @Test
+    @Timeout(180)
     void lostBrokerRepliesNeverReplayEffectsOnMySql() throws Exception {
         assertThat(System.getProperty("mysql.url")).as("FG6a requires -Dmysql.url").startsWith("jdbc:mysql:");
         assertThat(System.getProperty("mysql.user")).as("FG6a requires -Dmysql.user").isNotBlank();
@@ -98,7 +104,8 @@ class HostedWorkspaceToolTurnIT {
     }
 
     private void runDriver(List<String> cases, String driverName) throws Exception {
-        boolean faults = !driverName.equals("workspace-tool-turn");
+        boolean latency = driverName.equals("latency");
+        boolean faults = !driverName.equals("workspace-tool-turn") && !latency;
         boolean storeFaults = driverName.equals("store-failure");
         boolean cancellations = driverName.equals("cancellation");
         Path cli = Path.of(System.getProperty("qwen.cli.entry", "../../../dist/cli.js")).toAbsolutePath().normalize();
@@ -108,6 +115,16 @@ class HostedWorkspaceToolTurnIT {
         temporary = temporary.toRealPath();
         Files.createDirectory(temporary.resolve("runtime"));
         Path root = cli.getParent().getParent();
+        Path worker = cli;
+        int runtimeProvisioningDelayMs = 15_000;
+        if (latency) {
+            worker = temporary.resolve("delayed-worker.mjs");
+            ObjectMapper mapper = new ObjectMapper();
+            Files.writeString(worker, "await new Promise(resolve => setTimeout(resolve, "
+                    + runtimeProvisioningDelayMs + "));\nprocess.argv[1] = "
+                    + mapper.writeValueAsString(cli.toString()) + ";\nawait import("
+                    + mapper.writeValueAsString(cli.toUri().toString()) + ");\n");
+        }
         String tenant = "hosted-tools-" + UUID.randomUUID();
         List<Path> workspaces = new ArrayList<>();
         for (String name : cases) workspaces.add(Files.createDirectory(temporary.resolve(name)));
@@ -130,7 +147,7 @@ class HostedWorkspaceToolTurnIT {
                 "--qwen.managed-agent.runtime-broker.credential-key-id=test",
                 "--qwen.managed-agent.runtime-broker.credential-key=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
                 "--qwen.managed-agent.runtime-broker.node-executable=" + node,
-                "--qwen.managed-agent.runtime-broker.worker-entry=" + cli,
+                "--qwen.managed-agent.runtime-broker.worker-entry=" + worker,
                 "--qwen.managed-agent.runtime-broker.cli-entry=" + cli));
         for (int index = 0; index < workspaces.size(); index++) {
             String prefix = "--qwen.managed-agent.runtime-broker.workspace-mounts[" + index + "].";
@@ -202,7 +219,13 @@ class HostedWorkspaceToolTurnIT {
                         }
                     }
                 }
+                String database;
+                try (var connection = jdbc.getDataSource().getConnection()) {
+                    database = connection.getMetaData().getDatabaseProductName() + " "
+                            + connection.getMetaData().getDatabaseProductVersion();
+                }
                 new ObjectMapper().writeValue(config.toFile(), Map.of("tenantId", tenant, "sessions", sessions,
+                        "database", database, "runtimeProvisioningDelayMs", runtimeProvisioningDelayMs,
                         "storeUrl", "http://127.0.0.1:" + spring.getWebServer().getPort(),
                         "brokerUrl", broker.getBaseUri().toString(),
                         "statusGateUrl", "http://127.0.0.1:" + gateServer.getAddress().getPort() + "/release"));
@@ -214,7 +237,8 @@ class HostedWorkspaceToolTurnIT {
                     assertThat(driver.waitFor(130, TimeUnit.SECONDS)).as("Driver timeout: %s", Files.readString(log)).isTrue();
                     assertThat(driver.exitValue()).as("Driver output: %s", Files.readString(log)).isZero();
                     System.out.println(Files.readString(log));
-                    assertThat(Files.readString(log)).contains(cancellations ? "HOSTED_CANCELLATION_OK"
+                    assertThat(Files.readString(log)).contains(latency ? "HOSTED_LATENCY_OK"
+                            : cancellations ? "HOSTED_CANCELLATION_OK"
                             : storeFaults ? "HOSTED_STORE_FAILURES_OK"
                             : faults ? "HOSTED_REPLY_LOSS_OK" : "HOSTED_WORKSPACE_TOOLS_OK");
                     JsonNode reports = faults ? new ObjectMapper().readTree(
@@ -222,7 +246,23 @@ class HostedWorkspaceToolTurnIT {
                     if (faults && cases.contains("status")) assertThat(statusGate.isDone()).isTrue();
                     for (int index = 0; index < workspaces.size(); index++) {
                         Path workspace = workspaces.get(index);
-                        if (cancellations) cancellationProbe.assertReport(sessions.get(index), reports.get(index));
+                        if (latency) {
+                            boolean tool = cases.get(index).equals("tool");
+                            if (tool) assertThat(Files.readString(workspace.resolve("child/proof.txt"))).isEqualTo("latency-proof");
+                            else assertThat(workspace.resolve("child/proof.txt")).doesNotExist();
+                            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_execution"
+                                    + " WHERE harness_session_id = ?", Integer.class, sessions.get(index).get("sessionId")))
+                                    .isEqualTo(tool ? 1 : 0);
+                            if (tool) {
+                                var execution = jdbc.queryForMap("SELECT dispatch_generation, execution_status"
+                                        + " FROM qwen_tool_execution WHERE harness_session_id = ?", sessions.get(index).get("sessionId"));
+                                assertThat(((Number) execution.get("dispatch_generation")).longValue()).isEqualTo(1);
+                                assertThat(execution.get("execution_status")).isEqualTo("success");
+                            }
+                            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_journal_tx"
+                                    + " WHERE tenant_id = ? AND session_id = ? AND operation = 'settleTurn'",
+                                    Integer.class, tenant, sessions.get(index).get("sessionId"))).isEqualTo(1);
+                        } else if (cancellations) cancellationProbe.assertReport(sessions.get(index), reports.get(index));
                         else if (faults) assertFaultLedger(jdbc, tenant, sessions.get(index), index, reports.get(index), storeFaults);
                         else assertThat(Files.readString(workspace.resolve("child/proof.txt"))).isEqualTo("after");
                         assertThat(workspace.resolve("proof.txt")).doesNotExist();
