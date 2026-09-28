@@ -58,6 +58,10 @@ import {
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { normalizeContent } from '../utils/textUtils.js';
 import {
+  SESSION_SKILL_MANAGER,
+  sessionSkillManager,
+} from '../tools/skill-utils.js';
+import {
   buildModelIdContext,
   resolveModelId,
   type ResolvedModelId,
@@ -86,7 +90,6 @@ import {
 } from '../tools/agent/agent.js';
 import { toolConfigAllowsSkill } from '../agents/runtime/subagent-plan-tool-policy.js';
 import { ToolMode } from '../tools/code-mode.js';
-import type { SkillManager } from '../skills/skill-manager.js';
 
 const AGENT_CONFIG_DIR = 'agents';
 
@@ -135,26 +138,6 @@ function recordExecutionRefusal(
   ]) {
     if (name) refusals.set(name.toLowerCase(), error);
   }
-}
-
-/**
- * The session's own SkillManager, recorded on a subagent Config whose tool
- * policy withholds it. Symbol-keyed so `sessionSkillManager` reads it through
- * the prototype chain.
- */
-const SESSION_SKILL_MANAGER: unique symbol = Symbol.for(
-  'qwen-code.subagent.sessionSkillManager',
-);
-
-/**
- * The SkillManager the session itself holds, looking past any ancestor
- * subagent that withheld it from its own Config.
- */
-function sessionSkillManager(config: Config): SkillManager | null {
-  const recorded = (config as unknown as Record<symbol, unknown>)[
-    SESSION_SKILL_MANAGER
-  ] as SkillManager | null | undefined;
-  return recorded !== undefined ? recorded : config.getSkillManager();
 }
 
 /**

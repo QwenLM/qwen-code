@@ -83,6 +83,7 @@ import * as fsSync from 'node:fs';
 import {
   collectAvailableSkillEntries,
   renderAvailableSkillsBlock,
+  sessionSkillManager,
   SKILLS_ACTIVATED_OPENER,
   type AvailableSkillEntry,
 } from '../tools/skill-utils.js';
@@ -6092,7 +6093,14 @@ export class CoreToolScheduler {
           !this.config.getExecutionEnvironment?.()
         ) {
           const rulesRegistry = this.config.getConditionalRulesRegistry();
-          const skillManager = this.config.getSkillManager();
+          // Activation, unlike every other skill surface, is session-shared
+          // state: a subagent whose tool policy withholds the Skill tool must
+          // still feed it, or its file reads stop activating path-gated skills
+          // for a parent that can invoke them, and the one-shot rule is never
+          // consumed by anyone. The announcement below stays gated on
+          // `hasSkillTool`, and the bundled-reference route still reads
+          // `getSkillManager()`, so a withheld agent still gets no listing.
+          const skillManager = sessionSkillManager(this.config);
 
           // Collect every reminder block produced by this tool call, then
           // emit them as a single `<system-reminder>` envelope at the end.
