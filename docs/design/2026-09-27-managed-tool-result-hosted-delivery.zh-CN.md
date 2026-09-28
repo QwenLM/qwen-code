@@ -177,7 +177,9 @@ Hosted Shell 在接纳原 outcome 的同时冻结有界模型历史投影，包�
 
 append 异常后，当前 TypeScript authority 已进入 write-failed。通过受支持的归属路径关闭/重开并读取原 journal，不在同一对象上盲目追加。替代 writer 不能用新 token 重放旧事务：当前 Java duplicate-commit 规则要求原 writer 和 record identity。先读取并使用已有 receipt；仍需新增 receipt 时，由新的合法 owner 对同一 durable finished publication 做新的 fenced admission，通过唯一性约束避免重复回执。
 
-只依据保存的 committed 决定推进 `results_ready`。重放原 manifest、outcome reference 和 receipt sequence，不能恢复时生成新 UUID 资源。相同 ACK 仅发送给原来的活跃 Runtime generation。替代 generation 从 Session 读取结果，不接收或重执行旧调用。取消、进程排空与 Workspace release 条件独立于回执交付。仍运行孤立进程的通用接管归 W0e。
+只依据保存的 committed 决定推进 `results_ready`。重放原 manifest、outcome reference 和 receipt sequence，不能恢复时生成新 UUID 资源。相同 ACK 仅发送给原来的活跃 Runtime generation。替代 generation 从 Session 读取结果，不接收或重执行旧调用。取消、进程排空与 Workspace release 条件独立于回执交付。仍运行孤立进程的通用接管不属于本轮 O2。
+
+W0e 将 Broker 执行标记为 `ABANDONED` 后，其 ledger 保持终态，不伪造物理结果。若原 publication 独立达到 `FINISHED`，Hosted 可在当前 Session writer 授权下读取它，逐项对比完整的原预留 binding，然后沿现有 Session 接纳与回执路径推进。完成数据缺失、损坏或身份不符时继续阻断。此路径不重新启动执行、不向替代 Runtime generation 发送 ACK，也不释放 W0e 的物理 writer pin。
 
 ## 9. 固定版本读取
 

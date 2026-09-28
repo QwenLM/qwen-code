@@ -182,7 +182,9 @@ it('commits the whole batch before the first dispatch and each receipt before re
   expect(broker.release).toHaveBeenCalledOnce();
 });
 
-it('commits the original Shell receipt before history, checkpoint and ACK', async () => {
+async function shellReceiptScenario(
+  mode: 'normal' | 'abandoned' | 'mismatched',
+) {
   const shellCall = {
     ...calls[0],
     name: 'run_shell_command',
@@ -214,6 +216,7 @@ it('commits the original Shell receipt before history, checkpoint and ACK', asyn
     },
   };
   const order: string[] = [];
+  let originalBinding: unknown;
   broker.prepareV3.mockResolvedValue({
     executionCallId: 'shell-execution',
     runtimeBindingId: 'binding-1',
@@ -222,12 +225,22 @@ it('commits the original Shell receipt before history, checkpoint and ACK', asyn
   broker.executeV3.mockImplementation(async () => {
     order.push('execute');
     expect(session.authority.latestCheckpoint?.boundary).toBe('durable_wait');
+    if (mode !== 'normal')
+      throw new HostedWorkspaceBrokerRejection(
+        409,
+        'runtime_broker_execution_unknown',
+      );
     return envelope;
   });
   broker.acknowledgeV3.mockImplementation(async () => {
     order.push('ack');
     expect((await session.sink.project()).at(-1)?.type).toBe('tool_result');
     expect(session.authority.latestCheckpoint?.boundary).toBeNull();
+    if (mode === 'abandoned')
+      throw new HostedWorkspaceBrokerRejection(
+        409,
+        'runtime_broker_execution_unknown',
+      );
   });
   const request = vi.fn(async (route: string, body: unknown) => {
     if (route === '/grants') {
@@ -236,11 +249,19 @@ it('commits the original Shell receipt before history, checkpoint and ACK', asyn
           ? 'renew'
           : 'reserve',
       );
+      if ((body as { operation: string }).operation === 'reserve')
+        originalBinding = (body as { binding: unknown }).binding;
       return { state: 'OPEN' };
     }
     if (route.endsWith('/finished')) {
       order.push('finished');
-      return { result: envelope };
+      return {
+        binding:
+          mode === 'mismatched'
+            ? { ...(originalBinding as object), captureId: randomUUID() }
+            : originalBinding,
+        result: envelope,
+      };
     }
     if (route.endsWith('/admissions/prepare')) {
       order.push('admission');
@@ -293,12 +314,27 @@ it('commits the original Shell receipt before history, checkpoint and ACK', asyn
     () => true,
     { owner, captureBytes: 1024 * 1024 },
   );
-  const result = await shellTurn.execute(
+  const execution = shellTurn.execute(
     [shellCall],
     shellParts,
     'model',
     new AbortController().signal,
   );
+  if (mode === 'mismatched') {
+    await expect(execution).rejects.toBeInstanceOf(
+      HostedToolRecoveryRequiredError,
+    );
+    expect(broker.executeV3).toHaveBeenCalledOnce();
+    expect(
+      session.authority
+        .eventsInSequenceRange(1, session.authority.committedSequence)
+        .filter((event) => event.kind === 'tool.receipt'),
+    ).toHaveLength(0);
+    expect(broker.acknowledgeV3).not.toHaveBeenCalled();
+    return;
+  }
+  const result = await execution;
+  expect(broker.executeV3).toHaveBeenCalledOnce();
   expect(result[0]?.functionResponse?.response).toMatchObject({
     output: 'hi',
     manifestRef: manifest,
@@ -310,6 +346,7 @@ it('commits the original Shell receipt before history, checkpoint and ACK', asyn
     'reserve',
     'renew',
     'execute',
+    ...(mode === 'abandoned' ? ['finished'] : []),
     'finished',
     'admission',
     'receipt',
@@ -321,6 +358,7 @@ it('commits the original Shell receipt before history, checkpoint and ACK', asyn
       .eventsInSequenceRange(1, session.authority.committedSequence)
       .filter((event) => event.kind === 'tool.receipt'),
   ).toHaveLength(1);
+  expect(broker.acknowledgeV3.mock.calls[0]?.[0]).toBe('shell-execution');
   const publicationId = broker.prepareV3.mock.calls[0]?.[3] as string;
   broker.acknowledgeV3.mockRejectedValueOnce(new Error('ACK transport down'));
   await (
@@ -352,7 +390,12 @@ it('commits the original Shell receipt before history, checkpoint and ACK', asyn
       .eventsInSequenceRange(1, session.authority.committedSequence)
       .filter((event) => event.kind === 'tool.receipt'),
   ).toHaveLength(1);
-});
+}
+
+it.each(['normal', 'abandoned', 'mismatched'] as const)(
+  'uses only the original Shell publication after Broker %s',
+  shellReceiptScenario,
+);
 
 it('closes proven unstarted reservations after a later batch reservation fails', async () => {
   const shellCalls = [0, 1].map((index) => ({

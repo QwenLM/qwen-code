@@ -14,7 +14,11 @@ import {
 } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import { managedToolDigest } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
-import { createToolPublicationToken } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-publication.js';
+import {
+  createToolPublicationToken,
+  parseToolPublicationBinding,
+  type ToolPublicationBinding,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-publication.js';
 import type { HttpToolPublicationOwner } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import {
   parseToolResultEnvelope,
@@ -290,6 +294,7 @@ export class HostedWorkspaceToolTurn {
         intentSequence: number;
         modelCallId: string;
         captureId: string;
+        originalBinding?: ToolPublicationBinding;
       }
     >();
     let renewTimer: NodeJS.Timeout | undefined;
@@ -448,6 +453,7 @@ export class HostedWorkspaceToolTurn {
             (grant as Record<string, unknown>)['state'] !== 'OPEN'
           )
             throw new Error('Tool publication reservation was not confirmed.');
+          saved.originalBinding = parseToolPublicationBinding(binding);
           confirmedPublications.add(executionCallId);
         }
         renewGrants = () => {
@@ -489,13 +495,36 @@ export class HostedWorkspaceToolTurn {
           const saved = shellBindings.get(executionCallId);
           if (!saved) throw new Error('Original Shell publication is missing.');
           await renewGrants!();
-          const result = await this.broker.executeV3(
-            executionCallId,
-            request.payloadJson,
-            saved.publicationId,
-            saved.publicationToken,
-            signal,
-          );
+          let result: ToolResultEnvelope;
+          try {
+            result = await this.broker.executeV3(
+              executionCallId,
+              request.payloadJson,
+              saved.publicationId,
+              saved.publicationToken,
+              signal,
+            );
+          } catch (failure) {
+            if (
+              !(failure instanceof HostedWorkspaceBrokerRejection) ||
+              failure.status !== 409 ||
+              failure.code !== 'runtime_broker_execution_unknown' ||
+              !saved.originalBinding
+            )
+              throw failure;
+            const finished = (await this.publication!.owner.request(
+              `/publications/${saved.publicationId}/finished`,
+              {},
+            )) as Record<string, unknown>;
+            if (
+              !isDeepStrictEqual(
+                parseToolPublicationBinding(finished['binding']),
+                saved.originalBinding,
+              )
+            )
+              throw new Error('Finished publication binding changed.');
+            result = parseToolResultEnvelope(finished['result']);
+          }
           responses.push(
             ...(await this.acceptShell(
               request.call,
