@@ -314,6 +314,11 @@ reaped.
 Missing or damaged records and worker death do not authorize replacement;
 worker death does not prove escaped writers stopped. No host reboot reclamation
 is enabled by this option. Old v1 handles cannot be upgraded by guessing identity.
+This option does not retire idle workers or prune their registration and lock
+files. With session isolation, each Hosted Session can retain a separate idle
+worker across Broker restarts; budget process, memory and state-directory growth
+before enabling it. Physical cleanup needs an evidence-preserving lifecycle;
+do not delete records to reclaim capacity.
 See the [adoption design](../../../docs/design/2026-09-27-local-runtime-adoption.md).
 The Kubernetes adapter's real-cluster fault matrix remains a production gate. This
 standalone reference keeps the one configured directory for legacy unbound

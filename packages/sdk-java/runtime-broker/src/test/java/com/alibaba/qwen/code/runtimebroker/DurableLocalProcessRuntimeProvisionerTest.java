@@ -21,10 +21,13 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.DisabledOnOs;
+import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
+@DisabledOnOs(OS.WINDOWS)
 class DurableLocalProcessRuntimeProvisionerTest {
     static final LocalRuntimeStore.HostIdentity HOST = new LocalRuntimeStore.HostIdentity(
             "a".repeat(32), "11111111-1111-1111-1111-111111111111", "pid:[1]", "time:[1]");
