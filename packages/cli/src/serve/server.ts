@@ -1184,7 +1184,10 @@ export function createServeApp(
       sessionShellCommandEnabled,
       multiWorkspaceSessionsEnabled: () =>
         workspaceRegistry.listEntries().length > 1,
-      agentCollaborationEnabled: () => anyAgentCollaborationEnabled(),
+      // Present only while the routes are: a workspace opted in after boot
+      // does not mount them until the daemon restarts.
+      agentCollaborationEnabled: () =>
+        agentCollaborationRoutesMounted && anyAgentCollaborationEnabled(),
       dynamicWorkspaceRegistrationAvailable:
         deps.createWorkspaceRuntime !== undefined,
       persistentWorkspaceRegistrationAvailable:
@@ -1581,20 +1584,26 @@ export function createServeApp(
   // operator's process-wide override. The predicate is consulted at request
   // time, so a workspace registered or reconfigured after boot is seen
   // without a daemon restart.
+  // A settings file caught mid-edit (half-written JSON) keeps the last answer
+  // read for that workspace: reading it as "off" would strand every live run
+  // there within one recovery tick.
+  const lastAgentCollaborationSetting = new Map<string, boolean>();
   const isAgentCollaborationEnabledFor = (workspaceCwd: string): boolean => {
     if (process.env['QWEN_CODE_ENABLE_AGENT_COLLABORATION'] === '1')
       return true;
     try {
-      return (
+      const enabled =
         loadSettingsCached(workspaceCwd).merged.experimental
-          ?.agentCollaboration === true
-      );
+          ?.agentCollaboration === true;
+      lastAgentCollaborationSetting.set(workspaceCwd, enabled);
+      return enabled;
     } catch {
-      return false;
+      return lastAgentCollaborationSetting.get(workspaceCwd) ?? false;
     }
   };
   // Whether the routes and the recovery sweep exist at all. Evaluated at
   // call time over the registry rather than snapshotted at boot.
+  let agentCollaborationRoutesMounted = false;
   const anyAgentCollaborationEnabled = () =>
     workspaceRegistry
       .listAll()
@@ -3487,6 +3496,7 @@ export function createServeApp(
       mutate,
       isAgentCollaborationEnabledFor,
     });
+    agentCollaborationRoutesMounted = true;
   } else {
     // Close out runs the switch left mid-flight. Recovery cannot tell "the
     // daemon crashed" from "the operator turned this off" — both look like a

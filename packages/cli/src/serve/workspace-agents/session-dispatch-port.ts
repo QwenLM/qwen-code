@@ -71,7 +71,10 @@ export type AgentSessionBridge = Pick<
   Partial<
     Pick<
       AcpSessionBridge,
-      'updateSessionMetadata' | 'getSessionTurnStatus' | 'subscribeEvents'
+      | 'updateSessionMetadata'
+      | 'getSessionTurnStatus'
+      | 'subscribeEvents'
+      | 'closeSession'
     >
   >;
 
@@ -384,6 +387,21 @@ export function createSessionDispatchPort(
             sourceType: AGENT_SESSION_SOURCE_TYPE,
             sourceId: agent.id,
           };
+          // A person opening this transcript restores it without its agent
+          // source, so it can sit resident as an ordinary session. Resuming
+          // would attach to that body — no persona, no tool ceiling, no
+          // thread tools — so it is closed and reloaded as the agent's.
+          const resident = bridge
+            .listWorkspaceSessions(workspaceCwd)
+            .some((candidate) => candidate.sessionId === request.sessionId);
+          if (resident) {
+            if (!bridge.closeSession) {
+              throw new Error(
+                `Session ${request.sessionId} is open outside its agent.`,
+              );
+            }
+            await bridge.closeSession(request.sessionId);
+          }
           session = (await sessions.sessionExists(request.sessionId))
             ? await bridge.resumeSession(request)
             : await bridge.spawnOrAttach({

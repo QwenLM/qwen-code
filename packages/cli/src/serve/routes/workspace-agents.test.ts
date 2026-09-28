@@ -9,8 +9,9 @@ import * as http from 'node:http';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import express, { type RequestHandler } from 'express';
-import { afterEach, beforeEach, expect, it } from 'vitest';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { Storage } from '@qwen-code/qwen-code-core';
+import { getAgentsDir } from '@qwen-code/qwen-code-core/agents/workspace-agents/store.js';
 import { publishAgentEvent } from '../workspace-agents/agent-events.js';
 import {
   createWorkspaceGenerationGuard,
@@ -70,6 +71,12 @@ it('answers 404 for a workspace whose settings have not opted in', async () => {
     );
     expect(enabled.status).toBe(200);
     await enabled.body?.cancel();
+
+    // Recovery visits `on` (creating its store) before `off`; once it has,
+    // the opted-out workspace must still have nothing written into it.
+    await vi.waitFor(() => fs.stat(getAgentsDir(on.workspaceCwd)));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await expect(fs.stat(getAgentsDir(off.workspaceCwd))).rejects.toThrow();
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }

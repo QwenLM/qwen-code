@@ -24,6 +24,7 @@
  *    the shell; there is no field they can set to claim otherwise.
  */
 
+import { stat } from 'node:fs/promises';
 import type { Application, Request, RequestHandler, Response } from 'express';
 import type {
   ThreadPriority,
@@ -40,6 +41,7 @@ import {
   createThread,
   generateAgentId,
   generateEventId,
+  getAgentsDir,
   isValidAgentName,
   listThreads,
   readWorkspaceAgents,
@@ -425,8 +427,18 @@ export function registerWorkspaceAgentRoutes(
             // The workspace never opted in or flipped the flag off. Recovery
             // cannot tell "turned off" from "crashed", so strand any live
             // runs an earlier opt-in left behind — a person decides their
-            // fate — then leave nothing running. strandLocalReads reads
-            // nothing when the store is absent.
+            // fate — then leave nothing running. A workspace that never had a
+            // store is skipped outright: teardown reads the store, and reading
+            // it creates it.
+            if (
+              !owners.has(runtime.workspaceCwd) &&
+              !(await stat(getAgentsDir(runtime.workspaceCwd)).then(
+                () => true,
+                () => false,
+              ))
+            ) {
+              continue;
+            }
             await strandLocalRuns(runtime.workspaceCwd);
             await teardownWorkspaceOwner(runtime);
             continue;
