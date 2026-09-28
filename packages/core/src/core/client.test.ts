@@ -8717,6 +8717,11 @@ hello
         mockInteractionTelemetry.endInteractionSpan,
       ).not.toHaveBeenCalled();
 
+      // MockTurn does not copy emitted tool calls into pendingToolCalls.
+      mockMemoryManager.scheduleMetadataMigration.mockClear();
+      mockMemoryManager.scheduleExtract.mockClear();
+      mockMemoryManager.scheduleDream.mockClear();
+
       mockTurnRunFn.mockReturnValueOnce(
         (async function* () {
           yield { type: LlmEventType.Content, value: 'done' };
@@ -8743,6 +8748,66 @@ hello
         'ok',
         { promptId },
       );
+      expect(mockMemoryManager.scheduleMetadataMigration).toHaveBeenCalledTimes(
+        2,
+      );
+      expect(mockMemoryManager.scheduleExtract).toHaveBeenCalledOnce();
+      expect(mockMemoryManager.scheduleDream).toHaveBeenCalledOnce();
+    });
+
+    it('schedules memory work after a tool-result completion without telemetry', async () => {
+      const promptId = 'prompt-tool-loop-without-telemetry';
+      mockInteractionTelemetry.getActiveInteractionSpan.mockReturnValue(
+        undefined,
+      );
+      mockTurnRunFn.mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: LlmEventType.ToolCallRequest,
+            value: {
+              callId: 'call-1',
+              name: 'read_file',
+              args: {},
+              isClientInitiated: false,
+              prompt_id: promptId,
+            },
+          };
+        })(),
+      );
+
+      await fromAsync(
+        client.sendMessageStream(
+          [{ text: 'use a tool' }],
+          new AbortController().signal,
+          promptId,
+          { type: SendMessageType.UserQuery },
+        ),
+      );
+
+      // MockTurn does not copy emitted tool calls into pendingToolCalls.
+      mockMemoryManager.scheduleMetadataMigration.mockClear();
+      mockMemoryManager.scheduleExtract.mockClear();
+      mockMemoryManager.scheduleDream.mockClear();
+      mockTurnRunFn.mockReturnValueOnce(
+        (async function* () {
+          yield { type: LlmEventType.Content, value: 'done' };
+        })(),
+      );
+
+      await fromAsync(
+        client.sendMessageStream(
+          [{ functionResponse: { name: 'read_file', response: { ok: true } } }],
+          new AbortController().signal,
+          promptId,
+          { type: SendMessageType.ToolResult },
+        ),
+      );
+
+      expect(mockMemoryManager.scheduleMetadataMigration).toHaveBeenCalledTimes(
+        2,
+      );
+      expect(mockMemoryManager.scheduleExtract).toHaveBeenCalledOnce();
+      expect(mockMemoryManager.scheduleDream).toHaveBeenCalledOnce();
     });
 
     it('starts Retry as a fresh agent invocation', async () => {
