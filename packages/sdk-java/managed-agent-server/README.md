@@ -302,6 +302,15 @@ must be trusted; same-UID hostile tools and multi-host or remote storage are
 unsupported. Keep the host machine ID, SQL credential key, placement mapping,
 state directory and worker command stable across Broker restarts. Shutdown and
 late lease discard detach from registered workers instead of killing them.
+`/etc/machine-id` must be nonempty and stable, and Linux must expose the PID
+and time namespaces (`/proc/self/ns/pid` and `/proc/self/ns/time`; the latter
+requires Linux 5.6 or newer with `CONFIG_TIME_NS`). The service
+manager must let workers survive a Broker exit: systemd's default
+`KillMode=control-group` kills them, as does restarting a container whose main
+process is the Broker. Configure the service to leave child workers running
+(for example, systemd `KillMode=process`) and use an init that reaps orphaned
+processes. The Broker recognizes `Z`/`X` workers as exited even before they are
+reaped.
 Missing or damaged records and worker death do not authorize replacement;
 worker death does not prove escaped writers stopped. No host reboot reclamation
 is enabled by this option. Old v1 handles cannot be upgraded by guessing identity.

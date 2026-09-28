@@ -24,6 +24,12 @@ must also match before inspecting processes:
 A kernel exposing both namespace identities is required; unsupported or unreadable identity fails startup. Tests may inject identity through a
 package-private constructor; no deployment option accepts caller-supplied boot
 evidence.
+The machine ID must be nonempty and stable. The service manager must let workers
+survive a Broker exit; a default systemd `KillMode=control-group` unit or a
+container whose main process is the Broker kills them too. Configure the
+service to leave child workers running (for example, systemd
+`KillMode=process`) and use an init that reaps orphans to avoid accumulating
+zombies.
 
 Each provision seed has a SHA-256 resource key, a permanent lock file and a
 versioned JSON record. Directories are owner-only, files are owner-readable and
@@ -59,6 +65,8 @@ change the boot-time epoch it uses. Parsing skips the complete parenthesized
 command name, which can contain spaces, parentheses and newlines. A read failure
 proves nothing. Linux absence distinguishes a missing stat file from other
 read errors; the latter cannot retire the journal or invalidate a cached worker.
+After matching the original start ticks, a `Z` or `X` task state means the worker
+has exited; it does not prove escaped writers stopped.
 Deployment must preserve the Broker user and its procfs visibility. Ephemeral
 workers keep their original `Process` reaper-based lifetime checks.
 The non-Linux identity used by portable tests is not deployable.
@@ -72,6 +80,13 @@ a lapsed dispatch is fenced with the original key and its result is reconciled
 from the original worker. GET alone does not advance it. Physical cancellation
 of an already `UNKNOWN` invocation is still outside that contract; this feature
 does not imply Hosted Turn takeover or replay.
+
+An `INTENT` or `LAUNCHING` record left without a published lease, or an absent
+worker retired before lease publication, yields a non-retryable resource conflict
+instead of repeated reconciliation timeouts. No dispatch could have used that
+worker. The original placement remains fenced; observation does not start a
+replacement or invent loss or writer-stop evidence. A busy file lock or unreadable
+process identity remains uncertain.
 
 Closing a durable provisioner detaches. Discarding a lease after a lost SQL
 claim also detaches: another Broker may already have adopted the same worker.
@@ -97,17 +112,18 @@ configuration stay ephemeral.
 
 Real Broker processes must adopt the original real worker after SIGKILL without
 changing identity, token, endpoint or execution receipt. Test both boot versions,
-launch interruption, concurrent Brokers, late lease discard, shared observer
-shutdown, mismatched placement, missing/corrupt record, unsafe permissions,
-symlinks, reused PID and missing start identity. Negative cases must launch no
-second worker and clear no physical pin. Existing Stage F, HTTP, Java SQL and
-CLI regression tests remain required, followed by build/typecheck and two clean
-full-diff audits. A simulated boot identity validates decisions only; actual
-Linux reboot acceptance belongs to W0e-3 and requires a dedicated host.
+launch interruption (including no-fork failure), concurrent Brokers, late lease
+discard, shared observer shutdown, mismatched placement, missing/corrupt record,
+unsafe permissions, symlinks, reused PID, zombie state and missing start identity.
+Negative cases must launch no second worker and clear no physical pin. Existing
+Stage F, HTTP, Java SQL and CLI regression tests remain required, followed by
+build/typecheck and two clean full-diff audits. A simulated boot identity
+validates decisions only; actual Linux reboot acceptance belongs to W0e-3 and
+requires a dedicated host.
 
 ## Open validation
 
-The local development host is macOS. Portable real-process tests can use a
-test-only identity source, while production Linux identity and physical reboot
-acceptance must be reported separately. No dedicated rebootable Linux host has
-yet been supplied.
+The local development host is macOS. Portable real-process tests use a
+test-only identity source. Independent production-Linux adoption evidence is
+recorded in [PR #12865](https://github.com/QwenLM/qwen-code/pull/12865);
+the physical reboot acceptance gate belongs to W0e-3.
