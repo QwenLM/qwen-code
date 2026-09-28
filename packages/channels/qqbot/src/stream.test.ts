@@ -4982,3 +4982,44 @@ describe('stash ownership regressions', () => {
     expect(sentContents()).toContain('T2-TAIL');
   });
 });
+
+// R13-1: the boundary must seal the live turn's buffer-resident prefix, not
+// only the text diverted through streamOrphanBuffer.
+describe('R13-1 acceptance: boundary seal for buffer-resident text', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockSendQQMessage.mockResolvedValue(mockResponse(true));
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('a permanent flush failure after a boundary still delivers the pre-boundary prefix', async () => {
+    const ch = makeChannel();
+    setReplyMsgId(ch, 'test-chat', 'msg-A');
+    onPromptStart(ch, 'test-chat', 's1', 'msg-A');
+
+    // Text enters state.buffer straight from onResponseChunk (NOT via the
+    // orphan stash), then a mid-turn boundary clears the bridge's collection.
+    onResponseChunk(ch, 'test-chat', 'PRE-', 's1');
+    onResponseBoundary(ch, 'test-chat', 's1');
+
+    // The re-armed idle flush fails permanently.
+    mockSendQQMessage.mockRejectedValueOnce(
+      new DeliveryError('RETRY_EXHAUSTED', 'permanent failure'),
+    );
+    vi.advanceTimersByTime(2000);
+    await drain();
+
+    // The turn continues and completes with only the post-boundary text in
+    // fullText, so the prefix has no other copy.
+    onResponseChunk(ch, 'test-chat', 'POST', 's1');
+    await onResponseComplete(ch, 'test-chat', 'POST', 's1');
+    await drain();
+
+    // Delivered final body must still carry the pre-boundary prefix.
+    expect(sentContents().at(-1)).toBe('PRE-POST');
+  });
+});

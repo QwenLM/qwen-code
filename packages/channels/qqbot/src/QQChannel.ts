@@ -2117,6 +2117,11 @@ export class QQChannel extends ChannelBase {
       // is a mid-turn window gap, so hand the residual to the idle timer
       // instead — idleFlush's blocked branch re-arms while the send is live.
       if (state.buffer) {
+        // Seal ONLY the live turn's buffer-resident prefix: a stale/parked
+        // predecessor's buffer is delivered by its own chain on its own anchor,
+        // and sealing it would let the permanent-failure arm re-stash that text
+        // into a successor turn's reply (R9-1).
+        if (state.turn === currentTurn) state.sealedPre = state.buffer;
         if (state.timer) clearTimeout(state.timer);
         const reconnectId = this._reconnectId;
         state.timer = setTimeout(() => {
