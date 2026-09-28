@@ -15,9 +15,9 @@ public final class StoreModels {
     public record SessionRecord(String tenantId, String sessionId,
             String agentId, String agentRevision, String title,
             String status, String harnessBootId, String harnessEventEpoch,
-            long harnessLastEventId, long lastSequence, long createdAt,
-            long updatedAt, Long deletedAt, long version,
-            ContextBinding workspace) {
+            long harnessLastEventId, long lastSequence,
+            long replayFloorSequence, long createdAt, long updatedAt,
+            Long deletedAt, long version, ContextBinding workspace) {
         public SessionRecord(String tenantId, String sessionId,
                 String agentId, String title, String status,
                 String harnessBootId, String harnessEventEpoch,
@@ -25,7 +25,7 @@ public final class StoreModels {
                 long updatedAt, Long deletedAt, long version) {
             this(tenantId, sessionId, agentId, null, title, status,
                     harnessBootId, harnessEventEpoch, harnessLastEventId,
-                    lastSequence, createdAt, updatedAt, deletedAt, version,
+                    lastSequence, 0, createdAt, updatedAt, deletedAt, version,
                     null);
         }
     }
@@ -44,7 +44,26 @@ public final class StoreModels {
     public record EventRecord(String tenantId, String sessionId,
             long sequence, String eventId, String turnId, String type,
             Map<String, Object> data, boolean terminal, String sourceKey,
-            long createdAt) {
+            long createdAt, int schemaVersion, int projectionVersion,
+            String itemId, String contentPartId) {
+        public EventRecord(String tenantId, String sessionId, long sequence,
+                String eventId, String turnId, String type,
+                Map<String, Object> data, boolean terminal, String sourceKey,
+                long createdAt) {
+            this(tenantId, sessionId, sequence, eventId, turnId, type, data,
+                    terminal, sourceKey, createdAt,
+                    EventIdentity.SCHEMA_VERSION,
+                    EventIdentity.PROJECTION_VERSION, null, null);
+        }
+    }
+
+    /**
+     * Events at or below {@code floorSequence} may be pruned. A client that
+     * falls below it reloads the Snapshot, which covers events through
+     * {@code snapshotThroughSequence}.
+     */
+    public record ReplayWindow(long floorSequence,
+            long snapshotThroughSequence) {
     }
 
     public record CommandRecord(String tenantId, String operation,
@@ -55,13 +74,37 @@ public final class StoreModels {
 
     public enum SessionMutationKind {
         RENAME,
-        ARCHIVE,
-        UNARCHIVE,
-        DELETE
+        UNARCHIVE
     }
 
     public record SessionMutationCommand(String sessionId, String status,
-            String sessionStatusBefore, boolean replayed) {
+            boolean replayed) {
+    }
+
+    public enum OperationKind {
+        CLOSE,
+        ARCHIVE,
+        DELETE
+    }
+
+    /**
+     * A durable lifecycle operation. {@code sessionStatusBefore} is the
+     * Session status when it was admitted; only an operation admitted on an
+     * active Session closes the Harness.
+     */
+    public record OperationRecord(String tenantId, String sessionId,
+            String operationId, OperationKind kind, String requestDigest,
+            String state, String admissionStage, String deliveryState,
+            String sessionStatusBefore, String receiptId, String leaseOwner,
+            long claimGeneration, int attemptCount) {
+    }
+
+    public record OperationAdmission(OperationRecord operation,
+            boolean replayed) {
+    }
+
+    public record OperationTarget(String tenantId, String sessionId,
+            String operationId) {
     }
 
     public record Admission(String sessionId, String turnId,

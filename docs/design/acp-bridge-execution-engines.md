@@ -61,6 +61,9 @@ specified in the B2a follow-up,
 [Paired engine owner selection and typed rejections](./2026-09-26-paired-engine-owner-selection.md).
 Host wiring and the selection rules for new sessions are specified in the B2d
 design, [Paired engine host wiring](./2026-09-26-paired-engine-host-wiring.md).
+The [ordinary-host Managed engine](./2026-09-27-ordinary-host-managed-engine.md)
+design settles the relationship: a Managed session is a Managed Session log
+whose first transaction records the owner and then the header.
 
 ### Channels and admission
 

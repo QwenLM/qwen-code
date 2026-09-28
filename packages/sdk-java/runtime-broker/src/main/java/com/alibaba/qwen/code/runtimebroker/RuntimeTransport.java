@@ -54,6 +54,15 @@ public interface RuntimeTransport {
     CompletionStage<Map<String, Object>> execute(RuntimeLease lease,
             RuntimeSession session, Map<String, Object> reference);
 
+    default CompletionStage<Map<String, Object>> execute(RuntimeLease lease,
+            RuntimeSession session, Map<String, Object> reference,
+            Map<String, Object> payload) {
+        Map<String, Object> request = new java.util.LinkedHashMap<>(reference);
+        request.remove("dispatchMode");
+        request.putAll(payload);
+        return execute(lease, session, Map.copyOf(request));
+    }
+
     CompletionStage<Map<String, Object>> cancel(RuntimeLease lease,
             RuntimeSession session, Map<String, Object> reference);
 

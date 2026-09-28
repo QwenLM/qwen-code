@@ -4,7 +4,6 @@ import com.alibaba.qwen.code.daemon.SubmitHarnessTurn;
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.CommandAdmission;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.DeletedSession;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.InputBlock;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicEvent;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicContentPart;
@@ -32,6 +31,7 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.EventRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.EventPage;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.ItemPartRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.ItemRecord;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.ReplayWindow;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionPage;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutationCommand;
@@ -56,14 +56,11 @@ public class ManagedAgentService {
     private static final String SUBMIT = "SUBMIT_TURN";
     private static final String CANCEL = "CANCEL_TURN";
     private static final String RENAME = "RENAME_SESSION";
-    private static final String ARCHIVE = "ARCHIVE_SESSION";
     private static final String UNARCHIVE = "UNARCHIVE_SESSION";
-    private static final String DELETE = "DELETE_SESSION";
     private static final Pattern IDEMPOTENCY_KEY = Pattern.compile(
             "^[\\x21-\\x7e]{1,128}$");
-    // Snapshot reset and resync arrive with event replay (Stage D3).
-    private static final SessionCapabilities CAPABILITIES =
-            new SessionCapabilities(true, false, false, false);
+    // Catch-up reads of a stream use pages of this size.
+    static final int STREAM_PAGE = 100;
     // A context stays ready until cwd changes arrive (W2).
     private static final String WORKSPACE_STATE = "ready";
     // "text" is the spelling that clients used before the contract.
@@ -74,18 +71,15 @@ public class ManagedAgentService {
     private final RequestDigests digests;
     private final HarnessCoordinator coordinator;
     private final HarnessConnector harness;
-    private final RuntimeWarmer runtimeWarmer;
 
     public ManagedAgentService(AgentStateStore store,
             RequestDigests digests, HarnessCoordinator coordinator,
-            HarnessConnector harness, RuntimeWarmer runtimeWarmer,
-            ManagedWorkspaceRegistry workspaces) {
+            HarnessConnector harness, ManagedWorkspaceRegistry workspaces) {
         this.store = store;
         this.workspaces = workspaces;
         this.digests = digests;
         this.coordinator = coordinator;
         this.harness = harness;
-        this.runtimeWarmer = runtimeWarmer;
     }
 
     public CommandAdmission createSession(String tenantId,
@@ -262,12 +256,8 @@ public class ManagedAgentService {
                 sessionId), true);
     }
 
-    public SessionMutationResult<PublicSession> archiveSession(
-            String tenantId, String actorId, String idempotencyKey, String sessionId) {
-        return lifecycleMutation(tenantId, actorId, idempotencyKey, sessionId,
-                ARCHIVE, SessionMutationKind.ARCHIVE);
-    }
-
+    // An archived Session stays closed, so unarchive needs neither the
+    // Harness nor the Runtime.
     public SessionMutationResult<PublicSession> unarchiveSession(
             String tenantId, String actorId, String idempotencyKey, String sessionId) {
         validateIdempotencyKey(idempotencyKey);
@@ -277,12 +267,6 @@ public class ManagedAgentService {
                 UNARCHIVE, idempotencyKey, requestDigest, sessionId,
                 SessionMutationKind.UNARCHIVE);
         if (!"COMPLETED".equals(command.status())) {
-            try {
-                runtimeWarmer.resume(sessionId);
-            } catch (RuntimeException error) {
-                throw dependencyUnavailable("runtime_broker_unavailable",
-                        "The Runtime Broker could not resume the Session.");
-            }
             SessionRecord session = store.completeSessionMutation(tenantId,
                     UNARCHIVE, idempotencyKey, sessionId,
                     SessionMutationKind.UNARCHIVE, null, null);
@@ -291,24 +275,6 @@ public class ManagedAgentService {
         }
         return new SessionMutationResult<>(getPublicSession(tenantId,
                 sessionId), true);
-    }
-
-    public SessionMutationResult<DeletedSession> deleteSession(
-            String tenantId, String actorId, String idempotencyKey, String sessionId) {
-        validateIdempotencyKey(idempotencyKey);
-        requireLegacyWorkspace(tenantId, actorId, sessionId);
-        String requestDigest = lifecycleDigest(sessionId, DELETE);
-        SessionMutationCommand command = store.beginSessionMutation(tenantId,
-                DELETE, idempotencyKey, requestDigest, sessionId,
-                SessionMutationKind.DELETE);
-        if (!"COMPLETED".equals(command.status())) {
-            SessionRecord session = store.requireSession(tenantId, sessionId);
-            closeAndDrain(session, command.sessionStatusBefore());
-            store.completeSessionMutation(tenantId, DELETE, idempotencyKey,
-                    sessionId, SessionMutationKind.DELETE, null, null);
-        }
-        return new SessionMutationResult<>(new DeletedSession(sessionId,
-                "agent.session.deleted", true), command.replayed());
     }
 
     private PublicSession getPublicSession(String tenantId,
@@ -354,18 +320,21 @@ public class ManagedAgentService {
                 page.hasMore());
     }
 
-    public List<PublicEvent> publicEvents(String tenantId, String actorId,
-            String sessionId, long afterSequence, int requestedLimit) {
-        return events(tenantId, actorId, sessionId, afterSequence,
-                requestedLimit)
-                .stream().map(this::publicEvent).toList();
-    }
-
-    public List<WebShellEvent> webShellEvents(String tenantId, String actorId,
-            String sessionId, long afterSequence, int requestedLimit) {
-        return events(tenantId, actorId, sessionId, afterSequence,
-                requestedLimit)
-                .stream().map(this::webShellEvent).toList();
+    public PublicList<PublicEvent> publicEvents(String tenantId,
+            String actorId, String sessionId, long afterSequence,
+            int requestedLimit) {
+        requireEventCursor(afterSequence);
+        SessionRecord session = requireReadableSession(tenantId, actorId,
+                sessionId);
+        int limit = eventLimit(requestedLimit);
+        List<EventRecord> rows = replayableEvents(session, afterSequence,
+                limit + 1);
+        boolean hasMore = rows.size() > limit;
+        List<PublicEvent> events = rows.stream().limit(limit)
+                .map(this::publicEvent).toList();
+        String nextCursor = hasMore
+                ? Long.toString(events.getLast().sequence()) : null;
+        return new PublicList<>("list", events, hasMore, nextCursor);
     }
 
     public PublicItemList listPublicItems(String tenantId, String actorId,
@@ -399,7 +368,7 @@ public class ManagedAgentService {
             String sessionId, String cursor, int requestedLimit) {
         SessionRecord session = requireReadableSession(tenantId, actorId,
                 sessionId);
-        int limit = limit(requestedLimit);
+        int limit = eventLimit(requestedLimit);
         if (cursor == null || cursor.isBlank()) {
             SnapshotRecord snapshot = store.findSnapshot(tenantId, sessionId)
                     .orElse(null);
@@ -428,16 +397,27 @@ public class ManagedAgentService {
                 page.hasMore(), session.lastSequence());
     }
 
-    private List<EventRecord> events(String tenantId, String actorId,
-            String sessionId, long afterSequence, int requestedLimit) {
+    // Events are read before the floor: a floor that is not above the cursor
+    // after the read was not above it during the read either, so no event
+    // after the cursor had been pruned.
+    private List<EventRecord> replayableEvents(SessionRecord session,
+            long afterSequence, int limit) {
+        List<EventRecord> events = store.findEvents(session.tenantId(),
+                session.sessionId(), afterSequence, limit);
+        ReplayWindow window = store.findReplayWindow(session.tenantId(),
+                session.sessionId());
+        if (afterSequence < window.floorSequence()) {
+            throw new ReplayCursorExpired(window);
+        }
+        return events;
+    }
+
+    private static void requireEventCursor(long afterSequence) {
         if (afterSequence < 0) {
             throw new ApiException(HttpStatus.BAD_REQUEST,
                     "invalid_event_cursor",
                     "Event sequence must be non-negative.");
         }
-        requireReadableSession(tenantId, actorId, sessionId);
-        return store.findEvents(tenantId, sessionId, afterSequence,
-                limit(requestedLimit));
     }
 
     private PublicSession publicSession(SessionRecord session) {
@@ -450,10 +430,13 @@ public class ManagedAgentService {
                 session.status().toLowerCase(),
                 session.createdAt() / 1000, session.updatedAt() / 1000,
                 metadata, activeTurn == null ? null : publicTurn(activeTurn),
-                session.lastSequence(), 0,
+                session.lastSequence(), session.replayFloorSequence(),
                 store.findSnapshotCoveredSequence(session.tenantId(),
                         session.sessionId()),
-                CAPABILITIES, publicWorkspace(session));
+                // A Workspace-bound Session has no lifecycle operations yet.
+                new SessionCapabilities(true, true, false, true,
+                        session.workspace() == null),
+                publicWorkspace(session));
     }
 
     private WebShellSession webShellSession(SessionRecord session) {
@@ -527,15 +510,19 @@ public class ManagedAgentService {
     }
 
     PublicEvent publicEvent(EventRecord event) {
-        return new PublicEvent(event.sequence(), event.eventId(),
-                event.sessionId(), event.turnId(), event.type(),
-                event.createdAt() / 1000, event.data(), event.terminal());
+        return new PublicEvent(event.schemaVersion(),
+                event.projectionVersion(), event.sequence(), event.eventId(),
+                event.sessionId(), event.turnId(), event.itemId(),
+                event.contentPartId(), event.type(), event.createdAt() / 1000,
+                event.data(), event.terminal());
     }
 
     WebShellEvent webShellEvent(EventRecord event) {
-        return new WebShellEvent(event.sequence(), event.eventId(),
-                event.sessionId(), event.turnId(), event.type(),
-                event.createdAt(), event.data(), event.terminal());
+        return new WebShellEvent(event.schemaVersion(),
+                event.projectionVersion(), event.sequence(), event.eventId(),
+                event.sessionId(), event.turnId(), event.itemId(),
+                event.contentPartId(), event.type(), event.createdAt(),
+                event.data(), event.terminal());
     }
 
     private PublicItem publicItem(ItemRecord item) {
@@ -594,56 +581,12 @@ public class ManagedAgentService {
         }
     }
 
-    private SessionMutationResult<PublicSession> lifecycleMutation(
-            String tenantId, String actorId, String idempotencyKey, String sessionId,
-            String operation, SessionMutationKind kind) {
-        validateIdempotencyKey(idempotencyKey);
-        requireLegacyWorkspace(tenantId, actorId, sessionId);
-        String requestDigest = lifecycleDigest(sessionId, operation);
-        SessionMutationCommand command = store.beginSessionMutation(tenantId,
-                operation, idempotencyKey, requestDigest, sessionId, kind);
-        if (!"COMPLETED".equals(command.status())) {
-            SessionRecord session = store.requireSession(tenantId, sessionId);
-            closeAndDrain(session, command.sessionStatusBefore());
-            session = store.completeSessionMutation(tenantId, operation,
-                    idempotencyKey, sessionId, kind, null, null);
-            return new SessionMutationResult<>(publicSession(session),
-                    command.replayed());
-        }
-        return new SessionMutationResult<>(getPublicSession(tenantId,
-                sessionId), true);
-    }
-
-    private void closeAndDrain(SessionRecord session,
-            String sessionStatusBefore) {
-        boolean alreadyClosed = "ARCHIVED".equals(sessionStatusBefore);
-        if (!alreadyClosed && harness.isAvailable()) {
-            try {
-                harness.closeSession(session.tenantId(),
-                        session.sessionId());
-            } catch (RuntimeException error) {
-                throw dependencyUnavailable("hosted_harness_unavailable",
-                        "The Hosted Harness could not close the Session.");
-            }
-        } else if (!alreadyClosed && session.harnessBootId() != null) {
-            throw dependencyUnavailable("hosted_harness_unavailable",
-                    "The Hosted Harness is required to close the Session.");
-        }
-        try {
-            runtimeWarmer.drain(session.sessionId()).toCompletableFuture()
-                    .join();
-        } catch (RuntimeException error) {
-            throw dependencyUnavailable("runtime_broker_unavailable",
-                    "The Runtime Broker could not drain the Session.");
-        }
-    }
-
-    private String lifecycleDigest(String sessionId, String operation) {
+    String lifecycleDigest(String sessionId, String operation) {
         return digests.digest(Map.of(
                 "sessionId", sessionId, "operation", operation));
     }
 
-    private void requireLegacyWorkspace(String tenantId, String actorId,
+    void requireLegacyWorkspace(String tenantId, String actorId,
             String sessionId) {
         SessionRecord session = store.requireSession(tenantId, sessionId);
         if (session.workspace() != null) {
@@ -672,14 +615,14 @@ public class ManagedAgentService {
         }
     }
 
+    /**
+     * Reads the next catch-up page of a stream.
+     *
+     * @throws ReplayCursorExpired when the cursor is below the replay floor
+     */
     List<EventRecord> streamEvents(SessionRecord session, long afterSequence) {
-        if (afterSequence < 0) {
-            throw new ApiException(HttpStatus.BAD_REQUEST,
-                    "invalid_event_cursor",
-                    "Event sequence must be non-negative.");
-        }
-        return store.findEvents(session.tenantId(), session.sessionId(),
-                afterSequence, 100);
+        requireEventCursor(afterSequence);
+        return replayableEvents(session, afterSequence, STREAM_PAGE);
     }
 
     private SessionRecord requireVisibleSession(String tenantId,
@@ -784,7 +727,7 @@ public class ManagedAgentService {
         return title;
     }
 
-    private static void validateIdempotencyKey(String key) {
+    static void validateIdempotencyKey(String key) {
         if (key == null || !IDEMPOTENCY_KEY.matcher(key).matches()) {
             throw new ApiException(HttpStatus.BAD_REQUEST,
                     "invalid_idempotency_key",
@@ -796,6 +739,14 @@ public class ManagedAgentService {
         if (requested <= 0 || requested > 100) {
             throw new ApiException(HttpStatus.BAD_REQUEST, "invalid_limit",
                     "Limit must be between 1 and 100.");
+        }
+        return requested;
+    }
+
+    private static int eventLimit(int requested) {
+        if (requested <= 0 || requested > 1000) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "invalid_limit",
+                    "Limit must be between 1 and 1000.");
         }
         return requested;
     }

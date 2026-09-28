@@ -2,7 +2,7 @@
 
 [English](2026-09-27-managed-agent-api-contract.md) | [简体中文](2026-09-27-managed-agent-api-contract.zh-CN.md)
 
-状态：D1 已实现；D2 已在[会话查询](2026-09-27-managed-agent-session-query.zh-CN.md)中实现；D3 待实现
+状态：D1 已实现；D2 已在[会话查询](2026-09-27-managed-agent-session-query.zh-CN.md)中实现；D3 已在[事件回放](2026-09-27-managed-agent-event-replay.zh-CN.md)中实现；生命周期工作作为 [#12867](https://github.com/QwenLM/qwen-code/issues/12867) 的 D4 已在[持久生命周期](2026-09-28-managed-agent-durable-lifecycle.zh-CN.md)中实现
 日期：2026-09-27
 Issue：[#12793](https://github.com/QwenLM/qwen-code/issues/12793)，属于 [#12380](https://github.com/QwenLM/qwen-code/issues/12380)
 
@@ -113,10 +113,11 @@ spec 的 JSON Pointer 定位，因此 `$ref` 在同一个文件内解析。
 
 ### 5.1 路由
 
-测试从 Spring 的 `RequestMappingHandlerMapping` 读取 `/v1/agents` 与
-`/api/agent/web-shell/v1` 下的全部路由，与 spec 对照。映射了 spec 中不存在或
-标为 `planned` 的路由会失败；`partial` 或 `implemented` 的路由没有映射也会失败。
-4.3 与 4.5 之后没有路由差异。
+测试从 Spring 的 `RequestMappingHandlerMapping` 读取 `/v1/agent` 与
+`/api/agent/web-shell/v1` 下的全部路由，与 spec 对照。第一个前缀覆盖 `/v1/agents` 以及
+[H0a 任务契约](2026-09-27-managed-agent-task-contract.zh-CN.md)命名的 `/v1/agent-*` 资源；
+D1 只读取 `/v1/agents`。映射了 spec 中不存在或标为 `planned` 的路由会失败；
+`partial` 或 `implemented` 的路由没有映射也会失败。4.3 与 4.5 之后没有路由差异。
 
 ### 5.2 Record
 

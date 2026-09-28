@@ -42,6 +42,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
+        /** @description Without a cursor, a Session that has a Snapshot returns all of its Items, the events up to the Snapshot other than input, text-delta and tool-call updates, and every event after it. Otherwise, and for an olderCursor, limit bounds the page of events. */
         post: operations["webShellTranscript"];
         delete?: never;
         options?: never;
@@ -58,7 +59,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description POST SSE consumed through fetch response.body. */
+        /** @description POST SSE consumed through fetch response.body. An afterSequence below the replay floor ends the stream with one agent.session.resync_required frame instead of a 409; reload the transcript and resume after its lastSequence. */
         post: operations["webShellStreamEvents"];
         delete?: never;
         options?: never;
@@ -126,6 +127,70 @@ export interface paths {
         put?: never;
         /** @description Same authorization, paging, explicit default and pre-Session capability discovery as listWorkspaces, with camelCase fields. Listing errors must not cause silent fallback to a default directory. */
         post: operations["webShellQueryWorkspaces"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/operations/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["webShellQueryCwdOperation"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/sessions/close": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["closeWebShellSession"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/sessions/archive": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["archiveWebShellSession"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/sessions/delete": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["deleteWebShellSession"];
         delete?: never;
         options?: never;
         head?: never;
@@ -300,6 +365,7 @@ export interface components {
             /** Format: int64 */
             updatedAt: number;
         };
+        /** @description A committed event, replayed with the versions and identity it was accepted with. A stream.reconciled event is the exception: it means that Harness recovery retracted earlier deltas of its Turn, which now have empty text and no itemId or contentPartId, and that later deltas may name other Parts. Reload the transcript and resume after its lastSequence. */
         WebShellEvent: {
             /** @default 1 */
             schemaVersion?: number;
@@ -320,6 +386,19 @@ export interface components {
                 [key: string]: unknown;
             };
             terminal: boolean;
+        };
+        /** @description Data of the agent.session.resync_required SSE frame. Reload the transcript, then resume after its lastSequence. */
+        WebShellResyncRequired: {
+            /** @constant */
+            type: "agent.session.resync_required";
+            /** Format: uuid */
+            sessionId: string;
+            /** Format: int64 */
+            replayFloorSequence: number;
+            /** Format: int64 */
+            snapshotThroughSequence: number;
+            /** @constant */
+            action: "reload_snapshot";
         };
         ErrorEnvelope: {
             error: {
@@ -380,6 +459,33 @@ export interface components {
                 canCreateSession?: true;
             }) | null;
         };
+        WebShellOperationRequest: {
+            /** Format: uuid */
+            sessionId: string;
+            operationId: string;
+        };
+        /** @description Receipt IDs are opaque authorized product handles, not private journal or storage refs. Input/cancel completion is command acceptance, not Turn completion or physical stop. Action completion may only record one vote. Lifecycle completion requires its cleanup facts; archive may remain java_durable because Java is its authority. Task cancel completion means that the authority recorded the cancel, not that the task stopped: the task becomes cancelled only after its physical execution settles. */
+        WebShellCommandOperation: {
+            operationId: string;
+            /** Format: uuid */
+            sessionId: string;
+            /** @enum {unknown} */
+            type: "create_session" | "submit_input" | "cancel" | "action_response" | "close" | "archive" | "delete" | "task_cancel";
+            /** @enum {unknown} */
+            status: "pending" | "running" | "completed" | "failed" | "cancelled" | "recovery_blocked";
+            /** @enum {unknown} */
+            admissionStage: "java_durable" | "harness_confirmed";
+            /** @enum {unknown} */
+            deliveryState: "pending" | "leased" | "confirmed" | "blocked";
+            receiptId?: string;
+            replayed: boolean;
+        } & (unknown & unknown & unknown & unknown);
+        WebShellOperation: components["schemas"]["WebShellCommandOperation"];
+        WebShellLifecycleRequest: {
+            /** Format: uuid */
+            sessionId: string;
+            idempotencyKey: string;
+        };
         WebShellWorkspaceQueryRequest: {
             cursor?: string | null;
             /** @default 50 */
@@ -428,15 +534,6 @@ export interface components {
         };
         /** @description Resource absent or outside the caller tenant scope. */
         NotFound: {
-            headers: {
-                [name: string]: unknown;
-            };
-            content: {
-                "application/json": components["schemas"]["ErrorEnvelope"];
-            };
-        };
-        /** @description Replay cursor is older than the retained replay floor. */
-        CursorExpired: {
             headers: {
                 [name: string]: unknown;
             };
@@ -567,7 +664,6 @@ export interface operations {
             };
             400: components["responses"]["BadRequest"];
             404: components["responses"]["NotFound"];
-            409: components["responses"]["CursorExpired"];
         };
     };
     webShellCreateSession: {
@@ -681,6 +777,118 @@ export interface operations {
             };
             400: components["responses"]["BadRequest"];
             404: components["responses"]["NotFound"];
+        };
+    };
+    webShellQueryCwdOperation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellOperationRequest"];
+            };
+        };
+        responses: {
+            /** @description Same authorized operation semantics as the public API. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellOperation"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    closeWebShellSession: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellLifecycleRequest"];
+            };
+        };
+        responses: {
+            /** @description Same authorized operation semantics as the public API. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellCommandOperation"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    archiveWebShellSession: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellLifecycleRequest"];
+            };
+        };
+        responses: {
+            /** @description Same authorized operation semantics as the public API. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellCommandOperation"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    deleteWebShellSession: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellLifecycleRequest"];
+            };
+        };
+        responses: {
+            /** @description Same authorized operation semantics as the public API. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellCommandOperation"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
         };
     };
     webShellGetWorkspace: {
