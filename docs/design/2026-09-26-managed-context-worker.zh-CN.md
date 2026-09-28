@@ -95,7 +95,7 @@ gate 与工具启动不是原子的。两者之间被替换的目录，要到下
 
 ### 保留规则
 
-与工具日志一样，Runtime 在其整个生命周期内保留自己的安装记录。不做任何淘汰，所以第 5 步始终保护着存活的 Session，以其他值复用的 `operationId` 也总会被拒绝。Broker 回收 Runtime 时就限定了这个生命周期。每条记录只包含有上限的字段，至多几 KB。工具配置不会保留：每次调用各自构造，而且在其 Session 的上下文中构造，所以 core 不会为调试日志保留它；对于能被 JSON 文本完整描述、且首次编译即成功的参数 schema，core 只编译一次，因此重复构造不会增加编译出的校验器。每个 Session 还在其键下保留三条小记录，与其安装记录一样保留到 Runtime 结束：它的项目目录，以及 core 记录的它的模型和模型标识。要更早释放一个 Session 的记录，需要一个表示该 Session 已结束的信号。Broker 的 `release` 会话动词就是这个信号，但它目前还没有 worker 路由。
+与工具日志一样，Runtime 在其整个生命周期内保留自己的安装记录。不做任何淘汰，所以第 5 步始终保护着存活的 Session，以其他值复用的 `operationId` 也总会被拒绝。Broker 回收 Runtime 时就限定了这个生命周期。每条记录只包含有上限的字段，至多几 KB。工具配置不会保留：每次调用各自构造，而且在其 Session 的上下文中构造，所以 core 不会为调试日志保留它；对于能被 JSON 文本完整描述、且首次编译即成功的参数 schema，core 只编译一次，因此重复构造不会增加编译出的校验器。每个 Session 还在其键下保留三条小记录，与其安装记录一样保留到 Runtime 结束：它的项目目录，以及 core 记录的它的模型和模型标识。要更早释放一个 Session 的记录，需要一个表示该 Session 已结束的信号。Broker 的 `release` 会话动词就是这个信号，它现在经 provider control 路由到达 worker（见 [Broker Provider 控制契约](2026-09-27-broker-provider-control.zh-CN.md)）。这次释放会永久关闭该 Session 的准入，但既不删除它的安装记录（随后的 Workspace 激活 release 还要读取），也不删除上述三条记录。它只删除 core 以 Runtime Session ID 本身为键保存的记录，这些记录只有经该路由获取的 Session 才有。
 
 ### 错误
 
@@ -119,7 +119,7 @@ envelope 把四个问题留给了 W0c。worker 的回答如下：
 1. **拒绝记录。** worker 不写。只实现 v1 的 worker 写不出这样的记录，所以 Broker 永远无法依赖它。取而代之的是 W0c-2 为 boot v2 设置重试上限，并且绝不以 v1 重试。
 2. **配置安装。** 仍待决。本切片不安装任何配置，这条路由保持 v3 的形状。由安装请求携带配置，还是交给这条路由的后续版本，尚未决定。
 3. **`cwdRelative` 中的控制字符。** worker 原样沿用 W0a 的规则，即拒绝所有 Cc 字符。如果 W0a 放宽规则，worker 随之调整。
-4. **保留规则。** 如上所述，为 Runtime 的生命周期。更早释放记录要等会话动词。
+4. **保留规则。** 如上所述，为 Runtime 的生命周期。会话动词已经落地，但 `release` 会保留 Session 的安装记录和上述记录（见[保留规则](#保留规则)），因此更早释放它们仍待决。
 
 ## 安全
 
@@ -184,9 +184,9 @@ envelope 把四个问题留给了 W0c。worker 的回答如下：
 
 ## 后续工作
 
-| 切片     | 范围                                                                                                                                                                                                                                                                                       |
-| -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| W0c-2    | provisioner 写出 boot v2 并校验 ready v2；v3 attestation 客户端和安装客户端；不降级，并为 boot v2 设置重试上限；把标识符和 Session ID 的检查收紧到 envelope 的规则；测试 Broker 的 JSON 写入器不转义非 ASCII 字符；处理安装和 `execute` 返回的 `managed_context_unavailable`。             |
-| W0c-3    | 在 `managed-agent-server` 中以 Session 和存储解析器取代启动时的单一目录，并为共享 Workspace 使用 Workspace 轮次租约。                                                                                                                                                                      |
-| 会话动词 | 已经由 provider control 路由（`managed-runtime-provider/1`）落地，但语义不同：`release` 关闭该 Session 的 provider 准入，有意不删除安装记录——安装记录由 Workspace 激活的 release 负责删除。见 [2026-09-27-broker-provider-control.zh-CN.md](2026-09-27-broker-provider-control.zh-CN.md)。 |
-| 配置     | 根据 `contextConfigRef` 安装配置，由安装请求携带，或交给这条路由的后续版本（待决问题 2）。                                                                                                                                                                                                 |
+| 切片     | 范围                                                                                                                                                                                                                                                                                                                                                                                |
+| -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| W0c-2    | provisioner 写出 boot v2 并校验 ready v2；v3 attestation 客户端和安装客户端；不降级，并为 boot v2 设置重试上限；把标识符和 Session ID 的检查收紧到 envelope 的规则；测试 Broker 的 JSON 写入器不转义非 ASCII 字符；处理安装和 `execute` 返回的 `managed_context_unavailable`。                                                                                                      |
+| W0c-3    | 在 `managed-agent-server` 中以 Session 和存储解析器取代启动时的单一目录，并为共享 Workspace 使用 Workspace 轮次租约。                                                                                                                                                                                                                                                               |
+| 会话动词 | 已经由 provider control 路由（`managed-runtime-provider/1`）落地，但语义不同：`release` 永久关闭该 Session 的准入，有意不删除安装记录，因为随后的 Workspace 激活 release 还要读取它。激活 release 同样不删除安装记录，所以安装记录仍保留到 Runtime 结束（见[保留规则](#保留规则)）。见 [2026-09-27-broker-provider-control.zh-CN.md](2026-09-27-broker-provider-control.zh-CN.md)。 |
+| 配置     | 根据 `contextConfigRef` 安装配置，由安装请求携带，或交给这条路由的后续版本（待决问题 2）。                                                                                                                                                                                                                                                                                          |

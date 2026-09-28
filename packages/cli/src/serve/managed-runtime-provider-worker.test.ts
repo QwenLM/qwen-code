@@ -7,10 +7,27 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  onTestFinished,
+  vi,
+} from 'vitest';
 import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import { ToolConfirmationOutcome } from '@qwen-code/qwen-code-core/tools/tools.js';
 import { managedToolDigest } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
+import {
+  getSessionModel,
+  getSessionModelIdentity,
+  getSessionProjectDir,
+  registerSessionModel,
+  registerSessionProjectDir,
+  unregisterSessionModel,
+  unregisterSessionProjectDir,
+} from '@qwen-code/qwen-code-core/utils/sessionIdContext.js';
 import type {
   ManagedToolCallIdentity,
   ManagedToolInvocationReference,
@@ -919,12 +936,120 @@ describe('Managed Runtime provider worker', () => {
     expect(await control({ kind: 'release' })).toBe(true);
   });
 
-  it('refuses envelope Session ids that are not printable and path-safe', async () => {
+  it('drops the registry entries core keyed on a Runtime Session when it ends', async () => {
+    const other = { ...SESSION, runtimeSessionId: 'runtime-session-other' };
+    // The Harness Session's own entries, as its live Config registers them.
+    registerSessionProjectDir(SESSION.harnessSessionId, '/harness/project');
+    registerSessionModel(SESSION.harnessSessionId, 'harness-model');
+    onTestFinished(() => {
+      unregisterSessionProjectDir(SESSION.harnessSessionId);
+      unregisterSessionModel(SESSION.harnessSessionId);
+    });
+    await acquire();
+    expect(await control({ kind: 'acquire' }, other)).toBe(true);
+    for (const id of [SESSION.runtimeSessionId, other.runtimeSessionId]) {
+      expect(getSessionProjectDir(id)).toEqual(expect.any(String));
+      expect(getSessionModel(id)).toBe('managed-runtime-worker');
+    }
+
+    expect(await control({ kind: 'release' })).toBe(true);
+    expect(getSessionProjectDir(SESSION.runtimeSessionId)).toBeUndefined();
+    expect(getSessionModel(SESSION.runtimeSessionId)).toBeUndefined();
+    expect(getSessionModelIdentity(SESSION.runtimeSessionId)).toBeUndefined();
+    // Only the ended Session's entries go, never another Runtime Session's
+    // or the Harness Session's.
+    expect(getSessionModel(other.runtimeSessionId)).toBe(
+      'managed-runtime-worker',
+    );
+    expect(getSessionProjectDir(SESSION.harnessSessionId)).toBe(
+      '/harness/project',
+    );
+    expect(getSessionModel(SESSION.harnessSessionId)).toBe('harness-model');
+
+    await worker.close();
+    expect(getSessionProjectDir(other.runtimeSessionId)).toBeUndefined();
+    expect(getSessionModel(other.runtimeSessionId)).toBeUndefined();
+  });
+
+  it('refuses content modification on this profile and routes media context to read_file only', async () => {
+    await begin();
+    const source = reference(
+      await prepare(
+        'edit',
+        {
+          file_path: path.join(workspace, 'input.txt'),
+          old_string: 'original',
+          new_string: 'edited',
+        },
+        'edit-source',
+      ),
+    );
+    const edited = {
+      file_path: path.join(workspace, 'input.txt'),
+      old_string: 'original',
+      new_string: 'modified',
+    };
+    const modified = await post({
+      kind: 'prepare',
+      identity: { ...identity, callId: 'edit-modified' },
+      toolName: 'edit',
+      input: edited,
+      modification: { source, newContent: 'modified content\n' },
+    });
+    expect(modified.status).toBe(400);
+    expect(await modified.json()).toEqual({
+      code: 'managed_runtime_tool_invalid',
+      error:
+        'Managed Runtime provider profile does not admit content modification.',
+    });
+    // Refused before core journaled anything: the call is still free for
+    // other input.
+    await prepare(
+      'edit',
+      { ...edited, new_string: 'rewritten' },
+      'edit-modified',
+    );
+
+    const media = { inputModalities: { image: true } };
+    const read = await post({
+      kind: 'prepare',
+      identity: { ...identity, callId: 'media-read' },
+      toolName: 'read_file',
+      input: { file_path: path.join(workspace, 'input.txt') },
+      mediaContext: media,
+    });
+    expect(read.status).toBe(200);
+    // The media-bound tool still reads through the Session's file service.
+    const mediaRead = await execute<{ result?: unknown }>(
+      reference(await read.json().then((body) => body.result)),
+    );
+    expect(mediaRead).toMatchObject({ executionStatus: 'success' });
+    expect(JSON.stringify(mediaRead.result)).toContain('original content');
+    const write = await post({
+      kind: 'prepare',
+      identity: { ...identity, callId: 'media-write' },
+      toolName: 'write_file',
+      input: { file_path: path.join(workspace, 'output.txt'), content: 'x' },
+      mediaContext: media,
+    });
+    expect(write.status).toBe(409);
+    expect(await write.json()).toEqual({
+      code: 'managed_runtime_provider_operation_failed',
+      error: 'Managed Runtime tool does not support media context.',
+    });
+    expect(fs.readFileSync(path.join(workspace, 'input.txt'), 'utf8')).toBe(
+      'original content\n',
+    );
+  });
+
+  it('refuses envelope Session ids outside the path-safe ASCII allow-list', async () => {
     for (const session of [
       { ...SESSION, runtimeSessionId: '../escape' },
       { ...SESSION, runtimeSessionId: 'a/b\nc' },
       { ...SESSION, harnessSessionId: '../../etc' },
       { ...SESSION, runtimeSessionId: 'has\\backslash' },
+      { ...SESSION, runtimeSessionId: 'has space' },
+      { ...SESSION, runtimeSessionId: 'emoji-\u{1F600}' },
     ]) {
       const response = await post({ kind: 'acquire' }, session);
       expect(response.status).toBe(400);

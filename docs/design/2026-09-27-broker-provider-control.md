@@ -25,15 +25,19 @@ The authenticated, no-store POST route
 `/internal/managed-runtime/provider/v1/control` carries a closed envelope:
 `protocolVersion: 1`, `providerProtocol: managed-runtime-provider/1`, `session`
 and `operation`. Session contains `harnessSessionId`, `runtimeSessionId` and
-`turnKind` (`bootstrap` or `continuation`). Both Session ids must be
-printable, path-safe text (no separators, no `.`/`..` segments, no control
-characters or unpaired surrogates); the worker rejects any other spelling at
-the envelope, before the id can become core's session id or a file-history
-directory name. The UUID form is not required: identity-bearing operations
-already require it through the identity check, while acquire, release and
-manifest stay available to opaque ids. Every successful response repeats
-the version, protocol and Session and contains `result`; void results are null.
-Existing bearer, lease and epoch headers fence the selected physical Runtime.
+`turnKind` (`bootstrap` or `continuation`). Both Session ids are checked
+against an allow-list: 1 to 512 characters, each an ASCII letter, digit, `.`,
+`_` or `-`. An id may not be `.` or `..`, and may not contain `..` anywhere.
+The worker rejects any other id at the envelope, before it can become core's
+session id or a file-history directory name. The Broker refuses the same ids
+at `acquire` with 400 `runtime_broker_invalid_request`: every Runtime Session
+is released through this envelope, so an id the worker refuses would leave the
+Session stuck RELEASING with its storage held. The UUID form is not required:
+identity-bearing operations additionally require it through core's identity
+check, while acquire, release and manifest stay available to opaque ids.
+Every successful response repeats the version, protocol and Session and
+contains `result`; void results are null. Existing bearer, lease and epoch
+headers fence the selected physical Runtime.
 
 The operation is a closed discriminated union. Public Broker controls are
 `manifest`, `begin-turn`, `prepare`, `confirmation`, `confirm`, `preflight`,
@@ -41,9 +45,20 @@ The operation is a closed discriminated union. Public Broker controls are
 `acquire`, `release`, `execute`, `status` and `cancel`. Execute cannot enter
 through the public Broker control route and bypass its execution journal.
 Identity, references, modification, media, confirmation and history values
-reuse the existing Managed Tool contracts. Foreign Session references and
-unknown fields are refused before dispatch. Unsupported versions and operations
-fail explicitly; there is no legacy-route fallback.
+reuse the existing Managed Tool contracts. This provider profile refuses a
+`prepare` that carries `modification` with 400 `managed_runtime_tool_invalid`
+before any invocation is journaled: core applies content modification only to
+`notebook_edit`, and the profile exposes only `read_file`, `write_file`,
+`edit` and `run_shell_command`. The shared provider corpus still lists that
+shape as valid, because it pins the wire shape both sides accept, not what one
+profile serves. `mediaContext` is admitted for `read_file` only; it binds the
+tool's model-facing description to the Harness's modalities, while the read
+itself decides media delivery from this worker's own content-generator
+modalities, which it does not have, so a media file is still answered with the
+unsupported-type placeholder. Delivering media through the worker is follow-up
+work. Foreign Session references and unknown fields are refused
+before dispatch. Unsupported versions and operations fail explicitly; there is
+no legacy-route fallback.
 
 Tool selection or construction failures return `400 managed_runtime_tool_invalid`;
 unsupported provider profiles return `501 managed_runtime_provider_unsupported`.
@@ -52,26 +67,50 @@ The Broker preserves known provider error status/code pairs and reasons up to
 and no content encoding. The TypeScript client retains the bounded reason.
 This diagnostic evidence does not establish whether execution started.
 
-Control requests and responses are bounded at 8 MiB for history and 1 MiB for
-other operations. Tool arguments also have the existing core limit of 256 KiB
-of canonical JSON; fitting the outer envelope does not bypass that limit.
-A result that would exceed its operation's response budget is fitted rather
+Control requests and responses are bounded at 8 MiB for `bind-history`,
+`checkpoint` and `history`, and 1 MiB for other operations. Tool arguments
+also have the existing core limit of 256 KiB of canonical JSON; fitting the
+outer envelope does not bypass that limit. An `execute`, `status` or `cancel`
+result that would exceed its operation's response budget is fitted rather
 than refused: the worker first evicts oldest progress events (announced
 through `firstAvailableSeq`/`progressGap`), then cuts bulk text fields
-head-and-tail with an inline notice and sets `truncated` on shell displays,
-so a settled execution always keeps a terminal observation and release stays
-answerable. An oversized operation the Broker itself cannot encode is refused
+head-and-tail with an inline notice and sets `truncated` on shell displays.
+When even fully cut text could not fit beside what the cut cannot reach, a
+structured display (such as an edit's file diff, which only feeds the UI) and
+then hook results are dropped before any text is cut, and content the cut
+cannot reach at all (inline media) turns the model content into an explicit
+stub.
+The cut is measured in JSON-encoded UTF-8 bytes, the unit of the wire limit,
+and removes whole code points, so a surrogate pair is never split; the notice
+reports how many characters (code points) were omitted. When several fields
+are over, they are cut to one common size, so no field is emptied while
+another keeps most of its text. A settled execution
+therefore always keeps a terminal observation, and release stays answerable.
+An oversized operation the Broker itself cannot encode is refused
 with a definitive, non-retryable 413 before anything is sent.
 Acquisition and release are idempotent for the same complete
 Session identity. Reusing a Runtime Session for another Harness or turn kind
 is a conflict. Release refuses running work, cancels preparations that have not
 been reserved, and permanently closes admission without clearing the current
-turn's status/cancellation evidence. Starting a new turn retains the runtime's
-existing eviction policy; earlier dispatched invocations remain in the durable
-Broker journal. Broker HTTP can read owned terminal execution receipts without
-a READY Session; live observation and file-history controls still require READY.
-Release does not erase persisted evidence. A durable Broker reservation must be
-explicitly cancelled before release.
+turn's status/cancellation evidence. It also drops the process-global entries
+core keeps under the Runtime Session id (its project directory, model and
+model identity); worker shutdown drops them too. Starting a new turn retains
+the runtime's existing eviction policy; earlier dispatched invocations remain
+in the durable Broker journal. Broker HTTP can read owned terminal execution
+receipts without a READY Session; live observation and file-history controls
+still require READY. Repeating the cancellation of a prepared call that is
+already settled answers from its receipt once the Session is not READY or the
+binding generation it was prepared on can no longer answer. While that
+generation may still hold the preparation, a Broker process without a live
+Session for it answers a retryable 503 `runtime_reconciliation_required`, as
+reconciliation does: the caller acquires the Session again, and the
+cancellation is acknowledged once the worker confirms it. Another Harness's
+Session under the same id in this process is a conflict (409
+`runtime_session_conflict`). A repeat that the worker answers with `unknown`
+(it forgets settled calls at the next turn) is refused like a first one, with
+the non-retryable 409 `runtime_execution_cancel_unconfirmed`, and the receipt
+stays readable. Release does not erase persisted evidence. A durable Broker
+reservation must be explicitly cancelled before release.
 
 ## Runtime and persistence
 
@@ -175,7 +214,11 @@ for the current turn and any bound file-history state; earlier turns' invocation
 entries remain subject to eviction. After release, Broker execution inspection
 can return persisted terminal receipts without reopening the worker; private
 history and live invocation observations remain unavailable through the closed
-provider tool client. The worker currently
-retains the Session's Config, tools and runtime until worker shutdown, so memory
-can grow with released provider Sessions. Reducing that retention while
-preserving private observation semantics is follow-up work.
+provider tool client. Release drops the process-global entries core keeps
+under the Runtime Session id, but the worker's Session table keeps a closed entry for every
+released Session, so a repeated release stays idempotent and a re-acquire is
+refused. For an acquired Session that entry still holds the Session's Config,
+tools and runtime until worker shutdown, because status, cancellation and
+history after release read them, so memory can grow with released provider
+Sessions. Reducing that retention while preserving private observation
+semantics is follow-up work.

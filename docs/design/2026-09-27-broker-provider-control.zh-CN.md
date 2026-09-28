@@ -21,19 +21,28 @@ reference 和原始参数；provider 使用七字段的已准备调用 reference
 `/internal/managed-runtime/provider/v1/control` 使用封闭信封：
 `protocolVersion: 1`、`providerProtocol: managed-runtime-provider/1`、`session`
 和 `operation`。Session 包含 `harnessSessionId`、`runtimeSessionId` 及
-`turnKind`（`bootstrap` 或 `continuation`）。两个 Session id 都必须是可打印、
-路径安全的文本（不含路径分隔符、`.`/`..` 片段、控制字符或未配对代理项）；
-其他拼写在信封处即被拒绝，早于该 id 成为 core 会话 id 或文件历史目录名的任何
-时机。线上契约不要求 UUID 形式：携带身份的操作本就通过身份检查要求 UUID，
-而 acquire、release 和 manifest 对不透明 id 保持可用。成功响应重复版本、协议与
-Session，并包含 `result`；无返回值时为 null。现有 bearer、lease 和 epoch 请求头隔离选中的
-物理 Runtime。
+`turnKind`（`bootstrap` 或 `continuation`）。两个 Session id 都按白名单校验：
+长度为 1 到 512 个字符，每个字符只能是 ASCII 字母、数字、`.`、`_` 或 `-`；id 不能
+是 `.` 或 `..`，任何位置也不能出现 `..`。worker 在信封处拒绝其他任何 id，早于它
+成为 core 会话 id 或文件历史目录名。Broker 在 `acquire` 时以 400
+`runtime_broker_invalid_request` 拒绝同样的 id：每个 Runtime Session 都要经这个信封
+释放，worker 拒绝的 id 会让 Session 卡在 RELEASING，并一直占用其存储。线上契约不要求
+UUID 形式：携带身份的操作还会通过 core 的身份检查要求 UUID，而 acquire、release 和
+manifest 对不透明 id 保持可用。成功响应重复版本、协议与 Session，并包含 `result`；
+无返回值时为 null。现有 bearer、lease 和 epoch 请求头隔离选中的物理 Runtime。
 
 operation 是封闭的判别联合。公开 Broker 控制为 `manifest`、`begin-turn`、
 `prepare`、`confirmation`、`confirm`、`preflight`、`bind-history`、`checkpoint`
 和 `history`。仅 transport 使用 `acquire`、`release`、`execute`、`status` 和
 `cancel`。execute 不能经公开 Broker control 路由绕过执行日志。身份、reference、
-修改、媒体、确认和历史数据复用既有 Managed Tool 契约。派发前拒绝外来 Session
+修改、媒体、确认和历史数据复用既有 Managed Tool 契约。本 provider profile 拒绝携带
+`modification` 的 `prepare`，在记录任何调用之前返回 400 `managed_runtime_tool_invalid`：
+core 只对 `notebook_edit` 应用内容修改，而本 profile 只暴露 `read_file`、`write_file`、
+`edit` 和 `run_shell_command`。共享的 provider 语料仍把这种形状列为合法，因为语料固定的
+是两端都接受的线上形状，而不是某个 profile 实际提供的能力。`mediaContext` 只对
+`read_file` 生效：它把该工具面向模型的描述绑定到 Harness 的模态上，而读取本身按本
+worker 自己的 content-generator 模态决定是否交付媒体；本 worker 没有这些模态，所以
+媒体文件仍以“不支持的类型”占位文本作答。经 worker 交付媒体留作后续工作。派发前拒绝外来 Session
 reference 和未知字段。不支持的版本与操作明确失败，不回退到旧路由。
 
 工具选择或构建失败返回 `400 managed_runtime_tool_invalid`；不支持的 provider profile
@@ -41,19 +50,31 @@ reference 和未知字段。不支持的版本与操作明确失败，不回退�
 已知 provider 状态码/错误码组合及最多 4096 字符的原因，并要求 no-store 响应头且无
 Content-Encoding。TypeScript 客户端保留限长原因。这些诊断信息不能证明执行是否已开始。
 
-历史控制请求与响应限制为 8 MiB，其他操作为 1 MiB。工具参数还受 core 既有的
-256 KiB 规范化 JSON 限制；满足外层信封限制并不绕过参数限制。超出所属操作响应
-预算的结果会被适配而非拒绝：worker 先淘汰最旧的 progress 事件（通过
-`firstAvailableSeq`/`progressGap` 告知），再把大文本字段按首尾截断并内联标记，
-shell 展示置 `truncated`，因此已结算的执行始终保有终态观察，释放也始终可应答。
-Broker 自身无法编码的超大操作，在发送前即以确定且不可重试的 413 拒绝。相同完整
-Session 身份的获取与释放幂等。同一 Runtime Session 换用 Harness 或 turn kind 会
-产生冲突。释放拒绝
-运行中的工作，取消尚未预留的准备调用，并永久关闭新操作准入，不清除当前回合的
-状态/取消证据。开始新回合仍遵循 runtime 既有清理策略；较早已派发的调用仍保留在
-Broker 持久日志中。Broker HTTP 可在 Session 非 READY 时读取归属已验证的终态执行回执；
-实时观察与文件历史控制仍要求 READY。释放不删除持久证据。已持久化的 Broker 预留必须在
-释放前显式取消。
+`bind-history`、`checkpoint` 和 `history` 的控制请求与响应限制为 8 MiB，其他操作为
+1 MiB。工具参数还受 core 既有的 256 KiB 规范化 JSON 限制；满足外层信封限制并不绕过
+参数限制。`execute`、`status` 或 `cancel` 的结果超出所属操作响应预算时会被适配而非
+拒绝：worker 先淘汰最旧的 progress 事件（通过 `firstAvailableSeq`/`progressGap`
+告知），再把大文本字段按首尾截断并内联标记，shell 展示置 `truncated`；若大文本
+全部截到最短，仍放不下截断够不到的部分，则在截断任何文本之前，先丢弃结构化的展示
+（例如 edit 的文件 diff，它只供界面使用），再丢弃 hook 结果；截断完全够不到的内容
+（内联媒体）会让模型内容变为明确的占位存根。截断按 JSON
+编码后的 UTF-8 字节计量，与线上限制的单位一致；删除时以完整码点为单位，因此不会拆开
+代理对；标记注明省略了多少个字符（按码点计）。多个字段同时超长时，截到同一个大小，
+不会出现一个字段被清空、另一个字段仍保留大部分文本的情况。因此已结算的执行始终保有终态观察，
+释放也始终可应答。Broker 自身无法编码的超大操作，在发送前即以确定且不可重试的 413
+拒绝。相同完整 Session 身份的获取与释放幂等。同一 Runtime Session 换用 Harness 或
+turn kind 会产生冲突。释放拒绝运行中的工作，取消尚未预留的准备调用，并永久关闭新操作
+准入，不清除当前回合的状态/取消证据。释放还会删除 core 以该 Runtime Session id 为键
+保存的进程级记录（项目目录、模型与模型标识）；worker 关闭时同样删除。开始新回合仍
+遵循 runtime 既有清理策略；较早已派发的调用仍保留在 Broker 持久日志中。Broker HTTP
+可在 Session 非 READY 时读取归属已验证的终态执行回执；实时观察与文件历史控制仍要求
+READY。对已结算的准备调用重复取消时，若 Session 已非 READY，或该调用准备时所在的
+binding 代次已无法应答，则直接以回执作答。只要该代次仍可能持有这次准备，没有其活
+Session 的 Broker 进程就返回可重试的 503 `runtime_reconciliation_required`（与对账
+一致）：调用方重新获取 Session，待 worker 确认后才确认这次取消。本进程中若同一 id
+下是另一个 Harness 的 Session，则是冲突（409 `runtime_session_conflict`）。worker
+会在下一回合忘掉已结算的调用；它对重复取消回答 `unknown` 时，与首次取消一样以不可
+重试的 409 `runtime_execution_cancel_unconfirmed` 拒绝，回执仍可读取。释放不删除持久证据。已持久化的 Broker 预留必须在释放前显式取消。
 
 ## Runtime 与持久化
 
@@ -126,7 +147,9 @@ immediate `POST /executions` 路由仍从已保存的 reference 读取 `toolName
 
 释放后，私有 worker 路由保留当前回合的状态/取消证据及已绑定的文件历史状态；较早回合的
 调用条目仍可能被清理。释放后，Broker 执行检查可返回持久终态回执，无需重开 worker；
-已关闭的 provider 工具客户端仍不提供私有历史和实时调用观察。worker 当前保留 Session 的
-Config、工具与 runtime，直到 worker 关闭，因此
-内存可能随已释放的 provider Session 数量增长。在保留私有观察语义的前提下减少这部分
-保留是后续工作。
+已关闭的 provider 工具客户端仍不提供私有历史和实时调用观察。释放会删除 core 以该
+Runtime Session id 为键保存的进程级记录，但 worker 的 Session 表会为每个已释放的 Session 保留一条已
+关闭记录，使重复释放保持幂等，并拒绝再次获取。对已获取过的 Session，这条记录仍持有其
+Config、工具与 runtime，直到 worker 关闭，因为释放后的状态、取消与历史查询都要读取
+它们，所以内存可能随已释放的 provider Session 数量增长。在保留私有观察语义的前提下
+减少这部分保留是后续工作。

@@ -1,6 +1,8 @@
 package com.alibaba.qwen.code.runtimebroker;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -17,7 +19,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.CompletionStage;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.function.Supplier;
 import java.util.function.UnaryOperator;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -39,6 +43,7 @@ class ProviderRuntimeTransportTest {
     private volatile Object result = Map.of();
     private volatile Object acquireAnswer = true;
     private volatile UnaryOperator<Map<String, Object>> response = body -> body;
+    private volatile byte[] rawBody;
 
     @BeforeEach
     void start() throws Exception {
@@ -57,7 +62,7 @@ class ProviderRuntimeTransportTest {
             answer.put("providerProtocol", ProviderRuntimeProtocol.NAME);
             answer.put("session", request.get("session"));
             answer.put("result", value);
-            byte[] encoded = JsonCodec.encode(response.apply(answer));
+            byte[] encoded = rawBody != null ? rawBody : JsonCodec.encode(response.apply(answer));
             exchange.getResponseHeaders().set("Content-Type", contentType);
             exchange.getResponseHeaders().set("Cache-Control", cacheControl);
             if (contentEncoding != null) {
@@ -137,9 +142,10 @@ class ProviderRuntimeTransportTest {
 
     @Test
     void emitsTheSharedPublicControlFixturesWithoutChangingTheirIdentity() throws Exception {
-        JsonNode cases = new ObjectMapper().readTree(ManagedRuntimeAttestationConformanceTest
-                .contractDirectory().resolve("managed-runtime-provider-v1.fixtures.json").toFile())
-                .required("cases");
+        JsonNode corpus = new ObjectMapper().readTree(ManagedRuntimeAttestationConformanceTest
+                .contractDirectory().resolve("managed-runtime-provider-v1.fixtures.json").toFile());
+        assertEquals(ProviderRuntimeProtocol.NAME, corpus.required("protocol").asText());
+        JsonNode cases = corpus.required("cases");
         Set<String> publicKinds = Set.of("manifest", "history", "begin-turn", "prepare",
                 "confirmation", "preflight", "confirm", "bind-history", "checkpoint");
         List<String> exercised = new ArrayList<>();
@@ -311,16 +317,27 @@ class ProviderRuntimeTransportTest {
 
     @Test
     void rejectsMalformedStatusAndForeignOrPayloadBearingReferences() {
-        for (Object invalid : List.of(Map.of("state", "settled"),
+        // Every status but the unknown one carries a valid cursor set apart
+        // from the single field under test.
+        for (Object invalid : List.of(
+                Map.of("state", "settled", "cancelRequested", false, "lastSeq", 1,
+                        "firstAvailableSeq", 0, "progressGap", false, "progress", List.of()),
                 Map.of("state", "unknown", "result", Map.of()),
                 Map.of("state", "executing", "cancelRequested", false, "lastSeq", -1,
                         "firstAvailableSeq", 0, "progressGap", false, "progress", List.of()),
                 Map.of("state", "executing", "cancelRequested", false,
                         "lastSeq", new BigDecimal("1.0000000000000000000001"),
-                        "firstAvailableSeq", 0, "progressGap", false, "progress", List.of()))) {
+                        "firstAvailableSeq", 0, "progressGap", false, "progress", List.of()),
+                Map.of("state", "executing", "cancelRequested", "no", "lastSeq", 1,
+                        "firstAvailableSeq", 0, "progressGap", false, "progress", List.of()),
+                Map.of("state", "executing", "cancelRequested", false, "lastSeq", 1,
+                        "firstAvailableSeq", 0, "progressGap", "no", "progress", List.of()),
+                Map.of("state", "executing", "cancelRequested", false, "lastSeq", 1,
+                        "firstAvailableSeq", 0, "progressGap", false, "progress", "none"),
+                Map.of("state", "executing", "cancelRequested", false, "lastSeq", 1,
+                        "firstAvailableSeq", -1, "progressGap", false, "progress", List.of()))) {
             result = invalid;
-            assertThrows(CompletionException.class,
-                    () -> transport.status(lease, session, reference(), 0).toCompletableFuture().join());
+            assertAttestationInvalid(() -> transport.status(lease, session, reference(), 0), invalid);
         }
         requests.clear();
         Map<String, Object> invalid = new LinkedHashMap<>(reference());
@@ -330,6 +347,40 @@ class ProviderRuntimeTransportTest {
         invalid.put("input", Map.of());
         assertThrows(IllegalArgumentException.class, () -> transport.execute(lease, session, invalid));
         assertTrue(requests.isEmpty());
+    }
+
+    @Test
+    void refusesMalformedProviderResultsWhetherExecutedOrObserved() {
+        for (Map<String, Object> invalid : List.<Map<String, Object>>of(
+                Map.of("executionStatus", "success"),
+                Map.of("result", Map.of()),
+                Map.of("executionStatus", "banana"),
+                Map.of("executionStatus", "success", "result", Map.of(), "extra", 1))) {
+            result = invalid;
+            assertAttestationInvalid(() -> transport.execute(lease, session, reference()), invalid);
+            result = Map.of("state", "settled", "result", invalid, "cancelRequested", false,
+                    "lastSeq", 1, "firstAvailableSeq", 0, "progressGap", false, "progress", List.of());
+            assertAttestationInvalid(() -> transport.status(lease, session, reference(), 0), invalid);
+        }
+    }
+
+    @Test
+    void refusesAProviderAnswerThatIsNotAJsonObjectAsAPermanentFailure() {
+        // A gateway page and an array fail to parse; a JSON null parses to nothing.
+        for (String body : List.of("<html>Bad Gateway</html>", "[]", "null")) {
+            rawBody = body.getBytes(StandardCharsets.UTF_8);
+            assertAttestationInvalid(() -> transport.execute(lease, session, reference()), body);
+        }
+    }
+
+    private static void assertAttestationInvalid(Supplier<CompletionStage<?>> call, Object label) {
+        CompletionException failure = assertThrows(CompletionException.class,
+                () -> call.get().toCompletableFuture().join(), String.valueOf(label));
+        RuntimeBrokerException error = assertInstanceOf(RuntimeBrokerException.class,
+                failure.getCause(), String.valueOf(label));
+        assertEquals(400, error.getStatusCode(), String.valueOf(label));
+        assertEquals("managed_runtime_attestation_invalid", error.getCode(), String.valueOf(label));
+        assertFalse(error.isRetryable(), String.valueOf(label));
     }
 
     @Test

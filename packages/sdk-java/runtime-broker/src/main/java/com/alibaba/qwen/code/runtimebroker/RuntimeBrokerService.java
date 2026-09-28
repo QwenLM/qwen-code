@@ -153,9 +153,10 @@ public final class RuntimeBrokerService implements AutoCloseable {
             String harnessSessionId, String runtimeSessionId,
             String turnKind) {
         requireOpen();
-        String harnessId = BrokerValues.requireId(harnessSessionId,
+        String harnessId = BrokerValues.requirePathSafe(
+                BrokerValues.requireId(harnessSessionId, "harnessSessionId"),
                 "harnessSessionId");
-        String runtimeId = BrokerValues.requireWellFormed(
+        String runtimeId = BrokerValues.requirePathSafe(
                 BrokerValues.requireId(runtimeSessionId, "runtimeSessionId"),
                 "runtimeSessionId");
         return resolveScope(harnessId).thenCompose(scope -> {
@@ -416,12 +417,26 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 RuntimeBindingRecord binding = bindingRepository.findById(stored.getBindingId());
                 RuntimeSessionRecord owner = binding == null ? null : sessionRepository.findById(
                         binding.getRequest().getScope(), runtimeSessionId);
-                // A READY Session can refresh the worker's cancellation
-                // evidence; anywhere else the terminal receipt stands alone,
-                // the same rule that lets Broker HTTP read terminal receipts
-                // without a READY Session.
-                if (owner == null || owner.getState() != RuntimeSessionRecord.State.READY) {
+                // Only a READY Session whose binding can still answer may hold
+                // the worker's preparation; anywhere else the terminal receipt
+                // stands alone, the same rule that lets Broker HTTP read
+                // terminal receipts without a READY Session.
+                if (owner == null || owner.getState() != RuntimeSessionRecord.State.READY
+                        || binding.getState() != RuntimeBindingRecord.State.READY
+                                && binding.getState() != RuntimeBindingRecord.State.DRAINING) {
                     return CompletableFuture.completedFuture(stored);
+                }
+                // That worker may still hold the preparation, so the
+                // cancellation is not acknowledged without its evidence. A
+                // process without a live Session (a replaced Broker, or an
+                // acquire still adopting) asks for adoption, as reconciliation
+                // does; another Harness's Session under the same id stays a
+                // conflict below.
+                CompletableFuture<SessionContext> local = sessions.get(runtimeSessionId);
+                if (local == null || !local.isDone() || local.isCompletedExceptionally()) {
+                    throw unavailable("runtime_reconciliation_required",
+                            "Runtime Session is not active in this Broker process; "
+                                    + "acquire the Session again to confirm the cancellation");
                 }
             }
             return requireReadySession(harnessSessionId, runtimeSessionId)

@@ -16,9 +16,9 @@ owned Managed Runtime worker 在 attestation 之外增加三个工具操作—�
 
 ## 2. 范围
 
-范围内：路由清单声明、共享 schema 与 conformance fixtures，以及 worker 处理器和对应的 raw HTTP gate 放行。TypeScript 契约测试与 Java fixture 消费方共享契约；worker 测试覆盖已挂载的处理器。Java `HttpRuntimeTransport` 按本契约实现 `execute`、`status`、`cancel`。
+范围内：路由清单声明、共享 schema 与 conformance fixtures，以及 worker 处理器和对应的 raw HTTP gate 放行。TypeScript 契约测试与 Java fixture 消费方共享契约；worker 测试覆盖已挂载的处理器。Java `HttpRuntimeTransport` 按本契约实现 `execute`、`status`、`cancel`。七字段的已准备 reference、会话动词和 provider 控制则改走 `managed-runtime-provider/1`：`acquire` 在 Broker 本地应答，`release` 和各项控制经 provider control 路由发送（见 [2026-09-27-broker-provider-control.zh-CN.md](2026-09-27-broker-provider-control.zh-CN.md)）。
 
-范围外：将 `HttpRuntimeTransport` 接为 `RuntimeTransport`、Harness 侧工具接线，以及 `not_started_proven` 结果（需要持久回执存储）。
+范围外：~~将 `HttpRuntimeTransport` 接为 `RuntimeTransport`~~（已经由 `managed-runtime-provider/1` 落地）、Harness 侧工具接线，以及 `not_started_proven` 结果（需要持久回执存储）。
 
 ## 3. 设计
 

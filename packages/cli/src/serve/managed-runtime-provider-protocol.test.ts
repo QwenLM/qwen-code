@@ -9,6 +9,7 @@ import { describe, expect, it } from 'vitest';
 import { managedToolDigest } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
 import { ToolConfirmationOutcome } from '@qwen-code/qwen-code-core/tools/tools.js';
 import {
+  MANAGED_RUNTIME_PROVIDER_PROTOCOL,
   MANAGED_RUNTIME_PROVIDER_ROUTE,
   fitManagedRuntimeProviderResult,
   managedRuntimeProviderLimit,
@@ -28,6 +29,7 @@ const fixtures = JSON.parse(
     'utf8',
   ),
 ) as {
+  protocol: string;
   cases: Array<{
     name: string;
     valid: boolean;
@@ -57,6 +59,114 @@ describe('managed-runtime-provider/1', () => {
     if (valid)
       expect(parseManagedRuntimeProviderRequest(request)).toEqual(request);
     else expect(() => parseManagedRuntimeProviderRequest(request)).toThrow();
+  });
+
+  it('pins the shared corpus to this protocol and one case shape', () => {
+    // Both languages read the corpus by these literal keys.
+    expect(Object.keys(fixtures).sort()).toEqual(['cases', 'protocol']);
+    expect(fixtures.protocol).toBe(MANAGED_RUNTIME_PROVIDER_PROTOCOL);
+    expect(
+      new Set(fixtures.cases.map((entry) => Object.keys(entry).sort().join())),
+    ).toEqual(new Set(['name,request,valid']));
+  });
+
+  it('bounds the whole composed envelope, not only its operation', () => {
+    const envelope = (content: string) => ({
+      protocolVersion: 1,
+      providerProtocol: MANAGED_RUNTIME_PROVIDER_PROTOCOL,
+      session,
+      operation: {
+        kind: 'prepare',
+        identity,
+        toolName: 'write_file',
+        input: { file_path: '/workspace/note.txt', content },
+      },
+    });
+    const limit = managedRuntimeProviderLimit('prepare');
+    const base = Buffer.byteLength(JSON.stringify(envelope('')), 'utf8');
+    const exact = envelope('x'.repeat(limit - base));
+    expect(parseManagedRuntimeProviderRequest(exact)).toEqual(exact);
+    expect(() =>
+      parseManagedRuntimeProviderRequest(
+        envelope('x'.repeat(limit - base + 1)),
+      ),
+    ).toThrow('Managed Tool JSON exceeds size limit.');
+  });
+
+  it('admits only path-safe ASCII envelope Session ids', () => {
+    const request = (patch: Partial<ManagedRuntimeProviderSession>) => ({
+      protocolVersion: 1,
+      providerProtocol: MANAGED_RUNTIME_PROVIDER_PROTOCOL,
+      session: { ...session, ...patch },
+      operation: { kind: 'acquire' },
+    });
+    const refused = [
+      '',
+      '.',
+      '..',
+      'a..b',
+      'a/b',
+      'a\\b',
+      'a b',
+      'a:b',
+      'a\u0000b',
+      'a\u0001b',
+      'a\u2028b',
+      'a\u202eb',
+      'a\u200bb',
+      'a\uff0fb',
+      'a\ud83d\ude00b',
+      'a\ud800b',
+      'x'.repeat(513),
+    ].flatMap((id) =>
+      (['harnessSessionId', 'runtimeSessionId'] as const).map((key) => {
+        try {
+          parseManagedRuntimeProviderRequest(request({ [key]: id }));
+          return `${key} ${JSON.stringify(id)} was admitted`;
+        } catch (error) {
+          return (error as Error).message;
+        }
+      }),
+    );
+    expect(new Set(refused)).toEqual(
+      new Set([
+        "Managed Runtime provider Session identity must be 1-512 ASCII letters, digits, '.', '_' or '-', without '..'.",
+      ]),
+    );
+    // Opaque ids stay admitted: the Broker's fault gates drive this route
+    // with them, and every in-repo producer mints UUIDs or prefix_<hex>.
+    for (const id of [
+      'harness-1',
+      'runtime-session-1',
+      'turn_0123456789abcdef',
+      'a.b',
+      'x'.repeat(512),
+      session.runtimeSessionId,
+    ])
+      expect(
+        parseManagedRuntimeProviderRequest(request({ runtimeSessionId: id }))
+          .session.runtimeSessionId,
+      ).toBe(id);
+    // Every ASCII character, inside an id: exactly the allow-list admits.
+    const allowed =
+      'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-';
+    const admitted = [];
+    for (let code = 0; code < 0x80; code++) {
+      const character = String.fromCharCode(code);
+      try {
+        parseManagedRuntimeProviderRequest(
+          request({ runtimeSessionId: `a${character}b` }),
+        );
+        admitted.push(character);
+      } catch {
+        // refused
+      }
+    }
+    expect(admitted.join('')).toBe(
+      [...allowed]
+        .sort((left, right) => left.charCodeAt(0) - right.charCodeAt(0))
+        .join(''),
+    );
   });
 
   it('validates optional preparation values and their original Session', () => {
@@ -323,6 +433,17 @@ describe('managed-runtime-provider/1', () => {
   describe('fitManagedRuntimeProviderResult', () => {
     const budget = 64 * 1024;
     const execute = { kind: 'execute', reference } as const;
+    const NOTICE =
+      /\n\[Managed Runtime provider omitted (\d+) characters here to fit the \d+-byte wire limit\.\]\n/;
+    /** The characters a cut field kept, and the count its notice reports. */
+    const cutOf = (text: string) => {
+      const notice = text.match(NOTICE);
+      expect(notice).not.toBeNull();
+      return {
+        kept: [...text.replace(notice![0], '')],
+        omitted: Number(notice![1]),
+      };
+    };
 
     it('leaves fitting results and non-observation kinds untouched', () => {
       const small = {
@@ -379,6 +500,13 @@ describe('managed-runtime-provider/1', () => {
       expect(result.result.llmContent).toContain(
         'Managed Runtime provider omitted',
       );
+      // The three fields share the cut instead of the first being emptied.
+      for (const field of [
+        result.result.llmContent,
+        display.text,
+        display.output,
+      ])
+        expect(field.length).toBeGreaterThan(budget * 0.3);
     });
 
     it('evicts oldest progress before cutting a settled result', () => {
@@ -388,9 +516,10 @@ describe('managed-runtime-provider/1', () => {
         lastSeq: 6,
         firstAvailableSeq: 1,
         progressGap: false,
+        // Distinct sizes, so the byte total cannot hide which end survived.
         progress: [1, 2, 3, 4, 5, 6].map((seq) => ({
           seq,
-          output: 'p'.repeat(1024),
+          output: 'p'.repeat(1024 + seq),
         })),
         result: {
           executionStatus: 'success',
@@ -407,9 +536,265 @@ describe('managed-runtime-provider/1', () => {
         Buffer.byteLength(JSON.stringify(status), 'utf8'),
       ).toBeLessThanOrEqual(2048);
       expect(status.progressGap).toBe(true);
-      expect(status.progress.length).toBeGreaterThan(0);
+      expect(status.progress.map((event) => event.seq)).toEqual([6]);
+      expect(status.firstAvailableSeq).toBe(6);
       expect(status.progress[0].seq).toBe(status.firstAvailableSeq);
       expect(status.result.result.llmContent).toBe('short');
+    });
+
+    it.each([
+      ['three-byte text', '中', 444_444],
+      ['two-byte text', 'é', 600_000],
+      ['surrogate pairs', '\u{1F600}', 300_000],
+      ['unpaired surrogates', '\uD800', 200_000],
+      ['JSON-escaped controls', '\u0001', 200_000],
+      ['short-escaped newlines', '\n', 600_000],
+      ['escaped quotes', '"', 600_000],
+      ['escaped backslashes', '\\', 600_000],
+    ])(
+      'cuts %s by its encoded bytes without splitting a code point',
+      (_label, unit, count) => {
+        const limit = 1024 * 1024;
+        const result = {
+          executionStatus: 'success',
+          result: { llmContent: unit.repeat(count) },
+        };
+        fitManagedRuntimeProviderResult(execute, result, limit);
+        const bytes = Buffer.byteLength(JSON.stringify(result), 'utf8');
+        expect(bytes).toBeLessThanOrEqual(limit);
+        expect(bytes).toBeGreaterThan(limit * 0.99);
+        // Spreading yields whole code points: a split pair would leave a
+        // half that differs from the unit.
+        const { kept, omitted } = cutOf(result.result.llmContent);
+        expect(kept.every((character) => character === unit)).toBe(true);
+        expect(kept.length + omitted).toBe(count);
+      },
+    );
+
+    it('shares one level between fields and counts each cut exactly', () => {
+      const result = {
+        executionStatus: 'success',
+        result: {
+          llmContent: 'a'.repeat(5000),
+          returnDisplay: 'c'.repeat(5000),
+        },
+        error: { message: 'e'.repeat(80) },
+      };
+      fitManagedRuntimeProviderResult(execute, result, 400);
+      const bytes = Buffer.byteLength(JSON.stringify(result), 'utf8');
+      expect(bytes).toBeLessThanOrEqual(400);
+      expect(bytes).toBeGreaterThan(396);
+      // Below the common level, the message is left whole.
+      expect(result.error.message).toBe('e'.repeat(80));
+      for (const [field, letter] of [
+        [result.result.llmContent, 'a'],
+        [result.result.returnDisplay, 'c'],
+      ] as const) {
+        const { kept, omitted } = cutOf(field);
+        expect(kept.length).toBeGreaterThan(0);
+        expect(kept.every((character) => character === letter)).toBe(true);
+        expect(kept.length + omitted).toBe(5000);
+      }
+    });
+
+    it('never grows a field too short to hold its notice', () => {
+      const result = {
+        executionStatus: 'success',
+        result: { llmContent: 'a'.repeat(5000) },
+        error: { message: 'e'.repeat(80) },
+      };
+      // The level falls below the message's notice: cutting it would add
+      // bytes, so it stays, and the result is stubbed instead.
+      fitManagedRuntimeProviderResult(execute, result, 200);
+      expect(result.error.message).toBe('e'.repeat(80));
+      expect(result.result.llmContent).not.toContain('aaa');
+    });
+
+    it('leaves a field below the common level whole', () => {
+      const limit = 48 * 1024;
+      const result = {
+        executionStatus: 'success',
+        result: {
+          llmContent: 'a'.repeat(60_000),
+          returnDisplay: 'c'.repeat(10_000),
+        },
+      };
+      fitManagedRuntimeProviderResult(execute, result, limit);
+      const bytes = Buffer.byteLength(JSON.stringify(result), 'utf8');
+      expect(bytes).toBeLessThanOrEqual(limit);
+      expect(bytes).toBeGreaterThan(limit * 0.99);
+      expect(result.result.returnDisplay).toBe('c'.repeat(10_000));
+      const { kept, omitted } = cutOf(result.result.llmContent);
+      expect(kept.length + omitted).toBe(60_000);
+    });
+
+    it.each([
+      ['far larger than the budget', () => 1024 * 1024],
+      // Fits alone, but not beside the notice a cut would leave.
+      [
+        'too large to sit beside a notice',
+        (skeleton: number) => 1024 * 1024 - skeleton - 50,
+      ],
+    ])('drops hooks first when they are %s', (_label, hookSize) => {
+      const limit = 1024 * 1024;
+      const skeleton = Buffer.byteLength(
+        JSON.stringify({
+          executionStatus: 'success',
+          result: { llmContent: '' },
+          postHook: { note: '' },
+        }),
+        'utf8',
+      );
+      const result = {
+        executionStatus: 'success',
+        result: { llmContent: 'l'.repeat(1000) },
+        postHook: { note: 'h'.repeat(hookSize(skeleton)) },
+      };
+      fitManagedRuntimeProviderResult(execute, result, limit);
+      expect(
+        Buffer.byteLength(JSON.stringify(result), 'utf8'),
+      ).toBeLessThanOrEqual(limit);
+      expect(result).not.toHaveProperty('postHook');
+      expect(result.result.llmContent).toBe('l'.repeat(1000));
+    });
+
+    it('counts each notice when sharing the cut, so hooks stay whenever they fit', () => {
+      const limit = 1024 * 1024;
+      const noticeBytes = (count: number) =>
+        Buffer.byteLength(
+          JSON.stringify(
+            `\n[Managed Runtime provider omitted ${count} characters here to fit the ${limit}-byte wire limit.]\n`,
+          ),
+          'utf8',
+        ) - 2;
+      const skeleton = Buffer.byteLength(
+        JSON.stringify({
+          executionStatus: 'success',
+          result: { llmContent: '', returnDisplay: '' },
+          postHook: { note: '' },
+        }),
+        'utf8',
+      );
+      // The long field's notice is larger than the short field's; the hook
+      // leaves room for exactly that notice and 96 bytes of the short field,
+      // one byte less than a level that ignored the notices would give it.
+      const hook = limit - skeleton - noticeBytes(1_000_000) - 96;
+      const result = {
+        executionStatus: 'success',
+        result: {
+          llmContent: 'a'.repeat(1_000_000),
+          returnDisplay: 'c'.repeat(500),
+        },
+        postHook: { note: 'h'.repeat(hook) },
+      };
+      fitManagedRuntimeProviderResult(execute, result, limit);
+      expect(
+        Buffer.byteLength(JSON.stringify(result), 'utf8'),
+      ).toBeLessThanOrEqual(limit);
+      expect(result.postHook.note).toHaveLength(hook);
+      expect(cutOf(result.result.llmContent)).toEqual({
+        kept: [],
+        omitted: 1_000_000,
+      });
+      const display = cutOf(result.result.returnDisplay);
+      expect(display.kept.length + display.omitted).toBe(500);
+    });
+
+    it('stubs a display the cut cannot reach before cutting the model content or dropping hooks', () => {
+      const limit = 1024 * 1024;
+      // An edit's answer is longer than any notice; its file diff is the
+      // part that overflows.
+      const llmContent = `The file /w/a.json has been updated.\n${'y'.repeat(2000)}`;
+      const result = {
+        executionStatus: 'success',
+        result: {
+          llmContent,
+          returnDisplay: {
+            fileDiff: 'x'.repeat(limit),
+            fileName: 'a.json',
+            originalContent: 'o'.repeat(1000),
+            newContent: 'n'.repeat(1000),
+          },
+        },
+        postHook: { note: 'kept' },
+      };
+      fitManagedRuntimeProviderResult(execute, result, limit);
+      expect(
+        Buffer.byteLength(JSON.stringify(result), 'utf8'),
+      ).toBeLessThanOrEqual(limit);
+      expect(result.result.llmContent).toBe(llmContent);
+      expect(result.postHook).toEqual({ note: 'kept' });
+      expect(typeof result.result.returnDisplay).toBe('string');
+    });
+
+    it('re-measures the text after stubbing a display that alone overflows', () => {
+      // A shell display's uncut part is bounded (8 KiB of directory and file
+      // names), so only a small budget lets it overflow on its own.
+      const limit = 6000;
+      const result = {
+        executionStatus: 'success',
+        result: {
+          llmContent: 'l'.repeat(20_000),
+          returnDisplay: {
+            type: 'shell_result',
+            version: 1,
+            text: 't'.repeat(20_000),
+            output: 'o'.repeat(20_000),
+            directory: 'd'.repeat(8000),
+            exitCode: 0,
+            signal: null,
+            pid: null,
+            error: null,
+            outcome: 'completed',
+            notices: [],
+            truncated: false,
+            outputFiles: [],
+          } as unknown,
+        },
+      };
+      fitManagedRuntimeProviderResult(execute, result, limit);
+      const bytes = Buffer.byteLength(JSON.stringify(result), 'utf8');
+      expect(bytes).toBeLessThanOrEqual(limit);
+      expect(bytes).toBeGreaterThan(limit * 0.99);
+      expect(typeof result.result.returnDisplay).toBe('string');
+      const { kept, omitted } = cutOf(result.result.llmContent);
+      expect(kept.length + omitted).toBe(20_000);
+    });
+
+    it('stubs model content the cut cannot reach when nothing else is left', () => {
+      const limit = 1024 * 1024;
+      const result = {
+        executionStatus: 'success',
+        result: {
+          llmContent: [
+            { inlineData: { mimeType: 'image/png', data: 'A'.repeat(limit) } },
+            { text: 'caption' },
+          ] as unknown,
+        },
+      };
+      fitManagedRuntimeProviderResult(execute, result, limit);
+      expect(
+        Buffer.byteLength(JSON.stringify(result), 'utf8'),
+      ).toBeLessThanOrEqual(limit);
+      expect(typeof result.result.llmContent).toBe('string');
+    });
+
+    it('keeps hooks when cutting the text makes room', () => {
+      const limit = 1024 * 1024;
+      const postHook = { note: 'h'.repeat(1000) };
+      const result = {
+        executionStatus: 'success',
+        result: { llmContent: 'l'.repeat(2 * limit) },
+        postHook,
+      };
+      fitManagedRuntimeProviderResult(execute, result, limit);
+      expect(
+        Buffer.byteLength(JSON.stringify(result), 'utf8'),
+      ).toBeLessThanOrEqual(limit);
+      expect(result.postHook).toEqual({ note: 'h'.repeat(1000) });
+      expect(result.result.llmContent).toContain(
+        'Managed Runtime provider omitted',
+      );
     });
 
     it('keeps the terminal observation representable when everything is oversized', () => {
@@ -439,6 +824,8 @@ describe('managed-runtime-provider/1', () => {
       ).toBeLessThanOrEqual(budget);
       expect(status.state).toBe('settled');
       expect(status.result.executionStatus).toBe('success');
+      expect(status.progress).toEqual([]);
+      expect(status.firstAvailableSeq).toBe(status.lastSeq + 1);
     });
   });
 });

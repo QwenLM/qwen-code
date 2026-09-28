@@ -1209,6 +1209,43 @@ class DurableRuntimeRecoveryTest {
     }
 
     @Test
+    void aReplacedBrokerConfirmsAPreparedCancellationAfterAdoptingTheSession() {
+        var bindings = new InMemoryRuntimeBindingRepository();
+        var sessions = new InMemoryRuntimeSessionRepository();
+        var executions = new InMemoryToolExecutionRepository();
+        String runtime = "550e8400-e29b-41d4-a716-446655440302";
+        Map<String, Object> reference = Map.of("sessionId", runtime, "promptId", "turn",
+                "callId", "call", "argsDigest", "a".repeat(64), "capabilityDigest", "b".repeat(64),
+                "policyRevision", "policy", "invocationId", "invocation");
+        ToolExecutionRecord settled;
+        try (RuntimeBrokerService service = service(new DurableProvisioner(), new TestTransport(),
+                bindings, sessions, executions, "broker-one")) {
+            service.acquire("harness", runtime, "bootstrap").toCompletableFuture().join();
+            ToolExecutionRecord prepared = service.prepareExecution("harness", runtime, "key", reference)
+                    .toCompletableFuture().join();
+            // The process dies after persisting the cancellation and before
+            // the worker, which still holds the preparation, hears of it.
+            settled = executions.requestCancel(prepared.getExecutionCallId(), prepared.getVersion());
+        }
+        var transport = new TestTransport();
+        transport.cancelAnswer = Map.of("state", "settled", "result", Map.of("executionStatus", "cancelled"));
+        try (RuntimeBrokerService replaced = service(new DurableProvisioner(), transport,
+                bindings, sessions, executions, "broker-two")) {
+            RuntimeBrokerException adopt = brokerFailure(assertThrows(Exception.class,
+                    () -> replaced.cancelExecution("harness", runtime, settled.getExecutionCallId())
+                            .toCompletableFuture().join()));
+            assertEquals("runtime_reconciliation_required", adopt.getCode());
+            assertTrue(adopt.isRetryable());
+            assertEquals(0, transport.cancels.get());
+            replaced.acquire("harness", runtime, "bootstrap").toCompletableFuture().join();
+            ToolExecutionRecord confirmed = replaced.cancelExecution("harness", runtime,
+                    settled.getExecutionCallId()).toCompletableFuture().join();
+            assertEquals("cancelled", confirmed.getExecutionStatus());
+            assertEquals(1, transport.cancels.get());
+        }
+    }
+
+    @Test
     void lateReleaseReplyKeepsALostSessionPinned() {
         var bindings = new InMemoryRuntimeBindingRepository();
         var sessions = new InMemoryRuntimeSessionRepository();
@@ -1606,7 +1643,9 @@ class DurableRuntimeRecoveryTest {
         private final AtomicInteger attestations = new AtomicInteger();
         private final AtomicInteger acquisitions = new AtomicInteger();
         private final AtomicInteger releases = new AtomicInteger();
+        private final AtomicInteger cancels = new AtomicInteger();
         private CompletableFuture<Boolean> releaseResult = CompletableFuture.completedFuture(true);
+        private Map<String, Object> cancelAnswer = Map.of();
 
         TestTransport() {
             this(CompletableFuture.completedFuture(null), false, null);
@@ -1679,7 +1718,8 @@ class DurableRuntimeRecoveryTest {
         public CompletionStage<Map<String, Object>> cancel(
                 RuntimeLease lease, RuntimeSession session,
                 Map<String, Object> reference) {
-            return CompletableFuture.completedFuture(Map.of());
+            cancels.incrementAndGet();
+            return CompletableFuture.completedFuture(cancelAnswer);
         }
 
         @Override

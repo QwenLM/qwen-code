@@ -63,6 +63,7 @@ class RuntimeBrokerHttpServerTest {
                     "operation", Map.of("kind", "begin-turn", "identity", identity)));
             assertEquals(200, control.statusCode(), control.body());
             assertTrue(control.body().contains("\"result\":null"), control.body());
+            assertEquals(1, fixture.transport.controls.get());
             Map<String, Object> body = Map.of("protocolVersion", 1, "requestId", "prepare",
                     "idempotencyKey", "key", "harnessSessionId", "harness", "runtimeSessionId", runtime,
                     "turnId", "turn", "toolCallId", "call", "requestDigest", "b".repeat(64),
@@ -85,6 +86,20 @@ class RuntimeBrokerHttpServerTest {
             assertEquals(409, started.statusCode(), started.body());
             assertTrue(started.body().contains("runtime_broker_execution_unknown"));
             assertEquals(1, fixture.transport.executions.get());
+        }
+    }
+
+    @Test
+    void resultBearingControlsCarryTheTransportResult() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            String runtime = "550e8400-e29b-41d4-a716-446655440302";
+            fixture.service.acquire("harness", runtime, "bootstrap").toCompletableFuture().join();
+            HttpResponse<String> control = fixture.post("/tool-sessions/" + runtime + "/control", Map.of(
+                    "protocolVersion", 1, "requestId", "manifest", "harnessSessionId", "harness",
+                    "operation", Map.of("kind", "manifest")));
+            assertEquals(200, control.statusCode(), control.body());
+            assertEquals(FailingTransport.MANIFEST, JSON.parseObject(control.body()).getJSONObject("result"));
+            assertEquals(1, fixture.transport.controls.get());
         }
     }
 
@@ -310,7 +325,6 @@ class RuntimeBrokerHttpServerTest {
             assertTrue(response.body().contains("runtime_broker_invalid_request"), response.body());
             assertNull(fixture.executions.findByIdempotencyKey("key"));
             assertFalse(fixture.executions.hasActiveByRuntimeSession("runtime"));
-            assertEquals(0, fixture.transport.controls.get());
             assertEquals(0, fixture.transport.executions.get());
         }
     }
@@ -334,7 +348,6 @@ class RuntimeBrokerHttpServerTest {
             assertTrue(response.body().contains("runtime_reference_invalid"), response.body());
             assertNull(fixture.executions.findByIdempotencyKey("key"));
             assertFalse(fixture.executions.hasActiveByRuntimeSession("runtime"));
-            assertEquals(0, fixture.transport.controls.get());
             assertEquals(0, fixture.transport.executions.get());
         }
     }
@@ -382,7 +395,6 @@ class RuntimeBrokerHttpServerTest {
             assertSame(reserved, fixture.executions.findByExecutionCallId(reserved.getExecutionCallId()));
             assertEquals(ToolExecutionRecord.State.PREPARED, reserved.getState());
             assertEquals(0, reserved.getDispatchGeneration());
-            assertEquals(0, fixture.transport.controls.get());
             assertEquals(0, fixture.transport.executions.get());
         }
     }
@@ -473,6 +485,9 @@ class RuntimeBrokerHttpServerTest {
     }
 
     private static final class FailingTransport implements RuntimeTransport {
+        private static final Map<String, Object> MANIFEST = Map.of(
+                "tools", java.util.List.of(Map.of("name", "read_file")),
+                "capabilityDigest", "a".repeat(64), "policyRevision", "policy");
         private final AtomicInteger executions = new AtomicInteger();
         private final AtomicInteger controls = new AtomicInteger();
         private final AtomicInteger cancellations = new AtomicInteger();
@@ -506,7 +521,8 @@ class RuntimeBrokerHttpServerTest {
         public CompletionStage<Object> control(RuntimeLease lease, RuntimeSession session,
                 Map<String, Object> operation) {
             controls.incrementAndGet();
-            return CompletableFuture.completedFuture(null);
+            return CompletableFuture.completedFuture(
+                    "manifest".equals(operation.get("kind")) ? MANIFEST : null);
         }
 
         @Override

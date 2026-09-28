@@ -31,10 +31,14 @@ In scope: route manifest declarations, the shared schema and conformance
 fixtures, and the worker handlers with their raw HTTP gate admission.
 TypeScript contract tests and the Java fixture consumer share the contract;
 the worker tests exercise the mounted handlers. The Java `HttpRuntimeTransport`
-implements `execute`, `status`, and `cancel` against this contract.
+implements `execute`, `status`, and `cancel` against this contract. A
+seven-field prepared reference, the Session verbs and the provider controls
+use `managed-runtime-provider/1` instead: `acquire` answers Broker-local, and
+`release` and each control go through the provider control route (see
+[2026-09-27-broker-provider-control.md](2026-09-27-broker-provider-control.md)).
 
-Out of scope: wiring `HttpRuntimeTransport` into `RuntimeTransport`,
-Harness-side tool wiring, and a
+Out of scope: ~~wiring `HttpRuntimeTransport` into `RuntimeTransport`~~
+(landed through `managed-runtime-provider/1`), Harness-side tool wiring, and a
 `not_started_proven` outcome, which needs the durable receipt store.
 
 ## 3. Design

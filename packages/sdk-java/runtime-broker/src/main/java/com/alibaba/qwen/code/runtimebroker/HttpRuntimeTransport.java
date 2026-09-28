@@ -256,12 +256,13 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
      * protocols: the caller reference (the identity four plus
      * {@code toolName} and {@code input}) dispatches over Tool v2 and settles
      * to an {@code executionStatus}/{@code responseParts}/{@code error} map,
-     * while a seven-field prepared reference (the identity four plus
-     * {@code invocationId} and {@code argsDigest}, and no
-     * {@code toolName}/{@code input}) dispatches over the provider control
-     * protocol and settles to an {@code executionStatus}/{@code result}/
-     * {@code error}/{@code postHook}/{@code failureHook} map. Nothing else
-     * may ride along in either mode.
+     * while a prepared reference of exactly the seven fields in
+     * {@code ProviderRuntimeProtocol.REFERENCE_FIELDS} ({@code sessionId},
+     * {@code promptId}, {@code callId}, {@code capabilityDigest},
+     * {@code policyRevision}, {@code invocationId} and {@code argsDigest})
+     * dispatches over the provider control protocol and settles to an
+     * {@code executionStatus}/{@code result}/{@code error}/{@code postHook}/
+     * {@code failureHook} map. Nothing else may ride along in either mode.
      */
     public CompletionStage<Map<String, Object>> execute(RuntimeLease lease,
             RuntimeSession session, Map<String, Object> reference) {

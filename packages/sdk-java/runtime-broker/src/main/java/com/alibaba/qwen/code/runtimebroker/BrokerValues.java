@@ -9,9 +9,12 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Pattern;
 
 final class BrokerValues {
     private static final int MAXIMUM_ID_LENGTH = 512;
+    private static final Pattern PATH_SAFE_ID = Pattern.compile(
+            "[A-Za-z0-9._-]{1," + MAXIMUM_ID_LENGTH + "}");
     private static final int MAXIMUM_DECIMAL_SCALE = 2048;
     // The JDBC codec's reader (fastjson2 2.0.65) refuses a number literal
     // with more digits than this, whatever its scale.
@@ -28,6 +31,23 @@ final class BrokerValues {
                 || value.indexOf('\0') >= 0) {
             throw new IllegalArgumentException(name
                     + " must be a bounded non-empty string");
+        }
+        return value;
+    }
+
+    /**
+     * An id the worker admits on its provider envelope, where it becomes a
+     * file name: ASCII letters, digits, {@code .}, {@code _} and {@code -},
+     * never {@code .} and never containing {@code ..}. The Broker releases
+     * every Runtime Session through that envelope, so an id the worker would
+     * refuse must not be acquired.
+     */
+    static String requirePathSafe(String value, String name) {
+        if (value == null || !PATH_SAFE_ID.matcher(value).matches()
+                || value.equals(".") || value.contains("..")) {
+            throw new IllegalArgumentException(name
+                    + " must be 1-512 ASCII letters, digits, '.', '_' or '-',"
+                    + " without '..'");
         }
         return value;
     }

@@ -33,6 +33,7 @@ import type { AnyDeclarativeTool } from '@qwen-code/qwen-code-core/tools/tools.j
 import {
   registerSessionProjectDir,
   sessionIdContext,
+  unregisterSessionModel,
   unregisterSessionProjectDir,
 } from '@qwen-code/qwen-code-core/utils/sessionIdContext.js';
 import {
@@ -92,6 +93,17 @@ function conflict(
   code: ManagedToolConflictError['code'] = 'managed_runtime_provider_operation_failed',
 ): never {
   throw new ManagedToolConflictError(message, code);
+}
+
+/**
+ * Drops the process-global entries core registers per session — the project
+ * dir, and the model that `new Config` publishes — so a long-lived worker does
+ * not keep one set per ended Runtime Session. Keyed on the Runtime Session id,
+ * never the Harness Session id, whose live Config owns its own entries.
+ */
+function forgetSession(runtimeSessionId: string): void {
+  unregisterSessionProjectDir(runtimeSessionId);
+  unregisterSessionModel(runtimeSessionId);
 }
 
 function history(value: ProviderRuntime): ManagedToolFileHistory {
@@ -155,6 +167,7 @@ class ManagedRuntimeProviderWorker {
       entry.release = (async () => {
         await entry.value?.runtime.releasePrepared();
         this.executor.closeSessionAdmission(identity.runtimeSessionId);
+        forgetSession(identity.runtimeSessionId);
         entry.closed = true;
         return true;
       })().catch((error: unknown) => {
@@ -347,11 +360,18 @@ class ManagedRuntimeProviderWorker {
               'Managed Runtime does not admit background shell execution.',
             );
         }
+        // Core applies content modification only to notebook_edit, which
+        // this profile does not expose; refuse it before anything is
+        // journaled rather than through core's generic source mismatch.
+        if (operation.modification !== undefined)
+          throw new ManagedToolPreparationError(
+            'Managed Runtime provider profile does not admit content modification.',
+          );
         return runtime.prepare(
           operation.identity,
           operation.toolName,
           operation.input,
-          operation.modification,
+          undefined,
           operation.mediaContext,
         );
       }
@@ -406,7 +426,7 @@ class ManagedRuntimeProviderWorker {
         const value = await session.ready;
         await value?.runtime.dispose();
         await value?.history?.drain();
-        unregisterSessionProjectDir(session.identity.runtimeSessionId);
+        forgetSession(session.identity.runtimeSessionId);
       }),
     );
   }

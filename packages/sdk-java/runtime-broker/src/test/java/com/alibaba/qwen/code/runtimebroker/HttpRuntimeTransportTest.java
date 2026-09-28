@@ -821,7 +821,8 @@ class HttpRuntimeTransportTest {
     @Test
     void rawSessionAcquisitionIsBrokerLocal() {
         assertTrue(transport instanceof RuntimeTransport);
-        transport.acquire(toolLease(1), toolSession()).toCompletableFuture().join();
+        transport.acquire(toolLease(server.getAddress().getPort()), toolSession())
+                .toCompletableFuture().join();
         assertNull(captured.get());
     }
 

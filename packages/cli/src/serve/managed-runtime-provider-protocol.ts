@@ -130,30 +130,27 @@ function id(value: unknown): string {
 
 /**
  * Envelope Session ids become core's `Config.sessionId` and the file-history
- * owner's directory name, both of which are interpolated into file names, so
- * they must be printable, path-safe text: no separators, no `.`/`..`
- * segments, no control characters, no unpaired surrogates. The wire contract
+ * owner's directory name, both of which are interpolated into file names and
+ * log lines, so they are an allow-list rather than a list of known-bad
+ * characters: 1-512 ASCII letters, digits, `.`, `_` or `-`, never `.`/`..` and
+ * never containing `..`. The Broker refuses the same ids at acquire, since
+ * every Runtime Session is released through this envelope. The wire contract
  * deliberately does not require the UUID form — the Broker's own fault gates
  * drive this route with opaque ids, and non-identity operations
  * (acquire/release/manifest) stay available to them. Identity-bearing
  * operations keep requiring core's UUID form through `checkSession`.
  */
-// eslint-disable-next-line no-control-regex
-const UNSAFE_SESSION_ID = /[\0-\x1f\x7f-\x9f\uD800-\uDFFF]|\.\./;
+const SESSION_ID = /^[A-Za-z0-9._-]{1,512}$/;
 
 function envelopeSessionId(value: unknown): void {
   if (
     typeof value !== 'string' ||
-    value.length === 0 ||
-    value.length > 512 ||
+    !SESSION_ID.test(value) ||
     value === '.' ||
-    value === '..' ||
-    value.includes('/') ||
-    value.includes('\\') ||
-    UNSAFE_SESSION_ID.test(value)
+    value.includes('..')
   )
     throw new ManagedRuntimeProviderProtocolError(
-      'Managed Runtime provider Session identity must be printable and path-safe.',
+      "Managed Runtime provider Session identity must be 1-512 ASCII letters, digits, '.', '_' or '-', without '..'.",
     );
 }
 
@@ -532,26 +529,112 @@ function providerFitSlots(target: Record<string, unknown>): ProviderFitSlot[] {
   return slots;
 }
 
+/** UTF-8 bytes one code point occupies inside a JSON string literal. */
+function jsonCodePointBytes(codePoint: number): number {
+  if (codePoint === 0x22 || codePoint === 0x5c) return 2;
+  if (codePoint < 0x20)
+    return [0x08, 0x09, 0x0a, 0x0c, 0x0d].includes(codePoint) ? 2 : 6;
+  if (codePoint < 0x80) return 1;
+  if (codePoint < 0x800) return 2;
+  // JSON.stringify escapes an unpaired surrogate as `\uXXXX`.
+  if (codePoint >= 0xd800 && codePoint <= 0xdfff) return 6;
+  return codePoint < 0x10000 ? 3 : 4;
+}
+
+/** UTF-8 bytes `text` occupies inside a JSON string literal. */
+function jsonTextBytes(text: string): number {
+  return Buffer.byteLength(JSON.stringify(text), 'utf8') - 2;
+}
+
+/**
+ * Cuts the middle of one slot so its JSON-encoded text, notice included,
+ * takes at most `targetBytes`. Budgets are counted in encoded bytes because
+ * that is what the wire limit measures, and whole code points are removed so a
+ * surrogate pair is never split. A slot too short to hold its notice is left
+ * as it is rather than grown.
+ */
 function cutProviderFitSlot(
   slot: ProviderFitSlot,
-  removeChars: number,
+  targetBytes: number,
   budgetBytes: number,
 ): void {
   const text = slot.get();
-  let omitted = removeChars;
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const notice = providerFitNotice(omitted, budgetBytes);
-    const keep = text.length - omitted - notice.length;
-    if (keep < 2) {
-      const reduced = text.length - notice.length - 2;
-      if (reduced <= 0 || reduced >= omitted) return;
-      omitted = reduced;
-      continue;
-    }
-    const head = Math.ceil(keep / 2);
-    slot.set(text.slice(0, head) + notice + text.slice(head + omitted));
-    return;
+  const size = jsonTextBytes(text);
+  if (size <= targetBytes) return;
+  // `text.length` bounds the omitted code points, so this notice is the
+  // largest the cut can produce.
+  const keep = Math.max(
+    0,
+    targetBytes - jsonTextBytes(providerFitNotice(text.length, budgetBytes)),
+  );
+  let head = 0;
+  let headBytes = 0;
+  while (head < text.length) {
+    const codePoint = text.codePointAt(head)!;
+    const cost = jsonCodePointBytes(codePoint);
+    if (headBytes + cost > Math.ceil(keep / 2)) break;
+    headBytes += cost;
+    head += codePoint > 0xffff ? 2 : 1;
   }
+  let tail = text.length;
+  let tailBytes = 0;
+  while (tail > head) {
+    let start = tail - 1;
+    const unit = text.charCodeAt(start);
+    if (unit >= 0xdc00 && unit <= 0xdfff && start > head) {
+      const previous = text.charCodeAt(start - 1);
+      if (previous >= 0xd800 && previous <= 0xdbff) start--;
+    }
+    const cost = jsonCodePointBytes(text.codePointAt(start)!);
+    if (headBytes + tailBytes + cost > keep) break;
+    tailBytes += cost;
+    tail = start;
+  }
+  let omitted = 0;
+  for (const _ of text.slice(head, tail)) omitted++;
+  const next =
+    text.slice(0, head) +
+    providerFitNotice(omitted, budgetBytes) +
+    text.slice(tail);
+  if (omitted > 0 && jsonTextBytes(next) < size) slot.set(next);
+}
+
+interface ProviderFitSize {
+  readonly bytes: number;
+  /** The largest notice a cut can leave; a slot no larger never shrinks. */
+  readonly floor: number;
+}
+
+/** The bytes the slots give up when every one above `level` is cut to it. */
+function providerFitShed(
+  slots: readonly ProviderFitSize[],
+  level: number,
+): number {
+  return slots.reduce(
+    (shed, { bytes, floor }) =>
+      shed + Math.max(0, bytes - Math.max(level, floor)),
+    0,
+  );
+}
+
+/**
+ * The highest common size the slots can be cut to so they shed `excess`
+ * bytes together: no field is emptied while another keeps most of its text,
+ * and each slot's floor is counted, so fields whose notices differ in size
+ * still meet the budget in one pass.
+ */
+function providerFitLevel(
+  slots: readonly ProviderFitSize[],
+  excess: number,
+): number {
+  let low = 0;
+  let high = slots.reduce((largest, { bytes }) => Math.max(largest, bytes), 0);
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    if (providerFitShed(slots, middle) >= excess) low = middle;
+    else high = middle - 1;
+  }
+  return low;
 }
 
 /**
@@ -619,45 +702,61 @@ export function fitManagedRuntimeProviderResult(
     }
   }
 
-  // 2. Cut the bulk text fields, largest first, until the budget is met.
-  for (let attempt = 0; attempt < 8 && !fits(); attempt++) {
-    if (!execution) break;
-    const slots = providerFitSlots(execution);
-    let largest: ProviderFitSlot | undefined;
-    let largestBytes = 0;
-    for (const slot of slots) {
-      const bytes = Buffer.byteLength(slot.get(), 'utf8');
-      if (bytes > largestBytes) {
-        largest = slot;
-        largestBytes = bytes;
-      }
+  // 2. Cut the bulk text fields once, down to one common size. Each field is
+  //    cut at most once, so its notice counts everything omitted. When even
+  //    every field at its floor cannot meet the budget, step 3 takes over.
+  if (execution && !fits()) {
+    const measure = () =>
+      providerFitSlots(execution).map((slot) => ({
+        slot,
+        bytes: jsonTextBytes(slot.get()),
+        floor: jsonTextBytes(providerFitNotice(slot.get().length, budgetBytes)),
+      }));
+    let slots = measure();
+    // What the cut cannot reach goes before any text is cut when even fully
+    // cut text could not fit beside it: first a structured display (a file
+    // diff, say; it only feeds the UI), then hook results, so the model keeps
+    // its own content.
+    const overflows = () =>
+      Buffer.byteLength(JSON.stringify(root), 'utf8') -
+        providerFitShed(slots, 0) >
+      budgetBytes;
+    const result = execution['result'];
+    const toolResult =
+      result && typeof result === 'object' && !Array.isArray(result)
+        ? (result as Record<string, unknown>)
+        : undefined;
+    const display = toolResult?.['returnDisplay'];
+    if (
+      toolResult &&
+      display !== undefined &&
+      typeof display !== 'string' &&
+      overflows()
+    ) {
+      toolResult['returnDisplay'] = PROVIDER_RESULT_STUB;
+      slots = measure();
     }
-    if (!largest) break;
-    const excess =
-      Buffer.byteLength(JSON.stringify(root), 'utf8') - budgetBytes;
-    cutProviderFitSlot(largest, excess + 128, budgetBytes);
+    if (overflows()) {
+      delete execution['postHook'];
+      delete execution['failureHook'];
+    }
+    if (!fits()) {
+      const level = providerFitLevel(
+        slots,
+        Buffer.byteLength(JSON.stringify(root), 'utf8') - budgetBytes,
+      );
+      for (const { slot, bytes } of slots)
+        if (bytes > level) cutProviderFitSlot(slot, level, budgetBytes);
+    }
   }
 
-  // 3. Last resort: replace the remaining payload with an explicit stub so
+  // 3. Last resort: when even that cannot fit (content the cut cannot reach,
+  //    such as inline media), the model content becomes an explicit stub so
   //    the terminal observation always fits.
   if (!fits() && execution) {
-    delete execution['postHook'];
-    delete execution['failureHook'];
     const result = execution['result'];
-    if (
-      !fits() &&
-      result &&
-      typeof result === 'object' &&
-      !Array.isArray(result)
-    ) {
-      const toolResult = result as Record<string, unknown>;
-      toolResult['llmContent'] = PROVIDER_RESULT_STUB;
-      if (
-        toolResult['returnDisplay'] !== undefined &&
-        typeof toolResult['returnDisplay'] !== 'string'
-      )
-        toolResult['returnDisplay'] = PROVIDER_RESULT_STUB;
-    }
+    if (result && typeof result === 'object' && !Array.isArray(result))
+      (result as Record<string, unknown>)['llmContent'] = PROVIDER_RESULT_STUB;
   }
   return value;
 }
