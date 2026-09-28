@@ -87,6 +87,7 @@ import {
   canonicalizeWorkspace,
   createAcpSessionBridge,
   createSpawnChannelFactory,
+  defaultSpawnChannelFactory,
   MAX_SESSION_RESTORE_TIMEOUT_MS,
   resolveSessionRestoreTimeoutMs,
   SessionNotFoundError,
@@ -152,6 +153,10 @@ import {
   requestedSessionIdPersistenceExists,
 } from './session-id-admission.js';
 import { sessionAttachmentsRoots } from './session-attachments-root.js';
+import {
+  createPairedExecutionEngines,
+  type ManagedExecutionEngine,
+} from './session-execution-engine-selector.js';
 import {
   registerScheduledTasksRoutes,
   registerWorkspaceQualifiedScheduledTasksRoutes,
@@ -628,6 +633,12 @@ export interface ServeAppDeps {
     policy: ChildHeapPolicy;
     ownsBridge?: (bridge: AcpSessionBridge) => boolean;
   };
+  /**
+   * Managed engine for the default Bridge when `experimentalPairedEngines`
+   * pairs it. Without one, paired sessions run on Legacy and Managed owners
+   * are refused on restore.
+   */
+  managedExecutionEngine?: ManagedExecutionEngine;
   /**
    * Sink fed one (durationMs, statusCode) per matched daemon HTTP request, so
    * the metrics ring can bucket request rate and latency for the charts.
@@ -1261,6 +1272,36 @@ export function createServeApp(
     boundWorkspace,
     Storage.getRuntimeBaseDir(),
   );
+  const defaultBridgeChannels = () => {
+    const channelFactory =
+      acpChildArgs || deps.managedChildProcesses
+        ? createSpawnChannelFactory({
+            processRegistry: deps.managedChildProcesses?.registry,
+            childHeapPolicy: deps.managedChildProcesses?.policy,
+            ...(deps.managedChildProcesses
+              ? {
+                  reclaimIdleChild: async (signal?: AbortSignal) => {
+                    await reclaimIdleAcp?.(
+                      hashDaemonWorkspace(boundWorkspace),
+                      signal,
+                    );
+                  },
+                }
+              : {}),
+            extraArgs: acpChildArgs,
+          })
+        : undefined;
+    if (!opts.experimentalPairedEngines) {
+      return channelFactory ? { channelFactory } : {};
+    }
+    return {
+      executionEngines: createPairedExecutionEngines({
+        legacy: channelFactory ?? defaultSpawnChannelFactory,
+        runtimeBaseDir: Storage.getRuntimeBaseDir(),
+        managed: deps.managedExecutionEngine,
+      }),
+    };
+  };
   const bridge =
     injectedWorkspaceRegistry?.primary.bridge ??
     deps.bridge ??
@@ -1289,25 +1330,7 @@ export function createServeApp(
       ...(opts.restoreAskUserQuestion === true
         ? { restoreAskUserQuestion: true }
         : {}),
-      ...(acpChildArgs || deps.managedChildProcesses
-        ? {
-            channelFactory: createSpawnChannelFactory({
-              processRegistry: deps.managedChildProcesses?.registry,
-              childHeapPolicy: deps.managedChildProcesses?.policy,
-              ...(deps.managedChildProcesses
-                ? {
-                    reclaimIdleChild: async (signal?: AbortSignal) => {
-                      await reclaimIdleAcp?.(
-                        hashDaemonWorkspace(boundWorkspace),
-                        signal,
-                      );
-                    },
-                  }
-                : {}),
-              extraArgs: acpChildArgs,
-            }),
-          }
-        : {}),
+      ...defaultBridgeChannels(),
       boundWorkspace,
       sessionShellCommandEnabled,
       // Wire the production status provider so direct embeds / tests
@@ -2305,6 +2328,12 @@ export function createServeApp(
       app,
       hostedHarness,
       primaryBoundWorkspace,
+      opts.managedRuntimeBrokerUrl && opts.managedRuntimeBrokerToken
+        ? {
+            baseUrl: opts.managedRuntimeBrokerUrl,
+            token: opts.managedRuntimeBrokerToken,
+          }
+        : undefined,
     );
     app.use((req, res, next) => {
       if (req.path === '/capabilities' || req.path === '/health') next();

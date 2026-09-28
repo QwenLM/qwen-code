@@ -65,7 +65,7 @@ class EmbeddedRuntimeBrokerTest {
                 "storage-a", ".", "config-a", 1);
         when(store.findSessionById(SESSION_ID)).thenReturn(Optional.of(
                 new SessionRecord("tenant-a", SESSION_ID, "qwen-code",
-                        null, null, "ACTIVE", null, null, 0, 0, 1, 1, null,
+                        null, null, "ACTIVE", null, null, 0, 0, 0, 1, 1, null,
                         0, binding)));
         try (EmbeddedRuntimeBroker broker = broker(store, properties())) {
             assertThatThrownBy(() -> broker.warm(SESSION_ID)
@@ -79,7 +79,7 @@ class EmbeddedRuntimeBrokerTest {
     }
 
     @Test
-    void rejectsUnsupportedBrokerRoutesBeforeAnySideEffects()
+    void rejectsUnsupportedOrMalformedBrokerRoutesBeforeAnySideEffects()
             throws Exception {
         ManagedAgentStore store = mock(ManagedAgentStore.class);
         try (EmbeddedRuntimeBroker broker = broker(store, properties())) {
@@ -94,10 +94,12 @@ class EmbeddedRuntimeBrokerTest {
                         "Bearer broker-token");
                 connection.setDoOutput(true);
                 connection.getOutputStream().write("{}".getBytes());
-                assertThat(connection.getResponseCode()).isEqualTo(501);
+                boolean unsupported = route.endsWith(":resolve");
+                assertThat(connection.getResponseCode()).isEqualTo(unsupported ? 501 : 409);
                 assertThat(new String(connection.getErrorStream()
                         .readAllBytes(), java.nio.charset.StandardCharsets.UTF_8))
-                        .contains("runtime_broker_operation_unsupported");
+                        .contains(unsupported ? "runtime_broker_operation_unsupported"
+                                : "runtime_broker_protocol_conflict");
                 connection.disconnect();
             }
             org.mockito.Mockito.verifyNoInteractions(store);
