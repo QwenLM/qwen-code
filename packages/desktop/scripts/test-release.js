@@ -44,6 +44,7 @@ try {
   await testBootstrapWorkspaceVisibility();
   testLegacyApplicationIdentity();
   testElectronBridgeWorkflow();
+  testReleaseMatrixCoversUpdaterPlatforms();
   testDesktopReleaseSigningWorkflow();
   testDesktopReleaseHardening();
   testRuntimeNodePtyTargetMapping();
@@ -265,7 +266,10 @@ function testElectronBridgeWorkflow() {
     workflow,
     /windows_installers=\(release-assets\/\*-setup\.exe\)/,
   );
-  assert.match(workflow, /linux_appimages=\(release-assets\/\*\.AppImage\)/);
+  assert.match(
+    workflow,
+    /linux_appimages=\(release-assets\/\*_amd64\.AppImage\)/,
+  );
   assert.match(workflow, /^\s+release-assets\/latest\.yml$/m);
   assert.match(workflow, /^\s+release-assets\/latest-linux\.yml$/m);
   assert.match(workflow, /^\s+"\$\{windows_installers\[0\]\}"$/m);
@@ -282,6 +286,52 @@ function testElectronBridgeWorkflow() {
   ]) {
     assert.match(workflow, new RegExp(artifact.replaceAll('.', '\\.')));
   }
+}
+
+function testReleaseMatrixCoversUpdaterPlatforms() {
+  const workflow = fs.readFileSync(
+    path.join(repoRoot, '.github', 'workflows', 'desktop-release.yml'),
+    'utf8',
+  );
+  const manifestSource = fs.readFileSync(manifestScript, 'utf8');
+  // The matrix speaks in rust targets and the updater feed in Tauri's
+  // `${os}-${arch}` keys, so this table is the only thing tying them together.
+  // A leg nobody taught the manifest about still ships its artifact while the
+  // feed omits it, and nothing downstream fails loudly: that is how an arm64
+  // Linux installer ends up pulling the x86_64 AppImage (#12806).
+  const updaterPlatformByRustTarget = {
+    'aarch64-apple-darwin': 'darwin-aarch64',
+    'x86_64-apple-darwin': 'darwin-x86_64',
+    'x86_64-pc-windows-msvc': 'windows-x86_64',
+    'x86_64-unknown-linux-gnu': 'linux-x86_64',
+    'aarch64-unknown-linux-gnu': 'linux-aarch64',
+  };
+  const built = new Set();
+  for (const [, target] of workflow.matchAll(
+    /^ +rust_target: '([^']+)'\s*$/gm,
+  )) {
+    const platform = updaterPlatformByRustTarget[target];
+    assert.ok(
+      platform,
+      `build matrix target ${target} has no updater platform mapping`,
+    );
+    built.add(platform);
+  }
+  assert.ok(built.size > 0, 'the build matrix must declare rust targets');
+  // Keyed on the `[platform, selectArtifact(` entry shape, so commenting out
+  // one of the multi-line entries stops it counting as published.
+  const published = new Set();
+  for (const [, platform] of manifestSource.matchAll(
+    /\[\s*'((?:darwin|linux|windows)-(?:x86_64|aarch64))'\s*,/g,
+  )) {
+    published.add(platform);
+  }
+  assert.deepEqual(
+    [...built].sort(),
+    [...published].sort(),
+    'every build matrix leg needs an updater feed entry, and every feed entry ' +
+      'needs a leg that produces it',
+  );
 }
 
 function testDesktopReleaseSigningWorkflow() {
@@ -1295,6 +1345,7 @@ function testUpdateManifest(directory) {
     'Qwen-Code-x86_64-apple-darwin.app.tar.gz',
     'Qwen-Code_0.1.0_x64-setup.exe',
     'Qwen-Code_0.1.0_amd64.AppImage',
+    'Qwen-Code_0.1.0_aarch64.AppImage',
   ];
   for (const artifact of artifacts) {
     assert.ok(
@@ -1328,6 +1379,7 @@ function testUpdateManifest(directory) {
   assert.deepEqual(Object.keys(manifest.platforms).sort(), [
     'darwin-aarch64',
     'darwin-x86_64',
+    'linux-aarch64',
     'linux-x86_64',
     'windows-x86_64',
   ]);
@@ -1336,6 +1388,7 @@ function testUpdateManifest(directory) {
     ['darwin-x86_64', artifacts[1]],
     ['windows-x86_64', artifacts[2]],
     ['linux-x86_64', artifacts[3]],
+    ['linux-aarch64', artifacts[4]],
   ]) {
     assert.equal(
       manifest.platforms[platform].signature,
@@ -1368,6 +1421,7 @@ function testUpdateManifest(directory) {
     ['darwin-x86_64', artifacts[1]],
     ['windows-x86_64', artifacts[2]],
     ['linux-x86_64', artifacts[3]],
+    ['linux-aarch64', artifacts[4]],
   ]) {
     assert.equal(
       mirrorManifest.platforms[platform].url,
@@ -1375,24 +1429,210 @@ function testUpdateManifest(directory) {
     );
   }
 
-  fs.rmSync(path.join(assets, `${artifacts[3]}.sig`));
-  const failure = spawnSync(
-    process.execPath,
-    [
-      manifestScript,
-      '--assets',
-      assets,
-      '--repository',
-      'QwenLM/qwen-code',
-      '--tag',
-      'desktop-v0.1.0',
-      '--version',
-      '0.1.0',
-      '--output',
-      output,
-    ],
-    { encoding: 'utf8' },
+  // Re-mirroring an already-published release has to be able to reproduce the
+  // feed that release shipped, so a platform it predates can be named as
+  // optional -- by name, and only when it is genuinely absent (#12806).
+  // `spawnOptions`/`outputValue` exist for the relative --output spelling both
+  // production callers use (`cd`, then `--output desktop-latest.json`); every
+  // other run here passes absolute paths and inherits this test's cwd.
+  const spawnManifest = (spawnOptions, outputValue, ...extra) =>
+    spawnSync(
+      process.execPath,
+      [
+        manifestScript,
+        '--assets',
+        assets,
+        '--repository',
+        'QwenLM/qwen-code',
+        '--tag',
+        'desktop-v0.1.0',
+        '--version',
+        '0.1.0',
+        '--output',
+        outputValue,
+        ...extra,
+      ],
+      { encoding: 'utf8', ...spawnOptions },
+    );
+  const runManifest = (...extra) => spawnManifest({}, output, ...extra);
+
+  // Tolerated-and-present, which is the normal case on the only production
+  // caller: sync-desktop-to-oss.yml passes --allow-missing-platform
+  // linux-aarch64 on every SOURCE=release re-mirror, and from this release
+  // onward that artifact is in the downloaded assets. Without this run the
+  // `matches.length === 0 &&` conjunct is unpinned -- dropping it turns the
+  // escape hatch into a blanket opt-out that omits the arm64 leg from the
+  // mirror feed (the first updater endpoint) while the asset sits in the same
+  // bucket, exits 0, and prints a warning that is false. That is #12806 again.
+  const toleratedButPresent = runManifest(
+    '--allow-missing-platform',
+    'linux-aarch64',
   );
+  assert.equal(toleratedButPresent.status, 0, toleratedButPresent.stderr);
+  assert.deepEqual(
+    Object.keys(JSON.parse(fs.readFileSync(output, 'utf8')).platforms).sort(),
+    [
+      'darwin-aarch64',
+      'darwin-x86_64',
+      'linux-aarch64',
+      'linux-x86_64',
+      'windows-x86_64',
+    ],
+    'a tolerated platform whose artifact did upload must still be published',
+  );
+  assert.doesNotMatch(
+    toleratedButPresent.stdout,
+    /::warning::/,
+    'a tolerated platform that did upload must not be reported missing',
+  );
+
+  // Accumulation belongs to --allow-missing-platform alone. A duplicated
+  // single-valued flag has to override: comma-joining it would put
+  // `"version": "0.1.0,0.1.0"` in the signed feed, which the updater client
+  // cannot parse as semver, and for --output it would write a file named
+  // `<f>,<f>` so no feed exists at all -- both with the step exiting 0.
+  const duplicatedVersion = runManifest('--version', '0.1.0');
+  assert.equal(duplicatedVersion.status, 0, duplicatedVersion.stderr);
+  assert.equal(
+    JSON.parse(fs.readFileSync(output, 'utf8')).version,
+    '0.1.0',
+    'a repeated --version must override, not comma-join into the feed',
+  );
+  // Read the feed back the way duplicatedVersion does. On the absolute
+  // fixture path a comma-joined --output dies with ENOENT for a parent that
+  // does not exist, so `status === 0` only caught it by accident of the
+  // fixture; deleting the feed first makes the assertion about where the run
+  // wrote rather than about whether the write happened to fail.
+  fs.rmSync(output);
+  const duplicatedOutput = runManifest('--output', output);
+  assert.equal(
+    duplicatedOutput.status,
+    0,
+    `a repeated --output must override, not write a comma-joined filename: ${duplicatedOutput.stderr}`,
+  );
+  assert.equal(
+    JSON.parse(fs.readFileSync(output, 'utf8')).version,
+    '0.1.0',
+    'a repeated --output must write the feed to the path that was asked for',
+  );
+
+  // Both production callers spell --output relatively after a `cd`
+  // (sync-desktop-to-oss.yml:135, desktop-release.yml:721), and there the
+  // comma-joined value is a legal filename in the cwd: the run exits 0, writes
+  // `desktop-latest.json,desktop-latest.json`, and the upload step checksums a
+  // path that holds no feed.
+  const relativeDir = path.join(directory, 'relative-output');
+  fs.mkdirSync(relativeDir, { recursive: true });
+  const duplicatedRelativeOutput = spawnManifest(
+    { cwd: relativeDir },
+    'desktop-latest.json',
+    '--output',
+    'desktop-latest.json',
+  );
+  assert.equal(
+    duplicatedRelativeOutput.status,
+    0,
+    duplicatedRelativeOutput.stderr,
+  );
+  assert.equal(
+    JSON.parse(
+      fs.readFileSync(path.join(relativeDir, 'desktop-latest.json'), 'utf8'),
+    ).version,
+    '0.1.0',
+    'a repeated relative --output must override, not comma-join in the cwd',
+  );
+  assert.ok(
+    !fs.existsSync(
+      path.join(relativeDir, 'desktop-latest.json,desktop-latest.json'),
+    ),
+    'a repeated relative --output must not leave a comma-joined feed behind',
+  );
+
+  fs.rmSync(path.join(assets, artifacts[4]));
+  fs.rmSync(path.join(assets, `${artifacts[4]}.sig`));
+  const missingLeg = runManifest();
+  assert.notEqual(missingLeg.status, 0);
+  assert.match(
+    missingLeg.stderr,
+    /Expected one updater artifact for linux-aarch64, found 0/,
+  );
+  assert.doesNotMatch(
+    missingLeg.stdout,
+    /::warning::/,
+    'a run that refused to publish must not also report a tolerated platform',
+  );
+  assert.match(
+    runManifest('--allow-missing-platform', 'darwin-x86_64').stderr,
+    /linux-aarch64, found 0/,
+    'the escape hatch is keyed per platform, not a blanket opt-out',
+  );
+  const tolerant = runManifest('--allow-missing-platform', 'linux-aarch64');
+  assert.equal(tolerant.status, 0, tolerant.stderr);
+  assert.deepEqual(
+    Object.keys(JSON.parse(fs.readFileSync(output, 'utf8')).platforms).sort(),
+    ['darwin-aarch64', 'darwin-x86_64', 'linux-x86_64', 'windows-x86_64'],
+  );
+  // A dropped key is otherwise invisible: the run exits 0 and its log is
+  // byte-identical to a complete one, so the omission is only discoverable by
+  // diffing the published feed against the previous mirror.
+  assert.match(
+    tolerant.stdout,
+    /::warning::no updater artifact for linux-aarch64/,
+  );
+
+  // Both spellings of a multi-valued option must mean the same thing: a
+  // bash-array caller writes repeated flags, and plain assignment in
+  // parseArguments would silently keep only the last one.
+  fs.rmSync(path.join(assets, artifacts[0]));
+  fs.rmSync(path.join(assets, `${artifacts[0]}.sig`));
+  for (const spelling of [
+    [
+      '--allow-missing-platform',
+      'linux-aarch64',
+      '--allow-missing-platform',
+      'darwin-aarch64',
+    ],
+    ['--allow-missing-platform', 'linux-aarch64,darwin-aarch64'],
+  ]) {
+    const both = runManifest(...spelling);
+    assert.equal(both.status, 0, both.stderr);
+    assert.deepEqual(
+      Object.keys(JSON.parse(fs.readFileSync(output, 'utf8')).platforms).sort(),
+      ['darwin-x86_64', 'linux-x86_64', 'windows-x86_64'],
+    );
+  }
+
+  // darwin-aarch64 is tolerated but linux-aarch64 is not, so this run throws
+  // and writes no feed. It must not also publish an annotation claiming an
+  // incomplete feed went out: GitHub parses workflow commands from stdout, so
+  // a warning emitted at selection time turns a red run into a claim that
+  // sends oncall looking for a truncated desktop-latest.json that never
+  // existed, while the real cause is the other leg named in stderr.
+  const refusedAfterTolerating = runManifest(
+    '--allow-missing-platform',
+    'darwin-aarch64',
+  );
+  assert.notEqual(refusedAfterTolerating.status, 0);
+  assert.match(
+    refusedAfterTolerating.stderr,
+    /Expected one updater artifact for linux-aarch64, found 0/,
+  );
+  assert.doesNotMatch(
+    refusedAfterTolerating.stdout,
+    /::warning::/,
+    'a run that refused to publish must not also report a tolerated platform',
+  );
+
+  for (const artifact of [artifacts[0], artifacts[4]]) {
+    fs.writeFileSync(path.join(assets, artifact), artifact);
+    fs.writeFileSync(
+      path.join(assets, `${artifact}.sig`),
+      `signature:${artifact}\n`,
+    );
+  }
+
+  fs.rmSync(path.join(assets, `${artifacts[3]}.sig`));
+  const failure = runManifest();
   assert.notEqual(failure.status, 0);
   assert.match(failure.stderr, /Missing updater signature/);
 }
@@ -1412,6 +1652,9 @@ function testElectronBridgeManifest(directory) {
   artifacts.push(
     'Qwen-Code-Desktop_0.1.0_x64-setup.exe',
     'Qwen-Code-Desktop_0.1.0_amd64.AppImage',
+    // Not selected by any platform: the release matrix builds a second Linux
+    // AppImage, and the linux manifest must keep picking the x64 one.
+    'Qwen-Code-Desktop_0.1.0_aarch64.AppImage',
   );
   for (const artifact of artifacts.slice(4)) {
     fs.writeFileSync(path.join(assets, artifact), `contents:${artifact}`);

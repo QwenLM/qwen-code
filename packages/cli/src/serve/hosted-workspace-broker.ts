@@ -94,7 +94,7 @@ export class HostedWorkspaceBroker {
     digest: string,
     inputDigest?: string,
   ): Promise<string> {
-    const response = await this.request('/executions:prepare', {
+    const reservation = {
       idempotencyKey: `${this.identity.runtimeSessionId}:${callId}`,
       turnId: this.identity.runtimeSessionId,
       toolCallId: callId,
@@ -106,7 +106,18 @@ export class HostedWorkspaceBroker {
         argsDigest: digest,
         ...(inputDigest ? { runtimeProtocol: 3, inputDigest } : {}),
       },
-    });
+    };
+    let response: Record<string, unknown>;
+    try {
+      response = await this.request('/executions:prepare', reservation);
+    } catch (cause) {
+      if (
+        !(cause instanceof TypeError) &&
+        !(cause instanceof DOMException && cause.name === 'TimeoutError')
+      )
+        throw cause;
+      response = await this.request('/executions:prepare', reservation);
+    }
     const id = response['executionCallId'];
     if (
       typeof id !== 'string' ||
