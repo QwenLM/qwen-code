@@ -1390,6 +1390,85 @@ describe('MemoryManager', () => {
       },
     );
 
+    it('skips extraction after a successful manage_memory call', async () => {
+      const mgr = new MemoryManager();
+      const result = await mgr.scheduleExtract({
+        projectRoot,
+        sessionId: 'sess-1',
+        history: [
+          { role: 'user', parts: [{ text: 'Remember my unit preference.' }] },
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'manage-memory',
+                  name: ToolNames.MANAGE_MEMORY,
+                  args: { action: 'remember', content: 'Use microseconds.' },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'manage-memory',
+                  name: ToolNames.MANAGE_MEMORY,
+                  response: { output: '{"updated":1}' },
+                },
+              },
+            ],
+          },
+        ],
+      });
+
+      expect(result.skippedReason).toBe('memory_tool');
+      expect(runAutoMemoryExtract).not.toHaveBeenCalled();
+    });
+
+    it('does not skip extraction after manage_memory fails', async () => {
+      vi.mocked(runAutoMemoryExtract).mockResolvedValue({
+        touchedTopics: [],
+        cursor: { sessionId: 'sess-1', updatedAt: new Date().toISOString() },
+      });
+      const mgr = new MemoryManager();
+      const result = await mgr.scheduleExtract({
+        projectRoot,
+        sessionId: 'sess-1',
+        history: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'manage-memory',
+                  name: ToolNames.MANAGE_MEMORY,
+                  args: { action: 'remember', content: 'Use microseconds.' },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'manage-memory',
+                  name: ToolNames.MANAGE_MEMORY,
+                  response: { error: 'failed' },
+                },
+              },
+            ],
+          },
+        ],
+      });
+
+      expect(result.skippedReason).toBeUndefined();
+      expect(runAutoMemoryExtract).toHaveBeenCalledOnce();
+    });
+
     it('does not treat an unrelated bridged call as a memory write', async () => {
       vi.mocked(runAutoMemoryExtract).mockResolvedValue({
         touchedTopics: [],

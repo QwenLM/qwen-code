@@ -353,7 +353,10 @@ function updateRecord(
   record.updatedAt = new Date().toISOString();
 }
 
-function memoryWritePath(part: Part): string | undefined {
+function resolvedFunctionCall(part: Part): {
+  name?: string;
+  args?: Record<string, unknown>;
+} {
   let name = part.functionCall?.name
     ? canonicalToolName(part.functionCall.name)
     : undefined;
@@ -391,6 +394,11 @@ function memoryWritePath(part: Part): string | undefined {
       }
     }
   }
+  return { name, args };
+}
+
+function memoryWritePath(part: Part): string | undefined {
+  const { name, args } = resolvedFunctionCall(part);
   if (name && WRITE_TOOL_NAMES.has(name)) {
     const filePath =
       args?.['file_path'] ?? args?.['path'] ?? args?.['target_file'];
@@ -403,8 +411,16 @@ function historyWritesToMemory(
   history: Content[],
   projectRoot: string,
 ): boolean {
+  const successfulCallIds = successfulFunctionCallIds(history);
   return history.some((msg) =>
     (msg.parts ?? []).some((part) => {
+      if (
+        part.functionCall?.id &&
+        successfulCallIds.has(part.functionCall.id) &&
+        resolvedFunctionCall(part).name === ToolNames.MANAGE_MEMORY
+      ) {
+        return true;
+      }
       const filePath = memoryWritePath(part);
       return (
         filePath !== undefined &&
@@ -413,6 +429,25 @@ function historyWritesToMemory(
       );
     }),
   );
+}
+
+function successfulFunctionCallIds(history: Content[]): Set<string> {
+  const ids = new Set<string>();
+  for (const message of history) {
+    for (const part of message.parts ?? []) {
+      const response = part.functionResponse as
+        | { id?: string; response?: Record<string, unknown> }
+        | undefined;
+      if (
+        response?.id &&
+        response.response &&
+        !('error' in response.response)
+      ) {
+        ids.add(response.id);
+      }
+    }
+  }
+  return ids;
 }
 
 function latestHistoryWritesToUserMemory(history: Content[]): boolean {
@@ -426,23 +461,10 @@ function latestHistoryWritesToUserMemory(history: Content[]): boolean {
   );
   if (queryIndex < 0) return false;
 
-  const successfulCallIds = new Set<string>();
-  for (const message of history.slice(queryIndex + 1)) {
-    for (const part of message.parts ?? []) {
-      const response = part.functionResponse as
-        | { id?: string; response?: Record<string, unknown> }
-        | undefined;
-      if (
-        response?.id &&
-        response.response &&
-        !('error' in response.response)
-      ) {
-        successfulCallIds.add(response.id);
-      }
-    }
-  }
+  const recentHistory = history.slice(queryIndex + 1);
+  const successfulCallIds = successfulFunctionCallIds(recentHistory);
 
-  return history.slice(queryIndex + 1).some((message) =>
+  return recentHistory.some((message) =>
     (message.parts ?? []).some((part) => {
       if (
         !part.functionCall?.id ||
