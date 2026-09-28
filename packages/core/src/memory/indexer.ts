@@ -23,12 +23,12 @@ import {
 } from './paths.js';
 import { resolveTrustedMemoryRoot } from './trusted-memory-filesystem.js';
 import {
+  scanAllAutoMemoryTopicDocumentsFromRoot,
   scanAutoMemoryTopicDocuments,
   scanTeamAutoMemoryTopicDocuments,
   scanUserAutoMemoryTopicDocuments,
   type ScannedAutoMemoryDocument,
 } from './scan.js';
-import { scanAllAutoMemoryTopicDocumentsFromRoot } from './structured-scan.js';
 import type { AutoMemoryScope } from './types.js';
 import type { AutoMemoryMetadata } from './types.js';
 
@@ -254,7 +254,7 @@ export async function rebuildManagedAutoMemoryIndex(
     projectRoot,
     getAutoMemoryIndexPath(projectRoot),
     content,
-    { deliveryId, signal },
+    { deliveryId, signal, noFollow: true },
   );
   return content;
 }
@@ -288,6 +288,7 @@ export async function rebuildUserAutoMemoryIndex(
   const content = buildManagedAutoMemoryIndex(docs);
   await writeMemoryIndex(projectRoot, getUserAutoMemoryIndexPath(), content, {
     deliveryId,
+    noFollow: true,
   });
   return content;
 }
@@ -400,7 +401,11 @@ async function writeMemoryIndex(
     .catch((err: unknown) =>
       (err as NodeJS.ErrnoException).code === 'ENOENT' ? undefined : null,
     );
-  if (existing === content) {
+  if (
+    existing === content &&
+    (!options.noFollow ||
+      (await fs.lstat(indexPath).catch(() => undefined))?.isFile())
+  ) {
     return;
   }
   await atomicWriteFile(indexPath, content, {

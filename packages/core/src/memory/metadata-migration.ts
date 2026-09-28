@@ -8,7 +8,14 @@ import { createHash } from 'node:crypto';
 import * as fsSync from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import { isMap, isNode, parseDocument } from 'yaml';
+import {
+  isMap,
+  isNode,
+  parseDocument,
+  visit,
+  type Document,
+  type Node,
+} from 'yaml';
 import { deriveConfig, type Config } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
@@ -18,6 +25,7 @@ import {
   rebuildAutoMemoryIndexAtRoot,
   rebuildTeamAutoMemoryIndex,
 } from './indexer.js';
+import { withCoalescedMemoryChanges } from './memory-file-change.js';
 import {
   AUTO_MEMORY_INDEX_FILENAME,
   AUTO_MEMORY_PINNED_DIRNAME,
@@ -314,6 +322,20 @@ interface MergedMetadata {
   validation: StructuredAutoMemoryValidation;
 }
 
+function isAnchorReferenced(document: Document, node: Node): boolean {
+  let referenced = false;
+  visit(document, {
+    Alias: (_key, alias) => {
+      if (alias.resolve(document) === node) {
+        referenced = true;
+        return visit.BREAK;
+      }
+      return undefined;
+    },
+  });
+  return referenced;
+}
+
 function mergeMetadata(
   candidate: MemoryMetadataMigrationCandidate,
   metadata: GeneratedMemoryMetadata,
@@ -339,8 +361,12 @@ function mergeMetadata(
         for (const key of OWNED_FRONTMATTER_KEYS) {
           if (!missingOrInvalidFields.includes(key)) continue;
           const previous = document.get(key, true);
-          // Replacing an anchor would change aliases in unowned fields.
-          if (isNode(previous) && 'anchor' in previous && previous.anchor) {
+          if (
+            isNode(previous) &&
+            'anchor' in previous &&
+            previous.anchor &&
+            isAnchorReferenced(document, previous)
+          ) {
             return null;
           }
           document.set(key, document.createNode(metadata[key]));
@@ -507,199 +533,251 @@ export async function runMemoryMetadataMigration(params: {
   abortSignal?: AbortSignal;
   generateMetadata?: GenerateMetadata;
 }): Promise<MemoryMetadataMigrationResult> {
-  const generateMetadata =
-    params.generateMetadata ?? generateMemoryMetadataWithAgent;
-  const result: MemoryMetadataMigrationResult = {
-    filesScanned: 0,
-    legacyFiles: 0,
-    remainingLegacyFiles: 0,
-    attempted: 0,
-    committed: 0,
-    conflicts: 0,
-    failed: 0,
-    agentDurationMs: 0,
-    inputTokens: 0,
-    outputTokens: 0,
-    totalTokens: 0,
-  };
-  let bodyChars = 0;
-  const roots = params.roots ?? (params.root ? [params.root] : []);
-  result.filesScanned = (
-    await Promise.all(roots.map((root) => listMemoryFiles(root)))
-  ).reduce((count, files) => count + files.length, 0);
-  const initialCandidates = (
-    await Promise.all(
-      roots.map((root) =>
-        scanMemoryMetadataMigrationCandidates(root, params.scope),
-      ),
-    )
-  ).flat();
-  result.legacyFiles = initialCandidates.length;
-  result.remainingLegacyFiles = result.legacyFiles;
-  const candidates = initialCandidates;
-  // The vocabulary corpus is only rendered inside the candidate loop; a
-  // no-op run (the steady state once a corpus is migrated) must not pay
-  // for a full-corpus scan.
-  const docs: ScannedAutoMemoryDocument[] =
-    candidates.length === 0
-      ? []
-      : params.scope === 'project'
-        ? (
-            await scanAutoMemorySnapshot(params.projectRoot, {
-              scopes: ['project'],
-              trustedProject: params.config.isTrustedFolder?.() ?? false,
-              uncapped: true,
-            })
-          ).docs
-        : params.scope === 'user'
-          ? (
-              await scanAutoMemorySnapshot(params.projectRoot, {
-                scopes: ['user'],
-                uncapped: true,
-              })
-            ).docs
-          : (
-              await scanAutoMemorySnapshot(params.projectRoot, {
-                scopes: ['team'],
-                teamMemoryEnabled: true,
-                trustedProject: true,
-                uncapped: true,
-              })
-            ).docs;
-  const committedRoots = new Set<string>();
-  const trustMustRemain =
-    params.scope !== 'user' && (params.config.isTrustedFolder?.() ?? true);
-  const canCommit = () =>
-    !trustMustRemain || (params.config.isTrustedFolder?.() ?? true);
-  const rebuildIndexes = async (
-    indexRoots: readonly string[],
-  ): Promise<void> => {
-    if (!canCommit() || indexRoots.length === 0) return;
-    if (params.scope === 'team') {
-      await rebuildTeamAutoMemoryIndex(params.projectRoot);
-    } else {
-      await Promise.all(
-        indexRoots.map((root) =>
-          rebuildAutoMemoryIndexAtRoot(root, params.scope),
-        ),
-      );
-    }
-  };
-
-  for (const candidate of candidates) {
-    if (result.attempted >= MAX_FILES_PER_RUN) break;
-    if (params.abortSignal?.aborted) {
-      await rebuildIndexes([...committedRoots]);
-      throw new DOMException('Metadata migration aborted.', 'AbortError');
-    }
-    if (
-      result.attempted > 0 &&
-      bodyChars + candidate.bodyChars > MAX_BODY_CHARS_PER_RUN
-    ) {
-      continue;
-    }
-    result.attempted += 1;
-    const remainingBodyChars = MAX_BODY_CHARS_PER_RUN - bodyChars;
-    bodyChars += Math.min(candidate.bodyChars, remainingBodyChars);
-
-    try {
-      const vocabulary = renderWriterKeywordVocabularySnapshot(docs, {
-        scopes: [params.scope],
-      });
-      const agentCandidate =
-        candidate.bodyChars > remainingBodyChars
-          ? {
-              ...candidate,
-              content: candidate.content.slice(0, remainingBodyChars),
-              bodyChars: remainingBodyChars,
-            }
-          : candidate;
-      const generate = async (
-        validationFeedback?: readonly string[],
-      ): Promise<GeneratedMemoryMetadata> => {
-        const generated = await generateMetadata(
-          params.config,
-          agentCandidate,
-          vocabulary,
-          params.abortSignal,
-          validationFeedback,
-        );
-        const generatedMetadata =
-          'metadata' in generated ? generated.metadata : generated;
-        if ('metadata' in generated) {
-          result.agentDurationMs += generated.durationMs;
-          result.inputTokens += generated.usage.inputTokens;
-          result.outputTokens += generated.usage.outputTokens;
-          result.totalTokens += generated.usage.totalTokens;
-        }
-        return generatedMetadata;
+  return withCoalescedMemoryChanges(
+    params.projectRoot,
+    params.config.getMemoryHookDeliveryId?.(),
+    async () => {
+      const generateMetadata =
+        params.generateMetadata ?? generateMemoryMetadataWithAgent;
+      const result: MemoryMetadataMigrationResult = {
+        filesScanned: 0,
+        legacyFiles: 0,
+        remainingLegacyFiles: 0,
+        attempted: 0,
+        committed: 0,
+        conflicts: 0,
+        failed: 0,
+        agentDurationMs: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        totalTokens: 0,
       };
-      let metadata = await generate();
-      const merged = mergeMetadata(candidate, metadata);
-      if (merged && !merged.validation.valid) {
-        // Tell the writer which fields failed instead of silently counting the
-        // file as failed; one informed retry fixes bound violations the prompt
-        // contract could not prevent.
-        metadata = await generate(merged.validation.missingOrInvalidFields);
-      }
-      const status = await commitMigratedMemoryMetadata(
-        candidate,
-        metadata,
-        canCommit,
-      );
-      if (status === 'committed') {
-        result.committed += 1;
-        committedRoots.add(candidate.root);
-        try {
-          const content = await fs.readFile(candidate.filePath, 'utf-8');
-          // The committed doc re-enters the vocabulary corpus: give it its
-          // real mtime so the recency-sorted budget keeps the term it just
-          // established instead of ranking the newest file as the oldest.
-          const stats = await fs.stat(candidate.filePath);
-          const migratedDoc = parseAutoMemoryTopicDocument(
-            candidate.filePath,
-            content,
-            stats.mtimeMs,
-            candidate.relativePath,
-            params.scope,
-          );
-          if (migratedDoc) {
-            const existingIndex = docs.findIndex(
-              (doc) => doc.filePath === candidate.filePath,
+      let bodyChars = 0;
+      const roots = params.roots ?? (params.root ? [params.root] : []);
+      await Promise.all(
+        roots.map(async (root) => {
+          const indexPath = path.join(root, AUTO_MEMORY_INDEX_FILENAME);
+          const stats = await fs.lstat(indexPath).catch((error: unknown) => {
+            if ((error as NodeJS.ErrnoException).code === 'ENOENT')
+              return undefined;
+            throw error;
+          });
+          if (stats?.isSymbolicLink()) {
+            throw new Error(
+              `Refusing metadata migration while ${indexPath} is a symlink`,
             );
-            if (existingIndex >= 0) {
-              docs[existingIndex] = migratedDoc;
-            } else {
-              docs.push(migratedDoc);
+          }
+        }),
+      );
+      result.filesScanned = (
+        await Promise.all(roots.map((root) => listMemoryFiles(root)))
+      ).reduce((count, files) => count + files.length, 0);
+      const initialCandidates = (
+        await Promise.all(
+          roots.map((root) =>
+            scanMemoryMetadataMigrationCandidates(root, params.scope),
+          ),
+        )
+      ).flat();
+      result.legacyFiles = initialCandidates.length;
+      result.remainingLegacyFiles = result.legacyFiles;
+      const candidates = initialCandidates;
+      // The vocabulary corpus is only rendered inside the candidate loop; a
+      // no-op run (the steady state once a corpus is migrated) must not pay
+      // for a full-corpus scan.
+      const docs: ScannedAutoMemoryDocument[] =
+        candidates.length === 0
+          ? []
+          : params.scope === 'project'
+            ? (
+                await scanAutoMemorySnapshot(params.projectRoot, {
+                  scopes: ['project'],
+                  trustedProject: params.config.isTrustedFolder?.() ?? false,
+                  uncapped: true,
+                })
+              ).docs
+            : params.scope === 'user'
+              ? (
+                  await scanAutoMemorySnapshot(params.projectRoot, {
+                    scopes: ['user'],
+                    uncapped: true,
+                  })
+                ).docs
+              : (
+                  await scanAutoMemorySnapshot(params.projectRoot, {
+                    scopes: ['team'],
+                    teamMemoryEnabled: true,
+                    trustedProject: true,
+                    uncapped: true,
+                  })
+                ).docs;
+      const committedRoots = new Set<string>();
+      const trustMustRemain =
+        params.scope !== 'user' && (params.config.isTrustedFolder?.() ?? true);
+      const canCommit = () =>
+        !trustMustRemain || (params.config.isTrustedFolder?.() ?? true);
+      const rebuildIndexes = async (
+        indexRoots: readonly string[],
+      ): Promise<void> => {
+        if (!canCommit() || indexRoots.length === 0) return;
+        if (params.scope === 'team') {
+          await rebuildTeamAutoMemoryIndex(params.projectRoot, {
+            deliveryId: params.config.getMemoryHookDeliveryId?.(),
+            signal: params.abortSignal,
+          });
+        } else {
+          await Promise.all(
+            indexRoots.map((root) =>
+              rebuildAutoMemoryIndexAtRoot(root, params.scope),
+            ),
+          );
+        }
+      };
+
+      for (const candidate of candidates) {
+        if (result.attempted >= MAX_FILES_PER_RUN) break;
+        if (params.abortSignal?.aborted) {
+          await rebuildIndexes([...committedRoots]);
+          throw new DOMException('Metadata migration aborted.', 'AbortError');
+        }
+        const parts = splitFrontmatter(candidate.filePath, candidate.content);
+        if (parts.frontmatter.trim()) {
+          const document = parseDocument(parts.frontmatter, { schema: 'core' });
+          const { missingOrInvalidFields } =
+            validateStructuredAutoMemoryDocument(candidate.content);
+          // These refusals cannot be repaired by generated metadata; do not spend
+          // model calls or starve later candidates on them.
+          if (
+            document.errors.length ||
+            OWNED_FRONTMATTER_KEYS.some((key) => {
+              if (!missingOrInvalidFields.includes(key)) return false;
+              const node = document.get(key, true);
+              return (
+                isNode(node) &&
+                'anchor' in node &&
+                !!node.anchor &&
+                isAnchorReferenced(document, node)
+              );
+            })
+          ) {
+            result.failed += 1;
+            continue;
+          }
+        }
+        if (
+          result.attempted > 0 &&
+          bodyChars + candidate.bodyChars > MAX_BODY_CHARS_PER_RUN
+        ) {
+          continue;
+        }
+        result.attempted += 1;
+        const remainingBodyChars = MAX_BODY_CHARS_PER_RUN - bodyChars;
+        bodyChars += Math.min(candidate.bodyChars, remainingBodyChars);
+
+        try {
+          const vocabulary = renderWriterKeywordVocabularySnapshot(docs, {
+            scopes: [params.scope],
+          });
+          const agentCandidate =
+            candidate.bodyChars > remainingBodyChars
+              ? {
+                  ...candidate,
+                  content: candidate.content.slice(0, remainingBodyChars),
+                  bodyChars: remainingBodyChars,
+                }
+              : candidate;
+          const generate = async (
+            validationFeedback?: readonly string[],
+          ): Promise<GeneratedMemoryMetadata> => {
+            const generated = await generateMetadata(
+              params.config,
+              agentCandidate,
+              vocabulary,
+              params.abortSignal,
+              validationFeedback,
+            );
+            const generatedMetadata =
+              'metadata' in generated ? generated.metadata : generated;
+            if ('metadata' in generated) {
+              result.agentDurationMs += generated.durationMs;
+              result.inputTokens += generated.usage.inputTokens;
+              result.outputTokens += generated.usage.outputTokens;
+              result.totalTokens += generated.usage.totalTokens;
             }
+            return generatedMetadata;
+          };
+          let metadata = await generate();
+          const merged = mergeMetadata(candidate, metadata);
+          if (merged && !merged.validation.valid) {
+            // Tell the writer which fields failed instead of silently counting the
+            // file as failed; one informed retry fixes bound violations the prompt
+            // contract could not prevent.
+            metadata = await generate(merged.validation.missingOrInvalidFields);
+          }
+          const status = await commitMigratedMemoryMetadata(
+            candidate,
+            metadata,
+            canCommit,
+          );
+          if (status === 'committed') {
+            result.committed += 1;
+            committedRoots.add(candidate.root);
+            try {
+              const content = await fs.readFile(candidate.filePath, 'utf-8');
+              // The committed doc re-enters the vocabulary corpus: give it its
+              // real mtime so the recency-sorted budget keeps the term it just
+              // established instead of ranking the newest file as the oldest.
+              const stats = await fs.stat(candidate.filePath);
+              const migratedDoc = parseAutoMemoryTopicDocument(
+                candidate.filePath,
+                content,
+                stats.mtimeMs,
+                candidate.relativePath,
+                params.scope,
+              );
+              if (migratedDoc) {
+                const existingIndex = docs.findIndex(
+                  (doc) => doc.filePath === candidate.filePath,
+                );
+                if (existingIndex >= 0) {
+                  docs[existingIndex] = migratedDoc;
+                } else {
+                  docs.push(migratedDoc);
+                }
+              }
+            } catch (error) {
+              // The commit already succeeded; a file deleted or replaced in the
+              // instant before this re-read skips the vocabulary re-entry and
+              // must not be double-counted as a failure.
+              debugLogger.error(
+                'Post-commit vocabulary re-entry failed:',
+                error,
+              );
+            }
+          } else if (status === 'conflict') {
+            result.conflicts += 1;
+          } else {
+            result.failed += 1;
           }
         } catch (error) {
-          // The commit already succeeded; a file deleted or replaced in the
-          // instant before this re-read skips the vocabulary re-entry and
-          // must not be double-counted as a failure.
-          debugLogger.error('Post-commit vocabulary re-entry failed:', error);
+          if (params.abortSignal?.aborted) {
+            await rebuildIndexes([...committedRoots]);
+            throw error;
+          }
+          result.failed += 1;
         }
-      } else if (status === 'conflict') {
-        result.conflicts += 1;
-      } else {
-        result.failed += 1;
       }
-    } catch (error) {
-      if (params.abortSignal?.aborted) {
-        await rebuildIndexes([...committedRoots]);
-        throw error;
-      }
-      result.failed += 1;
-    }
-  }
-  // A previous run may have committed metadata before its index write failed.
-  await rebuildIndexes(roots);
-  result.remainingLegacyFiles = (
-    await Promise.all(
-      roots.map((root) =>
-        scanMemoryMetadataMigrationCandidates(root, params.scope),
-      ),
-    )
-  ).reduce((count, candidates) => count + candidates.length, 0);
-  return result;
+      // A previous run may have committed metadata before its index write failed.
+      await rebuildIndexes(roots);
+      result.remainingLegacyFiles = (
+        await Promise.all(
+          roots.map((root) =>
+            scanMemoryMetadataMigrationCandidates(root, params.scope),
+          ),
+        )
+      ).reduce((count, candidates) => count + candidates.length, 0);
+      return result;
+    },
+    params.abortSignal,
+  );
 }

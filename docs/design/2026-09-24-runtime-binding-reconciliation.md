@@ -2,8 +2,9 @@
 
 [English](2026-09-24-runtime-binding-reconciliation.md) | [简体中文](2026-09-24-runtime-binding-reconciliation.zh-CN.md)
 
-Status: implemented in `packages/sdk-java/runtime-broker`; no production
-provisioner opts in yet
+Status: implemented in `packages/sdk-java/runtime-broker`. Updated 2026-09-27:
+the production local-process provisioner uses durable identity, but worker
+ownership is still process-local; restart adoption remains unimplemented.
 
 Related: #12380 (Managed Agent staged delivery), the integration preview in
 #12358, and the endpoint-recovery reference design
@@ -42,10 +43,12 @@ In scope:
 
 Out of scope:
 
-- Recoverable provisioner implementations. The local-process provisioner keeps
-  its current in-memory ownership model and reports `legacy` kind, so its
-  restored bindings keep failing closed exactly as before. Durable local
-  adoption is a follow-up slice.
+- Recoverable provisioner implementations. The local-process provisioner
+  reports `local-process` and keeps ownership in memory. Restored bindings
+  enter reconciliation, observe `UNKNOWN`, and reach the deadline without
+  being adopted or retired. Production local recovery is tracked by #12766;
+  its execution-loss prerequisite is #12670. See the proposed
+  [W0e recovery design](2026-09-27-managed-workspace-recovery.md).
 - Drain lifecycle, background health refresh of adopted bindings, and the
   Kubernetes provisioner.
 - Schema migration for existing databases. The runtime-broker schema is still
@@ -92,8 +95,9 @@ restored row can never be reinterpreted under a different provisioner.
   proves nothing, and the Broker waits instead of guessing.
 
 `RuntimeTransport` gains a default `attest(lease, request, seed)` that fails
-closed with `runtime_broker_attestation_unavailable`. No production transport
-implements `RuntimeTransport` yet, so production wiring remains a later slice.
+closed with `runtime_broker_attestation_unavailable`. Subsequent slices added
+the production `HttpRuntimeTransport` and local worker wiring; implementing
+attestation does not by itself make local worker ownership recoverable.
 
 ### 3.3 Durable provisioning
 

@@ -11,6 +11,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
+import { registerMemoryChangedListener } from './memory-file-change.js';
 import {
   commitMigratedMemoryMetadata,
   runMemoryMetadataMigration,
@@ -93,6 +94,54 @@ describe('memory metadata migration', () => {
     await fs.writeFile(filePath, content, 'utf-8');
     return filePath;
   }
+
+  it('delivers committed metadata and its index only to the owning session', async () => {
+    const file = await write('project/legacy.md', legacyContent());
+    const owner = vi.fn();
+    const sibling = vi.fn();
+    const unregisterOwner = registerMemoryChangedListener(projectRoot, owner);
+    const unregisterSibling = registerMemoryChangedListener(
+      projectRoot,
+      sibling,
+    );
+    const controller = new AbortController();
+    const config = {
+      getMemoryHookDeliveryId: () => unregisterOwner.id,
+      isTrustedFolder: () => true,
+    } as unknown as Config;
+    try {
+      const result = await runMemoryMetadataMigration({
+        config,
+        projectRoot,
+        root: memoryRoot,
+        scope: 'project',
+        abortSignal: controller.signal,
+        generateMetadata: async (_config, candidate) => metadata(candidate),
+      });
+      expect(result.committed).toBe(1);
+      expect(await fs.readFile(file, 'utf8')).toContain(
+        'name: Migrated memory',
+      );
+      expect(await fs.readFile(file, 'utf8')).toContain(
+        'BODY\nWITH TRAILING NEWLINE\n',
+      );
+      expect(sibling).not.toHaveBeenCalled();
+      expect(owner).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          scope: 'project',
+          operation: 'update',
+          relativePaths: expect.arrayContaining([
+            'project/legacy.md',
+            'MEMORY.md',
+          ]),
+        }),
+        controller.signal,
+      );
+    } finally {
+      unregisterOwner();
+      unregisterSibling();
+    }
+  });
 
   it('selects only files missing the strict structured contract', async () => {
     await write('project/legacy.md', legacyContent());
@@ -821,6 +870,66 @@ describe('memory metadata migration', () => {
     expect(await fs.readFile(filePath, 'utf-8')).toBe(original);
   });
 
+  it('replaces invalid anchored metadata when no alias references it', async () => {
+    const original =
+      '---\ncategory: &category invalid_category\ntype: project\n---\nBody.\n';
+    const filePath = await write('project/legacy.md', original);
+
+    const result = await runMemoryMetadataMigration({
+      config: {} as Config,
+      projectRoot,
+      root: memoryRoot,
+      scope: 'project',
+      generateMetadata: async (_config, candidate) => metadata(candidate),
+    });
+
+    expect(result).toMatchObject({
+      attempted: 1,
+      committed: 1,
+      failed: 0,
+      remainingLegacyFiles: 0,
+    });
+    const updated = await fs.readFile(filePath, 'utf-8');
+    expect(updated).toContain('category: project_introduction');
+    expect(updated).not.toContain('&category');
+    expect(updated.endsWith('Body.\n')).toBe(true);
+  });
+
+  it('does not spend model calls or the file budget on anchored refusals', async () => {
+    const original =
+      '---\ncategory: &category invalid_category\ncustom_note: *category\ntype: project\n---\nBody.\n';
+    const refused = await Promise.all(
+      Array.from({ length: 10 }, (_, i) => write(`project/a${i}.md`, original)),
+    );
+    await write('project/z-legacy.md', legacyContent());
+    const generateMetadata = vi.fn(
+      async (_config: Config, candidate: MemoryMetadataMigrationCandidate) =>
+        metadata(candidate),
+    );
+    const params = {
+      config: {} as Config,
+      projectRoot,
+      root: memoryRoot,
+      scope: 'project' as const,
+      generateMetadata,
+    };
+    expect(await runMemoryMetadataMigration(params)).toMatchObject({
+      attempted: 1,
+      committed: 1,
+      failed: 10,
+      remainingLegacyFiles: 10,
+    });
+    expect(await runMemoryMetadataMigration(params)).toMatchObject({
+      attempted: 0,
+      committed: 0,
+      failed: 10,
+      remainingLegacyFiles: 10,
+    });
+    expect(generateMetadata).toHaveBeenCalledTimes(1);
+    for (const file of refused)
+      expect(await fs.readFile(file, 'utf-8')).toBe(original);
+  });
+
   it('tells the writer which fields failed validation and retries once', async () => {
     await write('project/legacy.md', legacyContent());
     const prefix = 'x'.repeat(64);
@@ -1118,31 +1227,40 @@ describe('memory metadata migration', () => {
   });
 
   it.each(['project', 'user'] as const)(
-    'does not follow a %s index symlink outside the memory root',
+    'refuses a %s index symlink before migrating topic files',
     async (scope) => {
       const root = scope === 'project' ? memoryRoot : getUserAutoMemoryRoot();
       await fs.mkdir(root, { recursive: true });
-      await fs.writeFile(path.join(root, 'legacy.md'), legacyContent());
+      const topic = path.join(root, 'legacy.md');
+      const original = legacyContent();
+      await fs.writeFile(topic, original);
       const outside = path.join(tempDir, 'outside.md');
       await fs.writeFile(outside, 'outside sentinel');
       const index = path.join(root, 'MEMORY.md');
       await fs.rm(index, { force: true });
       await fs.symlink(outside, index, 'file');
+      const generateMetadata = vi.fn(
+        async (_config: Config, candidate: MemoryMetadataMigrationCandidate) =>
+          metadata(candidate),
+      );
 
-      const result = await runMemoryMetadataMigration({
-        config: {} as Config,
-        projectRoot,
-        root,
-        scope,
-        generateMetadata: async (_config, candidate) => metadata(candidate),
-      });
+      await expect(
+        runMemoryMetadataMigration({
+          config: {} as Config,
+          projectRoot,
+          root,
+          scope,
+          generateMetadata,
+        }),
+      ).rejects.toThrow('symlink');
 
-      expect(result.committed).toBe(1);
+      expect(generateMetadata).not.toHaveBeenCalled();
+      await expect(fs.readFile(topic, 'utf-8')).resolves.toBe(original);
       await expect(fs.readFile(outside, 'utf-8')).resolves.toBe(
         'outside sentinel',
       );
-      expect((await fs.lstat(index)).isSymbolicLink()).toBe(false);
-      await expect(fs.readFile(index, 'utf-8')).resolves.toContain('legacy.md');
+      expect((await fs.lstat(index)).isSymbolicLink()).toBe(true);
+      await expect(fs.readlink(index)).resolves.toBe(outside);
     },
   );
 

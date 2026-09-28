@@ -764,7 +764,7 @@ describe('auto-memory extraction', () => {
   });
 
   it.each(['project', 'user'] as const)(
-    'keeps a symlink %s index update with the extracting session',
+    'attributes a replaced symlink %s index to the extracting session',
     async (scope) => {
       vi.stubEnv('QWEN_CODE_MEMORY_BASE_DIR', path.join(tempDir, 'memories'));
       await fs.mkdir(path.join(projectRoot, '.git'));
@@ -818,12 +818,16 @@ describe('auto-memory extraction', () => {
           config: mockConfig,
           history: [{ role: 'user', parts: [{ text: 'Remember routing.' }] }],
         });
-        expect(await fs.readFile(target, 'utf-8')).toContain('Routing memory');
+        expect(await fs.readFile(target, 'utf-8')).toBe('stale index');
+        expect((await fs.lstat(indexPath)).isSymbolicLink()).toBe(false);
+        expect(await fs.readFile(indexPath, 'utf-8')).toContain(
+          'Routing memory',
+        );
         expect.soft(sibling).not.toHaveBeenCalled();
         expect.soft(owner).toHaveBeenCalledExactlyOnceWith(
           expect.objectContaining({
             scope,
-            operation: 'update',
+            operation: 'create',
             relativePaths: ['MEMORY.md'],
           }),
           undefined,

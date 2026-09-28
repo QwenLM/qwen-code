@@ -27,7 +27,7 @@ async function fixture(
   handler: (
     path: string,
     body: Record<string, unknown>,
-  ) => { code?: number; body: unknown },
+  ) => { code?: number; body?: unknown; drop?: boolean },
 ) {
   server = createServer(async (req, res) => {
     expect(req.headers.authorization).toBe('Bearer test');
@@ -38,6 +38,10 @@ async function fixture(
       new URL(req.url!, 'http://fixture').pathname,
       body ? JSON.parse(body) : {},
     );
+    if (response.drop) {
+      res.destroy();
+      return;
+    }
     res.writeHead(response.code ?? 200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(response.body));
   });
@@ -70,6 +74,75 @@ it.each(['tenantId', 'workspaceId', 'capabilityDigest'])(
     await expect(broker.acquire()).rejects.toThrow('scope');
   },
 );
+
+it('preserves payload identity separately from the explicitly selected v3 input digest', async () => {
+  const requests: Array<Record<string, unknown>> = [];
+  const broker = await fixture((path, body) => {
+    requests.push(body);
+    return {
+      body: {
+        ...identity,
+        ...(path.endsWith(':publisher')
+          ? { installed: true, bindingGeneration: '7' }
+          : {
+              executionCallId: 'execution',
+              status: { state: 'prepared' },
+            }),
+      },
+    };
+  });
+  expect(
+    await broker.registerPublisher({
+      url: 'http://127.0.0.1:99/internal/hosted-shell-publisher/v1',
+      token: 'x'.repeat(43),
+    }),
+  ).toBe('7');
+  await broker.prepare(
+    'runtime-call',
+    `sha256:${'a'.repeat(64)}`,
+    'b'.repeat(64),
+  );
+  expect(requests[1]).toMatchObject({
+    requestDigest: `sha256:${'a'.repeat(64)}`,
+    reference: {
+      sessionId: 'turn',
+      promptId: 'turn',
+      callId: 'runtime-call',
+      argsDigest: `sha256:${'a'.repeat(64)}`,
+      runtimeProtocol: 3,
+      inputDigest: 'b'.repeat(64),
+    },
+  });
+});
+
+it('requires confirmation for the exact Shell receipt acknowledgement', async () => {
+  const broker = await fixture((_path, body) => {
+    expect(body['receipt']).toMatchObject({
+      executionCallId: 'execution',
+      deliveryStatus: 'blocked',
+      historyRevision: null,
+    });
+    expect(body['receipt']).not.toHaveProperty('outcomeRef');
+    return {
+      body: { ...identity, executionCallId: 'other', acknowledged: true },
+    };
+  });
+  await expect(
+    broker.acknowledge('execution', {
+      executionCallId: 'execution',
+      manifest: null,
+      deliveryStatus: 'blocked',
+      historyRevision: null,
+      outcomeRef: {
+        resourceId: 'outcome',
+        kind: 'managed-tool-outcome',
+        schemaVersion: 1,
+        byteLength: 0,
+        digest: 'a'.repeat(64),
+      },
+    }),
+  ).rejects.toThrow('acknowledge');
+});
 
 it('waits for original terminal evidence after a cancellation request', async () => {
   let cancelled = false;
@@ -111,6 +184,67 @@ it('waits for original terminal evidence after a cancellation request', async ()
     responseParts: [],
   });
   expect(starts).toBe(1);
+});
+
+it('retries a lost prepare reply with the original reservation', async () => {
+  const requests: Array<Record<string, unknown>> = [];
+  const broker = await fixture((path, body) => {
+    expect(path).toBe('/internal/runtime-broker/v1/executions:prepare');
+    requests.push(body);
+    return requests.length === 1
+      ? { drop: true }
+      : {
+          body: {
+            ...identity,
+            executionCallId: 'reserved',
+            status: { state: 'prepared' },
+          },
+        };
+  });
+  await expect(broker.prepare('call', 'sha256:original')).resolves.toBe(
+    'reserved',
+  );
+  expect(requests).toHaveLength(2);
+  expect(requests[1]).toEqual({
+    ...requests[0],
+    requestId: expect.any(String),
+  });
+  expect(requests[0]).toMatchObject({
+    idempotencyKey: 'turn:call',
+    toolCallId: 'call',
+    requestDigest: 'sha256:original',
+    reference: {
+      sessionId: 'turn',
+      promptId: 'turn',
+      callId: 'call',
+      argsDigest: 'sha256:original',
+    },
+  });
+});
+
+it('stops after two lost prepare replies', async () => {
+  let requests = 0;
+  const broker = await fixture(() => {
+    requests++;
+    return { drop: true };
+  });
+  await expect(broker.prepare('call', 'digest')).rejects.toThrow();
+  expect(requests).toBe(2);
+});
+
+it.each([
+  { code: 409, body: { code: 'runtime_idempotency_conflict' } },
+  { code: 503, body: { code: 'runtime_unavailable' } },
+  { body: { ...identity, harnessSessionId: 'wrong' } },
+  { body: { ...identity, status: { state: 'prepared' } } },
+])('does not retry a definite or invalid prepare reply: %j', async (reply) => {
+  let requests = 0;
+  const broker = await fixture(() => {
+    requests++;
+    return reply;
+  });
+  await expect(broker.prepare('call', 'digest')).rejects.toThrow();
+  expect(requests).toBe(1);
 });
 
 it('never starts a pre-cancelled reservation', async () => {
