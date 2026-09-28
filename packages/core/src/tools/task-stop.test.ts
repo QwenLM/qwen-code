@@ -395,6 +395,7 @@ describe('TaskStopTool', () => {
       expect(cancelTask).toHaveBeenCalledWith(migrationRecord.id);
       expect(result.error).toBeUndefined();
       expect(result.llmContent).toContain('migration task');
+      expect(result.llmContent).not.toContain('consolidation lock');
     });
 
     it('returns NOT_CANCELLABLE when the task id resolves to an extract record', async () => {

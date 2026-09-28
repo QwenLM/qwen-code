@@ -30,11 +30,13 @@ import { ToolNames } from '../tools/tool-names.js';
 
 const telemetryMocks = vi.hoisted(() => ({
   logMemoryExtract: vi.fn(),
+  logMemoryDream: vi.fn(),
 }));
 
 vi.mock('../telemetry/index.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../telemetry/index.js')>()),
   logMemoryExtract: telemetryMocks.logMemoryExtract,
+  logMemoryDream: telemetryMocks.logMemoryDream,
 }));
 
 vi.mock('./extract.js', () => ({
@@ -1051,6 +1053,7 @@ describe('MemoryManager', () => {
       const config = makeMockConfig({
         getMemoryRecallMode: vi.fn().mockReturnValue('structured'),
       });
+      telemetryMocks.logMemoryDream.mockClear();
 
       const result = await manager.scheduleUserDream({
         projectRoot,
@@ -1063,6 +1066,11 @@ describe('MemoryManager', () => {
         status: 'completed',
         metadata: { metadataWriteError: 'metadata unavailable' },
       });
+      expect(telemetryMocks.logMemoryDream).toHaveBeenCalledWith(
+        config,
+        expect.objectContaining({ scope: 'user', status: 'updated' }),
+      );
+      expect(telemetryMocks.logMemoryDream).toHaveBeenCalledTimes(1);
       await expect(
         manager.scheduleUserDream({
           projectRoot,

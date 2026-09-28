@@ -11,7 +11,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import type { PermissionManager } from '../permissions/permission-manager.js';
 import { ToolNames } from '../tools/tool-names.js';
-import { runForkedAgent } from '../agents/forkedAgent.js';
+import {
+  runForkedAgent,
+  type ForkedAgentResult,
+} from '../agents/forkedAgent.js';
 import {
   clearAutoMemoryRootCache,
   getAutoMemoryRoot,
@@ -214,4 +217,22 @@ describe('User Dream agent planner', () => {
       }),
     ).resolves.toBe('deny');
   });
+
+  it.each([
+    ['failed', 'Model timed out'],
+    ['cancelled', 'CANCELLED'],
+  ] as const)(
+    'rejects when the agent finishes as %s',
+    async (status, reason) => {
+      vi.mocked(runForkedAgent).mockResolvedValue({
+        status,
+        terminateReason: reason,
+        filesTouched: [],
+      } satisfies ForkedAgentResult);
+
+      await expect(
+        planUserAutoMemoryDreamByAgent(config, projectRoot),
+      ).rejects.toThrow(reason);
+    },
+  );
 });
