@@ -4,7 +4,7 @@
 
 ## Status and scope
 
-Implementation slice of [O2](2026-09-27-managed-tool-result-hosted-delivery.md), based on main `848cf5e6c`. O2a supplies a closed publication binding/request/grant contract, shared TypeScript/Java fixtures, a forward SQL migration, and an internal transactional reservation repository. Production HTTP publication routes, OSS data transfer, Session receipt admission and worker dispatch remain later slices. The repository is explicitly constructed with deployment capacity limits and the existing SQL Session/Broker authorities; no default-enabled bean or worker capability is added.
+Implementation foundation of the unified [O2 delivery](2026-09-27-managed-tool-result-hosted-delivery.md), based on main `848cf5e6c`. O2a supplies a closed publication binding/request/grant contract, shared TypeScript/Java fixtures, a forward SQL migration, and an internal transactional reservation repository. Production HTTP publication routes, OSS data transfer, Session receipt admission and worker dispatch remain later work in the same Draft PR. The repository is explicitly constructed with deployment capacity limits and the existing SQL Session/Broker authorities; no default-enabled bean or worker capability is added. O2b preserves this grant's closed `OPEN/FENCED/NOT_STARTED` authorization state and stores producer progress separately as `producerPhase`.
 
 ## Identity and authority
 

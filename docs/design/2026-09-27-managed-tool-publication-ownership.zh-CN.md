@@ -4,7 +4,7 @@
 
 ## 状态与范围
 
-这是 [O2](2026-09-27-managed-tool-result-hosted-delivery.zh-CN.md) 的实施切片，基于 main `848cf5e6c`。O2a 交付闭合 publication binding/request/grant 契约、TypeScript/Java 共享 fixture、新 SQL 迁移及内部事务预留 repository。生产 HTTP 发布路由、OSS 数据传输、Session 回执接纳及 worker 调度归后续切片。repository 显式接收部署容量限制及现有 SQL Session/Broker authority，不新增默认启用的 bean 或 worker 能力。
+这是统一 [O2 交付](2026-09-27-managed-tool-result-hosted-delivery.zh-CN.md) 的实施基础，基于 main `848cf5e6c`。O2a 交付闭合 publication binding/request/grant 契约、TypeScript/Java 共享 fixture、新 SQL 迁移及内部事务预留 repository。生产 HTTP 发布路由、OSS 数据传输、Session 回执接纳及 worker 调度归同一 Draft PR 的后续工作。repository 显式接收部署容量限制及现有 SQL Session/Broker authority，不新增默认启用的 bean 或 worker 能力。O2b 保留 grant 闭合的 `OPEN/FENCED/NOT_STARTED` 授权状态，另用 `producerPhase` 保存生产进度。
 
 ## 身份与授权
 

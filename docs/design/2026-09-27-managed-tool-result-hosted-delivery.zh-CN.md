@@ -4,11 +4,11 @@
 
 ## 1. 状态与建议
 
-O2 仍是分阶段设计；[O2a 契约与归属基础](2026-09-27-managed-tool-publication-ownership.zh-CN.md) 已在本地实现。O2b–O2d 尚未实施。调研日期：2026-09-27。代码基线为 main 的 `e0b8bea9e0ba369a0661bc51cbbb9a27555aff48`，已包含 O1c #12821。相邻 Hosted 工具轮次工作单独按 #12831 的 `25749df40093bcb4b971db8b3fbd2d8b21fffb7e` 调研，不假定其已经合并或之后没有变化。接线实施前必须重新核对该依赖。
+O2 作为一个交付，内部按阶段提交。[O2a 契约与归属基础](2026-09-27-managed-tool-publication-ownership.zh-CN.md) 已在本地实现；O2b–O2d 待实施。2026-09-28 调研更新以 `e4f3a2351` 为基线，其基于 main 的 `302e7d88e`，已经包含 Hosted 文件工具轮次 #12831。随后主线 `c3e880b8` 只修改 Web Shell。最终接线前重新核对主线。
 
 建议在现有 Java Managed Session Store 中增加私有 OSS 发布服务，catalog 与 Session journal 使用同一 SQL 数据库。复用 O1a 不可变分段、manifest 与 Tool v3，并按第 5 节显式澄清 call ID 语义；复用 O1c 捕获和背压。新增持久发布归属、经过校验的完整引用关系、有界容量准入，以及原始 Session 回执对账。
 
-首个后端建议采用 OSS，部署选择待确认。共享持久卷属于另一种持久性配置：它可以支持进程替换，但仅凭共享卷不能证明 Runtime 宿主丢失后结果仍可用。本设计不同时实现两个后端，也不开放公开产品门禁或提供通用孤立 worker 接管。
+首个后端确定为专用私有 OSS bucket。共享持久卷属于另一种持久性配置，不能证明 Runtime 宿主丢失后结果仍可用。私有 Shell profile 默认关闭。若真实 OSS 或替代宿主证据暂不可得，统一实现先提交 Draft PR，补齐验证后再转 Ready for review。通用孤立 worker 接管不属于 O2。
 
 ## 2. 调研发现与依赖
 
@@ -113,7 +113,7 @@ O1a 原先将 `manifest.callId` 定义为模型 ID，同时要求它重复 `refe
 
 segment 记录按 `(publicationId, streamId, ordinal)` 唯一，保存接收方计算的长度/SHA-256 和物理 object 位置。元数据使用稳定逻辑位置：page `(streamId, firstOrdinal)`、manifest `revision`、最终 envelope、接纳 outcome。同一位置换字节即冲突。保持现有 `ManagedSessionDurableRef`，不添加 provider URL 或凭证。
 
-publication 从 `OPEN` 经过持久 finish barrier 到 `FINISHED`，再到 `REFERENCED`。`FINISHED` 表示原始最终 envelope 及其声明的完整资源关系已经持久并冻结；可以描述 complete、partial 或 unavailable capture。`REFERENCED` 表示 Session receipt 保留该完整关系，包括 blocked receipt 的诊断 outcome；该状态本身不表示结果已经接纳。未完成而放弃的 publication 可被 fence 并保留诊断；缺少 receipt 从不等于允许删除。独立 `NOT_STARTED` 最终处置关闭已证明无副作用的预留，不制造 capture 或 manifest。
+保留 O2a 的授权 `grant.state`（`OPEN`、`FENCED`、`NOT_STARTED`），另在 publication 状态中增加 `producerPhase`（`OPEN → FINISHING → FINISHED → REFERENCED`），不修改闭合的 grant 结构。`FINISHED` 表示原始最终 envelope 及其声明的完整资源关系已经持久并冻结；可以描述 complete、partial 或 unavailable capture。`REFERENCED` 表示 Session receipt 保留该完整关系，包括 blocked receipt 的诊断 outcome，本身不表示模型可以接纳。`FENCED` 可与 `FINISHED` 或 `REFERENCED` 并存：替代 owner 可读取和接纳冻结结果，但不能恢复旧生产方 grant。`NOT_STARTED` 要求权威未启动证据，且不存在矛盾的已接纳生产操作。
 
 在 segment/resource catalog 行中逐步记录引用成员，finish 时冻结。Session 事务附着一个已校验 publication root；不把所有原始段展开到 `resources[]`，也不上调现有事务限制。blocked 结果保留 publication 已校验的全部数据，包括 partial manifest 没有引用的数据。完整引用关系不能跨 Session/publication，也不能隐式选择最新 revision。
 
@@ -139,15 +139,15 @@ pages、manifests 和 outcomes 使用同一持久 publication 服务。字节不
 
 seal 按顺序扫描不可变 verified 段，核对精确数量/长度及 SHA-256，保存原结果。prefix 在第一个缺口停止。不能从单段摘要推导拼接流的 SHA-256。finish 校验 page 位置、seal、manifest 身份/状态和原始物理结果，再冻结声明的完整关系。格式错误或相互矛盾的声明被拒绝；合法 partial/unavailable capture 可 finish，但不能在 `complete_required` 下被接纳。
 
-seal/finish 可能超过普通 HTTP 请求时限。采用幂等 verification-operation 记录和有界服务 executor；短请求观察同一在途操作，不因每次轮询重新扫描。成功操作重放原结果。被拒绝的 seal 不记录 seal：补齐缺段后，相同请求可新建一次 attempt 并成功，符合 O1a。服务重启后可从 ordinal 0 重新扫描不可变字节。本阶段不引入 SHA 状态序列化或 digest checkpoint 协议。
+seal/finish 可能超过普通 HTTP 请求时限。每个 publication 同时仅接纳一个生产操作；其他调用得到可重试 busy，不分配对象或队列项。持久保存操作 ID、请求摘要、对象 key、绝对 deadline、claim owner 和 epoch。接管只增加 epoch。GET status 不启动工作。最终安装在短事务内检查当前 claim、grant fence、phase 和 deadline；迟到 claim 只能留下计费的候选对象。内存正文丢失后，重试必须提交相同请求字节，除非原 key 已通过校验。被拒绝的 seal 不固化 seal：补齐缺段后，新 attempt 可成功。prefix 新查询从 ordinal 0 重新扫描；只保留有界的当前/最近 attempt 状态。不引入 SHA checkpoint。
 
-同一 publication 的 publish/seal/prefix 保持 O1a 顺序。接收 finish 时先持久关闭生产方新增写入入口，等待已登记操作，再校验和冻结结果；排空时不能加入新 ordinal。安装 barrier 前拒绝非法 finish 请求；barrier 后故障保留同一次 finalization attempt，仅用于服务可用性恢复，不能升级生产方最终 capture。操作并发、I/O deadline 和重试预算都是有限部署值。HTTP 响应丢失不触发 Shell 重执行。
+同一 publication 的 publish/seal/prefix 保持 O1a 顺序。finish 持久保存固定 envelope 和唯一的前置操作，关闭新增写入；允许该操作以原 claim 完成或恢复，然后校验并冻结结果，等待及 OSS I/O 期间不持有 SQL 锁。建立 barrier 前拒绝非法 finish；之后的故障重试原 finalization，不能升级最终 capture。busy、超时、失权和 I/O 故障属于操作失败，不伪装成 O1a 校验拒绝码。操作 deadline 和重试预算有限。HTTP 响应丢失不触发 Shell 重执行。
 
 ## 7. 容量与背压
 
 保持 O1c 默认 1 MiB 分段、每条流最多一个 publish 在途、总计 64 KiB 原始预览。保留每流写入队列，包括 Node 在进程退出时恢复 pipe 的情况。网络重试只保留当前不可变分段，并在该操作内进行；存储慢时不继续排队新的 chunk Promise。
 
-副作用前预留明确的最大捕获容量，以及两份独立、有界的元数据额度：生产方 finalization 和后续 Session admission attachment。限制每次执行、Session 已保留字节、tenant 已预留/已保留字节、活跃 capture 数及 gateway 并发请求数。这些均为必须提供的部署策略值，没有无限制或猜测的生产默认值。上线配置必须来自测量并容纳已声明的 100 MiB 验收；1 GiB 测试使用单独显式配额。
+副作用前预留明确的最大捕获容量，以及独立的生产方 finalization 和 Session admission 额度。O2a 原分配保持不变用于重放比较，另行核算实际保留字节、不确定候选和剩余预留。进入 `FINISHED` 时，只释放已证明未使用的捕获/生产方额度与活跃生产槽位；admission 容量保留到 `REFERENCED`。执行、Session、tenant、活跃 capture 与 gateway 限制均使用必填部署策略值。上线配置须容纳 100 MiB 验收；1 GiB 测试使用单独显式配额。
 
 预留覆盖待完成上传、verified object、inline 元数据和隔离 candidate。PUT 开始前计入预留；重复回执不重复占额。最终冻结且全部在途 candidate 核算完成后，只释放确定未用的 capture/producer 额度。admission 额度保留到 `REFERENCED`，或已证明最终取消且没有待处理 admission/candidate 工作；否则 tenant 满额时可能已完成捕获，却无法保存回执。被 fence 的未完成 publication 保留已用/不确定占额；释放其未用容量前，必须证明后续 publication 或原提交都不可能再到达。lease 到期或 status 查询失败均不是该证明。本阶段不引入自动对象删除或 GC。
 
@@ -159,11 +159,15 @@ seal/finish 可能超过普通 HTTP 请求时限。采用幂等 verification-ope
 
 Hosted worker finalize 并持久 finish 原始 envelope，然后报告 Tool v3 `settled`，其中 `deliveryStatus: pending`。worker 不能提交 Session receipt。本地同进程路径可保留注入式接纳；使用显式适配器，不通过方法缺失推断模式。Broker 状态分别记录物理结束和 Session 接纳。只有准入捕获的调用才在生产 transport 接口中增加明确 v3 选择/status/cancel/ACK。
 
+Broker prepare 持久保存显式 v3 选择，并返回原 Runtime binding ID/generation。原执行 reference 保留精确 payload 摘要；v3 请求使用已验证 O2a binding 中的规范化 reference。grant 安装是 start 前独立、已认证的 selected Runtime 操作。缺少或不匹配的预留一律拒绝。现有 dispatch 任务在一次异步 v3 execute 和有界 status 查询期间保持原 claim 与续租。execute 回应丢失只查询 status，不再执行一次；超时或失去 claim 保持 `UNKNOWN`。旧 worker 不能回答时，原身份匹配的持久 `FINISHED` publication 可用于对账 Broker 记录。已 claim 但 HTTP dispatch 前取消的调用持久记录为 `not_started`；worker 仍处于 prepared 时取消也如此，之后不得再启动。
+
 Session owner 首先查询已有原始 `tool.receipt`。若不存在，则加载 durable finished publication，验证原 intent/checkpoint/参数绑定、完整身份、物理 envelope、所有元数据摘要和完整 verified 引用关系。不能把 `isToolResultEnvelopeOf()` 的部分状态比较当作完整接纳校验。存储独立验证字节，TypeScript authority 继续负责完整性策略决定。
 
 通过幂等 admission slot 发布版本化 `toolOutcomeRef`，内容保存原 envelope、精确 manifest 引用与 `committed/blocked` 决定。其规范化内容摘要和 admission command identity 在重试间保持稳定。复用现有 `tool.receipt` 事件。在一个 SQL 事务内：核对当前 writer 和 finished root、确认 receipt 与该 root/决定一致、附着完整保留关系、追加 journal、保存原 receipt event sequence。普通小引用仍遵守原限制。决定 wrapper 是 admission attachment，不修改冻结的生产方 envelope/manifest。
 
-`committed` 的 `historyRevision` 是该正数事件 sequence，`resultRef` 指向精确 manifest。`blocked` 的 `resultRef` 与 ACK `historyRevision` 为 null，saved outcome 保留可能存在的 partial manifest。blocked 事件本身仍有正数 Session sequence。不能仅凭回执存在推断接纳。
+`committed` 的 `historyRevision` 是该正数事件 sequence，`resultRef` 指向精确 manifest。`blocked` 的 `resultRef` 与 ACK `historyRevision` 为 null，但 ACK 仍携带原 capture manifest，saved outcome 保留可能存在的 partial manifest。blocked 事件本身仍有正数 Session sequence。不能仅凭回执存在推断接纳。回执附着事务先锁 tenant 容量，再锁 Session head 和 publication，与 O2a 一致；OSS 验证均在事务外，事务内复核冻结根。
+
+Hosted Shell 在接纳原 outcome 的同时冻结有界模型历史投影，包括稳定的 message ID、时间、模型与 function response。按完整 ChatRecord 序列化后的 UTF-8 字节数核对 64 KiB 上限，逐步缩短预览，必要时退化为固定短摘要。回执 committed 后，追加前先查原历史 message，再推进 checkpoint。恢复时重用投影，不重建原执行、manifest 或旧 writer 的不确定事务。本地 O1c 接纳行为保持不变。
 
 未启动调用的 capture 为空，走现有无 capture 结果路径，并由 owner 幂等关闭其 publication 预留为 `NOT_STARTED`。要求原执行的权威证据，fence grant，核算已接收操作，再释放未用额度和活跃 capture 槽位。存在矛盾的 start/publication 证据时拒绝关闭。prepared cancellation 和明确的调度前拒绝可以提供证据；超时、lease 到期或查不到 status 均不能提供。该路径不能发送 Tool v3 capture ACK。
 
@@ -209,7 +213,7 @@ append 异常后，当前 TypeScript authority 已进入 write-failed。通过�
 | O2c：Session 接纳与对账 | Hosted authority 适配器、原子附着完整关系、原回执查询/checkpoint/ACK 恢复                          | complete-required 决策矩阵与全部 commit 窗口在真实 SQL 通过；不重复副作用或引用                |
 | O2d：独立进程接线       | Broker v3/grant binding、远端 worker publisher、接入届时 Hosted 工具轮次                           | 真实 worker 和不同宿主读取证明；100 MiB/1 GiB、故障/归属回归；仅私有门禁                       |
 
-各切片可独立评审。O2a 先落契约失败测试，不开放 Shell。若相邻单机 Shell bridge 先合入，复用其范围明确的 publisher/receipt 接口，保留其持久性配置。O2d 基于已评审 API 接线，不创建第二套 Hosted 工具循环。公开能力启用在上述门禁完成后另行决策。
+各切片按阶段 commit 提交到同一个 Draft PR。O2a 不开放 Shell。复用已合并 #12831 的 Hosted 文件工具循环和 O1c publisher/receipt 接点，不创建第二套 Hosted 循环。公开能力启用仍须在上述验收门禁通过后单独决定。
 
 | 预计修改区域                                   | 直接消费者与回归边界                                                                                                       |
 | ---------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
