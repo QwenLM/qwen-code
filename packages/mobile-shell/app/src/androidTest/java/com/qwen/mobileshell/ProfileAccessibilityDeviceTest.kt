@@ -91,6 +91,9 @@ class ProfileAccessibilityDeviceTest {
             assertTrue("Saved token input must be a password field", secret.isPassword)
             assertTrue("Saved token input must show its hint", secret.isShowingHintText)
             assertFalse("Saved token input must not expose its token", secret.text?.toString().orEmpty().contains("synthetic-token"))
+            assertFalse("The saved token must not reach any accessibility node", walk(instrumentation.uiAutomation.rootInActiveWindow).any { node ->
+                listOf(node.text, node.contentDescription, node.hintText).any { it?.toString()?.contains("synthetic-token") == true }
+            })
         }
     }
 
@@ -127,6 +130,10 @@ class ProfileAccessibilityDeviceTest {
             clickText(R.string.reset_profiles)
             find("Reset confirmation warning") { it.text?.toString() == context.getString(R.string.reset_profiles_warning) }
             clickText(android.R.string.cancel)
+            instrumentation.waitForIdleSync()
+            find("Recovery page still shown after cancelling Reset") {
+                it.text?.toString() == context.getString(R.string.storage_unavailable_hint)
+            }
             assertArrayEquals("Cancelling Reset must preserve the synthetic corrupt vault", byteArrayOf(1, 2, 3), vaultFile().readBytes())
         }
     }
