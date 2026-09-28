@@ -516,16 +516,26 @@ describe('git-sourced lint lanes', () => {
   });
 
   // The suite's only no-argument call, which is how production's runCommand
-  // invokes it: the sole witness for the four parameter defaults and the
-  // `= {}` fallback, including tempDir = TEMP_DIR (the directory the
-  // installers actually extract into). getLinterTempDir never reaches
-  // getPlatformArch(), so this case also runs on the Windows gate.
+  // invokes it: the witness for the `= {}` fallback and the tempDir and cwd
+  // defaults — TEMP_DIR is the directory the installers actually extract
+  // into, and cwd puts this repo's node_modules/.bin first on the lane PATH.
+  // getLinterTempDir never reaches getPlatformArch(), so this case also runs
+  // on the Windows gate.
   it('defaults to the module temp dir the installers extract into', async () => {
     const { getLinterPath, getLinterTempDir } = await import('../lint.js');
     const temp = toPosix(getLinterTempDir());
     expect(toPosix(getLinterPath())).toContain(
       `${temp}/actionlint:${temp}/shellcheck:`,
     );
+    // startsWith, not toContain: npm/npx prepend this repo's
+    // node_modules/.bin to process.env.PATH, so a containment check is
+    // satisfied by the inherited PATH tail even when the cwd default is
+    // broken — only the leading segment witnesses it.
+    expect(
+      toPosix(getLinterPath()).startsWith(
+        `${toPosix(process.cwd())}/node_modules/.bin:`,
+      ),
+    ).toBe(true);
   });
 });
 
