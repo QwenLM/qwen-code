@@ -93,7 +93,7 @@ final class FaultGateBroker {
                         config.getBooleanValue("durable") ? new LocalRuntimeStore(
                                 Path.of(config.getString("stateDir")).resolve("durable"),
                                 "Linux".equals(System.getProperty("os.name")) ? LocalRuntimeStore.HostIdentity.linux()
-                                        : DurableLocalProcessRuntimeProvisionerTest.HOST) : null);
+                                        : DurableLocalProcessRuntimeProvisionerTest.HOST) : null, config.getBooleanValue("trustedReboot"));
         String records = config.getString("records");
         RuntimeProvisioner provisioner = records == null ? local
                 : new RecoverableProcessProvisioner(local, runtime,
