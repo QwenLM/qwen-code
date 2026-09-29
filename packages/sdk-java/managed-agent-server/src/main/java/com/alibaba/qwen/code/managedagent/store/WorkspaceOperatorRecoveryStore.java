@@ -293,8 +293,12 @@ public final class WorkspaceOperatorRecoveryStore {
                     try {
                         JsonNode reference = json.readTree(row.getString("reference_json"));
                         JsonNode result = json.readTree(row.getString("result_json"));
-                        if (!"run_shell_command".equals(reference.path("toolName").asText())
-                                || "complete".equals(result.path("capture").path("captureStatus").asText())) {
+                        // Protocol-3 deferred references omit toolName; dispatch admits only Shell.
+                        boolean shell = "run_shell_command".equals(reference.path("toolName").asText())
+                                || reference.path("runtimeProtocol").asInt() == 3
+                                        && "deferred".equals(reference.path("dispatchMode").asText());
+                        if (!shell || "complete".equals(result.path("capture")
+                                .path("captureStatus").asText())) {
                             return null;
                         }
                         String captureStatus = result.path("capture").path("captureStatus").asText();

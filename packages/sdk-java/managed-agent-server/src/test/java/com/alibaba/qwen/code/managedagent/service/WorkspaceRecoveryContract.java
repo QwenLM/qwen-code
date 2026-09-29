@@ -36,7 +36,8 @@ public final class WorkspaceRecoveryContract {
                 original.binding().getGeneration(), fixture.session.sessionId(),
                 original.session().getRuntimeSessionId(), "turn", "call", "digest",
                 Map.of("sessionId", original.session().getRuntimeSessionId(), "promptId", "turn",
-                        "callId", "call", "argsDigest", "digest", "toolName", "run_shell_command")));
+                        "callId", "call", "argsDigest", "digest", "runtimeProtocol", 3,
+                        "inputDigest", "digest", "dispatchMode", "deferred")));
         var dispatched = fixture.executions.claimDispatch(prepared.getExecutionCallId(),
                 "dispatcher", Duration.ofMinutes(1));
         assertThat(dispatched).isNotNull();

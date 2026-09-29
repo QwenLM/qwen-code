@@ -171,10 +171,11 @@ public final class LocalProcessRuntimeProvisioner
         }
         return store.locked(binding.getRequest(), binding.getProvisionSeed(),
                 binding.getResourceHandle(), false, (resource, registration) -> {
-                    if (!store.sameBoot(registration)
-                            || registration.state() != LocalRuntimeStore.State.READY
-                                    && registration.state() != LocalRuntimeStore.State.RETIRED
-                            || !registration.processAbsent()) {
+                    boolean sameBoot = store.sameBoot(registration);
+                    if ((!sameBoot && !store.rebooted(registration))
+                            || (registration.state() != LocalRuntimeStore.State.READY
+                                    && registration.state() != LocalRuntimeStore.State.RETIRED)
+                            || (sameBoot && !registration.processAbsent())) {
                         throw LocalRuntimeStore.blocked();
                     }
                     if (registration.state() != LocalRuntimeStore.State.RETIRED) {
@@ -203,9 +204,9 @@ public final class LocalProcessRuntimeProvisioner
         }
         store.locked(binding.getRequest(), binding.getProvisionSeed(),
                 binding.getResourceHandle(), false, (resource, registration) -> {
-                    if (!store.sameBoot(registration)
-                            || registration.state() != LocalRuntimeStore.State.READY
-                                    && registration.state() != LocalRuntimeStore.State.RETIRED) {
+                    if ((!store.sameBoot(registration) && !store.rebooted(registration))
+                            || (registration.state() != LocalRuntimeStore.State.READY
+                                    && registration.state() != LocalRuntimeStore.State.RETIRED)) {
                         throw LocalRuntimeStore.blocked();
                     }
                     return null;

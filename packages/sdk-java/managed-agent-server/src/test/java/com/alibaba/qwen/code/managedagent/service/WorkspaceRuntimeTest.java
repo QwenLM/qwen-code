@@ -99,7 +99,7 @@ class WorkspaceRuntimeTest {
         String callId = UUID.randomUUID().toString();
         Map<String, Object> reference = Map.of("sessionId", runtimeSessionId,
                 "promptId", "prompt", "callId", "call", "argsDigest", "digest",
-                "toolName", "run_shell_command");
+                "runtimeProtocol", 3, "inputDigest", "digest", "dispatchMode", "deferred");
         var executions = new JdbcToolExecutionRepository(dataSource);
         ToolExecutionRecord prepared = executions.findOrCreate(ToolExecutionRecord.prepared(callId,
                 UUID.randomUUID().toString(), runtime.getBindingId(), runtime.getGeneration(),
