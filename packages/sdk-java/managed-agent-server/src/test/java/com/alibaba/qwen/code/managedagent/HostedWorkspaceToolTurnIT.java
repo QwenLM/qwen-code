@@ -115,12 +115,30 @@ class HostedWorkspaceToolTurnIT {
         runDriver(List.of("sse-gap"), "sse-gap");
     }
 
+    @Test
+    @Timeout(180)
+    @ExtendWith(OutputCaptureExtension.class)
+    void shellOutputFailuresNeverReplayEffectsOnMySql(CapturedOutput output) throws Exception {
+        assertThat(System.getProperty("mysql.url")).as("FG6f requires -Dmysql.url").startsWith("jdbc:mysql:");
+        assertThat(System.getProperty("mysql.user")).as("FG6f requires -Dmysql.user").isNotBlank();
+        assertThat(System.getProperty("os.name").toLowerCase()).doesNotContain("windows");
+        List<String> cases = List.of("publisher-kill", "worker-kill", "receipt-failure", "receipt-reply");
+        String selected = System.getProperty("qwen.fg6f.case");
+        if (selected != null) {
+            assertThat(cases).contains(selected);
+            cases = List.of(selected);
+        }
+        runDriver(cases, "shell-output");
+        if (cases.contains("receipt-failure")) assertThat(output).contains("java.sql.SQLException: FG6F_receipt-failure");
+    }
+
     private void runDriver(List<String> cases, String driverName) throws Exception {
         boolean latency = driverName.equals("latency");
         boolean faults = !driverName.equals("workspace-tool-turn") && !latency;
         boolean storeFaults = driverName.equals("store-failure");
         boolean cancellations = driverName.equals("cancellation");
         boolean sseGaps = driverName.equals("sse-gap");
+        boolean shellOutput = driverName.equals("shell-output");
         Path cli = Path.of(System.getProperty("qwen.cli.entry", "../../../dist/cli.js")).toAbsolutePath().normalize();
         assertThat(cli).isRegularFile();
         String node = System.getProperty("node.executable");
@@ -181,7 +199,7 @@ class HostedWorkspaceToolTurnIT {
             JdbcTemplate jdbc = spring.getBean(JdbcTemplate.class);
             if (faults) {
                 var metadata = jdbc.queryForMap("SELECT VERSION() AS version, @@version_comment AS engine");
-                System.out.println((sseGaps ? "FG6E_DATABASE " : cancellations ? "FG6D_DATABASE " : storeFaults ? "FG6B_DATABASE " : "FG6A_DATABASE ") + metadata);
+                System.out.println((shellOutput ? "FG6F_DATABASE " : sseGaps ? "FG6E_DATABASE " : cancellations ? "FG6D_DATABASE " : storeFaults ? "FG6B_DATABASE " : "FG6A_DATABASE ") + metadata);
                 assertThat(metadata.toString().toLowerCase()).containsAnyOf("mysql", "mariadb");
             }
             ManagedAgentStore store = spring.getBean(ManagedAgentStore.class);
@@ -198,7 +216,7 @@ class HostedWorkspaceToolTurnIT {
                         "sha256:" + "a".repeat(64), "qwen-code", null, null, List.of(), null,
                         new WorkspaceSelection(workspaceId, "child"));
                 sessions.add(Map.of("sessionId", created.sessionId(), "workspaceId", workspaceId,
-                        "toolProfile", faults || index < 2 ? "hosted-workspace-files/1" : "hosted-workspace-shell/1",
+                        "toolProfile", !shellOutput && (faults || index < 2) ? "hosted-workspace-files/1" : "hosted-workspace-shell/1",
                         "directory", workspaces.get(index).resolve("child").toString(), "fault", cases.get(index)));
                 if (faults) Files.writeString(workspaces.get(index).resolve("child/proof.txt"), "x");
             }
@@ -234,13 +252,16 @@ class HostedWorkspaceToolTurnIT {
                     ? new HostedCancellationProbe(jdbc, tenant, sessions, broker, gateServer) : null;
             HostedSseGapProbe sseProbe = sseGaps ? new HostedSseGapProbe(jdbc, tenant, sessions.getFirst(), broker,
                     store, spring.getBean(HarnessEventProjector.class), gateServer) : null;
+            HostedShellOutputProbe shellProbe = shellOutput
+                    ? new HostedShellOutputProbe(jdbc, tenant, sessions, broker, gateServer) : null;
             gateServer.start();
             List<String> triggers = new ArrayList<>();
-            try {
-                if (storeFaults) {
+            try (shellProbe) {
+                if (storeFaults || shellOutput) {
                     for (Map<String, Object> session : sessions) {
-                        if (!session.get("fault").toString().endsWith("-reply")) {
-                            String trigger = "fg6b_" + UUID.randomUUID().toString().replace("-", "");
+                        if (shellOutput ? session.get("fault").equals("receipt-failure")
+                                : !session.get("fault").toString().endsWith("-reply")) {
+                            String trigger = (shellOutput ? "fg6f_" : "fg6b_") + UUID.randomUUID().toString().replace("-", "");
                             triggers.add(trigger);
                             createStoreFaultTrigger(jdbc, tenant, session, trigger);
                         }
@@ -267,6 +288,7 @@ class HostedWorkspaceToolTurnIT {
                     assertThat(driver.exitValue()).as("Driver output: %s", Files.readString(log)).isZero();
                     System.out.println(Files.readString(log));
                     assertThat(Files.readString(log)).contains(latency ? "HOSTED_LATENCY_OK"
+                            : shellOutput ? "HOSTED_SHELL_OUTPUT_FAULTS_OK"
                             : sseGaps ? "HOSTED_SSE_GAP_OK"
                             : cancellations ? "HOSTED_CANCELLATION_OK"
                             : storeFaults ? "HOSTED_STORE_FAILURES_OK"
@@ -292,7 +314,8 @@ class HostedWorkspaceToolTurnIT {
                             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_journal_tx"
                                     + " WHERE tenant_id = ? AND session_id = ? AND operation = 'settleTurn'",
                                     Integer.class, tenant, sessions.get(index).get("sessionId"))).isEqualTo(1);
-                        } else if (sseGaps) sseProbe.assertReport(reports.get(index));
+                        } else if (shellOutput) shellProbe.assertReport(sessions.get(index), reports.get(index));
+                        else if (sseGaps) sseProbe.assertReport(reports.get(index));
                         else if (cancellations) cancellationProbe.assertReport(sessions.get(index), reports.get(index));
                         else if (faults) assertFaultLedger(jdbc, tenant, sessions.get(index), index, reports.get(index), storeFaults);
                         else if (index < 2) assertThat(Files.readString(workspace.resolve("child/proof.txt"))).isEqualTo("after");
@@ -385,6 +408,8 @@ class HostedWorkspaceToolTurnIT {
         String table = fault.equals("arguments") ? "qwen_managed_session_resource" : "qwen_managed_session_journal_tx";
         String condition = switch (fault) {
             case "arguments" -> "NEW.kind = 'managed-tool-input'";
+            case "receipt-failure" -> "NEW.operation = 'recordToolResult'"
+                    + " AND LOCATE('\"kind\":\"tool.receipt\"', CONVERT(NEW.record_bytes USING utf8mb4)) > 0";
             case "intent" -> "NEW.operation = 'toolIntent'";
             case "result-message" -> "NEW.operation = 'commitMessage'"
                     + " AND LOCATE('\"role\":\"tool_result\"', CONVERT(NEW.record_bytes USING utf8mb4)) > 0";
@@ -400,8 +425,8 @@ class HostedWorkspaceToolTurnIT {
         assertThat(session.get("sessionId").toString()).matches("[0-9a-f-]{36}");
         jdbc.execute("CREATE TRIGGER " + trigger + " BEFORE INSERT ON " + table + " FOR EACH ROW BEGIN IF"
                 + " NEW.tenant_id = '" + tenant + "' AND NEW.session_id = '" + session.get("sessionId")
-                + "' AND (" + condition + ") THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'FG6B_"
-                + fault + "'; END IF; END");
+                + "' AND (" + condition + ") THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = '"
+                + (fault.equals("receipt-failure") ? "FG6F_" : "FG6B_") + fault + "'; END IF; END");
     }
 
     private void assertStoreJournal(JdbcTemplate jdbc, String tenant, Map<String, Object> session,

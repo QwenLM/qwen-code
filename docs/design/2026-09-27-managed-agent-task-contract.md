@@ -269,10 +269,12 @@ declare.
 Errors keep `ErrorEnvelope` and the shared `BadRequest`, `Forbidden`,
 `NotFound`, `Conflict` and `CursorExpired` responses. The codes are those the
 API contract already froze, `invalid_idempotency_key`, which the idempotent
-routes already return, and three new task codes:
+routes already return, the tenant filter's `invalid_tenant` and
+`actor_scope_mismatch`, and three new task codes:
 
 | Status | Code                      | When                                                                                     |
 | ------ | ------------------------- | ---------------------------------------------------------------------------------------- |
+| `400`  | `invalid_tenant`          | `X-Qwen-Tenant-Id` is missing or malformed (tenant filter).                              |
 | `400`  | `invalid_cursor`          | The task list cursor is malformed.                                                       |
 | `400`  | `invalid_event_cursor`    | `after` is malformed or belongs to another task.                                         |
 | `400`  | `invalid_limit`           | `limit` is outside 1 to 100.                                                             |
@@ -280,6 +282,7 @@ routes already return, and three new task codes:
 | `400`  | `invalid_idempotency_key` | `Idempotency-Key` is malformed, as on the other idempotent routes.                       |
 | `400`  | `unsupported_feature`     | The Session does not serve tasks (`capabilities.tasks` is `false`).                      |
 | `403`  | `task_forbidden`          | The caller can read the task but may not cancel it. New.                                 |
+| `403`  | `actor_scope_mismatch`    | The authenticated actor belongs to another tenant or has an invalid ID (tenant filter).  |
 | `404`  | `session_not_found`       | The Session is absent or outside the caller's scope.                                     |
 | `404`  | `task_not_found`          | The task is absent or outside the caller's scope. New.                                   |
 | `409`  | `cursor_expired`          | `after` is older than the retained events.                                               |
@@ -287,7 +290,12 @@ routes already return, and three new task codes:
 | `409`  | `idempotency_conflict`    | The key was used with a different request.                                               |
 
 A caller that cannot read a task gets `404`, not `403`, as API contract
-section 10 requires, so the read routes declare no `403`; only cancel does. `cursor_expired` leaves the envelope's
+section 10 requires. The only `403` a read route answers is the tenant
+filter's `actor_scope_mismatch`, for an authenticated actor from another
+tenant or with an invalid ID. The filter covers every `/v1/agents/` and
+WebShell route; the task read routes declare it from `1.21.0`, as the
+Session and Turn reads do, and cancel adds `task_forbidden`. `cursor_expired`
+leaves the envelope's
 `replay_floor_sequence` and `snapshot_through_sequence` absent, because task
 cursors are opaque. An output event expires only after its text is in an
 Artifact, so a caller that first reads the retained events from the start and
@@ -318,7 +326,9 @@ one shape per event type, the event versions, list and page cursors, and the
 and, except the public-only `object` check, checked again, renamed to
 camelCase, against the WebShell mirror, so a
 conditional copied wrongly into one surface fails the test. The WebShell
-cancel and event query requests are checked as well.
+cancel and event query requests are checked as well. From `1.21.0` it also
+requires the tenant filter's `403` on the four `planned` task routes, which
+`ManagedAgentApiContractTest` cannot probe.
 
 ## 6. Validation
 
@@ -327,7 +337,8 @@ cancel and event query requests are checked as well.
   `managed-agent-api.test.ts` passes.
 - `ManagedAgentApiContractTest` (5 tests), `PlannedTaskContractTest` (5
   tests, 103 validations: 50 public, 49 WebShell mirrors and 4 WebShell
-  requests) and `ManagedSessionStoreContractFixtureTest` (3 tests) pass
+  requests; `1.21.0` adds a sixth test, see section 5) and
+  `ManagedSessionStoreContractFixtureTest` (3 tests) pass
   without new gap lines.
 - Mutations fail the matching gate:
   - Removing, on one surface, the conditionals of the task, the task event,
@@ -368,8 +379,11 @@ cancel and event query requests are checked as well.
   `artifact_refs` cannot be tied back to its task. The Artifact slices (O2,
   O4) should add one of the two before a task can rotate that many.
 - **Legacy states.** The daemon's task status includes `paused`, and
-  workflow runs add `pausing`; `TaskState` has neither. The adapter slice (H3
-  or H4) maps them, most likely to `waiting`, or the design adds a state.
+  workflow runs add `pausing`; `TaskState` has neither. Decided in #12847
+  (A9): the adapter slice (H3 or H4) maps both to `waiting`, and `TaskState`
+  gains no state. H0c made `TaskState` `partial` with its eight values, and
+  under section 5 of the API contract a new value would now be a breaking
+  change.
 - **Later additions.** Query filters (`kind`, `state`), a `send_input` route
   and any display label are additive `planned` changes. `SessionTaskView`
   has no title; the first slice that renders tasks in WebShell should decide

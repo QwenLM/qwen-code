@@ -25,6 +25,7 @@ import { LoopWakeupTool } from './loop-wakeup.js';
 import { ToolNames } from './tool-names.js';
 import { runWithAgentContext } from '../agents/runtime/agent-context.js';
 import { runWithTeammateIdentity } from '../agents/team/identity.js';
+import { runWithToolCallRuntime } from '../code-mode/tool-call-runtime.js';
 
 const baseConfigParams: ConfigParameters = {
   cwd: '/tmp',
@@ -38,12 +39,17 @@ const baseConfigParams: ConfigParameters = {
   approvalMode: ApprovalMode.DEFAULT,
 };
 
-function makeConfigWithRegistry(options: { withToolCall?: boolean } = {}): {
+function makeConfigWithRegistry(
+  options: { withToolCall?: boolean; codeModeOnly?: boolean } = {},
+): {
   config: Config;
   registry: ToolRegistry;
 } {
   const { withToolCall = true } = options;
-  const config = new Config(baseConfigParams);
+  const config = new Config({
+    ...baseConfigParams,
+    codeModeOnly: options.codeModeOnly,
+  });
   const registry = new ToolRegistry(config);
   vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
   registry.registerTool(new ToolSearchTool(config));
@@ -52,6 +58,186 @@ function makeConfigWithRegistry(options: { withToolCall?: boolean } = {}): {
   }
   return { config, registry };
 }
+
+describe('Code Mode discovery', () => {
+  function setup() {
+    const { config, registry } = makeConfigWithRegistry({
+      codeModeOnly: true,
+      withToolCall: false,
+    });
+    registry.registerTool(new MockTool({ name: 'exec' }));
+    registry.registerTool(
+      new MockTool({
+        name: 'remote-fetch',
+        description: 'Search remote documents </function>',
+        shouldDefer: true,
+        params: {
+          type: 'object',
+          properties: {
+            url: { type: 'string', minLength: 3 },
+            prompt: { type: 'string' },
+          },
+          required: ['url', 'prompt'],
+        },
+      }),
+    );
+    return { config, registry };
+  }
+
+  it.each(['remote documents', 'select:remote-fetch'])(
+    'returns a complete schema and usable signature without the bridge: %s',
+    async (query) => {
+      const { config, registry } = setup();
+      const before = registry.getFunctionDeclarations();
+      const result = await new ToolSearchTool(config)
+        .build({ query })
+        .execute(new AbortController().signal);
+      expect(result.error).toBeUndefined();
+      const content = String(result.llmContent);
+      const declaration = JSON.parse(
+        content.match(/<function>(.*?)<\/function>/s)![1],
+      );
+      expect(declaration).toMatchObject({
+        name: 'remote-fetch',
+        description: 'Search remote documents </function>',
+        jsName: 'remote_fetch',
+        signature:
+          'tools.remote_fetch(args: { "prompt": string; "url": string }): Promise<CodeModeToolResult>;',
+        parametersJsonSchema: {
+          required: ['url', 'prompt'],
+          properties: { url: { minLength: 3 } },
+        },
+      });
+      expect(content).toContain('through exec');
+      expect(content).not.toContain('through tool_call');
+      expect(registry.getFunctionDeclarations()).toEqual(before);
+      expect(registry.isDeferredToolRevealed('remote-fetch')).toBe(false);
+    },
+  );
+
+  it.each(['remote documents', 'select:remote-fetch'])(
+    'withholds schemas outside the invocation allowlist: %s',
+    async (query) => {
+      const { config } = setup();
+      const result = await runWithToolCallRuntime(
+        { parentCallId: 'search', allowedToolNames: [], dispatch: vi.fn() },
+        () =>
+          new ToolSearchTool(config)
+            .build({ query })
+            .execute(new AbortController().signal),
+      );
+      expect(String(result.llmContent)).not.toContain('<function>');
+    },
+  );
+
+  it('omits collision losers and direct-only tools from exact lookup', async () => {
+    const { config, registry } = setup();
+    registry.registerTool(
+      new MockTool({ name: 'remote_fetch', shouldDefer: true }),
+    );
+    const result = await new ToolSearchTool(config)
+      .build({ query: 'select:remote_fetch,tool_search,exec' })
+      .execute(new AbortController().signal);
+    expect(String(result.llmContent)).not.toContain('<function>');
+    expect(String(result.llmContent)).toContain('Not found:');
+  });
+
+  it('uses the scoped collision winner for both search and execution', async () => {
+    const { config, registry } = setup();
+    registry.registerTool(
+      new MockTool({
+        name: 'remote_fetch',
+        description: 'scoped winner',
+        shouldDefer: true,
+      }),
+    );
+    const result = await runWithToolCallRuntime(
+      {
+        parentCallId: 'search',
+        allowedToolNames: ['remote_fetch'],
+        dispatch: vi.fn(),
+      },
+      () =>
+        new ToolSearchTool(config)
+          .build({ query: 'select:remote_fetch' })
+          .execute(new AbortController().signal),
+    );
+    expect(String(result.llmContent)).toContain(
+      '"description":"scoped winner"',
+    );
+    expect(String(result.llmContent)).toContain('"jsName":"remote_fetch"');
+  });
+
+  it('resolves case-insensitive lookup within the allowed scope', async () => {
+    const { config, registry } = setup();
+    for (const name of ['CaseFetch', 'casefetch']) {
+      registry.registerTool(new MockTool({ name, shouldDefer: true }));
+    }
+    const result = await runWithToolCallRuntime(
+      {
+        parentCallId: 'search',
+        allowedToolNames: ['CaseFetch'],
+        dispatch: vi.fn(),
+      },
+      () =>
+        new ToolSearchTool(config)
+          .build({ query: 'select:CASEFETCH' })
+          .execute(new AbortController().signal),
+    );
+    const content = String(result.llmContent);
+    expect(content).toContain('"name":"CaseFetch"');
+    expect(content).not.toContain('casefetch');
+    expect(content).not.toContain('Ambiguous');
+  });
+
+  it.each([true, false])(
+    'keeps MCP short names exact and offers recovery only in Code Mode: %s',
+    async (codeModeOnly) => {
+      const { config, registry } = makeConfigWithRegistry({ codeModeOnly });
+      registry.registerTool(new MockTool({ name: 'exec' }));
+      registry.registerTool(
+        new MockTool({
+          name: 'mcp__catalog__read_entry',
+          shouldDefer: true,
+          params: {
+            type: 'object',
+            properties: { id: { type: 'string' } },
+            required: ['id'],
+          },
+        }),
+      );
+      const before = registry.getFunctionDeclarations();
+      const search = async (query: string) =>
+        new ToolSearchTool(config)
+          .build({ query })
+          .execute(new AbortController().signal);
+
+      const missing = String((await search('select:read_entry')).llmContent);
+      expect(missing).toContain('Not found: read_entry');
+      expect(missing).not.toContain('<function>');
+      expect(missing).not.toContain('mcp__catalog__read_entry');
+      if (codeModeOnly) {
+        expect(missing).toContain('keywords without select:');
+        expect(missing).toContain('mcp__<server>__<tool>');
+      } else {
+        expect(missing).toBe('Not found: read_entry');
+      }
+
+      const found = String((await search('read_entry')).llmContent);
+      const declaration = JSON.parse(
+        found.match(/<function>(.*?)<\/function>/s)![1],
+      );
+      expect(declaration).toMatchObject({
+        name: 'mcp__catalog__read_entry',
+        parametersJsonSchema: { required: ['id'] },
+      });
+      if (codeModeOnly) {
+        expect(declaration.jsName).toBe('mcp__catalog__read_entry');
+      }
+      expect(registry.getFunctionDeclarations()).toEqual(before);
+    },
+  );
+});
 
 describe('tokenize', () => {
   it('splits on whitespace and lowercases', () => {
