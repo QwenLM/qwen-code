@@ -246,6 +246,19 @@ describe('mcp add command', () => {
     });
   });
 
+  it('should split comma-separated values given across repeated flags', async () => {
+    await parser.parseAsync(
+      'add my-server /path/to/server ' +
+        '--exclude-tools write_file,edit_file --exclude-tools move_file',
+    );
+
+    expect(mockSetValue).toHaveBeenCalledWith(SettingScope.User, 'mcpServers', {
+      'my-server': expect.objectContaining({
+        excludeTools: ['write_file', 'edit_file', 'move_file'],
+      }),
+    });
+  });
+
   describe('when handling scope and directory', () => {
     const serverName = 'test-server';
     const command = 'echo';
