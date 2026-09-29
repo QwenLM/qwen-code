@@ -13,6 +13,7 @@ import {
   describeWorkflowCompileError,
 } from './workflow-sandbox.js';
 import { WorkflowDispatchScheduler } from './workflow-dispatch-scheduler.js';
+import { WorkflowUnsupportedSyntaxError } from './workflow-script-validation.js';
 import { expectWithinLatencyBudget } from '../../test-utils/latency-budget.js';
 
 describe('stripExportMeta', () => {
@@ -1736,6 +1737,35 @@ describe('createWorkflowSandbox security', () => {
     expect(String(result)).toMatch(/^undefined|^threw/);
   });
 
+  it('pipeline() refuses too many stages before they reach the host', async () => {
+    const pipeline = vi.fn(async () => []);
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ok',
+      pipeline,
+    });
+    const result = await sandbox.run(`
+      const stages = Array.from({ length: 4097 }, () => (x) => x);
+      try { await pipeline([1], ...stages); return 'resolved'; }
+      catch (e) {
+        let escaped;
+        try {
+          escaped = String(e.constructor.constructor('return typeof process')());
+        } catch (inner) { escaped = 'threw'; }
+        return [e.message, escaped];
+      }
+    `);
+    const [message, escaped] = result as [string, string];
+    expect(message).toContain('pipeline() stages: 4097 entries');
+    expect(escaped).toMatch(/^undefined|^threw/);
+    expect(pipeline).not.toHaveBeenCalled();
+
+    await sandbox.run(`
+      await pipeline([1], ...Array.from({ length: 4096 }, () => (x) => x));
+    `);
+    expect(pipeline).toHaveBeenCalledTimes(1);
+  });
+
   it('opts.budget overrides the throwing stub when provided', async () => {
     const sandbox = createWorkflowSandbox({
       args: undefined,
@@ -2977,6 +3007,124 @@ describe('createWorkflowSandbox primitives', () => {
       await expect(
         sandbox.run('const declared = 1; return declared;'),
       ).resolves.toBe(1);
+    });
+  });
+
+  describe('dynamic import() refusal', () => {
+    function refusal(source: string): WorkflowUnsupportedSyntaxError {
+      try {
+        compileWorkflowScript(source);
+      } catch (e) {
+        expect(e).toBeInstanceOf(WorkflowUnsupportedSyntaxError);
+        return e as WorkflowUnsupportedSyntaxError;
+      }
+      throw new Error('expected the source to be refused');
+    }
+
+    it.each([
+      ['awaited after an agent', "await agent('a');\nawait import('node:fs');"],
+      ['not awaited', "import('node:fs');\nreturn 1;"],
+      ['in a dead branch', "if (false) { await import('node:fs'); }"],
+      [
+        'in a function that is never called',
+        "function load() { return import('node:fs'); }",
+      ],
+      ['in a template substitution', "const s = `${import('node:fs')}`;"],
+      ['with a comment between the tokens', "import /* x */ ('node:fs');"],
+      [
+        'with a computed module name',
+        "const m = 'node:' + 'fs'; await import(m);",
+      ],
+      ['with import options', "await import('x.json', { with: {} });"],
+    ])('refuses import() %s before running', (_name, source) => {
+      expect(refusal(source).message).toMatch(
+        /dynamic import\(\) is not supported in workflow scripts/,
+      );
+    });
+
+    it('never dispatches an agent that precedes the import', async () => {
+      const dispatch = vi.fn(async () => 'ok');
+      const sandbox = createWorkflowSandbox({ args: undefined, dispatch });
+      await expect(
+        sandbox.run("await agent('must-not-run');\nimport('node:fs');"),
+      ).rejects.toThrow(/dynamic import\(\)/);
+      expect(dispatch).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['a string', 'return \'import("node:fs")\';'],
+      ['a line comment', "// import('node:fs')\nreturn 1;"],
+      ['a block comment', "/* import('node:fs') */ return 1;"],
+      ['a regex literal', "return /import\\('node:fs'\\)/.source.length > 0;"],
+      ['template text', "return `import('node:fs')`.length > 0;"],
+      ['a member call', 'const o = { import: () => 1 }; return o.import();'],
+      [
+        'an object method',
+        'return ({ import() { return 1; } }).import() === 1;',
+      ],
+      ['a property key', "return ({ 'import': 1 }).import === 1;"],
+    ])('runs a script with import in %s', async (_name, source) => {
+      const sandbox = createWorkflowSandbox({
+        args: undefined,
+        dispatch: async () => 'ok',
+      });
+      await expect(sandbox.run(source)).resolves.toBeTruthy();
+    });
+
+    it('reports the line the author wrote after a multiline meta block', () => {
+      const source = `export const meta = {
+  name: 'n',
+  description: 'd',
+}
+await agent('a');
+await import('node:fs');`;
+      expect(refusal(source).message).toMatch(/^line 6: /);
+    });
+
+    it.each([
+      ['LF', '\n'],
+      ['CRLF', '\r\n'],
+      ['lone CR', '\r'],
+      ['U+2028', '\u2028'],
+    ])('counts %s line breaks like the author', (_name, separator) => {
+      const source = ['const a = 1;', 'const b = 2;', "import('x');"].join(
+        separator,
+      );
+      expect(refusal(source).message).toMatch(/^line 3: /);
+    });
+
+    it('reports the first import when there are several', () => {
+      expect(
+        refusal("const a = 1;\nimport('a');\nimport('b');").message,
+      ).toMatch(/^line 2: /);
+    });
+
+    // Newer V8 compiles `import.source()`, which the parser does not know.
+    // Whichever of the two refuses it, the script must not run unchecked.
+    it('refuses a body the parser cannot read even when V8 compiles it', () => {
+      expect(() => compileWorkflowScript("import.source('x');")).toThrow();
+    });
+
+    it('leaves an ordinary syntax error to V8', () => {
+      expect(() =>
+        compileWorkflowScript("await import('x');\nconst x: string = 'a';"),
+      ).toThrow(SyntaxError);
+    });
+
+    it('accepts modern syntax V8 compiles', () => {
+      expect(() =>
+        compileWorkflowScript(
+          [
+            'class A { static #n = 1; static get n() { return A.#n; } }',
+            'const o = { a: { b: 1 } }; const v = o?.a?.b ?? 0;',
+            'let x = 0; x ||= 1; x &&= 2; x ??= 3;',
+            'const big = 1_000n; const re = /a/v;',
+            'for await (const r of [Promise.resolve(1)]) {}',
+            'label: { break label; }',
+            'return [A.n, v, x, big, re, Object.groupBy([], () => 1)];',
+          ].join('\n'),
+        ),
+      ).not.toThrow();
     });
   });
 
