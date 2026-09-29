@@ -360,10 +360,8 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
     }
 
     private static void requireProtocol(Map<String, Object> body) {
-        Object version = body.get("protocolVersion");
-        if (!(version instanceof Number)
-                || ((Number) version).intValue() != 1
-                || ((Number) version).doubleValue() != 1.0d) {
+        if (!Long.valueOf(1L).equals(
+                BrokerValues.exactLong(body.get("protocolVersion")))) {
             throw new RuntimeBrokerException(409,
                     "runtime_broker_protocol_conflict",
                     "Runtime Broker protocol version changed.", false);

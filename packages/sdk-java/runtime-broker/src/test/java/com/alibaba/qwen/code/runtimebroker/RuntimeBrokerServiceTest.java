@@ -10,12 +10,15 @@ import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.HashMap;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -1434,9 +1437,11 @@ class RuntimeBrokerServiceTest {
     @Test
     void refusesAnIllFormedRuntimeSessionIdBeforeResolvingTheScope() {
         try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
-            assertThrows(IllegalArgumentException.class,
-                    () -> fixture.service.acquire("harness", "s\uD800",
-                            "bootstrap"));
+            for (String surrogate : List.of("\uD800", "\uDC00")) {
+                assertThrows(IllegalArgumentException.class,
+                        () -> fixture.service.acquire("harness",
+                                "s" + surrogate, "bootstrap"));
+            }
             assertNull(fixture.resolver.lastHarness.get());
         }
     }
@@ -1467,18 +1472,84 @@ class RuntimeBrokerServiceTest {
                     invalidPayload.getCode());
             assertEquals(400, invalidPayload.getStatusCode());
             assertTrue(!invalidPayload.isRetryable());
-            // The JSON writer would send each of these as "p?".
-            for (String field : List.of("promptId", "callId",
-                    "argsDigest")) {
-                Map<String, Object> reference = new HashMap<>(Map.of(
-                        "sessionId", "runtime", "promptId", "prompt",
-                        "callId", "call", "argsDigest", "digest"));
-                reference.put(field, "p\uD800");
-                assertEquals("runtime_reference_invalid", failure(
-                        fixture.service.createExecution("harness", "runtime",
-                                "surrogate-" + field, reference)).getCode(),
-                        field);
+            // The JSON writer would send each of these as "p?", whether the
+            // lone surrogate is a high or a low one.
+            for (String surrogate : List.of("\uD800", "\uDC00")) {
+                for (String field : List.of("promptId", "callId",
+                        "argsDigest")) {
+                    Map<String, Object> reference = new HashMap<>(Map.of(
+                            "sessionId", "runtime", "promptId", "prompt",
+                            "callId", "call", "argsDigest", "digest"));
+                    reference.put(field, "p" + surrogate);
+                    RuntimeBrokerException refusal = failure(
+                            fixture.service.createExecution("harness",
+                                    "runtime", "surrogate-" + field
+                                            + surrogate, reference));
+                    assertEquals("runtime_reference_invalid",
+                            refusal.getCode(), field);
+                    // The identity check refuses it, before the whole
+                    // reference is checked.
+                    assertEquals("reference " + field + " is invalid",
+                            refusal.getMessage());
+                }
+                // The Worker would run the rewritten tool name or input.
+                for (Map<String, Object> call : List.<Map<String, Object>>of(
+                        Map.of("toolName", "read" + surrogate,
+                                "input", Map.of()),
+                        Map.of("toolName", "run_shell_command", "input",
+                                Map.of("command", "rm file" + surrogate)),
+                        Map.of("toolName", "read_file", "input",
+                                Map.of("path" + surrogate, "a")),
+                        Map.of("toolName", "read_file", "input",
+                                Map.of("args", List.of("y" + surrogate))))) {
+                    Map<String, Object> reference = new HashMap<>(Map.of(
+                            "sessionId", "runtime", "promptId", "prompt",
+                            "callId", "call", "argsDigest", "digest"));
+                    reference.putAll(call);
+                    assertEquals("runtime_reference_invalid", failure(
+                            fixture.service.createExecution("harness",
+                                    "runtime", "tool-" + call.hashCode(),
+                                    reference)).getCode(), call.toString());
+                }
             }
+            assertEquals(0, fixture.transport.executeCalls.get());
+        }
+    }
+
+    @Test
+    void refusesADeferredPayloadWithALoneSurrogate()
+            throws Exception {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            join(fixture.service.acquire("harness", "runtime",
+                    "bootstrap"));
+            // A raw one, which the UTF-8 encoder would turn into '?', then
+            // plain ASCII text where only the parsed payload shows the
+            // surrogates the Worker would receive as '?'.
+            for (String payload : List.of(
+                    "{\"toolName\":\"read_file\",\"input\":{\"path\":\"a\ud800\"}}",
+                    "{\"toolName\":\"read\\ud800\",\"input\":{}}",
+                    "{\"toolName\":\"read_file\",\"input\":"
+                            + "{\"path\":\"a\\udc00\"}}",
+                    "{\"toolName\":\"read_file\",\"input\":"
+                            + "{\"p\\udfff\":[\"a\"]}}")) {
+                String digest = "sha256:" + HexFormat.of().formatHex(
+                        MessageDigest.getInstance("SHA-256").digest(
+                                payload.getBytes(StandardCharsets.UTF_8)));
+                ToolExecutionRecord reserved = join(
+                        fixture.service.prepareExecution("harness",
+                                "runtime", "deferred-" + payload.hashCode(),
+                                Map.of("sessionId", "runtime", "promptId",
+                                        "prompt", "callId",
+                                        "call-" + payload.hashCode(),
+                                        "argsDigest", digest)));
+                RuntimeBrokerException refusal = failure(
+                        fixture.service.startExecution("harness", "runtime",
+                                reserved.getExecutionCallId(), payload));
+                assertEquals("runtime_payload_invalid", refusal.getCode(),
+                        payload);
+                assertEquals(400, refusal.getStatusCode());
+            }
+            assertEquals(0, fixture.transport.executeCalls.get());
         }
     }
 
@@ -3543,6 +3614,17 @@ class RuntimeBrokerServiceTest {
         public RuntimeSessionRecord completeSessionRelease(RuntimeSessionRepository sessions,
                 RuntimeSessionRecord expected) {
             return delegate.completeSessionRelease(sessions, expected);
+        }
+
+        @Override
+        public java.util.List<RuntimeBindingRecord> findRecoveryCandidates(String kind, String after, int limit) {
+            return delegate.findRecoveryCandidates(kind, after, limit);
+        }
+
+        @Override
+        public RuntimeBindingRecord finishLostRecovery(RuntimeSessionRepository sessions,
+                ToolExecutionRepository executions, RuntimeBindingRecord expected) {
+            return delegate.finishLostRecovery(sessions, executions, expected);
         }
 
         @Override

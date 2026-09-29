@@ -33,9 +33,10 @@ public interface RuntimeTransport {
 
     /**
      * Installs directory context only; does not activate a Session. The
-     * binding must be READY and be the one the Session was acquired on, at
-     * the same generation, and hold the Session's placement: its scope and,
-     * under session isolation, its Harness Session.
+     * Session record must be ACQUIRING or READY and name this binding at its
+     * current generation. The binding must be READY with no drain requested
+     * and hold the Session's placement: its scope and, under session
+     * isolation, its Harness Session.
      */
     default CompletionStage<Map<String, Object>> installContext(
             RuntimeBindingRecord runtime, RuntimeSessionRecord session,
