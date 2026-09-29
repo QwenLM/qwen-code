@@ -38,8 +38,11 @@ class DurableLocalRuntimeFaultGateTest {
             second.acquire(HARNESS, SESSION).requireOk();
             var retry = second.create(HARNESS, SESSION, "original", reference).object();
             assertEquals(execution, retry.getString("executionCallId"));
+            // The takeover scan may already have settled the call from the
+            // worker's evidence, as in the other process fault gates.
             FaultGateRig.await(() -> second.reconcile(HARNESS, SESSION, execution).object().getString("outcome"),
-                    "RESOLVED"::equals, "original journal settlement");
+                    outcome -> "RESOLVED".equals(outcome) || "ALREADY_SETTLED".equals(outcome),
+                    "original journal settlement");
             var restored = rig.activeBinding();
             assertEquals(original.getBindingId(), restored.getBindingId());
             assertEquals(original.getGeneration(), restored.getGeneration());
