@@ -353,7 +353,10 @@ function updateRecord(
   record.updatedAt = new Date().toISOString();
 }
 
-function memoryWritePath(part: Part): string | undefined {
+function resolvedFunctionCall(part: Part): {
+  name?: string;
+  args?: Record<string, unknown>;
+} {
   let name = part.functionCall?.name
     ? canonicalToolName(part.functionCall.name)
     : undefined;
@@ -391,6 +394,11 @@ function memoryWritePath(part: Part): string | undefined {
       }
     }
   }
+  return { name, args };
+}
+
+function memoryWritePath(part: Part): string | undefined {
+  const { name, args } = resolvedFunctionCall(part);
   if (name && WRITE_TOOL_NAMES.has(name)) {
     const filePath =
       args?.['file_path'] ?? args?.['path'] ?? args?.['target_file'];
@@ -403,9 +411,37 @@ function historyWritesToMemory(
   history: Content[],
   projectRoot: string,
 ): boolean {
+  const successfulCallIds = successfulFunctionCallIds(history);
   return history.some((msg) =>
     (msg.parts ?? []).some((part) => {
+      const { name, args } = resolvedFunctionCall(part);
+      if (
+        part.functionCall?.id &&
+        successfulCallIds.has(part.functionCall.id) &&
+        name === ToolNames.MANAGE_MEMORY &&
+        // Only `remember` implies a write: runManagedRememberByAgent throws
+        // `remember_no_update` when nothing was persisted, whereas `forget`
+        // returns `{ removed: 0 }` with no error key when nothing matched.
+        // Skipping on a no-op `forget` would suppress extraction of a turn
+        // that wrote nothing to memory.
+        args?.['action'] === 'remember'
+      ) {
+        return true;
+      }
       const filePath = memoryWritePath(part);
+      if (
+        filePath !== undefined &&
+        part.functionCall?.id &&
+        !successfulCallIds.has(part.functionCall.id)
+      ) {
+        // A *rejected* direct write — prior-read enforcement, a
+        // `permissions.deny` rule on a memory path, EISDIR/ENOSPC — wrote
+        // nothing to memory, so it must not suppress this turn's extraction.
+        // Same invariant as the `manage_memory` arm above. The gate is
+        // absence-of-failure rather than require-success: a call with no `id`
+        // has no response to check, and those keep the prior behaviour.
+        return false;
+      }
       return (
         filePath !== undefined &&
         (isAnyAutoMemPath(filePath, projectRoot) ||
@@ -415,19 +451,9 @@ function historyWritesToMemory(
   );
 }
 
-function latestHistoryWritesToUserMemory(history: Content[]): boolean {
-  const queryIndex = history.findLastIndex(
-    (message) =>
-      message.role === 'user' &&
-      (message.parts ?? []).some(
-        (part) => typeof part.text === 'string' && part.text.trim().length > 0,
-      ) &&
-      !(message.parts ?? []).some((part) => part.functionResponse),
-  );
-  if (queryIndex < 0) return false;
-
-  const successfulCallIds = new Set<string>();
-  for (const message of history.slice(queryIndex + 1)) {
+function successfulFunctionCallIds(history: Content[]): Set<string> {
+  const ids = new Set<string>();
+  for (const message of history) {
     for (const part of message.parts ?? []) {
       const response = part.functionResponse as
         | { id?: string; response?: Record<string, unknown> }
@@ -437,12 +463,31 @@ function latestHistoryWritesToUserMemory(history: Content[]): boolean {
         response.response &&
         !('error' in response.response)
       ) {
-        successfulCallIds.add(response.id);
+        ids.add(response.id);
       }
     }
   }
+  return ids;
+}
 
-  return history.slice(queryIndex + 1).some((message) =>
+function latestTurnHistory(history: Content[]): Content[] | undefined {
+  const queryIndex = history.findLastIndex(
+    (message) =>
+      message.role === 'user' &&
+      (message.parts ?? []).some(
+        (part) => typeof part.text === 'string' && part.text.trim().length > 0,
+      ) &&
+      !(message.parts ?? []).some((part) => part.functionResponse),
+  );
+  return queryIndex < 0 ? undefined : history.slice(queryIndex + 1);
+}
+
+function latestHistoryWritesToUserMemory(history: Content[]): boolean {
+  const recentHistory = latestTurnHistory(history);
+  if (!recentHistory) return false;
+  const successfulCallIds = successfulFunctionCallIds(recentHistory);
+
+  return recentHistory.some((message) =>
     (message.parts ?? []).some((part) => {
       if (
         !part.functionCall?.id ||
@@ -926,22 +971,29 @@ export class MemoryManager {
         );
         return record;
       }
-      if (result.committed > 0 || result.remainingLegacyFiles === 0) {
-        this.migrationStallCountByDomain.delete(domain);
-      } else {
+      const indexRebuildFailed = result.indexRebuildError !== undefined;
+      if (
+        indexRebuildFailed ||
+        (result.committed === 0 && result.remainingLegacyFiles > 0)
+      ) {
         this.migrationStallCountByDomain.set(
           domain,
           (this.migrationStallCountByDomain.get(domain) ?? 0) + 1,
         );
+      } else {
+        this.migrationStallCountByDomain.delete(domain);
       }
       const stalled =
         (this.migrationStallCountByDomain.get(domain) ?? 0) >=
         MIGRATION_STALL_LIMIT;
+      const failed = stalled || indexRebuildFailed;
       this.update(record, {
-        status: stalled ? 'failed' : 'completed',
-        ...(stalled
+        status: failed ? 'failed' : 'completed',
+        ...(failed
           ? {
-              error: `Migration stalled: ${result.remainingLegacyFiles} legacy file(s) could not be migrated in ${MIGRATION_STALL_LIMIT} consecutive runs; giving up for this session.`,
+              error:
+                result.indexRebuildError ??
+                `Migration stalled: ${result.remainingLegacyFiles} legacy file(s) could not be migrated in ${MIGRATION_STALL_LIMIT} consecutive runs; giving up for this session.`,
             }
           : {}),
         progressText: `Migrated ${result.committed} memory file(s).`,
@@ -951,7 +1003,9 @@ export class MemoryManager {
         params.config,
         new MemoryMigrationEvent({
           scope: params.scope,
-          status: stalled ? 'failed' : 'completed',
+          status: failed ? 'failed' : 'completed',
+          failure_reason:
+            result.indexRebuildError ?? (stalled ? 'stalled' : undefined),
           files_scanned: result.filesScanned,
           legacy_files: result.legacyFiles,
           remaining_legacy_files: result.remainingLegacyFiles,
@@ -1042,7 +1096,12 @@ export class MemoryManager {
     ReturnType<typeof runAutoMemoryExtract> extends Promise<infer T> ? T : never
   > {
     const wroteUserMemory = latestHistoryWritesToUserMemory(params.history);
-    if (historyWritesToMemory(params.history, params.projectRoot)) {
+    if (
+      historyWritesToMemory(
+        latestTurnHistory(params.history) ?? params.history,
+        params.projectRoot,
+      )
+    ) {
       const record = makeTaskRecord(
         'extract',
         params.projectRoot,

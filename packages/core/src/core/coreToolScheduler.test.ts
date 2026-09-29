@@ -4534,53 +4534,56 @@ describe('CoreToolScheduler', () => {
     },
   );
 
-  it('exempts read_mcp_resource from the persistence spill gate', async () => {
-    // The gate fires above DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD (25k) +
-    // GATE_HEADROOM (3k) ≈ 28k and is keyed by tool NAME (not maxOutputChars),
-    // so a self-capped read_mcp_resource result above that size must NOT be
-    // spilled to a stub — the model has to receive the framed body the tool
-    // reports as injected.
-    const content = 'a'.repeat(40_000);
-    const execute = vi.fn().mockResolvedValue({
-      llmContent: content,
-      returnDisplay: 'x',
-    });
-    const toolsByName = new Map<string, MockTool>([
-      [
-        'read_mcp_resource',
-        new MockTool({
-          name: 'read_mcp_resource',
-          execute,
-          maxOutputChars: Number.POSITIVE_INFINITY,
-        }),
-      ],
-    ]);
-    const { scheduler, onAllToolCallsComplete } =
-      createSchedulerForLegacyToolTests({ toolsByName });
+  it.each(['read_mcp_resource', 'search_memory'])(
+    'exempts %s from the persistence spill gate',
+    async (toolName) => {
+      // The gate fires above DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD (25k) +
+      // GATE_HEADROOM (3k) ≈ 28k and is keyed by tool NAME (not maxOutputChars),
+      // so a self-capped result above that size must NOT be
+      // spilled to a stub — the model has to receive the framed body the tool
+      // reports as injected.
+      const content = 'a'.repeat(40_000);
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: content,
+        returnDisplay: 'x',
+      });
+      const toolsByName = new Map<string, MockTool>([
+        [
+          toolName,
+          new MockTool({
+            name: toolName,
+            execute,
+            maxOutputChars: Number.POSITIVE_INFINITY,
+          }),
+        ],
+      ]);
+      const { scheduler, onAllToolCallsComplete } =
+        createSchedulerForLegacyToolTests({ toolsByName });
 
-    await scheduler.schedule(
-      [
-        {
-          callId: 'c',
-          name: 'read_mcp_resource',
-          args: {},
-          isClientInitiated: false,
-          prompt_id: 'p',
-        },
-      ],
-      new AbortController().signal,
-    );
+      await scheduler.schedule(
+        [
+          {
+            callId: 'c',
+            name: toolName,
+            args: {},
+            isClientInitiated: false,
+            prompt_id: 'p',
+          },
+        ],
+        new AbortController().signal,
+      );
 
-    await vi.waitFor(() => {
-      expect(onAllToolCallsComplete).toHaveBeenCalled();
-    });
+      await vi.waitFor(() => {
+        expect(onAllToolCallsComplete).toHaveBeenCalled();
+      });
 
-    const output = outputOfFirstCall(onAllToolCallsComplete);
-    expect(output).not.toContain(
-      'Tool output was too large and has been truncated',
-    );
-    expect(output).toBe(content);
-  });
+      const output = outputOfFirstCall(onAllToolCallsComplete);
+      expect(output).not.toContain(
+        'Tool output was too large and has been truncated',
+      );
+      expect(output).toBe(content);
+    },
+  );
 
   describe('producer-applied output budgets', () => {
     // These exercise the window between the generic spill gate

@@ -2005,6 +2005,14 @@ export class WorkflowOrchestrator {
     // rather than silently replaying the prior run's results.
     let prefixHash = deriveArgsSeed(req.args);
     let hadMiss = false;
+    const replayPrefix = new Set<string>();
+    let replayBarrier: Promise<void> | undefined;
+    let executionClosed = false;
+    const assertExecutionOpen = (): void => {
+      if (executionClosed || signal?.aborted) {
+        throw new DOMException('Workflow run has ended.', 'AbortError');
+      }
+    };
     let journalAgentId = 0;
     // The sandbox is assigned before its script can call countedDispatch.
     // Keeping the reference here lets resume diagnostics enter the sandbox's
@@ -2013,11 +2021,12 @@ export class WorkflowOrchestrator {
       current: undefined,
     };
 
-    const countedDispatch: WorkflowCountedDispatch = (
+    const countedDispatch: WorkflowCountedDispatch = async (
       prompt,
       opts,
       workflowCallId,
     ) => {
+      assertExecutionOpen();
       const stepId = readWorkflowStepId(opts.stepId);
       if (stepId !== undefined) opts = { ...opts, stepId };
       // Must run before deriveAgentKey below: hash.update() throws an
@@ -2045,6 +2054,7 @@ export class WorkflowOrchestrator {
         if (!hadMiss && replay) {
           const cached = replay.results.get(journalKey);
           if (cached !== undefined) {
+            replayPrefix.add(journalKey);
             // Cache hit: surface dispatch + completion to the registry so
             // the UI counters advance, then return the cached result. A
             // prior `started`-without-`result` for this key means the agent
@@ -2118,11 +2128,16 @@ export class WorkflowOrchestrator {
             : `[resume] respawning ${name}: interrupted in a previous run ` +
               `(${priorStarts.length} prior attempt${priorStarts.length === 1 ? '' : 's'})`;
         }
-        // First miss invalidates the suffix. The marker and respawn event are
-        // emitted only after the run-level admission gates below accept this
-        // call, so a refusal never leaves a phantom started/respawn record.
+        if (!hadMiss && replay) {
+          // Queue the rewrite synchronously, before any concurrent suffix call
+          // can dispatch or append. Even an unawaited call must persist it.
+          replayBarrier = journal.retainReplayPrefix(new Set(replayPrefix));
+          void replayBarrier.catch(() => undefined);
+        }
         hadMiss = true;
       }
+      if (replayBarrier) await replayBarrier;
+      assertExecutionOpen();
 
       // P5 R3 (wenshao #7): budget gate runs BEFORE `agentCount += 1`
       // so budget-rejected dispatches don't consume agent-cap slots.
@@ -2211,6 +2226,7 @@ export class WorkflowOrchestrator {
       return scheduler
         .run(async () => {
           try {
+            assertExecutionOpen();
             try {
               emitter?.dispatchStarted?.(dispatchId, Date.now());
             } catch (e) {
@@ -2262,7 +2278,7 @@ export class WorkflowOrchestrator {
             // resumable; a non-serializable result is skipped (the next
             // resume re-runs that dispatch live). Fire-and-forget — a
             // journal write failure must not fail the dispatch.
-            if (journal && journalKey !== undefined) {
+            if (!executionClosed && journal && journalKey !== undefined) {
               journal
                 .append({
                   type: 'result',
@@ -2312,6 +2328,7 @@ export class WorkflowOrchestrator {
             if (
               journal &&
               journalKey !== undefined &&
+              !executionClosed &&
               !signal?.aborted &&
               !isWorkflowRunLevelError(err)
             ) {
@@ -2325,7 +2342,13 @@ export class WorkflowOrchestrator {
                   debugLogger.warn(`journal failed-append failed: ${e}`),
                 );
             }
-            if (signal?.aborted || isWorkflowRunLevelError(err)) throw err;
+            if (
+              executionClosed ||
+              signal?.aborted ||
+              isWorkflowRunLevelError(err)
+            ) {
+              throw err;
+            }
             // Every other rejection belongs to this admitted agent. Settle it
             // here so sequential and fan-out calls share one contract even
             // for failures that predate WorkflowAgentFailedError markers.
@@ -2476,9 +2499,15 @@ export class WorkflowOrchestrator {
     });
     parentSandboxRef.current = sandbox;
     try {
-      const result = await dependencyContext.run({ tails: [] }, () =>
-        sandbox.run(req.script),
-      );
+      let result: unknown;
+      try {
+        result = await dependencyContext.run({ tails: [] }, () =>
+          sandbox.run(req.script),
+        );
+      } finally {
+        executionClosed = true;
+        await replayBarrier;
+      }
       return {
         runId,
         result,

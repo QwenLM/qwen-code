@@ -53,6 +53,8 @@ final class FaultGateRig implements AutoCloseable {
     enum Provisioner {
         /** The production provisioner alone: owns workers in memory. */
         LOCAL_PROCESS,
+        /** Production durable store; test host identity is injected only on non-Linux hosts. */
+        DURABLE_LOCAL_PROCESS,
         /** The production provisioner plus a pid record a restart adopts. */
         RECOVERABLE
     }
@@ -194,6 +196,7 @@ final class FaultGateRig implements AutoCloseable {
         config.put("node", "node");
         config.put("cli", cli.toString());
         config.put("stateDir", root.toString());
+        config.put("durable", provisioner == Provisioner.DURABLE_LOCAL_PROCESS);
         config.put("records", provisioner == Provisioner.RECOVERABLE
                 ? root.resolve("records").toString() : null);
         config.put("proxyPort", proxy.port());
@@ -222,6 +225,11 @@ final class FaultGateRig implements AutoCloseable {
     void killBroker(BrokerProcess broker) throws InterruptedException {
         orphans.addAll(broker.descendants());
         broker.kill();
+    }
+
+    void closeBroker(BrokerProcess broker) throws InterruptedException {
+        orphans.addAll(broker.descendants());
+        broker.close();
     }
 
     /** SIGKILLs a Broker's worker together with the tool processes below. */

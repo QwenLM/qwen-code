@@ -240,7 +240,10 @@ import type { GoalRecoveryRecord } from '../goals/goal-persistence.js';
 import { GOAL_DEFAULT_TOKEN_BUDGET } from '../goals/goal-protocol.js';
 import { createGoalVerifier } from '../goals/goal-verifier.js';
 import type { ToolInvocationGuard } from '../core/tool-invocation-guard.js';
-import type { BwrapPolicy } from '../sandbox/bwrap-execution.js';
+import type {
+  ExecutionSandboxPolicy,
+  ResolvedExecutionSandboxPolicy,
+} from '../sandbox/sandbox-execution.js';
 import {
   admitShellSandbox,
   probeShellSandbox,
@@ -1596,9 +1599,7 @@ export interface ConfigParameters {
   settingsWatcher?: { stopWatching(): void };
 }
 
-export interface ShellExecutionSandboxPolicy extends BwrapPolicy {
-  requestedBackend?: 'auto' | 'bwrap';
-}
+export type ShellExecutionSandboxPolicy = ExecutionSandboxPolicy;
 
 export type TerminalImageRenderSupport =
   | { available: true }
@@ -2601,8 +2602,9 @@ export function deriveConfig(
 }
 
 export class Config {
-  private readonly shellExecutionSandbox:
+  private shellExecutionSandbox:
     | Readonly<ShellExecutionSandboxPolicy>
+    | Readonly<ResolvedExecutionSandboxPolicy>
     | undefined;
   private sessionId: string;
   private sessionSourceType?: string;
@@ -3120,6 +3122,9 @@ export class Config {
   private readonly messageBusListeners = new Set<(bus: MessageBus) => void>();
   private readonly memoryManager: MemoryManager;
   private readonly modelChangeListeners = new Set<(model: string) => void>();
+  private readonly approvalModeChangeListeners = new Set<
+    (mode: ApprovalMode, prePlanMode: ApprovalMode | undefined) => void
+  >();
   // True on the Config that claimed the process-global QWEN_CODE_MODEL slot
   // (first in this process); gates the global write in publishModelEnv so no
   // other instance updates it. Per-session publishing is not gated on it.
@@ -3846,7 +3851,10 @@ export class Config {
   ): Promise<void> {
     try {
       if (this.shellExecutionSandbox)
-        await probeShellSandbox(this.shellExecutionSandbox, options?.signal);
+        this.shellExecutionSandbox = await probeShellSandbox(
+          this.shellExecutionSandbox,
+          options?.signal,
+        );
       const activation = this.activateChatRecording();
       this.sessionWriterActivationPromise = activation;
       try {
@@ -6084,6 +6092,25 @@ export class Config {
     }
   }
 
+  onApprovalModeChange(
+    listener: (
+      mode: ApprovalMode,
+      prePlanMode: ApprovalMode | undefined,
+    ) => void,
+  ): () => void {
+    this.approvalModeChangeListeners.add(listener);
+    return () => {
+      this.approvalModeChangeListeners.delete(listener);
+    };
+  }
+
+  private notifyApprovalModeChangeListeners(): void {
+    if (isDerivedConfig(this)) return;
+    for (const listener of this.approvalModeChangeListeners) {
+      listener(this.approvalMode, this.prePlanMode);
+    }
+  }
+
   // Keeps QWEN_CODE_MODEL on the model that is actually active. A subprocess
   // has no other authoritative source: settings files miss /model switches and
   // describe the wrong home under QWEN_HOME isolation. Published per session —
@@ -8262,12 +8289,12 @@ export class Config {
     if (!this.getStructuredMemoryRecallEnabled()) return undefined;
     if (this.memoryRecallMode === 'structured') return undefined;
     const status = await this.scanMemoryRecallCorpusStatus();
-    const to: MemoryRecallMode = status.ready ? 'structured' : 'legacy';
-    if (to === this.memoryRecallMode) {
+    if (!status.ready) {
       this.memoryCorpusRevision = status.revision;
       return undefined;
     }
     const projectRoot = this.getProjectRoot();
+    const teamEnabled = this.getTeamMemoryEnabled() && this.isTrustedFolder();
     const configuredProjectRoot = getAutoMemoryRoot(projectRoot);
     // Index rebuilds refresh the legacy MEMORY.md artifacts; the structured
     // prompt is built from scans, not these indexes, so a tier that cannot be
@@ -8284,9 +8311,7 @@ export class Config {
             : rebuildAutoMemoryIndexAtRoot(root, 'project'),
         ),
         rebuildUserAutoMemoryIndex(),
-        ...(this.getTeamMemoryEnabled() && this.isTrustedFolder()
-          ? [rebuildTeamAutoMemoryIndex(projectRoot)]
-          : []),
+        ...(teamEnabled ? [rebuildTeamAutoMemoryIndex(projectRoot)] : []),
       ].map((pending) =>
         pending.catch((error: unknown) => {
           this.debugLogger.debug(
@@ -8295,12 +8320,16 @@ export class Config {
         }),
       ),
     );
-    const autoMemoryPrompt = await this.buildAutoMemoryPromptForMode(to);
+    const autoMemoryPrompt = await buildStructuredAutoMemoryPrompt(
+      getAutoMemoryRoot(projectRoot),
+      getUserAutoMemoryRoot(),
+      teamEnabled ? getTeamAutoMemoryRoot(projectRoot) : undefined,
+    );
     const confirmed = await this.scanMemoryRecallCorpusStatus();
     if (confirmed.revision !== status.revision) return undefined;
     return {
-      from: this.memoryRecallMode,
-      to,
+      from: 'legacy',
+      to: 'structured',
       revision: confirmed.revision,
       autoMemoryPrompt,
       previousRevision: this.memoryCorpusRevision,
@@ -8344,47 +8373,6 @@ export class Config {
       teamMemoryEnabled: this.getTeamMemoryEnabled(),
       trustedProject: this.isTrustedFolder(),
     });
-  }
-
-  private async buildAutoMemoryPromptForMode(
-    mode: MemoryRecallMode,
-  ): Promise<string> {
-    const projectRoot = this.getProjectRoot();
-    const teamEnabled = this.getTeamMemoryEnabled() && this.isTrustedFolder();
-    if (mode === 'structured') {
-      return buildStructuredAutoMemoryPrompt(
-        getAutoMemoryRoot(projectRoot),
-        getUserAutoMemoryRoot(),
-        teamEnabled ? getTeamAutoMemoryRoot(projectRoot) : undefined,
-      );
-    }
-    const [projectIndex, userIndex, teamIndex] = await Promise.all([
-      readAutoMemoryIndexWithStats(projectRoot).then(
-        (result) => result?.content ?? null,
-      ),
-      readUserAutoMemoryIndexWithStats()
-        .then((result) => result?.content ?? null)
-        .catch(() => null),
-      teamEnabled
-        ? fsPromises
-            .readFile(
-              path.join(getTeamAutoMemoryRoot(projectRoot), 'MEMORY.md'),
-              'utf-8',
-            )
-            .catch(() => null)
-        : Promise.resolve(null),
-    ]);
-    return this.memoryManager.buildAutoMemoryPrompt(
-      getAutoMemoryRoot(projectRoot),
-      projectIndex,
-      { memoryDir: getUserAutoMemoryRoot(), indexContent: userIndex },
-      teamEnabled
-        ? {
-            memoryDir: getTeamAutoMemoryRoot(projectRoot),
-            indexContent: teamIndex,
-          }
-        : undefined,
-    );
   }
 
   getOutputLanguageFilePath(): string | undefined {
@@ -8606,8 +8594,22 @@ export class Config {
         'Cannot enable privileged approval modes in an untrusted folder.',
       );
     }
-    this.setApprovalMode(enabled ? ApprovalMode.PLAN : executionMode);
-    this.planExecutionMode = enabled ? executionMode : undefined;
+    const previousMode = this.approvalMode;
+    const previousExecutionMode = this.planExecutionMode;
+    if (enabled) this.planExecutionMode = executionMode;
+    try {
+      this.setApprovalMode(enabled ? ApprovalMode.PLAN : executionMode);
+    } catch (error) {
+      this.planExecutionMode = previousExecutionMode;
+      throw error;
+    }
+    if (
+      enabled &&
+      previousMode === ApprovalMode.PLAN &&
+      previousExecutionMode !== executionMode
+    ) {
+      this.notifyApprovalModeChangeListeners();
+    }
   }
 
   getApprovalModeRevision(): number {
@@ -8656,6 +8658,8 @@ export class Config {
        * model was never told about, and queues a one-shot system reminder.
        */
       fromApprovedPlanExit?: boolean;
+      /** Suppress a synthetic restore exit notice without approving the plan. */
+      fromSessionRestore?: boolean;
     },
   ): void {
     // Specialized execution overlays install an own method that owns
@@ -8708,9 +8712,10 @@ export class Config {
     } else if (mode !== ApprovalMode.PLAN && fromMode === ApprovalMode.PLAN) {
       this.prePlanMode = undefined;
       noticeEvent.version++;
-      noticeEvent.kind = options?.fromApprovedPlanExit
-        ? 'clear'
-        : 'manual-exit';
+      noticeEvent.kind =
+        options?.fromApprovedPlanExit || options?.fromSessionRestore
+          ? 'clear'
+          : 'manual-exit';
       if (
         options?.fromApprovedPlanExit &&
         Object.getPrototypeOf(this) === Config.prototype
@@ -8751,6 +8756,9 @@ export class Config {
     if (mode !== ApprovalMode.PLAN) this.planExecutionMode = undefined;
     if (fromMode !== mode) {
       this.approvalModeRevision++;
+      if (!isDerivedConfig(this)) {
+        this.notifyApprovalModeChangeListeners();
+      }
     }
   }
 

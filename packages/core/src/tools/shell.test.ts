@@ -18,9 +18,9 @@ import {
 } from 'vitest';
 
 const mockShellExecutionService = vi.hoisted(() => vi.fn());
-const mockExecuteBwrap = vi.hoisted(() => vi.fn());
-vi.mock('../sandbox/bwrap-execution.js', () => ({
-  executeBwrap: mockExecuteBwrap,
+const mockExecuteSandbox = vi.hoisted(() => vi.fn());
+vi.mock('../sandbox/execute-sandbox.js', () => ({
+  executeSandbox: mockExecuteSandbox,
 }));
 vi.mock('../sandbox/runtime-shell-policy.js', () => ({
   assertShellSandboxCwd: vi.fn(),
@@ -91,6 +91,7 @@ import {
 import {
   type ShellExecutionResult,
   type ShellOutputEvent,
+  type ShellRawCaptureSink,
 } from '../services/shellExecutionService.js';
 import * as fs from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -321,7 +322,7 @@ describe('ShellTool', () => {
         filesystem: 'workspace-write',
         network: 'closed',
       });
-      mockExecuteBwrap.mockResolvedValue({
+      mockExecuteSandbox.mockResolvedValue({
         pid: 12345,
         result: Promise.resolve({
           rawOutput: Buffer.alloc(0),
@@ -347,7 +348,7 @@ describe('ShellTool', () => {
           .type,
       ).toBe('exec');
       await invocation.execute(new AbortController().signal);
-      expect(mockExecuteBwrap).toHaveBeenCalledOnce();
+      expect(mockExecuteSandbox).toHaveBeenCalledOnce();
       expect(mockFileSystemService.readTextFile).not.toHaveBeenCalled();
       expect(mockFileSystemService.writeTextFile).not.toHaveBeenCalled();
       expect(mockShellExecutionService).not.toHaveBeenCalled();
@@ -374,16 +375,16 @@ describe('ShellTool', () => {
             is_background: true,
           })
           .execute(new AbortController().signal);
-        expect(mockExecuteBwrap).toHaveBeenCalledTimes(3);
-        expect(mockExecuteBwrap.mock.calls[0][1].args).toEqual([
+        expect(mockExecuteSandbox).toHaveBeenCalledTimes(3);
+        expect(mockExecuteSandbox.mock.calls[0][1].args).toEqual([
           '-c',
           'git commit -m test',
         ]);
-        expect(mockExecuteBwrap.mock.calls[1][1].args).toEqual([
+        expect(mockExecuteSandbox.mock.calls[1][1].args).toEqual([
           '-c',
           'gh pr create --title test --body test',
         ]);
-        expect(mockExecuteBwrap.mock.calls[2][1].args).toEqual([
+        expect(mockExecuteSandbox.mock.calls[2][1].args).toEqual([
           '-c',
           'gh pr create --title background --body background',
         ]);
@@ -401,13 +402,15 @@ describe('ShellTool', () => {
         on: vi.fn(),
         destroy,
       } as unknown as fs.WriteStream);
-      mockExecuteBwrap.mockRejectedValueOnce(new Error('sandbox setup failed'));
+      mockExecuteSandbox.mockRejectedValueOnce(
+        new Error('sandbox setup failed'),
+      );
       await expect(
         shellTool
           .build({ command: 'echo test', is_background: true })
           .execute(new AbortController().signal),
       ).rejects.toThrow('sandbox setup failed');
-      expect(mockExecuteBwrap.mock.calls[0][4]).toBe(false);
+      expect(mockExecuteSandbox.mock.calls[0][4]).toBe(false);
       expect(destroy).toHaveBeenCalledOnce();
       expect(fs.rmSync).toHaveBeenCalledWith(
         expect.stringMatching(/\.output$/),
@@ -4074,6 +4077,55 @@ describe('ShellTool', () => {
           'Tool output was too large and has been truncated',
         );
         expect(result.persistedOutputFiles).toBeUndefined();
+      });
+
+      it('does not persist a raw capture preview as full output', async () => {
+        const truncationModule = await import('./truncation.js');
+        const spy = vi
+          .spyOn(truncationModule, 'truncateToolOutput')
+          .mockResolvedValue({
+            content: 'Full output saved to /tmp/preview.output; use read_file.',
+            outputFile: '/tmp/preview.output',
+          });
+        const capture: ShellRawCaptureSink = {
+          write: vi.fn().mockResolvedValue(undefined),
+          finish: vi.fn().mockResolvedValue(undefined),
+          setStarted: vi.fn(),
+          setProcessResult: vi.fn(),
+        };
+        const output = 'x'.repeat(64 * 1024);
+        try {
+          const invocation = shellTool.build({
+            command: 'large-output-cmd',
+            is_background: false,
+          }) as ShellToolInvocation;
+          const pending = invocation.execute(
+            mockAbortSignal,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            capture,
+          );
+          resolveShellExecution({ output, exitCode: 0 });
+          const result = await pending;
+
+          expect(spy).not.toHaveBeenCalled();
+          expect(result.llmContent).toContain(output);
+          expect(result.llmContent).not.toContain('/tmp/preview.output');
+          expect(result.llmContent).not.toContain('read_file');
+          expect(result.persistedOutputFiles).toBeUndefined();
+          expect(result.returnDisplay).toMatchObject({ outputFiles: [] });
+          expect(mockShellExecutionService.mock.calls[0][5]).toMatchObject({
+            maxBufferedOutputBytes: 64 * 1024,
+          });
+          expect(capture.setProcessResult).toHaveBeenCalledWith(
+            expect.objectContaining({ output, exitCode: 0 }),
+          );
+        } finally {
+          spy.mockRestore();
+        }
       });
 
       it('passes an explicit low threshold to output truncation', async () => {

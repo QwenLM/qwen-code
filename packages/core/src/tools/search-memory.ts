@@ -14,6 +14,7 @@ import {
   type SearchMemoryToolParams,
 } from '../memory/search-memory.js';
 import {
+  AUTO_MEMORY_SCOPES,
   AUTO_MEMORY_TREE_CATEGORIES,
   AUTO_MEMORY_UNCATEGORIZED,
 } from '../memory/types.js';
@@ -328,7 +329,7 @@ const SEARCH_MEMORY_SCHEMA = {
     scopes: {
       type: 'array',
       description: 'search/explore only: visible memory scopes',
-      items: { type: 'string', enum: ['project', 'user', 'team'] },
+      items: { type: 'string', enum: [...AUTO_MEMORY_SCOPES] },
       minItems: 1,
     },
     categories: {
@@ -415,6 +416,7 @@ export class SearchMemoryTool extends BaseDeclarativeTool<
       if (
         'query' in params ||
         'keywords' in params ||
+        'scopes' in params ||
         'categories' in params ||
         'limit' in params ||
         'branches' in params ||
