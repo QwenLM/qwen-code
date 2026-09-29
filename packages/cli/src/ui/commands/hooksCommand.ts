@@ -68,7 +68,8 @@ async function reloadHooksFromSettings(
         projectHooks: settings.getProjectHooks(),
       },
       config.getBareMode() || config.isSafeMode(),
-      config.getMcpServers()?.['external-context'],
+      // Keep the confirmation hook while an MCP allow-list hides the server.
+      config.getTopTierMcpServers()?.['external-context'],
     ),
   );
   await hookSystem.reload();

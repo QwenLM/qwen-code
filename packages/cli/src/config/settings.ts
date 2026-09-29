@@ -674,7 +674,16 @@ function mergeSettings(
     }
   } else if (operatorMem0 !== undefined) {
     const memory = merged.memory;
+    const operatorMemory = customDeepMerge(
+      getMergeStrategyForPath,
+      ...[systemDefaults, user, system]
+        .filter((scope) => scope.memory !== undefined)
+        .map((scope) => ({ memory: scope.memory })),
+    )['memory'] as Settings['memory'];
     merged.memory = {
+      ...(operatorMemory && typeof operatorMemory === 'object'
+        ? operatorMemory
+        : {}),
       ...(memory && typeof memory === 'object' && !Array.isArray(memory)
         ? memory
         : {}),

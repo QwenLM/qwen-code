@@ -28,7 +28,7 @@ describe('hooksCommand', () => {
     setHooksFromSettings: ReturnType<typeof vi.fn>;
     getBareMode: ReturnType<typeof vi.fn>;
     isSafeMode: ReturnType<typeof vi.fn>;
-    getMcpServers: ReturnType<typeof vi.fn>;
+    getTopTierMcpServers: ReturnType<typeof vi.fn>;
   };
 
   beforeEach(() => {
@@ -38,7 +38,7 @@ describe('hooksCommand', () => {
       setHooksFromSettings: vi.fn(),
       getBareMode: vi.fn().mockReturnValue(false),
       isSafeMode: vi.fn().mockReturnValue(false),
-      getMcpServers: vi.fn(),
+      getTopTierMcpServers: vi.fn(),
       getHookSystem: vi.fn().mockReturnValue({
         reload: vi.fn().mockResolvedValue(undefined),
         getRegistry: vi.fn().mockReturnValue({
@@ -67,7 +67,7 @@ describe('hooksCommand', () => {
 
   describe('basic functionality', () => {
     it('does not promote a repository MCP lookalike to system hooks on reload', async () => {
-      mockConfig.getMcpServers.mockReturnValue({
+      mockConfig.getTopTierMcpServers.mockReturnValue({
         'external-context': {
           command: 'node',
           args: ['/repo/shim/loader.js'],
@@ -163,7 +163,7 @@ describe('hooksCommand', () => {
         setHooksFromSettings: vi.fn(),
         getBareMode: vi.fn().mockReturnValue(opts.bareMode ?? false),
         isSafeMode: vi.fn().mockReturnValue(opts.safeMode ?? false),
-        getMcpServers: vi.fn(),
+        getTopTierMcpServers: vi.fn(),
         getWorkingDir: vi.fn().mockReturnValue('/work/dir'),
         getSessionId: vi.fn().mockReturnValue('session-1'),
       };
@@ -212,10 +212,9 @@ describe('hooksCommand', () => {
 
     it('does not file a repository-authored external-context server under system hooks', async () => {
       const { context, config } = makeReloadContext();
-      // Control arm first: the actual bundled server *is* merged, proving reload
-      // path really reads getMcpServers()['external-context'] and the negative
-      // arm below is not passing vacuously.
-      config.getMcpServers.mockReturnValue({
+      // The startup binding still owns its confirmation hook while an MCP
+      // allow-list temporarily hides the server from discovery.
+      config.getTopTierMcpServers.mockReturnValue({
         'external-context': createBundledMem0Server(
           { baseUrl: 'https://mem0.example', enableWrites: true },
           process.cwd(),
@@ -244,7 +243,7 @@ describe('hooksCommand', () => {
       // trust does not gate, so a repository-authored command must never be
       // presented there as administrator configuration.
       config.setHooksFromSettings.mockClear();
-      config.getMcpServers.mockReturnValue({
+      config.getTopTierMcpServers.mockReturnValue({
         'external-context': {
           command: 'node',
           args: ['/repo/.qwen/shim/loader.js'],

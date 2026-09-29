@@ -3790,15 +3790,23 @@ describe('Settings Loading and Merging', () => {
         (fs.readFileSync as Mock).mockImplementation(
           (p: fs.PathOrFileDescriptor) => {
             if (p === USER_SETTINGS_PATH)
-              return JSON.stringify({ memory: { mem0 } });
+              return JSON.stringify({
+                memory: {
+                  mem0,
+                  enableManagedAutoMemory: false,
+                  enableManagedAutoDream: false,
+                },
+              });
             if (p === MOCK_WORKSPACE_SETTINGS_PATH)
               return JSON.stringify({ memory });
             return '{}';
           },
         );
-        expect(loadSettings(MOCK_WORKSPACE_DIR).merged.memory?.mem0).toEqual(
+        expect(loadSettings(MOCK_WORKSPACE_DIR).merged.memory).toMatchObject({
           mem0,
-        );
+          enableManagedAutoMemory: false,
+          enableManagedAutoDream: false,
+        });
       },
     );
     // R4-3: the strip, the warning and the dialog filter all derive from this
