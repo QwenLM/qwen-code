@@ -9,6 +9,17 @@ import { hooksCommand } from './hooksCommand.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 
 import { SettingScope } from '../../config/settings.js';
+import { createBundledMem0Server } from '../../config/mem0-settings.js';
+
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...actual,
+    existsSync: (path: string) =>
+      path.replaceAll('\\', '/').endsWith('/mem0/main.js') ||
+      actual.existsSync(path),
+  };
+});
 
 describe('hooksCommand', () => {
   let mockContext: ReturnType<typeof createMockCommandContext>;
@@ -201,17 +212,14 @@ describe('hooksCommand', () => {
 
     it('does not file a repository-authored external-context server under system hooks', async () => {
       const { context, config } = makeReloadContext();
-      // Control arm first: an unscoped entry — the shape
-      // createBundledMem0Server returns — *is* merged, which proves the reload
+      // Control arm first: the actual bundled server *is* merged, proving reload
       // path really reads getMcpServers()['external-context'] and the negative
       // arm below is not passing vacuously.
       config.getMcpServers.mockReturnValue({
-        'external-context': {
-          command: process.execPath,
-          args: ['/bundle/mem0/main.js'],
-          env: { QWEN_BUNDLED_MEM0_CONFIG: '{}' },
-          includeTools: ['context_search', 'context_remember'],
-        },
+        'external-context': createBundledMem0Server(
+          { baseUrl: 'https://mem0.example', enableWrites: true },
+          process.cwd(),
+        ),
       });
 
       await hooksCommand.action!(context, '');
