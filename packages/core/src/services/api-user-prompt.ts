@@ -123,11 +123,13 @@ export interface ApiUserPromptOptions {
    * Residual, shape-only: a genuine prompt whose entire text IS a bare
    * envelope (the user pasted one) is indistinguishable once serialized and
    * gets dropped — the same accepted limitation `turn-interruption.ts`
-   * documents for its shape-based fallback. Dropping fails closed (the turn
-   * refuses to resolve) rather than cutting a wrong boundary. Cron/loop
-   * turns carry user-authored prompt text with no envelope, so shape cannot
-   * separate them from real prompts; they keep counting pending #9608's
-   * marking design call.
+   * documents for its shape-based fallback. Dropping fails closed only at the
+   * tail, where `findApiRewindCutPoint` walks off the end and rewind refuses
+   * to resolve the turn; mid-history every later ordinal shifts down one, so
+   * turn N resolves to turn N+1's entry — a silently late boundary that
+   * leaves the targeted turn in place. Cron/loop turns carry user-authored
+   * prompt text with no envelope, so shape cannot separate them from real
+   * prompts; they keep counting pending #9608's marking design call.
    */
   excludeTaskNotifications?: boolean;
 }
