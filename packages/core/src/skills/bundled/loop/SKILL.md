@@ -1,6 +1,6 @@
 ---
 name: loop
-description: Run a prompt now, then again on a fixed schedule or through self-paced wakeups. Usage - /loop check the build, /loop 5m check the build, /loop check the PR every 30m; /loop list shows jobs, /loop clear cancels all.
+description: Create a loop that runs a prompt now and follows up either on a fixed schedule or through self-paced wakeups. Usage - /loop check the build, /loop 5m check the build, /loop check the PR every 30m. /loop list to show jobs, /loop clear to cancel all.
 argument-hint: '[interval] [prompt] | list | clear'
 allowedTools:
   - cron_create

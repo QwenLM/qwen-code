@@ -1,6 +1,6 @@
 ---
 name: goal-draft
-description: Turn a fuzzy intention into a /goal objective the Goal verifier can judge - one outcome, binary "Done when" checks that leave evidence, guardrails, a budget, and a block protocol. Use when the user wants to set or tighten a goal, or says "keep going until X". Usage - /goal-draft <what you want done, or an existing goal>. This skill only writes the objective; it never starts the work.
+description: Turn a fuzzy intention into a /goal objective the Goal verifier can actually judge - one outcome, numbered binary "Done when" checks that leave evidence in the transcript, guardrails, a budget, and a block protocol. Use when the user wants to set or define a goal, asks whether a goal is good enough, or says "keep going until X". Usage - /goal-draft <what you want done>, or /goal-draft <existing goal> to tighten it. This skill only writes the objective; it never starts the work.
 argument-hint: '[intent, or an existing goal to tighten]'
 allowedTools:
   - get_goal

@@ -1,6 +1,6 @@
 ---
 name: qc-helper
-description: Answer questions about Qwen Code usage, features, configuration, and troubleshooting from the official user docs, and view or modify settings.json. Invoke with `/qc-helper <question>`, e.g. `/qc-helper change approval mode to yolo`.
+description: Answer any question about Qwen Code usage, features, configuration, and troubleshooting by referencing the official user documentation. Also helps users view or modify their settings.json. Invoke with `/qc-helper` followed by a question, e.g. `/qc-helper how do I configure MCP servers?` or `/qc-helper change approval mode to yolo`.
 argument-hint: '<question>'
 allowedTools:
   - read_file
