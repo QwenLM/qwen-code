@@ -747,8 +747,7 @@ export function ThreadChat({
             !thread.posts.some(
               (post) =>
                 post.sourceRunId === run.id &&
-                (run.status !== 'running' ||
-                  post.text.trim() === run.progress?.outputText?.trim()),
+                post.text.trim() === run.progress?.outputText?.trim(),
             ),
         )
         .map(

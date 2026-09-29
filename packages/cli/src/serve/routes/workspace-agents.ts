@@ -58,6 +58,7 @@ import {
   maxConcurrentRunsFor,
   setWorkspaceAgentEnabled,
   setWorkspaceAgentExecution,
+  threadTokens,
   updateWorkspaceAgents,
   withAgentStoreTransaction,
 } from '@qwen-code/qwen-code-core/agents/workspace-agents/store.js';
@@ -978,19 +979,12 @@ export function registerWorkspaceAgentRoutes(
       const parent = thread.parentThreadId
         ? threads.find((candidate) => candidate.id === thread.parentThreadId)
         : undefined;
+      // Admission charges the tree with runs retention dropped (`trimmedTokens`),
+      // so the reported total has to come from the same helper or it reads
+      // smaller than the number the server actually enforces.
       const treeTokens = threads
         .filter((candidate) => candidate.rootThreadId === thread.rootThreadId)
-        .reduce(
-          (total, candidate) =>
-            total +
-            candidate.runs.reduce(
-              (runTotal, run) =>
-                runTotal +
-                run.usageByRound.reduce((sum, usage) => sum + usage.tokens, 0),
-              0,
-            ),
-          0,
-        );
+        .reduce((total, candidate) => total + threadTokens(candidate), 0);
       res.json({
         id: thread.id,
         title: thread.title,
@@ -1192,17 +1186,7 @@ export function registerWorkspaceAgentRoutes(
       };
       const treeTokens = threads
         .filter((candidate) => candidate.rootThreadId === thread.rootThreadId)
-        .reduce(
-          (total, candidate) =>
-            total +
-            candidate.runs.reduce(
-              (runTotal, run) =>
-                runTotal +
-                run.usageByRound.reduce((sum, usage) => sum + usage.tokens, 0),
-              0,
-            ),
-          0,
-        );
+        .reduce((total, candidate) => total + threadTokens(candidate), 0);
       const targets = [
         // An unknown mention is a target with a fate, not a silent omission.
         ...parsed.unknown.map((name) => ({

@@ -702,6 +702,30 @@ describe('dispatchOnce', () => {
     expect(kept.status).toBe('running');
   });
 
+  it('does not charge session history when a run has no usage baseline', async () => {
+    const thread = await seedQueued({
+      runs: [run({ status: 'running', attempts: 1, sessionId: 'se_1' })],
+    });
+    let state: AgentBodyState = {
+      kind: 'running',
+      threadId: thread.id,
+      runId: 'rn_1',
+      attempt: 1,
+    };
+    const driver = {
+      ...port({ inspect: async () => state }),
+      totalTokens: async () => DEFAULT_THREAD_TOKEN_BUDGET,
+    };
+
+    await dispatchOnce(PROJECT_ROOT, driver);
+    state = { kind: 'completed' };
+    await dispatchOnce(PROJECT_ROOT, driver);
+
+    const finished = (await readThread(PROJECT_ROOT, thread.id))!.runs[0]!;
+    expect(finished.status).toBe('completed');
+    expect(finished.usageByRound).toEqual([]);
+  });
+
   it('charges an interrupted attempt before replacing its usage baseline', async () => {
     const thread = await seedQueued({
       runs: [run({ attempts: 1, usageBaselineTokens: 100 })],

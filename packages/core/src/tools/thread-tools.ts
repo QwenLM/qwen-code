@@ -440,7 +440,35 @@ class ThreadCreateInvocation extends BaseToolInvocation<
               thread.assigneeAgentId === assignee.id &&
               !isThreadTerminal(thread.status),
           );
-          if (existing) return { child: existing, reused: true as const };
+          if (existing) {
+            // Dedupe exists so a retried call cannot duplicate a live hand-off.
+            // It must not also swallow a *different* delegation that happens to
+            // reuse the title: without this the body and acceptance criteria are
+            // written nowhere while the caller is told the work was delegated.
+            const carried = [
+              this.params.body ? `Task: ${this.params.body}` : '',
+              this.params.acceptanceCriteria
+                ? `Acceptance criteria: ${this.params.acceptanceCriteria}`
+                : '',
+            ]
+              .filter(Boolean)
+              .join('\n');
+            // A bare retry carries nothing new, so it stays silent.
+            if (!carried) return { child: existing, reused: true as const };
+            const posted = await postMessageInTransaction(
+              transaction,
+              existing.id,
+              {
+                from: SYSTEM_AUTHOR_ID,
+                authorKind: 'system',
+                sourceRunId: context.runId,
+                triggerKind: 'assignment',
+                text: `Re-delegated by ${context.agentId} from thread ${context.threadId} onto this existing sub-thread.\n${carried}`,
+              },
+              { agents, threadOverride: existing },
+            );
+            return { child: posted.thread, reused: true as const };
+          }
           const child = await prepareThreadInTransaction(transaction, {
             title,
             ...(this.params.body ? { body: this.params.body } : {}),
@@ -481,8 +509,15 @@ class ThreadCreateInvocation extends BaseToolInvocation<
 
       const shares = ` It shares this thread tree's budget.`;
       if (created.reused) {
+        const carried = Boolean(
+          this.params.body || this.params.acceptanceCriteria,
+        );
         return ok(
-          `Reused existing sub-thread ${created.child.id}; no duplicate was created.${shares}`,
+          `Reused existing sub-thread ${created.child.id}; no duplicate was created.${
+            carried
+              ? ` This call's task and acceptance criteria were posted to it, so the hand-off is not lost.`
+              : ''
+          }${shares}`,
         );
       }
       return ok(

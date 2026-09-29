@@ -212,3 +212,28 @@ it('does not read a longer Latin word as a shorter agent name', async () => {
     expect.objectContaining({ assignee: 'mar' }),
   );
 });
+
+it('matches an agent whose lowercase name has a different length', async () => {
+  const api = {
+    listAgents: vi.fn().mockResolvedValue({
+      agents: [
+        { id: 'reviewer', name: 'İnceleyici', enabled: true, retiredAt: null },
+      ],
+    }),
+    createThread: vi.fn().mockResolvedValue({ id: 'thread-1' }),
+  };
+  createThreadsHttpApi.mockReturnValue(api);
+  const node = document.createElement('div');
+  const root = createRoot(node);
+  mounted.push({ root, node });
+
+  act(() => root.render(<Probe baseUrl="x" getContext={() => ''} />));
+  await act(async () => {
+    expect(latestEntry.submit('@İnceleyici review this')).toBe(false);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+
+  expect(api.createThread).toHaveBeenCalledWith(
+    expect.objectContaining({ assignee: 'İnceleyici' }),
+  );
+});

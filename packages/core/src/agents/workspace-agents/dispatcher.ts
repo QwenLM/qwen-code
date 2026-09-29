@@ -863,8 +863,11 @@ async function chargeRunUsage(
     ...(run.sessionId ? { sessionId: run.sessionId } : {}),
   });
   if (total === undefined) return;
-  const baseline = run.usageBaselineTokens ?? 0;
-  const spent = Math.max(0, total - baseline);
+  // Without the starting reading, the session's cumulative total may include
+  // earlier runs. Charging it as this run's spend would count that history
+  // again and can stop the tree on a budget it has not actually used.
+  if (run.usageBaselineTokens === undefined) return;
+  const spent = Math.max(0, total - run.usageBaselineTokens);
   if (spent === 0) return;
   await upsertRunUsage(projectRoot, threadId, run.id, {
     attempt: run.attempts,
@@ -911,7 +914,8 @@ async function enforceTreeBudgets(
         ...(run.sessionId ? { sessionId: run.sessionId } : {}),
       });
       if (total === undefined) continue;
-      const spent = Math.max(0, total - (run.usageBaselineTokens ?? 0));
+      if (run.usageBaselineTokens === undefined) continue;
+      const spent = Math.max(0, total - run.usageBaselineTokens);
       const recorded = run.usageByRound.find(
         (usage) =>
           usage.attempt === run.attempts && usage.round === SESSION_USAGE_ROUND,

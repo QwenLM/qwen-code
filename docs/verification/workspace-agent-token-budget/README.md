@@ -24,8 +24,12 @@ so every expected value here is derived from the code, not observed.
 2. Lower the budget so a real model reaches it quickly. Temporarily set
    `DEFAULT_THREAD_TOKEN_BUDGET` in
    `packages/core/src/agents/workspace-agents/types.ts` to `20_000` in the
-   local build only, and do not commit it.
-3. Start the daemon step 1 built, from the checkout root and in a scratch
+   local build only, and do not commit it. Then **re-run `npm run bundle`**:
+   esbuild inlines the constant into the artifact, so editing the source after
+   step 1 changes nothing in `dist/`. Confirm the edit landed before going on —
+   `grep -c 'DEFAULT_THREAD_TOKEN_BUDGET=2e4' dist/chunks/*.js` must be
+   non-zero (a stale artifact still reads `1e6`).
+3. Start the daemon step 2 rebuilt, from the checkout root and in a scratch
    workspace:
    `QWEN_CODE_ENABLE_AGENT_COLLABORATION=1 node dist/cli.js serve`. Not a bare
    `qwen serve` — that runs whichever installed release `PATH` resolves to,
@@ -47,7 +51,9 @@ so every expected value here is derived from the code, not observed.
 
 For each row, record: tree total before and after, the run's final
 `status` / `error`, and the thread `status` / `reason`
-(`GET /workspaces/:ws/agent/threads/:id`).
+(`GET /workspaces/:ws/agent/threads/:id`). The `budget.tokensUsed` that route
+reports is the same total admission enforces — it includes `trimmedTokens`, so
+it must not drop when row 6 trims.
 
 ## Not covered by this change
 
