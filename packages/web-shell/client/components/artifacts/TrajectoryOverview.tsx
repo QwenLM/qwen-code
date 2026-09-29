@@ -15,12 +15,7 @@ import {
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
 } from 'react';
-import {
-  ClockIcon,
-  Maximize2Icon,
-  ZoomInIcon,
-  ZoomOutIcon,
-} from 'lucide-react';
+import { Maximize2Icon, XIcon, ZoomInIcon, ZoomOutIcon } from 'lucide-react';
 import { useI18n } from '../../i18n';
 import { formatDuration } from '../messages/StatsMessage';
 import type {
@@ -728,27 +723,59 @@ export function TrajectoryOverview({
               {clock || vStart > 0 ? windowFrom : '0'}
             </span>
             <span className={styles.axisEnd}>
-              {/* The buttons come first so the value stays last, its right
-                  edge on the track's right end, which is the point it names.
-                  Not `disabled` when there is nothing to do: a disabled button
-                  drops the focus of the reader who just pressed it, and these
-                  are pressed exactly when they are about to run out. The mode
-                switch leads: it changes what is drawn, the others only which
-                stretch of it is in view. */}
+              <span aria-hidden="true" data-testid="trajectory-overview-busy">
+                {clock
+                  ? zoomed
+                    ? windowTo
+                    : t('trajectory.clock.window', {
+                        elapsed: elapsed ?? '',
+                        active: activeText ?? '',
+                      })
+                  : zoomed
+                    ? t('trajectory.zoom.window', {
+                        to: windowTo,
+                        busy: busy ?? '',
+                      })
+                    : t('trajectory.overview.busy', { duration: busy ?? '' })}
+              </span>
+            </span>
+          </div>
+          <div className={styles.controls}>
+            <div
+              className={styles.modeGroup}
+              role="group"
+              aria-label={t('trajectory.mode.group')}
+            >
               <button
                 type="button"
-                className={styles.zoomButton}
+                className={styles.modeButton}
+                data-testid="trajectory-mode-active"
+                aria-pressed={!clock}
+                aria-label={t('trajectory.mode.active')}
+                title={t('trajectory.mode.active')}
+                onClick={() => {
+                  setLastAction('mode');
+                  onModeChange('active');
+                }}
+              >
+                {t('trajectory.mode.active.short')}
+              </button>
+              <button
+                type="button"
+                className={styles.modeButton}
                 data-testid="trajectory-mode-clock"
                 aria-pressed={clock}
                 aria-label={t('trajectory.mode.clock')}
                 title={t('trajectory.mode.clock')}
                 onClick={() => {
                   setLastAction('mode');
-                  onModeChange(clock ? 'active' : 'clock');
+                  onModeChange('clock');
                 }}
               >
-                <ClockIcon size={10} strokeWidth={1.8} aria-hidden="true" />
+                {t('trajectory.mode.clock.short')}
               </button>
+            </div>
+            <div className={styles.zoomGroup}>
               <button
                 type="button"
                 className={styles.zoomButton}
@@ -788,21 +815,22 @@ export function TrajectoryOverview({
               >
                 <Maximize2Icon size={10} strokeWidth={1.8} aria-hidden="true" />
               </button>
-              <span aria-hidden="true" data-testid="trajectory-overview-busy">
-                {clock
-                  ? zoomed
-                    ? windowTo
-                    : t('trajectory.clock.window', {
-                        elapsed: elapsed ?? '',
-                        active: activeText ?? '',
-                      })
-                  : zoomed
-                    ? t('trajectory.zoom.window', {
-                        to: windowTo,
-                        busy: busy ?? '',
-                      })
-                    : t('trajectory.overview.busy', { duration: busy ?? '' })}
-              </span>
+            </div>
+          </div>
+          <div className={styles.legend}>
+            <span>
+              <i className={styles.ttftKey} />
+              {t('trajectory.legend.ttft')}
+            </span>
+            <span>
+              <i className={styles.afterKey} />
+              {t('trajectory.legend.after')}
+            </span>
+            <span>
+              <i className={styles.errorKey} aria-hidden="true">
+                <XIcon size={11} strokeWidth={2.5} />
+              </i>
+              {t('trajectory.legend.error')}
             </span>
           </div>
           {/* The axis is hidden from assistive technology, and the group's

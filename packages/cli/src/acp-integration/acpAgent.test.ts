@@ -1209,6 +1209,7 @@ import {
   SESSION_ARTIFACT_PERSISTENCE_VERSION,
   mcpServerRequiresOAuth,
   APPROVAL_MODES,
+  ApprovalMode,
   ToolNames,
   GoalPersistenceUnavailableError,
   GoalConflictError,
@@ -1230,6 +1231,10 @@ import {
   SESSION_SOURCE_META_KEY,
 } from '@qwen-code/acp-bridge';
 import { DAEMON_OWNED_STANDALONE_CREATION_KEY } from '@qwen-code/acp-bridge/sessionSource';
+import {
+  AGENT_HOST_SESSION_SOURCE_TYPE,
+  AGENT_SESSION_SOURCE_TYPE,
+} from '../runtime/agent-session-source.js';
 import type {
   Agent,
   LoadSessionResponse,
@@ -8857,31 +8862,36 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
-  it('rejects direct mutation to the reserved standalone source', async () => {
-    const sessionId = 'session-A';
-    const recording = {
-      recordSessionSource: vi.fn().mockResolvedValue(true),
-    };
-    const innerConfig = await setupSessionMocks(sessionId);
-    innerConfig.getChatRecordingService = vi.fn().mockReturnValue(recording);
-    const { agent, agentPromise } = await bootAcpAgent();
+  it.each(['standalone', AGENT_HOST_SESSION_SOURCE_TYPE])(
+    'rejects direct mutation to the reserved %s source',
+    async (sourceType) => {
+      const sessionId = 'session-A';
+      const recording = {
+        recordSessionSource: vi.fn().mockResolvedValue(true),
+      };
+      const innerConfig = await setupSessionMocks(sessionId);
+      innerConfig.getChatRecordingService = vi.fn().mockReturnValue(recording);
+      const { agent, agentPromise } = await bootAcpAgent();
 
-    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
-    await expect(
-      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionSource, {
-        sessionId,
-        sourceType: 'standalone',
-      }),
-    ).rejects.toThrow(
-      '`standalone` is reserved for daemon-owned session creation',
-    );
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionSource, {
+          sessionId,
+          sourceType,
+        }),
+      ).rejects.toThrow(
+        sourceType === 'standalone'
+          ? '`standalone` is reserved for daemon-owned session creation'
+          : '`agent-host` is reserved for daemon-owned host creation',
+      );
 
-    expect(recording.recordSessionSource).not.toHaveBeenCalled();
-    expect(lastSessionMock?.enableLiveScreenContext).not.toHaveBeenCalled();
+      expect(recording.recordSessionSource).not.toHaveBeenCalled();
+      expect(lastSessionMock?.enableLiveScreenContext).not.toHaveBeenCalled();
 
-    mockConnectionState.resolve();
-    await agentPromise;
-  });
+      mockConnectionState.resolve();
+      await agentPromise;
+    },
+  );
 
   it('rejects forged daemon-owned standalone creation from an untrusted parent', async () => {
     await setupSessionMocks('11111111-1111-4111-8111-111111111111');
@@ -8908,6 +8918,33 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     mockConnectionState.resolve();
     await agentPromise;
   });
+
+  it.each([
+    [AGENT_HOST_SESSION_SOURCE_TYPE, 'daemon-owned host creation'],
+    [AGENT_SESSION_SOURCE_TYPE, 'daemon-owned workspace agent creation'],
+  ] as const)(
+    'rejects forged %s creation from an untrusted parent',
+    async (sourceType, reason) => {
+      await setupSessionMocks('11111111-1111-4111-8111-111111111111');
+      const { agent, agentPromise } = await bootInitializedAcpAgent(
+        makeSessionSettings(),
+      );
+
+      await expect(
+        agent.newSession({
+          cwd: '/tmp',
+          mcpServers: [],
+          _meta: {
+            [SESSION_SOURCE_META_KEY]: { sourceType },
+          },
+        }),
+      ).rejects.toThrow(`\`${sourceType}\` is reserved for ${reason}`);
+      expect(loadCliConfig).not.toHaveBeenCalled();
+
+      mockConnectionState.resolve();
+      await agentPromise;
+    },
+  );
 
   it('accepts standalone creation and source persistence from the trusted parent', async () => {
     const sessionId = '11111111-1111-4111-8111-111111111111';
@@ -27267,6 +27304,7 @@ describe('QwenAgent unstable_listSessions cursor parsing', () => {
         expect(listSessions).toHaveBeenCalledWith({
           cursor: undefined,
           size: undefined,
+          excludeSourceTypes: ['agent-host', 'agent'],
         });
       }
     } finally {
@@ -27310,6 +27348,7 @@ describe('QwenAgent unstable_listSessions cursor parsing', () => {
         expect(listSessions).toHaveBeenCalledWith({
           cursor: undefined,
           size: undefined,
+          excludeSourceTypes: ['agent-host', 'agent'],
         });
       }
     } finally {
@@ -27350,6 +27389,7 @@ describe('QwenAgent unstable_listSessions cursor parsing', () => {
         expect(listSessions).toHaveBeenCalledWith({
           cursor: undefined,
           size: expected,
+          excludeSourceTypes: ['agent-host', 'agent'],
         });
       }
     } finally {
@@ -27406,6 +27446,7 @@ describe('QwenAgent unstable_listSessions cursor parsing', () => {
       expect(listSessions).toHaveBeenCalledWith({
         cursor: 1_797_860_000_000.5,
         size: 2,
+        excludeSourceTypes: ['agent-host', 'agent'],
       });
     } finally {
       mockConnectionState.resolve();
@@ -27558,6 +27599,8 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       unregisterSessionRegistry: vi.fn().mockResolvedValue(undefined),
       reassertSessionRegistryRecord: vi.fn().mockResolvedValue(undefined),
     };
+    let approvalMode = ApprovalMode.DEFAULT;
+    let prePlanMode: ApprovalMode | undefined;
     const recording = {
       rebuildTurnBoundaries: vi.fn(),
       flush: vi.fn().mockResolvedValue(undefined),
@@ -27565,6 +27608,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       close: vi.fn().mockResolvedValue(undefined),
       hasWriteOwnership: vi.fn().mockReturnValue(false),
       recordSessionModel: vi.fn().mockResolvedValue(true),
+      recordSessionApprovalMode: vi.fn().mockResolvedValue(true),
       runWithWriteBarrier: vi.fn(
         async <T>(operation: () => Promise<T>): Promise<T> => operation(),
       ),
@@ -27599,7 +27643,21 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       getContentGeneratorConfig: vi.fn().mockReturnValue({}),
       getAvailableModels: vi.fn().mockReturnValue([]),
       getModes: vi.fn().mockReturnValue([]),
-      getApprovalMode: vi.fn().mockReturnValue('default'),
+      getApprovalMode: vi.fn(() => approvalMode),
+      getPrePlanMode: vi.fn(() => prePlanMode),
+      getBareMode: vi.fn().mockReturnValue(false),
+      isSafeMode: vi.fn().mockReturnValue(false),
+      setApprovalMode: vi.fn((mode: ApprovalMode) => {
+        if (mode === ApprovalMode.PLAN && approvalMode !== ApprovalMode.PLAN) {
+          prePlanMode = approvalMode;
+        } else if (
+          mode !== ApprovalMode.PLAN &&
+          approvalMode === ApprovalMode.PLAN
+        ) {
+          prePlanMode = undefined;
+        }
+        approvalMode = mode;
+      }),
       getSessionId: vi.fn().mockReturnValue('persisted-1'),
       getAuthType: vi.fn().mockReturnValue('api-key'),
       getAllConfiguredModels: vi.fn().mockReturnValue([]),
@@ -27759,6 +27817,9 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         const lastSessionModel = [...messages]
           .reverse()
           .find((message) => message['subtype'] === 'session_model');
+        const lastSessionApprovalMode = [...messages]
+          .reverse()
+          .find((message) => message['subtype'] === 'session_approval_mode');
         return {
           sessionId,
           filePath: '/tmp/session.jsonl',
@@ -27773,6 +27834,12 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
               turnParentUuids: [],
               ...(lastSessionModel?.['systemPayload']
                 ? { sessionModel: lastSessionModel['systemPayload'] }
+                : {}),
+              ...(lastSessionApprovalMode?.['systemPayload']
+                ? {
+                    sessionApprovalMode:
+                      lastSessionApprovalMode['systemPayload'],
+                  }
                 : {}),
             },
             artifactSnapshot: data.artifactSnapshot,
@@ -27918,6 +27985,79 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     }
     return { agent, agentPromise };
   }
+
+  it.each([
+    { action: 'load', standalone: false },
+    { action: 'resume', standalone: false },
+    { action: 'load', standalone: true },
+    { action: 'resume', standalone: true },
+  ] as const)(
+    'cold $action restores approval state before Session construction (standalone=$standalone)',
+    async ({ action, standalone }) => {
+      const innerConfig = bindRestoreMocks({
+        sessionExists: true,
+        resumedConversation: {
+          messages: [
+            {
+              uuid: 'approval-1',
+              type: 'system',
+              subtype: 'session_approval_mode',
+              systemPayload: { mode: ApprovalMode.YOLO },
+            },
+            { role: 'user', parts: [{ text: 'hello' }] },
+          ],
+        },
+      });
+      const { agent, agentPromise } = await spawnAgent(
+        standalone ? 'expected-capability' : undefined,
+      );
+      const request = {
+        cwd: '/tmp',
+        sessionId: 'persisted-1',
+        mcpServers: [],
+        ...(standalone
+          ? {
+              _meta: {
+                [SESSION_SOURCE_META_KEY]: {
+                  sourceType: 'standalone',
+                  [DAEMON_OWNED_STANDALONE_CREATION_KEY]: true,
+                },
+              },
+            }
+          : {}),
+      };
+
+      try {
+        if (action === 'load') {
+          await agent.loadSession(request);
+        } else {
+          await agent.unstable_resumeSession(request);
+        }
+
+        expect(innerConfig.getApprovalMode()).toBe(ApprovalMode.YOLO);
+        expect(innerConfig.setApprovalMode).toHaveBeenCalledWith(
+          ApprovalMode.YOLO,
+          { fromSessionRestore: true },
+        );
+        expect(
+          innerConfig.setApprovalMode.mock.invocationCallOrder[0],
+        ).toBeLessThan(vi.mocked(Session).mock.invocationCallOrder[0]!);
+        expect(
+          innerConfig.getChatRecordingService().recordSessionApprovalMode,
+        ).not.toHaveBeenCalled();
+        expect(
+          (
+            agent as unknown as {
+              sessionApprovalModeConverged: Map<string, ApprovalMode>;
+            }
+          ).sessionApprovalModeConverged.get('persisted-1'),
+        ).toBe(ApprovalMode.DEFAULT);
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
 
   it('loadSession throws resourceNotFound when the persisted session is missing', async () => {
     bindRestoreMocks({ sessionExists: false });
@@ -28080,9 +28220,16 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     },
   );
 
-  it.each(['load', 'resume'] as const)(
-    '%s rejects a standalone restore without a trusted daemon parent',
-    async (action) => {
+  it.each([
+    ['load', 'standalone'],
+    ['resume', 'standalone'],
+    ['load', AGENT_HOST_SESSION_SOURCE_TYPE],
+    ['resume', AGENT_HOST_SESSION_SOURCE_TYPE],
+    ['load', AGENT_SESSION_SOURCE_TYPE],
+    ['resume', AGENT_SESSION_SOURCE_TYPE],
+  ] as const)(
+    '%s rejects a %s restore without a trusted daemon parent',
+    async (action, sourceType) => {
       bindRestoreMocks({ sessionExists: true });
       const { agent, agentPromise } = await spawnAgent();
 
@@ -28093,8 +28240,10 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
           mcpServers: [],
           _meta: {
             [SESSION_SOURCE_META_KEY]: {
-              sourceType: 'standalone',
-              [DAEMON_OWNED_STANDALONE_CREATION_KEY]: true,
+              sourceType,
+              ...(sourceType === 'standalone'
+                ? { [DAEMON_OWNED_STANDALONE_CREATION_KEY]: true }
+                : {}),
             },
           },
         };
@@ -28104,7 +28253,11 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
             ? agent.loadSession(request)
             : agent.unstable_resumeSession(request),
         ).rejects.toThrow(
-          '`standalone` is reserved for daemon-owned session restore',
+          sourceType === 'standalone'
+            ? '`standalone` is reserved for daemon-owned session restore'
+            : sourceType === AGENT_SESSION_SOURCE_TYPE
+              ? '`agent` is reserved for daemon-owned workspace agent restore'
+              : '`agent-host` is reserved for daemon-owned host restore',
         );
       } finally {
         mockConnectionState.resolve();
@@ -29546,7 +29699,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     const innerConfig = makeRestoreInnerConfig({
       resumedConversation: { messages },
     });
-    innerConfig.getApprovalMode.mockReturnValue('plan');
+    innerConfig.getApprovalMode.mockReturnValue(ApprovalMode.PLAN);
     innerConfig.getSessionService.mockReturnValue({
       loadSession: vi.fn(),
       readLiveRestoreProjection: vi.fn().mockResolvedValue({
@@ -33308,8 +33461,7 @@ describe('sessionLanguage multi-session propagation', () => {
   it('keeps runtime-only approval-mode transitions across unchanged-file reloads', async () => {
     // The file pins plan; the session legitimately exits plan through an
     // approved exit_plan_mode, which switches the live mode at runtime
-    // without ever persisting (core Config.setApprovalMode is runtime-only,
-    // as are ACP session/set_mode and the sessionApprovalMode ext). A reload
+    // without changing workspace settings. A reload
     // whose file value is unchanged must not re-apply the disk value: that
     // would flip the executing session back into PLAN between turns and
     // destroy its approved revision + stop-guard trust.
@@ -35459,6 +35611,38 @@ describe('createManagedExternalToolGuard', () => {
       },
     );
   });
+
+  it.each([true, false, undefined])(
+    'forwards only the true runtime permissionChecked marker (%s)',
+    async (permissionChecked) => {
+      const extMethod = vi.fn().mockResolvedValue({ allowed: true });
+      const guard = createManagedExternalToolGuard({
+        extMethod,
+      } as unknown as AgentSideConnection);
+      const args = { command: 'pwd', permissionChecked: true };
+
+      await expect(
+        guard({
+          callId: 'call-1',
+          toolName: 'run_shell_command',
+          args,
+          signal: new AbortController().signal,
+          sessionId: 'session-1',
+          ...(permissionChecked === undefined ? {} : { permissionChecked }),
+        }),
+      ).resolves.toEqual({ allowed: true });
+      expect(extMethod).toHaveBeenCalledExactlyOnceWith(
+        SERVE_CONTROL_EXT_METHODS.externalToolGuardPrepare,
+        {
+          sessionId: 'session-1',
+          toolCallId: 'call-1',
+          toolName: 'run_shell_command',
+          arguments: args,
+          ...(permissionChecked === true ? { permissionChecked: true } : {}),
+        },
+      );
+    },
+  );
 
   it('preserves a validated denial reason from the provider', async () => {
     const extMethod = vi.fn().mockResolvedValue({

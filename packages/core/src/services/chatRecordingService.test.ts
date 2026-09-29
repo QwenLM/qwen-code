@@ -10,6 +10,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
+import { ApprovalMode } from '../config/approval-mode.js';
 import {
   backgroundTurnContext,
   type BackgroundNotificationTurn,
@@ -29,7 +30,7 @@ import {
 import { MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS } from '../utils/toolResultDisplayCompaction.js';
 import * as jsonl from '../utils/jsonl-utils.js';
 import { computeInitialTurnFromHistory } from './session-turn-state.js';
-import type { Part } from '@google/genai';
+import type { Content, Part } from '@google/genai';
 import type { FileDiff, McpAppResultDisplay } from '../tools/tools.js';
 import {
   deserializeSnapshots,
@@ -51,6 +52,8 @@ import {
   type ShellResultDisplay,
 } from '../utils/shell-result.js';
 import type { ToolResultBoundaryObservation } from '../tools/tool-result-boundary-diagnostics.js';
+import { CompressionStatus } from '../core/turn.js';
+import { markApiHistoryPrompt } from './session-api-history.js';
 
 function branchTestRecord(
   uuid: string,
@@ -288,7 +291,12 @@ describe('ChatRecordingService', () => {
   describe('recordUserMessage', () => {
     it('should record a user message immediately', async () => {
       const userParts: Part[] = [{ text: 'Hello, world!' }];
-      chatRecordingService.recordUserMessage(userParts);
+      chatRecordingService.recordUserMessage(
+        userParts,
+        undefined,
+        undefined,
+        'prompt-1',
+      );
       await chatRecordingService.flush();
 
       expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
@@ -304,12 +312,80 @@ describe('ChatRecordingService', () => {
       expect(record.version).toBe('1.0.0');
       expect(record.gitBranch).toBe('main');
       expect(record.provenance).toBe('real_user');
+      expect(record.promptId).toBe('prompt-1');
       expect(record.daemonPromptId).toBeUndefined();
+    });
+
+    it('preserves prompt identities in compression checkpoints', async () => {
+      const content: Content = {
+        role: 'user',
+        parts: [{ text: 'prompt' }],
+      };
+      markApiHistoryPrompt(content, 'prompt-1');
+
+      chatRecordingService.recordChatCompression({
+        info: {
+          originalTokenCount: 10,
+          newTokenCount: 5,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        },
+        compressedHistory: [content],
+      });
+      await chatRecordingService.flush();
+
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      expect(record.systemPayload).toMatchObject({ promptIds: ['prompt-1'] });
+    });
+
+    it('freezes the compression snapshot array against later live-history mutation', async () => {
+      // Deferred serialization must keep entries aligned with promptIds.
+      const first: Content = { role: 'user', parts: [{ text: 'A' }] };
+      const second: Content = { role: 'user', parts: [{ text: 'B' }] };
+      markApiHistoryPrompt(first, 'prompt-1');
+      markApiHistoryPrompt(second, 'prompt-2');
+      const liveHistory: Content[] = [first, second];
+
+      chatRecordingService.recordChatCompression({
+        info: {
+          originalTokenCount: 10,
+          newTokenCount: 5,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        },
+        compressedHistory: liveHistory,
+      });
+
+      // Mutations the same turn performs before the queued write drains.
+      liveHistory.splice(1, 0, {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: { name: 'tool', response: {} },
+          } as Part,
+        ],
+      });
+      liveHistory.push({ role: 'user', parts: [{ text: 'C' }] });
+
+      await chatRecordingService.flush();
+
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      const payload = record.systemPayload as {
+        compressedHistory: Content[];
+        promptIds: Array<string | null>;
+      };
+      expect(payload.compressedHistory).toHaveLength(2);
+      expect(payload.compressedHistory).toHaveLength(payload.promptIds.length);
+      expect(payload.promptIds).toEqual(['prompt-1', 'prompt-2']);
+      expect(
+        payload.compressedHistory.map((c) =>
+          c.parts?.map((p) => ('text' in p ? p.text : undefined)),
+        ),
+      ).toEqual([['A'], ['B']]);
     });
 
     it('persists the daemon prompt identity before any turn result', async () => {
       chatRecordingService.recordUserMessage(
         [{ text: 'same prompt' }],
+        undefined,
         undefined,
         undefined,
         'daemon-prompt-1',
@@ -330,6 +406,7 @@ describe('ChatRecordingService', () => {
         const daemonPromptId = `test-session-id########${turn}`;
         chatRecordingService.recordUserMessage(
           [{ text: 'same prompt' }],
+          undefined,
           undefined,
           undefined,
           daemonPromptId,
@@ -506,6 +583,7 @@ describe('ChatRecordingService', () => {
         '',
         undefined,
         { displayText: '', hookContext: '', resourceLinks },
+        undefined,
         'resource-prompt',
       );
       await chatRecordingService.flush();
@@ -3224,6 +3302,247 @@ describe('ChatRecordingService', () => {
         modelId: 'qwen3-coder-flash',
         authType: 'openai',
       });
+    });
+  });
+
+  describe('recordSessionApprovalMode', () => {
+    it('appends normalized approval state and skips identical payloads', async () => {
+      vi.mocked(jsonl.writeLine).mockClear();
+      await expect(
+        chatRecordingService.recordSessionApprovalMode({
+          mode: ApprovalMode.PLAN,
+        }),
+      ).resolves.toBe(true);
+
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      expect(record).toMatchObject({
+        type: 'system',
+        subtype: 'session_approval_mode',
+        systemPayload: {
+          mode: ApprovalMode.PLAN,
+          prePlanMode: ApprovalMode.DEFAULT,
+        },
+      });
+
+      vi.mocked(jsonl.writeLine).mockClear();
+      await expect(
+        chatRecordingService.recordSessionApprovalMode({
+          mode: ApprovalMode.PLAN,
+          prePlanMode: ApprovalMode.DEFAULT,
+        }),
+      ).resolves.toBe(true);
+      expect(jsonl.writeLine).not.toHaveBeenCalled();
+
+      await expect(
+        chatRecordingService.recordSessionApprovalMode({
+          mode: ApprovalMode.PLAN,
+          prePlanMode: ApprovalMode.DEFAULT,
+          planExecutionMode: ApprovalMode.YOLO,
+        }),
+      ).resolves.toBe(true);
+      expect(jsonl.writeLine).toHaveBeenCalledOnce();
+      expect(
+        (vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord)
+          .systemPayload,
+      ).toEqual({
+        mode: ApprovalMode.PLAN,
+        prePlanMode: ApprovalMode.DEFAULT,
+        planExecutionMode: ApprovalMode.YOLO,
+      });
+    });
+
+    it('restores projected approval state for duplicate suppression', async () => {
+      const service = new ChatRecordingService(mockConfig, undefined, false, {
+        lastCompletedUuid: 'projected-leaf',
+        turnParentUuids: [null],
+        sessionApprovalMode: { mode: ApprovalMode.YOLO },
+      });
+      vi.mocked(jsonl.writeLine).mockClear();
+
+      await expect(
+        service.recordSessionApprovalMode({ mode: ApprovalMode.YOLO }),
+      ).resolves.toBe(true);
+      expect(jsonl.writeLine).not.toHaveBeenCalled();
+    });
+
+    it('restores approval state from a full-record replay', async () => {
+      vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({
+        conversation: {
+          messages: [
+            {
+              uuid: 'approval-1',
+              parentUuid: null,
+              sessionId: 'test-session-id',
+              timestamp: '2026-08-31T00:00:00.000Z',
+              type: 'system',
+              subtype: 'session_approval_mode',
+              cwd: '/test/project/root',
+              version: '1.0.0',
+              systemPayload: { mode: ApprovalMode.YOLO },
+            },
+          ],
+        },
+        lastCompletedUuid: 'approval-1',
+      } as unknown as ReturnType<Config['getResumedSessionData']>);
+      const service = new ChatRecordingService(mockConfig, undefined, false);
+      vi.mocked(jsonl.writeLine).mockClear();
+
+      await expect(
+        service.recordSessionApprovalMode({ mode: ApprovalMode.YOLO }),
+      ).resolves.toBe(true);
+      expect(jsonl.writeLine).not.toHaveBeenCalled();
+    });
+
+    it('re-anchors the supplied live approval state onto the rewind branch', async () => {
+      chatRecordingService.recordUserMessage([{ text: 'first' }]);
+      await chatRecordingService.recordSessionApprovalMode({
+        mode: ApprovalMode.YOLO,
+      });
+      chatRecordingService.recordUserMessage([{ text: 'second' }]);
+      await chatRecordingService.flush();
+      vi.mocked(jsonl.writeLine).mockClear();
+
+      chatRecordingService.rewindRecording(
+        1,
+        { truncatedCount: 1 },
+        undefined,
+        { mode: ApprovalMode.DEFAULT },
+      );
+      await chatRecordingService.flush();
+
+      const written = vi
+        .mocked(jsonl.writeLine)
+        .mock.calls.map((call) => call[1] as ChatRecord);
+      expect(written.map((record) => record.subtype)).toEqual([
+        'rewind',
+        'session_approval_mode',
+      ]);
+      expect(written[1]?.parentUuid).toBe(written[0]?.uuid);
+      expect(written[1]?.systemPayload).toEqual({
+        mode: ApprovalMode.DEFAULT,
+      });
+    });
+
+    it('re-anchors a pending approval change when rewind lands mid-write', async () => {
+      chatRecordingService.recordUserMessage([{ text: 'first' }]);
+      await chatRecordingService.recordSessionApprovalMode({
+        mode: ApprovalMode.DEFAULT,
+      });
+      chatRecordingService.recordUserMessage([{ text: 'second' }]);
+      await chatRecordingService.flush();
+
+      vi.mocked(jsonl.writeLine).mockClear();
+      let releaseWrite: (() => void) | undefined;
+      vi.mocked(jsonl.writeLine).mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            releaseWrite = resolve;
+          }),
+      );
+      const pendingChange = chatRecordingService.recordSessionApprovalMode({
+        mode: ApprovalMode.YOLO,
+      });
+      await vi.waitFor(() => {
+        expect(vi.mocked(jsonl.writeLine).mock.calls.length).toBe(1);
+      });
+
+      chatRecordingService.rewindRecording(1, { truncatedCount: 1 });
+      releaseWrite?.();
+      await pendingChange;
+      await chatRecordingService.flush();
+
+      const written = vi
+        .mocked(jsonl.writeLine)
+        .mock.calls.map((call) => call[1] as ChatRecord);
+      const rewindIndex = written.findIndex(
+        (record) => record.subtype === 'rewind',
+      );
+      expect(written[rewindIndex + 1]).toMatchObject({
+        subtype: 'session_approval_mode',
+        systemPayload: { mode: ApprovalMode.YOLO },
+      });
+    });
+
+    it('retries an identical approval state after a synchronous failure', async () => {
+      const writeFileSpy = vi.spyOn(fs, 'writeFileSync');
+      writeFileSpy.mockImplementationOnce(() => {
+        throw Object.assign(new Error('ENOSPC'), { code: 'ENOSPC' });
+      });
+      const service = new ChatRecordingService(mockConfig, undefined, false);
+
+      await expect(
+        service.recordSessionApprovalMode({ mode: ApprovalMode.YOLO }),
+      ).resolves.toBe(false);
+      expect(jsonl.writeLine).not.toHaveBeenCalled();
+
+      await expect(
+        service.recordSessionApprovalMode({ mode: ApprovalMode.YOLO }),
+      ).resolves.toBe(true);
+      expect(jsonl.writeLine).toHaveBeenCalledOnce();
+    });
+
+    it('does not suppress a later mode after a failed write races a newer one', async () => {
+      const service = new ChatRecordingService(mockConfig, undefined, false, {
+        lastCompletedUuid: 'projected-leaf',
+        turnParentUuids: [null],
+        sessionApprovalMode: { mode: ApprovalMode.DEFAULT },
+      });
+      vi.spyOn(fs, 'writeFileSync').mockImplementationOnce(() => {
+        throw Object.assign(new Error('ENOSPC'), { code: 'ENOSPC' });
+      });
+
+      const failed = service.recordSessionApprovalMode({
+        mode: ApprovalMode.YOLO,
+      });
+      const later = service.recordSessionApprovalMode({
+        mode: ApprovalMode.PLAN,
+      });
+      await expect(failed).resolves.toBe(false);
+      await expect(later).resolves.toBe(true);
+      const writesBefore = vi.mocked(jsonl.writeLine).mock.calls.length;
+
+      await expect(
+        service.recordSessionApprovalMode({ mode: ApprovalMode.DEFAULT }),
+      ).resolves.toBe(true);
+      expect(vi.mocked(jsonl.writeLine).mock.calls.length).toBe(
+        writesBefore + 1,
+      );
+    });
+
+    it('rejects a Plan predecessor that is itself Plan', async () => {
+      vi.mocked(jsonl.writeLine).mockClear();
+      await expect(
+        chatRecordingService.recordSessionApprovalMode({
+          mode: ApprovalMode.PLAN,
+          prePlanMode: ApprovalMode.PLAN,
+        }),
+      ).resolves.toBe(false);
+      expect(jsonl.writeLine).not.toHaveBeenCalled();
+    });
+
+    it('rejects Plan as its own execution mode', async () => {
+      vi.mocked(jsonl.writeLine).mockClear();
+      await expect(
+        chatRecordingService.recordSessionApprovalMode({
+          mode: ApprovalMode.PLAN,
+          planExecutionMode: ApprovalMode.PLAN,
+        }),
+      ).resolves.toBe(false);
+      expect(jsonl.writeLine).not.toHaveBeenCalled();
+    });
+
+    it('ignores predecessor data on a non-Plan record', async () => {
+      vi.mocked(jsonl.writeLine).mockClear();
+      await expect(
+        chatRecordingService.recordSessionApprovalMode({
+          mode: ApprovalMode.YOLO,
+          prePlanMode: ApprovalMode.PLAN,
+          planExecutionMode: ApprovalMode.PLAN,
+        }),
+      ).resolves.toBe(true);
+
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      expect(record.systemPayload).toEqual({ mode: ApprovalMode.YOLO });
     });
   });
 
