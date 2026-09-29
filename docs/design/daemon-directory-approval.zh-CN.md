@@ -12,7 +12,7 @@
 
 Core scheduler 和 ACP Session 在正常准入及 PreToolUse 处理后，为最终 guard 调用设置 `permissionChecked: true`。Core 的 `fixed_policy` 调用跳过这套权限流程，因此携带 `false`；它们仍经过 host guard，也不会新增确认步骤。Managed ACP adapter 将这个运行时字段与模型参数分开传递。BridgeClient 校验其类型及会话、prompt 归属。
 
-Daemon 仍校验上报的 invocation 执行范围；对经过正常权限流程准入的调用，跳过额外的目录/Git 范围检查。强制外部 provider 仍检查最终调用，并且可以拒绝。Speculation 不设置该字段，保留现有范围 guard。Managed Runtime 工具执行不经过正常权限流程，因此其 executor 在构建 shell 调用时保留显式的工作区目录准入检查。
+Daemon 仍校验上报的 invocation 执行范围；对经过正常权限流程准入、且在会话自身目录中执行的调用，跳过额外的目录/Git 范围检查。被固定到自身 worktree 的 sub-agent 即使已准入也保留该范围检查：worktree 边界是阻止它触及兄弟 worktree 和父 checkout 的唯一机制，权限流程不会重建这条边界，Full Access 下也没有其他环节会这样做。强制外部 provider 仍检查最终调用，并且可以拒绝。Speculation 不设置该字段，保留现有范围 guard。Managed Runtime 工具执行不经过正常权限流程，因此其 executor 在构建 shell 调用时保留显式的工作区目录准入检查。
 
 ## 约束
 
@@ -29,5 +29,6 @@ Daemon 仍校验上报的 invocation 执行范围；对经过正常权限流程�
 - Core scheduler、ACP Session 和 bridge 测试固定运行时标记的传递；模型参数中的同名字段不会授予权限。
 - 固定策略调用携带 `false`，普通调用携带 `true`；host 的允许/拒绝仍决定是否开始执行。
 - 无标记的调用及无法验证的 invocation 范围保留原有 guard。
+- 设置标记后，固定到 worktree 的 sub-agent 仍被限制在该 worktree 内；会话的普通子目录与会话根目录一样获得准入。
 
 已使用全局 CLI 和两个临时仓库复现基线。报告修复通过前，使用修复后的 bundle 重跑同样的 daemon E2E 用例，并运行定向单元测试、build 和 typecheck。

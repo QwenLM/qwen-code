@@ -26,7 +26,11 @@ The managed ACP adapter forwards this runtime-owned field separately from
 model arguments. BridgeClient validates its type and session/prompt ownership.
 
 The daemon still validates the reported invocation scope. For a call admitted
-by the normal permission flow, it skips the extra directory/Git containment check.
+by the normal permission flow that runs in the session's own directory, it
+skips the extra directory/Git containment check. A sub-agent pinned to its own
+worktree keeps that containment even when admitted: the worktree boundary is
+what keeps it out of sibling worktrees and the parent checkout, the permission
+flow never re-establishes it, and under Full Access nothing else would.
 The required external provider still evaluates the final call and can deny it.
 Speculation does not set the field and retains the existing containment guard.
 Managed Runtime tool execution has no normal permission flow, so its executor
@@ -59,6 +63,8 @@ configuration, approval UI, grant token or general shell parser is introduced.
 - Fixed-policy calls carry `false`, ordinary calls carry `true`, and host
   allow/deny still determines whether execution starts.
 - Unmarked calls and unverifiable invocation scopes retain their guards.
+- A sub-agent pinned to a worktree stays contained to it with the marker set;
+  an ordinary subdirectory of the session is admitted like the session root.
 
 The baseline was reproduced using the global CLI against two temporary
 repositories. Run the same daemon E2E cases with the fixed bundle, targeted

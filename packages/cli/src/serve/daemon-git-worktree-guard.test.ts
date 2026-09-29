@@ -2378,6 +2378,15 @@ it -C ${cmdPath(outsideRepo)} reset --hard`,
       await expect(
         guard(call(`git -C ${sibling} reset --hard`, agentWorktree)),
       ).resolves.toMatchObject({ allowed: false });
+      // Admission does not lift that containment: the permission flow never
+      // re-establishes the worktree boundary, so a pinned sub-agent stays
+      // pinned even after Full Access or a human admitted the call.
+      await expect(
+        guard({
+          ...call(`git -C ${sibling} reset --hard`, agentWorktree),
+          permissionChecked: true,
+        }),
+      ).resolves.toMatchObject({ allowed: false });
     });
 
     it('contains a sub-agent to the worktree it reports', async () => {
@@ -2403,6 +2412,14 @@ it -C ${cmdPath(outsideRepo)} reset --hard`,
         // ...while reaching back into the parent checkout is not.
         await expect(
           guard(inWorktree(`git -C ${effectiveCwd} reset --hard`)),
+        ).resolves.toMatchObject({ allowed: false });
+        // An admitted call is contained the same way: the worktree, not the
+        // admission, is the boundary for a pinned sub-agent.
+        await expect(
+          guard({
+            ...inWorktree(`git -C ${effectiveCwd} reset --hard`),
+            permissionChecked: true,
+          }),
         ).resolves.toMatchObject({ allowed: false });
       } finally {
         await rm(GitWorktreeService.getSessionDir(isolatedSessionId), {
