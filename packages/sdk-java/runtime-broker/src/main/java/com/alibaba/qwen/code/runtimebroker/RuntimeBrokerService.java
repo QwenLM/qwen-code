@@ -249,8 +249,11 @@ public final class RuntimeBrokerService implements AutoCloseable {
             if (!"deferred".equals(record.getReference().get("dispatchMode"))) {
                 throw conflict("runtime_execution_conflict", "Execution was not reserved for deferred dispatch");
             }
-            byte[] bytes = BrokerValues.requireWellFormed(payloadJson, "payloadJson")
-                    .getBytes(StandardCharsets.UTF_8);
+            // The UTF-8 encoder would turn an unpaired surrogate into '?'.
+            if (payloadJson == null || !BrokerValues.isWellFormedJson(payloadJson)) {
+                throw invalid("runtime_payload_invalid", "Tool payload is invalid");
+            }
+            byte[] bytes = payloadJson.getBytes(StandardCharsets.UTF_8);
             if (bytes.length > 256 * 1024) {
                 throw invalid("runtime_payload_invalid", "Tool payload exceeds 256 KiB");
             }
@@ -264,9 +267,12 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 throw conflict("runtime_idempotency_conflict", "Tool payload differs from its reserved digest");
             }
             Map<String, Object> payload = JsonCodec.parseObject(bytes, "tool payload");
+            // An escaped unpaired surrogate passes the text check above but
+            // would still reach the Worker, and run, as '?'.
             if (!payload.keySet().equals(Set.of("toolName", "input"))
                     || !(payload.get("toolName") instanceof String toolName) || toolName.isEmpty()
                     || !(payload.get("input") instanceof Map)
+                    || !BrokerValues.isWellFormedJson(payload)
                     || Integer.valueOf(3).equals(record.getReference().get("runtimeProtocol"))
                         && !"run_shell_command".equals(toolName)) {
                 throw invalid("runtime_payload_invalid", "Tool payload is invalid");
@@ -740,6 +746,12 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     referenceString(safeReference, "callId"),
                     referenceString(safeReference, "argsDigest"),
                     safeReference);
+            // The JSON writer and the JDBC codec write an unpaired surrogate
+            // as '?', so the Worker would run another tool name or input.
+            if (!BrokerValues.isWellFormedJson(safeReference)) {
+                throw invalid("runtime_reference_invalid",
+                        "reference must be well-formed text");
+            }
             try {
                 record = bindingRepository.admitExecution(sessionRepository,
                         executionRepository, candidate);
@@ -1104,6 +1116,11 @@ public final class RuntimeBrokerService implements AutoCloseable {
         long operationGeneration = claimed.getOperationGeneration();
         CompletableFuture<BindingContext> operation =
                 new CompletableFuture<>();
+        // A non-retryable failure is answered as is. The failure handler
+        // publishes it before it records the block, so a deadline that fires
+        // after the failure keeps that answer.
+        AtomicReference<RuntimeBrokerException> nonRetryable =
+                new AtomicReference<>();
         // The deadline fires independently of provisioning progress, so a
         // parked ensureResource, provision or attestation call cannot hold
         // the binding open forever. Releasing the claim first fences any
@@ -1111,19 +1128,24 @@ public final class RuntimeBrokerService implements AutoCloseable {
         ScheduledFuture<?> deadlineTask;
         try {
             deadlineTask = scheduler.schedule(() -> {
+                // Legacy startup keeps its timeout answer.
+                RuntimeBrokerException failure = request.isManagedContext()
+                        ? nonRetryable.get() : null;
+                RuntimeBrokerException answer = failure != null ? failure
+                        : unavailable("runtime_broker_provision_timeout",
+                                "Managed Runtime provisioning timed out.");
                 boolean blocked = false;
                 try {
                     RuntimeBindingRecord timedOut = renewal.stopAndGet();
                     blocked = request.isManagedContext() && timedOut != null
-                            && blockRecoveryQuietly(timedOut, null);
+                            && blockRecoveryQuietly(timedOut, answer);
                 } finally {
                     releaseOperationQuietly(bindingId, operationGeneration);
                     // A retry cannot succeed once the binding is blocked.
-                    operation.completeExceptionally(blocked
+                    operation.completeExceptionally(blocked && failure == null
                             ? conflict("runtime_broker_recovery_blocked",
                                     "Managed Runtime recovery is blocked.")
-                            : unavailable("runtime_broker_provision_timeout",
-                                    "Managed Runtime provisioning timed out."));
+                            : answer);
                 }
             }, operationDeadlineNanos(), TimeUnit.NANOSECONDS);
         } catch (RuntimeException scheduleFailure) {
@@ -1155,10 +1177,16 @@ public final class RuntimeBrokerService implements AutoCloseable {
                                     handle));
                 })
                 .handle((outcome, error) -> {
+                    Throwable cause = unwrap(error);
+                    // Published before taking the claim, which a renewal can
+                    // hold across a database round trip.
+                    if (cause instanceof RuntimeBrokerException failure
+                            && !failure.isRetryable()) {
+                        nonRetryable.set(failure);
+                    }
                     RuntimeBindingRecord currentClaim = renewal.stopAndGet();
                     try {
                         if (error != null) {
-                            Throwable cause = unwrap(error);
                             boolean retryable = !(cause instanceof RuntimeBrokerException
                                     brokerFailure) || brokerFailure.isRetryable();
                             if (currentClaim != null) {
@@ -1748,9 +1776,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
             return latest != null && latest.getState()
                     == RuntimeBindingRecord.State.RECOVERY_BLOCKED;
         } catch (RuntimeException failure) {
-            if (cause != null) {
-                cause.addSuppressed(failure);
-            }
+            cause.addSuppressed(failure);
             return false;
         }
     }
