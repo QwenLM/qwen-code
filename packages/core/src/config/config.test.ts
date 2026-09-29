@@ -87,6 +87,7 @@ import {
   createDebugLogger,
   resetDebugLoggingState,
   setDebugLogSession,
+  type DebugLogger,
 } from '../utils/debugLogger.js';
 import { logGoalState, logRipgrepFallback } from '../telemetry/loggers.js';
 import { RipgrepFallbackEvent } from '../telemetry/types.js';
@@ -9107,6 +9108,148 @@ describe('Server Config (config.ts)', () => {
       expect(config.getFastModel()).toBe('openai:shared-model');
     });
 
+    it.each(['fastModel', 'compactionModel'] as const)(
+      'drops a stale auxiliary endpoint instead of unconfiguring %s',
+      (key) => {
+        const config = new Config({
+          ...baseParams,
+          authType: AuthType.USE_OPENAI,
+          model: 'main',
+          [key]: 'openai:shared\0https://removed.example/v1',
+          modelProvidersConfig: {
+            openai: [{ id: 'shared', baseUrl: 'https://moved.example/v1' }],
+          },
+        });
+        // The pin no longer names a configured endpoint, so the selector falls
+        // back to the bare form and the registry's first same-id match — the
+        // pre-#12760 behaviour — instead of reporting the model as unset.
+        const read = () =>
+          key === 'fastModel'
+            ? config.getFastModel()
+            : config.getCompactionModel();
+        expect(read()).toBe('openai:shared');
+      },
+    );
+
+    it.each(['fastModel', 'compactionModel'] as const)(
+      'warns when a stale auxiliary endpoint pin is dropped (%s)',
+      (key) => {
+        const config = new Config({
+          ...baseParams,
+          authType: AuthType.USE_OPENAI,
+          model: 'main',
+          [key]: 'openai:shared\0https://removed.example/v1',
+          modelProvidersConfig: {
+            openai: [{ id: 'shared', baseUrl: 'https://moved.example/v1' }],
+          },
+        });
+        const warn = vi.spyOn(
+          (config as unknown as { debugLogger: DebugLogger }).debugLogger,
+          'warn',
+        );
+        const read = () =>
+          key === 'fastModel'
+            ? config.getFastModel()
+            : config.getCompactionModel();
+        expect(read()).toBe('openai:shared');
+        expect(warn).toHaveBeenCalledWith(
+          expect.stringContaining('Aux endpoint pin dropped for "shared"'),
+        );
+        // The escaped form must reach the log, never a raw NUL byte.
+        expect(warn).not.toHaveBeenCalledWith(expect.stringContaining('\0'));
+      },
+    );
+
+    it('keeps the pin when a same-id sibling declares the colliding default URL (#12760)', () => {
+      // The first row declares no baseUrl, so its effective URL is the
+      // provider default — the same URL the second row declares. Matching the
+      // pin on effective baseUrl with first-hit semantics would return the
+      // first row's undefined registryBaseUrl and silently drop the pin,
+      // rebinding every fast-model call to the personal key.
+      const config = new Config({
+        ...baseParams,
+        authType: AuthType.USE_OPENAI,
+        model: 'main',
+        fastModel: 'openai:gpt-4o\0https://api.openai.com/v1',
+        modelProvidersConfig: {
+          openai: [
+            { id: 'gpt-4o', envKey: 'OPENAI_API_KEY_PERSONAL' },
+            {
+              id: 'gpt-4o',
+              baseUrl: 'https://api.openai.com/v1',
+              envKey: 'OPENAI_API_KEY_WORK',
+            },
+          ],
+        },
+      });
+
+      expect(config.getFastModel()).toBe(
+        'openai:gpt-4o\0https://api.openai.com/v1',
+      );
+    });
+
+    it.each(['fastModel', 'compactionModel'] as const)(
+      'keeps %s bare when the pinned entry declares no endpoint of its own',
+      (key) => {
+        const config = new Config({
+          ...baseParams,
+          authType: AuthType.USE_OPENAI,
+          model: 'main',
+          // What the picker persists for a row whose provider entry has no
+          // `baseUrl`: the registry's effective (default) URL.
+          [key]: 'openai:shared\0https://api.openai.com/v1',
+          modelProvidersConfig: { openai: [{ id: 'shared' }] },
+        });
+        // Such an entry is registered under the plain id, which a bare
+        // selector already resolves to; re-attaching the effective URL would
+        // hand consumers a registry key that does not exist.
+        const read = () =>
+          key === 'fastModel'
+            ? config.getFastModel()
+            : config.getCompactionModel();
+        expect(read()).toBe('openai:shared');
+      },
+    );
+
+    it('keeps the endpoint disambiguator on a persisted fast model selector (#12760)', () => {
+      // Two providers expose the same model id over the openai protocol; the
+      // picker pins the second one as `authType:id\0baseUrl`. Dropping the
+      // suffix would rebind the fast model to the first registered endpoint
+      // (registry first-match fallback) — e.g. an exhausted token plan.
+      const config = new Config({
+        ...baseParams,
+        authType: AuthType.USE_OPENAI,
+        model: 'qwen3.7-max',
+        fastModel: 'openai:shared-fast\0https://free-quota.example.com/v1',
+        modelProvidersConfig: {
+          [AuthType.USE_OPENAI]: [
+            {
+              id: 'qwen3.7-max',
+              name: 'qwen3.7-max',
+              baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+              envKey: 'DASHSCOPE_API_KEY',
+            },
+            {
+              id: 'shared-fast',
+              name: 'shared-fast (token plan)',
+              baseUrl: 'https://exhausted-plan.example.com/v1',
+              envKey: 'TOKEN_PLAN_API_KEY',
+            },
+            {
+              id: 'shared-fast',
+              name: 'shared-fast (free quota)',
+              baseUrl: 'https://free-quota.example.com/v1',
+              envKey: 'FREE_QUOTA_API_KEY',
+            },
+          ],
+        },
+      });
+
+      expect(config.getFastModel()).toBe(
+        'openai:shared-fast\0https://free-quota.example.com/v1',
+      );
+    });
+
     it('preserves authType-qualified fast model selectors across auth types', () => {
       const config = new Config({
         ...baseParams,
@@ -9296,6 +9439,48 @@ describe('Server Config (config.ts)', () => {
     });
 
     describe('getCompactionModel', () => {
+      it('keeps the endpoint disambiguator on a persisted compaction model selector (#12760)', async () => {
+        // Twin of the getFastModel case: the picker pins the second of two
+        // same-id endpoints and runSideQuery's resolveForModel consumes the
+        // suffix. Dropping it would rebind compaction to the first registered
+        // endpoint (registry first-match fallback).
+        const config = new Config({
+          ...baseParams,
+          authType: AuthType.USE_OPENAI,
+          model: 'qwen3.7-max',
+          compactionModel:
+            'openai:shared-compact\0https://free-quota.example.com/v1',
+          modelProvidersConfig: {
+            [AuthType.USE_OPENAI]: [
+              {
+                id: 'qwen3.7-max',
+                name: 'qwen3.7-max',
+                baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+                envKey: 'DASHSCOPE_API_KEY',
+              },
+              {
+                id: 'shared-compact',
+                name: 'shared-compact (token plan)',
+                baseUrl: 'https://exhausted-plan.example.com/v1',
+                envKey: 'TOKEN_PLAN_API_KEY',
+              },
+              {
+                id: 'shared-compact',
+                name: 'shared-compact (free quota)',
+                baseUrl: 'https://free-quota.example.com/v1',
+                envKey: 'FREE_QUOTA_API_KEY',
+              },
+            ],
+          },
+        });
+
+        await config.refreshAuth(AuthType.USE_OPENAI);
+
+        expect(config.getCompactionModel()).toBe(
+          'openai:shared-compact\0https://free-quota.example.com/v1',
+        );
+      });
+
       it('returns the compaction model when set', async () => {
         const config = new Config({
           ...baseParams,

@@ -1475,12 +1475,16 @@ vi.mock('./components/dialogs/ModelDialog', async () => {
       mode?: string;
       models?: Array<{ id: string }>;
       onSelect?: (id: string) => void;
+      currentModelId?: string;
     }) =>
       React.createElement(
         'button',
         {
           'data-testid': 'model-select',
           type: 'button',
+          ...(props.currentModelId !== undefined
+            ? { 'data-current-model-id': props.currentModelId }
+            : {}),
           onClick: () => {
             const id =
               props.mode === 'voice' ? props.models?.[0]?.id : 'fast-model-x';
@@ -37703,6 +37707,39 @@ describe('App session callbacks', () => {
     ).toBe(true);
     expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
     expect(settingsReload).toHaveBeenCalled();
+  });
+
+  it('decodes a pinned fastModel setting before opening the fast-model picker (#12760)', async () => {
+    // The CLI picker persists `authType:id\0<baseUrl>`; handing the raw value
+    // to the dialog makes currentIdx -1 (no registry id can contain NUL), so
+    // the picker highlights an unrelated row and Enter erases the pin.
+    const pinned = 'openai:shared-fast\0https://free-quota.example.com/v1';
+    testState.settings = [
+      {
+        key: 'fastModel',
+        values: { effective: pinned, workspace: pinned },
+      } as DaemonSettingDescriptor,
+    ];
+    const { container } = renderApp();
+    await flush();
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-fast-model"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+
+    const select = container.querySelector<HTMLButtonElement>(
+      '[data-testid="model-select"]',
+    );
+    expect(select?.getAttribute('data-current-model-id')).toBe(
+      'shared-fast(openai)',
+    );
   });
 
   it.each([
