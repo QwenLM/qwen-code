@@ -140,6 +140,29 @@ describe('AsyncHookRegistry', () => {
       expect(output.messages[0].type).toBe('error');
       expect(output.messages[0].message).toContain('Hook failed');
     });
+
+    it('forwards an attached HookOutput to the same channel complete() uses', () => {
+      registry.register({
+        hookId: 'test-hook-1',
+        hookName: 'Test Hook',
+        hookEvent: HookEventName.PostToolUse,
+        sessionId: 'session-1',
+        startTime: Date.now(),
+        timeout: 60000,
+        stdout: '',
+        stderr: '',
+      });
+
+      registry.fail('test-hook-1', new Error('Hook failed'), {
+        systemMessage: 'denied: do not run rm -rf',
+      });
+
+      const output = registry.getPendingOutput();
+      expect(output.messages.some((m) => m.type === 'error')).toBe(true);
+      expect(output.messages.some((m) => m.type === 'system')).toBe(true);
+      const messageEntry = output.messages.find((m) => m.type === 'system');
+      expect(messageEntry?.message).toBe('denied: do not run rm -rf');
+    });
   });
 
   describe('timeout', () => {

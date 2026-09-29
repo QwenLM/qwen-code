@@ -168,7 +168,7 @@ export class AsyncHookRegistry {
   /**
    * Mark a hook as failed
    */
-  fail(hookId: string, error: Error): void {
+  fail(hookId: string, error: Error, output?: HookOutput): void {
     const hook = this.pendingHooks.get(hookId);
     if (!hook) {
       debugLogger.warn(`Attempted to fail unknown hook: ${hookId}`);
@@ -177,6 +177,18 @@ export class AsyncHookRegistry {
 
     hook.status = 'failed';
     hook.error = error;
+    if (output) {
+      hook.output = output;
+      if (typeof output.systemMessage === 'string') {
+        this.completedOutputs.push({
+          type: 'system',
+          message: output.systemMessage,
+          hookName: hook.hookName,
+          hookId: hook.hookId,
+          timestamp: Date.now(),
+        });
+      }
+    }
 
     // Add error message to outputs
     this.completedOutputs.push({

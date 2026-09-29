@@ -190,7 +190,7 @@ The launcher must:
 - Build the entire Qwen argument vector and reject all caller arguments.
 - Require TTY stdin and stdout.
 - Use an administrator-defined environment allowlist and set the documented memory and telemetry environment overrides to zero.
-- On Windows, resolve `powershell` through an administrator-controlled `PATH` and allow no user-controlled PowerShell profile; command Hooks currently enter Qwen's PowerShell runner before invoking the pinned Node executable.
+- On Windows, resolve `pwsh` and `powershell` through an administrator-controlled `PATH` (`pwsh` wins when both are present, and only where the hook shell is resolved by probing), pin `ComSpec` to the **absolute path** of that interpreter because a `ComSpec` naming `powershell.exe` or `pwsh.exe` is launched as it stands with no `PATH` lookup, and allow no user-controlled PowerShell profile; command Hooks currently enter Qwen's PowerShell runner before invoking the pinned Node executable.
 - Refuse headless, stream-json, ACP, `serve`, YOLO, `--continue`, and `--resume` deployments.
 - Keep the managed `QWEN_HOME`, settings, configuration, dependency tree, and credential unavailable for user modification.
 

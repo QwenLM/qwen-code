@@ -5,6 +5,7 @@
  */
 
 import { expect, describe, it, beforeEach, vi, afterEach } from 'vitest';
+import path from 'node:path';
 import {
   buildShellExecWarnings,
   checkArgumentSafety,
@@ -21,6 +22,7 @@ import {
   isCommandAllowed,
   isCommandNeedsPermission,
   normalizeMonitorCommand,
+  resolveCommandPath,
   splitCommands,
   stripTrailingBackgroundAmp,
   stripShellWrapper,
@@ -39,6 +41,26 @@ vi.mock('os', () => ({
   platform: mockPlatform,
   homedir: mockHomedir,
 }));
+
+const mockExecFileSync = vi.hoisted(() => vi.fn());
+const mockAccessSync = vi.hoisted(() => vi.fn());
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  // Default: pass through to the real call so unrelated tests keep working.
+  mockExecFileSync.mockImplementation(actual.execFileSync);
+  return {
+    ...actual,
+    execFileSync: mockExecFileSync,
+  };
+});
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  mockAccessSync.mockImplementation(actual.accessSync);
+  return {
+    ...actual,
+    accessSync: mockAccessSync,
+  };
+});
 
 const mockQuote = vi.hoisted(() => vi.fn());
 vi.mock('shell-quote', async () => {
@@ -1558,5 +1580,81 @@ describe('splitCommands', () => {
     ])('splits %s', (command, expected) => {
       expect(splitCommands(command)).toEqual(expected);
     });
+  });
+});
+
+describe('resolveCommandPath', () => {
+  it('returns a path for a command that exists', () => {
+    const { path, error } = resolveCommandPath(
+      process.platform === 'win32' ? 'cmd.exe' : 'sh',
+    );
+    expect(error).toBeUndefined();
+    expect(typeof path).toBe('string');
+    expect(path).toContain(process.platform === 'win32' ? 'cmd.exe' : 'sh');
+  });
+
+  it('reports a miss as no path and no error', () => {
+    expect(resolveCommandPath('qwen-definitely-not-a-command-xyzzy')).toEqual({
+      path: null,
+      error: undefined,
+    });
+  });
+
+  it('resolves without opts when process.cwd() throws uv_cwd', () => {
+    const cwdSpy = vi.spyOn(process, 'cwd').mockImplementation(() => {
+      throw Object.assign(
+        new Error('ENOENT: no such file or directory, uv_cwd'),
+        { code: 'ENOENT', syscall: 'uv_cwd' },
+      );
+    });
+    try {
+      const { path: hit, error } = resolveCommandPath(
+        process.platform === 'win32' ? 'cmd.exe' : 'sh',
+      );
+      expect(error).toBeUndefined();
+      expect(typeof hit).toBe('string');
+    } finally {
+      cwdSpy.mockRestore();
+    }
+  });
+
+  it('absolutizes a relative probe hit against opts.cwd and takes only the first win32 hit', async () => {
+    const originalPlatform = process.platform;
+    try {
+      const probeCwd = path.resolve('/probe');
+
+      mockPlatform.mockReturnValue('linux');
+      mockExecFileSync.mockReturnValueOnce('zzprobe_x\n');
+      mockAccessSync.mockImplementationOnce(() => undefined);
+      Object.defineProperty(process, 'platform', {
+        value: 'linux',
+        configurable: true,
+      });
+      const expected = path.resolve(probeCwd, 'zzprobe_x');
+      const { path: hit } = resolveCommandPath('zzprobe_x', { cwd: probeCwd });
+      expect(hit).toBe(expected);
+      expect(mockAccessSync).toHaveBeenCalledWith(expected, expect.anything());
+
+      mockExecFileSync.mockReturnValueOnce(
+        'C:\\Program Files\\PowerShell\\7\\pwsh.exe\r\nD:\\shims\\pwsh.exe\r\n',
+      );
+      mockAccessSync.mockImplementationOnce(() => undefined);
+      Object.defineProperty(process, 'platform', {
+        value: 'win32',
+        configurable: true,
+      });
+      const win = resolveCommandPath('pwsh', { cwd: probeCwd });
+      expect(win.error).toBeUndefined();
+      expect(win.path).toBe('C:\\Program Files\\PowerShell\\7\\pwsh.exe');
+      expect(mockAccessSync).toHaveBeenLastCalledWith(
+        'C:\\Program Files\\PowerShell\\7\\pwsh.exe',
+        expect.anything(),
+      );
+    } finally {
+      Object.defineProperty(process, 'platform', {
+        value: originalPlatform,
+        configurable: true,
+      });
+    }
   });
 });

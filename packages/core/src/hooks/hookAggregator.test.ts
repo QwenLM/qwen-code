@@ -1275,6 +1275,429 @@ describe('HookAggregator', () => {
     });
   });
 
+  describe('blocking outcomes', () => {
+    const blockingResult = (
+      eventName: HookEventName,
+      output?: HookOutput,
+    ): HookExecutionResult => ({
+      hookConfig: { type: HookType.Command, command: 'gate' },
+      eventName,
+      success: false,
+      outcome: 'blocking',
+      output,
+      duration: 5,
+    });
+
+    it('denies for PreToolUse when the payload carries no deny', () => {
+      const result = aggregator.aggregateResults(
+        [blockingResult(HookEventName.PreToolUse, { decision: 'allow' })],
+        HookEventName.PreToolUse,
+      );
+      const output = createHookOutput(
+        HookEventName.PreToolUse,
+        result.finalOutput ?? {},
+      ) as PreToolUseHookOutput;
+      expect(output.isDenied()).toBe(true);
+      expect(output.reason).toContain('blocking error');
+    });
+
+    it('denies for PermissionRequest in the shape its consumer reads', () => {
+      const result = aggregator.aggregateResults(
+        [
+          blockingResult(HookEventName.PermissionRequest, {
+            hookSpecificOutput: { decision: { behavior: 'allow' } },
+          }),
+        ],
+        HookEventName.PermissionRequest,
+      );
+      const output = createHookOutput(
+        HookEventName.PermissionRequest,
+        result.finalOutput ?? {},
+      ) as PermissionRequestHookOutput;
+      expect(output.isPermissionDenied()).toBe(true);
+      expect(output.getPermissionDecision()?.message).toContain(
+        'blocking error',
+      );
+    });
+
+    it('keeps the deny a blocking hook already produced', () => {
+      const result = aggregator.aggregateResults(
+        [
+          blockingResult(HookEventName.PreToolUse, {
+            decision: 'deny',
+            reason: 'policy says no',
+          }),
+        ],
+        HookEventName.PreToolUse,
+      );
+      expect(result.finalOutput?.reason).toBe('policy says no');
+    });
+
+    it('leaves a stop request alone instead of rewriting it into a deny', () => {
+      const result = aggregator.aggregateResults(
+        [
+          blockingResult(HookEventName.PreToolUse, {
+            continue: false,
+            stopReason: 'enough for today',
+          }),
+        ],
+        HookEventName.PreToolUse,
+      );
+      expect(result.finalOutput?.continue).toBe(false);
+      expect(result.finalOutput?.decision).toBeUndefined();
+    });
+
+    it('leaves a stop request alone on a lane whose consumer reads no ask', () => {
+      const result = aggregator.aggregateResults(
+        [
+          blockingResult(HookEventName.Stop, {
+            continue: false,
+            decision: 'ask',
+          }),
+        ],
+        HookEventName.Stop,
+      );
+      expect(result.finalOutput?.continue).toBe(false);
+      expect(result.finalOutput?.decision).toBe('ask');
+    });
+
+    const permissionRequestCases: Array<
+      [string, HookOutput | undefined, string]
+    > = [
+      ['no output at all', undefined, 'Hook exited with a blocking error'],
+      ['an empty object', {}, 'Hook exited with a blocking error'],
+      [
+        'a top-level deny, which its consumer ignores',
+        { decision: 'deny', reason: 'blocked by policy' },
+        'blocked by policy',
+      ],
+      [
+        'a stop request',
+        { continue: false },
+        'Hook exited with a blocking error',
+      ],
+    ];
+
+    it.each(permissionRequestCases)(
+      'denies for PermissionRequest when the payload carries %s',
+      (_label, output, message) => {
+        const result = aggregator.aggregateResults(
+          [blockingResult(HookEventName.PermissionRequest, output)],
+          HookEventName.PermissionRequest,
+        );
+        const denied = createHookOutput(
+          HookEventName.PermissionRequest,
+          result.finalOutput ?? {},
+        ) as PermissionRequestHookOutput;
+        expect(denied.isPermissionDenied()).toBe(true);
+        expect(denied.getPermissionDecision()?.message).toBe(message);
+      },
+    );
+
+    it('denies when a sibling allow outranks the blocking decision', () => {
+      const result = aggregator.aggregateResults(
+        [
+          blockingResult(HookEventName.PreToolUse, {
+            decision: 'block',
+            hookSpecificOutput: { permissionDecision: 'allow' },
+          }),
+        ],
+        HookEventName.PreToolUse,
+      );
+      const output = createHookOutput(
+        HookEventName.PreToolUse,
+        result.finalOutput ?? {},
+      ) as PreToolUseHookOutput;
+      expect(output.isDenied()).toBe(true);
+    });
+
+    it('replaces an allow reason with the denial reason', () => {
+      const result = aggregator.aggregateResults(
+        [
+          blockingResult(HookEventName.PreToolUse, {
+            hookSpecificOutput: {
+              permissionDecision: 'allow',
+              permissionDecisionReason: 'user pre-approved this batch',
+            },
+          }),
+        ],
+        HookEventName.PreToolUse,
+      );
+      const output = createHookOutput(
+        HookEventName.PreToolUse,
+        result.finalOutput ?? {},
+      ) as PreToolUseHookOutput;
+      expect(output.getPermissionDecisionReason()).not.toContain(
+        'pre-approved',
+      );
+      expect(output.getPermissionDecisionReason()).toContain('blocking error');
+    });
+
+    const okResult = (
+      eventName: HookEventName,
+      output: HookOutput,
+    ): HookExecutionResult => ({
+      hookConfig: { type: HookType.Command, command: 'gate' },
+      eventName,
+      success: true,
+      outcome: 'success',
+      output,
+      duration: 5,
+    });
+
+    it('refuses with the generic text when only a sibling carried a reason', () => {
+      const result = aggregator.aggregateResults(
+        [
+          okResult(HookEventName.PreToolUse, {
+            decision: 'allow',
+            reason: 'Hook executed successfully',
+          }),
+          blockingResult(HookEventName.PreToolUse, undefined),
+        ],
+        HookEventName.PreToolUse,
+      );
+      const output = createHookOutput(
+        HookEventName.PreToolUse,
+        result.finalOutput ?? {},
+      ) as PreToolUseHookOutput;
+      expect(output.isDenied()).toBe(true);
+      expect(result.finalOutput?.reason).toBe(
+        'Hook exited with a blocking error',
+      );
+      expect(output.getPermissionDecisionReason()).toBe(
+        'Hook exited with a blocking error',
+      );
+    });
+
+    it('keeps the blocking hook stopReason when it carries no decision', () => {
+      const result = aggregator.aggregateResults(
+        [
+          blockingResult(HookEventName.Stop, {
+            stopReason: '3 unit tests still failing - run npm test',
+          }),
+        ],
+        HookEventName.Stop,
+      );
+      expect(result.finalOutput?.continue).toBe(false);
+      expect(result.finalOutput?.stopReason).toBe(
+        '3 unit tests still failing - run npm test',
+      );
+    });
+
+    it.each([
+      [
+        'a nested ask on the blocking hook itself',
+        [
+          blockingResult(HookEventName.PreToolUse, {
+            hookSpecificOutput: { permissionDecision: 'ask' },
+          }),
+        ],
+      ],
+      [
+        'an ask a sibling hook contributed',
+        [
+          okResult(HookEventName.PreToolUse, {
+            hookSpecificOutput: {
+              permissionDecision: 'ask',
+              permissionDecisionReason: 'needs human review',
+            },
+          }),
+          blockingResult(HookEventName.PreToolUse, {
+            continue: false,
+            stopReason: 'denied by policy',
+          }),
+        ],
+      ],
+      [
+        'a stop request that also asks',
+        [
+          blockingResult(HookEventName.PreToolUse, {
+            continue: false,
+            decision: 'ask',
+          }),
+        ],
+      ],
+    ])('denies rather than prompts when %s', (_label, results) => {
+      const result = aggregator.aggregateResults(
+        results,
+        HookEventName.PreToolUse,
+      );
+      const output = createHookOutput(
+        HookEventName.PreToolUse,
+        result.finalOutput ?? {},
+      ) as PreToolUseHookOutput;
+      expect(output.isDenied()).toBe(true);
+      expect(output.isAsk()).toBe(false);
+    });
+
+    const todoCases: Array<[HookEventName, string, HookOutput, string]> = [
+      [
+        HookEventName.TodoCreated,
+        'an empty payload',
+        {},
+        'Hook exited with a blocking error',
+      ],
+      [
+        HookEventName.TodoCompleted,
+        'an empty payload',
+        {},
+        'Hook exited with a blocking error',
+      ],
+      [
+        HookEventName.TodoCreated,
+        'a stop request it never reads',
+        { continue: false },
+        'Hook exited with a blocking error',
+      ],
+      [
+        HookEventName.TodoCompleted,
+        'a stop request it never reads',
+        { continue: false },
+        'Hook exited with a blocking error',
+      ],
+      [
+        HookEventName.TodoCreated,
+        'the deny an exit 2 produces',
+        { decision: 'deny', reason: 'not allowed' },
+        'not allowed',
+      ],
+      [
+        HookEventName.TodoCompleted,
+        'the deny an exit 2 produces',
+        { decision: 'deny', reason: 'not allowed' },
+        'not allowed',
+      ],
+    ];
+
+    it.each(todoCases)(
+      'writes the block literal the %s consumer compares to, for %s',
+      (eventName, _case, payload, reason) => {
+        const result = aggregator.aggregateResults(
+          [blockingResult(eventName, payload)],
+          eventName,
+        );
+        expect(result.finalOutput?.decision).toBe('block');
+        expect(result.finalOutput?.reason).toBe(reason);
+      },
+    );
+
+    it('passes a blocking decision the consumer already reads straight through', () => {
+      const result = aggregator.aggregateResults(
+        [
+          blockingResult(HookEventName.PreToolUse, {
+            decision: 'block',
+            reason: 'gate says block',
+          }),
+        ],
+        HookEventName.PreToolUse,
+      );
+      expect(result.finalOutput?.decision).toBe('block');
+      expect(result.finalOutput?.reason).toBe('gate says block');
+    });
+
+    it.each([
+      HookEventName.UserPromptSubmit,
+      HookEventName.UserPromptExpansion,
+    ])(
+      '%s on a blocking outcome with no payload synthesizes a deny',
+      (eventName) => {
+        const result = aggregator.aggregateResults(
+          [blockingResult(eventName, undefined)],
+          eventName,
+        );
+        expect(result.finalOutput?.decision).toBe('deny');
+        expect(result.finalOutput?.reason).toBe(
+          'Hook exited with a blocking error',
+        );
+      },
+    );
+
+    it.each([
+      HookEventName.UserPromptSubmit,
+      HookEventName.UserPromptExpansion,
+    ])(
+      '%s on a blocking outcome keeps the payload reason and message',
+      (eventName) => {
+        const result = aggregator.aggregateResults(
+          [
+            blockingResult(eventName, {
+              reason: 'not allowed',
+              systemMessage: 'gate says no',
+            }),
+          ],
+          eventName,
+        );
+        expect(result.finalOutput?.decision).toBe('deny');
+        expect(result.finalOutput?.reason).toBe('not allowed');
+        expect(result.finalOutput?.systemMessage).toBe('gate says no');
+      },
+    );
+
+    const nonGatingEvents: HookEventName[] = [
+      HookEventName.PostToolUseFailure,
+      HookEventName.Notification,
+      HookEventName.SessionStart,
+      HookEventName.SessionEnd,
+      HookEventName.SessionDelete,
+      HookEventName.SubagentStart,
+      HookEventName.MessageDisplay,
+      HookEventName.PreCompact,
+      HookEventName.PostCompact,
+      HookEventName.PermissionDenied,
+      HookEventName.InstructionsLoaded,
+    ];
+
+    it.each(nonGatingEvents)(
+      '%s on a blocking outcome with no payload leaves finalOutput untouched',
+      (eventName) => {
+        const result = aggregator.aggregateResults(
+          [blockingResult(eventName, undefined)],
+          eventName,
+        );
+        expect(result.finalOutput).toBeUndefined();
+      },
+    );
+
+    it.each(nonGatingEvents)(
+      '%s on a blocking outcome with a payload keeps the payload as-is',
+      (eventName) => {
+        const result = aggregator.aggregateResults(
+          [
+            blockingResult(eventName, {
+              systemMessage: 'a message only, no deny',
+            }),
+          ],
+          eventName,
+        );
+        expect(result.finalOutput?.decision).toBeUndefined();
+        expect(result.finalOutput?.systemMessage).toBe(
+          'a message only, no deny',
+        );
+      },
+    );
+
+    it('PostToolUse stays a stop-request-only lane and a blocking exit 2 does not deny it', () => {
+      const empty = aggregator.aggregateResults(
+        [blockingResult(HookEventName.PostToolUse, undefined)],
+        HookEventName.PostToolUse,
+      );
+      expect(empty.finalOutput).toBeUndefined();
+
+      const payload = aggregator.aggregateResults(
+        [
+          blockingResult(HookEventName.PostToolUse, {
+            systemMessage: 'a message only, no deny',
+          }),
+        ],
+        HookEventName.PostToolUse,
+      );
+      expect(payload.finalOutput?.decision).toBe('allow');
+      expect(payload.finalOutput?.systemMessage).toBe(
+        'a message only, no deny',
+      );
+    });
+  });
+
   describe('mergeWithOrLogic - PreToolUse permissionDecision ranking', () => {
     const aggregatePreToolUse = (outputs: HookOutput[]) => {
       const results: HookExecutionResult[] = outputs.map((output) => ({
