@@ -166,3 +166,49 @@ it('sends an @ message as ordinary chat when the roster cannot be read', async (
     undefined,
   );
 });
+
+it('does not read a longer Latin word as a shorter agent name', async () => {
+  const api = {
+    listAgents: vi.fn().mockResolvedValue({
+      agents: [{ id: 'mar', name: 'mar', enabled: true, retiredAt: null }],
+    }),
+    createThread: vi.fn().mockResolvedValue({ id: 'thread-1' }),
+  };
+  createThreadsHttpApi.mockReturnValue(api);
+  const onSubmit = vi.fn(() => true);
+  const node = document.createElement('div');
+  const root = createRoot(node);
+  mounted.push({ root, node });
+
+  act(() =>
+    root.render(
+      <Probe baseUrl="x" getContext={() => ''} onSubmit={onSubmit} />,
+    ),
+  );
+
+  // Core's `agentForToken` refuses this token, and the server-side parser is
+  // authoritative, so intercepting it here would silently turn an ordinary
+  // chat message into work assigned to an agent nobody addressed.
+  await act(async () => {
+    expect(latestEntry.submit('ask @maría to review')).toBe(false);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  expect(api.createThread).not.toHaveBeenCalled();
+  expect(onSubmit).toHaveBeenCalledWith(
+    'ask @maría to review',
+    undefined,
+    undefined,
+    expect.any(Function),
+    undefined,
+  );
+
+  // Control: the exact name still leads, so the guard above is not refusing
+  // every mention.
+  await act(async () => {
+    expect(latestEntry.submit('@mar take a look')).toBe(false);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  expect(api.createThread).toHaveBeenCalledWith(
+    expect.objectContaining({ assignee: 'mar' }),
+  );
+});

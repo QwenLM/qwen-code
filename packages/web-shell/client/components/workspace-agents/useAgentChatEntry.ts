@@ -206,11 +206,20 @@ export function useAgentChatEntry({
                     // Same addressability predicate as the picker above:
                     // interception must not fire for an agent admission
                     // would skip.
-                    (agent) =>
-                      agent.enabled &&
-                      !agent.retiredAt &&
-                      token.startsWith(agent.name.toLowerCase()) &&
-                      !/^[a-z0-9_-]/.test(token.slice(agent.name.length)),
+                    (agent) => {
+                      const rest = token.slice(agent.name.length);
+                      return (
+                        agent.enabled &&
+                        !agent.retiredAt &&
+                        token.startsWith(agent.name.toLowerCase()) &&
+                        !/^[a-z0-9_-]/.test(rest) &&
+                        // Core's `agentForToken` refuses a longer Latin word
+                        // too: "@maría" is not "mar", "@alice２" is not
+                        // "alice". A Han or kana continuation is still its own
+                        // word, so it keeps resolving.
+                        !/^[\p{Script=Latin}\p{Nd}]/u.test(rest)
+                      );
+                    },
                   )
                   .sort((a, b) => b.name.length - a.name.length)[0],
             )
