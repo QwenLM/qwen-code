@@ -2064,10 +2064,189 @@ describe('CoreToolScheduler', () => {
     const [bridgeRefusal, directFailure] = third;
     expect(bridgeRefusal.status).toBe('error');
     expect(directFailure.status).toBe('error');
+    // Both halves of the claim this test's name makes: each channel reaches
+    // the threshold on its own key by the third batch.
+    if (bridgeRefusal.status === 'error') {
+      expect(bridgeRefusal.response.error?.message).toContain(
+        'RETRY LOOP DETECTED',
+      );
+    }
     if (directFailure.status === 'error') {
       expect(directFailure.response.error?.message).toContain(
         'RETRY LOOP DETECTED',
       );
+    }
+  });
+
+  it('accrues alternating bridged and direct failures of one target across separate batches', async () => {
+    // The channel marker alone is not enough: the batch-start presence prune
+    // runs per batch, so if each batch preserves only the channel it contains,
+    // a model that alternates between bridging a deferred target and calling
+    // it directly deletes the OTHER channel's counter every turn. Neither
+    // counter then exceeds 1, RETRY LOOP DETECTED is never injected, and the
+    // mixed-channel loop runs indefinitely — the stagnation this PR exists to
+    // stop. Mutation check: dropping `bridgeRetryToolName(r.name)` from the
+    // presence set in _schedule turns this red (no batch ever fires).
+    const bridge = new MockTool({ name: ToolNames.TOOL_CALL });
+    const writeFile = new MockTool({
+      name: 'write_file',
+      shouldDefer: true,
+      params: {
+        type: 'object',
+        properties: {
+          file_path: { type: 'string' },
+          content: { type: 'string' },
+        },
+        required: ['file_path', 'content'],
+        additionalProperties: false,
+      },
+    });
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName: new Map([
+          [bridge.name, bridge],
+          [writeFile.name, writeFile],
+        ]),
+        deferredHiddenNames: new Set([writeFile.name]),
+      });
+
+    // One request per batch, so each batch's presence set holds exactly one
+    // channel plus whatever the widening adds for it.
+    const runSingleBatch = async (
+      callId: string,
+      request: { name: string; args: Record<string, unknown> },
+    ) => {
+      onAllToolCallsComplete.mockClear();
+      await scheduler.schedule(
+        {
+          callId,
+          name: request.name,
+          args: request.args,
+          isClientInitiated: false,
+          prompt_id: 'prompt-bridge-alternating',
+        },
+        new AbortController().signal,
+      );
+      await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+      return onAllToolCallsComplete.mock.calls[0][0][0] as ToolCall;
+    };
+    const bridged = {
+      name: ToolNames.TOOL_CALL,
+      args: { name: 'write_file', arguments: {} },
+    };
+    const direct = { name: 'write_file', args: {} };
+
+    const messages: string[] = [];
+    for (const batchId of [1, 2, 3, 4, 5, 6]) {
+      const completed = await runSingleBatch(
+        `alternating-${batchId}`,
+        batchId % 2 === 1 ? bridged : direct,
+      );
+      expect(completed.status).toBe('error');
+      if (completed.status === 'error') {
+        expect(completed.response.errorType).toBe(
+          ToolErrorType.INVALID_TOOL_PARAMS,
+        );
+        messages.push(completed.response.error?.message ?? '');
+      }
+    }
+
+    // The bridged channel climbs 1, 2, 3 across the odd batches while the
+    // even batches restart the direct channel, so the directive fires exactly
+    // once — on the fifth batch — and never prematurely.
+    expect(messages).toHaveLength(6);
+    for (const early of messages.slice(0, 4)) {
+      expect(early).not.toContain('RETRY LOOP DETECTED');
+    }
+    expect(messages[4]).toContain('RETRY LOOP DETECTED');
+    expect(messages[5]).not.toContain('RETRY LOOP DETECTED');
+  });
+
+  it('clears a target’s bridge-marked counter when a bridged call to it succeeds', async () => {
+    // The clearing half of the presence widening. A resolved bridge renames
+    // the request to the TARGET, so the batch-start presence set now keeps
+    // both of that target's channels and the prune no longer drops the stale
+    // bridge-marked count. clearRetryCountsForTool must cover the marked
+    // channel too, or the surviving count of 2 plus two later refusals would
+    // fire RETRY LOOP DETECTED prematurely. Mutation check: reverting
+    // clearRetryCountsForTool to the bare `${toolName}:` prefix turns this red.
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: [{ text: 'published' }],
+      returnDisplay: 'published',
+    });
+    const bridge = new MockTool({ name: ToolNames.TOOL_CALL });
+    // A neutral target: PATH_ARG_KEYS (file_path/path/...) are rewritten on
+    // request.args during execution, which is not what this case measures.
+    const publishNote = new MockTool({
+      name: 'publish_note',
+      shouldDefer: true,
+      execute,
+      params: {
+        type: 'object',
+        properties: {
+          note_id: { type: 'string' },
+          body: { type: 'string' },
+        },
+        required: ['note_id', 'body'],
+        additionalProperties: false,
+      },
+    });
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName: new Map([
+          [bridge.name, bridge],
+          [publishNote.name, publishNote],
+        ]),
+        deferredHiddenNames: new Set([publishNote.name]),
+      });
+
+    const runBridged = async (
+      callId: string,
+      args: Record<string, unknown>,
+    ) => {
+      onAllToolCallsComplete.mockClear();
+      await scheduler.schedule(
+        {
+          callId,
+          name: ToolNames.TOOL_CALL,
+          args: { name: 'publish_note', arguments: args },
+          isClientInitiated: false,
+          prompt_id: 'prompt-bridge-clear',
+        },
+        new AbortController().signal,
+      );
+      await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+      return onAllToolCallsComplete.mock.calls[0][0][0] as ToolCall;
+    };
+
+    // Two bridged refusals take the marked channel to 2.
+    for (const batchId of [1, 2]) {
+      const completed = await runBridged(`clear-${batchId}`, {});
+      expect(completed.status).toBe('error');
+      if (completed.status === 'error') {
+        expect(completed.response.error?.message).not.toContain(
+          'RETRY LOOP DETECTED',
+        );
+      }
+    }
+
+    // A successful bridged execution of the SAME target clears both channels.
+    const succeeded = await runBridged('clear-success', {
+      note_id: 'n-1',
+      body: 'ok',
+    });
+    expect(succeeded.status).toBe('success');
+    expect(execute).toHaveBeenCalledTimes(1);
+
+    // Two more refusals restart at 1 instead of inheriting the stale count.
+    for (const batchId of [3, 4]) {
+      const completed = await runBridged(`clear-after-${batchId}`, {});
+      expect(completed.status).toBe('error');
+      if (completed.status === 'error') {
+        expect(completed.response.error?.message).not.toContain(
+          'RETRY LOOP DETECTED',
+        );
+      }
     }
   });
 

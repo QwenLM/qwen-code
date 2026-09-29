@@ -2882,12 +2882,15 @@ export class CoreToolScheduler {
   /**
    * Removes all validation retry counters for the given tool. Keys are
    * "<toolName>:<errorMessage>", so a plain `Map.delete(toolName)` would not
-   * match anything.
+   * match anything. The bridge-marked channel is cleared too: the two channels
+   * are one family for presence (see the prune in _schedule), so clearing must
+   * cover both or a successful execution of the target would leave its stale
+   * bridge-channel count behind to fire RETRY LOOP DETECTED prematurely.
    */
   private clearRetryCountsForTool(toolName: string): void {
-    const prefix = `${toolName}:`;
+    const prefixes = [`${toolName}:`, `${bridgeRetryToolName(toolName)}:`];
     for (const key of this.validationRetryCounts.keys()) {
-      if (key.startsWith(prefix)) {
+      if (prefixes.some((prefix) => key.startsWith(prefix))) {
         this.validationRetryCounts.delete(key);
       }
     }
@@ -2972,24 +2975,40 @@ export class CoreToolScheduler {
       // present in the current batch. Keeping every tracked tool's counters
       // whenever any current request matched caused stale counts for
       // unrelated tools to survive and fire RETRY LOOP DETECTED prematurely
-      // the next time those tools were used. A refused bridge request keeps
-      // the wrapper name (`tool_call`), so the channel-marked name of the
-      // validated target must join the presence set alongside it — but only
-      // for INVALID_TOOL_PARAMS refusals, the one error type that accrues
-      // below: an EXECUTION_DENIED (policy) refusal records nothing, so it
-      // must not keep the denied target's stale counters alive either.
+      // the next time those tools were used.
+      //
+      // A target's direct and bridge-marked channels are ONE family for
+      // presence: a request naming X preserves both `X` and
+      // `bridgeRetryToolName(X)`. Widening presence only for the bridged
+      // channel let alternating channels ACROSS batches prune each other — a
+      // bridged batch kept just the marked key and a direct batch just the
+      // bare one, so neither counter ever reached
+      // VALIDATION_RETRY_LOOP_THRESHOLD and a mixed-channel loop rode on
+      // without the stop directive. clearRetryCountsForTool clears both
+      // channels, so this widening cannot resurrect the stale bridge count
+      // that a resolved-and-executed target leaves behind.
+      //
+      // A refused bridge request keeps the wrapper name (`tool_call`), so the
+      // channel-marked name of the validated target must join the presence set
+      // alongside it — but only for INVALID_TOOL_PARAMS refusals, the one error
+      // type that accrues below: an EXECUTION_DENIED (policy) refusal records
+      // nothing, so it must not keep the denied target's stale counters alive
+      // either.
       if (this.validationRetryCounts.size > 0) {
         const currentToolNames = new Set(
-          requestsToProcess.flatMap((r) =>
-            r.bridgeResolutionError?.type ===
-              ToolErrorType.INVALID_TOOL_PARAMS &&
-            r.bridgeResolutionError.targetName !== undefined
-              ? [
-                  r.name,
-                  bridgeRetryToolName(r.bridgeResolutionError.targetName),
-                ]
-              : [r.name],
-          ),
+          requestsToProcess.flatMap((r) => {
+            const names = [r.name, bridgeRetryToolName(r.name)];
+            if (
+              r.bridgeResolutionError?.type ===
+                ToolErrorType.INVALID_TOOL_PARAMS &&
+              r.bridgeResolutionError.targetName !== undefined
+            ) {
+              names.push(
+                bridgeRetryToolName(r.bridgeResolutionError.targetName),
+              );
+            }
+            return names;
+          }),
         );
         for (const key of [...this.validationRetryCounts.keys()]) {
           const sep = key.indexOf(':');
