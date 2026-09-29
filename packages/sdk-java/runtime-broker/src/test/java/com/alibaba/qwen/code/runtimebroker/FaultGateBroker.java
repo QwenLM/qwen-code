@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.runtimebroker;
 
 import com.alibaba.fastjson2.JSON;
 import com.alibaba.fastjson2.JSONObject;
+import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.io.PrintStream;
@@ -78,11 +79,17 @@ final class FaultGateBroker {
                 .build();
         HttpRuntimeTransport runtime = new HttpRuntimeTransport(client,
                 Duration.ofMillis(config.getLongValue("requestTimeoutMillis")));
+        // A context selects managed-context/1: the provisioner then places
+        // every scope on the configured storage, with boot v2.
+        JSONObject context = config.getJSONObject("context");
         LocalProcessRuntimeProvisioner local =
                 new LocalProcessRuntimeProvisioner(List.of(
                         config.getString("node"), config.getString("cli"),
                         "managed-runtime-worker"),
-                        Path.of(config.getString("stateDir")), runtime);
+                        Path.of(config.getString("stateDir")), runtime,
+                        context == null ? null
+                                : placement -> context.getString(
+                                        "storageId"));
         String records = config.getString("records");
         RuntimeProvisioner provisioner = records == null ? local
                 : new RecoverableProcessProvisioner(local, runtime,
@@ -94,14 +101,27 @@ final class FaultGateBroker {
                 scope.getString("canonicalCwd"),
                 scope.getString("capabilityDigest"),
                 scope.getString("isolationClass"));
+        JdbcRuntimeBindingRepository bindings =
+                new JdbcRuntimeBindingRepository(dataSource,
+                        AesGcmSecretProtector.fromBase64("fault-gate",
+                                config.getString("secretKey")));
+        JdbcRuntimeSessionRepository sessions =
+                new JdbcRuntimeSessionRepository(dataSource);
+        FaultGateTransport transport = context == null
+                ? new FaultGateTransport(runtime)
+                : new FaultGateTransport(runtime, new ContextBinding(
+                        runtimeScope.getTenantId(),
+                        runtimeScope.getWorkspaceId(),
+                        Long.parseLong(runtimeScope.getWorkspaceGeneration()),
+                        context.getString("storageId"),
+                        context.getString("cwdRelative"),
+                        WorkspaceExecutionProfile.CONTEXT_CONFIG_REF,
+                        context.getLongValue("contextRevision")),
+                        bindings, sessions);
         return new RuntimeBrokerService(
                 harnessSessionId -> CompletableFuture.completedFuture(
                         runtimeScope),
-                provisioner, new FaultGateTransport(runtime),
-                new JdbcRuntimeBindingRepository(dataSource,
-                        AesGcmSecretProtector.fromBase64("fault-gate",
-                                config.getString("secretKey"))),
-                new JdbcRuntimeSessionRepository(dataSource),
+                provisioner, transport, bindings, sessions,
                 new JdbcToolExecutionRepository(dataSource),
                 config.getString("ownerId"),
                 Duration.ofMillis(config.getLongValue("operationLeaseMillis")),

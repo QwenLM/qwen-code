@@ -255,6 +255,15 @@ jobs:
             legacy_arch: ''
             rust_target: 'x86_64-unknown-linux-gnu'
             tauri_args: '--target x86_64-unknown-linux-gnu --bundles appimage,deb'
+          # 22.04's ARM image, not 24.04's, so both Linux legs share a glibc
+          # floor (2.35): an arm64 artifact built on 24.04 would need 2.39 and
+          # refuse to start on Ubuntu 22.04 / Debian 12 arm64, which the x64
+          # artifact still supports.
+          - name: 'Linux arm64'
+            os: 'ubuntu-22.04-arm'
+            legacy_arch: ''
+            rust_target: 'aarch64-unknown-linux-gnu'
+            tauri_args: '--target aarch64-unknown-linux-gnu --bundles appimage,deb'
     env:
       QWEN_CODE_COMMIT: '${{ needs.prepare.outputs.qwen_code_sha }}'
       QWEN_DESKTOP_TARGET: '${{ matrix.rust_target }}'
@@ -766,7 +775,9 @@ jobs:
           if [ "$ELECTRON_BRIDGE" = 'true' ]; then
             shopt -s nullglob
             windows_installers=(release-assets/*-setup.exe)
-            linux_appimages=(release-assets/*.AppImage)
+            # Pinned to the x64 AppImage: the bridge is x64-only on Linux, and
+            # a bare *.AppImage glob now matches the arm64 artifact too.
+            linux_appimages=(release-assets/*_amd64.AppImage)
             if [ "${#windows_installers[@]}" -ne 1 ] || [ "${#linux_appimages[@]}" -ne 1 ]; then
               echo '::error::The Electron bridge requires one Windows installer and one Linux AppImage.'
               exit 1

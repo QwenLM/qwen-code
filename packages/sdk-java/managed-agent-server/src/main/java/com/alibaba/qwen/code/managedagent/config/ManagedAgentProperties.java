@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.config;
 
 import java.time.Duration;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
@@ -12,6 +13,7 @@ public class ManagedAgentProperties {
     private final Dispatch dispatch = new Dispatch();
     private final Events events = new Events();
     private final RuntimeBroker runtimeBroker = new RuntimeBroker();
+    private String agentRevision = "1";
 
     public Harness getHarness() {
         return harness;
@@ -31,6 +33,14 @@ public class ManagedAgentProperties {
 
     public RuntimeBroker getRuntimeBroker() {
         return runtimeBroker;
+    }
+
+    public String getAgentRevision() {
+        return agentRevision;
+    }
+
+    public void setAgentRevision(String agentRevision) {
+        this.agentRevision = agentRevision;
     }
 
     public static class Harness {
@@ -270,6 +280,7 @@ public class ManagedAgentProperties {
         private String workspaceId = "";
         private String workspaceGeneration = "1";
         private String workspaceCwd = "";
+        private List<WorkspaceMount> workspaceMounts = List.of();
         private String isolationClass = "session";
         private String stateDirectory = "";
         private String credentialKeyId = "";
@@ -362,6 +373,17 @@ public class ManagedAgentProperties {
 
         public String getIsolationClass() {
             return isolationClass;
+        }
+
+        public List<WorkspaceMount> getWorkspaceMounts() {
+            return workspaceMounts;
+        }
+
+        public void setWorkspaceMounts(List<WorkspaceMount> workspaceMounts) {
+            this.workspaceMounts = workspaceMounts;
+        }
+
+        public record WorkspaceMount(String tenantId, String storageId, String root) {
         }
 
         public void setIsolationClass(String isolationClass) {

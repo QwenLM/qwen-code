@@ -615,6 +615,30 @@ class LocalProcessRuntimeProvisionerTest {
                 new InMemoryRuntimeBindingRepository();
 
         @Override
+        public RuntimeSessionRecord completeSessionRelease(RuntimeSessionRepository sessions,
+                RuntimeSessionRecord expected) {
+            return delegate.completeSessionRelease(sessions, expected);
+        }
+
+        @Override
+        public RuntimeBindingRecord recoverLost(RuntimeSessionRepository sessions,
+                ToolExecutionRepository executions, RuntimeBindingRecord expected) {
+            return delegate.recoverLost(sessions, executions, expected);
+        }
+
+        @Override
+        public RuntimeSessionRecord admitSession(RuntimeSessionRepository sessions,
+                RuntimeSessionRecord candidate) {
+            return delegate.admitSession(sessions, candidate);
+        }
+
+        @Override
+        public ToolExecutionRecord admitExecution(RuntimeSessionRepository sessions,
+                ToolExecutionRepository executions, ToolExecutionRecord candidate) {
+            return delegate.admitExecution(sessions, executions, candidate);
+        }
+
+        @Override
         public RuntimeBindingRecord findOrCreate(
                 RuntimeProvisionRequest request) {
             return delegate.findOrCreate(request);

@@ -48,6 +48,84 @@ public class ManagedWorkspaceRegistry {
                 key).isEmpty();
     }
 
+    public List<WorkspaceSummary> listReadable(String tenantId,
+            String actorId, String afterId, int limit) {
+        byte[] key = actorKey(tenantId, actorId);
+        return jdbc.query("SELECT r.workspace_id, r.display_name, r.state,"
+                        + " a.can_create FROM managed_workspace_registry r"
+                        + " JOIN managed_workspace_access a ON"
+                        + " a.tenant_id = r.tenant_id"
+                        + " AND a.workspace_id = r.workspace_id"
+                        + " AND CAST(CONCAT(a.tenant_id, '!') AS BINARY(513))"
+                        + " = CAST(CONCAT(r.tenant_id, '!') AS BINARY(513))"
+                        + " AND CAST(CONCAT(a.workspace_id, '!') AS BINARY(513))"
+                        + " = CAST(CONCAT(r.workspace_id, '!') AS BINARY(513))"
+                        + " WHERE r.tenant_id = ?"
+                        + " AND CAST(CONCAT(r.tenant_id, '!') AS BINARY(513))"
+                        + " = CAST(CONCAT(?, '!') AS BINARY(513))"
+                        + " AND a.actor_id = ? AND a.can_read = TRUE"
+                        + " AND (? IS NULL OR"
+                        + " CAST(CONCAT(r.workspace_id, '!') AS BINARY(513)) >"
+                        + " CAST(CONCAT(?, '!') AS BINARY(513)))"
+                        + " ORDER BY CAST(CONCAT(r.workspace_id, '!')"
+                        + " AS BINARY(513)) LIMIT ?",
+                (result, row) -> summary(result), tenantId, tenantId, key,
+                afterId, afterId, limit);
+    }
+
+    public WorkspaceSummary findReadable(String tenantId, String actorId,
+            String workspaceId) {
+        byte[] key = actorKey(tenantId, actorId);
+        List<WorkspaceSummary> rows = jdbc.query(
+                "SELECT r.workspace_id, r.display_name, r.state,"
+                        + " a.can_create FROM managed_workspace_registry r"
+                        + " JOIN managed_workspace_access a ON"
+                        + " a.tenant_id = r.tenant_id"
+                        + " AND a.workspace_id = r.workspace_id"
+                        + " AND CAST(CONCAT(a.tenant_id, '!') AS BINARY(513))"
+                        + " = CAST(CONCAT(r.tenant_id, '!') AS BINARY(513))"
+                        + " AND CAST(CONCAT(a.workspace_id, '!') AS BINARY(513))"
+                        + " = CAST(CONCAT(r.workspace_id, '!') AS BINARY(513))"
+                        + " WHERE r.tenant_id = ? AND r.workspace_id = ?"
+                        + " AND CAST(CONCAT(r.tenant_id, '!') AS BINARY(513))"
+                        + " = CAST(CONCAT(?, '!') AS BINARY(513))"
+                        + " AND CAST(CONCAT(r.workspace_id, '!') AS BINARY(513))"
+                        + " = CAST(CONCAT(?, '!') AS BINARY(513))"
+                        + " AND a.actor_id = ? AND a.can_read = TRUE",
+                (result, row) -> summary(result), tenantId, workspaceId,
+                tenantId, workspaceId, key);
+        return rows.isEmpty() ? null : rows.getFirst();
+    }
+
+    public WorkspaceSummary readableDefault(String tenantId,
+            String actorId) {
+        List<String> ids = jdbc.queryForList(
+                "SELECT workspace_id FROM managed_workspace_default"
+                        + " WHERE tenant_id = ?"
+                        + " AND CAST(CONCAT(tenant_id, '!') AS BINARY(513))"
+                        + " = CAST(CONCAT(?, '!') AS BINARY(513))",
+                String.class, tenantId, tenantId);
+        if (ids.isEmpty()) {
+            return null;
+        }
+        WorkspaceSummary found = findReadable(tenantId, actorId,
+                ids.getFirst());
+        return found != null && found.canCreateSession() ? found : null;
+    }
+
+    private static WorkspaceSummary summary(ResultSet result)
+            throws SQLException {
+        String state = result.getString("state");
+        return new WorkspaceSummary(result.getString("workspace_id"),
+                result.getString("display_name"), state,
+                result.getBoolean("can_create")
+                        && "ACTIVE".equals(state));
+    }
+
+    public record WorkspaceSummary(String workspaceId, String displayName,
+            String state, boolean canCreateSession) {
+    }
+
     public ResolvedBinding resolveForCreation(String tenantId,
             String actorId, WorkspaceSelection selection) {
         if (!TransactionSynchronizationManager.isActualTransactionActive()) {
