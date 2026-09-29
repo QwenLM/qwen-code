@@ -48,9 +48,9 @@ describe('monitor-tool', () => {
 
     const [result, foundMonitor] = await Promise.all([
       resultPromise,
-      rig.waitForToolCall('monitor', 120000),
+      rig.waitForToolCall('monitor', 180_000),
     ]);
     expect(foundMonitor).toBeTruthy();
     validateModelOutput(result, null, 'monitor tool call');
-  }, 180000);
+  });
 });

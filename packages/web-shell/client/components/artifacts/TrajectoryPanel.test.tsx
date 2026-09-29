@@ -217,6 +217,131 @@ const metricsOf = (container: HTMLElement) =>
   ).map((node) => node.textContent ?? '');
 
 describe('TrajectoryPanel', () => {
+  it('opens record details and invalidates them when a refreshed window reuses the key', async () => {
+    let textValue = 'first payload';
+    let failRefresh = false;
+    const loadPage = vi.fn(async () =>
+      failRefresh
+        ? page([], { replayError: 'temporary failure' })
+        : page([userText(textValue, 'same-record')]),
+    );
+    const container = await render(loadPage);
+    act(() =>
+      container
+        .querySelector<HTMLElement>('[data-testid="trajectory-row-user"]')!
+        .click(),
+    );
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="trajectory-selected"] + button',
+        )!
+        .click(),
+    );
+    expect(
+      container.querySelector('[data-testid="trajectory-inspector"]'),
+    ).not.toBeNull();
+    await act(async () => {
+      [
+        ...container.querySelectorAll<HTMLButtonElement>(
+          '[data-testid="trajectory-inspector"] button',
+        ),
+      ]
+        .find((button) => button.textContent === 'Body')!
+        .click();
+    });
+    expect(
+      text(container.querySelector('[data-testid="trajectory-inspector"] pre')),
+    ).toContain('first payload');
+
+    failRefresh = true;
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Refresh"]')!
+        .click(),
+    );
+    expect(
+      text(container.querySelector('[data-testid="trajectory-inspector"] pre')),
+    ).toContain('first payload');
+
+    failRefresh = false;
+    textValue = 'second payload';
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Refresh"]')!
+        .click(),
+    );
+    expect(
+      text(container.querySelector('[data-testid="trajectory-inspector"]')),
+    ).toContain('The record window changed');
+    expect(
+      text(container.querySelector('[data-testid="trajectory-inspector"]')),
+    ).not.toContain('second payload');
+
+    act(() =>
+      container
+        .querySelector<HTMLElement>('[data-testid="trajectory-row-user"]')!
+        .click(),
+    );
+    await act(async () => {
+      [
+        ...container.querySelectorAll<HTMLButtonElement>(
+          '[data-testid="trajectory-inspector"] button',
+        ),
+      ]
+        .find((button) => button.textContent === 'Body')!
+        .click();
+    });
+    expect(
+      text(container.querySelector('[data-testid="trajectory-inspector"] pre')),
+    ).toContain('second payload');
+  });
+
+  it('keeps the grid focused while an open inspector follows row selection', async () => {
+    const container = await render(async () => page(REAL_EVENTS));
+    act(() =>
+      container
+        .querySelector<HTMLElement>('[data-testid="trajectory-row-request"]')!
+        .click(),
+    );
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="trajectory-selected"] + button',
+        )!
+        .click(),
+    );
+    const grid = container.querySelector<HTMLElement>(
+      '[data-testid="trajectory-rows"]',
+    )!;
+    act(() => grid.focus());
+    act(() =>
+      grid.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }),
+      ),
+    );
+    expect(document.activeElement).toBe(grid);
+    expect(
+      text(container.querySelector('[data-testid="trajectory-inspector"]')),
+    ).not.toContain('Select a record');
+    act(() =>
+      container
+        .querySelector<HTMLElement>('[data-testid="trajectory-turn"]')!
+        .click(),
+    );
+    expect(
+      text(container.querySelector('[data-testid="trajectory-inspector"]')),
+    ).toContain('Turn selected. Select a record');
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="trajectory-inspector"] button[aria-label="Close details"]',
+        )!
+        .click();
+    });
+    expect(document.activeElement).toBe(grid);
+  });
+
   it('folds a real page into turns, requests and tools', async () => {
     const container = await render(async () => page(REAL_EVENTS));
 
