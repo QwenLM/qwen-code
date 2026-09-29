@@ -2236,5 +2236,48 @@ for (const theme of THEMES) {
       );
       await expect(drawerAside).toBeVisible();
     });
+
+    test(`rebuilt edit diff annotation`, async ({ page }, testInfo) => {
+      // The completed edit carries no recorded fileDiff, so the expanded
+      // card rebuilds the diff from the call's old/new text and shows the
+      // reconstruction note — the motivating state of #12919 that the
+      // transcript card otherwise renders with no visual witness.
+      const scenario = createWebShellDaemonScenario({
+        events: [
+          userTextEvent('Add a cache to getUser in routes.ts.', { id: 1 }),
+          toolCallEvent(
+            'call-edit-rebuilt',
+            'edit',
+            {
+              file_path: '/workspace/src/routes.ts',
+              old_string:
+                'export async function getUser(id: string) {\n  return db.query(id);\n}\n',
+              new_string:
+                'export async function getUser(id: string) {\n  const cached = cache.get(id);\n  if (cached) return cached;\n  const user = await db.query(id);\n  cache.set(id, user);\n  return user;\n}\n',
+            },
+            { id: 2 },
+          ),
+          assistantTextEvent('Added the cache to getUser.', { id: 3 }),
+          turnCompleteEvent('prompt-edit-rebuilt', { id: 4 }),
+        ],
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+
+      // The finished turn renders collapsed; expand its steps first so the
+      // edit tool line is reachable, then expand the card.
+      await page.getByRole('button', { name: 'Expand steps' }).click();
+
+      const editRow = page.getByRole('button', { name: 'Edit routes.ts' });
+      await editRow.click();
+      await expect(
+        page.getByText('Diff rebuilt from the tool call arguments'),
+      ).toBeVisible();
+      await captureScreenshot(page, `rebuilt-edit-diff-${theme}`);
+    });
   });
 }
