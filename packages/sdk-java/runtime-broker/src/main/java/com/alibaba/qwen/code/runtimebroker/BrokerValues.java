@@ -37,13 +37,51 @@ final class BrokerValues {
      * '?', so two identifiers could reach the Runtime as one.
      */
     static String requireWellFormed(String value, String name) {
-        if (value.codePoints().anyMatch(point ->
-                point >= Character.MIN_SURROGATE
-                        && point <= Character.MAX_SURROGATE)) {
+        if (!isWellFormed(value)) {
             throw new IllegalArgumentException(name
                     + " must be well-formed text");
         }
         return value;
+    }
+
+    /**
+     * Whether a value is JSON (maps with string keys, lists, strings,
+     * numbers, booleans and null) whose strings and keys are all well-formed
+     * text, for the same reason as {@link #requireWellFormed}: a tool input
+     * would reach the Runtime, and run, with '?' in place of an unpaired
+     * surrogate. Anything else, such as an array or a set the writer would
+     * also serialize, answers false.
+     */
+    static boolean isWellFormedJson(Object value) {
+        if (value instanceof String text) {
+            return isWellFormed(text);
+        }
+        if (value instanceof Map<?, ?> map) {
+            for (Map.Entry<?, ?> entry : map.entrySet()) {
+                if (!(entry.getKey() instanceof String key)
+                        || !isWellFormed(key)
+                        || !isWellFormedJson(entry.getValue())) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        if (value instanceof List<?> list) {
+            for (Object item : list) {
+                if (!isWellFormedJson(item)) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        return value == null || value instanceof Number
+                || value instanceof Boolean;
+    }
+
+    private static boolean isWellFormed(String value) {
+        return value.codePoints().noneMatch(point ->
+                point >= Character.MIN_SURROGATE
+                        && point <= Character.MAX_SURROGATE);
     }
 
     static URI requireOrigin(URI value, String name) {

@@ -228,13 +228,34 @@ class HttpRuntimeTransportTest {
                         on(runtime, session), "op", binding),
                 () -> transport.installContext(runtime.withState(
                         RuntimeBindingRecord.State.LOST, lease, Instant.now()),
-                        on(runtime, session), "op", binding));
+                        on(runtime, session), "op", binding),
+                // A READY binding asked to drain admits no new Session.
+                () -> transport.installContext(runtime.withDrainRequested(true,
+                        Instant.now()), on(runtime, session), "op", binding));
         captured.set(null);
         for (Runnable call : refused) {
             assertEquals("session must belong to a READY Runtime binding",
                     assertThrows(IllegalArgumentException.class, call::run).getMessage());
         }
+        // A Session on its way out of the binding it names.
+        for (RuntimeSessionRecord.State state : List.of(RuntimeSessionRecord.State.RELEASING,
+                RuntimeSessionRecord.State.RELEASED, RuntimeSessionRecord.State.FAILED)) {
+            assertEquals("session must be acquiring or ready",
+                    assertThrows(IllegalArgumentException.class, () -> transport.installContext(
+                            runtime, on(runtime, session).withState(state, Instant.now()),
+                            "op", binding)).getMessage(), state.name());
+        }
         assertNull(captured.get());
+        // Acquisition installs while the Session is still ACQUIRING.
+        Map<String, Object> acquiring = ManagedContextProtocol.receipt(seed, "op", "session",
+                binding);
+        reply.set(json(200, JsonCodec.encode(acquiring)));
+        assertTrue(BrokerValues.sameJsonMap(acquiring, transport.installContext(runtime,
+                on(runtime, session).withState(RuntimeSessionRecord.State.ACQUIRING,
+                        Instant.now()), "op", binding)
+                .toCompletableFuture().get(2, TimeUnit.SECONDS)));
+        assertEquals(ManagedContextProtocol.CONTEXT_PATH, capturedPath.get());
+        captured.set(null);
         // Under session isolation, the Runtime of the Session's own Harness
         // Session installs.
         RuntimeBindingRecord harnessARuntime = ready(new RuntimeProvisionRequest(isolated,
@@ -253,21 +274,48 @@ class HttpRuntimeTransportTest {
         RuntimeLease lease = contextLease(ManagedContextProtocolTest.seed());
         RuntimeSession session = session("session", ManagedContextProtocolTest.request());
         captured.set(null);
-        for (String field : List.of("sessionId", "promptId", "callId", "argsDigest")) {
-            Map<String, Object> reference = new LinkedHashMap<>(Map.of("sessionId", "session",
-                    "promptId", "prompt", "callId", "call", "argsDigest", "digest",
-                    "toolName", "read_file", "input", Map.of()));
-            reference.put(field, "p\ud800");
-            assertThrows(IllegalArgumentException.class,
-                    () -> transport.execute(lease, session, reference), field);
-            assertThrows(IllegalArgumentException.class,
-                    () -> transport.status(lease, session, reference, 0), field);
-            assertThrows(IllegalArgumentException.class,
-                    () -> transport.cancel(lease, session, reference), field);
+        // A lone high and a lone low surrogate: the writer sends each as '?'.
+        for (String surrogate : List.of("\ud800", "\udc00")) {
+            for (String field : List.of("sessionId", "promptId", "callId", "argsDigest")) {
+                Map<String, Object> reference = new LinkedHashMap<>(Map.of("sessionId",
+                        "session", "promptId", "prompt", "callId", "call", "argsDigest",
+                        "digest", "toolName", "read_file", "input", Map.of()));
+                reference.put(field, "p" + surrogate);
+                assertThrows(IllegalArgumentException.class,
+                        () -> transport.execute(lease, session, reference), field);
+                assertThrows(IllegalArgumentException.class,
+                        () -> transport.status(lease, session, reference, 0), field);
+                assertThrows(IllegalArgumentException.class,
+                        () -> transport.cancel(lease, session, reference), field);
+            }
+            // The Worker would run the rewritten tool name or input.
+            List<Map<String, Object>> calls = List.of(
+                    Map.of("toolName", "read" + surrogate),
+                    Map.of("input", Map.of("command", "rm file" + surrogate)),
+                    Map.of("input", Map.of("path" + surrogate, "a")),
+                    Map.of("input", Map.of("nested", List.of(Map.of("args",
+                            List.of("x", "y" + surrogate))))),
+                    // Not JSON, though the writer would serialize it.
+                    Map.of("input", Map.of("command", new String[] {"rm file" + surrogate})));
+            for (Map<String, Object> call : calls) {
+                Map<String, Object> reference = new LinkedHashMap<>(Map.of("sessionId",
+                        "session", "promptId", "prompt", "callId", "call", "argsDigest",
+                        "digest", "toolName", "read_file", "input", Map.of()));
+                reference.putAll(call);
+                assertThrows(IllegalArgumentException.class,
+                        () -> transport.execute(lease, session, reference), call.toString());
+                assertThrows(IllegalArgumentException.class,
+                        () -> transport.executeV3(lease, session, reference, Map.of(
+                                "tenantId", "tenant", "sessionId", "harness", "turnId", "prompt",
+                                "executionCallId", "execution", "bindingGeneration", "1",
+                                "capturePolicy", "complete_required")), call.toString());
+            }
         }
         assertNull(captured.get());
-        assertThrows(IllegalArgumentException.class,
-                () -> new RuntimeSession("harness", "s\ud800", "bootstrap", scope));
+        for (String surrogate : List.of("\ud800", "\udc00")) {
+            assertThrows(IllegalArgumentException.class,
+                    () -> new RuntimeSession("harness", "s" + surrogate, "bootstrap", scope));
+        }
     }
 
     @Test
@@ -793,6 +841,25 @@ class HttpRuntimeTransportTest {
                 toolSession(), reference).toCompletableFuture()
                 .get(2, TimeUnit.SECONDS);
 
+        assertEquals(JSON.valueToTree(input), JSON.readTree(captured.get())
+                .required("input"));
+    }
+
+    @Test
+    void sendsWellFormedUnicodeToolNamesAndInputUnchanged() throws Exception {
+        Map<String, Object> input = new LinkedHashMap<>();
+        input.put("路径-𝄞", List.of("é", "𝄞", Map.of("键", "値-😀")));
+        Map<String, Object> reference = toolReference();
+        reference.put("toolName", "读取-𝄞");
+        reference.put("input", input);
+        reply.set(json(200, JSON.writeValueAsBytes(findIn(toolSuite("execute"),
+                "success").required("expected").required("body"))));
+
+        transport.execute(toolLease(server.getAddress().getPort()),
+                toolSession(), reference).toCompletableFuture()
+                .get(2, TimeUnit.SECONDS);
+
+        assertEquals("读取-𝄞", JSON.readTree(captured.get()).required("toolName").asText());
         assertEquals(JSON.valueToTree(input), JSON.readTree(captured.get())
                 .required("input"));
     }
