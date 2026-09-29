@@ -12112,7 +12112,12 @@ export function App({
       modelSettingScope,
       'fastModel',
     );
-    return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+    // The CLI picker may persist `authType:id\0<baseUrl>` (#12760); decode
+    // like the vision sibling so the dialog highlights the pinned row
+    // instead of falling to the list head. The persisted value keeps the
+    // suffix — this is a read-side strip only.
+    if (typeof value !== 'string' || !value.trim()) return undefined;
+    return decodeVisionModelForPicker(value.trim());
   })();
   const currentAdvisorModel = readScopedModelSetting(
     workspaceSettings,
@@ -18120,6 +18125,24 @@ export function App({
     (modelId: string) => {
       if (!projectFeaturesAvailable) return;
       if (!workspaceContextActive) {
+        // This picker cannot distinguish same-id rows by endpoint, so writing
+        // the bare id would erase a live `authType:id\0<baseUrl>` pin the CLI
+        // picker made (#12760). Confirming the already-pinned row leaves the
+        // setting untouched.
+        const existingFast = readScopedModelSetting(
+          workspaceSettings,
+          modelSettingScope,
+          'fastModel',
+        );
+        if (
+          typeof existingFast === 'string' &&
+          existingFast.includes('\0') &&
+          extractBareModelId(
+            decodeVisionModelForPicker(existingFast.trim()),
+          ) === modelId
+        ) {
+          return;
+        }
         void setWorkspaceSetting(modelSettingScope, 'fastModel', modelId)
           .then(() => {
             void reloadWorkspaceSettings().catch((error: unknown) => {
@@ -18198,6 +18221,7 @@ export function App({
       projectFeaturesAvailable,
       setWorkspaceSetting,
       workspaceContextActive,
+      workspaceSettings,
     ],
   );
 
