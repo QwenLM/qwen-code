@@ -34,6 +34,7 @@ import {
   SessionTranscriptDurabilityError,
   buildApiHistoryFromConversation,
   computeUniqueBranchTitle,
+  getApiHistoryPromptId,
   normalizeDerivedBranchTitle,
   getResumePromptTokenCount,
   getResumeTokenCounts,
@@ -4589,10 +4590,14 @@ describe('SessionService', () => {
 
   describe('buildApiHistoryFromConversation', () => {
     it('should return linear messages when no compression checkpoint exists', () => {
+      const identifiedUser: ChatRecord = {
+        ...recordA1,
+        promptId: 'prompt-1',
+      };
       const assistantA1: ChatRecord = {
         ...recordB2,
         sessionId: sessionIdA,
-        parentUuid: recordA1.uuid,
+        parentUuid: identifiedUser.uuid,
       };
 
       const conversation: ConversationRecord = {
@@ -4600,12 +4605,28 @@ describe('SessionService', () => {
         projectHash: 'test-project-hash',
         startTime: '2024-01-01T00:00:00Z',
         lastUpdated: '2024-01-01T00:00:00Z',
-        messages: [recordA1, assistantA1],
+        messages: [identifiedUser, assistantA1],
       };
 
       const history = buildApiHistoryFromConversation(conversation);
 
-      expect(history).toEqual([recordA1.message, assistantA1.message]);
+      expect(
+        history.map((content) => ({
+          role: content.role,
+          parts: content.parts,
+        })),
+      ).toEqual([
+        {
+          role: identifiedUser.message!.role,
+          parts: identifiedUser.message!.parts,
+        },
+        {
+          role: assistantA1.message!.role,
+          parts: assistantA1.message!.parts,
+        },
+      ]);
+      expect(getApiHistoryPromptId(history[0]!)).toBe('prompt-1');
+      expect(JSON.stringify(history[0])).not.toContain('prompt-1');
     });
 
     it('keeps Realtime dialogue out of backend model history', () => {
@@ -5432,6 +5453,65 @@ describe('SessionService', () => {
       expect(telemetry.systemPayload.uiEvent.prompt_id).toBe(
         `${newId}#Explore#0`,
       );
+    });
+
+    it('remaps record and chat_compression promptIds into the fork', async () => {
+      // Forked ids must remain visible to the new session's seed.
+      const oldId = '71717171-7171-7171-7171-717171717171';
+      const newId = '81818181-8181-8181-8181-818181818181';
+      const { file, lines } = seedSession(oldId);
+      const userRecord = {
+        ...(lines[0] as Record<string, unknown>),
+        promptId: `${oldId}########0`,
+      };
+      fs.writeFileSync(
+        file,
+        [
+          userRecord,
+          lines[1]!,
+          {
+            uuid: 'compression-1',
+            parentUuid: 'u2',
+            sessionId: oldId,
+            type: 'system',
+            subtype: 'chat_compression',
+            timestamp: '2026-04-22T00:00:02.000Z',
+            cwd,
+            version: 'test',
+            systemPayload: {
+              info: {
+                originalTokenCount: 100,
+                newTokenCount: 40,
+                compressionStatus: 'compressed',
+              },
+              compressedHistory: [
+                { role: 'user', parts: [{ text: 'summary' }] },
+              ],
+              promptIds: [`${oldId}########0`, null],
+            },
+          },
+        ]
+          .map((record) => JSON.stringify(record))
+          .join('\n') + '\n',
+      );
+
+      const result = await service.forkSession(oldId, newId);
+      const written = fs
+        .readFileSync(result.filePath, 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line));
+
+      const copiedUser = written.find((record) => record.uuid === 'u1');
+      expect(copiedUser.promptId).toBe(`${newId}########0`);
+
+      const copiedCompression = written.find(
+        (record) => record.subtype === 'chat_compression',
+      );
+      expect(copiedCompression.systemPayload.promptIds).toEqual([
+        `${newId}########0`,
+        null,
+      ]);
     });
 
     it('does not copy source turn_result identities into a fork', async () => {

@@ -37,11 +37,14 @@ describe('monitor-tool', () => {
         'Set description to "test events". After starting the monitor, just say "Monitor launched."',
     );
 
+    // The monitor call typically sits behind a ToolSearch roundtrip, so the
+    // model needs two chained turns before the tool call lands in telemetry.
+    // On a loaded Docker leg that exceeds the 60s CI default (#12962).
     const [result, foundMonitor] = await Promise.all([
       resultPromise,
-      rig.waitForToolCall('monitor'),
+      rig.waitForToolCall('monitor', 180_000),
     ]);
     expect(foundMonitor).toBeTruthy();
     validateModelOutput(result, null, 'monitor tool call');
-  }, 60000);
+  });
 });

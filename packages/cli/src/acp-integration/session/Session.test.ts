@@ -10373,6 +10373,7 @@ describe('Session', () => {
               withDisplayText
                 ? { displayText: 'visible prompt', hookContext: '' }
                 : undefined,
+              expect.stringContaining('test-session-id########'),
               currentPromptId,
             );
             return Promise.resolve(createEmptyStream());
@@ -10395,7 +10396,7 @@ describe('Session', () => {
           }
           expect(
             mockChatRecordingService.recordUserMessage.mock.calls.map(
-              (args) => args[3],
+              (args) => args[4],
             ),
           ).toEqual(['daemon-first', 'daemon-second']);
         },
@@ -10414,6 +10415,7 @@ describe('Session', () => {
           'untrusted identity',
           undefined,
           undefined,
+          expect.stringContaining('test-session-id########'),
           undefined,
         );
       });
@@ -11490,6 +11492,7 @@ describe('Session', () => {
         '原始语音文本',
         undefined,
         undefined,
+        expect.stringContaining('test-session-id########'),
         trustedContext.promptId,
       );
       expect(textParts(firstSentMessage())).toEqual([
@@ -11539,6 +11542,7 @@ describe('Session', () => {
           hookContext: '',
           inputAnnotations: expectedAnnotations,
         },
+        expect.stringContaining('test-session-id########'),
         'tag-prompt',
       );
       expect(textParts(firstSentMessage())).toEqual(['model-only prompt']);
@@ -11559,6 +11563,7 @@ describe('Session', () => {
           'hello',
           undefined,
           undefined,
+          expect.stringContaining('test-session-id########'),
           undefined,
         );
       },
@@ -11588,6 +11593,7 @@ describe('Session', () => {
           hookContext: '',
           inputAnnotations: [valid],
         },
+        expect.stringContaining('test-session-id########'),
         undefined,
       );
     });
@@ -11612,6 +11618,7 @@ describe('Session', () => {
         'hello',
         undefined,
         undefined,
+        expect.stringContaining('test-session-id########'),
         undefined,
       );
     });
@@ -11669,6 +11676,7 @@ describe('Session', () => {
             hookContext: '',
             resourceLinks: expectedLinks,
           },
+          expect.stringContaining('test-session-id########'),
           trustedContext.promptId,
         );
         expect(textParts(firstSentMessage())).toEqual([
@@ -11721,6 +11729,7 @@ describe('Session', () => {
           hookContext: '',
           attachmentReferences: [imageReference, fileReference],
         },
+        expect.stringContaining('test-session-id########'),
         undefined,
       );
     });
@@ -11748,6 +11757,7 @@ describe('Session', () => {
         'describe these',
         undefined,
         expect.objectContaining({ attachmentReferences }),
+        expect.stringContaining('test-session-id########'),
         undefined,
       );
     });
@@ -11777,6 +11787,7 @@ describe('Session', () => {
         expect.objectContaining({
           attachmentReferences: [attachmentReference],
         }),
+        expect.stringContaining('test-session-id########'),
         undefined,
       );
     });
@@ -16654,6 +16665,7 @@ describe('Session', () => {
         '3',
         undefined,
         undefined,
+        'test-session-id########3',
         undefined,
       );
       expect(mockLlmClient.tryCompressChat).toHaveBeenCalledWith(
@@ -16683,6 +16695,7 @@ describe('Session', () => {
         'internal channel instructions\n\nhello',
         undefined,
         { displayText: 'hello', hookContext: '' },
+        expect.stringContaining('test-session-id########'),
         undefined,
       );
       expect(
@@ -28005,6 +28018,7 @@ describe('Session', () => {
           '/btw question',
           undefined,
           undefined,
+          expect.stringContaining('test-session-id########'),
           undefined,
         );
         expect(
@@ -28125,6 +28139,7 @@ describe('Session', () => {
           '/advisor check my work',
           undefined,
           undefined,
+          expect.stringContaining('test-session-id########'),
           'daemon-advisor',
         );
       });
@@ -28181,6 +28196,7 @@ describe('Session', () => {
               },
             ],
           },
+          expect.stringContaining('test-session-id########'),
           'daemon-advisor',
         );
       });
@@ -31584,6 +31600,7 @@ describe('Session', () => {
           'hello',
           permit,
           undefined,
+          expect.stringContaining('test-session-id########'),
           undefined,
         );
         expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(permit);
@@ -36256,10 +36273,62 @@ describe('Session', () => {
 
       describe('PreToolUse hook', () => {
         it('fires PreToolUse hook before tool execution', async () => {
+          const seen: string[] = [];
+          const definition = (label: string): core.HookDefinition[] => [
+            {
+              hooks: [
+                {
+                  type: core.HookType.Function,
+                  name: label,
+                  errorMessage: 'failed',
+                  callback: async () => {
+                    seen.push(label);
+                    return true;
+                  },
+                },
+              ],
+            },
+          ];
+          Object.assign(mockConfig, {
+            getAllowedHttpHookUrls: () => [],
+            getAllowPrivateNetworkHooks: () => false,
+            getSystemHooks: () => ({}),
+            getUserHooks: () => ({ PreToolUse: definition('G') }),
+            getProjectHooks: () => ({}),
+            getExtensions: () => [],
+            isTrustedFolder: () => true,
+            getTranscriptPath: () => '/tmp/transcript',
+            getWorkingDir: () => '/tmp',
+            getSessionSourceType: () => undefined,
+            getSessionSourceId: () => undefined,
+          });
+          const system = new core.HookSystem(mockConfig);
+          mockConfig.getHookSystem = vi.fn().mockReturnValue(system);
+          await system.initialize();
+          const owner = {
+            runtimeId: system.runtimeId,
+            sessionId: mockConfig.getSessionId(),
+            agentId: 'agent-A',
+          };
+          for (const agentId of ['agent-A', 'agent-B'])
+            system
+              .getRegistry()
+              .addAgentHooks({ PreToolUse: definition(agentId) }, agentId, {
+                owner: { ...owner, agentId },
+              });
           const messageBus = {
-            request: vi.fn().mockResolvedValue({
-              success: true,
-              output: {},
+            publish: vi.fn(),
+            request: vi.fn(async (request: core.HookExecutionRequest) => {
+              if (request.eventName === 'PreToolUse')
+                await core.runWithHookExecutionOwner(request.owner, () =>
+                  system.firePreToolUseEvent(
+                    String(request.input['tool_name']),
+                    request.input['tool_input'] as Record<string, unknown>,
+                    String(request.input['tool_use_id']),
+                    core.PermissionMode.Default,
+                  ),
+                );
+              return { success: true, output: {} };
             }),
           };
           mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
@@ -36300,14 +36369,19 @@ describe('Session', () => {
             ]),
           );
 
-          await session.prompt({
-            sessionId: 'test-session-id',
-            prompt: [{ type: 'text', text: 'read the file' }],
-          });
+          await core.runWithHookExecutionOwner(owner, () =>
+            session.prompt({
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'read the file' }],
+            }),
+          );
 
+          expect(seen.sort()).toEqual(['G', 'agent-A']);
+          expect(executeSpy).toHaveBeenCalled();
           expect(messageBus.request).toHaveBeenCalledWith(
             expect.objectContaining({
               eventName: 'PreToolUse',
+              owner,
               input: expect.objectContaining({
                 tool_name: 'read_file',
                 tool_input: { path: '/tmp/test.txt' },
