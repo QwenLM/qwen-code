@@ -1,0 +1,84 @@
+.inspector {
+  flex: 0 1 32%;
+  min-height: 120px;
+  max-height: 240px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--border);
+  background: var(--background);
+  font-size: 12px;
+}
+
+.header,
+.tabs,
+.notice {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+}
+
+.header h3 {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+.header button,
+.tabs button,
+.notice button,
+.content button {
+  border: 0;
+  border-radius: 4px;
+  padding: 3px 6px;
+  background: transparent;
+  color: var(--foreground);
+  cursor: pointer;
+}
+
+.header button:hover,
+.tabs button:hover,
+.notice button:hover,
+.content button:hover {
+  background: var(--muted);
+}
+
+.tabs {
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+}
+
+.tabs button[aria-pressed='true'] {
+  color: var(--primary);
+  box-shadow: inset 0 -2px 0 var(--primary);
+}
+
+.notice {
+  color: var(--muted-foreground);
+}
+
+.content {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 8px;
+}
+
+.field {
+  margin-bottom: 8px;
+}
+.fieldLabel {
+  color: var(--muted-foreground);
+}
+.field pre {
+  margin: 3px 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono, ui-monospace, monospace);
+}

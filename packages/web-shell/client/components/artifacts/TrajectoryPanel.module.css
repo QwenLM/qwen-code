@@ -113,6 +113,17 @@
   white-space: nowrap;
 }
 
+.selectedLine {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+}
+
+.selectedLine .selectedInfo {
+  flex: 1;
+  min-width: 0;
+}
+
 .contextNotice {
   color: var(--muted-foreground);
 }
@@ -201,6 +212,10 @@
   min-height: 0;
   display: flex;
   flex-direction: column;
+}
+
+.tableWrapWithInspector {
+  min-height: 120px;
 }
 
 .placeholder {

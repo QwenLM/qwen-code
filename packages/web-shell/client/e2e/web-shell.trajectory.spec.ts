@@ -165,6 +165,72 @@ function mountedRows(page: Page): Locator {
 }
 
 test.describe('trajectory panel', () => {
+  test('inspects a selected tool without fetching more transcript data @smoke', async ({
+    page,
+  }, testInfo) => {
+    await page.setViewportSize({ width: 2400, height: 900 });
+    const grid = await openTrajectory(
+      page,
+      String(testInfo.project.use.baseURL),
+    );
+    let detailRequests = 0;
+    page.on('request', (request) => {
+      if (/\/transcript(?:\?|$)|\/attachments?\//.test(request.url())) {
+        detailRequests += 1;
+      }
+    });
+    const tool = page.getByTestId('trajectory-row-tool').last();
+    await tool.click();
+    await page.getByRole('button', { name: 'View details' }).click();
+    const inspector = page.getByTestId('trajectory-inspector');
+    await expect(inspector).toBeVisible();
+    await expect(tool).toBeInViewport();
+    await inspector.getByRole('button', { name: 'Input' }).click();
+    await expect(inspector).toContainText(`/workspace/demo/note-${TURNS}.txt`);
+    await inspector.getByRole('button', { name: 'Output' }).click();
+    await expect(inspector).toContainText('unrecorded');
+    const evidenceDir = resolve(
+      process.cwd(),
+      '../../.qwen/e2e-tests/trajectory-pr2',
+    );
+    mkdirSync(evidenceDir, { recursive: true });
+    const panel = page.getByTestId('trajectory-panel');
+    const resizeHandle = page
+      .locator('[role="separator"][aria-orientation="vertical"]')
+      .last();
+    for (const width of [320, 960]) {
+      const current = (await panel.boundingBox())!.width;
+      const handle = (await resizeHandle.boundingBox())!;
+      await page.mouse.move(
+        handle.x + handle.width / 2,
+        handle.y + handle.height / 2,
+      );
+      await page.mouse.down();
+      await page.mouse.move(
+        handle.x + handle.width / 2 + current - width,
+        handle.y + handle.height / 2,
+        { steps: 5 },
+      );
+      await page.mouse.up();
+      await expect
+        .poll(async () => Math.round((await panel.boundingBox())!.width))
+        .toBe(width);
+      await expect(tool).toBeInViewport();
+      expect(
+        await panel.evaluate(
+          (element) => element.scrollWidth - element.clientWidth,
+        ),
+      ).toBeLessThanOrEqual(1);
+      await panel.screenshot({
+        path: resolve(evidenceDir, `inspector-${width}.png`),
+      });
+    }
+    await inspector.getByRole('button', { name: 'Close details' }).click();
+    await expect(inspector).toHaveCount(0);
+    await expect(grid).toBeFocused();
+    expect(detailRequests).toBe(0);
+  });
+
   for (const { language, theme } of [
     { language: 'en', theme: 'dark' },
     { language: 'zh-CN', theme: 'light' },

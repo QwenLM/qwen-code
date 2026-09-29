@@ -43,6 +43,7 @@ import {
 } from '../../trajectory/timelineRange';
 import { summarizeTrajectory } from '../../trajectory/summarizeTrajectory';
 import { TrajectoryOverview } from './TrajectoryOverview';
+import { TrajectoryInspector } from './TrajectoryInspector';
 import styles from './TrajectoryPanel.module.css';
 
 /** Every row is one line and every row is this tall, turn headers included. */
@@ -284,6 +285,14 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
   } = useTrajectoryWindow(loadPage);
 
   const [selectedKey, setSelectedKey] = useState<string | undefined>(undefined);
+  const [inspectorSelection, setInspectorSelection] = useState<
+    { of: Trajectory; loader: TrajectoryPageLoader; key: string } | undefined
+  >();
+  const [inspectorOpen, setInspectorOpen] = useState(false);
+  useEffect(() => {
+    setInspectorOpen(false);
+    setInspectorSelection(undefined);
+  }, [loadPage]);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const settledOnceRef = useRef(false);
   /** Last offset this panel knows the reader at; see the resize effect. */
@@ -427,14 +436,26 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
     [selectedKey, visualRows],
   );
 
+  useLayoutEffect(() => {
+    if (!inspectorOpen || selectedIndex < 0) return;
+    const frame = requestAnimationFrame(() => {
+      virtualizer.scrollToIndex(selectedIndex, { align: 'auto' });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [inspectorOpen, selectedIndex, virtualizer]);
+
   const moveSelection = useCallback(
     (nextIndex: number) => {
       if (visualRows.length === 0) return;
       const clamped = Math.min(Math.max(nextIndex, 0), visualRows.length - 1);
-      setSelectedKey(visualRows[clamped]!.key);
+      const key = visualRows[clamped]!.key;
+      setSelectedKey(key);
+      if (inspectorOpen && trajectory && loadPage) {
+        setInspectorSelection({ of: trajectory, loader: loadPage, key });
+      }
       virtualizer.scrollToIndex(clamped, { align: 'auto' });
     },
-    [virtualizer, visualRows],
+    [inspectorOpen, loadPage, trajectory, virtualizer, visualRows],
   );
 
   /**
@@ -442,8 +463,32 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
    * click has to hand focus back to it: the rows themselves are not focusable,
    * and leaving focus on the document would strand the arrow keys.
    */
-  const selectRow = useCallback((key: string) => {
-    setSelectedKey(key);
+  const selectRow = useCallback(
+    (key: string) => {
+      setSelectedKey(key);
+      if (inspectorOpen && trajectory && loadPage) {
+        setInspectorSelection({ of: trajectory, loader: loadPage, key });
+      }
+      scrollRef.current?.focus({ preventScroll: true });
+    },
+    [inspectorOpen, trajectory, loadPage],
+  );
+
+  const openInspector = useCallback(() => {
+    if (!trajectory || !loadPage || !selectedKey) return;
+    const row = trajectory.rows.find((item) => item.key === selectedKey);
+    if (!row) return;
+    setInspectorSelection({
+      of: trajectory,
+      loader: loadPage,
+      key: selectedKey,
+    });
+    setInspectorOpen(true);
+  }, [trajectory, loadPage, selectedKey]);
+
+  const closeInspector = useCallback(() => {
+    setInspectorOpen(false);
+    setInspectorSelection(undefined);
     scrollRef.current?.focus({ preventScroll: true });
   }, []);
 
@@ -459,6 +504,11 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
         return;
       }
       if (visualRows.length === 0) return;
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        openInspector();
+        return;
+      }
       const current = selectedIndex < 0 ? -1 : selectedIndex;
       if (event.key === 'ArrowDown') {
         event.preventDefault();
@@ -474,7 +524,7 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
         moveSelection(visualRows.length - 1);
       }
     },
-    [moveSelection, range, selectedIndex, setRange, visualRows],
+    [moveSelection, openInspector, range, selectedIndex, setRange, visualRows],
   );
 
   const summary = useMemo(
@@ -482,6 +532,13 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
     [trajectory],
   );
   const selectedEntry = visualRows.find((entry) => entry.key === selectedKey);
+  const inspectorCurrent =
+    inspectorSelection !== undefined &&
+    inspectorSelection.of === trajectory &&
+    inspectorSelection.loader === loadPage;
+  const inspectorRow = inspectorCurrent
+    ? trajectory?.rows.find((row) => row.key === inspectorSelection.key)
+    : undefined;
   const selectedText = selectedEntry
     ? selectedEntry.kind === 'turn'
       ? t('trajectory.selected.turn', {
@@ -710,12 +767,27 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
       />
 
       <div className={styles.context}>
-        <div
-          className={styles.selectedInfo}
-          data-testid="trajectory-selected"
-          aria-live="polite"
-        >
-          {selectedText}
+        <div className={styles.selectedLine}>
+          <div
+            className={styles.selectedInfo}
+            data-testid="trajectory-selected"
+            aria-live="polite"
+          >
+            {selectedText}
+          </div>
+          <button
+            type="button"
+            className={styles.headerButton}
+            onClick={openInspector}
+            disabled={
+              !trajectory ||
+              !loadPage ||
+              !selectedKey ||
+              !trajectory.rowIndexByKey.has(selectedKey)
+            }
+          >
+            {t('trajectory.inspector.open')}
+          </button>
         </div>
         <div
           className={styles.contextNotice}
@@ -759,7 +831,6 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
             .join(' · ') || (rangeCounts ? '' : '\u00a0')}
         </div>
       </div>
-
       <div className={styles.errorSlot}>
         {error !== undefined && (
           <div className={styles.error} role="alert">
@@ -781,7 +852,9 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
         )}
       </div>
 
-      <div className={styles.tableWrap}>
+      <div
+        className={`${styles.tableWrap} ${inspectorOpen ? styles.tableWrapWithInspector : ''}`}
+      >
         {visualRows.length === 0 ? (
           // An error with nothing folded is already stated by the alert above;
           // repeating it here as a placeholder would say it twice.
@@ -914,6 +987,25 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
           </>
         )}
       </div>
+      {inspectorOpen &&
+        inspectorSelection !== undefined &&
+        inspectorSelection.loader === loadPage && (
+          <TrajectoryInspector
+            row={inspectorRow}
+            stale={!inspectorCurrent}
+            turnSelected={selectedEntry?.kind === 'turn'}
+            title={inspectorRow ? labelOf(inspectorRow, t).text : undefined}
+            hiddenByRange={
+              !!(
+                range &&
+                inspectorRow &&
+                !visualRows.some((entry) => entry.key === inspectorRow.key)
+              )
+            }
+            onClearRange={() => setRange(undefined)}
+            onClose={closeInspector}
+          />
+        )}
     </div>
   );
 }
