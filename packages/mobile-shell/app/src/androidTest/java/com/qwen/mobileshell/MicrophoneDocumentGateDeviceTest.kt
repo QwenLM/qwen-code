@@ -24,6 +24,7 @@ class MicrophoneDocumentGateDeviceTest {
                 instrumentation.waitForIdleSync()
                 fixture.scenario.onActivity { activity ->
                     assertEquals(List(attempt + 1) { Activity.RESULT_CANCELED }, fixture.results)
+                    assertTrue("Cancelled results must have no payload", fixture.payloads.all { it == null })
                     val dialog = field(activity, "activeDialog") as AlertDialog
                     assertTrue(dialog.isShowing)
                     dialog.getButton(AlertDialog.BUTTON_NEGATIVE).performClick()
@@ -40,6 +41,7 @@ class MicrophoneDocumentGateDeviceTest {
             instrumentation.waitForIdleSync()
             fixture.scenario.onActivity { activity ->
                 assertEquals(listOf(Activity.RESULT_CANCELED), fixture.results)
+                assertEquals(listOf<Intent?>(null), fixture.payloads)
                 val dialog = field(activity, "activeDialog") as AlertDialog
                 assertTrue(dialog.isShowing)
                 dialog.cancel()
@@ -59,6 +61,7 @@ class MicrophoneDocumentGateDeviceTest {
             instrumentation.waitForIdleSync()
             fixture.scenario.onActivity { activity ->
                 assertEquals(listOf(Activity.RESULT_CANCELED), fixture.results)
+                assertEquals(listOf<Intent?>(null), fixture.payloads)
                 assertNull(field(activity, "activeDialog"))
             }
         }
@@ -67,6 +70,7 @@ class MicrophoneDocumentGateDeviceTest {
     private class Fixture : AutoCloseable {
         val scenario = ActivityScenario.launch(MainActivity::class.java)
         val results = mutableListOf<Int>()
+        val payloads = mutableListOf<Intent?>()
         lateinit var launcher: ActivityResultLauncher<Intent>
         lateinit var view: WebView
 
@@ -80,7 +84,7 @@ class MicrophoneDocumentGateDeviceTest {
                 setField(activity, "microphoneAuthorized", true)
                 launcher = activity.activityResultRegistry.register("microphone-document-test", ActivityResultContracts.StartActivityForResult()) {
                     results.add(it.resultCode)
-                    assertNull(it.data)
+                    payloads.add(it.data)
                 }
             }
         }
