@@ -17,6 +17,7 @@ import * as path from 'node:path';
 import { getProjectHash } from './paths.js';
 import {
   _recoverObjectsFromLine,
+  parseLineTolerant,
   parseLineTolerantWithIntegrity,
 } from './jsonl-utils.js';
 import { openSyncNoFollow } from './no-follow-open.js';
@@ -837,47 +838,78 @@ function lastLineContaining(text: string, marker: string): string | undefined {
   return undefined;
 }
 
-function lastCommittedDomainLine(
+function newestSessionId(line: string, filePath: string): string | undefined {
+  let newest: string | undefined;
+  for (const record of parseLineTolerant<{
+    managedSession?: { sessionKey?: { sessionId?: unknown } };
+  }>(line, filePath)) {
+    const sessionId = record.managedSession?.sessionKey?.sessionId;
+    if (typeof sessionId === 'string' && sessionId.length > 0) {
+      newest = sessionId;
+    }
+  }
+  return newest;
+}
+
+type ManagedDomainEvent = {
+  subtype?: string;
+  managedSession?: {
+    firstSequence?: number;
+    lastSequence?: number;
+    eventCount?: number;
+    sequence?: number;
+    kind?: string;
+    payload?: {
+      recordRef?: {
+        kind?: unknown;
+        resourceId?: unknown;
+        byteLength?: unknown;
+        digest?: unknown;
+      };
+    };
+  };
+};
+
+function lastCommittedDomainRecord(
   text: string,
   marker: string,
-): string | undefined {
+  filePath: string,
+): ManagedDomainEvent | undefined {
   const lines = text.split('\n');
   lines.pop();
   let committed: { firstSequence: number; lastSequence: number } | undefined;
   for (let index = lines.length - 1; index >= 0; index--) {
     const line = lines[index];
-    const record = JSON.parse(line) as {
-      subtype?: string;
-      managedSession?: {
-        firstSequence?: number;
-        lastSequence?: number;
-        eventCount?: number;
-        sequence?: number;
-        kind?: string;
-      };
-    };
-    const body = record.managedSession;
-    if (record.subtype === 'managed_session_commit_v1') {
-      const first = body?.firstSequence;
-      const last = body?.lastSequence;
-      committed =
-        Number.isSafeInteger(first) &&
-        Number.isSafeInteger(last) &&
-        first! > 0 &&
-        last! >= first! &&
-        body?.eventCount === last! - first! + 1
-          ? { firstSequence: first!, lastSequence: last! }
-          : undefined;
-    } else if (
-      committed !== undefined &&
-      record.subtype === 'managed_session_event_v1' &&
-      body?.kind === 'domain.committed' &&
-      Number.isSafeInteger(body.sequence) &&
-      body.sequence! >= committed.firstSequence &&
-      body.sequence! <= committed.lastSequence &&
-      line.includes(marker)
-    ) {
-      return line;
+    // A crash mid-append glues two records onto one line, so a line can hold
+    // more than one record and a bare JSON.parse would throw away every
+    // record around the tear.
+    for (const record of parseLineTolerant<ManagedDomainEvent>(
+      line,
+      filePath,
+    )) {
+      const body = record.managedSession;
+      if (record.subtype === 'managed_session_commit_v1') {
+        const first = body?.firstSequence;
+        const last = body?.lastSequence;
+        committed =
+          Number.isSafeInteger(first) &&
+          Number.isSafeInteger(last) &&
+          first! > 0 &&
+          last! >= first! &&
+          body?.eventCount === last! - first! + 1
+            ? { firstSequence: first!, lastSequence: last! }
+            : undefined;
+      } else if (
+        committed !== undefined &&
+        record.subtype === 'managed_session_event_v1' &&
+        body?.kind === 'domain.committed' &&
+        Number.isSafeInteger(body.sequence) &&
+        body.sequence! >= committed.firstSequence &&
+        body.sequence! <= committed.lastSequence &&
+        line.includes(marker)
+      ) {
+        return record;
+      }
     }
   }
   return undefined;
@@ -1096,39 +1128,25 @@ function readManagedDomainBodySync(
 
     /* The recorded identity, not the file name, decides where the resources
        live. */
-    const header = JSON.parse(headerLine) as {
-      managedSession?: { sessionKey?: { sessionId?: unknown } };
-    };
-    const recordedId = header.managedSession?.sessionKey?.sessionId;
-    if (typeof recordedId !== 'string' || recordedId.length === 0) return {};
+    const recordedId = newestSessionId(headerLine, filePath);
+    if (recordedId === undefined) return {};
     const resourceRoot = managedSessionResourceRoot(runtimeBaseDir, recordedId);
 
-    let line = undefined as string | undefined;
+    let record = undefined as ManagedDomainEvent | undefined;
     const tailLength = Math.min(fileSize, LITE_READ_BUF_SIZE);
     const tailOffset = fileSize - tailLength;
     if (tailOffset > 0) {
       const tailBytes = fs.readSync(fd, buffer, 0, tailLength, tailOffset);
       const tailText = buffer.toString('utf-8', 0, tailBytes);
-      line = lastCommittedDomainLine(
+      record = lastCommittedDomainRecord(
         tailText.slice(tailText.indexOf('\n') + 1),
         marker,
+        filePath,
       );
     }
-    line ??= lastCommittedDomainLine(headText, marker);
-    if (line === undefined) return {};
+    record ??= lastCommittedDomainRecord(headText, marker, filePath);
+    if (record === undefined) return {};
 
-    const record = JSON.parse(line) as {
-      managedSession?: {
-        payload?: {
-          recordRef?: {
-            kind?: unknown;
-            resourceId?: unknown;
-            byteLength?: unknown;
-            digest?: unknown;
-          };
-        };
-      };
-    };
     const ref = record.managedSession?.payload?.recordRef;
     if (typeof ref?.kind !== 'string' || typeof ref.resourceId !== 'string') {
       return {};
