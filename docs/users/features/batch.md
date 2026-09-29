@@ -154,9 +154,16 @@ output files are deleted.
   mode; retries reuse them.
 - Estimates are token-based unless you set
   `QWEN_BATCH_INPUT_PRICE_PER_1M_USD` and
-  `QWEN_BATCH_OUTPUT_PRICE_PER_1M_USD`. A plan's `maxCostUsd` is an estimate
-  gate, not a cap on the bill, and needs those prices. Neither figure
-  includes what your session spent preparing the plan.
+  `QWEN_BATCH_OUTPUT_PRICE_PER_1M_USD`. The rough estimate leaves out
+  thinking tokens, which can be several times the output. A plan's
+  `maxCostUsd` is enforced against the worst case at the request caps: it
+  needs those prices, a `maxOutputTokens`, and thinking off or a
+  `thinking_budget`, or the run is refused. Neither figure includes what your
+  session spent preparing the plan.
+- A remote cleanup that fails never blocks `retry`, `cancel` or `clean`; a
+  later `collect` retries it. A result file the provider cannot serve in
+  full (after one fresh download) or no longer has fails the affected items
+  instead of leaving the task stuck.
 - `clean` refuses while a batch may still be running or holds uncollected
   results, unless you pass `--force`.
 - Targets must stay inside the project and outside any hidden path

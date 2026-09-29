@@ -18,8 +18,8 @@ import java.util.stream.Stream;
  * The managed-extension-record/1 contract (H0b of #12827): the records that
  * the Stage H capabilities share, as the control plane reads them. The
  * shared schema and fixtures in packages/core pin the contract, and the
- * TypeScript module there replays the same cases. Nothing commits these
- * records until H0c.
+ * TypeScript module there replays the same cases. The Session store reads
+ * them as they commit (H0c, see ManagedExtensionProjection).
  */
 public final class ManagedExtensionRecords {
     public static final List<String> DOMAINS = List.of("config_install",
@@ -117,7 +117,7 @@ public final class ManagedExtensionRecords {
                     && left.decimalValue().compareTo(right.decimalValue()) == 0
                     ? 0 : 1;
     private static final long MAX_COUNT = 9_007_199_254_740_990L;
-    private static final long MAX_TIME = 8_640_000_000_000_000L;
+    static final long MAX_TIME = 8_640_000_000_000_000L;
     private static final BigInteger MAX_GENERATION =
             BigInteger.valueOf(Long.MAX_VALUE);
     private static final Pattern GENERATION = Pattern.compile(
@@ -324,6 +324,9 @@ public final class ManagedExtensionRecords {
         require(!"settled".equals(state)
                 || !"not_started_proven".equals(execution),
                 "run cannot settle an execution that never started");
+        require(!"running".equals(state) && !"waiting".equals(state)
+                || !"not_started_proven".equals(execution),
+                "run cannot run on an execution that never started");
         require(!"session".equals(target) || "planned".equals(deliveryState)
                 || "cancelled".equals(deliveryState)
                 || TERMINAL.contains(state),
@@ -423,6 +426,25 @@ public final class ManagedExtensionRecords {
                 && "running_attached".equals(executionAfter)
                 && generationOf(runtimeAfter, "generation").compareTo(
                         generationOf(runtimeBefore, "generation")) > 0;
+    }
+
+    /**
+     * Whether {@code run} may open a run: it starts reserved or admitted,
+     * with no execution beyond an intent and no delivery beyond a plan, so
+     * the first revision of a record never skips a step the later ones take
+     * one at a time.
+     */
+    public static boolean isRunStart(JsonNode run) {
+        if (!accepts(() -> requireRun(run))) {
+            return false;
+        }
+        String state = text(run, "state");
+        String execution = text(run, "execution");
+        JsonNode delivery = run.get("delivery");
+        return ("reserved".equals(state) || "admitted".equals(state))
+                && (execution == null || "intent".equals(execution))
+                && (delivery.isNull()
+                        || "planned".equals(text(delivery, "state")));
     }
 
     /** Checks the body of a managed-monitor_run domain record. */
@@ -570,6 +592,18 @@ public final class ManagedExtensionRecords {
     }
 
     /**
+     * Whether {@code monitor} may be the first revision of a monitor: its
+     * run opens, and it has written no output, which needs a watch. It
+     * cannot have observed anything either, since an observation needs a
+     * start receipt.
+     */
+    public static boolean isMonitorRunStart(JsonNode monitor) {
+        return accepts(() -> requireMonitorRun(monitor))
+                && isRunStart(monitor.get("run"))
+                && monitor.get("outputRef").isNull();
+    }
+
+    /**
      * Equality that compares numbers by value, so a record built in Java,
      * where 4 may be a long, matches the same record parsed from JSON.
      */
@@ -596,7 +630,7 @@ public final class ManagedExtensionRecords {
         }
     }
 
-    private static void closed(JsonNode node, Set<String> keys,
+    static void closed(JsonNode node, Set<String> keys,
             String label) {
         require(node != null && node.isObject() && node.size() == keys.size(),
                 label + " must be an object with exactly " + keys);
@@ -604,7 +638,7 @@ public final class ManagedExtensionRecords {
                 label + " must be an object with exactly " + keys));
     }
 
-    private static String id(JsonNode node, String label) {
+    static String id(JsonNode node, String label) {
         require(node != null && node.isTextual() && !node.textValue()
                 .isEmpty(), label + " must be a non-empty string");
         String value = node.textValue();
@@ -634,7 +668,7 @@ public final class ManagedExtensionRecords {
      * JavaScript, 1.0 counts as 1; a number past the double range, which
      * Jackson reads as an infinity, counts as none.
      */
-    private static long count(JsonNode node, long min, long max,
+    static long count(JsonNode node, long min, long max,
             String label) {
         BigDecimal value = node != null && node.isNumber()
                 && Double.isFinite(node.doubleValue())
@@ -661,7 +695,7 @@ public final class ManagedExtensionRecords {
                 label + " must be canonical decimal text from 1 to 2^63-1");
     }
 
-    private static void durableRef(JsonNode node, String label) {
+    static void durableRef(JsonNode node, String label) {
         closed(node, Set.of("resourceId", "kind", "schemaVersion",
                 "byteLength", "digest"), label);
         id(node.get("resourceId"), label + ".resourceId");
