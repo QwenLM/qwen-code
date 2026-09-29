@@ -232,8 +232,11 @@ export function TrajectoryInspector({
           return [[t('trajectory.inspector.body'), block.text]];
         case 'permission':
           return [
-            [t('trajectory.inspector.title'), block.title],
-            [t('trajectory.inspector.status'), block.resolved],
+            [t('trajectory.inspector.permissionTitle'), block.title],
+            [
+              t('trajectory.inspector.status'),
+              block.resolved ?? t('trajectory.inspector.permissionPending'),
+            ],
           ];
         case 'prompt_cancelled':
           return [[t('trajectory.inspector.reason'), block.reason]];

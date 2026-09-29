@@ -13,6 +13,7 @@ import { I18nProvider } from '../../i18n';
 import { buildTrajectory } from '../../trajectory/buildTrajectory';
 import { projectTrajectoryWindow } from '../../trajectory/projectTrajectoryWindow';
 import type {
+  TrajectoryOtherRow,
   TrajectoryRequestRow,
   TrajectoryRow,
   TrajectoryToolRow,
@@ -326,4 +327,27 @@ it.each([
   const container = await render(tool(undefined, value));
   await click(container, 'Output');
   expect(container.querySelector('pre')?.textContent).toBe(expected);
+});
+
+it('labels a permission title and shows an unresolved permission as pending', async () => {
+  const row: TrajectoryOtherRow = {
+    kind: 'other',
+    key: 'perm:1',
+    turnIndex: 1,
+    depth: 0,
+    block: {
+      kind: 'permission',
+      id: 'p1',
+      title: 'Allow Bash?',
+    } as TrajectoryOtherRow['block'],
+  };
+  const container = await render(row);
+  await click(container, 'Body');
+  const labels = [...container.querySelectorAll('pre')].map(
+    (pre) => pre.previousElementSibling?.textContent,
+  );
+  expect(labels).toEqual(['Title', 'Status']);
+  expect(container.textContent).toContain('Allow Bash?');
+  expect(container.textContent).toContain('pending');
+  expect(container.textContent).not.toContain('unrecorded');
 });
