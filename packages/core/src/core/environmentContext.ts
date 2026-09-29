@@ -155,6 +155,12 @@ export function isSkillListingReminder(text: string): boolean {
   return openers.some((opener) => text.startsWith(`${open}${opener}`));
 }
 
+/**
+ * The only text a deferred tool shows the model before `tool_search` reveals
+ * it: the description's first line, capped. A deferred tool's selection rule
+ * ("pick me over X when…") therefore has to live in that line, or the resident
+ * guidance that recommends X is all the model sees (#12702).
+ */
 function truncateDeferredToolDescription(description: string): string {
   const firstLine = (description || '').split('\n')[0].trim();
   return firstLine.length > MAX_DEFERRED_TOOL_DESC_LEN
