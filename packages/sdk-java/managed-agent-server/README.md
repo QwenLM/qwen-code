@@ -33,8 +33,11 @@ same file by `npm run generate:managed-agent-api` in `packages/web-shell`.
 Sessions record the agent revision from `QWEN_MANAGED_AGENT_REVISION` (default
 `1`) when they are created. Every response carries `X-Request-Id`, which error
 envelopes repeat as `request_id` and the logs print. Events keep the schema and
-projection versions and the Item and Part identity they were accepted with,
-except that a `stream.reconciled` event announces retracted deltas. A
+projection versions they were accepted with. They keep their Item and Part
+identity too, except after Harness recovery retracts output: the retracted
+deltas lose their text and identity, later deltas may name other Parts, and a
+`stream.reconciled` event announces it. A client that sees one reloads the
+Items and resumes after their `snapshot_through_sequence`. A
 cursor below a Session's replay floor gets `409 cursor_expired` from the JSON
 event query and one `agent.session.resync_required` frame from either stream.
 `GET /v1/agents/sessions/{id}/turns` lists a Session's Turns newest first with

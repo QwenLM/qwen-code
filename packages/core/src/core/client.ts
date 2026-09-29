@@ -417,6 +417,8 @@ export function getMainSessionBaseSystemPrompt(
           declaredTools: config.getPromptToolSnapshot?.(),
           executionSandboxFilesystem:
             config.getShellExecutionSandbox?.()?.filesystem,
+          executionSandboxBackend:
+            config.getShellExecutionSandbox?.()?.effectiveBackend,
         },
       );
 }
