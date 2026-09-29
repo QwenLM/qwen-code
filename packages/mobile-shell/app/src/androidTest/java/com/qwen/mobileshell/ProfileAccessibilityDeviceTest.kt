@@ -64,15 +64,18 @@ class ProfileAccessibilityDeviceTest {
     @Test fun profileActionsIdentifyTheirOwnConnection() {
         ActivityScenario.launch(MainActivity::class.java).use {
             for (profile in listOf(alpha, beta)) {
-                for ((action, description) in listOf(
-                    R.string.connect to "Connect to ${profile.name}",
-                    R.string.edit to "Edit ${profile.name}",
-                    R.string.delete to "Delete ${profile.name}",
+                for ((action, descriptionResource) in listOf(
+                    R.string.connect to R.string.connect_profile,
+                    R.string.edit to R.string.edit_named_profile,
+                    R.string.delete to R.string.delete_named_profile,
                 )) {
+                    val description = context.getString(descriptionResource, profile.name)
                     val node = findWithScroll(description) { it.contentDescription?.toString() == description }
                     assertTrue("$description must be clickable", node.isClickable)
                     assertTrue("$description must keep its visible action label", node.text.toString().equals(context.getString(action), ignoreCase = true))
-                    assertFalse("$description must not expose the saved token", node.contentDescription.toString().contains("synthetic-token"))
+                    assertFalse("The profile list must not expose the saved token in any accessibility node", walk(instrumentation.uiAutomation.rootInActiveWindow).any { item ->
+                        listOf(item.text, item.contentDescription, item.hintText).any { it?.toString()?.contains("synthetic-token") == true }
+                    })
                 }
             }
         }
@@ -111,7 +114,12 @@ class ProfileAccessibilityDeviceTest {
             setText(find("Daemon address field after validation") { it.isEditable && it.hintText?.toString() == context.getString(R.string.daemon_address) }, alpha.origin)
             clickText(R.string.save)
             find("Renamed profile in the noneditable connection list") { !it.isEditable && it.text?.toString() == renamed }
-            assertEquals("Correcting the address must commit the edited profile", alpha.copy(name = renamed), store.vault.load().profiles.first { it.id == alpha.id })
+            val saved = store.vault.load().profiles.first { it.id == alpha.id }
+            assertEquals("Correcting the address must commit the edited name", renamed, saved.name)
+            assertEquals("The origin must be preserved", alpha.origin, saved.origin)
+            assertTrue("The saved credential must be preserved", alpha.token == saved.token)
+            assertEquals("The browser identity must be preserved", alpha.browserId, saved.browserId)
+            assertEquals("Browser initialization must be preserved", alpha.browserInitialized, saved.browserInitialized)
         }
     }
 
