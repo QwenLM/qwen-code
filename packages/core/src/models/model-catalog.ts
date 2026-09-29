@@ -33,8 +33,27 @@ export const MODELS_DEV_URL = 'https://models.dev/api.json';
 /** Replaces the models.dev URL, e.g. with a corporate mirror. */
 export const MODEL_CATALOG_URL_ENV = 'QWEN_CODE_MODELS_DEV_URL';
 
+const GENERIC_MODEL_KEYS = new Set([
+  'auto',
+  'fast',
+  'free',
+  'latest',
+  'low',
+  'max',
+]);
+
 export function isModelCatalogDisabled(): boolean {
   return process.env[MODEL_CATALOG_ENV] === 'off';
+}
+
+export function isModelCatalogKey(key: string): boolean {
+  return (
+    normalize(key) === key &&
+    !/^\d+$/.test(key) &&
+    !key.includes('@') &&
+    !GENERIC_MODEL_KEYS.has(key) &&
+    (key.length >= 5 || /^o\d+$/i.test(key))
+  );
 }
 
 export function getModelCatalogCachePath(): string {
@@ -103,8 +122,8 @@ export function loadModelCatalog(): ModelCatalog {
     // A cache written before the projection's guards can hold keys no
     // normalized spelling reaches (deepseek-v3 did) or no usable entries at
     // all; neither may displace the bundled snapshot.
-    const usableEntries = Object.entries(cached?.models ?? {}).filter(
-      ([key]) => normalize(key) === key,
+    const usableEntries = Object.entries(cached?.models ?? {}).filter(([key]) =>
+      isModelCatalogKey(key),
     );
     const usable =
       cached && cached.source === source && usableEntries.length > 0

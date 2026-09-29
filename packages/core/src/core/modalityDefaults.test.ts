@@ -287,18 +287,16 @@ describe('defaultModalities', () => {
       expect(m.pdf).toBeUndefined();
     });
 
-    it('returns image + pdf + video for glm-5v-turbo', () => {
+    it('returns image + video for glm-5v-turbo', () => {
       expect(defaultModalities('glm-5v-turbo')).toEqual({
         image: true,
-        pdf: true,
         video: true,
       });
     });
 
-    it('returns image + pdf + video for glm-5.3-flash', () => {
+    it('returns image + video for glm-5.3-flash', () => {
       expect(defaultModalities('glm-5.3-flash')).toEqual({
         image: true,
-        pdf: true,
         video: true,
       });
     });

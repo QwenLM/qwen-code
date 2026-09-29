@@ -203,7 +203,7 @@ describe('trimModelsDevCatalog', () => {
     });
   });
 
-  it('unions modalities across providers instead of dropping on disagreement', () => {
+  it('ignores modality claims from untrusted routers', () => {
     const models = trimModelsDevCatalog(
       {
         zai: {
@@ -217,10 +217,9 @@ describe('trimModelsDevCatalog', () => {
       },
       NOW,
     ).models;
-    // The router's limit is untrusted, but its modality report still unions.
     expect(models['glm-x']).toEqual({
       context: 204800,
-      modalities: { image: true, pdf: true },
+      modalities: { image: true },
     });
   });
 
@@ -250,6 +249,26 @@ describe('trimModelsDevCatalog', () => {
     ).models;
     expect(models).not.toHaveProperty('acme-v3');
     expect(models).toEqual({});
+  });
+
+  it('omits lossy and generic normalized keys', () => {
+    const models = trimModelsDevCatalog(
+      {
+        anthropic: {
+          models: {
+            numeric: chat('claude-sonnet-4:thinking:32768', {
+              context: 200000,
+            }),
+            tagged: chat('claude-sonnet-4@default', { context: 200000 }),
+            generic: chat('anthropic/auto', { context: 200000 }),
+          },
+        },
+      },
+      NOW,
+    ).models;
+    expect(models).not.toHaveProperty('32768');
+    expect(models).not.toHaveProperty('claude-sonnet-4@default');
+    expect(models).not.toHaveProperty('auto');
   });
 });
 

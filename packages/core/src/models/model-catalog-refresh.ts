@@ -14,6 +14,7 @@ import {
   getModelCatalogCachePath,
   invalidateModelCatalog,
   isModelCatalogDisabled,
+  isModelCatalogKey,
   MODEL_CATALOG_URL_ENV,
   MODELS_DEV_URL,
   parseModelCatalog,
@@ -145,13 +146,10 @@ function sameEntry(a: ModelCatalogEntry, b: ModelCatalogEntry): boolean {
  * request will reach, so such models keep the answer the regex tables give
  * them today.
  *
- * Modalities describe the weights, so every provider that serves the model
- * contributes them, unioned: a first-party vendor outside the allowlist (or a
- * custom endpoint's vendor, e.g. issue #8558's thinkingmachines/inkling)
- * still surfaces image/pdf support. A catalog modality is not a guarantee on
- * every endpoint — the lookup-side corrections handle the endpoint-specific
- * exceptions — so a stray router report can only widen, never replace, what
- * the regex tables and the vendor tables already allow.
+ * Modalities describe the weights, so trusted first-party providers contribute
+ * them. `thinkingmachines` is included for issue #8558 without trusting its
+ * endpoint limits. Router claims are excluded because they can widen a
+ * model's capabilities beyond what its owner reports.
  */
 export function trimModelsDevCatalog(
   api: ModelsDevApi,
@@ -162,6 +160,8 @@ export function trimModelsDevCatalog(
   const modalityCandidates = new Map<string, InputModalities[]>();
   for (const [provider, bucket] of Object.entries(api)) {
     const trustedForLimits = MODELS_DEV_PROVIDERS.includes(provider);
+    const trustedForModalities =
+      trustedForLimits || provider === 'thinkingmachines';
     for (const model of Object.values(bucket?.models ?? {})) {
       if (typeof model.id !== 'string' || !servesAgentTurns(model)) {
         continue;
@@ -171,11 +171,11 @@ export function trimModelsDevCatalog(
       // normalized form is unreachable by its own spelling while a dated
       // alias still hits it (`deepseek-v3-0324` -> `deepseek-v3` ->
       // `deepseek`). Omit it so both spellings share the regex answer.
-      if (normalize(key) !== key) {
+      if (!isModelCatalogKey(key)) {
         continue;
       }
       const modalities = toModalities(model);
-      if (modalities) {
+      if (modalities && trustedForModalities) {
         const existing = modalityCandidates.get(key);
         if (existing) {
           existing.push(modalities);

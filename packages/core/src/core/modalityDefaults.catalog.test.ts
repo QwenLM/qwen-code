@@ -12,6 +12,7 @@ vi.mock('../models/model-catalog.js', () => {
     'qwen-catalog-vision': { modalities: { image: true } },
     'qwen3-vl-catalog': { modalities: { pdf: true } },
     'catalog-only-model': { modalities: { audio: true } },
+    'catalog-pdf-model': { modalities: { pdf: true } },
     'catalog-vision-model': { modalities: { image: true } },
   };
   return { lookupModelCatalog: (model: string) => entries[model] };
@@ -22,16 +23,16 @@ describe('models.dev catalog', () => {
     expect(defaultModalities('qwen-catalog-vision')).toEqual({ image: true });
   });
 
-  it('merges catalog and regex modalities instead of replacing them', () => {
+  it('keeps PDF controlled by an existing family rule', () => {
     expect(defaultModalities('qwen3-vl-catalog')).toEqual({
       image: true,
       video: true,
-      pdf: true,
     });
   });
 
   it('uses the catalog alone for a model no family pattern matches', () => {
     expect(defaultModalities('catalog-only-model')).toEqual({ audio: true });
+    expect(defaultModalities('catalog-pdf-model')).toEqual({});
     expect(defaultModalities('unknown-model')).toEqual({});
   });
 

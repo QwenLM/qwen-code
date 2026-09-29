@@ -21,9 +21,7 @@ if (process.env['QWEN_SERVE_NO_PERSISTENT_REGISTRATION'] === undefined) {
 
 // Model limits and modalities come from the regex tables unless a test opts
 // into the models.dev catalog.
-if (process.env['QWEN_CODE_MODELS_DEV'] === undefined) {
-  process.env['QWEN_CODE_MODELS_DEV'] = 'off';
-}
+process.env['QWEN_CODE_MODELS_DEV'] = 'off';
 
 // The review sandbox policy is the OPERATOR's setting for their own reviews,
 // and this suite must not inherit it. A maintainer who turns the feature on

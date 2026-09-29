@@ -114,21 +114,21 @@ const MODALITY_PATTERNS: Array<[RegExp, InputModalities]> = [
  * Return the default input modalities for a model based on its name.
  *
  * Uses the same normalize-then-regex pattern as {@link tokenLimit}, merged
- * with the models.dev catalog entry. Both sources only ever record a
- * modality as `true`, so spreading them is a union: the catalog can add a
- * modality a family pattern lacks but never removes one, and a model
- * neither source knows stays text-only (empty object) to avoid sending
- * unsupported media types that would cause unrecoverable API errors.
+ * with the models.dev catalog entry. PDF stays explicit because it selects a
+ * different file-reading path; other catalog modalities can extend a known
+ * family. A model neither source knows stays text-only (empty object) to avoid
+ * sending unsupported media types that would cause unrecoverable API errors.
  */
 export function defaultModalities(model: string): InputModalities {
   const norm = normalize(model);
-  const fromCatalog = lookupModelCatalog(norm)?.modalities;
+  const fromCatalog = { ...lookupModelCatalog(norm)?.modalities };
+  delete fromCatalog.pdf;
   for (const [regex, modalities] of MODALITY_PATTERNS) {
     if (regex.test(norm)) {
       return { ...fromCatalog, ...modalities };
     }
   }
-  return { ...fromCatalog };
+  return fromCatalog;
 }
 
 /**

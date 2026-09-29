@@ -22,9 +22,7 @@ setSimulate429(false);
 
 // Model limits and modalities come from the regex tables unless a test opts
 // into the models.dev catalog.
-if (process.env['QWEN_CODE_MODELS_DEV'] === undefined) {
-  process.env['QWEN_CODE_MODELS_DEV'] = 'off';
-}
+process.env['QWEN_CODE_MODELS_DEV'] = 'off';
 
 // Keep managed auto-memory test fixtures under per-test temp project roots.
 if (process.env['QWEN_CODE_MEMORY_LOCAL'] === undefined) {

@@ -14,7 +14,6 @@ import { AuthType } from '../core/contentGenerator.js';
 import {
   defaultOutputCeiling,
   hasExplicitOutputLimit,
-  normalize,
   tokenLimit,
 } from '../core/tokenLimits.js';
 import { computeThresholds } from '../services/chatCompressionService.js';
@@ -23,6 +22,7 @@ import bundled from './generated/model-registry.json' with { type: 'json' };
 import {
   getModelCatalogCachePath,
   invalidateModelCatalog,
+  isModelCatalogKey,
   loadModelCatalog,
   lookupModelCatalog,
   MODEL_CATALOG_URL_ENV,
@@ -208,9 +208,9 @@ describe('model catalog', () => {
     expect(tokenLimit('claude-sonnet-5')).toBe(1_000_000);
   });
 
-  it('keys every bundled entry by a normalize() fixed point so its own id reaches it', () => {
+  it('keys every bundled entry by a usable model id', () => {
     for (const id of Object.keys(bundled.models)) {
-      expect(normalize(id)).toBe(id);
+      expect(isModelCatalogKey(id)).toBe(true);
     }
     // Both spellings of a model must resolve alike; a dated alias must not
     // land on a key the canonical id cannot reach (deepseek-v3 did).
@@ -229,6 +229,24 @@ describe('model catalog', () => {
     invalidateModelCatalog();
     expect(lookupModelCatalog('deepseek-v3')).toBeUndefined();
     expect(tokenLimit('deepseek-v3-0324', 'output')).toBe(32_000);
+  });
+
+  it('drops lossy and generic keys from an older cache', () => {
+    writeJson(getModelCatalogCachePath(), {
+      source: MODELS_DEV_URL,
+      fetchedAt: FAR_FUTURE,
+      models: {
+        '32768': { modalities: { pdf: true } },
+        'model@default': { context: 123 },
+        auto: { modalities: { image: true } },
+        'valid-model': { context: 456 },
+      },
+    });
+    invalidateModelCatalog();
+    expect(lookupModelCatalog('32768')).toBeUndefined();
+    expect(lookupModelCatalog('model@default')).toBeUndefined();
+    expect(lookupModelCatalog('auto')).toBeUndefined();
+    expect(lookupModelCatalog('valid-model')).toEqual({ context: 456 });
   });
 
   it('keeps output pins after refresh while filling unknown model limits', () => {

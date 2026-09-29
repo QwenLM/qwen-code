@@ -6,7 +6,7 @@ The catalog supplies inferred context windows and input modalities with bundled/
 
 The draft-only `model.customCatalog` was removed after real Config testing exposed late initialization and cross-session global state. Private/offline overrides use existing `modelProviders` or model generation settings. No custom catalog cache is read. Effort metadata and provider-aware catalog lookup remain deferred.
 
-qwen3.8-max PDF support is **explicit opt-in**, not a catalog default. This removes an unverified, protocol-dependent behavior from the release scope while preserving explicit model configuration. The correction applies equally to bundled and refreshed metadata.
+Catalog PDF support is **explicit opt-in** for every model. This removes an unverified, protocol-dependent behavior from the release scope while preserving explicit model configuration. The correction applies equally to bundled and refreshed metadata.
 
 ## Evidence collected on 2026-09-26
 
@@ -40,7 +40,7 @@ The local comparison scripts exercised the real token helpers and default provid
 From the repository root, run `npm run build` and `npm run typecheck`. From `packages/core`, run:
 
 ```sh
-npx vitest run src/models/model-catalog.test.ts src/models/model-catalog-refresh.test.ts src/core/tokenLimits.test.ts src/core/modalityDefaults.test.ts src/models/modelConfigResolver.test.ts src/models/modelsConfig.test.ts --coverage.enabled=false
+npx vitest run src/models/model-catalog.test.ts src/models/model-catalog-refresh.test.ts src/core/tokenLimits.test.ts src/core/modalityDefaults.test.ts src/core/modalityDefaults.catalog.test.ts src/models/modelConfigResolver.test.ts src/models/modelsConfig.test.ts --coverage.enabled=false
 ```
 
 These suites cover real bundled configuration resolution, explicit overrides, offline switches, invalid data, normalized conflicts, corrections, cache freshness, 304 revalidation, failed fetches and concurrent refreshes. Global suites retain regex-only setup; the catalog-specific suite explicitly enables the real catalog in an isolated QWEN_HOME.
