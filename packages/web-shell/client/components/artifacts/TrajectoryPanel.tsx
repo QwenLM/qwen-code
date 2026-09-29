@@ -696,7 +696,7 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
         </div>
       </div>
 
-      <div className={styles.metrics} data-testid="trajectory-metrics">
+      <div className={styles.overviewMetrics} data-testid="trajectory-metrics">
         {(
           [
             ['elapsed', summary?.elapsedMs],
@@ -1086,7 +1086,11 @@ function RecordRow({
       <span className={`${styles.text} ${label.faint ? styles.faint : ''}`}>
         {label.text}
       </span>
-      <span className={styles.metrics} data-testid="trajectory-row-metrics">
+      <span
+        className={styles.rowMetrics}
+        data-testid="trajectory-row-metrics"
+        title={metrics.length > 0 ? metrics.join(' · ') : undefined}
+      >
         {metrics.length > 0 ? metrics.join(' · ') : '—'}
       </span>
     </div>

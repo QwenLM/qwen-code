@@ -216,6 +216,17 @@ test.describe('trajectory panel', () => {
         .poll(async () => Math.round((await panel.boundingBox())!.width))
         .toBe(width);
       await expect(tool).toBeInViewport();
+      const rowBox = (await tool.boundingBox())!;
+      const metricsBox = (await tool
+        .getByTestId('trajectory-row-metrics')
+        .boundingBox())!;
+      expect(metricsBox.y).toBeGreaterThanOrEqual(rowBox.y - 1);
+      expect(metricsBox.y + metricsBox.height).toBeLessThanOrEqual(
+        rowBox.y + rowBox.height + 1,
+      );
+      expect(metricsBox.x + metricsBox.width).toBeLessThanOrEqual(
+        rowBox.x + rowBox.width + 1,
+      );
       expect(
         await panel.evaluate(
           (element) => element.scrollWidth - element.clientWidth,
@@ -270,6 +281,21 @@ test.describe('trajectory panel', () => {
           .toBe(width);
         await expect(panel.getByTestId('trajectory-mode-active')).toBeVisible();
         await expect(panel.getByTestId('trajectory-mode-clock')).toBeVisible();
+        const request = panel.getByTestId('trajectory-row-request').last();
+        await request.scrollIntoViewIfNeeded();
+        const rowBox = (await request.boundingBox())!;
+        const labelBox = (await request.locator('span').nth(1).boundingBox())!;
+        const metricsBox = (await request
+          .getByTestId('trajectory-row-metrics')
+          .boundingBox())!;
+        expect(labelBox.width).toBeGreaterThanOrEqual(95);
+        expect(metricsBox.y).toBeGreaterThanOrEqual(rowBox.y - 1);
+        expect(metricsBox.y + metricsBox.height).toBeLessThanOrEqual(
+          rowBox.y + rowBox.height + 1,
+        );
+        expect(metricsBox.x + metricsBox.width).toBeLessThanOrEqual(
+          rowBox.x + rowBox.width + 1,
+        );
         const overflow = await panel.evaluate(
           (element) => element.scrollWidth - element.clientWidth,
         );

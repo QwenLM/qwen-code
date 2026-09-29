@@ -23,7 +23,7 @@
   white-space: nowrap;
 }
 
-.metrics {
+.overviewMetrics {
   position: relative;
   z-index: 1003;
   display: grid;
@@ -348,7 +348,7 @@
 
 .text {
   flex: 1;
-  min-width: 0;
+  min-width: 96px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -360,13 +360,19 @@
   font-style: italic;
 }
 
-.metrics {
-  flex-shrink: 0;
+.overviewMetrics,
+.rowMetrics {
   font-family: var(--font-mono, ui-monospace, monospace);
   font-size: 10px;
   color: var(--muted-foreground);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
+}
+
+.rowMetrics {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .toneError {
