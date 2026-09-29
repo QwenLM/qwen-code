@@ -53,7 +53,19 @@ import {
   createHookOutput,
   PermissionMode,
   SessionStartSource,
+  HookEventName,
+  HookType,
+  type HookInput,
 } from '../hooks/types.js';
+import { HookSystem } from '../hooks/hookSystem.js';
+import {
+  getHookExecutionOwner,
+  runWithHookExecutionOwner,
+} from '../hooks/hook-execution-context.js';
+import {
+  getInvocationContext,
+  runWithInvocationContext,
+} from '../utils/invocation-context.js';
 import type { ModelsConfig } from '../models/modelsConfig.js';
 import { UnauthorizedError } from '../utils/errors.js';
 import { retryWithBackoff } from '../utils/retry.js';
@@ -395,6 +407,7 @@ vi.mock('../telemetry/uiTelemetry.js', () => ({
   uiTelemetryService: mockUiTelemetryService,
 }));
 vi.mock('../telemetry/loggers.js', () => ({
+  logHookCall: vi.fn(),
   logChatCompression: vi.fn(),
   logNextSpeakerCheck: vi.fn(),
   logApiRequest: vi.fn(),
@@ -3966,6 +3979,99 @@ describe('Gemini Client (client.ts)', () => {
   });
 
   describe('resetChat', () => {
+    it.each([false, true])(
+      'keeps clear session ownership across warmup (rotate again: %s)',
+      async (rotateAgain) => {
+        const events: HookInput[] = [];
+        let sessionId = 'old-session';
+        vi.mocked(mockConfig.getSessionId).mockImplementation(() => sessionId);
+        vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+        vi.mocked(mockConfig.hasHooksForEvent).mockReturnValue(true);
+        Object.assign(mockConfig, {
+          getAllowedHttpHookUrls: () => [],
+          getAllowPrivateNetworkHooks: () => false,
+          getSystemHooks: () => undefined,
+          getUserHooks: () => ({
+            [HookEventName.SessionStart]: [
+              {
+                hooks: [
+                  {
+                    type: HookType.Function,
+                    id: 'clear-recorder',
+                    errorMessage: 'recorder failed',
+                    callback: async (input: HookInput) => {
+                      events.push(input);
+                    },
+                  },
+                ],
+              },
+            ],
+          }),
+          getProjectHooks: () => undefined,
+          getExtensions: () => [],
+          getSessionSourceType: () => undefined,
+          getSessionSourceId: () => undefined,
+          getTranscriptPath: () => '/tmp/clear-transcript',
+          isTrustedFolder: () => true,
+        });
+        const hooks = new HookSystem(mockConfig);
+        vi.mocked(mockConfig.getHookSystem).mockReturnValue(hooks);
+        await hooks.initialize();
+        const invocation = {
+          version: 1 as const,
+          sessionId,
+          promptId: 'clear-prompt',
+        };
+        const owner = { runtimeId: hooks.runtimeId, sessionId, agentId: null };
+        await runWithInvocationContext(invocation, () =>
+          runWithHookExecutionOwner(owner, async () => {
+            sessionId = 'new-session';
+            let releaseWarmup!: () => void;
+            let markWarmup!: () => void;
+            const enteredWarmup = new Promise<void>((resolve) => {
+              markWarmup = resolve;
+            });
+            const warmup = new Promise<void>((resolve) => {
+              releaseWarmup = resolve;
+            });
+            vi.mocked(
+              mockConfig.getToolRegistry().warmAll,
+            ).mockImplementationOnce(() => {
+              markWarmup();
+              return warmup;
+            });
+            const reset = client.resetChat();
+            await enteredWarmup;
+            if (rotateAgain) sessionId = 'later-session';
+            releaseWarmup();
+            await reset;
+            expect(events).toHaveLength(rotateAgain ? 0 : 1);
+            if (!rotateAgain) {
+              expect(events[0]).toMatchObject({
+                hook_event_name: HookEventName.SessionStart,
+                source: SessionStartSource.Clear,
+                session_id: 'new-session',
+              });
+              expect(events[0]).not.toHaveProperty('agent_id');
+            }
+            expect(getInvocationContext()).toBe(invocation);
+            expect(getHookExecutionOwner()).toBe(owner);
+            await expect(
+              hooks.firePreToolUseEvent(
+                'read_file',
+                {},
+                'late-tool',
+                PermissionMode.Default,
+              ),
+            ).rejects.toThrow(
+              'Hook execution owner does not match this runtime/session',
+            );
+            expect(events).toHaveLength(rotateAgain ? 0 : 1);
+          }),
+        );
+      },
+    );
+
     it('refreshes the live system instruction after the working directory changes', async () => {
       vi.mocked(getRecentGitStatus)
         .mockReturnValueOnce('Git snapshot A')
