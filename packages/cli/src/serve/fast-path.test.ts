@@ -465,6 +465,10 @@ describe('CLI entry import boundary', () => {
     );
     expect(runServeSource).toContain("import('./server.js')");
     expect(runServeSource).toContain("import('@qwen-code/acp-bridge/bridge')");
+    expect(runServeSource).not.toMatch(/import \{ SessionService \} from/);
+    expect(runServeSource).toMatch(
+      /await import\(\s*'@qwen-code\/qwen-code-core\/services\/sessionService\.js'/,
+    );
     // web-shell-static (express-static/CSP machinery) must stay out of the
     // fast-path static closure at every depth, including transitive edges
     // through server/self-origin.js and web-shell-preauth.js; the static
@@ -732,6 +736,11 @@ describe('serve fast path argument parsing', () => {
       ['rate-limit-window-ms', ['--rate-limit-window-ms', '60000']],
       ['experimental-lsp', ['--experimental-lsp']],
       ['profile', ['--profile', 'hosted-harness']],
+      [
+        'hosted-harness-capability-digest',
+        ['--hosted-harness-capability-digest', `sha256:${'a'.repeat(64)}`],
+      ],
+      ['experimental-paired-engines', ['--experimental-paired-engines']],
       ['experimental-managed-agents', ['--experimental-managed-agents']],
       [
         'experimental-managed-runtime-worker',
@@ -774,6 +783,8 @@ describe('serve fast path argument parsing', () => {
     const expectedFallbackOptions = new Set([
       'channel',
       'profile',
+      'hosted-harness-capability-digest',
+      'experimental-paired-engines',
       'experimental-managed-agents',
       'experimental-managed-runtime-worker',
       'experimental-managed-runtime-auto-local',

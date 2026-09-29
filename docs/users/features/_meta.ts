@@ -13,6 +13,7 @@ export default {
   skills: 'Skills',
   memory: 'Memory',
   headless: 'Headless Mode',
+  batch: 'Batch Mode (DashScope)',
   'structured-output': 'Structured Output',
   'dual-output': 'Dual Output',
   'approval-mode': 'Approval Mode',

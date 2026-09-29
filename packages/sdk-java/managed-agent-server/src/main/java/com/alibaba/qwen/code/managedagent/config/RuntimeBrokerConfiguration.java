@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent.config;
 import com.alibaba.qwen.code.managedagent.service.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.managedagent.service.RuntimeWarmer;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeSessionRepository;
@@ -66,9 +67,10 @@ public class RuntimeBrokerConfiguration {
             AgentStateStore store, ManagedAgentProperties properties,
             RuntimeBindingRepository bindingRepository,
             RuntimeSessionRepository sessionRepository,
-            ToolExecutionRepository executionRepository) {
+            ToolExecutionRepository executionRepository,
+            WorkspaceExecutionStore workspaceExecutionStore) {
         return new EmbeddedRuntimeBroker(store, properties,
-                bindingRepository, sessionRepository, executionRepository);
+                bindingRepository, sessionRepository, executionRepository, workspaceExecutionStore);
     }
 
     @Bean
@@ -88,10 +90,6 @@ public class RuntimeBrokerConfiguration {
             @Override
             public CompletableFuture<Void> drain(String sessionId) {
                 return CompletableFuture.completedFuture(null);
-            }
-
-            @Override
-            public void resume(String sessionId) {
             }
         };
     }

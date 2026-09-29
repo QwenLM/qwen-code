@@ -84,6 +84,13 @@ function developmentCsp(requestUrl: string): string {
     websocket.protocol = websocket.protocol === 'https:' ? 'wss:' : 'ws:';
     connectOrigins.push(origin, websocket.origin);
   }
+  const clientMcpOverWs = process.env['QWEN_SERVE_CLIENT_MCP_OVER_WS'];
+  if (
+    clientMcpOverWs !== undefined &&
+    !['0', 'false'].includes(clientMcpOverWs.trim().toLowerCase())
+  ) {
+    connectOrigins.push('http://127.0.0.1:47821');
+  }
   return [
     "default-src 'self'",
     "script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'",
@@ -196,6 +203,7 @@ export default defineConfig(({ command }) => ({
       '/standalone/sessions': daemonProxy,
       '/session': daemonProxy,
       '/permission': daemonProxy,
+      '^/workspaces/[^/]+/agent(?:/|$)': daemonProxy,
       [QUALIFIED_VOICE_STREAM_PROXY]: { ...daemonProxy, ws: true },
       [QUALIFIED_ACP_WS_PROXY]: { ...daemonProxy, ws: true },
       '/workspace': daemonProxy,

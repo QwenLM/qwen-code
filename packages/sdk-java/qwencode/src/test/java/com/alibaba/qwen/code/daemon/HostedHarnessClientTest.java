@@ -101,6 +101,7 @@ class HostedHarnessClientTest {
                     CreateHarnessSession.builder()
                             .harnessSessionId(SESSION_ID)
                             .approvalMode(DaemonApprovalMode.DEFAULT)
+                            .toolProfile("hosted-workspace-files/1")
                             .managedSessionStore(
                                     ManagedSessionStoreConnection.builder()
                                             .baseUri(URI.create(
@@ -125,6 +126,7 @@ class HostedHarnessClientTest {
         assertTrue(body.get().contains("\"sessionId\":\"" + SESSION_ID
                 + "\""));
         assertTrue(body.get().contains("\"sessionScope\":\"thread\""));
+        assertTrue(body.get().contains("\"toolProfile\":\"hosted-workspace-files/1\""));
         assertTrue(body.get().contains("\"managedSessionStore\":{"
                 + "\"baseUrl\":\"https://store.example\","));
         assertTrue(body.get().contains("\"tenantId\":\"tenant-a\""));
@@ -327,7 +329,7 @@ class HostedHarnessClientTest {
                                     .workspaceId("workspace-a")
                                     .writerId(BOOT_ID)
                                     .leaseDuration(Duration.ofSeconds(45))
-                                            .build(), true));
+                                            .build(), true, "hosted-workspace-files/1"));
             HarnessRuntimeRecovery recovery = session.getRuntimeRecovery();
             assertNotNull(recovery);
             assertEquals("await_runtime", recovery.getPhase());
@@ -358,6 +360,7 @@ class HostedHarnessClientTest {
         assertEquals(1, detached.get());
         assertEquals(1, deleted.get());
         assertTrue(loadBody.get().contains("\"managedSessionStore\":{"));
+        assertTrue(loadBody.get().contains("\"toolProfile\":\"hosted-workspace-files/1\""));
         assertTrue(loadBody.get().contains(
                 "\"baseUrl\":\"https://store.example\""));
         assertTrue(loadBody.get().contains("\"writerId\":\"" + BOOT_ID
@@ -825,11 +828,19 @@ class HostedHarnessClientTest {
         exchange.close();
     }
 
+    /**
+     * Sends a body-less response and ends the connection with it. On Java 11
+     * the JDK's own HTTP server drops the connection after a response without
+     * a body, while the Java 11 HttpClient keeps it pooled; the next request
+     * over it fails with "HTTP/1.1 header parser received no bytes". This is
+     * the same fixture fix as DaemonSessionClientTest#sendNoContent.
+     */
     private static void sendSessionNoContent(HttpExchange exchange)
             throws IOException {
         assertPrivateHeaders(exchange);
         exchange.getResponseHeaders().set(
                 HostedHarnessClient.BOOT_ID_HEADER, BOOT_ID);
+        exchange.getResponseHeaders().set("Connection", "close");
         exchange.sendResponseHeaders(204, -1);
         exchange.close();
     }

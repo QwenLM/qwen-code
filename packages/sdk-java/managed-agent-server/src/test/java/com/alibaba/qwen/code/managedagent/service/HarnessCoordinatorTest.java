@@ -10,6 +10,8 @@ import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 import com.alibaba.qwen.code.daemon.HarnessRuntimeRecovery;
@@ -23,6 +25,9 @@ import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.HarnessEvent;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnRecord;
+import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -33,9 +38,129 @@ import java.util.Optional;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.InOrder;
 
 class HarnessCoordinatorTest {
+    @Test
+    void recoveredBoundTurnFailsBeforeAnyLegacyHarnessCall() {
+        String tenantId = "tenant-bound";
+        String sessionId = "session-bound";
+        String turnId = "turn-bound";
+        ContextBinding binding = new ContextBinding(tenantId, "ws-a", 1,
+                "storage-a", ".", "config-a", 1);
+        SessionRecord session = new SessionRecord(tenantId, sessionId,
+                "qwen-code", null, null, "ACTIVE", null, null, 0,
+                0, 0, 1, 1, null, 1, binding);
+        for (String status : List.of("ACCEPTED", "CANCELLING")) {
+            AgentStateStore store = mock(AgentStateStore.class);
+            HarnessConnector harness = mock(HarnessConnector.class);
+            RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+            TurnRecord claimed = turn(tenantId, sessionId, turnId,
+                    "11111111-1111-4111-8111-111111111111", null, 0,
+                    status, false, 0);
+            when(store.claimTurn(eq(tenantId), eq(sessionId), eq(turnId),
+                    anyString(), any(Duration.class)))
+                    .thenReturn(Optional.of(claimed));
+            when(store.requireSession(tenantId, sessionId))
+                    .thenReturn(session);
+            HarnessCoordinator coordinator = new HarnessCoordinator(store,
+                    harness, new HarnessEventProjector(), runtimeWarmer,
+                    directExecutor(), Clock.systemUTC(),
+                    new ManagedAgentProperties());
+            try {
+                coordinator.dispatch(tenantId, sessionId, turnId);
+            } finally {
+                coordinator.close();
+            }
+            verify(store).failTurn(eq(tenantId), eq(sessionId), eq(turnId),
+                    anyString(), eq("workspace_unavailable"), anyString());
+            verify(harness).isWorkspaceFilesAvailable();
+            verifyNoMoreInteractions(harness);
+            verifyNoInteractions(runtimeWarmer);
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+        "false, false, 0, false",
+        "false, false, 5, false",
+        "true, false, 0, true",
+        "false, true, 5, true"
+    })
+    void classifiesWorkspaceRefusalBeforeSubmission(boolean retryable,
+            boolean submitted, int retryCount, boolean expectRetry) {
+        AgentStateStore store = mock(AgentStateStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        TurnRecord claimed = turn("tenant", "session", "turn", "prompt",
+                null, 0, submitted, retryCount);
+        when(store.claimTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(store.requireSession("tenant", "session")).thenReturn(
+                new SessionRecord("tenant", "session", "qwen-code", null,
+                        null, "ACTIVE", null, null, 0, 0, 0, 1, 1, null, 1,
+                        new ContextBinding("tenant", "ws-a", 1,
+                                "storage-a", ".", "config-a", 1)));
+        when(harness.isWorkspaceFilesAvailable()).thenReturn(true);
+        RuntimeBrokerException refusal = retryable
+                ? new RuntimeBrokerException(409, "workspace_busy",
+                        "Workspace is busy.", true)
+                : WorkspaceExecutionStore.unavailable();
+        when(harness.createOrLoad("tenant", "session", false))
+                .thenThrow(refusal);
+        HarnessCoordinator coordinator = new HarnessCoordinator(store, harness,
+                new HarnessEventProjector(), mock(RuntimeWarmer.class),
+                directExecutor(), Clock.systemUTC(),
+                new ManagedAgentProperties());
+        try {
+            coordinator.dispatch("tenant", "session", "turn");
+        } finally {
+            coordinator.close();
+        }
+        if (expectRetry) {
+            verify(store).scheduleTurnRetry(eq("tenant"), eq("session"),
+                    eq("turn"), anyString(), anyLong());
+            verify(store, never()).failTurn(anyString(), anyString(),
+                    anyString(), anyString(), anyString(), anyString());
+        } else {
+            verify(store).failTurn(eq("tenant"), eq("session"), eq("turn"),
+                    anyString(), eq("workspace_unavailable"),
+                    eq(refusal.getMessage()));
+            verify(store, never()).scheduleTurnRetry(anyString(), anyString(),
+                    anyString(), anyString(), anyLong());
+        }
+        verify(harness, never()).submit(anyString(), anyString(), anyString(),
+                any(), anyString());
+    }
+
+    @Test
+    void boundCancellationNeverCallsTheLegacyHarness() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        RuntimeWarmer warmer = mock(RuntimeWarmer.class);
+        when(store.findTurn("tenant", "session", "turn")).thenReturn(Optional.of(
+                turn("tenant", "session", "turn", "prompt", "epoch", 1,
+                        "CANCELLING")));
+        when(store.requireSession("tenant", "session")).thenReturn(
+                new SessionRecord("tenant", "session", "qwen-code", null,
+                        null, "ACTIVE", "boot", "epoch", 1, 1, 0, 1, 1, null, 1,
+                        new ContextBinding("tenant", "ws-a", 1,
+                                "storage-a", ".", "config-a", 1)));
+        HarnessCoordinator coordinator = new HarnessCoordinator(store, harness,
+                new HarnessEventProjector(), warmer, directExecutor(),
+                Clock.systemUTC(), new ManagedAgentProperties());
+        try {
+            coordinator.cancel("tenant", "session", "turn");
+            verify(store).requireSession("tenant", "session");
+            verifyNoInteractions(harness, warmer);
+        } finally {
+            coordinator.close();
+        }
+    }
+
     @Test
     void cancelsKnownSettledRecoveredRuntimeAndStreamsCancellation() {
         String tenantId = "tenant-recovery-cancel";
@@ -463,8 +588,10 @@ class HarnessCoordinatorTest {
                 anyString(), anyString(), anyString());
     }
 
-    @Test
-    void doesNotExhaustAfterSubmissionMayHaveBeenAdmitted() {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void doesNotExhaustAfterSubmissionMayHaveBeenAdmitted(
+            boolean workspaceRefusal) {
         String tenantId = "tenant-retry-submitted";
         String sessionId = "session-retry-submitted";
         String turnId = "turn-retry-submitted";
@@ -490,7 +617,8 @@ class HarnessCoordinatorTest {
                 .thenReturn(new Attachment("boot-new", null, null, null));
         when(harness.submit(eq(tenantId), eq(sessionId), eq(promptId), any(),
                 anyString())).thenThrow(
-                        new IllegalStateException("response lost"));
+                        workspaceRefusal ? WorkspaceExecutionStore.unavailable()
+                                : new IllegalStateException("response lost"));
         when(runtimeWarmer.isEnabled()).thenReturn(false);
 
         HarnessCoordinator coordinator = new HarnessCoordinator(store,

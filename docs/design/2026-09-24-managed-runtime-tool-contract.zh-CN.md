@@ -2,7 +2,7 @@
 
 [English](2026-09-24-managed-runtime-tool-contract.md) | [简体中文](2026-09-24-managed-runtime-tool-contract.zh-CN.md)
 
-状态：契约、worker 处理器与 Java 工具 transport 已实现；Broker transport 接入仍为后续工作
+状态：契约、worker 处理器与 Java 工具 transport 已实现；Broker transport 经 `managed-runtime-provider/1` 接入（见 [2026-09-27-broker-provider-control.zh-CN.md](2026-09-27-broker-provider-control.zh-CN.md)）
 
 相关：#12380（Managed Agent 分阶段交付）、[2026-09-22-managed-runtime-attestation-contract.md](2026-09-22-managed-runtime-attestation-contract.md) 的 attestation 契约，以及 #12380 上本契约所答复的对账讨论。
 
@@ -16,15 +16,15 @@ owned Managed Runtime worker 在 attestation 之外增加三个工具操作—�
 
 ## 2. 范围
 
-范围内：路由清单声明、共享 schema 与 conformance fixtures，以及 worker 处理器和对应的 raw HTTP gate 放行。TypeScript 契约测试与 Java fixture 消费方共享契约；worker 测试覆盖已挂载的处理器。Java `HttpRuntimeTransport` 按本契约实现 `execute`、`status`、`cancel`。
+范围内：路由清单声明、共享 schema 与 conformance fixtures，以及 worker 处理器和对应的 raw HTTP gate 放行。TypeScript 契约测试与 Java fixture 消费方共享契约；worker 测试覆盖已挂载的处理器。Java `HttpRuntimeTransport` 按本契约实现 `execute`、`status`、`cancel`。七字段的已准备 reference、会话动词和 provider 控制则改走 `managed-runtime-provider/1`：`acquire` 在 Broker 本地应答，`release` 和各项控制经 provider control 路由发送（见 [2026-09-27-broker-provider-control.zh-CN.md](2026-09-27-broker-provider-control.zh-CN.md)）。
 
-范围外：将 `HttpRuntimeTransport` 接为 `RuntimeTransport`、Harness 侧工具接线，以及 `not_started_proven` 结果（需要持久回执存储）。
+范围外：~~将 `HttpRuntimeTransport` 接为 `RuntimeTransport`~~（已经由 `managed-runtime-provider/1` 落地）、Harness 侧工具接线，以及 `not_started_proven` 结果（需要持久回执存储）。
 
 ## 3. 设计
 
 ### 3.1 路由
 
-三个操作都在 `OWNED_MANAGED_RUNTIME_ROUTES` 中声明，沿用 attestation 的纪律：`POST` 精确路径、协议版本 2、封闭 JSON 请求体、双向 `no-store`、先鉴权后解析，以及 lease id 与 epoch 请求头。`execute` 的请求上限为 256 KiB，使工具调用的 `input` 放得下；`status` 与 `cancel` 的请求上限为 16 KiB。每个操作的响应上限均为 1 MiB。更大的工具输出走产物交付通道，绝不进入这些信封。
+三个操作都在 `OWNED_MANAGED_RUNTIME_ROUTES` 中声明，沿用 attestation 的纪律：`POST` 精确路径、协议版本 2、封闭 JSON 请求体、双向 `no-store`、先鉴权后解析，以及 lease id 与 epoch 请求头。`execute` 的请求上限为 256 KiB，使工具调用的 `input` 放得下；`status` 与 `cancel` 的请求上限为 16 KiB。每个操作的响应上限均为 1 MiB。更大的工具输出走产物交付通道，绝不进入这些信封；该通道的契约见[Managed 工具结果契约](2026-09-26-managed-tool-result-contract.zh-CN.md)，它通过 Tool v3 启用，这些 v2 信封保持不变。
 
 fixture 的请求头对象封闭为五个协议头。这约束的是 fixture 声明，不限制客户端或中间层添加的普通 HTTP 头。负面用例通过显式的省略或替换指令构造。
 
@@ -52,7 +52,7 @@ reference 是 harness 分配的原始调用身份；Runtime 不会得知任何 B
 
 本切片只固定 `responseParts` 为数组，有意把元素结构推迟到 worker 处理器与 Broker 接入切片。后续必须从实际工具结果路径推导结构（`ToolCallResponseInfo.responseParts` 使用 SDK `Part[]`），并在提供结果之前补齐共享一致性覆盖。fixture 中的文本 part 仅作示例，不定义新的 part 格式。`settled` 下的 `not_started` 是 Runtime 明确给出的终态；记录缺失仍须返回 `unknown`，绝不能据此推导 `not_started`。
 
-失败沿用共享分类：401 凭据、400/413 协议、409 身份、404 不兼容。JSON 错误保留共享的稳定错误码；gate 的不兼容 404 为空响应体。含 attestation 名称的错误码由各路由共享；每个解析器执行对应路由的请求体上限。
+失败沿用共享分类：401 凭据、400/413 协议、409 身份、404 不兼容。在 `managed-context/1` 的 boot v2 下，`execute` 还可能返回 409 `managed_context_unavailable`，其类别为 recovery；见 [Managed Context Worker](2026-09-26-managed-context-worker.zh-CN.md)。JSON 错误保留共享的稳定错误码；gate 的不兼容 404 为空响应体。含 attestation 名称的错误码由各路由共享；每个解析器执行对应路由的请求体上限。
 
 ### 3.4 Conformance fixtures
 
@@ -76,13 +76,13 @@ reference 是 harness 分配的原始调用身份；Runtime 不会得知任何 B
 
 ## 5. 后续工作
 
-- 完成会话操作并将 `HttpRuntimeTransport` 接为 `RuntimeTransport`。按 §4.1 所述从已保存的 reference 之外单独提供 `toolName`/`input`，并端到端覆盖真实 Broker 分发。
+- ~~完成会话操作并将 `HttpRuntimeTransport` 接为 `RuntimeTransport`。~~ 已经由 `managed-runtime-provider/1` 协议落地，见 [2026-09-27-broker-provider-control.zh-CN.md](2026-09-27-broker-provider-control.zh-CN.md)。§4.1 仍存的缺口：immediate `POST /executions` 路由仍然从已保存的 reference 读取 `toolName`/`input`，其调用方必须把工具参数持久化进 `reference_json`；请改用 deferred reserve/start 路径或 provider 协议。为 immediate 路由提供同样的负载分离仍为后续工作。
 - `UNKNOWN` 执行对账器已在 #12655 落地。其 transport 必须先校验 status 线上信封，再投影为 `{state, result}`（仅 `settled` 携带 `result`）。去掉 `protocolVersion` 与 `lastSequence`；Broker 拒绝额外字段，目前没有游标消费方。
 - 对 Runtime 报告仍在运行的执行是否发送物理取消，有意推迟。
 
 ## 6. Worker 实现
 
-合入的 attestation worker 现在在 `attest` 旁边挂载了这三个路由。其执行器恰好准入首版的普通工具——`read_file`、`write_file`、`edit` 与前台 `run_shell_command`——运行在以已证明的工作区 cwd 为根的真实 `Config` 之上，checkpointing 关闭。准入发生在 Harness 侧；worker 执行时不再有审批门。Harness 准入必须包含工作区边界判定：worker 不会将工具路径或 shell 命令限制在工作区内。调用日志按构造只在内存中：worker 进程就是 Runtime 代数，重启即是新代数而非延续，对该进程从未见过的请求，`unknown` 才是诚实的应答。worker 禁用依赖对话的文件读取缓存：它没有内容仍在对话历史中的证据，且可能服务多个 Runtime 会话。任何先读后写要求由 Harness 准入负责。
+合入的 attestation worker 现在在 `attest` 旁边挂载了这三个路由。其执行器恰好准入首版的普通工具——`read_file`、`write_file`、`edit` 与前台 `run_shell_command`——运行在以已证明的工作区 cwd 为根的真实 `Config` 之上，checkpointing 关闭。在 `managed-context/1` 的 boot v2 下，每个新调用改为在其 Session 已安装的实际目录中运行，并须先通过激活 gate；见 [Managed Context Worker](2026-09-26-managed-context-worker.zh-CN.md)。准入发生在 Harness 侧；worker 执行时不再有审批门。Harness 准入必须包含工作区边界判定：worker 不会将工具路径或 shell 命令限制在工作区内。调用日志按构造只在内存中：worker 进程就是 Runtime 代数，重启即是新代数而非延续，对该进程从未见过的请求，`unknown` 才是诚实的应答。worker 禁用依赖对话的文件读取缓存：它没有内容仍在对话历史中的证据，且可能服务多个 Runtime 会话。任何先读后写要求由 Harness 准入负责。
 
 契约之上的语义：
 

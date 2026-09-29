@@ -6,6 +6,8 @@ import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.Acquir
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.BlockRecoveryRequest;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitReceipt;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitTransactionRequest;
+import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.PublishToolResultRequest;
+import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.ToolResultResourceRef;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.RenewWriterRequest;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.RecoveryStateReceipt;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.RestoreHead;
@@ -97,6 +99,14 @@ public class ManagedSessionStoreController {
             @RequestParam String workspaceId) {
         return store.restore(tenant.tenantId(), workspaceId, sessionId,
                 writerToken);
+    }
+
+    @PostMapping("/tool-results:publish")
+    public ToolResultResourceRef publishToolResult(TenantContext tenant,
+            @PathVariable String sessionId,
+            @RequestHeader(ManagedSessionStoreModels.WRITER_TOKEN_HEADER) String writerToken,
+            @Valid @RequestBody PublishToolResultRequest request) {
+        return store.publishToolResult(tenant.tenantId(), sessionId, writerToken, request);
     }
 
     @GetMapping("/transactions")

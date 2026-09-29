@@ -107,7 +107,8 @@ describe('bundled workflow-authoring skill', () => {
     ['is not an agent dispatch'],
     ['nests one level only'],
     ['read `budget.total`'],
-    ['subagent completed without calling StructuredOutput'],
+    ['the third failed submission stops it'],
+    ['makes agent() resolve to null without starting the agent'],
     ['Unresolved names make the admitted agent() resolve to null'],
   ])('moved out of the tool description: %s', (anchor) => {
     it('is in the skill', () => {
@@ -269,6 +270,9 @@ describe('bundled workflow-authoring skill', () => {
     ['Math.floor(budget.total / 100_000)'],
     // Saving is a different skill.
     ['`workflow-creator` skill'],
+    ["interactive TUI's ink renderer"],
+    ['OpenTUI renderer does not yet run client-scheduled tools'],
+    ["Workflow({ name: '<name>' })"],
   ])('states the script contract: %s', (anchor) => {
     expect(skillProse()).toContain(anchor);
   });

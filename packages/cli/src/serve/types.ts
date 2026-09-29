@@ -342,6 +342,13 @@ export interface ServeOptions {
    * `POST /session/:id/prompt` from receipt to completion.
    */
   promptDeadlineMs?: number;
+  /**
+   * Build every ordinary workspace runtime's Bridge with paired Legacy and
+   * Managed engines. No Managed engine exists for these hosts yet, so new
+   * sessions run on Legacy with a durable owner and Managed owners are
+   * refused on restore.
+   */
+  experimentalPairedEngines?: boolean;
   /** Mount the experimental resident Managed Gateway and Tool Runtime path. */
   experimentalManagedAgents?: boolean;
   /** Expose the private authenticated Tool-only Runtime worker protocol. */
@@ -453,6 +460,8 @@ export interface HostedHarnessCapabilities {
 
 export interface CapabilitiesEnvelope {
   v: 1;
+  /** Private process generation and protocol for the Hosted Harness client. */
+  hostedHarness?: HostedHarnessCapabilities;
   /**
    * Serve protocol versions supported by this daemon. Optional because this is
    * additive to v=1; older v=1 daemons omit it.
