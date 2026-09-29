@@ -25,7 +25,8 @@ class DurableLocalRuntimeFaultGateTest {
             var firstProxy = rig.proxy();
             var first = rig.broker("first", firstProxy, FaultGateRig.Provisioner.DURABLE_LOCAL_PROCESS);
             first.acquire(HARNESS, SESSION).requireOk();
-            var reference = FaultGateRig.shell("call", "echo start >> marker; sleep 3; echo end >> marker");
+            var reference = FaultGateRig.shell("call",
+                    "echo start >> marker; while [ ! -f finish ]; do sleep 0.05; done; echo end >> marker");
             var created = first.create(HARNESS, SESSION, "original", reference).object();
             String execution = created.getString("executionCallId");
             rig.awaitMarker(marker(rig), List.of("start"));
@@ -38,6 +39,8 @@ class DurableLocalRuntimeFaultGateTest {
             second.acquire(HARNESS, SESSION).requireOk();
             var retry = second.create(HARNESS, SESSION, "original", reference).object();
             assertEquals(execution, retry.getString("executionCallId"));
+            assertEquals("UNRESOLVED", second.reconcile(HARNESS, SESSION, execution).object().getString("outcome"));
+            Files.writeString(rig.directory.resolve("finish"), "release");
             FaultGateRig.await(() -> second.reconcile(HARNESS, SESSION, execution).object().getString("outcome"),
                     "RESOLVED"::equals, "original journal settlement");
             var restored = rig.activeBinding();
