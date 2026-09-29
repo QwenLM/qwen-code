@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Qwen Managed Agent Public and WebShell API",
-    "version": "1.26.0",
-    "description": "Canonical contract for the public Managed Agent resources and the WebShell adapter. partial means that the route exists but generated types and full contract tests are pending; planned means that the route or field is not implemented. Workspace context and cwd operations are v1.9 target contracts, not current server capabilities. v1.10 adds planned command admission, Actions, lifecycle and actor authorization. v1.12 refines planned W0 creation discovery, actor-specific create hints and explicit default selection. Full tool-result descriptors from the v1.11 design are not yet included. Filter planned fields as well as routes from production SDKs. v1.13 moves this contract into the Qwen Code repository as its single source and records the shipped rename, archive, unarchive and delete routes as partial. v1.14 integrates W0d workspace discovery, the WebShell workspace lookup, and empty-session binding as partial; workspace_binding/workspaceBinding advertises this narrow flow without enabling workspace execution or context switching. v1.15 adds the archived, archiving and deleting Session statuses and the cancelling Turn status, requires request_id in error envelopes, declares the error responses that the server returns, and marks Session create, list and get on both surfaces implemented. v1.16 adds the planned Stage H task contract (SessionTaskView as PublicTask, task list, detail, events and cancel) and names the MCP catalog, hook catalog, automation and channel resources as planned; their shapes arrive with Stages H1 to H6. v1.17 implements event replay: events carry their schema and projection versions and a top-level Item and Part identity, JSON event pages return has_more and next_cursor and accept limits up to 1000, and a persisted replay floor answers expired cursors with 409 cursor_expired in JSON and one agent.session.resync_required frame over SSE; it marks the public event query and stream, the WebShell event stream and the WebShell transcript implemented. v1.18 implements the durable Session lifecycle (Stage D4): close, archive and delete answer 202 with a command operation on both surfaces, an archive requires a closed Session, a deleted Session leaves a tombstone whose operations stay readable, and the operation query serves them; unarchive restores a closed Session, and Session capabilities advertise session_lifecycle. v1.19 serves the task list and detail on both surfaces as partial (Stage H0c): the Session store projects them from the Stage H records the Session authority commits, a task.updated Session event announces each change of a task's view, and Session capabilities advertise tasks. Task events and cancel stay planned until a slice's tasks produce output and accept a cancel. v1.20 implements the Turn read model (Stage D5): the public Turn list and detail read a Session's Turns without their input, newest first by creation time in milliseconds and then Turn ID, with an opaque cursor; a deleted Session's Turns are not readable, and the durable admission fields of a Turn stay planned until D7. v1.21 declares on the task list, detail and event routes of both surfaces the 403 actor_scope_mismatch that the tenant filter answers on every /v1/agents/ and WebShell route, as the Session and Turn reads already do, and the shared Forbidden response names it; a caller that cannot read a task still gets 404. v1.22 adds deployment-opted-in creation with an initial Workspace file-tool Turn (G0) on the public and WebShell surfaces; the fixed server-owned profile does not enable later Workspace operations. v1.23 settles the planned task event and cancel semantics: a durable retention floor, committed-prefix publication, stable cursors, Artifact visibility before expiry, bounded backlog under archival failure, ordered idempotent cancellation and command outcomes. Clients tolerate unknown optional event fields across minor versions. Task events and cancel remain planned. v1.24 serves the read-only Session MCP catalog as partial (Stage H1), projecting display metadata and schemas from committed records without Runtime identities, credentials or production profile enablement. v1.25 implements permission Actions (Stage D6b) on both surfaces: list, get and respond, projected from the Session's action.changed records; a WebShell permission Action carries inputRevision, policyRevision, functionCallId, toolName and expiresAt, its option ids allow and deny are stable, a Turn has at most one requested approval at a time, and a response is a durable command operation carrying requestId. v1.26 declares the tenant filter's 403 actor_scope_mismatch on every covered public and WebShell route, including planned routes, and pins the refusal code in contract traffic."
+    "version": "1.27.0",
+    "description": "Canonical contract for the public Managed Agent resources and the WebShell adapter. partial means that the route exists but generated types and full contract tests are pending; planned means that the route or field is not implemented. Workspace context and cwd operations are v1.9 target contracts, not current server capabilities. v1.10 adds planned command admission, Actions, lifecycle and actor authorization. v1.12 refines planned W0 creation discovery, actor-specific create hints and explicit default selection. Filter planned fields as well as routes from production SDKs. v1.13 moves this contract into the Qwen Code repository as its single source and records the shipped rename, archive, unarchive and delete routes as partial. v1.14 integrates W0d workspace discovery, the WebShell workspace lookup, and empty-session binding as partial; workspace_binding/workspaceBinding advertises this narrow flow without enabling workspace execution or context switching. v1.15 adds the archived, archiving and deleting Session statuses and the cancelling Turn status, requires request_id in error envelopes, declares the error responses that the server returns, and marks Session create, list and get on both surfaces implemented. v1.16 adds the planned Stage H task contract (SessionTaskView as PublicTask, task list, detail, events and cancel) and names the MCP catalog, hook catalog, automation and channel resources as planned; their shapes arrive with Stages H1 to H6. v1.17 implements event replay: events carry their schema and projection versions and a top-level Item and Part identity, JSON event pages return has_more and next_cursor and accept limits up to 1000, and a persisted replay floor answers expired cursors with 409 cursor_expired in JSON and one agent.session.resync_required frame over SSE; it marks the public event query and stream, the WebShell event stream and the WebShell transcript implemented. v1.18 implements the durable Session lifecycle (Stage D4): close, archive and delete answer 202 with a command operation on both surfaces, an archive requires a closed Session, a deleted Session leaves a tombstone whose operations stay readable, and the operation query serves them; unarchive restores a closed Session, and Session capabilities advertise session_lifecycle. v1.19 serves the task list and detail on both surfaces as partial (Stage H0c): the Session store projects them from the Stage H records the Session authority commits, a task.updated Session event announces each change of a task's view, and Session capabilities advertise tasks. Task events and cancel stay planned until a slice's tasks produce output and accept a cancel. v1.20 implements the Turn read model (Stage D5): the public Turn list and detail read a Session's Turns without their input, newest first by creation time in milliseconds and then Turn ID, with an opaque cursor; a deleted Session's Turns are not readable, and the durable admission fields of a Turn stay planned until D7. v1.21 declares on the task list, detail and event routes of both surfaces the 403 actor_scope_mismatch that the tenant filter answers on every /v1/agents/ and WebShell route, as the Session and Turn reads already do, and the shared Forbidden response names it; a caller that cannot read a task still gets 404. v1.22 adds deployment-opted-in creation with an initial Workspace file-tool Turn (G0) on the public and WebShell surfaces; the fixed server-owned profile does not enable later Workspace operations. v1.23 settles the planned task event and cancel semantics: a durable retention floor, committed-prefix publication, stable cursors, Artifact visibility before expiry, bounded backlog under archival failure, ordered idempotent cancellation and command outcomes. Clients tolerate unknown optional event fields across minor versions. Task events and cancel remain planned. v1.24 serves the read-only Session MCP catalog as partial (Stage H1), projecting display metadata and schemas from committed records without Runtime identities, credentials or production profile enablement. v1.25 implements permission Actions (Stage D6b) on both surfaces: list, get and respond, projected from the Session's action.changed records; a WebShell permission Action carries inputRevision, policyRevision, functionCallId, toolName and expiresAt, its option ids allow and deny are stable, a Turn has at most one requested approval at a time, and a response is a durable command operation carrying requestId. v1.26 declares the tenant filter's 403 actor_scope_mismatch on every covered public and WebShell route, including planned routes, and pins the refusal code in contract traffic. v1.27 adds O3 durable tool-result projection, artifact metadata, immutable range/streaming content and WebShell result reads. Artifact capability requires a configured O3 reader and a Workspace-bound Session; execution admission remains independent."
   },
   "servers": [
     {
@@ -30,7 +30,9 @@
   "paths": {
     "/v1/agents": {
       "post": {
-        "tags": ["Public Resources"],
+        "tags": [
+          "Public Resources"
+        ],
         "operationId": "createAgent",
         "x-qwen-implementation-status": "planned",
         "parameters": [
@@ -61,6 +63,9 @@
           },
           "409": {
             "$ref": "#/components/responses/Conflict"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
           }
         }
       }
@@ -79,7 +84,9 @@
         }
       ],
       "get": {
-        "tags": ["Public Resources"],
+        "tags": [
+          "Public Resources"
+        ],
         "operationId": "getAgent",
         "x-qwen-implementation-status": "planned",
         "parameters": [
@@ -113,7 +120,9 @@
         }
       },
       "post": {
-        "tags": ["Public Resources"],
+        "tags": [
+          "Public Resources"
+        ],
         "operationId": "updateAgent",
         "x-qwen-implementation-status": "planned",
         "parameters": [
@@ -156,7 +165,9 @@
     },
     "/v1/agents/sessions": {
       "post": {
-        "tags": ["Public Sessions"],
+        "tags": [
+          "Public Sessions"
+        ],
         "operationId": "createSession",
         "x-qwen-implementation-status": "implemented",
         "description": "Workspace selection is persisted with the original actor-scoped creation receipt. With the deployment's G0 file admission opt-in, qwen-code Sessions in an authorized, preregistered Workspace may include initial input under the fixed preapproved file-tool profile. Public callers cannot select the profile. Otherwise Workspace creation must have empty input. Later Workspace submit, cancel and lifecycle operations remain gated. Check replay before resolving defaults; a durable binding is not proof of Runtime readiness.",
@@ -212,7 +223,9 @@
         }
       },
       "get": {
-        "tags": ["Public Sessions"],
+        "tags": [
+          "Public Sessions"
+        ],
         "operationId": "listSessions",
         "x-qwen-implementation-status": "implemented",
         "parameters": [
@@ -259,7 +272,9 @@
         }
       ],
       "get": {
-        "tags": ["Public Sessions"],
+        "tags": [
+          "Public Sessions"
+        ],
         "operationId": "getSession",
         "x-qwen-implementation-status": "implemented",
         "responses": {
@@ -285,7 +300,9 @@
         }
       },
       "patch": {
-        "tags": ["Public Sessions"],
+        "tags": [
+          "Public Sessions"
+        ],
         "operationId": "updateSession",
         "x-qwen-implementation-status": "partial",
         "description": "Renames the Session. Shipped before the v1.10 lifecycle review, which does not cover it.",
@@ -335,7 +352,9 @@
         }
       },
       "delete": {
-        "tags": ["Public Sessions"],
+        "tags": [
+          "Public Sessions"
+        ],
         "operationId": "deleteSession",
         "x-qwen-implementation-status": "implemented",
         "description": "Accepts an active, closed or archived Session. 409 turn_active while a Turn is active, session_operation_active while another lifecycle change is pending, and workspace_unavailable for a Workspace-bound Session. The same key from the same actor returns the original operation, also after the Session was deleted.",
@@ -377,7 +396,9 @@
         }
       ],
       "post": {
-        "tags": ["Public Sessions"],
+        "tags": [
+          "Public Sessions"
+        ],
         "operationId": "postSessionEvent",
         "x-qwen-implementation-status": "partial",
         "parameters": [
@@ -421,7 +442,9 @@
         }
       },
       "get": {
-        "tags": ["Public Sessions"],
+        "tags": [
+          "Public Sessions"
+        ],
         "operationId": "getSessionEvents",
         "x-qwen-implementation-status": "implemented",
         "description": "Returns JSON by default. Accept text/event-stream or stream=true to receive SSE. Last-Event-ID takes precedence over after. A cursor below replay_floor_sequence gets 409 cursor_expired as JSON; a stream instead sends one agent.session.resync_required frame and closes.",
@@ -493,7 +516,9 @@
         }
       ],
       "get": {
-        "tags": ["Public Resources"],
+        "tags": [
+          "Public Resources"
+        ],
         "operationId": "listTurns",
         "x-qwen-implementation-status": "implemented",
         "description": "Turns of this Session, newest first: by creation time in milliseconds, which created_at shows in whole seconds, then by id, both descending. next_cursor names the last Turn of the page and is null on the last page; a page never repeats or skips a Turn that existed when the first page was read. 400 invalid_limit for a 32-bit integer limit outside 1 to 100, invalid_request for a limit that is not a 32-bit integer, and invalid_cursor for a cursor that does not decode to the createdAt:turnId form this server issues. 404 session_not_found for an unknown, deleted or unreadable Session.",
@@ -538,7 +563,9 @@
         }
       ],
       "get": {
-        "tags": ["Public Resources"],
+        "tags": [
+          "Public Resources"
+        ],
         "operationId": "getTurn",
         "x-qwen-implementation-status": "implemented",
         "description": "404 session_not_found for an unknown, deleted or unreadable Session, and turn_not_found for a Turn that this Session does not have; an id that differs from a Turn's only by trailing spaces does not find it. 400 invalid_request for a Turn id longer than 64 characters.",
@@ -572,7 +599,9 @@
         }
       ],
       "get": {
-        "tags": ["Public Resources"],
+        "tags": [
+          "Public Resources"
+        ],
         "operationId": "listItems",
         "x-qwen-implementation-status": "partial",
         "parameters": [
@@ -620,12 +649,20 @@
         }
       ],
       "get": {
-        "tags": ["Public Resources"],
+        "tags": [
+          "Public Resources"
+        ],
         "operationId": "listArtifacts",
-        "x-qwen-implementation-status": "planned",
+        "x-qwen-implementation-status": "implemented",
         "parameters": [
           {
-            "$ref": "#/components/parameters/Cursor"
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 2048
+            }
           },
           {
             "$ref": "#/components/parameters/ListLimit"
@@ -633,7 +670,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Artifact metadata page.",
+            "description": "Authorized persisted tool result resource.",
             "content": {
               "application/json": {
                 "schema": {
@@ -642,11 +679,55 @@
               }
             }
           },
-          "404": {
-            "$ref": "#/components/responses/NotFound"
+          "400": {
+            "description": "Invalid request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Trusted actor required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
           },
           "403": {
-            "$ref": "#/components/responses/Forbidden"
+            "description": "Authenticated actor scope mismatch.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown or unreadable resource.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Resource temporarily unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
           }
         }
       }
@@ -661,14 +742,41 @@
         }
       ],
       "get": {
-        "tags": ["Public Resources"],
+        "tags": [
+          "Public Resources"
+        ],
         "operationId": "getArtifactContent",
-        "x-qwen-implementation-status": "planned",
+        "x-qwen-implementation-status": "implemented",
         "responses": {
           "200": {
-            "description": "Authorized artifact bytes with integrity metadata.",
+            "description": "Exact immutable bytes; streamed with bounded memory.",
             "headers": {
-              "Digest": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Repr-Digest": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Length": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Disposition": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Accept-Ranges": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Cache-Control": {
                 "schema": {
                   "type": "string"
                 }
@@ -683,18 +791,202 @@
               }
             }
           },
-          "404": {
-            "$ref": "#/components/responses/NotFound"
+          "206": {
+            "description": "Exact immutable bytes; streamed with bounded memory.",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Repr-Digest": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Length": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Disposition": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Accept-Ranges": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Range": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Trusted actor required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
           },
           "403": {
-            "$ref": "#/components/responses/Forbidden"
+            "description": "Authenticated actor scope mismatch or original-byte access denied.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown or unreadable resource.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Resource temporarily unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Reserved for future retention support; O3 does not expire retained representations.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "412": {
+            "description": "If-Match mismatch.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "416": {
+            "description": "Unsatisfiable range.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "headers": {
+              "Content-Range": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Reader limit reached.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
           }
-        }
+        },
+        "parameters": [
+          {
+            "name": "revision",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          },
+          {
+            "name": "Range",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "If-Match",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "If-Range",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "description": "Requires a trusted actor and current Workspace read/raw-content grants. revision is mandatory. One range up to 1 MiB; malformed, multiple, or oversized ranges return 400. A mismatched If-Range selects the full response. Authorization precedes validators and range parsing. No latest-version fallback or transparent compression."
       }
     },
     "/api/agent/web-shell/v1/sessions/query": {
       "post": {
-        "tags": ["WebShell"],
+        "tags": [
+          "WebShell"
+        ],
         "operationId": "webShellListSessions",
         "x-qwen-implementation-status": "implemented",
         "requestBody": {
@@ -729,7 +1021,9 @@
     },
     "/api/agent/web-shell/v1/sessions/get": {
       "post": {
-        "tags": ["WebShell"],
+        "tags": [
+          "WebShell"
+        ],
         "operationId": "webShellGetSession",
         "x-qwen-implementation-status": "implemented",
         "requestBody": {
@@ -767,7 +1061,9 @@
     },
     "/api/agent/web-shell/v1/transcript/query": {
       "post": {
-        "tags": ["WebShell"],
+        "tags": [
+          "WebShell"
+        ],
         "operationId": "webShellTranscript",
         "x-qwen-implementation-status": "implemented",
         "requestBody": {
@@ -806,7 +1102,9 @@
     },
     "/api/agent/web-shell/v1/events/stream": {
       "post": {
-        "tags": ["WebShell"],
+        "tags": [
+          "WebShell"
+        ],
         "operationId": "webShellStreamEvents",
         "x-qwen-implementation-status": "implemented",
         "description": "POST SSE consumed through fetch response.body. An afterSequence below the replay floor ends the stream with one agent.session.resync_required frame instead of a 409; reload the transcript and resume after its lastSequence.",
@@ -849,7 +1147,9 @@
     },
     "/api/agent/web-shell/v1/sessions/create": {
       "post": {
-        "tags": ["WebShell"],
+        "tags": [
+          "WebShell"
+        ],
         "operationId": "webShellCreateSession",
         "x-qwen-implementation-status": "implemented",
         "description": "Maps workspaceId/cwdRelative to public Workspace selection without using environmentId or absolute cwd. Shares G0's opt-in initial file-tool Turn admission and fixed server-owned profile with public Session creation. Later Workspace submit, cancel and lifecycle operations remain gated. Freeze selection with the original idempotency key; admission does not prove physical directory readiness.",
@@ -902,7 +1202,9 @@
     },
     "/api/agent/web-shell/v1/turns/submit": {
       "post": {
-        "tags": ["WebShell"],
+        "tags": [
+          "WebShell"
+        ],
         "operationId": "webShellSubmitTurn",
         "x-qwen-implementation-status": "partial",
         "requestBody": {
@@ -948,7 +1250,9 @@
     },
     "/api/agent/web-shell/v1/turns/cancel": {
       "post": {
-        "tags": ["WebShell"],
+        "tags": [
+          "WebShell"
+        ],
         "operationId": "webShellCancelTurn",
         "x-qwen-implementation-status": "partial",
         "requestBody": {
@@ -994,7 +1298,9 @@
     },
     "/v1/agents/workspaces": {
       "get": {
-        "tags": ["Public Resources"],
+        "tags": [
+          "Public Resources"
+        ],
         "operationId": "listWorkspaces",
         "x-qwen-implementation-status": "partial",
         "description": "Only readable preregistered workspaces, ordered by stable workspace id. Opaque cursors are bound to tenant, actor and filters; ACLs are rechecked on each page. Return actor-specific creation hints, pre-Session capability discovery and the authorized explicit default even when it is outside this page. No physical paths are exposed and no Runtime is started.",
@@ -1057,7 +1363,9 @@
         }
       ],
       "get": {
-        "tags": ["Public Resources"],
+        "tags": [
+          "Public Resources"
+        ],
         "operationId": "getWorkspace",
         "x-qwen-implementation-status": "partial",
         "responses": {
@@ -1090,7 +1398,9 @@
         }
       ],
       "post": {
-        "tags": ["Public Sessions"],
+        "tags": [
+          "Public Sessions"
+        ],
         "operationId": "changeSessionCwd",
         "x-qwen-implementation-status": "planned",
         "description": "W2: same-workspace only. Replay the original operation before revision/busy checks. Reject active or queued input and context holds. Poll the operation or await session.context.changed; do not treat 202 as activation.",
@@ -1152,7 +1462,9 @@
         }
       ],
       "get": {
-        "tags": ["Public Sessions"],
+        "tags": [
+          "Public Sessions"
+        ],
         "operationId": "getSessionCwdOperation",
         "x-qwen-implementation-status": "implemented",
         "description": "Reads one operation of the Session. Close, archive and delete operations are served now; cwd, command and task operations arrive with their slices. 404 operation_not_found for an unknown operation.",
@@ -1184,7 +1496,9 @@
     },
     "/api/agent/web-shell/v1/workspaces/query": {
       "post": {
-        "tags": ["WebShell"],
+        "tags": [
+          "WebShell"
+        ],
         "operationId": "webShellQueryWorkspaces",
         "x-qwen-implementation-status": "partial",
         "description": "Same authorization, paging, explicit default and pre-Session capability discovery as listWorkspaces, with camelCase fields. Listing errors must not cause silent fallback to a default directory.",
@@ -1223,7 +1537,9 @@
     },
     "/api/agent/web-shell/v1/sessions/cwd/change": {
       "post": {
-        "tags": ["WebShell"],
+        "tags": [
+          "WebShell"
+        ],
         "operationId": "webShellChangeCwd",
         "x-qwen-implementation-status": "planned",
         "requestBody": {
@@ -1264,7 +1580,9 @@
     },
     "/api/agent/web-shell/v1/operations/query": {
       "post": {
-        "tags": ["WebShell"],
+        "tags": [
+          "WebShell"
+        ],
         "operationId": "webShellQueryCwdOperation",
         "x-qwen-implementation-status": "implemented",
         "requestBody": {
@@ -1310,7 +1628,9 @@
         }
       ],
       "get": {
-        "tags": ["Public Sessions"],
+        "tags": [
+          "Public Sessions"
+        ],
         "operationId": "listSessionActions",
         "x-qwen-implementation-status": "implemented",
         "responses": {
@@ -1360,7 +1680,9 @@
         }
       ],
       "get": {
-        "tags": ["Public Sessions"],
+        "tags": [
+          "Public Sessions"
+        ],
         "operationId": "getSessionAction",
         "x-qwen-implementation-status": "implemented",
         "responses": {
@@ -1402,7 +1724,9 @@
         }
       ],
       "post": {
-        "tags": ["Public Sessions"],
+        "tags": [
+          "Public Sessions"
+        ],
         "operationId": "respondToSessionAction",
         "x-qwen-implementation-status": "implemented",
         "responses": {
@@ -1457,7 +1781,9 @@
         }
       ],
       "post": {
-        "tags": ["Public Sessions"],
+        "tags": [
+          "Public Sessions"
+        ],
         "operationId": "closeSession",
         "x-qwen-implementation-status": "implemented",
         "description": "Accepts an active Session; 409 session_state_conflict otherwise. 409 turn_active while a Turn is active, session_operation_active while another lifecycle change is pending, and workspace_unavailable for a Workspace-bound Session.",
@@ -1499,7 +1825,9 @@
         }
       ],
       "post": {
-        "tags": ["Public Sessions"],
+        "tags": [
+          "Public Sessions"
+        ],
         "operationId": "archiveSession",
         "x-qwen-implementation-status": "implemented",
         "description": "Accepts a closed Session; 409 session_state_conflict otherwise, session_operation_active while another lifecycle change is pending, and workspace_unavailable for a Workspace-bound Session.",
@@ -1541,7 +1869,9 @@
         }
       ],
       "post": {
-        "tags": ["Public Sessions"],
+        "tags": [
+          "Public Sessions"
+        ],
         "operationId": "unarchiveSession",
         "x-qwen-implementation-status": "partial",
         "description": "Restores an archived Session to closed. Shipped before the v1.10 lifecycle review, which does not cover it. It stays a synchronous mutation rather than a command operation: Java is its only authority, and the Session stays closed.",
@@ -1583,7 +1913,9 @@
     },
     "/api/agent/web-shell/v1/actions/query": {
       "post": {
-        "tags": ["WebShell"],
+        "tags": [
+          "WebShell"
+        ],
         "operationId": "queryWebShellActions",
         "x-qwen-implementation-status": "implemented",
         "responses": {
@@ -1627,7 +1959,9 @@
     },
     "/api/agent/web-shell/v1/actions/get": {
       "post": {
-        "tags": ["WebShell"],
+        "tags": [
+          "WebShell"
+        ],
         "operationId": "getWebShellAction",
         "x-qwen-implementation-status": "implemented",
         "responses": {
@@ -1671,7 +2005,9 @@
     },
     "/api/agent/web-shell/v1/actions/respond": {
       "post": {
-        "tags": ["WebShell"],
+        "tags": [
+          "WebShell"
+        ],
         "operationId": "respondWebShellAction",
         "x-qwen-implementation-status": "implemented",
         "responses": {
@@ -1716,7 +2052,9 @@
     },
     "/api/agent/web-shell/v1/sessions/close": {
       "post": {
-        "tags": ["WebShell"],
+        "tags": [
+          "WebShell"
+        ],
         "operationId": "closeWebShellSession",
         "x-qwen-implementation-status": "implemented",
         "responses": {
@@ -1757,7 +2095,9 @@
     },
     "/api/agent/web-shell/v1/sessions/archive": {
       "post": {
-        "tags": ["WebShell"],
+        "tags": [
+          "WebShell"
+        ],
         "operationId": "archiveWebShellSession",
         "x-qwen-implementation-status": "implemented",
         "responses": {
@@ -1798,7 +2138,9 @@
     },
     "/api/agent/web-shell/v1/sessions/delete": {
       "post": {
-        "tags": ["WebShell"],
+        "tags": [
+          "WebShell"
+        ],
         "operationId": "deleteWebShellSession",
         "x-qwen-implementation-status": "implemented",
         "responses": {
@@ -1839,7 +2181,9 @@
     },
     "/api/agent/web-shell/v1/workspaces/get": {
       "post": {
-        "tags": ["WebShell"],
+        "tags": [
+          "WebShell"
+        ],
         "operationId": "webShellGetWorkspace",
         "x-qwen-implementation-status": "partial",
         "description": "Read one authorized Workspace by its logical ID; absent or unreadable Workspaces return 404. No Runtime is started.",
@@ -1883,7 +2227,9 @@
         }
       ],
       "get": {
-        "tags": ["Public Sessions"],
+        "tags": [
+          "Public Sessions"
+        ],
         "operationId": "listSessionTasks",
         "x-qwen-implementation-status": "partial",
         "responses": {
@@ -1927,7 +2273,9 @@
         }
       ],
       "get": {
-        "tags": ["Public Sessions"],
+        "tags": [
+          "Public Sessions"
+        ],
         "operationId": "getSessionTask",
         "x-qwen-implementation-status": "partial",
         "responses": {
@@ -1963,7 +2311,9 @@
         }
       ],
       "get": {
-        "tags": ["Public Sessions"],
+        "tags": [
+          "Public Sessions"
+        ],
         "operationId": "listSessionTaskEvents",
         "x-qwen-implementation-status": "planned",
         "responses": {
@@ -2010,7 +2360,9 @@
         }
       ],
       "post": {
-        "tags": ["Public Sessions"],
+        "tags": [
+          "Public Sessions"
+        ],
         "operationId": "cancelSessionTask",
         "x-qwen-implementation-status": "planned",
         "responses": {
@@ -2046,7 +2398,9 @@
     },
     "/api/agent/web-shell/v1/tasks/query": {
       "post": {
-        "tags": ["WebShell"],
+        "tags": [
+          "WebShell"
+        ],
         "operationId": "queryWebShellTasks",
         "x-qwen-implementation-status": "partial",
         "responses": {
@@ -2084,7 +2438,9 @@
     },
     "/api/agent/web-shell/v1/tasks/get": {
       "post": {
-        "tags": ["WebShell"],
+        "tags": [
+          "WebShell"
+        ],
         "operationId": "getWebShellTask",
         "x-qwen-implementation-status": "partial",
         "responses": {
@@ -2122,7 +2478,9 @@
     },
     "/api/agent/web-shell/v1/tasks/events/query": {
       "post": {
-        "tags": ["WebShell"],
+        "tags": [
+          "WebShell"
+        ],
         "operationId": "queryWebShellTaskEvents",
         "x-qwen-implementation-status": "planned",
         "responses": {
@@ -2163,7 +2521,9 @@
     },
     "/api/agent/web-shell/v1/tasks/cancel": {
       "post": {
-        "tags": ["WebShell"],
+        "tags": [
+          "WebShell"
+        ],
         "operationId": "cancelWebShellTask",
         "x-qwen-implementation-status": "planned",
         "responses": {
@@ -2209,7 +2569,9 @@
         }
       ],
       "get": {
-        "tags": ["Public Resources"],
+        "tags": [
+          "Public Resources"
+        ],
         "operationId": "getSessionMcpCatalog",
         "x-qwen-implementation-status": "partial",
         "responses": {
@@ -2242,7 +2604,9 @@
         }
       ],
       "get": {
-        "tags": ["Public Resources"],
+        "tags": [
+          "Public Resources"
+        ],
         "operationId": "getSessionHookCatalog",
         "x-qwen-implementation-status": "planned",
         "responses": {
@@ -2260,7 +2624,9 @@
     },
     "/v1/agent-channels": {
       "get": {
-        "tags": ["Public Resources"],
+        "tags": [
+          "Public Resources"
+        ],
         "operationId": "listAgentChannels",
         "x-qwen-implementation-status": "planned",
         "responses": {
@@ -2287,7 +2653,9 @@
         }
       ],
       "get": {
-        "tags": ["Public Resources"],
+        "tags": [
+          "Public Resources"
+        ],
         "operationId": "listAgentChannelDeliveries",
         "x-qwen-implementation-status": "planned",
         "responses": {
@@ -2305,7 +2673,9 @@
     },
     "/v1/agent-automations": {
       "get": {
-        "tags": ["Public Resources"],
+        "tags": [
+          "Public Resources"
+        ],
         "operationId": "listAgentAutomations",
         "x-qwen-implementation-status": "planned",
         "responses": {
@@ -2332,7 +2702,9 @@
         }
       ],
       "get": {
-        "tags": ["Public Resources"],
+        "tags": [
+          "Public Resources"
+        ],
         "operationId": "listAgentAutomationRuns",
         "x-qwen-implementation-status": "planned",
         "responses": {
@@ -2344,6 +2716,414 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/api/agent/web-shell/v1/tool-results/get": {
+      "post": {
+        "tags": [
+          "WebShell"
+        ],
+        "operationId": "getWebShellToolResult",
+        "x-qwen-implementation-status": "implemented",
+        "responses": {
+          "200": {
+            "description": "Authorized persisted tool result resource.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebShellToolResultResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Trusted actor required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated actor scope mismatch.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown or unreadable resource.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Resource temporarily unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebShellToolResultRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agent/web-shell/v1/artifacts/get": {
+      "post": {
+        "tags": [
+          "WebShell"
+        ],
+        "operationId": "getWebShellArtifact",
+        "x-qwen-implementation-status": "implemented",
+        "responses": {
+          "200": {
+            "description": "Authorized persisted tool result resource.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebShellArtifactResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Trusted actor required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated actor scope mismatch.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown or unreadable resource.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Resource temporarily unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebShellArtifactRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agent/web-shell/v1/artifacts/query": {
+      "post": {
+        "tags": [
+          "WebShell"
+        ],
+        "operationId": "queryWebShellArtifacts",
+        "x-qwen-implementation-status": "implemented",
+        "responses": {
+          "200": {
+            "description": "Authorized persisted tool result resource.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebShellArtifactPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Trusted actor required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated actor scope mismatch.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown or unreadable resource.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Resource temporarily unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebShellArtifactQueryRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/agents/sessions/{sessionId}/items/{itemId}/tool-result": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/SessionId"
+        },
+        {
+          "name": "itemId",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        }
+      ],
+      "get": {
+        "tags": [
+          "Public Resources"
+        ],
+        "operationId": "getToolResult",
+        "x-qwen-implementation-status": "implemented",
+        "responses": {
+          "200": {
+            "description": "Authorized persisted tool result resource.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebShellToolResultResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Trusted actor required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated actor scope mismatch.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown or unreadable resource.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Resource temporarily unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/agents/sessions/{sessionId}/artifacts/{artifactId}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/SessionId"
+        },
+        {
+          "$ref": "#/components/parameters/ArtifactId"
+        }
+      ],
+      "get": {
+        "tags": [
+          "Public Resources"
+        ],
+        "operationId": "getArtifact",
+        "x-qwen-implementation-status": "implemented",
+        "responses": {
+          "200": {
+            "description": "Authorized persisted tool result resource.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebShellArtifactResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Trusted actor required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated actor scope mismatch.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown or unreadable resource.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Resource temporarily unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
           }
         }
       }
@@ -2580,7 +3360,11 @@
       "PublicMcpCatalog": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["object", "session_id", "servers"],
+        "required": [
+          "object",
+          "session_id",
+          "servers"
+        ],
         "properties": {
           "object": {
             "const": "agent.mcp_catalog"
@@ -2619,7 +3403,10 @@
             "minimum": 1
           },
           "catalog_revision": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "minimum": 1,
             "description": "The pinned catalog revision; null while no catalog has been published."
           },
@@ -2649,7 +3436,10 @@
       "PublicMcpTool": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["name", "input_schema"],
+        "required": [
+          "name",
+          "input_schema"
+        ],
         "properties": {
           "name": {
             "type": "string",
@@ -2667,7 +3457,10 @@
       "PublicMcpResource": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["name", "uri"],
+        "required": [
+          "name",
+          "uri"
+        ],
         "properties": {
           "name": {
             "type": "string",
@@ -2688,7 +3481,9 @@
       "PublicMcpPrompt": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["name"],
+        "required": [
+          "name"
+        ],
         "properties": {
           "name": {
             "type": "string",
@@ -2708,7 +3503,9 @@
       "PublicMcpPromptArgument": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["name"],
+        "required": [
+          "name"
+        ],
         "properties": {
           "name": {
             "type": "string",
@@ -2725,30 +3522,54 @@
       "PublicMcpDiscovery": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["tools", "resources", "prompts"],
+        "required": [
+          "tools",
+          "resources",
+          "prompts"
+        ],
         "properties": {
           "tools": {
             "type": "string",
-            "enum": ["complete", "partial", "failed", "stale"]
+            "enum": [
+              "complete",
+              "partial",
+              "failed",
+              "stale"
+            ]
           },
           "resources": {
             "type": "string",
-            "enum": ["complete", "partial", "failed", "stale"]
+            "enum": [
+              "complete",
+              "partial",
+              "failed",
+              "stale"
+            ]
           },
           "prompts": {
             "type": "string",
-            "enum": ["complete", "partial", "failed", "stale"]
+            "enum": [
+              "complete",
+              "partial",
+              "failed",
+              "stale"
+            ]
           }
         }
       },
       "InputBlock": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["type", "text"],
+        "required": [
+          "type",
+          "text"
+        ],
         "properties": {
           "type": {
             "type": "string",
-            "enum": ["input_text"]
+            "enum": [
+              "input_text"
+            ]
           },
           "text": {
             "type": "string",
@@ -2760,7 +3581,9 @@
       "CreateSessionRequest": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["agent_id"],
+        "required": [
+          "agent_id"
+        ],
         "properties": {
           "agent_id": {
             "type": "string",
@@ -2768,7 +3591,10 @@
             "maxLength": 128
           },
           "agent_revision": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "maxLength": 128,
             "description": "Optional explicit revision; omitted resolves current revision atomically at admission."
           },
@@ -2811,7 +3637,10 @@
       "InputMessageEventRequest": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["type", "input"],
+        "required": [
+          "type",
+          "input"
+        ],
         "properties": {
           "type": {
             "const": "agent.session.input.message"
@@ -2829,7 +3658,10 @@
       "CancelEventRequest": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["type", "turn_id"],
+        "required": [
+          "type",
+          "turn_id"
+        ],
         "properties": {
           "type": {
             "const": "agent.session.cancel"
@@ -2844,7 +3676,9 @@
       "UpdateSessionRequest": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["title"],
+        "required": [
+          "title"
+        ],
         "properties": {
           "title": {
             "type": "string",
@@ -2855,14 +3689,21 @@
       },
       "CommandAdmission": {
         "type": "object",
-        "required": ["session_id", "status", "replayed"],
+        "required": [
+          "session_id",
+          "status",
+          "replayed"
+        ],
         "properties": {
           "session_id": {
             "type": "string",
             "format": "uuid"
           },
           "turn_id": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "maxLength": 64
           },
           "status": {
@@ -2879,17 +3720,29 @@
           },
           "admission_stage": {
             "type": "string",
-            "enum": ["java_durable", "harness_confirmed"],
+            "enum": [
+              "java_durable",
+              "harness_confirmed"
+            ],
             "x-qwen-implementation-status": "planned"
           },
           "delivery_state": {
             "type": "string",
-            "enum": ["pending", "leased", "confirmed", "blocked"],
+            "enum": [
+              "pending",
+              "leased",
+              "confirmed",
+              "blocked"
+            ],
             "x-qwen-implementation-status": "planned"
           }
         },
         "dependentRequired": {
-          "operation_id": ["operation_id", "admission_stage", "delivery_state"],
+          "operation_id": [
+            "operation_id",
+            "admission_stage",
+            "delivery_state"
+          ],
           "admission_stage": [
             "operation_id",
             "admission_stage",
@@ -2999,7 +3852,10 @@
             "description": "Absent for unbound legacy records, whose execution stays blocked pending evidence-based migration. Ready means committed context, not an active Runtime gate."
           },
           "archived_at": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "format": "int64",
             "x-qwen-implementation-status": "planned"
           }
@@ -3060,7 +3916,13 @@
       },
       "PublicTurn": {
         "type": "object",
-        "required": ["id", "object", "session_id", "status", "created_at"],
+        "required": [
+          "id",
+          "object",
+          "session_id",
+          "status",
+          "created_at"
+        ],
         "properties": {
           "id": {
             "type": "string",
@@ -3074,7 +3936,10 @@
             "format": "uuid"
           },
           "input_item_id": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "maxLength": 64
           },
           "status": {
@@ -3094,11 +3959,17 @@
             "format": "int64"
           },
           "completed_at": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "format": "int64"
           },
           "error_code": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "maxLength": 128
           },
           "operation_id": {
@@ -3109,12 +3980,20 @@
           },
           "admission_stage": {
             "type": "string",
-            "enum": ["java_durable", "harness_confirmed"],
+            "enum": [
+              "java_durable",
+              "harness_confirmed"
+            ],
             "x-qwen-implementation-status": "planned"
           },
           "delivery_state": {
             "type": "string",
-            "enum": ["pending", "leased", "confirmed", "blocked"],
+            "enum": [
+              "pending",
+              "leased",
+              "confirmed",
+              "blocked"
+            ],
             "x-qwen-implementation-status": "planned"
           }
         }
@@ -3156,15 +4035,24 @@
             "format": "uuid"
           },
           "turn_id": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "maxLength": 64
           },
           "item_id": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "maxLength": 64
           },
           "content_part_id": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "maxLength": 128
           },
           "type": {
@@ -3234,7 +4122,11 @@
           },
           "type": {
             "type": "string",
-            "enum": ["input_text", "output_text", "reasoning"]
+            "enum": [
+              "input_text",
+              "output_text",
+              "reasoning"
+            ]
           },
           "text": {
             "type": "string"
@@ -3277,7 +4169,10 @@
             "format": "uuid"
           },
           "turn_id": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "maxLength": 64
           },
           "type": {
@@ -3292,8 +4187,17 @@
             ]
           },
           "role": {
-            "type": ["string", "null"],
-            "enum": ["user", "assistant", "tool", "system", null]
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "user",
+              "assistant",
+              "tool",
+              "system",
+              null
+            ]
           },
           "revision": {
             "type": "integer",
@@ -3334,32 +4238,47 @@
       },
       "PublicArtifact": {
         "type": "object",
+        "additionalProperties": false,
         "required": [
           "id",
-          "object",
           "session_id",
-          "size",
+          "result_id",
+          "revision",
+          "stream_role",
+          "byte_length",
           "sha256",
           "media_type",
+          "availability",
           "created_at"
         ],
         "properties": {
           "id": {
             "type": "string",
+            "minLength": 1,
             "maxLength": 128
-          },
-          "object": {
-            "const": "agent.artifact"
           },
           "session_id": {
             "type": "string",
-            "format": "uuid"
+            "minLength": 1,
+            "maxLength": 128
           },
-          "turn_id": {
-            "type": ["string", "null"],
-            "maxLength": 64
+          "result_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
           },
-          "size": {
+          "revision": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "stream_role": {
+            "type": "string",
+            "enum": [
+              "stdout",
+              "stderr"
+            ]
+          },
+          "byte_length": {
             "type": "integer",
             "format": "int64",
             "minimum": 0
@@ -3371,16 +4290,29 @@
           "media_type": {
             "type": "string"
           },
+          "availability": {
+            "type": "string",
+            "enum": [
+              "available",
+              "unavailable"
+            ]
+          },
           "created_at": {
             "type": "integer",
-            "format": "int64"
+            "format": "int64",
+            "minimum": 0
           }
         }
       },
       "AgentDefinitionRequest": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["model", "instructions", "tools", "permission_policy"],
+        "required": [
+          "model",
+          "instructions",
+          "tools",
+          "permission_policy"
+        ],
         "properties": {
           "model": {
             "type": "object",
@@ -3419,7 +4351,10 @@
             "additionalProperties": true
           },
           "environment_template_id": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "maxLength": 128
           },
           "metadata": {
@@ -3430,7 +4365,13 @@
       },
       "AgentDefinition": {
         "type": "object",
-        "required": ["id", "object", "revision", "digest", "created_at"],
+        "required": [
+          "id",
+          "object",
+          "revision",
+          "digest",
+          "created_at"
+        ],
         "properties": {
           "id": {
             "type": "string",
@@ -3459,7 +4400,11 @@
       },
       "PublicSessionList": {
         "type": "object",
-        "required": ["object", "data", "has_more"],
+        "required": [
+          "object",
+          "data",
+          "has_more"
+        ],
         "properties": {
           "object": {
             "const": "list"
@@ -3474,13 +4419,20 @@
             "type": "boolean"
           },
           "next_cursor": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
       "PublicEventList": {
         "type": "object",
-        "required": ["object", "data", "has_more"],
+        "required": [
+          "object",
+          "data",
+          "has_more"
+        ],
         "properties": {
           "object": {
             "const": "list"
@@ -3495,14 +4447,21 @@
             "type": "boolean"
           },
           "next_cursor": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "description": "The after value for the next page; null when has_more is false."
           }
         }
       },
       "PublicTurnList": {
         "type": "object",
-        "required": ["object", "data", "has_more"],
+        "required": [
+          "object",
+          "data",
+          "has_more"
+        ],
         "properties": {
           "object": {
             "const": "list"
@@ -3517,13 +4476,21 @@
             "type": "boolean"
           },
           "next_cursor": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
       "PublicItemList": {
         "type": "object",
-        "required": ["object", "data", "has_more", "snapshot_through_sequence"],
+        "required": [
+          "object",
+          "data",
+          "has_more",
+          "snapshot_through_sequence"
+        ],
         "properties": {
           "object": {
             "const": "list"
@@ -3538,7 +4505,10 @@
             "type": "boolean"
           },
           "next_cursor": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "snapshot_through_sequence": {
             "type": "integer",
@@ -3549,7 +4519,13 @@
       },
       "PublicArtifactList": {
         "type": "object",
-        "required": ["object", "data", "has_more"],
+        "additionalProperties": false,
+        "required": [
+          "object",
+          "data",
+          "has_more",
+          "next_cursor"
+        ],
         "properties": {
           "object": {
             "const": "list"
@@ -3557,14 +4533,17 @@
           "data": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/PublicArtifact"
+              "$ref": "#/components/schemas/WebShellArtifactResponse"
             }
           },
           "has_more": {
             "type": "boolean"
           },
           "next_cursor": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -3573,11 +4552,17 @@
         "additionalProperties": false,
         "properties": {
           "cursor": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "maxLength": 512
           },
           "limit": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "minimum": 1,
             "maximum": 100,
             "default": 20
@@ -3592,7 +4577,9 @@
       "WebShellSessionRequest": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["sessionId"],
+        "required": [
+          "sessionId"
+        ],
         "properties": {
           "sessionId": {
             "type": "string",
@@ -3603,18 +4590,26 @@
       "WebShellTranscriptRequest": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["sessionId"],
+        "required": [
+          "sessionId"
+        ],
         "properties": {
           "sessionId": {
             "type": "string",
             "format": "uuid"
           },
           "cursor": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "maxLength": 512
           },
           "limit": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "minimum": 1,
             "maximum": 1000,
             "default": 100
@@ -3624,14 +4619,19 @@
       "WebShellStreamRequest": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["sessionId"],
+        "required": [
+          "sessionId"
+        ],
         "properties": {
           "sessionId": {
             "type": "string",
             "format": "uuid"
           },
           "afterSequence": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "format": "int64",
             "minimum": 0,
             "default": 0
@@ -3641,10 +4641,16 @@
       "WebShellCreateRequest": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["idempotencyKey", "agentId"],
+        "required": [
+          "idempotencyKey",
+          "agentId"
+        ],
         "properties": {
           "requestId": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "maxLength": 128,
             "description": "Trace correlation only."
           },
@@ -3659,11 +4665,17 @@
             "maxLength": 128
           },
           "environmentId": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "description": "Planned; phase one rejects non-blank values."
           },
           "title": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "maxLength": 512
           },
           "input": {
@@ -3685,10 +4697,16 @@
       "WebShellSubmitRequest": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["idempotencyKey", "sessionId"],
+        "required": [
+          "idempotencyKey",
+          "sessionId"
+        ],
         "properties": {
           "requestId": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "maxLength": 128,
             "description": "Trace correlation only."
           },
@@ -3717,10 +4735,17 @@
       "WebShellCancelRequest": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["idempotencyKey", "sessionId", "turnId"],
+        "required": [
+          "idempotencyKey",
+          "sessionId",
+          "turnId"
+        ],
         "properties": {
           "requestId": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "maxLength": 128,
             "description": "Trace correlation only."
           },
@@ -3741,7 +4766,10 @@
         }
       },
       "WebShellMetadata": {
-        "type": ["object", "null"],
+        "type": [
+          "object",
+          "null"
+        ],
         "additionalProperties": false,
         "properties": {
           "clientId": {
@@ -3753,14 +4781,21 @@
       },
       "WebShellAdmission": {
         "type": "object",
-        "required": ["sessionId", "status", "replayed"],
+        "required": [
+          "sessionId",
+          "status",
+          "replayed"
+        ],
         "properties": {
           "sessionId": {
             "type": "string",
             "format": "uuid"
           },
           "turnId": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "maxLength": 64
           },
           "status": {
@@ -3777,25 +4812,50 @@
           },
           "admissionStage": {
             "type": "string",
-            "enum": ["java_durable", "harness_confirmed"],
+            "enum": [
+              "java_durable",
+              "harness_confirmed"
+            ],
             "x-qwen-implementation-status": "planned"
           },
           "deliveryState": {
             "type": "string",
-            "enum": ["pending", "leased", "confirmed", "blocked"],
+            "enum": [
+              "pending",
+              "leased",
+              "confirmed",
+              "blocked"
+            ],
             "x-qwen-implementation-status": "planned"
           }
         },
         "dependentRequired": {
-          "operationId": ["operationId", "admissionStage", "deliveryState"],
-          "admissionStage": ["operationId", "admissionStage", "deliveryState"],
-          "deliveryState": ["operationId", "admissionStage", "deliveryState"]
+          "operationId": [
+            "operationId",
+            "admissionStage",
+            "deliveryState"
+          ],
+          "admissionStage": [
+            "operationId",
+            "admissionStage",
+            "deliveryState"
+          ],
+          "deliveryState": [
+            "operationId",
+            "admissionStage",
+            "deliveryState"
+          ]
         },
         "description": "With durable_operations enabled, all three target fields are returned. accepted means Java durable delivery responsibility, not model execution. Missing fields retain the deployed legacy response semantics."
       },
       "WebShellTurn": {
         "type": "object",
-        "required": ["turnId", "sessionId", "status", "submittedAt"],
+        "required": [
+          "turnId",
+          "sessionId",
+          "status",
+          "submittedAt"
+        ],
         "properties": {
           "turnId": {
             "type": "string"
@@ -3812,14 +4872,23 @@
             "format": "int64"
           },
           "completedAt": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "format": "int64"
           },
           "errorCode": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "usage": {
-            "type": ["object", "null"],
+            "type": [
+              "object",
+              "null"
+            ],
             "additionalProperties": true
           },
           "operationId": {
@@ -3830,12 +4899,20 @@
           },
           "admissionStage": {
             "type": "string",
-            "enum": ["java_durable", "harness_confirmed"],
+            "enum": [
+              "java_durable",
+              "harness_confirmed"
+            ],
             "x-qwen-implementation-status": "planned"
           },
           "deliveryState": {
             "type": "string",
-            "enum": ["pending", "leased", "confirmed", "blocked"],
+            "enum": [
+              "pending",
+              "leased",
+              "confirmed",
+              "blocked"
+            ],
             "x-qwen-implementation-status": "planned"
           }
         }
@@ -3863,7 +4940,10 @@
             "format": "uuid"
           },
           "title": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "agentId": {
             "type": "string"
@@ -3890,7 +4970,10 @@
             ]
           },
           "environment": {
-            "type": ["object", "null"],
+            "type": [
+              "object",
+              "null"
+            ],
             "additionalProperties": true
           },
           "lastSequence": {
@@ -3906,7 +4989,10 @@
             "$ref": "#/components/schemas/WebShellSessionCapabilities"
           },
           "archivedAt": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "format": "int64",
             "x-qwen-implementation-status": "planned"
           },
@@ -3926,7 +5012,11 @@
       },
       "WebShellSessionCapabilities": {
         "type": "object",
-        "required": ["tasks", "actions"],
+        "required": [
+          "tasks",
+          "artifacts",
+          "actions"
+        ],
         "properties": {
           "workspaceContext": {
             "type": "boolean",
@@ -3954,12 +5044,18 @@
           },
           "tasks": {
             "type": "boolean"
+          },
+          "artifacts": {
+            "type": "boolean"
           }
         }
       },
       "WebShellSessionPage": {
         "type": "object",
-        "required": ["data", "hasMore"],
+        "required": [
+          "data",
+          "hasMore"
+        ],
         "properties": {
           "data": {
             "type": "array",
@@ -3968,7 +5064,10 @@
             }
           },
           "nextCursor": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "hasMore": {
             "type": "boolean"
@@ -4003,7 +5102,10 @@
             "minimum": 0
           },
           "olderCursor": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "hasMore": {
             "type": "boolean"
@@ -4017,7 +5119,13 @@
       },
       "WebShellContentPart": {
         "type": "object",
-        "required": ["partId", "type", "text", "firstSequence", "lastSequence"],
+        "required": [
+          "partId",
+          "type",
+          "text",
+          "firstSequence",
+          "lastSequence"
+        ],
         "properties": {
           "partId": {
             "type": "string"
@@ -4070,7 +5178,10 @@
             "type": "string"
           },
           "role": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "status": {
             "type": "string"
@@ -4142,15 +5253,24 @@
             "format": "uuid"
           },
           "turnId": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "maxLength": 64
           },
           "itemId": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "maxLength": 64
           },
           "contentPartId": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "maxLength": 128
           },
           "type": {
@@ -4206,11 +5326,17 @@
       },
       "ErrorEnvelope": {
         "type": "object",
-        "required": ["error"],
+        "required": [
+          "error"
+        ],
         "properties": {
           "error": {
             "type": "object",
-            "required": ["code", "message", "request_id"],
+            "required": [
+              "code",
+              "message",
+              "request_id"
+            ],
             "properties": {
               "code": {
                 "type": "string"
@@ -4223,11 +5349,17 @@
                 "maxLength": 128
               },
               "replay_floor_sequence": {
-                "type": ["integer", "null"],
+                "type": [
+                  "integer",
+                  "null"
+                ],
                 "format": "int64"
               },
               "snapshot_through_sequence": {
-                "type": ["integer", "null"],
+                "type": [
+                  "integer",
+                  "null"
+                ],
                 "format": "int64"
               }
             }
@@ -4239,13 +5371,18 @@
         "minLength": 1,
         "maxLength": 1024,
         "description": "Logical directory relative to the authorized workspace root; dot denotes root. Use slash separators. Reject absolute paths, drive prefixes, backslashes, NUL and parent segments. Runtime must verify directory existence, realpath containment and symlink safety before activation; schema validation alone is insufficient. Preserve spaces and case, normalize repeated separators and dot segments, and never percent-decode JSON values.",
-        "examples": [".", "services/api"],
+        "examples": [
+          ".",
+          "services/api"
+        ],
         "x-qwen-implementation-status": "partial"
       },
       "WorkspaceSelection": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["workspace_id"],
+        "required": [
+          "workspace_id"
+        ],
         "properties": {
           "workspace_id": {
             "type": "string",
@@ -4284,7 +5421,11 @@
           },
           "state": {
             "type": "string",
-            "enum": ["ready", "changing", "recovery_blocked"]
+            "enum": [
+              "ready",
+              "changing",
+              "recovery_blocked"
+            ]
           }
         },
         "x-qwen-implementation-status": "partial"
@@ -4319,7 +5460,11 @@
           },
           "state": {
             "type": "string",
-            "enum": ["active", "draining", "removed"]
+            "enum": [
+              "active",
+              "draining",
+              "removed"
+            ]
           }
         },
         "x-qwen-implementation-status": "partial"
@@ -4348,12 +5493,18 @@
             "type": "boolean"
           },
           "next_cursor": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "capabilities": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["workspace_context", "workspace_binding"],
+            "required": [
+              "workspace_context",
+              "workspace_binding"
+            ],
             "properties": {
               "workspace_context": {
                 "type": "boolean",
@@ -4400,7 +5551,10 @@
       "ChangeCwdRequest": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["cwd_relative", "expected_context_revision"],
+        "required": [
+          "cwd_relative",
+          "expected_context_revision"
+        ],
         "properties": {
           "cwd_relative": {
             "$ref": "#/components/schemas/WorkspaceRelativePath"
@@ -4461,12 +5615,18 @@
             "$ref": "#/components/schemas/WorkspaceRelativePath"
           },
           "result_context_revision": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "format": "int64",
             "minimum": 1
           },
           "failure_code": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "maxLength": 128
           },
           "replayed": {
@@ -4482,10 +5642,14 @@
                   "const": "completed"
                 }
               },
-              "required": ["status"]
+              "required": [
+                "status"
+              ]
             },
             "then": {
-              "required": ["result_context_revision"],
+              "required": [
+                "result_context_revision"
+              ],
               "properties": {
                 "result_context_revision": {
                   "type": "integer",
@@ -4501,7 +5665,9 @@
       "WebShellWorkspaceSelection": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["workspaceId"],
+        "required": [
+          "workspaceId"
+        ],
         "properties": {
           "workspaceId": {
             "type": "string",
@@ -4518,7 +5684,12 @@
       "WebShellWorkspaceContext": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["workspaceId", "cwdRelative", "contextRevision", "state"],
+        "required": [
+          "workspaceId",
+          "cwdRelative",
+          "contextRevision",
+          "state"
+        ],
         "properties": {
           "workspaceId": {
             "type": "string",
@@ -4535,7 +5706,11 @@
           },
           "state": {
             "type": "string",
-            "enum": ["ready", "changing", "recovery_blocked"]
+            "enum": [
+              "ready",
+              "changing",
+              "recovery_blocked"
+            ]
           }
         },
         "x-qwen-implementation-status": "partial"
@@ -4543,7 +5718,12 @@
       "WebShellWorkspace": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["workspaceId", "displayName", "state", "canCreateSession"],
+        "required": [
+          "workspaceId",
+          "displayName",
+          "state",
+          "canCreateSession"
+        ],
         "properties": {
           "workspaceId": {
             "type": "string",
@@ -4561,7 +5741,11 @@
           },
           "state": {
             "type": "string",
-            "enum": ["active", "draining", "removed"]
+            "enum": [
+              "active",
+              "draining",
+              "removed"
+            ]
           }
         },
         "x-qwen-implementation-status": "partial"
@@ -4569,7 +5753,12 @@
       "WebShellWorkspacePage": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["data", "hasMore", "capabilities", "defaultWorkspace"],
+        "required": [
+          "data",
+          "hasMore",
+          "capabilities",
+          "defaultWorkspace"
+        ],
         "properties": {
           "data": {
             "type": "array",
@@ -4581,12 +5770,18 @@
             "type": "boolean"
           },
           "nextCursor": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "capabilities": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["workspaceContext", "workspaceBinding"],
+            "required": [
+              "workspaceContext",
+              "workspaceBinding"
+            ],
             "properties": {
               "workspaceContext": {
                 "type": "boolean",
@@ -4658,7 +5853,10 @@
             "minimum": 1
           },
           "requestId": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "maxLength": 128
           }
         },
@@ -4667,7 +5865,10 @@
       "WebShellOperationRequest": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["sessionId", "operationId"],
+        "required": [
+          "sessionId",
+          "operationId"
+        ],
         "properties": {
           "sessionId": {
             "type": "string",
@@ -4717,12 +5918,18 @@
             "$ref": "#/components/schemas/WorkspaceRelativePath"
           },
           "resultContextRevision": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "format": "int64",
             "minimum": 1
           },
           "failureCode": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "maxLength": 128
           },
           "replayed": {
@@ -4738,10 +5945,14 @@
                   "const": "completed"
                 }
               },
-              "required": ["status"]
+              "required": [
+                "status"
+              ]
             },
             "then": {
-              "required": ["resultContextRevision"],
+              "required": [
+                "resultContextRevision"
+              ],
               "properties": {
                 "resultContextRevision": {
                   "type": "integer",
@@ -4757,7 +5968,10 @@
       "ActionOption": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id", "label"],
+        "required": [
+          "id",
+          "label"
+        ],
         "properties": {
           "id": {
             "type": "string",
@@ -4819,7 +6033,10 @@
       "ActionSource": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["kind", "id"],
+        "required": [
+          "kind",
+          "id"
+        ],
         "properties": {
           "kind": {
             "enum": [
@@ -4870,7 +6087,12 @@
             "$ref": "#/components/schemas/ActionSource"
           },
           "state": {
-            "enum": ["requested", "decided", "cancelled", "expired"]
+            "enum": [
+              "requested",
+              "decided",
+              "cancelled",
+              "expired"
+            ]
           },
           "input_revision": {
             "type": "integer",
@@ -4927,10 +6149,14 @@
                   "const": "decided"
                 }
               },
-              "required": ["state"]
+              "required": [
+                "state"
+              ]
             },
             "then": {
-              "required": ["decision_receipt_id"]
+              "required": [
+                "decision_receipt_id"
+              ]
             }
           }
         ],
@@ -4968,7 +6194,12 @@
             "$ref": "#/components/schemas/ActionSource"
           },
           "state": {
-            "enum": ["requested", "decided", "cancelled", "expired"]
+            "enum": [
+              "requested",
+              "decided",
+              "cancelled",
+              "expired"
+            ]
           },
           "input_revision": {
             "type": "integer",
@@ -5011,10 +6242,14 @@
                   "const": "decided"
                 }
               },
-              "required": ["state"]
+              "required": [
+                "state"
+              ]
             },
             "then": {
-              "required": ["decision_receipt_id"]
+              "required": [
+                "decision_receipt_id"
+              ]
             }
           }
         ]
@@ -5033,7 +6268,10 @@
       "PublicActionList": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["data", "has_more"],
+        "required": [
+          "data",
+          "has_more"
+        ],
         "properties": {
           "data": {
             "type": "array",
@@ -5046,7 +6284,10 @@
             "type": "boolean"
           },
           "next_cursor": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "maxLength": 512
           }
         }
@@ -5054,7 +6295,9 @@
       "QuestionAnswer": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["question_id"],
+        "required": [
+          "question_id"
+        ],
         "properties": {
           "question_id": {
             "type": "string",
@@ -5081,17 +6324,26 @@
         "x-qwen-implementation-status": "planned",
         "anyOf": [
           {
-            "required": ["option_ids"]
+            "required": [
+              "option_ids"
+            ]
           },
           {
-            "required": ["text"]
+            "required": [
+              "text"
+            ]
           }
         ]
       },
       "PermissionResponse": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["kind", "input_revision", "policy_revision", "option_id"],
+        "required": [
+          "kind",
+          "input_revision",
+          "policy_revision",
+          "option_id"
+        ],
         "properties": {
           "kind": {
             "const": "permission"
@@ -5116,7 +6368,12 @@
       "QuestionResponse": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["kind", "input_revision", "policy_revision", "answers"],
+        "required": [
+          "kind",
+          "input_revision",
+          "policy_revision",
+          "answers"
+        ],
         "properties": {
           "kind": {
             "const": "question"
@@ -5157,7 +6414,11 @@
       "ActionResolution": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["action_id", "outcome", "receipt_id"],
+        "required": [
+          "action_id",
+          "outcome",
+          "receipt_id"
+        ],
         "properties": {
           "action_id": {
             "type": "string",
@@ -5165,7 +6426,10 @@
             "maxLength": 128
           },
           "outcome": {
-            "enum": ["vote_recorded", "decided"],
+            "enum": [
+              "vote_recorded",
+              "decided"
+            ],
             "description": "D6 supports decided only; vote_recorded is planned."
           },
           "receipt_id": {
@@ -5188,10 +6452,14 @@
                   "const": "decided"
                 }
               },
-              "required": ["outcome"]
+              "required": [
+                "outcome"
+              ]
             },
             "then": {
-              "required": ["decision_receipt_id"]
+              "required": [
+                "decision_receipt_id"
+              ]
             }
           }
         ]
@@ -5248,10 +6516,18 @@
             ]
           },
           "admission_stage": {
-            "enum": ["java_durable", "harness_confirmed"]
+            "enum": [
+              "java_durable",
+              "harness_confirmed"
+            ]
           },
           "delivery_state": {
-            "enum": ["pending", "leased", "confirmed", "blocked"]
+            "enum": [
+              "pending",
+              "leased",
+              "confirmed",
+              "blocked"
+            ]
           },
           "receipt_id": {
             "type": "string",
@@ -5281,7 +6557,9 @@
                       "const": "completed"
                     }
                   },
-                  "required": ["status"]
+                  "required": [
+                    "status"
+                  ]
                 },
                 {
                   "properties": {
@@ -5289,7 +6567,9 @@
                       "const": "harness_confirmed"
                     }
                   },
-                  "required": ["admission_stage"]
+                  "required": [
+                    "admission_stage"
+                  ]
                 },
                 {
                   "properties": {
@@ -5297,12 +6577,16 @@
                       "const": "confirmed"
                     }
                   },
-                  "required": ["delivery_state"]
+                  "required": [
+                    "delivery_state"
+                  ]
                 }
               ]
             },
             "then": {
-              "required": ["receipt_id"]
+              "required": [
+                "receipt_id"
+              ]
             }
           },
           {
@@ -5315,10 +6599,15 @@
                   "const": "completed"
                 }
               },
-              "required": ["type", "status"]
+              "required": [
+                "type",
+                "status"
+              ]
             },
             "then": {
-              "required": ["action_resolution"]
+              "required": [
+                "action_resolution"
+              ]
             }
           },
           {
@@ -5336,11 +6625,15 @@
                   ]
                 }
               },
-              "required": ["type"]
+              "required": [
+                "type"
+              ]
             },
             "then": {
               "not": {
-                "required": ["action_resolution"]
+                "required": [
+                  "action_resolution"
+                ]
               }
             }
           },
@@ -5351,14 +6644,20 @@
                   "const": "task_cancel"
                 }
               },
-              "required": ["type"]
+              "required": [
+                "type"
+              ]
             },
             "then": {
-              "required": ["task_id"]
+              "required": [
+                "task_id"
+              ]
             },
             "else": {
               "not": {
-                "required": ["task_id"]
+                "required": [
+                  "task_id"
+                ]
               }
             }
           },
@@ -5370,7 +6669,9 @@
                   "const": "task_cancel"
                 }
               },
-              "required": ["type"]
+              "required": [
+                "type"
+              ]
             },
             "then": {
               "properties": {
@@ -5388,10 +6689,14 @@
                         "const": "failed"
                       }
                     },
-                    "required": ["status"]
+                    "required": [
+                      "status"
+                    ]
                   },
                   "then": {
-                    "required": ["failure_code"]
+                    "required": [
+                      "failure_code"
+                    ]
                   }
                 },
                 {
@@ -5401,7 +6706,9 @@
                         "const": "completed"
                       }
                     },
-                    "required": ["status"]
+                    "required": [
+                      "status"
+                    ]
                   },
                   "then": {
                     "properties": {
@@ -5418,10 +6725,15 @@
                   "if": {
                     "properties": {
                       "status": {
-                        "enum": ["failed", "recovery_blocked"]
+                        "enum": [
+                          "failed",
+                          "recovery_blocked"
+                        ]
                       }
                     },
-                    "required": ["status"]
+                    "required": [
+                      "status"
+                    ]
                   },
                   "then": {
                     "properties": {
@@ -5465,7 +6777,11 @@
       "WebShellActionResolution": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["actionId", "outcome", "receiptId"],
+        "required": [
+          "actionId",
+          "outcome",
+          "receiptId"
+        ],
         "properties": {
           "actionId": {
             "type": "string",
@@ -5473,7 +6789,10 @@
             "maxLength": 128
           },
           "outcome": {
-            "enum": ["vote_recorded", "decided"],
+            "enum": [
+              "vote_recorded",
+              "decided"
+            ],
             "description": "D6 supports decided only; vote_recorded is planned."
           },
           "receiptId": {
@@ -5496,10 +6815,14 @@
                   "const": "decided"
                 }
               },
-              "required": ["outcome"]
+              "required": [
+                "outcome"
+              ]
             },
             "then": {
-              "required": ["decisionReceiptId"]
+              "required": [
+                "decisionReceiptId"
+              ]
             }
           }
         ]
@@ -5507,7 +6830,9 @@
       "WebShellQuestionAnswer": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["questionId"],
+        "required": [
+          "questionId"
+        ],
         "properties": {
           "questionId": {
             "type": "string",
@@ -5534,10 +6859,14 @@
         "x-qwen-implementation-status": "planned",
         "anyOf": [
           {
-            "required": ["optionIds"]
+            "required": [
+              "optionIds"
+            ]
           },
           {
-            "required": ["text"]
+            "required": [
+              "text"
+            ]
           }
         ]
       },
@@ -5634,10 +6963,18 @@
             ]
           },
           "admissionStage": {
-            "enum": ["java_durable", "harness_confirmed"]
+            "enum": [
+              "java_durable",
+              "harness_confirmed"
+            ]
           },
           "deliveryState": {
-            "enum": ["pending", "leased", "confirmed", "blocked"]
+            "enum": [
+              "pending",
+              "leased",
+              "confirmed",
+              "blocked"
+            ]
           },
           "receiptId": {
             "type": "string",
@@ -5667,7 +7004,9 @@
                       "const": "completed"
                     }
                   },
-                  "required": ["status"]
+                  "required": [
+                    "status"
+                  ]
                 },
                 {
                   "properties": {
@@ -5675,7 +7014,9 @@
                       "const": "harness_confirmed"
                     }
                   },
-                  "required": ["admissionStage"]
+                  "required": [
+                    "admissionStage"
+                  ]
                 },
                 {
                   "properties": {
@@ -5683,12 +7024,16 @@
                       "const": "confirmed"
                     }
                   },
-                  "required": ["deliveryState"]
+                  "required": [
+                    "deliveryState"
+                  ]
                 }
               ]
             },
             "then": {
-              "required": ["receiptId"]
+              "required": [
+                "receiptId"
+              ]
             }
           },
           {
@@ -5701,10 +7046,15 @@
                   "const": "completed"
                 }
               },
-              "required": ["type", "status"]
+              "required": [
+                "type",
+                "status"
+              ]
             },
             "then": {
-              "required": ["actionResolution"]
+              "required": [
+                "actionResolution"
+              ]
             }
           },
           {
@@ -5722,11 +7072,15 @@
                   ]
                 }
               },
-              "required": ["type"]
+              "required": [
+                "type"
+              ]
             },
             "then": {
               "not": {
-                "required": ["actionResolution"]
+                "required": [
+                  "actionResolution"
+                ]
               }
             }
           },
@@ -5737,14 +7091,20 @@
                   "const": "task_cancel"
                 }
               },
-              "required": ["type"]
+              "required": [
+                "type"
+              ]
             },
             "then": {
-              "required": ["taskId"]
+              "required": [
+                "taskId"
+              ]
             },
             "else": {
               "not": {
-                "required": ["taskId"]
+                "required": [
+                  "taskId"
+                ]
               }
             }
           },
@@ -5756,7 +7116,9 @@
                   "const": "task_cancel"
                 }
               },
-              "required": ["type"]
+              "required": [
+                "type"
+              ]
             },
             "then": {
               "properties": {
@@ -5774,10 +7136,14 @@
                         "const": "failed"
                       }
                     },
-                    "required": ["status"]
+                    "required": [
+                      "status"
+                    ]
                   },
                   "then": {
-                    "required": ["failureCode"]
+                    "required": [
+                      "failureCode"
+                    ]
                   }
                 },
                 {
@@ -5787,7 +7153,9 @@
                         "const": "completed"
                       }
                     },
-                    "required": ["status"]
+                    "required": [
+                      "status"
+                    ]
                   },
                   "then": {
                     "properties": {
@@ -5804,10 +7172,15 @@
                   "if": {
                     "properties": {
                       "status": {
-                        "enum": ["failed", "recovery_blocked"]
+                        "enum": [
+                          "failed",
+                          "recovery_blocked"
+                        ]
                       }
                     },
-                    "required": ["status"]
+                    "required": [
+                      "status"
+                    ]
                   },
                   "then": {
                     "properties": {
@@ -5858,7 +7231,12 @@
             "$ref": "#/components/schemas/WebShellActionSource"
           },
           "state": {
-            "enum": ["requested", "decided", "cancelled", "expired"]
+            "enum": [
+              "requested",
+              "decided",
+              "cancelled",
+              "expired"
+            ]
           },
           "inputRevision": {
             "type": "integer",
@@ -5901,10 +7279,14 @@
                   "const": "decided"
                 }
               },
-              "required": ["state"]
+              "required": [
+                "state"
+              ]
             },
             "then": {
-              "required": ["decisionReceiptId"]
+              "required": [
+                "decisionReceiptId"
+              ]
             }
           }
         ]
@@ -5943,7 +7325,12 @@
             "$ref": "#/components/schemas/WebShellActionSource"
           },
           "state": {
-            "enum": ["requested", "decided", "cancelled", "expired"]
+            "enum": [
+              "requested",
+              "decided",
+              "cancelled",
+              "expired"
+            ]
           },
           "inputRevision": {
             "type": "integer",
@@ -6000,10 +7387,14 @@
                   "const": "decided"
                 }
               },
-              "required": ["state"]
+              "required": [
+                "state"
+              ]
             },
             "then": {
-              "required": ["decisionReceiptId"]
+              "required": [
+                "decisionReceiptId"
+              ]
             }
           }
         ],
@@ -6012,7 +7403,12 @@
       "WebShellPermissionResponse": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["kind", "inputRevision", "policyRevision", "optionId"],
+        "required": [
+          "kind",
+          "inputRevision",
+          "policyRevision",
+          "optionId"
+        ],
         "properties": {
           "kind": {
             "const": "permission"
@@ -6037,7 +7433,10 @@
       "WebShellActionPage": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["data", "hasMore"],
+        "required": [
+          "data",
+          "hasMore"
+        ],
         "properties": {
           "data": {
             "type": "array",
@@ -6050,7 +7449,10 @@
             "type": "boolean"
           },
           "nextCursor": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "maxLength": 512
           }
         }
@@ -6058,7 +7460,10 @@
       "WebShellActionSource": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["kind", "id"],
+        "required": [
+          "kind",
+          "id"
+        ],
         "properties": {
           "kind": {
             "enum": [
@@ -6090,7 +7495,10 @@
       "WebShellActionOption": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id", "label"],
+        "required": [
+          "id",
+          "label"
+        ],
         "properties": {
           "id": {
             "type": "string",
@@ -6111,7 +7519,12 @@
       "WebShellQuestionResponse": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["kind", "inputRevision", "policyRevision", "answers"],
+        "required": [
+          "kind",
+          "inputRevision",
+          "policyRevision",
+          "answers"
+        ],
         "properties": {
           "kind": {
             "const": "question"
@@ -6151,7 +7564,9 @@
       "WebShellActionQueryRequest": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["sessionId"],
+        "required": [
+          "sessionId"
+        ],
         "properties": {
           "sessionId": {
             "type": "string",
@@ -6172,7 +7587,10 @@
       "WebShellActionGetRequest": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["sessionId", "actionId"],
+        "required": [
+          "sessionId",
+          "actionId"
+        ],
         "properties": {
           "sessionId": {
             "type": "string",
@@ -6188,7 +7606,12 @@
       "WebShellActionRespondRequest": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["sessionId", "actionId", "idempotencyKey", "response"],
+        "required": [
+          "sessionId",
+          "actionId",
+          "idempotencyKey",
+          "response"
+        ],
         "properties": {
           "sessionId": {
             "type": "string",
@@ -6216,7 +7639,10 @@
       "WebShellLifecycleRequest": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["sessionId", "idempotencyKey"],
+        "required": [
+          "sessionId",
+          "idempotencyKey"
+        ],
         "properties": {
           "sessionId": {
             "type": "string",
@@ -6234,11 +7660,17 @@
         "additionalProperties": false,
         "properties": {
           "cursor": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "maxLength": 2048
           },
           "limit": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "minimum": 1,
             "maximum": 100,
             "default": 50
@@ -6249,7 +7681,9 @@
       "WebShellWorkspaceGetRequest": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["workspaceId"],
+        "required": [
+          "workspaceId"
+        ],
         "properties": {
           "workspaceId": {
             "type": "string",
@@ -6287,13 +7721,23 @@
       },
       "TaskRuntimeState": {
         "type": "string",
-        "enum": ["unbound", "provisioning", "ready", "draining", "lost"],
+        "enum": [
+          "unbound",
+          "provisioning",
+          "ready",
+          "draining",
+          "lost"
+        ],
         "x-qwen-implementation-status": "partial",
         "description": "Redacted state of the Runtime that hosts the task, without binding identity or generation."
       },
       "TaskActionCapability": {
         "type": "string",
-        "enum": ["cancel", "send_input", "read_output"],
+        "enum": [
+          "cancel",
+          "send_input",
+          "read_output"
+        ],
         "x-qwen-implementation-status": "partial",
         "description": "Actions the task supports now, the same for every caller. cancel: the cancel route accepts a new command for this task; whether a caller may use it is an authorization check (403 on the cancel route). send_input: reserved for a later capability route. read_output: the task events route returns output events for this task to any caller that can read it. read_output does not change during the task's life, and a task without it produces no output events: its output goes only to Artifacts, so the events route never filters out events that exist."
       },
@@ -6386,18 +7830,29 @@
             "if": {
               "properties": {
                 "state": {
-                  "enum": ["completed", "failed", "cancelled"]
+                  "enum": [
+                    "completed",
+                    "failed",
+                    "cancelled"
+                  ]
                 }
               },
-              "required": ["state"]
+              "required": [
+                "state"
+              ]
             },
             "then": {
-              "required": ["settled_at"],
+              "required": [
+                "settled_at"
+              ],
               "properties": {
                 "action_capabilities": {
                   "not": {
                     "contains": {
-                      "enum": ["cancel", "send_input"]
+                      "enum": [
+                        "cancel",
+                        "send_input"
+                      ]
                     }
                   }
                 }
@@ -6405,7 +7860,9 @@
             },
             "else": {
               "not": {
-                "required": ["settled_at"]
+                "required": [
+                  "settled_at"
+                ]
               }
             }
           },
@@ -6413,13 +7870,22 @@
             "if": {
               "properties": {
                 "state": {
-                  "enum": ["running", "waiting", "degraded", "completed"]
+                  "enum": [
+                    "running",
+                    "waiting",
+                    "degraded",
+                    "completed"
+                  ]
                 }
               },
-              "required": ["state"]
+              "required": [
+                "state"
+              ]
             },
             "then": {
-              "required": ["started_at"]
+              "required": [
+                "started_at"
+              ]
             }
           },
           {
@@ -6429,11 +7895,15 @@
                   "const": "pending"
                 }
               },
-              "required": ["state"]
+              "required": [
+                "state"
+              ]
             },
             "then": {
               "not": {
-                "required": ["started_at"]
+                "required": [
+                  "started_at"
+                ]
               }
             }
           },
@@ -6444,7 +7914,9 @@
                   "const": "recovery_blocked"
                 }
               },
-              "required": ["state"]
+              "required": [
+                "state"
+              ]
             },
             "then": {
               "properties": {
@@ -6464,7 +7936,11 @@
       "PublicTaskList": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["object", "data", "has_more"],
+        "required": [
+          "object",
+          "data",
+          "has_more"
+        ],
         "properties": {
           "object": {
             "const": "list"
@@ -6480,7 +7956,10 @@
             "type": "boolean"
           },
           "next_cursor": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "maxLength": 512
           }
         },
@@ -6493,10 +7972,14 @@
                   "const": true
                 }
               },
-              "required": ["has_more"]
+              "required": [
+                "has_more"
+              ]
             },
             "then": {
-              "required": ["next_cursor"],
+              "required": [
+                "next_cursor"
+              ],
               "properties": {
                 "next_cursor": {
                   "type": "string",
@@ -6580,20 +8063,30 @@
                   "const": "state_changed"
                 }
               },
-              "required": ["type"]
+              "required": [
+                "type"
+              ]
             },
             "then": {
-              "required": ["state"],
+              "required": [
+                "state"
+              ],
               "not": {
                 "anyOf": [
                   {
-                    "required": ["text"]
+                    "required": [
+                      "text"
+                    ]
                   },
                   {
-                    "required": ["truncated"]
+                    "required": [
+                      "truncated"
+                    ]
                   },
                   {
-                    "required": ["artifact_id"]
+                    "required": [
+                      "artifact_id"
+                    ]
                   }
                 ]
               }
@@ -6606,20 +8099,30 @@
                   "const": "output"
                 }
               },
-              "required": ["type"]
+              "required": [
+                "type"
+              ]
             },
             "then": {
-              "required": ["text"],
+              "required": [
+                "text"
+              ],
               "not": {
                 "anyOf": [
                   {
-                    "required": ["state"]
+                    "required": [
+                      "state"
+                    ]
                   },
                   {
-                    "required": ["runtime_state"]
+                    "required": [
+                      "runtime_state"
+                    ]
                   },
                   {
-                    "required": ["artifact_id"]
+                    "required": [
+                      "artifact_id"
+                    ]
                   }
                 ]
               }
@@ -6632,23 +8135,35 @@
                   "const": "artifact"
                 }
               },
-              "required": ["type"]
+              "required": [
+                "type"
+              ]
             },
             "then": {
-              "required": ["artifact_id"],
+              "required": [
+                "artifact_id"
+              ],
               "not": {
                 "anyOf": [
                   {
-                    "required": ["state"]
+                    "required": [
+                      "state"
+                    ]
                   },
                   {
-                    "required": ["runtime_state"]
+                    "required": [
+                      "runtime_state"
+                    ]
                   },
                   {
-                    "required": ["text"]
+                    "required": [
+                      "text"
+                    ]
                   },
                   {
-                    "required": ["truncated"]
+                    "required": [
+                      "truncated"
+                    ]
                   }
                 ]
               }
@@ -6742,18 +8257,29 @@
             "if": {
               "properties": {
                 "state": {
-                  "enum": ["completed", "failed", "cancelled"]
+                  "enum": [
+                    "completed",
+                    "failed",
+                    "cancelled"
+                  ]
                 }
               },
-              "required": ["state"]
+              "required": [
+                "state"
+              ]
             },
             "then": {
-              "required": ["settledAt"],
+              "required": [
+                "settledAt"
+              ],
               "properties": {
                 "actionCapabilities": {
                   "not": {
                     "contains": {
-                      "enum": ["cancel", "send_input"]
+                      "enum": [
+                        "cancel",
+                        "send_input"
+                      ]
                     }
                   }
                 }
@@ -6761,7 +8287,9 @@
             },
             "else": {
               "not": {
-                "required": ["settledAt"]
+                "required": [
+                  "settledAt"
+                ]
               }
             }
           },
@@ -6769,13 +8297,22 @@
             "if": {
               "properties": {
                 "state": {
-                  "enum": ["running", "waiting", "degraded", "completed"]
+                  "enum": [
+                    "running",
+                    "waiting",
+                    "degraded",
+                    "completed"
+                  ]
                 }
               },
-              "required": ["state"]
+              "required": [
+                "state"
+              ]
             },
             "then": {
-              "required": ["startedAt"]
+              "required": [
+                "startedAt"
+              ]
             }
           },
           {
@@ -6785,11 +8322,15 @@
                   "const": "pending"
                 }
               },
-              "required": ["state"]
+              "required": [
+                "state"
+              ]
             },
             "then": {
               "not": {
-                "required": ["startedAt"]
+                "required": [
+                  "startedAt"
+                ]
               }
             }
           },
@@ -6800,7 +8341,9 @@
                   "const": "recovery_blocked"
                 }
               },
-              "required": ["state"]
+              "required": [
+                "state"
+              ]
             },
             "then": {
               "properties": {
@@ -6820,7 +8363,10 @@
       "WebShellTaskPage": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["data", "hasMore"],
+        "required": [
+          "data",
+          "hasMore"
+        ],
         "properties": {
           "data": {
             "type": "array",
@@ -6833,7 +8379,10 @@
             "type": "boolean"
           },
           "nextCursor": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "maxLength": 512
           }
         },
@@ -6846,10 +8395,14 @@
                   "const": true
                 }
               },
-              "required": ["hasMore"]
+              "required": [
+                "hasMore"
+              ]
             },
             "then": {
-              "required": ["nextCursor"],
+              "required": [
+                "nextCursor"
+              ],
               "properties": {
                 "nextCursor": {
                   "type": "string",
@@ -6933,20 +8486,30 @@
                   "const": "state_changed"
                 }
               },
-              "required": ["type"]
+              "required": [
+                "type"
+              ]
             },
             "then": {
-              "required": ["state"],
+              "required": [
+                "state"
+              ],
               "not": {
                 "anyOf": [
                   {
-                    "required": ["text"]
+                    "required": [
+                      "text"
+                    ]
                   },
                   {
-                    "required": ["truncated"]
+                    "required": [
+                      "truncated"
+                    ]
                   },
                   {
-                    "required": ["artifactId"]
+                    "required": [
+                      "artifactId"
+                    ]
                   }
                 ]
               }
@@ -6959,20 +8522,30 @@
                   "const": "output"
                 }
               },
-              "required": ["type"]
+              "required": [
+                "type"
+              ]
             },
             "then": {
-              "required": ["text"],
+              "required": [
+                "text"
+              ],
               "not": {
                 "anyOf": [
                   {
-                    "required": ["state"]
+                    "required": [
+                      "state"
+                    ]
                   },
                   {
-                    "required": ["runtimeState"]
+                    "required": [
+                      "runtimeState"
+                    ]
                   },
                   {
-                    "required": ["artifactId"]
+                    "required": [
+                      "artifactId"
+                    ]
                   }
                 ]
               }
@@ -6985,23 +8558,35 @@
                   "const": "artifact"
                 }
               },
-              "required": ["type"]
+              "required": [
+                "type"
+              ]
             },
             "then": {
-              "required": ["artifactId"],
+              "required": [
+                "artifactId"
+              ],
               "not": {
                 "anyOf": [
                   {
-                    "required": ["state"]
+                    "required": [
+                      "state"
+                    ]
                   },
                   {
-                    "required": ["runtimeState"]
+                    "required": [
+                      "runtimeState"
+                    ]
                   },
                   {
-                    "required": ["text"]
+                    "required": [
+                      "text"
+                    ]
                   },
                   {
-                    "required": ["truncated"]
+                    "required": [
+                      "truncated"
+                    ]
                   }
                 ]
               }
@@ -7013,7 +8598,11 @@
       "WebShellTaskEventPage": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["data", "hasMore", "nextCursor"],
+        "required": [
+          "data",
+          "hasMore",
+          "nextCursor"
+        ],
         "properties": {
           "data": {
             "type": "array",
@@ -7037,7 +8626,9 @@
       "WebShellTaskQueryRequest": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["sessionId"],
+        "required": [
+          "sessionId"
+        ],
         "properties": {
           "sessionId": {
             "type": "string",
@@ -7059,7 +8650,10 @@
       "WebShellTaskGetRequest": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["sessionId", "taskId"],
+        "required": [
+          "sessionId",
+          "taskId"
+        ],
         "properties": {
           "sessionId": {
             "type": "string",
@@ -7076,7 +8670,10 @@
       "WebShellTaskEventQueryRequest": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["sessionId", "taskId"],
+        "required": [
+          "sessionId",
+          "taskId"
+        ],
         "properties": {
           "sessionId": {
             "type": "string",
@@ -7105,7 +8702,11 @@
       "WebShellTaskCancelRequest": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["sessionId", "taskId", "idempotencyKey"],
+        "required": [
+          "sessionId",
+          "taskId",
+          "idempotencyKey"
+        ],
         "properties": {
           "sessionId": {
             "type": "string",
@@ -7134,7 +8735,12 @@
       "PublicTaskEventList": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["object", "data", "has_more", "next_cursor"],
+        "required": [
+          "object",
+          "data",
+          "has_more",
+          "next_cursor"
+        ],
         "properties": {
           "object": {
             "const": "list"
@@ -7157,6 +8763,287 @@
           }
         },
         "x-qwen-implementation-status": "planned"
+      },
+      "ToolResultPreview": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "text",
+          "truncated",
+          "stream_id",
+          "source_start",
+          "source_end"
+        ],
+        "properties": {
+          "text": {
+            "type": "string",
+            "maxLength": 8192
+          },
+          "truncated": {
+            "type": "boolean"
+          },
+          "stream_id": {
+            "type": "string",
+            "enum": [
+              "stdout",
+              "stderr"
+            ]
+          },
+          "source_start": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "source_end": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "PublicToolResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "session_id",
+          "turn_id",
+          "item_id",
+          "projection_revision",
+          "execution_status",
+          "capture_status",
+          "delivery_status",
+          "capture_scope",
+          "upstream_truncated",
+          "artifacts"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "session_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "turn_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "item_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "projection_revision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "execution_status": {
+            "type": "string",
+            "enum": [
+              "success",
+              "error",
+              "cancelled",
+              "not_started"
+            ]
+          },
+          "capture_status": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "complete",
+              "partial",
+              "unavailable",
+              null
+            ]
+          },
+          "delivery_status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "committed",
+              "blocked"
+            ]
+          },
+          "capture_scope": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "upstream_truncated": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "reason_code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 128
+          },
+          "preview": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ToolResultPreview"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "artifacts": {
+            "type": "array",
+            "maxItems": 2,
+            "items": {
+              "$ref": "#/components/schemas/PublicArtifact"
+            }
+          }
+        }
+      },
+      "ArtifactAccess": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "can_read_content"
+        ],
+        "properties": {
+          "can_read_content": {
+            "type": "boolean"
+          }
+        }
+      },
+      "WebShellToolResultResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "result",
+          "access"
+        ],
+        "properties": {
+          "result": {
+            "$ref": "#/components/schemas/PublicToolResult"
+          },
+          "access": {
+            "$ref": "#/components/schemas/ArtifactAccess"
+          }
+        }
+      },
+      "WebShellArtifactResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "artifact",
+          "access"
+        ],
+        "properties": {
+          "artifact": {
+            "$ref": "#/components/schemas/PublicArtifact"
+          },
+          "access": {
+            "$ref": "#/components/schemas/ArtifactAccess"
+          }
+        }
+      },
+      "WebShellArtifactPage": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "data",
+          "nextCursor",
+          "hasMore"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WebShellArtifactResponse"
+            }
+          },
+          "nextCursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "hasMore": {
+            "type": "boolean"
+          }
+        }
+      },
+      "WebShellToolResultRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "sessionId",
+          "itemId"
+        ],
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "itemId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        }
+      },
+      "WebShellArtifactRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "sessionId",
+          "artifactId"
+        ],
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "artifactId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        }
+      },
+      "WebShellArtifactQueryRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "sessionId"
+        ],
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 2048
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          }
+        }
       }
     }
   }

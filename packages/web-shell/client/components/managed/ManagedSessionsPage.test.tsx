@@ -49,6 +49,7 @@ vi.mock('../MessageList', () => ({
 }));
 
 import { ManagedSessionsPage } from './ManagedSessionsPage';
+import { artifact } from './managed-tool-result.test-fixtures';
 
 function summary(
   sessionId = 's1',
@@ -173,6 +174,54 @@ describe('ManagedSessionsPage', () => {
       await flush();
     });
   }
+
+  it('gates result transport on the server capability and can discover output without its event', async () => {
+    const listArtifacts = vi.fn().mockResolvedValue({
+      data: [{ artifact, access: { can_read_content: false } }],
+      nextCursor: null,
+      hasMore: false,
+    });
+    provider = {
+      ...provider,
+      toolResults: {
+        canDownload: false,
+        getResult: vi.fn(),
+        listArtifacts,
+        getArtifact: vi
+          .fn()
+          .mockResolvedValue({ artifact, access: { can_read_content: false } }),
+        readRange: vi.fn(),
+        downloadArtifact: vi.fn(),
+      },
+    };
+    await render('s1');
+    expect(
+      [...container.querySelectorAll('button')].some(
+        (node) => node.textContent === 'Outputs',
+      ),
+    ).toBe(false);
+    expect(listArtifacts).not.toHaveBeenCalled();
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', {
+        capabilities: { canSend: true, canCancel: false, artifacts: true },
+      }),
+    );
+    await render(undefined);
+    await render('s1');
+    const button = [...container.querySelectorAll('button')].find(
+      (node) => node.textContent === 'Outputs',
+    );
+    expect(button).toBeTruthy();
+    await act(async () => {
+      button!.click();
+      await flush();
+    });
+    expect(listArtifacts).toHaveBeenCalledWith(
+      's1',
+      expect.objectContaining({ limit: 50, signal: expect.any(AbortSignal) }),
+    );
+    expect(provider.toolResults!.readRange).not.toHaveBeenCalled();
+  });
 
   it('uses an explicit Java provider without daemon Managed capabilities', async () => {
     mocks.features = [];

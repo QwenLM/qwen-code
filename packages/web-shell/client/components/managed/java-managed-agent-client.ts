@@ -1,4 +1,10 @@
 import type { components } from './generated/managed-agent-api';
+import type {
+  ManagedArtifact,
+  ManagedArtifactPage,
+  ManagedArtifactResponse,
+  ManagedToolResultResponse,
+} from './managed-tool-result-types';
 
 type Schemas = components['schemas'];
 
@@ -141,6 +147,154 @@ export class JavaManagedAgentClient {
     signal?: AbortSignal,
   ): Promise<JavaAgentCommandAdmission> {
     return this.post('/turns/cancel', request, signal);
+  }
+
+  getToolResult(sessionId: string, itemId: string, signal?: AbortSignal) {
+    return this.post<ManagedToolResultResponse>(
+      '/tool-results/get',
+      { sessionId, itemId },
+      signal,
+    );
+  }
+
+  listArtifacts(
+    request: { sessionId: string; cursor?: string; limit?: number },
+    signal?: AbortSignal,
+  ) {
+    return this.post<ManagedArtifactPage>('/artifacts/query', request, signal);
+  }
+
+  getArtifact(sessionId: string, artifactId: string, signal?: AbortSignal) {
+    return this.post<ManagedArtifactResponse>(
+      '/artifacts/get',
+      { sessionId, artifactId },
+      signal,
+    );
+  }
+
+  async readArtifactRange(
+    artifact: ManagedArtifact,
+    offset: number,
+    length: number,
+    signal?: AbortSignal,
+  ): Promise<Uint8Array> {
+    if (
+      !Number.isSafeInteger(offset) ||
+      !Number.isSafeInteger(length) ||
+      offset < 0 ||
+      length < 1 ||
+      length > 1024 * 1024 ||
+      offset >= artifact.byte_length
+    ) {
+      throw new Error('Invalid artifact byte range');
+    }
+    const end = Math.min(offset + length, artifact.byte_length) - 1;
+    const response = await this.artifactContent(
+      artifact,
+      signal,
+      `bytes=${offset}-${end}`,
+    );
+    if (
+      response.status !== 206 ||
+      response.headers.get('content-range') !==
+        `bytes ${offset}-${end}/${artifact.byte_length}`
+    ) {
+      await response.body?.cancel();
+      throw new Error('Artifact response does not match the requested range');
+    }
+    const bytes = new Uint8Array(end - offset + 1);
+    const reader = response.body?.getReader();
+    if (!reader) throw new Error('Artifact response has no byte stream');
+    let received = 0;
+    try {
+      while (true) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        if (received + chunk.value.byteLength > bytes.byteLength) {
+          throw new Error('Artifact response exceeds the requested range');
+        }
+        bytes.set(chunk.value, received);
+        received += chunk.value.byteLength;
+      }
+      if (received !== bytes.byteLength) {
+        throw new Error('Artifact response ended before the requested range');
+      }
+      return bytes;
+    } finally {
+      await reader.cancel().catch(() => undefined);
+    }
+  }
+
+  async openArtifactStream(
+    artifact: ManagedArtifact,
+    signal?: AbortSignal,
+  ): Promise<ReadableStream<Uint8Array>> {
+    const response = await this.artifactContent(artifact, signal);
+    if (
+      response.status !== 200 ||
+      response.headers.get('content-length') !== String(artifact.byte_length) ||
+      !response.body
+    ) {
+      await response.body?.cancel();
+      throw new Error('Artifact download does not match its metadata');
+    }
+    let received = 0;
+    return response.body.pipeThrough(
+      new TransformStream<Uint8Array, Uint8Array>({
+        transform(chunk, controller) {
+          received += chunk.byteLength;
+          if (received > artifact.byte_length) {
+            throw new Error('Artifact download exceeds its declared length');
+          }
+          controller.enqueue(chunk);
+        },
+        flush() {
+          if (received !== artifact.byte_length) {
+            throw new Error('Artifact download is incomplete');
+          }
+        },
+      }),
+      { signal },
+    );
+  }
+
+  private async artifactContent(
+    artifact: ManagedArtifact,
+    signal?: AbortSignal,
+    range?: string,
+  ): Promise<Response> {
+    if (
+      !/^[a-f0-9]{64}$/.test(artifact.revision) ||
+      artifact.sha256 !== artifact.revision ||
+      !Number.isSafeInteger(artifact.byte_length) ||
+      artifact.byte_length < 0
+    ) {
+      throw new Error('Artifact byte identity is invalid');
+    }
+    const headers = new Headers(await this.options.getHeaders?.());
+    headers.set('accept', 'application/octet-stream');
+    headers.set('if-match', `"${artifact.sha256}"`);
+    if (range) headers.set('range', range);
+    const path = `/v1/agents/sessions/${encodeURIComponent(artifact.session_id)}/artifacts/${encodeURIComponent(artifact.id)}/content`;
+    const response = await this.fetchImpl(
+      `${this.baseUrl}${path}?revision=${encodeURIComponent(artifact.revision)}`,
+      {
+        method: 'GET',
+        headers,
+        credentials: this.credentials,
+        signal,
+        redirect: 'error',
+      },
+    );
+    if (!response.ok) throw await toHttpError(response);
+    if (
+      response.headers.get('etag') !== `"${artifact.sha256}"` ||
+      ![null, 'identity'].includes(response.headers.get('content-encoding'))
+    ) {
+      await response.body?.cancel();
+      throw new Error('Artifact validator does not match its metadata');
+    }
+    return response;
   }
 
   async *streamEvents(

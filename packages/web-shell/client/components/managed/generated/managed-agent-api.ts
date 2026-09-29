@@ -297,6 +297,54 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/agent/web-shell/v1/tool-results/get": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["getWebShellToolResult"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/artifacts/get": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["getWebShellArtifact"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/artifacts/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["queryWebShellArtifacts"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -305,6 +353,22 @@ export interface components {
             /** @enum {string} */
             type: "input_text";
             text: string;
+        };
+        PublicArtifact: {
+            id: string;
+            session_id: string;
+            result_id: string;
+            revision: string;
+            /** @enum {string} */
+            stream_role: "stdout" | "stderr";
+            /** Format: int64 */
+            byte_length: number;
+            sha256: string;
+            media_type: string;
+            /** @enum {string} */
+            availability: "available" | "unavailable";
+            /** Format: int64 */
+            created_at: number;
         };
         WebShellListRequest: {
             cursor?: string | null;
@@ -408,6 +472,7 @@ export interface components {
             /** @default false */
             actions: boolean;
             tasks: boolean;
+            artifacts: boolean;
         };
         WebShellSessionPage: {
             data: components["schemas"]["WebShellSession"][];
@@ -770,6 +835,63 @@ export interface components {
             /** Format: uuid */
             sessionId: string;
             taskId: string;
+        };
+        ToolResultPreview: {
+            text: string;
+            truncated: boolean;
+            /** @enum {string} */
+            stream_id: "stdout" | "stderr";
+            /** Format: int64 */
+            source_start: number;
+            /** Format: int64 */
+            source_end: number;
+        };
+        PublicToolResult: {
+            id: string;
+            session_id: string;
+            turn_id: string;
+            item_id: string;
+            projection_revision: number;
+            /** @enum {string} */
+            execution_status: "success" | "error" | "cancelled" | "not_started";
+            /** @enum {string|null} */
+            capture_status: "complete" | "partial" | "unavailable" | null;
+            /** @enum {string} */
+            delivery_status: "pending" | "committed" | "blocked";
+            capture_scope: string | null;
+            upstream_truncated: boolean | null;
+            reason_code?: string | null;
+            preview?: components["schemas"]["ToolResultPreview"] | null;
+            artifacts: components["schemas"]["PublicArtifact"][];
+        };
+        ArtifactAccess: {
+            can_read_content: boolean;
+        };
+        WebShellToolResultResponse: {
+            result: components["schemas"]["PublicToolResult"];
+            access: components["schemas"]["ArtifactAccess"];
+        };
+        WebShellArtifactResponse: {
+            artifact: components["schemas"]["PublicArtifact"];
+            access: components["schemas"]["ArtifactAccess"];
+        };
+        WebShellArtifactPage: {
+            data: components["schemas"]["WebShellArtifactResponse"][];
+            nextCursor: string | null;
+            hasMore: boolean;
+        };
+        WebShellToolResultRequest: {
+            sessionId: string;
+            itemId: string;
+        };
+        WebShellArtifactRequest: {
+            sessionId: string;
+            artifactId: string;
+        };
+        WebShellArtifactQueryRequest: {
+            sessionId: string;
+            cursor?: string | null;
+            limit?: number;
         };
     };
     responses: {
@@ -1343,6 +1465,213 @@ export interface operations {
             400: components["responses"]["BadRequest"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+        };
+    };
+    getWebShellToolResult: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellToolResultRequest"];
+            };
+        };
+        responses: {
+            /** @description Authorized persisted tool result resource. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellToolResultResponse"];
+                };
+            };
+            /** @description Invalid request. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Trusted actor required. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Authenticated actor scope mismatch. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unknown or unreadable resource. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Resource temporarily unavailable. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    getWebShellArtifact: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellArtifactRequest"];
+            };
+        };
+        responses: {
+            /** @description Authorized persisted tool result resource. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellArtifactResponse"];
+                };
+            };
+            /** @description Invalid request. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Trusted actor required. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Authenticated actor scope mismatch. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unknown or unreadable resource. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Resource temporarily unavailable. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    queryWebShellArtifacts: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellArtifactQueryRequest"];
+            };
+        };
+        responses: {
+            /** @description Authorized persisted tool result resource. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellArtifactPage"];
+                };
+            };
+            /** @description Invalid request. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Trusted actor required. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Authenticated actor scope mismatch. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unknown or unreadable resource. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Resource temporarily unavailable. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
         };
     };
 }

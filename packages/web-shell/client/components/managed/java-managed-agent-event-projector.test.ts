@@ -4,8 +4,116 @@ import {
   projectJavaAgentItem,
   toTimestamp,
 } from './java-managed-agent-event-projector';
+import { result } from './managed-tool-result.test-fixtures';
+import { managedEventsToMessages } from './managed-session-messages';
+import javaFixture from './managed-tool-result.java-fixture.json';
+import type {
+  JavaAgentEvent,
+  JavaAgentItem,
+} from './java-managed-agent-client';
 
 describe('java managed agent event projector', () => {
+  it('recovers the same tool from real Java publication, snapshot and event responses', () => {
+    // Exported by ManagedArtifactApiIntegrationTest after publication/receipt and SQL projection.
+    const live = javaFixture.events.flatMap((event) => {
+      const projected = projectJavaAgentEvent(event as JavaAgentEvent);
+      return projected ? [projected] : [];
+    });
+    const snapshot = javaFixture.transcript.items.flatMap((item) =>
+      projectJavaAgentItem(item as JavaAgentItem),
+    );
+    const messages = managedEventsToMessages(live, '[truncated]');
+    expect(messages).toEqual(managedEventsToMessages(snapshot, '[truncated]'));
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({
+      role: 'tool_group',
+      tools: [
+        {
+          callId: `${javaFixture.toolResult.result.turn_id}:${javaFixture.toolResult.result.item_id}`,
+          toolName: 'run_shell_command',
+          status: 'completed',
+          rawOutput: 'abc',
+          toolResult: javaFixture.toolResult.result,
+        },
+      ],
+    });
+    expect(
+      javaFixture.toolResult.result.artifacts.map((entry) => entry.byte_length),
+    ).toEqual([3, 0]);
+  });
+
+  it('renders the same canonical result from a live event and a settled snapshot', () => {
+    const cancelled = { ...result, execution_status: 'cancelled' as const };
+    const live = projectJavaAgentEvent({
+      sequence: 4,
+      eventId: 'event-4',
+      sessionId: result.session_id,
+      turnId: result.turn_id,
+      itemId: result.item_id,
+      type: 'item.tool_result.updated',
+      createdAt: 40,
+      terminal: false,
+      data: {
+        toolCallId: 'model-call',
+        input: { command: 'echo test' },
+        status: 'cancelled',
+        result: cancelled,
+      },
+    });
+    const snapshot = projectJavaAgentItem({
+      itemId: result.item_id,
+      sessionId: result.session_id,
+      turnId: result.turn_id,
+      type: 'tool_call',
+      role: 'assistant',
+      status: 'cancelled',
+      content: [],
+      attributes: {
+        toolCallId: 'model-call',
+        input: { command: 'echo test' },
+        result: cancelled,
+      },
+      firstSequence: 4,
+      lastSequence: 4,
+      createdAt: 40,
+      updatedAt: 40,
+    });
+    const liveMessages = managedEventsToMessages([live!], '[truncated]');
+    expect(liveMessages).toEqual(
+      managedEventsToMessages(snapshot, '[truncated]'),
+    );
+    expect(liveMessages[0]).toMatchObject({
+      role: 'tool_group',
+      tools: [
+        {
+          callId: 'turn-1:item-1',
+          status: 'failed',
+          wasCancelled: true,
+          toolResult: cancelled,
+          args: { command: 'echo test' },
+        },
+      ],
+    });
+  });
+
+  it('preserves pending tool state in a snapshot', () => {
+    expect(
+      projectJavaAgentItem({
+        itemId: 'item-1',
+        sessionId: 's',
+        turnId: 't',
+        type: 'tool_call',
+        role: 'assistant',
+        status: 'pending',
+        content: [],
+        attributes: {},
+        firstSequence: 1,
+        lastSequence: 1,
+        createdAt: 1,
+        updatedAt: 1,
+      })[0]?.type,
+    ).toBe('tool_requested');
+  });
   it('maps canonical events without exposing Java event names', () => {
     expect(
       projectJavaAgentEvent({

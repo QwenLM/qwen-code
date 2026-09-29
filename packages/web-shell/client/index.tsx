@@ -37,6 +37,12 @@ export {
   ManagedAgentWebShell,
   type ManagedAgentWebShellProps,
 } from './ManagedAgentWebShell';
+export type {
+  ManagedArtifact,
+  ManagedArtifactSave,
+  ManagedToolResult,
+  ManagedToolResultReader,
+} from './components/managed/managed-tool-result-types';
 export {
   type ManagedAgentCommandOptions,
   type ManagedAgentProvider,

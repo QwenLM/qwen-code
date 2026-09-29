@@ -4,6 +4,7 @@ import {
   managedEventsToMessages,
   mergeManagedEvents,
 } from './managed-session-messages';
+import { result } from './managed-tool-result.test-fixtures';
 
 function event(
   id: number,
@@ -15,6 +16,78 @@ function event(
 }
 
 describe('Managed transcript projection', () => {
+  it('attaches a late result to its original turn without settling a new response', () => {
+    const source = { ...result, session_id: 's1', turn_id: 'p1' };
+    const events = [
+      event(1, 'accepted', { prompt: [{ type: 'text', text: 'First' }] }),
+      event(2, 'tool_completed', {
+        toolCallId: 'call',
+        toolName: 'run_shell_command',
+      }),
+      event(3, 'completed'),
+      event(
+        4,
+        'accepted',
+        { prompt: [{ type: 'text', text: 'Second' }] },
+        'p2',
+      ),
+      event(5, 'assistant_delta', { text: 'Working' }, 'p2'),
+      event(6, 'tool_result_updated', {
+        itemId: 'item-1',
+        toolCallId: 'call',
+        result: source,
+      }),
+      event(7, 'assistant_delta', { text: ' now' }, 'p2'),
+    ];
+    const messages = managedEventsToMessages(events, 'truncated');
+    expect(messages).toHaveLength(4);
+    expect(messages[1]).toMatchObject({
+      role: 'tool_group',
+      tools: [{ callId: 'p1:item-1', toolResult: source }],
+    });
+    expect(messages[3]).toMatchObject({
+      role: 'assistant',
+      content: 'Working now',
+      isStreaming: true,
+    });
+  });
+
+  it('places a result-only tool in its original turn and ignores older projection revisions', () => {
+    const source = {
+      ...result,
+      session_id: 's1',
+      turn_id: 'p1',
+      projection_revision: 2,
+    };
+    const messages = managedEventsToMessages(
+      [
+        event(1, 'accepted', { prompt: [{ type: 'text', text: 'First' }] }),
+        event(2, 'completed'),
+        event(
+          3,
+          'accepted',
+          { prompt: [{ type: 'text', text: 'Second' }] },
+          'p2',
+        ),
+        event(4, 'tool_result_updated', { itemId: 'item-1', result: source }),
+        event(5, 'tool_result_updated', {
+          itemId: 'item-1',
+          result: {
+            ...source,
+            projection_revision: 1,
+            execution_status: 'error',
+          },
+        }),
+      ],
+      'truncated',
+    );
+    expect(messages).toHaveLength(3);
+    expect(messages[1]).toMatchObject({
+      role: 'tool_group',
+      tools: [{ status: 'completed', toolResult: source }],
+    });
+    expect(messages[2]).toMatchObject({ role: 'user', content: 'Second' });
+  });
   it('preserves inline images admitted through the Managed API in user history', () => {
     const messages = managedEventsToMessages(
       [

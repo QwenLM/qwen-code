@@ -12,6 +12,7 @@ import {
 import { useManagedSession } from './use-managed-session';
 import { ManagedSessionProgress } from './ManagedSessionProgress';
 import { WorkspaceBindingCreator } from './WorkspaceBindingCreator';
+import { ManagedToolResultPanel } from './ManagedToolResultPanel';
 import type {
   ManagedAgentProvider,
   ManagedAgentSessionSummary,
@@ -130,6 +131,16 @@ function ManagedSessionsContent({
   const [error, setError] = useState<string>();
   const [text, setText] = useState('');
   const [busy, setBusy] = useState(false);
+  const [outputTarget, setOutputTarget] = useState<{
+    sessionId: string;
+    itemId?: string;
+  }>();
+  const openResult = useCallback(
+    (itemId: string) => {
+      if (sessionId) setOutputTarget({ sessionId, itemId });
+    },
+    [sessionId],
+  );
   const pendingKey = `qwen-managed-pending:${provider.storageKey}:${clientId}`;
   const [pending, setPending] = useState<PendingPrompt | undefined>(() =>
     readPending(pendingKey),
@@ -421,6 +432,17 @@ function ManagedSessionsContent({
                   {t(`managed.runtime.${summary.runtimeState}`)}
                 </span>
               )}
+              {summary.capabilities.artifacts && provider.toolResults && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() =>
+                    setOutputTarget({ sessionId: summary.sessionId })
+                  }
+                >
+                  {t('managed.result.outputs')}
+                </Button>
+              )}
             </div>
           )}
           {summary?.workspace && (
@@ -458,6 +480,11 @@ function ManagedSessionsContent({
             <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
               <MessageList
                 messages={messages}
+                onToolResultOpen={
+                  summary?.capabilities.artifacts && provider.toolResults
+                    ? openResult
+                    : undefined
+                }
                 pendingApproval={null}
                 sessionKey={`managed:${provider.storageKey}:${sessionId ?? 'new'}`}
                 loadingTranscript={detail.loading}
@@ -548,6 +575,20 @@ function ManagedSessionsContent({
               </div>
             </form>
           ) : null}
+          {outputTarget &&
+            outputTarget.sessionId === sessionId &&
+            sessionId &&
+            summary?.capabilities.artifacts &&
+            provider.toolResults && (
+              <ManagedToolResultPanel
+                key={`${sessionId}:${outputTarget.itemId ?? 'all'}`}
+                reader={provider.toolResults}
+                sessionId={sessionId}
+                clientId={clientId}
+                itemId={outputTarget.itemId}
+                onClose={() => setOutputTarget(undefined)}
+              />
+            )}
         </section>
       </div>
     </div>

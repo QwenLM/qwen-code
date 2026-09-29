@@ -3,7 +3,14 @@ package com.alibaba.qwen.code.managedagent;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.service.ManagedArtifactPolicy;
+import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.store.ManagedArtifactReader;
+import com.alibaba.qwen.code.managedagent.store.ManagedToolResultProjector;
+import com.alibaba.qwen.code.managedagent.store.ManagedToolResultStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.store.ToolPublicationContract;
@@ -60,6 +67,14 @@ class ToolPublicationStoreTest {
     private JdbcTemplate jdbc;
     private DataSourceTransactionManager manager;
     private ManagedSessionStore sessions;
+    private ManagedToolResultStore publicResults;
+    private ManagedAgentStore publicSessions;
+    private ManagedAgentProperties projectionProperties;
+    private ManagedWorkspaceRegistry publicWorkspaces;
+    private ManagedArtifactReader apiReader;
+    private Map<String, byte[]> apiObjects;
+    private String apiFailNextObject;
+    private boolean keepApiFixture;
     private JdbcRuntimeBindingRepository bindings;
     private JdbcToolExecutionRepository executions;
     private ToolPublicationStore store;
@@ -72,11 +87,21 @@ class ToolPublicationStoreTest {
 
     @BeforeEach
     void setup() {
-        javax.sql.DataSource source = publicationDataSource();
+        initialize(publicationDataSource());
+    }
+
+    private void initialize(javax.sql.DataSource source) {
         Flyway.configure().dataSource(source).load().migrate();
         jdbc = new JdbcTemplate(source);
         manager = new DataSourceTransactionManager(source);
         sessions = new ManagedSessionStore(jdbc);
+        projectionProperties = new ManagedAgentProperties();
+        projectionProperties.getArtifacts().setEnabled(true);
+        publicWorkspaces = org.mockito.Mockito.mock(ManagedWorkspaceRegistry.class);
+        publicSessions = new ManagedAgentStore(jdbc, JSON, java.time.Clock.systemUTC(), events -> {},
+                publicWorkspaces, projectionProperties);
+        publicResults = new ManagedToolResultStore(jdbc, manager, publicSessions);
+        sessions.setToolResults(publicResults);
         bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("key", new byte[32]),
                 () -> "binding-1");
         executions = new JdbcToolExecutionRepository(source);
@@ -531,6 +556,12 @@ class ToolPublicationStoreTest {
         assertThat(sessions.readResource("tenant-1", "workspace-1", "session-1",
                 admission.path("resourceId").asText(), WRITER_TOKEN).bytes())
                 .isEqualTo(outcome.toString().getBytes(StandardCharsets.UTF_8));
+        JsonNode blockedPublic = projectPublicReceipt(data);
+        assertThat(blockedPublic.path("execution_status").asText()).isEqualTo("error");
+        assertThat(blockedPublic.path("capture_status").asText()).isEqualTo("unavailable");
+        assertThat(blockedPublic.path("delivery_status").asText()).isEqualTo("blocked");
+        assertThat(blockedPublic.path("upstream_truncated").isNull()).isTrue();
+        assertThat(blockedPublic.path("artifacts")).isEmpty();
         String objectKey = jdbc.queryForObject("SELECT object_key FROM qwen_tool_publication_object"
                 + " WHERE slot_key = 'admission'", String.class);
         objects.get(objectKey)[0] = 'z';
@@ -557,6 +588,10 @@ class ToolPublicationStoreTest {
 
             @Override
             public InputStream open(String key) {
+                if (key.equals(apiFailNextObject)) {
+                    apiFailNextObject = null;
+                    throw new IllegalStateException("storage temporarily unavailable");
+                }
                 return new ByteArrayInputStream(objects.get(key));
             }
 
@@ -567,21 +602,23 @@ class ToolPublicationStoreTest {
         var data = new ToolPublicationDataStore(jdbc, manager, store, sessions, bucket,
                 Duration.ofMinutes(2), Duration.ofSeconds(30), VERIFICATION_BUDGET);
         JsonNode key = binding.get("sessionKey");
-        byte[] segment = "abc".getBytes(StandardCharsets.UTF_8);
+        byte[] segment = "ab".getBytes(StandardCharsets.UTF_8);
         JsonNode first = data.publishSegment(key, "pub-1", PUBLICATION_TOKEN,
-                "operation-1", "stdout", 0, segment, digest("abc"));
+                "operation-1", "stdout", 0, segment, digest("ab"));
         segment[0] = 'x';
         assertThat(data.publishSegment(key, "pub-1", PUBLICATION_TOKEN,
-                "operation-1", "stdout", 0, "abc".getBytes(StandardCharsets.UTF_8), digest("abc")))
+                "operation-1", "stdout", 0, "ab".getBytes(StandardCharsets.UTF_8), digest("ab")))
                 .isEqualTo(first);
         assertThat(data.operationStatus(key, "pub-1", PUBLICATION_TOKEN, "operation-1")
                 .path("receipt")).isEqualTo(first);
         assertThat(objects.values()).singleElement().satisfies(bytes ->
-                assertThat(bytes).isEqualTo("abc".getBytes(StandardCharsets.UTF_8)));
+                assertThat(bytes).isEqualTo("ab".getBytes(StandardCharsets.UTF_8)));
         assertThat(data.prefix(key, "pub-1", PUBLICATION_TOKEN, "operation-prefix", "stdout")
-                .path("byteLength").asLong()).isEqualTo(3);
-        assertThat(data.seal(key, "pub-1", PUBLICATION_TOKEN, "operation-seal", "stdout", 1,
-                3, digest("abc")).path("segmentCount").asInt()).isEqualTo(1);
+                .path("byteLength").asLong()).isEqualTo(2);
+        data.publishSegment(key, "pub-1", PUBLICATION_TOKEN, "operation-second", "stdout", 1,
+                "c".getBytes(StandardCharsets.UTF_8), digest("c"));
+        assertThat(data.seal(key, "pub-1", PUBLICATION_TOKEN, "operation-seal", "stdout", 2,
+                3, digest("abc")).path("segmentCount").asInt()).isEqualTo(2);
         if (!partial) {
             data.seal(key, "pub-1", PUBLICATION_TOKEN, "operation-seal-empty", "stderr", 0,
                     0, digest(""));
@@ -589,7 +626,7 @@ class ToolPublicationStoreTest {
         assertThat(data.prefix(key, "pub-1", PUBLICATION_TOKEN, "operation-prefix-2", "stdout")
                 .path("sealed").asBoolean()).isTrue();
         assertThatThrownBy(() -> data.publishSegment(key, "pub-1", PUBLICATION_TOKEN,
-                "operation-extra", "stdout", 1, "x".getBytes(StandardCharsets.UTF_8), null))
+                "operation-extra", "stdout", 2, "x".getBytes(StandardCharsets.UTF_8), null))
                 .hasMessageContaining("sealed");
         assertThatThrownBy(() -> data.publishSegment(key, "pub-1", PUBLICATION_TOKEN,
                 "operation-2", "stdout", 0, "abd".getBytes(StandardCharsets.UTF_8), null))
@@ -597,7 +634,8 @@ class ToolPublicationStoreTest {
         ObjectNode page = JSON.createObjectNode().put("toolResult", "managed-tool-result/1")
                 .put("type", "page").put("captureId", "capture-1")
                 .put("streamId", "stdout").put("firstOrdinal", 0).put("offset", 0);
-        page.putArray("segments").add(JSON.createObjectNode().put("byteLength", 3).put("digest", digest("abc")));
+        page.putArray("segments").add(JSON.createObjectNode().put("byteLength", 2).put("digest", digest("ab")))
+                .add(JSON.createObjectNode().put("byteLength", 1).put("digest", digest("c")));
         assertThatThrownBy(() -> data.publishResource(key, "pub-1", PUBLICATION_TOKEN,
                 "wrong-page-slot", "page:stdout:1", "managed-tool-result-page",
                 page.toString().getBytes(StandardCharsets.UTF_8)))
@@ -626,7 +664,7 @@ class ToolPublicationStoreTest {
                 .put("state", "sealed").put("byteLength", 3).put("digest", digest("abc"));
         content.putArray("missingRanges");
         ObjectNode body = JSON.createObjectNode();
-        ObjectNode pageLink = JSON.createObjectNode().put("segmentCount", 1).put("byteLength", 3);
+        ObjectNode pageLink = JSON.createObjectNode().put("segmentCount", 2).put("byteLength", 3);
         pageLink.set("ref", ref);
         body.putArray("pages").add(pageLink);
         content.set("body", body);
@@ -742,14 +780,110 @@ class ToolPublicationStoreTest {
         assertThat(data.readRange(key, "pub-1", WRITER_TOKEN, manifestRef, identity,
                 "stdout", 3, 0)).isEmpty();
         assertThatThrownBy(() -> data.readRange(key, "pub-1", WRITER_TOKEN, manifestRef,
-                identity, "stdout", 2, 2)).hasMessageContaining("range exceeds");
-        objects.values().iterator().next()[0] = 'z';
+                identity, "stdout", 2, 2)).hasMessageContaining("Invalid publication range");
+        JsonNode projected = projectPublicReceipt(data);
+        assertThat(projected.path("preview").path("text").asText()).isEqualTo("abc");
+        var artifacts = publicResults.listArtifacts("tenant-1", "session-1", null, null, null, 1);
+        assertThat(artifacts.hasMore()).isTrue();
+        assertThat(artifacts.artifacts()).hasSize(1);
+        var last = artifacts.artifacts().getFirst();
+        var remaining = publicResults.listArtifacts("tenant-1", "session-1", artifacts.watermark(),
+                last.creationSequence(), last.descriptor().path("id").asText(), 1);
+        assertThat(remaining.artifacts()).hasSize(1);
+        assertThat(remaining.hasMore()).isFalse();
+        assertThat(publicResults.findArtifact("other-tenant", "session-1", last.descriptor().path("id").asText())).isEmpty();
+        var provider = publicationProvider(data);
+        var publicReader = new ManagedArtifactReader(provider);
+        var stdout = publicResults.listArtifacts("tenant-1", "session-1", null, null, null, 100).artifacts()
+                .stream().filter(artifact -> artifact.streamId().equals("stdout")).findFirst().orElseThrow();
+        jdbc.update("UPDATE qwen_managed_session_journal_head SET writer_lease_until = TIMESTAMP '2000-01-01 00:00:00'");
+        assertThat(publicReader.readRange(stdout, 1, 2)).isEqualTo("bc".getBytes(StandardCharsets.UTF_8));
+        // Restore the lease only for the existing private-reader corruption checks.
+        jdbc.update("UPDATE qwen_managed_session_journal_head SET writer_lease_until = TIMESTAMP '2099-01-01 00:00:00'");
+        if (keepApiFixture) {
+            apiReader = publicReader;
+            apiObjects = objects;
+            return;
+        }
+        String firstObject = jdbc.queryForObject("SELECT object_key FROM qwen_tool_publication_object"
+                + " WHERE slot_key = 'segment:stdout:0'", String.class);
+        objects.get(firstObject)[0] = 'z';
         assertThatThrownBy(() -> data.readRange(key, "pub-1", WRITER_TOKEN, manifestRef,
                 identity, "stdout", 0, 1)).hasMessageContaining("digest changed");
         assertThat(jdbc.queryForObject("SELECT state FROM qwen_tool_publication_object"
                 + " WHERE slot_key = 'segment:stdout:0'", String.class)).isEqualTo("QUARANTINED");
         assertThatThrownBy(() -> sessions.readResource("tenant-1", "workspace-1", "session-1",
                 admission.path("resourceId").asText(), WRITER_TOKEN)).hasMessageContaining("verification");
+    }
+
+    @Test
+    void publicReaderStopsBeforeNextSegmentWhenAccessIsRevoked() throws Exception {
+        var artifact = preparePublicReader();
+        var allowed = new java.util.concurrent.atomic.AtomicBoolean(true);
+        try (var stream = apiReader.open(artifact, () -> {
+            if (!allowed.get()) {
+                throw new SecurityException("access revoked");
+            }
+        })) {
+            assertThat(stream.readNBytes(2)).isEqualTo("ab".getBytes(StandardCharsets.UTF_8));
+            allowed.set(false);
+            byte[] target = new byte[] {'?'};
+            assertThatThrownBy(() -> stream.read(target)).isInstanceOf(SecurityException.class);
+            assertThat(target).containsExactly((byte) '?');
+        }
+    }
+
+    @Test
+    void publicReaderStopsBeforeNextSegmentWhenPublicationIsQuarantined() throws Exception {
+        var artifact = preparePublicReader();
+        try (var stream = apiReader.open(artifact)) {
+            assertThat(stream.readNBytes(2)).isEqualTo("ab".getBytes(StandardCharsets.UTF_8));
+            jdbc.update("UPDATE qwen_tool_publication SET quarantined = TRUE WHERE publication_id = 'pub-1'");
+            byte[] target = new byte[] {'?'};
+            assertThatThrownBy(() -> stream.read(target)).hasMessageContaining("receipt is unavailable");
+            assertThat(target).containsExactly((byte) '?');
+        }
+    }
+
+    @Test
+    void publicReaderNeverExposesBytesFromCorruptSegmentEvenWhenRetried() throws Exception {
+        var artifact = preparePublicReader();
+        try (var stream = apiReader.open(artifact)) {
+            assertThat(stream.readNBytes(2)).isEqualTo("ab".getBytes(StandardCharsets.UTF_8));
+            String secondObject = jdbc.queryForObject("SELECT object_key FROM qwen_tool_publication_object"
+                    + " WHERE slot_key = 'segment:stdout:1'", String.class);
+            apiObjects.get(secondObject)[0] = 'x';
+            byte[] target = new byte[] {'?'};
+            assertThatThrownBy(() -> stream.read(target)).hasMessageContaining("digest changed");
+            assertThat(target).containsExactly((byte) '?');
+            assertThatThrownBy(() -> stream.read(target)).hasMessageContaining("receipt is unavailable");
+            assertThat(target).containsExactly((byte) '?');
+            assertThat(jdbc.queryForObject("SELECT state FROM qwen_tool_publication_object"
+                    + " WHERE slot_key = 'segment:stdout:1'", String.class)).isEqualTo("QUARANTINED");
+        }
+    }
+
+    @Test
+    void publicReaderDoesNotAdvancePastSegmentWhenStorageReadFails() throws Exception {
+        var artifact = preparePublicReader();
+        try (var stream = apiReader.open(artifact)) {
+            assertThat(stream.readNBytes(2)).isEqualTo("ab".getBytes(StandardCharsets.UTF_8));
+            apiFailNextObject = jdbc.queryForObject("SELECT object_key FROM qwen_tool_publication_object"
+                    + " WHERE slot_key = 'segment:stdout:1'", String.class);
+            byte[] target = new byte[] {'?'};
+            assertThatThrownBy(() -> stream.read(target)).hasMessageContaining("storage temporarily unavailable");
+            assertThat(target).containsExactly((byte) '?');
+            assertThat(stream.read(target)).isEqualTo(1);
+            assertThat(target).containsExactly((byte) 'c');
+            assertThat(stream.read()).isEqualTo(-1);
+        }
+    }
+
+    private ManagedToolResultStore.Artifact preparePublicReader() {
+        keepApiFixture = true;
+        publishesImmutableSegmentAndResourceUnderOriginalAuthorization();
+        return publicResults.listArtifacts("tenant-1", "session-1", null, null, null, 100).artifacts().stream()
+                .filter(artifact -> artifact.streamId().equals("stdout")).findFirst().orElseThrow();
     }
 
     @Test
@@ -1448,6 +1582,185 @@ class ToolPublicationStoreTest {
         event.set("payload", payload);
         event.set("subject", JSON.createObjectNode().put("type", "activation").put("activationId", "activation-1").put("epoch", 1));
         return JSON.createObjectNode().put("subtype", "managed_session_event_v1").set("managedSession", event) + "\n";
+    }
+
+    record ApiFixture(JdbcTemplate jdbc, DataSourceTransactionManager manager, ManagedToolResultStore results,
+            ManagedAgentStore sessions, ManagedArtifactReader reader, ManagedAgentProperties properties,
+            ManagedArtifactPolicy policy, ManagedWorkspaceRegistry workspaces) { }
+
+    static ApiFixture apiFixture() {
+        var fixture = new ToolPublicationStoreTest();
+        fixture.setup();
+        return apiFixture(fixture);
+    }
+
+    static ApiFixture apiFixture(javax.sql.DataSource source) {
+        var fixture = new ToolPublicationStoreTest();
+        fixture.initialize(source);
+        return apiFixture(fixture);
+    }
+
+    private static ApiFixture apiFixture(ToolPublicationStoreTest fixture) {
+        fixture.keepApiFixture = true;
+        fixture.publishesImmutableSegmentAndResourceUnderOriginalAuthorization();
+        return new ApiFixture(fixture.jdbc, fixture.manager, fixture.publicResults, fixture.publicSessions,
+                fixture.apiReader, fixture.projectionProperties, publicationPolicy(), fixture.publicWorkspaces);
+    }
+
+    @Test
+    void projectsOrdinaryNotStartedReceiptAndBackfillsItAfterCrash() {
+        ordinaryNotStartedReceipt();
+        assertThat(jdbc.queryForObject("SELECT producer_phase FROM qwen_tool_publication", String.class)).isEqualTo("OPEN");
+        assertThat(jdbc.queryForObject("SELECT receipt_sequence FROM qwen_tool_publication", Long.class)).isNull();
+        jdbc.update("DELETE FROM managed_agent_tool_result");
+        for (int i = 0; i < 4; i++) {
+            publicResults.backfillOnePage();
+        }
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_tool_result", Long.class)).isEqualTo(1);
+        JsonNode result = projectPublicReceipt(null);
+        assertThat(result.path("execution_status").asText()).isEqualTo("not_started");
+        assertThat(result.path("capture_status").isNull()).isTrue();
+        assertThat(result.path("capture_scope").isNull()).isTrue();
+        assertThat(result.path("upstream_truncated").isNull()).isTrue();
+        assertThat(result.path("artifacts")).isEmpty();
+        publicSessions.appendPublicEventIfAbsent("tenant-1", "session-1", "turn_public_1", "item.tool_call.updated",
+                Map.of("toolCallId", "model-1", "status", "in_progress"), false, "late-tool-update");
+        new TransactionTemplate(manager).executeWithoutResult(status -> publicSessions.materializeNextBatch("tenant-1", "session-1", 100));
+        assertThat(publicSessions.findSnapshot("tenant-1", "session-1").orElseThrow().items()).singleElement()
+                .satisfies(item -> {
+                    assertThat(item.status()).isEqualTo("failed");
+                    assertThat(JSON.valueToTree(item.attributes()).path("result")).isEqualTo(result);
+                });
+    }
+
+    @Test
+    void deletionBeforeProjectionSkipsPublicationReads() {
+        ordinaryNotStartedReceipt();
+        insertPublicSession();
+        jdbc.update("UPDATE managed_agent_session SET status = 'DELETING'");
+        var provider = publicationProvider(null);
+        var reader = org.mockito.Mockito.mock(ManagedArtifactReader.class);
+        var policy = org.mockito.Mockito.mock(ManagedArtifactPolicy.class);
+        new ManagedToolResultProjector(publicResults, jdbc, provider, reader, policy,
+                projectionProperties).project(publicResults.claim().orElseThrow());
+        org.mockito.Mockito.verifyNoInteractions(reader, policy);
+        assertThat(jdbc.queryForObject("SELECT work_state FROM managed_agent_tool_result", String.class)).isEqualTo("SUPPRESSED");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_event", Long.class)).isZero();
+    }
+
+    @Test
+    void deletionAfterProjectionReadSuppressesPublicCommit() {
+        ordinaryNotStartedReceipt();
+        insertPublicSession();
+        var original = publicationPolicy();
+        var policy = new ManagedArtifactPolicy() {
+            public String version() { return original.version(); }
+            public boolean publishOriginal(String tenant, String workspace, String session) {
+                jdbc.update("UPDATE managed_agent_session SET status = 'DELETING'");
+                return true;
+            }
+            public boolean publishPreview(String tenant, String workspace, String session) { return false; }
+            public boolean readOriginal(String tenant, String actor, String workspace, String session) { return true; }
+        };
+        var provider = publicationProvider(null);
+        new ManagedToolResultProjector(publicResults, jdbc, provider, new ManagedArtifactReader(provider), policy,
+                projectionProperties).project(publicResults.claim().orElseThrow());
+        assertThat(jdbc.queryForObject("SELECT work_state FROM managed_agent_tool_result", String.class)).isEqualTo("SUPPRESSED");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_event", Long.class)).isZero();
+    }
+
+    @Test
+    void journalRollbackAlsoRollsBackPendingProjectionSource() {
+        reserve();
+        var ref = ref("rollback-outcome", "managed-tool-outcome", JSON.createObjectNode());
+        ObjectNode receipt = JSON.createObjectNode().put("executionCallId", "execution-1").putNull("resultRef");
+        receipt.set("toolOutcomeRef", ref);
+        receipt.putArray("resources");
+        new TransactionTemplate(manager).executeWithoutResult(status -> {
+            append("recordToolResult", event(sequence + 1, "tool.receipt", receipt) + "{}\n", 1,
+                    List.of(resource(ref, JSON.createObjectNode())), null);
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_tool_result", Long.class)).isEqualTo(1);
+            status.setRollbackOnly();
+        });
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_tool_result", Long.class)).isZero();
+    }
+
+    private void ordinaryNotStartedReceipt() {
+        reserve();
+        var execution = executions.findByExecutionCallId("execution-1");
+        executions.requestCancel(execution.getExecutionCallId(), execution.getVersion());
+        store.apply(request("close_not_started"), WRITER_TOKEN, null);
+        ObjectNode envelope = JSON.createObjectNode().put("executionStatus", "not_started").putNull("capture");
+        envelope.putArray("responseParts");
+        ObjectNode outcome = JSON.createObjectNode().put("schemaVersion", 1).put("decision", "blocked").putNull("manifestRef");
+        outcome.set("envelope", envelope);
+        JsonNode ref = ref("unstarted-outcome", "managed-tool-outcome", outcome);
+        ObjectNode receipt = JSON.createObjectNode().put("executionCallId", "execution-1")
+                .put("historyRevision", sequence + 1).putNull("resultRef");
+        receipt.set("toolOutcomeRef", ref);
+        receipt.putArray("resources");
+        append("recordToolResult", event(sequence + 1, "tool.receipt", receipt) + "{}\n", 1,
+                List.of(resource(ref, outcome)), null);
+    }
+
+    private JsonNode projectPublicReceipt(ToolPublicationDataStore data) {
+        insertPublicSession();
+        var provider = publicationProvider(data);
+        var projector = new ManagedToolResultProjector(publicResults, jdbc, provider, new ManagedArtifactReader(provider),
+                publicationPolicy(), projectionProperties);
+        var crashedClaim = publicResults.claim().orElseThrow();
+        jdbc.update("UPDATE managed_agent_tool_result SET claim_until = 1 WHERE result_id = ?", crashedClaim.source().id());
+        var replacement = publicResults.claim().orElseThrow();
+        projector.project(replacement);
+        projector.project(crashedClaim);
+        assertThat(jdbc.queryForObject("SELECT work_state FROM managed_agent_tool_result", String.class)).isEqualTo("READY");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_event", Long.class)).isEqualTo(1);
+        var result = JSON.valueToTree(jdbc.queryForObject("SELECT data_json FROM managed_agent_event", String.class));
+        JsonNode event = ToolPublicationContract.readJson(result.asText().getBytes(StandardCharsets.UTF_8));
+        JsonNode descriptor = event.path("result");
+        assertThat(descriptor.path("turn_id").asText()).isEqualTo("turn_public_1");
+        assertThat(event.path("toolCallId").asText()).isEqualTo("model-1");
+        assertThat(publicResults.findResult("tenant-1", "session-1", descriptor.path("item_id").asText()))
+                .contains(descriptor);
+        assertThat(publicResults.findResult("tenant-1", "other-session", descriptor.path("item_id").asText())).isEmpty();
+        new TransactionTemplate(manager).executeWithoutResult(status -> publicSessions.materializeNextBatch("tenant-1", "session-1", 100));
+        assertThat(publicSessions.findSnapshot("tenant-1", "session-1").orElseThrow().items()).singleElement()
+                .satisfies(item -> assertThat(JSON.valueToTree(item.attributes()).path("result")).isEqualTo(descriptor));
+        assertThat(publicSessions.findControlEvents("tenant-1", "session-1", 1)).isEmpty();
+        assertThat(jdbc.queryForObject("SELECT status FROM managed_agent_turn", String.class)).isEqualTo("COMPLETED");
+        return descriptor;
+    }
+
+    private void insertPublicSession() {
+        jdbc.update("INSERT INTO managed_agent_session (tenant_id, session_id, agent_id, status, created_at, updated_at,"
+                        + " workspace_id, workspace_generation, workspace_storage_id, cwd_relative, context_config_ref,"
+                        + " context_revision, workspace_config_ref, workspace_policy_ref)"
+                        + " VALUES ('tenant-1', 'session-1', 'qwen-code', 'CLOSED', 1, 1, 'workspace-1', 1, 'storage-1', '.', ?, 1, 'config', 'policy')",
+                "sha256:" + digest("config\u0000policy"));
+        jdbc.update("INSERT INTO managed_agent_turn (tenant_id, session_id, turn_id, prompt_id, input_json, payload_digest,"
+                + " status, created_at, updated_at) VALUES ('tenant-1', 'session-1', 'turn_public_1', 'turn-1', '[]', 'sha256:a', 'COMPLETED', 1, 1)");
+        jdbc.update("INSERT INTO managed_agent_consumer_progress (tenant_id, session_id, consumer_name, covered_sequence, updated_at)"
+                + " VALUES ('tenant-1', 'session-1', 'message_projection', 0, 1)");
+    }
+
+    private static org.springframework.beans.factory.ObjectProvider<ToolPublicationDataStore> publicationProvider(ToolPublicationDataStore data) {
+        var beans = new org.springframework.beans.factory.support.StaticListableBeanFactory();
+        if (data != null) {
+            beans.addBean("publication", data);
+        }
+        return beans.getBeanProvider(ToolPublicationDataStore.class);
+    }
+
+    private static ManagedArtifactPolicy publicationPolicy() {
+        return new ManagedArtifactPolicy() {
+            public String version() { return "test-v1"; }
+            public boolean publishOriginal(String tenant, String workspace, String session) {
+                assertThat(org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive()).isFalse();
+                return true;
+            }
+            public boolean publishPreview(String tenant, String workspace, String session) { return true; }
+            public boolean readOriginal(String tenant, String actor, String workspace, String session) { return true; }
+        };
     }
 
     private void append(String operation, String records, int events,
