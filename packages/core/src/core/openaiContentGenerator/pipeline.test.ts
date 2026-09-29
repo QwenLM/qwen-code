@@ -23,6 +23,7 @@ import {
   StreamLifetimeExceededError,
 } from './pipeline.js';
 import { OpenAIContentConverter } from './converter.js';
+import { toolCallArgumentsWereIncomplete } from '../incomplete-tool-call-args.js';
 import { openaiRequestCaptureContext } from './requestCaptureContext.js';
 import { StreamingToolCallParser } from './streamingToolCallParser.js';
 import type { Config } from '../../config/config.js';
@@ -7340,6 +7341,9 @@ describe('ContentGenerationPipeline', () => {
       // observes the unsettled reason.
       function arrangeReferenceStream(opts: {
         trailingCompletionTokens?: number;
+        /** Emit the repaired call in the parked finish response, as the real
+         * converter does, so the settle path has parts to mark. */
+        withRepairedToolCall?: boolean;
       }) {
         const argsChunk = {
           id: 'chunk-args',
@@ -7382,7 +7386,23 @@ describe('ContentGenerationPipeline', () => {
         const finishResponse = new GenerateContentResponse();
         finishResponse.candidates = [
           {
-            content: { parts: [], role: 'model' },
+            content: {
+              parts: opts.withRepairedToolCall
+                ? [
+                    {
+                      functionCall: {
+                        id: 'call_1',
+                        name: 'read_file',
+                        args: {
+                          file_path: '/tmp/ad01.yml',
+                          limit: { file_path: '/tmp/node01.yml', limit: null },
+                        },
+                      },
+                    },
+                  ]
+                : [],
+              role: 'model',
+            },
             finishReason: FinishReason.MAX_TOKENS,
           },
         ];
@@ -7463,6 +7483,25 @@ describe('ContentGenerationPipeline', () => {
         // validation failure instead of carrying the max_tokens note.
         expect(response.candidates?.[0]?.finishReason).toBe(FinishReason.STOP);
         expect(response.usageMetadata?.candidatesTokenCount).toBe(185);
+      });
+
+      // The settle path withdraws the diagnosis after the parts already exist,
+      // so it has to carry the guard's key over itself — otherwise the delayed
+      // disproof silently lets a repaired partial write_file execute.
+      it('keeps the incomplete-arguments mark when the settle downgrades the override', async () => {
+        arrangeReferenceStream({
+          trailingCompletionTokens: 185,
+          withRepairedToolCall: true,
+        });
+
+        const response = await yieldedFinishReason();
+
+        expect(response.candidates?.[0]?.finishReason).toBe(FinishReason.STOP);
+        const fnCall = response.candidates?.[0]?.content?.parts?.find(
+          (part) => part.functionCall,
+        )?.functionCall;
+        expect(fnCall?.name).toBe('read_file');
+        expect(toolCallArgumentsWereIncomplete(fnCall!)).toBe(true);
       });
 
       it('keeps the override when trailing usage corroborates truncation', async () => {

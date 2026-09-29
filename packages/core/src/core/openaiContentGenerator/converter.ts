@@ -21,6 +21,7 @@ import { GenerateContentResponse, FinishReason } from '@google/genai';
 import type OpenAI from 'openai';
 import { safeJsonParse } from '../../utils/safeJsonParse.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
+import { markToolCallArgumentsIncomplete } from '../incomplete-tool-call-args.js';
 import { createOpenAIReasoningThoughtPart } from '../../utils/thoughtUtils.js';
 import {
   estimateTextTokens,
@@ -1939,6 +1940,20 @@ export function convertOpenAIChunkToLlm(
       chunk.usage?.completion_tokens,
       requestContext.maxOutputTokens,
     );
+    if (suspectTruncation) {
+      // This rewrite decides whether a file-modifying call is rejected and
+      // whether the max_tokens recovery loop runs, and the heuristic has been
+      // wrong in both directions (#4964 missed a real cut, #12970 invented
+      // one), so the two numbers it was decided from have to be recoverable
+      // from a log rather than re-derived from source.
+      debugLogger.debug('Truncated tool-call finish_reason override', {
+        providerFinishReason: choice.finish_reason,
+        completionTokens: chunk.usage?.completion_tokens ?? null,
+        maxOutputTokens: requestContext.maxOutputTokens ?? null,
+        verdict: usageVerdict,
+        overrideApplied: usageVerdict !== 'disproved',
+      });
+    }
     const effectiveFinishReason =
       suspectTruncation && usageVerdict !== 'disproved'
         ? 'length'
@@ -1954,6 +1969,14 @@ export function convertOpenAIChunkToLlm(
       requestContext.pendingTruncationOverride = {
         finishReason: mapOpenAIFinishReasonToLlm(choice.finish_reason),
       };
+    }
+    if (suspectTruncation && usageVerdict === 'disproved') {
+      // The token-limit diagnosis is withdrawn, so `wasOutputTruncated` will
+      // not be set downstream — but the arguments really did arrive
+      // unterminated and were repaired into shape. Mark them so the
+      // scheduler's reject-incomplete-file-writes guard stays armed and only
+      // the wording follows the corrected diagnosis (#12970).
+      markToolCallArgumentsIncomplete(parts);
     }
 
     // Only include finishReason key if finish_reason is present

@@ -11366,6 +11366,56 @@ describe('CoreToolScheduler truncated output protection', () => {
     }
   });
 
+  // The token-limit diagnosis being withdrawn must not withdraw the data-loss
+  // guard with it: incomplete arguments mean incomplete file content either
+  // way (QwenLM/qwen-code#12970).
+  it('rejects Kind.Edit calls whose arguments were incomplete without a max_tokens cut', async () => {
+    const declarativeTool = new TestApprovalTool({
+      getApprovalMode: () => ApprovalMode.AUTO_EDIT,
+    } as unknown as Config);
+    const { scheduler, onAllToolCallsComplete } = createTruncationTestScheduler(
+      declarativeTool,
+      [TestApprovalTool.Name],
+    );
+
+    await scheduler.schedule(
+      [
+        {
+          callId: '1',
+          name: TestApprovalTool.Name,
+          args: { id: 'test-malformed' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-malformed',
+          hadIncompleteArguments: true,
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as ToolCall[];
+    expect(completedCalls).toHaveLength(1);
+    const completedCall = completedCalls[0];
+    expect(completedCall.status).toBe('error');
+
+    if (completedCall.status === 'error') {
+      const errorMessage = completedCall.response.error?.message ?? '';
+      // Still rejected, and for the real reason.
+      expect(errorMessage).toContain(
+        'rejected to prevent writing incomplete content',
+      );
+      expect(errorMessage).toContain('malformed generation');
+      expect(errorMessage).not.toContain('was truncated due to max_tokens');
+      expect(completedCall.response.errorType).toBe(
+        ToolErrorType.INVALID_TOOL_PARAMS,
+      );
+    }
+  });
+
   it('should allow Kind.Edit tool calls when wasOutputTruncated is false', async () => {
     const declarativeTool = new TestApprovalTool({
       getApprovalMode: () => ApprovalMode.AUTO_EDIT,

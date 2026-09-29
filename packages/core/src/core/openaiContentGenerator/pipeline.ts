@@ -33,6 +33,7 @@ import { redactProxyError } from '../../utils/runtimeFetchOptions.js';
 import { runtimeDiagnostics } from '../../utils/runtimeDiagnostics.js';
 import { createChildAbortController } from '../../utils/abortController.js';
 import { reconcileMaxTokens } from '../tokenLimits.js';
+import { markToolCallArgumentsIncomplete } from '../incomplete-tool-call-args.js';
 import {
   getGptReasoningCapabilities,
   isReasoningEffortPlaceholder,
@@ -1088,14 +1089,27 @@ export class ContentGenerationPipeline {
     if (!candidate || candidate.finishReason !== FinishReason.MAX_TOKENS) {
       return;
     }
-    if (
-      corroborateTruncationFromCompletionTokens(
-        response.usageMetadata?.candidatesTokenCount,
-        context.maxOutputTokens,
-      ) === 'disproved'
-    ) {
+    const verdict = corroborateTruncationFromCompletionTokens(
+      response.usageMetadata?.candidatesTokenCount,
+      context.maxOutputTokens,
+    );
+    if (verdict === 'disproved') {
       candidate.finishReason = parked.finishReason;
+      // Same withdrawal as the converter's immediate `disproved` branch, only
+      // decided here because the usage totals arrived after the finish chunk.
+      // The arguments were unterminated — that is why an override was parked
+      // at all — so the guard has to stay armed through the downgrade.
+      markToolCallArgumentsIncomplete(candidate.content?.parts);
     }
+    debugLogger.debug('Settled a parked truncation override', {
+      candidatesTokenCount:
+        response.usageMetadata?.candidatesTokenCount ?? null,
+      maxOutputTokens: context.maxOutputTokens ?? null,
+      verdict,
+      downgraded: verdict === 'disproved',
+      from: FinishReason.MAX_TOKENS,
+      to: candidate.finishReason,
+    });
   }
 
   private async buildRequest(

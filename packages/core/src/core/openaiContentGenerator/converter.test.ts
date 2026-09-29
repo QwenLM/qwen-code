@@ -6,6 +6,7 @@
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { OpenAIContentConverter } from './converter.js';
+import { toolCallArgumentsWereIncomplete } from '../incomplete-tool-call-args.js';
 import { StreamingToolCallParser } from './streamingToolCallParser.js';
 import { TaggedThinkingParser } from './taggedThinkingParser.js';
 import type { RequestContext } from './types.js';
@@ -8449,6 +8450,11 @@ describe('Truncated tool call detection in streaming', () => {
     // wasOutputTruncated on MAX_TOKENS, so STOP here is what keeps the
     // scheduler from appending the max_tokens note to the validation error.
     expect(result.candidates?.[0]?.finishReason).toBe(FinishReason.STOP);
+    // Withdrawing the diagnosis must not withdraw the data-loss guard: the
+    // arguments really did arrive unterminated, so the call is still marked
+    // and the scheduler still refuses to let a repaired partial file write
+    // through (it just words the refusal by the real cause).
+    expect(toolCallArgumentsWereIncomplete(fnCall!.functionCall!)).toBe(true);
   });
 
   it('should still override finishReason to MAX_TOKENS when usage corroborates truncation', () => {
