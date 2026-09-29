@@ -11723,6 +11723,7 @@ describe('Session', () => {
             hookContext: '',
             embeddedResources: [expectedResource],
           },
+          expect.stringContaining('test-session-id########'),
           'embedded-1',
         );
       },
@@ -11754,6 +11755,7 @@ describe('Session', () => {
           hookContext: '',
           embeddedResourcesTruncated: true,
         }),
+        expect.stringContaining('test-session-id########'),
         undefined,
       );
     });
@@ -11843,6 +11845,7 @@ describe('Session', () => {
           hookContext: '',
           attachmentReferences: [attachmentReference],
         },
+        expect.stringContaining('test-session-id########'),
         undefined,
       );
     });
@@ -11893,6 +11896,7 @@ describe('Session', () => {
           attachmentReferences: [attachmentReference],
           embeddedResources: [directResource],
         },
+        expect.stringContaining('test-session-id########'),
         undefined,
       );
     });
@@ -11930,6 +11934,7 @@ describe('Session', () => {
         expect.objectContaining({
           embeddedResources: [directResource, nativeResource],
         }),
+        expect.stringContaining('test-session-id########'),
         undefined,
       );
     });
@@ -12000,6 +12005,7 @@ describe('Session', () => {
           hookContext: '',
           attachmentReferences,
         },
+        expect.stringContaining('test-session-id########'),
         undefined,
       );
     });
@@ -28485,6 +28491,7 @@ describe('Session', () => {
             hookContext: '',
             embeddedResourcesTruncated: true,
           },
+          expect.stringContaining('test-session-id########'),
           'daemon-advisor',
         );
       });
@@ -28539,6 +28546,7 @@ describe('Session', () => {
           '/advisor check my work',
           undefined,
           expect.objectContaining({ attachmentReferences }),
+          expect.stringContaining('test-session-id########'),
           'daemon-advisor',
         );
       });
