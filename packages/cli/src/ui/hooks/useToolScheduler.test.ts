@@ -617,7 +617,7 @@ describe('useReactToolScheduler', () => {
                   name: 'mockTool',
                   response: {
                     error:
-                      '[Operation Cancelled] Reason: Tool call cancelled before execution.',
+                      '[Operation Cancelled] Reason: This tool call was cancelled before it ran. Stop and await further instructions; do not retry or work around it.',
                   },
                 },
               },
@@ -690,7 +690,7 @@ describe('useReactToolScheduler', () => {
         name: 'mockTool',
         response: {
           error:
-            '[Operation Cancelled] Reason: Tool call cancelled before execution.',
+            '[Operation Cancelled] Reason: This tool call was cancelled before it ran. Stop and await further instructions; do not retry or work around it.',
         },
       },
     });
