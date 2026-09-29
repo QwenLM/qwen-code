@@ -524,6 +524,35 @@ describe('composer tag input annotations', () => {
     ]);
   });
 
+  it('recovers a stale placement whose true occurrence is behind its recorded start', () => {
+    // The first chip's inserted text was longer than its serialized form, so
+    // every later chip's recorded range sits past its true position. The
+    // fallback therefore has to search the whole prompt: anchoring the search
+    // at the stale start would silently drop the later chip's annotation.
+    const content = '@alpha X @beta';
+    expect(
+      createInputAnnotationsFromComposerTags(
+        content,
+        [],
+        [
+          {
+            start: 0,
+            end: 12,
+            tag: { id: 'file:@alpha', kind: 'file', value: '@alpha' },
+          },
+          {
+            start: 15,
+            end: 21,
+            tag: { id: 'file:@beta', kind: 'file', value: '@beta' },
+          },
+        ],
+      ).map(({ start, end }) => [start, end]),
+    ).toEqual([
+      [0, 6],
+      [9, 14],
+    ]);
+  });
+
   it('uses annotations for custom provider references', () => {
     expect(
       splitComposerTagContentByAnnotations('open @dataset:users now', [
