@@ -767,7 +767,7 @@ export class MonitorTool extends BaseDeclarativeTool<
     super(
       MonitorTool.Name,
       ToolDisplayNames.MONITOR,
-      'Runs a command and pushes each output line to you as an event (logs, watch builds, polling loops); is_background only keeps output for you to read later.\n\n' +
+      'Runs a command and pushes each output line to you as an event (logs, watch builds, polling loops); is_background notifies you only once, when it exits.\n\n' +
         'Use this tool for:\n' +
         '- Watching log files: `tail -f /var/log/app.log`\n' +
         '- Monitoring build output: `npm run build --watch`\n' +
