@@ -2217,7 +2217,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 : safeStage(() -> transport.executeV3(context.lease(), context.session(),
                         executing.getReference(), payload, capture(grant)))
                         .handle((ignored, error) -> {
-                            if (unsupportedToolV3(error)) {
+                            if (nonRetryableToolV3(error)) {
                                 throw new CompletionException(unwrap(error));
                             }
                             return null;
@@ -2287,7 +2287,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
                         if (answer.isDone()) {
                             return;
                         }
-                        if (unsupportedToolV3(error)) {
+                        if (nonRetryableToolV3(error)) {
                             answer.completeExceptionally(unwrap(error));
                             return;
                         }
@@ -2315,10 +2315,9 @@ public final class RuntimeBrokerService implements AutoCloseable {
         }
     }
 
-    private static boolean unsupportedToolV3(Throwable error) {
+    private static boolean nonRetryableToolV3(Throwable error) {
         return error != null && unwrap(error) instanceof RuntimeBrokerException failure
-                && failure.getStatusCode() == 501
-                && "runtime_tool_v3_unsupported".equals(failure.getCode());
+                && !failure.isRetryable();
     }
 
     private static Map<String, Object> dispatchReference(ToolExecutionRecord record) {

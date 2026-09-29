@@ -338,7 +338,7 @@ describe('remote Shell result publication', () => {
     expect(operationIds).toEqual(['seg-stdout-0', 'seg-stdout-0']);
   });
 
-  it.each(['http failure', 'lost request'])(
+  it.each(['http failure', 'lost request', 'non-JSON gateway failure'])(
     'replays an unknown operation after %s',
     async (failure) => {
       const attempts: Array<{ id: string; bytes: Buffer }> = [];
@@ -362,6 +362,10 @@ describe('remote Shell result publication', () => {
           if (attempts.length === 1) {
             if (failure === 'lost request')
               throw new TypeError('connection reset');
+            if (failure === 'non-JSON gateway failure')
+              return new Response('<html>gateway unavailable</html>', {
+                status: 502,
+              });
             return new Response(
               JSON.stringify({ error: { code: 'internal_error' } }),
               { status: 503 },

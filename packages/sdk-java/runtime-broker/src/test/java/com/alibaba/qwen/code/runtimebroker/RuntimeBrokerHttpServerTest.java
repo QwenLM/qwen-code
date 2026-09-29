@@ -244,11 +244,12 @@ class RuntimeBrokerHttpServerTest {
     }
 
     @Test
-    void unsupportedV3DispatchOrStatusStopsWithoutRepeatedPolling() throws Exception {
+    void nonRetryableV3DispatchOrStatusStopsWithoutRepeatedPolling() throws Exception {
         for (boolean dispatchUnsupported : new boolean[] {true, false}) {
             try (Fixture fixture = new Fixture(true)) {
                 fixture.transport.v3Unsupported = dispatchUnsupported;
                 fixture.transport.v3StatusUnsupported = !dispatchUnsupported;
+                fixture.transport.v3RefusalStatus = 409;
                 fixture.service.acquire("harness", "runtime", "bootstrap").toCompletableFuture().join();
                 String payload = "{\"toolName\":\"run_shell_command\",\"input\":{\"command\":\"printf hi\"}}";
                 String exact = "sha256:" + HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
@@ -495,6 +496,7 @@ class RuntimeBrokerHttpServerTest {
         private boolean fail = true;
         private boolean v3Unsupported;
         private boolean v3StatusUnsupported;
+        private int v3RefusalStatus = 501;
         private Map<String, Object> lastReference;
         private Map<String, Object> runtimeStatus = Map.of("state", "unknown");
 
@@ -547,8 +549,9 @@ class RuntimeBrokerHttpServerTest {
                 RuntimeSession session, Map<String, Object> reference,
                 Map<String, Object> payload, Map<String, Object> capture) {
             if (v3Unsupported) {
-                return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
-                        "runtime_tool_v3_unsupported", "Tool v3 is unavailable", false));
+                return CompletableFuture.failedFuture(new RuntimeBrokerException(v3RefusalStatus,
+                        v3RefusalStatus == 501 ? "runtime_tool_v3_unsupported" : "runtime_execution_conflict",
+                        "Tool v3 is unavailable", false));
             }
             v3Executions.incrementAndGet();
             return CompletableFuture.completedFuture(Map.of("state", "executing"));
@@ -559,8 +562,9 @@ class RuntimeBrokerHttpServerTest {
                 RuntimeSession session, Map<String, Object> reference, long afterSequence) {
             v3StatusCalls.incrementAndGet();
             if (v3StatusUnsupported) {
-                return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
-                        "runtime_tool_v3_unsupported", "Tool v3 status is unavailable", false));
+                return CompletableFuture.failedFuture(new RuntimeBrokerException(v3RefusalStatus,
+                        v3RefusalStatus == 501 ? "runtime_tool_v3_unsupported" : "runtime_execution_conflict",
+                        "Tool v3 status is unavailable", false));
             }
             return CompletableFuture.completedFuture(Map.of("state", "executing"));
         }

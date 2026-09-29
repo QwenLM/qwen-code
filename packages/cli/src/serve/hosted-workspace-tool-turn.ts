@@ -385,7 +385,6 @@ export class HostedWorkspaceToolTurn {
       }
     }
     const reserved: string[] = [];
-    const confirmedPublications = new Set<string>();
     const shellBindings = new Map<
       string,
       {
@@ -594,18 +593,34 @@ export class HostedWorkspaceToolTurn {
             intentSequence: saved.intentSequence,
             checkpointRef,
           };
-          const grant = await this.publication!.owner.request(
-            '/grants',
-            {
-              publication: 'managed-tool-publication/1',
-              operation: 'reserve',
-              sessionKey: key,
-              owner,
-              binding,
-              captureBytes: this.publication!.captureBytes,
-            },
-            saved.publicationToken,
-          );
+          const reservation = {
+            publication: 'managed-tool-publication/1',
+            operation: 'reserve',
+            sessionKey: key,
+            owner,
+            binding,
+            captureBytes: this.publication!.captureBytes,
+          };
+          let grant: unknown;
+          for (let attempt = 0; attempt < 3; attempt++) {
+            try {
+              grant = await this.publication!.owner.request(
+                '/grants',
+                reservation,
+                saved.publicationToken,
+              );
+              break;
+            } catch (cause) {
+              const retryable =
+                (cause instanceof ManagedSessionStoreHttpError &&
+                  (cause.status === 429 || cause.status >= 500)) ||
+                cause instanceof TypeError ||
+                (cause instanceof DOMException &&
+                  ['AbortError', 'TimeoutError'].includes(cause.name));
+              if (!retryable || attempt === 2) throw cause;
+              await new Promise((resolve) => setTimeout(resolve, 250));
+            }
+          }
           if (
             typeof grant !== 'object' ||
             grant === null ||
@@ -613,7 +628,6 @@ export class HostedWorkspaceToolTurn {
           )
             throw new Error('Tool publication reservation was not confirmed.');
           saved.originalBinding = parseToolPublicationBinding(binding);
-          confirmedPublications.add(executionCallId);
         }
         renewGrants = () => {
           if (renewInFlight) return renewInFlight;
@@ -812,7 +826,7 @@ export class HostedWorkspaceToolTurn {
       const activeRenewal = renewInFlight as Promise<void> | null;
       await activeRenewal?.catch(() => undefined);
       await Promise.allSettled(reserved.map((id) => this.broker.cancel(id)));
-      for (const executionCallId of confirmedPublications) {
+      for (const executionCallId of shellBindings.keys()) {
         const saved = shellBindings.get(executionCallId);
         if (!saved) continue;
         try {
@@ -1125,7 +1139,7 @@ export class HostedWorkspaceToolTurn {
         } catch (error) {
           const uncertain =
             (error instanceof ManagedSessionStoreHttpError &&
-              error.status >= 500) ||
+              (error.status === 429 || error.status >= 500)) ||
             error instanceof TypeError ||
             (error instanceof DOMException &&
               ['AbortError', 'TimeoutError'].includes(error.name));

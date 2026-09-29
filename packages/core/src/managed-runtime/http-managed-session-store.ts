@@ -579,7 +579,7 @@ class ManagedSessionStoreHttpClient {
         } catch (error) {
           const uncertain =
             (error instanceof ManagedSessionStoreHttpError &&
-              error.status >= 500) ||
+              (error.status === 429 || error.status >= 500)) ||
             error instanceof TypeError ||
             (error instanceof DOMException &&
               ['AbortError', 'TimeoutError'].includes(error.name));

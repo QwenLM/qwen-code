@@ -220,7 +220,8 @@ async function shellReceiptScenario(
     | 'truncated'
     | 'large'
     | 'sentinel'
-    | 'lost-admission',
+    | 'lost-admission'
+    | 'lost-reserve',
 ) {
   const shellCall = {
     ...calls[0],
@@ -281,7 +282,8 @@ async function shellReceiptScenario(
       mode !== 'truncated' &&
       mode !== 'large' &&
       mode !== 'sentinel' &&
-      mode !== 'lost-admission'
+      mode !== 'lost-admission' &&
+      mode !== 'lost-reserve'
     )
       throw new HostedWorkspaceBrokerRejection(
         409,
@@ -310,6 +312,11 @@ async function shellReceiptScenario(
       );
       if ((body as { operation: string }).operation === 'reserve')
         originalBinding = (body as { binding: unknown }).binding;
+      if (
+        mode === 'lost-reserve' &&
+        order.filter((step) => step === 'reserve').length === 1
+      )
+        throw new TypeError('Reservation response lost.');
       return { state: 'OPEN' };
     }
     if (route.endsWith('/finished')) {
@@ -424,6 +431,7 @@ async function shellReceiptScenario(
   expect(order).toEqual([
     'assistant',
     'reserve',
+    ...(mode === 'lost-reserve' ? ['reserve'] : []),
     'renew',
     'execute',
     ...(mode === 'abandoned' ? ['finished'] : []),
@@ -441,6 +449,15 @@ async function shellReceiptScenario(
   ).toHaveLength(1);
   expect(broker.acknowledgeV3.mock.calls[0]?.[0]).toBe('shell-execution');
   const publicationId = broker.prepareV3.mock.calls[0]?.[3] as string;
+  if (mode === 'lost-reserve') {
+    const reservations = request.mock.calls.filter(
+      ([route, body]) =>
+        route === '/grants' &&
+        (body as { operation: string }).operation === 'reserve',
+    );
+    expect(reservations).toHaveLength(2);
+    expect(reservations[0]).toEqual(reservations[1]);
+  }
   broker.acknowledgeV3.mockRejectedValueOnce(new Error('ACK transport down'));
   const replayed = await (
     shellTurn as unknown as {
@@ -482,6 +499,7 @@ it.each([
   'large',
   'sentinel',
   'lost-admission',
+  'lost-reserve',
 ] as const)(
   'uses only the original Shell publication after Broker %s',
   shellReceiptScenario,
@@ -630,11 +648,17 @@ it('closes proven unstarted reservations after a later batch reservation fails',
     'cancel',
     'cancel',
     'close_not_started',
+    'close_not_started',
   ]);
-  expect(request.mock.calls.at(-1)?.[1]).toMatchObject({
-    operation: 'close_not_started',
-    publicationId: broker.prepareV3.mock.calls[0]?.[3],
-  });
+  expect(
+    request.mock.calls
+      .filter(
+        ([, body]) =>
+          (body as { operation: string }).operation === 'close_not_started',
+      )
+      .map(([, body]) => (body as { publicationId: string }).publicationId)
+      .sort(),
+  ).toEqual(broker.prepareV3.mock.calls.map((call) => call[3]).sort());
   expect(broker.executeV3).not.toHaveBeenCalled();
 });
 

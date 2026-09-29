@@ -102,31 +102,39 @@ function endpoint(value: string): URL {
 async function boundedJson(
   response: globalThis.Response,
 ): Promise<Record<string, unknown>> {
-  const reader = response.body?.getReader();
-  if (!reader) throw new Error('Publication service returned no response.');
-  const chunks: Uint8Array[] = [];
-  let length = 0;
+  let body: Record<string, unknown>;
   try {
-    while (true) {
-      const item = await reader.read();
-      if (item.done) break;
-      length += item.value.byteLength;
-      if (length > 1024 * 1024)
-        throw new Error('Publication response is too large.');
-      chunks.push(item.value);
+    const reader = response.body?.getReader();
+    if (!reader) throw new Error('Publication service returned no response.');
+    const chunks: Uint8Array[] = [];
+    let length = 0;
+    try {
+      while (true) {
+        const item = await reader.read();
+        if (item.done) break;
+        length += item.value.byteLength;
+        if (length > 1024 * 1024)
+          throw new Error('Publication response is too large.');
+        chunks.push(item.value);
+      }
+    } finally {
+      reader.releaseLock();
     }
-  } finally {
-    reader.releaseLock();
+    body = record(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+  } catch (failure) {
+    if (!response.ok)
+      throw new PublicationRejection(response.status, 'unknown');
+    throw failure;
   }
-  const body = record(JSON.parse(Buffer.concat(chunks).toString('utf8')));
   if (!response.ok) {
-    const failure = record(body['error']);
-    if (failure['code'] === 'managed_tool_publication_quota_exhausted')
+    const failure = body['error'];
+    const code =
+      failure && typeof failure === 'object' && !Array.isArray(failure)
+        ? String((failure as Record<string, unknown>)['code'] ?? 'unknown')
+        : 'unknown';
+    if (code === 'managed_tool_publication_quota_exhausted')
       throw new Error('quota_exhausted');
-    throw new PublicationRejection(
-      response.status,
-      String(failure['code'] ?? 'unknown'),
-    );
+    throw new PublicationRejection(response.status, code);
   }
   return body;
 }
