@@ -261,6 +261,17 @@
   white-space: nowrap;
 }
 
+/* Tones live in this sheet rather than in utility classes so they beat
+   `.memberStatus`'s own `color` by source order instead of losing a
+   single-class specificity tie to whichever sheet was injected last. */
+.memberStatusAttention {
+  color: var(--status-attention-fg);
+}
+
+.memberStatusRunning {
+  color: var(--status-running-fg);
+}
+
 .leadBadge {
   padding: 0 6px;
   border-radius: 999px;

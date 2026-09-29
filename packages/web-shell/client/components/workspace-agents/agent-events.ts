@@ -124,7 +124,19 @@ function openStream(
       },
       signal: controller.signal,
     });
-    if (!response.ok || !response.body) {
+    // A proxy, or a route mounted after startup, can answer 200 with HTML —
+    // `threads-api.ts` guards its own calls against the same thing. Only an
+    // event stream counts as open: reporting anything else as `'open'` resets
+    // `retryMs` on every cycle, so the backoff never grows and the resulting
+    // open/closed flap keeps recreating the consumers' poll intervals before
+    // they can elapse.
+    if (
+      !response.ok ||
+      !response.body ||
+      !(response.headers.get('content-type') ?? '').includes(
+        'text/event-stream',
+      )
+    ) {
       throw new Error(`Agent event stream failed (${response.status})`);
     }
     onState('open');

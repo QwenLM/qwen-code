@@ -16,6 +16,7 @@ import { TurnBudget } from '../../core/turn-budget.js';
 import {
   getWorkflowTaskMutationKey,
   isTerminalWorkflowStatus,
+  isWorkflowRunPersistenceActive,
   tryWithWorkflowTaskMutation,
   WorkflowRunRegistry,
   type WorkflowTask,
@@ -33,7 +34,10 @@ import {
   WorkflowJournalUnavailableError,
   WorkflowStartCancelledError,
 } from './workflow-runner.js';
-import { claimInterruptedWorkflowRuns } from '../workflow-checkpoint.js';
+import {
+  claimInterruptedWorkflowRuns,
+  readWorkflowCheckpoint,
+} from '../workflow-checkpoint.js';
 import { compileWorkflowScript } from './workflow-sandbox.js';
 import {
   WORKFLOW_SIZE_GUIDELINE_AGENTS,
@@ -1386,6 +1390,59 @@ describe('WorkflowRunner', () => {
       expect.objectContaining({ status: 'cancelled' }),
     ]);
   });
+
+  it.each([true, false])(
+    'drains journal writes before releasing persistence with registry=%s',
+    async (withRegistry) => {
+      const { config, registry } = configWithRegistry();
+      if (!withRegistry) {
+        Object.assign(config, { getWorkflowRunRegistry: () => undefined });
+      }
+      stubStorage(config, await makeStorageRoot());
+      let releaseWrite: (() => void) | undefined;
+      writeLineMock.mockImplementation(
+        (_file: string, record: { type: string }) =>
+          record.type === 'result'
+            ? new Promise<void>((resolve) => {
+                releaseWrite = resolve;
+              })
+            : Promise.resolve(),
+      );
+      const handle = await WorkflowRunner.start({
+        config,
+        signal: new AbortController().signal,
+        script: 'return await agent("work")',
+        args: undefined,
+        dispatch: async () => 'done',
+      });
+      let settled = false;
+      void handle.completion.then(() => {
+        settled = true;
+      });
+      try {
+        await vi.waitFor(() => expect(releaseWrite).toBeDefined());
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect(settled).toBe(false);
+        expect(isWorkflowRunPersistenceActive(config, handle.runId)).toBe(true);
+        if (withRegistry) {
+          expect(registry.getHandle(handle.runId)).toBe(handle);
+          await vi.waitFor(async () => {
+            expect(
+              await readWorkflowCheckpoint(config, handle.runId),
+            ).toBeDefined();
+          });
+        }
+      } finally {
+        releaseWrite?.();
+        await handle.completion;
+      }
+      expect(isWorkflowRunPersistenceActive(config, handle.runId)).toBe(false);
+      expect(registry.getHandle(handle.runId)).toBeUndefined();
+      expect(
+        await readWorkflowCheckpoint(config, handle.runId),
+      ).toBeUndefined();
+    },
+  );
 
   it('freezes snapshot and telemetry before late dispatches drain', async () => {
     const { config, registry } = configWithRegistry();
