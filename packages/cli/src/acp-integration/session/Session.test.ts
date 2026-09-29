@@ -18031,6 +18031,114 @@ describe('Session', () => {
         );
       });
 
+      it('keeps EXECUTION_DENIED for a policy-denied bridge target instead of a parameter pre-check refusal', async () => {
+        // The ACP half of the resolution-time policy wiring: with the
+        // wrapper allowed but the target denied, resolution must refuse with
+        // the policy denial BEFORE the argument pre-check — otherwise a
+        // denied target with malformed arguments gets INVALID_TOOL_PARAMS
+        // plus an invalid-parameter strike toward the loop stop for a call
+        // that could never run. Mutation check: removing the
+        // `...(pm ? { isTargetExecutionAllowed } : {})` spread in
+        // Session.runTool turns this red (errorType flips to
+        // INVALID_TOOL_PARAMS and invalidToolParamErrors gains an entry).
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockConfig.getPermissionManager = vi.fn().mockReturnValue({
+          isToolEnabled: vi.fn(async (name: string) => name !== 'web_fetch'),
+        });
+        const bridge = {
+          name: core.ToolNames.TOOL_CALL,
+          kind: core.Kind.Other,
+          description: 'Deferred tool bridge',
+          build: vi.fn((params: Record<string, unknown>) => ({ params })),
+        };
+        const toolSearch = {
+          name: core.ToolNames.TOOL_SEARCH,
+          kind: core.Kind.Other,
+          description: 'Deferred tool discovery',
+          build: vi.fn((params: Record<string, unknown>) => ({ params })),
+        };
+        const target = {
+          name: 'web_fetch',
+          kind: core.Kind.Other,
+          description: 'Fetches a URL',
+          schema: {
+            parametersJsonSchema: {
+              type: 'object',
+              properties: {
+                url: { type: 'string' },
+                prompt: { type: 'string' },
+              },
+              required: ['url', 'prompt'],
+              additionalProperties: false,
+            },
+          },
+          build: vi.fn(),
+        };
+        mockToolRegistry.getTool.mockImplementation((name: string) =>
+          name === bridge.name
+            ? bridge
+            : name === target.name
+              ? target
+              : name === toolSearch.name
+                ? toolSearch
+                : undefined,
+        );
+        mockToolRegistry.ensureTool.mockImplementation(async (name: string) =>
+          name === bridge.name
+            ? bridge
+            : name === target.name
+              ? target
+              : name === toolSearch.name
+                ? toolSearch
+                : undefined,
+        );
+        mockToolRegistry.isDeferredAndHidden.mockImplementation(
+          (name: string) => name === target.name,
+        );
+        const toolLoopState = {
+          totalToolCalls: 0,
+          invalidToolParamErrors: new Map<string, number>(),
+          toolCallKeyCounts: new Map<string, number>(),
+          maxToolCallKeyRepeat: 0,
+          loopDetected: false,
+        };
+
+        const result = await (
+          session as unknown as {
+            runToolCalls: (
+              abortSignal: AbortSignal,
+              promptId: string,
+              calls: FunctionCall[],
+              loopState: typeof toolLoopState,
+            ) => Promise<{ parts: Part[] }>;
+          }
+        ).runToolCalls(
+          new AbortController().signal,
+          'prompt-tool-call-bridge-denied',
+          [
+            {
+              id: 'bridge-denied-call',
+              name: core.ToolNames.TOOL_CALL,
+              args: { name: target.name, arguments: {} },
+            },
+          ],
+          toolLoopState,
+        );
+
+        const errorText = String(
+          result.parts[0]?.functionResponse?.response?.['error'],
+        );
+        expect(
+          errorText.startsWith(core.DEFERRED_TOOL_CALL_REFUSAL_PREFIX),
+        ).toBe(true);
+        expect(errorText).toContain(
+          "not permitted by this agent's tool policy",
+        );
+        expect(errorText).not.toContain("required property 'url'");
+        expect(toolLoopState.invalidToolParamErrors.size).toBe(0);
+        expect(target.build).not.toHaveBeenCalled();
+      });
+
       it('marks a disabled ACP tool_call as a bridge refusal', async () => {
         mockConfig.getPermissionManager = vi.fn().mockReturnValue({
           isToolEnabled: vi.fn().mockResolvedValue(false),

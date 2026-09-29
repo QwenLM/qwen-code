@@ -1456,12 +1456,14 @@ describe('AgentTool', () => {
       expect(result).toBeNull();
     });
 
-    it('coalesces a second synchronous refresh kick onto the in-flight refresh', async () => {
-      // An unknown subagent_type kicks refreshSubagents so the cache catches
-      // up — but validation can fire twice for one call (the tool_call
-      // bridge pre-check validates ahead of build(), #12889), and each kick
-      // used to start its own full subagent rescan + llmClient.setTools. A
-      // kick arriving while a refresh is in flight must coalesce onto it.
+    it('coalesces a synchronous refresh kick onto the in-flight refresh and arms one follow-up', async () => {
+      // An unknown subagent_type kicks a refresh so the cache catches up —
+      // the kick is the ONLY discovery path for agent files created out of
+      // band (the change listener does not fire for those), and the
+      // in-flight scan may have read the directory before the file existed,
+      // so a kick landing mid-refresh must queue one follow-up scan instead
+      // of being dropped. The second synchronous kick still coalesces onto
+      // the in-flight scan (one scan, one arm — not three scans).
       await agentTool.refreshSubagents();
       const listSpy = vi.mocked(mockSubagentManager.listSubagents);
       listSpy.mockClear();
@@ -1476,13 +1478,18 @@ describe('AgentTool', () => {
       });
       expect(listSpy).toHaveBeenCalledTimes(1);
 
-      // After the in-flight refresh settles, a later kick re-scans.
+      // The armed follow-up re-scans once the in-flight refresh settles —
+      // no third kick needed. Mutation check: kicking plain
+      // refreshSubagents() (dropping the arm) leaves this at 1.
       await vi.runAllTimersAsync();
+      expect(listSpy).toHaveBeenCalledTimes(2);
+
+      // After everything settled, a later kick re-scans again.
       agentTool.validateToolParams({
         ...validParams,
         subagent_type: 'missing',
       });
-      expect(listSpy).toHaveBeenCalledTimes(2);
+      expect(listSpy).toHaveBeenCalledTimes(3);
     });
 
     it('should reject empty description', async () => {
@@ -2856,6 +2863,111 @@ describe('AgentTool', () => {
 
       expect(agentTool.description).toContain('new-agent');
       expect(agentTool.description).toContain('A brand new agent');
+    });
+
+    it('arms exactly one follow-up scan when a change lands mid-refresh', async () => {
+      // A change landing mid-refresh is not reflected in the in-flight scan
+      // (it may have read the directory before the file existed), so the
+      // listener arms one follow-up instead of coalescing into the stale
+      // read — and two change events during one refresh must yield ONE
+      // follow-up, not two. Mutation checks: coalescing listener kicks like
+      // validation kicks (bare return when a refresh is in flight) leaves
+      // the count at 1; dropping the arm-once guard yields 3.
+      const listSpy = vi.mocked(mockSubagentManager.listSubagents);
+      listSpy.mockClear();
+      let releaseScan!: () => void;
+      listSpy.mockImplementationOnce(
+        () =>
+          new Promise<SubagentConfig[]>((resolve) => {
+            releaseScan = () => resolve(mockSubagents);
+          }),
+      );
+
+      void agentTool.refreshSubagents();
+      expect(listSpy).toHaveBeenCalledTimes(1);
+
+      const listener = changeListeners[0];
+      listener?.();
+      listener?.();
+      // Both change events coalesced into one armed follow-up; the
+      // in-flight scan is still the only scan so far.
+      expect(listSpy).toHaveBeenCalledTimes(1);
+
+      releaseScan();
+      await vi.runAllTimersAsync();
+      expect(listSpy).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not run an armed follow-up refresh after dispose', async () => {
+      // dispose() removes the change listener, but an already-armed
+      // follow-up is a separate promise chain: without a disposal guard it
+      // would still run a full rescan + llmClient.setTools() on a torn-down
+      // tool. Mutation check: dropping the disposed check from the armed
+      // callback turns this red (a second scan runs).
+      const listSpy = vi.mocked(mockSubagentManager.listSubagents);
+      listSpy.mockClear();
+      let releaseScan!: () => void;
+      listSpy.mockImplementationOnce(
+        () =>
+          new Promise<SubagentConfig[]>((resolve) => {
+            releaseScan = () => resolve(mockSubagents);
+          }),
+      );
+
+      void agentTool.refreshSubagents();
+      expect(listSpy).toHaveBeenCalledTimes(1);
+
+      changeListeners[0]?.();
+      agentTool.dispose();
+
+      releaseScan();
+      await vi.runAllTimersAsync();
+      expect(listSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('absorbs a setTools rejection from an armed follow-up refresh', async () => {
+      // runRefreshSubagents can reject (its finally awaits
+      // llmClient.setTools()), and .finally() propagates that rejection into
+      // the armed follow-up chain — without a .catch at the void boundary it
+      // floats as an unhandledRejection, which this file's own contract
+      // forbids. The follow-up scan must still run. Mutation check: dropping
+      // the armed chain's .catch(...) turns the rejection assertion red.
+      const setTools = vi.fn().mockRejectedValue(new Error('setTools failed'));
+      vi.mocked(config.getLlmClient).mockReturnValue({
+        setTools,
+      } as unknown as ReturnType<Config['getLlmClient']>);
+      const unhandledRejections: unknown[] = [];
+      const onUnhandledRejection = (reason: unknown) => {
+        unhandledRejections.push(reason);
+      };
+      process.on('unhandledRejection', onUnhandledRejection);
+      try {
+        const listSpy = vi.mocked(mockSubagentManager.listSubagents);
+        listSpy.mockClear();
+        let releaseScan!: () => void;
+        listSpy.mockImplementationOnce(
+          () =>
+            new Promise<SubagentConfig[]>((resolve) => {
+              releaseScan = () => resolve(mockSubagents);
+            }),
+        );
+
+        // The in-flight refresh rejects in its finally (setTools); the test
+        // swallows that one directly so only the armed chain is measured.
+        const inFlight = agentTool.refreshSubagents();
+        void inFlight.catch(() => {});
+        changeListeners[0]?.();
+
+        releaseScan();
+        await vi.runAllTimersAsync();
+
+        // The armed follow-up still ran (and hit the rejecting setTools
+        // again), and no rejection escaped either void boundary.
+        expect(listSpy).toHaveBeenCalledTimes(2);
+        expect(unhandledRejections).toEqual([]);
+      } finally {
+        process.removeListener('unhandledRejection', onUnhandledRejection);
+      }
     });
 
     it('should refresh available subagents and update description', async () => {

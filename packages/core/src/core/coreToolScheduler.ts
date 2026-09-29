@@ -1088,6 +1088,20 @@ function getModelFacingToolName(request: ToolCallRequestInfo): string {
   );
 }
 
+/**
+ * Retry-accounting namespace for bridge pre-check refusals. The refusal fires
+ * before the request is rewritten to the target, but recordRetryableToolError
+ * prunes same-prefix keys — so keying it on the bare target name would let a
+ * bridged refusal and a direct validation failure of the SAME target reset
+ * each other every batch and neither channel would ever reach
+ * VALIDATION_RETRY_LOOP_THRESHOLD. The suffix keeps the two channels
+ * independent while the per-batch presence prune still recognizes the entry
+ * as belonging to the target.
+ */
+function bridgeRetryToolName(targetName: string): string {
+  return `${targetName}(via tool_call)`;
+}
+
 // NOTE: the `⚠` in this and TRUNCATION_RETRY_LOOP_DIRECTIVE below is part of an
 // LLM-facing prompt directive (injected into the model prompt, not rendered in
 // the TUI). The width-1 glyph rationale used elsewhere in this change does not
@@ -2722,6 +2736,21 @@ export class CoreToolScheduler {
         // The owner policy must win over the argument pre-check so a denied
         // target keeps its specific EXECUTION_DENIED.
         isTargetExecutionAllowed: this.isToolExecutionAllowed,
+        // The permission-manager gate in _schedule owns the richer denial
+        // (deny-rule attribution); a pm-denied target skips the argument
+        // pre-check so that denial — not a parameter error for a call that
+        // could never run — is what the model sees.
+        suppressArgumentPreCheck: permissionManager
+          ? async (targetName: string) => {
+              try {
+                return !(await permissionManager.isToolEnabled(targetName));
+              } catch {
+                // A policy lookup failure must not swallow the argument
+                // pre-check; the loop's permission gate reports the error.
+                return false;
+              }
+            }
+          : undefined,
       }),
     );
     if ('error' in resolution) {
@@ -2735,22 +2764,10 @@ export class CoreToolScheduler {
       };
     }
 
-    // The pre-schedule gates saw the wrapper, so apply the owner's policy to
-    // the resolved target before execution.
-    if (
-      this.isToolExecutionAllowed &&
-      !this.isToolExecutionAllowed(resolution.tool.name)
-    ) {
-      return {
-        ...request,
-        bridgeResolutionError: {
-          error: new Error(
-            `Tool "${resolution.tool.name}" is not permitted by this agent's tool policy (execution allowlist or disallowedTools blocklist).`,
-          ),
-          type: ToolErrorType.EXECUTION_DENIED,
-        },
-      };
-    }
+    // No post-resolution isToolExecutionAllowed gate here: resolution
+    // already consulted the same predicate (constructor-fixed) on the same
+    // target name, so a second copy would be unreachable and free to
+    // diverge.
 
     return {
       ...request,
@@ -2910,13 +2927,21 @@ export class CoreToolScheduler {
       // whenever any current request matched caused stale counts for
       // unrelated tools to survive and fire RETRY LOOP DETECTED prematurely
       // the next time those tools were used. A refused bridge request keeps
-      // the wrapper name (`tool_call`), so its validated target name must
-      // join the presence set alongside it.
+      // the wrapper name (`tool_call`), so the channel-marked name of the
+      // validated target must join the presence set alongside it — but only
+      // for INVALID_TOOL_PARAMS refusals, the one error type that accrues
+      // below: an EXECUTION_DENIED (policy) refusal records nothing, so it
+      // must not keep the denied target's stale counters alive either.
       if (this.validationRetryCounts.size > 0) {
         const currentToolNames = new Set(
           requestsToProcess.flatMap((r) =>
-            r.bridgeResolutionError?.targetName !== undefined
-              ? [r.name, r.bridgeResolutionError.targetName]
+            r.bridgeResolutionError?.type ===
+              ToolErrorType.INVALID_TOOL_PARAMS &&
+            r.bridgeResolutionError.targetName !== undefined
+              ? [
+                  r.name,
+                  bridgeRetryToolName(r.bridgeResolutionError.targetName),
+                ]
               : [r.name],
           ),
         );
@@ -3001,9 +3026,16 @@ export class CoreToolScheduler {
             ) {
               // Key on the validated target, not the `tool_call` wrapper:
               // alternating failures against distinct targets must accrue
-              // per-target instead of pruning each other's counter.
+              // per-target instead of pruning each other's counter. The
+              // channel marker keeps a target's bridged pre-check refusals
+              // from prefix-pruning (or being pruned by) the SAME target's
+              // direct validation failures — see bridgeRetryToolName.
               const count = recordBatchRetryableToolError(
-                reqInfo.bridgeResolutionError.targetName ?? reqInfo.name,
+                reqInfo.bridgeResolutionError.targetName !== undefined
+                  ? bridgeRetryToolName(
+                      reqInfo.bridgeResolutionError.targetName,
+                    )
+                  : reqInfo.name,
                 bridgeError.message,
               );
               if (count >= VALIDATION_RETRY_LOOP_THRESHOLD) {

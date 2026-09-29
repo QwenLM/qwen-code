@@ -68,6 +68,15 @@ export interface DeferredToolCallOptions {
    * instead of surfacing a parameter error for a call that could never run.
    */
   isTargetExecutionAllowed?: (targetName: string) => boolean | Promise<boolean>;
+  /**
+   * Set when the caller applies its own target policy downstream of
+   * resolution (the scheduler's permission-manager gate) with a richer
+   * denial message than the bridge can build. Returning true skips the
+   * argument pre-check for that target so the caller's own denial — not a
+   * parameter error for a call that could never run — is what the model
+   * sees.
+   */
+  suppressArgumentPreCheck?: (targetName: string) => boolean | Promise<boolean>;
 }
 
 export const DEFERRED_TOOL_CALL_REFUSAL_PREFIX = '[tool_call bridge refused] ';
@@ -266,43 +275,40 @@ export async function resolveDeferredToolCall(
   // The bridge envelope deliberately types `arguments` as a bare object (the
   // declaration must stay byte-stable across catalog changes), so `{}` is
   // envelope-valid even when the target requires fields. Pre-validate against
-  // the target's own schema so the refusal names the target and the missing
-  // field, instead of surfacing a bare Ajv message after the call has been
-  // unwrapped (#12889). Validate a clone: SchemaValidator coerces values in
-  // place, and the scheduler re-validates the returned arguments at build
+  // the target's model-visible schema so the refusal names the target and the
+  // missing field, instead of surfacing a bare Ajv message after the call has
+  // been unwrapped (#12889). Validate a clone: SchemaValidator coerces values
+  // in place, and the scheduler re-validates the returned arguments at build
   // time.
   //
-  // Omni media-policy targets are pre-checked against the model-visible
-  // projection (their `schema` getter) instead of the native schema: both
-  // frontends run the modelAccess gate AFTER bridge resolution
-  // (coreToolScheduler's `evaluateMediaPolicyToolCall`, before buildInvocation;
-  // ACP Session.runTool), and that gate resolves `resourceId` → `inputPath`
-  // and merges `defaultArguments`/`lockedArguments`. Their `validateToolParams`
-  // deliberately checks the NATIVE schema plus io value rules that assume
-  // that completion, so running it here refuses calls the very next stage
-  // accepts — and for an operator locked key the refusal is unwinnable both
-  // ways (omitting it fails natively, sending it fails the gate). The
-  // projection has locked keys stripped from `required`, so validating it
-  // still refuses a missing model-visible required field while never
-  // demanding a key the model is forbidden to send. `mediaPolicyDescriptor`
-  // is the code-level fact the gate itself keys off (it passes every
-  // non-policy tool through untouched), so the narrowed check covers exactly
-  // the tools whose arguments a downstream stage completes. Nothing fails
-  // open: the gate still emits named `invalid_params` refusals, and build()
-  // re-validates the merged arguments against the native schema.
-  const isMediaPolicyTarget = target.mediaPolicyDescriptor !== undefined;
+  // Only the schema layer runs here — never the target's full
+  // validateToolParams: its value-level rules (fs stats, content scans, the
+  // AgentTool refresh kick) run unchanged at build() time, so running them
+  // here would pay their side effects twice per bridged call. The
+  // model-visible `schema` getter is also what makes this safe for omni
+  // media-policy targets: their declaration is a projection with operator
+  // `lockedArguments` stripped from `required`, while their
+  // `validateToolParams` deliberately checks the NATIVE schema plus io value
+  // rules that assume the modelAccess gate (which both frontends run AFTER
+  // bridge resolution) has merged those arguments back in — running it here
+  // would refuse calls the very next stage accepts.
   let paramsError: string | null = null;
   // A truncated response yields to the caller's truncation handling: the
   // arguments are incomplete for transport reasons, not a schema misreading.
-  if (!options?.wasOutputTruncated) {
+  // A target the caller's own downstream policy gate will deny (the
+  // scheduler's permission-manager gate owns the richer denial message)
+  // must surface that denial, not a parameter error for a call that could
+  // never run.
+  const preCheckSuppressed =
+    options?.suppressArgumentPreCheck !== undefined &&
+    (await options.suppressArgumentPreCheck(target.name));
+  if (!options?.wasOutputTruncated && !preCheckSuppressed) {
     try {
       const argsClone = structuredClone(invocation.params.arguments);
-      paramsError = isMediaPolicyTarget
-        ? SchemaValidator.validate(
-            target.schema.parametersJsonSchema,
-            argsClone,
-          )
-        : target.validateToolParams(argsClone);
+      paramsError = SchemaValidator.validate(
+        target.schema.parametersJsonSchema,
+        argsClone,
+      );
     } catch {
       // A target whose validation throws under this pre-check must not become
       // a new bridge failure mode: the scheduler's build() reports the same

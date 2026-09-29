@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { MockTool } from '../test-utils/mock-tool.js';
 import { runWithAgentContext } from '../agents/runtime/agent-context.js';
 import { runWithTeammateIdentity } from '../agents/team/identity.js';
@@ -425,6 +425,35 @@ describe('ToolCallTool', () => {
     });
   });
 
+  it('denies a policy-blocked target ahead of the hidden-tool gate', async () => {
+    // Registered NOT hidden: the caller's execution-policy gate must fire
+    // BEFORE the isDeferredAndHidden check, like the sibling plan-lifecycle
+    // and leader-only gates above. Otherwise a policy-disabled but visible
+    // target bridged through tool_call gets the "already visible — call it
+    // directly" INVALID_TOOL_PARAMS, telling the model to call a tool the
+    // owner's policy forbids (and on ACP accruing an invalid-parameter
+    // strike). Mutation check: moving the isTargetExecutionAllowed gate
+    // below the isDeferredAndHidden check turns this red with the
+    // "already visible" refusal; dropping targetName from the denial also
+    // turns it red.
+    const target = new MockTool({ name: 'web_fetch', shouldDefer: false });
+    const result = await resolveDeferredToolCall(
+      makeRegistry([target], new Set()),
+      { name: target.name, arguments: {} },
+      { isTargetExecutionAllowed: async () => false },
+    );
+
+    expect(result).toMatchObject({
+      errorType: ToolErrorType.EXECUTION_DENIED,
+      targetName: 'web_fetch',
+      error: expect.objectContaining({
+        message: expect.stringContaining(
+          "not permitted by this agent's tool policy",
+        ),
+      }),
+    });
+  });
+
   it.each([
     ToolNames.TEAM_DELETE,
     ToolNames.WORKFLOW,
@@ -809,6 +838,43 @@ describe('ToolCallTool', () => {
       expect(result).toMatchObject({ arguments: { count: '3' } });
     });
 
+    it('pre-checks only the schema layer, leaving value-level rules to build()', async () => {
+      // The pre-check exists to name the target and the missing field in
+      // the refusal (#12889); a target's value-level rules (fs stats,
+      // content scans, the AgentTool refresh kick) must run exactly once,
+      // at build() time — running them here would pay their side effects
+      // twice per bridged call. Mutation check: routing the pre-check
+      // through target.validateToolParams (schema + value rules) fires the
+      // spy and turns this red.
+      const valueRuleSpy = vi.fn(
+        (_params: { [key: string]: unknown }): string | null => null,
+      );
+      class ValueRuleTool extends MockTool {
+        protected override validateToolParamValues(params: {
+          [key: string]: unknown;
+        }): string | null {
+          return valueRuleSpy(params);
+        }
+      }
+      const target = new ValueRuleTool({
+        name: 'write_file',
+        shouldDefer: true,
+        params: {
+          type: 'object',
+          properties: { file_path: { type: 'string' } },
+          required: ['file_path'],
+        },
+      });
+
+      const result = await resolveDeferredToolCall(
+        makeRegistry([target], new Set([target.name])),
+        { name: 'write_file', arguments: { file_path: '/tmp/a.txt' } },
+      );
+
+      expect(result).not.toHaveProperty('error');
+      expect(valueRuleSpy).not.toHaveBeenCalled();
+    });
+
     // The shared native shape of the omni media-policy family: io params
     // with `resourceId` as the model-facing `inputPath` alternative, and
     // only `outputDir` required natively (0 of the 14 shipped tools require
@@ -968,16 +1034,17 @@ describe('ToolCallTool', () => {
       }
     });
 
-    it('resolves a target whose validateToolParams throws, leaving the throw to build()', async () => {
-      // A throwing validator must not become a new bridge failure mode: the
-      // scheduler's build() reports the same throw as before. Mutation
-      // check: dropping the try/catch around the pre-check turns this red.
-      class ThrowingValidatorTool extends MockTool {
-        override validateToolParams(): string | null {
-          throw new Error('boom from validator');
+    it('resolves a target whose schema access throws, leaving the throw to build()', async () => {
+      // A target whose declaration throws under the pre-check must not
+      // become a new bridge failure mode: the scheduler's build() reports
+      // the same throw as before. Mutation check: dropping the try/catch
+      // around the pre-check turns this red.
+      class ThrowingSchemaTool extends MockTool {
+        override get schema(): never {
+          throw new Error('boom from schema access');
         }
       }
-      const target = new ThrowingValidatorTool({
+      const target = new ThrowingSchemaTool({
         name: 'throwing_tool',
         shouldDefer: true,
         params: { type: 'object', properties: {} },

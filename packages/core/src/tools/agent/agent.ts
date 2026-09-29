@@ -886,7 +886,7 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
     this.delegationSurface = resolveAgentDelegationSurface(config);
     this.subagentManager = config.getSubagentManager();
     this.removeChangeListener = this.subagentManager.addChangeListener(() => {
-      this.refreshSubagentsFromListener();
+      this.requestRefresh();
     });
 
     // Initialize the tool asynchronously
@@ -894,20 +894,23 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
   }
 
   dispose(): void {
+    this.disposed = true;
     this.removeChangeListener();
   }
 
   private refreshInFlight: Promise<void> | undefined;
   private listenerRefreshArmed = false;
+  private disposed = false;
 
   /**
    * Asynchronously initializes the tool by loading available subagents
    * and updating the description and schema.
    *
-   * Concurrent kicks coalesce onto the in-flight refresh: validateToolParams
-   * fires one per validated call (and the bridge argument pre-check doubles
-   * that for a bridged Agent call), and a second scan + setTools mid-turn
-   * buys nothing — the in-flight scan already reads the current state.
+   * Concurrent callers coalesce onto the in-flight refresh: a second scan +
+   * setTools mid-turn buys nothing on its own. Signals that mean "subagent
+   * state changed" (the change listener, the unknown-subagent_type
+   * validation kick) go through requestRefresh() instead, because the
+   * in-flight scan may have read the directory before the change landed.
    */
   refreshSubagents(): Promise<void> {
     this.refreshInFlight ??= this.runRefreshSubagents().finally(() => {
@@ -917,22 +920,35 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
   }
 
   /**
-   * The change listener must not be dropped like a validation kick: a change
-   * landing mid-refresh is not reflected in the in-flight scan, so arm one
-   * follow-up refresh instead of coalescing into the stale read.
+   * Fire-and-forget refresh for out-of-band signals (the change listener and
+   * the validation kick — the kick is the only discovery path for agent
+   * files created outside the manager, which the listener never sees). A
+   * signal landing mid-refresh is not reflected in the in-flight scan, so
+   * arm exactly one follow-up refresh instead of coalescing into the stale
+   * read. The voided chains are .catch()-guarded per this file's contract:
+   * runRefreshSubagents can reject (its finally awaits llmClient.setTools()).
    */
-  private refreshSubagentsFromListener(): void {
+  private requestRefresh(): void {
+    if (this.disposed) {
+      return;
+    }
     if (this.refreshInFlight) {
       if (!this.listenerRefreshArmed) {
         this.listenerRefreshArmed = true;
-        void this.refreshInFlight.finally(() => {
-          this.listenerRefreshArmed = false;
-          void this.refreshSubagents();
-        });
+        void this.refreshInFlight
+          .finally(() => {
+            this.listenerRefreshArmed = false;
+            this.requestRefresh();
+          })
+          .catch((error) =>
+            debugLogger.warn('Follow-up subagent refresh failed:', error),
+          );
       }
       return;
     }
-    void this.refreshSubagents();
+    void this.refreshSubagents().catch((error) =>
+      debugLogger.warn('Subagent refresh failed:', error),
+    );
   }
 
   private async runRefreshSubagents(): Promise<void> {
@@ -1161,8 +1177,11 @@ The background-agent rules above apply to background forks unchanged.${delegatio
           // resolves the type via loadSubagent(), which reads from disk and
           // fails with a clear "not found" error if the agent truly doesn't
           // exist. Kick a refresh (validation must stay synchronous) so the
-          // cache and schema catch up for subsequent calls.
-          void this.refreshSubagents();
+          // cache and schema catch up for subsequent calls. The kick goes
+          // through requestRefresh(): a kick landing mid-scan arms one
+          // follow-up, because the in-flight scan may have read the
+          // directory before the file existed.
+          this.requestRefresh();
         }
       }
     }
