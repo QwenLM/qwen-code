@@ -276,7 +276,7 @@ describe('Hosted Harness no-tool session', () => {
     },
   );
 
-  it('refuses prompt, configuration and resource admission while MCP close is pending', async () => {
+  it('refuses every MCP operation and prompt admission while close is pending', async () => {
     const { server, authorize } = await mcpApp();
     const resource = () =>
       authorize(
@@ -286,7 +286,7 @@ describe('Hosted Harness no-tool session', () => {
         serverId: 'demo',
         request: { kind: 'resource_read', uri: 'memory://note' },
       });
-    expect((await resource()).status).toBe(202);
+    const operationId = (await resource()).body.operationId as string;
     const control = vi.mocked(HostedWorkspaceBroker.prototype.control);
     const original = control.getMockImplementation()!;
     let released: () => void = () => undefined;
@@ -336,6 +336,24 @@ describe('Hosted Harness no-tool session', () => {
       });
       expect(configure.status).toBe(409);
       expect((await resource()).status).toBe(409);
+      expect(
+        (
+          await authorize(
+            supertest(server).get(
+              `/session/${SESSION_ID}/mcp/operations/${operationId}`,
+            ),
+          )
+        ).status,
+      ).toBe(409);
+      expect(
+        (
+          await authorize(
+            supertest(server).post(
+              `/session/${SESSION_ID}/mcp/operations/${operationId}/cancel`,
+            ),
+          )
+        ).status,
+      ).toBe(409);
       expect(admit).not.toHaveBeenCalled();
       expect(state.model).not.toHaveBeenCalled();
     } finally {
@@ -424,7 +442,7 @@ describe('Hosted Harness no-tool session', () => {
       );
       let modelRequests = 0;
       state.model.mockImplementation(async ({ toolTurn }) => {
-        await toolTurn!.declarations();
+        await toolTurn!.declarations(new AbortController().signal);
         modelRequests++;
         return { text: 'done', model: 'test-model' };
       });
@@ -745,9 +763,11 @@ describe('Hosted Harness no-tool session', () => {
     );
     expect(created.status).toBe(200);
     state.model.mockImplementationOnce(async ({ toolTurn }) => {
-      expect((await toolTurn!.declarations()).map((tool) => tool.name)).toEqual(
-        ['read_file', 'write_file', 'edit', 'run_shell_command'],
-      );
+      expect(
+        (await toolTurn!.declarations(new AbortController().signal)).map(
+          (tool) => tool.name,
+        ),
+      ).toEqual(['read_file', 'write_file', 'edit', 'run_shell_command']);
       return { text: 'text without side effects', model: 'test-model' };
     });
     const prompt = [{ type: 'text', text: 'hello' }];

@@ -119,6 +119,27 @@ export class HostedToolRecoveryRequiredError extends Error {
   }
 }
 
+async function waitForTurn<T>(
+  work: Promise<T>,
+  signal: AbortSignal,
+): Promise<T> {
+  signal.throwIfAborted();
+  let onAbort: () => void = () => undefined;
+  try {
+    const result = await Promise.race([
+      work,
+      new Promise<never>((_, reject) => {
+        onAbort = () => reject(signal.reason);
+        signal.addEventListener('abort', onAbort, { once: true });
+      }),
+    ]);
+    signal.throwIfAborted();
+    return result;
+  } finally {
+    signal.removeEventListener('abort', onAbort);
+  }
+}
+
 export class HostedWorkspaceToolTurn {
   private readonly broker: HostedWorkspaceBroker;
   private readonly warmed: Promise<void>;
@@ -158,8 +179,9 @@ export class HostedWorkspaceToolTurn {
     void this.warmed.catch(() => undefined);
   }
 
-  async declarations(): Promise<FunctionDeclaration[]> {
-    if (this.mcp) await this.mcp.refresh();
+  async declarations(signal: AbortSignal): Promise<FunctionDeclaration[]> {
+    signal.throwIfAborted();
+    if (this.mcp) await waitForTurn(this.mcp.refresh(signal), signal);
     this.advertised = [
       ...(this.shell
         ? HOSTED_WORKSPACE_SHELL_TOOLS
@@ -175,8 +197,9 @@ export class HostedWorkspaceToolTurn {
     model: string,
     signal: AbortSignal,
   ): Promise<Part[]> {
-    if (this.mcp) await this.warmed;
-    const declarations = this.advertised ?? (await this.declarations());
+    signal.throwIfAborted();
+    if (this.mcp) await waitForTurn(this.warmed, signal);
+    const declarations = this.advertised ?? (await this.declarations(signal));
     const ids = new Set<string>();
     const requests = calls.map((call) => {
       const runtimeCallId = randomUUID();
@@ -309,19 +332,7 @@ export class HostedWorkspaceToolTurn {
         throw new HostedToolRecoveryRequiredError(cause);
       }
     }
-    let onAbort: () => void = () => undefined;
-    try {
-      await Promise.race([
-        this.warmed,
-        new Promise<never>((_, reject) => {
-          onAbort = () => reject(signal.reason);
-          signal.addEventListener('abort', onAbort, { once: true });
-        }),
-      ]);
-    } finally {
-      signal.removeEventListener('abort', onAbort);
-    }
-    signal.throwIfAborted();
+    await waitForTurn(this.warmed, signal);
     if (!this.acquired) {
       // Acquisition may have taken effect even when its reply is lost.
       this.uncertain = true;

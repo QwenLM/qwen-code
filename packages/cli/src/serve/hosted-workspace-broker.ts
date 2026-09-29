@@ -32,6 +32,7 @@ export class HostedWorkspaceBrokerRejection extends Error {
   constructor(
     readonly status: number,
     readonly code: unknown,
+    readonly details?: Record<string, unknown>,
   ) {
     super(`Runtime Broker returned HTTP ${status} (${String(code)}).`);
   }
@@ -189,8 +190,9 @@ export class HostedWorkspaceBroker {
     }
     const end = Date.now() + observationMs;
     while (Date.now() < end) {
+      const cancelling = signal.aborted && !cancellationSent;
       try {
-        if (signal.aborted && !cancellationSent) {
+        if (cancelling) {
           cancellationSent = true;
           response = await this.request(`${path}:cancel`, {});
         }
@@ -198,14 +200,18 @@ export class HostedWorkspaceBroker {
           waitForUnknown ? `${path}?reconcile=true` : path,
         );
       } catch (cause) {
+        const transportFailed =
+          cause instanceof TypeError ||
+          (cause instanceof DOMException && cause.name === 'TimeoutError');
+        if (cancelling && transportFailed) cancellationSent = false;
         if (
           !waitForUnknown ||
           !(
             (cause instanceof HostedWorkspaceBrokerRejection &&
               cause.status === 409 &&
-              cause.code === 'runtime_broker_execution_unknown') ||
-            cause instanceof TypeError ||
-            (cause instanceof DOMException && cause.name === 'TimeoutError')
+              cause.code === 'runtime_broker_execution_unknown' &&
+              cause.details?.['terminal'] !== true) ||
+            transportFailed
           )
         )
           throw cause;
@@ -347,8 +353,16 @@ export class HostedWorkspaceBroker {
       reader.releaseLock();
     }
     const parsed = object(JSON.parse(Buffer.concat(chunks).toString('utf8')));
-    if (!response.ok)
-      throw new HostedWorkspaceBrokerRejection(response.status, parsed['code']);
+    if (!response.ok) {
+      const details = parsed['details'];
+      throw new HostedWorkspaceBrokerRejection(
+        response.status,
+        parsed['code'],
+        details && typeof details === 'object' && !Array.isArray(details)
+          ? (details as Record<string, unknown>)
+          : undefined,
+      );
+    }
     if (
       parsed['protocolVersion'] !== 1 ||
       parsed['harnessSessionId'] !== this.key.sessionId ||

@@ -42,15 +42,15 @@ MCP 需要独立配置与操作记录、不可变目录修订、由 Runtime 持�
 
 网络发送或进程启动前必须已有提交的 intent。尚未进入 `dispatch_started` 的资源/提示 intent 可以保留原 pin 恢复首次派发，也可以在本地取消并证明从未开始；状态查询不能把这种未发送的 intent 变成未知副作用。已提交结果的重放无需重新连接 Runtime。发送后的响应失败为 `outcome_unknown`，恢复只查询原身份，重连路径不能再次发送。未发送请求可立即取消；派发后的取消延迟到原响应到达。Runtime 不发送原生取消通知，因为 SDK server 会抑制后续响应，导致结算证据永久丢失。仍记录原响应；取消绝不证明远端副作用未执行。可验证的迟到响应可以结算原调用。Runtime 丢失时，未决副作用保持阻塞。
 
-发现期间收到的列表变更通知会使对应类别保持 stale，并发列表响应不能清除该失效信息。每次模型请求和新资源/提示命令之前，Harness 检查发现状态。未变化的目录保留修订，包括从未返回有效列表的类别持续失败时；健康类别保留原连接。失败类别恢复后会发布变化的目录；目录变化或连接退休后，安装新的不可变配置与连接代数。已准入请求保留原 pin，绝不重发。未确认或失败的 discovery 以错误结束当前 turn，不会永久阻塞 Session；下一轮可以重新刷新。配置或调用结果未知时仍必须对账原操作。公开目录仍是已提交快照，不是 Runtime 实时健康或可用性检查。
+发现期间收到的列表变更通知会使对应类别保持 stale，并发列表响应不能清除该失效信息。每次模型请求和新资源/提示命令之前，Harness 检查发现状态。未变化的目录保留修订，包括从未返回有效列表的类别持续失败时；健康类别保留原连接。失败类别恢复后会发布变化的目录；目录变化或连接退休后，安装新的不可变配置与连接代数。已准入请求保留原 pin，绝不重发。未确认或失败的 discovery 以错误结束当前 turn，不会永久阻塞 Session；下一轮可以重新刷新。配置或调用结果未知时仍必须对账原操作。取消 turn 会立即停止等待预热或刷新，并阻止该次刷新继续发现或替换；已经派发的工作保留原恢复身份。公开目录仍是已提交快照，不是 Runtime 实时健康或可用性检查。
 
-Harness 空闲重载后，先推进现有配置记录的持久修订，再为新 writer 签发 grant；目录和连接 pin 保持不变。Runtime grant gate 仍拒绝同一修订更换 owner。初始配置明确失败后，显式替换命令可安装允许的新定义，无需先让失败的初始定义恢复。未决配置以 HTTP 503 阻止该 server 的新修订，但仍允许重试原显式配置命令。Detach 会按原操作对账所有未决配置，包括被旧版本 writer 的新配置越过的历史记录；只有明确结算并完成 drain 后才释放所有权。
+Harness 空闲重载后，先推进现有配置记录的持久修订，再为新 writer 签发 grant；目录和连接 pin 保持不变。Runtime grant gate 仍拒绝同一修订更换 owner。初始配置明确失败后，显式替换命令可安装允许的新定义，无需先让失败的初始定义恢复。未决配置以 HTTP 503 阻止该 server 的新修订，但仍允许重试原显式配置命令。后续未知查询不能覆写已经明确失败或取消的配置。Detach 会按原操作对账所有未决配置，包括被旧版本 writer 的新配置越过的历史记录；只有明确结算并完成 drain 后才释放所有权。
 
 ## 准入、凭据与清理
 
 Runtime 只允许目标 workspace 已配置的定义，以及 Session 已安装的 server binding。配置凭据留在 Runtime。Stdio command、参数、环境键和值不能包含 NUL；无效定义在分配连接前拒绝。公开目录不包含连接配方、环境、headers、endpoint、进程标识、grant 或内部 binding ID。错误使用有界稳定代码，不回显可能带凭据的底层连接异常。
 
-每个 Runtime 实例最多允许 16 个连接和 32 个在途请求，包括等待 drain 的旧连接；替换不能临时超额。Hosted Session 创建只接受 1–16 个 server pin，超限配置在创建 Session 前拒绝。旧版本已保存且最多含 32 个 pin 的 Session 保留原定义，仍可加载并 detach 以清理资源。替换先打开新连接，再退役旧连接。正好有 16 个活动连接时没有替换余量：目录变更或显式替换持续返回配额错误，直到 detach/load 关闭旧连接并重新获取。需要实时目录刷新的部署必须留出一个空位（没有其他旧连接等待 drain 时，最多固定 15 个 server）。已有连接仍可能耗尽 Runtime 容量；prompt 准入、配置替换或原始操作初始化期间的配额失败返回 HTTP 409 和 `managed_mcp_connection_quota`，不会准入模型 turn。prompt 已准入后才发现的配额失败仍以 turn 错误报告。release 前封闭新准入；活动操作保留原 transport 直到结算。空闲退休连接立即关闭；繁忙退休连接仅在原请求结算后关闭。Streamable HTTP DELETE 采用一秒上限的尽力清理；release 表示全部请求结算后本地 transport 已关闭，不保证远端 server Session 被删除。本地关闭有时间上限，不能确认 drain 时不能 ACK release。Runtime/Session release 等待这些 hold。未进入派发的配置可用 `not_started_proven` 取消；close 随后完成并释放原 Broker 所有权，包括此前因 Workspace busy 留下的未完成 acquire，期间不配置 MCP。
+每个 Runtime 实例最多允许 16 个连接和 32 个在途请求，包括仍活动且等待 drain 的旧连接。已关闭连接保留未知结果证据和释放 hold，但不占用活动请求配额；替换不能临时超额。Hosted Session 创建只接受 1–16 个 server pin，超限配置在创建 Session 前拒绝。旧版本已保存且最多含 32 个 pin 的 Session 保留原定义，仍可加载并 detach 以清理资源。替换先打开新连接，再退役旧连接。正好有 16 个活动连接时没有替换余量：目录变更或显式替换持续返回配额错误，直到 detach/load 关闭旧连接并重新获取。需要实时目录刷新的部署必须留出一个空位（没有其他旧连接等待 drain 时，最多固定 15 个 server）。已有连接仍可能耗尽 Runtime 容量；prompt 准入、配置替换或原始操作初始化期间的配额失败返回 HTTP 409 和 `managed_mcp_connection_quota`，不会准入模型 turn。prompt 已准入后才发现的配额失败仍以 turn 错误报告。release 前封闭新准入；活动操作保留原 transport 直到结算。SDK 协议错误会退役连接，但不会判定活动请求丢失；物理关闭仍把未决请求转为结果未知。空闲退休连接立即关闭；繁忙退休连接仅在原请求结算后关闭。Streamable HTTP DELETE 采用一秒上限的尽力清理；release 表示全部请求结算后本地 transport 已关闭，不保证远端 server Session 被删除。本地关闭有时间上限，不能确认 drain 时不能 ACK release。Runtime/Session release 等待这些 hold。未进入派发的配置可用 `not_started_proven` 取消；close 随后完成并释放原 Broker 所有权，包括此前因 Workspace busy 留下的未完成 acquire，期间不配置 MCP，也不重试 acquire。Broker 先将原 Runtime Session 持久置为 `RELEASING`，封闭后续 claim；确认它没有持有存储租约后即可释放，无需联系从未安装的 worker。仍持有租约时必须先完成物理停用，其他 Session 的租约不受影响。状态查询和取消与 close 串行；close 失败后仍可用于恢复。
 
 ## 文件与接线点
 
@@ -101,7 +101,7 @@ Runtime 只允许目标 workspace 已配置的定义，以及 Session 已安装�
 
 H1 明确保留每个 tenant/storage lease 同时仅一个 attached MCP owner 的限制。同一 Workspace 的其他 Session，以及共享该 storage 的其他 Workspace，即使在两次 turn 之间也不能执行；detach 后释放租约。stdio server 仍能访问 Workspace 时提前释放租约会允许并发写入；连接寿命与存储所有权解耦属于生产启用前的后续工作。
 
-存在未决请求时物理连接丢失仍保持 recovery-blocked。连接丢失或 server 永不回复可能耗尽整个 630 秒 Hosted 观察窗口；更短的 Runtime 超时或取消不会缩短该窗口。模型请求前必须成功刷新所有固定 server，因此一个 server 不可用也会阻塞纯文本 turn 和健康 server 的调用，直到它恢复。工具在 630 秒 Hosted 观察窗口结束后才结算，或 Harness 在 turn 中途重启，仍需要本私有阶段尚未实现的 checkpoint 恢复。原始资源/提示操作可通过原 ID 的状态接口或 close 接受迟到结果。Runtime 回执历史及已关闭连接的 tombstone 仍保留至进程结束，随历史增长；基于持久 ACK 的回收，以及永久丢失请求的 release 等待者清理，留作后续工作。并发配额不代表历史内存有上限。
+存在未决请求时物理连接丢失仍保持 recovery-blocked。取消 HTTP 响应丢失时按原 execution 身份重试；明确终态的 Runtime 丢失响应立即结束观察。其他连接丢失或 server 永不回复可能耗尽整个 630 秒 Hosted 观察窗口；更短的 Runtime 超时或取消不会缩短该窗口。模型请求前必须成功刷新所有固定 server，因此一个 server 不可用也会阻塞纯文本 turn 和健康 server 的调用，直到它恢复。工具在 630 秒 Hosted 观察窗口结束后才结算，或 Harness 在 turn 中途重启，仍需要本私有阶段尚未实现的 checkpoint 恢复。原始资源/提示操作可通过原 ID 的状态接口或 close 接受迟到结果。Runtime 回执历史及已关闭连接的 tombstone 仍保留至进程结束，随历史增长；基于持久 ACK 的回收，以及永久丢失请求的 release 等待者清理，留作后续工作。并发配额不代表历史内存有上限。
 
 模型工具名有意包含目录和连接身份，防止旧广告调用静默使用新 binding；重新加载的历史可能保留旧名字。stdio HOME/USERPROFILE 为 Workspace；会写 HOME 缓存的 server 应通过部署定义显式设置独立 HOME。
 
@@ -109,4 +109,4 @@ Session 存储全局识别这两个记录 domain；实际执行仍由显式私�
 
 尚未发布的 MCP migration 使用 V21，避免与 #12894 的 V19/V20 publication migration 重号。部署应按递增顺序执行，后合并分支必须再次对照 main 检查。如果 MCP V21 已先执行，后到达且尚未应用的 publication migration 必须重新编号到已部署版本之后，不能靠启用 out-of-order migration 绕过检查。#12868 的通用 control 需要语义合并，保留撤权后的 MCP 原 owner 恢复，以及先 drain 再释放存储租约的顺序。
 
-公开配置管理和生产 AgentBundle 能力发布另行部署。没有查询或幂等支持的远端系统不能自动恢复未知副作用。Runtime 的代内回执不能跨物理 Runtime 丢失持久保留；此时已提交的 Session intent 保持阻塞结果。配额按 Runtime 实例计算，不跨独立 Runtime 进程汇总。私有配置沿用现有 inline Session Store：每类发现列表限制为 16 KiB，保留部分条目时标记 partial，无法保留有效条目时标记 failed；原始操作响应限制为 60 KiB，超限以 output-limit 错误结算。本阶段不启用 SDK 反向客户端、生产 profile 公告、跨进程总预算或对象存储结果。
+公开配置管理和生产 AgentBundle 能力发布另行部署。没有查询或幂等支持的远端系统不能自动恢复未知副作用。Runtime 的代内回执不能跨物理 Runtime 丢失持久保留；此时已提交的 Session intent 保持阻塞结果。配额按 Runtime 实例计算，不跨独立 Runtime 进程汇总。私有配置沿用现有 inline Session Store：每类发现列表限制为 16 KiB 和 64 页，保留部分条目时标记 partial，无法保留有效条目时标记 failed；原始操作响应限制为 60 KiB，超限以 output-limit 错误结算。本阶段不启用 SDK 反向客户端、生产 profile 公告、跨进程总预算或对象存储结果。

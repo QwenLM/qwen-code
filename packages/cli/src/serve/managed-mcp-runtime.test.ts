@@ -33,6 +33,7 @@ const definitionDigest = 'a'.repeat(64);
 const serverCode = String.raw`
 import { createInterface } from 'node:readline';
 import { appendFileSync, existsSync } from 'node:fs';
+let pages = 0;
 const send = (id, result) => process.stdout.write(JSON.stringify({jsonrpc:'2.0',id,result})+'\n');
 createInterface({input:process.stdin}).on('line', line => {
  const request=JSON.parse(line);
@@ -42,6 +43,7 @@ createInterface({input:process.stdin}).on('line', line => {
  if (request.method==='initialize') send(request.id,{protocolVersion:'2024-11-05',capabilities:{tools:{},resources:{},prompts:{}},serverInfo:{name:'fixture',version:'1'}});
  else if (process.env.UNSUPPORTED_LISTS && ['resources/list','prompts/list'].includes(request.method)) process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:request.id,error:{code:-32601,message:'Not supported'}})+'\n');
  else if (request.method==='tools/list') {
+   if (process.env.EMPTY_PAGES) {send(request.id,{tools:[],nextCursor:String(++pages)});return;}
    send(request.id,{tools:[...['echo','delayed','drop'].map(name=>({name,inputSchema:{type:'object'}})), ...(process.env.LARGE_CATALOG?[{name:'too-large',description:'x'.repeat(20*1024),inputSchema:{type:'object'}}]:[])]});
    if (process.env.INVALIDATE_DISCOVERY) process.stdout.write(JSON.stringify({jsonrpc:'2.0',method:'notifications/tools/list_changed'})+'\n');
  }
@@ -51,6 +53,8 @@ createInterface({input:process.stdin}).on('line', line => {
  else if (request.method==='prompts/get') send(request.id,{messages:[{role:'user',content:{type:'text',text:'first'}},{role:'assistant',content:{type:'text',text:'second'}}]});
  else if (request.method==='tools/call') {
    if(request.params.name==='drop') process.exit(0);
+   if(request.params.arguments.stray) send(999999,{});
+   if(request.params.arguments.strayAfter) setTimeout(()=>send(999999,{}),100);
    if(request.params.arguments.duplicateId) send(request.params.arguments.duplicateId,{content:[{type:'text',text:'duplicate'}]});
    if(request.params.arguments.notify) process.stdout.write(JSON.stringify({jsonrpc:'2.0',method:'notifications/tools/list_changed'})+'\n');
    const respond=()=>send(request.id,{content:[{type:'text',text:request.params.arguments.large?'x'.repeat(61*1024):JSON.stringify({args:request.params.arguments,hasScopedSecret:process.env.MCP_SECRET==='runtime-only-secret',ambient:process.env.MCP_AMBIENT_SECRET??null,logname:process.env.LOGNAME??null,cwd:process.cwd(),systemRoot:process.env.SYSTEMROOT??null})}]});
@@ -199,6 +203,113 @@ function invoke(
 }
 
 describe('Managed MCP Runtime', () => {
+  it('bounds catalog pagination even when every page is empty with a fresh cursor', async () => {
+    const definition = stdioDefinition();
+    const instance = runtime([
+      { ...definition, env: { ...definition.env, EMPTY_PAGES: '1' } },
+    ]);
+    const result = await settled(instance, configure());
+    expect(result.catalog?.discovery.tools).toBe('failed');
+    const requests = (
+      await readFile(path.join(directory, 'calls-1'), 'utf8')
+    ).split('\n');
+    expect(requests.filter((method) => method === 'tools/list')).toHaveLength(
+      64,
+    );
+  });
+
+  it('keeps dead-transport evidence without charging it to live request capacity', async () => {
+    const instance = runtime();
+    const catalog = (await settled(instance, configure())).catalog!;
+    const pending = Array.from({ length: 31 }, (_, i) =>
+      instance.invokeTool(
+        runtimeSessionId,
+        invoke(catalog, `pending-${i}`, {
+          kind: 'tool_call',
+          name: 'delayed',
+          arguments: { releaseFile: path.join(directory, 'never-released') },
+        }),
+      ),
+    );
+    await vi.waitFor(async () => {
+      const methods = (
+        await readFile(path.join(directory, 'calls-1'), 'utf8')
+      ).split('\n');
+      expect(methods.filter((method) => method === 'tools/call')).toHaveLength(
+        31,
+      );
+    });
+    pending.push(
+      instance.invokeTool(
+        runtimeSessionId,
+        invoke(catalog, 'drop-all', {
+          kind: 'tool_call',
+          name: 'drop',
+          arguments: {},
+        }),
+      ),
+    );
+    expect(
+      (await Promise.all(pending)).every(
+        (view) => view.state === 'outcome_unknown',
+      ),
+    ).toBe(true);
+    expect(instance.hasHolds(runtimeSessionId)).toBe(true);
+    const next = (
+      await settled(instance, {
+        ...configure(),
+        operationId: 'configuration-2',
+        configRevision: 2,
+        grant: grant('configuration-2'),
+      })
+    ).catalog!;
+    const result = await instance.invokeTool(
+      runtimeSessionId,
+      invoke(next, 'healthy', {
+        kind: 'tool_call',
+        name: 'echo',
+        arguments: {},
+      }),
+    );
+    expect(result.error).toBeUndefined();
+    expect(result.response).toBeDefined();
+    expect(instance.hasHolds(runtimeSessionId)).toBe(true);
+  });
+
+  it('lets pending calls settle after an SDK protocol error and then closes the retired transport', async () => {
+    const instance = runtime();
+    const catalog = (await settled(instance, configure())).catalog!;
+    const call = invoke(catalog, 'stray-frame', {
+      kind: 'tool_call',
+      name: 'delayed',
+      arguments: { stray: true },
+    });
+    const result = await instance.invokeTool(runtimeSessionId, call);
+    expect(result.state).toBe('settled');
+    expect(result.error).toBeUndefined();
+    expect(result.response).toBeDefined();
+    await vi.waitFor(() =>
+      expect(instance.hasHolds(runtimeSessionId)).toBe(false),
+    );
+  });
+
+  it('closes an idle connection retired by an SDK protocol error', async () => {
+    const instance = runtime();
+    const catalog = (await settled(instance, configure())).catalog!;
+    const result = await instance.invokeTool(
+      runtimeSessionId,
+      invoke(catalog, 'idle-stray', {
+        kind: 'tool_call',
+        name: 'echo',
+        arguments: { strayAfter: true },
+      }),
+    );
+    expect(result.state).toBe('settled');
+    await vi.waitFor(() =>
+      expect(instance.hasHolds(runtimeSessionId)).toBe(false),
+    );
+  });
+
   it.each<Partial<ManagedMcpDefinition>>([
     { command: 'node\0' },
     { args: ['\0'] },
@@ -863,6 +974,7 @@ describe('Managed MCP Runtime', () => {
       let events: ServerResponse | undefined;
       let failPrompts = true;
       const methods: string[] = [];
+      const accepts: string[] = [];
       const server = createServer(async (request, response) => {
         expect(request.headers['authorization']).toBe(
           'Bearer scoped-test-secret',
@@ -872,6 +984,11 @@ describe('Managed MCP Runtime', () => {
           return;
         }
         if (request.method === 'GET' && transport === 'sse') {
+          accepts.push(request.headers.accept ?? '');
+          if (!request.headers.accept?.includes('text/event-stream')) {
+            response.writeHead(406).end();
+            return;
+          }
           events = response;
           response.writeHead(200, { 'content-type': 'text/event-stream' });
           response.write('event: endpoint\ndata: /messages\n\n');
@@ -951,6 +1068,7 @@ describe('Managed MCP Runtime', () => {
         },
       ]);
       const configured = await settled(instance, configure());
+      if (transport === 'sse') expect(accepts).toEqual(['text/event-stream']);
       expect(configured.error).toBeUndefined();
       expect(configured.catalog!.discovery).toEqual({
         tools: 'complete',

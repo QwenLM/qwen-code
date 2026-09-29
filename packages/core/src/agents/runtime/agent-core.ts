@@ -16,6 +16,11 @@
  * and how to interpret the results.
  */
 
+import {
+  captureHookExecutionOwner,
+  runWithHookExecutionOwner,
+  type HookExecutionOwner,
+} from '../../hooks/hook-execution-context.js';
 import { runWithAgentChat } from './agent-context.js';
 import { randomUUID } from 'node:crypto';
 import { createChildAbortController } from '../../utils/abortController.js';
@@ -382,6 +387,7 @@ export class AgentCore {
   private executionChat?: LlmChat;
   private promptOrdinal = 0;
   readonly subagentId: string;
+  private readonly hookExecutionOwner: HookExecutionOwner | undefined;
   readonly name: string;
   /** Business/task name used for local per-invocation usage labels. */
   readonly taskName?: string;
@@ -470,6 +476,11 @@ export class AgentCore {
   ) {
     this.subagentId =
       subagentId ?? `${name}-${randomUUID().replace(/-/g, '').slice(0, 8)}`;
+    // Internal forks without an explicit identity retain the caller's hook scope.
+    this.hookExecutionOwner = captureHookExecutionOwner(
+      runtimeContext,
+      subagentId,
+    );
     this.name = name;
     this.taskName = taskName;
     this.runtimeContext = runtimeContext;
@@ -856,6 +867,10 @@ export class AgentCore {
     );
   }
 
+  runInHookFrame<T>(fn: () => T): T {
+    return runWithHookExecutionOwner(this.hookExecutionOwner, fn);
+  }
+
   /**
    * Run `fn` inside both ALS frames this agent owns:
    * 1. {@link subagentNameContext} so token-attribution code resolves to
@@ -949,9 +964,11 @@ export class AgentCore {
           },
         ),
       );
-    return inheritedTeammateIdentity
-      ? runWithTeammateIdentity(inheritedTeammateIdentity, runInner)
-      : runInner();
+    return this.runInHookFrame(() =>
+      inheritedTeammateIdentity
+        ? runWithTeammateIdentity(inheritedTeammateIdentity, runInner)
+        : runInner(),
+    );
   }
 
   /**
@@ -1743,7 +1760,12 @@ export class AgentCore {
       return false;
     }
     if (this.executionAllowedTools === undefined) {
-      // Code Mode gateways operate on the agent's scoped nested-tool allowlist.
+      // Code mode declares exec unconditionally (getCodeModeFunctionDeclarations
+      // keeps exposure 'exec' regardless of the allowed set), and prepareTools
+      // adds tool_search beside it, so a finite configured list that omits
+      // them must not refuse the tools the model was shown — the same
+      // carve-out the executionAllowedTools branch applies below. Both
+      // gateways apply the agent's scoped nested-tool allowlist themselves.
       if (
         (toolName === ToolNames.EXEC || toolName === ToolNames.TOOL_SEARCH) &&
         this.runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly

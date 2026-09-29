@@ -403,3 +403,53 @@ it('preserves a definite acquisition refusal from the HTTP response', async () =
     new HostedWorkspaceBrokerRejection(409, 'workspace_busy'),
   );
 });
+
+it('retries a cancellation whose transport reply was lost without restarting', async () => {
+  const paths: string[] = [];
+  let cancellations = 0;
+  const broker = await fixture((path) => {
+    paths.push(path);
+    if (path.endsWith(':cancel') && ++cancellations === 1)
+      return { drop: true };
+    return {
+      body: {
+        ...identity,
+        executionCallId: 'execution',
+        status: {
+          state: 'settled',
+          result: { executionStatus: 'cancelled' },
+        },
+      },
+    };
+  });
+  const abort = new AbortController();
+  abort.abort();
+  await expect(
+    broker.execute('execution', '{}', abort.signal, 3000, true),
+  ).resolves.toMatchObject({ executionStatus: 'cancelled' });
+  expect(paths.filter((entry) => entry.endsWith(':cancel'))).toHaveLength(2);
+  expect(paths.some((entry) => entry.endsWith(':start'))).toBe(false);
+});
+
+it('stops observation immediately when the original execution is terminally unknown', async () => {
+  const paths: string[] = [];
+  const broker = await fixture((path) => {
+    paths.push(path);
+    return {
+      code: 409,
+      body: {
+        code: 'runtime_broker_execution_unknown',
+        details: { terminal: true, reason: 'runtime_lost' },
+      },
+    };
+  });
+  const abort = new AbortController();
+  abort.abort();
+  await expect(
+    broker.execute('execution', '{}', abort.signal, 500, true),
+  ).rejects.toMatchObject({
+    code: 'runtime_broker_execution_unknown',
+    details: { terminal: true, reason: 'runtime_lost' },
+  });
+  expect(paths).toHaveLength(1);
+});

@@ -606,6 +606,45 @@ it.each(['x'.repeat(70 * 1024), '中'.repeat(23 * 1024), '"'.repeat(17 * 1024)])
   },
 );
 
+it.each(['refresh', 'warmup'] as const)(
+  'aborts MCP %s without waiting for the original work to finish',
+  async (phase) => {
+    const pending = new Promise<void>(() => undefined);
+    const refresh = vi.fn(() =>
+      phase === 'refresh' ? pending : Promise.resolve(),
+    );
+    const mcp = {
+      broker: { ...broker, runtimeSessionId: 'mcp:session' },
+      ensureReady: () => (phase === 'warmup' ? pending : Promise.resolve()),
+      refresh,
+      tools: () => [],
+    };
+    const mcpTurn = new HostedWorkspaceToolTurn(
+      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+      session,
+      harness,
+      'prompt',
+      async () => randomUUID(),
+      () => true,
+      undefined,
+      mcp as unknown as import('./hosted-mcp-session.js').HostedMcpSession,
+    );
+    const abort = new AbortController();
+    const reason = new Error('cancelled test turn');
+    const work =
+      phase === 'refresh'
+        ? mcpTurn.declarations(abort.signal)
+        : mcpTurn.execute([], [], 'model', abort.signal);
+    const observed = work.catch((cause: unknown) => cause);
+    abort.abort(reason);
+    await expect(observed).resolves.toBe(reason);
+    expect(broker.prepare).not.toHaveBeenCalled();
+    await expect(mcpTurn.execute([], [], 'model', abort.signal)).rejects.toBe(
+      reason,
+    );
+  },
+);
+
 it('executes against the declarations actually advertised before a catalog replacement', async () => {
   let name = 'mcp_old';
   const input = { toolName: 'managed_mcp_call', input: { pinned: 'original' } };
@@ -626,7 +665,9 @@ it('executes against the declarations actually advertised before a catalog repla
     undefined,
     mcp as unknown as import('./hosted-mcp-session.js').HostedMcpSession,
   );
-  expect((await mcpTurn.declarations()).at(-1)?.name).toBe('mcp_old');
+  expect(
+    (await mcpTurn.declarations(new AbortController().signal)).at(-1)?.name,
+  ).toBe('mcp_old');
   name = 'mcp_new';
   const call = { ...calls[0], name: 'mcp_old', args: { text: 'hello' } };
   await mcpTurn.execute(
@@ -660,7 +701,9 @@ it('executes against the declarations actually advertised before a catalog repla
     intent!.payload['toolDefinitionRef'] as unknown as ManagedSessionDurableRef,
   );
   expect(JSON.parse(saved.toString()).name).toBe('mcp_old');
-  expect((await mcpTurn.declarations()).at(-1)?.name).toBe('mcp_new');
+  expect(
+    (await mcpTurn.declarations(new AbortController().signal)).at(-1)?.name,
+  ).toBe('mcp_new');
 });
 it('returns durable errors for a refused Shell batch and permits a corrected call', async () => {
   turn = createTurn(true);

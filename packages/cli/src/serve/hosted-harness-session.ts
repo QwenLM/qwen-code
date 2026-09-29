@@ -815,20 +815,34 @@ export function registerHostedHarnessSessionRoutes(
     const session = identity(req, sessions);
     if (!session) return error(res, 404, 'hosted_session_not_found');
     if (!session.mcp) return error(res, 409, 'hosted_mcp_unavailable');
-    void session.mcp.cancel(req.params['operationId']).then(
-      (response) => res.status(202).json(response),
-      () => error(res, 503, 'hosted_mcp_cancel_failed'),
-    );
+    if (session.mcpBusy) return error(res, 409, 'hosted_mcp_operation_active');
+    session.mcpBusy = true;
+    void session.mcp
+      .cancel(req.params['operationId'])
+      .then(
+        (response) => res.status(202).json(response),
+        () => error(res, 503, 'hosted_mcp_cancel_failed'),
+      )
+      .finally(() => {
+        session.mcpBusy = false;
+      });
   });
 
   app.get('/session/:id/mcp/operations/:operationId', (req, res) => {
     const session = identity(req, sessions);
     if (!session) return error(res, 404, 'hosted_session_not_found');
     if (!session.mcp) return error(res, 409, 'hosted_mcp_unavailable');
-    void session.mcp.status(req.params['operationId']).then(
-      (response) => res.json(response),
-      () => error(res, 503, 'hosted_mcp_status_failed'),
-    );
+    if (session.mcpBusy) return error(res, 409, 'hosted_mcp_operation_active');
+    session.mcpBusy = true;
+    void session.mcp
+      .status(req.params['operationId'])
+      .then(
+        (response) => res.json(response),
+        () => error(res, 503, 'hosted_mcp_status_failed'),
+      )
+      .finally(() => {
+        session.mcpBusy = false;
+      });
   });
 
   app.get('/session/:id/events', (req, res) => {

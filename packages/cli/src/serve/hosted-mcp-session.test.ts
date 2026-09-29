@@ -29,6 +29,7 @@ import {
 } from './hosted-workspace-broker.js';
 import {
   HostedMcpSession,
+  HostedMcpRecoveryRequiredError,
   parseHostedMcpServers,
 } from './hosted-mcp-session.js';
 
@@ -517,7 +518,7 @@ it('reconciles an older unknown configuration during close after a legacy writer
 });
 
 it('closes a never-dispatched configuration after workspace admission is refused', async () => {
-  vi.mocked(HostedWorkspaceBroker.prototype.acquire).mockRejectedValueOnce(
+  vi.mocked(HostedWorkspaceBroker.prototype.acquire).mockRejectedValue(
     new HostedWorkspaceBrokerRejection(409, 'workspace_busy'),
   );
   await expect(mcp.ensureReady()).rejects.toThrow('workspace_busy');
@@ -530,7 +531,7 @@ it('closes a never-dispatched configuration after workspace admission is refused
     run: { state: 'cancelled', execution: 'not_started_proven' },
   });
   expect(requests).toEqual([]);
-  expect(HostedWorkspaceBroker.prototype.acquire).toHaveBeenCalledTimes(2);
+  expect(HostedWorkspaceBroker.prototype.acquire).toHaveBeenCalledOnce();
   expect(HostedWorkspaceBroker.prototype.release).toHaveBeenCalledOnce();
 });
 
@@ -756,6 +757,19 @@ it('advances past a failed replacement revision while retaining the published ca
   await expect(mcp.configure(failedId, pin, 1)).rejects.toThrow(
     'configuration failed',
   );
+  const failedRecord = session.authority.extensionRecord(
+    'mcp_configuration',
+    failedId,
+  )!;
+  const failure = replies.get(failedId)!;
+  replies.set(failedId, { operationId: failedId, state: 'outcome_unknown' });
+  await expect(mcp.configure(failedId, pin, 1)).rejects.toBeInstanceOf(
+    HostedMcpRecoveryRequiredError,
+  );
+  expect(
+    session.authority.extensionRecord('mcp_configuration', failedId),
+  ).toEqual(failedRecord);
+  replies.set(failedId, failure);
   expect(mcp.getCatalogs()[0].configRevision).toBe(1);
   await expect(mcp.configure(randomUUID(), pin, 1)).rejects.toThrow(
     'revision conflicts',
@@ -907,5 +921,39 @@ it('does not let a stale cancel intent claim not-started after invocation dispat
   expect(requests.filter((entry) => entry.kind === 'mcp-cancel')).toHaveLength(
     1,
   );
+  await mcp.close();
+});
+
+it('stops refresh after cancellation without configuring a changed catalog or polling again', async () => {
+  await mcp.ensureReady();
+  const original = mcp.getCatalogs()[0];
+  const control = vi.mocked(HostedWorkspaceBroker.prototype.control);
+  const physical = control.getMockImplementation()!;
+  let respond!: (view: ManagedMcpOperationView) => void;
+  const response = new Promise<ManagedMcpOperationView>((resolve) => {
+    respond = resolve;
+  });
+  let discoveryId: string | undefined;
+  control.mockImplementation(async (operation) => {
+    if (operation.kind === 'mcp-discover') {
+      discoveryId = operation.operationId;
+      return response;
+    }
+    return physical(operation);
+  });
+  const abort = new AbortController();
+  const refresh = mcp.refresh(abort.signal).catch((cause: unknown) => cause);
+  await vi.waitFor(() => expect(discoveryId).toBeDefined());
+  const count = control.mock.calls.length;
+  const reason = new Error('cancelled discovery');
+  abort.abort(reason);
+  respond({
+    operationId: discoveryId!,
+    state: 'settled',
+    catalog: { ...original, catalogRevision: 2 },
+  });
+  expect(await refresh).toBe(reason);
+  expect(control.mock.calls).toHaveLength(count);
+  expect(mcp.getCatalogs()).toEqual([original]);
   await mcp.close();
 });

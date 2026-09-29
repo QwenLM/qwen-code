@@ -41,8 +41,11 @@ class DurableLocalRuntimeFaultGateTest {
             assertEquals(execution, retry.getString("executionCallId"));
             assertEquals("UNRESOLVED", second.reconcile(HARNESS, SESSION, execution).object().getString("outcome"));
             Files.writeString(rig.directory.resolve("finish"), "release");
+            // The takeover scan may already have settled the call from the
+            // worker's evidence, as in the other process fault gates.
             FaultGateRig.await(() -> second.reconcile(HARNESS, SESSION, execution).object().getString("outcome"),
-                    "RESOLVED"::equals, "original journal settlement");
+                    outcome -> "RESOLVED".equals(outcome) || "ALREADY_SETTLED".equals(outcome),
+                    "original journal settlement");
             var restored = rig.activeBinding();
             assertEquals(original.getBindingId(), restored.getBindingId());
             assertEquals(original.getGeneration(), restored.getGeneration());
@@ -117,24 +120,28 @@ class DurableLocalRuntimeFaultGateTest {
 
     @ParameterizedTest
     @EnumSource(FaultGateRig.Placement.class)
-    void adoptedWorkerCanCancelItsOriginalActiveCall(FaultGateRig.Placement placement) throws Exception {
+    void adoptedWorkerCanCancelALiveClaimBeforeOriginalBrokerExit(FaultGateRig.Placement placement) throws Exception {
         try (var rig = FaultGateRig.open(placement)) {
             var first = rig.broker("first", rig.proxy(), FaultGateRig.Provisioner.DURABLE_LOCAL_PROCESS);
             first.acquire(HARNESS, SESSION).requireOk();
-            var reference = FaultGateRig.shell("call", "echo start >> marker; sleep 30; echo end >> marker");
+            var reference = FaultGateRig.shell("call",
+                    "echo start >> marker; while [ ! -f finish ]; do sleep 0.05; done; echo end >> marker");
             String execution = first.create(HARNESS, SESSION, "key", reference).object().getString("executionCallId");
             rig.awaitMarker(marker(rig), List.of("start"));
-            rig.killBroker(first);
             var proxy = rig.proxy();
             var second = rig.broker("second", proxy, FaultGateRig.Provisioner.DURABLE_LOCAL_PROCESS);
             second.acquire(HARNESS, SESSION).requireOk();
+            // Keep the dispatch claim live through cancellation; a lapsed v2
+            // claim is deliberately left UNKNOWN and does not send a cancel.
             second.cancel(HARNESS, SESSION, execution).requireOk();
             assertEquals(1, proxy.count("cancel"), "cancellation must reach the original active worker");
+            rig.killBroker(first);
             rig.awaitDispatchLapse(execution);
             assertEquals(execution, second.create(HARNESS, SESSION, "key", reference).object()
                     .getString("executionCallId"));
             FaultGateRig.await(() -> second.reconcile(HARNESS, SESSION, execution).object().getString("outcome"),
-                    "RESOLVED"::equals, "cancelled original call");
+                    outcome -> "RESOLVED".equals(outcome) || "ALREADY_SETTLED".equals(outcome),
+                    "cancelled original call");
             assertEquals("cancelled", rig.execution(execution).getExecutionStatus());
             assertEquals(List.of("start"), rig.marker(marker(rig)));
             assertEquals(1, proxy.count("cancel"));
@@ -156,7 +163,8 @@ class DurableLocalRuntimeFaultGateTest {
             rig.killWorker(first);
             rig.killBroker(first);
             var second = rig.broker("second", rig.proxy(), FaultGateRig.Provisioner.DURABLE_LOCAL_PROCESS);
-            assertEquals("runtime_broker_runtime_lost", second.warm(HARNESS).code());
+            FaultGateRig.await(() -> second.warm(HARNESS).code(),
+                    "runtime_broker_runtime_lost"::equals, "original worker loss");
             assertEquals(ToolExecutionRecord.State.ABANDONED, rig.execution(execution).getState());
             assertEquals(original.getBindingId(), rig.activeBinding().getBindingId());
             assertNull(rig.activeBinding().getStopEvidence());

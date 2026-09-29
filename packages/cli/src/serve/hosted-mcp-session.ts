@@ -141,19 +141,26 @@ export class HostedMcpSession {
     return this.ready;
   }
 
-  async refresh(): Promise<void> {
+  async refresh(signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
     await this.ensureReady();
+    signal?.throwIfAborted();
     await this.acquireOwner();
     for (const { configuration, catalog } of this.catalogs.values()) {
-      const response = await this.dispatch({
-        kind: 'mcp-discover',
-        sessionKey: this.key,
-        operationId: randomUUID(),
-        serverId: catalog.serverId,
-        serverRevision: catalog.serverRevision,
-        connectionGeneration: catalog.connectionGeneration,
-        grant: this.grant('mcp_configuration', configuration.configurationId),
-      });
+      signal?.throwIfAborted();
+      const response = await this.dispatch(
+        {
+          kind: 'mcp-discover',
+          sessionKey: this.key,
+          operationId: randomUUID(),
+          serverId: catalog.serverId,
+          serverRevision: catalog.serverRevision,
+          connectionGeneration: catalog.connectionGeneration,
+          grant: this.grant('mcp_configuration', configuration.configurationId),
+        },
+        signal,
+      );
+      signal?.throwIfAborted();
       if (response.state !== 'settled')
         throw new Error('Runtime MCP discovery failed.');
       if (response.catalog && digest(response.catalog) === digest(catalog))
@@ -314,9 +321,12 @@ export class HostedMcpSession {
     } else {
       operation = await this.lookup(configuration.configurationId);
     }
+    const concluded = ['settled', 'failed', 'cancelled'].includes(
+      configuration.run.state,
+    );
     if (operation.state !== 'settled') {
       if (
-        configuration.run.state !== 'settled' &&
+        !concluded &&
         !(
           configuration.run.execution === 'outcome_unknown' &&
           operation.state === 'running'
@@ -338,7 +348,7 @@ export class HostedMcpSession {
       throw new HostedMcpRecoveryRequiredError();
     }
     if (operation.error || !operation.catalog) {
-      if (configuration.run.state !== 'settled')
+      if (!concluded)
         await this.commitConfiguration({
           ...configuration,
           run: {
@@ -719,7 +729,14 @@ export class HostedMcpSession {
         // A lost release reply can be confirmed only by the original owner.
       }
     }
-    if (configurations.some((entry) => entry.releaseState === 'active')) {
+    if (
+      configurations.some(
+        (entry) =>
+          entry.releaseState === 'active' &&
+          entry.run.execution !== 'not_started_proven' &&
+          !(entry.run.state === 'failed' && entry.run.execution === 'settled'),
+      )
+    ) {
       await this.acquireOwner();
     }
     for (let configuration of configurations) {
@@ -932,19 +949,24 @@ export class HostedMcpSession {
 
   private async dispatch(
     operation: ManagedMcpControl,
+    signal?: AbortSignal,
   ): Promise<ManagedMcpOperationView> {
+    signal?.throwIfAborted();
     let response: ManagedMcpOperationView;
     try {
       response = await this.broker.control(operation);
     } catch {
+      signal?.throwIfAborted();
       response = await this.lookup(operation.operationId);
     }
+    signal?.throwIfAborted();
     const deadline = Date.now() + 630_000;
     let interval = 100;
     while (response.state === 'running' && Date.now() < deadline) {
-      await delay(interval);
+      await delay(interval, undefined, { signal });
       interval = Math.min(interval * 2, 1_000);
       response = await this.lookup(operation.operationId);
+      signal?.throwIfAborted();
     }
     return response;
   }

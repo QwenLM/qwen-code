@@ -95,6 +95,7 @@ const MAX_INFLIGHT = 32;
 const MAX_MANIFEST_BYTES = 1024 * 1024;
 const MAX_RESULT_BYTES = 60 * 1024;
 const MAX_CATALOG_CATEGORY_BYTES = 16 * 1024;
+const MAX_CATALOG_PAGES = 64;
 const TIMEOUT_MS = 25_000;
 const REQUEST_TIMEOUT_MS = 600_000;
 const identifier = /^[A-Za-z0-9._:-]{1,128}$/u;
@@ -630,7 +631,6 @@ export class ManagedMcpRuntime {
                   fetch: (url, init) =>
                     fetch(url, {
                       ...init,
-                      headers: definition.headers,
                       redirect: 'error',
                     }),
                 },
@@ -679,8 +679,8 @@ export class ManagedMcpRuntime {
       };
       client.onerror = () => {
         connection.retiring = true;
-        for (const pending of connection.pending.values())
-          this.unknown(pending, 'managed_mcp_connection_lost');
+        if (connection.pending.size === 0)
+          void this.closeConnection(connection).catch(() => undefined);
       };
       try {
         await client.connect(transport, { timeout: TIMEOUT_MS });
@@ -840,6 +840,7 @@ export class ManagedMcpRuntime {
     let cursor: string | undefined;
     try {
       do {
+        if (cursors.size >= MAX_CATALOG_PAGES) throw new Error('pages');
         const result = await client.request(
           { method: `${kind}/list`, params: cursor ? { cursor } : {} },
           schema,
@@ -908,7 +909,7 @@ export class ManagedMcpRuntime {
         throw new ManagedMcpError('managed_mcp_capability_unavailable');
       if (
         [...this.connections.values()].reduce(
-          (count, entry) => count + entry.pending.size,
+          (count, entry) => count + (entry.closed ? 0 : entry.pending.size),
           0,
         ) >= MAX_INFLIGHT
       )

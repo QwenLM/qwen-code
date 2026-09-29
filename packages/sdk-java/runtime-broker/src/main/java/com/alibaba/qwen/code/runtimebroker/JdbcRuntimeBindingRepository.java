@@ -74,6 +74,17 @@ public final class JdbcRuntimeBindingRepository
     @Override
     public RuntimeBindingRecord recoverLost(RuntimeSessionRepository sessions,
             ToolExecutionRepository executions, RuntimeBindingRecord expected) {
+        return recoverLost(sessions, executions, expected, !expected.getRequest().isManagedContext());
+    }
+
+    @Override
+    public RuntimeBindingRecord finishLostRecovery(RuntimeSessionRepository sessions,
+            ToolExecutionRepository executions, RuntimeBindingRecord expected) {
+        return recoverLost(sessions, executions, expected, true);
+    }
+
+    private RuntimeBindingRecord recoverLost(RuntimeSessionRepository sessions,
+            ToolExecutionRepository executions, RuntimeBindingRecord expected, boolean holdersCleared) {
         if (!(sessions instanceof JdbcRuntimeSessionRepository jdbcSessions)
                 || !jdbcSessions.usesDataSource(dataSource)
                 || !(executions instanceof JdbcToolExecutionRepository jdbcExecutions)
@@ -104,7 +115,7 @@ public final class JdbcRuntimeBindingRepository
             List<RuntimeSessionRecord> batch = JdbcRuntimeSessionRepository.lockActiveSessions(
                     connection, current);
             JdbcToolExecutionRepository.abandonByBinding(connection, current);
-            if (!current.hasStoppedWriters()
+            if (!holdersCleared || !current.hasStoppedWriters()
                     || JdbcToolExecutionRepository.hasActiveByBinding(connection,
                             current.getBindingId(), current.getGeneration())) {
                 return current;
@@ -306,6 +317,36 @@ public final class JdbcRuntimeBindingRepository
                                         .getIsolationKey())) {
                             throw new IllegalStateException(
                                     "Runtime binding scope hash collision");
+                        }
+                        records.add(record);
+                    }
+                }
+            }
+            return List.copyOf(records);
+        });
+    }
+
+    @Override
+    public List<RuntimeBindingRecord> findRecoveryCandidates(String kind, String afterBindingId, int limit) {
+        BrokerValues.requireId(kind, "provisionerKind");
+        if (limit < 1 || limit > 100) {
+            throw new IllegalArgumentException("Recovery batch must contain 1-100 bindings");
+        }
+        return JdbcRepositorySupport.read(dataSource, connection -> {
+            List<RuntimeBindingRecord> records = new ArrayList<>();
+            try (PreparedStatement statement = connection.prepareStatement("SELECT " + BINDING_COLUMNS
+                    + " FROM qwen_runtime_binding WHERE provisioner_kind = ? AND binding_id > ?"
+                    + " AND resource_handle_version = 2"
+                    + " AND binding_state IN ('PROVISIONING', 'READY', 'DRAINING', 'RECOVERY_BLOCKED', 'LOST')"
+                    + " ORDER BY binding_id LIMIT ?")) {
+                statement.setString(1, kind);
+                statement.setString(2, afterBindingId == null ? "" : afterBindingId);
+                statement.setInt(3, limit);
+                try (ResultSet result = statement.executeQuery()) {
+                    while (result.next()) {
+                        RuntimeBindingRecord record = mapBinding(result);
+                        if (!kind.equals(record.getRequest().getProvisionerKind())) {
+                            throw new IllegalStateException("Recovery provisioner identity differs");
                         }
                         records.add(record);
                     }

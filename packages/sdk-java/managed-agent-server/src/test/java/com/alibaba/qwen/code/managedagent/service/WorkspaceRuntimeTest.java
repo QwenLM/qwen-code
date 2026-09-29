@@ -26,6 +26,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.RuntimeResourceHandle;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository;
+import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
@@ -163,10 +164,10 @@ class WorkspaceRuntimeTest {
             assertBusy(() -> otherClient.claim(binding, loser));
             ContextBinding changedGeneration = new ContextBinding(binding.getTenantId(), "other-workspace", 2,
                     binding.getStorageId(), "child", binding.getContextConfigRef(), 1);
-            assertBusy(() -> otherClient.claim(changedGeneration, loser));
+            assertUnavailable(() -> otherClient.claim(changedGeneration, loser));
             ContextBinding independentStorage = new ContextBinding(binding.getTenantId(), "other-workspace", 1,
                     "other-storage", ".", binding.getContextConfigRef(), 1);
-            otherClient.claim(independentStorage, loser);
+            assertUnavailable(() -> otherClient.claim(independentStorage, loser));
             authority.release(binding, winner);
             otherClient.claim(binding, loser);
             authority.release(binding, winner);
@@ -179,6 +180,24 @@ class WorkspaceRuntimeTest {
         String refs = WorkspaceExecutionProfile.CONFIG_REF + "\0" + WorkspaceExecutionProfile.POLICY_REF;
         assertThat(digest(refs)).isEqualTo(WorkspaceExecutionProfile.CONTEXT_CONFIG_REF);
         assertThat(digest(WorkspaceExecutionProfile.PROFILE + "\0" + refs)).isEqualTo(WorkspaceExecutionProfile.CAPABILITY_DIGEST);
+    }
+
+    @Test
+    void releasesAnUnclaimedSessionWithoutActivatingItOrReleasingTheWorkspaceHolder() throws Exception {
+        SessionRecord session = createSession("storage", ".");
+        var fixture = transport(session);
+        var rival = holder(session, "holder");
+        authority.claim(session.workspace(), rival);
+        assertBusy(() -> fixture.transport().acquire(fixture.lease(), fixture.record().getSession()));
+        var repository = new JdbcRuntimeSessionRepository(dataSource);
+        var releasing = repository.compareAndSet(fixture.record(),
+                fixture.record().withState(RuntimeSessionRecord.State.RELEASING, Instant.now()));
+        assertThat(releasing).isNotNull();
+        assertThat(fixture.transport().release(fixture.lease(), releasing.getSession()).toCompletableFuture().join()).isTrue();
+        authority.assertHeld(session.workspace(), rival);
+        assertUnavailable(() -> authority.claim(session.workspace(), releasing));
+        verify(fixture.http(), never()).installContext(any(), any(), any(), any());
+        verify(fixture.http(), never()).activateWorkspace(any(), any(), any(), any(Boolean.class));
     }
 
     @Test
@@ -198,6 +217,8 @@ class WorkspaceRuntimeTest {
         when(fixture.http().activateWorkspace(any(), any(), any(), eq(true))).thenReturn(CompletableFuture.completedFuture(null));
         fixture.transport().acquire(fixture.lease(), runtimeSession).toCompletableFuture().join();
         authority.assertHeld(binding, fixture.record());
+        assertThat(new JdbcRuntimeSessionRepository(dataSource).compareAndSet(fixture.record(),
+                fixture.record().withState(RuntimeSessionRecord.State.RELEASING, Instant.now()))).isNotNull();
         when(fixture.http().activateWorkspace(any(), any(), any(), eq(false)))
                 .thenReturn(CompletableFuture.failedFuture(new IllegalStateException("lost release")));
         assertThatThrownBy(() -> fixture.transport().release(fixture.lease(), runtimeSession).toCompletableFuture().join())
@@ -394,8 +415,8 @@ class WorkspaceRuntimeTest {
         var lease = runtime.getLease();
         var record = new RuntimeSessionRecord(runtimeSession, runtime.getBindingId(), runtime.getGeneration(),
                 RuntimeSessionRecord.State.ACQUIRING, 0, Instant.now());
-        var runtimeSessions = mock(RuntimeSessionRepository.class);
-        when(runtimeSessions.findById(resolved.scope(), runtimeSession.getRuntimeSessionId())).thenReturn(record);
+        var runtimeSessions = new JdbcRuntimeSessionRepository(dataSource);
+        record = bindings.admitSession(runtimeSessions, record);
         var http = mock(HttpRuntimeTransport.class);
         return new TransportFixture(new WorkspaceRuntimeTransport(http, resolver, authority, bindings, runtimeSessions),
                 http, record, lease, runtime, bindings);
@@ -463,8 +484,9 @@ class WorkspaceRuntimeTest {
                 WorkspaceExecutionProfile.CAPABILITY_DIGEST, "session");
         var runtime = readyBinding(bindings(), new RuntimeProvisionRequest(scope, id, "local-process",
                 binding.getStorageId()));
-        return new RuntimeSessionRecord(new RuntimeSession(session.sessionId(), id, "bootstrap", scope),
-                runtime.getBindingId(), runtime.getGeneration(), RuntimeSessionRecord.State.ACQUIRING, 0, Instant.now());
+        return bindings().admitSession(new JdbcRuntimeSessionRepository(dataSource),
+                new RuntimeSessionRecord(new RuntimeSession(session.sessionId(), id, "bootstrap", scope),
+                        runtime.getBindingId(), runtime.getGeneration(), RuntimeSessionRecord.State.ACQUIRING, 0, Instant.now()));
     }
 
     private static String digest(String text) throws Exception {

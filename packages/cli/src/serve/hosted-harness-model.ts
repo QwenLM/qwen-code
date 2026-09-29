@@ -116,7 +116,9 @@ export async function runHostedHarnessTextTurn(input: {
       if (input.toolTurn)
         client.getChat().setTools([
           {
-            functionDeclarations: await input.toolTurn.declarations(),
+            functionDeclarations: await input.toolTurn.declarations(
+              input.signal,
+            ),
           },
         ]);
       let calls: ToolCallRequestInfo[] = [];

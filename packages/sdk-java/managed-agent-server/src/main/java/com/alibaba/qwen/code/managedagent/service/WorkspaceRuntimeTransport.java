@@ -235,6 +235,11 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
             return delegate.release(lease, session);
         }
         Context context = context(lease, session, false);
+        // RELEASING fences later claims; an absent holder needs no physical release.
+        if (context.session().getState() == RuntimeSessionRecord.State.RELEASING
+                && !ownership.isHeld(context.binding(), context.session())) {
+            return CompletableFuture.completedFuture(true);
+        }
         return delegate.activateWorkspace(context.runtime(), context.session(), context.binding(), false)
                 .thenApply(ignored -> {
                     ownership.release(context.binding(), context.session());

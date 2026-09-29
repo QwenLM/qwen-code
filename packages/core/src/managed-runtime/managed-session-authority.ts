@@ -265,7 +265,7 @@ export class ManagedSessionConflictError extends ManagedSessionRecordError {
 }
 
 /** The digest-chain head of a log that has no commit marker yet. */
-const EMPTY_COMMIT_PREFIX_HASH = '0'.repeat(64);
+export const EMPTY_COMMIT_PREFIX_HASH = '0'.repeat(64);
 
 /**
  * A crash between the last event and its commit marker. The remedy is to
