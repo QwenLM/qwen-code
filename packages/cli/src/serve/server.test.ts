@@ -798,6 +798,11 @@ const EXPECTED_REGISTERED_FEATURES = [
     if (feature === 'session_agent_trace') {
       return [feature, 'scheduled_task_session_reuse'];
     }
+    // Conditional, so it is absent from the stage1 baseline above but present
+    // in the registry, declared immediately after `workspace_agent_generate`.
+    if (feature === 'workspace_agent_generate') {
+      return [feature, 'agent_collaboration_v1'];
+    }
     if (feature === 'session_export') {
       return [
         feature,
@@ -4209,6 +4214,20 @@ describe('createServeApp', () => {
           ).not.toContain(feature);
           continue;
         }
+        if (feature === 'agent_collaboration_v1') {
+          expect(predicate({ agentCollaborationEnabled: true })).toBe(true);
+          expect(predicate({ agentCollaborationEnabled: false })).toBe(false);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              agentCollaborationEnabled: true,
+            }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
         // Future conditional tag. Authors must add a branch above with
         // the toggle field that drives this predicate. Failing here is
         // intentional: it forces the new conditional tag to ship with a
@@ -4316,6 +4335,52 @@ describe('createServeApp', () => {
       expect(res.headers['x-frame-options']).toBe('DENY');
       expect(res.headers['referrer-policy']).toBe('no-referrer');
       expect(res.headers['cache-control']).toContain('no-cache');
+    });
+
+    it.each([false, true])(
+      'gates desktop relay CSP on client MCP capability (%s)',
+      async (clientMcpOverWs) => {
+        const app = createServeApp(
+          { ...baseOpts, clientMcpOverWs },
+          undefined,
+          { webShellDir },
+        );
+        const res = await request(app).get('/').set('Host', host).expect(200);
+        const connect = res.headers['content-security-policy']
+          .split('; ')
+          .find((directive: string) => directive.startsWith('connect-src '));
+        expect(connect).toBe(
+          clientMcpOverWs
+            ? "connect-src 'self' http://127.0.0.1:47821 https://unpkg.com/@qwen-code/"
+            : "connect-src 'self' https://unpkg.com/@qwen-code/",
+        );
+      },
+    );
+
+    it('mints a one-time desktop relay credential without making it a bearer token', async () => {
+      const app = createServeApp(
+        { ...baseOpts, token: 'runtime-secret', clientMcpOverWs: true },
+        undefined,
+        { webShellDir },
+      );
+      const issued = await request(app)
+        .post('/desktop-relay/credential')
+        .set('Host', host)
+        .set('Authorization', 'Bearer runtime-secret')
+        .send({
+          sessionId: 'session-1',
+          workspace: { kind: 'cwd', value: '/work/project' },
+        });
+      expect(issued.status).toBe(200);
+      expect(issued.headers['cache-control']).toBe('no-store');
+      expect(issued.body.credential).toEqual(expect.any(String));
+
+      const bearerReplay = await request(app)
+        .post('/desktop-relay/credential')
+        .set('Host', host)
+        .set('Authorization', `Bearer ${issued.body.credential}`)
+        .send({ sessionId: 'session-1' });
+      expect(bearerReplay.status).toBe(401);
     });
 
     it('adds the validated ?daemon= origin to the shell CSP connect-src', async () => {
@@ -5235,6 +5300,83 @@ describe('createServeApp', () => {
   });
 
   describe('GET /capabilities', () => {
+    it('does not mount collaboration routes or recovery when the opt-in is off', async () => {
+      const app = createServeApp(baseOpts, undefined, { bridge: fakeBridge() });
+      const capabilities = await request(app)
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(capabilities.body.features).not.toContain(
+        'agent_collaboration_v1',
+      );
+      expect(app.locals['stopWorkspaceAgentRecovery']).toBeUndefined();
+
+      const primary = capabilities.body.workspaces.find(
+        (workspace: { primary?: boolean }) => workspace.primary,
+      );
+      expect(primary).toBeDefined();
+      await request(app)
+        .get(`/workspaces/${primary.id}/agent/agents`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .expect(404);
+    });
+
+    it('keeps collaboration enabled while workspace settings are malformed', async () => {
+      const root = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-agent-collaboration-settings-'),
+      );
+      const home = path.join(root, 'home');
+      const workspace = path.join(root, 'workspace');
+      const workspaceSettings = path.join(workspace, '.qwen', 'settings.json');
+      const previousQwenHome = process.env['QWEN_HOME'];
+      let app: ReturnType<typeof createServeApp> | undefined;
+      try {
+        await fsp.mkdir(home);
+        await fsp.mkdir(path.dirname(workspaceSettings), { recursive: true });
+        await fsp.writeFile(
+          workspaceSettings,
+          JSON.stringify({
+            experimental: { agentCollaboration: true },
+          }),
+        );
+        process.env['QWEN_HOME'] = home;
+        resetHomeEnvBootstrapForTesting();
+        const bridge = fakeBridge();
+        app = createServeApp({ ...baseOpts, workspace }, undefined, {
+          bridge,
+          workspaceRegistry: createWorkspaceRegistry([
+            makeWorkspaceRuntimeForTest({
+              workspaceId: 'primary-id',
+              workspaceCwd: workspace,
+              primary: true,
+              bridge,
+            }),
+          ]),
+        });
+
+        const before = await request(app)
+          .get('/capabilities')
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(before.body.features).toContain('agent_collaboration_v1');
+
+        await fsp.writeFile(workspaceSettings, '{');
+        const after = await request(app)
+          .get('/capabilities')
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(after.body.features).toContain('agent_collaboration_v1');
+        await expect(fsp.readFile(workspaceSettings, 'utf8')).resolves.toBe(
+          '{',
+        );
+      } finally {
+        (
+          app?.locals['stopWorkspaceAgentRecovery'] as (() => void) | undefined
+        )?.();
+        restoreEnv('QWEN_HOME', previousQwenHome);
+        resetHomeEnvBootstrapForTesting();
+        await fsp.rm(root, { recursive: true, force: true });
+      }
+    });
+
     it('advertises the SSH descriptor and disables its workflow while keeping anchor ownership', async () => {
       const primary = makeWorkspaceRuntimeForTest({
         workspaceId: 'primary-id',
@@ -13837,6 +13979,27 @@ describe('createServeApp', () => {
       expect(bridge.calls).toHaveLength(0);
     });
 
+    // Only the daemon's dispatcher creates these, in-process.
+    it.each(['agent-host', 'agent'])(
+      'rejects the reserved %s source',
+      async (sourceType) => {
+        const bridge = fakeBridge();
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+        const res = await request(app)
+          .post('/session')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ sourceType, sourceId: 'ag_x' });
+
+        expect(res.status).toBe(400);
+        expect(res.body.code).toBe('reserved_session_source');
+        expect(bridge.calls).toHaveLength(0);
+      },
+    );
+
     it('forwards a valid UUID sessionId to the bridge', async () => {
       const bridge = fakeBridge();
       const app = createServeApp(
@@ -15828,6 +15991,84 @@ describe('createServeApp', () => {
             clientCount: 1,
             hasActivePrompt: false,
             worktree: { slug: 'task', path: '/tmp/wt', branch: 'wt-task' },
+          },
+        ],
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      mockWt.impl = () => ({
+        isGitRepository: () => Promise.resolve(true),
+        getCurrentBranch: () => Promise.resolve('main'),
+      });
+      mockBranchOps.getHeadCommit = () => Promise.resolve('abc123');
+
+      try {
+        const res = await request(app)
+          .post('/session')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ branch: { name: 'feat/x' } });
+
+        expect(res.status).toBe(200);
+        expect(bridge.calls).toHaveLength(1);
+      } finally {
+        mockWt.impl = undefined;
+        mockBranchOps.getHeadCommit = undefined;
+      }
+    });
+
+    it('allows branch creation when only the hidden agent host shares the workspace', async () => {
+      const bridge = fakeBridge({
+        listImpl: () => [
+          {
+            sessionId: 'agent-host',
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-01-01T00:00:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: false,
+            sourceType: 'agent-host',
+          },
+        ],
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      mockWt.impl = () => ({
+        isGitRepository: () => Promise.resolve(true),
+        getCurrentBranch: () => Promise.resolve('main'),
+      });
+      mockBranchOps.getHeadCommit = () => Promise.resolve('abc123');
+
+      try {
+        const res = await request(app)
+          .post('/session')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ branch: { name: 'feat/x' } });
+
+        expect(res.status).toBe(200);
+        expect(bridge.calls).toHaveLength(1);
+      } finally {
+        mockWt.impl = undefined;
+        mockBranchOps.getHeadCommit = undefined;
+      }
+    });
+
+    it('allows branch creation when only a resident mesh agent shares the workspace', async () => {
+      // A mesh agent body session is daemon-driven and holds no user edits;
+      // it must not block branch creation any more than the hidden host does.
+      const bridge = fakeBridge({
+        listImpl: () => [
+          {
+            sessionId: 'agent-body',
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-01-01T00:00:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: false,
+            sourceType: 'agent',
           },
         ],
       });
@@ -17853,6 +18094,30 @@ describe('createServeApp', () => {
           .post(`/session/persisted-channel/${action}`)
           .set('Host', `127.0.0.1:${baseOpts.port}`)
           .send({ sourceType: 'standalone' });
+
+        expect(res.status).toBe(400);
+        expect(res.body.code).toBe('reserved_session_source');
+        expect(bridge.loadCalls).toHaveLength(0);
+        expect(bridge.resumeCalls).toHaveLength(0);
+      },
+    );
+
+    // A restore that adopted the body's source would relabel the session so
+    // the dispatcher sends a real agent run into it.
+    it.each(['load', 'resume'] as const)(
+      'rejects the reserved agent source on %s',
+      async (action) => {
+        const bridge = fakeBridge();
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        const res = await request(app)
+          .post(`/session/persisted-channel/${action}`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ sourceType: 'agent', sourceId: 'ag_x' });
 
         expect(res.status).toBe(400);
         expect(res.body.code).toBe('reserved_session_source');
@@ -20488,6 +20753,7 @@ describe('createServeApp', () => {
           archiveState: 'active',
           size: 1,
           signal: preflightSignal,
+          excludeSourceTypes: ['agent-host', 'agent'],
         });
         catalogRequest.abort();
         await vi.waitFor(() => expect(preflightSignal?.aborted).toBe(true));
@@ -22056,6 +22322,7 @@ describe('createServeApp', () => {
           cursor: 1000123.456,
           size: 20,
           archiveState: 'active',
+          excludeSourceTypes: ['agent-host', 'agent'],
         });
       } finally {
         listSessionsSpy.mockRestore();

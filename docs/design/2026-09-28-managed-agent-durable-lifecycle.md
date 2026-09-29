@@ -113,7 +113,7 @@ A new operation answers:
 
 ### 4.3 Operations and their idempotency domain
 
-Flyway V16 adds `managed_agent_operation`. A row holds the operation's Session,
+Flyway V17 adds `managed_agent_operation`. A row holds the operation's Session,
 id (`op_` and 32 hex digits), kind, actor digest, key and request digest, its
 status, admission stage and delivery state, the Session status it was admitted
 on, its receipt, and the lease, claim generation, attempt count and
@@ -232,7 +232,7 @@ Session that no Harness held stay `java_durable`: no Harness confirmed
 anything about the Session. So does one whose Harness was replaced by a
 restart: the new Harness answers that it does not hold the Session, and the
 operation completes once the old process's writer lease has expired instead of
-being sealed. An archive migrated from before V16 was admitted on an active
+being sealed. An archive migrated from before V17 was admitted on an active
 Session, so it closes the Session first and can complete as
 `harness_confirmed` (4.10). `failure_code`, `blocked` and the `failed`,
 `cancelled` and `recovery_blocked` statuses are not produced.
@@ -270,7 +270,7 @@ existing checks and adds the actor to the idempotency domain:
 
 ### 4.10 Upgrade
 
-V16 turns every pending `ARCHIVE_SESSION` and `DELETE_SESSION` command into a
+V17 turns every pending `ARCHIVE_SESSION` and `DELETE_SESSION` command into a
 pending operation under its key and digest, with an empty actor digest and the
 Session status the command recorded, and marks the command `MIGRATED`. The
 worker finishes them. An archive admitted on an active Session first closes it,
@@ -284,15 +284,16 @@ repeated archive answers `409 session_state_conflict` and a repeated delete
 `404`. A Session archived before the upgrade counts as closed.
 
 Mixed-version rolling upgrades are not supported: stop every server of the
-previous version before V16 runs. An archive or delete that an old server
+previous version before V17 runs. An archive or delete that an old server
 leaves pending after the upgrade is never converted, and its pending command
 blocks every later lifecycle change on that Session with
 `409 session_operation_active`; an old server's unarchive would also reopen a
 Session that D4 closed.
 
-V16 is the next free version on `main`, which two open pull requests also
-take. Whichever of them merges later must renumber; a gap left instead would
-make Flyway refuse to start a database that already applied the later version.
+W0e (#12839) took V16 first, so this migration is V17, the next free version
+on `main`. An open pull request that takes V17 or a later version must
+renumber past it; a gap left instead would make Flyway refuse to start a
+database that already applied the later version.
 
 ## 5. Tests
 
@@ -354,13 +355,13 @@ make Flyway refuse to start a database that already applied the later version.
   delete carry their `operationId`.
 - Public Sessions gain `capabilities.session_lifecycle`.
 - The generated WebShell types add the lifecycle requests and operations.
-- Flyway V16 adds a table and converts pending commands; no other row changes.
+- Flyway V17 adds a table and converts pending commands; no other row changes.
 
 ## 7. Validation
 
 - The Managed Agent server's `mvn test` (151 tests) and Checkstyle pass.
 - `ManagedAgentMySqlIT` passes against `mariadb:10.11.18`, the image CI uses,
-  and against `mysql:8.4`, including the V16 upgrade. `HostedHarnessMySqlIT`
+  and against `mysql:8.4`, including the V17 upgrade. `HostedHarnessMySqlIT`
   passes against `mysql:8.4` with the bundled CLI.
 - The Web Shell managed component tests (73), including the generated-types
   freshness test, and its typecheck pass.
@@ -376,7 +377,7 @@ make Flyway refuse to start a database that already applied the later version.
   id on the public route; ignoring pending commands or
   open operations; advertising lifecycle on a bound Session; confirming every
   completion, any answer, or the answer of a replaced Harness; unarchive
-  reopening the Session; V16 leaving commands pending or converting finished
+  reopening the Session; V17 leaving commands pending or converting finished
   ones; and new digest names. Skipping the Harness close also fails the Hosted
   process test.
 

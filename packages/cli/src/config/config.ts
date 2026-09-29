@@ -57,6 +57,10 @@ import {
   type OutputStyleDefinition,
   validateModelProvidersConfig,
 } from '@qwen-code/qwen-code-core';
+import {
+  AGENT_HOST_SESSION_SOURCE_TYPE,
+  AGENT_SESSION_SOURCE_TYPE,
+} from '../runtime/agent-session-source.js';
 import { extensionsCommand } from '../commands/extensions.js';
 import {
   agentExecutionBackend,
@@ -2243,7 +2247,12 @@ export async function loadCliConfig(
   if (argv.continue || argv.resume) {
     const sessionService = new SessionService(cwd);
     if (argv.continue) {
-      sessionData = await sessionService.loadLastSession();
+      sessionData = await sessionService.loadLastSession({
+        excludeSourceTypes: [
+          AGENT_HOST_SESSION_SOURCE_TYPE,
+          AGENT_SESSION_SOURCE_TYPE,
+        ],
+      });
       if (sessionData) {
         sessionId = sessionData.conversation.sessionId;
       } else if (argv.forkSession) {
@@ -2595,6 +2604,8 @@ export async function loadCliConfig(
     lsToolEnabled: settings.tools?.listDirectory?.enabled === true,
     todoWriteEnabled: settings.tools?.todoWrite?.enabled === true,
     agentTeamEnabled: settings.experimental?.agentTeam ?? false,
+    agentCollaborationEnabled:
+      settings.experimental?.agentCollaboration ?? false,
     artifactEnabled: settings.experimental?.artifact ?? true,
     artifactAutoOpen: settings.artifact?.autoOpen ?? true,
     artifactPublisher: settings.artifact?.publisher ?? 'local',
@@ -2719,6 +2730,10 @@ export async function loadCliConfig(
       bareMode || safeMode
         ? false
         : (settings.memory?.enableTeamMemorySync ?? false),
+    enableStructuredMemoryRecall:
+      bareMode || safeMode
+        ? false
+        : (settings.memory?.enableStructuredRecall ?? false),
     enableAutoSkill:
       bareMode || safeMode
         ? false
@@ -2824,6 +2839,7 @@ export async function loadCliConfig(
     configParams.enableManagedAutoDream = false;
     configParams.enableTeamMemory = false;
     configParams.enableTeamMemorySync = false;
+    configParams.enableStructuredMemoryRecall = false;
     configParams.enableAutoSkill = false;
     configParams.fileCheckpointingEnabled = false;
     configParams.artifactEnabled = false;

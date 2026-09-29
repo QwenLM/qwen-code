@@ -25,7 +25,9 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutationCommand;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SnapshotRecord;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnPage;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnRecord;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnSummary;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry.ResolvedBinding;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -70,6 +72,8 @@ public class ManagedAgentStore implements AgentStateStore {
             + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
     private static final List<String> ACTIVE_TURN_STATES = List.of(
             "ACCEPTED", "RUNNING", "CANCELLING");
+    private static final String TURN_SUMMARY_COLUMNS = "session_id,"
+            + " turn_id, status, created_at, completed_at, error_code";
     private final JdbcTemplate jdbc;
     private final ObjectMapper objectMapper;
     private final Clock clock;
@@ -92,6 +96,12 @@ public class ManagedAgentStore implements AgentStateStore {
                     result.getLong("updated_at"),
                     nullableLong(result, "deleted_at"),
                     result.getLong("version"), readBinding(result));
+    private final RowMapper<TurnSummary> turnSummaryMapper =
+            (result, row) -> new TurnSummary(result.getString("session_id"),
+                    result.getString("turn_id"), result.getString("status"),
+                    result.getLong("created_at"),
+                    nullableLong(result, "completed_at"),
+                    result.getString("error_code"));
     private final RowMapper<TurnRecord> turnMapper = (result, row) ->
             new TurnRecord(result.getString("tenant_id"),
                     result.getString("session_id"),
@@ -863,6 +873,44 @@ public class ManagedAgentStore implements AgentStateStore {
         return rows.stream().findFirst();
     }
 
+    // Reads leave the Turn's input out; the public view never shows it.
+    @Override
+    public TurnPage listTurns(String tenantId, String sessionId,
+            Long beforeCreatedAt, String beforeTurnId, int limit) {
+        List<Object> arguments = new ArrayList<>(List.of(tenantId,
+                sessionId));
+        String before = "";
+        if (beforeCreatedAt != null) {
+            before = " AND (created_at < ? OR (created_at = ? AND"
+                    + " turn_id < ?))";
+            arguments.add(beforeCreatedAt);
+            arguments.add(beforeCreatedAt);
+            arguments.add(beforeTurnId);
+        }
+        arguments.add(limit + 1);
+        List<TurnSummary> rows = jdbc.query("SELECT " + TURN_SUMMARY_COLUMNS
+                        + " FROM managed_agent_turn WHERE tenant_id = ? AND"
+                        + " session_id = ?" + before + " ORDER BY created_at"
+                        + " DESC, turn_id DESC LIMIT ?",
+                turnSummaryMapper, arguments.toArray());
+        boolean hasMore = rows.size() > limit;
+        return new TurnPage(hasMore ? List.copyOf(rows.subList(0, limit))
+                : rows, hasMore);
+    }
+
+    @Override
+    public Optional<TurnSummary> findTurnSummary(String tenantId,
+            String sessionId, String turnId) {
+        return jdbc.query("SELECT " + TURN_SUMMARY_COLUMNS + " FROM"
+                        + " managed_agent_turn WHERE tenant_id = ? AND"
+                        + " session_id = ? AND turn_id = ?",
+                turnSummaryMapper, tenantId, sessionId, turnId).stream()
+                // The binary collation ignores trailing spaces, so the
+                // database also matches an ID that adds some.
+                .filter(turn -> turn.turnId().equals(turnId))
+                .findFirst();
+    }
+
     public List<EventRecord> findEvents(String tenantId, String sessionId,
             long afterSequence, int limit) {
         requireSession(tenantId, sessionId);
@@ -1568,6 +1616,29 @@ public class ManagedAgentStore implements AgentStateStore {
         }
     }
 
+    @Transactional
+    public void appendLiveSessionEventIfAbsent(String tenantId,
+            String sessionId, String type, Map<String, Object> data,
+            String sourceKey) {
+        // A locking read sees the latest committed status, where a plain one
+        // could still see the snapshot taken before a deletion committed.
+        Optional<SessionRecord> session = jdbc.query("SELECT * FROM"
+                        + " managed_agent_session WHERE tenant_id = ?"
+                        + " AND CAST(CONCAT(tenant_id, '!') AS BINARY(513))"
+                        + " = CAST(CONCAT(?, '!') AS BINARY(513)) AND"
+                        + " session_id = ? FOR UPDATE",
+                sessionMapper, tenantId, tenantId, sessionId).stream()
+                .findFirst();
+        if (session.isEmpty() || "DELETING".equals(session.get().status())
+                || "DELETED".equals(session.get().status())) {
+            return;
+        }
+        if (!hasSourceEvent(tenantId, sessionId, sourceKey)) {
+            appendEvent(tenantId, sessionId, null, type, data, false,
+                    sourceKey, clock.millis());
+        }
+    }
+
     public SessionRecord requireSession(String tenantId, String sessionId) {
         return findSession(tenantId, sessionId).orElseThrow(() ->
                 new ApiException(HttpStatus.NOT_FOUND, "session_not_found",
@@ -1946,7 +2017,7 @@ public class ManagedAgentStore implements AgentStateStore {
         }
     }
 
-    // ARCHIVING remains only for an archive admitted before V16, which closes
+    // ARCHIVING remains only for an archive admitted before V17, which closes
     // the Harness as archive used to.
     private static String pendingStatus(OperationKind kind) {
         return switch (kind) {

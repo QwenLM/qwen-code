@@ -6258,6 +6258,64 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  it('returns the explicit load approval override in restored state', async () => {
+    let approvalMode = ApprovalMode.PLAN;
+    const bridge = makeBridge({
+      channelFactory: async () =>
+        makeChannel({
+          loadSessionImpl: () =>
+            ({
+              modes: {
+                currentModeId: ApprovalMode.PLAN,
+                _meta: { planExecutionMode: ApprovalMode.YOLO },
+                availableModes: [],
+              },
+              configOptions: [
+                {
+                  id: 'mode',
+                  name: 'Approval mode',
+                  type: 'select',
+                  currentValue: ApprovalMode.PLAN,
+                  options: [],
+                },
+              ],
+            }) as unknown as LoadSessionResponse,
+          extMethodImpl: (method, params) => {
+            if (method === SERVE_CONTROL_EXT_METHODS.sessionApprovalMode) {
+              const previous = approvalMode;
+              approvalMode = params['mode'] as ApprovalMode;
+              return { previous, current: approvalMode };
+            }
+            return {};
+          },
+        }).channel,
+    });
+
+    const loaded = await bridge.loadSession({
+      sessionId: 'persisted-approval',
+      workspaceCwd: WS_A,
+      approvalMode: ApprovalMode.DEFAULT,
+    });
+
+    expect(loaded.state.modes?.currentModeId).toBe(ApprovalMode.DEFAULT);
+    expect(loaded.state.modes?._meta?.['planExecutionMode']).toBeUndefined();
+    expect(
+      loaded.state.configOptions?.find((option) => option.id === 'mode'),
+    ).toMatchObject({ currentValue: ApprovalMode.DEFAULT });
+
+    const attached = await bridge.loadSession({
+      sessionId: 'persisted-approval',
+      workspaceCwd: WS_A,
+    });
+    expect(attached.state.modes?.currentModeId).toBe(ApprovalMode.DEFAULT);
+    expect(attached.state.modes?._meta?.['planExecutionMode']).toBeUndefined();
+    expect(
+      attached.state.configOptions?.find((option) => option.id === 'mode'),
+    ).toMatchObject({ currentValue: ApprovalMode.DEFAULT });
+
+    await bridge.shutdown();
+  });
+
   it('surfaces replayDegraded on loadSession when compaction fails', async () => {
     const handle = makeChannel({
       promptImpl: async (p) => {
@@ -16207,6 +16265,75 @@ describe('createAcpSessionBridge', () => {
       expect(
         handle.agent.promptCalls[0]?._meta?.['qwen.daemon.channelDelivery'],
       ).toEqual({ deliveryId: 'prompt-1', target });
+      await bridge.shutdown();
+    });
+
+    it('strips a spoofed agent run and injects only the trusted one', async () => {
+      // The run frame decides which thread an agent's tools act on. A caller
+      // that could set this key could make one agent post under another's
+      // name, so it gets the same treatment as the delivery above.
+      const handle = makeChannel();
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const trusted = {
+        workspaceId: 'ws_1',
+        agentId: 'ag_alice',
+        runId: 'run_1',
+        threadId: 'th_1',
+        rootThreadId: 'th_1',
+        attempt: 1,
+        contextThroughSequence: 3,
+      };
+
+      await bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'take a turn' }],
+          _meta: {
+            'qwen.daemon.agentRun': {
+              workspaceId: 'ws_1',
+              agentId: 'ag_mallory',
+              runId: 'run_forged',
+              threadId: 'th_victim',
+              rootThreadId: 'th_victim',
+              attempt: 1,
+            },
+          },
+        } as PromptRequest,
+        undefined,
+        { promptId: 'run_1', agentRun: trusted },
+      );
+
+      expect(
+        handle.agent.promptCalls[0]?._meta?.['qwen.daemon.agentRun'],
+      ).toEqual(trusted);
+      await bridge.shutdown();
+    });
+
+    it('sends no agent run when the trusted context carries none', async () => {
+      // An ordinary session prompt must establish no frame at all: a person
+      // typing into an agent's session is not taking that agent's turn.
+      const handle = makeChannel();
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'hello' }],
+          _meta: {
+            'qwen.daemon.agentRun': { agentId: 'ag_mallory', runId: 'r' },
+          },
+        } as PromptRequest,
+        undefined,
+        { promptId: 'p-1' },
+      );
+
+      expect(
+        handle.agent.promptCalls[0]?._meta?.['qwen.daemon.agentRun'],
+      ).toBeUndefined();
       await bridge.shutdown();
     });
 

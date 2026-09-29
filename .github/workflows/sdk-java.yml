@@ -18,6 +18,9 @@ on:
       - 'packages/cli/src/acp-integration/**'
       - 'packages/acp-bridge/**'
       - 'integration-tests/fake-openai-server.ts'
+      - 'integration-tests/helpers/hosted-*'
+      - 'integration-tests/cli/hosted-latency-baseline.test.ts'
+      - 'integration-tests/baselines/hosted-latency.json'
       - 'package.json'
       - 'pnpm-lock.yaml'
       - 'docs/developers/sdk-java.md'
@@ -43,6 +46,9 @@ on:
       - 'packages/cli/src/acp-integration/**'
       - 'packages/acp-bridge/**'
       - 'integration-tests/fake-openai-server.ts'
+      - 'integration-tests/helpers/hosted-*'
+      - 'integration-tests/cli/hosted-latency-baseline.test.ts'
+      - 'integration-tests/baselines/hosted-latency.json'
       - 'package.json'
       - 'pnpm-lock.yaml'
       - 'docs/developers/sdk-java.md'
@@ -260,7 +266,7 @@ jobs:
         run: 'node scripts/check-failsafe-reports.js non-hosted packages/sdk-java/runtime-broker packages/sdk-java/managed-agent-server'
 
   hosted-harness-mysql:
-    name: 'Hosted no-tool processes / MySQL 8.4 / Java 21'
+    name: 'Hosted process fault gates / MySQL 8.4 / Java 21'
     runs-on: 'ubuntu-latest'
     timeout-minutes: 30
     services:
@@ -304,7 +310,7 @@ jobs:
           mvn --batch-mode --no-transfer-progress -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
           mvn --batch-mode --no-transfer-progress -f packages/sdk-java/runtime-broker/pom.xml -DskipTests install
       - name: 'Verify Hosted Java, Spring and MySQL processes'
-        timeout-minutes: 5
+        timeout-minutes: 12
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
           MYSQL_PORT: "${{ job.services.mysql.ports['3306'] }}"
@@ -317,6 +323,11 @@ jobs:
           -Dmysql.user=root -Dmysql.password=hosted-fixture clean verify checkstyle:check
       - name: 'Check that every Hosted integration test class ran'
         run: 'node scripts/check-failsafe-reports.js hosted packages/sdk-java/managed-agent-server'
+      - name: 'Check Hosted latency measurements'
+        run: |-
+          test -s packages/sdk-java/managed-agent-server/target/hosted-latency-baseline.json
+          cd integration-tests
+          npx vitest run cli/hosted-latency-baseline.test.ts
       - name: 'Run Runtime Broker fault gates'
         timeout-minutes: 10
         env:
@@ -329,7 +340,9 @@ jobs:
         uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
         with:
           name: 'hosted-harness-mysql-reports'
-          path: 'packages/sdk-java/managed-agent-server/target/failsafe-reports/'
+          path: |
+            packages/sdk-java/managed-agent-server/target/failsafe-reports/
+            packages/sdk-java/managed-agent-server/target/hosted-latency-baseline.json
           retention-days: 7
 
   daemon-e2e:

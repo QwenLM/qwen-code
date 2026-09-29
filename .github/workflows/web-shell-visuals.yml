@@ -192,7 +192,7 @@ jobs:
         continue-on-error: true
         env:
           WEB_SHELL_VISUALS_OUTPUT_DIR: '${{ runner.temp }}/web-shell-before'
-        run: 'npm run test:e2e:visuals --workspace=packages/web-shell -- screenshots.spec.ts workflow-page.spec.ts git-branch-picker.spec.ts session-workflow.spec.ts'
+        run: 'npm run test:e2e:visuals --workspace=packages/web-shell -- screenshots.spec.ts workflow-page.spec.ts git-branch-picker.spec.ts session-workflow.spec.ts collaboration.spec.ts'
 
       - name: 'Compose before/after and keep only changed views'
         env:

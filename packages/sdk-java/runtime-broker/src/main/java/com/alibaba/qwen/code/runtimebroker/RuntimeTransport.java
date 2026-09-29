@@ -33,9 +33,10 @@ public interface RuntimeTransport {
 
     /**
      * Installs directory context only; does not activate a Session. The
-     * binding must be READY and be the one the Session was acquired on, at
-     * the same generation, and hold the Session's placement: its scope and,
-     * under session isolation, its Harness Session.
+     * Session record must be ACQUIRING or READY and name this binding at its
+     * current generation. The binding must be READY with no drain requested
+     * and hold the Session's placement: its scope and, under session
+     * isolation, its Harness Session.
      */
     default CompletionStage<Map<String, Object>> installContext(
             RuntimeBindingRecord runtime, RuntimeSessionRecord session,
@@ -47,6 +48,21 @@ public interface RuntimeTransport {
 
     CompletionStage<Void> acquire(RuntimeLease lease,
             RuntimeSession session);
+
+    default CompletionStage<Void> installPublisher(RuntimeLease lease,
+            RuntimeSession session, Map<String, Object> publisher) {
+        return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
+                "managed_tool_publisher_unavailable",
+                "Runtime transport does not support output publication.", false));
+    }
+
+    default CompletionStage<Map<String, Object>> acknowledge(RuntimeLease lease,
+            RuntimeSession session, Map<String, Object> reference,
+            Map<String, Object> receipt) {
+        return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
+                "managed_tool_result_acknowledge_unsupported",
+                "Runtime transport does not support result acknowledgement.", false));
+    }
 
     CompletionStage<Object> control(RuntimeLease lease,
             RuntimeSession session, Map<String, Object> operation);
