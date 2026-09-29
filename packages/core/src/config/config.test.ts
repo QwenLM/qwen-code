@@ -10092,34 +10092,42 @@ describe('Server Config (config.ts)', () => {
     vi.spyOn(config, 'getManagedAutoMemoryEnabled').mockReturnValue(true);
     vi.spyOn(config, 'getStructuredMemoryRecallEnabled').mockReturnValue(true);
     vi.spyOn(config, 'getProjectRoot').mockReturnValue('/tmp/project');
-    vi.spyOn(config, 'getTeamMemoryEnabled').mockReturnValue(false);
-    vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+    vi.spyOn(config, 'getTeamMemoryEnabled').mockReturnValue(true);
+    vi.spyOn(config, 'isTrustedFolder').mockReturnValue(false);
     const scan = vi
       .fn()
       .mockResolvedValue({ ready: true, revision: 'structured-revision' });
-    Object.assign(config, {
-      scanMemoryRecallCorpusStatus: scan,
-      buildAutoMemoryPromptForMode: vi
-        .fn()
-        .mockResolvedValue('structured prompt'),
+    Object.assign(config, { scanMemoryRecallCorpusStatus: scan });
+
+    scan.mockResolvedValueOnce({
+      ready: false,
+      revision: 'not-ready-revision',
     });
+    await expect(config.prepareMemoryRecallTransition()).resolves.toBe(
+      undefined,
+    );
+    expect(config.getMemoryRecallMode()).toBe('legacy');
 
     const transition = await config.prepareMemoryRecallTransition();
     expect(transition).toMatchObject({
       from: 'legacy',
       to: 'structured',
       revision: 'structured-revision',
-      autoMemoryPrompt: 'structured prompt',
-      previousRevision: 'legacy-revision',
+      previousRevision: 'not-ready-revision',
       previousAutoMemoryPrompt: 'legacy prompt',
     });
+    expect(transition?.autoMemoryPrompt).toContain(
+      'Use the complete tree and focused metadata for routing.',
+    );
+    expect(transition?.autoMemoryPrompt).not.toContain('TEAM:');
+    expect(rebuildTeamAutoMemoryIndex).not.toHaveBeenCalled();
     await expect(
       config.confirmMemoryRecallTransition(transition!),
     ).resolves.toBe(true);
 
     config.commitMemoryRecallTransition(transition!);
     expect(config.getMemoryRecallMode()).toBe('structured');
-    expect(config.getAutoMemoryPrompt()).toBe('structured prompt');
+    expect(config.getAutoMemoryPrompt()).toBe(transition?.autoMemoryPrompt);
 
     config.rollbackMemoryRecallTransition(transition!);
     expect(config.getMemoryRecallMode()).toBe('legacy');
@@ -10152,9 +10160,6 @@ describe('Server Config (config.ts)', () => {
       scanMemoryRecallCorpusStatus: vi
         .fn()
         .mockResolvedValue({ ready: true, revision: 'structured-revision' }),
-      buildAutoMemoryPromptForMode: vi
-        .fn()
-        .mockResolvedValue('structured prompt'),
     });
     vi.mocked(rebuildUserAutoMemoryIndex).mockRejectedValueOnce(
       new Error('EACCES: cannot read user root'),
@@ -10166,8 +10171,10 @@ describe('Server Config (config.ts)', () => {
       from: 'legacy',
       to: 'structured',
       revision: 'structured-revision',
-      autoMemoryPrompt: 'structured prompt',
     });
+    expect(transition?.autoMemoryPrompt).toContain(
+      'Use the complete tree and focused metadata for routing.',
+    );
   });
 
   it('prepareMemoryRecallTransition stays inert in safe mode', async () => {
@@ -10186,12 +10193,7 @@ describe('Server Config (config.ts)', () => {
     const scan = vi
       .fn()
       .mockResolvedValue({ ready: true, revision: 'structured-revision' });
-    Object.assign(config, {
-      scanMemoryRecallCorpusStatus: scan,
-      buildAutoMemoryPromptForMode: vi
-        .fn()
-        .mockResolvedValue('structured prompt'),
-    });
+    Object.assign(config, { scanMemoryRecallCorpusStatus: scan });
 
     await expect(config.prepareMemoryRecallTransition()).resolves.toBe(
       undefined,
@@ -10216,12 +10218,7 @@ describe('Server Config (config.ts)', () => {
     const scan = vi
       .fn()
       .mockResolvedValue({ ready: true, revision: 'structured-revision' });
-    Object.assign(config, {
-      scanMemoryRecallCorpusStatus: scan,
-      buildAutoMemoryPromptForMode: vi
-        .fn()
-        .mockResolvedValue('structured prompt'),
-    });
+    Object.assign(config, { scanMemoryRecallCorpusStatus: scan });
 
     await expect(config.prepareMemoryRecallTransition()).resolves.toBe(
       undefined,
