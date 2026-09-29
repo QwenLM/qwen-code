@@ -176,6 +176,8 @@ describe('HookSystem', () => {
         mockHookRunner,
         mockHookAggregator,
         expect.any(SessionHooksManager),
+        undefined,
+        hookSystem.runtimeId,
       );
     });
   });

@@ -35,6 +35,7 @@ import {
   SessionTranscriptDurabilityError,
   buildApiHistoryFromConversation,
   computeUniqueBranchTitle,
+  getApiHistoryPromptId,
   normalizeDerivedBranchTitle,
   getResumePromptTokenCount,
   getResumeTokenCounts,
@@ -3213,15 +3214,35 @@ describe('SessionService', () => {
       );
 
     it('should return linear messages when no compression checkpoint exists', () => {
+      const identifiedUser: ChatRecord = {
+        ...recordA1,
+        promptId: 'prompt-1',
+      };
       const assistantA1: ChatRecord = {
         ...recordB2,
         sessionId: sessionIdA,
-        parentUuid: recordA1.uuid,
+        parentUuid: identifiedUser.uuid,
       };
 
-      const history = historyOf([recordA1, assistantA1]);
+      const history = historyOf([identifiedUser, assistantA1]);
 
-      expect(history).toEqual([recordA1.message, assistantA1.message]);
+      expect(
+        history.map((content) => ({
+          role: content.role,
+          parts: content.parts,
+        })),
+      ).toEqual([
+        {
+          role: identifiedUser.message!.role,
+          parts: identifiedUser.message!.parts,
+        },
+        {
+          role: assistantA1.message!.role,
+          parts: assistantA1.message!.parts,
+        },
+      ]);
+      expect(getApiHistoryPromptId(history[0]!)).toBe('prompt-1');
+      expect(JSON.stringify(history[0])).not.toContain('prompt-1');
     });
 
     it('keeps Realtime dialogue out of backend model history', () => {
@@ -3723,6 +3744,43 @@ describe('SessionService', () => {
       expect(telemetry.systemPayload.uiEvent.prompt_id).toBe(
         `${newId}#Explore#0`,
       );
+    });
+
+    it('remaps record and chat_compression promptIds into the fork', async () => {
+      // Forked ids must remain visible to the new session's seed.
+      const { file, lines } = seedSession();
+      writeJsonl(file, [
+        { ...lines[0], promptId: `${oldId}########0` },
+        lines[1],
+        sys(
+          'compression-1',
+          'u2',
+          'chat_compression',
+          2,
+          {
+            info: {
+              originalTokenCount: 100,
+              newTokenCount: 40,
+              compressionStatus: 'compressed',
+            },
+            compressedHistory: [{ role: 'user', parts: [{ text: 'summary' }] }],
+            promptIds: [`${oldId}########0`, null],
+          },
+          { cwd },
+        ),
+      ]);
+
+      const written = readJsonl((await fork()).filePath);
+
+      const copiedUser = written.find((record) => record.uuid === 'u1');
+      expect(copiedUser.promptId).toBe(`${newId}########0`);
+      const copiedCompression = written.find(
+        (record) => record.subtype === 'chat_compression',
+      );
+      expect(copiedCompression.systemPayload.promptIds).toEqual([
+        `${newId}########0`,
+        null,
+      ]);
     });
 
     it('does not copy source turn_result identities into a fork', async () => {

@@ -518,6 +518,38 @@ describe('ReadFileTool', () => {
       );
     });
 
+    it('does not cache a read that returns after cancellation', async () => {
+      const filePath = path.join(tempRootDir, 'late-read.txt');
+      await fsp.writeFile(filePath, 'content', 'utf-8');
+      let release!: (result: { content: string }) => void;
+      const response = new Promise<{ content: string }>((resolve) => {
+        release = resolve;
+      });
+      const read = vi
+        .spyOn(StandardFileSystemService.prototype, 'readTextFile')
+        .mockReturnValueOnce(response);
+      const recordRead = vi.spyOn(fileReadCache, 'recordRead');
+      const controller = new AbortController();
+      const running = tool
+        .build({ file_path: filePath, offset: 0, limit: 20 })
+        .execute(controller.signal)
+        .then(
+          (value) => ({ value }),
+          (error: unknown) => ({ error }),
+        );
+      try {
+        await vi.waitFor(() => expect(read).toHaveBeenCalledOnce());
+        controller.abort();
+        release({ content: 'late content' });
+        expect(await running).toEqual({ error: controller.signal.reason });
+        expect(recordRead).not.toHaveBeenCalled();
+      } finally {
+        release({ content: 'late content' });
+        await running;
+        read.mockRestore();
+      }
+    });
+
     it('should handle text file with lines exceeding maximum length', async () => {
       const longLine = 'a'.repeat(2500); // Exceeds MAX_LINE_LENGTH_TEXT_FILE (2000)
       const filePath = await put(

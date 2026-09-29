@@ -767,6 +767,68 @@ describe('ChatCompressionService', () => {
     expect(result.info.warning).toBeUndefined();
   });
 
+  it("measures the pinned endpoint's window for a same-id compaction pin (#12760)", async () => {
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'msg1' }] },
+      { role: 'model', parts: [{ text: 'msg2' }] },
+      { role: 'user', parts: [{ text: 'msg3' }] },
+      { role: 'model', parts: [{ text: 'msg4' }] },
+    ];
+    vi.mocked(mockChat.getHistory).mockReturnValue(history);
+    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(100);
+    vi.mocked(tokenLimit).mockReturnValue(1000);
+    // Two same-id openai entries; the picker pinned the second (free-quota)
+    // endpoint, and getCompactionModel re-attaches its *declared* baseUrl.
+    // The guard must measure the pinned entry's 16k window, not the first
+    // same-id row's 131k — otherwise the compression is routed to an
+    // endpoint whose window the payload exceeds.
+    vi.mocked(mockConfig.getCompactionModel).mockReturnValue(
+      'openai:shared\0https://free-quota.example.com/v1',
+    );
+    vi.mocked(mockConfig.getAllConfiguredModels).mockReturnValue([
+      {
+        id: 'shared',
+        registryBaseUrl: 'https://token-plan.example.com/v1',
+        contextWindowSize: 131_072,
+      },
+      {
+        id: 'shared',
+        registryBaseUrl: 'https://free-quota.example.com/v1',
+        contextWindowSize: 16_384,
+      },
+    ] as never[]);
+
+    const mockGenerateText = vi.fn().mockResolvedValue({
+      text: 'Summary',
+      usage: {
+        promptTokenCount: 1100,
+        candidatesTokenCount: 50,
+        totalTokenCount: 1150,
+      },
+    });
+    vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+      generateText: mockGenerateText,
+    } as unknown as BaseLlmClient);
+
+    const result = await service.compress(mockChat, {
+      promptId: mockPromptId,
+      force: true,
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount: 100,
+    });
+
+    // COMPACT_MAX_OUTPUT_TOKENS (20k) alone exceeds the pinned 16k window.
+    expect(result.info.warning).toBeDefined();
+    expect(result.info.warning).toContain('too small');
+    expect(result.info.warning).toContain('16,384');
+    expect(mockGenerateText).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: 'test-model',
+      }),
+    );
+  });
+
   it('coalesces to the main model (not fastModel) when getCompactionModel returns undefined', async () => {
     vi.mocked(mockConfig.getFastModel).mockReturnValue('fast-model-v1');
     // Must use the main model, NOT the fast model

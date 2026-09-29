@@ -865,7 +865,9 @@ await agent('scan package.json')
   // limits and guideline paragraph (25,759); from 26,500 for
   // `agent({tools})`, what the allowlist refuses and cannot promise (26,900);
   // from 27,500, reached exactly by the resume refusals, for how a run
-  // interrupted by its process exiting is listed.
+  // interrupted by its process exiting is listed; from 28,000, nearly
+  // reached, when the `schema` entry gained what is refused before dispatch
+  // and what a failed structured result reports.
   it('keeps the inline fallback description within its budget', () => {
     const tool = new WorkflowTool({
       ...fakeConfig(),
@@ -876,7 +878,7 @@ await agent('scan package.json')
     } as unknown as Config);
 
     expect(tool.authoringSurface).toBe('inline');
-    expect(tool.description.length).toBeLessThanOrEqual(28_000);
+    expect(tool.description.length).toBeLessThanOrEqual(28_500);
   });
 
   it.each([

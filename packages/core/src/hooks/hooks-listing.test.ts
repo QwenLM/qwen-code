@@ -402,7 +402,9 @@ describe('buildHooksListing', () => {
   describe('agentScope', () => {
     it('carries the agent scope of an entry a subagent attached', async () => {
       const registry = await registryEntries({});
-      registry.addAgentHooks(LINT_SETTINGS, 'agent-reviewer');
+      registry.addAgentHooks(LINT_SETTINGS, 'agent-reviewer', {
+        owner: { sessionId: 'session-1', agentId: 'agent-1' },
+      });
 
       const [row] = rows({ entries: () => registry.getAllHooks() });
 
@@ -411,6 +413,30 @@ describe('buildHooksListing', () => {
         source: HooksConfigSource.Session,
         agentScope: 'agent-reviewer',
       });
+    });
+
+    it('uses live source trust instead of the viewing workspace trust', async () => {
+      const registry = await registryEntries({});
+      let trusted = true;
+      registry.addAgentHooks(LINT_SETTINGS, 'source-agent', {
+        owner: { sessionId: SESSION_ID, agentId: 'A' },
+        isSourceTrusted: () => trusted,
+      });
+      const config = makeConfig({
+        entries: () => registry.getAllHooks(),
+        trusted: false,
+      });
+      expect(buildHooksListing(config).rows[0]).toMatchObject({
+        enabled: true,
+        trustGated: true,
+      });
+      trusted = false;
+      expect(buildHooksListing(config).rows[0]).toMatchObject({
+        enabled: false,
+        disabledReason: 'untrusted',
+      });
+      trusted = true;
+      expect(buildHooksListing(config).rows[0].enabled).toBe(true);
     });
 
     it('omits agentScope on an entry from settings', async () => {

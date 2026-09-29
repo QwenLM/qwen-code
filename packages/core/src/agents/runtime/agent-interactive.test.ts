@@ -5,6 +5,11 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import {
+  getHookExecutionOwner,
+  runWithHookExecutionOwner,
+} from '../../hooks/hook-execution-context.js';
+
 import { AgentInteractive } from './agent-interactive.js';
 import type { AgentCore } from './agent-core.js';
 import { AgentEventEmitter, AgentEventType } from './agent-events.js';
@@ -76,6 +81,15 @@ function createMockCore(
 
   const core = {
     subagentId: 'test-agent-abc123',
+    runInHookFrame: <T>(fn: () => T): T =>
+      runWithHookExecutionOwner(
+        {
+          runtimeId: 'runtime',
+          sessionId: 'session',
+          agentId: 'test-agent-abc123',
+        },
+        fn,
+      ),
     name: 'test-agent',
     eventEmitter: emitter,
     stats: {
@@ -287,6 +301,47 @@ describe('AgentInteractive', () => {
     expect(prepDepth).toBe(0);
     expect(loopId).toBe('agent-1');
     expect(loopDepth).toBe(0);
+  });
+
+  it('restores its hook owner during preparation and later queued rounds', async () => {
+    const { core } = createMockCore();
+    const seen: Array<{
+      stage: string;
+      owner: ReturnType<typeof getHookExecutionOwner>;
+    }> = [];
+    const record = (stage: string) =>
+      seen.push({ stage, owner: getHookExecutionOwner() });
+    vi.mocked(core.createChat).mockImplementation(async () => {
+      record('chat');
+      return { sendMessageStream: vi.fn() } as never;
+    });
+    vi.mocked(core.prepareTools).mockImplementation(async () => {
+      record('prepare');
+      return [];
+    });
+    vi.mocked(core.runReasoningLoop).mockImplementation(async () => {
+      record('loop');
+      return { text: 'Done', terminateMode: null, turnsUsed: 1 };
+    });
+    const agent = new AgentInteractive(createConfig(), core);
+    const foreign = { runtimeId: 'other', sessionId: 'other', agentId: 'B' };
+    await runWithHookExecutionOwner(foreign, async () => {
+      await agent.start(context);
+      expect(getHookExecutionOwner()).toEqual(foreign);
+      agent.enqueueMessage('later round');
+      await vi.waitFor(() =>
+        expect(seen.some(({ stage }) => stage === 'loop')).toBe(true),
+      );
+      expect(getHookExecutionOwner()).toEqual(foreign);
+    });
+    expect(seen.map(({ stage }) => stage)).toEqual(['chat', 'prepare', 'loop']);
+    for (const { owner } of seen)
+      expect(owner).toEqual({
+        runtimeId: 'runtime',
+        sessionId: 'session',
+        agentId: 'test-agent-abc123',
+      });
+    await agent.shutdown();
   });
 
   it('pins the construction-time depth when built inside a sub-agent frame', async () => {

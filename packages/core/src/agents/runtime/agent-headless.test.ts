@@ -7,6 +7,11 @@
 import type { FunctionCall, FunctionDeclaration, Part } from '@google/genai';
 import { Type } from '@google/genai';
 import {
+  getHookExecutionOwner,
+  runWithHookExecutionOwner,
+} from '../../hooks/hook-execution-context.js';
+
+import {
   afterEach,
   beforeEach,
   describe,
@@ -626,6 +631,56 @@ describe('subagent.ts', () => {
     });
 
     describe('execute - Initialization and Prompting', () => {
+      it('owns createChat and prepareTools before entering the reasoning loop', async () => {
+        const { config } = await createMockConfig();
+        vi.spyOn(config, 'getHookSystem').mockReturnValue({
+          runtimeId: 'headless-runtime',
+        } as unknown as ReturnType<Config['getHookSystem']>);
+        const scope = await AgentHeadless.create(
+          'A',
+          config,
+          { systemPrompt: '' },
+          defaultModelConfig,
+          defaultRunConfig,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          'explicit-A',
+        );
+        const expected = {
+          runtimeId: 'headless-runtime',
+          sessionId: config.getSessionId(),
+          agentId: scope.getCore().subagentId,
+        };
+        const stages: string[] = [];
+        vi.spyOn(scope.getCore(), 'createChat').mockImplementation(async () => {
+          stages.push('chat');
+          expect(getHookExecutionOwner()).toEqual(expected);
+          return {} as LlmChat;
+        });
+        vi.spyOn(scope.getCore(), 'prepareTools').mockImplementation(
+          async () => {
+            stages.push('prepare');
+            expect(getHookExecutionOwner()).toEqual(expected);
+            throw new Error('stop after preparation');
+          },
+        );
+        const foreign = {
+          runtimeId: 'other',
+          sessionId: 'other',
+          agentId: 'B',
+        };
+        await runWithHookExecutionOwner(foreign, async () => {
+          await expect(scope.execute(new ContextState())).rejects.toThrow(
+            'stop after preparation',
+          );
+          expect(getHookExecutionOwner()).toEqual(foreign);
+        });
+        expect(stages).toEqual(['chat', 'prepare']);
+      });
+
       it('sends an explicit empty tools list for a no-tool agent', async () => {
         const { config } = await createMockConfig();
         mockSendMessageStream.mockImplementation(createMockStream(['stop']));

@@ -177,6 +177,17 @@ describe('BackgroundAgentResumeService', () => {
         serverName?: string;
       }>;
       skillManager?: unknown;
+      /**
+       * Tool names the stub registry reports as registered, on top of any
+       * `currentForkRuntime` declarations. `getInitialChatHistory` ANDs the
+       * caller's `includeAvailableSkillsReminder` with
+       * `toolRegistry.getAllToolNames().includes(ToolNames.SKILL)` (#12838), so
+       * a test asserting that the listing reaches `initialMessages` must also
+       * say the Skill tool is registered. Without it every row answers "no
+       * listing" for the registry's reason rather than the predicate's, and the
+       * negative rows pass vacuously.
+       */
+      registeredToolNames?: string[];
       toolMode?: ToolMode;
       hookSystem?:
         | {
@@ -228,11 +239,14 @@ describe('BackgroundAgentResumeService', () => {
       getAllTools: vi.fn().mockReturnValue([]),
       getAllToolNames: vi
         .fn()
-        .mockReturnValue(
-          liveTools
-            .map((declaration) => declaration.name)
-            .filter((name): name is string => Boolean(name)),
-        ),
+        .mockReturnValue([
+          ...new Set([
+            ...liveTools
+              .map((declaration) => declaration.name)
+              .filter((name): name is string => Boolean(name)),
+            ...(options.registeredToolNames ?? []),
+          ]),
+        ]),
       getTool: vi.fn(),
       stop: vi.fn().mockResolvedValue(undefined),
       warmAll: vi.fn().mockResolvedValue(undefined),
@@ -1272,6 +1286,11 @@ describe('BackgroundAgentResumeService', () => {
       };
       const { service, subagentManager } = createService({
         toolMode,
+        // The session this resume runs in does have the Skill tool; the rows
+        // below are about `subagentWillHaveSkillTool`, not about #12838's
+        // registry gate. Omitting this made every row answer "no listing" for
+        // the registry's reason and the two negative rows pass vacuously.
+        registeredToolNames: [ToolNames.SKILL],
         skillManager: {
           listSkills: vi.fn().mockResolvedValue([
             {

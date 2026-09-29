@@ -30,6 +30,12 @@ import {
 } from './openaiResponsesContentGenerator/responses-converter.js';
 import type { ResponsesSSEEvent } from './openaiResponsesContentGenerator/types.js';
 import { getToolCallFingerprint } from './toolCallIdUtils.js';
+import {
+  buildApiHistoryFromConversation,
+  findApiHistoryPromptIndex,
+  getApiHistoryPromptId,
+} from '../services/session-api-history.js';
+import type { ChatRecord } from '../services/chatRecordingService.js';
 import { classifyRetryError } from '../utils/retryErrorClassification.js';
 import { ResponsesHttpError } from '../utils/responses-http-error.js';
 import { convertGeminiContentsToResponsesInput } from './openaiResponsesContentGenerator/responses-converter.js';
@@ -861,6 +867,37 @@ describe('LlmChat', async () => {
         'Qwen Code is streaming a model response',
       );
       expect(mockSleepInhibitorRelease).toHaveBeenCalledTimes(1);
+    });
+
+    it('marks the pushed user entry with the send promptId', async () => {
+      // Rewind reads this mark through getHistoryShallow.
+      streamMock().mockImplementation(async () =>
+        streamOf(stopResponse([{ text: 'ok' }])),
+      );
+
+      const sendMarked = async (options?: { promptId?: string }) => {
+        await drain(
+          await chat.sendMessageStream(
+            'test-model',
+            { message: 'hello' },
+            'prompt-id-mark',
+            undefined,
+            options,
+          ),
+        );
+        return chat
+          .getHistoryShallow()
+          .filter((entry) => entry.role === 'user')
+          .at(-1)!;
+      };
+
+      expect(
+        getApiHistoryPromptId(
+          await sendMarked({ promptId: 'session########7' }),
+        ),
+      ).toBe('session########7');
+      // No identity supplied (retry, continuation, tool result): unmarked.
+      expect(getApiHistoryPromptId(await sendMarked())).toBeUndefined();
     });
 
     describe('manual plan-exit notices', () => {
@@ -3084,6 +3121,94 @@ describe('LlmChat', async () => {
       expect(infoOf(events[0]).newTokenCount).toBe(200);
     });
 
+    it('persists the in-flight user turn in the in-send compression snapshot', async () => {
+      // Resume replaces history with this pre-push compression snapshot.
+      const compressedHistory: Content[] = [
+        { role: 'user', parts: [{ text: 'COMPACTION_SUMMARY' }] },
+        { role: 'model', parts: [{ text: 'ACK' }] },
+      ];
+      // Derive ids synchronously, as the real recording service does.
+      const recordedPromptIds: Array<Array<string | null>> = [];
+      const recordChatCompression = vi.fn(
+        (payload: { compressedHistory: Content[] }) => {
+          recordedPromptIds.push(
+            payload.compressedHistory.map(
+              (content) => getApiHistoryPromptId(content) ?? null,
+            ),
+          );
+        },
+      );
+      const chatWithRecording = newChat({
+        recorder: { recordAssistantTurn: vi.fn(), recordChatCompression },
+      });
+      mockCompressOnce(
+        compressResult(
+          CompressionStatus.COMPRESSED,
+          compressedHistory,
+          100_000,
+          40_000,
+          true,
+        ),
+      );
+      mockStream(textStream('ANSWER_TO_P'));
+
+      const promptId = 'probe-session########7';
+      await drain(
+        await chatWithRecording.sendMessageStream(
+          'test-model',
+          { message: 'QUESTION_P' },
+          'prompt-id-in-send-compaction-roundtrip',
+          undefined,
+          { promptId },
+        ),
+      );
+
+      expect(recordChatCompression).toHaveBeenCalledTimes(1);
+      const recordPayload = recordChatCompression.mock.calls[0][0] as {
+        compressedHistory: Content[];
+      };
+      expect(
+        recordPayload.compressedHistory.map((content) =>
+          content.parts?.map((part) => part.text).join(''),
+        ),
+      ).toEqual(['COMPACTION_SUMMARY', 'ACK', 'QUESTION_P']);
+      // The mark must already be on the recorded copy.
+      const promptIds = recordedPromptIds[0]!;
+      expect(promptIds).toEqual([null, null, promptId]);
+
+      // Round-trip the persisted shape through the resume builder.
+      const resumed = buildApiHistoryFromConversation({
+        messages: [
+          {
+            type: 'user',
+            message: { role: 'user', parts: [{ text: 'QUESTION_P' }] },
+            promptId,
+          },
+          {
+            type: 'system',
+            subtype: 'chat_compression',
+            systemPayload: { ...recordPayload, promptIds },
+          },
+          {
+            type: 'assistant',
+            message: { role: 'model', parts: [{ text: 'ANSWER_TO_P' }] },
+          },
+        ] as unknown as ChatRecord[],
+      });
+      expect(resumed.map((content) => content.role)).toEqual([
+        'user',
+        'model',
+        'user',
+        'model',
+      ]);
+      expect(
+        resumed.map((content) =>
+          content.parts?.map((part) => part.text).join(''),
+        ),
+      ).toEqual(['COMPACTION_SUMMARY', 'ACK', 'QUESTION_P', 'ANSWER_TO_P']);
+      expect(findApiHistoryPromptIndex(resumed, promptId)).toBe(2);
+    });
+
     it('forwards the pending user message and request config to compression', async () => {
       // The cheap-gate sizes the prompt with estimatePromptTokens(history,
       // pendingUserMessage, lastPromptTokenCount), so the first send after
@@ -3659,7 +3784,13 @@ describe('LlmChat', async () => {
         }),
       );
       expect(recordPayload.info.newTokenCountIsEstimated).toBe(true);
-      expect(recordPayload.compressedHistory).toEqual(summaryAck());
+      // The snapshot carries the pending turn the compression belongs to:
+      // resume replaces history wholesale at the compression record, so a
+      // snapshot without it would resurrect the answer with no question.
+      expect(recordPayload.compressedHistory).toEqual([
+        ...summaryAck(),
+        { role: 'user', parts: [{ text: userMessage }] },
+      ]);
     });
 
     it('rejects before request serialization when oversized resumed history cannot be compressed', async () => {

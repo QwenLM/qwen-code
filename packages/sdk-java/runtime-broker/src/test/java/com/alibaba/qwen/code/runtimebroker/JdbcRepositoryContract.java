@@ -57,6 +57,7 @@ public final class JdbcRepositoryContract {
         verifyExecution(dataSource, prefix);
         verifyExecutionFences(dataSource, prefix);
         verifyExecutionForgeries(dataSource, prefix);
+        ExecutionTakeoverContract.verify(new JdbcToolExecutionRepository(dataSource), prefix + "-takeover-scan");
         verifyLeaseDeadlines(dataSource, prefix);
         RuntimeRecoveryContract.verify(new JdbcRuntimeBindingRepository(dataSource, protector(prefix)),
                 new JdbcRuntimeSessionRepository(dataSource), new JdbcToolExecutionRepository(dataSource),

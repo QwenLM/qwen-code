@@ -50,6 +50,7 @@ describe('MessageBus', () => {
     bus.request<HookExecutionRequest, HookExecutionResponse>(
       {
         type: MessageBusType.HOOK_EXECUTION_REQUEST,
+        owner: { runtimeId: 'runtime', sessionId: 'session', agentId: null },
         eventName: 'TestEvent',
         input: {},
       },
@@ -80,6 +81,7 @@ describe('MessageBus', () => {
       );
       await bus.publish({
         type: MessageBusType.HOOK_EXECUTION_REQUEST,
+        owner: { runtimeId: 'runtime', sessionId: 'session', agentId: null },
         eventName: 'UserPromptSubmit',
         input: { prompt: 'test' },
         correlationId: 'hook-123',

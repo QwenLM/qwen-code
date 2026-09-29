@@ -2869,6 +2869,7 @@ describe('SubagentManager', () => {
         mockAgentHeadlessCreate.mockResolvedValue({
           execute: vi.fn(),
           getResult: vi.fn(),
+          getCore: () => ({ subagentId: 'created-agent-id' }),
         });
       });
 
@@ -2889,11 +2890,72 @@ describe('SubagentManager', () => {
         expect(result).toHaveProperty('dispose');
         expect(typeof result.dispose).toBe('function');
         expect(addAgentHooksSpy).toHaveBeenCalledTimes(1);
+        expect(addAgentHooksSpy.mock.calls[0][2].owner).toEqual({
+          sessionId: mockConfig.getSessionId(),
+          agentId: 'created-agent-id',
+        });
         expect(unregisterSpy).not.toHaveBeenCalled();
 
         await result.dispose();
 
         expect(unregisterSpy).toHaveBeenCalledTimes(1);
+      });
+
+      it('assigns distinct explicit identities when the caller omits an id', async () => {
+        const addAgentHooks = vi.fn().mockReturnValue(vi.fn());
+        vi.spyOn(mockConfig, 'getHookSystem').mockReturnValue({
+          getRegistry: () => ({ addAgentHooks }),
+        } as unknown as ReturnType<Config['getHookSystem']>);
+        mockAgentHeadlessCreate.mockImplementation(
+          async (...args: unknown[]) => ({
+            getCore: () => ({ subagentId: args[10] }),
+          }),
+        );
+        const config: SubagentConfig = {
+          ...baseConfig,
+          hooks: {
+            PreToolUse: [{ hooks: [{ type: 'command', command: 'echo' }] }],
+          },
+        };
+        const first = await manager.createAgentHeadless(config, mockConfig);
+        const second = await manager.createAgentHeadless(config, mockConfig);
+        const firstId = mockAgentHeadlessCreate.mock.calls[0][10];
+        const secondId = mockAgentHeadlessCreate.mock.calls[1][10];
+        expect(firstId).toMatch(/^cleanup-agent-[a-f0-9]{8}$/);
+        expect(secondId).not.toBe(firstId);
+        expect(addAgentHooks.mock.calls[0][2].owner.agentId).toBe(firstId);
+        expect(addAgentHooks.mock.calls[1][2].owner.agentId).toBe(secondId);
+        await first.dispose();
+        await second.dispose();
+      });
+
+      it('keeps the invocation session when construction overlaps a session change', async () => {
+        const session = vi
+          .spyOn(mockConfig, 'getSessionId')
+          .mockReturnValue('before');
+        const addAgentHooks = vi.fn().mockReturnValue(vi.fn());
+        vi.spyOn(mockConfig, 'getHookSystem').mockReturnValue({
+          getRegistry: () => ({ addAgentHooks }),
+        } as unknown as ReturnType<Config['getHookSystem']>);
+        mockAgentHeadlessCreate.mockImplementationOnce(async () => {
+          session.mockReturnValue('after');
+          return { getCore: () => ({ subagentId: 'actual-id' }) };
+        });
+        const result = await manager.createAgentHeadless(
+          {
+            ...baseConfig,
+            hooks: {
+              PreToolUse: [{ hooks: [{ type: 'command', command: 'echo' }] }],
+            },
+          },
+          mockConfig,
+          { subagentId: 'requested-id' },
+        );
+        expect(addAgentHooks.mock.calls[0][2]).toEqual({
+          owner: { sessionId: 'before', agentId: 'actual-id' },
+          isSourceTrusted: undefined,
+        });
+        await result.dispose();
       });
 
       it('does not register hooks for a project-level subagent in an untrusted folder', async () => {
@@ -2915,7 +2977,43 @@ describe('SubagentManager', () => {
         const result = await createHooked('Bash', { level: 'project' });
 
         expect(addAgentHooksSpy).toHaveBeenCalledTimes(1);
+        const registration = addAgentHooksSpy.mock.calls[0][2];
+        expect(registration.isSourceTrusted()).toBe(true);
+        vi.mocked(mockConfig.isTrustedFolder).mockReturnValue(false);
+        expect(registration.isSourceTrusted()).toBe(false);
         await result.dispose();
+      });
+
+      it('binds trust to the source manager even when the runtime has different trust', async () => {
+        const addAgentHooks = vi.fn().mockReturnValue(vi.fn());
+        const runtime = Object.create(mockConfig) as Config;
+        runtime.getHookSystem = () =>
+          ({ getRegistry: () => ({ addAgentHooks }) }) as unknown as ReturnType<
+            Config['getHookSystem']
+          >;
+        runtime.isTrustedFolder = () => true;
+        const sourceTrust = vi
+          .spyOn(mockConfig, 'isTrustedFolder')
+          .mockReturnValue(false);
+        const config: SubagentConfig = {
+          ...baseConfig,
+          level: 'project',
+          hooks: {
+            PreToolUse: [{ hooks: [{ type: 'command', command: 'echo' }] }],
+          },
+        };
+        const untrusted = await manager.createAgentHeadless(config, runtime);
+        expect(addAgentHooks).not.toHaveBeenCalled();
+        await untrusted.dispose();
+        sourceTrust.mockReturnValue(true);
+        runtime.isTrustedFolder = () => false;
+        const trusted = await manager.createAgentHeadless(config, runtime);
+        expect(addAgentHooks).toHaveBeenCalledOnce();
+        const registration = addAgentHooks.mock.calls[0][2];
+        expect(registration.isSourceTrusted()).toBe(true);
+        sourceTrust.mockReturnValue(false);
+        expect(registration.isSourceTrusted()).toBe(false);
+        await trusted.dispose();
       });
 
       it('dispose unregisters even when execute() never runs (early-exit leak fix)', async () => {
@@ -2956,7 +3054,7 @@ describe('SubagentManager', () => {
         await expect(createHooked('*')).rejects.toThrow(
           /synthetic constructor failure/,
         );
-        expect(unregisterSpy).toHaveBeenCalledTimes(1);
+        expect(unregisterSpy).not.toHaveBeenCalled();
       });
     });
 

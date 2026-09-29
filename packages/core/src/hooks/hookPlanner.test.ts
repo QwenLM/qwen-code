@@ -557,3 +557,80 @@ describe('HookPlanner', () => {
     });
   });
 });
+
+describe('agent hook ownership with a real registry', () => {
+  it('filters before dedup and preserves exact session/agent identity through reload and dispose', async () => {
+    const { HookRegistry } = await import('./hookRegistry.js');
+    const registry = new HookRegistry({
+      getProjectRoot: () => '/source',
+      isTrustedFolder: () => true,
+      getSystemHooks: () => ({}),
+      getUserHooks: () => ({
+        [HookEventName.PreToolUse]: [
+          { hooks: [{ type: HookType.Command, command: 'global' }] },
+        ],
+      }),
+      getProjectHooks: () => ({}),
+      getExtensions: () => [],
+    });
+    await registry.initialize();
+    const planner = new HookPlanner(registry);
+    let trusted = true;
+    const local = (description: string) => ({
+      [HookEventName.PreToolUse]: [
+        {
+          matcher: 'Read',
+          hooks: [
+            {
+              type: HookType.Command as const,
+              command: 'same',
+              name: 'same',
+              description,
+            },
+          ],
+        },
+      ],
+    });
+    const disposeA = registry.addAgentHooks(local('A'), 'registration-A', {
+      owner: { sessionId: 's1', agentId: 'A' },
+      isSourceTrusted: () => trusted,
+    });
+    registry.addAgentHooks(local('B'), 'registration-B', {
+      owner: { sessionId: 's1', agentId: 'B' },
+    });
+    const plan = (agentId: string | null, sessionId = 's1') =>
+      planner
+        .createExecutionPlan(
+          HookEventName.PreToolUse,
+          { toolName: 'read_file' },
+          { runtimeId: 'runtime', sessionId, agentId },
+        )
+        ?.hookConfigs.map(
+          (hook) =>
+            hook.description ??
+            (hook.type === HookType.Command ? hook.command : hook.type),
+        );
+    expect(plan(null)).toEqual(['global']);
+    expect(plan('A')).toEqual(['global', 'A']);
+    expect(plan('B')).toEqual(['global', 'B']);
+    expect(plan('C')).toEqual(['global']);
+    expect(plan('A', 's2')).toEqual(['global']);
+    expect(
+      planner.createExecutionPlan(HookEventName.PreToolUse)?.hookConfigs,
+    ).toHaveLength(1);
+    trusted = false;
+    expect(plan('A')).toEqual(['global']);
+    expect(plan('B')).toEqual(['global', 'B']);
+    await registry.reloadConfiguredHooks();
+    expect(plan('A')).toEqual(['global']);
+    trusted = true;
+    expect(plan('A')).toEqual(['global', 'A']);
+    registry.addAgentHooks(local('resumed A'), 'registration-A-new', {
+      owner: { sessionId: 's1', agentId: 'A' },
+    });
+    disposeA();
+    disposeA();
+    expect(plan('A')).toEqual(['global', 'resumed A']);
+    expect(plan('B')).toEqual(['global', 'B']);
+  });
+});

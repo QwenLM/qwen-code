@@ -1485,7 +1485,7 @@ describe('resident tool gating (#12032)', () => {
     const codeModePrompt = (declaredTools?: ReadonlySet<string>) =>
       corePrompt({ model: 'gpt-4', codeMode: true, declaredTools });
 
-    // Reverse check: in code mode the tools are reached as `tools.<name>`
+    // Reverse check: in code mode the tools are reached as `tools.<jsName>`
     // inside `exec` and are not declarations, so a narrow declared set must not
     // strip that guidance.
     expect(codeModePrompt(new Set([ToolNames.EXEC]))).toBe(codeModePrompt());
@@ -1520,11 +1520,11 @@ describe('CodeModeOnly tool guidance', () => {
   const codeModePrompt = (model = 'gpt-4') =>
     corePrompt({ model, codeMode: true });
 
-  it('points the dedicated-tool guidance at tools.<name>', () => {
+  it('points the dedicated-tool guidance at tools.<jsName>', () => {
     expectText(
       codeModePrompt(),
       [
-        'as `tools.<name>(args)`',
+        'as `tools.<jsName>(args)`',
         "use the top-level 'tool_search' when available",
         'Read its returned schema and JavaScript name',
         'To read files use `tools.read_file`',
@@ -1564,8 +1564,17 @@ describe('CodeModeOnly tool guidance', () => {
   it('replaces multi-tool parallelism with batching inside one exec program', () => {
     expectText(
       codeModePrompt(),
-      ['**Batch Into One Program:**', 'await them together with `Promise.all`'],
-      ['Call independent tools in parallel; run dependent calls sequentially'],
+      [
+        '**Batch Into One Program:**',
+        'await Promise.allSettled([...])',
+        'Inspect every result',
+        'String(result.reason)',
+        'Keep dependent actions, mutations, and approvals sequential',
+      ],
+      [
+        'await Promise.all([',
+        'Call independent tools in parallel; run dependent calls sequentially',
+      ],
     );
   });
 
@@ -1597,7 +1606,7 @@ describe('CodeModeOnly tool guidance', () => {
         'Call independent tools in parallel; run dependent calls sequentially',
         '[tool_call: run_shell_command for',
       ],
-      ['tools.<name>(args)', '**Batch Into One Program:**'],
+      ['tools.<jsName>(args)', '**Batch Into One Program:**'],
     );
   });
 });

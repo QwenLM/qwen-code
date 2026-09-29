@@ -228,6 +228,10 @@ describe('HookEventHandler', () => {
     expect(mockHookPlanner.createExecutionPlan).toHaveBeenCalledWith(
       event,
       context,
+      expect.objectContaining({
+        runtimeId: expect.any(String),
+        sessionId: 'test-session-id',
+      }),
     );
 
   /** Checks the parallel runner's call; the two callbacks are hook start/end. */

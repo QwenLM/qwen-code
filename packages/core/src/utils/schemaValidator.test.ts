@@ -429,6 +429,111 @@ describe('SchemaValidator', () => {
     });
   });
 
+  describe('compileStrict allowMatchingProperties', () => {
+    const overlapping = {
+      type: 'object',
+      properties: { foo: { type: 'string' } },
+      patternProperties: { '^f': { minLength: 1 } },
+    };
+
+    it('keeps refusing the overlap by default', () => {
+      expect(SchemaValidator.compileStrict(overlapping)).toContain(
+        'allowMatchingProperties',
+      );
+    });
+
+    it('accepts the overlap when asked, keeping the other strict checks', () => {
+      expect(
+        SchemaValidator.compileStrict(overlapping, {
+          allowMatchingProperties: true,
+        }),
+      ).toBeNull();
+      expect(
+        SchemaValidator.compileStrict(
+          { ...overlapping, propertees: {} },
+          { allowMatchingProperties: true },
+        ),
+      ).toContain('propertees');
+    });
+  });
+
+  describe('compileIsolated', () => {
+    it('reports a schema that does not compile instead of skipping it', () => {
+      expect(SchemaValidator.validate({ type: 42 }, {})).toBeNull();
+      expect(SchemaValidator.compileIsolated({ type: 42 })).toEqual({
+        error: expect.stringContaining('type'),
+      });
+    });
+
+    it.each([null, [], 'object'])(
+      'refuses the non-object schema %j',
+      (schema) => {
+        expect(SchemaValidator.compileIsolated(schema)).toEqual({
+          error: 'schema must be a JSON object',
+        });
+      },
+    );
+
+    it('refuses an asynchronous schema', () => {
+      expect(
+        SchemaValidator.compileIsolated({ $async: true, type: 'object' }),
+      ).toEqual({ error: 'asynchronous schemas ($async) are not supported' });
+    });
+
+    it('validates with the same coercion and messages as validate()', () => {
+      const schema = {
+        type: 'object',
+        properties: {
+          flag: { type: 'boolean' },
+          count: { type: 'integer' },
+        },
+        required: ['count'],
+      };
+      const compiled = SchemaValidator.compileIsolated(schema);
+      if (compiled.error !== undefined) throw new Error(compiled.error);
+      const isolatedData: Record<string, unknown> = {
+        flag: 'true',
+        count: '2',
+      };
+      const sharedData: Record<string, unknown> = { flag: 'true', count: '2' };
+      expect(compiled.validate(isolatedData)).toBeNull();
+      expect(SchemaValidator.validate(schema, sharedData)).toBeNull();
+      expect(isolatedData).toEqual(sharedData);
+      expect(compiled.validate({})).toBe(SchemaValidator.validate(schema, {}));
+      expect(compiled.validate(null)).toBe('Value of params must be an object');
+    });
+
+    it('enforces a schema whose $id the shared validator already holds', () => {
+      const id = 'https://example.com/schemas/isolated-taken-id.json';
+      expect(
+        SchemaValidator.validate(
+          { $id: id, type: 'object', required: ['a'] },
+          {},
+        ),
+      ).toContain("'a'");
+      const compiled = SchemaValidator.compileIsolated({
+        $id: id,
+        type: 'object',
+        required: ['b'],
+      });
+      if (compiled.error !== undefined) throw new Error(compiled.error);
+      expect(compiled.validate({})).toContain("'b'");
+    });
+
+    it('selects the draft-2020-12 compiler from $schema', () => {
+      const compiled = SchemaValidator.compileIsolated({
+        $schema: 'https://json-schema.org/draft/2020-12/schema#',
+        type: 'object',
+        properties: {
+          pair: { type: 'array', prefixItems: [{ type: 'string' }] },
+        },
+      });
+      if (compiled.error !== undefined) throw new Error(compiled.error);
+      expect(compiled.validate({ pair: ['a'] })).toBeNull();
+      expect(compiled.validate({ pair: [{}] })).toContain('pair');
+    });
+  });
+
   describe('non-string to string coercion', () => {
     it('converts scalar string fields and preserves strings and numeric siblings', () => {
       const schema = obj({

@@ -166,6 +166,8 @@ describe('Turn', () => {
         maybeIncludeSchemaDepthContext: mockMaybeIncludeSchemaDepthContext,
       } as unknown as LlmChat,
       'prompt-id-1',
+      undefined,
+      'stable-prompt-id',
     );
     mockGetHistory.mockReturnValue([]);
     mockGetHistoryLength.mockReturnValue(0);
@@ -258,6 +260,7 @@ describe('Turn', () => {
         },
         'prompt-id-1',
         undefined,
+        { promptId: 'stable-prompt-id' },
       );
 
       expect(events).toEqual([contentEvent('Hello'), contentEvent(' world')]);

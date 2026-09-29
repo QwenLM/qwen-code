@@ -414,6 +414,28 @@ describe('FileHistoryService', () => {
       );
     });
 
+    // A shared id must not select and truncate an arbitrary snapshot.
+    it('should refuse to rewind a promptId shared by two snapshots', async () => {
+      const file = join(projectDir, 'a.txt');
+      await writeFile(file, 'original');
+
+      await service.makeSnapshot('p1');
+      await service.trackEdit(file);
+      await writeFile(file, 'modified');
+      await service.makeSnapshot('p1');
+
+      await expect(service.rewind('p1', true)).rejects.toThrow(
+        'The selected snapshot shares its checkpoint identity with another turn',
+      );
+
+      // The refusal must leave the timeline (and the file) untouched.
+      expect(service.getSnapshots().map((s) => s.promptId)).toEqual([
+        'p1',
+        'p1',
+      ]);
+      expect(await readFile(file, 'utf-8')).toBe('modified');
+    });
+
     it('should not truncate snapshot timeline when restore has failures', async () => {
       await trackAndEdit('a.txt', 'original', 'modified');
       await service.makeSnapshot('p3');

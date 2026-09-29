@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { WORKFLOW_SUBAGENT_DISALLOWED_TOOLS } from '../../../agents/runtime/workflow-orchestrator.js';
 import { ToolDisplayNames, ToolNames } from '../../../tools/tool-names.js';
+import { buildWorkflowToolDescription } from '../../../tools/workflow/workflow.js';
 import { parseSkillContent } from '../../skill-load.js';
 
 const loadSkill = () => {
@@ -31,6 +32,18 @@ describe('bundled workflow-authoring skill', () => {
     "Workflow({ name: '<name>' })",
   ])('states the script contract: %s', (anchor) => {
     expect(loadSkill().body.replace(/\s+/g, ' ')).toContain(anchor);
+  });
+
+  // Moved out of the tool description: present here, absent there, so the
+  // guidance can neither vanish nor be pasted back.
+  it.each([
+    'the third failed submission stops it',
+    'makes agent() resolve to null without starting the agent',
+  ])('moved out of the tool description: %s', (anchor) => {
+    expect(loadSkill().body.replace(/\s+/g, ' ')).toContain(anchor);
+    expect(
+      buildWorkflowToolDescription('pointer').replace(/\s+/g, ' '),
+    ).not.toContain(anchor);
   });
 
   it('names exactly the tools a workflow subagent can never use', () => {
