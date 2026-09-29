@@ -342,6 +342,34 @@ describe('agent versioned store', () => {
     });
   });
 
+  it('reads the thread directory once per transaction and keeps it current', async () => {
+    await writeThread(PROJECT_ROOT, thread());
+    await withAgentStoreTransaction(PROJECT_ROOT, async (transaction) => {
+      const first = await transaction.listThreads();
+      expect(first.threads.map((entry) => entry.title)).toEqual(['Root']);
+
+      // A change on disk mid-transaction is not re-read: nothing else may
+      // write while the lock is held, so the listing is taken once.
+      await writeRaw(getThreadPath(PROJECT_ROOT, 'th_root'), {
+        ...thread(),
+        title: 'Changed outside',
+      });
+      // An in-place edit that is never written does not leak into the cache.
+      first.threads[0]!.title = 'Edited, not written';
+      const second = await transaction.listThreads();
+      expect(second.threads.map((entry) => entry.title)).toEqual(['Root']);
+
+      // The transaction's own write is what the next read sees.
+      const [root] = second.threads;
+      await transaction.writeThread({ ...root!, title: 'Written' });
+      const third = await transaction.listThreads();
+      expect(third.threads.map((entry) => entry.title)).toEqual(['Written']);
+      await expect(transaction.readThread('th_root')).resolves.toMatchObject({
+        title: 'Written',
+      });
+    });
+  });
+
   it('rejects nested workspace transactions instead of deadlocking', async () => {
     await expect(
       withAgentStoreTransaction(PROJECT_ROOT, () =>
