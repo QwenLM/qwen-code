@@ -1,0 +1,220 @@
+.inspector {
+  flex: 0 1 38%;
+  min-height: 180px;
+  max-height: 320px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--border);
+  background: var(--background);
+}
+
+.header {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  padding: 9px 12px 7px;
+}
+
+.heading {
+  flex: 1;
+  min-width: 0;
+}
+
+.eyebrow {
+  display: block;
+  margin-bottom: 2px;
+  color: var(--muted-foreground);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.heading h3 {
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 17px;
+}
+
+.closeButton {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 27px;
+  height: 27px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--background);
+  color: var(--muted-foreground);
+  cursor: pointer;
+}
+
+.closeButton:hover,
+.closeButton:focus-visible {
+  background: var(--muted);
+  color: var(--foreground);
+}
+
+.tabs {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  overflow-x: auto;
+  padding: 0 10px 7px;
+  border-bottom: 1px solid var(--border);
+}
+
+.tabs button {
+  flex: none;
+  border: 0;
+  border-radius: 6px;
+  padding: 5px 9px;
+  background: transparent;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.tabs button[aria-pressed='true'] {
+  background: var(--muted);
+  color: var(--foreground);
+  font-weight: 600;
+}
+
+.tabs button:hover,
+.tabs button:focus-visible,
+.notice button:hover,
+.footer button:hover,
+.footer button:focus-visible {
+  background: var(--muted);
+}
+
+.notice {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  padding: 9px 12px;
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
+.notice button {
+  border: 0;
+  border-radius: 4px;
+  padding: 2px 5px;
+  background: transparent;
+  color: var(--foreground);
+  cursor: pointer;
+}
+
+.content {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 10px 12px 12px;
+}
+
+.fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 8px;
+  max-width: 1200px;
+  align-content: start;
+}
+
+.fields[data-layout='reading'] {
+  grid-template-columns: minmax(0, 1fr);
+  max-width: none;
+}
+
+.field {
+  min-width: 0;
+  border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  border-radius: 8px;
+  padding: 9px 10px;
+  background: color-mix(in srgb, var(--muted) 40%, var(--background));
+}
+
+.fieldLabel {
+  color: var(--muted-foreground);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.field pre {
+  margin: 5px 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--foreground);
+}
+
+.field[data-tone='success'] pre,
+.field[data-tone='error'] pre {
+  display: inline-block;
+  border-radius: 4px;
+  padding: 2px 7px;
+  font-weight: 600;
+}
+
+.field[data-tone='success'] pre {
+  background: var(--success-bg);
+  color: var(--success-color);
+}
+
+.field[data-tone='error'] pre {
+  background: var(--error-bg);
+  color: var(--error-color);
+}
+
+.truncated {
+  display: block;
+  margin-top: 6px;
+  color: var(--muted-foreground);
+  font-size: 10px;
+}
+
+.footer {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-height: 37px;
+  box-sizing: border-box;
+  padding: 6px 12px;
+  border-top: 1px solid var(--border);
+}
+
+.footer button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 8px;
+  background: transparent;
+  color: var(--foreground);
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.copyButton {
+  font-weight: 600;
+}
+
+.copyStatus {
+  margin-right: auto;
+  color: var(--muted-foreground);
+  font-size: 10px;
+}
