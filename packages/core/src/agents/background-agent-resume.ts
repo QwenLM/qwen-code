@@ -124,29 +124,36 @@ const CONTAINER_EXECUTION_BLOCKED_REASON =
  * An empty list is normalized the way the launch path normalizes it: `tools: []`
  * is the definition layer's "inherit everything" marker, while the `ToolConfig`
  * layer reads it as deny-all. A non-array value, which only unvalidated SDK
- * `initialize.agents` JSON can produce, resolves to zero tools at launch, so it
- * has no Skill tool here either. The same ingress can produce a non-array
- * `disallowedTools`, which launch resolves one character at a time into entries
- * that name no tool, so it denies nothing there and is dropped here. Names are
- * otherwise matched as written — the launch path also resolves display names
- * through `convertToRuntimeConfig` and this helper does not, so a definition
- * that uses one can still drift. Pre-existing, and outside #12424's measured
- * scope.
+ * `initialize.agents` JSON can produce, follows launch too: a nullish or empty
+ * one leaves `toolConfig` unset for `createAgentHeadless` to default to
+ * `['*']`, while a non-empty string is walked per character, so `"*"` stays
+ * the wildcard and `"read_file"` becomes nine entries naming no tool. The same
+ * ingress can produce a non-array `disallowedTools`, which launch resolves one
+ * character at a time into entries that name no tool, so it denies nothing
+ * there and is dropped here. Names are otherwise matched as written — the
+ * launch path also resolves display names through `convertToRuntimeConfig` and
+ * this helper does not, so a definition that uses one can still drift.
+ * Pre-existing, and outside #12424's measured scope.
  */
 function subagentWillHaveSkillTool(
   subagentConfig: SubagentConfig | undefined,
   codeModeOnly = false,
 ): boolean {
-  const tools = subagentConfig?.tools;
-  // Nullish has to stay on the wildcard path: launch reads `config.tools?.length`,
-  // which is falsy for both `undefined` and `null`.
-  if (tools != null && !Array.isArray(tools)) {
-    return false;
-  }
+  // Launch reads `config.tools?.length ? resolveToolNames(config.tools) : ['*']`,
+  // and `resolveToolNames`' `for...of` walks a bare string per character,
+  // preserving each one. Nullish and `''` are falsy in that test, so both take
+  // the wildcard path; the cast admits the scalar only unvalidated SDK
+  // `initialize.agents` JSON produces.
+  const tools = subagentConfig?.tools as string[] | string | null | undefined;
+  const allowList = Array.isArray(tools)
+    ? tools
+    : tools != null && tools.length > 0
+      ? [...tools]
+      : undefined;
   const disallowedTools = subagentConfig?.disallowedTools;
   return toolConfigAllowsSkill(
     {
-      tools: tools?.length ? tools : ['*'],
+      tools: allowList?.length ? allowList : ['*'],
       // Launch reads `config.disallowedTools?.length`, which a non-empty string
       // satisfies, and hands it to `resolveToolNames`, whose `for...of` walks
       // the string per character and preserves every character as-is: the

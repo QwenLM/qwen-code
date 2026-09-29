@@ -1328,8 +1328,17 @@ describe('BackgroundAgentResumeService', () => {
     // Launch reads `config.tools?.length`, which is falsy for `null` too, so
     // `null` is the wildcard and not the malformed case below.
     ['declares a null tools value', { tools: null }, true],
-    // Only unvalidated SDK `initialize.agents` JSON produces this. Launch
-    // resolves it to zero tools, so resume must neither throw nor list.
+    // Launch hands `"*"` to `resolveToolNames`, whose `for...of` walks it per
+    // character and preserves the `*`, so the launched agent keeps the
+    // wildcard: resume must keep the listing, as base did through
+    // `String.prototype.includes('*')`.
+    ['declares a wildcard tools string', { tools: '*' }, true],
+    // `''` is falsy in launch's `config.tools?.length` test, so `toolConfig`
+    // stays unset and `createAgentHeadless` defaults it to `['*']`.
+    ['declares an empty tools string', { tools: '' }, true],
+    // Only unvalidated SDK `initialize.agents` JSON produces this. Launch walks
+    // the string per character into nine entries naming no tool, so resume must
+    // neither throw nor list.
     ['declares a non-array tools value', { tools: 'read_file' }, false],
     // Same ingress, sibling field. Launch resolves a scalar blocklist one
     // character at a time (`"skill"` → `['s','k','i','l','l']`), so it denies
