@@ -1085,6 +1085,27 @@ fn z_index_from_front_to_back(total: usize, position: usize) -> usize {
 }
 
 #[cfg(test)]
+mod child_window_capture_tests {
+    use super::{GetWindowStateTool, ToolState};
+    use cua_driver_core::tool::Tool;
+
+    #[tokio::test]
+    async fn rejects_children_before_resolving_a_native_target() {
+        let tool = GetWindowStateTool {
+            state: ToolState::new(),
+        };
+        let result = tool
+            .invoke(serde_json::json!({"include_child_windows": true}))
+            .await;
+        assert_eq!(result.is_error, Some(true));
+        assert_eq!(
+            result.structured_content.as_ref().unwrap()["code"],
+            "unsupported_platform"
+        );
+    }
+}
+
+#[cfg(test)]
 mod list_windows_z_index_tests {
     use super::{exact_window_ownership_result, z_index_from_front_to_back};
 

@@ -468,10 +468,10 @@ fn build_window_capture_plan(
     use screencapturekit::prelude::{SCContentFilter, SCShareableContent, SCStreamConfiguration};
 
     if include_child_windows && expected_identity.requires_display_crop {
-        anyhow::bail!("child-window capture is unavailable for an attached-window crop");
+        anyhow::bail!("child-window capture is unavailable for an attached or unconfirmed window group; use include_child_windows:false for default capture");
     }
     if include_child_windows && !has_metal_device() {
-        anyhow::bail!("child-window capture requires a Metal device");
+        anyhow::bail!("child-window capture requires a Metal device; use include_child_windows:false for default capture");
     }
     let use_display_crop = expected_identity.requires_display_crop || include_child_windows;
 
@@ -526,7 +526,12 @@ fn build_window_capture_plan(
             .into_iter()
             .find(|display| relative_capture_rect(frame, display.frame()).is_some())
             .ok_or_else(|| {
-                anyhow::anyhow!("attached window {window_id} is not fully contained in one display")
+                let target = if include_child_windows {
+                    "window"
+                } else {
+                    "attached window"
+                };
+                anyhow::anyhow!("{target} {window_id} is not fully contained in one display")
             })?;
         SCContentFilter::create()
             .with_display(&display)
@@ -563,9 +568,10 @@ fn build_window_capture_plan(
     }
     if !expected_identity.requires_display_crop {
         // SCK may otherwise scale a GTK attachment group into this window's frame.
+        // Preserve the base setting for attached crops; true was refused above.
         config = config.with_includes_child_windows(include_child_windows);
         if include_child_windows && !config.includes_child_windows() {
-            anyhow::bail!("child-window capture requires macOS 14.2 or later");
+            anyhow::bail!("child-window capture requires macOS 14.2 or later; use include_child_windows:false for default capture");
         }
     }
 

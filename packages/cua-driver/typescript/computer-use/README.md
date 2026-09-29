@@ -74,9 +74,13 @@ is clipped, not scaled into the image. It does not enable background popup input
 Expanded capture requires Metal and a window fully on one display. It is unavailable
 for attached-window display crops and when native capture fails; existing AX
 information remains available. Other platforms
-reject true. `observeWindow` accepts the same option.
-If expanded capture fails, observation text reports the reason and suggests
-retrying with `includeChildWindows: false`; AX actions remain available.
+reject true. The expanded screenshot hides the cursor. For exact-window capture,
+use `observeWindow({ pid, windowId, includeScreenshot: true, includeChildWindows: true })`;
+the child option alone does not request a screenshot. `screenshotOutFile` also
+requests capture.
+If expanded capture fails, observation text reports the error and identifies
+`includeChildWindows: false` as default capture. Missing-window and frame-mismatch
+errors advise observing the current window again; AX actions remain available.
 
 Native code selects semantic or synthesized input after checking the target.
 App input makes one guarded activation of the exact target, dispatches once and
@@ -163,6 +167,9 @@ metrics live under `diagnostics`; the raw native response is not exposed.
 `screenshotError` when available. Consult this context before deciding whether
 pixel input or an explicit foreground request is appropriate. Coordinates for
 SDK actions remain screenshot pixels; `windowBounds` describes screen points.
+If capture is unavailable or `screenshotFrameValid` is false, obtain a new
+successful screenshot before using coordinates. The exact-window API does not
+enforce the App facade's missing-screenshot input gate.
 The native revision's `capture_complete` flag takes precedence over a legacy
 root-level flag.
 

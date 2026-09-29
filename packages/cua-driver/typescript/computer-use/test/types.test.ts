@@ -87,6 +87,7 @@ export async function exerciseComputerUseTypes(
     windowId: 7,
     disableDiff: false,
     includeScreenshot: true,
+    includeChildWindows: true,
     maxTextChars: 12_000,
     signal,
   });
