@@ -1936,10 +1936,7 @@ export function convertOpenAIChunkToLlm(
     const effectiveFinishReason =
       toolCallsTruncated &&
       choice.finish_reason !== 'length' &&
-      usageConsistentWithTruncation(
-        chunk.usage,
-        requestContext.maxOutputTokens,
-      )
+      usageConsistentWithTruncation(chunk.usage, requestContext.maxOutputTokens)
         ? 'length'
         : choice.finish_reason;
 
