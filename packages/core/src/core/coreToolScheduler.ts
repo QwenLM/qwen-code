@@ -49,6 +49,10 @@ import {
   firePermissionRequestHook,
   appendAdditionalContext,
 } from './toolHookTriggers.js';
+import {
+  appendToolHookContextToParts,
+  boundToolHookContext,
+} from './tool-hook-context.js';
 import { NotificationType } from '../hooks/types.js';
 import type { PostToolBatchToolCall } from '../hooks/types.js';
 import type { MessageBus } from '../confirmation-bus/message-bus.js';
@@ -1671,6 +1675,10 @@ export class CoreToolScheduler {
   // PostToolUse — reusing this id keeps the Pre/Post pair correlated instead
   // of orphaning two events. Cleared on terminal state via finalizeToolSpan.
   private readonly bouncedToolUseId = new Map<string, string>();
+  // Sanitized PreToolUse additionalContext keyed by callId. Held until the
+  // batch's terminal assembly (it must survive an 'ask' bounce, whose
+  // re-execution skips the hook) and cleared with the batch's hook owners.
+  private readonly preToolUseContexts = new Map<string, string>();
   private readonly askUserQuestionResponseClaims = new Set<string>();
   private readonly runtimeContentGeneratorViews = new Map<
     string,
@@ -2819,7 +2827,10 @@ export class CoreToolScheduler {
     return runWithHookExecutionOwner(owner, () =>
       this._schedule(request, signal, runtimeView),
     ).catch((error: unknown) => {
-      for (const item of items) this.hookOwners.delete(item.callId);
+      for (const item of items) {
+        this.hookOwners.delete(item.callId);
+        this.preToolUseContexts.delete(item.callId);
+      }
       throw error;
     });
   }
@@ -5437,6 +5448,9 @@ export class CoreToolScheduler {
                 hasAdditionalContext: !!r.additionalContext,
               },
       );
+      if (preHookResult.additionalContext) {
+        this.preToolUseContexts.set(callId, preHookResult.additionalContext);
+      }
       if (!signal.aborted && !preHookResult.shouldProceed) {
         // A PreToolUse hook returning permissionDecision:'ask' wants the
         // user to confirm in the TUI before the tool runs. When we can
@@ -7034,6 +7048,13 @@ export class CoreToolScheduler {
       let completedCalls = [...this.toolCalls] as CompletedToolCall[];
       this.toolCalls = [];
       this.isFinalizingToolCalls = true;
+      // Captured before PostToolBatch, which can rewrite a cancelled call
+      // into an error; a cancelled call never delivers PreToolUse context.
+      const preToolUseContextCallIds = new Set(
+        completedCalls
+          .filter((call) => call.status !== 'cancelled')
+          .map((call) => call.request.callId),
+      );
       const batchSignal = completedCalls
         .map((call) =>
           this.callIdToPostToolBatchSignal.get(call.request.callId),
@@ -7154,6 +7175,13 @@ export class CoreToolScheduler {
           );
         }
 
+        // After PostToolBatch so a batch stop cannot erase it, and before the
+        // final budget so the batch/send caps still bound it.
+        completedCalls = this.withPreToolUseContext(
+          completedCalls,
+          preToolUseContextCallIds,
+        );
+
         // Hooks may replace responses or append context, so enforce the same
         // final invariant again after PostToolBatch.
         completedCalls = await this.applyBatchOutputBudget(completedCalls);
@@ -7188,6 +7216,7 @@ export class CoreToolScheduler {
           // for PostToolBatch open when one of them throws.
           for (const call of completedCalls) {
             this.hookOwners.delete(call.request.callId);
+            this.preToolUseContexts.delete(call.request.callId);
             this.finalizeToolSpan(call.request.callId, true);
           }
           this.postToolBatchEnabledForBatch = false;
@@ -7254,6 +7283,40 @@ export class CoreToolScheduler {
       content: result.content,
       persistedOutputFiles: result.outputFile ? [result.outputFile] : [],
     };
+  }
+
+  private withPreToolUseContext(
+    completedCalls: CompletedToolCall[],
+    deliverableCallIds: ReadonlySet<string>,
+  ): CompletedToolCall[] {
+    if (this.preToolUseContexts.size === 0) return completedCalls;
+    const maxChars = this.config.getTruncateToolOutputThreshold();
+    return completedCalls.map((call) => {
+      const callId = call.request.callId;
+      const stored = this.preToolUseContexts.get(callId);
+      this.preToolUseContexts.delete(callId);
+      if (!stored || !deliverableCallIds.has(callId)) return call;
+      const context = boundToolHookContext([stored], maxChars);
+      const responseParts = appendToolHookContextToParts(
+        call.response.responseParts,
+        callId,
+        context,
+      );
+      if (responseParts === call.response.responseParts) return call;
+      return {
+        ...call,
+        response: {
+          ...call.response,
+          responseParts,
+          contentLength:
+            call.response.contentLength !== undefined
+              ? call.response.contentLength +
+                toolResponseTextLength(responseParts) -
+                toolResponseTextLength(call.response.responseParts)
+              : undefined,
+        },
+      } as CompletedToolCall;
+    });
   }
 
   private async applyBatchOutputBudget(

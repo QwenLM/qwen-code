@@ -36931,6 +36931,217 @@ describe('Session', () => {
         });
       });
 
+      describe('hook additionalContext delivery', () => {
+        function contextBus(outputs: Record<string, unknown>) {
+          return {
+            request: vi
+              .fn()
+              .mockImplementation(async (request: { eventName: string }) => ({
+                success: true,
+                output: outputs[request.eventName] ?? {},
+              })),
+          };
+        }
+
+        async function runReadFile(
+          messageBus: ReturnType<typeof contextBus>,
+          execute: ReturnType<typeof vi.fn>,
+        ) {
+          mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+          mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+          mockConfig.getApprovalMode = vi
+            .fn()
+            .mockReturnValue(ApprovalMode.YOLO);
+          mockConfig.getTruncateToolOutputThreshold = vi
+            .fn()
+            .mockReturnValue(25_000);
+          mockToolRegistry.getTool.mockReturnValue({
+            name: 'read_file',
+            kind: core.Kind.Read,
+            build: vi.fn().mockReturnValue({
+              params: { path: '/tmp/test.txt' },
+              getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+              execute,
+            }),
+          });
+          mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'call-ctx',
+                      name: 'read_file',
+                      args: { path: '/tmp/test.txt' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          );
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'read the file' }],
+          });
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+          const message = vi.mocked(mockChat.sendMessageStream).mock.calls[1][1]
+            .message as Part[];
+          const response = message.find(
+            (part) => part.functionResponse?.id === 'call-ctx',
+          )?.functionResponse?.response;
+          return { message, response };
+        }
+
+        function count(value: unknown, needle: string): number {
+          return JSON.stringify(value).split(needle).length - 1;
+        }
+
+        function uiUpdates(): string {
+          return JSON.stringify(
+            vi
+              .mocked(mockClient.sessionUpdate)
+              .mock.calls.map(([params]) => params.update),
+          );
+        }
+
+        const preContext = (extra: Record<string, unknown> = {}) => ({
+          hookSpecificOutput: {
+            hookEventName: 'PreToolUse',
+            additionalContext: 'P02A_PRE <x>',
+            ...extra,
+          },
+        });
+        const failureContext = {
+          hookSpecificOutput: {
+            hookEventName: 'PostToolUseFailure',
+            additionalContext: 'P02A_FAIL',
+          },
+        };
+
+        it('delivers PreToolUse context with a successful tool result', async () => {
+          const execute = vi.fn().mockResolvedValue({
+            llmContent: 'file contents',
+            returnDisplay: 'success',
+          });
+          const { message, response } = await runReadFile(
+            contextBus({ PreToolUse: preContext() }),
+            execute,
+          );
+
+          expect(execute).toHaveBeenCalledOnce();
+          expect(response).toEqual({
+            output: 'file contents\n\nP02A_PRE &lt;x&gt;',
+          });
+          expect(count(message, 'P02A_PRE')).toBe(1);
+          expect(uiUpdates()).not.toContain('P02A_PRE');
+          expect(
+            mockChatRecordingService.recordToolResult,
+          ).toHaveBeenCalledWith(
+            expect.arrayContaining([
+              expect.objectContaining({
+                functionResponse: expect.objectContaining({
+                  response: { output: 'file contents\n\nP02A_PRE &lt;x&gt;' },
+                }),
+              }),
+            ]),
+            expect.objectContaining({ callId: 'call-ctx', status: 'success' }),
+          );
+        });
+
+        it('delivers PreToolUse context on a denied result without executing', async () => {
+          const execute = vi.fn();
+          const { response } = await runReadFile(
+            contextBus({
+              PreToolUse: preContext({
+                permissionDecision: 'deny',
+                permissionDecisionReason: 'no reads',
+              }),
+            }),
+            execute,
+          );
+
+          expect(execute).not.toHaveBeenCalled();
+          expect(response).toEqual({
+            error: 'no reads\n\nP02A_PRE &lt;x&gt;',
+          });
+          expect(uiUpdates()).not.toContain('P02A_PRE');
+        });
+
+        it('delivers Pre and failure context when the tool returns an error', async () => {
+          const execute = vi.fn().mockResolvedValue({
+            llmContent: 'Error: disk gone',
+            returnDisplay: 'disk gone',
+            error: {
+              message: 'disk gone',
+              type: core.ToolErrorType.EXECUTION_FAILED,
+            },
+          });
+          const { message, response } = await runReadFile(
+            contextBus({
+              PreToolUse: preContext(),
+              PostToolUseFailure: failureContext,
+            }),
+            execute,
+          );
+
+          expect(count(message, 'P02A_PRE')).toBe(1);
+          expect(count(message, 'P02A_FAIL')).toBe(1);
+          const text = JSON.stringify(response);
+          expect(text.indexOf('P02A_PRE')).toBeLessThan(
+            text.indexOf('P02A_FAIL'),
+          );
+          expect(uiUpdates()).not.toContain('P02A_FAIL');
+          expect(
+            mockChatRecordingService.recordToolResult,
+          ).toHaveBeenCalledWith(
+            expect.anything(),
+            expect.objectContaining({
+              callId: 'call-ctx',
+              status: 'error',
+              error: new Error('disk gone'),
+            }),
+          );
+        });
+
+        it('delivers Pre and failure context when the tool throws', async () => {
+          const execute = vi.fn().mockRejectedValue(new Error('Tool failed'));
+          const { message, response } = await runReadFile(
+            contextBus({
+              PreToolUse: preContext(),
+              PostToolUseFailure: failureContext,
+            }),
+            execute,
+          );
+
+          expect(response).toEqual({
+            error: 'Tool failed\n\nP02A_PRE &lt;x&gt;\n\nP02A_FAIL',
+          });
+          expect(count(message, 'P02A_FAIL')).toBe(1);
+          expect(uiUpdates()).not.toContain('P02A_FAIL');
+          expect(
+            mockChatRecordingService.recordToolResult,
+          ).toHaveBeenCalledWith(
+            expect.anything(),
+            expect.objectContaining({
+              callId: 'call-ctx',
+              status: 'error',
+              errorType: core.ToolErrorType.UNHANDLED_EXCEPTION,
+              error: new Error('Tool failed'),
+            }),
+          );
+        });
+
+        it('leaves results unchanged when hooks return no context', async () => {
+          const execute = vi.fn().mockResolvedValue({
+            llmContent: 'file contents',
+            returnDisplay: 'success',
+          });
+          const { response } = await runReadFile(contextBus({}), execute);
+          expect(response).toEqual({ output: 'file contents' });
+        });
+      });
+
       describe('StopFailure hook', () => {
         it('fires StopFailure hook when API error occurs during sendMessageStream', async () => {
           const mockFireStopFailureEvent = vi.fn().mockResolvedValue({

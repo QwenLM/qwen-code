@@ -560,7 +560,7 @@ Hook output supports three categories of fields:
 - `hookSpecificOutput.permissionDecision`: "allow", "deny", or "ask" (REQUIRED)
 - `hookSpecificOutput.permissionDecisionReason`: explanation for the decision (REQUIRED)
 - `hookSpecificOutput.updatedInput`: modified tool input parameters to use instead of original
-- `hookSpecificOutput.additionalContext`: additional context information
+- `hookSpecificOutput.additionalContext`: text appended, after a blank line, to this call's tool result that the model sees next. It is delivered whatever the decision: after the tool's own output when it runs, or after the error message when it is denied, stopped, or fails. `<` and `>` are escaped.
 
 The `permissionDecision` value controls whether the tool runs:
 
@@ -569,6 +569,10 @@ The `permissionDecision` value controls whether the tool runs:
 - `"ask"` — pause and ask the user to confirm the tool call in the TUI before it runs. Confirming runs the tool once; declining cancels it. In contexts that cannot prompt for confirmation — headless (`--prompt`) runs and background subagents — `"ask"` falls back to `"deny"`.
 
 For `"ask"`, the TUI displays `permissionDecisionReason` as literal text rather than interpreting inline Markdown. This keeps formatting markers and link targets visible to the user.
+
+With `"ask"`, the hook runs once. Its `additionalContext` is delivered with the tool result if the user confirms, and dropped if the user declines or the call is cancelled. In ACP sessions (IDE integrations), `"ask"` is currently treated as `"deny"`, and the context is delivered with the denial.
+
+`additionalContext` is added only to the model-facing tool result. It does not change the tool input, the approval prompt, the error shown in the UI, or the user's prompt. It counts toward the same output limits as the tool result: the text a call's PreToolUse and PostToolUseFailure hooks add is cut to `tools.truncateToolOutputThreshold` characters, and the batch output limits still apply to the result as a whole. A cancelled call does not deliver it.
 
 **Note**: While standard hook output fields like `decision` and `reason` are technically supported by the underlying class, the official interface expects the `hookSpecificOutput` with `permissionDecision` and `permissionDecisionReason`.
 
@@ -642,7 +646,7 @@ For `"ask"`, the TUI displays `permissionDecisionReason` as literal text rather 
 
 **Output Options**:
 
-- `hookSpecificOutput.additionalContext`: error handling information
+- `hookSpecificOutput.additionalContext`: error handling information, appended after the error in the tool result the model sees next. This applies both when the tool returns an error and when it throws. `<` and `>` are escaped.
 - Standard hook output fields
 
 **Example Output**:

@@ -117,6 +117,8 @@ import {
   firePreToolUseHook,
   firePostToolUseHook,
   firePostToolUseFailureHook,
+  appendToolHookContextToParts,
+  boundToolHookContext,
   buildContextUsage,
   injectPermissionRulesIfMissing,
   NotificationType,
@@ -13227,6 +13229,24 @@ export class Session implements SessionContext {
     let toolType: 'native' | 'mcp' = 'native';
     let mcpServerName: string | undefined = undefined;
     const guardContext: { policyToolName?: string } = {};
+    // Sanitized hook additionalContext for this call, appended to the
+    // model-facing functionResponse only (never to UI/error projections).
+    let preToolUseContext: string | undefined;
+    let failureContext: string | undefined;
+    const withHookContext = (
+      parts: Part[],
+      status: 'success' | 'error' | 'cancelled',
+    ): Part[] =>
+      status === 'cancelled' || (!preToolUseContext && !failureContext)
+        ? parts
+        : appendToolHookContextToParts(
+            parts,
+            callId,
+            boundToolHookContext(
+              [preToolUseContext, failureContext],
+              this.config.getTruncateToolOutputThreshold(),
+            ),
+          );
     if (toolLoopState?.loopDetected) {
       return {
         parts: [
@@ -13358,6 +13378,7 @@ export class Session implements SessionContext {
         opts.status,
         opts.errorType,
       );
+      const modelErrorParts = withHookContext(errorParts, opts.status);
       if (toolName !== ToolNames.TODO_WRITE) {
         try {
           if (opts.settledMetadata) {
@@ -13411,7 +13432,7 @@ export class Session implements SessionContext {
       queueToolResultRecord?.(fc, {
         callId,
         toolName,
-        responseParts: errorParts,
+        responseParts: modelErrorParts,
         persistedOutputFiles: opts.settledMetadata?.persistedOutputFiles,
         policyToolName: guardContext.policyToolName,
         toolType,
@@ -13444,7 +13465,7 @@ export class Session implements SessionContext {
           error,
         );
       return {
-        parts: errorParts,
+        parts: modelErrorParts,
         stopAfterPermissionCancel: opts.stopAfterPermissionCancel ?? false,
         loopDetected,
       };
@@ -14802,6 +14823,7 @@ export class Session implements SessionContext {
               callId,
               hookOwner,
             );
+            preToolUseContext = preHookResult.additionalContext;
             const preHookCancellation =
               cancelBeforeExecutionIfAborted(toolName);
             if (preHookCancellation) return preHookCancellation;
@@ -14828,15 +14850,6 @@ export class Session implements SessionContext {
                 errorType: ToolErrorType.EXECUTION_DENIED,
                 executionStatus: 'not_started',
               });
-            }
-
-            // Add additional context from PreToolUse hook if provided
-            // Note: This context would need to be passed to the tool invocation
-            // For now, we just log it as the tool execution proceeds
-            if (preHookResult.additionalContext) {
-              debugLogger.debug(
-                `PreToolUse hook additional context for ${toolName}: ${preHookResult.additionalContext}`,
-              );
             }
           }
 
@@ -15428,11 +15441,7 @@ export class Session implements SessionContext {
                 elapsedExecutionMs(),
                 hookOwner,
               );
-              if (failureHookResult.additionalContext) {
-                debugLogger.debug(
-                  `PostToolUseFailure hook additional context for ${toolName}: ${failureHookResult.additionalContext}`,
-                );
-              }
+              failureContext = failureHookResult.additionalContext;
               await this.emitHookArtifactsNotification({
                 hookEventName: 'PostToolUseFailure',
                 toolName,
@@ -15594,10 +15603,11 @@ export class Session implements SessionContext {
             );
           }
 
+          const modelResponseParts = withHookContext(responseParts, status);
           queueToolResultRecord?.(fc, {
             callId,
             toolName,
-            responseParts,
+            responseParts: modelResponseParts,
             persistedOutputFiles: settledPersistedOutputFiles,
             policyToolName,
             toolType,
@@ -15638,7 +15648,7 @@ export class Session implements SessionContext {
             spanError = toolResult.error.message;
           }
           return {
-            parts: responseParts,
+            parts: modelResponseParts,
             ...('modelOverride' in toolResult && succeeded
               ? { modelOverride: toolResult.modelOverride }
               : {}),
@@ -15686,11 +15696,7 @@ export class Session implements SessionContext {
                 elapsedExecutionMs(),
                 hookOwner,
               );
-              if (failureHookResult.additionalContext) {
-                debugLogger.debug(
-                  `PostToolUseFailure hook additional context for ${toolName}: ${failureHookResult.additionalContext}`,
-                );
-              }
+              failureContext = failureHookResult.additionalContext;
               await this.emitHookArtifactsNotification({
                 hookEventName: 'PostToolUseFailure',
                 toolName,
