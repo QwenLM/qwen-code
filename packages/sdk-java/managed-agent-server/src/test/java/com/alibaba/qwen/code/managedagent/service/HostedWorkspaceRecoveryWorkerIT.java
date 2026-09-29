@@ -24,7 +24,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
         "spring.datasource.driver-class-name=org.h2.Driver", "spring.datasource.username=sa", "spring.datasource.password=",
         "qwen.managed-agent.harness.enabled=false"
 })
-class WorkspaceRecoveryWorkerIT {
+class HostedWorkspaceRecoveryWorkerIT {
     @Autowired private DataSource source;
     @Autowired private JdbcTemplate jdbc;
     @Autowired private ManagedAgentStore store;
