@@ -2153,6 +2153,8 @@ export default {
   '{{count}} tool calls': '{{count}} tool calls',
   '{{count}} event': '{{count}} event',
   '{{count}} events': '{{count}} events',
+  'Output capture failed. Displayed output may be incomplete.':
+    'Output capture failed. Displayed output may be incomplete.',
   '{{count}} dropped': '{{count}} dropped',
   'pid {{pid}}': 'pid {{pid}}',
   'exit {{exitCode}}': 'exit {{exitCode}}',

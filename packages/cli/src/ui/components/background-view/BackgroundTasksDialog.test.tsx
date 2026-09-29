@@ -1344,6 +1344,15 @@ describe('BackgroundTasksDialog', () => {
       expect(f5).toContain('5 events');
     });
 
+    it('shows a capture warning only when output capture failed', () => {
+      const failed = openMonitorDetail({
+        outputCaptureError: 'ENOSPC: private/path',
+      } as Partial<DialogEntry>);
+      expect(failed).toContain('Output capture failed.');
+      expect(failed).not.toContain('private/path');
+      expect(openMonitorDetail()).not.toContain('Output capture failed.');
+    });
+
     it('renders droppedLines only when > 0', () => {
       expect(
         openMonitorDetail({ droppedLines: 0 } as Partial<DialogEntry>),

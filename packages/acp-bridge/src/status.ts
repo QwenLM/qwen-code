@@ -143,6 +143,7 @@ export const SERVE_STATUS_EXT_METHODS = {
   sessionTasks: 'qwen/status/session/tasks',
   sessionAgents: 'qwen/status/session/agents',
   sessionAgentTrace: 'qwen/status/session/agent_trace',
+  sessionTaskOutput: 'qwen/status/session/task_output',
   sessionStats: 'qwen/status/session/stats',
   sessionLspStatus: 'qwen/status/session/lsp',
   sessionResources: 'qwen/status/session/resources',
@@ -891,10 +892,25 @@ export interface ServeSessionMonitorTaskStatus {
   eventCount: number;
   lastEventTime: number;
   droppedLines: number;
+  /**
+   * Capture write failure since the last successful flush. The served
+   * output tail may be stale until capture recovers.
+   */
+  outputCaptureError?: string;
   exitCode?: number;
   error?: string;
   ownerAgentId?: string;
   toolUseId?: string;
+}
+
+export interface ServeSessionTaskOutputStatus {
+  v: typeof STATUS_SCHEMA_VERSION;
+  sessionId: string;
+  taskId: string;
+  kind: 'shell' | 'monitor';
+  output: string;
+  truncated: boolean;
+  error?: string;
 }
 
 export interface ServeWorkflowPhaseVisit {

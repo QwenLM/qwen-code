@@ -3348,10 +3348,25 @@ export interface DaemonSessionMonitorTaskStatus {
   eventCount: number;
   lastEventTime: number;
   droppedLines: number;
+  /**
+   * Capture write failure since the last successful flush. The served
+   * output tail may be stale until capture recovers.
+   */
+  outputCaptureError?: string;
   exitCode?: number;
   error?: string;
   ownerAgentId?: string;
   toolUseId?: string;
+}
+
+export interface DaemonSessionTaskOutputStatus {
+  v: 1;
+  sessionId: string;
+  taskId: string;
+  kind: 'shell' | 'monitor';
+  output: string;
+  truncated: boolean;
+  error?: string;
 }
 
 export interface DaemonWorkflowPhaseVisit {

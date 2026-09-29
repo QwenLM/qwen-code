@@ -26,40 +26,75 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 import { openSyncNoFollow } from '../utils/no-follow-open.js';
 import { todoWorkChainContext } from '../utils/promptIdContext.js';
 import {
-  isBidiControlChar,
   stripDisplayControlChars,
   truncateNotificationLabel,
 } from '../utils/terminalSafe.js';
 import { escapeXml } from '../utils/xml.js';
+import { TaskOutputSanitizer } from '../utils/task-output-sanitizer.js';
 
 const debugLogger = createDebugLogger('BACKGROUND_SHELLS');
 const MAX_NOTIFICATION_MODEL_COMMAND_LENGTH = 500;
 export const MAX_NOTIFICATION_OUTPUT_TAIL_BYTES = 8192;
+export const MAX_TASK_OUTPUT_TAIL_BYTES = 64 * 1024;
+// Bound the extra read used to recover sequence state before the window.
+const MAX_TAIL_SEQUENCE_LOOKBACK_BYTES = 4096;
 
-function stripOutputControlChars(text: string): string {
-  let out = '';
-  for (let i = 0; i < text.length; i++) {
-    const code = text.charCodeAt(i);
-    if (code === 0x09 || code === 0x0a || code === 0x0d) {
-      out += text[i];
-      continue;
-    }
-    if (code < 0x20) continue;
-    if (code >= 0x80 && code <= 0x9f) continue;
-    // Same bidi set as the shared display helper, in its own loop only
-    // because the tail must keep \n and \r, which that helper strips.
-    if (isBidiControlChar(code)) continue;
-    out += text[i];
-  }
-  return out;
+export function stripOutputControlChars(text: string): string {
+  return new TaskOutputSanitizer().write(text);
 }
 
-type OutputTailResult =
+/**
+ * Normalize carriage returns for non-TTY consumers of the tail. CRLF is a
+ * real newline and collapses to LF; a lone CR redraws the current line
+ * (`npm --progress`, `curl -#`, pip), so each LF-delimited segment keeps
+ * only the frame after its last CR — with a fallback to the latest
+ * non-blank frame so a line that ends right after a redraw's final CR
+ * still shows the frame it drew. A whitespace-only frame is an erase pad
+ * (a progress bar clearing its own line), not a drawn frame, so it is
+ * never kept and never counts as dropped.
+ *
+ * `droppedFrames` reports whether the collapse discarded any non-blank
+ * frame. A redraw stream drops frames by design, but the same collapse
+ * applied to CR-delimited records destroys whole records — nothing
+ * separates the two shapes, so the loss is reported and folded into
+ * `truncated` rather than guessed at.
+ */
+function normalizeOutputCarriageReturns(text: string): {
+  text: string;
+  droppedFrames: boolean;
+} {
+  if (!text.includes('\r')) return { text, droppedFrames: false };
+  let droppedFrames = false;
+  const normalized = text
+    .replace(/\r\n/g, '\n')
+    .split('\n')
+    .map((line) => {
+      if (!line.includes('\r')) return line;
+      const frames = line.split('\r');
+      let kept: string | undefined;
+      for (let i = frames.length - 1; i >= 0; i--) {
+        if (frames[i]!.trim().length === 0) continue;
+        if (kept === undefined) {
+          kept = frames[i]!;
+        } else {
+          droppedFrames = true;
+        }
+      }
+      return kept ?? '';
+    })
+    .join('\n');
+  return { text: normalized, droppedFrames };
+}
+
+export type TaskOutputTailResult =
   | { text: string; truncated: boolean }
   | { error: string }
   | undefined;
 
-function readOutputTail(outputFile: string): OutputTailResult {
+export function readTaskOutputTail(
+  outputFile: string,
+  maxBytes = MAX_NOTIFICATION_OUTPUT_TAIL_BYTES,
+): TaskOutputTailResult {
   let fd: number | undefined;
   try {
     // O_NOFOLLOW (or the compensating identity check where the flag does
@@ -69,14 +104,27 @@ function readOutputTail(outputFile: string): OutputTailResult {
     const stat = fs.fstatSync(fd);
     if (!stat.isFile() || stat.size <= 0) return undefined;
 
-    const length = Math.min(stat.size, MAX_NOTIFICATION_OUTPUT_TAIL_BYTES);
+    const length = Math.min(stat.size, maxBytes, MAX_TASK_OUTPUT_TAIL_BYTES);
     const start = stat.size - length;
-    const buffer = Buffer.allocUnsafe(length);
-    const bytesRead = fs.readSync(fd, buffer, 0, length, start);
+    // Parse a bounded prefix only to recover sequence state; its printable
+    // bytes must never become part of the served window.
+    const lookback = Math.min(MAX_TAIL_SEQUENCE_LOOKBACK_BYTES, start);
+    const buffer = Buffer.allocUnsafe(lookback + length);
+    const bytesRead = fs.readSync(
+      fd,
+      buffer,
+      0,
+      buffer.length,
+      start - lookback,
+    );
+    if (bytesRead <= lookback) {
+      // The file shrank under the read before the window was reached.
+      return undefined;
+    }
 
     // When the read offset lands mid-codepoint (truncated read), skip
     // leading UTF-8 continuation bytes to avoid U+FFFD replacement chars.
-    let sliceOffset = 0;
+    let sliceOffset = lookback;
     if (start > 0) {
       while (
         sliceOffset < bytesRead &&
@@ -86,17 +134,29 @@ function readOutputTail(outputFile: string): OutputTailResult {
       }
     }
 
-    const text = stripOutputControlChars(
-      buffer.subarray(sliceOffset, bytesRead).toString('utf8'),
+    const sanitizer = new TaskOutputSanitizer();
+    sanitizer.write(buffer.subarray(0, sliceOffset).toString('utf8'));
+    const continuedSequence = sanitizer.hasPendingSequence;
+    const { text, droppedFrames } = normalizeOutputCarriageReturns(
+      sanitizer.write(buffer.subarray(sliceOffset, bytesRead).toString('utf8')),
+    );
+    const trimmed = (
+      continuedSequence && text.startsWith('\n') ? text.slice(1) : text
     ).trimEnd();
 
-    if (!text) return undefined;
+    // Invalid UTF-8 can expand into three-byte replacement characters.
+    const encoded = Buffer.from(trimmed);
+    let offset = Math.max(0, encoded.length - length);
+    while (offset < encoded.length && (encoded[offset]! & 0xc0) === 0x80) {
+      offset++;
+    }
+    if (!trimmed) return undefined;
     return {
-      text,
-      truncated: start > 0,
+      text: encoded.subarray(offset).toString('utf8'),
+      truncated: start > 0 || droppedFrames || offset > 0,
     };
   } catch (error) {
-    debugLogger.warn(`Failed to read shell output tail:`, error);
+    debugLogger.warn(`Failed to read task output tail:`, error);
     return {
       error: error instanceof Error ? error.message : String(error),
     };
@@ -537,7 +597,7 @@ export class BackgroundShellRegistry {
         `<result>${escapeXml(stripDisplayControlChars(entry.error))}</result>`,
       );
     }
-    const outputTail = readOutputTail(entry.outputFile);
+    const outputTail = readTaskOutputTail(entry.outputFile);
     if (outputTail) {
       if ('error' in outputTail) {
         xmlParts.push(`<output-tail error="unreadable" />`);

@@ -2441,6 +2441,8 @@ export default {
   '{{count}} tool calls': '{{count}} 个工具调用',
   '{{count}} event': '{{count}} 个事件',
   '{{count}} events': '{{count}} 个事件',
+  'Output capture failed. Displayed output may be incomplete.':
+    '输出捕获失败，显示的输出可能不完整。',
   '{{count}} dropped': '丢弃 {{count}} 行',
   'pid {{pid}}': 'pid {{pid}}',
   'exit {{exitCode}}': '退出码 {{exitCode}}',

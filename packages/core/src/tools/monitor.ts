@@ -18,10 +18,11 @@
 
 import { spawn, type ChildProcess } from 'node:child_process';
 import { executeRuntimeShell } from '../sandbox/runtime-shell.js';
+import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import stripAnsi from 'strip-ansi';
+import { StringDecoder } from 'node:string_decoder';
 import type { Config } from '../config/config.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import type {
@@ -58,6 +59,12 @@ import { getCurrentAgentId } from '../agents/runtime/agent-context.js';
 import { getShellContextEnvVars } from '../services/shellContextEnv.js';
 import { getShellPagerEnv } from '../utils/shell-pager-env.js';
 import { sanitizeChildEnv } from '../utils/sanitize-child-env.js';
+import {
+  atomicWriteFile,
+  atomicWriteFileSync,
+} from '../utils/atomicFileWrite.js';
+import { MAX_TASK_OUTPUT_TAIL_BYTES } from '../services/backgroundShellRegistry.js';
+import { TaskOutputSanitizer } from '../utils/task-output-sanitizer.js';
 
 const debugLogger = createDebugLogger('MONITOR');
 
@@ -67,6 +74,13 @@ const DEFAULT_IDLE_TIMEOUT_MS = 300_000; // 5 minutes
 const MAX_IDLE_TIMEOUT_MS = 600_000; // 10 minutes
 const MAX_DISPLAY_DESCRIPTION_LENGTH = 80;
 const PARTIAL_LINE_BUFFER_CAP = 4096;
+// The extra byte preserves readTaskOutputTail's `truncated` signal after the
+// capture starts discarding older output.
+const MAX_MONITOR_OUTPUT_CAPTURE_BYTES = MAX_TASK_OUTPUT_TAIL_BYTES + 1;
+// Consecutive capture-write failures after which the writer stops
+// re-attempting: a full disk or a read-only project dir fails every chunk,
+// and each attempt rewrites the whole retained tail.
+const MAX_OUTPUT_WRITE_FAILURES = 3;
 
 // Throttling constants (token bucket)
 const THROTTLE_BURST_SIZE = 5;
@@ -328,6 +342,11 @@ class MonitorToolInvocation extends BaseToolInvocation<
     const monitorId = `mon_${randomUUID().replace(/-/g, '').slice(0, 16)}`;
     const registry = this.config.getMonitorRegistry();
     const ownerAgentId = getCurrentAgentId() ?? undefined;
+    const outputFile = getMonitorOutputPath(
+      this.config.storage.getProjectDir(),
+      this.config.getSessionId(),
+      monitorId,
+    );
 
     // Check concurrent monitor limit before spawning
     const running = registry.getRunning();
@@ -355,16 +374,120 @@ class MonitorToolInvocation extends BaseToolInvocation<
       maxEvents,
       idleTimeoutMs,
       droppedLines: 0,
-      // Reserved path for a future per-monitor writer; no file is created
-      // today (events stream into the parent's chat record via the
-      // notification callback).
-      outputFile: getMonitorOutputPath(
-        this.config.storage.getProjectDir(),
-        this.config.getSessionId(),
-        monitorId,
-      ),
+      outputFile,
       ...(ownerAgentId ? { ownerAgentId } : {}),
     };
+
+    try {
+      fs.mkdirSync(path.dirname(outputFile), { recursive: true });
+      atomicWriteFileSync(outputFile, Buffer.alloc(0), {
+        flush: false,
+        noFollow: true,
+      });
+    } catch (err) {
+      return {
+        llmContent: `Monitor failed to create its output file: ${getErrorMessage(err)}`,
+        returnDisplay: `Monitor failed: ${getErrorMessage(err)}`,
+      };
+    }
+
+    let outputTail = Buffer.alloc(0);
+    let outputDirty = false;
+    let outputWritePromise: Promise<void> | undefined;
+    let outputCloseRequested = false;
+    let outputCaptureClosed = false;
+    let outputWriteFailures = 0;
+    let outputWriteGaveUp = false;
+    const outputCloseCallbacks: Array<() => void> = [];
+
+    const finishOutputCapture = (): void => {
+      if (
+        !outputCaptureClosed &&
+        outputCloseRequested &&
+        !outputDirty &&
+        !outputWritePromise
+      ) {
+        outputCaptureClosed = true;
+        for (const callback of outputCloseCallbacks.splice(0)) callback();
+      }
+    };
+
+    const flushOutputCapture = (): void => {
+      if (outputWritePromise) return;
+
+      outputWritePromise = (async () => {
+        while (outputDirty) {
+          outputDirty = false;
+          try {
+            await atomicWriteFile(outputFile, outputTail, {
+              flush: false,
+              noFollow: true,
+            });
+            outputWriteFailures = 0;
+            delete registration.outputCaptureError;
+          } catch (err) {
+            outputWriteFailures++;
+            // Keep the warning until a later flush restores the captured tail.
+            registration.outputCaptureError ??= getErrorMessage(err);
+            debugLogger.warn(
+              `Monitor ${monitorId} output write error: ${getErrorMessage(err)}`,
+            );
+            if (outputWriteFailures >= MAX_OUTPUT_WRITE_FAILURES) {
+              outputWriteGaveUp = true;
+              outputDirty = false;
+            }
+          }
+        }
+      })().finally(() => {
+        outputWritePromise = undefined;
+        // A chunk that arrived between the loop's last dirty check and
+        // this reset marked the tail dirty without restarting the loop;
+        // restart it here or the capture silently stops advancing and the
+        // close join never settles. A writer that gave up has forced
+        // outputDirty false, so this never re-arms a doomed write.
+        if (outputDirty) {
+          flushOutputCapture();
+          return;
+        }
+        finishOutputCapture();
+      });
+    };
+
+    const writeOutputCapture = (text: string): void => {
+      if (outputCloseRequested || outputWriteGaveUp || text.length === 0)
+        return;
+
+      const chunk = Buffer.from(text);
+      if (chunk.length >= MAX_MONITOR_OUTPUT_CAPTURE_BYTES) {
+        outputTail = Buffer.from(
+          chunk.subarray(-MAX_MONITOR_OUTPUT_CAPTURE_BYTES),
+        );
+      } else {
+        const bytesToKeep = MAX_MONITOR_OUTPUT_CAPTURE_BYTES - chunk.length;
+        outputTail = Buffer.concat([outputTail.subarray(-bytesToKeep), chunk]);
+      }
+      outputDirty = true;
+      flushOutputCapture();
+    };
+
+    const closeOutputCapture = (onClosed?: () => void): void => {
+      outputCloseRequested = true;
+      if (onClosed) {
+        if (outputCaptureClosed) {
+          onClosed();
+          return;
+        }
+        outputCloseCallbacks.push(onClosed);
+      }
+      finishOutputCapture();
+    };
+
+    // Teardown join handle: resolves when the capture is closed and its
+    // last in-flight write has drained, so removing the project tree can
+    // await it instead of racing a staged temp file into an rmSync walk.
+    registration.outputCaptureClosed = new Promise<void>((resolve) => {
+      outputCloseCallbacks.push(resolve);
+    });
 
     // Spawn the process
     const { executable, argsPrefix } = getShellConfiguration();
@@ -388,6 +511,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
           },
         });
     } catch (err) {
+      closeOutputCapture();
       return {
         llmContent: `Monitor failed to start: ${getErrorMessage(err)}`,
         returnDisplay: `Monitor failed: ${getErrorMessage(err)}`,
@@ -410,8 +534,16 @@ class MonitorToolInvocation extends BaseToolInvocation<
     // path — either `entryAc.signal.aborted` already true at registration
     // time, or `registry.register()` throwing — can flush via
     // `flushPartialLineBuffers` without hitting a TDZ ReferenceError.
-    const stdoutBuf = { value: '' };
-    const stderrBuf = { value: '' };
+    const stdoutBuf = {
+      value: '',
+      sanitizer: new TaskOutputSanitizer(),
+      decoder: new StringDecoder('utf8'),
+    };
+    const stderrBuf = {
+      value: '',
+      sanitizer: new TaskOutputSanitizer(),
+      decoder: new StringDecoder('utf8'),
+    };
     let tokenBucket = THROTTLE_BURST_SIZE;
     let lastRefill = Date.now();
 
@@ -459,6 +591,9 @@ class MonitorToolInvocation extends BaseToolInvocation<
     // after flushing.
     const flushPartialLineBuffers = (): void => {
       for (const buf of [stdoutBuf, stderrBuf]) {
+        const tail = buf.sanitizer.write(buf.decoder.end());
+        writeOutputCapture(tail);
+        buf.value += tail;
         const trimmed = buf.value.trim();
         if (trimmed.length > 0) {
           throttledEmit(trimmed);
@@ -510,6 +645,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
     // line(s) the child wrote between the abort signal and process exit.
     const abortHandler = (): void => {
       flushPartialLineBuffers();
+      closeOutputCapture();
       killChildProcessGroup();
     };
     entryAc.signal.addEventListener('abort', abortHandler, { once: true });
@@ -530,6 +666,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
       )?.destroy?.();
       child?.removeListener('error', captureEarlySpawnError);
       child?.on('error', () => {});
+      closeOutputCapture();
       return {
         llmContent: `Monitor failed to start: ${getErrorMessage(err)}`,
         returnDisplay: `Monitor failed: ${getErrorMessage(err)}`,
@@ -537,14 +674,19 @@ class MonitorToolInvocation extends BaseToolInvocation<
     }
 
     const processLines = (
-      buffer: { value: string },
+      buffer: {
+        value: string;
+        sanitizer: TaskOutputSanitizer;
+        decoder: StringDecoder;
+      },
       data: Buffer | string,
     ): void => {
       if (registration.status !== 'running') return;
 
-      const text = stripAnsi(
-        typeof data === 'string' ? data : data.toString('utf-8'),
-      );
+      const decoded =
+        typeof data === 'string' ? data : buffer.decoder.write(data);
+      const text = buffer.sanitizer.write(decoded);
+      writeOutputCapture(text);
       buffer.value += text;
 
       // Guard against unbounded partial-line accumulation. If a command emits
@@ -593,11 +735,15 @@ class MonitorToolInvocation extends BaseToolInvocation<
     //     `abortHandler` (so this is a no-op) but removing the guard keeps
     //     cleanup defensive against future status-flip races.
     let cleanedUp = false;
-    const cleanup = (): void => {
-      if (cleanedUp) return;
+    const cleanup = (onOutputClosed?: () => void): void => {
+      if (cleanedUp) {
+        closeOutputCapture(onOutputClosed);
+        return;
+      }
       cleanedUp = true;
 
       flushPartialLineBuffers();
+      closeOutputCapture(onOutputClosed);
 
       entryAc.signal.removeEventListener('abort', abortHandler);
 
@@ -635,18 +781,17 @@ class MonitorToolInvocation extends BaseToolInvocation<
 
     const onClose = (code: number | null, sig: NodeJS.Signals | null): void => {
       exited = true;
-      cleanup();
-
       const result = exitResult ?? { code, sig };
-      settleFromExit(result.code, result.sig);
+      cleanup(() => settleFromExit(result.code, result.sig));
     };
 
     const onError = (err: Error): void => {
       exited = true;
-      cleanup();
-      if (registration.status === 'running') {
-        registry.fail(monitorId, getErrorMessage(err));
-      }
+      cleanup(() => {
+        if (registration.status === 'running') {
+          registry.fail(monitorId, getErrorMessage(err));
+        }
+      });
     };
 
     child?.on('exit', onExit);
@@ -693,13 +838,14 @@ class MonitorToolInvocation extends BaseToolInvocation<
         void handle.result.then(
           (result) => {
             exited = true;
-            cleanup();
-            if (result.error) {
-              if (registration.status === 'running')
-                registry.fail(monitorId, result.error.message);
-            } else {
-              settleFromExit(result.exitCode, result.signal);
-            }
+            cleanup(() => {
+              if (result.error) {
+                if (registration.status === 'running')
+                  registry.fail(monitorId, result.error.message);
+              } else {
+                settleFromExit(result.exitCode, result.signal);
+              }
+            });
           },
           (error: unknown) =>
             onError(error instanceof Error ? error : new Error(String(error))),
@@ -730,6 +876,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
         `description: ${description}\n` +
         `max_events: ${maxEvents}\n` +
         `idle_timeout: ${idleTimeoutMs}ms\n` +
+        `output file: ${outputFile}\n` +
         `Events will be delivered as notifications. ` +
         `The monitor auto-stops after ${maxEvents} events or ${idleTimeoutMs}ms of silence.\n` +
         `To inspect: /tasks (text) or the interactive Background tasks dialog (focus the footer Background tasks pill, then Enter — detail view + live updates).`,

@@ -644,6 +644,7 @@ export type {
   DaemonMcpAppToolResult,
   DaemonSessionAgentTaskStatus,
   DaemonSessionMonitorTaskStatus,
+  DaemonSessionTaskOutputStatus,
   DaemonSessionWorkflowTaskStatus,
   DaemonWorkflowActionInput,
   DaemonWorkflowApprovalStatusEntry,

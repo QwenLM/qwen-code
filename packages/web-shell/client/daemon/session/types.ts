@@ -35,6 +35,7 @@ import type {
   DaemonSessionSummary,
   DaemonSessionSupportedCommandsStatus,
   DaemonSessionTaskWithWorkflowStatus,
+  DaemonSessionTaskOutputStatus,
   DaemonSessionTasksStatus,
   DaemonSessionWorkflowTaskStatus,
   DaemonSessionWorkflowTasksStatus,
@@ -671,6 +672,10 @@ export interface DaemonSessionActions {
   ): Promise<DaemonRemovePendingPromptResult>;
   sendShellCommand(command: string): Promise<DaemonShellCommandResult>;
   getTasks(opts?: GetTasksActionOptions): Promise<DaemonSessionTasksStatus>;
+  getTaskOutput(
+    taskId: string,
+    kind: 'shell' | 'monitor',
+  ): Promise<DaemonSessionTaskOutputStatus>;
   getWorkflowTasks(
     opts?: GetTasksActionOptions,
   ): Promise<DaemonSessionWorkflowTasksStatus>;

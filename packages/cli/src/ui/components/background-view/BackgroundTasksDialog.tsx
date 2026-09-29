@@ -1146,6 +1146,14 @@ const MonitorDetailBody: React.FC<{
         <Text wrap="truncate-end">{entry.command}</Text>
       </Box>
 
+      {entry.outputCaptureError && (
+        <Box>
+          <Text color={theme.status.warning} wrap="wrap">
+            {t('Output capture failed. Displayed output may be incomplete.')}
+          </Text>
+        </Box>
+      )}
+
       {hasError && (
         <Fragment>
           <Box />
