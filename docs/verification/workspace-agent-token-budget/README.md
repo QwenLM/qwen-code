@@ -25,8 +25,14 @@ so every expected value here is derived from the code, not observed.
    `DEFAULT_THREAD_TOKEN_BUDGET` in
    `packages/core/src/agents/workspace-agents/types.ts` to `20_000` in the
    local build only, and do not commit it.
-3. Start `qwen serve` with `QWEN_CODE_ENABLE_AGENT_COLLABORATION=1` in a
-   scratch workspace. Create two agents, `lead` and `helper`.
+3. Start the daemon step 1 built, from the checkout root and in a scratch
+   workspace:
+   `QWEN_CODE_ENABLE_AGENT_COLLABORATION=1 node dist/cli.js serve`. Not a bare
+   `qwen serve` — that runs whichever installed release `PATH` resolves to,
+   which contains none of this PR, so the tag is absent, every `agent/*` route
+   404s, and the matrix reads as a budget-contract failure. Confirm
+   `GET /capabilities` lists `agent_collaboration_v1` before starting row 1.
+   Create two agents, `lead` and `helper`.
 
 ## Matrix
 
