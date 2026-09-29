@@ -689,6 +689,56 @@ describe('filter origin regressions (real Git)', () => {
     },
   );
 
+  it.each([true, false])(
+    'R9-1: refuses a tracked config behind a corroborating descendant gitfile (local include: %s)',
+    (localInclude) => {
+      const repo = join(dir, 'main');
+      const linked = join(dir, 'linked');
+      const name = 'dotfiles/gitconfig';
+      const payload = join(repo, name);
+      init(repo);
+      mkdirSync(dirname(payload));
+      git(repo, 'config', '--file', payload, TEAM, 'cat');
+      git(repo, 'add', name);
+      git(repo, 'commit', '-qm', 'tracked filter');
+      git(repo, 'worktree', 'add', '--detach', '-q', linked, 'HEAD');
+      const common = discover(linked, '--git-common-dir');
+      const gitDir = discover(linked, '--git-dir');
+      git(linked, 'config', '--global', 'include.path', gitPath(payload));
+      if (localInclude) {
+        git(linked, 'config', 'include.path', gitPath(payload));
+      }
+      expect(filterCommandsIn(common, gitDir, linked)).toEqual(refusedTeam);
+      expect(checkoutFilterCommands(linked)).toEqual([TEAM]);
+
+      const root = dirname(payload);
+      git(linked, 'config', 'core.worktree', gitPath(root));
+      const marker = join(root, '.git');
+      writeFileSync(marker, `gitdir: ${gitPath(common)}\n`);
+      expect(
+        normalize(git(common, 'rev-parse', '--resolve-git-dir', marker)),
+      ).toBe(common);
+      expect(discover(root, '--show-toplevel')).toBe(root);
+      expect(
+        git(
+          linked,
+          `--git-dir=${common}`,
+          `--work-tree=${repo}`,
+          'ls-files',
+          '--error-unmatch',
+          '--',
+          name,
+        ),
+      ).toBe(name);
+      expect(git(linked, 'config', '--includes', '--get', TEAM)).toBe('cat');
+
+      expect
+        .soft(filterCommandsIn(common, gitDir, linked))
+        .toEqual(refusedTeam);
+      expect.soft(checkoutFilterCommands(linked)).toEqual([TEAM]);
+    },
+  );
+
   it.each(['native', 'included'])(
     'R7 control: preserves a legitimate %s global filter with relative core.worktree',
     (kind) => {

@@ -1092,8 +1092,9 @@ export interface FilterScreen {
    */
   exempt: string[];
   /**
-   * Trusted filter keys reached through the repo-local include graph. Residue
-   * measurements blank these keys, but leave unrelated global filters active.
+   * Trusted filter keys reached through the repo-local include graph. The
+   * controlled base tree blanks them; shared-tree residue stays unmeasured
+   * because checkout may legitimately have used them to transform content.
    */
   reachedExempt: string[];
   /**
@@ -1490,7 +1491,10 @@ export function filterCommandsIn(
           );
           if (
             'value' in discoveredGitDir &&
-            rootNamesGitDir(discoveredTop.value, discoveredGitDir.value)
+            rootNamesGitDir(discoveredTop.value, discoveredGitDir.value) &&
+            ['untracked', 'outside-root'].includes(
+              trackedAt(dirname(commonDir), file, true),
+            )
           ) {
             verdict = 'outside';
           }
@@ -1525,7 +1529,10 @@ export function filterCommandsIn(
           tracked === 'tracked'
             ? 'controlled'
             : (tracked === 'untracked' || tracked === 'outside-root') &&
-                rootNamesGitDir(configuredWorktree, commonDir)
+                rootNamesGitDir(configuredWorktree, commonDir) &&
+                ['untracked', 'outside-root'].includes(
+                  trackedAt(dirname(commonDir), file, true),
+                )
               ? 'outside'
               : 'unknown';
       } else {
@@ -2884,10 +2891,21 @@ export function worktreeResidue(
             'include, or the file it names, if it is not yours',
         };
       }
-      filterBlanks = filterBlankEnv([
-        ...screen.filters,
-        ...screen.reachedExempt,
-      ]);
+      // Running these commands is unsafe here; without running them we
+      // cannot prove that their authorized checkout output is unmodified.
+      if (screen.reachedExempt.length > 0) {
+        return {
+          paths: [],
+          total: 0,
+          unmeasured:
+            'the residue measurement would blank trusted filters this ' +
+            'checkout was authorized to run: ' +
+            `${describeFilterScreen(screen.reachedExempt)}; their normalized ` +
+            'output cannot be distinguished from foreign residue without ' +
+            'executing those filters',
+        };
+      }
+      filterBlanks = filterBlankEnv(screen.filters);
     }
   } catch {
     // A cwd that no longer resolves is not a tree this probe can measure.

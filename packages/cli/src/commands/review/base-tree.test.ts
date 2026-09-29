@@ -2546,7 +2546,7 @@ describe('runBaseTree', () => {
       withHome(home, () => {
         expect.soft(filterScreenForTree(tree())).toMatchObject({
           filters: [],
-          exempt: ['filter.evil.clean'],
+          exempt: expect.arrayContaining(['filter.evil.clean']),
           reachedExempt: ['filter.evil.clean'],
           unread: [],
           dangling: [],

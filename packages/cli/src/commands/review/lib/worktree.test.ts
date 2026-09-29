@@ -241,7 +241,7 @@ describe('worktreeResidue', () => {
     expect(got).toEqual({ paths: [], total: 0 });
   });
 
-  it('blanks a globally exempt filter during the residue measurement', () => {
+  it('leaves residue unmeasured rather than executing an included trusted filter', () => {
     const marker = join(repo, "PWNED global 'included'");
     const globalConfig = join(gitIsolation.home, '.gitconfig');
     gitRepo(
@@ -268,11 +268,13 @@ describe('worktreeResidue', () => {
 
     const got = worktreeResidue(tree, 12, git('rev-parse', 'HEAD'));
     expect(existsSync(marker)).toBe(false);
-    expect(got).toEqual({ paths: [], total: 0 });
+    expect(got.paths).toEqual([]);
+    expect(got.total).toBe(0);
+    expect(got.unmeasured).toContain('filter.evil.clean');
   });
 
   it.skipIf(process.platform === 'win32')(
-    'R8-2: sees residue normalized by a transitively included global filter without running it',
+    'R9-2: leaves trusted transitive filter normalization unmeasured without running it',
     () => {
       const marker = join(gitIsolation.home, 'transitive-clean-ran');
       const globalConfig = join(gitIsolation.home, '.gitconfig');
@@ -296,13 +298,69 @@ describe('worktreeResidue', () => {
       const stale = new Date(Date.now() + 60_000);
       utimesSync(join(tree, 'a.ts'), stale, stale);
       expect(existsSync(marker)).toBe(false);
+      expect(git('status', '--porcelain')).toBe('');
+      expect(existsSync(marker)).toBe(true);
+      rmSync(marker);
+      utimesSync(join(tree, 'a.ts'), stale, stale);
 
       const residue = worktreeResidue(tree, 12, head);
-      expect.soft(residue).toEqual({ paths: ['a.ts'], total: 1 });
+      expect.soft(residue.paths).toEqual([]);
+      expect.soft(residue.total).toBe(0);
+      expect.soft(residue.unmeasured).toContain('filter.evil.clean');
       expect.soft(existsSync(marker)).toBe(false);
       expect(readFileSync(join(tree, 'a.ts'), 'utf8')).toBe(
         'EXPORT CONST X = 1;\n',
       );
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'R9-2: does not name a pristine smudged payload as foreign residue',
+    () => {
+      const marker = join(gitIsolation.home, 'lfs-clean-ran');
+      const globalConfig = join(gitIsolation.home, '.gitconfig');
+      gitRepo(
+        'config',
+        '--file',
+        globalConfig,
+        'filter.lfs.clean',
+        `touch ${shellQuotePath(marker)} && cat >/dev/null && printf 'pointer\\n'`,
+      );
+      gitRepo(
+        'config',
+        '--file',
+        globalConfig,
+        'filter.lfs.smudge',
+        "cat >/dev/null && printf 'expanded payload\\n'",
+      );
+      gitRepo('config', 'include.path', globalConfig);
+      writeFileSync(join(repo, '.gitattributes'), 'a.ts filter=lfs\n');
+      gitRepo('add', '.gitattributes');
+      gitRepo('add', '--renormalize', 'a.ts');
+      gitRepo('commit', '-qm', 'filtered pointer');
+      const head = gitRepo('rev-parse', 'HEAD');
+      git('reset', '--hard', '-q', head);
+      expect(git('show', `${head}:a.ts`)).toBe('pointer');
+      expect(readFileSync(join(tree, 'a.ts'), 'utf8')).toBe(
+        'expanded payload\n',
+      );
+      expect(git('status', '--porcelain')).toBe('');
+      expect(existsSync(marker)).toBe(true);
+      rmSync(marker);
+      expect(localFilterCommands(tree)).toEqual([]);
+      expect(checkoutFilterCommands(tree)).toEqual([]);
+      execFileSync('git', ['hash-object', '--path=a.ts', 'a.ts'], {
+        cwd: tree,
+      });
+      expect(existsSync(marker)).toBe(true);
+      rmSync(marker);
+
+      const residue = worktreeResidue(tree, 12, head);
+      expect.soft(residue.paths).toEqual([]);
+      expect.soft(residue.total).toBe(0);
+      expect.soft(residue.unmeasured).toContain('filter.lfs.clean');
+      expect.soft(residue.unmeasured).toContain('filter.lfs.smudge');
+      expect.soft(existsSync(marker)).toBe(false);
     },
   );
 

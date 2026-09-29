@@ -293,7 +293,10 @@ describe('runScratchTree', () => {
     const r = run();
 
     expect(r.available).toBe(true);
-    expect(r.note).not.toContain('filter.lfs.clean');
+    expect(r.sharedTreeResidue).toEqual([]);
+    expect(r.sharedTreeUnmeasured).toContain('filter.lfs.clean');
+    expect(r.note).toContain('could not be measured');
+    expect(r.note).not.toContain('shared review worktree is NOT clean');
   });
 
   it.skipIf(process.platform === 'win32')(
