@@ -1043,15 +1043,28 @@ describe('MemoryManager', () => {
       // 12-field literal is exactly where a transposed field lands. With
       // five of six counters at 0 a swap between two zero-valued counters
       // survives even a full-payload assertion.
-      vi.mocked(runManagedUserAutoMemoryDream).mockResolvedValueOnce({
-        touchedTopics: ['user', 'feedback'],
-        createdEntries: 3,
-        updatedEntries: 5,
-        deletedEntries: 7,
-        dedupedEntries: 11,
-        splitEntries: 13,
-        keywordBackfilled: 17,
-      });
+      //
+      // The clock is flipped from inside the dream mock, not by
+      // `mockReturnValueOnce`: a once-value is consumed by whichever code
+      // calls `Date.now()` first, so any timestamp added to the scheduling
+      // prologue would move `startedAt` and fail `duration_ms` from inside
+      // the telemetry payload, far from this setup. Holding the pre-dream
+      // value at 1_000 makes `duration_ms` a property of the flip alone.
+      const dateNow = vi.spyOn(Date, 'now').mockReturnValue(1_000);
+      vi.mocked(runManagedUserAutoMemoryDream).mockImplementationOnce(
+        async () => {
+          dateNow.mockReturnValue(1_025);
+          return {
+            touchedTopics: ['user', 'feedback'],
+            createdEntries: 3,
+            updatedEntries: 5,
+            deletedEntries: 7,
+            dedupedEntries: 11,
+            splitEntries: 13,
+            keywordBackfilled: 17,
+          };
+        },
+      );
       vi.spyOn(userDream, 'completeUserAutoMemoryDream').mockRejectedValueOnce(
         new Error('metadata unavailable'),
       );
@@ -1060,10 +1073,6 @@ describe('MemoryManager', () => {
         getMemoryRecallMode: vi.fn().mockReturnValue('structured'),
       });
       telemetryMocks.logMemoryDream.mockClear();
-      const dateNow = vi
-        .spyOn(Date, 'now')
-        .mockReturnValueOnce(1_000)
-        .mockReturnValue(1_025);
 
       const result = await manager.scheduleUserDream({
         projectRoot,
@@ -1158,9 +1167,13 @@ describe('MemoryManager', () => {
 
     it('keeps a cancelled User Dream cancelled when the dream resolves after abort', async () => {
       // User-dream mirror of the project-dream case in `cancelTask()`
-      // below. runForkedAgent maps a cancelled agent to a *resolved*
-      // result, so `dream-operations.ts`'s single in-loop abort check can
-      // be passed and the callee can still return normally. What keeps the
+      // below. The callee can still return normally with the signal
+      // already aborted: the agent reaches its goal and the cancel lands
+      // during or after the apply, so `dream-operations.ts`'s per-delete
+      // check is already behind it (see `does not rebuild the user index
+      // after cancellation` in user-dream.test.ts). A *cancelled* agent
+      // result never gets that far — the planner throws on any
+      // non-`completed` status. What keeps the
       // record from flipping to `completed` is the manager's post-await
       // abort guard plus the `abortSignal.aborted && record.status ===
       // 'cancelled'` discrimination in runUserDream's catch.

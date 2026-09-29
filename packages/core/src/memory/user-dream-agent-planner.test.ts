@@ -218,6 +218,28 @@ describe('User Dream agent planner', () => {
     ).resolves.toBe('deny');
   });
 
+  it('forwards the caller abort signal to the fork agent', async () => {
+    // The cancelled-status cases below all inject the abort *after* the
+    // fork call, so nothing else pins the `abortSignal` member of that
+    // call. Dropping it stays type-clean (the parameter is optional on
+    // both sides) and keeps every suite green, while `task_stop` on a
+    // running user dream aborts a controller the agent never sees and the
+    // agent writes for its full turn/time budget. The signal is optional
+    // on planUserAutoMemoryDreamByAgent as well, so this case has to pass
+    // one explicitly or it asserts nothing.
+    const controller = new AbortController();
+
+    await planUserAutoMemoryDreamByAgent(
+      config,
+      projectRoot,
+      controller.signal,
+    );
+
+    expect(vi.mocked(runForkedAgent)).toHaveBeenCalledWith(
+      expect.objectContaining({ abortSignal: controller.signal }),
+    );
+  });
+
   it.each([
     ['failed', 'Model timed out'],
     ['cancelled', 'CANCELLED'],
