@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { EventEmitter } from 'node:events';
 import {
   type QQChannel as QQChannelClass,
   DeliveryError,
@@ -116,7 +117,10 @@ function mockResponse(ok: boolean, status = 200): MockResponse {
   return { ok, status, text: async () => '' };
 }
 
-function makeChannel(overrides: Record<string, unknown> = {}): QQChannelClass {
+function makeChannel(
+  overrides: Record<string, unknown> = {},
+  bridgeOverride: Record<string, unknown> = {},
+): QQChannelClass {
   const ch = new QQChannel(
     'test-bot',
     {
@@ -133,7 +137,7 @@ function makeChannel(overrides: Record<string, unknown> = {}): QQChannelClass {
       appSecret: 'test-secret',
       ...overrides,
     },
-    {} as unknown as import('@qwen-code/channel-base').ChannelAgentBridge,
+    bridgeOverride as unknown as import('@qwen-code/channel-base').ChannelAgentBridge,
   );
   const chp = ch as unknown as Record<string, unknown>;
   chp['accessToken'] = 'test-token';
@@ -5174,5 +5178,99 @@ describe('R15-1 acceptance: tail hand-off must not stash under an ended turn', (
     setReplyMsgId(ch, 'test-chat', 'msg-B');
     onPromptStart(ch, 'test-chat', 's1', 'msg-B');
     expect(completedTurns.has('s1')).toBe(false);
+  });
+});
+
+describe('boundary suppressed from the adapter hook still seals the stash', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockSendQQMessage.mockResolvedValue(mockResponse(true));
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('seals the stash on the bridge boundary the hook never saw (stale-entry reader)', async () => {
+    const bridge = new EventEmitter();
+    const ch = makeChannel({}, bridge as unknown as Record<string, unknown>);
+    const { resolveSend, orphanBuffer } = await reachStaleStash(ch);
+    expect(orphanBuffer.get('s1')).toEqual({ turn: 2, text: 'T2-HEAD ' });
+
+    // ChannelBase's own responseBoundary listener returns early while a cancel
+    // is pending, so ch.onResponseBoundary never runs. The bridge's emit — and
+    // its own clearChunks — still happen, dropping 'T2-HEAD ' from fullText.
+    bridge.emit('responseBoundary', 's1');
+
+    // The cancel loses the race; the turn completes normally with only the
+    // post-boundary text in fullText.
+    mockSendQQMessage.mockResolvedValue(mockResponse(true));
+    await onResponseComplete(ch, 'test-chat', 'T2-REST', 's1');
+    expect(sentContents().at(-1)).toBe('T2-HEAD T2-REST');
+    resolveSend(mockResponse(true));
+    await drain();
+  });
+
+  it('seals the stash on the bridge boundary the hook never saw (normal reader)', async () => {
+    const bridge = new EventEmitter();
+    const ch = makeChannel({}, bridge as unknown as Record<string, unknown>);
+    const { orphanBuffer } = await reachStashedOrphan(ch);
+    expect(orphanBuffer.get('s1')).toEqual({ turn: 2, text: 'T2-HEAD ' });
+
+    bridge.emit('responseBoundary', 's1');
+
+    await onResponseComplete(ch, 'test-chat', 'T2-REST', 's1');
+    expect(sentContents().at(-1)).toBe('T2-HEAD T2-REST');
+  });
+
+  it('does not prepend when no boundary cleared the collection (stale-entry reader)', async () => {
+    const bridge = new EventEmitter();
+    const ch = makeChannel({}, bridge as unknown as Record<string, unknown>);
+    const { resolveSend, orphanBuffer } = await reachStaleStash(ch);
+    expect(orphanBuffer.get('s1')).toEqual({ turn: 2, text: 'T2-HEAD ' });
+    expect(orphanBuffer.get('s1')!.pre).toBeUndefined();
+
+    await onResponseComplete(ch, 'test-chat', 'T2-HEAD T2-REST', 's1');
+    const contents = sentContents();
+    expect(contents.filter((c) => c === 'T2-HEAD T2-REST')).toHaveLength(1);
+    expect(contents.some((c) => c.includes('T2-HEAD T2-HEAD'))).toBe(false);
+    resolveSend(mockResponse(true));
+    await drain();
+  });
+
+  it('does not prepend when no boundary cleared the collection (normal reader)', async () => {
+    const bridge = new EventEmitter();
+    const ch = makeChannel({}, bridge as unknown as Record<string, unknown>);
+    const { orphanBuffer } = await reachStashedOrphan(ch);
+    expect(orphanBuffer.get('s1')).toEqual({ turn: 2, text: 'T2-HEAD ' });
+
+    await onResponseComplete(ch, 'test-chat', 'T2-HEAD T2-REST', 's1');
+    const contents = sentContents();
+    expect(contents.filter((c) => c === 'T2-HEAD T2-REST')).toHaveLength(1);
+    expect(contents.some((c) => c.includes('T2-HEAD T2-HEAD'))).toBe(false);
+  });
+
+  it('recovers only the sealed head when post-boundary chunks joined the stash', async () => {
+    const bridge = new EventEmitter();
+    const ch = makeChannel({}, bridge as unknown as Record<string, unknown>);
+    const { resolveSend, orphanBuffer } = await reachStaleStash(ch);
+    expect(orphanBuffer.get('s1')).toEqual({ turn: 2, text: 'T2-HEAD ' });
+
+    // The suppressed hook misses the boundary, but the bridge still cleared
+    // its collection at that point.
+    bridge.emit('responseBoundary', 's1');
+    // A post-boundary chunk arrives while the predecessor is still parked: it
+    // joins the stash AND the bridge's fresh collection (so it is in fullText).
+    onResponseChunk(ch, 'test-chat', 'T2-POST', 's1');
+
+    mockSendQQMessage.mockResolvedValue(mockResponse(true));
+    // fullText carries only the post-boundary text; the sealed head is the
+    // only part that must be recovered. Prepending the whole stash (or a
+    // fullText-comparison guard) would repeat T2-POST.
+    await onResponseComplete(ch, 'test-chat', 'T2-POST', 's1');
+    expect(sentContents().at(-1)).toBe('T2-HEAD T2-POST');
+    resolveSend(mockResponse(true));
+    await drain();
   });
 });

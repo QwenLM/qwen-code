@@ -575,6 +575,80 @@ describe('purgeSingleScopeOrphans', () => {
     );
   });
 
+  it('does NOT purge live user-shaped routes when sessionScope is unrecognized', () => {
+    // SessionRouter.routingKey() falls through `case 'user': default:` for any
+    // value outside the SessionScope union, so an unrecognized scope value
+    // (operator typo) still builds live `<channel>:<sender>:<chat>` keys. The
+    // purge predicate must therefore only fire for scopes it recognises as
+    // non-user; `!== 'user'` instead treats a typo as "purge everything".
+    const removeSessionId = vi.fn(() => true);
+    const router = {
+      getAll: () => [
+        {
+          key: 'test-bot:user-1:chat-1',
+          sessionId: 'live-user-shaped',
+          target: {
+            channelName: 'test-bot',
+            senderId: 'user-1',
+            chatId: 'chat-1',
+          },
+        },
+      ],
+      removeSessionId,
+    };
+    const ch = makeChannelWithRouter(router, { sessionScope: 'threads' });
+    callPurge(ch);
+    expect(removeSessionId).not.toHaveBeenCalled();
+  });
+
+  it.each(['thread', 'chat_thread', 'single'] as const)(
+    'still purges a legacy user-scope key under recognized non-user scope %s',
+    (sessionScope) => {
+      // The fail-closed gate must not narrow to thread|chat_thread alone:
+      // under 'single' the live routing key is `<channel>:__single__`, so a
+      // persisted three-part user-era key is just as unroutable there.
+      const removeSessionId = vi.fn(() => true);
+      const router = {
+        getAll: () => [
+          {
+            key: 'test-bot:user-1:chat-1',
+            sessionId: 'user-era-1',
+            target: {
+              channelName: 'test-bot',
+              senderId: 'user-1',
+              chatId: 'chat-1',
+            },
+          },
+        ],
+        removeSessionId,
+      };
+      const ch = makeChannelWithRouter(router, { sessionScope });
+      callPurge(ch);
+      expect(removeSessionId).toHaveBeenCalledWith('user-era-1');
+    },
+  );
+
+  it('leaves single-scope routes alone when sessionScope is unrecognized', () => {
+    // The other half of the fail-closed gate: with an unrecognized scope we
+    // cannot know the routing shape at all, so even a `__single__` key that a
+    // typo scope makes unreachable must be left for the operator to fix rather
+    // than purged on a guess about which keys a scope would build.
+    const removeSessionId = vi.fn(() => true);
+    const router = {
+      getAll: () => [
+        {
+          key: 'test-bot:__single__',
+          sessionId: 'single-shaped',
+          target: { channelName: 'test-bot' },
+        },
+      ],
+      removeSessionId,
+    };
+    const ch = makeChannelWithRouter(router, { sessionScope: 'threads' });
+    callPurge(ch);
+    expect(removeSessionId).not.toHaveBeenCalled();
+  });
+
   it('releases the daemon-side session for each purged orphan (bridge.discardSession)', () => {
     // restoreSessions() re-attaches orphaned sessions via bridge.loadSession;
     // removeSessionId alone only clears the router maps, leaving the orphan

@@ -332,6 +332,18 @@ export class QQChannel extends ChannelBase {
    * most one entry per session seen since the last of those.
    */
   private completedTurns: Map<string, number> = new Map();
+  /**
+   * Bridge-side `responseBoundary` observer. ChannelBase's own listener returns
+   * early while a cancel is pending, so onResponseBoundary can miss a boundary
+   * even though the bridge still cleared its chunk collection — the stash's
+   * `pre` would then never be sealed and the diverted head would be absent from
+   * both state.buffer and fullText. Observing the bridge event directly (the
+   * same emit the bridge's clearChunks listens to) is ungated.
+   */
+  private _bridgeBoundarySeal = (sessionId: string): void => {
+    this.sealOrphanStash(sessionId);
+  };
+  private bridgeBoundarySealAttached = false;
   private readonly qqStatePath: string;
   /**
    * Path to the global sessions.json managed by start.ts.
@@ -433,6 +445,9 @@ export class QQChannel extends ChannelBase {
       this._cronTextHandler = (sid, t) => this.handleCronTextChunk(sid, t);
       this.attachCronHandler();
     }
+    // Seal a stashed head on every bridge boundary, including the ones
+    // ChannelBase suppresses while a cancel is pending.
+    this.attachBridgeBoundarySeal();
   }
 
   private handleCronTextChunk(sessionId: string, text: string): void {
@@ -645,8 +660,10 @@ export class QQChannel extends ChannelBase {
    */
   override setBridge(bridge: ChannelAgentBridge): void {
     this.detachCronHandler();
+    this.detachBridgeBoundarySeal();
     super.setBridge(bridge);
     this.attachCronHandler();
+    this.attachBridgeBoundarySeal();
   }
 
   // ── ChannelBase interface ──────────────────────────────────────
@@ -1207,6 +1224,7 @@ export class QQChannel extends ChannelBase {
       this.connectReject = null;
     }
     this.detachCronHandler();
+    this.detachBridgeBoundarySeal();
     this.chatTypeMap.clear();
     this.replyMsgId.clear();
     this.replyContextByMessageId.clear();
@@ -2110,8 +2128,7 @@ export class QQChannel extends ChannelBase {
     // and must still be prepended when the turn completes. Seal that portion
     // separately: chunks arriving after the boundary append to `text` but are
     // already in fullText and must not be prepended too (R9-1).
-    const stashed = this.streamOrphanBuffer.get(sessionId);
-    if (stashed) stashed.pre = stashed.text;
+    this.sealOrphanStash(sessionId);
     // A stale entry belongs to an earlier turn; when the deletes below drop it
     // its parked flush chain can never settle again, so its reply anchor has
     // to be released here (expectedMsgId-gated, so a live turn's own anchor is
@@ -2604,6 +2621,35 @@ export class QQChannel extends ChannelBase {
     }
   }
 
+  /**
+   * Attach the ungated `responseBoundary` observer to the current bridge.
+   * No-op if already attached.
+   */
+  private attachBridgeBoundarySeal(): void {
+    if (this.bridgeBoundarySealAttached) return;
+    this.bridge.on?.('responseBoundary', this._bridgeBoundarySeal);
+    this.bridgeBoundarySealAttached = true;
+  }
+
+  /** Detach the boundary observer. No-op if not attached. */
+  private detachBridgeBoundarySeal(): void {
+    if (!this.bridgeBoundarySealAttached) return;
+    this.bridge.off?.('responseBoundary', this._bridgeBoundarySeal);
+    this.bridgeBoundarySealAttached = false;
+  }
+
+  /**
+   * Seal the pre-boundary portion of a stashed head. Called from both the
+   * adapter hook and the bridge's own boundary event: ChannelBase suppresses
+   * the hook while a cancel is pending, but the bridge clears its chunk
+   * collection on every boundary it emits, so only the ungated observer can
+   * guarantee `pre` is set before the turn completes.
+   */
+  private sealOrphanStash(sessionId: string): void {
+    const stashed = this.streamOrphanBuffer.get(sessionId);
+    if (stashed) stashed.pre = stashed.text;
+  }
+
   /** Flush pending state writes immediately (called on disconnect). */
   private flushQQState(): void {
     if (this.saveTimer) {
@@ -2880,7 +2926,8 @@ export class QQChannel extends ChannelBase {
    * thread/chat_thread routing key is `<channel>:<chatId>` and its 'single'
    * key is `<channel>:__single__`, while resolve() is a bare map lookup with
    * no shape fallback. This channel's own user-scope entries are therefore
-   * purged under every non-'user' scope; a sibling channel's are left alone,
+   * purged under every recognized non-'user' scope; an unrecognized scope
+   * fails closed (see knownScope below). A sibling channel's are left alone,
    * decided by target ownership, never by key prefix. The purge runs after
    * restore, so on the first boot those keys are still re-attached once by
    * bridge.loadSession and then released here; afterwards they are gone from
@@ -2894,7 +2941,21 @@ export class QQChannel extends ChannelBase {
    * daemon-side session (see bridge.discardSession below) are torn down.
    */
   private purgeSingleScopeOrphans(): void {
-    const singleScope = this.config.sessionScope === 'single';
+    const scope: string = this.config.sessionScope;
+    // Fail closed on an unrecognized scope. SessionRouter.routingKey() switches
+    // on scope with `case 'user': default:`, so any value outside the
+    // SessionScope union still builds LIVE `<channel>:<sender>:<chat>` keys.
+    // Testing orphanhood with `scope !== 'user'` therefore treats an operator
+    // typo (or a value written by a different version) as "every live route is
+    // an orphan" and discards all of the channel's persisted sessions on each
+    // cold start. Only a scope this code can reason about may authorise a
+    // destructive purge.
+    const knownScope =
+      scope === 'user' ||
+      scope === 'thread' ||
+      scope === 'chat_thread' ||
+      scope === 'single';
+    const singleScope = scope === 'single';
     try {
       // Optional-call like the READY path: an externally supplied router may
       // not expose getAll; fall back to an empty list rather than crash.
@@ -2921,9 +2982,12 @@ export class QQChannel extends ChannelBase {
         // era are `<thisChannel>:__single__`, so the exact match still cleans
         // up this channel's orphans without touching sibling routes — but
         // only when the current scope is not 'single', where this exact key
-        // is the live one.
+        // is the live one. Gated on knownScope too, and there the purge is
+        // suppressed deliberately: an unrecognized scope cannot tell us which
+        // keys a scope would build, so even a currently unreachable
+        // `__single__` route is left for the operator rather than guessed at.
         const isSingleOrphan =
-          !singleScope && entry.key === `${this.name}:__single__`;
+          knownScope && !singleScope && entry.key === `${this.name}:__single__`;
         // Legacy user-scope routes of THIS channel are unroutable under every
         // non-'user' scope (including 'single', whose key is
         // `<channel>:__single__`), so a persisted user-era key there can never
@@ -2934,7 +2998,8 @@ export class QQChannel extends ChannelBase {
         // name is unrestricted user config and may itself contain colons, so
         // the part count does not identify the scope.
         const isOwnLegacyUserKey =
-          this.config.sessionScope !== 'user' &&
+          knownScope &&
+          scope !== 'user' &&
           entry.target?.channelName === this.name &&
           entry.key ===
             `${entry.target.channelName}:${entry.target.senderId}:${entry.target.chatId}`;
@@ -3463,6 +3528,7 @@ export class QQChannel extends ChannelBase {
     this.isReconnecting = false;
     this.coldStart = false;
     this.attachCronHandler();
+    this.attachBridgeBoundarySeal();
   }
 
   private handleGatewayMessage(
