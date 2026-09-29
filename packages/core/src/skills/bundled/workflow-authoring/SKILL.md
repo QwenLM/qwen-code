@@ -98,10 +98,18 @@ say explicitly what each one should read and whether it may edit files.
   `phase()` between groups rather than per dispatch.
 - `schema` (JSON Schema object) — the subagent must deliver its result by
   calling `structured_output` with arguments matching the schema; agent()
-  resolves to the validated object. After two in-conversation nudges without a
-  valid result, it resolves to null and the failure is recorded as "subagent
-  completed without calling StructuredOutput (after 2 in-conversation nudges)";
-  check for null.
+  resolves to the validated object. The schema is checked before the agent
+  starts: a value that is not a schema object, a schema that does not compile
+  (a misspelled keyword, a `$ref` that does not resolve, an unsupported draft,
+  `$async`), or one that requires a property the same object forbids (such as
+  `required: ['answer']` with `additionalProperties: false` and no `answer` in
+  `properties`) makes agent() resolve to null without starting the agent, and
+  the failure names the problem. Each failed `structured_output` submission
+  hands its error back to the agent to retry; nothing else nudges it, and the
+  third failed submission stops it. An agent that ends without a valid result
+  resolves to null and the failure states how many submissions failed and the
+  last error, e.g. "subagent stopped after 3 failed structured_output
+  submissions without a valid result. Last error: …"; check for null.
 - `agentType` (string) — resolves against the declarative-agents registry
   (`.qwen/agents/<name>.md`, project then user then built-in). Unresolved names
   make the admitted agent() resolve to null and record "agent({agentType}):
