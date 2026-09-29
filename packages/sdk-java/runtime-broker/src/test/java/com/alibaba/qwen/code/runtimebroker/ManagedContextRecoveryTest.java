@@ -57,8 +57,10 @@ class ManagedContextRecoveryTest {
         try (RuntimeBrokerService service = service(bindings, provisioner)) {
             ExecutionException error = assertThrows(ExecutionException.class,
                     () -> service.warm("harness").toCompletableFuture().get(8, TimeUnit.SECONDS));
-            assertEquals("runtime_broker_provision_timeout",
-                    ((RuntimeBrokerException) error.getCause()).getCode());
+            RuntimeBrokerException timeout = (RuntimeBrokerException) error.getCause();
+            assertEquals("runtime_broker_provision_timeout", timeout.getCode());
+            // The failed block write rides on the answer.
+            assertEquals(List.of("transient database failure"), messages(timeout.getSuppressed()));
             assertEquals(1, blockWrites.get());
             org.junit.jupiter.api.Assertions.assertNull(delegate.findActive(REQUEST).getOperationOwner());
             assertBlocked(service);
@@ -439,6 +441,117 @@ class ManagedContextRecoveryTest {
     }
 
     @Test
+    void aDeadlineThatFindsTheBlockKeepsANonRetryableAnswer() throws Exception {
+        assertEquals("runtime_broker_attestation_conflict",
+                failBeforeTheDeadline(REQUEST).getCode());
+        // The failure handler's block write, then the deadline's.
+        assertEquals(2, raceBlockWrites.get());
+    }
+
+    @Test
+    void aLegacyDeadlineKeepsItsTimeoutAnswer() throws Exception {
+        // Legacy startup is unchanged: its deadline records no block and
+        // answers the timeout, even after a non-retryable failure.
+        assertEquals("runtime_broker_provision_timeout", failBeforeTheDeadline(
+                new RuntimeProvisionRequest(REQUEST.getScope(), null,
+                        REQUEST.getProvisionerKind())).getCode());
+        assertEquals(1, raceBlockWrites.get());
+    }
+
+    private final AtomicInteger raceBlockWrites = new AtomicInteger();
+
+    /**
+     * The launch fails before the deadline, and its handler records the
+     * block but does not answer until the deadline has. Returns the answer.
+     */
+    private RuntimeBrokerException failBeforeTheDeadline(RuntimeProvisionRequest request)
+            throws Exception {
+        InMemoryRuntimeBindingRepository delegate = new InMemoryRuntimeBindingRepository();
+        CompletableFuture<Void> answered = new CompletableFuture<>();
+        java.util.concurrent.CountDownLatch held = new java.util.concurrent.CountDownLatch(1);
+        RuntimeBindingRepository bindings = (RuntimeBindingRepository) java.lang.reflect.Proxy
+                .newProxyInstance(getClass().getClassLoader(),
+                        new Class<?>[] {RuntimeBindingRepository.class}, (proxy, method, args) -> {
+                            Object result = invoke(method, delegate, args);
+                            if (isBlockWrite(method, args) && raceBlockWrites.getAndIncrement() == 0) {
+                                answered.get(30, TimeUnit.SECONDS);
+                                held.countDown();
+                            }
+                            return result;
+                        });
+        FailingProvisioner provisioner = new FailingProvisioner(request);
+        try (RuntimeBrokerService service = service(bindings, provisioner)) {
+            CompletableFuture<RuntimeBindingRecord> warm = service.warm("harness").toCompletableFuture();
+            warm.whenComplete((ignored, error) -> answered.complete(null));
+            provisioner.pending.completeExceptionally(ATTESTATION_CONFLICT);
+            ExecutionException error = assertThrows(ExecutionException.class,
+                    () -> warm.get(30, TimeUnit.SECONDS));
+            assertTrue(held.await(30, TimeUnit.SECONDS));
+            assertEquals(RuntimeBindingRecord.State.RECOVERY_BLOCKED,
+                    delegate.findActive(request).getState());
+            return (RuntimeBrokerException) error.getCause();
+        } finally {
+            assertEquals(1, provisioner.launches.get());
+        }
+    }
+
+    @Test
+    void aNonRetryableFailureAfterTheDeadlineFiredReportsTheBlock() throws Exception {
+        InMemoryRuntimeBindingRepository delegate = new InMemoryRuntimeBindingRepository();
+        AtomicInteger blockWrites = new AtomicInteger();
+        CompletableFuture<Void> answered = new CompletableFuture<>();
+        CompletableFuture<Void> published = new CompletableFuture<>();
+        java.util.concurrent.CountDownLatch held = new java.util.concurrent.CountDownLatch(2);
+        FailingProvisioner provisioner = new FailingProvisioner(true);
+        // The deadline records the block, then the launch fails on another
+        // thread, whose handler has published the failure but not answered
+        // when the deadline answers. The deadline fired first, so it keeps
+        // its own answer, as it did before failures were published.
+        RuntimeBindingRepository bindings = (RuntimeBindingRepository) java.lang.reflect.Proxy
+                .newProxyInstance(getClass().getClassLoader(),
+                        new Class<?>[] {RuntimeBindingRepository.class}, (proxy, method, args) -> {
+                            Object result = invoke(method, delegate, args);
+                            if (isBlockWrite(method, args)) {
+                                if (blockWrites.getAndIncrement() == 0) {
+                                    new Thread(() -> provisioner.pending
+                                            .completeExceptionally(ATTESTATION_CONFLICT)).start();
+                                    published.get(30, TimeUnit.SECONDS);
+                                } else {
+                                    published.complete(null);
+                                    answered.get(30, TimeUnit.SECONDS);
+                                }
+                                held.countDown();
+                            }
+                            return result;
+                        });
+        try (RuntimeBrokerService service = service(bindings, provisioner)) {
+            CompletableFuture<RuntimeBindingRecord> warm = service.warm("harness").toCompletableFuture();
+            warm.whenComplete((ignored, error) -> answered.complete(null));
+            ExecutionException error = assertThrows(ExecutionException.class,
+                    () -> warm.get(30, TimeUnit.SECONDS));
+            assertTrue(held.await(30, TimeUnit.SECONDS));
+            assertEquals("runtime_broker_recovery_blocked",
+                    ((RuntimeBrokerException) error.getCause()).getCode());
+            assertEquals(2, blockWrites.get());
+            assertBlocked(service);
+        }
+        assertEquals(1, provisioner.launches.get());
+    }
+
+    private static final RuntimeBrokerException ATTESTATION_CONFLICT = new RuntimeBrokerException(
+            409, "runtime_broker_attestation_conflict", "another Runtime answered", false);
+
+    private static boolean isBlockWrite(java.lang.reflect.Method method, Object[] args) {
+        return "compareAndSet".equals(method.getName())
+                && ((RuntimeBindingRecord) args[1]).getState()
+                        == RuntimeBindingRecord.State.RECOVERY_BLOCKED;
+    }
+
+    private static List<String> messages(Throwable[] failures) {
+        return java.util.Arrays.stream(failures).map(Throwable::getMessage).toList();
+    }
+
+    @Test
     void aBlockThatCannotBeRecordedKeepsTheFailuresAnswer() throws Exception {
         InMemoryRuntimeBindingRepository delegate = new InMemoryRuntimeBindingRepository();
         AtomicInteger blockWrites = new AtomicInteger();
@@ -460,6 +573,7 @@ class ManagedContextRecoveryTest {
             RuntimeBrokerException failure = (RuntimeBrokerException) error.getCause();
             assertEquals("runtime_provision_failed", failure.getCode());
             assertTrue(failure.isRetryable());
+            assertEquals(List.of("transient database failure"), messages(failure.getSuppressed()));
             // The resource handle was persisted, so the next call blocks.
             assertBlocked(service);
         }
@@ -572,16 +686,26 @@ class ManagedContextRecoveryTest {
                 new java.util.concurrent.CountDownLatch(1);
         private final boolean hang;
         private final RuntimeBrokerException failure;
+        private final RuntimeProvisionRequest request;
 
         private FailingProvisioner(boolean hang) {
             this.hang = hang;
             this.failure = new RuntimeBrokerException(503, "runtime_provision_failed",
                     "ambiguous launch", true);
+            this.request = REQUEST;
         }
 
         private FailingProvisioner(RuntimeBrokerException failure) {
             this.hang = false;
             this.failure = failure;
+            this.request = REQUEST;
+        }
+
+        /** Places {@code request} and hangs until the test settles {@link #pending}. */
+        private FailingProvisioner(RuntimeProvisionRequest request) {
+            this.hang = true;
+            this.failure = null;
+            this.request = request;
         }
 
         @Override
@@ -591,7 +715,7 @@ class ManagedContextRecoveryTest {
 
         @Override
         public RuntimeProvisionRequest createRequest(RuntimeScope scope, String isolationKey) {
-            return REQUEST;
+            return request;
         }
 
         @Override

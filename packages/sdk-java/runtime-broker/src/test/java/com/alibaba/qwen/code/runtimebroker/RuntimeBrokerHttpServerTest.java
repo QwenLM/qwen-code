@@ -13,6 +13,7 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.HexFormat;
+import java.util.List;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.Map;
@@ -62,6 +63,29 @@ class RuntimeBrokerHttpServerTest {
             assertTrue(response.body().contains("runtime_broker_execution_unknown"));
             assertEquals(1, fixture.transport.executions.get());
         }
+    }
+
+    @Test
+    void refusesAProtocolVersionThatIsNotExactlyOne() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            // Each literal would read as version 1.
+            for (String version : List.of("1.0000000000000001",
+                    "0.10000000000000001E+1", "1.0000000000000001D", "65537S")) {
+                HttpResponse<String> response = fixture.post(
+                        "/tool-sessions:acquire", acquire(version));
+                assertEquals(409, response.statusCode(), version);
+                assertTrue(response.body().contains(
+                        "runtime_broker_protocol_conflict"), version);
+            }
+            assertEquals(200, fixture.post("/tool-sessions:acquire",
+                    acquire("1.0")).statusCode());
+        }
+    }
+
+    private static String acquire(String protocolVersion) {
+        return "{\"protocolVersion\":" + protocolVersion
+                + ",\"requestId\":\"acquire\",\"harnessSessionId\":\"harness\","
+                + "\"runtimeSessionId\":\"runtime\",\"turnKind\":\"bootstrap\"}";
     }
 
     @Test
@@ -277,10 +301,14 @@ class RuntimeBrokerHttpServerTest {
         }
 
         private HttpResponse<String> post(String path, Map<String, Object> body) throws Exception {
+            return post(path, JSON.toJSONString(body));
+        }
+
+        private HttpResponse<String> post(String path, String body) throws Exception {
             return client.send(HttpRequest.newBuilder(uri(path))
                     .header("Authorization", "Bearer secret")
                     .header("Content-Type", "application/json")
-                    .POST(HttpRequest.BodyPublishers.ofString(JSON.toJSONString(body)))
+                    .POST(HttpRequest.BodyPublishers.ofString(body))
                     .build(), HttpResponse.BodyHandlers.ofString());
         }
 

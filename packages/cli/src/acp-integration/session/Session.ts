@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { isToolCallConcurrencySafe } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
 import {
   captureHookExecutionOwner,
   runWithHookExecutionOwner,
@@ -12366,14 +12367,20 @@ export class Session implements SessionContext {
       ]),
     );
     const pendingToolResultRecords: PendingToolResultRecord[] = [];
-    const pendingNestedToolResultRecords: PendingToolResultRecord[] = [];
+    const pendingNestedToolResultRecords = new Map<
+      string,
+      PendingToolResultRecord[]
+    >();
     let toolResultRecordSequence = 0;
     const queueToolResultRecord: QueueToolResultRecord = (fc, record) => {
       const ordinal = dedupedFunctionCalls.indexOf(fc);
       const target =
         ordinal === -1
-          ? pendingNestedToolResultRecords
+          ? (pendingNestedToolResultRecords.get(record.callId) ?? [])
           : pendingToolResultRecords;
+      if (ordinal === -1) {
+        pendingNestedToolResultRecords.set(record.callId, target);
+      }
       target.push({
         ...record,
         toolArgs: (fc.args ?? {}) as Record<string, unknown>,
@@ -12432,9 +12439,11 @@ export class Session implements SessionContext {
       return finalized;
     };
     const finalizeNestedToolResult = async (
+      callId: string,
       result: RunToolResult,
     ): Promise<Part[]> => {
-      const records = pendingNestedToolResultRecords.splice(0);
+      const records = pendingNestedToolResultRecords.get(callId) ?? [];
+      pendingNestedToolResultRecords.delete(callId);
       if (records.length === 0) return result.parts;
       const finalized = await finalizeAndRecord(records);
       return finalized.flatMap((entry) => entry.responseParts);
@@ -12443,9 +12452,9 @@ export class Session implements SessionContext {
       result: RunToolResult,
     ): Promise<RunToolResult> => {
       await finalizeAndRecord(
-        [...pendingNestedToolResultRecords].sort(
-          (left, right) => left.sequence - right.sequence,
-        ),
+        [...pendingNestedToolResultRecords.values()]
+          .flat()
+          .sort((left, right) => left.sequence - right.sequence),
       );
       const orderedRecords = [...pendingToolResultRecords].sort(
         (left, right) =>
@@ -13200,7 +13209,10 @@ export class Session implements SessionContext {
       parentCallId: string;
       source: 'code_mode';
     },
-    finalizeCodeModeToolResult?: (result: RunToolResult) => Promise<Part[]>,
+    finalizeCodeModeToolResult?: (
+      callId: string,
+      result: RunToolResult,
+    ) => Promise<Part[]>,
     appExecution?: {
       tool: DiscoveredMCPTool;
       onResult: (result: McpAppToolResult) => void;
@@ -14850,6 +14862,7 @@ export class Session implements SessionContext {
                 toolName: policyToolName,
                 args: invocation.params as Record<string, unknown>,
                 signal: activeToolAbortSignal,
+                permissionChecked: true,
                 // Same identity and execution scope `CoreToolScheduler`
                 // supplies. This is the path daemon ACP sessions actually
                 // take, so without them a host policy that falls back to the
@@ -15032,32 +15045,80 @@ export class Session implements SessionContext {
                   this.config.getShellExecutionConfig(),
                 );
               if (toolName !== ToolNames.EXEC) {
-                toolResult = await execute();
+                if (codeModeContext) {
+                  let cancelExecution: (() => void) | undefined;
+                  try {
+                    toolResult = await new Promise<ToolResult>(
+                      (resolve, reject) => {
+                        cancelExecution = () => {
+                          toolSettled = true;
+                          reject(new Error(TOOL_EXECUTION_CANCELLED_MESSAGE));
+                        };
+                        if (activeToolAbortSignal.aborted) {
+                          cancelExecution();
+                          return;
+                        }
+                        activeToolAbortSignal.addEventListener(
+                          'abort',
+                          cancelExecution,
+                          { once: true },
+                        );
+                        void execute().then(resolve, reject);
+                      },
+                    );
+                  } finally {
+                    if (cancelExecution) {
+                      activeToolAbortSignal.removeEventListener(
+                        'abort',
+                        cancelExecution,
+                      );
+                    }
+                  }
+                } else {
+                  toolResult = await execute();
+                }
               } else {
-                let dispatchTail = Promise.resolve();
+                let admissionTail = Promise.resolve();
+                const executing = new Set<Promise<void>>();
+                const nestedAbortController = new AbortController();
+                const maxConcurrency = parsePositiveIntegerEnv(
+                  process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'],
+                  10,
+                );
+                const stopNestedAfterPermissionCancel = () => {
+                  if (nestedPermissionCancelled) return;
+                  nestedPermissionCancelled = true;
+                  nestedAbortController.abort(USER_CANCEL_ABORT_REASON);
+                  onStopAfterPermissionCancel?.();
+                };
                 const dispatch = (
                   nestedName: string,
                   nestedArgs: Record<string, unknown>,
                   nestedSignal: AbortSignal,
                   onResult?: (response: ToolCallResponseInfo) => void,
                 ): Promise<CodeModeToolResult> => {
-                  const next = dispatchTail.then(async () => {
+                  const nestedCallId = `${callId}:code:${++this.codeModeNestedSequence}`;
+                  const signal = AbortSignal.any([
+                    activeToolAbortSignal,
+                    nestedSignal,
+                    nestedAbortController.signal,
+                  ]);
+                  const runNested = async (): Promise<CodeModeToolResult> => {
                     if (!isCodeModeToolCallAllowed(nestedName, 'code_mode')) {
                       throw new Error(
                         `Tool "${nestedName}" is not callable from exec.`,
                       );
                     }
-                    const nestedCallId = `${callId}:code:${++this.codeModeNestedSequence}`;
                     const nested = await runWithoutToolCallRuntime(() =>
                       this.runTool(
-                        nestedSignal,
+                        signal,
                         promptId,
                         {
                           id: nestedCallId,
                           name: nestedName,
                           args: nestedArgs,
                         },
-                        onStopAfterPermissionCancel,
+                        stopNestedAfterPermissionCancel,
                         toolLoopState,
                         recordSkippedToolCall,
                         queueToolResultRecord,
@@ -15066,8 +15127,11 @@ export class Session implements SessionContext {
                         { parentCallId: callId, source: 'code_mode' },
                       ),
                     );
+                    if (nested.stopAfterPermissionCancel) {
+                      stopNestedAfterPermissionCancel();
+                    }
                     const nestedParts = finalizeCodeModeToolResult
-                      ? await finalizeCodeModeToolResult(nested)
+                      ? await finalizeCodeModeToolResult(nestedCallId, nested)
                       : nested.parts;
                     const functionResponse = nestedParts
                       .map((part) => part.functionResponse)
@@ -15110,20 +15174,50 @@ export class Session implements SessionContext {
                           : JSON.stringify(nestedOutput),
                       ...(content ? { content } : {}),
                     };
+                  };
+                  let result: Promise<CodeModeToolResult>;
+                  const admitted = admissionTail.then(async () => {
+                    const kind = this.config
+                      .getToolRegistry()
+                      .getTool(nestedName)?.kind;
+                    const safe =
+                      isToolCallConcurrencySafe(nestedName, kind, nestedArgs) &&
+                      !(
+                        kind === Kind.Execute &&
+                        !this.config.getDisableAllHooks?.() &&
+                        this.config.hasHooksForEvent?.('PermissionRequest')
+                      );
+                    if (!safe) {
+                      await Promise.all(executing);
+                    } else if (executing.size >= maxConcurrency) {
+                      await Promise.race(executing);
+                    }
+                    result = runNested();
+                    const settled = result
+                      .then(
+                        () => undefined,
+                        () => undefined,
+                      )
+                      .finally(() => executing.delete(settled));
+                    executing.add(settled);
+                    if (!safe) await settled;
                   });
-                  dispatchTail = next.then(
-                    () => undefined,
-                    () => undefined,
-                  );
-                  return next;
+                  admissionTail = admitted.catch(() => undefined);
+                  return admitted.then(() => result);
                 };
-                toolResult = await runWithToolCallRuntime(
-                  {
-                    parentCallId: callId,
-                    dispatch,
-                  },
-                  execute,
-                );
+                try {
+                  toolResult = await runWithToolCallRuntime(
+                    {
+                      parentCallId: callId,
+                      dispatch,
+                    },
+                    execute,
+                  );
+                } finally {
+                  nestedAbortController.abort();
+                  await admissionTail;
+                  await Promise.all(executing);
+                }
               }
               executeReturned = true;
               try {
