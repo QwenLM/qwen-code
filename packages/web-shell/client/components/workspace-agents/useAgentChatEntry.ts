@@ -207,11 +207,12 @@ export function useAgentChatEntry({
                     // interception must not fire for an agent admission
                     // would skip.
                     (agent) => {
-                      const rest = token.slice(agent.name.length);
+                      const lowerName = agent.name.toLowerCase();
+                      const rest = token.slice(lowerName.length);
                       return (
                         agent.enabled &&
                         !agent.retiredAt &&
-                        token.startsWith(agent.name.toLowerCase()) &&
+                        token.startsWith(lowerName) &&
                         !/^[a-z0-9_-]/.test(rest) &&
                         // Core's `agentForToken` refuses a longer Latin word
                         // too: "@maría" is not "mar", "@alice２" is not

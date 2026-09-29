@@ -18680,9 +18680,9 @@ export function App({
     (id: string, cwd: string) => {
       setCollaborationThread({ id, cwd, server: workspace.baseUrl });
       setMainView('chat');
-      setActivePanel(null);
+      closePanel();
     },
-    [workspace.baseUrl],
+    [closePanel, workspace.baseUrl],
   );
   const handleCollaborationThreadError = useCallback(
     (message: string) => pushToast('error', message),
