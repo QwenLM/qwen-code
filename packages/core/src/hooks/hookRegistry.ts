@@ -79,6 +79,13 @@ export interface HookRegistryEntry {
    * (session/user/project/extension) entries leave this undefined.
    */
   agentScope?: string;
+  owner?: Readonly<{ sessionId: string; agentId: string }>;
+  isSourceTrusted?: () => boolean;
+}
+
+export interface AgentHookRegistration {
+  owner: Readonly<{ sessionId: string; agentId: string }>;
+  isSourceTrusted?: () => boolean;
 }
 
 /**
@@ -179,23 +186,27 @@ export class HookRegistry {
    * entry is logged and dropped instead of breaking the spawn. Returns an
    * unregister callback that removes exactly the entries added by this call;
    * the caller is responsible for invoking it when the subagent finishes.
-   *
-   * v1 scope limitation: entries added here fire for every event of their
-   * declared type while they remain in the registry, regardless of which
-   * agent is currently active. If two subagents with different per-agent
-   * hook sets run concurrently, both sets fire for both agents. Proper
-   * per-agent scope filtering at firing time is left to a follow-up.
    */
   addAgentHooks(
     hooks: { [K in HookEventName]?: HookDefinition[] },
     agentScope: string,
+    registration: AgentHookRegistration,
   ): () => void {
     const before = this.entries.length;
-    this.processHooksConfiguration(
-      hooks,
-      HooksConfigSource.Session,
-      agentScope,
-    );
+    try {
+      this.processHooksConfiguration(
+        hooks,
+        HooksConfigSource.Session,
+        agentScope,
+      );
+      for (const entry of this.entries.slice(before)) {
+        entry.owner = Object.freeze({ ...registration.owner });
+        entry.isSourceTrusted = registration.isSourceTrusted;
+      }
+    } catch (error) {
+      this.entries.splice(before);
+      throw error;
+    }
     const addedCount = this.entries.length - before;
     debugLogger.debug(
       `Registered ${addedCount} ephemeral hook entries for agent scope "${agentScope}"`,
