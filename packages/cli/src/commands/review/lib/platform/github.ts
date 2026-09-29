@@ -119,37 +119,41 @@ function hostOfRepoUrl(url: string): string {
     .toLowerCase();
 }
 
+export function resolveGithubRepo(ownerRepo?: string): RepoIdentity {
+  if (ownerRepo !== undefined) checkOwnerRepo(ownerRepo);
+  // `gh repo view` resolves through gh's default-repo. That preference is a
+  // remote literally NAMED `upstream` when one exists — it is NOT an API
+  // fork check: an origin-only fork clone (no `upstream` remote) resolves
+  // to the FORK, where the PR does not live, and a same-numbered PR there
+  // would hand the review the wrong head SHA. Fetch `parent` and prefer it
+  // when the resolved repo is a fork, so a bare PR number always targets
+  // the repo that actually hosts PRs (the measured "guessed fork repo"
+  // incident the deleted prose recorded).
+  const view = ghJson<GhRepoView>(
+    'repo',
+    'view',
+    ...(ownerRepo === undefined ? [] : [ownerRepo]),
+    '--json',
+    'owner,name,url,parent',
+  );
+  const target = view.parent ?? view;
+  return {
+    // A fork and its parent share one host, and `parent` carries no `url` —
+    // so the host comes from the resolved repo's own url, always.
+    host: hostOfRepoUrl(view.url),
+    owner: target.owner.login,
+    repo: target.name,
+    // GitHub repos are always exactly two segments.
+    groupPath: `${target.owner.login}/${target.name}`.toLowerCase(),
+  };
+}
+
 export const githubReader: ReviewPlatformReader = {
   kind: 'github',
 
   ensureAuthenticated,
 
-  resolveRepo(): RepoIdentity {
-    // `gh repo view` resolves through gh's default-repo. That preference is a
-    // remote literally NAMED `upstream` when one exists — it is NOT an API
-    // fork check: an origin-only fork clone (no `upstream` remote) resolves
-    // to the FORK, where the PR does not live, and a same-numbered PR there
-    // would hand the review the wrong head SHA. Fetch `parent` and prefer it
-    // when the resolved repo is a fork, so a bare PR number always targets
-    // the repo that actually hosts PRs (the measured "guessed fork repo"
-    // incident the deleted prose recorded).
-    const view = ghJson<GhRepoView>(
-      'repo',
-      'view',
-      '--json',
-      'owner,name,url,parent',
-    );
-    const target = view.parent ?? view;
-    return {
-      // A fork and its parent share one host, and `parent` carries no `url` —
-      // so the host comes from the resolved repo's own url, always.
-      host: hostOfRepoUrl(view.url),
-      owner: target.owner.login,
-      repo: target.name,
-      // GitHub repos are always exactly two segments.
-      groupPath: `${target.owner.login}/${target.name}`.toLowerCase(),
-    };
-  },
+  resolveRepo: resolveGithubRepo,
 
   getPrMeta(prNumber: number, ownerRepo: string): PrMeta {
     checkOwnerRepo(ownerRepo);

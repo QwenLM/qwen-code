@@ -311,6 +311,7 @@ describe('publish-assets', () => {
     ghMock.mockImplementation((...args: string[]) => {
       if (args[0] === 'repo' && args[1] === 'view') {
         return JSON.stringify({
+          url: 'https://github.com/AaronZ345/qwen-code',
           owner: { login: 'AaronZ345' },
           name: 'qwen-code',
           parent: { owner: { login: 'QwenLM' }, name: 'qwen-code' },
@@ -322,6 +323,12 @@ describe('publish-assets', () => {
 
     run({ files: [pngFile('evidence.png')] });
 
+    expect(ghMock).toHaveBeenCalledWith(
+      'repo',
+      'view',
+      '--json',
+      'owner,name,url,parent',
+    );
     expect(process.exitCode).toBeUndefined();
     const stderr = (stderrSpy.mock.calls.map((c) => c[0]) as string[]).join(
       '\n',
@@ -345,8 +352,8 @@ describe('publish-assets', () => {
   });
 
   it('folds --reviewed-repo to its upstream before the self-target check', () => {
-    // The flag names the probe TARGET, not the answer: `repo view --repo
-    // <fork>` still resolves the fork, and `parent` folds it to the upstream
+    // The flag names the probe TARGET, not the answer: `repo view <fork>`
+    // resolves the fork, and `parent` folds it to the upstream
     // that hosts the PR. Passing the fork must warn exactly as the CWD-probe
     // branch does — otherwise the same (review-target, assets-repo) pair warns
     // or stays silent purely on whether the caller passed the flag. Reverting
@@ -355,11 +362,8 @@ describe('publish-assets', () => {
     process.env['QWEN_REVIEW_ASSETS_REPO'] = 'QwenLM/qwen-code';
     ghMock.mockImplementation((...args: string[]) => {
       if (args[0] === 'repo' && args[1] === 'view') {
-        // The probe carries `--repo AaronZ345/qwen-code`; gh resolves the fork
-        // and reports its upstream in `parent`.
-        expect(args).toContain('--repo');
-        expect(args).toContain('AaronZ345/qwen-code');
         return JSON.stringify({
+          url: 'https://github.com/AaronZ345/qwen-code',
           owner: { login: 'AaronZ345' },
           name: 'qwen-code',
           parent: { owner: { login: 'QwenLM' }, name: 'qwen-code' },
@@ -374,6 +378,13 @@ describe('publish-assets', () => {
       reviewedRepo: 'AaronZ345/qwen-code',
     });
 
+    expect(ghMock).toHaveBeenCalledWith(
+      'repo',
+      'view',
+      'AaronZ345/qwen-code',
+      '--json',
+      'owner,name,url,parent',
+    );
     expect(process.exitCode).toBeUndefined();
     const stderr = (stderrSpy.mock.calls.map((c) => c[0]) as string[]).join(
       '\n',
@@ -391,6 +402,7 @@ describe('publish-assets', () => {
     ghMock.mockImplementation((...args: string[]) => {
       if (args[0] === 'repo' && args[1] === 'view') {
         return JSON.stringify({
+          url: 'https://github.com/QwenLM/qwen-code',
           owner: { login: 'QwenLM' },
           name: 'qwen-code',
           parent: null,
@@ -418,6 +430,7 @@ describe('publish-assets', () => {
     ghMock.mockImplementation((...args: string[]) => {
       if (args[0] === 'repo' && args[1] === 'view') {
         return JSON.stringify({
+          url: 'https://github.com/qwenlm/qwen-code',
           owner: { login: 'qwenlm' },
           name: 'qwen-code',
           parent: null,
@@ -447,6 +460,7 @@ describe('publish-assets', () => {
     ghMock.mockImplementation((...args: string[]) => {
       if (args[0] === 'repo' && args[1] === 'view') {
         return JSON.stringify({
+          url: 'https://github.com/AaronZ345/qwen-code',
           owner: { login: 'AaronZ345' },
           name: 'qwen-code',
           parent: { owner: { login: 'QwenLM' }, name: 'qwen-code' },
@@ -466,6 +480,39 @@ describe('publish-assets', () => {
       'QWEN_REVIEW_ASSETS_REPO points at the reviewed repository',
     );
   });
+
+  it.each([
+    ['network failure', undefined],
+    ['network failure', 'QwenLM/qwen-code'],
+    ['invalid JSON', undefined],
+    ['invalid JSON', 'QwenLM/qwen-code'],
+    ['incomplete metadata', undefined],
+    ['incomplete metadata', 'QwenLM/qwen-code'],
+  ])(
+    'reports a skipped self-target check after %s (%s)',
+    (failure, reviewedRepo) => {
+      ghMock.mockImplementation((...args: string[]) => {
+        if (args[0] === 'repo' && args[1] === 'view') {
+          if (failure === 'network failure') throw new Error('HTTP 503');
+          return failure === 'invalid JSON' ? '{' : '{}';
+        }
+        return args.includes('.object.sha') ? 'headsha1234567890' : '{}';
+      });
+      ghWithInputMock.mockImplementation(() => '{}');
+
+      run({ files: [pngFile('evidence.png')], reviewedRepo });
+
+      expect(process.exitCode).toBeUndefined();
+      expect(stderrSpy).toHaveBeenCalledWith(
+        'publish-assets: warning — could not determine the reviewed repository; ' +
+          'the self-target check was skipped. Publication is still authorised.',
+      );
+      expect(stdoutSpy).toHaveBeenCalledWith(
+        JSON.stringify({ published: true, count: 1 }),
+      );
+      expect(ghWithInputMock).toHaveBeenCalled();
+    },
+  );
 
   it('creates the branch when missing, from the default branch head', () => {
     // First ref lookup throws (missing branch); the creation path then asks

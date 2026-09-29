@@ -12,9 +12,93 @@
 // process cannot see, so composing a link there could point away from the
 // host the write actually took.
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { githubReader } from './github.js';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { githubReader, resolveGithubRepo } from './github.js';
 import { getGhHost, setGhHost } from '../gh.js';
+
+const ghMock = vi.hoisted(() => vi.fn((..._args: string[]) => ''));
+vi.mock('../gh.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../gh.js')>();
+  return { ...actual, gh: ghMock };
+});
+
+describe('resolveGithubRepo', () => {
+  beforeEach(() => {
+    ghMock.mockReset();
+    ghMock.mockReturnValue(
+      JSON.stringify({
+        owner: { login: 'contributor' },
+        name: 'project',
+        url: 'https://github.com/contributor/project',
+        parent: { owner: { login: 'upstream' }, name: 'project' },
+      }),
+    );
+  });
+
+  it('keeps default repository resolution on the shared implementation', () => {
+    expect(githubReader.resolveRepo()).toEqual({
+      host: 'github.com',
+      owner: 'upstream',
+      repo: 'project',
+      groupPath: 'upstream/project',
+    });
+    expect(ghMock).toHaveBeenCalledWith(
+      'repo',
+      'view',
+      '--json',
+      'owner,name,url,parent',
+    );
+  });
+
+  it('passes an explicit repository positionally and preserves fork folding', () => {
+    expect(resolveGithubRepo('contributor/project')).toEqual({
+      host: 'github.com',
+      owner: 'upstream',
+      repo: 'project',
+      groupPath: 'upstream/project',
+    });
+    expect(ghMock).toHaveBeenCalledWith(
+      'repo',
+      'view',
+      'contributor/project',
+      '--json',
+      'owner,name,url,parent',
+    );
+  });
+
+  it('keeps the repository itself when it is not a fork', () => {
+    ghMock.mockReturnValue(
+      JSON.stringify({
+        owner: { login: 'UPSTREAM' },
+        name: 'Project',
+        url: 'https://ghe.example.com/UPSTREAM/Project',
+        parent: null,
+      }),
+    );
+    expect(resolveGithubRepo('UPSTREAM/Project')).toEqual({
+      host: 'ghe.example.com',
+      owner: 'UPSTREAM',
+      repo: 'Project',
+      groupPath: 'upstream/project',
+    });
+  });
+
+  it.each(['', '--repo', '../project', 'not-a-repository'])(
+    'rejects an invalid explicit repository before invoking gh: %s',
+    (repository) => {
+      expect(() => resolveGithubRepo(repository)).toThrow(TypeError);
+      expect(ghMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it('leaves lookup failures visible to the caller', () => {
+    const failure = new Error('HTTP 503');
+    ghMock.mockImplementation(() => {
+      throw failure;
+    });
+    expect(() => resolveGithubRepo('upstream/project')).toThrow(failure);
+  });
+});
 
 describe('githubReader.composeUrl', () => {
   let savedEnvHost: string | undefined;
