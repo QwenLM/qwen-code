@@ -731,9 +731,9 @@ export function fitManagedRuntimeProviderResult(
       }));
     let slots = measure();
     // What the cut cannot reach goes before any text is cut when even fully
-    // cut text could not fit beside it: first a structured display (a file
-    // diff, say; it only feeds the UI), then hook results, so the model keeps
-    // its own content.
+    // cut text could not fit beside it: first what only feeds a client
+    // surface (a structured display such as a file diff, then artifacts),
+    // then hook results, so the model keeps its own content.
     const overflows = () =>
       Buffer.byteLength(JSON.stringify(root), 'utf8') -
         providerFitShed(slots, 0) >
@@ -753,6 +753,8 @@ export function fitManagedRuntimeProviderResult(
       toolResult['returnDisplay'] = PROVIDER_RESULT_STUB;
       slots = measure();
     }
+    if (toolResult && toolResult['artifacts'] !== undefined && overflows())
+      delete toolResult['artifacts'];
     if (overflows()) {
       delete execution['postHook'];
       delete execution['failureHook'];

@@ -1716,6 +1716,7 @@ class HttpRuntimeTransportTest {
     void keepsExactlyTheCapOfAnOversizedBodyAndCancelsTheRest() {
         // The delivery that crosses the cap fits only in part: without
         // growth, after doubling, and in one delivery past double.
+        assertTruncatedAtTheCap(0, 5, 5);
         assertTruncatedAtTheCap(10, 12, 6);
         assertTruncatedAtTheCap(20_000, 3 * 8192, 8192);
         assertTruncatedAtTheCap(100_000, 100_001, 100_001);

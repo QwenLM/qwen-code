@@ -1299,6 +1299,43 @@ describe('Managed Runtime provider worker', () => {
     expect(await observed).toMatchObject({ revision: expect.any(Number) });
   });
 
+  it('retires the Session just released when every retained one is being observed', async () => {
+    const sessions = Array.from({ length: 9 }, (_, index) => ({
+      ...SESSION,
+      runtimeSessionId: `550e8400-e29b-41d4-a716-4466554401${String(index).padStart(2, '0')}`,
+    }));
+    for (const session of sessions.slice(0, 8)) {
+      expect(await control({ kind: 'acquire' }, session)).toBe(true);
+      await control(
+        {
+          kind: 'bind-history',
+          binding: {
+            ...binding(),
+            ownerRuntimeSessionId: session.runtimeSessionId,
+          },
+        },
+        session,
+      );
+      expect(await control({ kind: 'release' }, session)).toBe(true);
+    }
+    // A history read holds each of the eight retained Sessions.
+    const drain = hold(ManagedToolFileHistory.prototype, 'drain', 8);
+    const observed = sessions
+      .slice(0, 8)
+      .map((session) => control({ kind: 'history' }, session));
+    await drain.entered(8);
+    const shutdown = vi.spyOn(Config.prototype, 'shutdown');
+    expect(await control({ kind: 'acquire' }, sessions[8])).toBe(true);
+    expect(await control({ kind: 'release' }, sessions[8])).toBe(true);
+    // The Session just released is the one idle: the bound of eight holds.
+    expect(
+      shutdown.mock.contexts.map((config) => (config as Config).getSessionId()),
+    ).toEqual([sessions[8].runtimeSessionId]);
+    drain.release();
+    for (const history of await Promise.all(observed))
+      expect(history).toMatchObject({ revision: expect.any(Number) });
+  });
+
   it('answers a release that came before any acquire with a forgetful tombstone', async () => {
     await acquire();
     const fresh = {

@@ -788,6 +788,40 @@ describe('managed-runtime-provider/1', () => {
       expect(typeof result.result.returnDisplay).toBe('string');
     });
 
+    it('drops artifacts the cut cannot reach before cutting the model content or dropping hooks', () => {
+      const limit = 1024 * 1024;
+      const result = {
+        executionStatus: 'success',
+        result: {
+          llmContent: 'l'.repeat(1000),
+          artifacts: [{ title: 'report', description: 'd'.repeat(limit) }],
+        },
+        postHook: { note: 'kept' },
+      };
+      fitManagedRuntimeProviderResult(execute, result, limit);
+      expect(
+        Buffer.byteLength(JSON.stringify(result), 'utf8'),
+      ).toBeLessThanOrEqual(limit);
+      expect(result.result).not.toHaveProperty('artifacts');
+      expect(result.result.llmContent).toBe('l'.repeat(1000));
+      expect(result.postHook).toEqual({ note: 'kept' });
+    });
+
+    it('keeps artifacts that fit beside the cut text', () => {
+      const limit = 1024 * 1024;
+      const artifacts = [{ title: 'report', description: 'small' }];
+      const result = {
+        executionStatus: 'success',
+        result: { llmContent: 'l'.repeat(2 * limit), artifacts },
+      };
+      fitManagedRuntimeProviderResult(execute, result, limit);
+      expect(
+        Buffer.byteLength(JSON.stringify(result), 'utf8'),
+      ).toBeLessThanOrEqual(limit);
+      expect(result.result.artifacts).toEqual(artifacts);
+      expect(result.result.llmContent.length).toBeLessThan(limit);
+    });
+
     it('re-measures the text after stubbing a display that alone overflows', () => {
       // A shell display's uncut part is bounded (8 KiB of directory and file
       // names), so only a small budget lets it overflow on its own.

@@ -86,8 +86,9 @@ than refused: the worker first evicts oldest progress events (announced
 through `firstAvailableSeq`/`progressGap`), then cuts bulk text fields
 head-and-tail with an inline notice and sets `truncated` on shell displays.
 When even fully cut text could not fit beside what the cut cannot reach, a
-structured display (such as an edit's file diff, which only feeds the UI) and
-then hook results are dropped before any text is cut, and content the cut
+structured display (such as an edit's file diff, which only feeds the UI), then
+artifacts, which also only feed a client surface, and then hook results are
+dropped before any text is cut, and content the cut
 cannot reach at all (inline media) turns the model content into an explicit
 stub.
 The cut is measured in JSON-encoded UTF-8 bytes, the unit of the wire limit,
