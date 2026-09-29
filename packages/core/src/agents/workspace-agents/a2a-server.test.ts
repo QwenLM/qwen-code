@@ -145,4 +145,25 @@ describe('A2A tasks', () => {
       }),
     ).resolves.toEqual({ ok: false, kind: 'refused' });
   });
+
+  it('lets a share follow the agent’s later configuration', async () => {
+    // The chosen contract: a grant is checked against the agent's live
+    // definition, so changing the agent after sharing applies to the share.
+    const { secret } = await issueA2AGrant(PROJECT_ROOT, {
+      callerId: 'share_1',
+      agentId: 'ag_lead',
+    });
+    await updateWorkspaceAgents(PROJECT_ROOT, (agents) =>
+      agents.map((agent) => ({ ...agent, instructions: 'Changed later.' })),
+    );
+
+    await expect(
+      a2aSendMessage(PROJECT_ROOT, { callerId: 'share_1', secret }, {
+        agentId: 'ag_lead',
+        messageId: 'msg-1',
+        title: 'Explain',
+        body: 'Why is the build slow?',
+      }),
+    ).resolves.toMatchObject({ ok: true });
+  });
 });
