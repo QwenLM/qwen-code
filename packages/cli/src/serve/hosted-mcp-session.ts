@@ -129,7 +129,7 @@ export class HostedMcpSession {
       options,
       session.authority.sessionHeader.sessionKey,
       owners.values().next().value ??
-        `mcp:${session.authority.sessionHeader.sessionKey.sessionId}${previous ? `:${previous}` : ''}`,
+        `mcp-${digest([session.authority.sessionHeader.sessionKey, previous])}`,
     );
   }
 

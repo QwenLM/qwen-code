@@ -10,6 +10,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { OperationGrant } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-record.js';
+import { MANAGED_MCP_TOOL } from '@qwen-code/qwen-code-core/managed-runtime/managed-mcp-protocol.js';
 import type {
   ManagedMcpCatalog,
   ManagedMcpConfigure,
@@ -22,6 +23,10 @@ import {
   type ManagedMcpDefinition,
   type ManagedMcpManifest,
 } from './managed-mcp-runtime.js';
+import {
+  ManagedToolExecutor,
+  type ManagedToolSet,
+} from './managed-runtime-tool-executor.js';
 
 const sessionKey = {
   tenantId: 'tenant-a',
@@ -203,6 +208,40 @@ function invoke(
 }
 
 describe('Managed MCP Runtime', () => {
+  it('refuses an MCP tool when a provider claims its Session during context lookup', async () => {
+    const instance = runtime();
+    const catalog = (await settled(instance, configure())).catalog!;
+    let admit!: (tools: ManagedToolSet) => void;
+    const tools = new Promise<ManagedToolSet>((resolve) => (admit = resolve));
+    const resolveTools = vi.fn(() => tools);
+    const executor = new ManagedToolExecutor(resolveTools, undefined, instance);
+    const input = invoke(catalog, 'tool-race', {
+      kind: 'tool_call',
+      name: 'echo',
+      arguments: {},
+    });
+    const reference = {
+      sessionId: runtimeSessionId,
+      promptId: 'prompt',
+      callId: input.operationId,
+      argsDigest: 'digest',
+    };
+    const invoked = vi.spyOn(instance, 'invokeTool');
+    const pending = executor.execute(reference, MANAGED_MCP_TOOL, { ...input });
+    await vi.waitFor(() => expect(resolveTools).toHaveBeenCalledOnce());
+    executor.claimProviderSession(runtimeSessionId);
+    admit({
+      sessionId: runtimeSessionId,
+      tools: new Map(),
+      admitsDirectory: () => true,
+    });
+    await expect(pending).rejects.toThrow(
+      'Managed Runtime protocol conflicts.',
+    );
+    expect(invoked).not.toHaveBeenCalled();
+    expect(executor.status(reference)).toBeNull();
+  });
+
   it('bounds catalog pagination even when every page is empty with a fresh cursor', async () => {
     const definition = stdioDefinition();
     const instance = runtime([

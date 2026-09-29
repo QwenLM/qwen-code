@@ -32,6 +32,7 @@ import {
   HostedMcpRecoveryRequiredError,
   parseHostedMcpServers,
 } from './hosted-mcp-session.js';
+import { parseManagedRuntimeProviderRequest } from './managed-runtime-provider-protocol.js';
 
 let root: string;
 let session: ManagedSession;
@@ -664,6 +665,21 @@ it('restores the original owner before close and uses fresh identities after con
     identities.add(next.broker.runtimeSessionId);
     await next.ensureReady();
     await next.close();
+  }
+  for (const runtimeSessionId of identities) {
+    expect(() =>
+      parseManagedRuntimeProviderRequest({
+        protocolVersion: 1,
+        providerProtocol: 'managed-runtime-provider/1',
+        session: {
+          harnessSessionId:
+            session.authority.sessionHeader.sessionKey.sessionId,
+          runtimeSessionId,
+          turnKind: 'bootstrap',
+        },
+        operation: { kind: 'release' },
+      }),
+    ).not.toThrow();
   }
 });
 

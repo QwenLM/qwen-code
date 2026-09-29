@@ -225,6 +225,9 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
                 throw WorkspaceExecutionStore.unavailable();
             }
             ownership.assertHeld(context.binding(), context.session());
+        } else if (managed(session) && !"history".equals(operation.get("kind"))) {
+            Context context = context(lease, session, true);
+            ownership.assertHeld(context.binding(), context.session());
         }
         return delegate.control(lease, session, operation);
     }
@@ -240,7 +243,12 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
                 && !ownership.isHeld(context.binding(), context.session())) {
             return CompletableFuture.completedFuture(true);
         }
-        return delegate.activateWorkspace(context.runtime(), context.session(), context.binding(), false)
+        return delegate.release(lease, session).thenCompose(released -> {
+            if (!Boolean.TRUE.equals(released)) {
+                throw WorkspaceExecutionStore.unavailable();
+            }
+            return delegate.activateWorkspace(context.runtime(), context.session(), context.binding(), false);
+        })
                 .thenApply(ignored -> {
                     ownership.release(context.binding(), context.session());
                     return true;

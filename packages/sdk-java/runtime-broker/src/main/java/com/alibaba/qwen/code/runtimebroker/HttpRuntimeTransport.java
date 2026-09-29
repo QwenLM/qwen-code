@@ -12,6 +12,7 @@ import java.net.http.HttpResponse;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -27,8 +28,9 @@ import java.util.concurrent.TimeUnit;
  *
  * <p>Attestation plus the tool operations execute, status, and cancel, keyed
  * by the original call reference. Status and cancel answers are projected to
- * the Broker's closed state and result. MCP controls have their own bounded
- * envelope. Generic acquire, control, and release remain unsupported.
+ * the Broker's closed state and result. Prepared provider invocations use
+ * their separate Session control protocol. MCP controls have their own
+ * bounded envelope.
  */
 public final class HttpRuntimeTransport implements RuntimeTransport {
     static final int BODY_LIMIT_BYTES = 16 * 1024;
@@ -259,15 +261,28 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
     }
 
     /**
-     * Runs one tool call to settlement. The reference carries the identity
-     * four plus {@code toolName} and {@code input}; nothing else may ride
-     * along. Returns the settled result map.
+     * Runs one tool call to settlement. Two reference shapes select two
+     * protocols: the caller reference (the identity four plus
+     * {@code toolName} and {@code input}) dispatches over Tool v2 and settles
+     * to an {@code executionStatus}/{@code responseParts}/{@code error} map,
+     * while a prepared reference of exactly the seven fields in
+     * {@code ProviderRuntimeProtocol.REFERENCE_FIELDS} ({@code sessionId},
+     * {@code promptId}, {@code callId}, {@code capabilityDigest},
+     * {@code policyRevision}, {@code invocationId} and {@code argsDigest})
+     * dispatches over the provider control protocol and settles to an
+     * {@code executionStatus}/{@code result}/{@code error}/{@code postHook}/
+     * {@code failureHook} map. Nothing else may ride along in either mode.
      */
     public CompletionStage<Map<String, Object>> execute(RuntimeLease lease,
             RuntimeSession session, Map<String, Object> reference) {
         if (lease == null || session == null) {
             throw new IllegalArgumentException(
                     "lease and session are required");
+        }
+        if (ProviderRuntimeProtocol.isReference(reference)) {
+            ProviderRuntimeProtocol.reference(reference, session.getRuntimeSessionId());
+            return provider(lease, session, Map.of("kind", "execute", "reference", reference))
+                    .thenApply(value -> providerResult(value, "execute"));
         }
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("protocolVersion", 2);
@@ -306,6 +321,12 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
             throw new IllegalArgumentException(
                     "afterSequence must be non-negative");
         }
+        if (ProviderRuntimeProtocol.isReference(reference)) {
+            ProviderRuntimeProtocol.reference(reference, session.getRuntimeSessionId());
+            return provider(lease, session, Map.of("kind", "status", "reference", reference,
+                    "afterSequence", afterSequence))
+                    .thenApply(value -> providerStatus(value, "status"));
+        }
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("protocolVersion", 2);
         body.put("reference", referenceIdentity(reference));
@@ -322,6 +343,11 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
         if (lease == null || session == null) {
             throw new IllegalArgumentException(
                     "lease and session are required");
+        }
+        if (ProviderRuntimeProtocol.isReference(reference)) {
+            ProviderRuntimeProtocol.reference(reference, session.getRuntimeSessionId());
+            return provider(lease, session, Map.of("kind", "cancel", "reference", reference))
+                    .thenApply(value -> providerStatus(value, "cancel"));
         }
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("protocolVersion", 2);
@@ -566,40 +592,148 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
         return true;
     }
 
-    /**
-     * Session verbs are not on the v2 tool contract. Fail closed instead of
-     * inventing a route the worker does not serve.
-     */
+    /** Session acquisition is Broker-local until the provider is used. */
     @Override
     public CompletionStage<Void> acquire(RuntimeLease lease,
             RuntimeSession session) {
-        return unsupportedSessionVerb();
+        if (lease == null || session == null) {
+            throw new IllegalArgumentException("lease and session are required");
+        }
+        return CompletableFuture.completedFuture(null);
     }
 
     @Override
     public CompletionStage<Object> control(RuntimeLease lease,
             RuntimeSession session, Map<String, Object> operation) {
-        if (!ManagedMcpProtocol.isOperation(operation)) {
-            return unsupportedSessionVerb();
+        if (lease == null || session == null) {
+            throw new IllegalArgumentException("lease and session are required");
         }
-        ManagedMcpProtocol.validateSession(session, operation);
-        Map<String, Object> body = Map.of("protocolVersion", 1,
-                "runtimeSessionId", session.getRuntimeSessionId(), "operation", operation);
-        return post(lease, ManagedMcpProtocol.PATH,
-                encodeToolRequest(body, TOOL_REQUEST_LIMIT_BYTES), TOOL_RESULT_LIMIT_BYTES)
-                .thenApply(bytes -> ManagedMcpProtocol.response(bytes, session, operation));
+        Map<String, Object> immutable = BrokerValues.immutableMap(operation);
+        if (ManagedMcpProtocol.isOperation(immutable)) {
+            ManagedMcpProtocol.validateSession(session, immutable);
+            Map<String, Object> body = Map.of("protocolVersion", 1,
+                    "runtimeSessionId", session.getRuntimeSessionId(), "operation", immutable);
+            return post(lease, ManagedMcpProtocol.PATH,
+                    encodeToolRequest(body, TOOL_REQUEST_LIMIT_BYTES), TOOL_RESULT_LIMIT_BYTES)
+                    .thenApply(bytes -> ManagedMcpProtocol.response(bytes, session, immutable));
+        }
+        ProviderRuntimeProtocol.control(immutable, session.getHarnessSessionId(), session.getRuntimeSessionId());
+        if ("history".equals(immutable.get("kind"))) {
+            return provider(lease, session, immutable);
+        }
+        return provider(lease, session, Map.of("kind", "acquire"))
+                .thenCompose(value -> {
+                    if (!Boolean.TRUE.equals(value)) {
+                        throw protocol("Managed Runtime acquire response is invalid.");
+                    }
+                    return provider(lease, session, immutable);
+                });
     }
 
     @Override
     public CompletionStage<Boolean> release(RuntimeLease lease,
             RuntimeSession session) {
-        return unsupportedSessionVerb();
+        return provider(lease, session, Map.of("kind", "release"))
+                .thenApply(value -> {
+                    if (!Boolean.TRUE.equals(value)) {
+                        throw protocol("Managed Runtime did not confirm Session release.");
+                    }
+                    return true;
+                });
     }
 
-    private static <T> CompletionStage<T> unsupportedSessionVerb() {
-        return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
-                "runtime_session_verb_unsupported",
-                "Runtime transport does not support session verbs.", false));
+    private CompletionStage<Object> provider(RuntimeLease lease, RuntimeSession session,
+            Map<String, Object> operation) {
+        if (lease == null || session == null) {
+            throw new IllegalArgumentException("lease and session are required");
+        }
+        Map<String, Object> identity = Map.of("harnessSessionId", session.getHarnessSessionId(),
+                "runtimeSessionId", session.getRuntimeSessionId(), "turnKind", session.getTurnKind());
+        Map<String, Object> body = Map.of("protocolVersion", 1,
+                "providerProtocol", ProviderRuntimeProtocol.NAME, "session", identity,
+                "operation", operation);
+        String kind = (String) operation.get("kind");
+        int limit = ProviderRuntimeProtocol.limit(kind);
+        byte[] encoded;
+        try {
+            encoded = encodeToolRequest(body, limit);
+        } catch (IllegalArgumentException tooLarge) {
+            // An oversized operation can never succeed; answer the definitive
+            // 413 shape instead of letting a runtime exception degrade to a
+            // retryable 503 downstream.
+            throw new RuntimeBrokerException(413, "runtime_control_operation_too_large",
+                    "Runtime provider operation exceeds its size limit.", false);
+        }
+        return post(lease, ProviderRuntimeProtocol.PATH, encoded, limit)
+                .thenApply(bytes -> {
+                    Map<String, Object> response;
+                    try {
+                        response = BrokerValues.immutableMap(JSON.parseObject(
+                                new String(bytes, StandardCharsets.UTF_8),
+                                JSONReader.Feature.DisableReferenceDetect,
+                                JSONReader.Feature.UseBigDecimalForDoubles,
+                                JSONReader.Feature.UseBigDecimalForFloats));
+                    } catch (RuntimeException exception) {
+                        throw protocol("Managed Runtime provider response is invalid.");
+                    }
+                    if (!response.keySet().equals(Set.of("protocolVersion", "providerProtocol",
+                            "session", "result"))
+                            || !Integer.valueOf(1).equals(response.get("protocolVersion"))
+                            || !ProviderRuntimeProtocol.NAME.equals(response.get("providerProtocol"))
+                            || !identity.equals(response.get("session"))) {
+                        throw protocol("Managed Runtime provider response identity is invalid.");
+                    }
+                    Object result = response.get("result");
+                    if (("begin-turn".equals(kind) || "confirm".equals(kind)) && result != null) {
+                        throw protocol("Managed Runtime provider void response is invalid.");
+                    }
+                    if (!Set.of("acquire", "release", "begin-turn", "confirm").contains(kind)
+                            && !(result instanceof Map)) {
+                        throw protocol("Managed Runtime provider result is invalid.");
+                    }
+                    return result;
+                });
+    }
+
+    private static Map<String, Object> providerResult(Object value, String operation) {
+        if (!(value instanceof Map<?, ?> result)
+                || !Set.of("executionStatus", "result", "error", "postHook", "failureHook")
+                        .containsAll(result.keySet())
+                || !(result.get("executionStatus") instanceof String status)
+                || !EXECUTION_STATUSES.contains(status)
+                || "success".equals(status) && !(result.get("result") instanceof Map)) {
+            throw protocol("Managed Runtime provider " + operation + " result is invalid.");
+        }
+        return ProviderRuntimeProtocol.object(value);
+    }
+
+    private static Map<String, Object> providerStatus(Object value, String operation) {
+        if (!(value instanceof Map<?, ?> status)
+                || !Set.of("state", "cancelRequested", "lastSeq", "firstAvailableSeq",
+                        "progressGap", "progress", "result").containsAll(status.keySet())) {
+            throw protocol("Managed Runtime provider " + operation + " status is invalid.");
+        }
+        Map<String, Object> result = ProviderRuntimeProtocol.object(value);
+        if ("unknown".equals(result.get("state"))) {
+            if (!result.keySet().equals(Set.of("state"))) {
+                throw protocol("Managed Runtime provider unknown status is invalid.");
+            }
+        } else if (!(result.get("cancelRequested") instanceof Boolean)
+                || !(result.get("progressGap") instanceof Boolean)
+                || !(result.get("progress") instanceof List)
+                || !providerSequence(result.get("lastSeq"))
+                || !providerSequence(result.get("firstAvailableSeq"))) {
+            throw protocol("Managed Runtime provider status cursor is invalid.");
+        }
+        if ("settled".equals(result.get("state"))) {
+            providerResult(result.get("result"), operation);
+        }
+        return projectClosedStatus(result, operation);
+    }
+
+    private static boolean providerSequence(Object value) {
+        Long sequence = BrokerValues.exactLong(value);
+        return sequence != null && sequence >= 0 && sequence <= 9007199254740991L;
     }
 
     /**
@@ -796,6 +930,13 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
             BoundedBody responseBody = response.body();
             String operation = path.substring(path.lastIndexOf('/') + 1);
             if (response.statusCode() != 200) {
+                RuntimeBrokerException providerError =
+                        ProviderRuntimeProtocol.PATH.equals(path)
+                                ? providerFailure(response, responseBody) : null;
+                if (providerError != null) {
+                    result.completeExceptionally(providerError);
+                    return;
+                }
                 RuntimeBrokerException classified =
                         contextFailure(response, responseBody, path);
                 result.completeExceptionally(error(classified.getStatusCode(),
@@ -810,8 +951,9 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
                         "managed_runtime_attestation_too_large",
                         "Managed Runtime " + operation
                                 + " response exceeds "
-                                + (responseLimit == TOOL_RESULT_LIMIT_BYTES
-                                        ? "1 MiB." : "16 KiB."), false));
+                                + (responseLimit >= 1024 * 1024
+                                        ? responseLimit / (1024 * 1024) + " MiB."
+                                        : responseLimit / 1024 + " KiB."), false));
                 return;
             }
             if (!"no-store".equals(response.headers()
@@ -845,6 +987,41 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
             }
         });
         return returned;
+    }
+
+    private static RuntimeBrokerException providerFailure(
+            HttpResponse<BoundedBody> response, BoundedBody body) {
+        if (body.overflow()
+                || !"no-store".equals(response.headers().firstValue("Cache-Control").orElse(""))
+                || !jsonContentType(response.headers().firstValue("Content-Type").orElse(""))
+                || response.headers().firstValue("Content-Encoding").isPresent()) {
+            return null;
+        }
+        try {
+            Map<String, Object> fields = ManagedContextProtocol.parse(body.bytes());
+            if (!fields.keySet().equals(Set.of("code", "error"))
+                    || !(fields.get("code") instanceof String code)
+                    || !(fields.get("error") instanceof String message)
+                    || message.isEmpty() || message.length() > 4096 || message.indexOf('\0') >= 0) {
+                return null;
+            }
+            int expectedStatus = switch (code) {
+                case "managed_runtime_provider_invalid", "managed_runtime_tool_invalid" -> 400;
+                case "managed_runtime_identity_conflict", "managed_context_unavailable",
+                        "managed_context_conflict", "managed_runtime_provider_operation_failed",
+                        "managed_runtime_provider_incompatible" -> 409;
+                case "managed_runtime_provider_too_large" -> 413;
+                case "managed_runtime_provider_unsupported" -> 501;
+                default -> 0;
+            };
+            if (response.statusCode() == expectedStatus) {
+                return error(expectedStatus, code,
+                        BrokerValues.requireWellFormed(message, "provider error"), false);
+            }
+        } catch (RuntimeBrokerException | IllegalArgumentException ignored) {
+            // Unrecognized responses supply no provider-specific error evidence.
+        }
+        return null;
     }
 
     private static RuntimeBrokerException contextFailure(
@@ -1102,7 +1279,7 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
         return new RuntimeBrokerException(status, code, message, retryable);
     }
 
-    private static final class BoundedBody {
+    static final class BoundedBody {
         private final byte[] bytes;
         private final boolean overflow;
 
@@ -1111,32 +1288,37 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
             this.overflow = overflow;
         }
 
-        private byte[] bytes() {
+        byte[] bytes() {
             return bytes;
         }
 
-        private boolean overflow() {
+        boolean overflow() {
             return overflow;
         }
     }
 
     /**
-     * Stops reading once the cap is crossed. A body that stalls after the
-     * response headers is bounded by the stage deadline ({@code orTimeout}),
-     * not by {@code HttpRequest.timeout}.
+     * Stops reading once the cap is crossed. The buffer grows with the body,
+     * so a small answer under a large cap stays small. A body that stalls
+     * after the response headers is bounded by the stage deadline
+     * ({@code orTimeout}), not by {@code HttpRequest.timeout}.
      */
-    private static final class BoundedBodySubscriber
+    static final class BoundedBodySubscriber
             implements HttpResponse.BodySubscriber<BoundedBody> {
         private final int limit;
-        private final byte[] bytes;
+        private byte[] bytes;
         private int size;
         private final CompletableFuture<BoundedBody> body =
                 new CompletableFuture<>();
         private Flow.Subscription subscription;
 
-        private BoundedBodySubscriber(int limit) {
+        BoundedBodySubscriber(int limit) {
             this.limit = limit;
-            this.bytes = new byte[limit];
+            this.bytes = new byte[Math.min(limit, 8192)];
+        }
+
+        int capacity() {
+            return bytes.length;
         }
 
         @Override
@@ -1185,9 +1367,12 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
             if (count <= 0) {
                 return;
             }
-            byte[] chunk = new byte[count];
-            buffer.get(chunk);
-            System.arraycopy(chunk, 0, bytes, size, count);
+            // onNext never passes more than limit - size.
+            if (count > bytes.length - size) {
+                bytes = Arrays.copyOf(bytes, (int) Math.min(limit,
+                        Math.max(2L * bytes.length, (long) size + count)));
+            }
+            buffer.get(bytes, size, count);
             size += count;
         }
 

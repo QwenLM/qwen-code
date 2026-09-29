@@ -16,7 +16,7 @@ MCP 需要独立配置与操作记录、不可变目录修订、由 Runtime 持�
 
 定义是 Runtime 的部署配置，按 workspace、server ID 和不可变修订选择。只有 Runtime 读取的 manifest 保存连接配方与凭据；Harness 只得到展示信息和 schema。Harness 不执行隐式 settings 或 OAuth 发现。修改连接配方必须产生新的定义修订。安装替代连接不会改变已受理操作的定义、目录或连接代数。
 
-本次不实现 Hooks、Shell/Monitor 后台工作、子任务、Channels、自动化、公开 MCP 配置编辑器或远端自动重试，也不扩大现有普通文件工具配置。必要的 control 转发范围有限，其他通用 Broker control 动词继续不受支持。
+本次不实现 Hooks、Shell/Monitor 后台工作、子任务、Channels、自动化、公开 MCP 配置编辑器或远端自动重试，也不扩大现有普通文件工具配置。MCP control 使用独立且有大小限制的协议，与 #12868 的通用 Broker provider control 并存，各自保留校验和准入规则。
 
 ## 架构与归属
 
@@ -34,7 +34,7 @@ MCP 需要独立配置与操作记录、不可变目录修订、由 Runtime 持�
 
 ## 记录、目录与副作用
 
-配置与非工具操作内嵌 H0 运行块。每份配置持久保存不可变的 `runtimeSessionId`，使重新加载、查询与 drain 都指向原 owner。只有 Broker 确认释放后才将配置标记为 released；下一次连接根据已提交配置历史派生新的 Runtime Session 身份。其修订链没有任务投影。TypeScript/Java 共用 fixture 覆盖畸形结构、不可变身份、合法后继与终态。资源闭包包含目录、参数及原始 MCP 响应引用。
+配置与非工具操作内嵌 H0 运行块。每份配置持久保存不可变的 `runtimeSessionId`，使重新加载、查询与 drain 都指向原 owner。只有 Broker 确认释放后才将配置标记为 released；下一次连接根据已提交配置历史派生新的 Runtime Session 身份。新 Runtime Session 身份使用 `mcp-` 加 Session key 与已提交配置历史的摘要，满足 Broker/provider 的路径安全身份约束，并保留确定性重载和释放后生成新身份的语义。已有记录始终保留原 owner；不支持迁移合并前使用冒号 owner 的开发快照。其修订链没有任务投影。TypeScript/Java 共用 fixture 覆盖畸形结构、不可变身份、合法后继与终态。资源闭包包含目录、参数及原始 MCP 响应引用。
 
 配置 intent 固定 server 定义。回执记录连接代数，以及 tools/resources/prompts 各自的发现状态（`complete`、`partial`、`failed`、`stale`）。成功的空列表是 complete。发现失败不能把先前有效的列表替换成貌似权威的空列表。目录更新只影响后续新调用。
 
@@ -82,7 +82,7 @@ Runtime 只允许目标 workspace 已配置的定义，以及 Session 已安装�
 }
 ```
 
-`streamable-http` 或 `sse` 使用 `url` 和可选 `headers`，不能同时提供 `command`、`args`、`env`。定义在 Runtime 启动时装载；修改连接配方必须提供新的 `serverRevision` 和对应 digest。替换活动 binding 时应同时保留两个修订。可选 `timeoutMs` 为 1 至 600000 的整数，调用响应默认等待 600000 毫秒；连接和发现仍为 25 秒上限。Hosted 工具观察窗口为 630 秒，在临时 UNKNOWN 后继续查询原 execution；MCP 轮询通过 `GET /executions/:id?reconcile=true` 显式请求原 execution 对账，Java 仅持久接受明确的迟到 Runtime 结果。未显式请求对账的 v2 状态查询保持被动读取，v3 保留既有自动对账。可选查询参数接受 `true` 或 `false`，不改变 execution 归属，也不允许派发。轮询复用已取得的 owner，状态查询失败时仅重建原 owner 路由。
+`streamable-http` 或 `sse` 使用 `url` 和可选 `headers`，不能同时提供 `command`、`args`、`env`。定义在 Runtime 启动时装载；修改连接配方必须提供新的 `serverRevision` 和对应 digest。替换活动 binding 时应同时保留两个修订。可选 `timeoutMs` 为 1 至 600000 的整数，调用响应默认等待 600000 毫秒；连接和发现仍为 25 秒上限。Hosted 工具观察窗口为 630 秒，在临时 UNKNOWN 后继续查询原 execution；MCP 轮询通过 `GET /executions/:id?reconcile=true` 显式请求原 execution 对账，Java 仅持久接受明确的迟到 Runtime 结果。未显式请求对账的 v2 状态查询保持被动读取，v3 与通用 provider 引用保留自动对账。可选查询参数接受 `true` 或 `false`，不改变 execution 归属，也不允许派发。轮询复用已取得的 owner，状态查询失败时仅重建原 owner 路由。
 
 创建或加载私有 Hosted Session 时，在原有 `managedSessionStore` 字段之外提供 `toolProfile: "hosted-workspace-mcp/1"` 和 `mcpServers: [{serverId, serverRevision, definitionDigest}]`。Session 保留初始准入 pin，后续替换单独提交。首个 prompt 或资源/提示操作会先初始化 binding，再受理工作。Hosted 请求沿用现有 Harness protocol/boot 与 client 身份 headers。
 
@@ -107,6 +107,6 @@ H1 明确保留每个 tenant/storage lease 同时仅一个 attached MCP owner �
 
 Session 存储全局识别这两个记录 domain；实际执行仍由显式私有 profile 和限定范围的 Runtime 定义控制。共享 Broker acquire 有意对原 owner 幂等，并返回 workspace generation 与 Runtime binding/generation；普通文件/Shell prepare 保留实际 prompt 和 call 身份。
 
-尚未发布的 MCP migration 使用 V21，避免与 #12894 的 V19/V20 publication migration 重号。部署应按递增顺序执行，后合并分支必须再次对照 main 检查。如果 MCP V21 已先执行，后到达且尚未应用的 publication migration 必须重新编号到已部署版本之后，不能靠启用 out-of-order migration 绕过检查。#12868 的通用 control 需要语义合并，保留撤权后的 MCP 原 owner 恢复，以及先 drain 再释放存储租约的顺序。
+尚未发布的 MCP migration 使用 V21，避免与 #12894 的 V19/V20 publication migration 重号。部署应按递增顺序执行，后合并分支必须再次对照 main 检查。如果 MCP V21 已先执行，后到达且尚未应用的 publication migration 必须重新编号到已部署版本之后，不能靠启用 out-of-order migration 绕过检查。#12868 的通用 control 与 MCP 撤权后的原 owner 恢复并存。正常 release 必须等待 provider 清理和 MCP hold 结束，再停用 Workspace 并释放存储租约；没有持有租约的 RELEASING Session 保留无需联系 worker 的清理路径。provider 不能接管已有 MCP 工具日志的 Session，MCP 工具派发在 context 查询后再次检查协议归属。
 
 公开配置管理和生产 AgentBundle 能力发布另行部署。没有查询或幂等支持的远端系统不能自动恢复未知副作用。Runtime 的代内回执不能跨物理 Runtime 丢失持久保留；此时已提交的 Session intent 保持阻塞结果。配额按 Runtime 实例计算，不跨独立 Runtime 进程汇总。私有配置沿用现有 inline Session Store：每类发现列表限制为 16 KiB 和 64 页，保留部分条目时标记 partial，无法保留有效条目时标记 failed；原始操作响应限制为 60 KiB，超限以 output-limit 错误结算。本阶段不启用 SDK 反向客户端、生产 profile 公告、跨进程总预算或对象存储结果。

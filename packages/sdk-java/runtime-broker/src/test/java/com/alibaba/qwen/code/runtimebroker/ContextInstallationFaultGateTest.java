@@ -8,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.alibaba.fastjson2.JSON;
 import com.alibaba.fastjson2.JSONObject;
 import java.io.IOException;
 import java.nio.file.Files;
@@ -87,6 +88,10 @@ class ContextInstallationFaultGateTest {
         assertEquals(1, proxy.count("context"));
         assertEquals(1, proxy.count("activation"));
         assertEquals(1, proxy.count("execute"));
+        int beforeRelease = proxy.exchanges().size();
+        assertEquals(Boolean.TRUE, broker.release(HARNESS, SESSION).requireOk().value());
+        assertEquals(List.of("control", "activation"), proxy.exchanges().stream()
+                .skip(beforeRelease).map(FaultProxy.Exchange::operation).toList());
     }
 
     @ParameterizedTest
@@ -375,11 +380,12 @@ class ContextInstallationFaultGateTest {
 
     /** A tool of the Session, sent straight to the worker, is refused. */
     private void assertRefused(RuntimeLease lease, String session) {
+        FaultGateRig.ToolCall call = FaultGateRig.shell(session, "stray", rig.recordRun());
         ExecutionException refused = assertThrows(ExecutionException.class,
                 () -> new HttpRuntimeTransport().execute(lease,
                         new RuntimeSession(HARNESS, session, "bootstrap",
                                 rig.scope),
-                        FaultGateRig.shell(session, "stray", rig.recordRun()))
+                        call.reference(), JSON.parseObject(call.payloadJson()))
                         .toCompletableFuture().get(30, TimeUnit.SECONDS));
         RuntimeBrokerException refusal =
                 (RuntimeBrokerException) refused.getCause();

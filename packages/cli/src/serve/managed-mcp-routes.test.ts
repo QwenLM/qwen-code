@@ -31,6 +31,7 @@ import {
   WORKSPACE_CONTEXT_CONFIG_REF,
   WORKSPACE_EXECUTION_PROFILE,
 } from './managed-workspace-activation.js';
+import { MANAGED_RUNTIME_PROVIDER_ROUTE } from './managed-runtime-provider-protocol.js';
 
 let worker: ManagedRuntimeAttestationWorkerHandle | undefined;
 let server: Server | undefined;
@@ -89,7 +90,7 @@ it('authenticates MCP controls, executes tools through the ordinary ledger and h
     workspaceId: 'workspace-a',
     sessionId: 'session-a',
   };
-  const runtimeSessionId = 'mcp:session-a';
+  const runtimeSessionId = 'mcp-session-a';
   const manifest = path.join(directory, 'manifest.json');
   await writeFile(
     manifest,
@@ -206,6 +207,17 @@ it('authenticates MCP controls, executes tools through the ordinary ledger and h
     runtimeSessionId,
     operation,
   });
+  const provider = (kind: 'acquire' | 'release') =>
+    post(MANAGED_RUNTIME_PROVIDER_ROUTE.path, {
+      protocolVersion: 1,
+      providerProtocol: 'managed-runtime-provider/1',
+      session: {
+        harnessSessionId: key.sessionId,
+        runtimeSessionId,
+        turnKind: 'bootstrap',
+      },
+      operation: { kind },
+    });
   expect(
     (
       await post(MANAGED_MCP_ROUTE, request(configure), {
@@ -274,6 +286,8 @@ it('authenticates MCP controls, executes tools through the ordinary ledger and h
     (await post('/internal/managed-runtime/v2/execute', execution)).status,
   ).toBe(200);
   expect(effects).toBe(1);
+  expect((await provider('acquire')).status).toBe(409);
+  expect((await provider('release')).status).toBe(409);
   const status = await post('/internal/managed-runtime/v2/status', {
     protocolVersion: 2,
     reference,
@@ -308,6 +322,10 @@ it('authenticates MCP controls, executes tools through the ordinary ledger and h
       operation: { state: 'settled', response: { released: true } },
     });
   });
+  expect((await provider('release')).status).toBe(200);
+  expect(
+    (await post('/internal/managed-runtime/v2/execute', execution)).status,
+  ).toBe(409);
   expect(
     (
       await post('/internal/managed-runtime/v3/activation', {
