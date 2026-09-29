@@ -2711,6 +2711,7 @@ export class LlmChat {
       config: this.config,
       consecutiveFailures: this.consecutiveFailures,
       originalTokenCount,
+      originalTokenCountIsEstimated,
       pendingUserMessage: options?.pendingUserMessage,
       precomputedEffectiveTokens: options?.precomputedEffectiveTokens,
       requestGenerationConfig: options?.requestGenerationConfig,
