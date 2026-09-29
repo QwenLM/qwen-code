@@ -52,7 +52,7 @@ class DownloadsDeviceTest {
         assertEquals("choosing", it.state())
         val intent = it.intents.single()
         assertEquals(Intent.ACTION_CREATE_DOCUMENT, intent.action)
-        assertEquals("_report.txt", intent.getStringExtra(Intent.EXTRA_TITLE))
+        assertEquals(".._report.txt", intent.getStringExtra(Intent.EXTRA_TITLE))
         assertEquals("text/plain", intent.type)
         assertEquals(Intent.FLAG_GRANT_WRITE_URI_PERMISSION, intent.flags)
         assertTrue(intent.hasCategory(Intent.CATEGORY_OPENABLE))
@@ -148,7 +148,13 @@ class DownloadsDeviceTest {
         }
     }
 
-    @Test fun cancellationDuringProviderWriteFinishesTheFileWithoutStaleSuccess() {
+    @Test fun cancellationDuringProviderWriteFinishesTheFileWithoutSuccessOnCurrentPage() =
+        providerWriteCompletes(cancel = true)
+
+    @Test fun successfulProviderWriteReportsSavedOnceForTheMatchingTransfer() =
+        providerWriteCompletes(cancel = false)
+
+    private fun providerWriteCompletes(cancel: Boolean) {
         val uri = DownloadsFixtureProvider.URI
         fun provider(method: String) = context.contentResolver.call(uri, method, null, null)!!
         fun awaitProvider(predicate: (android.os.Bundle) -> Boolean): android.os.Bundle {
@@ -162,10 +168,10 @@ class DownloadsDeviceTest {
         }
         val bytes = ByteArray(4 * 1024 * 1024) { (it % 251).toByte() }
         lateinit var fixture: Fixture
+        instrumentation.runOnMainSync { fixture = Fixture(context) }
         provider("grant")
         try {
             instrumentation.runOnMainSync {
-                fixture = Fixture(context)
                 fixture.send(begin(bytes.size))
                 for (offset in bytes.indices step DownloadBuffer.CHUNK_SIZE) {
                     val chunk = bytes.copyOfRange(offset, minOf(offset + DownloadBuffer.CHUNK_SIZE, bytes.size))
@@ -177,36 +183,35 @@ class DownloadsDeviceTest {
                 fixture.downloads.result(Activity.RESULT_OK, Intent().setData(uri).addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION))
             }
             awaitProvider { it.getInt("count") > 0 }
-            var cancelledState = ""
-            instrumentation.runOnMainSync {
-                fixture.downloads.cancel()
-                cancelledState = fixture.state()
-                fixture.current = false
+            if (cancel) {
+                instrumentation.runOnMainSync {
+                    fixture.downloads.cancel()
+                    assertEquals("cancelled", fixture.state())
+                    assertTrue("Cancellation must be tested independently of a stale page", fixture.current)
+                }
             }
-            assertEquals("cancelled", cancelledState)
             provider("resume")
             val state = awaitProvider { it.getBoolean("done") }
             assertNull("Provider must finish without I/O errors", state.getString("error"))
-            assertEquals("Cancelling after writing starts must preserve the whole file", bytes.size, state.getInt("count"))
+            assertEquals("The provider must receive the whole file", bytes.size, state.getInt("count"))
             assertEquals(CRC32().apply { update(bytes) }.value, state.getLong("crc"))
             // Wait for the writer's main-thread completion by retrying a new transfer.
             var ready = false
             val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
             while (!ready && System.nanoTime() < deadline) {
                 instrumentation.runOnMainSync {
-                    fixture.current = true
                     fixture.send(begin(0, "f".repeat(32)))
                     ready = fixture.state() == "ready"
                 }
                 if (!ready) Thread.sleep(20)
             }
             assertTrue("Writer must release its slot", ready)
-            var saved = false
             instrumentation.runOnMainSync {
-                saved = fixture.replies.any { it.getString("state") == "saved" }
+                val terminalStates = fixture.replies.filter { it.getString("id") == id }
+                    .map { it.getString("state") }.filter { it in listOf("saved", "cancelled", "error") }
+                assertEquals(listOf(if (cancel) "cancelled" else "saved"), terminalStates)
                 fixture.downloads.cancel()
             }
-            assertFalse("A cancelled transfer must not report success", saved)
         } finally {
             provider("resume")
             instrumentation.runOnMainSync { fixture.downloads.cancel() }

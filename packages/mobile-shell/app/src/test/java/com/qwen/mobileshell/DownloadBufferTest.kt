@@ -38,11 +38,18 @@ class DownloadBufferTest {
     }
 
     @Test fun sanitizesDestinationNameWithoutAcceptingPaths() {
-        assertEquals("_.._report_.txt", DownloadBuffer.fileName("../..\\report\n.txt"))
+        assertEquals(".._.._report_.txt", DownloadBuffer.fileName("../..\\report\n.txt"))
         assertEquals("download", DownloadBuffer.fileName(" .. "))
         assertEquals("download", DownloadBuffer.fileName(""))
         assertEquals("download", DownloadBuffer.fileName(". ."))
         assertEquals(255, DownloadBuffer.fileName("a".repeat(300)).length)
+    }
+
+    @Test fun preservesLeadingDotsInConfigurationFileNames() {
+        for (name in listOf(".gitignore", ".env", ".npmrc", ".eslintrc.json")) {
+            assertEquals(name, DownloadBuffer.fileName(name))
+            assertEquals(name, DownloadBuffer.fileName("  $name. "))
+        }
     }
 
     @Test fun replacesBidirectionalFormatCharactersInDestinationNames() {

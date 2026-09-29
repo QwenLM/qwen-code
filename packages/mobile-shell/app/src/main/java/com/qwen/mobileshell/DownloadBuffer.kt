@@ -27,7 +27,7 @@ internal class DownloadBuffer(val id: String, size: Int) {
 
         fun fileName(value: String): String {
             val clean = value.replace(Regex("[\\p{Cc}\\p{Cf}\\p{Cs}/\\\\:*?\"<>|]"), "_")
-                .trim { it.isWhitespace() || it == '.' }
+                .trimStart { it.isWhitespace() }.trimEnd { it.isWhitespace() || it == '.' }
             val dot = clean.lastIndexOf('.')
             val extension = if (dot > 0 && clean.length - dot in 2..16) clean.substring(dot) else ""
             val source = clean.substring(0, clean.length - extension.length)
