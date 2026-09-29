@@ -13,6 +13,7 @@ import {
 } from './resumeHistoryUtils.js';
 import { MessageType, ToolCallStatus } from '../types.js';
 import { SUPERSEDED_FINDINGS_MESSAGE } from './findings-coalescing.js';
+import { isRealUserTurn } from './historyMapping.js';
 import type {
   AnyDeclarativeTool,
   Config,
@@ -377,6 +378,261 @@ describe('resumeHistoryUtils', () => {
     ]);
   });
 
+  describe('injected system-reminder envelopes', () => {
+    const buildUserItems = (record: Record<string, unknown>) => {
+      const conversation = {
+        messages: [record],
+      } as unknown as ConversationRecord;
+      const session: ResumedSessionData = {
+        conversation,
+      } as ResumedSessionData;
+      return buildResumedHistoryItems(session, makeConfig({}), 1_000);
+    };
+
+    it('restores the prompt without the envelope only the model should see', () => {
+      const items = buildUserItems({
+        type: 'user',
+        message: {
+          parts: [
+            {
+              text: '<system-reminder>\n1 background agent was restored from this session.\n</system-reminder>\n\nmy prompt',
+            },
+          ],
+        },
+      });
+      expect(items).toEqual([
+        {
+          id: 1_001,
+          type: 'user',
+          text: 'my prompt',
+          sentToModel: true,
+          // The unstripped model text rides along so a rewind restore can
+          // re-arm the consumed one-shot envelope for the resubmit.
+          modelText:
+            '<system-reminder>\n1 background agent was restored from this session.\n</system-reminder>\n\nmy prompt',
+        },
+      ]);
+    });
+
+    it('keeps an envelope the user pasted into their own prompt', () => {
+      const text = 'quote: <system-reminder>mine</system-reminder> end';
+      const items = buildUserItems({
+        type: 'user',
+        message: { parts: [{ text }] },
+      });
+      expect(items).toEqual([
+        { id: 1_001, type: 'user', text, sentToModel: true },
+      ]);
+    });
+
+    it('strips the envelope from a winning displayText source', () => {
+      // `displayText` wins the resolution chain and can itself carry the
+      // envelope (it is the model-facing request text whenever submitted
+      // provenance was unavailable), so the strip must apply to the
+      // resolved value, not only to the parts fallback.
+      const items = buildUserItems({
+        type: 'user',
+        message: { parts: [{ text: 'my prompt' }] },
+        systemPayload: {
+          displayText:
+            '<system-reminder>\nnotice\n</system-reminder>\n\nmy prompt',
+          hookContext: 'ctx',
+        },
+      });
+      expect(items).toEqual([
+        {
+          id: 1_001,
+          type: 'user',
+          text: 'my prompt',
+          sentToModel: true,
+          modelText:
+            '<system-reminder>\nnotice\n</system-reminder>\n\nmy prompt',
+        },
+      ]);
+    });
+
+    it('keeps a user-authored leading envelope a winning displayText carries', () => {
+      // The record's model-facing parts carry the same leading run as the
+      // displayText, so the record cannot prove the run was injected (a
+      // provenance-backed writer keeps an injected prefix out of
+      // displayText): the row rebuilds to the user's typed text verbatim,
+      // with no modelText because nothing injected needs a rewind re-arm.
+      const text =
+        '<system-reminder>\nuser pasted note\n</system-reminder>\n\nmy prompt';
+      const items = buildUserItems({
+        type: 'user',
+        message: { parts: [{ text }] },
+        systemPayload: { displayText: text, hookContext: 'ctx' },
+      });
+      expect(items).toEqual([
+        {
+          id: 1_001,
+          type: 'user',
+          text,
+          sentToModel: true,
+        },
+      ]);
+    });
+
+    it('strips the envelope from an at-command userText', () => {
+      const conversation = {
+        messages: [
+          {
+            type: 'system',
+            subtype: 'at_command',
+            systemPayload: {
+              userText:
+                '<system-reminder>\nnotice\n</system-reminder>\n\nmy @file prompt',
+              filesRead: ['/tmp/file.ts'],
+              status: 'success',
+            },
+          },
+          {
+            type: 'user',
+            message: { parts: [{ text: 'expanded model prompt' }] },
+          },
+        ],
+      } as unknown as ConversationRecord;
+      const items = buildResumedHistoryItems(
+        { conversation } as ResumedSessionData,
+        makeConfig({}),
+        1_000,
+      );
+      const userItem = items.find((i) => i.type === 'user') as {
+        text: string;
+        sentToModel?: boolean;
+        modelText?: string;
+      };
+      expect(userItem.text).toBe('my @file prompt');
+      // Record-backed: stamped as a real turn, with the unstripped text
+      // carried for the rewind re-arm.
+      expect(userItem.sentToModel).toBe(true);
+      expect(userItem.modelText).toBe(
+        '<system-reminder>\nnotice\n</system-reminder>\n\nmy @file prompt',
+      );
+    });
+
+    it('strips the envelope from a lone at-command record', () => {
+      const conversation = {
+        messages: [
+          {
+            type: 'system',
+            subtype: 'at_command',
+            systemPayload: {
+              userText:
+                '<system-reminder>\nnotice\n</system-reminder>\n\nmy @file prompt',
+              filesRead: ['/tmp/file.ts'],
+              status: 'success',
+            },
+          },
+        ],
+      } as unknown as ConversationRecord;
+      const items = buildResumedHistoryItems(
+        { conversation } as ResumedSessionData,
+        makeConfig({}),
+        1_000,
+      );
+      const userItem = items.find((i) => i.type === 'user') as { text: string };
+      expect(userItem.text).toBe('my @file prompt');
+    });
+
+    it('classifies a resumed "?"-leading prompt as a real user turn', () => {
+      // The strip removes the '<system-reminder>' first char, so the legacy
+      // lexical fallback would misread a '?'-leading prompt as non-model
+      // text; the rebuild stamps the provenance instead.
+      const items = buildUserItems({
+        type: 'user',
+        message: {
+          parts: [
+            {
+              text: '<system-reminder>\nnotice\n</system-reminder>\n\n?what does this do',
+            },
+          ],
+        },
+      });
+      expect(items).toEqual([
+        {
+          id: 1_001,
+          type: 'user',
+          text: '?what does this do',
+          sentToModel: true,
+          modelText:
+            '<system-reminder>\nnotice\n</system-reminder>\n\n?what does this do',
+        },
+      ]);
+      expect(isRealUserTurn(items[0])).toBe(true);
+    });
+
+    it('keeps an envelope-only prompt as its own row, matching the live path', () => {
+      // The live path keeps the raw text when stripping would leave
+      // nothing; resume must not silently drop the row the live transcript
+      // showed.
+      const text = '<system-reminder>\nnotice\n</system-reminder>';
+      const items = buildUserItems({
+        type: 'user',
+        message: { parts: [{ text }] },
+      });
+      expect(items).toEqual([
+        { id: 1_001, type: 'user', text, sentToModel: true },
+      ]);
+    });
+
+    it('carries the enveloped model text through on a UserPromptSubmit-hook record', () => {
+      // A hook-context record resolves displayText (the clean projection)
+      // and filters every text part out of the projection, so the
+      // envelope lives only in the record's model-facing parts. The
+      // carry-through must read those parts (minus the hook-context
+      // trailer) or the rewind re-arm can never fire for this shape.
+      const items = buildUserItems({
+        type: 'user',
+        message: {
+          parts: [
+            {
+              text: '<system-reminder>\nnotice\n</system-reminder>\n\nmy prompt',
+            },
+            {
+              text: '<qwen:user-prompt-submit-context>\nctx\n</qwen:user-prompt-submit-context>',
+            },
+          ],
+        },
+        systemPayload: { displayText: 'my prompt', hookContext: 'ctx' },
+      });
+      expect(items).toEqual([
+        {
+          id: 1_001,
+          type: 'user',
+          text: 'my prompt',
+          sentToModel: true,
+          modelText:
+            '<system-reminder>\nnotice\n</system-reminder>\n\nmy prompt',
+        },
+      ]);
+    });
+
+    it('strips an injected envelope from a mid-turn steer row on resume', () => {
+      // A steer queued while an injector was armed persists the envelope in
+      // displayText; the resumed row must match the live row and the
+      // OpenTUI adapter, which both strip it.
+      const items = buildUserItems({
+        type: 'user',
+        subtype: 'mid_turn_user_message',
+        message: { parts: [{ text: 'my steer text' }] },
+        systemPayload: {
+          displayText:
+            '<system-reminder>\n1 background agent was restored from this session.\n</system-reminder>\n\nmy steer text',
+        },
+      });
+      expect(items).toEqual([
+        {
+          id: 1_001,
+          type: 'user',
+          text: 'my steer text',
+          sentToModel: false,
+        },
+      ]);
+    });
+  });
+
   describe('UserPromptSubmit hook context provenance', () => {
     const tagged =
       '<qwen:user-prompt-submit-context>\ninjected hook context\n</qwen:user-prompt-submit-context>';
@@ -400,7 +656,9 @@ describe('resumeHistoryUtils', () => {
           hookContext: 'injected hook context',
         },
       });
-      expect(items).toEqual([{ id: 1_001, type: 'user', text: 'my prompt' }]);
+      expect(items).toEqual([
+        { id: 1_001, type: 'user', text: 'my prompt', sentToModel: true },
+      ]);
     });
 
     it('does not fall back to hidden text when displayText is empty', () => {
@@ -429,7 +687,9 @@ describe('resumeHistoryUtils', () => {
           hookContext: 'injected hook context',
         },
       });
-      expect(items).toEqual([{ id: 1_001, type: 'user', text: 'my prompt' }]);
+      expect(items).toEqual([
+        { id: 1_001, type: 'user', text: 'my prompt', sentToModel: true },
+      ]);
     });
 
     it('strips a trailing whole-part tagged block when no displayText is recorded', () => {
@@ -437,7 +697,9 @@ describe('resumeHistoryUtils', () => {
         type: 'user',
         message: { parts: [{ text: 'my prompt' }, { text: tagged }] },
       });
-      expect(items).toEqual([{ id: 1_001, type: 'user', text: 'my prompt' }]);
+      expect(items).toEqual([
+        { id: 1_001, type: 'user', text: 'my prompt', sentToModel: true },
+      ]);
     });
 
     it('keeps user-authored text that merely contains the tag', () => {
@@ -446,7 +708,12 @@ describe('resumeHistoryUtils', () => {
         message: { parts: [{ text: `quote: ${tagged} end` }] },
       });
       expect(items).toEqual([
-        { id: 1_001, type: 'user', text: `quote: ${tagged} end` },
+        {
+          id: 1_001,
+          type: 'user',
+          text: `quote: ${tagged} end`,
+          sentToModel: true,
+        },
       ]);
     });
 
@@ -455,7 +722,9 @@ describe('resumeHistoryUtils', () => {
         type: 'user',
         message: { parts: [{ text: tagged }] },
       });
-      expect(items).toEqual([{ id: 1_001, type: 'user', text: tagged }]);
+      expect(items).toEqual([
+        { id: 1_001, type: 'user', text: tagged, sentToModel: true },
+      ]);
     });
 
     it('falls back to raw concatenation for legacy bare-injected records', () => {
@@ -466,7 +735,12 @@ describe('resumeHistoryUtils', () => {
         },
       });
       expect(items).toEqual([
-        { id: 1_001, type: 'user', text: 'my prompt\nbare injected context' },
+        {
+          id: 1_001,
+          type: 'user',
+          text: 'my prompt\nbare injected context',
+          sentToModel: true,
+        },
       ]);
     });
 
@@ -575,7 +849,7 @@ describe('resumeHistoryUtils', () => {
     );
 
     expect(items).toEqual([
-      { id: baseTimestamp + 1, type: 'user', text: 'Hello' },
+      { id: baseTimestamp + 1, type: 'user', text: 'Hello', sentToModel: true },
       {
         id: baseTimestamp + 2,
         type: 'gemini',
@@ -730,7 +1004,53 @@ describe('resumeHistoryUtils', () => {
     const items = buildResumedHistoryItems(session, makeConfig({}), 50);
 
     expect(items).toEqual([
-      { id: 51, type: 'user', text: '[User message with attachments]' },
+      {
+        id: 51,
+        type: 'user',
+        text: '[User message with attachments]',
+        sentToModel: true,
+      },
+    ]);
+  });
+
+  it('restores media-reference user messages whose record has no message.parts', () => {
+    // validateTranscriptRecord drops a non-object message or a non-array
+    // message.parts, yielding a user record with no parts at all. The
+    // modelText recovery must tolerate that shape instead of throwing.
+    const conversation = {
+      messages: [
+        {
+          type: 'user',
+          message: { role: 'user' },
+          systemPayload: {
+            displayText: '',
+            hookContext: '',
+            attachmentReferences: [
+              {
+                type: 'image',
+                attachmentId: 'image-1',
+                mimeType: 'image/png',
+                size: 8,
+              },
+            ],
+          },
+        },
+      ],
+    } as unknown as ConversationRecord;
+
+    const session: ResumedSessionData = {
+      conversation,
+    } as ResumedSessionData;
+
+    const items = buildResumedHistoryItems(session, makeConfig({}), 50);
+
+    expect(items).toEqual([
+      {
+        id: 51,
+        type: 'user',
+        text: '[User message with attachments]',
+        sentToModel: true,
+      },
     ]);
   });
 
@@ -765,7 +1085,9 @@ describe('resumeHistoryUtils', () => {
 
     const items = buildResumedHistoryItems(session, makeConfig({}), 30);
 
-    expect(items).toEqual([{ id: 31, type: 'user', text: 'raw @file prompt' }]);
+    expect(items).toEqual([
+      { id: 31, type: 'user', text: 'raw @file prompt', sentToModel: true },
+    ]);
   });
 
   it('projects the user turn when legacy @-command metadata has no userText', () => {
@@ -833,7 +1155,9 @@ describe('resumeHistoryUtils', () => {
       30,
     );
 
-    expect(items).toEqual([{ id: 31, type: 'user', text: 'user prompt' }]);
+    expect(items).toEqual([
+      { id: 31, type: 'user', text: 'user prompt', sentToModel: true },
+    ]);
   });
 
   it('keeps legacy bare hook context when no reliable boundary exists', () => {
@@ -862,6 +1186,7 @@ describe('resumeHistoryUtils', () => {
         id: 31,
         type: 'user',
         text: 'user prompt\nlegacy bare hook context',
+        sentToModel: true,
       },
     ]);
   });
@@ -1057,6 +1382,7 @@ describe('resumeHistoryUtils', () => {
       id: 12,
       type: 'user',
       text: 'next user message',
+      sentToModel: true,
     });
   });
 

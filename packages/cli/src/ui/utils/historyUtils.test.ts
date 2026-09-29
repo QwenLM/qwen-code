@@ -10,9 +10,15 @@ import { ToolCallStatus } from '../types.js';
 import {
   buildThoughtHeadIdMap,
   findLastUserItemIndex,
+  isOnlyLeadingSystemReminders,
   isSyntheticHistoryItem,
   itemsAfterAreOnlySynthetic,
+  omitSystemReminderBlocks,
+  prependMissingSystemReminders,
   realUserPromptTexts,
+  splitInjectedLeadingReminders,
+  splitLeadingSystemReminders,
+  stripLeadingSystemReminders,
 } from './historyUtils.js';
 
 const mk = (
@@ -274,5 +280,268 @@ describe('realUserPromptTexts', () => {
       mk({ type: 'user', text: 'valid' }, 3),
     ];
     expect(realUserPromptTexts(h)).toEqual(['valid']);
+  });
+});
+describe('stripLeadingSystemReminders', () => {
+  it('strips a single leading envelope', () => {
+    expect(
+      stripLeadingSystemReminders(
+        '<system-reminder>\nnote\n</system-reminder>\n\nmy prompt',
+      ),
+    ).toBe('my prompt');
+  });
+
+  it('strips stacked envelopes', () => {
+    expect(
+      stripLeadingSystemReminders(
+        '<system-reminder>one</system-reminder>\n\n' +
+          '<system-reminder>two</system-reminder>\n\nreview this',
+      ),
+    ).toBe('review this');
+  });
+
+  it('returns an envelope-only message unchanged rather than empty', () => {
+    const only = '<system-reminder>\nnote\n</system-reminder>';
+    expect(stripLeadingSystemReminders(only)).toBe(only);
+    const stacked =
+      '<system-reminder>one</system-reminder>\n\n<system-reminder>two</system-reminder>';
+    expect(stripLeadingSystemReminders(stacked)).toBe(stacked);
+  });
+
+  it('keeps a mid-message envelope the user pasted', () => {
+    const pasted = 'review <system-reminder>pasted</system-reminder> this';
+    expect(stripLeadingSystemReminders(pasted)).toBe(pasted);
+  });
+
+  it('keeps an unterminated envelope', () => {
+    const unterminated = '<system-reminder>never closed\nreview this';
+    expect(stripLeadingSystemReminders(unterminated)).toBe(unterminated);
+  });
+
+  it('returns the empty string unchanged', () => {
+    expect(stripLeadingSystemReminders('')).toBe('');
+  });
+
+  it('splits the exact reminder prefix from the display rest', () => {
+    const text =
+      '<system-reminder>\na\n</system-reminder>\n\n' +
+      '<system-reminder>\nb\n</system-reminder>\n\nreview this';
+    expect(splitLeadingSystemReminders(text)).toEqual({
+      reminders:
+        '<system-reminder>\na\n</system-reminder>\n\n' +
+        '<system-reminder>\nb\n</system-reminder>\n\n',
+      rest: 'review this',
+    });
+  });
+
+  it('splits no prefix for plain or envelope-only text', () => {
+    expect(splitLeadingSystemReminders('review this')).toEqual({
+      reminders: '',
+      rest: 'review this',
+    });
+    const only = '<system-reminder>\nnote\n</system-reminder>';
+    expect(splitLeadingSystemReminders(only)).toEqual({
+      reminders: '',
+      rest: only,
+    });
+  });
+});
+
+describe('isOnlyLeadingSystemReminders', () => {
+  it('accepts a single envelope prefix with trailing separator', () => {
+    expect(
+      isOnlyLeadingSystemReminders(
+        '<system-reminder>\nnote\n</system-reminder>\n\n',
+      ),
+    ).toBe(true);
+  });
+
+  it('accepts stacked envelopes', () => {
+    expect(
+      isOnlyLeadingSystemReminders(
+        '<system-reminder>one</system-reminder>\n\n' +
+          '<system-reminder>two</system-reminder>\n\n',
+      ),
+    ).toBe(true);
+  });
+
+  it('rejects a prefix that mixes envelopes with display content', () => {
+    expect(
+      isOnlyLeadingSystemReminders(
+        '<system-reminder>\nnote\n</system-reminder>\n\n@src/foo.ts\n\n',
+      ),
+    ).toBe(false);
+  });
+
+  it('rejects plain text, empty input, and unterminated envelopes', () => {
+    expect(isOnlyLeadingSystemReminders('review this')).toBe(false);
+    expect(isOnlyLeadingSystemReminders('')).toBe(false);
+    expect(
+      isOnlyLeadingSystemReminders('<system-reminder>never closed\n'),
+    ).toBe(false);
+  });
+});
+
+describe('prependMissingSystemReminders', () => {
+  it('prepends an armed envelope that is not already present', () => {
+    const envelope = '<system-reminder>\nnotice\n</system-reminder>';
+    expect(
+      prependMissingSystemReminders(`${envelope}\n\n`, 'review this'),
+    ).toBe(`${envelope}\n\nreview this`);
+  });
+
+  it('drops an armed copy the injector already re-fired', () => {
+    const envelope = '<system-reminder>\nsteering\n</system-reminder>';
+    const text = `${envelope}\n\nrun the workflow`;
+    expect(prependMissingSystemReminders(`${envelope}\n\n`, text)).toBe(text);
+  });
+
+  it('re-arms only the blocks that did not re-fire', () => {
+    const first = '<system-reminder>\nrecovered\n</system-reminder>';
+    const second = '<system-reminder>\nsteering\n</system-reminder>';
+    const text = `${second}\n\nrun the workflow`;
+    expect(
+      prependMissingSystemReminders(`${first}\n\n${second}\n\n`, text),
+    ).toBe(`${first}\n\n${text}`);
+  });
+
+  it('does not stack a block the pile already carries behind another block', () => {
+    // The re-arm accumulator passes the armed pile as `text`: a pile led
+    // by one block must still recognize a re-armed copy of a later block,
+    // or every abort appends it again and the pile grows without bound.
+    const first = '<system-reminder>\nrecovered\n</system-reminder>';
+    const second = '<system-reminder>\nsteering\n</system-reminder>';
+    const pile = `${first}\n\n${second}\n\n`;
+    expect(prependMissingSystemReminders(`${second}\n\n`, pile)).toBe(pile);
+  });
+
+  it('keeps the pile stable across repeated re-arms of the same block set', () => {
+    const first = '<system-reminder>\nrecovered\n</system-reminder>';
+    const second = '<system-reminder>\nsteering\n</system-reminder>';
+    const rearm = `${first}\n\n${second}\n\n`;
+    let pile = rearm;
+    for (let i = 0; i < 3; i++) {
+      pile = prependMissingSystemReminders(rearm, pile);
+    }
+    expect(pile).toBe(rearm);
+  });
+
+  it('still arms a block the text only quotes mid-string', () => {
+    // Membership is limited to the text's own LEADING block run: a block
+    // the user's own prompt quotes mid-string is content, not a delivered
+    // copy, so the armed block must still be prepended.
+    const envelope = '<system-reminder>\nnotice\n</system-reminder>';
+    const text = `explain ${envelope} please`;
+    expect(prependMissingSystemReminders(`${envelope}\n\n`, text)).toBe(
+      `${envelope}\n\n${text}`,
+    );
+  });
+
+  it('returns the text unchanged for an empty envelope run', () => {
+    expect(prependMissingSystemReminders('', 'review this')).toBe(
+      'review this',
+    );
+  });
+});
+
+describe('omitSystemReminderBlocks', () => {
+  it('removes a mid-string envelope block listed by the producer', () => {
+    const envelope = '<system-reminder>\nnotice\n</system-reminder>';
+    expect(
+      omitSystemReminderBlocks(
+        `first\n\n${envelope}\n\nsecond`,
+        `${envelope}\n\n`,
+      ),
+    ).toBe('first\n\nsecond');
+  });
+
+  it('removes each listed block once and leaves user-authored twins in place', () => {
+    const envelope = '<system-reminder>\nnotice\n</system-reminder>';
+    const text = `${envelope}\n\nfirst\n\n${envelope}\n\nsecond`;
+    // The producer lists only the leading (injected) block; the identical
+    // block the user pasted mid-message is content and stays.
+    expect(omitSystemReminderBlocks(text, `${envelope}\n\n`)).toBe(
+      `first\n\n${envelope}\n\nsecond`,
+    );
+  });
+
+  it('returns the text unchanged for an empty reminder list', () => {
+    const text = '<system-reminder>\nnotice\n</system-reminder>\n\nkept';
+    expect(omitSystemReminderBlocks(text, '')).toBe(text);
+  });
+
+  it('matches the leading-only split when the listed block leads the text', () => {
+    const envelope = '<system-reminder>\nnotice\n</system-reminder>';
+    const text = `${envelope}\n\nmy prompt`;
+    expect(omitSystemReminderBlocks(text, `${envelope}\n\n`)).toBe('my prompt');
+  });
+
+  it('consumes exactly the separator run the decomposition recorded', () => {
+    // Round-trip against the arming side: any separator run
+    // isOnlyLeadingSystemReminders accepted into the prefix must come out
+    // with the block, or the dispatch adoption gate's byte-identity can
+    // never hold (a member's trimmed projection leaves its leading
+    // whitespace inside the armed run) and a mid-string envelope falls
+    // through to the leading-only strip, surfacing as the user's words.
+    const envelope = '<system-reminder>\nnotice\n</system-reminder>';
+    for (const separator of ['\n\n', '\n\n ', '\n\n\n\n']) {
+      const prefix = `${envelope}${separator}`;
+      expect(isOnlyLeadingSystemReminders(prefix)).toBe(true);
+      expect(omitSystemReminderBlocks(`${prefix}rest`, prefix)).toBe('rest');
+      expect(omitSystemReminderBlocks(`first\n\n${prefix}rest`, prefix)).toBe(
+        'first\n\nrest',
+      );
+    }
+  });
+
+  it('keeps whitespace the decomposition did not record', () => {
+    // The removal is the exact inverse of the arming, never a greedy
+    // whitespace run re-derived from the text: whitespace past the
+    // recorded separator is display content and stays.
+    const envelope = '<system-reminder>\nnotice\n</system-reminder>';
+    expect(
+      omitSystemReminderBlocks(
+        `${envelope}\n\n  indented prompt`,
+        `${envelope}\n\n`,
+      ),
+    ).toBe('  indented prompt');
+  });
+});
+
+describe('splitInjectedLeadingReminders', () => {
+  const userRun = '<system-reminder>\nuser pasted note\n</system-reminder>\n\n';
+  const injected = '<system-reminder>\nmanaged context\n</system-reminder>\n\n';
+
+  it('returns the injected prefix ahead of a user-authored leading run', () => {
+    // The membership test this replaces answered "user-authored" here
+    // because the model text CONTAINS the user's run — ahead of it sits
+    // the injected block the run had to be distinguished from.
+    expect(
+      splitInjectedLeadingReminders(
+        `${userRun}[Pasted Content 12 chars]`,
+        `${injected}${userRun}line1\nline2`,
+      ),
+    ).toBe(injected);
+  });
+
+  it('returns an empty prefix when nothing was injected ahead', () => {
+    expect(
+      splitInjectedLeadingReminders(`${userRun}rest`, `${userRun}rest`),
+    ).toBe('');
+  });
+
+  it('returns undefined when the projection carries no leading run', () => {
+    expect(splitInjectedLeadingReminders('rest', `${injected}rest`)).toBe(
+      undefined,
+    );
+  });
+
+  it('returns undefined when the runs do not line up', () => {
+    expect(
+      splitInjectedLeadingReminders(
+        `${userRun}rest`,
+        `${injected}rest without the user run`,
+      ),
+    ).toBe(undefined);
   });
 });

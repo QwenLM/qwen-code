@@ -23,6 +23,7 @@ import {
   isGoalCheckpointBookkeepingRecord,
   parseGoalStateRecordPayloadV2,
   projectUserTranscriptForDisplay,
+  stripTrailingUserPromptSubmitContextPart,
 } from '@qwen-code/qwen-code-core';
 import type {
   HistoryItem,
@@ -38,6 +39,11 @@ import {
   formatHistoryGapNotice,
   indexGapsByChild,
 } from './history-gap-notice.js';
+import {
+  hasUserAuthoredLeadingReminders,
+  isOnlyLeadingSystemReminders,
+  stripLeadingSystemReminders,
+} from './historyUtils.js';
 import { coalesceFindingsHistoryItems } from './findings-coalescing.js';
 import { shouldDisplayGoalStateCause } from './goal-runtime.js';
 import {
@@ -393,11 +399,16 @@ function convertToHistoryItems(
           const hasAttachmentReferences =
             Array.isArray(payload?.attachmentReferences) &&
             payload.attachmentReferences.length > 0;
-          const text =
+          // Same strip as the sibling user branches and the OpenTUI
+          // adapter: a steer queued while an injector was armed persists
+          // the envelope in displayText, and both renderers must agree on
+          // the row.
+          const text = stripLeadingSystemReminders(
             payload?.displayText ||
-            (hasAttachmentReferences
-              ? '[User message with attachments]'
-              : extractTextFromParts(record.message?.parts as Part[]));
+              (hasAttachmentReferences
+                ? '[User message with attachments]'
+                : extractTextFromParts(record.message?.parts as Part[])),
+          );
           if (text) {
             items.push({ type: MessageType.USER, text, sentToModel: false });
           }
@@ -415,11 +426,41 @@ function convertToHistoryItems(
 
           const payload = pendingAtCommands.shift()!;
           const projection = projectUserTranscriptForDisplay(record);
-          const text =
+          // Strip the resolved value: `userText`/`displayText` win the
+          // chain and both can carry the envelope, so wrapping only the
+          // parts branch would leave the normal path unfiltered. A winning
+          // `displayText` whose leading run the record's own model-facing
+          // parts also carry is user-authored content, though — keep it
+          // verbatim.
+          const raw =
             payload.userText ||
             (projection.displayText ?? extractTextFromParts(projection.parts));
+          const text =
+            !payload.userText &&
+            projection.displayText &&
+            hasUserAuthoredLeadingReminders(
+              projection.displayText,
+              extractTextFromParts(
+                stripTrailingUserPromptSubmitContextPart(
+                  (record.message?.parts ?? []) as Part[],
+                ),
+              ),
+            )
+              ? raw
+              : stripLeadingSystemReminders(raw);
           if (text) {
-            items.push({ type: 'user', text });
+            // A recorded user message is a turn that reached the model:
+            // stamp it so isRealUserTurn does not fall back to the lexical
+            // check, which misreads a '?'-leading prompt once the envelope
+            // strip removed its '<system-reminder>' first char. Keep the
+            // unstripped text as modelText so a rewind restore can re-arm
+            // the consumed one-shot envelope.
+            items.push({
+              type: 'user',
+              text,
+              sentToModel: true,
+              ...(text === raw ? {} : { modelText: raw }),
+            });
           }
 
           const toolDisplays = buildAtCommandDisplays(payload);
@@ -447,13 +488,60 @@ function convertToHistoryItems(
         const hasAttachmentReferences =
           Array.isArray(payload?.attachmentReferences) &&
           payload.attachmentReferences.length > 0;
-        const text =
+        // The record's model-facing parts (a hook-context trailer
+        // stripped): the modelText carry-through's envelope source below,
+        // and the provenance check for a winning `displayText`.
+        const modelFromParts = extractTextFromParts(
+          stripTrailingUserPromptSubmitContextPart(
+            (record.message?.parts ?? []) as Part[],
+          ),
+        );
+        const raw =
           projection.displayText ||
           (hasAttachmentReferences
             ? '[User message with attachments]'
             : extractTextFromParts(projection.parts));
+        // A winning `displayText` whose leading envelope run the parts
+        // also carry is user-authored content, not an injected notice:
+        // keep it verbatim rather than shape-stripping the user's words.
+        const text =
+          projection.displayText &&
+          hasUserAuthoredLeadingReminders(
+            projection.displayText,
+            modelFromParts,
+          )
+            ? raw
+            : stripLeadingSystemReminders(raw);
         if (text) {
-          items.push({ type: 'user', text });
+          // Same stamp as the at-command branch above. The modelText
+          // carry-through prefers the record's model-facing parts over the
+          // resolved display value: on the displayText-wins path (a
+          // UserPromptSubmit-hook record) the display value is the typed
+          // text, so when `text === raw` the enveloped model text would be
+          // dropped — killing the rewind re-arm for exactly the records
+          // whose envelope was injected. The parts-derived text is adopted
+          // only when it differs from `text` by a pure leading envelope
+          // run (a hook-context trailing part is stripped first); otherwise
+          // `raw` itself is the model text that carried the envelope.
+          const envelopePrefix =
+            modelFromParts !== '' &&
+            modelFromParts !== text &&
+            modelFromParts.endsWith(text)
+              ? modelFromParts.slice(0, modelFromParts.length - text.length)
+              : undefined;
+          const modelText =
+            envelopePrefix !== undefined &&
+            isOnlyLeadingSystemReminders(envelopePrefix)
+              ? modelFromParts
+              : text !== raw
+                ? raw
+                : undefined;
+          items.push({
+            type: 'user',
+            text,
+            sentToModel: true,
+            ...(modelText === undefined ? {} : { modelText }),
+          });
         }
         break;
       }
@@ -614,9 +702,17 @@ function convertToHistoryItems(
         currentToolGroup = [];
       }
 
-      const text = payload.userText;
+      const raw = payload.userText;
+      const text = raw ? stripLeadingSystemReminders(raw) : raw;
       if (text) {
-        items.push({ type: 'user', text });
+        // Lone at-command payloads have no user record to prove the turn
+        // reached the model, so they keep the lexical classification and
+        // get no sentToModel stamp — only the modelText carry-through.
+        items.push({
+          type: 'user',
+          text,
+          ...(text === raw ? {} : { modelText: raw }),
+        });
       }
       const toolDisplays = buildAtCommandDisplays(payload);
       if (toolDisplays.length > 0) {
