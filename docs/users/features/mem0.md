@@ -41,6 +41,8 @@ The default user/repository scope survives restart and starting from Git subdire
 
 Search is read-only by default. To enable saving, add `"enableWrites": true` inside `memory.mem0`, restart the interactive CLI, and ask Qwen to save specific content. The automatically installed Hook asks you to approve the exact content, including in YOLO mode. Rejecting sends no write request. Writes use `infer: false`.
 
+PolarDB can return a single-user message array encoded as JSON for these direct imports. Its presets restore that message's exact text when the result is marked `infer: false`; ordinary text and other protocols are left unchanged.
+
 Noninteractive/ACP sessions and sessions with Hooks disabled keep search only. Bare/safe mode, untrusted/provisional folders and SSH workspaces do not activate this local binding. Workspace settings cannot configure the binding.
 
 `stored` means valid synchronous IDs were returned. `accepted` means an asynchronous request was accepted, not that persistence finished. `failed` means a definitive rejection: fix the reported cause before retrying. `unknown` means the write may have happened: do not retry automatically.

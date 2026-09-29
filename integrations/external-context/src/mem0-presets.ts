@@ -32,6 +32,7 @@ export interface Mem0Preset {
     fixedBody?: Readonly<Record<string, number | boolean>>;
     idField: 'id' | 'memory_id';
     contentFields: ReadonlyArray<'memory' | 'content' | 'text'>;
+    directImportMessages?: boolean;
   };
   write?:
     | {
@@ -102,6 +103,7 @@ const legacyPresets = {
       limitField: 'top_k',
       idField: 'id',
       contentFields: ['memory'],
+      directImportMessages: true,
     },
     write: {
       path: '/v1/memories',
