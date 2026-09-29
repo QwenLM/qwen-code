@@ -44,9 +44,15 @@ describe('managed-agent-server e2e runner', () => {
   });
 
   // When the assertion fires the operator must tell an ordering defect from
-  // provider latency, so the thrown message must carry the in-scope timings.
+  // provider latency, so the thrown message must carry the deciding sequence
+  // operands alongside the in-scope timings (observedAt is a poll-batch stamp,
+  // so the timings alone can be identical or argue against the verdict).
   it('reports the ordering timings when the assertion fires', () => {
     const source = read('scripts/run-managed-agent-server-e2e.ts');
+    expect(source).toContain('firstModelSequence=${firstModel.event.sequence}');
+    expect(source).toContain(
+      'runtimeReadySequence=${runtimeReady.event.sequence}',
+    );
     expect(source).toContain(
       'firstModelEventMs=${firstModel.observedAt - requestStartedAt}',
     );

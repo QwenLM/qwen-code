@@ -1605,7 +1605,9 @@ try {
     ) {
       throw new Error(
         'First model event did not precede Runtime readiness ' +
-          `(firstModelEventMs=${firstModel.observedAt - requestStartedAt}, ` +
+          `(firstModelSequence=${firstModel.event.sequence}, ` +
+          `runtimeReadySequence=${runtimeReady.event.sequence}, ` +
+          `firstModelEventMs=${firstModel.observedAt - requestStartedAt}, ` +
           `runtimeReadyMs=${runtimeReady.observedAt - requestStartedAt}, ` +
           `runtimeDelayMs=${runtimeDelayMs})`,
       );
