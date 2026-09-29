@@ -37,6 +37,7 @@ import type { PermissionDecision } from '../permissions/types.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { getErrorMessage } from '../utils/errors.js';
 import {
+  buildOutsideWorkspaceWarning,
   buildShellExecWarnings,
   getCommandRoot,
   getShellConfiguration,
@@ -292,8 +293,8 @@ class MonitorToolInvocation extends BaseToolInvocation<
         normalized.safetyCommand,
         this.params.command,
       ) ?? []),
-      ...(this.isDirectoryOutsideWorkspace()
-        ? [`Runs outside the workspace in ${this.params.directory}`]
+      ...(this.params.directory && this.isDirectoryOutsideWorkspace()
+        ? [buildOutsideWorkspaceWarning(this.params.directory)]
         : []),
     ];
 

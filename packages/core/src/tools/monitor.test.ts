@@ -663,18 +663,18 @@ describe('MonitorTool', () => {
       mockIsPathWithinWorkspace.mockReturnValue(false);
       const invocation = createInvocation({
         command: 'tail -f log',
-        directory: '/tmp/project-a-evil/x',
+        directory: '/elsewhere/project-a-evil/x',
       });
 
       await expect(invocation.getDefaultPermission()).resolves.toBe('ask');
       expect(mockIsPathWithinWorkspace).toHaveBeenCalledWith(
-        '/tmp/project-a-evil/x',
+        '/elsewhere/project-a-evil/x',
       );
       const details = (await invocation.getConfirmationDetails(
         new AbortController().signal,
       )) as { warnings?: string[] };
-      expect(details.warnings).toContain(
-        'Runs outside the workspace in /tmp/project-a-evil/x',
+      expect(details.warnings ?? []).toContain(
+        'Runs outside the workspace in /elsewhere/project-a-evil/x',
       );
     });
 

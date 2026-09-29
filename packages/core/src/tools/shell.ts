@@ -79,6 +79,7 @@ import { formatMemoryUsage } from '../utils/formatters.js';
 import type { AnsiOutput } from '../utils/terminalSerializer.js';
 import { isSubpaths, makeRelative, shortenPath } from '../utils/paths.js';
 import {
+  buildOutsideWorkspaceWarning,
   buildShellExecWarnings,
   detectSelfKillCommand,
   getCommandRoot,
@@ -2360,8 +2361,8 @@ export class ShellToolInvocation extends BaseToolInvocation<
     const warnings = [
       ...(buildShellExecWarnings(command, this.params.command) ?? []),
       ...(sedEditPreviewWarning ? [sedEditPreviewWarning] : []),
-      ...(this.isDirectoryOutsideWorkspace()
-        ? [`Runs outside the workspace in ${this.params.directory}`]
+      ...(this.params.directory && this.isDirectoryOutsideWorkspace()
+        ? [buildOutsideWorkspaceWarning(this.params.directory)]
         : []),
     ];
 

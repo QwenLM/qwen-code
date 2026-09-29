@@ -8850,7 +8850,7 @@ describe('ShellTool', () => {
       const details = (await outside.getConfirmationDetails(
         new AbortController().signal,
       )) as { warnings?: string[] };
-      expect(details.warnings).toContain(
+      expect(details.warnings ?? []).toContain(
         'Runs outside the workspace in /test/dir-other',
       );
     });
