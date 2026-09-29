@@ -62,6 +62,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // Prompts and mid-turn messages reference session-scoped image and file
   // attachments by their stored filename.
   session_attachments: { since: 'v1' },
+  session_attachment_chunk_upload: { since: 'v1' },
   session_attachment_list: { since: 'v1' },
   session_mid_turn_message_mutation: { since: 'v1' },
   // Daemon-owned reconciliation surface for mid-turn messages:

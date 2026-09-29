@@ -47,7 +47,10 @@ import type {
   SessionArtifactMutationResult,
   SessionArtifactsEnvelope,
 } from './sessionArtifacts.js';
-import type { SessionAttachmentReference } from './sessionAttachments.js';
+import type {
+  SessionAttachmentReference,
+  SessionAttachmentUploadMetadata,
+} from './sessionAttachments.js';
 import type {
   ServeSessionAgentsStatus,
   ServeSessionAgentTrace,
@@ -2742,6 +2745,33 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
       content?: readonly BridgePromptContentBlock[];
     },
   ): { accepted: boolean; messageId?: string; reason?: 'session_idle' };
+
+  createSessionAttachmentUpload(
+    sessionId: string,
+    metadata: SessionAttachmentUploadMetadata,
+    context?: BridgeClientRequestContext,
+  ): { uploadId: string };
+
+  appendSessionAttachmentUpload(
+    sessionId: string,
+    uploadId: string,
+    offset: number,
+    data: Buffer,
+    context?: BridgeClientRequestContext,
+  ): { offset: number };
+
+  completeSessionAttachmentUpload(
+    sessionId: string,
+    uploadId: string,
+    context?: BridgeClientRequestContext,
+    assertCanCommit?: () => void,
+  ): Promise<SessionAttachmentReference>;
+
+  cancelSessionAttachmentUpload(
+    sessionId: string,
+    uploadId: string,
+    context?: BridgeClientRequestContext,
+  ): void;
 
   storeSessionAttachment(
     sessionId: string,
