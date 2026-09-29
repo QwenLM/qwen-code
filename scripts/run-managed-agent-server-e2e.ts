@@ -68,7 +68,9 @@ if (inflightFailover || continuationFailover) {
 
 const durableFailover =
   sessionFailover || inflightFailover || continuationFailover;
-const modelBeforeRuntimeAssertionDelayMs = 20_000;
+// The Stage A acceptance criterion names a 15-second Runtime delay; below it
+// real-provider TTFT does not reliably precede Runtime readiness.
+const modelBeforeRuntimeAssertionDelayMs = 15_000;
 
 if (!Number.isSafeInteger(runtimeDelayMs) || runtimeDelayMs < 0) {
   throw new Error('--runtime-delay-ms must be a non-negative integer');
