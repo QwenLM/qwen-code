@@ -1715,13 +1715,30 @@ export function matchesMcpPattern(
     legacySpelling !== undefined &&
     rawToolName !== undefined &&
     legacySpelling.length !== rawToolName.length;
-  const prefixSpellings = legacyTruncated
+  const windowedSpellings = legacyTruncated
     ? spellings.map((spelling) =>
         spelling === legacySpelling
           ? spelling.slice(0, LEGACY_REDUCTION_HEAD_LENGTH)
           : spelling,
       )
     : spellings;
+  // A truncated reduction vouches only for its head window, but the tool's
+  // own raw identity re-rendered in the legacy character set — the
+  // substitution half of `generateLegacyMcpToolName`, with no middle
+  // truncation — is positionally faithful for its whole length, so the
+  // prefix arms may read all of it. Without it a legacy-spelled per-tool
+  // prefix longer than the 28-character window matches nothing once the raw
+  // identity crosses the 63-character budget, even though the reduction IS
+  // advertised (R14-2). Copy the array: when the reduction is not truncated
+  // `windowedSpellings` IS `spellings`, and the exact and server-level arms
+  // must not see this rendering.
+  let prefixSpellings = windowedSpellings;
+  if (legacySpelling !== undefined && rawToolName !== undefined) {
+    const lengthPreservingLegacy = rawToolName.replace(/[^A-Za-z0-9_.-]/g, '_');
+    if (!windowedSpellings.includes(lengthPreservingLegacy)) {
+      prefixSpellings = [...windowedSpellings, lengthPreservingLegacy];
+    }
+  }
   const matchesPrefixLiterally = (prefix: string): boolean =>
     prefixSpellings.some((spelling) => spelling.startsWith(prefix));
 
@@ -1753,9 +1770,18 @@ export function matchesMcpPattern(
   // window pins the boundary down (R12-1), so segment[1] is trustworthy.
   const patternParts = pattern.split('__');
   if (patternParts.length === 2 && patternParts[0] === 'mcp') {
+    // A server name containing '__' makes this split unreliable, but that is
+    // the accepted provider-safe-name residual (see mcp-tool.ts). The tool
+    // side must still be an MCP name, or a bare mcp__<server> rule reaches
+    // any tool named X__<server>__Y — `matchesRule` enters this arm whenever
+    // the RULE starts with `mcp__`, whatever the tool is (R14-1).
     return spellings.some((spelling) => {
       const spellingParts = spelling.split('__');
-      return spellingParts.length >= 3 && spellingParts[1] === patternParts[1];
+      return (
+        spellingParts.length >= 3 &&
+        spellingParts[0] === 'mcp' &&
+        spellingParts[1] === patternParts[1]
+      );
     });
   }
 

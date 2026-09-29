@@ -919,6 +919,41 @@ describe('legacy-spelled wildcard prefixes keep covering their own server', () =
       ),
     ).toBe(true);
   });
+
+  it('keeps a >28-char legacy prefix effective when the advertised reduction is truncated (R14-2)', async () => {
+    // Raw identity is 71 chars, so the published legacy reduction is the
+    // middle-truncated one; the persisted prefix is 37 chars — past the
+    // 28-char head window the prefix arms may read of it. The registered
+    // name diverges at the `.` and the raw identity at the `+`, so only the
+    // length-preserving legacy rendering can vouch for this entry.
+    const longDotted = prodTool(
+      'foo.bar',
+      'get+data_for_a_specific_location_and_date_range_extended',
+    );
+    const rule = 'mcp__foo.bar__get_data_for_a_specific*';
+    expect(
+      matchesToolPattern(rule, longDotted.name, longDotted.permissionAliases),
+    ).toBe(true);
+    expect(matchesRuleWith(rule, longDotted)).toBe(true);
+
+    const pm = new PermissionManager(makeConfig({ permissionsDeny: [rule] }));
+    pm.initialize();
+    expect(
+      await pm.evaluate({
+        toolName: longDotted.name,
+        toolAliases: longDotted.permissionAliases,
+      }),
+    ).toBe('deny');
+
+    // Negative control: the same prefix must not reach a different server.
+    const other = prodTool(
+      'other.server',
+      'get+data_for_a_specific_location_and_date_range_extended',
+    );
+    expect(matchesToolPattern(rule, other.name, other.permissionAliases)).toBe(
+      false,
+    );
+  });
 });
 
 // A bare `mcp__<server>` rule is the `__*` prefix without the glob, so it
@@ -1529,6 +1564,40 @@ describe('a leading-underscore tool cannot borrow another key boundary (R4-2)', 
     // Positive control: the tool's OWN whole-server rule still matches.
     expect(
       matchesToolPattern('mcp__foo', tool.name, tool.permissionAliases),
+    ).toBe(true);
+  });
+
+  it('refuses a bare server rule against a non-MCP tool named X__<server>__Y (R14-1)', async () => {
+    // `matchesRule` enters the MCP arm when the RULE starts with `mcp__`, so
+    // a discovered non-MCP tool named `x__github__deploy` reaches the
+    // server-level arm with no `mcp__` anywhere on the tool side; the arm
+    // must constrain the tool side's first segment, not only the rule's.
+    const toolName = 'x__github__deploy';
+    expect(matchesRule(parseRule('mcp__github'), toolName)).toBe(false);
+    for (const lists of [
+      { permissionsAllow: ['mcp__github'] },
+      { permissionsDeny: ['mcp__github'] },
+    ]) {
+      const pm = new PermissionManager(makeConfig(lists));
+      pm.initialize();
+      expect(await pm.evaluate({ toolName })).toBe('default');
+    }
+
+    // Positive control: a real MCP tool of that server still matches.
+    const real = prodTool('github', 'deploy');
+    expect(real.name).toBe('mcp__github__deploy');
+    expect(
+      matchesRule(
+        parseRule('mcp__github'),
+        real.name,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        real.permissionAliases,
+      ),
     ).toBe(true);
   });
 
