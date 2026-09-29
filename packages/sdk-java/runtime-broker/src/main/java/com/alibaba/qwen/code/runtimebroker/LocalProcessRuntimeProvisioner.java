@@ -319,16 +319,26 @@ public final class LocalProcessRuntimeProvisioner
                     "Managed Runtime ready record");
         URI endpoint;
         if (request.isManagedContext()) {
-            endpoint = ManagedContextProtocol.ready(ready, document);
+            try {
+                endpoint = ManagedContextProtocol.ready(ready, document);
+            } catch (IllegalArgumentException exception) {
+                // A rejected record is a provision failure in both store
+                // modes; the durable store would retype it as a 409.
+                throw new RuntimeBrokerException(503, "runtime_provision_failed",
+                        "Managed context startup failed; recovery is blocked.",
+                        false, exception);
+            }
         } else {
             if (!"ready".equals(ready.get("type"))
-                    || !Long.valueOf(1L).equals(number(ready.get("version")))
+                    || !Long.valueOf(1L).equals(
+                        BrokerValues.exactLong(ready.get("version")))
                     || !seed.getProvisionalRuntimeId().equals(
                         ready.get("runtimeInstanceId"))
                     || !seed.getGatewayIncarnation().equals(
                         ready.get("runtimeIncarnation"))
                     || !seed.getLeaseId().equals(ready.get("leaseId"))
-                    || !Long.valueOf(seed.getEpoch()).equals(number(ready.get("epoch")))) {
+                    || !Long.valueOf(seed.getEpoch()).equals(
+                        BrokerValues.exactLong(ready.get("epoch")))) {
                 throw failed("Managed Runtime ready record is invalid.");
             }
             endpoint = URI.create(String.valueOf(ready.get("url")));
@@ -410,7 +420,20 @@ public final class LocalProcessRuntimeProvisioner
             if (ready == null) {
                 return null;
             }
-            lease = readyLease(request, seed, document, ready);
+            try {
+                lease = readyLease(request, seed, document, ready);
+            } catch (RuntimeException rejection) {
+                // A definitive rejection recurs on every retry and
+                // reconcile, so retire the binding and reap the worker
+                // instead of wedging both.
+                ProcessHandle worker = registration.process();
+                if (worker != null) {
+                    worker.destroyForcibly();
+                }
+                resource.save(registration.withState(
+                        LocalRuntimeStore.State.RETIRED));
+                throw rejection;
+            }
         } else {
             lease = new RuntimeLease(seed.getProvisionalRuntimeId(), registration.endpoint(),
                     seed.getToken(), seed.getLeaseId(), seed.getEpoch());
@@ -644,10 +667,6 @@ public final class LocalProcessRuntimeProvisioner
             }
             builder.append((char) value);
         }
-    }
-
-    private static Long number(Object value) {
-        return value instanceof Number number ? number.longValue() : null;
     }
 
     private static RuntimeBrokerException failed(String message) {
