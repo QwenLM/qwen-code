@@ -220,7 +220,10 @@ export async function resolveDeferredToolCall(
   // clear or rewind, is refused rather than run by name (#12569). Registries
   // without the optional lookup (test stubs) keep the ungated behaviour.
   const reviewed = registry.getReviewedDeclaration?.(target.name);
-  if (registry.getReviewedDeclaration && reviewed === undefined) {
+  if (
+    typeof registry.getReviewedDeclaration === 'function' &&
+    reviewed === undefined
+  ) {
     return {
       error: bridgeRefusal(
         `Deferred tool "${target.name}" has no schema in the current context. Run tool_search with select:${target.name} and call it with the returned schema.`,
