@@ -308,6 +308,30 @@ describe('prepareWorkflowSchema', () => {
     });
   });
 
+  describe('properties that also match patternProperties', () => {
+    const overlapping = {
+      type: 'object',
+      properties: { foo: { type: 'string' } },
+      patternProperties: { '^f': { minLength: 1 } },
+      required: ['foo'],
+    };
+
+    it('prepares the schema and enforces both constraints', () => {
+      const validate = prepared(overlapping);
+      expect(validate({ foo: 'ok' })).toBeNull();
+      expect(validate({ foo: '' })).toContain(
+        'must NOT have fewer than 1 characters',
+      );
+      expect(validate({})).toContain("required property 'foo'");
+    });
+
+    it('still refuses an unknown keyword next to the overlap', () => {
+      expect(refusal({ ...overlapping, propertees: {} })).toMatch(
+        /^agent\(\{schema\}\): is not a valid JSON Schema: /,
+      );
+    });
+  });
+
   describe('validation', () => {
     it('keeps the four coercion passes of tool parameter validation', () => {
       const validate = prepared({

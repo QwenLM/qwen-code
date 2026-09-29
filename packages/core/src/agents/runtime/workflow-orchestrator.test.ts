@@ -6617,6 +6617,24 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
       },
     );
 
+    it('dispatches a schema whose properties also match patternProperties', async () => {
+      const { dispatch, calls } = dispatchWith(
+        [{ success: true, args: { foo: 'ok' } }],
+        'CANCELLED',
+      );
+      await expect(
+        dispatch('extract', {
+          schema: {
+            type: 'object',
+            properties: { foo: { type: 'string' } },
+            patternProperties: { '^f': { minLength: 1 } },
+            required: ['foo'],
+          },
+        }),
+      ).resolves.toEqual({ foo: 'ok' });
+      expect(calls).toHaveLength(1);
+    });
+
     it('gives the structured_output tool this call validator, not the shared one', async () => {
       const id = 'https://example.com/schemas/workflow-tool-shared-id.json';
       // The shared validator now holds this $id for another shape.

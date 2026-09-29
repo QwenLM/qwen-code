@@ -456,6 +456,28 @@ describe('workflow replay of structured results', () => {
     expect(await fs.readFile(journalPath, 'utf8')).toBe(before);
   });
 
+  it('serves a valid cached result for a schema whose properties also match patternProperties', async () => {
+    const overlapping = {
+      type: 'object',
+      properties: { foo: { type: 'string' } },
+      patternProperties: { '^f': { minLength: 1 } },
+      required: ['foo'],
+    };
+    await journalFromOlderRuntime(overlapping, { foo: 'ok' });
+    const before = await fs.readFile(journalPath, 'utf8');
+    const resumed = await resumeJournal();
+    const dispatch = vi.fn(async () => 'unexpected');
+    const outcome = await new WorkflowOrchestrator(dispatch).run({
+      script: script(overlapping),
+      args: undefined,
+      ...resumed,
+    });
+    await resumed.journal.drain();
+    expect(outcome.result).toEqual([{ foo: 'ok' }, 'b@1']);
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(await fs.readFile(journalPath, 'utf8')).toBe(before);
+  });
+
   it('persists the miss of a refused schema even when the budget then refuses the call', async () => {
     await journalFromOlderRuntime({ type: 42 }, { ok: 1 });
     const resumed = await resumeJournal();

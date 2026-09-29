@@ -851,6 +851,34 @@ describe('SchemaValidator', () => {
     });
   });
 
+  describe('compileStrict allowMatchingProperties', () => {
+    const overlapping = {
+      type: 'object',
+      properties: { foo: { type: 'string' } },
+      patternProperties: { '^f': { minLength: 1 } },
+    };
+
+    it('keeps refusing the overlap by default', () => {
+      expect(SchemaValidator.compileStrict(overlapping)).toContain(
+        'allowMatchingProperties',
+      );
+    });
+
+    it('accepts the overlap when asked, keeping the other strict checks', () => {
+      expect(
+        SchemaValidator.compileStrict(overlapping, {
+          allowMatchingProperties: true,
+        }),
+      ).toBeNull();
+      expect(
+        SchemaValidator.compileStrict(
+          { ...overlapping, propertees: {} },
+          { allowMatchingProperties: true },
+        ),
+      ).toContain('propertees');
+    });
+  });
+
   describe('compileIsolated', () => {
     it('reports a schema that does not compile instead of skipping it', () => {
       expect(SchemaValidator.validate({ type: 42 }, {})).toBeNull();

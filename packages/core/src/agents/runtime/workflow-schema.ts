@@ -78,7 +78,11 @@ export function prepareWorkflowSchema(
   } catch (error) {
     return fail(`is not JSON: ${errorText(error)}`);
   }
-  const strictError = SchemaValidator.compileStrict(copy);
+  // A property may be both declared and matched by a pattern; the result
+  // must then satisfy both schemas, which the runtime validator enforces.
+  const strictError = SchemaValidator.compileStrict(copy, {
+    allowMatchingProperties: true,
+  });
   if (strictError !== null) {
     return fail(`is not a valid JSON Schema: ${strictError}`);
   }

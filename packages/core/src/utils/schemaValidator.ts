@@ -241,8 +241,15 @@ export class SchemaValidator {
    * silently skip on compile failure — callers (e.g. the CLI's
    * `--json-schema` parser) need to surface invalid schemas instead of
    * letting them no-op at runtime.
+   *
+   * `options.allowMatchingProperties` lets a property named in `properties`
+   * also match a `patternProperties` pattern, which JSON Schema permits (both
+   * apply); every other strict check stays on.
    */
-  static compileStrict(schema: unknown): string | null {
+  static compileStrict(
+    schema: unknown,
+    options: { allowMatchingProperties?: boolean } = {},
+  ): string | null {
     if (!schema || typeof schema !== 'object' || Array.isArray(schema)) {
       return 'schema must be a JSON object';
     }
@@ -266,6 +273,7 @@ export class SchemaValidator {
       strictTypes: false, // allow inferred / partial type info
       validateFormats: false, // unknown `format` values don't fail
       allowUnionTypes: true, // type: ["a","b"]
+      allowMatchingProperties: options.allowMatchingProperties === true,
     };
     const strictAjv: Ajv = isDraft2020Uri(
       (schema as { $schema?: unknown }).$schema,
