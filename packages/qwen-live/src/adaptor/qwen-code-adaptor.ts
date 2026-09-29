@@ -28,11 +28,13 @@
  */
 
 import { DaemonClient } from '@qwen-code/sdk';
+import { publicActivity } from './public-activity.js';
 import type {
   BackendAdaptor,
   BackendCapabilities,
   BackendEvent,
   BackendHandle,
+  CancelJobResult,
   ContentBlock,
   PermissionDecision,
   PermissionOption,
@@ -73,6 +75,7 @@ export interface DaemonClientLike {
   ): Promise<{
     sessionId: string;
     hasActivePrompt?: boolean;
+    backgroundTurn?: { turnId: string };
     clientId?: string;
   }>;
   listWorkspaceSessions(
@@ -102,6 +105,11 @@ export interface DaemonClientLike {
     opts?: Record<string, unknown>,
   ): Promise<{ accepted: boolean; messageId?: string }>;
   cancel(sessionId: string, clientId?: string): Promise<void>;
+  removePendingPrompt(
+    sessionId: string,
+    promptId: string,
+    opts?: { clientId?: string },
+  ): Promise<{ removed: boolean }>;
   respondToSessionPermission(
     sessionId: string,
     requestId: string,
@@ -143,6 +151,8 @@ export interface QwenCodeAdaptorOptions {
 interface SessionState {
   busy: boolean;
   activeJobRef?: string;
+  /** Turn id of the admitted automatic background execution, if observed. */
+  backgroundTurnId?: string;
   /** Daemon-issued client id for this session; echoed on every call. */
   clientId?: string;
   /** Accumulated assistant text for the current turn. */
@@ -404,6 +414,7 @@ export class QwenCodeAdaptor implements BackendAdaptor {
     if (cwd !== undefined) this.sessionCwds.add(cwd);
     const state = this.trackSession(session.sessionId, {
       busy: session.hasActivePrompt === true,
+      backgroundTurnId: session.backgroundTurn?.turnId,
       // The daemon issues the authoritative per-client id on create/attach;
       // every later call for this session must echo it (a self-made id is
       // rejected by the daemon's client registration guard). Older daemons
@@ -475,7 +486,17 @@ export class QwenCodeAdaptor implements BackendAdaptor {
   ): Promise<PromptReceipt> {
     const state = this.trackSession(handle.id);
 
-    if (opts?.steer && state.busy) {
+    // A background-only busy session (busy seeded by a snapshot or observed
+    // background turn, with no foreground job) can never confirm a steer: the
+    // background turn's terminal is dropped by design, so a "joined" job
+    // would wait forever. Fall through and queue the handoff as a full
+    // prompt behind the background turn instead.
+    const backgroundOnlyBusy =
+      state.busy &&
+      state.activeJobRef === undefined &&
+      state.backgroundTurnId !== undefined;
+
+    if (opts?.steer && state.busy && !backgroundOnlyBusy) {
       // Mid-turn injection is text-only on the wire; a handoff carrying
       // image attachments must go through a full prompt so the images are
       // not silently dropped — the fall-through below queues it as the
@@ -506,7 +527,10 @@ export class QwenCodeAdaptor implements BackendAdaptor {
           return {
             status: 'accepted',
             joinedActiveTurn: true,
-            ...(state.activeJobRef !== undefined
+            ...(steered.messageId
+              ? { joinedMessageId: steered.messageId }
+              : {}),
+            ...(!steered.messageId && state.activeJobRef !== undefined
               ? { jobRef: state.activeJobRef }
               : {}),
             note: 'joined the currently running task',
@@ -589,6 +613,19 @@ export class QwenCodeAdaptor implements BackendAdaptor {
     await this.client.cancel(handle.id, this.sessions.get(handle.id)?.clientId);
   }
 
+  async cancelJob(
+    handle: BackendHandle,
+    jobRef: string,
+  ): Promise<CancelJobResult> {
+    const state = this.sessions.get(handle.id);
+    if (handle.adaptor !== this.name || !state || state.closed)
+      return 'not_found';
+    const result = await this.client.removePendingPrompt(handle.id, jobRef, {
+      ...(state.clientId ? { clientId: state.clientId } : {}),
+    });
+    return result.removed ? 'stopping' : 'not_found';
+  }
+
   async respondPermission(
     handle: BackendHandle,
     requestId: string,
@@ -641,7 +678,9 @@ export class QwenCodeAdaptor implements BackendAdaptor {
 
   private trackSession(
     sessionId: string,
-    seed?: Partial<Pick<SessionState, 'busy' | 'clientId'>>,
+    seed?: Partial<
+      Pick<SessionState, 'busy' | 'clientId' | 'backgroundTurnId'>
+    >,
   ): SessionState {
     let state = this.sessions.get(sessionId);
     if (!state) {
@@ -655,6 +694,9 @@ export class QwenCodeAdaptor implements BackendAdaptor {
       this.sessions.set(sessionId, state);
     } else if (seed?.busy !== undefined) {
       state.busy = seed.busy;
+    }
+    if (seed && 'backgroundTurnId' in seed) {
+      state.backgroundTurnId = seed.backgroundTurnId;
     }
     if (seed?.clientId !== undefined) state.clientId = seed.clientId;
     return state;
@@ -694,6 +736,30 @@ export class QwenCodeAdaptor implements BackendAdaptor {
   ): BackendEvent[] {
     const data = isRecord(envelope.data) ? envelope.data : {};
     switch (envelope.type) {
+      case 'mid_turn_message_injected': {
+        const jobRef = envelope.promptId;
+        if (!jobRef || !Array.isArray(data['messageIds'])) return [];
+        // A background turn's drain names the background turnId, which no
+        // orchestrator job owns: adopting it would latch busy state that the
+        // (dropped) background terminal could never release.
+        if (jobRef === state.backgroundTurnId) return [];
+        if (state.activeJobRef === undefined) {
+          state.activeJobRef = jobRef;
+          state.busy = true;
+          state.turnBuffer = '';
+        }
+        return data['messageIds'].flatMap((messageId) =>
+          typeof messageId === 'string' && messageId
+            ? [
+                {
+                  type: 'turn_joined' as const,
+                  messageId,
+                  jobRef,
+                },
+              ]
+            : [],
+        );
+      }
       case 'pending_prompt_started': {
         state.busy = true;
         state.turnBuffer = '';
@@ -706,19 +772,50 @@ export class QwenCodeAdaptor implements BackendAdaptor {
       case 'session_update': {
         const update = isRecord(data['update']) ? data['update'] : undefined;
         if (!update) return [];
+        // An automatic background turn is never an orchestrator-dispatched
+        // job: its stamped updates must not adopt the session's activeJobRef,
+        // or its terminal would be reported as that job's completion.
+        const updateMeta = isRecord(update['_meta']) ? update['_meta'] : {};
+        const backgroundUpdate = updateMeta['backgroundTurn'] !== undefined;
+        if (backgroundUpdate && envelope.promptId !== undefined) {
+          state.backgroundTurnId = envelope.promptId;
+        }
+        if (
+          state.activeJobRef === undefined &&
+          envelope.promptId !== undefined &&
+          !backgroundUpdate
+        ) {
+          state.activeJobRef = envelope.promptId;
+          state.busy = true;
+          state.turnBuffer = '';
+        }
         const kind = update['sessionUpdate'];
+        // Background activity is session-level: stamping the background
+        // turnId as jobRef would buffer the reply into an unrelated pending
+        // submission (or drop it), since no orchestrator job owns that ref.
+        const activity = publicActivity(
+          update,
+          backgroundUpdate
+            ? undefined
+            : (envelope.promptId ?? state.activeJobRef),
+        );
         if (kind === 'agent_message_chunk') {
           const content = isRecord(update['content'])
             ? update['content']
             : undefined;
           const text = content?.['text'];
-          if (typeof text === 'string') {
+          if (
+            typeof text === 'string' &&
+            activity?.kind === 'message' &&
+            (envelope.promptId === undefined ||
+              envelope.promptId === state.activeJobRef)
+          ) {
             state.turnBuffer = `${state.turnBuffer}${text}`;
             if (state.turnBuffer.length > MAX_DETAIL_CHARS) {
               state.turnBuffer = tailSlice(state.turnBuffer, MAX_DETAIL_CHARS);
             }
           }
-          return [];
+          return activity ? [activity] : [];
         }
         if (kind === 'tool_call') {
           const title = update['title'];
@@ -727,21 +824,46 @@ export class QwenCodeAdaptor implements BackendAdaptor {
           return [
             {
               type: 'progress',
-              ...(envelope.promptId !== undefined
+              ...(envelope.promptId !== undefined && !backgroundUpdate
                 ? { jobRef: envelope.promptId }
                 : {}),
               summary: summary || 'running a tool',
             },
           ];
         }
-        return [];
+        return activity ? [activity] : [];
       }
       case 'turn_complete': {
-        state.busy = false;
         const jobRef = envelope.promptId ?? state.activeJobRef;
-        state.activeJobRef = undefined;
-        const detail = state.turnBuffer.trim();
-        state.turnBuffer = '';
+        if (data['backgroundTurn']) {
+          // A background turn's terminal is the only frame that can release
+          // state the turn itself seeded (attach during the turn, or a
+          // mid-turn drain consumed before its start marker was observed).
+          // Never touch a foreground job's state.
+          if (
+            state.activeJobRef === undefined ||
+            state.activeJobRef === jobRef
+          ) {
+            state.busy = false;
+            state.activeJobRef = undefined;
+            state.turnBuffer = '';
+          }
+          if (state.backgroundTurnId === jobRef) {
+            state.backgroundTurnId = undefined;
+          }
+          return [];
+        }
+        const active =
+          envelope.promptId === undefined || jobRef === state.activeJobRef;
+        const detail = active ? state.turnBuffer.trim() : '';
+        if (active) {
+          state.busy = false;
+          state.activeJobRef = undefined;
+          state.turnBuffer = '';
+        }
+        if (data['stopReason'] === 'cancelled') {
+          return [{ type: 'turn_error', jobRef, error: 'cancelled' }];
+        }
         return [
           {
             type: 'turn_complete',
@@ -753,10 +875,12 @@ export class QwenCodeAdaptor implements BackendAdaptor {
       }
       case 'turn_error':
       case 'prompt_cancelled': {
-        state.busy = false;
         const jobRef = envelope.promptId ?? state.activeJobRef;
-        state.activeJobRef = undefined;
-        state.turnBuffer = '';
+        if (envelope.promptId === undefined || jobRef === state.activeJobRef) {
+          state.busy = false;
+          state.activeJobRef = undefined;
+          state.turnBuffer = '';
+        }
         const message = data['message'] ?? data['error'];
         return [
           {

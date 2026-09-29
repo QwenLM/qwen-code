@@ -334,13 +334,18 @@ class DocumentErrorBoundary extends Component<
 
 const rootNode = document.getElementById('app');
 if (!rootNode) throw new Error('Transcript document root is missing.');
-const root = createRoot(rootNode);
-try {
-  root.render(
-    <DocumentErrorBoundary>
-      <DocumentApp value={parseDocument()} />
-    </DocumentErrorBoundary>,
-  );
-} catch {
-  root.render(<DocumentError />);
+// The inline showLoadError script marks the body 'error' when the stylesheet
+// or renderer asset fails to load. Leave its alert in place rather than
+// replacing it with an unstyled transcript.
+if (document.body.dataset.renderComplete !== 'error') {
+  const root = createRoot(rootNode);
+  try {
+    root.render(
+      <DocumentErrorBoundary>
+        <DocumentApp value={parseDocument()} />
+      </DocumentErrorBoundary>,
+    );
+  } catch {
+    root.render(<DocumentError />);
+  }
 }

@@ -32,8 +32,11 @@ export interface ServeCapabilityDescriptor {
 export const SERVE_CAPABILITY_REGISTRY = {
   health: { since: 'v1' },
   daemon_status: { since: 'v1' },
+  daemon_update: { since: 'v1' },
   capabilities: { since: 'v1' },
   session_create: { since: 'v1' },
+  hosted_harness_private_v1: { since: 'v1' },
+  session_startup_config: { since: 'v1' },
   session_id_override: { since: 'v1' },
   session_scope_override: { since: 'v1' },
   session_load: { since: 'v1' },
@@ -42,6 +45,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // the underlying ACP method from unstable_resumeSession to resumeSession.
   unstable_session_resume: { since: 'v1' },
   session_list: { since: 'v1' },
+  session_catalog_batch: { since: 'v1' },
   // Aggregate persisted session counts via
   // `GET /workspace/:id/session-info` (and the plural
   // `/workspaces/:workspace/session-info` twin). Performs a disk scan of
@@ -69,6 +73,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_events: { since: 'v1' },
   session_artifacts: { since: 'v1' },
   session_artifacts_persistence: { since: 'v1' },
+  session_sources: { since: 'v1' },
   // Daemon emits `slow_client_warning` synthetic frames at 75% queue
   // fill and honors `?maxQueued=N` (range [16, 2048]) on
   // `GET /session/:id/events`. Old daemons silently lack both — SDK
@@ -215,6 +220,11 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // operation after the activation operation commits.
   extension_activation_explicit_refresh: { since: 'v1' },
   workspace_skill_manage: { since: 'v1' },
+  // `GET /brand` — the Web Shell's product name and logo, resolved from the
+  // operator settings scopes. Unconditional because the route is registered
+  // unconditionally. Advertised so a host can preflight rather than issue the
+  // request and swallow a 404 from a daemon too old to have it.
+  web_shell_brand: { since: 'v1' },
   workspace_settings: { since: 'v1' },
   // `GET /workspace/permissions` is always available when this tag is
   // advertised. `POST /workspace/permissions` updates the active ACP
@@ -248,6 +258,39 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // and its auth is reported per-request through the
   // `github_cli_unavailable` / `github_prs_failed` error codes.
   workspace_github_prs: { since: 'v1' },
+  // `GET /workspaces/:workspace/git/worktrees` lists every worktree of the
+  // workspace's repository, `GET .../git/worktrees/status?path=` reads one
+  // listed worktree's working-tree counters, and
+  // `POST .../git/worktrees/remove` removes one linked worktree by path,
+  // leaving the repository's other registrations alone except where git
+  // refuses per-path removal of a registration it has marked stale — usually
+  // a directory that outlived its gitfile — which falls back to
+  // `git worktree prune`. Removal refuses the main
+  // worktree and any registered workspace outright, and a dirty or
+  // session-hosting worktree unless the body carries `force: true` (409
+  // `worktree_dirty` / `worktree_in_use` / `worktree_locked` /
+  // `worktree_operation_in_progress` / `worktree_unmerged_commits` /
+  // `worktree_status_unknown` / `worktree_nested_repository`, the last for a
+  // submodule whose own repository the removal would delete — which git
+  // itself only refuses while the checkout is still there, and which carries
+  // `submodulesUnknown` instead when whether there is one could not be
+  // checked). The
+  // `worktree_is_workspace` refusal names the blocking workspace in
+  // `workspaceCwd`, since it may be rooted below the worktree. Any
+  // other refusal git makes on a non-forced removal that changed nothing,
+  // for a checkout git can still reach, comes back as 409
+  // `worktree_remove_refused` with git's own sentence in `detail`, so a
+  // refusal `--force --force` would clear is not a dead end. A forced
+  // removal's failure, and one git cannot validate, surface as git's error. Whichever
+  // refusal answers, it carries everything else the same `force` would take. The session count spans every
+  // registered workspace's current runtime, draining ones included, so a
+  // worktree holding another workspace's session is refused too. A success
+  // carries `directoryRemains` when the registration went and the directory
+  // did not — an unfinished deletion, or the prune fallback, which deletes
+  // no file in the working tree, though it does delete the registration's
+  // admin directory and with it that worktree's HEAD, reflog and any
+  // submodule repository.
+  workspace_git_worktrees: { since: 'v1' },
   // `POST /workspace/mcp/:server/restart` performs
   // a single-server MCP restart (disconnect + reconnect + rediscover)
   // through the ACP child's `McpClientManager`. Pre-checks the live
@@ -350,6 +393,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_hooks: { since: 'v1' },
   workspace_extensions: { since: 'v1' },
   session_branch: { since: 'v1' },
+  session_branch_worktree: { since: 'v1' },
   rate_limit: { since: 'v1' },
   workspace_reload: { since: 'v1' },
   // Immediate best-effort channel delivery for prompt/scheduled finals and
@@ -391,6 +435,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   native_directory_picker: { since: 'v1' },
   // Workspace-owned runtime lifecycle status and explicit on-demand startup.
   workspace_runtime: { since: 'v1' },
+  workspace_runtime_stop: { since: 'v1' },
   // The daemon host can open a workspace directory in the host's OS file
   // manager (Finder via `open` on macOS, Explorer via `explorer.exe` on
   // Windows, xdg-open on a Linux host with a display). Headless hosts omit
@@ -503,6 +548,10 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // gate. `/live/status` remains the dynamic readiness surface for the Host,
   // permissions, self-checks, and provider reachability.
   realtime_voice: { since: 'v1' },
+  // The Web Shell page may itself be the Live Voice audio endpoint over WS
+  // `/live/web`, on any platform. Separate from `realtime_voice` so clients
+  // that only know the native Host never offer its macOS install flow here.
+  realtime_voice_web: { since: 'v1' },
   web_terminal: { since: 'v1' },
 } as const satisfies Record<string, ServeCapabilityDescriptor>;
 
@@ -514,6 +563,7 @@ export type ServeFeature = keyof typeof SERVE_CAPABILITY_REGISTRY;
  * advertised.
  */
 export interface AdvertiseFeatureToggles {
+  hostedHarness?: boolean;
   requireAuth?: boolean;
   mcpPoolActive?: boolean;
   externalToolGuardActive?: boolean;
@@ -559,6 +609,7 @@ export interface AdvertiseFeatureToggles {
   workspaceRuntimeRemovalAvailable?: boolean;
   nativeDirectoryPickerAvailable?: boolean;
   workspaceRuntimeAvailable?: boolean;
+  workspaceRuntimeStopAvailable?: boolean;
   localPathOpenAvailable?: boolean;
   localTerminalOpenAvailable?: boolean;
   /**
@@ -567,6 +618,7 @@ export interface AdvertiseFeatureToggles {
    */
   acpHttpEnabled?: boolean;
   realtimeVoiceEnabled?: boolean;
+  realtimeVoiceWebEnabled?: boolean;
   workspaceTrustHotReloadAvailable?: boolean;
   standaloneSessionsAvailable?: boolean;
 }
@@ -607,6 +659,7 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   ServeFeature,
   (toggles: AdvertiseFeatureToggles) => boolean
 > = new Map<ServeFeature, (toggles: AdvertiseFeatureToggles) => boolean>([
+  ['hosted_harness_private_v1', (toggles) => toggles.hostedHarness === true],
   ['require_auth', (toggles) => toggles.requireAuth === true],
   [
     'standalone_sessions_v1',
@@ -648,6 +701,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   ],
   [
     'session_artifacts_persistence',
+    (toggles) => toggles.sessionArtifactsPersistenceAvailable === true,
+  ],
+  [
+    'session_sources',
     (toggles) => toggles.sessionArtifactsPersistenceAvailable === true,
   ],
   [
@@ -709,6 +766,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
     (toggles) => toggles.nativeDirectoryPickerAvailable === true,
   ],
   [
+    'workspace_runtime_stop',
+    (toggles) => toggles.workspaceRuntimeStopAvailable === true,
+  ],
+  [
     'workspace_runtime',
     (toggles) => toggles.workspaceRuntimeAvailable === true,
   ],
@@ -767,6 +828,12 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
     'realtime_voice',
     (toggles) =>
       toggles.acpHttpEnabled === true && toggles.realtimeVoiceEnabled === true,
+  ],
+  [
+    'realtime_voice_web',
+    (toggles) =>
+      toggles.acpHttpEnabled === true &&
+      toggles.realtimeVoiceWebEnabled === true,
   ],
   ['web_terminal', (toggles) => toggles.acpHttpEnabled === true],
 ]);

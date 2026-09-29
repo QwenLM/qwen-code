@@ -16,6 +16,7 @@ import type {
   DaemonBridgeTelemetryMetrics,
 } from '@qwen-code/qwen-code-core';
 import { MAX_SUB_SESSION_PROMPT_CHARS } from '@qwen-code/qwen-code-core/subSessionConstants';
+import type { SessionExecutionEngine } from '@qwen-code/qwen-code-core/services/session-execution-engine.js';
 import type { ChannelFactory } from './channel.js';
 import type { PermissionPolicy } from './permission.js';
 import type { PermissionAuditPublisher } from './permissionMediator.js';
@@ -23,6 +24,27 @@ import type { ServePreflightCell, ServeWorkspaceEnvStatus } from './status.js';
 import type { BridgeFileSystem } from './bridgeFileSystem.js';
 import type { JournalGrowthSessionLimit } from './replayWindowLimits.js';
 import type { PromptLedgerRecord } from './prompt-ledger.js';
+import type {
+  BridgeSpawnRequest,
+  BridgeRestoreSessionRequest,
+} from './bridgeTypes.js';
+
+export type BridgeExecutionEngine = SessionExecutionEngine;
+// The ACP host writes this receipt and the Bridge checks it: one definition.
+export { SESSION_EXECUTION_ENGINE_META_KEY } from '@qwen-code/qwen-code-core/services/session-execution-engine.js';
+
+export type BridgeExecutionSelection = {
+  readonly daemonOwnedStandalone: boolean;
+} & (
+  | {
+      readonly operation: 'spawn';
+      readonly request: Readonly<BridgeSpawnRequest>;
+    }
+  | {
+      readonly operation: 'load' | 'resume';
+      readonly request: Readonly<BridgeRestoreSessionRequest>;
+    }
+);
 
 /**
  * Sink for serve-level diagnostic lines (set by the cli daemon logger).
@@ -229,6 +251,8 @@ export interface BridgeTelemetry {
  * strictly-required field. See per-field JSDoc for caller contract.
  */
 export interface BridgeOptions {
+  /** Captured owner runtime for saved webpage bytes and references. */
+  artifactSnapshotRuntimeBaseDir?: string;
   /**
    * Runtime-owned directory for persistent session attachment bytes. Daemon
    * callers provide a workspace-scoped directory under the Qwen runtime temp
@@ -259,6 +283,22 @@ export interface BridgeOptions {
   sessionScope?: 'single' | 'thread';
   /** Channel factory; defaults to spawning `qwen --acp` as a child process. */
   channelFactory?: ChannelFactory;
+  /** Server-owned selection; restore must use verified durable ownership. */
+  executionEngines?: {
+    legacy: ChannelFactory;
+    managed: ChannelFactory;
+    select(
+      context: BridgeExecutionSelection,
+    ): BridgeExecutionEngine | Promise<BridgeExecutionEngine>;
+  };
+  /**
+   * How long a quarantined channel of a paired Bridge may drain before its
+   * running turns are cancelled and it is terminated. Measured once from the
+   * start of the quarantine and never extended by activity. Defaults to five
+   * minutes. Validated on every Bridge, but only a Bridge with
+   * `executionEngines` quarantines this way.
+   */
+  quarantineDrainTimeoutMs?: number;
   /** Workspace-scoped epoch source shared across Bridge replacement. */
   runtimeEpochSource?: BridgeRuntimeEpochSource;
   /** Daemon-global admission for the process-wide MCP OAuth callback port. */
@@ -705,6 +745,8 @@ export interface CreateSubSessionInfo {
   completion: 'sent' | 'first-turn';
   /** Optional model service id for the sub-session (falls back to default). */
   model?: string;
+  /** Optional named group for a scheduled-task run session. */
+  groupId?: string;
   /** Optional display name for the sub-session in the session list. */
   name?: string;
   /** Optional immutable creator attribution for the fresh session. */
@@ -802,7 +844,7 @@ export interface LiveSpeakToUserInfo {
 
 export type LiveSpeakToUserHandler = (
   info: LiveSpeakToUserInfo,
-) => Promise<void>;
+) => Promise<void | boolean>;
 
 // Canonical set — cli channel-delivery-ipc.ts and bridgeClient.ts import this;
 // sdk-typescript events.ts carries an independent copy with a cross-check test.

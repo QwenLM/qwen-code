@@ -210,6 +210,7 @@ async function start(
   mode: ApprovalMode | null = ApprovalMode.DEFAULT,
   extra: {
     getSessionId?: () => string;
+    ownsSessionId?: (id: string) => boolean;
     settleSentMessage?: (
       msgId: string,
       status: string,
@@ -222,9 +223,10 @@ async function start(
         }
       | undefined;
     reassertSessionRecord?: () => Promise<void>;
-    getPolicySetting?: () => InboundPolicy | undefined;
-    getHeldExpiryMs?: () => number | null;
-    getPolicyScope?: () => PolicyScope | undefined;
+    getApprovalMode?: (sessionId?: string) => ApprovalMode | null;
+    getPolicySetting?: (sessionId?: string) => InboundPolicy | undefined;
+    getHeldExpiryMs?: (sessionId?: string) => number | null;
+    getPolicyScope?: (sessionId?: string) => PolicyScope | undefined;
     controllerRegistryPath?: string;
     admission?: PeerAdmission;
     dropReceiptTrailMs?: number;
@@ -500,6 +502,74 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
       origMsgId: frame.msgId,
       from: m.socketPath,
     });
+  });
+
+  it('delivers to a host of several sessions only when the frame names one it holds', async () => {
+    const sender = await startSenderInbox();
+    const hosted = new Set(['session-a', 'session-b']);
+    const { messaging: m, submitted } = await start(ApprovalMode.DEFAULT, {
+      ownsSessionId: (id) => hosted.has(id),
+    });
+
+    const mine = peerFrame({
+      content: 'for session-b',
+      from: sender.socketPath,
+      fromMode: 'prompting',
+      toSessionId: 'session-b',
+    });
+    await send(m.socketPath!, mine);
+    await settle();
+    expect(submitted).toHaveLength(1);
+
+    const stranger = peerFrame({
+      content: 'for nobody here',
+      from: sender.socketPath,
+      fromMode: 'prompting',
+      toSessionId: 'session-gone',
+    });
+    await send(m.socketPath!, stranger);
+    await settle();
+
+    expect(submitted).toHaveLength(1);
+    expect(receipts.at(-1)).toMatchObject({
+      status: 'misaddressed',
+      origMsgId: stranger.msgId,
+    });
+  });
+
+  it('refuses an unpinned frame at a host of several sessions', async () => {
+    // The one place the two rules differ. A process holding one session
+    // takes an unpinned frame — it could only have meant that one. A
+    // process hosting several has nothing to guess from, and the
+    // protocol page tells senders to always pin for exactly this reason.
+    const sender = await startSenderInbox();
+    const { messaging: m, submitted } = await start(ApprovalMode.DEFAULT, {
+      ownsSessionId: () => true,
+    });
+    const unpinned = peerFrame({
+      content: 'to whom it may concern',
+      from: sender.socketPath,
+      fromMode: 'prompting',
+    });
+    await send(m.socketPath!, unpinned);
+    await settle();
+
+    expect(submitted).toHaveLength(0);
+    expect(receipts.at(-1)).toMatchObject({
+      status: 'misaddressed',
+      origMsgId: unpinned.msgId,
+    });
+  });
+
+  it('refuses to be wired as both one session and a host of several', async () => {
+    // A configuration mistake, not a runtime condition: a process that
+    // answered both would judge pins by whichever check ran first.
+    await expect(
+      start(ApprovalMode.DEFAULT, {
+        getSessionId: () => 'session-now',
+        ownsSessionId: () => true,
+      }),
+    ).rejects.toThrow('getSessionId or ownsSessionId');
   });
 
   it('admits a pinned message when it has no session id to judge it against', async () => {
@@ -1305,6 +1375,67 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
         .map((r) => (r as { status: string }).status);
     expect(statusesFor(consumed.msgId)).toEqual(['delivered']);
     expect(statusesFor(waiting.msgId)).toEqual(['delivered', 'expired']);
+  });
+
+  it('asks each setting reader about the session a message is addressed to', async () => {
+    const sender = await startSenderInbox();
+    const asked: Record<string, Array<string | undefined>> = {
+      policy: [],
+      mode: [],
+      expiry: [],
+      scope: [],
+    };
+    // An explicit setting decides on its own, so it is the path that
+    // reads the scope and arms the expiry; parity is the path that reads
+    // the approval mode. One message each covers all four readers.
+    let policy: InboundPolicy | undefined = 'hold';
+    const { submitted } = await start(null, {
+      ownsSessionId: (id) => id === 'hosted-1',
+      getPolicySetting: (id) => {
+        asked['policy']!.push(id);
+        return policy;
+      },
+      getApprovalMode: (id) => {
+        asked['mode']!.push(id);
+        return ApprovalMode.DEFAULT;
+      },
+      getHeldExpiryMs: (id) => {
+        asked['expiry']!.push(id);
+        return 60_000;
+      },
+      getPolicyScope: (id) => {
+        asked['scope']!.push(id);
+        return 'workspace';
+      },
+    });
+    await send(
+      messaging!.socketPath!,
+      peerFrame({
+        content: 'held by the setting',
+        from: sender.socketPath,
+        toSessionId: 'hosted-1',
+      }),
+    );
+    await settle();
+    policy = undefined;
+    await send(
+      messaging!.socketPath!,
+      peerFrame({
+        content: 'delivered by parity',
+        from: sender.socketPath,
+        toSessionId: 'hosted-1',
+      }),
+    );
+    await settle();
+
+    expect(submitted).toHaveLength(1);
+    expect(messaging!.getHeld()).toHaveLength(1);
+    // Every reader that judges a message is asked about the session it
+    // is addressed to, never about the process.
+    for (const [reader, ids] of Object.entries(asked)) {
+      expect([reader, ids.length > 0]).toEqual([reader, true]);
+      expect([reader, new Set(ids)]).toEqual([reader, new Set(['hosted-1'])]);
+    }
   });
 
   it('settles a partially flushed buffer alongside queued frames at exit', async () => {

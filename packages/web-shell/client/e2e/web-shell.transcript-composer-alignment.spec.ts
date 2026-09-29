@@ -70,7 +70,9 @@ for (const navigation of [true, false]) {
         },
       });
     });
-    await page.goto(`/session/${encodeURIComponent(scenario.sessionId)}`);
+    await page.goto(
+      `/session/${encodeURIComponent(scenario.sessionId)}?theme=light`,
+    );
     await expect(page.locator('[data-web-shell-root]')).toBeVisible();
     const connection = await daemon.sse.waitForConnection(scenario.sessionId);
     await daemon.sendEvent(
@@ -100,6 +102,21 @@ for (const navigation of [true, false]) {
         ),
       )
       .toBeGreaterThan(0);
+    await expect
+      .soft(page.locator('[class*="chatHeaderRow"]'))
+      .toHaveCSS('border-bottom-width', '1px');
+    await messageList.hover();
+    await page.mouse.wheel(0, -400);
+    const scrollToBottom = page.getByRole('button', {
+      name: /Scroll to bottom|回到底部/,
+    });
+    await expect(scrollToBottom).toBeVisible();
+    await expect.soft(scrollToBottom).toHaveCSS('border-top-width', '1px');
+    await expect(scrollToBottom).toHaveCSS(
+      'background-color',
+      'color(srgb 1 1 1 / 0.96)',
+    );
+    await scrollToBottom.click();
     for (const width of [1440, 1300, 1261, 1260, 1259, 1000, 802, 700, 599]) {
       await page.setViewportSize({ width, height: 900 });
       await expectSameEdges(message, composer);

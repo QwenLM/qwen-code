@@ -132,6 +132,12 @@ export function extensionToOutputString(
       output += `\n  ${agent.name}`;
     });
   }
+  if (extension.workflows && extension.workflows.length > 0) {
+    output += `\n ${t('Workflows:')}`;
+    extension.workflows.forEach((workflow) => {
+      output += `\n  /${workflow.name}`;
+    });
+  }
   if (extension.config.mcpServers) {
     output += `\n ${t('MCP servers:')}`;
     Object.keys(extension.config.mcpServers).forEach((key) => {

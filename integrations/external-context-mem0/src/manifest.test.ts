@@ -89,7 +89,7 @@ describe('Mem0 Extension package', () => {
           type: 'command',
           command,
           ...(shell === undefined ? {} : { shell }),
-          timeout: 8000,
+          timeout: 8,
           name: 'external-context-mem0-auto-recall',
           statusMessage: 'Retrieving external context',
         },

@@ -18,7 +18,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import {
   bannedFamily,
@@ -581,7 +581,7 @@ describe('end-to-end gate run (main wiring)', () => {
       [
         '--input-type=module',
         '-e',
-        `await import('file://${join(base, 'scripts', 'check-tui-dep-direction.mjs')}'); process.stdout.write('imported-only');`,
+        `await import(${JSON.stringify(pathToFileURL(join(base, 'scripts', 'check-tui-dep-direction.mjs')).href)}); process.stdout.write('imported-only');`,
       ],
       { encoding: 'utf8', timeout: 30000 },
     );

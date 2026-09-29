@@ -13,10 +13,12 @@ import {
   useState,
   type ReactNode,
 } from 'react';
+import { notificationExcerpt } from './notification-text';
 import { getTranslator, type WebShellLanguage } from './i18n';
 import {
   createTurnNotificationObserver,
   TurnNotificationContext,
+  TurnNotificationNavigationContext,
   type TurnNotification,
 } from './daemon/session/turn-notification-context';
 
@@ -24,6 +26,26 @@ export const BROWSER_NOTIFICATIONS_STORAGE_KEY =
   'qwen-code-web-shell-browser-notifications';
 const CLAIMS_STORAGE_KEY = 'qwen-code-web-shell-notification-claims';
 const MAX_CLAIMS = 1024;
+const NOTIFICATION_ICON_URL = new URL(
+  './assets/qwen-code-notification.png',
+  import.meta.url,
+).href;
+
+export interface WebShellBrowserNotificationsOptions {
+  /** Initial preference when none is saved. Defaults to false; never requests permission automatically. */
+  defaultEnabled?: boolean;
+  /** Application name prefixed to notification titles. Defaults to QwenCode. */
+  appName?: string;
+  /** Image URL, including HTTPS CDN URLs. Defaults to the bundled Qwen Code icon. */
+  iconUrl?: string;
+}
+
+interface BrowserTurnNotificationsProps {
+  children: ReactNode;
+  language: WebShellLanguage;
+  options?: WebShellBrowserNotificationsOptions;
+  active?: boolean;
+}
 
 type Permission = NotificationPermission | 'unavailable';
 
@@ -35,6 +57,7 @@ interface BrowserNotificationSettings {
   error: boolean;
   setEnabled(enabled: boolean): Promise<void>;
   refreshPermission(): void;
+  syncLanguage(language: WebShellLanguage): void;
 }
 
 const BrowserNotificationSettingsContext = createContext<
@@ -59,22 +82,28 @@ function readStoredPreference(): string | null | undefined {
   }
 }
 
-function readPreference() {
+function readPreference(defaultEnabled: boolean) {
   const stored = readStoredPreference();
-  return { enabled: stored === 'true', persistent: stored !== undefined };
+  return {
+    enabled: stored === 'true' || (stored === null && defaultEnabled),
+    persistent: stored !== undefined,
+  };
 }
 
 export function BrowserTurnNotifications({
   children,
   language,
-}: {
-  children: ReactNode;
-  language: WebShellLanguage;
-}) {
+  options,
+  active = true,
+}: BrowserTurnNotificationsProps) {
   if (typeof window === 'undefined' || window.top !== window.self)
     return <>{children}</>;
   return (
-    <StandaloneNotifications language={language}>
+    <StandaloneNotifications
+      language={language}
+      options={options}
+      active={active}
+    >
       {children}
     </StandaloneNotifications>
   );
@@ -83,11 +112,17 @@ export function BrowserTurnNotifications({
 function StandaloneNotifications({
   children,
   language,
-}: {
-  children: ReactNode;
-  language: WebShellLanguage;
-}) {
-  const [preference, setPreference] = useState(readPreference);
+  options,
+  active = true,
+}: BrowserTurnNotificationsProps) {
+  const activeRef = useRef(active);
+  activeRef.current = active;
+  const [navigationTarget] = useState(() => new EventTarget());
+  const [appLanguage, syncLanguage] = useState<WebShellLanguage>();
+  const [defaultEnabled] = useState(options?.defaultEnabled ?? false);
+  const [preference, setPreference] = useState(() =>
+    readPreference(defaultEnabled),
+  );
   const [currentPermission, setPermission] = useState(permission);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState(false);
@@ -120,7 +155,7 @@ function StandaloneNotifications({
       if (event.key !== null && event.key !== BROWSER_NOTIFICATIONS_STORAGE_KEY)
         return;
       version.current++;
-      const next = readPreference();
+      const next = readPreference(defaultEnabled);
       enabledRef.current = next.enabled;
       setPreference(next);
       setPending(false);
@@ -134,7 +169,7 @@ function StandaloneNotifications({
       window.removeEventListener('storage', sync);
       window.removeEventListener('focus', refreshPermission);
     };
-  }, [refreshPermission]);
+  }, [refreshPermission, defaultEnabled]);
 
   const setEnabled = useCallback(
     async (enabled: boolean) => {
@@ -159,20 +194,21 @@ function StandaloneNotifications({
       setPending(false);
       setPermission(permission());
       if (readStoredPreference() !== storedBeforeRequest) {
-        const next = readPreference();
+        const next = readPreference(defaultEnabled);
         enabledRef.current = next.enabled;
         setPreference(next);
         return;
       }
       if (nextPermission === 'granted') savePreference(true);
     },
-    [savePreference],
+    [savePreference, defaultEnabled],
   );
 
   notifyRef.current = (turn) => {
     const request = version.current;
     const canShow = () =>
       mounted.current &&
+      activeRef.current &&
       request === version.current &&
       enabledRef.current &&
       permission() === 'granted' &&
@@ -208,15 +244,42 @@ function StandaloneNotifications({
             // Storage restrictions degrade to page-local deduplication and tag replacement.
           }
         }
-        const t = getTranslator(language);
-        const notification = new window.Notification('Qwen Code', {
-          body: t(`browserNotifications.${turn.outcome}`),
-          tag,
-          ...{ renotify: false },
-        });
+        const t = getTranslator(appLanguage ?? language);
+        const appName = options?.appName?.trim() || 'QwenCode';
+        const title = notificationExcerpt(turn.sessionTitle ?? '', 60);
+        const prompt = notificationExcerpt(turn.promptText ?? '', 80);
+        const excerpt =
+          turn.outcome === 'failed'
+            ? ''
+            : notificationExcerpt(turn.responseText ?? '', 120);
+        const status = t(`browserNotifications.${turn.outcome}`);
+        const notification = new window.Notification(
+          title ? `${appName} · ${title}` : appName,
+          {
+            body: [
+              status,
+              prompt && t('browserNotifications.prompt', { text: prompt }),
+              excerpt && t('browserNotifications.reply', { text: excerpt }),
+            ]
+              .filter(Boolean)
+              .join('\n'),
+            icon: options?.iconUrl?.trim() || NOTIFICATION_ICON_URL,
+            tag,
+            ...{ renotify: false },
+          },
+        );
         notification.onclick = () => {
           try {
             window.focus();
+          } catch {
+            // Browsers may deny focus even though the page can still navigate.
+          }
+          try {
+            if (turn.target) {
+              navigationTarget.dispatchEvent(
+                new CustomEvent('qwen:open-session', { detail: turn.target }),
+              );
+            }
           } finally {
             notification.close();
           }
@@ -242,19 +305,28 @@ function StandaloneNotifications({
   };
 
   return (
-    <TurnNotificationContext.Provider value={observer}>
-      <BrowserNotificationSettingsContext.Provider
-        value={{
-          ...preference,
-          permission: currentPermission,
-          pending,
-          error,
-          setEnabled,
-          refreshPermission,
-        }}
-      >
-        {children}
-      </BrowserNotificationSettingsContext.Provider>
-    </TurnNotificationContext.Provider>
+    <TurnNotificationNavigationContext.Provider
+      value={active ? navigationTarget : undefined}
+    >
+      <TurnNotificationContext.Provider value={active ? observer : undefined}>
+        <BrowserNotificationSettingsContext.Provider
+          value={
+            active
+              ? {
+                  ...preference,
+                  permission: currentPermission,
+                  pending,
+                  error,
+                  setEnabled,
+                  refreshPermission,
+                  syncLanguage,
+                }
+              : undefined
+          }
+        >
+          {children}
+        </BrowserNotificationSettingsContext.Provider>
+      </TurnNotificationContext.Provider>
+    </TurnNotificationNavigationContext.Provider>
   );
 }

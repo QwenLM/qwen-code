@@ -42,7 +42,7 @@ describe('discoverProviderModels', () => {
     fetchWithPolicyMock.mockReset();
   });
 
-  it('returns every served id uncurated, merging known specs first in stable order', async () => {
+  it('returns every served id uncurated and preserves provider order without dates', async () => {
     fetchWithPolicyMock.mockResolvedValue(
       response({
         data: [
@@ -59,9 +59,9 @@ describe('discoverProviderModels', () => {
     );
 
     await expect(discoverProviderModels(options)).resolves.toEqual([
-      { id: 'known-a', contextWindowSize: 1000 },
       { id: 'known-b', enableThinking: true },
       { id: 'new-model' },
+      { id: 'known-a', contextWindowSize: 1000 },
       { id: 'padded-model' },
       { id: 'qwen2-audio-instruct' },
       { id: 'qwen-vl-ocr-latest' },
@@ -79,6 +79,64 @@ describe('discoverProviderModels', () => {
         },
       }),
     );
+  });
+
+  it('sorts served models by creation time with newest first', async () => {
+    fetchWithPolicyMock.mockResolvedValue(
+      response({
+        data: [
+          { id: 'older-model', created: 100 },
+          { id: 'newest-model', created: 300 },
+          { id: 'same-age-model', created: 200 },
+          { id: 'known-a', created: 200 },
+        ],
+      }),
+    );
+
+    await expect(discoverProviderModels(options)).resolves.toEqual([
+      { id: 'newest-model' },
+      { id: 'same-age-model' },
+      { id: 'known-a', contextWindowSize: 1000 },
+      { id: 'older-model' },
+    ]);
+  });
+
+  it('preserves provider order when creation dates are incomplete', async () => {
+    fetchWithPolicyMock.mockResolvedValue(
+      response({
+        data: [
+          { id: 'older-model', created: 100 },
+          { id: 'undated-model' },
+          { id: 'newer-model', created: 200 },
+        ],
+      }),
+    );
+
+    await expect(discoverProviderModels(options)).resolves.toEqual([
+      { id: 'older-model' },
+      { id: 'undated-model' },
+      { id: 'newer-model' },
+    ]);
+  });
+
+  it('preserves provider order when creation dates are invalid', async () => {
+    fetchWithPolicyMock.mockResolvedValue(
+      response({
+        data: [
+          { id: 'string-dated', created: '100' },
+          { id: 'newest-model', created: 300 },
+          { id: 'null-dated', created: null },
+          { id: 'negative-dated', created: -1 },
+        ],
+      }),
+    );
+
+    await expect(discoverProviderModels(options)).resolves.toEqual([
+      { id: 'string-dated' },
+      { id: 'newest-model' },
+      { id: 'null-dated' },
+      { id: 'negative-dated' },
+    ]);
   });
 
   it.each([

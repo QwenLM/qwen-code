@@ -38,8 +38,9 @@ import {
 import { formatDuration } from '../utils/formatters.js';
 import { getArenaStatusLabel } from '../utils/displayUtils.js';
 import { toOriginalKey } from './key-map.js';
-import { nextEnabledIndex } from './dialogs-misc.js';
+import { findNextEnabledIndex } from './dialogs-core.js';
 import { C } from './theme.js';
+import { useBatchSafeCursor, useBatchSafeState } from './batch-cursor.js';
 
 export type ArenaDialogMode = 'start' | 'select' | 'stop' | 'status';
 
@@ -48,7 +49,7 @@ export interface OpenTuiArenaDialogProps {
   mode: ArenaDialogMode;
   onClose: () => void;
   /** Command-style chat messages (ink addItem parity). */
-  notify: (text: string) => void;
+  notify: (text: string, level?: 'info' | 'error') => void;
   /** ink handleArenaModelsSelected: fill the composer, keep it unsubmitted. */
   onFillInput?: (text: string) => void;
 }
@@ -144,8 +145,14 @@ function ArenaStart({ config, onClose, onFillInput }: OpenTuiArenaDialogProps) {
         };
       });
   }, [config]);
-  const [cursor, setCursor] = useState(0);
-  const [checked, setChecked] = useState<ReadonlySet<string>>(new Set());
+  const { cursor, cursorRef, setCursor } = useBatchSafeCursor();
+  // Keystrokes of one burst are handled against the render that registered the
+  // handler, whose `checked` set is already stale by the second Space.
+  const {
+    value: checked,
+    ref: checkedRef,
+    setValue: setChecked,
+  } = useBatchSafeState<ReadonlySet<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
 
   const hasDisabledQwenOauth = modelItems.some((m) => m.disabled);
@@ -158,24 +165,21 @@ function ArenaStart({ config, onClose, onFillInput }: OpenTuiArenaDialogProps) {
     if (o.name === 'escape') {
       onClose();
     } else if (o.name === 'up' || o.name === 'down') {
-      const d = o.name === 'up' ? -1 : 1;
-      setCursor((c) => nextEnabledIndex(modelItems, c, d));
+      setCursor(findNextEnabledIndex(modelItems, cursorRef.current, o.name));
     } else if (o.name === 'space') {
-      const item = modelItems[cursor];
+      const item = modelItems[cursorRef.current];
       if (!item || item.disabled) return;
-      setChecked((prev) => {
-        const next = new Set(prev);
-        if (next.has(item.key)) next.delete(item.key);
-        else next.add(item.key);
-        return next;
-      });
+      const next = new Set(checkedRef.current);
+      if (next.has(item.key)) next.delete(item.key);
+      else next.add(item.key);
+      setChecked(next);
     } else if (o.name === 'return') {
-      if (checked.size < 2) {
+      if (checkedRef.current.size < 2) {
         setError('Please select at least 2 models to start an Arena session.');
         return;
       }
       const values = modelItems
-        .filter((m) => checked.has(m.key))
+        .filter((m) => checkedRef.current.has(m.key))
         .map((m) => m.key);
       onFillInput?.(`/arena start --models ${values.join(',')} `);
       onClose();
@@ -359,7 +363,7 @@ function ArenaStatus({ config, onClose }: OpenTuiArenaDialogProps) {
           </text>
         </box>
       </box>
-      <text fg={C.dim}>{'─'.repeat(innerWidth)}</text>
+      <text fg={C.borderDefault}>{'─'.repeat(innerWidth)}</text>
       {agents.length === 0 ? (
         <text fg={C.dim}>{'No agents registered yet.'}</text>
       ) : (
@@ -435,7 +439,11 @@ function ArenaStop({ config, onClose, notify }: OpenTuiArenaDialogProps) {
       desc: 'Keep worktrees and session files for later inspection',
     },
   ];
-  const [sel, setSel] = useState(preserveDefault ? 1 : 0);
+  const {
+    cursor: sel,
+    cursorRef: selRef,
+    setCursor: setSel,
+  } = useBatchSafeCursor(preserveDefault ? 1 : 0);
 
   const runStop = async (action: StopAction) => {
     if (processing) return;
@@ -443,7 +451,7 @@ function ArenaStop({ config, onClose, notify }: OpenTuiArenaDialogProps) {
     onClose();
     const mgr = config?.getArenaManager?.();
     if (!mgr) {
-      notify('✗ No running Arena session found.');
+      notify('No running Arena session found.', 'error');
       return;
     }
     try {
@@ -470,7 +478,8 @@ function ArenaStop({ config, onClose, notify }: OpenTuiArenaDialogProps) {
       );
     } catch (error) {
       notify(
-        `✗ Failed to stop Arena session: ${error instanceof Error ? error.message : String(error)}`,
+        `Failed to stop Arena session: ${error instanceof Error ? error.message : String(error)}`,
+        'error',
       );
     }
   };
@@ -481,9 +490,9 @@ function ArenaStop({ config, onClose, notify }: OpenTuiArenaDialogProps) {
     if (o.name === 'escape') {
       onClose();
     } else if (o.name === 'up' || o.name === 'down') {
-      setSel((s) => (s === 0 ? 1 : 0));
+      setSel(selRef.current === 0 ? 1 : 0);
     } else if (o.name === 'return') {
-      void runStop(items[sel]?.key ?? 'cleanup');
+      void runStop(items[selRef.current]?.key ?? 'cleanup');
     }
   });
 
@@ -497,19 +506,14 @@ function ArenaStop({ config, onClose, notify }: OpenTuiArenaDialogProps) {
       </box>
       <box marginTop={1} flexDirection="column">
         {items.map((it, i) => (
-          <box key={it.key} flexDirection="column">
-            <box flexDirection="row">
-              <text fg={i === sel ? C.accent : C.dim}>
-                {i === sel ? '● ' : '○ '}
-              </text>
-              <text
-                fg={i === sel ? C.text : C.dim}
-                attributes={i === sel ? 1 : 0}
-              >
-                {it.label}
+          <box key={it.key} flexDirection="row" alignItems="flex-start">
+            <box minWidth={2} flexShrink={0}>
+              <text fg={i === sel ? C.green : C.text}>
+                {i === sel ? '›' : ' '}
               </text>
             </box>
-            <box paddingLeft={2}>
+            <box flexDirection="column" flexGrow={1}>
+              <text fg={i === sel ? C.green : C.text}>{it.label}</text>
               <text fg={C.dim}>{it.desc}</text>
             </box>
           </box>
@@ -616,7 +620,11 @@ function ArenaSelect({ config, onClose, notify }: OpenTuiArenaDialogProps) {
   const manager = config?.getArenaManager?.() ?? null;
   const agents = useMemo(() => manager?.getAgentStates() ?? [], [manager]);
   const result = manager?.getResult();
-  const [sel, setSel] = useState(() =>
+  const {
+    cursor: sel,
+    cursorRef: selRef,
+    setCursor: setSel,
+  } = useBatchSafeCursor(() =>
     Math.max(
       0,
       agents.findIndex((a) => isSuccessStatus(a.status)),
@@ -672,7 +680,7 @@ function ArenaSelect({ config, onClose, notify }: OpenTuiArenaDialogProps) {
     onClose();
     const mgr = config?.getArenaManager?.();
     if (!mgr) {
-      notify('✗ No arena session found. Start one with /arena start.');
+      notify('No arena session found. Start one with /arena start.', 'error');
       return;
     }
     const agent =
@@ -682,14 +690,18 @@ function ArenaSelect({ config, onClose, notify }: OpenTuiArenaDialogProps) {
     notify(`Applying changes from ${label}…`);
     const applyResult = await mgr.applyAgentResult(agentId);
     if (!applyResult.success) {
-      notify(`✗ Failed to apply changes from ${label}: ${applyResult.error}`);
+      notify(
+        `Failed to apply changes from ${label}: ${applyResult.error}`,
+        'error',
+      );
       return;
     }
     try {
       await config?.cleanupArenaRuntime?.(true);
     } catch (err) {
       notify(
-        `✗ Warning: failed to clean up arena resources: ${err instanceof Error ? err.message : String(err)}`,
+        `Warning: failed to clean up arena resources: ${err instanceof Error ? err.message : String(err)}`,
+        'error',
       );
     }
     notify(
@@ -701,7 +713,7 @@ function ArenaSelect({ config, onClose, notify }: OpenTuiArenaDialogProps) {
     onClose();
     const mgr = config?.getArenaManager?.();
     if (!mgr) {
-      notify('✗ No arena session found. Start one with /arena start.');
+      notify('No arena session found. Start one with /arena start.', 'error');
       return;
     }
     try {
@@ -710,7 +722,8 @@ function ArenaSelect({ config, onClose, notify }: OpenTuiArenaDialogProps) {
       notify('Arena results discarded. All worktrees cleaned up.');
     } catch (err) {
       notify(
-        `✗ Failed to clean up arena worktrees: ${err instanceof Error ? err.message : String(err)}`,
+        `Failed to clean up arena worktrees: ${err instanceof Error ? err.message : String(err)}`,
+        'error',
       );
     }
   };
@@ -720,9 +733,9 @@ function ArenaSelect({ config, onClose, notify }: OpenTuiArenaDialogProps) {
     if (o.name === 'escape') {
       onClose();
     } else if (o.name === 'up' || o.name === 'down') {
-      setSel((s) => nextEnabledIndex(rows, s, o.name === 'up' ? -1 : 1));
+      setSel(findNextEnabledIndex(rows, selRef.current, o.name));
     } else if (o.name === 'return') {
-      const row = rows[sel];
+      const row = rows[selRef.current];
       if (row && !row.disabled) void applyWinner(row.key);
     } else if (!o.ctrl && !o.meta) {
       if (o.name === 'p') setShowPreview((v) => !v);
@@ -759,35 +772,34 @@ function ArenaSelect({ config, onClose, notify }: OpenTuiArenaDialogProps) {
       </box>
       <box marginTop={1} flexDirection="column">
         {rows.map((row, i) => (
-          <box key={row.key} flexDirection="column">
-            <box flexDirection="row">
-              <text fg={row.disabled ? C.dim : i === sel ? C.accent : C.dim}>
-                {i === sel ? '● ' : '○ '}
-              </text>
-              <text
-                fg={row.disabled ? C.dim : i === sel ? C.text : C.dim}
-                attributes={!row.disabled && i === sel ? 1 : 0}
-              >
-                {row.label}
+          <box key={row.key} flexDirection="row" alignItems="flex-start">
+            <box minWidth={2} flexShrink={0}>
+              <text fg={i === sel ? C.green : C.text}>
+                {i === sel ? '›' : ' '}
               </text>
             </box>
-            <box paddingLeft={2} flexDirection="row">
-              <text fg={row.status.color}>{row.status.text}</text>
-              <text
-                fg={C.dim}
-              >{` · ${row.duration} · ${row.tokens} tokens`}</text>
-              {row.fileCount > 0 && (
-                <text fg={C.dim}>{` · ${row.fileCount} files`}</text>
-              )}
-              {(row.additions > 0 || row.deletions > 0) && (
-                <>
-                  <text fg={C.dim}>{' · '}</text>
-                  <text fg={C.green}>{`+${row.additions}`}</text>
-                  <text fg={C.dim}>{'/'}</text>
-                  <text fg={C.red}>{`-${row.deletions}`}</text>
-                  <text fg={C.dim}>{' lines'}</text>
-                </>
-              )}
+            <box flexDirection="column" flexGrow={1}>
+              <text fg={row.disabled ? C.dim : i === sel ? C.green : C.text}>
+                {row.label}
+              </text>
+              <box flexDirection="row">
+                <text fg={row.status.color}>{row.status.text}</text>
+                <text
+                  fg={C.dim}
+                >{` · ${row.duration} · ${row.tokens} tokens`}</text>
+                {row.fileCount > 0 && (
+                  <text fg={C.dim}>{` · ${row.fileCount} files`}</text>
+                )}
+                {(row.additions > 0 || row.deletions > 0) && (
+                  <>
+                    <text fg={C.dim}>{' · '}</text>
+                    <text fg={C.green}>{`+${row.additions}`}</text>
+                    <text fg={C.dim}>{'/'}</text>
+                    <text fg={C.red}>{`-${row.deletions}`}</text>
+                    <text fg={C.dim}>{' lines'}</text>
+                  </>
+                )}
+              </box>
             </box>
           </box>
         ))}

@@ -9,6 +9,7 @@ import {
   printRemoteQuickstart,
   quickstartPrintMode,
   remoteQuickstartAddresses,
+  tokenQrNoEffectReason,
 } from './remote-quickstart.js';
 
 const mocks = vi.hoisted(() => ({
@@ -102,6 +103,80 @@ describe('quickstartPrintMode', () => {
     expect(quickstartPrintMode('127.0.0.1', true)).toBe('token-only');
     expect(quickstartPrintMode('::1', true)).toBe('token-only');
     expect(quickstartPrintMode('127.0.0.1', false)).toBe('silent');
+  });
+});
+
+describe('tokenQrNoEffectReason', () => {
+  it('stays silent when nobody requested the token QR', () => {
+    expect(
+      tokenQrNoEffectReason({
+        requested: false,
+        webShellMounted: false,
+        boundAddress: '127.0.0.1',
+        generated: false,
+      }),
+    ).toBeUndefined();
+  });
+
+  it('names the unmounted Web Shell first', () => {
+    expect(
+      tokenQrNoEffectReason({
+        requested: true,
+        webShellMounted: false,
+        boundAddress: '0.0.0.0',
+        generated: false,
+      }),
+    ).toContain('because the Web Shell is not mounted.');
+  });
+
+  it('names the unmounted Web Shell first even on a loopback bind', () => {
+    // The discriminating input: on a non-loopback address the loopback
+    // branch is unreachable, so the case above stays green under a swapped
+    // branch order; only this input pins which cause is named first.
+    expect(
+      tokenQrNoEffectReason({
+        requested: true,
+        webShellMounted: false,
+        boundAddress: '127.0.0.1',
+        generated: false,
+      }),
+    ).toContain('because the Web Shell is not mounted.');
+  });
+
+  it('names the loopback bind when the Web Shell is mounted', () => {
+    expect(
+      tokenQrNoEffectReason({
+        requested: true,
+        webShellMounted: true,
+        boundAddress: '127.0.0.1',
+        generated: false,
+      }),
+    ).toContain('a loopback listener prints no quickstart QR.');
+  });
+
+  it('names the loopback bind for a generated token too', () => {
+    // `token-only` mode still prints the bearer as text, but no QR — so the
+    // diagnostic is the same, and this pins that the loopback cause does not
+    // depend on `generated`.
+    expect(
+      tokenQrNoEffectReason({
+        requested: true,
+        webShellMounted: true,
+        boundAddress: '127.0.0.1',
+        generated: true,
+      }),
+    ).toContain('a loopback listener prints no quickstart QR.');
+  });
+
+  it('reports nothing when the QR can print', () => {
+    expect(
+      tokenQrNoEffectReason({
+        requested: true,
+        webShellMounted: true,
+        boundAddress: '0.0.0.0',
+        generated: false,
+      }),
+    ).toBeUndefined();
   });
 });
 
@@ -361,8 +436,12 @@ it('prints nothing for an operator token on a loopback bind', async () => {
   expect(mocks.generate).not.toHaveBeenCalled();
 });
 
-it('never QRs a stable operator token into captured stdout', async () => {
+it('withholds the token-bearing QR for a stable token on captured stdout, printing a hint and an address-only QR', async () => {
   stubIsTTY(undefined);
+  mocks.generate.mockImplementationOnce(
+    (_url: string, _options: unknown, callback: (code: string) => void) =>
+      callback('QR\n'),
+  );
   await printRemoteQuickstart({
     bind: '192.168.1.2',
     boundAddress: '192.168.1.2',
@@ -372,11 +451,200 @@ it('never QRs a stable operator token into captured stdout', async () => {
     generated: false,
     web: true,
   });
-  expect(mocks.generate).not.toHaveBeenCalled();
+  // The degraded QR encodes the bare address — already printed as plain text
+  // — and nothing else; the token reaches no line in raw or encoded form.
+  // Exhaustive, not existential: a second generate call carrying the token
+  // would leak the bearer while every assertion below stayed green.
+  expect(mocks.generate).toHaveBeenCalledOnce();
+  expect(mocks.generate).toHaveBeenCalledWith(
+    'http://192.168.1.2:4170',
+    { small: true },
+    expect.any(Function),
+  );
+  for (const call of mocks.generate.mock.calls) {
+    expect(String(call[0])).not.toContain('#token=');
+  }
+  expect(mocks.line).toHaveBeenCalledWith(
+    'Token-bearing QR suppressed: stable operator token with ' +
+      'non-interactive stdout. Pass --token-qr to print it anyway.',
+  );
+  expect(mocks.line).toHaveBeenCalledWith(
+    'Address-only QR: the Web Shell will ask for the bearer token.',
+  );
   expect(mocks.line).toHaveBeenCalledWith('Address: http://192.168.1.2:4170');
   expect(mocks.line.mock.calls.flat().join('\n')).not.toContain(
     'stable-secret',
   );
+});
+
+it('prints the token-bearing QR for a stable token on captured stdout when tokenQr opts in', async () => {
+  stubIsTTY(undefined);
+  mocks.generate.mockImplementationOnce(
+    (_url: string, _options: unknown, callback: (code: string) => void) =>
+      callback('QR\n'),
+  );
+  await printRemoteQuickstart({
+    bind: '192.168.1.2',
+    boundAddress: '192.168.1.2',
+    port: 4170,
+    tls: false,
+    token: 'stable-secret',
+    generated: false,
+    web: true,
+    tokenQrMode: 'force',
+  });
+  expect(mocks.generate).toHaveBeenCalledWith(
+    'http://192.168.1.2:4170/#token=stable-secret',
+    { small: true },
+    expect.any(Function),
+  );
+  expect(mocks.line).toHaveBeenCalledWith(
+    'SECRET QR: grants daemon access. Do not share.',
+  );
+  expect(mocks.line.mock.calls.flat().join('\n')).not.toContain('suppressed');
+});
+
+it('attributes the suppression to the veto instead of advising the flag just passed', async () => {
+  stubIsTTY(undefined);
+  mocks.generate.mockImplementationOnce(
+    (_url: string, _options: unknown, callback: (code: string) => void) =>
+      callback('QR\n'),
+  );
+  await printRemoteQuickstart({
+    bind: '192.168.1.2',
+    boundAddress: '192.168.1.2',
+    port: 4170,
+    tls: false,
+    token: 'stable-secret',
+    generated: false,
+    web: true,
+    tokenQrMode: 'veto',
+  });
+  expect(mocks.line).toHaveBeenCalledWith(
+    'Token-bearing QR suppressed: the token QR was explicitly ' +
+      'disabled for this run.',
+  );
+  expect(mocks.line.mock.calls.flat().join('\n')).not.toContain(
+    'Pass --token-qr',
+  );
+  expect(mocks.line.mock.calls.flat().join('\n')).not.toContain(
+    'stable-secret',
+  );
+});
+
+it('honors an explicit veto at an interactive terminal too', async () => {
+  stubIsTTY(true);
+  mocks.generate.mockImplementationOnce(
+    (_url: string, _options: unknown, callback: (code: string) => void) =>
+      callback('QR\n'),
+  );
+  await printRemoteQuickstart({
+    bind: '192.168.1.2',
+    boundAddress: '192.168.1.2',
+    port: 4170,
+    tls: false,
+    token: 'stable-secret',
+    generated: false,
+    web: true,
+    tokenQrMode: 'veto',
+  });
+  expect(mocks.generate).toHaveBeenCalledOnce();
+  expect(mocks.generate).toHaveBeenCalledWith(
+    'http://192.168.1.2:4170',
+    { small: true },
+    expect.any(Function),
+  );
+  expect(mocks.line.mock.calls.flat().join('\n')).not.toContain(
+    'stable-secret',
+  );
+});
+
+it('honors an explicit veto for a generated token, which still prints as text', async () => {
+  stubIsTTY(undefined);
+  mocks.generate.mockImplementationOnce(
+    (_url: string, _options: unknown, callback: (code: string) => void) =>
+      callback('QR\n'),
+  );
+  await printRemoteQuickstart({
+    bind: '192.168.1.2',
+    boundAddress: '192.168.1.2',
+    port: 4170,
+    tls: false,
+    token: 'gen-token-veto',
+    generated: true,
+    web: true,
+    tokenQrMode: 'veto',
+  });
+  // The QR degrades to the address, but the generated bearer keeps its own
+  // plain-text delivery line, so the veto costs the operator nothing.
+  expect(mocks.generate).toHaveBeenCalledOnce();
+  expect(mocks.generate).toHaveBeenCalledWith(
+    'http://192.168.1.2:4170',
+    { small: true },
+    expect.any(Function),
+  );
+  for (const call of mocks.generate.mock.calls) {
+    expect(String(call[0])).not.toContain('#token=');
+  }
+  expect(mocks.line).toHaveBeenCalledWith(
+    'Generated bearer token (secret; changes on restart): gen-token-veto',
+  );
+});
+
+// The two cases below pass the shape production actually sends by default:
+// the caller resolves the posture once, so "nobody requested it" arrives as
+// 'policy' — a distinction a resolved boolean cannot express, since its
+// `false` conflates "not requested" with "explicitly vetoed" and gating the
+// veto on it suppressed the QR on every default run.
+it('still QRs a generated token when the caller resolved the default policy', async () => {
+  stubIsTTY(undefined);
+  mocks.generate.mockImplementationOnce(
+    (_url: string, _options: unknown, callback: (code: string) => void) =>
+      callback('QR\n'),
+  );
+  await printRemoteQuickstart({
+    bind: '192.168.1.2',
+    boundAddress: '192.168.1.2',
+    port: 4170,
+    tls: false,
+    token: 'gen-token-abc',
+    generated: true,
+    web: true,
+    tokenQrMode: 'policy',
+  });
+  expect(mocks.generate).toHaveBeenCalledWith(
+    'http://192.168.1.2:4170/#token=gen-token-abc',
+    { small: true },
+    expect.any(Function),
+  );
+  expect(mocks.line).toHaveBeenCalledWith(
+    'SECRET QR: grants daemon access. Do not share.',
+  );
+  expect(mocks.line.mock.calls.flat().join('\n')).not.toContain('suppressed');
+});
+
+it('still QRs a stable token at a TTY when the caller resolved the default policy', async () => {
+  stubIsTTY(true);
+  mocks.generate.mockImplementationOnce(
+    (_url: string, _options: unknown, callback: (code: string) => void) =>
+      callback('QR\n'),
+  );
+  await printRemoteQuickstart({
+    bind: '192.168.1.2',
+    boundAddress: '192.168.1.2',
+    port: 4170,
+    tls: false,
+    token: 'stable-secret',
+    generated: false,
+    web: true,
+    tokenQrMode: 'policy',
+  });
+  expect(mocks.generate).toHaveBeenCalledWith(
+    'http://192.168.1.2:4170/#token=stable-secret',
+    { small: true },
+    expect.any(Function),
+  );
+  expect(mocks.line.mock.calls.flat().join('\n')).not.toContain('suppressed');
 });
 
 it('QRs a stable token only at an interactive terminal', async () => {
@@ -395,6 +663,13 @@ it('QRs a stable token only at an interactive terminal', async () => {
     web: true,
   });
   expect(mocks.generate).toHaveBeenCalledOnce();
+  // Payload, not just call count: suppression now also calls generate (with
+  // the bare address), so only the payload pins the interactive path.
+  expect(mocks.generate).toHaveBeenCalledWith(
+    'http://192.168.1.2:4170/#token=stable-secret',
+    { small: true },
+    expect.any(Function),
+  );
   expect(mocks.line).toHaveBeenCalledWith('QR');
 });
 
@@ -415,6 +690,30 @@ it('prints generated API credentials but never QR for no-web', async () => {
       .flat()
       .filter((line: string) => line.includes('secret')),
   ).toHaveLength(1);
+});
+
+it('prints only the QR-unavailable fallback when the renderer fails', async () => {
+  // A suppression hint beside the fallback would advise --token-qr where no
+  // QR can print at all — the renderer failed, not the policy.
+  stubIsTTY(undefined);
+  mocks.generate.mockImplementationOnce(() => {
+    throw new Error('render failed');
+  });
+  await printRemoteQuickstart({
+    bind: '192.168.1.2',
+    boundAddress: '192.168.1.2',
+    port: 4170,
+    tls: false,
+    token: 'stable-secret',
+    generated: false,
+    web: true,
+  });
+  const output = mocks.line.mock.calls.flat().join('\n');
+  expect(output).toContain(
+    'QR unavailable; enter the bearer token at the daemon address.',
+  );
+  expect(output).not.toContain('Pass --token-qr');
+  expect(output).not.toContain('stable-secret');
 });
 
 it('prints the QR fallback when no candidate address exists', async () => {
@@ -538,5 +837,9 @@ describe('wildcard enumeration and QR candidate', () => {
     expect(mocks.line).toHaveBeenCalledWith(
       'QR unavailable; enter the bearer token at the daemon address.',
     );
+    // Pins the ordering the design relies on: the suppression hint lives
+    // below the candidate guard, so hoisting it would advise --token-qr
+    // where no QR can print at all.
+    expect(mocks.line.mock.calls.flat().join('\n')).not.toContain('suppressed');
   });
 });

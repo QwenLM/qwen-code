@@ -69,6 +69,9 @@ describe('buildSettingsListItems', () => {
     expect(items.length).toBeGreaterThan(0);
     const keys = items.map((item) => item.key);
     expect(keys).toContain('ui.theme');
+    expect(keys.indexOf('tools.codeModeOnly')).toBe(
+      keys.indexOf('tools.approvalMode') + 1,
+    );
     // Labels are resolved from the schema definitions.
     const themeItem = items.find((item) => item.key === 'ui.theme');
     expect(themeItem?.label).toBeTruthy();
@@ -193,5 +196,17 @@ describe('parseEditCommit', () => {
     expect(parseEditCommit('general.maxInitEvents', 'number', ' 12 ')).toBe(12);
     expect(parseEditCommit('general.maxInitEvents', 'number', '')).toBeNull();
     expect(parseEditCommit('general.maxInitEvents', 'number', 'x')).toBeNull();
+  });
+
+  it('parses integer settings as numbers instead of leaving them uneditable', () => {
+    expect(
+      parseEditCommit('tools.webSearch.maxPerSession', 'integer', ' 12 '),
+    ).toBe(12);
+    expect(
+      parseEditCommit('tools.webSearch.maxPerSession', 'integer', ''),
+    ).toBeNull();
+    expect(
+      parseEditCommit('tools.webSearch.maxPerSession', 'integer', 'x'),
+    ).toBeNull();
   });
 });

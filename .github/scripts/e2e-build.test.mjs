@@ -14,9 +14,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { parse } from 'yaml';
 
 const PACK = fileURLToPath(new URL('./e2e-build-pack.sh', import.meta.url));
 const UNPACK = fileURLToPath(new URL('./e2e-build-unpack.sh', import.meta.url));
+const E2E_WORKFLOW = fileURLToPath(
+  new URL('../workflows/e2e.yml', import.meta.url),
+);
 const SHA = 'a'.repeat(40);
 // Three roots, two entries sharing one of them, one negated entry: the
 // script must scan every non-negated root once, not a list of its own.
@@ -422,5 +426,385 @@ describe('e2e build archive', () => {
     });
     assert.notEqual(result.status, 0);
     assert.ok(!existsSync(join(leg, 'dist/cli.js')));
+  });
+});
+
+describe('e2e build artifact upload retry (e2e.yml build job)', () => {
+  // Run 34208365262 died with "Upload progress stalled." after ten minutes
+  // and skipped every leg: the upload is the single point that feeds all
+  // download-artifact consumers. The workflow's answer is one bounded
+  // retry, and its semantics live entirely in step properties nothing
+  // else asserts on. A regression here — the retry dropped, its trigger
+  // or overwrite removed, the names drifting apart — is silent until the
+  // next transient stall reddens a main run again, so pin the contract.
+  const doc = parse(readFileSync(E2E_WORKFLOW, 'utf8'));
+  const buildSteps = doc.jobs.build.steps;
+  const uploads = buildSteps.filter((s) =>
+    String(s.uses || '').startsWith('actions/upload-artifact@'),
+  );
+  const downloads = Object.values(doc.jobs).flatMap((job) =>
+    (job.steps ?? []).filter((s) =>
+      String(s.uses || '').startsWith('actions/download-artifact@'),
+    ),
+  );
+
+  it('keeps the two-attempt shape with the retry gated on the first outcome', () => {
+    // Scope to the archive, not the action: an unrelated second artifact
+    // in the build job must not redden the retry contract, and the two
+    // attempts are bound by step name, never by position.
+    const archiveUploads = uploads.filter((s) => s.with?.name === 'e2e-build');
+    assert.equal(
+      archiveUploads.length,
+      2,
+      'the e2e-build archive must be uploaded exactly twice: first attempt plus one bounded retry',
+    );
+    const first = archiveUploads.find(
+      (s) => s.name === 'Upload build artifact',
+    );
+    const retry = archiveUploads.find(
+      (s) => s.name === 'Upload build artifact (retry)',
+    );
+    assert.ok(first, "the build job must have an 'Upload build artifact' step");
+    assert.ok(
+      retry,
+      "the build job must have an 'Upload build artifact (retry)' step",
+    );
+    // The first attempt's failure must not red the job before the retry
+    // runs; the retry carries no continue-on-error, so a double failure
+    // still fails the job and a deterministic failure (missing archive)
+    // stays red through both attempts.
+    assert.equal(first.id, 'upload-build');
+    assert.equal(first['continue-on-error'], true);
+    assert.equal(retry['continue-on-error'], undefined);
+    // A job-level key computes the build conclusion green whatever either
+    // attempt exits, and every leg behind needs: ['build'] then runs against
+    // a missing artifact. isolated-nightly's deliberate job-level key is a
+    // different job — this pins build only.
+    assert.equal(doc.jobs.build['continue-on-error'], undefined);
+    // The whole expression, not a substring: a prepended failure() conjunct
+    // is false once the first attempt's continue-on-error absorbs the stall
+    // (its conclusion is success; only its outcome is failure), so the retry
+    // would never run while a substring pin still reads green.
+    assert.equal(retry.if, "${{ steps.upload-build.outcome == 'failure' }}");
+    // v4+ 409s a same-name upload only against an artifact finalized in
+    // this run attempt — a stall aborts before finalize and reserves
+    // nothing, so overwrite guards the finalize-then-fail window: an
+    // attempt that finalized e2e-build and only then reported failure.
+    assert.equal(retry.with.overwrite, true);
+    // Both attempts publish the same payload under the same name; the
+    // missing-archive guard rides on both so a pack regression fails
+    // fast in either attempt. overwrite is the one intentional asymmetry,
+    // so compare the with: blocks rather than a hand-picked key subset.
+    assert.equal(first.with['if-no-files-found'], 'error');
+    const retryWith = { ...retry.with };
+    delete retryWith.overwrite;
+    assert.deepEqual(
+      retryWith,
+      first.with,
+      'retry must publish the same payload as the first attempt',
+    );
+    assert.equal(
+      retry.uses,
+      first.uses,
+      'both attempts must run the same action pin',
+    );
+    // Pin the handoff, not just the agreement: the deepEqual above only
+    // compares the two upload with: blocks to each other, so a directory
+    // drift moving both together would stay green. The two sides spell
+    // one directory differently — the shell ${RUNNER_TEMP} in the pack
+    // run vs. the ${{ runner.temp }} expression in the upload with: — so
+    // pin each literal separately rather than comparing them as one.
+    const pack = buildSteps.find((s) => s.name === 'Pack build outputs');
+    assert.ok(pack, "the build job must have a 'Pack build outputs' step");
+    const archive = first.with.path.split('/').pop();
+    assert.ok(
+      pack.run.includes('"${RUNNER_TEMP}/' + archive + '"'),
+      'pack step must write the archive the upload publishes',
+    );
+    assert.equal(
+      first.with.path,
+      '${{ runner.temp }}/' + archive,
+      'the upload must publish the exact file the pack step writes',
+    );
+    assert.ok(
+      buildSteps.indexOf(pack) < buildSteps.indexOf(first) &&
+        buildSteps.indexOf(first) < buildSteps.indexOf(retry),
+      'pack must run before the first attempt, which must run before the retry',
+    );
+
+    // An absorbed first attempt leaves the job green, so the main-CI
+    // failure tracker — gated on conclusion == "failure" — never records
+    // the stall the retry recovered from. The announce step keeps it
+    // countable as a warning annotation (the same surface that named run
+    // 34208365262's "Upload progress stalled.") without reddening the job;
+    // after the retry, the implicit success() gate scopes it to the
+    // absorbed case — a double failure reddens the job directly.
+    const announce = buildSteps.find(
+      (s) => s.name === 'Announce absorbed upload failure',
+    );
+    assert.ok(
+      announce,
+      "the build job must have an 'Announce absorbed upload failure' step",
+    );
+    assert.equal(
+      announce.if,
+      "${{ steps.upload-build.outcome == 'failure' }}",
+      'the announce step must be gated on the first attempt outcome, exactly like the retry',
+    );
+    assert.ok(
+      !announce.uses,
+      'the announce step must be a plain run step — an action would carry its own failure modes',
+    );
+    assert.match(
+      announce.run,
+      /::warning::/,
+      'the announce step must emit a warning annotation the check-run annotations API keeps queryable',
+    );
+    assert.doesNotMatch(
+      announce.run,
+      /::error::|exit\s+[1-9]/,
+      'the announce step must not be able to turn the build job red',
+    );
+    assert.ok(
+      buildSteps.indexOf(retry) < buildSteps.indexOf(announce),
+      'the announce step must run after the retry so it fires only for the absorbed failure',
+    );
+    // The archive name above is derived from the upload side, so the
+    // consumer side must be pinned against it too: a rename moving the
+    // pack step and both upload paths together re-derives `archive` and
+    // stays green here while every leg still unpacks the old name. The
+    // legs download into runner.temp/e2e-build/ and unpack from there, so
+    // assert the run's trailing argument, not the upload's full path.
+    const unpacks = Object.values(doc.jobs).flatMap((job) =>
+      (job.steps ?? []).filter((s) => s.name === 'Unpack build artifact'),
+    );
+    // A leg unpacks once what it downloads in two attempts (first try plus
+    // the bounded retry pinned below), so count the consuming legs by
+    // the archive they pull, not by step name: a leg fetching e2e-build
+    // under off-convention step names must still join the count.
+    const archiveLegs = Object.values(doc.jobs).filter((job) =>
+      (job.steps ?? []).some(
+        (s) =>
+          String(s.uses || '').startsWith('actions/download-artifact@') &&
+          s.with?.name === 'e2e-build',
+      ),
+    );
+    assert.equal(unpacks.length, archiveLegs.length);
+    for (const unpack of unpacks) {
+      assert.ok(
+        unpack.run.endsWith('/' + archive + '"'),
+        'a leg unpacks a different archive than the build job uploads',
+      );
+    }
+  });
+
+  it('feeds every download leg a name the workflow actually uploads', () => {
+    // Compare against every name the workflow uploads: a consumed name no
+    // job uploads still fails, while a second, correctly-uploaded artifact
+    // does not. The four known legs' agreement with the first attempt's
+    // name is already pinned in scripts/tests/e2e-workflow.test.js.
+    const consumed = new Set(downloads.map((s) => s.with?.name));
+    const uploaded = new Set(
+      Object.values(doc.jobs).flatMap((job) =>
+        (job.steps ?? [])
+          .filter((s) =>
+            String(s.uses || '').startsWith('actions/upload-artifact@'),
+          )
+          .map((s) => s.with?.name),
+      ),
+    );
+    for (const name of consumed) {
+      assert.ok(
+        uploaded.has(name),
+        `a leg downloads '${name}', which no job uploads`,
+      );
+    }
+    assert.ok(
+      consumed.has('e2e-build'),
+      'no leg downloads the artifact the build job publishes',
+    );
+  });
+});
+
+describe('e2e build artifact download retry (consumer legs)', () => {
+  // Run 35250857883's macOS shard 2/2 died in 'Download build artifact'
+  // with the build job green behind it (#12125): the download crosses the
+  // same runner-to-blobstore network as the #11364 upload stall, but unlike
+  // the upload it carried no retry, so one transient failure reddened a
+  // whole leg. Every consumer leg now mirrors the upload side's one bounded
+  // retry. The semantics live entirely in step properties nothing else
+  // asserts on, and a regression — the retry dropped, its gate reworded,
+  // the attempts drifting apart — is silent until the next transient stall
+  // reds a main run again, so pin the contract per leg.
+  const doc = parse(readFileSync(E2E_WORKFLOW, 'utf8'));
+  // Membership by the behaviour the contract protects — pulling the
+  // e2e-build archive — not by step name: a leg fetching it under
+  // off-convention names must still carry the retry pair below.
+  const consumers = Object.entries(doc.jobs).filter(([, job]) =>
+    (job.steps ?? []).some(
+      (s) =>
+        String(s.uses || '').startsWith('actions/download-artifact@') &&
+        s.with?.name === 'e2e-build',
+    ),
+  );
+
+  it('finds the legs that consume the build artifact', () => {
+    // The pins below are per consumer; an empty match set would green them
+    // vacuously, so fail when the filter stops seeing legs. The four known
+    // legs are pinned by name in scripts/tests/e2e-workflow.test.js; a new
+    // leg downloading e2e-build joins consumers on its own and must then
+    // carry the pair.
+    assert.ok(
+      consumers.length >= 4,
+      'expected the four e2e legs downloading the build artifact',
+    );
+  });
+
+  it('keeps the two-attempt shape per leg, gated on the first outcome', () => {
+    for (const [jobName, job] of consumers) {
+      const steps = job.steps;
+      // Scope to the archive, not the action: an unrelated second artifact
+      // download in a leg must not redden the retry contract, and the two
+      // attempts are bound by step name, never by position.
+      const archiveDownloads = steps.filter(
+        (s) =>
+          String(s.uses || '').startsWith('actions/download-artifact@') &&
+          s.with?.name === 'e2e-build',
+      );
+      assert.equal(
+        archiveDownloads.length,
+        2,
+        `${jobName} must download e2e-build exactly twice: first attempt plus one bounded retry`,
+      );
+      const first = archiveDownloads.find(
+        (s) => s.name === 'Download build artifact',
+      );
+      const retry = archiveDownloads.find(
+        (s) => s.name === 'Download build artifact (retry)',
+      );
+      assert.ok(first, `${jobName} must have a 'Download build artifact' step`);
+      assert.ok(
+        retry,
+        `${jobName} must have a 'Download build artifact (retry)' step`,
+      );
+      // The first attempt's failure must not red the leg before the retry
+      // runs; the retry carries no continue-on-error, so a double failure
+      // still fails the leg and a deterministic failure — the artifact
+      // missing — stays red through both attempts.
+      assert.equal(first.id, 'download-build');
+      assert.equal(first['continue-on-error'], true);
+      // An absorbed stall must not burn the job budget unbounded, so the
+      // first attempt is time-boxed and a hang converts into a retryable
+      // failure. The 2100s coupling is leg-scoped: only e2e-test-linux
+      // records E2E_JOB_START_EPOCH and runs run-e2e-tests.sh, whose
+      // sandbox:none shard retry is budget-gated on the 2100s — that
+      // leg's 60-minute job timeout minus a 25-minute reserve. There the
+      // download sits between 'Record job start epoch' and 'Run E2E
+      // tests', so up to 600s of absorbed stall is charged to the 2100s,
+      // flipping the shard-retry decision only when pre-stall elapsed
+      // already sits in the 1500–2100s window. The other legs have no
+      // shard-retry budget; there the box only bounds how long a stall
+      // can delay the retry.
+      assert.equal(
+        first['timeout-minutes'],
+        10,
+        `${jobName} first download attempt must be time-boxed`,
+      );
+      assert.equal(retry['continue-on-error'], undefined);
+      // A job-level key computes the leg's conclusion green whatever
+      // either attempt exits. isolated-nightly carries one deliberately,
+      // so it is exempt — the fork-gated legs must not grow one.
+      if (jobName !== 'isolated-nightly') {
+        assert.equal(job['continue-on-error'], undefined);
+      }
+      // The whole expression, not a substring: a prepended failure()
+      // conjunct is false once the first attempt's continue-on-error absorbs
+      // the stall (its conclusion is success; only its outcome is failure),
+      // so the retry would never run while a substring pin still reads green.
+      assert.equal(
+        retry.if,
+        "${{ steps.download-build.outcome == 'failure' }}",
+      );
+      // Both attempts pull the same artifact into the same path — unpack
+      // reads the first attempt's path, so a retry downloading elsewhere
+      // leaves the leg red on a recovered download. There is no asymmetry
+      // like the upload's overwrite here: a download reserves nothing.
+      assert.deepEqual(
+        retry.with,
+        first.with,
+        `${jobName} retry must download the same payload to the same path`,
+      );
+      assert.equal(
+        retry.uses,
+        first.uses,
+        `${jobName} attempts must run the same action pin`,
+      );
+      assert.ok(
+        steps.indexOf(first) < steps.indexOf(retry),
+        `${jobName} first attempt must run before the retry`,
+      );
+      // Unpack consumes what the download produced, so it must wait for the
+      // retry: wedged between the attempts it would run on the first
+      // attempt's empty path and fail the leg the retry would have saved.
+      const unpack = steps.find((s) => s.name === 'Unpack build artifact');
+      assert.ok(unpack, `${jobName} must have an 'Unpack build artifact' step`);
+      assert.ok(
+        steps.indexOf(retry) < steps.indexOf(unpack),
+        `${jobName} unpack must run after the retry`,
+      );
+    }
+  });
+
+  it('announces an absorbed first-attempt failure per leg', () => {
+    // A recovered download leaves the leg green, so the main-CI failure
+    // tracker — gated on conclusion == "failure" — never records the stall
+    // the retry absorbed, and the recurrence count goes quiet while the
+    // network class keeps striking. Same remedy as the upload side: a
+    // warning annotation keeps it countable without reddening the leg;
+    // placed after the retry, the implicit success() gate scopes it to the
+    // absorbed case — a double failure reddens the leg directly.
+    for (const [jobName, job] of consumers) {
+      const steps = job.steps;
+      const announce = steps.find(
+        (s) => s.name === 'Announce absorbed download failure',
+      );
+      assert.ok(
+        announce,
+        `${jobName} must have an 'Announce absorbed download failure' step`,
+      );
+      assert.equal(
+        announce.if,
+        "${{ steps.download-build.outcome == 'failure' }}",
+        `${jobName} announce must be gated on the first attempt outcome, exactly like the retry`,
+      );
+      assert.ok(
+        !announce.uses,
+        `${jobName} announce must be a plain run step — an action would carry its own failure modes`,
+      );
+      assert.match(
+        announce.run,
+        /::warning::/,
+        `${jobName} announce must emit a warning annotation the check-run annotations API keeps queryable`,
+      );
+      assert.doesNotMatch(
+        announce.run,
+        /::error::|exit\s+[1-9]/,
+        `${jobName} announce must not be able to turn the leg red`,
+      );
+      const retry = steps.find(
+        (s) => s.name === 'Download build artifact (retry)',
+      );
+      assert.ok(
+        retry,
+        `${jobName} must have a 'Download build artifact (retry)' step`,
+      );
+      const unpack = steps.find((s) => s.name === 'Unpack build artifact');
+      assert.ok(unpack, `${jobName} must have an 'Unpack build artifact' step`);
+      assert.ok(
+        steps.indexOf(retry) < steps.indexOf(announce) &&
+          steps.indexOf(announce) < steps.indexOf(unpack),
+        `${jobName} announce must sit between the retry and unpack: after unpack it inherits the leg's failures through the implicit success() gate and goes quiet on exactly the red legs the watch needs`,
+      );
+    }
   });
 });

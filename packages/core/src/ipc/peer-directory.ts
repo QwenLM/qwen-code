@@ -110,16 +110,28 @@ export async function listMessageablePeers(): Promise<PeerSessionInfo[]> {
     .map(toPeerSessionInfo)
     .filter((peer): peer is PeerSessionInfo => peer !== null);
 
-  const verdicts = await Promise.all(
-    candidates.map((peer) => probePeerSocketVerdict(peer.ipcPath)),
+  // One address per probe, not one record per probe. A process hosting
+  // several sessions advertises the same inbox in every one of their
+  // records, and dialling it once per record would mean a fistful of
+  // simultaneous connections to a single socket on every listing and
+  // every send — from every session on the machine. The answer is a
+  // property of the address, so asking once is also the honest shape.
+  const verdicts = new Map(
+    await Promise.all(
+      [...new Set(candidates.map((peer) => peer.ipcPath))].map(
+        async (ipcPath) =>
+          [ipcPath, await probePeerSocketVerdict(ipcPath)] as const,
+      ),
+    ),
   );
   // Only a definitive `alive` advertises a peer. An `unknown` verdict --
   // local descriptor exhaustion, a permission error, the 250 ms deadline --
   // establishes nothing about the peer, and admitting it here would let a
   // newer, unreachable twin shadow the one that answers in the dedupe
   // below, whose tie-break is `startedAt` alone.
-  const reachable = verdicts.map((verdict) => verdict === 'alive');
-  return dedupeSameNameTwins(candidates.filter((_, index) => reachable[index]));
+  return dedupeSameNameTwins(
+    candidates.filter((peer) => verdicts.get(peer.ipcPath) === 'alive'),
+  );
 }
 
 /**

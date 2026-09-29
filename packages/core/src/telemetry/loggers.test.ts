@@ -28,6 +28,7 @@ import {
   EVENT_API_RESPONSE,
   EVENT_CLI_CONFIG,
   EVENT_FLASH_FALLBACK,
+  EVENT_GOAL_STATE,
   EVENT_TOOL_CALL,
   EVENT_REPEATED_TOOL_FAILURE_GUARD,
   EVENT_USER_PROMPT,
@@ -45,6 +46,9 @@ import {
   EVENT_TOOL_OUTPUT_TRUNCATED,
   EVENT_PROTOCOL_TAG_SANITIZED,
   EVENT_MEMORY_RECALL_DELIVERY,
+  EVENT_MEMORY_SEARCH,
+  EVENT_MEMORY_MIGRATION,
+  EVENT_MEMORY_RECALL_MODE_TRANSITION,
   EVENT_WORKFLOW_RUN,
 } from './constants.js';
 import {
@@ -57,6 +61,7 @@ import {
   logLoopDetected,
   logRepeatedToolFailureGuard,
   logFlashFallback,
+  logGoalState,
   logChatCompression,
   logMalformedJsonResponse,
   logFileOperation,
@@ -73,6 +78,9 @@ import {
   logApiRetry,
   logProtocolTagSanitized,
   logMemoryRecallDelivery,
+  logMemorySearch,
+  logMemoryMigration,
+  logMemoryRecallModeTransition,
   logWorkflowRun,
   normalizeToolCallEvent,
 } from './loggers.js';
@@ -86,6 +94,7 @@ import {
   ApiRequestEvent,
   ApiResponseEvent,
   FlashFallbackEvent,
+  makeGoalStateEvent,
   StartSessionEvent,
   ToolCallEvent,
   UserPromptEvent,
@@ -105,6 +114,9 @@ import {
   ApiRetryEvent,
   ProtocolTagSanitizedEvent,
   MemoryRecallDeliveryEvent,
+  MemorySearchEvent,
+  MemoryMigrationEvent,
+  MemoryRecallModeTransitionEvent,
   LoopDetectedEvent,
   LoopType,
   RepeatedToolFailureGuardEvent,
@@ -281,6 +293,7 @@ describe('loggers', () => {
           strategy: 'model',
           docs_selected: 2,
           latency_ms: 123,
+          router_delivered: false,
         },
       });
       expect(mockLogger.emit.mock.calls[0][0].attributes).toHaveProperty(
@@ -322,6 +335,101 @@ describe('loggers', () => {
           delivery_point: 'tool_result',
           strategy: 'model',
         },
+      );
+    });
+  });
+
+  describe('memory migration telemetry', () => {
+    it('records aggregate memory search telemetry without query content', () => {
+      const config = makeFakeConfig({ sessionId: 'test-session-id' });
+
+      logMemorySearch(
+        config,
+        new MemorySearchEvent({
+          mode: 'search',
+          docs_scanned: 12,
+          results_returned: 3,
+          duration_ms: 45,
+        }),
+      );
+
+      expect(mockLogger.emit).toHaveBeenCalledWith({
+        body: 'Memory search: mode=search. Returned 3/12 docs.',
+        attributes: expect.objectContaining({
+          'session.id': 'test-session-id',
+          'event.name': EVENT_MEMORY_SEARCH,
+          mode: 'search',
+          docs_scanned: 12,
+          results_returned: 3,
+          duration_ms: 45,
+        }),
+      });
+      expect(JSON.stringify(mockLogger.emit.mock.calls[0])).not.toMatch(
+        /query|keyword|content|filePath|relativePath|sourceHash|secret/i,
+      );
+    });
+
+    it('records aggregate migration cost without memory content', () => {
+      const config = makeFakeConfig({ sessionId: 'test-session-id' });
+      logMemoryMigration(
+        config,
+        new MemoryMigrationEvent({
+          scope: 'project',
+          status: 'completed',
+          files_scanned: 12,
+          legacy_files: 3,
+          remaining_legacy_files: 1,
+          batch_files: 3,
+          committed: 2,
+          conflicts: 1,
+          failed: 0,
+          agent_duration_ms: 400,
+          input_tokens: 100,
+          output_tokens: 20,
+          total_tokens: 120,
+          duration_ms: 450,
+        }),
+      );
+
+      expect(mockLogger.emit).toHaveBeenCalledWith({
+        body: 'Memory metadata migration: scope=project. status=completed. Committed 2/3.',
+        attributes: expect.objectContaining({
+          'session.id': 'test-session-id',
+          'event.name': EVENT_MEMORY_MIGRATION,
+          files_scanned: 12,
+          legacy_files: 3,
+          total_tokens: 120,
+        }),
+      });
+      expect(
+        JSON.stringify(mockLogger.emit.mock.calls[0]?.[0].attributes),
+      ).not.toMatch(/keyword|memory-file|sourceHash|relativePath|content/i);
+    });
+
+    it('records recall mode transition outcomes without corpus identifiers', () => {
+      const config = makeFakeConfig({ sessionId: 'test-session-id' });
+      logMemoryRecallModeTransition(
+        config,
+        new MemoryRecallModeTransitionEvent({
+          from_mode: 'legacy',
+          to_mode: 'structured',
+          status: 'committed',
+          duration_ms: 12,
+        }),
+      );
+
+      expect(mockLogger.emit).toHaveBeenCalledWith({
+        body: 'Memory recall mode transition: legacy -> structured. status=committed.',
+        attributes: expect.objectContaining({
+          'event.name': EVENT_MEMORY_RECALL_MODE_TRANSITION,
+          from_mode: 'legacy',
+          to_mode: 'structured',
+          status: 'committed',
+          duration_ms: 12,
+        }),
+      });
+      expect(JSON.stringify(mockLogger.emit.mock.calls[0])).not.toMatch(
+        /revision|hash|path|keyword|content/i,
       );
     });
   });
@@ -1138,6 +1246,72 @@ describe('loggers', () => {
     });
   });
 
+  describe('logGoalState', () => {
+    const mockConfig = {
+      getSessionId: () => 'test-session-id',
+      getUsageStatisticsEnabled: () => true,
+      getTelemetryMetricsIncludeSessionId: () => false,
+    } as unknown as Config;
+
+    beforeEach(() => {
+      vi.spyOn(QwenLogger.prototype, 'logGoalStateEvent');
+      vi.spyOn(metrics, 'recordGoalStateMetrics');
+    });
+
+    it('emits the transition with its figures and records its metrics', () => {
+      const event = makeGoalStateEvent({
+        cause: 'usage_limited',
+        goal_id: 'g-1',
+        revision: 2,
+        status: 'usage_limited',
+        limit_kind: 'turn_budget',
+        turn_count: 20,
+        tokens_used: 1_234,
+      });
+
+      logGoalState(mockConfig, event);
+
+      expect(mockLogger.emit).toHaveBeenCalledWith({
+        body: 'Goal usage_limited.',
+        attributes: {
+          'session.id': 'test-session-id',
+          'event.name': EVENT_GOAL_STATE,
+          'event.timestamp': '2025-01-01T00:00:00.000Z',
+          cause: 'usage_limited',
+          goal_id: 'g-1',
+          revision: 2,
+          status: 'usage_limited',
+          limit_kind: 'turn_budget',
+          turn_count: 20,
+          tokens_used: 1_234,
+        },
+      });
+      expect(QwenLogger.prototype.logGoalStateEvent).toHaveBeenCalledWith(
+        event,
+      );
+      expect(metrics.recordGoalStateMetrics).toHaveBeenCalledWith(
+        mockConfig,
+        event,
+      );
+    });
+
+    it('still reaches the analytics sink when the OpenTelemetry SDK is off', () => {
+      vi.spyOn(sdk, 'isTelemetrySdkInitialized').mockReturnValue(false);
+      const event = makeGoalStateEvent({
+        cause: 'create',
+        goal_id: 'g-1',
+        revision: 1,
+      });
+
+      logGoalState(mockConfig, event);
+
+      expect(QwenLogger.prototype.logGoalStateEvent).toHaveBeenCalledWith(
+        event,
+      );
+      expect(mockLogger.emit).not.toHaveBeenCalled();
+    });
+  });
+
   describe('logRipgrepFallback', () => {
     const mockConfig = {
       getSessionId: () => 'test-session-id',
@@ -1414,6 +1588,72 @@ describe('loggers', () => {
       expect(event.function_name).toBe('   ');
       expect(event.success).toBe(true);
       expect(event.error_type).toBe(' ');
+    });
+
+    it('records when the call started, as the scheduler measured it', () => {
+      const recordUiTelemetryEvent = vi.fn();
+      const configWithRecording = {
+        ...mockConfig,
+        getChatRecordingService: () => ({ recordUiTelemetryEvent }),
+      } as unknown as Config;
+      const call: CompletedToolCall = {
+        status: 'success',
+        request: {
+          name: 'glob',
+          args: {},
+          callId: 'call-started',
+          isClientInitiated: false,
+          prompt_id: 'prompt-started',
+        },
+        response: {
+          callId: 'call-started',
+          responseParts: [],
+          resultDisplay: undefined,
+          error: undefined,
+          errorType: undefined,
+          executionStatus: 'success',
+        },
+        tool: new EditTool(mockConfig),
+        invocation: {} as AnyToolInvocation,
+        startTime: 1_760_000_000_000,
+        durationMs: 16,
+      };
+
+      logToolCall(configWithRecording, new ToolCallEvent(call));
+
+      const started = expect.objectContaining({
+        started_at_ms: 1_760_000_000_000,
+        duration_ms: 16,
+      });
+      expect(recordUiTelemetryEvent).toHaveBeenCalledWith(started);
+      expect(mockUiEvent.addEvent).toHaveBeenCalledWith(
+        started,
+        'test-session-id',
+      );
+    });
+
+    it('records no start for a call that never started', () => {
+      const call: CompletedToolCall = {
+        status: 'cancelled',
+        request: {
+          name: 'glob',
+          args: {},
+          callId: 'call-unstarted',
+          isClientInitiated: false,
+          prompt_id: 'prompt-unstarted',
+        },
+        response: {
+          callId: 'call-unstarted',
+          responseParts: [],
+          resultDisplay: undefined,
+          error: undefined,
+          errorType: undefined,
+          executionStatus: 'not_started',
+        },
+        durationMs: 0,
+      };
+
+      expect(new ToolCallEvent(call).started_at_ms).toBeUndefined();
     });
 
     it('clears call errors when cancellation is the final outcome', () => {

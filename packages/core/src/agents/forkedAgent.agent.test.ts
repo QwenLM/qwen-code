@@ -124,6 +124,36 @@ describe('runForkedAgent (AgentHeadless path) bound-tool isolation', () => {
     return { captured, restore: () => spy.mockRestore() };
   }
 
+  it('rejects a tool-capable fork when the operator requires container execution', async () => {
+    const parent = new ConfigImpl({
+      ...baseParams,
+      agentExecutionBackend: 'container',
+    });
+    const parentRegistry = await parent.createToolRegistry(undefined, {
+      skipDiscovery: true,
+    });
+    const registrySpy = vi
+      .spyOn(parent, 'getToolRegistry')
+      .mockReturnValue(parentRegistry);
+    const executeSpy = vi.spyOn(AgentHeadless.prototype, 'execute');
+
+    try {
+      await expect(
+        runForkedAgent({
+          name: 'test-fork',
+          systemPrompt: 'You are a test fork.',
+          taskPrompt: 'do the task',
+          config: parent,
+        }),
+      ).rejects.toThrow('has no execution environment');
+      expect(executeSpy).not.toHaveBeenCalled();
+    } finally {
+      executeSpy.mockRestore();
+      registrySpy.mockRestore();
+      await parentRegistry.stop();
+    }
+  });
+
   it('does not treat empty extraHistory as caller-owned initial messages by default', async () => {
     const parent = new ConfigImpl(baseParams);
     const parentRegistry = await parent.createToolRegistry(undefined, {
@@ -1308,6 +1338,54 @@ describe('runForkedAgent (AgentHeadless path) bound-tool isolation', () => {
 
     await new Promise((resolve) => setImmediate(resolve));
     expect(stopSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('forwards FINISH token totals into the forked-agent result', async () => {
+    const parent = new ConfigImpl(baseParams);
+    const parentRegistry = await parent.createToolRegistry(undefined, {
+      skipDiscovery: true,
+    });
+    vi.spyOn(parent, 'getToolRegistry').mockReturnValue(parentRegistry);
+    const createSpy = vi.spyOn(AgentHeadless, 'create').mockImplementation(
+      async (
+        _name,
+        _config,
+        _promptConfig,
+        _modelConfig,
+        _runConfig,
+        _toolConfig,
+        emitter?: AgentEventEmitter,
+      ): Promise<AgentHeadless> =>
+        ({
+          execute: vi.fn().mockImplementation(async () => {
+            emitter!.emit(AgentEventType.FINISH, {
+              subagentId: 'test-fork',
+              terminateReason: AgentTerminateMode.GOAL,
+              timestamp: Date.now(),
+              inputTokens: 100,
+              outputTokens: 20,
+              totalTokens: 120,
+            });
+          }),
+          getTerminateMode: vi.fn().mockReturnValue(AgentTerminateMode.GOAL),
+          getFinalText: vi.fn().mockReturnValue('done'),
+        }) as unknown as AgentHeadless,
+    );
+
+    try {
+      await expect(
+        runForkedAgent({
+          name: 'test-fork',
+          systemPrompt: 'You are a test fork.',
+          taskPrompt: 'do the task',
+          config: parent,
+        }),
+      ).resolves.toMatchObject({
+        usage: { inputTokens: 100, outputTokens: 20, totalTokens: 120 },
+      });
+    } finally {
+      createSpy.mockRestore();
+    }
   });
 
   it('uses a runtime content-generator view for cross-auth fast models', async () => {

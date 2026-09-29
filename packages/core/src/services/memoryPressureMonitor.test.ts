@@ -142,7 +142,11 @@ function createMockConfig(
       getChat?: () => {
         getHistoryShallow?: () => unknown[];
         getHistory?: () => unknown[];
-        setHistory?: (h: unknown[]) => void;
+        setHistory?: (
+          h: unknown[],
+          completedToolCallIds?: readonly string[],
+        ) => void;
+        getCompletedToolCallIds?: () => readonly string[] | undefined;
       };
     } | null;
     clearContextOnIdle?: {
@@ -157,6 +161,7 @@ function createMockConfig(
       ? {
           isInitialized: () => true,
           getChat: () => ({
+            getCompletedToolCallIds: () => undefined,
             getHistoryShallow: () => [],
             getHistory: () => [],
             setHistory: vi.fn(),
@@ -169,10 +174,14 @@ function createMockConfig(
     getFileReadCache: () =>
       ({
         clear: vi.fn(),
+        dropEntries: vi.fn(),
         evictNotAccessedSince: vi.fn().mockReturnValue(0),
         ...overrides.fileReadCache,
       }) as unknown as FileReadCache,
     getLlmClient: () => client as never,
+    getMemoryManager: () => ({
+      markMemoryBodiesEvictedFromHistory: vi.fn(),
+    }),
     getClearContextOnIdle: () => ({
       clearContextMinutes: 60,
       toolResultsNumToKeep: 5,
@@ -654,12 +663,14 @@ describe('MemoryPressureMonitor', () => {
       expect(evictSpy).toHaveBeenCalledWith(30);
     });
 
-    it('calls clear on critical pressure', async () => {
+    it('drops local entries without clearing remote reads on critical pressure', async () => {
       const clearSpy = vi.fn();
+      const clearHistory = vi.fn();
       const monitor = new MemoryPressureMonitor(
         createMockConfig({
           fileReadCache: {
-            clear: clearSpy,
+            clear: clearHistory,
+            dropEntries: clearSpy,
             evictNotAccessedSince: vi.fn(),
           },
         }),
@@ -670,6 +681,7 @@ describe('MemoryPressureMonitor', () => {
       monitor.performCheck();
       await drainCleanupMeasurement();
       expect(clearSpy).toHaveBeenCalled();
+      expect(clearHistory).not.toHaveBeenCalled();
     });
 
     it('runs escalated critical cleanup after lower cleanup finishes', async () => {
@@ -678,7 +690,7 @@ describe('MemoryPressureMonitor', () => {
       const monitor = new MemoryPressureMonitor(
         createMockConfig({
           fileReadCache: {
-            clear: clearSpy,
+            dropEntries: clearSpy,
             evictNotAccessedSince: evictSpy,
           },
         }),
@@ -703,7 +715,7 @@ describe('MemoryPressureMonitor', () => {
       const monitor = new MemoryPressureMonitor(
         createMockConfig({
           fileReadCache: {
-            clear: clearSpy,
+            dropEntries: clearSpy,
             evictNotAccessedSince: evictSpy,
           },
         }),
@@ -731,7 +743,7 @@ describe('MemoryPressureMonitor', () => {
       const monitor = new MemoryPressureMonitor(
         createMockConfig({
           fileReadCache: {
-            clear: clearSpy,
+            dropEntries: clearSpy,
             evictNotAccessedSince: evictSpy,
           },
         }),
@@ -881,7 +893,7 @@ describe('MemoryPressureMonitor', () => {
       const monitor = new MemoryPressureMonitor(
         createMockConfig({
           fileReadCache: {
-            clear: clearSpy,
+            dropEntries: clearSpy,
             evictNotAccessedSince: vi.fn(),
           },
         }),
@@ -928,7 +940,7 @@ describe('MemoryPressureMonitor', () => {
       const monitor = new MemoryPressureMonitor(
         createMockConfig({
           fileReadCache: {
-            clear: clearSpy,
+            dropEntries: clearSpy,
             evictNotAccessedSince: evictSpy,
           },
         }),
@@ -989,6 +1001,7 @@ describe('MemoryPressureMonitor', () => {
         createMockConfig({
           fileReadCache: {
             clear: vi.fn(),
+            dropEntries: vi.fn(),
             evictNotAccessedSince: evictSpy,
           },
         }),
@@ -1028,7 +1041,7 @@ describe('MemoryPressureMonitor', () => {
       const monitor = new MemoryPressureMonitor(
         createMockConfig({
           fileReadCache: {
-            clear: clearSpy,
+            dropEntries: clearSpy,
             evictNotAccessedSince: vi.fn(),
           },
         }),
@@ -1057,6 +1070,7 @@ describe('MemoryPressureMonitor', () => {
         createMockConfig({
           fileReadCache: {
             clear: vi.fn(),
+            dropEntries: vi.fn(),
             evictNotAccessedSince: vi.fn(),
           },
         }),
@@ -1251,6 +1265,7 @@ describe('MemoryPressureMonitor', () => {
           llmClient: {
             isInitialized: () => false,
             getChat: () => ({
+              getCompletedToolCallIds: () => undefined,
               getHistoryShallow: () => [{ role: 'user' }],
               getHistory: () => [{ role: 'user' }],
               setHistory,
@@ -1275,6 +1290,7 @@ describe('MemoryPressureMonitor', () => {
           llmClient: {
             isInitialized: () => true,
             getChat: () => ({
+              getCompletedToolCallIds: () => undefined,
               getHistoryShallow: () => originalHistory,
               getHistory: () => [...originalHistory],
               setHistory,
@@ -1299,6 +1315,7 @@ describe('MemoryPressureMonitor', () => {
           llmClient: {
             isInitialized: () => true,
             getChat: () => ({
+              getCompletedToolCallIds: () => undefined,
               getHistoryShallow: () => [],
               getHistory: () => [],
               setHistory,
@@ -1390,11 +1407,30 @@ describe('MemoryPressureMonitor', () => {
           },
         );
       }
+      toolHistory.push(
+        {
+          role: 'model',
+          parts: [{ functionCall: { id: 'goal-end', name: 'update_goal' } }],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'goal-end',
+                name: 'update_goal',
+                response: {},
+              },
+            },
+          ],
+        },
+      );
       const monitor = new MemoryPressureMonitor(
         createMockConfig({
           llmClient: {
             isInitialized: () => true,
             getChat: () => ({
+              getCompletedToolCallIds: () => ['call_1', 'goal-end'],
               getHistoryShallow: () => toolHistory,
               setHistory,
             }),
@@ -1418,6 +1454,10 @@ describe('MemoryPressureMonitor', () => {
       expect(setHistory).toHaveBeenCalled();
       expect(clearCache).toHaveBeenCalled();
       const compacted = setHistory.mock.calls[0][0] as Content[];
+      expect(setHistory.mock.calls[0][1]).toEqual(['call_1', 'goal-end']);
+      expect(compacted.at(-1)?.parts?.[0]?.functionResponse?.id).toBe(
+        'goal-end',
+      );
       // microcompactHistory blanks old tool responses with a cleared message
       // rather than removing entries — verify some were blanked.
       const blankedResponses = compacted.filter((entry) =>
@@ -1428,12 +1468,160 @@ describe('MemoryPressureMonitor', () => {
         ),
       );
       expect(blankedResponses.length).toBeGreaterThan(0);
+      for (const entry of blankedResponses) {
+        const index = compacted.indexOf(entry);
+        expect(entry).not.toBe(toolHistory[index]);
+        expect(entry.parts?.[0]?.functionResponse?.id).toBe(
+          toolHistory[index].parts?.[0]?.functionResponse?.id,
+        );
+      }
+      expect(
+        blankedResponses
+          .flatMap((entry) => entry.parts ?? [])
+          .map((part) => part.functionResponse?.id),
+      ).toContain('call_1');
       const memoryResult = compacted
         .flatMap((entry) => entry.parts ?? [])
         .find((part) => part.functionResponse?.id === 'call_0');
       expect(memoryResult?.functionResponse?.response?.['output']).toBe(
         'content of f0',
       );
+    });
+
+    it('forwards evicted search_memory bodies to the memory manager', async () => {
+      const markMemoryBodiesEvictedFromHistory = vi.fn();
+      const toolHistory: Content[] = [];
+      for (let index = 0; index < 7; index += 1) {
+        const callId = `memory_${index}`;
+        toolHistory.push(
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: callId,
+                  name: 'search_memory',
+                  args: { mode: 'fetch', refs: [`project:${index}.md`] },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: callId,
+                  name: 'search_memory',
+                  response: {
+                    output: JSON.stringify({
+                      mode: 'fetch',
+                      results: [
+                        {
+                          ref: `project:${index}.md`,
+                          version: index + 1,
+                          content: `memory body ${index}`,
+                          range: { start: 0, end: 13, total: 13 },
+                        },
+                      ],
+                    }),
+                  },
+                },
+              },
+            ],
+          },
+        );
+      }
+      const config = createMockConfig({
+        llmClient: {
+          isInitialized: () => true,
+          getChat: () => ({
+            getHistoryShallow: () => toolHistory,
+            setHistory: vi.fn(),
+            getCompletedToolCallIds: () => [],
+          }),
+        },
+      });
+      vi.spyOn(config, 'getMemoryManager').mockReturnValue({
+        markMemoryBodiesEvictedFromHistory,
+      } as unknown as ReturnType<Config['getMemoryManager']>);
+      const monitor = new MemoryPressureMonitor(config, {
+        ...DEFAULT_PRESSURE_CONFIG,
+        cleanupCooldownMs: 0,
+      });
+
+      setMemUsage(11 * 1024 * 1024 * 1024);
+      monitor.performCheck();
+      await drainCleanupMeasurement();
+
+      expect(markMemoryBodiesEvictedFromHistory).toHaveBeenCalledWith([
+        { memoryRef: 'project:0.md', mtimeMs: 1 },
+        { memoryRef: 'project:1.md', mtimeMs: 2 },
+      ]);
+    });
+
+    it('falls back to the blanket wipe when an evicted memory body is unresolved', async () => {
+      const markMemoryBodiesEvictedFromHistory = vi.fn();
+      const markAllMemoryBodiesEvictedFromHistory = vi.fn();
+      const toolHistory: Content[] = [];
+      for (let index = 0; index < 7; index += 1) {
+        const callId = `memory_${index}`;
+        toolHistory.push(
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: callId,
+                  name: 'search_memory',
+                  args: { mode: 'fetch', refs: [`project:${index}.md`] },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: callId,
+                  name: 'search_memory',
+                  response: {
+                    // Unparseable output (e.g. scheduler-truncated): the body
+                    // refs cannot be recovered, so the eviction is unresolved.
+                    output: '{"mode":"fetch","results":[{"ref":"project:0.md"',
+                  },
+                },
+              },
+            ],
+          },
+        );
+      }
+      const config = createMockConfig({
+        llmClient: {
+          isInitialized: () => true,
+          getChat: () => ({
+            getHistoryShallow: () => toolHistory,
+            setHistory: vi.fn(),
+            getCompletedToolCallIds: () => [],
+          }),
+        },
+      });
+      vi.spyOn(config, 'getMemoryManager').mockReturnValue({
+        markMemoryBodiesEvictedFromHistory,
+        markAllMemoryBodiesEvictedFromHistory,
+      } as unknown as ReturnType<Config['getMemoryManager']>);
+      const monitor = new MemoryPressureMonitor(config, {
+        ...DEFAULT_PRESSURE_CONFIG,
+        cleanupCooldownMs: 0,
+      });
+
+      setMemUsage(11 * 1024 * 1024 * 1024);
+      monitor.performCheck();
+      await drainCleanupMeasurement();
+
+      expect(markAllMemoryBodiesEvictedFromHistory).toHaveBeenCalledTimes(1);
+      expect(markMemoryBodiesEvictedFromHistory).not.toHaveBeenCalled();
     });
 
     it('overrides positive toolResultsThresholdMinutes to 0', async () => {
@@ -1472,12 +1660,14 @@ describe('MemoryPressureMonitor', () => {
           llmClient: {
             isInitialized: () => true,
             getChat: () => ({
+              getCompletedToolCallIds: () => undefined,
               getHistoryShallow: () => toolHistory,
               setHistory,
             }),
           },
           fileReadCache: {
             clear: vi.fn(),
+            dropEntries: vi.fn(),
             evictNotAccessedSince: vi.fn().mockReturnValue(0),
           },
           clearContextOnIdle: {
@@ -1532,12 +1722,14 @@ describe('MemoryPressureMonitor', () => {
           llmClient: {
             isInitialized: () => true,
             getChat: () => ({
+              getCompletedToolCallIds: () => undefined,
               getHistoryShallow: () => toolHistory,
               setHistory,
             }),
           },
           fileReadCache: {
             clear: vi.fn(),
+            dropEntries: vi.fn(),
             evictNotAccessedSince: vi.fn().mockReturnValue(0),
           },
           clearContextOnIdle: {
@@ -1592,12 +1784,14 @@ describe('MemoryPressureMonitor', () => {
           llmClient: {
             isInitialized: () => true,
             getChat: () => ({
+              getCompletedToolCallIds: () => undefined,
               getHistoryShallow: () => toolHistory,
               setHistory,
             }),
           },
           fileReadCache: {
             clear: vi.fn(),
+            dropEntries: vi.fn(),
             evictNotAccessedSince: vi.fn().mockReturnValue(0),
           },
           clearContextOnIdle: {
@@ -1689,6 +1883,7 @@ describe('MemoryPressureMonitor', () => {
         createMockConfig({
           fileReadCache: {
             clear: vi.fn(),
+            dropEntries: vi.fn(),
             evictNotAccessedSince: vi.fn(),
           },
         }),
@@ -1725,6 +1920,7 @@ describe('MemoryPressureMonitor', () => {
         createMockConfig({
           fileReadCache: {
             clear: vi.fn(),
+            dropEntries: vi.fn(),
             evictNotAccessedSince: vi.fn(),
           },
         }),
@@ -1766,6 +1962,7 @@ describe('MemoryPressureMonitor', () => {
         createMockConfig({
           fileReadCache: {
             clear: vi.fn(),
+            dropEntries: vi.fn(),
             evictNotAccessedSince: vi.fn(),
           },
         }),

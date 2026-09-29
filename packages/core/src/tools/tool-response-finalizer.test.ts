@@ -76,6 +76,33 @@ describe('tool response finalization', () => {
     }));
   });
 
+  it('fits exec output to a batch budget without persisting known-empty artifacts', async () => {
+    const result = await finalizeToolResponses(config(1000), [
+      {
+        ...entry(
+          'exec-inline',
+          [
+            {
+              functionResponse: {
+                id: 'exec-inline',
+                name: 'exec',
+                response: { output: 'x'.repeat(32_000) },
+              },
+            },
+          ],
+          [],
+        ),
+        toolName: 'exec',
+      },
+    ]);
+    expect(persist).not.toHaveBeenCalled();
+    expect(result[0].persistedOutputFiles).toEqual([]);
+    expect(toolResponseTextLength(result[0].responseParts)).toBeLessThanOrEqual(
+      1000,
+    );
+    expect(JSON.stringify(result[0].responseParts)).not.toContain('Persisted');
+  });
+
   it('leaves a batch within budget unchanged', async () => {
     const entries = [
       entry('small', [
@@ -693,6 +720,69 @@ describe('tool response finalization', () => {
       finalizeToolResponses(config(Number.POSITIVE_INFINITY), entries),
     ).resolves.toBe(entries);
     expect(persist).not.toHaveBeenCalled();
+  });
+
+  it('does not slice structured search_memory JSON', async () => {
+    const output = JSON.stringify({ content: '\\"'.repeat(20_000) });
+    const entries: ToolResponseBudgetEntry[] = [
+      {
+        callId: 'memory-search',
+        toolName: ToolNames.SEARCH_MEMORY,
+        responseParts: [
+          {
+            functionResponse: {
+              id: 'memory-search',
+              name: ToolNames.SEARCH_MEMORY,
+              response: { output },
+            },
+          },
+        ],
+      },
+    ];
+
+    const result = await finalizeToolResponses(config(100), entries);
+
+    const retained =
+      result[0]?.responseParts[0]?.functionResponse?.response?.['output'];
+    expect(retained).toBe(output);
+    expect(() => JSON.parse(String(retained))).not.toThrow();
+    expect(persist).not.toHaveBeenCalled();
+  });
+
+  it('keeps search_memory JSON intact inside a send-boundary batch', () => {
+    const output = JSON.stringify({ content: 'memory body' });
+    const entries: ToolResponseBudgetEntry[] = [
+      {
+        callId: 'send-boundary',
+        toolName: 'tool-response-batch',
+        responseParts: [
+          {
+            functionResponse: {
+              id: 'memory-search',
+              name: ToolNames.SEARCH_MEMORY,
+              response: { output },
+            },
+          },
+          {
+            functionResponse: {
+              id: 'shell',
+              name: 'shell',
+              response: { output: 'x'.repeat(1_000) },
+            },
+          },
+        ],
+      },
+    ];
+
+    const result = enforceFunctionResponseBudget(entries, 100);
+    const retained =
+      result[0]?.responseParts[0]?.functionResponse?.response?.['output'];
+
+    expect(retained).toBe(output);
+    expect(() => JSON.parse(String(retained))).not.toThrow();
+    expect(
+      result[0]?.responseParts[1]?.functionResponse?.response?.['output'],
+    ).not.toBe('x'.repeat(1_000));
   });
 
   it('does not split UTF-16 surrogate pairs', () => {

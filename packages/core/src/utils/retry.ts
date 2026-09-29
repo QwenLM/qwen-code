@@ -13,10 +13,13 @@ import {
 } from './quotaErrorDetection.js';
 import { createDebugLogger } from './debugLogger.js';
 import { getErrorStatus } from './errors.js';
-import { isRateLimitError } from './rateLimit.js';
 import { getRetryAfterDelayMs, getRetryDelayMs } from './retryPolicy.js';
-import { classifyRetryError } from './retryErrorClassification.js';
+import {
+  classifyRetryError,
+  isRetryableUpstreamError,
+} from './retryErrorClassification.js';
 import { retryContext } from './retryContext.js';
+import { ResponsesHttpError } from './responses-http-error.js';
 
 const debugLogger = createDebugLogger('RETRY');
 
@@ -101,7 +104,9 @@ export const DEFAULT_RETRY_OPTIONS: RetryOptions = {
 
 /**
  * Default predicate function to determine if a retry should be attempted.
- * Retries on 429 (Too Many Requests) and 5xx server errors.
+ * Retries on 5xx server errors, on provider rate-limit codes, and on anything
+ * else the classifier calls retryable — transport failures and status-less
+ * upstream error bodies, which no HTTP status can decide.
  * @param error The error object.
  * @returns True if the error is a transient error, false otherwise.
  */
@@ -109,20 +114,20 @@ function defaultShouldRetry(
   error: Error | unknown,
   extraRetryErrorCodes?: readonly number[],
 ): boolean {
+  if (error instanceof ResponsesHttpError) {
+    return error.shouldRetry(extraRetryErrorCodes);
+  }
   const status = getErrorStatus(error);
-  // isRateLimitError already covers HTTP 429 (and 503) via RATE_LIMIT_ERROR_CODES,
-  // so an explicit `status === 429` check here would be redundant.
-  if (
-    isRateLimitError(error, extraRetryErrorCodes) ||
-    (status !== undefined && status >= 500 && status < 600)
-  ) {
+  if (status !== undefined && status >= 500 && status < 600) {
     return true;
   }
-  // Transport errors (ECONNRESET, ETIMEDOUT, etc.) carry no HTTP status and
-  // would otherwise fall through every predicate above.
-  return (
-    classifyRetryError(error, { extraRetryErrorCodes }).kind === 'transport'
-  );
+  // HTTP 429/503 and the provider rate-limit codes reach the retry through the
+  // shared verdict, whose classification already returns 'retryable' for them;
+  // the verdict's separate rate-limit term matters only where a higher branch
+  // classified the error fail-fast, and its doc names that case. Sharing the
+  // verdict with LlmChat's inline stream predicate is what keeps a change to
+  // the status-less policy from landing on one path and not the other.
+  return isRetryableUpstreamError(error, extraRetryErrorCodes);
 }
 
 /**
@@ -335,13 +340,15 @@ export async function retryWithBackoff<T>(
     } catch (error) {
       const errorStatus = getErrorStatus(error);
 
-      // Classification drives logging plus one control decision: a 'fail-fast'
+      // Classification drives logging plus three control decisions in this
+      // function: an 'abort' kind rethrows immediately below; a 'fail-fast'
       // verdict keeps a permanent error out of the unbounded persistent loop
-      // (see shouldPersist below). Normal retry control still follows
-      // shouldRetryOnError and the persistent policy. Computed before the Qwen
-      // quota fast-fail so the original error (status, request id, provider
-      // body) is always classified and logged, even when we replace it with a
-      // guidance message.
+      // (see shouldPersist below); and a 'retryable' verdict decides the retry
+      // itself wherever defaultShouldRetry is the operative shouldRetryOnError
+      // — which it is unless the caller supplied its own. Computed before the
+      // Qwen quota fast-fail so the original error (status, request id,
+      // provider body) is always classified and logged, even when we replace it
+      // with a guidance message.
       const retryDiagnostics = classifyRetryError(error, {
         authType,
         extraRetryErrorCodes,
@@ -425,9 +432,11 @@ export async function retryWithBackoff<T>(
       if (shouldPersist) {
         persistentAttempt++;
 
-        const retryAfterMs = hasRetryAfterStatus(errorStatus)
-          ? getRetryAfterDelayMs(error)
-          : null;
+        const retryAfterMs =
+          hasRetryAfterStatus(errorStatus) ||
+          error instanceof ResponsesHttpError
+            ? getRetryAfterDelayMs(error)
+            : null;
 
         if (retryAfterMs !== null && retryAfterMs > 0) {
           // Retry-After is a server-specified wait — respect it, only cap at
@@ -488,9 +497,11 @@ export async function retryWithBackoff<T>(
         }
       } else {
         // Normal retry path.
-        const retryAfterMs = hasRetryAfterStatus(errorStatus)
-          ? getRetryAfterDelayMs(error)
-          : null;
+        const retryAfterMs =
+          hasRetryAfterStatus(errorStatus) ||
+          error instanceof ResponsesHttpError
+            ? getRetryAfterDelayMs(error)
+            : null;
 
         let actualDelayMs: number;
         if (retryAfterMs !== null && retryAfterMs > 0) {

@@ -273,6 +273,30 @@ describe('permissionUtils', () => {
     });
   });
 
+  it('forwards the complete plain-text Goal approval prompt', () => {
+    const prompt = 'Replace the paused Goal?\n\nOutcome: fix **all** tests.';
+    expect(
+      buildPermissionRequestContent({
+        type: 'info',
+        title: 'Set this as the session Goal?',
+        prompt,
+        renderPromptAsPlainText: true,
+        onConfirm: async () => undefined,
+      }),
+    ).toEqual([{ type: 'content', content: { type: 'text', text: prompt } }]);
+  });
+
+  it('preserves the existing content contract for other info approvals', () => {
+    expect(
+      buildPermissionRequestContent({
+        type: 'info',
+        title: 'Confirm',
+        prompt: 'Existing informational prompt',
+        onConfirm: async () => undefined,
+      }),
+    ).toEqual([]);
+  });
+
   it('places warnings before edit diff content', () => {
     const content = buildPermissionRequestContent({
       type: 'edit',

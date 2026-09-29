@@ -21,7 +21,8 @@ import {
 /**
  * Ceiling on how long {@link MessageDisplayDispatcher.finish} waits for the
  * final payload's delivery to complete before letting the turn's teardown
- * proceed anyway. Well short of `DEFAULT_HOOK_TIMEOUT` (60s, hookRunner.ts)
+ * proceed anyway. Well short of the 60s default command hook timeout
+ * (`DEFAULT_COMMAND_HOOK_TIMEOUT_SECONDS` in hooks/hook-timeout.ts)
  * because a slow or hung MessageDisplay hook shouldn't be able to freeze
  * `qwen -p` or an ACP stream loop's `finally` for anywhere near that long.
  * The budget is shared across finish() calls (client.ts calls it from an

@@ -127,20 +127,65 @@ describe('node_repl MCP server', () => {
     const { client, close } = await connected();
     try {
       expect(client.getInstructions()).toBe(NODE_REPL_INSTRUCTIONS);
-      expect(NODE_REPL_INSTRUCTIONS.length).toBeLessThan(2048);
+      expect(NODE_REPL_INSTRUCTIONS.length).toBeLessThan(256);
       expect(NODE_REPL_INSTRUCTIONS).not.toMatch(
         /Computer Use|cua-sdk|RecreationBench/,
       );
-      expect(NODE_REPL_INSTRUCTIONS).toContain('globalThis');
-      expect(NODE_REPL_INSTRUCTIONS).toContain('node_repl_cancel');
-      expect(NODE_REPL_INSTRUCTIONS).toContain('nodeRepl.signal');
-      expect(NODE_REPL_INSTRUCTIONS).toContain(
+      const { tools } = await client.listTools();
+      const description = tools.find(
+        (tool) => tool.name === 'node_repl',
+      )?.description;
+      expect(description).toContain('globalThis');
+      expect(description).toContain('node_repl_cancel');
+      expect(description).toContain('nodeRepl.signal');
+      expect(description).toContain('do not commit');
+      expect(description).toContain('cancellation does not roll back effects');
+      expect(description).toContain(
         'Runtime errors retain completed statement state',
       );
     } finally {
       await close();
     }
   });
+
+  it('reports a stuck cell timeout and allows a fresh cell', async () => {
+    const { client, close } = await connected();
+    try {
+      await client.callTool({
+        name: 'node_repl',
+        arguments: { code: 'const beforeHang = 42;' },
+      });
+      const running = await client.callTool({
+        name: 'node_repl',
+        arguments: {
+          code: 'await nodeRepl.signal.waitUntil(new Promise(() => {}));',
+          timeout_ms: 100,
+          yield_time_ms: 10,
+        },
+      });
+      const match = textOf(running).match(
+        /cell ([0-9a-f]{8}-[0-9a-f-]{27}) is still running/i,
+      );
+      expect(match?.[1]).toBeTruthy();
+      const terminal = await client.callTool({
+        name: 'node_repl_wait',
+        arguments: { cell_id: match![1], yield_time_ms: 7_000 },
+      });
+      expect(terminal.isError).toBe(true);
+      expect(textOf(terminal)).toContain('[node_repl timeout]');
+      expect(textOf(terminal)).toContain('bindings were lost');
+      expect(textOf(terminal)).toContain('verify external state');
+
+      const recovered = await client.callTool({
+        name: 'node_repl',
+        arguments: { code: 'nodeRepl.write(typeof beforeHang);' },
+      });
+      expect(recovered.isError).not.toBe(true);
+      expect(textOf(recovered)).toBe('undefined');
+    } finally {
+      await close();
+    }
+  }, 15_000);
 
   it('yields, cancels, and retains the persistent kernel state', async () => {
     const { client, close } = await connected();

@@ -18,6 +18,10 @@ import { LoggingContentGenerator } from './index.js';
 import { OpenAIContentConverter } from '../openaiContentGenerator/converter.js';
 import { openaiRequestCaptureContext } from '../openaiContentGenerator/requestCaptureContext.js';
 import {
+  convertResponsesEventToGemini,
+  ResponsesStreamState,
+} from '../openaiResponsesContentGenerator/responses-converter.js';
+import {
   logApiRequest,
   logApiResponse,
   logApiError,
@@ -323,6 +327,8 @@ const createConfig = (overrides: Record<string, unknown> = {}): Config => {
     getWorkingDir: () => process.cwd(),
     getTelemetryIncludeSensitiveSpanAttributes: () =>
       Boolean(configContent['includeSensitiveSpanAttributes']),
+    getTelemetryLogPromptsEnabled: () =>
+      Boolean(configContent['logPrompts'] ?? true),
     getTelemetrySensitiveSpanAttributeMaxLength: () =>
       (configContent['sensitiveSpanAttributeMaxLength'] as number) ??
       1024 * 1024,
@@ -838,6 +844,156 @@ describe('LoggingContentGenerator', () => {
       choices: [],
     });
     expect(openaiError).toBeUndefined();
+  });
+
+  it('omits request_text and response_text from API telemetry when logPrompts is false', async () => {
+    const wrapped = createWrappedGenerator(
+      vi
+        .fn()
+        .mockResolvedValue(
+          createResponse('resp-noprompts', 'test-model', [
+            { text: 'SENSITIVE_RESPONSE_MARKER' },
+          ]),
+        ),
+      vi.fn(),
+    );
+    const generator = new LoggingContentGenerator(
+      wrapped,
+      createConfig({ logPrompts: false }),
+      {
+        model: 'test-model',
+        authType: AuthType.USE_OPENAI,
+      },
+    );
+
+    await generator.generateContent(
+      {
+        model: 'test-model',
+        contents: [
+          { role: 'user', parts: [{ text: 'SENSITIVE_REQUEST_MARKER' }] },
+        ],
+      } as unknown as GenerateContentParameters,
+      'prompt-noprompts',
+    );
+
+    expect(logApiRequest).toHaveBeenCalledTimes(1);
+    const [, requestEvent] = vi.mocked(logApiRequest).mock.calls[0];
+    expect(requestEvent.request_text).toBeUndefined();
+
+    expect(logApiResponse).toHaveBeenCalledTimes(1);
+    const [, responseEvent] = vi.mocked(logApiResponse).mock.calls[0];
+    expect(responseEvent.response_text).toBeUndefined();
+  });
+
+  it('keeps request_text and response_text in API telemetry when logPrompts is true', async () => {
+    const wrapped = createWrappedGenerator(
+      vi
+        .fn()
+        .mockResolvedValue(
+          createResponse('resp-prompts', 'test-model', [
+            { text: 'KEEP_RESPONSE_MARKER' },
+          ]),
+        ),
+      vi.fn(),
+    );
+    const generator = new LoggingContentGenerator(
+      wrapped,
+      createConfig({ logPrompts: true }),
+      {
+        model: 'test-model',
+        authType: AuthType.USE_OPENAI,
+      },
+    );
+
+    await generator.generateContent(
+      {
+        model: 'test-model',
+        contents: [{ role: 'user', parts: [{ text: 'KEEP_REQUEST_MARKER' }] }],
+      } as unknown as GenerateContentParameters,
+      'prompt-prompts',
+    );
+
+    const [, requestEvent] = vi.mocked(logApiRequest).mock.calls[0];
+    expect(requestEvent.request_text).toContain('KEEP_REQUEST_MARKER');
+
+    const [, responseEvent] = vi.mocked(logApiResponse).mock.calls[0];
+    expect(responseEvent.response_text).toBe('KEEP_RESPONSE_MARKER');
+  });
+
+  it('omits request_text and response_text from API telemetry for streaming when logPrompts is false', async () => {
+    const streamFn = vi.fn().mockResolvedValue(
+      (async function* () {
+        yield createResponse('resp-stream-noprompts', 'test-model', [
+          { text: 'SENSITIVE_RESPONSE_MARKER' },
+        ]);
+      })(),
+    );
+    const wrapped = createWrappedGenerator(vi.fn(), streamFn);
+    const generator = new LoggingContentGenerator(
+      wrapped,
+      createConfig({ logPrompts: false }),
+      {
+        model: 'test-model',
+        authType: AuthType.USE_OPENAI,
+      },
+    );
+
+    const stream = await generator.generateContentStream(
+      {
+        model: 'test-model',
+        contents: [
+          { role: 'user', parts: [{ text: 'SENSITIVE_REQUEST_MARKER' }] },
+        ],
+      } as unknown as GenerateContentParameters,
+      'prompt-stream-noprompts',
+    );
+    for await (const _ of stream) {
+      // Drain the stream so response logging finalizes.
+    }
+
+    expect(logApiRequest).toHaveBeenCalledTimes(1);
+    const [, requestEvent] = vi.mocked(logApiRequest).mock.calls[0];
+    expect(requestEvent.request_text).toBeUndefined();
+
+    expect(logApiResponse).toHaveBeenCalledTimes(1);
+    const [, responseEvent] = vi.mocked(logApiResponse).mock.calls[0];
+    expect(responseEvent.response_text).toBeUndefined();
+  });
+
+  it('keeps request_text and response_text in API telemetry for streaming when logPrompts is true', async () => {
+    const streamFn = vi.fn().mockResolvedValue(
+      (async function* () {
+        yield createResponse('resp-stream-prompts', 'test-model', [
+          { text: 'KEEP_RESPONSE_MARKER' },
+        ]);
+      })(),
+    );
+    const wrapped = createWrappedGenerator(vi.fn(), streamFn);
+    const generator = new LoggingContentGenerator(
+      wrapped,
+      createConfig({ logPrompts: true }),
+      {
+        model: 'test-model',
+        authType: AuthType.USE_OPENAI,
+      },
+    );
+
+    const stream = await generator.generateContentStream(
+      {
+        model: 'test-model',
+        contents: [{ role: 'user', parts: [{ text: 'KEEP_REQUEST_MARKER' }] }],
+      } as unknown as GenerateContentParameters,
+      'prompt-stream-prompts',
+    );
+    for await (const _ of stream) {
+      // Drain the stream so response logging finalizes.
+    }
+
+    const [, requestEvent] = vi.mocked(logApiRequest).mock.calls[0];
+    expect(requestEvent.request_text).toContain('KEEP_REQUEST_MARKER');
+
+    const [, responseEvent] = vi.mocked(logApiResponse).mock.calls[0];
+    expect(responseEvent.response_text).toContain('KEEP_RESPONSE_MARKER');
   });
 
   it('creates and closes the non-stream API span on success', async () => {
@@ -2343,6 +2499,73 @@ describe('LoggingContentGenerator', () => {
       outputTokens: 3,
     });
     expect(spanRecord.ended).toBe(true);
+  });
+
+  it('reports nested Responses stream errors with provider details', async () => {
+    const message =
+      'Your requests to gpt-6-astra in eastus have exceeded rate limit.';
+    const expectedMessage = `Responses API error: rate_limit_exceeded: ${message}`;
+    const wrapped = createWrappedGenerator(
+      vi.fn(),
+      vi.fn().mockResolvedValue(
+        (async function* () {
+          const chunk = convertResponsesEventToGemini(
+            {
+              event: 'error',
+              data: {
+                type: 'error',
+                error: {
+                  message,
+                  type: 'too_many_requests',
+                  code: 'rate_limit_exceeded',
+                },
+              },
+            },
+            'gpt-6-astra',
+            new ResponsesStreamState(),
+          );
+          if (chunk) yield chunk;
+        })(),
+      ),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'gpt-6-astra',
+      authType: AuthType.USE_OPENAI_RESPONSES,
+      enableOpenAILogging: true,
+    });
+    const stream = await generator.generateContentStream(
+      { model: 'gpt-6-astra', contents: 'Hello' },
+      'prompt-responses-error',
+    );
+    await expect(async () => {
+      for await (const _item of stream) {
+        // Consume the stream to reach the provider error.
+      }
+    }).rejects.toThrow(expectedMessage);
+
+    expect(logApiResponse).not.toHaveBeenCalled();
+    expect(logApiError).toHaveBeenCalledTimes(1);
+    const [, errorEvent] = vi.mocked(logApiError).mock.calls[0];
+    expect(errorEvent).toMatchObject({
+      error_message: expectedMessage,
+      error_type: 'too_many_requests',
+      status_code: 429,
+      auth_type: AuthType.USE_OPENAI_RESPONSES,
+    });
+    const openaiLoggerInstance = vi.mocked(OpenAILogger).mock.results[0]
+      ?.value as { logInteraction: ReturnType<typeof vi.fn> };
+    const [, , loggedError] = openaiLoggerInstance.logInteraction.mock.calls[0];
+    expect(loggedError).toMatchObject({
+      message: expectedMessage,
+      code: 'rate_limit_exceeded',
+      type: 'too_many_requests',
+      status: 429,
+    });
+    expect(getStreamSpanRecord().endMetadata).toMatchObject({
+      success: false,
+      errorType: 'too_many_requests',
+      errorStatusCode: 429,
+    });
   });
 
   it('keeps a real partial-stream failure as an error when it races an abort', async () => {

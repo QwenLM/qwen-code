@@ -3,12 +3,18 @@ import type { ChannelAgentBridge } from './ChannelAgentBridge.js';
 import type { ChannelBase, ChannelBaseOptions } from './ChannelBase.js';
 import type { ChannelWebhookConfig } from './ChannelWebhookTask.js';
 
+/** @deprecated Use PrivatePolicy. */
 export type SenderPolicy = 'allowlist' | 'pairing' | 'open';
 export type SessionScope = 'user' | 'thread' | 'chat_thread' | 'single';
 export type ChannelType = string;
 export type GroupPolicy = 'disabled' | 'allowlist' | 'pairing' | 'open';
+export type PrivatePolicy = 'disabled' | 'allowlist' | 'pairing' | 'open';
+/** Members who may speak inside an admitted group. */
+export type GroupSenderPolicy = 'open' | 'allowlist';
+/** @deprecated Use PrivatePolicy. */
 export type DmPolicy = 'disabled' | 'open';
 export type DispatchMode = 'collect' | 'steer' | 'followup';
+export type ChannelOutputMode = 'per_task' | 'per_response' | 'per_turn';
 
 export interface ChannelIdentityConfig {
   id?: string;
@@ -38,6 +44,15 @@ export interface GroupConfig {
   requireMention?: boolean; // default: true
   dispatchMode?: DispatchMode;
   groupHistoryLimit?: number;
+  /** Who may speak in the group. Default: `open`. */
+  senders?: GroupSenderPolicy;
+  /** Members allowed to speak when `senders` is `allowlist`. */
+  allowedUsers?: string[];
+}
+
+export interface SessionRotationConfig {
+  maxTurns?: number;
+  maxAgeHours?: number;
 }
 
 export interface ChannelConfig {
@@ -45,23 +60,36 @@ export interface ChannelConfig {
   token: string;
   clientId?: string;
   clientSecret?: string;
-  senderPolicy: SenderPolicy;
+  privatePolicy?: PrivatePolicy;
+  /** @deprecated Use privatePolicy. Read only as a private-access fallback. */
+  senderPolicy?: SenderPolicy;
   allowedUsers: string[];
   /** Channel routing scope. `thread` is retained for existing configurations only. */
   sessionScope: SessionScope;
+  sessionRotation?: SessionRotationConfig;
   /** Retain an owner-scoped catalog of named sessions in daemon-managed mode. */
   multiSession?: boolean;
   cwd: string;
   approvalMode?: string;
   instructions?: string;
-  /** Only dispatch user messages beginning with this exact prefix. */
-  messagePrefix?: string;
+  /** Exact message prefixes mapped to first-turn session instructions. */
+  messageRoutes?: Record<string, string>;
+  /** Configured route used for messages without a matching prefix. */
+  defaultMessageRoute?: string;
   identity?: ChannelIdentityConfig;
   memoryScope?: ChannelMemoryScopeConfig;
   webhooks?: ChannelWebhookConfig;
   model?: string;
+  /** Output grouping for opted-in adapters. Defaults to `per_turn`. */
+  outputMode?: ChannelOutputMode;
   groupPolicy: GroupPolicy; // default: "disabled"
-  dmPolicy: DmPolicy; // default: "open"
+  /** @deprecated Use privatePolicy. Read only as a private-access fallback. */
+  dmPolicy?: DmPolicy;
+  /**
+   * Who may operate a shared session (/approve, /cancel, /clear, /loop, ...).
+   * Unset or empty grants no shared-session operator permissions.
+   */
+  operators?: string[];
   groupHistoryLimit?: number;
   groups: Record<string, GroupConfig>; // "*" for defaults, group IDs for overrides
 
@@ -92,36 +120,16 @@ export interface Envelope {
   chatId: string;
   chatName?: string;
   text: string;
-  /** User-authored text to display when `text` contains model-only context. */
-  displayText?: string;
-  /**
-   * Where `displayText` begins inside `text`, for adapters that compose
-   * the two.
-   *
-   * The prefix filter rewrites the user-authored segment in place. Both
-   * the sender nick and the message body are attacker-controlled on some
-   * platforms, so a nick equal to the body would make a search for
-   * `displayText` land in the sender tag and leave the prefix on the
-   * dispatched message. An adapter that knows where it put the segment
-   * says so here; without it the filter refuses to guess between two
-   * occurrences.
-   */
-  displayTextOffset?: number;
-  /**
-   * The user-authored text with the leading mention run removed, for
-   * adapters whose mention markers the shared prefix matcher cannot read as
-   * one token. Mentions after the prefix stay in place.
-   */
-  messagePrefixText?: string;
-  /** System event, or adapter input whose prefix was already checked. */
-  bypassMessagePrefix?: true;
+  /** Selected by the channel's route matcher, never by the remote sender. */
+  messageRoute?: string;
+  /** Internal provider events that are not user-authored messages. */
+  bypassMessageRoutes?: true;
   /**
    * `text` is an adapter-synthesized placeholder (`(image)`, `(voice
    * message)`, `(file: …)`) rather than something the user typed.
    *
-   * No user action can put the configured prefix on it, so it bypasses the
-   * prefix filter -- and it is never recorded as quoted group history,
-   * where it would reach the next prompt as if a member had typed it.
+   * It is never recorded as quoted group history, where it would reach
+   * the next prompt as if a member had typed it.
    */
   syntheticText?: true;
   threadId?: string;
@@ -171,6 +179,7 @@ export interface Envelope {
 
 export interface SessionTarget {
   channelName: string;
+  messageRoute?: string;
   senderId: string;
   chatId: string;
   threadId?: string;
@@ -282,6 +291,7 @@ export interface ChannelOutputSegmentContext {
   target: SessionTarget;
   sourceLabel?: string;
   messageId?: string;
+  partial?: boolean;
 }
 
 export type ChannelOutputSegmentEndReason =
@@ -323,6 +333,7 @@ export interface SanitizedToolCallEvent {
 /** 'dropped' = loop was disabled/deleted mid-run (not user-cancelled). */
 export type ChannelTaskCancellationReason =
   | 'cancel_command'
+  | 'runtime_cancelled'
   | 'clear'
   | 'steer'
   | 'timeout'
@@ -558,6 +569,9 @@ export interface ChannelPlugin {
 
   /** Optional config fields whose string values may reference environment vars. */
   envResolvableConfigFields?: string[];
+
+  /** Opt in to shared task, response, and turn output grouping. */
+  supportsOutputMode?: boolean;
 
   /** Serializable metadata for safe configuration management. */
   management?: ChannelManagementDescriptor;

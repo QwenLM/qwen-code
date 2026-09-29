@@ -8,7 +8,11 @@ import { execFile } from 'node:child_process';
 import * as path from 'node:path';
 import { promisify } from 'node:util';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { findGitRoot, isGitRepository } from '../utils/gitUtils.js';
+import {
+  findGitRoot,
+  isGitRepository,
+  NO_EXEC_CONFIG,
+} from '../utils/gitUtils.js';
 import { getTeamAutoMemoryRoot } from './paths.js';
 
 const execFileAsync = promisify(execFile);
@@ -52,25 +56,29 @@ async function tryGit(
   killSignal: NodeJS.Signals = 'SIGTERM',
 ): Promise<string | null> {
   try {
-    const { stdout } = await execFileAsync('git', args, {
-      cwd,
-      encoding: 'utf8',
-      timeout: GIT_TIMEOUT_MS,
-      killSignal,
-      env: {
-        ...process.env,
-        // Force non-interactive git so a missing credential / askpass prompt
-        // fails fast instead of hanging session start on the network steps.
-        GIT_TERMINAL_PROMPT: '0',
-        // Non-interactive ssh, but APPEND onto a user's GIT_SSH_COMMAND rather
-        // than clobbering it — their custom identity (`-i`), proxy jump (`-J`),
-        // or port stays intact; we only add the batch guards (theirs win on any
-        // duplicate option, since ssh takes the first value).
-        GIT_SSH_COMMAND: process.env['GIT_SSH_COMMAND']
-          ? `${process.env['GIT_SSH_COMMAND']} -oBatchMode=yes -oConnectTimeout=5`
-          : 'ssh -oBatchMode=yes -oConnectTimeout=5',
+    const { stdout } = await execFileAsync(
+      'git',
+      [...NO_EXEC_CONFIG, ...args],
+      {
+        cwd,
+        encoding: 'utf8',
+        timeout: GIT_TIMEOUT_MS,
+        killSignal,
+        env: {
+          ...process.env,
+          // Force non-interactive git so a missing credential / askpass prompt
+          // fails fast instead of hanging session start on the network steps.
+          GIT_TERMINAL_PROMPT: '0',
+          // Non-interactive ssh, but APPEND onto a user's GIT_SSH_COMMAND rather
+          // than clobbering it — their custom identity (`-i`), proxy jump (`-J`),
+          // or port stays intact; we only add the batch guards (theirs win on any
+          // duplicate option, since ssh takes the first value).
+          GIT_SSH_COMMAND: process.env['GIT_SSH_COMMAND']
+            ? `${process.env['GIT_SSH_COMMAND']} -oBatchMode=yes -oConnectTimeout=5`
+            : 'ssh -oBatchMode=yes -oConnectTimeout=5',
+        },
       },
-    });
+    );
     return stdout;
   } catch (error) {
     debugLogger.debug(`git ${args[0]} failed`, error);
@@ -136,6 +144,11 @@ export async function syncTeamMemory(
     pushed: false,
   };
 
+  // The commit THIS sync created, captured so a rejected push can rewind to it
+  // by SHA instead of assuming `HEAD~1` is ours (a concurrent writer may have
+  // committed on top during the push window).
+  let ourSha: string | null = null;
+
   const teamRoot = getTeamAutoMemoryRoot(projectRoot);
   const gitRoot = findGitRoot(teamRoot);
   if (!gitRoot || !isGitRepository(gitRoot)) {
@@ -193,7 +206,18 @@ export async function syncTeamMemory(
   }
 
   // 2. Commit local team-memory changes (only the team path) on top of upstream.
+  // `--no-optional-locks` keeps this read from refreshing and writing the
+  // index, so a tree-shipped `.git/hooks/post-index-change` never runs. It
+  // matters on the no-upstream path, where this probe is the flow's only
+  // index-writing call (`add`/`commit`/`reset` are all gated on this returning
+  // a non-empty result). When an upstream exists the preceding `pull --ff-only`
+  // also writes the index, so a tree-shipped `post-index-change` can still run
+  // there — deliberately out of scope, as mutating commands are. The flag must
+  // precede `status` — after
+  // the subcommand git answers `rc=129`, which `tryGit` swallows into `null`
+  // and this flow misreads as "no changes to sync".
   const status = await tryGit(gitRoot, [
+    '--no-optional-locks',
     'status',
     '--porcelain',
     '--',
@@ -201,13 +225,18 @@ export async function syncTeamMemory(
   ]);
   if (status && status.trim().length > 0) {
     const staged = (await tryGit(gitRoot, ['add', '--', relPath])) !== null;
-    const commitArgs = ['commit', '-m', opts.message];
+    const commitArgs = ['commit', '--no-gpg-sign', '-m', opts.message];
     if (opts.author) {
       const email = opts.author.email ?? `${opts.author.name}@users.noreply`;
       commitArgs.push('--author', `${opts.author.name} <${email}>`);
     }
     commitArgs.push('--', relPath);
     result.committed = (await tryGit(gitRoot, commitArgs)) !== null;
+    if (result.committed) {
+      ourSha =
+        (await tryGit(gitRoot, ['rev-parse', 'HEAD'], 'SIGKILL'))?.trim() ??
+        null;
+    }
     if (!result.committed && staged) {
       // Commit failed (hook/GPG/missing user.email — tryGit swallowed it).
       // Unstage the team paths so a user's next manual `git commit` does not
@@ -243,6 +272,52 @@ export async function syncTeamMemory(
       'SIGKILL',
     )) !== null;
   if (!result.pushed) {
+    // A rejected push (e.g. a remote enforcing signed commits while the sync
+    // commit is deliberately `--no-gpg-sign`) leaves our commit stranded on the
+    // branch. That stranded commit trips the `wasAheadBeforeSync` gate next
+    // cycle and disables pushing permanently, and it also blocks the user's own
+    // next signed push. Undo our own commit so the branch returns to its
+    // pre-sync HEAD and cannot stay ahead.
+    //
+    // The rewind is by SHA, never a blind `HEAD~1`: a second writer (the
+    // user's own terminal, or another daemon session) may have committed on top
+    // during the push window, and a blind `HEAD~1` would drop THAT commit and
+    // sweep its files into the shared index. `headNow !== ourSha` means someone
+    // else advanced HEAD — leave their commit alone. `remoteHasIt` covers the
+    // false-negative push: `tryGit` collapses a push that was SIGKILLed (or
+    // dropped by a proxy) after the remote applied the ref into the same `null`
+    // as a rejection, and rewinding a commit the remote already has would
+    // demote the published note to untracked and wedge the next `pull --ff-only`.
+    const headNow =
+      (await tryGit(gitRoot, ['rev-parse', 'HEAD'], 'SIGKILL'))?.trim() ?? null;
+    const remoteTip = await tryGit(
+      gitRoot,
+      ['ls-remote', pushTarget.remote, pushTarget.mergeRef],
+      'SIGKILL',
+    );
+    const remoteHasIt = ourSha !== null && (remoteTip ?? '').includes(ourSha);
+    if (headNow === ourSha && !remoteHasIt) {
+      // `--soft` keeps the index and working tree intact (unlike a whole-tree
+      // mixed reset, which would unstage unrelated work this sync never
+      // touches); the pathspec-limited reset then unstages only the team path,
+      // mirroring the unstage-on-commit-failure pattern above.
+      const rewound =
+        (await tryGit(
+          gitRoot,
+          ['reset', '--soft', `${ourSha}^`],
+          'SIGTERM',
+        )) !== null;
+      const unstaged =
+        (await tryGit(gitRoot, ['reset', '--quiet', '--', relPath])) !== null;
+      if (!rewound || !unstaged) {
+        // A partial rollback (e.g. the second reset died on a held index.lock)
+        // would leave HEAD rewound while the team path stays staged — surface
+        // it rather than dropping both results.
+        debugLogger.warn(
+          `team memory push-failed rollback incomplete (reset=${rewound}, unstage=${unstaged})`,
+        );
+      }
+    }
     result.skippedReason = 'push-failed';
   }
   return result;

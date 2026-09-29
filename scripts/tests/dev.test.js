@@ -11,20 +11,29 @@ import { fileURLToPath } from 'node:url';
 
 const {
   spawnMock,
+  execSyncMock,
   platformMock,
   existsSyncMock,
   readFileSyncMock,
   writeFileSyncMock,
+  copyBrowserUseAssetsMock,
 } = vi.hoisted(() => ({
   spawnMock: vi.fn(() => ({ on: vi.fn() })),
+  execSyncMock: vi.fn(),
   platformMock: vi.fn(() => 'darwin'),
   existsSyncMock: vi.fn(() => false),
   readFileSyncMock: vi.fn(() => JSON.stringify({ version: '0.0.0-test' })),
   writeFileSyncMock: vi.fn(),
+  copyBrowserUseAssetsMock: vi.fn(),
+}));
+
+vi.mock('../copy-browser-use-assets.js', () => ({
+  copyBrowserUseAssets: copyBrowserUseAssetsMock,
 }));
 
 vi.mock('node:child_process', () => ({
   spawn: spawnMock,
+  execSync: execSyncMock,
 }));
 
 vi.mock('node:os', async (importOriginal) => {
@@ -85,11 +94,27 @@ describe('scripts/dev.js launcher', () => {
     expect(command).toBe('C:\\Program Files\\nodejs\\node.exe');
     expect(args.map(normalizePath)).toEqual([
       expect.stringContaining('node_modules/tsx/dist/cli.mjs'),
+      '--tsconfig',
+      expect.stringContaining('packages/cli/tsconfig.json'),
       expect.stringContaining('packages/cli/index.ts'),
       '--help',
     ]);
     expect(options).toEqual(expect.objectContaining({ shell: false }));
   });
+
+  it.each(['--version', '--help'])(
+    'launches %s without building or staging Browser Use',
+    async (flag) => {
+      process.argv = ['node', 'scripts/dev.js', flag];
+
+      await import('../dev.js?browser-use');
+
+      expect(execSyncMock).not.toHaveBeenCalled();
+      expect(copyBrowserUseAssetsMock).not.toHaveBeenCalled();
+      expect(spawnMock).toHaveBeenCalledOnce();
+      expect(spawnMock.mock.calls[0][1]).toContain(flag);
+    },
+  );
 
   it('keeps shell fallback for Windows tsx.cmd resolution', async () => {
     platformMock.mockReturnValue('win32');
@@ -102,6 +127,8 @@ describe('scripts/dev.js launcher', () => {
     const [command, args, options] = spawnMock.mock.calls[0];
     expect(normalizePath(command)).toContain('tsx.cmd');
     expect(args.map(normalizePath)).toEqual([
+      '--tsconfig',
+      expect.stringContaining('packages/cli/tsconfig.json'),
       expect.stringContaining('packages/cli/index.ts'),
     ]);
     expect(options).toEqual(expect.objectContaining({ shell: true }));

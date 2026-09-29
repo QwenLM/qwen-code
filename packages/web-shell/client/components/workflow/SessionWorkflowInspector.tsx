@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type {
   DaemonSessionArtifact,
   DaemonSessionTaskStatus,
@@ -19,13 +19,26 @@ import {
   workflowClock,
   workflowInitials,
   workflowTaskStatusKey,
+  type SessionWorkflowProjection,
 } from './session-workflow-model';
 import styles from './SessionWorkflowInspector.module.css';
+
+/**
+ * Activity rows shown before the list asks to be expanded. The summary beside
+ * it reports the true total, so the remainder must stay reachable.
+ */
+const ACTIVITY_PREVIEW_COUNT = 6;
 
 export interface SessionWorkflowInspectorProps {
   todos: readonly TodoItem[];
   tools: readonly ACPToolCall[];
   tasks: readonly DaemonSessionTaskStatus[];
+  /**
+   * The projection shared by every workflow surface for this render. The app
+   * derives it once and hands the same object to the cockpit, the embedded
+   * graph and this inspector; when absent it is derived from the raw props.
+   */
+  projection?: SessionWorkflowProjection;
   artifacts: readonly DaemonSessionArtifact[];
   selectedTodoId?: string;
   onSelectedTodoIdChange: (todoId: string | undefined) => void;
@@ -39,6 +52,7 @@ export function SessionWorkflowInspector({
   todos,
   tools,
   tasks,
+  projection: sharedProjection,
   artifacts,
   selectedTodoId,
   onSelectedTodoIdChange,
@@ -48,11 +62,23 @@ export function SessionWorkflowInspector({
   canvasMode = false,
 }: SessionWorkflowInspectorProps) {
   const { language, t } = useI18n();
+  // Fallback only: with the app's shared projection this returns the
+  // passed-in object without rebuilding.
   const projection = useMemo(
-    () => buildSessionWorkflowProjection(todos, tools, tasks),
-    [tasks, todos, tools],
+    () =>
+      sharedProjection ?? buildSessionWorkflowProjection(todos, tools, tasks),
+    [sharedProjection, tasks, todos, tools],
   );
   const defaultTodoId = getDefaultWorkflowTodoId(todos, projection);
+  // Dependencies are stated as Todo ids, which are addresses, not labels. The
+  // step number is what the list and the graph both show, so carry it into
+  // every dependency reference.
+  const stepNumberById = useMemo(() => {
+    const numbers = new Map<string, number>();
+    todos.forEach((todo, index) => numbers.set(todo.id, index + 1));
+    return numbers;
+  }, [todos]);
+  const [showAllActivity, setShowAllActivity] = useState(false);
   const effectiveSelectedTodoId = projection.todosById.has(selectedTodoId ?? '')
     ? selectedTodoId
     : defaultTodoId;
@@ -84,9 +110,16 @@ export function SessionWorkflowInspector({
   const selectedTools = selectedTodo
     ? (projection.agentToolsByTodo.get(selectedTodo.id) ?? [])
     : [];
-  const upstream = selectedTodo?.blockedBy?.filter((id) =>
-    projection.todosById.has(id),
-  );
+  // blockedBy is model-authored and can repeat an id — or name the todo
+  // itself. Dedup before mapping so a repeated reference cannot emit a
+  // duplicate key or a second link, and drop self-references with the same
+  // rule the projection's dependentsByTodo builder applies, so the
+  // inspector never shows a step blocked by itself.
+  const upstream = selectedTodo
+    ? [...new Set(selectedTodo.blockedBy ?? [])].filter(
+        (id) => id !== selectedTodo.id && projection.todosById.has(id),
+      )
+    : undefined;
   // The projection already derives this for the graph's edges; recomputing it
   // here rescanned every todo's `blockedBy` for the same answer. It also drops
   // a todo that lists itself in `blockedBy`, which the previous filter kept as
@@ -94,6 +127,30 @@ export function SessionWorkflowInspector({
   const downstream = selectedTodo
     ? (projection.dependentsByTodo.get(selectedTodo.id) ?? [])
     : [];
+
+  // A dependency reference selects the step it names: the list of ids was
+  // read-only text, so following an edge meant finding the row by eye.
+  const dependencyLink = (todoId: string) => {
+    const target = projection.todosById.get(todoId);
+    const number = stepNumberById.get(todoId);
+    return (
+      <li key={todoId}>
+        <button
+          className={styles.dependencyLink}
+          data-plan-interactive
+          data-testid={`workflow-dependency-${todoId}`}
+          onClick={() => onSelectedTodoIdChange(todoId)}
+          title={target?.content}
+          type="button"
+        >
+          {number !== undefined && (
+            <span className={styles.dependencyNumber}>{number}</span>
+          )}
+          <span>{target?.content ?? todoId}</span>
+        </button>
+      </li>
+    );
+  };
 
   const detail = selectedTodo && selectedState && (
     <section className={styles.detail} data-testid="workflow-step-detail">
@@ -111,17 +168,25 @@ export function SessionWorkflowInspector({
         <div>
           <dt>{t('workflow.dependencies.upstream')}</dt>
           <dd>
-            {upstream?.length
-              ? upstream.join(', ')
-              : t('workflow.dependencies.none')}
+            {upstream?.length ? (
+              <ul className={styles.dependencyList}>
+                {upstream.map((id) => dependencyLink(id))}
+              </ul>
+            ) : (
+              t('workflow.dependencies.none')
+            )}
           </dd>
         </div>
         <div>
           <dt>{t('workflow.dependencies.unblocks')}</dt>
           <dd>
-            {downstream.length
-              ? downstream.map((todo) => todo.id).join(', ')
-              : t('workflow.dependencies.noDownstream')}
+            {downstream.length ? (
+              <ul className={styles.dependencyList}>
+                {downstream.map((todo) => dependencyLink(todo.id))}
+              </ul>
+            ) : (
+              t('workflow.dependencies.noDownstream')
+            )}
           </dd>
         </div>
       </dl>
@@ -168,7 +233,13 @@ export function SessionWorkflowInspector({
                         task.description}
                     </small>
                   )}
-                  {metrics.length > 0 && <small>{metrics.join(' · ')}</small>}
+                  {metrics.length > 0 && (
+                    <small className={styles.metrics}>
+                      {metrics.map((metric) => (
+                        <span key={metric}>{metric}</span>
+                      ))}
+                    </small>
+                  )}
                 </span>
                 {task && (
                   <span className={styles.stateLabel} data-status={task.status}>
@@ -314,7 +385,10 @@ export function SessionWorkflowInspector({
           <small>{projection.activity.length}</small>
         </summary>
         <div className={styles.activityList}>
-          {projection.activity.slice(0, 6).map((task) => {
+          {(showAllActivity
+            ? projection.activity
+            : projection.activity.slice(0, ACTIVITY_PREVIEW_COUNT)
+          ).map((task) => {
             const tool = projection.toolsByTaskId.get(task.id);
             const at = task.endTime ?? task.startTime;
             const content = (
@@ -359,6 +433,20 @@ export function SessionWorkflowInspector({
           {projection.activity.length === 0 && (
             <p>{t('workflow.activity.empty')}</p>
           )}
+          {!showAllActivity &&
+            projection.activity.length > ACTIVITY_PREVIEW_COUNT && (
+              <button
+                className={styles.showAllActivity}
+                data-plan-interactive
+                data-testid="workflow-activity-show-all"
+                onClick={() => setShowAllActivity(true)}
+                type="button"
+              >
+                {t('workflow.activity.showAll', {
+                  count: projection.activity.length,
+                })}
+              </button>
+            )}
         </div>
       </details>
 
@@ -377,8 +465,9 @@ export function SessionWorkflowInspector({
             >
               <span className={styles.itemText}>
                 <strong>{artifact.title}</strong>
-                <small>
-                  {artifact.kind} · {artifact.status}
+                <small className={styles.metrics}>
+                  <span>{artifact.kind}</span>
+                  <span>{artifact.status}</span>
                 </small>
               </span>
               <ArrowUpRightIcon aria-hidden="true" />

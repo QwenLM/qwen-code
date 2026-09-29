@@ -6,7 +6,7 @@
 
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
-import { execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
@@ -162,7 +162,7 @@ describe('ChatRecordingService - auto-title trigger', () => {
       parts.pop();
       return parts.join('/');
     });
-    vi.mocked(execSync).mockReturnValue('main\n');
+    vi.mocked(execFileSync).mockReturnValue('main\n');
     vi.spyOn(fs, 'mkdirSync').mockImplementation(() => undefined);
     vi.spyOn(fs, 'writeFileSync').mockImplementation(() => undefined);
     vi.spyOn(fs, 'existsSync').mockReturnValue(false);
@@ -218,6 +218,14 @@ describe('ChatRecordingService - auto-title trigger', () => {
 
     const titleRecord = findCustomTitleRecord();
     expect(titleRecord).toBeDefined();
+    // The assistant-turn record carries the branch from the (mocked)
+    // `getGitBranch` -> `execFileSync` call; pin it so a stale mock target
+    // (`execSync`) surfaces as `undefined` instead of silently passing.
+    const assistantRecord = vi
+      .mocked(jsonl.writeLine)
+      .mock.calls.map((c) => c[1] as ChatRecord)
+      .find((r) => r.type === 'assistant');
+    expect(assistantRecord?.gitBranch).toBe('main');
     expect(titleRecord?.systemPayload).toEqual({
       customTitle: 'Fix login button',
       titleSource: 'auto',

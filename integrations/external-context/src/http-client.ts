@@ -20,7 +20,10 @@ export class ProviderHttpStatusError extends Error {
   }
 }
 
-export function validateProviderBaseUrl(value: string): URL {
+export function validateProviderBaseUrl(
+  value: string,
+  options?: { allowInsecureHttp?: boolean; allowInsecureHttpHint?: boolean },
+): URL {
   let url: URL;
   try {
     url = new URL(value);
@@ -38,23 +41,28 @@ export function validateProviderBaseUrl(value: string): URL {
       'Provider URL must not contain credentials, path, query, or fragment.',
     );
   }
-  if (url.protocol === 'https:') {
-    return url;
-  }
   if (
-    url.protocol === 'http:' &&
-    (url.hostname === 'localhost' ||
-      url.hostname === '127.0.0.1' ||
-      url.hostname === '[::1]')
+    url.protocol === 'https:' ||
+    (url.protocol === 'http:' &&
+      (url.hostname === 'localhost' ||
+        url.hostname === '127.0.0.1' ||
+        url.hostname === '[::1]' ||
+        options?.allowInsecureHttp === true))
   ) {
     return url;
   }
-  throw new Error('Provider URL must use HTTPS or loopback HTTP.');
+  throw new Error(
+    options?.allowInsecureHttpHint === true && url.protocol === 'http:'
+      ? 'Provider URL must use HTTPS or loopback HTTP; set "allowInsecureHttp": true to permit plain HTTP for this provider.'
+      : 'Provider URL must use HTTPS or loopback HTTP.',
+  );
 }
-
 export async function postJson(input: {
   url: URL;
-  authorization: string;
+  credentialHeader: {
+    name: 'authorization' | 'x-api-key';
+    value: string;
+  };
   body: unknown;
   signal: AbortSignal;
 }): Promise<unknown> {
@@ -64,7 +72,7 @@ export async function postJson(input: {
       method: 'POST',
       headers: {
         accept: 'application/json',
-        authorization: input.authorization,
+        [input.credentialHeader.name]: input.credentialHeader.value,
         'content-type': 'application/json',
       },
       body: JSON.stringify(input.body),

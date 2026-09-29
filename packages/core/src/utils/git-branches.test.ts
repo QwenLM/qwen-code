@@ -33,6 +33,7 @@ import {
   gitPush,
   isValidCheckoutRef,
   parseDroppedStashSha,
+  streamGitRecords,
 } from './git-branches.js';
 import { getDefaultBranch } from './github-prs.js';
 
@@ -50,6 +51,7 @@ function makeRepo(): string {
   git(dir, 'config', 'user.name', 'Test');
   git(dir, 'config', 'commit.gpgsign', 'false');
   git(dir, 'config', 'tag.gpgsign', 'false');
+  git(dir, 'config', 'core.autocrlf', 'false');
   git(dir, 'config', 'core.hooksPath', path.join(dir, '.git', 'hooks'));
   fs.writeFileSync(path.join(dir, 'a.txt'), 'one\n');
   git(dir, 'add', '.');
@@ -90,6 +92,7 @@ function makeUpstream(): { dir: string; clone: string } {
   git(clone, 'config', 'user.email', 'other@example.com');
   git(clone, 'config', 'user.name', 'Other');
   git(clone, 'config', 'commit.gpgsign', 'false');
+  git(clone, 'config', 'core.autocrlf', 'false');
   return { dir, clone };
 }
 
@@ -216,6 +219,27 @@ describe('isValidCheckoutRef', () => {
 });
 
 describe('gitEnv (R12 env isolation)', () => {
+  it('preserves commit identity while scrubbing repository selectors', () => {
+    const env = gitEnv({
+      GIT_AUTHOR_NAME: 'CI Bot',
+      GIT_AUTHOR_EMAIL: 'bot@example.invalid',
+      GIT_COMMITTER_NAME: 'CI Bot',
+      GIT_COMMITTER_EMAIL: 'bot@example.invalid',
+      GIT_SSL_CAINFO: '/operator/ca.pem',
+      GIT_SSL_CAPATH: '/operator/certs',
+      GIT_DIR: '/elsewhere/.git',
+    });
+    expect(env).toMatchObject({
+      GIT_AUTHOR_NAME: 'CI Bot',
+      GIT_AUTHOR_EMAIL: 'bot@example.invalid',
+      GIT_COMMITTER_NAME: 'CI Bot',
+      GIT_COMMITTER_EMAIL: 'bot@example.invalid',
+      GIT_SSL_CAINFO: '/operator/ca.pem',
+      GIT_SSL_CAPATH: '/operator/certs',
+    });
+    expect(env['GIT_DIR']).toBeUndefined();
+  });
+
   it('strips repository-shaping variables from the child environment', () => {
     const env = gitEnv({
       PATH: '/usr/bin',
@@ -230,6 +254,31 @@ describe('gitEnv (R12 env isolation)', () => {
       GIT_CONFIG_PARAMETERS: "'foo=bar'",
       GIT_OBJECT_DIRECTORY: '/tmp/objects',
       GIT_ALTERNATE_OBJECT_DIRECTORIES: '/tmp/alt',
+      GIT_ASKPASS: '/tmp/askpass',
+      SSH_ASKPASS: '/tmp/ssh-askpass',
+      GIT_SSH: '/tmp/git-ssh',
+      GIT_SSH_COMMAND: '/tmp/git-ssh-command',
+      GIT_EXEC_PATH: '/tmp/git-exec',
+      GIT_TEMPLATE_DIR: '/tmp/git-template',
+      GIT_EXTERNAL_DIFF: '/tmp/git-diff',
+      GIT_PROXY_COMMAND: '/tmp/git-proxy',
+      PREFIX: '/tmp/prefix',
+      GIT_CONFIG: '/tmp/git-config',
+      XDG_CONFIG_HOME: '/tmp/evil-xdg',
+      GIT_TRACE2: '/tmp/trace',
+      GIT_DEFAULT_HASH: 'sha256',
+      GIT_SSL_NO_VERIFY: '1',
+      GIT_REDIRECT_STDOUT: '/tmp/stdout',
+      git_askpass: '/tmp/lowercase-askpass',
+      git_config_key_1: 'core.sshCommand',
+      git_config_value_1: '/tmp/ssh-command',
+      EDITOR: 'vi',
+      VISUAL: 'vim',
+      GIT_EDITOR: 'vim',
+      GIT_SEQUENCE_EDITOR: 'nano',
+      PAGER: 'less',
+      GIT_PAGER: 'cat',
+      GIT_ALLOW_PROTOCOL: 'https:ssh:ext',
     });
     expect(env['PATH']).toBe('/usr/bin');
     expect(env['LC_ALL']).toBe('C');
@@ -245,9 +294,49 @@ describe('gitEnv (R12 env isolation)', () => {
       'GIT_CONFIG_PARAMETERS',
       'GIT_OBJECT_DIRECTORY',
       'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+      'GIT_ASKPASS',
+      'SSH_ASKPASS',
+      'GIT_SSH',
+      'GIT_SSH_COMMAND',
+      'GIT_EXEC_PATH',
+      'GIT_TEMPLATE_DIR',
+      'GIT_EXTERNAL_DIFF',
+      'GIT_PROXY_COMMAND',
+      'PREFIX',
+      'GIT_CONFIG',
+      'XDG_CONFIG_HOME',
+      'GIT_TRACE2',
+      'GIT_DEFAULT_HASH',
+      'GIT_SSL_NO_VERIFY',
+      'GIT_REDIRECT_STDOUT',
+      'git_askpass',
+      'git_config_key_1',
+      'git_config_value_1',
+      'EDITOR',
+      'VISUAL',
+      'GIT_EDITOR',
+      'GIT_SEQUENCE_EDITOR',
+      'PAGER',
+      'GIT_PAGER',
     ]) {
       expect(env[key]).toBeUndefined();
     }
+    // GIT_ALLOW_PROTOCOL is normalized, not deleted: the helper-executing
+    // entries are stripped while a restrictive inherited list keeps its
+    // deny-by-default force over config-file policy.
+    expect(env['GIT_ALLOW_PROTOCOL']).toBe('https:ssh');
+  });
+
+  it('normalizes an inherited GIT_ALLOW_PROTOCOL instead of deleting it', () => {
+    expect(
+      gitEnv({ GIT_ALLOW_PROTOCOL: 'https:ssh' })['GIT_ALLOW_PROTOCOL'],
+    ).toBe('https:ssh');
+    // A helper-only list filters to empty, which stays SET: an empty list
+    // is deny-all, while undefined would hand the decision to config.
+    expect(gitEnv({ GIT_ALLOW_PROTOCOL: 'ext:fd' })['GIT_ALLOW_PROTOCOL']).toBe(
+      '',
+    );
+    expect(gitEnv({})['GIT_ALLOW_PROTOCOL']).toBeUndefined();
   });
 
   it('keeps repository discovery on the cwd even with a hostile GIT_DIR', async () => {
@@ -262,6 +351,23 @@ describe('gitEnv (R12 env isolation)', () => {
       if (saved === undefined) delete process.env['GIT_DIR'];
       else process.env['GIT_DIR'] = saved;
     }
+  });
+
+  it('does not load inherited XDG git configuration', () => {
+    const dir = makeRepo();
+    const xdg = path.join(dir, 'evil-xdg');
+    fs.mkdirSync(path.join(xdg, 'git'), { recursive: true });
+    fs.writeFileSync(
+      path.join(xdg, 'git', 'config'),
+      '[probe]\n  marker = came-from-xdg\n',
+    );
+    const env = gitEnv({ ...hermeticEnv(), XDG_CONFIG_HOME: xdg });
+    expect(() =>
+      execFileSync('git', ['config', '--get', 'probe.marker'], {
+        cwd: dir,
+        env,
+      }),
+    ).toThrow();
   });
 });
 
@@ -731,14 +837,32 @@ describe('gitCreateBranch rollback (R12)', () => {
 });
 
 describe('gitPush', () => {
+  it.skipIf(process.platform === 'win32')(
+    'preserves the caller SSH command for remote pushes',
+    async () => {
+      const dir = makeRepo();
+      git(dir, 'remote', 'add', 'origin', 'ssh://example.invalid/repo');
+      await expect(
+        gitPush(
+          dir,
+          { setUpstream: true },
+          {
+            ...hermeticEnv(),
+            GIT_SSH_COMMAND: "sh -c 'echo qwen-transport-probe >&2; exit 1'",
+          },
+        ),
+      ).rejects.toThrow(/qwen-transport-probe/);
+    },
+  );
+
   it('throws a clear error when setUpstream is used in detached HEAD', async () => {
     const dir = makeRepo();
     git(dir, 'tag', 'v1.0');
     git(dir, 'checkout', '-q', 'v1.0');
 
-    await expect(gitPush(dir, { setUpstream: true })).rejects.toThrow(
-      /detached HEAD/,
-    );
+    await expect(
+      gitPush(dir, { setUpstream: true }, hermeticEnv()),
+    ).rejects.toThrow(/detached HEAD/);
   });
 
   it('preserves an existing upstream instead of rewriting it', async () => {
@@ -757,7 +881,7 @@ describe('gitPush', () => {
     git(dir, 'add', '.');
     git(dir, 'commit', '-q', '-m', 'second');
 
-    await gitPush(dir, { setUpstream: true });
+    await gitPush(dir, { setUpstream: true }, hermeticEnv());
 
     // Tracking must still point at upstream, not origin.
     const tracking = git(
@@ -781,7 +905,7 @@ describe('gitPush', () => {
     git(dir, 'add', '.');
     git(dir, 'commit', '-q', '-m', 'second');
 
-    await gitPush(dir, { setUpstream: true });
+    await gitPush(dir, { setUpstream: true }, hermeticEnv());
 
     const branch = currentBranch(dir);
     const tracking = git(
@@ -804,7 +928,7 @@ describe('gitPush', () => {
     git(dir, 'add', '.');
     git(dir, 'commit', '-q', '--amend', '-m', 'amended');
 
-    await gitPush(dir, { force: true });
+    await gitPush(dir, { force: true }, hermeticEnv());
 
     const remoteLog = git(remote, 'log', '--oneline', '-1');
     expect(remoteLog).toContain('amended');
@@ -823,7 +947,7 @@ describe('gitPush push-remote precedence (R12)', () => {
     git(dir, 'add', '.');
     git(dir, 'commit', '-q', '-m', 'second');
 
-    await gitPush(dir, { setUpstream: true });
+    await gitPush(dir, { setUpstream: true }, hermeticEnv());
 
     const branch = currentBranch(dir);
     const tracking = git(
@@ -850,7 +974,7 @@ describe('gitPush push-remote precedence (R12)', () => {
     git(dir, 'add', '.');
     git(dir, 'commit', '-q', '-m', 'second');
 
-    await gitPush(dir, { setUpstream: true });
+    await gitPush(dir, { setUpstream: true }, hermeticEnv());
 
     const tracking = git(
       dir,
@@ -863,6 +987,31 @@ describe('gitPush push-remote precedence (R12)', () => {
 });
 
 describe('gitCommit', () => {
+  it('uses identity supplied by the operator environment', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-gitidentity-'));
+    tmpRoots.push(dir);
+    const env = {
+      ...hermeticEnv(),
+      GIT_AUTHOR_NAME: 'CI Bot',
+      GIT_AUTHOR_EMAIL: 'bot@example.invalid',
+      GIT_COMMITTER_NAME: 'CI Bot',
+      GIT_COMMITTER_EMAIL: 'bot@example.invalid',
+    };
+    execFileSync('git', ['init', '-q'], { cwd: dir, env });
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'one\n');
+    execFileSync('git', ['add', 'a.txt'], { cwd: dir, env });
+
+    await gitCommit(dir, 'first commit', undefined, env);
+
+    expect(
+      execFileSync('git', ['log', '-1', '--format=%ae'], {
+        cwd: dir,
+        env,
+        encoding: 'utf8',
+      }).trim(),
+    ).toBe('bot@example.invalid');
+  });
+
   it('commits staged changes and returns sha and subject', async () => {
     const dir = makeRepo();
     fs.writeFileSync(path.join(dir, 'a.txt'), 'two\n');
@@ -2030,5 +2179,142 @@ describe('getDefaultBranch (R10 #3)', () => {
   it('returns null when origin/HEAD is not set', async () => {
     const dir = makeRepo();
     expect(await getDefaultBranch(dir)).toBeNull();
+  });
+});
+
+describe('streamGitRecords', () => {
+  it('hands over each record as it arrives, and stops when told to', async () => {
+    const dir = makeRepo();
+    for (const name of ['b.txt', 'c.txt', 'd.txt']) {
+      fs.writeFileSync(path.join(dir, name), 'x\n');
+    }
+    git(dir, 'add', '.');
+    const seen: string[] = [];
+    const stopped = await streamGitRecords(dir, ['ls-files', '-z'], (r) => {
+      seen.push(r.toString('utf8'));
+      return r.toString('utf8') === 'b.txt';
+    });
+    // Stopped on the second record, and nothing after it reached the reader.
+    expect([stopped, seen]).toEqual([true, ['a.txt', 'b.txt']]);
+
+    const all: string[] = [];
+    const reachedEnd = await streamGitRecords(dir, ['ls-files', '-z'], (r) => {
+      all.push(r.toString('utf8'));
+      return false;
+    });
+    expect([reachedEnd, all]).toEqual([
+      false,
+      ['a.txt', 'b.txt', 'c.txt', 'd.txt'],
+    ]);
+  });
+
+  it('keeps a path the bytes it is', async () => {
+    const dir = makeRepo();
+    const blob = git(dir, 'rev-parse', 'HEAD:a.txt').trim();
+    // git writes paths as bytes, and `-z` does not quote them. Decoding the
+    // stream before splitting it would replace this byte and hand the
+    // reader a path that names some other file.
+    const odd = Buffer.concat([
+      Buffer.from('sub'),
+      Buffer.from([0xff]),
+      Buffer.from('.txt'),
+    ]);
+    execFileSync('git', ['update-index', '--index-info'], {
+      cwd: dir,
+      input: Buffer.concat([
+        Buffer.from(`100644 ${blob} 0\t`),
+        odd,
+        Buffer.from('\n'),
+      ]),
+    });
+    const records: Buffer[] = [];
+    await streamGitRecords(dir, ['ls-files', '-z'], (r) => {
+      records.push(Buffer.from(r));
+      return false;
+    });
+    expect(records.some((r) => r.equals(odd))).toBe(true);
+  });
+
+  it('counts the last record, which no separator follows', async () => {
+    const dir = makeRepo();
+    const records: string[] = [];
+    await streamGitRecords(dir, ['rev-parse', 'HEAD'], (r) => {
+      records.push(r.toString('utf8').trim());
+      return false;
+    });
+    expect(records).toEqual([git(dir, 'rev-parse', 'HEAD').trim()]);
+  });
+
+  it('rejects when the reader throws, on any record, the last one included', async () => {
+    const dir = makeRepo();
+    // The last record is only seen once git has closed; a throw there has
+    // to become this promise's rejection, not an uncaught one from inside
+    // an event listener.
+    await expect(
+      streamGitRecords(dir, ['rev-parse', 'HEAD'], () => {
+        throw new Error('reader broke');
+      }),
+    ).rejects.toThrow('reader broke');
+    await expect(
+      streamGitRecords(dir, ['ls-files', '-z'], () => {
+        throw new Error('reader broke early');
+      }),
+    ).rejects.toThrow('reader broke early');
+  });
+
+  it('rejects when git fails, rather than answering "nothing found"', async () => {
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-norepo-'));
+    tmpRoots.push(outside);
+    await expect(
+      streamGitRecords(
+        outside,
+        ['ls-files', '-z'],
+        () => false,
+        // Without a repository of its own, git would otherwise walk up to
+        // whatever repository holds the temporary directory.
+        { ...process.env, GIT_CEILING_DIRECTORIES: path.dirname(outside) },
+      ),
+    ).rejects.toThrow(/not a git repository/i);
+  });
+
+  it('names the subcommand when git fails without a word', async () => {
+    const dir = makeRepo();
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'changed\n');
+    // `diff --quiet` exits 1 on a change and says nothing, and the `-c`
+    // pair in front is how every call here begins.
+    await expect(
+      streamGitRecords(
+        dir,
+        ['-c', 'core.fsmonitor=false', 'diff', '--quiet'],
+        () => false,
+      ),
+    ).rejects.toThrow('git diff exited with 1');
+  });
+
+  // A shell-script stand-in for git on PATH; POSIX only.
+  it.skipIf(process.platform === 'win32')(
+    'says which signal stopped git when nothing else is said',
+    async () => {
+      const bin = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-fakegit-'));
+      tmpRoots.push(bin);
+      fs.writeFileSync(path.join(bin, 'git'), '#!/bin/sh\nkill -TERM $$\n');
+      fs.chmodSync(path.join(bin, 'git'), 0o755);
+      await expect(
+        streamGitRecords(bin, ['ls-files', '-z'], () => false, {
+          ...process.env,
+          PATH: `${bin}${path.delimiter}${process.env['PATH'] ?? ''}`,
+        }),
+      ).rejects.toThrow('git ls-files exited with SIGTERM');
+    },
+  );
+
+  it('gives up on git that never finishes', async () => {
+    const dir = makeRepo();
+    // `cat-file --batch` waits on its input, which nothing ever sends.
+    await expect(
+      streamGitRecords(dir, ['cat-file', '--batch'], () => false, undefined, {
+        timeoutMs: 300,
+      }),
+    ).rejects.toThrow(/timed out/);
   });
 });

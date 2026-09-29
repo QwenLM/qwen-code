@@ -1566,6 +1566,26 @@ describe('BackgroundTasksDialog', () => {
       expect(f).toContain('3.5kt');
     });
 
+    it('explains the large-workflow flag in the detail view', () => {
+      const wf = workflowEntry({
+        status: 'running',
+        sizeWarning: {
+          axis: 'agents' as const,
+          scheduledAgents: 40,
+          totalTokens: 0,
+          projectedTokens: 2_800_000,
+          agentCap: 15,
+          tokenCap: 1_500_000,
+          capFromGuideline: true,
+          at: 0,
+        },
+      });
+      const h = openWorkflowDetail([wf]);
+      const f = (h.lastFrame() ?? '').replace(/\s+/g, ' ');
+      expect(f).toContain('Large workflow:');
+      expect(f).toContain('40 agents scheduled');
+    });
+
     it('renders plain spent (no cap) when uncapped and zero per-phase chips suppressed', () => {
       const wf = workflowEntry({
         tokensSpent: 850,

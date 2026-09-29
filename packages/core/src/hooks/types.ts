@@ -125,7 +125,8 @@ export type HookExecutionOutcome =
   | 'success' // Hook executed successfully
   | 'blocking' // Hook blocked the operation
   | 'non_blocking_error' // Hook failed but doesn't block
-  | 'cancelled'; // Hook was cancelled/aborted
+  | 'cancelled' // Hook was cancelled/aborted by the caller
+  | 'timeout'; // Hook ran past its timeout; distinct from a user cancel
 
 /**
  * Context provided to function hooks for state access
@@ -265,6 +266,15 @@ export interface HookInput {
   cwd: string;
   hook_event_name: string;
   timestamp: string;
+  /**
+   * Approval mode of the session. Tool and subagent events report the mode
+   * that applied to them instead.
+   */
+  permission_mode?: PermissionMode;
+  /** Present only when the event fires inside a subagent. */
+  agent_id?: string;
+  /** Prompt id of the model turn the event belongs to, when known. */
+  prompt_id?: string;
 }
 
 export type InstructionMemoryType = 'user' | 'project' | 'local' | 'extension';
@@ -379,6 +389,27 @@ export function createHookOutput(
     default:
       return new DefaultHookOutput(data);
   }
+}
+
+/**
+ * Whether a hook's output is a blocking decision on this event: for PreToolUse
+ * the permission decision wins over the generic `decision` field. The HTTP
+ * runner and the progress reporting both use this one test, so they report
+ * such a decision the same way.
+ *
+ * It covers decisions only. Output that stops the turn with `continue: false`,
+ * or a PreToolUse `ask`, also keeps a tool call from proceeding but is not a
+ * blocking decision here, and the function runner applies its own test that
+ * counts `continue: false`. Reporting a stop is left to the progress display.
+ */
+export function isBlockingHookOutput(
+  eventName: string,
+  data: Partial<HookOutput>,
+): boolean {
+  const output = createHookOutput(eventName, data);
+  return output instanceof PreToolUseHookOutput
+    ? output.isDenied()
+    : output.isBlockingDecision();
 }
 
 /**
@@ -776,6 +807,7 @@ export interface PostToolUseInput extends HookInput {
   tool_response: Record<string, unknown>;
   tool_use_id: string; // Unique identifier for this tool use instance (internal format, e.g., toolu_xxx)
   tool_call_id?: string; // Original API call ID from the LLM provider (e.g., call_xxx for OpenAI/Qwen)
+  duration_ms?: number; // Tool execution time in milliseconds, when execution started
 }
 
 /**
@@ -803,6 +835,7 @@ export interface PostToolUseFailureInput extends HookInput {
   tool_input: Record<string, unknown>;
   error: string; // Error message describing the failure
   is_interrupt?: boolean; // Whether the failure was caused by user interruption
+  duration_ms?: number; // Tool execution time in milliseconds, when execution started
 }
 
 /**

@@ -260,12 +260,9 @@ could send two searches for one turn. Use the v2 Extension profile for
 on-demand `context_search`, or the v3 Hook-only profile for Auto Recall, never
 both in one Qwen process.
 
-The Hook requires a non-empty `submitted_prompt` captured before prompt
-expansion. This includes supported interactive TUI submissions and headless
-CLI user turns (`qwen -p` and stream-json input, including SDK clients using
-that path). The field establishes prompt provenance, not a TUI-only origin.
-The Hook never falls back to the expanded `prompt`; events without
-`submitted_prompt` do not trigger retrieval.
+The Hook requires a non-empty `submitted_prompt` captured before prompt expansion. This includes supported interactive TUI submissions, first-turn headless CLI `UserQuery` sends (`qwen -p` and stream-json input, including SDK clients using that path), and explicitly declared fresh non-channel turns on the ACP session path used by ACP clients, `serve`, and daemon hosts. ACP/daemon clients must provide `_meta: { "qwen.submittedPrompt": "original submitted text" }` per eligible request; Web Shell does so at its submission boundary. Realtime voice handoffs omit declarations because their text comes from model-generated tool arguments. Existing ACP clients without a declaration continue to omit the field. Internal background dispatches and all channel messages, including human messages, are excluded. See [UserPromptSubmit](../../docs/users/features/hooks.md#userpromptsubmit).
+
+The field establishes prompt provenance, not a TUI-only origin or proof of human authorship. The Hook never falls back to `prompt`; events without `submitted_prompt` do not trigger retrieval.
 
 Register this profile only in launchers where automatic retrieval is intended
 for all eligible inputs. To disable every Hook for an automation run, use

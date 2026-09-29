@@ -16,6 +16,7 @@ import {
   createWorkspaceRegistry,
   type WorkspaceRuntime,
 } from '../workspace-registry.js';
+import type { WorkspaceFileSystemFactory } from '../fs/index.js';
 
 const telemetryMocks = vi.hoisted(() => ({
   setDaemonTelemetryWorkspace: vi.fn(),
@@ -55,6 +56,10 @@ function runtime(opts: {
     ...opts,
     sessionRuntimeBaseDir: path.join(opts.workspaceCwd, '.runtime'),
     trusted: opts.trusted !== false,
+    routeFileSystemFactory: {
+      forRequest: vi.fn(),
+      assertCanWrite: vi.fn(),
+    } as WorkspaceFileSystemFactory,
   } as WorkspaceRuntime;
 }
 

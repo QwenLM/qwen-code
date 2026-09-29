@@ -8,11 +8,13 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
+import { parse } from 'yaml';
 
 import externalContextConfig from '../../integrations/external-context/vitest.config.js';
 import externalContextMem0Config from '../../integrations/external-context-mem0/vitest.config.js';
 import acpBridgeConfig from '../../packages/acp-bridge/vitest.config.js';
 import audioCaptureConfig from '../../packages/audio-capture/vitest.config.js';
+import browserUseConfig from '../../packages/browser-use/vitest.config.js';
 import channelsBaseConfig from '../../packages/channels/base/vitest.config.js';
 import dingtalkConfig from '../../packages/channels/dingtalk/vitest.config.js';
 import dwsConfig from '../../packages/channels/dws/vitest.config.js';
@@ -54,6 +56,7 @@ const configs: Record<string, ExemptionConfig> = {
   'integrations/external-context-mem0': externalContextMem0Config,
   'packages/acp-bridge': acpBridgeConfig,
   'packages/audio-capture': audioCaptureConfig,
+  'packages/browser-use': browserUseConfig,
   'packages/channels/base': channelsBaseConfig,
   'packages/channels/dingtalk': dingtalkConfig,
   'packages/channels/dws': dwsConfig,
@@ -109,6 +112,8 @@ const configModules: Record<
     import('../../packages/acp-bridge/vitest.config.js'),
   'packages/audio-capture': () =>
     import('../../packages/audio-capture/vitest.config.js'),
+  'packages/browser-use': () =>
+    import('../../packages/browser-use/vitest.config.js'),
   'packages/channels/base': () =>
     import('../../packages/channels/base/vitest.config.js'),
   'packages/channels/dingtalk': () =>
@@ -196,6 +201,7 @@ describe('shared-pool test timeout', () => {
     'integrations/external-context-mem0',
     'packages/acp-bridge',
     'packages/audio-capture',
+    'packages/browser-use',
     'packages/channels/base',
     'packages/channels/dingtalk',
     'packages/channels/dws',
@@ -397,26 +403,33 @@ describe('autofix gate load clamps', () => {
     // that cap is the shield keeping a 1.x workspace's legs alive under
     // the clamps — pin it here so removing it fails the suite instead of
     // crashing every gate leg for the workspace.
-    const lock = JSON.parse(
+    type ImporterDeps = Record<string, { version?: string }> | undefined;
+    const lock = parse(
       readFileSync(
-        fileURLToPath(new URL('../../package-lock.json', import.meta.url)),
+        fileURLToPath(new URL('../../pnpm-lock.yaml', import.meta.url)),
         'utf8',
       ),
-    ) as { packages: Record<string, { version?: string }> };
-    const hoisted = lock.packages['node_modules/vitest']?.version ?? '';
-    // Nested lockfile copies under workspace dirs are exactly the
-    // workspaces whose pinned vitest differs from the hoisted one; if the
-    // hoisted copy itself were 1.x this filter would go blind, so pin the
-    // premise.
-    expect(Number(hoisted.split('.')[0])).toBeGreaterThanOrEqual(2);
-    const legacyWorkspaces = Object.entries(lock.packages)
-      .filter(
-        ([path, entry]) =>
-          path.endsWith('/node_modules/vitest') &&
-          (path.startsWith('packages/') || path.startsWith('integrations/')) &&
-          Number(entry.version?.split('.')[0] ?? 99) < 2,
-      )
-      .map(([path]) => path.slice(0, -'/node_modules/vitest'.length));
+    ) as {
+      importers: Record<
+        string,
+        { dependencies?: ImporterDeps; devDependencies?: ImporterDeps }
+      >;
+    };
+    // Each importer records the vitest it resolves (with a peer suffix
+    // after the version), so a workspace pinning 1.x shows up directly.
+    const vitestVersion = (importer: string) =>
+      lock.importers[importer]?.devDependencies?.['vitest']?.version ??
+      lock.importers[importer]?.dependencies?.['vitest']?.version ??
+      '';
+    // The shield only matters beside a 2.x+ root; if the root itself were
+    // 1.x the premise of this test would be gone, so pin it.
+    expect(Number(vitestVersion('.').split('.')[0])).toBeGreaterThanOrEqual(2);
+    const legacyWorkspaces = Object.keys(lock.importers).filter(
+      (path) =>
+        (path.startsWith('packages/') || path.startsWith('integrations/')) &&
+        vitestVersion(path) !== '' &&
+        Number(vitestVersion(path).split('.')[0]) < 2,
+    );
     for (const workspace of legacyWorkspaces) {
       if (!(workspace in configs)) {
         throw new Error(
