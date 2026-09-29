@@ -30,8 +30,32 @@ import {
 import { PermissionManager } from './permission-manager.js';
 import type { PermissionManagerConfig } from './permission-manager.js';
 import { extractShellOperationsAcrossCommand } from './shell-semantics.js';
-import { normalizeToolNameForProvider } from '../utils/tool-name-utils.js';
+import {
+  generateLegacyMcpToolName,
+  normalizeToolNameForProvider,
+} from '../utils/tool-name-utils.js';
+import { DiscoveredMCPTool } from '../tools/mcp-tool.js';
+import type { CallableTool } from '@google/genai';
 import { ToolNames, ToolDisplayNames } from '../tools/tool-names.js';
+
+// Builds the tool exactly as MCP discovery builds it, so the permission
+// aliases under test are the tool's own advertised `permissionAliases` — the
+// exact raw identity first, then the legacy spelling — never a hand-written
+// stand-in that could drift from the producer (same pattern as
+// mcp-server-rule-collision.test.ts).
+const callableTool = { callTool: async () => [] } as unknown as CallableTool;
+function prodTool(
+  serverName: string,
+  serverToolName: string,
+): DiscoveredMCPTool {
+  return new DiscoveredMCPTool(
+    callableTool,
+    serverName,
+    serverToolName,
+    'test tool',
+    {},
+  );
+}
 
 const debugLoggerMock = vi.hoisted(() => ({
   isEnabled: vi.fn().mockReturnValue(false),
@@ -2083,26 +2107,50 @@ describe('PermissionManager', () => {
     });
 
     it('refuses a legacy truncated MCP permission alias on an exact entry', async () => {
-      const rawName = `mcp__server__${'x'.repeat(80)}`;
-      const legacyName = rawName.slice(0, 28) + '___' + rawName.slice(-32);
-      const providerSafeName = normalizeToolNameForProvider(rawName);
+      // Built through the real producer: the 31-character server key pushes
+      // the raw identity past the 63-character budget, so registration
+      // truncates and hashes, and the legacy reduction middle-truncates at
+      // slice(0, 28) — keeping only the key's first 23 characters. A cut
+      // that reached the server segment vouches for no server, so the
+      // producer advertises only the exact raw identity (R12-1), and a
+      // persisted allow in the truncated spelling fails closed instead of
+      // auto-approving the tool; see mcp-server-rule-collision.test.ts
+      // (R8-1) for the two-servers-one-spelling witnesses.
+      const tool = prodTool(
+        'weather-forecast-server-premium',
+        'get_extended_forecast_for_next_week',
+      );
+      const legacyName = generateLegacyMcpToolName(
+        'mcp__weather-forecast-server-premium__get_extended_forecast_for_next_week',
+      );
+      expect(tool.permissionAliases).not.toContain(legacyName);
       const pm2 = new PermissionManager(
         makeConfig({ permissionsAllow: [legacyName] }),
       );
       pm2.initialize();
 
-      // The middle-truncated window keeps only the first 23 characters of
-      // the server key, so two different servers publish it byte-identically:
-      // the spelling names no single server, and the exact arm refuses it —
-      // the same provenance the prefix arms require. The unambiguous
-      // spellings (the raw identity, a length-preserving legacy reduction)
-      // still match; see mcp-server-rule-collision.test.ts (R8-1).
       expect(
         await pm2.evaluate({
-          toolName: providerSafeName,
-          toolAliases: [legacyName],
+          toolName: tool.name,
+          toolAliases: tool.permissionAliases,
         }),
       ).toBe('default');
+
+      // Control: the same rule in the exact raw identity still names it.
+      const rawPm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: [
+            'mcp__weather-forecast-server-premium__get_extended_forecast_for_next_week',
+          ],
+        }),
+      );
+      rawPm.initialize();
+      expect(
+        await rawPm.evaluate({
+          toolName: tool.name,
+          toolAliases: tool.permissionAliases,
+        }),
+      ).toBe('allow');
     });
 
     it('honors legacy MCP wildcard deny rules for provider-safe names', async () => {
