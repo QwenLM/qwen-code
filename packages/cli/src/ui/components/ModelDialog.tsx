@@ -32,6 +32,7 @@ import { UIStateContext, type UIState } from '../contexts/UIStateContext.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import { t } from '../../i18n/index.js';
+import { publicProviderBaseUrl } from '../../utils/acpModelUtils.js';
 import {
   formatUnsupportedVoiceModelMessage,
   isSelectableVoiceModel,
@@ -164,6 +165,32 @@ function resolvePersistScope(
   if (persistScope === 'workspace') return SettingScope.Workspace;
   if (persistScope === 'user') return SettingScope.User;
   return getPersistScopeForModelSelection(settings);
+}
+
+/**
+ * Workspace settings are shareable (`<project>/.qwen/settings.json` gets
+ * committed), so only a provably public endpoint may be persisted there;
+ * otherwise drop just the `\0baseUrl` disambiguator, matching the policy in
+ * serve/routes/workspace-models.ts. `publicProviderBaseUrl` is the fail-closed
+ * of the two URL predicates — it also rejects query/hash secrets — and a kept
+ * URL stays byte-identical, which `Config.pinnedAuxEndpoint` requires. User
+ * scope is never rewritten. Parity: ui/opentui/dialog-data.ts.
+ */
+function shareableAuxSelector(selector: string, scope: SettingScope): string {
+  if (scope !== SettingScope.Workspace) return selector;
+  const sep = selector.indexOf('\0');
+  if (sep === -1) return selector;
+  const endpoint = selector.slice(sep + 1);
+  return publicProviderBaseUrl(endpoint) === endpoint
+    ? selector
+    : selector.slice(0, sep);
+}
+
+/** Disclose that the disambiguator stayed out of the shared settings file. */
+function endpointNotSavedNote(selector: string, persisted: string): string {
+  return selector === persisted
+    ? ''
+    : t(' (endpoint not saved: project settings are shared)');
 }
 
 function persistModelSelection(
@@ -967,7 +994,10 @@ export function ModelDialog({
       if (isFastModelMode) {
         const fastModel = encodeAuxModelSelector(selected);
         const scope = resolvePersistScope(settings, persistScope);
-        settings.setValue(scope, 'fastModel', fastModel);
+        // The shareable workspace file only ever receives a provably public
+        // endpoint; this session's in-memory pin keeps the picked row.
+        const persistedFastModel = shareableAuxSelector(fastModel, scope);
+        settings.setValue(scope, 'fastModel', persistedFastModel);
         // Sync the runtime Config so forked agents pick up the change immediately.
         config?.setFastModel(fastModel);
         const scopeSuffix =
@@ -978,7 +1008,7 @@ export function ModelDialog({
               : '';
         reportAuxiliaryModelSelection({
           type: 'success',
-          text: `${t('Fast Model')}: ${fastModel.split('\0')[0]}${scopeSuffix}`,
+          text: `${t('Fast Model')}: ${persistedFastModel.split('\0')[0]}${scopeSuffix}${endpointNotSavedNote(fastModel, persistedFastModel)}`,
         });
         onClose();
         return;
@@ -1036,7 +1066,11 @@ export function ModelDialog({
         }
         const compactionModelId = encodeAuxModelSelector(selected);
         const scope = resolvePersistScope(settings, persistScope);
-        settings.setValue(scope, 'compactionModel', compactionModelId);
+        const persistedCompactionModel = shareableAuxSelector(
+          compactionModelId,
+          scope,
+        );
+        settings.setValue(scope, 'compactionModel', persistedCompactionModel);
         // Sync runtime Config so the compression service picks it up immediately.
         config.setCompactionModel(compactionModelId);
         const scopeSuffix =
@@ -1047,7 +1081,7 @@ export function ModelDialog({
               : '';
         reportAuxiliaryModelSelection({
           type: 'success',
-          text: `${t('Compaction Model')}: ${compactionModelId.split('\0')[0]}${scopeSuffix}`,
+          text: `${t('Compaction Model')}: ${persistedCompactionModel.split('\0')[0]}${scopeSuffix}${endpointNotSavedNote(compactionModelId, persistedCompactionModel)}`,
         });
         onClose();
         return;
