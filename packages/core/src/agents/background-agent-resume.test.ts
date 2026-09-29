@@ -117,17 +117,20 @@ describe('BackgroundAgentResumeService', () => {
       copyDiscoveredToolsFrom: vi.fn(),
       registerFactory: vi.fn(),
       getAllTools: vi.fn().mockReturnValue([]),
-      getAllToolNames: vi
-        .fn()
-        .mockReturnValue(
-          (
-            options.currentForkRuntime?.registeredTools ??
-            options.currentForkRuntime?.advertisedTools ??
-            []
-          )
-            .map((declaration) => declaration.name)
-            .filter((name): name is string => Boolean(name)),
-        ),
+      getAllToolNames: vi.fn().mockReturnValue(
+        (
+          options.currentForkRuntime?.registeredTools ??
+          options.currentForkRuntime?.advertisedTools ??
+          []
+        )
+          .map((declaration) => declaration.name)
+          .filter((name): name is string => Boolean(name))
+          // Mirror the real rebuilt resume registry (the `forSubAgent`
+          // guard in config.ts): it registers the Skill tool whenever the
+          // config holds a SkillManager — the registry presence the
+          // getInitialChatHistory gate reads (#12838).
+          .concat(options.skillManager ? [ToolNames.SKILL] : []),
+      ),
       getTool: vi.fn(),
       stop: vi.fn().mockResolvedValue(undefined),
       warmAll: vi.fn().mockResolvedValue(undefined),
