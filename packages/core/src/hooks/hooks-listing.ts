@@ -414,8 +414,11 @@ export function buildHooksListing(config: HooksListingConfig): HooksListing {
           origin: 'registry',
           entryEnabled: entry.enabled,
           agentScope: entry.agentScope,
+          trustGated: entry.isSourceTrusted !== undefined,
         },
-        gates,
+        entry.isSourceTrusted
+          ? { ...gates, trustedFolder: entry.isSourceTrusted() }
+          : gates,
       ),
     );
   }

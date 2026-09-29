@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.runtimebroker;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Map;
+import java.util.List;
 
 /** Persistence boundary for idempotent Tool execution state. */
 public interface ToolExecutionRepository {
@@ -46,6 +47,18 @@ public interface ToolExecutionRepository {
      * construction, so implementations must not add a lease predicate. */
     ToolExecutionRecord resolveUnknown(ToolExecutionRecord expected,
             Map<String, Object> resolutionResult, Instant resolutionTime);
+
+    /** Evidence-only settlement of EXECUTING, CANCEL_REQUESTED or UNKNOWN.
+     * Atomically checks identity and version, without claiming or fencing a
+     * dispatch. Preserves the stored dispatch identity and cancellation intent. */
+    ToolExecutionRecord resolveUnsettled(ToolExecutionRecord expected,
+            Map<String, Object> resolutionResult, Instant resolutionTime);
+
+    /** At most 100 potentially dispatched executions belonging to this exact
+     * Session and binding generation, ordered by execution ID hash. The
+     * exclusive cursor is an execution ID, including one already settled. */
+    List<ToolExecutionRecord> findUnsettled(RuntimeSessionRecord session,
+            String afterExecutionCallId, int limit);
 
     boolean hasActiveByRuntimeSession(String runtimeSessionId);
 
