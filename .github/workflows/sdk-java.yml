@@ -7,6 +7,7 @@ on:
       - 'release/**'
     paths:
       - 'packages/sdk-java/**'
+      - '**/.mvn/**'
       - 'packages/core/src/config/approval-modes.json'
       - 'packages/core/src/managed-runtime/**'
       - 'packages/cli/src/config/**'
@@ -22,6 +23,7 @@ on:
       - 'docs/developers/sdk-java.md'
       - 'docs/design/java-daemon-sdk-alpha.md'
       - 'scripts/run-java-daemon-sdk-e2e.ts'
+      - 'scripts/check-failsafe-reports.js'
       - '.github/workflows/sdk-java.yml'
       - '.github/workflows/release-sdk-java.yml'
   push:
@@ -30,6 +32,7 @@ on:
       - 'release/**'
     paths:
       - 'packages/sdk-java/**'
+      - '**/.mvn/**'
       - 'packages/core/src/config/approval-modes.json'
       - 'packages/core/src/managed-runtime/**'
       - 'packages/cli/src/config/**'
@@ -45,6 +48,7 @@ on:
       - 'docs/developers/sdk-java.md'
       - 'docs/design/java-daemon-sdk-alpha.md'
       - 'scripts/run-java-daemon-sdk-e2e.ts'
+      - 'scripts/check-failsafe-reports.js'
       - '.github/workflows/sdk-java.yml'
       - '.github/workflows/release-sdk-java.yml'
 
@@ -250,8 +254,13 @@ jobs:
           -Dmysql.url='jdbc:mysql://127.0.0.1:3306/managed_agent_test?createDatabaseIfNotExist=true&allowPublicKeyRetrieval=true&useSSL=false'
           -Dmysql.user=root -Dmysql.password=runtime-broker clean verify checkstyle:check
 
+      # Maven passes a selection narrowed by a profile, MAVEN_ARGS or
+      # .mvn/maven.config, so compare what ran with the source tree.
+      - name: 'Check that every non-Hosted integration test class ran'
+        run: 'node scripts/check-failsafe-reports.js non-hosted packages/sdk-java/runtime-broker packages/sdk-java/managed-agent-server'
+
   hosted-harness-mysql:
-    name: 'Hosted no-tool processes / MySQL 8.4 / Java 21'
+    name: 'Hosted process fault gates / MySQL 8.4 / Java 21'
     runs-on: 'ubuntu-latest'
     timeout-minutes: 30
     services:
@@ -295,16 +304,19 @@ jobs:
           mvn --batch-mode --no-transfer-progress -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
           mvn --batch-mode --no-transfer-progress -f packages/sdk-java/runtime-broker/pom.xml -DskipTests install
       - name: 'Verify Hosted Java, Spring and MySQL processes'
-        timeout-minutes: 5
+        timeout-minutes: 12
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
           MYSQL_PORT: "${{ job.services.mysql.ports['3306'] }}"
         run: >-
           mvn --batch-mode --no-transfer-progress -f packages/sdk-java/managed-agent-server/pom.xml
-          -Phosted-harness-mysql -Dit.test=HostedHarnessMySqlIT
+          -Phosted-harness-mysql
+          -Dnode.executable="$(command -v node)"
           -Dqwen.cli.entry="${GITHUB_WORKSPACE}/dist/cli.js"
           -Dmysql.url="jdbc:mysql://127.0.0.1:${MYSQL_PORT}/hosted_harness_test?allowPublicKeyRetrieval=true&useSSL=false"
-          -Dmysql.user=root -Dmysql.password=hosted-fixture verify checkstyle:check
+          -Dmysql.user=root -Dmysql.password=hosted-fixture clean verify checkstyle:check
+      - name: 'Check that every Hosted integration test class ran'
+        run: 'node scripts/check-failsafe-reports.js hosted packages/sdk-java/managed-agent-server'
       - name: 'Run Runtime Broker fault gates'
         timeout-minutes: 10
         env:

@@ -60,6 +60,11 @@ public interface RuntimeProvisioner extends AutoCloseable {
                 RuntimeObservation.unknown(handle));
     }
 
+    /** Whether saved startup identity can be observed without relaunching it. */
+    default boolean supportsStartupRecovery(RuntimeResourceHandle handle) {
+        return false;
+    }
+
     /**
      * Proves a lease this process already treats as ready still answers
      * attestation. The default accepts the in-memory lease.
@@ -67,6 +72,14 @@ public interface RuntimeProvisioner extends AutoCloseable {
     default CompletionStage<Void> confirm(RuntimeProvisionRequest request,
             RuntimeLease lease) {
         return CompletableFuture.completedFuture(null);
+    }
+
+    /**
+     * Whether a failed confirmation can be retried against the same owned,
+     * still-live resource. Unknown implementations keep the binding fenced.
+     */
+    default boolean canRetryFailedConfirm(RuntimeLease lease) {
+        return false;
     }
 
     /**

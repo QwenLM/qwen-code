@@ -17,6 +17,8 @@ public final class ManagedSessionStoreModels {
     public static final int MAX_RESOURCES_PER_TRANSACTION = 1024;
     public static final int MAX_TRANSACTION_BYTES = 8 * 1024 * 1024;
     public static final int MAX_TRANSACTION_EVENTS = 256;
+    /** The deepest record line the Session authority's reader accepts. */
+    public static final int MAX_JSON_DEPTH = 64;
     public static final int MIN_WRITER_TOKEN_LENGTH = 32;
     public static final int MAX_WRITER_TOKEN_LENGTH = 512;
     public static final long MIN_LEASE_MILLIS = 1_000;
@@ -101,6 +103,22 @@ public final class ManagedSessionStoreModels {
             @Min(0) long byteLength,
             @NotBlank @Pattern(regexp = DIGEST_PATTERN) String digest,
             @Size(max = 90_000) String bytesBase64) {
+    }
+
+    public record PublishToolResultRequest(
+            @NotBlank @Size(max = 512) String workspaceId,
+            @NotBlank @Size(max = 512) String writerId,
+            @Min(1) @Max(MAX_SAFE_COUNTER) long writerGeneration,
+            @NotBlank @Size(max = 512) String resourceId,
+            @NotBlank @Size(max = 512) String kind,
+            @Min(1) @Max(1) int schemaVersion,
+            @Min(1) @Max(1024 * 1024) long byteLength,
+            @NotBlank @Pattern(regexp = DIGEST_PATTERN) String digest,
+            @NotBlank @Size(max = 1_398_104) String bytesBase64) {
+    }
+
+    public record ToolResultResourceRef(String resourceId, String kind,
+            int schemaVersion, long byteLength, String digest) {
     }
 
     public record CommitTransactionRequest(
