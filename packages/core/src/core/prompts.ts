@@ -438,6 +438,7 @@ function getToolGuidanceSection(
     return `
 ## Using Your Tools
 - **Calling Convention:** Ordinary tools exist only inside '${ToolNames.EXEC}', as \`tools.<name>(args)\`. Every other tool declared to you — ${directControls} — is called directly and is not reachable through \`tools\`.
+- **Tool Discovery:** If a needed tool's signature is absent from '${ToolNames.EXEC}', use the top-level '${ToolNames.TOOL_SEARCH}' when available. Read its returned schema and JavaScript name before calling that tool in a later '${ToolNames.EXEC}' program.
 - **Prefer Dedicated Tools:** Do NOT use \`tools.${ToolNames.SHELL}\` to run commands when a relevant dedicated tool is provided. Dedicated tools make actions easier to review:
   - To read files use \`tools.${ToolNames.READ_FILE}\` instead of cat, head, tail, or sed
   - To edit files use \`tools.${ToolNames.EDIT}\` instead of sed or awk

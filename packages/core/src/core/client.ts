@@ -470,10 +470,7 @@ export class LlmClient {
   private readonly surfacedRelevantAutoMemoryPaths = new Set<string>();
   private shutdownRequested = false;
   private readonly settledSteerInputs = new WeakSet<SteerInput>();
-  private readonly interactionStartTypeByOwner = new WeakMap<
-    object,
-    SendMessageType
-  >();
+  private readonly interactionStartTypes = new Map<string, SendMessageType>();
 
   private readonly loopDetector: LoopDetectionService;
   private lastPromptId: string | undefined = undefined;
@@ -590,6 +587,7 @@ export class LlmClient {
     if (this.isInitialized() && this.initializedSessionId === sessionId) {
       return;
     }
+    this.interactionStartTypes.clear();
 
     // Check if we're resuming from a previous session
     const resumedSessionData = this.config.getResumedSessionData();
@@ -1881,6 +1879,7 @@ export class LlmClient {
     this.lastApiCompletionTimestamp = null;
     this.lastHookMicrocompactionTimestamp = null;
     this.recentCompletedToolNames = [];
+    this.interactionStartTypes.clear();
     // startChat() rewrites the chat to its initial state. Any prior
     // read_file tool results the FileReadCache still tracks are no
     // longer in history, so a follow-up Read would serve a placeholder
@@ -3094,15 +3093,14 @@ export class LlmClient {
       }
     }
 
-    // extract and dream keep the original UserQuery-only gate to preserve
-    // the existing "once per user turn" semantics and avoid redundant work.
-    if (messageType !== SendMessageType.UserQuery) {
+    if (
+      messageType !== SendMessageType.UserQuery &&
+      messageType !== SendMessageType.ToolResult
+    ) {
       return;
     }
 
     const projectRoot = this.config.getProjectRoot();
-    const sessionId = this.config.getSessionId();
-    const history = this.getHistoryShallow();
     const mgr = this.config.getMemoryManager();
 
     if (!this.config.getManagedAutoMemoryEnabled()) {
@@ -3124,6 +3122,14 @@ export class LlmClient {
         });
     }
 
+    // Extract and Dream stay once per user query; migration also needs the
+    // completed ToolResult path so tool-using turns can activate recall.
+    if (messageType !== SendMessageType.UserQuery) {
+      return;
+    }
+
+    const sessionId = this.config.getSessionId();
+    const history = this.getHistoryShallow();
     const extractPromise = mgr
       .scheduleExtract({
         projectRoot,
@@ -3428,6 +3434,8 @@ export class LlmClient {
     prompt_id: string,
     options?: SendMessageOptions,
     turns: number = MAX_TURNS,
+    managedMemoryType: SendMessageType = options?.type ??
+      SendMessageType.UserQuery,
   ): AsyncGenerator<ServerLlmStreamEvent, Turn> {
     const messageType = options?.type ?? SendMessageType.UserQuery;
     const startsInteraction =
@@ -3450,16 +3458,17 @@ export class LlmClient {
       errorType?: string,
     ) => {
       if (
-        !interactionOwner ||
+        interactionOwner &&
         getActiveInteractionSpan(prompt_id) !== interactionOwner
       ) {
         return;
       }
-      const interactionStartType =
-        this.interactionStartTypeByOwner.get(interactionOwner);
+      const interactionStartType = this.interactionStartTypes.get(prompt_id);
+      this.interactionStartTypes.delete(prompt_id);
       const ownsStructuredOutputContract =
         interactionStartType === SendMessageType.UserQuery ||
         interactionStartType === SendMessageType.Retry;
+      if (!interactionOwner) return;
       if (
         status === 'ok' &&
         ownsStructuredOutputContract &&
@@ -3780,12 +3789,8 @@ export class LlmClient {
         messageType,
       });
       interactionOwner = getActiveInteractionSpan(prompt_id);
-      if (
-        interactionOwner &&
-        !this.interactionStartTypeByOwner.has(interactionOwner)
-      ) {
-        this.interactionStartTypeByOwner.set(interactionOwner, messageType);
-      }
+      this.interactionStartTypes.clear();
+      this.interactionStartTypes.set(prompt_id, messageType);
       if (
         interactionOwner &&
         messageType === SendMessageType.UserQuery &&
@@ -3797,6 +3802,10 @@ export class LlmClient {
           options.submittedPrompt,
         );
       }
+    }
+    const interactionStartType = this.interactionStartTypes.get(prompt_id);
+    if (interactionStartType !== undefined) {
+      managedMemoryType = interactionStartType;
     }
     let userPromptRecordPayload: UserPromptRecordPayload | undefined;
     let hooksEnabled: boolean;
@@ -5030,6 +5039,7 @@ export class LlmClient {
                 steerInput,
               },
               steerTurnBudget,
+              managedMemoryType,
             );
           } finally {
             settleSteerInput(steerInput, pushCountBefore);
@@ -5179,6 +5189,7 @@ export class LlmClient {
                   steerInput: pendingSteer,
                 },
                 hookTurnBudget,
+                managedMemoryType,
               );
             } finally {
               settleSteerInput(pendingSteer, pushCountBefore);
@@ -5277,6 +5288,7 @@ export class LlmClient {
                 steerInput: pendingSteer,
               },
               hookTurnBudget,
+              managedMemoryType,
             );
           } finally {
             settleSteerInput(pendingSteer, pushCountBefore);
@@ -5338,7 +5350,7 @@ export class LlmClient {
 
         if (this.config.getSkipNextSpeakerCheck()) {
           if (!isGoalRuntimeTurn) {
-            this.runManagedAutoMemoryBackgroundTasks(messageType);
+            this.runManagedAutoMemoryBackgroundTasks(managedMemoryType);
           }
           if (arenaAgentClient) {
             await arenaAgentClient.reportCompleted();
@@ -5393,6 +5405,7 @@ export class LlmClient {
                 steerInput: pendingSteer,
               },
               continueTurnBudget,
+              managedMemoryType,
             );
           } finally {
             settleSteerInput(pendingSteer, pushCountBefore);
@@ -5420,7 +5433,7 @@ export class LlmClient {
         }
 
         if (!isGoalRuntimeTurn) {
-          this.runManagedAutoMemoryBackgroundTasks(messageType);
+          this.runManagedAutoMemoryBackgroundTasks(managedMemoryType);
         }
 
         if (arenaAgentClient) {
