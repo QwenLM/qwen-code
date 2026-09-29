@@ -20,11 +20,13 @@ decide whether to execute. Execution-sandbox and user-skills restrictions stay.
 
 The core scheduler and ACP Session mark the final guard call with
 `permissionChecked: true` after normal admission and PreToolUse handling.
+Core `fixed_policy` calls skip that permission flow and carry `false` instead;
+they still run the host guard and do not acquire a new confirmation step.
 The managed ACP adapter forwards this runtime-owned field separately from
 model arguments. BridgeClient validates its type and session/prompt ownership.
 
-The daemon still validates the reported invocation scope. For an admitted
-call it does not apply the redundant directory/Git containment rejection.
+The daemon still validates the reported invocation scope. For a call admitted
+by the normal permission flow, it skips the extra directory/Git containment check.
 The required external provider still evaluates the final call and can deny it.
 Speculation does not set the field and retains the existing containment guard.
 Managed Runtime tool execution has no normal permission flow, so its executor
@@ -32,9 +34,11 @@ retains explicit workspace-directory admission when building a shell call.
 
 ## Constraints
 
-This updates the unconditional-rejection policy in
-[the Git guard design](daemon-git-worktree-guard.md); its parser is unchanged
-and remains the fallback for calls without normal permission admission.
+This document defines the current post-approval policy, superseding the
+unconditional rejection described in [the original Git guard design](daemon-git-worktree-guard.md).
+The original document remains a historical reference for the unchanged parser
+and fallback containment checks on shell calls without normal permission admission.
+It does not describe a second veto on normally admitted calls.
 The field is provenance, not an OS credential or a model-granted capability.
 The same-host, same-UID trust model is unchanged. Omission retains the previous
 guard behavior. The external provider HTTP protocol is unchanged.
@@ -52,6 +56,8 @@ configuration, approval UI, grant token or general shell parser is introduced.
 - Sandbox-invalid directories and unapproved managed calls remain rejected.
 - Core scheduler, ACP Session and bridge tests pin the runtime marker; a
   marker inside model arguments does not authorize anything.
+- Fixed-policy calls carry `false`, ordinary calls carry `true`, and host
+  allow/deny still determines whether execution starts.
 - Unmarked calls and unverifiable invocation scopes retain their guards.
 
 The baseline was reproduced using the global CLI against two temporary
