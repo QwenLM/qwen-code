@@ -38,6 +38,7 @@ import type {
 import {
   ApprovalMode,
   AuthType,
+  ModelsConfig,
   GOAL_PAUSE_REASON_SESSION_TOKEN_LIMIT,
   GOAL_PAUSE_REASON_SESSION_DISPOSED,
   GOAL_PAUSE_REASON_STOP_HOOK_CAP,
@@ -515,6 +516,10 @@ describe('Session', () => {
   let originalServeStamp: string | undefined;
   let switchModelSpy: ReturnType<typeof vi.fn>;
   let getAvailableCommandsSpy: ReturnType<typeof vi.fn>;
+  let approvalModeChangeListener:
+    | ((mode: ApprovalMode, prePlanMode: ApprovalMode | undefined) => void)
+    | undefined;
+  let unsubscribeApprovalModeChange: ReturnType<typeof vi.fn>;
   let mockChatRecordingService: {
     recordTurnResult: ReturnType<typeof vi.fn>;
     recordUserMessage: ReturnType<typeof vi.fn>;
@@ -534,6 +539,7 @@ describe('Session', () => {
     recordBranchCheckpointTransaction: ReturnType<typeof vi.fn>;
     flush: ReturnType<typeof vi.fn>;
     recordSessionModel: ReturnType<typeof vi.fn>;
+    recordSessionApprovalMode: ReturnType<typeof vi.fn>;
   };
   let mockFileHistoryService: {
     makeSnapshot: ReturnType<typeof vi.fn>;
@@ -553,15 +559,21 @@ describe('Session', () => {
     refreshSystemInstruction: ReturnType<typeof vi.fn>;
     setTools: ReturnType<typeof vi.fn>;
     tryCompressChat: ReturnType<typeof vi.fn>;
+    activatePreparedMemoryRecallTransition: ReturnType<typeof vi.fn>;
     beginManagedAutoMemoryRecall: ReturnType<typeof vi.fn>;
     consumeManagedAutoMemoryRecall: ReturnType<typeof vi.fn>;
+    commitManagedAutoMemoryRecallDelivery: ReturnType<typeof vi.fn>;
+    discardManagedAutoMemoryRecallDelivery: ReturnType<typeof vi.fn>;
     finishManagedAutoMemoryRecall: ReturnType<typeof vi.fn>;
     captureCacheSafeParams: ReturnType<typeof vi.fn>;
     recordCompletedToolCall: ReturnType<typeof vi.fn>;
+    resetManagedAutoMemoryAfterCompression: ReturnType<typeof vi.fn>;
   };
   let mockMemoryManager: {
+    scheduleMetadataMigration: ReturnType<typeof vi.fn>;
     scheduleExtract: ReturnType<typeof vi.fn>;
     scheduleDream: ReturnType<typeof vi.fn>;
+    resetExhaustedBodyRefsForCurrentTurn: ReturnType<typeof vi.fn>;
   };
   let mockBackgroundTaskRegistry: {
     abortAll: ReturnType<typeof vi.fn>;
@@ -809,15 +821,23 @@ describe('Session', () => {
         newTokenCount: 0,
         compressionStatus: core.CompressionStatus.NOOP,
       }),
+      activatePreparedMemoryRecallTransition: vi
+        .fn()
+        .mockResolvedValue(undefined),
       beginManagedAutoMemoryRecall: vi.fn(),
       consumeManagedAutoMemoryRecall: vi.fn().mockResolvedValue(null),
+      commitManagedAutoMemoryRecallDelivery: vi.fn(),
+      discardManagedAutoMemoryRecallDelivery: vi.fn(),
       finishManagedAutoMemoryRecall: vi.fn(),
       captureCacheSafeParams: vi.fn(),
       recordCompletedToolCall: vi.fn(),
+      resetManagedAutoMemoryAfterCompression: vi.fn(),
     };
     mockMemoryManager = {
+      scheduleMetadataMigration: vi.fn().mockResolvedValue(undefined),
       scheduleExtract: vi.fn().mockResolvedValue(undefined),
       scheduleDream: vi.fn().mockResolvedValue(undefined),
+      resetExhaustedBodyRefsForCurrentTurn: vi.fn(),
     };
     mockBackgroundTaskRegistry = {
       abortAll: vi.fn(),
@@ -879,6 +899,8 @@ describe('Session', () => {
       list: vi.fn().mockReturnValue([]),
       abortAll: vi.fn(),
     };
+    approvalModeChangeListener = undefined;
+    unsubscribeApprovalModeChange = vi.fn();
 
     mockChatRecordingService = {
       recordTurnResult: vi.fn(),
@@ -903,6 +925,7 @@ describe('Session', () => {
       recordBranchCheckpointTransaction: vi.fn().mockResolvedValue(undefined),
       flush: vi.fn().mockResolvedValue(undefined),
       recordSessionModel: vi.fn().mockResolvedValue(true),
+      recordSessionApprovalMode: vi.fn().mockResolvedValue(true),
     };
     mockGoalRuntime = {
       getSnapshot: vi.fn().mockReturnValue({
@@ -959,12 +982,25 @@ describe('Session', () => {
       // session.prompt(), so the default must be defined. Individual tests
       // that care override via `mockConfig.getApprovalMode = vi.fn()...`.
       getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
+      getPrePlanMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
+      getPlanExecutionMode: vi.fn().mockReturnValue(undefined),
       getApprovalModeRevision: vi.fn().mockReturnValue(0),
       getShellExecutionConfig: vi.fn().mockReturnValue({
         terminalWidth: 80,
         terminalHeight: 24,
         showColor: false,
       }),
+      onApprovalModeChange: vi.fn(
+        (
+          listener: (
+            mode: ApprovalMode,
+            prePlanMode: ApprovalMode | undefined,
+          ) => void,
+        ) => {
+          approvalModeChangeListener = listener;
+          return unsubscribeApprovalModeChange;
+        },
+      ),
       switchModel: switchModelSpy,
       getModel: vi.fn().mockImplementation(() => currentModel),
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
@@ -1110,6 +1146,144 @@ describe('Session', () => {
     );
   });
 
+  describe('MCP App tools', () => {
+    const request = {
+      serverName: 'tableau',
+      resourceUri: 'ui://tableau/app',
+      name: 'get-embed-token',
+      arguments: {},
+    };
+    function installAppTool() {
+      const raw = {
+        content: [{ type: 'text', text: '{"token":"APP_PRIVATE_TOKEN"}' }],
+        _meta: { secret: 'APP_PRIVATE_TOKEN' },
+        structuredContent: { token: 'APP_PRIVATE_TOKEN' },
+      };
+      const callTool = vi.fn().mockResolvedValue(raw);
+      const tool = new core.DiscoveredMCPTool(
+        { tool: async () => ({}), callTool: async () => [] },
+        'tableau',
+        'get-embed-token',
+        'Get embed token',
+        { type: 'object', properties: {} },
+        false,
+        undefined,
+        mockConfig,
+        { callTool },
+      );
+      const registry = Object.assign(mockToolRegistry, {
+        hasMcpAppResource: vi.fn(
+          (server: string, uri: string) =>
+            server === request.serverName && uri === request.resourceUri,
+        ),
+        getMcpAppTool: vi.fn((server: string, name: string) =>
+          server === request.serverName && name === request.name
+            ? tool
+            : undefined,
+        ),
+      });
+      return { raw, callTool, tool, registry };
+    }
+
+    it('requests permission and returns raw data only to the App', async () => {
+      const { raw, callTool, tool } = installAppTool();
+      const buildForApp = vi.spyOn(tool, 'buildForApp');
+      await expect(
+        session.callMcpAppTool('mcp-app-1', request),
+      ).resolves.toEqual(raw);
+      expect(buildForApp).toHaveBeenCalledWith(
+        request.arguments,
+        expect.any(Function),
+        mockConfig,
+      );
+      expect(mockClient.requestPermission).toHaveBeenCalledOnce();
+      expect(callTool).toHaveBeenCalledOnce();
+      expect(
+        JSON.stringify(vi.mocked(mockClient.sessionUpdate).mock.calls),
+      ).not.toContain('APP_PRIVATE_TOKEN');
+      expect(
+        JSON.stringify(mockChatRecordingService.recordToolResult.mock.calls),
+      ).not.toContain('APP_PRIVATE_TOKEN');
+      expect(mockChat.addHistory).not.toHaveBeenCalled();
+    });
+
+    it('does not execute when permission is cancelled', async () => {
+      const { callTool } = installAppTool();
+      vi.mocked(mockClient.requestPermission).mockResolvedValue({
+        outcome: { outcome: 'cancelled' },
+      });
+      expect(await session.callMcpAppTool('mcp-app-2', request)).toMatchObject({
+        isError: true,
+      });
+      expect(callTool).not.toHaveBeenCalled();
+    });
+
+    it('honors explicit permission deny before YOLO and rejects unknown origins and targets', async () => {
+      const { callTool } = installAppTool();
+      vi.mocked(mockConfig.getApprovalMode).mockReturnValue(ApprovalMode.YOLO);
+      vi.mocked(mockConfig.getPermissionManager).mockReturnValue({
+        isToolEnabled: async () => true,
+        hasRelevantRules: () => true,
+        evaluate: async () => 'deny',
+        findMatchingDenyRule: () => 'mcp__tableau__get-embed-token',
+      } as unknown as ReturnType<Config['getPermissionManager']>);
+      expect(
+        await session.callMcpAppTool('mcp-app-deny', request),
+      ).toMatchObject({ isError: true });
+      expect(mockClient.requestPermission).not.toHaveBeenCalled();
+      await expect(
+        session.callMcpAppTool('mcp-app-server', {
+          ...request,
+          serverName: 'other',
+        }),
+      ).rejects.toThrow('resource');
+      await expect(
+        session.callMcpAppTool('mcp-app-resource', {
+          ...request,
+          resourceUri: 'ui://other',
+        }),
+      ).rejects.toThrow('resource');
+      await expect(
+        session.callMcpAppTool('mcp-app-target', { ...request, name: 'shell' }),
+      ).rejects.toThrow('tool');
+      expect(callTool).not.toHaveBeenCalled();
+    });
+
+    it.each(['dispose', 'cancelMcpAppCalls'] as const)(
+      'preserves a pending App across a reversible close gate until %s',
+      async (cancel) => {
+        const { callTool } = installAppTool();
+        vi.mocked(mockClient.requestPermission).mockReturnValue(
+          new Promise(() => {}),
+        );
+        const pending = session.callMcpAppTool('mcp-app-close', request);
+        const rejected = pending.catch((error: unknown) => error);
+        await vi.waitFor(() =>
+          expect(mockClient.requestPermission).toHaveBeenCalledOnce(),
+        );
+        expect(session.isTurnIdle()).toBe(false);
+        expect(session.collectActiveWorkHolds()).toContainEqual({
+          category: 'session',
+          id: 'session:active-turn',
+        });
+        expect(() => session.beginHistoryMutation()).toThrow('busy');
+        let settled = false;
+        void rejected.then(() => {
+          settled = true;
+        });
+        const release = session.beginClose();
+        release();
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(settled).toBe(false);
+        expect(session.isTurnIdle()).toBe(false);
+        session[cancel]();
+        expect(await rejected).toBeInstanceOf(Error);
+        expect(callTool).not.toHaveBeenCalled();
+        expect(session.isTurnIdle()).toBe(cancel === 'cancelMcpAppCalls');
+      },
+    );
+  });
+
   afterEach(() => {
     session?.dispose();
     if (originalProcessGuardMode === undefined) {
@@ -1181,6 +1355,30 @@ describe('Session', () => {
       (merged['experimental'] as Record<string, unknown>)['sessionWorkflow'],
     ).toBe(false);
     expect(provider?.()).toBe(true);
+  });
+
+  it('does not create approval transcript state during construction', () => {
+    expect(
+      mockChatRecordingService.recordSessionApprovalMode,
+    ).not.toHaveBeenCalled();
+  });
+
+  it('records approval changes and unsubscribes on dispose', () => {
+    vi.mocked(mockConfig.getPlanExecutionMode).mockReturnValue(
+      ApprovalMode.AUTO_EDIT,
+    );
+    approvalModeChangeListener?.(ApprovalMode.PLAN, ApprovalMode.YOLO);
+
+    expect(
+      mockChatRecordingService.recordSessionApprovalMode,
+    ).toHaveBeenCalledWith({
+      mode: ApprovalMode.PLAN,
+      prePlanMode: ApprovalMode.YOLO,
+      planExecutionMode: ApprovalMode.AUTO_EDIT,
+    });
+
+    session.dispose();
+    expect(unsubscribeApprovalModeChange).toHaveBeenCalledOnce();
   });
 
   it('reloads model providers from the session-owned settings', async () => {
@@ -2951,7 +3149,24 @@ describe('Session', () => {
         'hello',
         expect.any(AbortSignal),
       );
+      expect(
+        mockMemoryManager.resetExhaustedBodyRefsForCurrentTurn,
+      ).toHaveBeenCalledOnce();
       expect(textParts(firstSentMessage())).toEqual([memoryPrompt, 'hello']);
+      expect(mockMemoryManager.scheduleMetadataMigration).toHaveBeenCalledTimes(
+        2,
+      );
+      expect(mockMemoryManager.scheduleMetadataMigration).toHaveBeenCalledWith({
+        projectRoot: '/repo',
+        scope: 'project',
+        config: mockConfig,
+      });
+      expect(mockMemoryManager.scheduleMetadataMigration).toHaveBeenCalledWith({
+        projectRoot: '/repo',
+        scope: 'user',
+        config: mockConfig,
+      });
+
       // Captured twice: once inside `#recordPromptCompletionEffects` (before
       // `scheduleExtract`, pinned below) and once at the turn boundary that
       // feeds the follow-up suggestion.
@@ -2977,6 +3192,31 @@ describe('Session', () => {
       expect(
         mockLlmClient.finishManagedAutoMemoryRecall,
       ).toHaveBeenCalledOnce();
+    });
+
+    it('drives the prepared recall-mode transition before the per-turn reset on a fresh user turn', async () => {
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hello' }],
+      });
+
+      expect(
+        mockLlmClient.activatePreparedMemoryRecallTransition,
+      ).toHaveBeenCalledOnce();
+      const activationOrder =
+        mockLlmClient.activatePreparedMemoryRecallTransition.mock
+          .invocationCallOrder[0]!;
+      expect(activationOrder).toBeLessThan(
+        mockMemoryManager.resetExhaustedBodyRefsForCurrentTurn.mock
+          .invocationCallOrder[0]!,
+      );
+      expect(activationOrder).toBeLessThan(
+        mockLlmClient.beginManagedAutoMemoryRecall.mock.invocationCallOrder[0]!,
+      );
     });
 
     it('delivers refined recall after tool responses and records the completed tool', async () => {
@@ -3041,6 +3281,9 @@ describe('Session', () => {
         'read_file',
         { path: '/tmp/test.txt' },
       );
+      expect(
+        mockMemoryManager.resetExhaustedBodyRefsForCurrentTurn,
+      ).toHaveBeenCalledOnce();
     });
 
     it('does not run managed memory for retries or failed turns', async () => {
@@ -3055,6 +3298,9 @@ describe('Session', () => {
       } as PromptRequest);
 
       expect(mockLlmClient.beginManagedAutoMemoryRecall).not.toHaveBeenCalled();
+      expect(
+        mockMemoryManager.resetExhaustedBodyRefsForCurrentTurn,
+      ).not.toHaveBeenCalled();
       expect(mockMemoryManager.scheduleExtract).not.toHaveBeenCalled();
       expect(mockMemoryManager.scheduleDream).not.toHaveBeenCalled();
       // A retry skips managed auto-memory, but the turn still ends `end_turn`,
@@ -3082,6 +3328,231 @@ describe('Session', () => {
       expect(
         mockLlmClient.finishManagedAutoMemoryRecall,
       ).toHaveBeenCalledOnce();
+    });
+
+    it('commits delivery after the final response attempt completes', async () => {
+      const delivery = {
+        prompt: '<system-reminder>tree</system-reminder>',
+        selectedDocs: [],
+        strategy: 'heuristic',
+        deliveredTreeRevision: 'tree-v1',
+      };
+      mockLlmClient.consumeManagedAutoMemoryRecall.mockResolvedValueOnce(
+        delivery,
+      );
+      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+        (async function* () {
+          yield { type: core.StreamEventType.RETRY } as const;
+          expect(
+            mockLlmClient.commitManagedAutoMemoryRecallDelivery,
+          ).not.toHaveBeenCalled();
+          yield {
+            type: core.StreamEventType.CHUNK,
+            value: { text: 'ok' },
+          } as const;
+          expect(
+            mockLlmClient.commitManagedAutoMemoryRecallDelivery,
+          ).not.toHaveBeenCalled();
+        })(),
+      );
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hello' }],
+      });
+
+      expect(
+        mockLlmClient.commitManagedAutoMemoryRecallDelivery,
+      ).toHaveBeenCalledOnce();
+      expect(
+        mockLlmClient.commitManagedAutoMemoryRecallDelivery,
+      ).toHaveBeenCalledWith(delivery);
+      expect(
+        mockLlmClient.discardManagedAutoMemoryRecallDelivery,
+      ).not.toHaveBeenCalled();
+    });
+
+    it('commits delivery when the user cancels after a response chunk', async () => {
+      const delivery = {
+        prompt: '<system-reminder>tree</system-reminder>',
+        selectedDocs: [],
+        strategy: 'heuristic',
+        deliveredTreeRevision: 'tree-v1',
+      };
+      let firstChunkConsumed!: () => void;
+      const consumed = new Promise<void>((resolve) => {
+        firstChunkConsumed = resolve;
+      });
+      let releaseStream!: () => void;
+      const streamGate = new Promise<void>((resolve) => {
+        releaseStream = resolve;
+      });
+      mockLlmClient.consumeManagedAutoMemoryRecall.mockResolvedValueOnce(
+        delivery,
+      );
+      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+        (async function* () {
+          yield {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              candidates: [{ content: { parts: [{ text: 'partial' }] } }],
+            },
+          } as const;
+          firstChunkConsumed();
+          await streamGate;
+          yield {
+            type: core.StreamEventType.CHUNK,
+            value: { text: 'ignored' },
+          } as const;
+        })(),
+      );
+
+      const prompt = session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hello' }],
+      });
+      await consumed;
+      await session.cancelPendingPrompt();
+      releaseStream();
+
+      await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
+      expect(
+        mockLlmClient.commitManagedAutoMemoryRecallDelivery,
+      ).toHaveBeenCalledWith(delivery);
+      expect(
+        mockLlmClient.discardManagedAutoMemoryRecallDelivery,
+      ).not.toHaveBeenCalled();
+    });
+
+    it('resets managed-memory delivery state after stream compression', async () => {
+      const delivery = {
+        prompt: '<system-reminder>tree</system-reminder>',
+        selectedDocs: [],
+        strategy: 'heuristic',
+        deliveredTreeRevision: 'tree-v1',
+      };
+      mockLlmClient.consumeManagedAutoMemoryRecall.mockResolvedValueOnce(
+        delivery,
+      );
+      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+        (async function* () {
+          yield {
+            type: core.StreamEventType.COMPRESSED,
+            info: {
+              originalTokenCount: 1000,
+              newTokenCount: 200,
+              compressionStatus: core.CompressionStatus.COMPRESSED,
+            },
+          } as const;
+          yield {
+            type: core.StreamEventType.CHUNK,
+            value: { text: 'ok' },
+          } as const;
+        })(),
+      );
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hello' }],
+      });
+
+      expect(
+        mockLlmClient.resetManagedAutoMemoryAfterCompression,
+      ).toHaveBeenCalledTimes(2);
+      expect(
+        mockLlmClient.commitManagedAutoMemoryRecallDelivery,
+      ).toHaveBeenCalledWith(delivery);
+    });
+
+    it('discards delivery when the provider send fails', async () => {
+      const delivery = {
+        prompt: '<system-reminder>tree</system-reminder>',
+        selectedDocs: [],
+        strategy: 'heuristic',
+        deliveredTreeRevision: 'tree-v1',
+      };
+      mockLlmClient.consumeManagedAutoMemoryRecall.mockResolvedValueOnce(
+        delivery,
+      );
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockRejectedValueOnce(new Error('provider failed'));
+
+      await expect(
+        session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'hello' }],
+        }),
+      ).rejects.toThrow('provider failed');
+
+      expect(
+        mockLlmClient.discardManagedAutoMemoryRecallDelivery,
+      ).toHaveBeenCalledWith(delivery);
+      expect(
+        mockLlmClient.commitManagedAutoMemoryRecallDelivery,
+      ).not.toHaveBeenCalled();
+    });
+
+    it('discards delivery when the provider stream ends without a chunk', async () => {
+      const delivery = {
+        prompt: '<system-reminder>tree</system-reminder>',
+        selectedDocs: [],
+        strategy: 'heuristic',
+        deliveredTreeRevision: 'tree-v1',
+      };
+      mockLlmClient.consumeManagedAutoMemoryRecall.mockResolvedValueOnce(
+        delivery,
+      );
+      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+        (async function* () {
+          yield { type: core.StreamEventType.RETRY } as const;
+        })(),
+      );
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hello' }],
+      });
+
+      expect(
+        mockLlmClient.discardManagedAutoMemoryRecallDelivery,
+      ).toHaveBeenCalledWith(delivery);
+      expect(
+        mockLlmClient.commitManagedAutoMemoryRecallDelivery,
+      ).not.toHaveBeenCalled();
+    });
+
+    it('discards chunks from an attempt superseded by a retry', async () => {
+      const delivery = {
+        prompt: '<system-reminder>tree</system-reminder>',
+        selectedDocs: [],
+        strategy: 'heuristic',
+        deliveredTreeRevision: 'tree-v1',
+      };
+      mockLlmClient.consumeManagedAutoMemoryRecall.mockResolvedValueOnce(
+        delivery,
+      );
+      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+        (async function* () {
+          yield {
+            type: core.StreamEventType.CHUNK,
+            value: { text: 'discarded attempt' },
+          } as const;
+          yield { type: core.StreamEventType.RETRY } as const;
+        })(),
+      );
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hello' }],
+      });
+
+      expect(
+        mockLlmClient.discardManagedAutoMemoryRecallDelivery,
+      ).toHaveBeenCalledWith(delivery);
+      expect(
+        mockLlmClient.commitManagedAutoMemoryRecallDelivery,
+      ).not.toHaveBeenCalled();
     });
   });
 
@@ -4833,6 +5304,17 @@ describe('Session', () => {
   });
 
   it('runs a per-run scheduled task in the task session when the daemon cannot create a fresh one', async () => {
+    const recordOrder: string[] = [];
+    mockChatRecordingService.recordSessionApprovalMode.mockImplementationOnce(
+      async () => {
+        recordOrder.push('approval');
+        return true;
+      },
+    );
+    mockChat.sendMessageStream = vi.fn(async () => {
+      recordOrder.push('model');
+      return createEmptyStream();
+    });
     const annotateRunSession = vi.fn().mockResolvedValue(undefined);
     const scheduler = {
       hasPendingWork: true,
@@ -4890,6 +5372,7 @@ describe('Session', () => {
     await vi.waitFor(() => {
       expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
     });
+    expect(recordOrder.slice(0, 2)).toEqual(['approval', 'model']);
     expect(
       JSON.stringify(vi.mocked(mockChat.sendMessageStream).mock.calls[0]),
     ).toContain('review the next PR');
@@ -7312,6 +7795,7 @@ describe('Session', () => {
         1,
         { truncatedCount: 2 },
         [],
+        { mode: ApprovalMode.DEFAULT },
       );
     });
 
@@ -7393,6 +7877,7 @@ describe('Session', () => {
         1,
         { truncatedCount: 2 },
         expect.arrayContaining([expect.objectContaining({ promptId: 'p1' })]),
+        { mode: ApprovalMode.DEFAULT },
       );
     });
 
@@ -7431,6 +7916,7 @@ describe('Session', () => {
         2,
         { truncatedCount: 2 },
         [snapshots[0], snapshots[1]],
+        { mode: ApprovalMode.DEFAULT },
       );
     });
 
@@ -8081,6 +8567,82 @@ describe('Session', () => {
         'qwen/notify/session/model-update',
         expect.anything(),
       );
+    });
+
+    it.each([
+      "Model 'qwen-typo' not found for authType 'openai'",
+      "Model 'qwen\ntypo' not found for authType 'openai'",
+      "Image-only model 'qwen-image' cannot be used as the primary model",
+      "Voice-only model 'qwen-voice' cannot be used as the primary model",
+      "Realtime-only model 'qwen-realtime' cannot be used as the primary model",
+    ])(
+      'maps the caller-caused switchModel refusal to invalid params: %s',
+      async (message) => {
+        switchModelSpy.mockRejectedValueOnce(new Error(message));
+        const rejection: unknown = await session
+          .setModel({
+            sessionId: 'test-session-id',
+            modelId: `qwen-typo(${AuthType.USE_OPENAI})`,
+          })
+          .then(
+            () => {
+              throw new Error('expected setModel to reject');
+            },
+            (error: unknown) => error,
+          );
+        expect(rejection).toBeInstanceOf(RequestError);
+        expect((rejection as RequestError).code).toBe(-32602);
+        expect((rejection as Error).message).toBe(`Invalid params: ${message}`);
+        expect(mockSettings.setValue).not.toHaveBeenCalled();
+      },
+    );
+
+    it('maps the refusal core actually throws, not a hand-written copy of its message', async () => {
+      // The classifier matches core's human-readable switchModel messages;
+      // driving the real ModelsConfig keeps that string contract honest — a
+      // reworded core message turns this red instead of silently degrading
+      // the definite caller rejection into an internal error.
+      const realModels = new ModelsConfig({
+        modelProvidersConfig: {
+          openai: [
+            { id: 'chat-model' },
+            { id: 'image-model', imageOnly: true },
+          ],
+        },
+      });
+      switchModelSpy.mockImplementation((authType: AuthType, modelId: string) =>
+        realModels.switchModel(authType, modelId),
+      );
+
+      for (const modelId of ['qwen-typo', 'image-model']) {
+        const rejection: unknown = await session
+          .setModel({
+            sessionId: 'test-session-id',
+            modelId: `${modelId}(${AuthType.USE_OPENAI})`,
+          })
+          .then(
+            () => {
+              throw new Error('expected setModel to reject');
+            },
+            (error: unknown) => error,
+          );
+        expect(rejection).toBeInstanceOf(RequestError);
+        expect((rejection as RequestError).code).toBe(-32602);
+      }
+      expect(mockSettings.setValue).not.toHaveBeenCalled();
+    });
+
+    it('keeps daemon-side switchModel faults as internal errors', async () => {
+      const fault = new Error(
+        "Missing API key for openai auth. Current model: 'gpt-5.4'.",
+      );
+      switchModelSpy.mockRejectedValueOnce(fault);
+      await expect(
+        session.setModel({
+          sessionId: 'test-session-id',
+          modelId: `gpt-5.4(${AuthType.USE_OPENAI})`,
+        }),
+      ).rejects.toBe(fault);
     });
 
     it('rejects empty/whitespace model IDs', async () => {
@@ -9654,6 +10216,29 @@ describe('Session', () => {
   });
 
   describe('prompt', () => {
+    it('anchors approval state before recording the first real user message', async () => {
+      const order: string[] = [];
+      mockChatRecordingService.recordSessionApprovalMode.mockImplementation(
+        async () => {
+          order.push('approval');
+          return true;
+        },
+      );
+      mockChatRecordingService.recordUserMessage.mockImplementation(() => {
+        order.push('user');
+      });
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hello' }],
+      });
+
+      expect(order.slice(0, 2)).toEqual(['approval', 'user']);
+    });
+
     it('does not record a branch checkpoint for a channel prompt', async () => {
       mockChat.sendMessageStream = vi
         .fn()
@@ -11282,6 +11867,55 @@ describe('Session', () => {
       });
 
       expect(observed).toEqual([rootContext, undefined, undefined]);
+    });
+
+    it('resets per-turn memory state on every cron-fired prompt', async () => {
+      let cronCallback: ((job: { prompt: string }) => void) | undefined;
+      const scheduler = {
+        size: 1,
+        hasPendingWork: true,
+        start: vi.fn((callback: (job: { prompt: string }) => void) => {
+          cronCallback = callback;
+        }),
+        stop: vi.fn(),
+        getExitSummary: vi.fn().mockReturnValue(undefined),
+      };
+      mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+      mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockImplementation(() => Promise.resolve(createEmptyStream()));
+      const internals = session as unknown as {
+        cronCompletion: Promise<void> | null;
+      };
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'root prompt' }],
+      });
+      const resetsAfterUserTurn =
+        mockMemoryManager.resetExhaustedBodyRefsForCurrentTurn.mock.calls
+          .length;
+
+      cronCallback?.({ prompt: 'scheduled prompt' });
+      await vi.waitFor(() => {
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+      });
+      await vi.waitFor(() => {
+        expect(internals.cronCompletion).toBeNull();
+      });
+      cronCallback?.({ prompt: 'scheduled prompt again' });
+      await vi.waitFor(() => {
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(3);
+      });
+      await vi.waitFor(() => {
+        expect(internals.cronCompletion).toBeNull();
+      });
+
+      expect(
+        mockMemoryManager.resetExhaustedBodyRefsForCurrentTurn.mock.calls
+          .length,
+      ).toBe(resetsAfterUserTurn + 2);
     });
 
     it('records the latest file history snapshot after makeSnapshot', async () => {
@@ -20087,10 +20721,19 @@ describe('Session', () => {
                 execution_status?: string;
                 success?: boolean;
                 error_type?: string;
+                started_at_ms?: number;
+                duration_ms?: number;
+                'event.timestamp'?: string;
               },
           )
           .find((ev) => ev.function_name === 'read_file');
         expect(toolEvent?.call_id).toBe('call-1');
+        // The start the duration was measured from, so start + duration is the
+        // call's end, which cannot be after the event was logged.
+        expect(toolEvent?.started_at_ms).toEqual(expect.any(Number));
+        expect(
+          toolEvent!.started_at_ms! + toolEvent!.duration_ms!,
+        ).toBeLessThanOrEqual(Date.parse(toolEvent!['event.timestamp']!));
         expect(toolEvent?.status).toBe('error');
         expect(toolEvent?.execution_status).toBe('error');
         expect(toolEvent?.success).toBe(false);
@@ -27458,6 +28101,9 @@ describe('Session', () => {
             kind: CommandKind.FILE,
           },
         });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockReturnValue(createEmptyStream());
         mockChatRecordingService.recordUserMessage.mockClear();
 
         await session.prompt(
@@ -28429,6 +29075,12 @@ describe('Session', () => {
       it('records /clear user-turn before the session switch', async () => {
         mockChatRecordingService.recordUserMessage.mockClear();
         const callOrder: string[] = [];
+        mockChatRecordingService.recordSessionApprovalMode.mockImplementationOnce(
+          async () => {
+            callOrder.push('recordSessionApprovalMode');
+            return true;
+          },
+        );
         mockChatRecordingService.recordUserMessage.mockImplementationOnce(
           () => {
             callOrder.push('recordUserMessage');
@@ -28455,6 +29107,7 @@ describe('Session', () => {
         });
 
         expect(callOrder).toEqual([
+          'recordSessionApprovalMode',
           'recordUserMessage',
           'action-start',
           'action-end',
@@ -28770,6 +29423,18 @@ describe('Session', () => {
       });
 
       it('runs a host-scheduled Goal turn with the canonical permit', async () => {
+        const recordOrder: string[] = [];
+        mockChatRecordingService.recordSessionApprovalMode.mockImplementationOnce(
+          async () => {
+            recordOrder.push('approval');
+            return true;
+          },
+        );
+        mockChatRecordingService.recordGoalRuntimeMessage.mockImplementationOnce(
+          () => {
+            recordOrder.push('goal');
+          },
+        );
         const permit: core.GoalTurnPermit = {
           goalId: 'goal-1',
           revision: 1,
@@ -28860,6 +29525,7 @@ describe('Session', () => {
         expect(
           mockChatRecordingService.recordGoalRuntimeMessage,
         ).toHaveBeenCalledWith(expect.any(Array), permit);
+        expect(recordOrder.slice(0, 2)).toEqual(['approval', 'goal']);
         expect(
           mockChatRecordingService.recordUserMessage,
         ).not.toHaveBeenCalled();
@@ -38191,6 +38857,167 @@ describe('Session', () => {
   });
 
   describe('runToolCalls', () => {
+    it.each([false, true])(
+      'emits approved tool metadata before execution with preparation=%s',
+      async (prepared) => {
+        mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+        const toolName = 'mcp__inventory__lookup';
+        const args = {
+          query: 'approved item',
+          description: 'Lookup approved data',
+        };
+        const updates = vi.spyOn(session, 'sendUpdate');
+        let beforeExecution: Array<Parameters<Session['sendUpdate']>[0]> = [];
+        const execute = vi.fn().mockImplementation(async () => {
+          beforeExecution = updates.mock.calls.map(([update]) => update);
+          return { llmContent: 'executed', returnDisplay: 'executed' };
+        });
+        const tool = mockConfirmingTool(toolName, execute);
+        tool.displayName = 'Inventory lookup';
+        tool.kind = core.Kind.Read;
+        const invocation = tool.build();
+        invocation.getDescription.mockReturnValue('Lookup approved data');
+        invocation.toolLocations.mockReturnValue([
+          { path: '/tmp/approved-item', line: 7 },
+        ]);
+        mockToolRegistry.getTool.mockReturnValue(tool);
+        vi.mocked(mockClient.requestPermission).mockResolvedValue({
+          outcome: { outcome: 'selected', optionId: 'proceed_once' },
+        });
+        vi.spyOn(core, 'logToolCall').mockImplementation(() => {});
+        if (prepared) {
+          await (
+            session as unknown as {
+              toolCallEmitter: import('./emitters/tool-call-emitter.js').ToolCallEmitter;
+            }
+          ).toolCallEmitter.emitStart({
+            callId: 'approved-metadata',
+            toolName,
+            args: {},
+            phase: 'preparing',
+          });
+        }
+        const result = await (
+          session as unknown as ToolCallInternals
+        ).runToolCalls(new AbortController().signal, 'approved-prompt', [
+          { id: 'approved-metadata', name: toolName, args },
+        ]);
+        expect(execute).toHaveBeenCalledOnce();
+        expect(result.parts[0]?.functionResponse?.response).toEqual({
+          output: 'executed',
+        });
+        expect(
+          beforeExecution.filter(
+            (update) =>
+              'toolCallId' in update &&
+              update.toolCallId === 'approved-metadata' &&
+              update.status === 'in_progress',
+          ),
+        ).toEqual([
+          expect.objectContaining({
+            sessionUpdate: prepared ? 'tool_call_update' : 'tool_call',
+            toolCallId: 'approved-metadata',
+            status: 'in_progress',
+            rawInput: args,
+            title: 'Inventory lookup: Lookup approved data',
+            kind: 'read',
+            locations: [{ path: '/tmp/approved-item', line: 7 }],
+            _meta: expect.objectContaining({
+              toolName,
+              startedAt: expect.any(Number),
+              provenance: 'mcp',
+              serverId: 'inventory',
+            }),
+          }),
+        ]);
+      },
+    );
+
+    it('sends approved arguments before execution starts', async () => {
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+      const args = {
+        command: 'printf approved',
+        description: 'Inspect approved command',
+      };
+      const updates = vi.spyOn(session, 'sendUpdate');
+      const execute = vi.fn().mockImplementation(async () => {
+        expect(updates.mock.calls.map(([update]) => update)).toContainEqual(
+          expect.objectContaining({
+            sessionUpdate: 'tool_call',
+            toolCallId: 'approved-call',
+            status: 'in_progress',
+            rawInput: args,
+            _meta: expect.objectContaining({
+              toolName: 'approved_tool',
+              startedAt: expect.any(Number),
+            }),
+          }),
+        );
+        return { llmContent: 'executed', returnDisplay: 'executed' };
+      });
+      mockToolRegistry.getTool.mockReturnValue(
+        mockConfirmingTool('approved_tool', execute),
+      );
+      vi.mocked(mockClient.requestPermission).mockResolvedValue({
+        outcome: { outcome: 'selected', optionId: 'proceed_once' },
+      });
+      vi.spyOn(core, 'logToolCall').mockImplementation(() => {});
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(new AbortController().signal, 'approved-prompt', [
+        { id: 'approved-call', name: 'approved_tool', args },
+      ]);
+      expect(execute).toHaveBeenCalledOnce();
+      expect(mockClient.requestPermission).toHaveBeenCalledOnce();
+      expect(result.parts[0]?.functionResponse?.response).toEqual({
+        output: 'executed',
+      });
+    });
+
+    it('executes an approved tool even if timing notification fails', async () => {
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: 'executed',
+        returnDisplay: 'executed',
+      });
+      mockToolRegistry.getTool.mockReturnValue(
+        mockConfirmingTool('timing_tool', execute),
+      );
+      vi.mocked(mockClient.requestPermission).mockResolvedValue({
+        outcome: { outcome: 'selected', optionId: 'proceed_once' },
+      });
+      const original = session.sendUpdate.bind(session);
+      let rejectedTiming = 0;
+      vi.spyOn(session, 'sendUpdate').mockImplementation(async (update) => {
+        if (
+          update.sessionUpdate === 'tool_call' &&
+          update.status === 'in_progress' &&
+          update._meta?.['startedAt']
+        ) {
+          rejectedTiming++;
+          throw new Error('timing transport failure');
+        }
+        return original(update);
+      });
+      vi.spyOn(core, 'logToolCall').mockImplementation(() => {});
+      const result = await (
+        session as unknown as {
+          runToolCalls: (
+            signal: AbortSignal,
+            promptId: string,
+            calls: FunctionCall[],
+          ) => Promise<{ parts: Part[] }>;
+        }
+      ).runToolCalls(new AbortController().signal, 'timing-prompt', [
+        { id: 'timing-call', name: 'timing_tool', args: {} },
+      ]);
+      expect(rejectedTiming).toBe(1);
+      expect(execute).toHaveBeenCalledOnce();
+      expect(result.parts[0]?.functionResponse?.response).toEqual({
+        output: 'executed',
+      });
+    });
+
     type ToolCallInternals = {
       runToolCalls: (
         abortSignal: AbortSignal,
@@ -38216,7 +39043,7 @@ describe('Session', () => {
       }>;
     };
 
-    it('re-enters the ACP tool chain and preserves native result metadata', async () => {
+    it('allows top-level discovery then re-enters the ACP tool chain with native result metadata', async () => {
       const onResult = vi.fn();
       mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
       mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
@@ -38286,8 +39113,40 @@ describe('Session', () => {
         canUpdateOutput: false,
         isOutputMarkdown: true,
       };
+      const searchExecute = vi.fn().mockResolvedValue({
+        llmContent: 'tools.read_file(args: { file_path: string })',
+        returnDisplay: 'Reviewed read_file',
+      });
+      const searchTool = {
+        ...outerTool,
+        name: core.ToolNames.TOOL_SEARCH,
+        build: vi.fn().mockReturnValue({
+          params: { query: 'select:read_file' },
+          execute: searchExecute,
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          getDescription: vi.fn().mockReturnValue('Search'),
+          toolLocations: vi.fn().mockReturnValue([]),
+        }),
+      };
       mockToolRegistry.getTool.mockImplementation((name: string) =>
-        name === core.ToolNames.EXEC ? outerTool : nestedTool,
+        name === core.ToolNames.EXEC
+          ? outerTool
+          : name === core.ToolNames.TOOL_SEARCH
+            ? searchTool
+            : nestedTool,
+      );
+      const search = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(new AbortController().signal, 'prompt-code-mode-search', [
+        {
+          id: 'search-acp',
+          name: core.ToolNames.TOOL_SEARCH,
+          args: { query: 'select:read_file' },
+        },
+      ]);
+      expect(searchExecute).toHaveBeenCalledOnce();
+      expect(search.parts[0].functionResponse?.response?.['output']).toContain(
+        'tools.read_file',
       );
 
       const result = await (
@@ -38677,7 +39536,7 @@ describe('Session', () => {
       const logToolCallSpy = vi
         .spyOn(core, 'logToolCall')
         .mockImplementation(() => {});
-
+      const before = Date.now();
       const result = await (
         session as unknown as ToolCallInternals
       ).runToolCalls(new AbortController().signal, 'prompt-missing-name', [
@@ -38703,6 +39562,12 @@ describe('Session', () => {
           error_type: core.ToolErrorType.INVALID_TOOL_PARAMS,
         }),
       );
+      const timing = logToolCallSpy.mock.calls.find(
+        ([, event]) => event.call_id === 'missing_name_call',
+      )?.[1];
+      expect(timing?.started_at_ms).toBeGreaterThanOrEqual(before);
+      expect(timing?.started_at_ms).toBeLessThanOrEqual(Date.now());
+      expect(timing?.duration_ms).toBeGreaterThanOrEqual(0);
       expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
         result.parts,
         expect.objectContaining({
@@ -38888,6 +39753,7 @@ describe('Session', () => {
         mockAllowedTool('success_tool', execute),
       );
 
+      const before = Date.now();
       const result = await (
         session as unknown as ToolCallInternals
       ).runToolCalls(new AbortController().signal, 'prompt-success', [
@@ -38906,6 +39772,12 @@ describe('Session', () => {
           execution_status: 'success',
         }),
       );
+      const timing = logToolCallSpy.mock.calls.find(
+        ([, event]) => event.call_id === 'success_call',
+      )?.[1];
+      expect(timing?.started_at_ms).toBeGreaterThanOrEqual(before);
+      expect(timing?.started_at_ms).toBeLessThanOrEqual(Date.now());
+      expect(timing?.duration_ms).toBeGreaterThanOrEqual(0);
       expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledTimes(
         1,
       );

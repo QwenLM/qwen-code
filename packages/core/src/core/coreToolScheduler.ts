@@ -27,7 +27,6 @@ import type {
 } from '../tools/tools.js';
 import type { EditorType } from '../utils/editor.js';
 import type { Config } from '../config/config.js';
-import type { ToolRegistry } from '../tools/tool-registry.js';
 import type { ChatRecordingService } from '../services/chatRecordingService.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { evaluateMediaPolicyToolCall } from '../omni/policy/model-access.js';
@@ -84,6 +83,7 @@ import * as fsSync from 'node:fs';
 import {
   collectAvailableSkillEntries,
   renderAvailableSkillsBlock,
+  SKILLS_ACTIVATED_OPENER,
   type AvailableSkillEntry,
 } from '../tools/skill-utils.js';
 import { escapeSystemReminderTags } from '../utils/xml.js';
@@ -275,6 +275,7 @@ const GATE_EXEMPT_TOOLS = new Set<string>([
   ToolNames.READ_FILE,
   ToolNames.READ_MCP_RESOURCE,
   ToolNames.ENTER_PLAN_MODE,
+  ToolNames.SEARCH_MEMORY,
 ]);
 
 // The tri-state persistedOutputFiles mapping every truncation pass reports
@@ -584,9 +585,15 @@ type CoreToolCallResponseInfo = ToolCallResponseInfo & {
 
 export type ErroredToolCall = {
   status: 'error';
+  invocation?: AnyToolInvocation;
   request: ToolCallRequestInfo;
   response: ToolCallResponseInfo;
   tool?: AnyDeclarativeTool;
+  /**
+   * When `durationMs` started counting (epoch ms). Absent on a call that never
+   * reached scheduling, whose `durationMs` is a placeholder.
+   */
+  startTime?: number;
   durationMs?: number;
   outcome?: ToolConfirmationOutcome;
 };
@@ -597,6 +604,11 @@ export type SuccessfulToolCall = {
   tool: AnyDeclarativeTool;
   response: ToolCallResponseInfo;
   invocation: AnyToolInvocation;
+  /**
+   * When `durationMs` started counting (epoch ms). Absent on a call that never
+   * reached scheduling, whose `durationMs` is a placeholder.
+   */
+  startTime?: number;
   durationMs?: number;
   outcome?: ToolConfirmationOutcome;
 };
@@ -635,6 +647,11 @@ export type CancelledToolCall = {
   response: ToolCallResponseInfo;
   tool?: AnyDeclarativeTool;
   invocation?: AnyToolInvocation;
+  /**
+   * When `durationMs` started counting (epoch ms). Absent on a call that never
+   * reached scheduling, whose `durationMs` is a placeholder.
+   */
+  startTime?: number;
   durationMs?: number;
   outcome?: ToolConfirmationOutcome;
 };
@@ -1359,6 +1376,7 @@ function withPostToolBatchStop(
     request: lastCall.request,
     tool: lastCall.tool,
     response,
+    startTime: lastCall.startTime,
     durationMs: lastCall.durationMs,
     outcome: undefined,
   } as ErroredToolCall;
@@ -1579,7 +1597,9 @@ function producerContentEqual(
 
 export class CoreToolScheduler {
   private readonly schedulerOptions: CoreToolSchedulerOptions;
-  private toolRegistry: ToolRegistry;
+  private get toolRegistry() {
+    return this.config.getToolRegistry();
+  }
   private toolCalls: ToolCall[] = [];
   private outputUpdateHandler?: OutputUpdateHandler;
   private onAllToolCallsComplete?: AllToolCallsCompleteHandler;
@@ -1675,7 +1695,6 @@ export class CoreToolScheduler {
   constructor(options: CoreToolSchedulerOptions) {
     this.schedulerOptions = options;
     this.config = options.config;
-    this.toolRegistry = options.config.getToolRegistry();
     this.outputUpdateHandler = options.outputUpdateHandler;
     this.onAllToolCallsComplete = options.onAllToolCallsComplete;
     this.onToolCallsUpdate = options.onToolCallsUpdate;
@@ -1968,6 +1987,9 @@ export class CoreToolScheduler {
             status: 'success',
             response: auxiliaryData as CoreToolCallResponseInfo,
             durationMs,
+            ...(durationMs !== undefined
+              ? { startTime: existingStartTime }
+              : {}),
             outcome,
           } as SuccessfulToolCall;
         }
@@ -1979,8 +2001,12 @@ export class CoreToolScheduler {
             request: currentCall.request,
             status: 'error',
             tool: toolInstance,
+            invocation,
             response: auxiliaryData as CoreToolCallResponseInfo,
             durationMs,
+            ...(durationMs !== undefined
+              ? { startTime: existingStartTime }
+              : {}),
             outcome,
           } as ErroredToolCall;
         }
@@ -2080,6 +2106,9 @@ export class CoreToolScheduler {
             status: 'cancelled',
             response,
             durationMs,
+            ...(durationMs !== undefined
+              ? { startTime: existingStartTime }
+              : {}),
             outcome,
           } as CancelledToolCall;
         }
@@ -2137,6 +2166,7 @@ export class CoreToolScheduler {
           args as Record<string, unknown>,
           targetCallId,
           call.request.prompt_id,
+          call.request.executionOrigin?.kind === 'client',
         ),
       );
       if (invocationOrError instanceof Error) {
@@ -2437,24 +2467,31 @@ export class CoreToolScheduler {
 
   /**
    * Builds a tool invocation and threads optional context (callId,
-   * promptId) into it via duck-typed setters when the invocation
-   * exposes them. Both setters are intentionally optional:
+   * promptId, completion delivery) through the setters it exposes.
+   * Client tools need completion delivery because they do not continue
+   * the model's tool-result turn; code-mode calls return to their parent.
+   * The setters are intentionally optional:
    * - Existing tools whose invocations do not implement these setters
    *   stay compatible without any change.
    * - Future contexts (subagent / direct buildAndExecute / non-scheduler
    *   callers) may invoke this with fewer arguments and still get a
    *   valid invocation back.
-   * Production call sites in this scheduler always pass both — see
-   * the setArgs path at L1036 and the schedule path at L1497.
+   * Scheduling and argument rebuilds pass the request's client provenance;
+   * a missing origin (including nested code-mode calls) does not opt in.
    */
   private buildInvocation(
     tool: AnyDeclarativeTool,
     args: object,
     callId?: string,
     promptId?: string,
+    notifyOnCompletion = false,
   ): AnyToolInvocation | Error {
     try {
       const invocation = tool.build(structuredClone(args));
+      const notificationAware = invocation as {
+        setCompletionNotificationEnabled?: (enabled: boolean) => void;
+      };
+      notificationAware.setCompletionNotificationEnabled?.(notifyOnCompletion);
       if (callId) {
         const maybeAware = invocation as { setCallId?: (id: string) => void };
         if (typeof maybeAware.setCallId === 'function') {
@@ -2599,7 +2636,14 @@ export class CoreToolScheduler {
       distance: levenshtein.get(unknownToolName, toolName),
     }));
 
-    matches.sort((a, b) => a.distance - b.distance);
+    matches.sort((a, b) => {
+      const aIsPrefix = unknownToolName.startsWith(a.name);
+      const bIsPrefix = unknownToolName.startsWith(b.name);
+      if (aIsPrefix !== bIsPrefix) {
+        return aIsPrefix ? -1 : 1;
+      }
+      return a.distance - b.distance;
+    });
 
     const topNResults = matches.slice(0, topN);
 
@@ -3157,6 +3201,7 @@ export class CoreToolScheduler {
               policyGate.args,
               reqInfo.callId,
               reqInfo.prompt_id,
+              reqInfo.executionOrigin?.kind === 'client',
             ),
           );
           if (recordPrevalidationCancellation()) continue;
@@ -5603,7 +5648,8 @@ export class CoreToolScheduler {
                 setPromoteAbortControllerCallback,
                 canPromoteForegroundShell,
               );
-            return scheduledCall.request.name === ToolNames.EXEC
+            return scheduledCall.request.name === ToolNames.EXEC ||
+              scheduledCall.request.name === ToolNames.TOOL_SEARCH
               ? runWithToolCallRuntime(
                   {
                     parentCallId: callId,
@@ -5644,7 +5690,8 @@ export class CoreToolScheduler {
                 liveOutputCallback,
                 shellExecutionConfig,
               );
-            return scheduledCall.request.name === ToolNames.EXEC
+            return scheduledCall.request.name === ToolNames.EXEC ||
+              scheduledCall.request.name === ToolNames.TOOL_SEARCH
               ? runWithToolCallRuntime(
                   {
                     parentCallId: callId,
@@ -6117,7 +6164,7 @@ export class CoreToolScheduler {
               }
               if (activatedEntries.length > 0) {
                 reminderBlocks.push(
-                  `The following skill(s) became available via the Skill tool based on the file you just accessed; invoke a skill by passing its name to the Skill tool:\n<available_skills>\n${renderAvailableSkillsBlock(
+                  `${SKILLS_ACTIVATED_OPENER}; invoke a skill by passing its name to the Skill tool:\n<available_skills>\n${renderAvailableSkillsBlock(
                     activatedEntries,
                   )}\n</available_skills>`,
                 );

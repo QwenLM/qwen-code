@@ -240,6 +240,50 @@ describe('WorkspaceChannelSettingsStore', () => {
     },
   );
 
+  it('persists normalized message routes and their default', async () => {
+    const store = new WorkspaceChannelSettingsStore(workspace);
+    await store.upsert('routed', {
+      expectedRevision: store.snapshot().revision,
+      config: {
+        type: 'user-default-management-test',
+        messageRoutes: { ' /review ': ' Review code. ', '/QA': '' },
+        defaultMessageRoute: ' /QA ',
+      },
+    });
+    expect(readStoredChannel('routed')).toMatchObject({
+      messageRoutes: { '/review': 'Review code.', '/QA': '' },
+      defaultMessageRoute: '/QA',
+    });
+  });
+
+  it.each([
+    { messageRoutes: null },
+    { messageRoutes: [] },
+    { messageRoutes: '/review' },
+    { messageRoutes: {} },
+    { messageRoutes: { ' ': 'instructions' } },
+    { messageRoutes: { ' constructor ': 'instructions' } },
+    { messageRoutes: { '/review': 1 } },
+    { messageRoutes: { '/review': '', ' /review ': '' } },
+    { messageRoutes: { '/review': '' }, multiSession: true },
+    { defaultMessageRoute: '/review' },
+    { messageRoutes: { '/review': '' }, defaultMessageRoute: '/missing' },
+    { defaultMessageRoute: '' },
+    { defaultMessageRoute: null },
+    { defaultMessageRoute: 1 },
+  ])('rejects invalid managed message routing %j', async (routing) => {
+    const store = new WorkspaceChannelSettingsStore(workspace);
+    await expect(
+      store.upsert('routed', {
+        expectedRevision: store.snapshot().revision,
+        config: { type: 'user-default-management-test', ...routing },
+      }),
+    ).rejects.toMatchObject({
+      code: 'channel_settings_invalid_config',
+      message: expect.stringMatching(/messageRoutes|defaultMessageRoute/),
+    });
+  });
+
   it('preserves an existing secret unless replace or clear is explicit', async () => {
     // The stored secret is an environment reference, so the assertion below only
     // means something with the variable defined: while it is unset, resolution
@@ -669,6 +713,12 @@ describe('WorkspaceChannelSettingsStore', () => {
       message: 'cannot use groupHistoryLimit',
     },
     {
+      label: 'session rotation',
+      type: 'user-default-management-test',
+      extra: { sessionRotation: { maxTurns: 2 } },
+      message: 'cannot use sessionRotation',
+    },
+    {
       label: 'per-group history',
       type: 'user-default-management-test',
       extra: {
@@ -688,6 +738,30 @@ describe('WorkspaceChannelSettingsStore', () => {
       code: 'channel_settings_invalid_config',
       message: expect.stringContaining(message),
     });
+  });
+
+  it('accepts bounded session rotation and rejects malformed bounds', async () => {
+    const store = new WorkspaceChannelSettingsStore(workspace);
+    const saved = await store.upsert('bot', {
+      expectedRevision: store.snapshot().revision,
+      config: {
+        type: 'user-default-management-test',
+        sessionRotation: { maxTurns: 2, maxAgeHours: 24 },
+      },
+    });
+    expect(saved.channels['bot']?.['sessionRotation']).toEqual({
+      maxTurns: 2,
+      maxAgeHours: 24,
+    });
+    await expect(
+      store.upsert('bot', {
+        expectedRevision: saved.revision,
+        config: {
+          type: 'user-default-management-test',
+          sessionRotation: { maxTurns: 0 },
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'channel_settings_invalid_config' });
   });
 
   it('rejects enabling multiSession while preserving webhook config', async () => {
@@ -1550,7 +1624,108 @@ describe('WorkspaceChannelSettingsStore', () => {
     expect(fs.readFileSync(settingsPath, 'utf8')).toBe(before);
   });
 
-  it('rejects a groupSenderPolicy the group sender axis cannot take', async () => {
+  it.each(['pairing', 'inherit'])(
+    'rejects removed or unsupported group senders %s',
+    async (senders) => {
+      writeWorkspaceSettings(`{
+  "$version": 4,
+  "channels": { "bot": {
+    "type": "management-validation-test",
+    "clientId": "client-id",
+    "clientSecret": "existing-secret"
+  } }
+}\n`);
+      const store = new WorkspaceChannelSettingsStore(workspace);
+      const before = fs.readFileSync(settingsPath, 'utf8');
+
+      await expect(
+        store.upsert('bot', {
+          expectedRevision: store.snapshot().revision,
+          config: {
+            type: 'management-validation-test',
+            clientId: 'client-id',
+            groups: { '*': { senders } },
+          },
+          secrets: { clientSecret: { operation: 'preserve' } },
+        }),
+      ).rejects.toMatchObject({
+        code: 'channel_settings_invalid_config',
+        message: 'Channel field "groups.*.senders" is invalid.',
+      });
+
+      expect(fs.readFileSync(settingsPath, 'utf8')).toBe(before);
+    },
+  );
+
+  it.each(['disabled', 'allowlist', 'pairing', 'open'])(
+    'stores privatePolicy=%s alongside deprecated keys',
+    async (privatePolicy) => {
+      writeWorkspaceSettings(
+        JSON.stringify({
+          $version: 4,
+          channels: {
+            bot: {
+              type: 'management-validation-test',
+              clientId: 'client-id',
+              clientSecret: 'existing-secret',
+            },
+          },
+        }),
+      );
+      const store = new WorkspaceChannelSettingsStore(workspace);
+      await store.upsert('bot', {
+        expectedRevision: store.snapshot().revision,
+        config: {
+          type: 'management-validation-test',
+          clientId: 'client-id',
+          privatePolicy,
+          senderPolicy: 'open',
+          dmPolicy: 'disabled',
+        },
+        secrets: { clientSecret: { operation: 'preserve' } },
+      });
+      expect(store.snapshot().channels['bot']).toMatchObject({
+        privatePolicy,
+        senderPolicy: 'open',
+        dmPolicy: 'disabled',
+      });
+    },
+  );
+
+  it('stores per-group senders with their own member list', async () => {
+    writeWorkspaceSettings(`{
+  "$version": 4,
+  "channels": { "bot": {
+    "type": "management-validation-test",
+    "clientId": "client-id",
+    "clientSecret": "existing-secret"
+  } }
+}\n`);
+    const store = new WorkspaceChannelSettingsStore(workspace);
+
+    await store.upsert('bot', {
+      expectedRevision: store.snapshot().revision,
+      config: {
+        type: 'management-validation-test',
+        clientId: 'client-id',
+        groups: { ops: { senders: 'allowlist', allowedUsers: ['member1'] } },
+      },
+      secrets: { clientSecret: { operation: 'preserve' } },
+    });
+
+    expect(
+      (
+        readWorkspaceSettings()['channels'] as Record<
+          string,
+          Record<string, unknown>
+        >
+      )['bot'],
+    ).toMatchObject({
+      groups: { ops: { senders: 'allowlist', allowedUsers: ['member1'] } },
+    });
+  });
+
+  it('refuses the moved top-level group sender keys', async () => {
     writeWorkspaceSettings(`{
   "$version": 4,
   "channels": { "bot": {
@@ -1568,19 +1743,19 @@ describe('WorkspaceChannelSettingsStore', () => {
         config: {
           type: 'management-validation-test',
           clientId: 'client-id',
-          groupSenderPolicy: 'pairing',
+          groupSenderPolicy: 'open',
         },
         secrets: { clientSecret: { operation: 'preserve' } },
       }),
     ).rejects.toMatchObject({
       code: 'channel_settings_invalid_config',
-      message: 'Channel field "groupSenderPolicy" has an invalid value.',
+      message:
+        'Channel field "groupSenderPolicy" moved to groups["*"].senders.',
     });
-
     expect(fs.readFileSync(settingsPath, 'utf8')).toBe(before);
   });
 
-  it('stores a decoupled group sender axis with its own member list', async () => {
+  it('stores an operators list and refuses one that is not a string array', async () => {
     writeWorkspaceSettings(`{
   "$version": 4,
   "channels": { "bot": {
@@ -1596,12 +1771,11 @@ describe('WorkspaceChannelSettingsStore', () => {
       config: {
         type: 'management-validation-test',
         clientId: 'client-id',
-        groupSenderPolicy: 'allowlist',
-        allowedGroupUsers: ['member1'],
+        operators: ['admin'],
       },
       secrets: { clientSecret: { operation: 'preserve' } },
     });
-
+    const before = fs.readFileSync(settingsPath, 'utf8');
     expect(
       (
         readWorkspaceSettings()['channels'] as Record<
@@ -1609,10 +1783,23 @@ describe('WorkspaceChannelSettingsStore', () => {
           Record<string, unknown>
         >
       )['bot'],
-    ).toMatchObject({
-      groupSenderPolicy: 'allowlist',
-      allowedGroupUsers: ['member1'],
+    ).toMatchObject({ operators: ['admin'] });
+
+    await expect(
+      store.upsert('bot', {
+        expectedRevision: store.snapshot().revision,
+        config: {
+          type: 'management-validation-test',
+          clientId: 'client-id',
+          operators: 'admin',
+        },
+        secrets: { clientSecret: { operation: 'preserve' } },
+      }),
+    ).rejects.toMatchObject({
+      code: 'channel_settings_invalid_config',
+      message: 'Channel field "operators" must be a string array.',
     });
+    expect(fs.readFileSync(settingsPath, 'utf8')).toBe(before);
   });
 
   it('preserves an unchanged invalid nested object while a sibling property changes', async () => {

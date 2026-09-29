@@ -45,6 +45,16 @@ import {
 } from '@qwen-code/sdk/daemon';
 import { installSseTransport, type SseTransport } from './sseTransport';
 
+/** One transcript page as the mock daemon serves it. */
+export interface MockTranscriptPage {
+  events: DaemonEvent[];
+  hasMore?: boolean;
+  nextCursor?: string;
+}
+
+/** Cursors whose one-off failure has already been served, per scenario. */
+const failedTranscriptReads = new WeakMap<object, Set<string>>();
+
 export interface DaemonRequestRecord {
   method: string;
   path: string;
@@ -102,10 +112,19 @@ export interface WebShellDaemonScenario {
   /** Artifact list returned by `GET /session/:id/artifacts`. */
   artifacts: DaemonSessionArtifact[];
   /**
-   * Page served by `GET /session/:id/transcript`. Unset answers an empty page,
-   * which is what a session with no persisted records reads as.
+   * Pages served by `GET /session/:id/transcript`. Unset answers an empty page,
+   * which is what a session with no persisted records reads as. `older` is
+   * keyed by the `cursor` the previous page handed back, so a spec can walk
+   * backwards. A `{ status }` entry answers that read with a failure instead
+   * of a page; with `then`, only the first read fails and later ones get the
+   * page, which is how a retry is exercised.
    */
-  transcriptPage?: { events: DaemonEvent[]; hasMore?: boolean };
+  transcriptPage?: MockTranscriptPage & {
+    older?: Record<
+      string,
+      MockTranscriptPage | { status: number; then?: MockTranscriptPage }
+    >;
+  };
   /** File contents served by `GET /file?path=...`, keyed by requested path. */
   workspaceFiles: Record<string, string>;
   /**
@@ -2240,12 +2259,58 @@ async function handleDaemonRoute(
       return;
     }
     if (action === 'transcript') {
-      const page = scenario.transcriptPage;
+      const cursor = searchParams.get('cursor');
+      // The daemon refuses a cursor sent with a direction or an anchor: the
+      // cursor already carries both. Answer the same way, so a client that
+      // sends the pair fails here rather than only against a real daemon.
+      if (
+        cursor &&
+        (searchParams.has('direction') ||
+          searchParams.has('beforeRecordId') ||
+          searchParams.has('atRecordId'))
+      ) {
+        await json(
+          route,
+          {
+            error: 'Invalid transcript cursor and anchor combination',
+            code: 'invalid_transcript_cursor',
+          },
+          400,
+        );
+        return;
+      }
+      const configured = scenario.transcriptPage;
+      let page: MockTranscriptPage | undefined = configured;
+      if (cursor) {
+        const entry = configured?.older?.[cursor];
+        if (entry && 'status' in entry) {
+          let failed = failedTranscriptReads.get(scenario);
+          if (!failed) {
+            failed = new Set();
+            failedTranscriptReads.set(scenario, failed);
+          }
+          if (!entry.then || !failed.has(cursor)) {
+            failed.add(cursor);
+            await json(
+              route,
+              { error: 'Transcript page is unavailable' },
+              entry.status,
+            );
+            return;
+          }
+          page = entry.then;
+        } else {
+          page = entry;
+        }
+      }
       await json(route, {
         v: 1,
         sessionId,
         events: page?.events ?? [],
         hasMore: page?.hasMore ?? false,
+        ...(page?.nextCursor !== undefined
+          ? { nextCursor: page.nextCursor }
+          : {}),
       });
       return;
     }

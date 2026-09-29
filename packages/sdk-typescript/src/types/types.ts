@@ -143,6 +143,8 @@ export interface CLIMcpServerConfig {
   // Common
   timeout?: number;
   versionNegotiation?: 'auto' | 'legacy';
+  appResourceMaxBytes?: number;
+  appResourceTimeoutMs?: number;
   trust?: boolean;
   // Metadata
   description?: string;

@@ -232,7 +232,7 @@ describe('SubagentValidator', () => {
       const result = validator.validateTools([]);
       expect(result.isValid).toBe(true);
       expect(result.warnings).toContain(
-        'Empty tools array - subagent will inherit all available tools',
+        'Empty tools array - subagent will inherit all available tools (any disallowedTools still apply)',
       );
     });
 
