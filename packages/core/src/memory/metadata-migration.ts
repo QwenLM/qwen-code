@@ -25,7 +25,10 @@ import {
   rebuildAutoMemoryIndexAtRoot,
   rebuildTeamAutoMemoryIndex,
 } from './indexer.js';
-import { withCoalescedMemoryChanges } from './memory-file-change.js';
+import {
+  notifyMemoryFileChange,
+  withCoalescedMemoryChanges,
+} from './memory-file-change.js';
 import {
   AUTO_MEMORY_INDEX_FILENAME,
   AUTO_MEMORY_PINNED_DIRNAME,
@@ -628,7 +631,11 @@ export async function runMemoryMetadataMigration(params: {
         } else {
           await Promise.all(
             indexRoots.map((root) =>
-              rebuildAutoMemoryIndexAtRoot(root, params.scope),
+              rebuildAutoMemoryIndexAtRoot(root, params.scope, {
+                projectRoot: params.projectRoot,
+                deliveryId: params.config.getMemoryHookDeliveryId?.(),
+                signal: params.abortSignal,
+              }),
             ),
           );
         }
@@ -720,6 +727,13 @@ export async function runMemoryMetadataMigration(params: {
             canCommit,
           );
           if (status === 'committed') {
+            await notifyMemoryFileChange(
+              candidate.filePath,
+              params.projectRoot,
+              'update',
+              params.config.getMemoryHookDeliveryId?.(),
+              params.abortSignal,
+            );
             result.committed += 1;
             committedRoots.add(candidate.root);
             try {

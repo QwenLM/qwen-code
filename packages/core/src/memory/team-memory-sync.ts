@@ -55,6 +55,7 @@ async function tryGit(
   cwd: string,
   args: string[],
   killSignal: NodeJS.Signals = 'SIGTERM',
+  maxBuffer?: number,
 ): Promise<string | null> {
   try {
     const { stdout } = await execFileAsync(
@@ -65,6 +66,7 @@ async function tryGit(
         encoding: 'utf8',
         timeout: GIT_TIMEOUT_MS,
         killSignal,
+        ...(maxBuffer === undefined ? {} : { maxBuffer }),
         env: {
           ...process.env,
           // Force non-interactive git so a missing credential / askpass prompt
@@ -203,17 +205,22 @@ export async function syncTeamMemory(
       if (!pulled || !before) return pulled;
       const after = (await tryGit(gitRoot, ['rev-parse', 'HEAD']))?.trim();
       if (!after || after === before) return pulled;
-      const changes = await tryGit(gitRoot, [
-        'diff',
-        '--raw',
-        '-z',
-        '--no-abbrev',
-        '--no-renames',
-        before,
-        after,
-        '--',
-        relPath,
-      ]);
+      const changes = await tryGit(
+        gitRoot,
+        [
+          'diff',
+          '--raw',
+          '-z',
+          '--no-abbrev',
+          '--no-renames',
+          before,
+          after,
+          '--',
+          relPath,
+        ],
+        'SIGKILL',
+        Infinity,
+      );
       const entries = changes?.split('\0') ?? [];
       for (let i = 0; i + 1 < entries.length; i += 2) {
         const [, mode, , blob] = entries[i]!.split(' ');
@@ -222,12 +229,12 @@ export async function syncTeamMemory(
         if (mode === '000000') {
           record(filePath, null);
         } else if ((mode === '100644' || mode === '100755') && blob) {
-          const content = await tryGit(gitRoot, [
-            'cat-file',
-            '--filters',
-            `--path=${entries[i + 1]!}`,
-            blob,
-          ]);
+          const content = await tryGit(
+            gitRoot,
+            ['cat-file', '--filters', `--path=${entries[i + 1]!}`, blob],
+            'SIGKILL',
+            Infinity,
+          );
           if (content !== null) record(filePath, content);
         }
       }

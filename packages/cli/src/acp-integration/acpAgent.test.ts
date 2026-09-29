@@ -19304,16 +19304,85 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       'User',
       'memory.enableManagedAutoDream',
       true,
+      undefined,
+      { throwOnWriteFailure: true },
     );
     expect(settings.setValue).toHaveBeenCalledWith(
       'User',
       'memory.enableAutoSkill',
       true,
+      undefined,
+      { throwOnWriteFailure: true },
     );
 
     mockConnectionState.resolve();
     await agentPromise;
   });
+
+  it.each([false, true])(
+    'qwen/settings setMemory reports only persisted toggles when a write fails (partial=%s)',
+    async (partial) => {
+      const memoryFileChange = await import(
+        '@qwen-code/qwen-code-core/memory/memory-file-change.js'
+      );
+      const notify = vi
+        .spyOn(memoryFileChange, 'notifyMemoryEnabledChange')
+        .mockResolvedValue(undefined);
+      const memory = { enableManagedAutoMemory: true };
+      const settings = {
+        merged: { mcpServers: {}, memory },
+        user: { path: '/home/test/.qwen/settings.json', settings: { memory } },
+        getSystemHooks: vi.fn(),
+        getUserHooks: vi.fn().mockReturnValue({}),
+        getProjectHooks: vi.fn().mockReturnValue({}),
+        setValue: vi.fn(
+          (
+            _scope: string,
+            key: string,
+            value: unknown,
+            _guard: unknown,
+            options?: { throwOnWriteFailure?: boolean },
+          ) => {
+            if (partial && key === 'memory.enableManagedAutoMemory') {
+              memory.enableManagedAutoMemory = value as boolean;
+              return;
+            }
+            if (options?.throwOnWriteFailure)
+              throw new Error('Refused settings write');
+            memory.enableManagedAutoMemory = value as boolean;
+          },
+        ),
+      } as unknown as LoadedSettings;
+      vi.mocked(loadSettings).mockReturnValue(settings);
+      const running = runAcpAgent(mockConfig, settings, mockArgv);
+      await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+      const agent = capturedAgentFactory!({
+        get closed() {
+          return mockConnectionState.promise;
+        },
+      }) as AgentLike;
+      try {
+        await expect(
+          agent.extMethod('qwen/settings/setMemory', {
+            updates: {
+              enableManagedAutoMemory: false,
+              ...(partial ? { enableAutoSkill: true } : {}),
+            },
+          }),
+        ).rejects.toThrow('Refused settings write');
+        expect(memory.enableManagedAutoMemory).toBe(!partial);
+        if (partial) {
+          expect(notify).toHaveBeenCalledExactlyOnceWith('/tmp', false);
+        } else {
+          expect(notify).not.toHaveBeenCalled();
+        }
+      } finally {
+        notify.mockRestore();
+        mockConnectionState.resolve();
+        await running;
+      }
+    },
+  );
 
   it('qwen/settings setMemory does not emit when a workspace override still wins', async () => {
     const memoryFileChange = await import(

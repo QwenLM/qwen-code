@@ -9,6 +9,7 @@ import { lstatSync, readdirSync, realpathSync } from 'node:fs';
 import path from 'node:path';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import {
+  AUTO_MEMORY_DIRNAME,
   getAutoMemoryRoot,
   getTeamAutoMemoryRoot,
   getUserAutoMemoryRoot,
@@ -70,14 +71,22 @@ interface ReportedMemoryContent {
 
 let reportSequence = 0;
 /**
- * The store is the current window's outside-baseline bucket. A notify made
+ * The store retains the current window's baseline and explicit notices. A notify
  * inside a window is not delivered; it is still recorded for every OTHER open
  * window so a sibling window's closing diff does not re-report the write
  * under its own attribution.
  */
-const suppressDelivery = new AsyncLocalStorage<
-  Map<string, ReportedMemoryContent>
->();
+interface MemoryChangeWindow {
+  outside: Map<string, ReportedMemoryContent>;
+  pending: Array<{
+    sequence: number;
+    projectRoot: string;
+    changes: MemoryDocumentChange[];
+    deliveryId?: symbol;
+    signal?: AbortSignal;
+  }>;
+}
+const suppressDelivery = new AsyncLocalStorage<MemoryChangeWindow>();
 
 /**
  * Register a listener for one workspace. A write is delivered to the
@@ -153,6 +162,21 @@ function relativeInside(root: string, filePath: string): string | undefined {
   return relative.split(path.sep).join('/');
 }
 
+function isProjectRootAllowed(
+  projectRoot: string,
+  resolvedRoot: string,
+): boolean {
+  return (
+    process.env['QWEN_CODE_MEMORY_LOCAL'] !== '1' ||
+    resolvedRoot ===
+      path.join(
+        realpathNearestExisting(projectRoot),
+        QWEN_DIR,
+        AUTO_MEMORY_DIRNAME,
+      )
+  );
+}
+
 function isTeamRootInRepository(root: string, resolvedRoot: string): boolean {
   const repoRoot = path.dirname(path.dirname(root));
   return (
@@ -196,6 +220,11 @@ export function describeMemoryFileChange(
   ];
   for (const candidate of candidates) {
     const resolvedRoot = realpathNearestExisting(candidate.root);
+    if (
+      candidate.scope === 'project' &&
+      !isProjectRootAllowed(projectRoot, resolvedRoot)
+    )
+      continue;
     if (candidate.scope === 'team') {
       if (
         !isTeamRootInRepository(candidate.root, resolvedRoot) ||
@@ -310,7 +339,7 @@ async function rememberOutsideEmit(
   filePaths: readonly string[],
 ): Promise<void> {
   if (outsideWindowEmits.size === 0) return;
-  const ownBucket = suppressDelivery.getStore();
+  const ownBucket = suppressDelivery.getStore()?.outside;
   for (const filePath of filePaths) {
     const stat = await fs
       .lstat(filePath)
@@ -432,7 +461,8 @@ export async function notifyMemoryFileChange(
       ...(scope === 'user' ? {} : { workspace }),
     });
   }
-  const inWindow = suppressDelivery.getStore() !== undefined;
+  const window = suppressDelivery.getStore();
+  const inWindow = window !== undefined;
   let baselinePaths = emittedPaths;
   // Inside a window the closing diff owns walk-visible paths; only paths the
   // walk can never observe are delivered immediately.
@@ -474,6 +504,30 @@ export async function notifyMemoryFileChange(
         }
       }
     }
+  }
+  if (window) {
+    const deferredPaths = new Set(baselinePaths);
+    const pending = changes.flatMap((change) => {
+      const kept = change.paths
+        .map((p, i) => (deferredPaths.has(p) ? i : -1))
+        .filter((i) => i >= 0);
+      return kept.length === 0
+        ? []
+        : [
+            {
+              ...change,
+              paths: kept.map((i) => change.paths[i]!),
+              relativePaths: kept.map((i) => change.relativePaths[i]!),
+            },
+          ];
+    });
+    window.pending.push({
+      sequence: ++reportSequence,
+      projectRoot,
+      changes: pending,
+      deliveryId,
+      signal,
+    });
   }
   // Record even when delivery is suppressed inside a coalesced window, so a
   // sibling window does not re-report the write under its own attribution.
@@ -650,9 +704,13 @@ async function readMemoryDocuments(
       symlinks: new Set(),
       complete: true,
     };
-    const roots = [getUserAutoMemoryRoot(), getAutoMemoryRoot(projectRoot)].map(
-      (root) => realpathNearestExisting(root),
+    const roots = [realpathNearestExisting(getUserAutoMemoryRoot())];
+    const projectMemoryRoot = realpathNearestExisting(
+      getAutoMemoryRoot(projectRoot),
     );
+    if (isProjectRootAllowed(projectRoot, projectMemoryRoot)) {
+      roots.push(projectMemoryRoot);
+    }
     if (isTeamRootInRepository(teamRoot, resolvedTeamRoot)) {
       roots.push(resolvedTeamRoot);
     }
@@ -684,15 +742,44 @@ export async function withCoalescedMemoryChanges<T>(
     const before = await readMemoryDocuments(projectRoot).catch(
       () => undefined,
     );
+    if (!before?.complete) return await fn();
+    const window: MemoryChangeWindow = { outside, pending: [] };
     try {
-      return await suppressDelivery.run(outside, fn);
+      return await suppressDelivery.run(window, fn);
     } finally {
       // The snapshot is best-effort: a failure here must never replace fn's
       // outcome (the extract cursor depends on it).
       const after = await readMemoryDocuments(projectRoot).catch(
         () => undefined,
       );
-      if (before?.complete && after?.complete) {
+      if (!after?.complete) {
+        for (const pending of window.pending) {
+          const changes = pending.changes.flatMap((change) => {
+            const kept = change.paths
+              .map((filePath, i) =>
+                (outside.get(filePath)?.sequence ?? 0) > pending.sequence
+                  ? -1
+                  : i,
+              )
+              .filter((i) => i >= 0);
+            return kept.length === 0
+              ? []
+              : [
+                  {
+                    ...change,
+                    paths: kept.map((i) => change.paths[i]!),
+                    relativePaths: kept.map((i) => change.relativePaths[i]!),
+                  },
+                ];
+          });
+          await emit(
+            pending.projectRoot,
+            changes,
+            pending.deliveryId,
+            pending.signal,
+          );
+        }
+      } else {
         const created: string[] = [];
         const updated: string[] = [];
         const deleted: string[] = [];

@@ -11,7 +11,10 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
-import { registerMemoryChangedListener } from './memory-file-change.js';
+import {
+  registerMemoryChangedListener,
+  withCoalescedMemoryChanges,
+} from './memory-file-change.js';
 import {
   commitMigratedMemoryMetadata,
   runMemoryMetadataMigration,
@@ -140,6 +143,69 @@ describe('memory metadata migration', () => {
     } finally {
       unregisterOwner();
       unregisterSibling();
+    }
+  });
+
+  it('keeps intermediate metadata commits out of a sibling window', async () => {
+    await write('project/one.md', legacyContent());
+    await write('project/two.md', legacyContent());
+    const owner = vi.fn();
+    const sibling = vi.fn();
+    const stopOwner = registerMemoryChangedListener(projectRoot, owner);
+    const stopSibling = registerMemoryChangedListener(projectRoot, sibling);
+    let closeSibling!: () => void;
+    let siblingOpened!: () => void;
+    const opened = new Promise<void>((resolve) => {
+      siblingOpened = resolve;
+    });
+    const close = new Promise<void>((resolve) => {
+      closeSibling = resolve;
+    });
+    const siblingWindow = withCoalescedMemoryChanges(
+      projectRoot,
+      stopSibling.id,
+      async () => {
+        siblingOpened();
+        await close;
+      },
+    );
+    try {
+      await opened;
+      let generated = 0;
+      const result = await runMemoryMetadataMigration({
+        config: {
+          getMemoryHookDeliveryId: () => stopOwner.id,
+          isTrustedFolder: () => true,
+        } as unknown as Config,
+        projectRoot,
+        root: memoryRoot,
+        scope: 'project',
+        generateMetadata: async (_config, candidate) => {
+          if (++generated === 2) {
+            closeSibling();
+            await siblingWindow;
+          }
+          return metadata(candidate);
+        },
+      });
+      expect(result.committed).toBe(2);
+      expect(sibling).not.toHaveBeenCalled();
+      expect(owner).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          operation: 'update',
+          relativePaths: expect.arrayContaining([
+            'project/one.md',
+            'project/two.md',
+            'MEMORY.md',
+          ]),
+        }),
+        undefined,
+      );
+    } finally {
+      closeSibling();
+      await siblingWindow;
+      stopOwner();
+      stopSibling();
     }
   });
 

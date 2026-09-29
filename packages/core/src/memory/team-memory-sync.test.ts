@@ -157,9 +157,13 @@ describe('syncTeamMemory', () => {
     ).toBe(true);
   }, 30_000);
 
-  it.each([false, true])(
-    'excludes concurrent pulled documents while preserving local window writes (autocrlf=%s)',
-    async (autocrlf) => {
+  it.each([
+    { autocrlf: false, large: false },
+    { autocrlf: true, large: false },
+    { autocrlf: false, large: true },
+  ])(
+    'excludes pulled documents while preserving local writes ($autocrlf, $large)',
+    async ({ autocrlf, large }) => {
       const { bare, repo } = freshRemoteAndClone('alice');
       git(repo, 'config', 'core.autocrlf', String(autocrlf));
       vi.stubEnv(
@@ -169,6 +173,12 @@ describe('syncTeamMemory', () => {
       const bob = makeWorkingClone(bare, 'bob');
       cleanup.push(path.dirname(bob));
       writeTeamMemory(bob, 'reference/remote.md', 'collaborator fact');
+      if (large) {
+        fs.appendFileSync(
+          path.join(getTeamAutoMemoryRoot(bob), 'reference/remote.md'),
+          '\n' + 'large memory '.repeat(180_000),
+        );
+      }
       git(bob, 'add', '--', '.qwen/team-memory');
       git(bob, 'commit', '-m', 'collaborator fact');
       git(bob, 'push');

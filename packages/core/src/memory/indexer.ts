@@ -262,15 +262,29 @@ export async function rebuildManagedAutoMemoryIndex(
 export async function rebuildAutoMemoryIndexAtRoot(
   root: string,
   scope: AutoMemoryScope,
+  notification?: {
+    projectRoot: string;
+    deliveryId?: symbol;
+    signal?: AbortSignal;
+  },
 ): Promise<string> {
   if (!existsSync(root)) return '';
   await resolveTrustedMemoryRoot(root, getMemoryRootTrustedAnchor(root));
   const docs = await scanAllAutoMemoryTopicDocumentsFromRoot(root, scope);
   const content = buildManagedAutoMemoryIndex(docs);
-  await atomicWriteFile(path.join(root, AUTO_MEMORY_INDEX_FILENAME), content, {
-    encoding: 'utf-8',
-    noFollow: true,
-  });
+  const indexPath = path.join(root, AUTO_MEMORY_INDEX_FILENAME);
+  if (notification) {
+    await writeMemoryIndex(notification.projectRoot, indexPath, content, {
+      deliveryId: notification.deliveryId,
+      signal: notification.signal,
+      noFollow: true,
+    });
+  } else {
+    await atomicWriteFile(indexPath, content, {
+      encoding: 'utf-8',
+      noFollow: true,
+    });
+  }
   return content;
 }
 

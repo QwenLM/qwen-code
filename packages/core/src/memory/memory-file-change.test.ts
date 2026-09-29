@@ -449,6 +449,54 @@ describe('memory file change hook', () => {
     },
   );
 
+  it.skipIf(process.platform === 'win32').each(['.qwen', '.qwen/memory'])(
+    'ignores a relocated local project root through %s',
+    async (suffix) => {
+      const workspace = await setup();
+      const originalLocal = process.env['QWEN_CODE_MEMORY_LOCAL'];
+      process.env['QWEN_CODE_MEMORY_LOCAL'] = '1';
+      const outside = path.join(tempDir!, 'outside');
+      const link = path.join(workspace, suffix);
+      const file = path.join(
+        outside,
+        suffix === '.qwen' ? 'memory' : '',
+        'a.md',
+      );
+      const seen: MemoryChangedNotice[] = [];
+      const stop = registerMemoryChangedListener(workspace, (change) => {
+        seen.push(change);
+      });
+      try {
+        await fs.mkdir(path.dirname(file), { recursive: true });
+        await fs.writeFile(file, 'outside');
+        await fs.mkdir(path.dirname(link), { recursive: true });
+        await fs.symlink(outside, link, 'dir');
+        const readFile = vi.spyOn(fs, 'readFile');
+        await withCoalescedMemoryChanges(workspace, stop.id, async () => {
+          await fs.writeFile(file, 'changed outside');
+          await notifyMemoryFileChange(file, workspace, 'update', stop.id);
+        });
+        expect(describeMemoryFileChange(file, workspace)).toBeUndefined();
+        expect(
+          describeMemoryFileChange(
+            path.join(getAutoMemoryRoot(workspace), 'a.md'),
+            workspace,
+          ),
+        ).toBeUndefined();
+        expect(readFile).not.toHaveBeenCalledWith(
+          await fs.realpath(file),
+          'utf-8',
+        );
+        expect(seen).toEqual([]);
+      } finally {
+        stop();
+        if (originalLocal === undefined)
+          delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+        else process.env['QWEN_CODE_MEMORY_LOCAL'] = originalLocal;
+      }
+    },
+  );
+
   it.skipIf(process.platform === 'win32')(
     'does not classify a team child symlink that escapes its root',
     async () => {
@@ -1192,6 +1240,82 @@ describe('memory file change hook', () => {
     },
   );
 
+  it.each(['opening', 'closing'] as const)(
+    'retains explicit notifications when the %s snapshot is incomplete',
+    async (failure) => {
+      const workspace = await setup();
+      const root = getUserAutoMemoryRoot();
+      await fs.mkdir(root, { recursive: true });
+      const canonicalRoot = await fs.realpath(root);
+      const file = path.join(root, 'saved.md');
+      const seen: MemoryChangedNotice[] = [];
+      const signals: Array<AbortSignal | undefined> = [];
+      const stop = registerMemoryChangedListener(
+        workspace,
+        (notice, signal) => {
+          seen.push(notice);
+          signals.push(signal);
+        },
+      );
+      const sibling = vi.fn();
+      const stopSibling = registerMemoryChangedListener(workspace, sibling);
+      const controller = new AbortController();
+      let closing = false;
+      const readdir = fs.readdir;
+      vi.spyOn(fs, 'readdir').mockImplementation(
+        async (...args: Parameters<typeof readdir>) => {
+          if (
+            args[0] === canonicalRoot &&
+            closing === (failure === 'closing')
+          ) {
+            throw Object.assign(new Error('unreadable directory'), {
+              code: 'EACCES',
+            });
+          }
+          return readdir(...args);
+        },
+      );
+      const taskError = new Error('task failed after saving');
+      try {
+        await expect(
+          withCoalescedMemoryChanges(
+            workspace,
+            stop.id,
+            async () => {
+              await fs.writeFile(file, 'saved');
+              await notifyMemoryFileChange(
+                file,
+                workspace,
+                'create',
+                stop.id,
+                controller.signal,
+              );
+              await fs.writeFile(
+                path.join(root, 'unreported.md'),
+                'unknown raw write',
+              );
+              closing = true;
+              throw taskError;
+            },
+            controller.signal,
+          ),
+        ).rejects.toBe(taskError);
+        expect(seen).toEqual([
+          expect.objectContaining({
+            scope: 'user',
+            operation: 'create',
+            relativePaths: ['saved.md'],
+          }),
+        ]);
+        expect(signals).toEqual([controller.signal]);
+        expect(sibling).not.toHaveBeenCalled();
+      } finally {
+        stop();
+        stopSibling();
+      }
+    },
+  );
+
   it('emits nothing from the window when a memory root cannot be enumerated', async () => {
     const projectRoot = await setup();
     const userRoot = path.join(tempDir!, 'memories');
@@ -1875,6 +1999,55 @@ describe('memory change snapshot ordering', () => {
       }),
     ]);
   });
+  it('does not replay a saved notification superseded by an outside delete when the closing snapshot fails', async () => {
+    const seen: MemoryChangedNotice[] = [];
+    const writer: MemoryChangedNotice[] = [];
+    const id = listener(seen);
+    const writerId = listener(writer);
+    const root = await fs.realpath(getUserAutoMemoryRoot());
+    const file = path.join(root, 'saved.md');
+    const kept = path.join(root, 'kept.md');
+    const saved = deferred();
+    const release = deferred();
+    const pending = withCoalescedMemoryChanges(workspace, id, async () => {
+      await fs.writeFile(file, 'saved');
+      await fs.writeFile(kept, 'kept');
+      await notifyMemoryFileChange([file, kept], workspace, 'create', id);
+      saved.resolve();
+      await release.promise;
+    });
+    try {
+      await saved.promise;
+      await fs.unlink(file);
+      await notifyMemoryFileChange(file, workspace, 'delete', writerId);
+      const readdir = fs.readdir;
+      vi.spyOn(fs, 'readdir').mockImplementation(
+        async (...args: Parameters<typeof readdir>) => {
+          if (args[0] === root)
+            throw Object.assign(new Error('unreadable'), { code: 'EACCES' });
+          return readdir(...args);
+        },
+      );
+      release.resolve();
+      await pending;
+      expect(writer).toEqual([
+        expect.objectContaining({
+          operation: 'delete',
+          relativePaths: ['saved.md'],
+        }),
+      ]);
+      expect(seen).toEqual([
+        expect.objectContaining({
+          operation: 'create',
+          relativePaths: ['kept.md'],
+        }),
+      ]);
+    } finally {
+      release.resolve();
+      await pending;
+    }
+  });
+
   it('outside create during closing directory enumeration produces no window delete', async () => {
     const seen: MemoryChangedNotice[] = [];
     const writer: MemoryChangedNotice[] = [];
