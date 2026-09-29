@@ -102,6 +102,7 @@ export class OverlayFs {
   async applyToReal(): Promise<string[]> {
     const applied: string[] = [];
     const failed: string[] = [];
+    let firstError: unknown;
 
     for (const [rel, overlayPath] of this.writtenFiles) {
       const realPath = join(this.realCwd, rel);
@@ -109,15 +110,19 @@ export class OverlayFs {
         await mkdir(dirname(realPath), { recursive: true });
         await copyFile(overlayPath, realPath);
         applied.push(realPath);
-      } catch {
-        // Keep going so the other files still land, then report this one.
+      } catch (err) {
+        // Keep going so the other files still land, then report this one. The
+        // first failure rides along as the cause so the caller can tell EACCES
+        // from ENOSPC instead of only seeing that something went wrong.
         failed.push(realPath);
+        firstError ??= err;
       }
     }
 
     if (failed.length > 0) {
       throw new Error(
         `Could not apply ${failed.length} of ${this.writtenFiles.size} file(s) to disk: ${failed.join(', ')}`,
+        { cause: firstError },
       );
     }
 
