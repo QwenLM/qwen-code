@@ -22,6 +22,7 @@ import java.util.Set;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.function.UnaryOperator;
 import org.junit.jupiter.api.AfterEach;
@@ -46,6 +47,8 @@ class ProviderRuntimeTransportTest {
     private volatile Object acquireAnswer = true;
     private volatile UnaryOperator<Map<String, Object>> response = body -> body;
     private volatile byte[] rawBody;
+    /** A result spelled out as JSON text, for number forms a map cannot carry. */
+    private volatile String rawResult;
 
     @BeforeEach
     void start() throws Exception {
@@ -64,6 +67,12 @@ class ProviderRuntimeTransportTest {
             answer.put("session", request.get("session"));
             answer.put("result", value);
             byte[] encoded = rawBody != null ? rawBody : JsonCodec.encode(response.apply(answer));
+            if (rawResult != null && !"acquire".equals(operation.get("kind"))) {
+                encoded = ("{\"protocolVersion\":1,\"providerProtocol\":\"" + ProviderRuntimeProtocol.NAME
+                        + "\",\"session\":" + new String(JsonCodec.encode(request.get("session")),
+                                StandardCharsets.UTF_8)
+                        + ",\"result\":" + rawResult + "}").getBytes(StandardCharsets.UTF_8);
+            }
             exchange.getResponseHeaders().set("Content-Type", contentType);
             exchange.getResponseHeaders().set("Cache-Control", cacheControl);
             if (contentEncoding != null) {
@@ -379,6 +388,52 @@ class ProviderRuntimeTransportTest {
             rawBody = body.getBytes(StandardCharsets.UTF_8);
             assertAttestationInvalid(() -> transport.execute(lease, session, reference()), body);
         }
+    }
+
+    @Test
+    void refusesProviderStatusCursorsThatAreNotExactIntegers() {
+        // fastjson2 reads these forms as Short 4, Byte 4 and Double 1.0.
+        for (String cursor : List.of("65540S", "260B", "1.0000000000000001D")) {
+            rawResult = "{\"state\":\"executing\",\"cancelRequested\":false,\"lastSeq\":" + cursor
+                    + ",\"firstAvailableSeq\":0,\"progressGap\":false,\"progress\":[]}";
+            assertAttestationInvalid(() -> transport.status(lease, session, reference(), 0), cursor);
+        }
+        rawResult = "{\"state\":\"executing\",\"cancelRequested\":false,\"lastSeq\":4"
+                + ",\"firstAvailableSeq\":0,\"progressGap\":false,\"progress\":[]}";
+        assertEquals("executing", transport.status(lease, session, reference(), 0)
+                .toCompletableFuture().join().get("state"));
+    }
+
+    @Test
+    void refusesAnUnpairedSurrogateAnywhereInAControl() {
+        // The JSON writer would send one as '?', which a shell reads as a wildcard.
+        Map<String, Object> identity = new LinkedHashMap<>(reference());
+        identity.remove("invocationId");
+        identity.remove("argsDigest");
+        List<Function<String, Map<String, Object>>> operations = List.of(
+                text -> Map.of("kind", "prepare", "identity", identity, "toolName",
+                        "run_shell_command", "input", Map.of("command", "rm /tmp/a" + text + "b")),
+                text -> Map.of("kind", "prepare", "identity", identity, "toolName",
+                        "run_shell_command", "input", Map.of("command", "ls", "k" + text, "v")),
+                text -> Map.of("kind", "prepare", "identity", identity, "toolName", "edit",
+                        "input", Map.of(), "modification",
+                        Map.of("source", reference(), "newContent", "next" + text)),
+                text -> Map.of("kind", "confirm", "reference", reference(), "outcome",
+                        "proceed_once", "payload", Map.of("updatedInput",
+                                Map.of("command", "ls " + text))),
+                text -> Map.of("kind", "bind-history", "binding", Map.of("ownerSessionId",
+                        HARNESS, "ownerRuntimeSessionId", SESSION, "executionCwd",
+                        "/work/" + text, "snapshots", List.of())));
+        for (Function<String, Map<String, Object>> operation : operations) {
+            // Well-formed, the same operation passes.
+            ProviderRuntimeProtocol.control(operation.apply("x"), HARNESS, SESSION);
+            for (String surrogate : List.of("\uD800", "\uDC00")) {
+                RuntimeBrokerException error = assertThrows(RuntimeBrokerException.class,
+                        () -> transport.control(lease, session, operation.apply(surrogate)));
+                assertEquals("runtime_control_operation_invalid", error.getCode());
+            }
+        }
+        assertTrue(requests.isEmpty());
     }
 
     private static void assertAttestationInvalid(Supplier<CompletionStage<?>> call, Object label) {

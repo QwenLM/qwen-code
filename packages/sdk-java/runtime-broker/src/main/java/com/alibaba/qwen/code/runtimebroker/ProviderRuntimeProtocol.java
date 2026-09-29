@@ -46,6 +46,11 @@ final class ProviderRuntimeProtocol {
     }
 
     static void control(Map<String, Object> operation, String harnessSessionId, String sessionId) {
+        // The JSON writer would send an unpaired surrogate as '?', so a key or
+        // string of the input could reach the Worker, and run, as another.
+        if (!BrokerValues.isWellFormedJson(operation)) {
+            throw invalid();
+        }
         String kind = string(operation, "kind");
         Set<String> required;
         Set<String> optional = Set.of();

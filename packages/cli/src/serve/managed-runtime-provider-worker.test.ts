@@ -571,6 +571,29 @@ describe('Managed Runtime provider worker', () => {
     });
   });
 
+  it('keeps shell calls inside the Session workspace', async () => {
+    await begin();
+    // Core's shell tool would ask here, and a preapproved Session never asks.
+    const outside = await post({
+      kind: 'prepare',
+      identity,
+      toolName: 'run_shell_command',
+      input: { command: 'pwd', directory: storage },
+    });
+    expect(outside.status).toBe(400);
+    expect(await outside.json()).toEqual({
+      code: 'managed_runtime_tool_invalid',
+      error: `Directory '${storage}' is not within any of the registered workspace directories.`,
+    });
+    expect(
+      await prepare(
+        'run_shell_command',
+        { command: 'pwd', directory: workspace },
+        'call-2',
+      ),
+    ).toMatchObject({ callId: 'call-2' });
+  });
+
   it('rechecks directories for new work while status, cancellation and release remain available', async () => {
     await begin();
     const ref = reference(

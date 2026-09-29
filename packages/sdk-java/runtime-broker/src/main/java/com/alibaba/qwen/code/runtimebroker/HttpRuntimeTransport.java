@@ -723,12 +723,8 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
     }
 
     private static boolean providerSequence(Object value) {
-        if (!(value instanceof Number number)) {
-            return false;
-        }
-        BigDecimal sequence = new BigDecimal(number.toString());
-        return sequence.signum() >= 0 && sequence.stripTrailingZeros().scale() <= 0
-                && sequence.compareTo(BigDecimal.valueOf(9007199254740991L)) <= 0;
+        Long sequence = BrokerValues.exactLong(value);
+        return sequence != null && sequence >= 0 && sequence <= 9007199254740991L;
     }
 
     /**

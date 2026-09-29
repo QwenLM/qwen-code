@@ -41,11 +41,15 @@ operation 是封闭的判别联合。公开 Broker 控制为 `manifest`、`begin
 `modification` 的 `prepare`，在记录任何调用之前返回 400 `managed_runtime_tool_invalid`：
 core 只对 `notebook_edit` 应用内容修改，而本 profile 只暴露 `read_file`、`write_file`、
 `edit` 和 `run_shell_command`。共享的 provider 语料仍把这种形状列为合法，因为语料固定的
-是两端都接受的线上形状，而不是某个 profile 实际提供的能力。`mediaContext` 只对
+是两端都接受的线上形状，而不是某个 profile 实际提供的能力。`directory` 位于 Session
+工作区之外的 `run_shell_command` 同样以此拒绝：core 的 shell 工具会先询问再在那里执行，
+而预先批准的 Session 从不询问。`mediaContext` 只对
 `read_file` 生效：它把该工具面向模型的描述绑定到 Harness 的模态上，而读取本身按本
 worker 自己的 content-generator 模态决定是否交付媒体；本 worker 没有这些模态，所以
 媒体文件仍以“不支持的类型”占位文本作答。经 worker 交付媒体留作后续工作。派发前拒绝外来 Session
-reference 和未知字段。不支持的版本与操作明确失败，不回退到旧路由。
+reference 和未知字段。Broker 还会以 400 `runtime_control_operation_invalid` 拒绝任何键或
+字符串中含未配对代理项的操作，否则 JSON 写入器会把它发成 `?`。
+不支持的版本与操作明确失败，不回退到旧路由。
 
 工具选择或构建失败返回 `400 managed_runtime_tool_invalid`；不支持的 provider profile
 返回 `501 managed_runtime_provider_unsupported`。Broker 仅从封闭 JSON 错误响应中保留

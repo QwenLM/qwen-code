@@ -53,13 +53,19 @@ before any invocation is journaled: core applies content modification only to
 `notebook_edit`, and the profile exposes only `read_file`, `write_file`,
 `edit` and `run_shell_command`. The shared provider corpus still lists that
 shape as valid, because it pins the wire shape both sides accept, not what one
-profile serves. `mediaContext` is admitted for `read_file` only; it binds the
+profile serves. A `run_shell_command` whose `directory` lies outside the
+Session's workspace is refused the same way: core's shell tool would ask before
+running there, and a preapproved Session never asks. `mediaContext` is admitted
+for `read_file` only; it binds the
 tool's model-facing description to the Harness's modalities, while the read
 itself decides media delivery from this worker's own content-generator
 modalities, which it does not have, so a media file is still answered with the
 unsupported-type placeholder. Delivering media through the worker is follow-up
 work. Foreign Session references and unknown fields are refused
-before dispatch. Unsupported versions and operations fail explicitly; there is
+before dispatch. The Broker also refuses, with 400
+`runtime_control_operation_invalid`, an operation with an unpaired surrogate in
+any key or string, which the JSON writer would otherwise send as `?`.
+Unsupported versions and operations fail explicitly; there is
 no legacy-route fallback.
 
 Tool selection or construction failures return `400 managed_runtime_tool_invalid`;

@@ -426,13 +426,26 @@ class ManagedRuntimeProviderWorker {
       case 'prepare': {
         if (operation.toolName === ShellTool.Name) {
           const normalized = structuredClone(operation.input);
-          if (
-            value.shell.validateToolParams(normalized) === null &&
-            normalized['is_background'] === true
-          )
-            conflict(
-              'Managed Runtime does not admit background shell execution.',
-            );
+          if (value.shell.validateToolParams(normalized) === null) {
+            if (normalized['is_background'] === true)
+              conflict(
+                'Managed Runtime does not admit background shell execution.',
+              );
+            // Core's shell tool asks before running in a directory outside
+            // the workspace, and a preapproved Session never asks, so keep
+            // every call inside the Session's workspace, as the executor does.
+            const directory = normalized['directory'];
+            if (
+              typeof directory === 'string' &&
+              directory !== '' &&
+              !value.config
+                .getWorkspaceContext()
+                .isPathWithinWorkspace(directory)
+            )
+              throw new ManagedToolPreparationError(
+                `Directory '${directory}' is not within any of the registered workspace directories.`,
+              );
+          }
         }
         // Core applies content modification only to notebook_edit, which
         // this profile does not expose; refuse it before anything is
