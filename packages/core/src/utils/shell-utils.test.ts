@@ -5,7 +5,10 @@
  */
 
 import { expect, describe, it, beforeEach, vi, afterEach } from 'vitest';
+import fs from 'node:fs';
+import path from 'node:path';
 import {
+  buildOutsideWorkspaceWarning,
   buildShellExecWarnings,
   checkArgumentSafety,
   checkCommandPermissions,
@@ -1457,6 +1460,38 @@ describe('checkArgumentSafety', () => {
 // `bash -c`) — was untested. Without coverage, removing the
 // `|| detectCommandSubstitution(rawCommand)` clause would not regress
 // any test in this file.
+describe('buildOutsideWorkspaceWarning', () => {
+  it('names the directory as given when nothing resolves differently', () => {
+    expect(buildOutsideWorkspaceWarning('/elsewhere/project')).toBe(
+      'Runs outside the workspace in /elsewhere/project',
+    );
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'names where a symlinked directory really points',
+    async () => {
+      const { tmpdir } =
+        await vi.importActual<typeof import('node:os')>('node:os');
+      const root = fs.realpathSync(
+        fs.mkdtempSync(path.join(tmpdir(), 'outside-warning-')),
+      );
+      try {
+        const target = path.join(root, 'elsewhere');
+        const link = path.join(root, 'workspace', 'link-out');
+        fs.mkdirSync(target);
+        fs.mkdirSync(path.dirname(link));
+        fs.symlinkSync(target, link);
+
+        expect(buildOutsideWorkspaceWarning(link)).toBe(
+          `Runs outside the workspace in ${target} (via ${link})`,
+        );
+      } finally {
+        fs.rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+});
+
 describe('buildShellExecWarnings', () => {
   it('returns undefined when neither stripped nor raw command has substitution', () => {
     expect(

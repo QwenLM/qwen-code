@@ -89,7 +89,11 @@ final class FaultGateBroker {
                         Path.of(config.getString("stateDir")), runtime,
                         context == null ? null
                                 : placement -> context.getString(
-                                        "storageId"));
+                                        "storageId"),
+                        config.getBooleanValue("durable") ? new LocalRuntimeStore(
+                                Path.of(config.getString("stateDir")).resolve("durable"),
+                                "Linux".equals(System.getProperty("os.name")) ? LocalRuntimeStore.HostIdentity.linux()
+                                        : DurableLocalProcessRuntimeProvisionerTest.HOST) : null);
         String records = config.getString("records");
         RuntimeProvisioner provisioner = records == null ? local
                 : new RecoverableProcessProvisioner(local, runtime,
