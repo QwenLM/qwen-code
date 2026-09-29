@@ -1933,12 +1933,28 @@ export function convertOpenAIChunkToLlm(
     // and the override then misdiagnoses the schema-validation failure as
     // max_tokens truncation (QwenLM/qwen-code#12970). Only apply it when
     // the reported usage cannot disprove truncation.
+    const suspectTruncation =
+      toolCallsTruncated && choice.finish_reason !== 'length';
+    const usageVerdict = corroborateTruncationFromCompletionTokens(
+      chunk.usage?.completion_tokens,
+      requestContext.maxOutputTokens,
+    );
     const effectiveFinishReason =
-      toolCallsTruncated &&
-      choice.finish_reason !== 'length' &&
-      usageConsistentWithTruncation(chunk.usage, requestContext.maxOutputTokens)
+      suspectTruncation && usageVerdict !== 'disproved'
         ? 'length'
         : choice.finish_reason;
+    if (suspectTruncation && usageVerdict === 'unknown') {
+      // This chunk carried no usable usage, which is the normal case rather
+      // than an edge one: the pipeline requests `stream_options.include_usage`
+      // (pipeline.ts) and under that convention the finish chunk reports
+      // `usage: null` while the totals land on a later `choices: []` chunk.
+      // Hand the provider's own reason to the pipeline so it can settle the
+      // rewrite on the parked finish response, where the delayed evidence is
+      // merged in before the response is ever yielded.
+      requestContext.pendingTruncationOverride = {
+        finishReason: mapOpenAIFinishReasonToLlm(choice.finish_reason),
+      };
+    }
 
     // Only include finishReason key if finish_reason is present
     const candidate: Candidate = {
@@ -2036,6 +2052,15 @@ export function convertOpenAIChunkToLlm(
  */
 const TRUNCATION_COMPLETION_TOKEN_RATIO_THRESHOLD = 0.5;
 
+/** What reported usage says about a suspected token-limit cut. */
+export type TruncationUsageVerdict =
+  /** Consumption reached the threshold, so a real cut is plausible. */
+  | 'corroborated'
+  /** Consumption is decisively below the ceiling: not a token-limit cut. */
+  | 'disproved'
+  /** No usable evidence either way; the legacy brace-depth inference stands. */
+  | 'unknown';
+
 /**
  * The truncated-tool-call finish_reason override exists for providers that
  * report "stop"/"tool_calls" for output actually cut by the token limit
@@ -2045,23 +2070,34 @@ const TRUNCATION_COMPLETION_TOKEN_RATIO_THRESHOLD = 0.5;
  * comes from malformed generation instead (QwenLM/qwen-code#12970). When
  * usage or the ceiling is unavailable the check is inconclusive and the
  * legacy inference stands.
+ *
+ * A count that is missing, non-numeric or non-positive is *not* a disproof.
+ * Callers only consult this once the parser found incomplete tool-call JSON,
+ * so output existed and merely went uncounted: providers that zero-fill usage
+ * on the finish chunk and send the real totals on a trailing `choices: []`
+ * chunk (ModelScope) would otherwise read as proof against truncation, which
+ * suppresses the #4964 recovery and disarms the scheduler's
+ * reject-file-writes-while-truncated guard on exactly the responses it exists
+ * for. Such a count returns `unknown` so the delayed totals can still settle
+ * it (see RequestContext.pendingTruncationOverride).
  */
-function usageConsistentWithTruncation(
-  usage: OpenAI.Chat.ChatCompletionChunk['usage'],
+export function corroborateTruncationFromCompletionTokens(
+  completionTokens: number | null | undefined,
   maxOutputTokens: number | undefined,
-): boolean {
-  const completionTokens = usage?.completion_tokens;
+): TruncationUsageVerdict {
   if (
-    completionTokens === undefined ||
+    typeof completionTokens !== 'number' ||
+    !Number.isFinite(completionTokens) ||
+    completionTokens <= 0 ||
     maxOutputTokens === undefined ||
     maxOutputTokens <= 0
   ) {
-    return true;
+    return 'unknown';
   }
-  return (
-    completionTokens >=
+  return completionTokens >=
     maxOutputTokens * TRUNCATION_COMPLETION_TOKEN_RATIO_THRESHOLD
-  );
+    ? 'corroborated'
+    : 'disproved';
 }
 
 function mapOpenAIFinishReasonToLlm(openaiReason: string | null): FinishReason {

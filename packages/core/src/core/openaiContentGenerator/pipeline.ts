@@ -6,6 +6,7 @@
 
 import type OpenAI from 'openai';
 import {
+  FinishReason,
   type GenerateContentParameters,
   GenerateContentResponse,
 } from '@google/genai';
@@ -13,7 +14,10 @@ import type {
   ContentGeneratorConfig,
   PromptCacheSharingParameters,
 } from '../contentGenerator.js';
-import { OpenAIContentConverter } from './converter.js';
+import {
+  corroborateTruncationFromCompletionTokens,
+  OpenAIContentConverter,
+} from './converter.js';
 import { DashScopeOpenAICompatibleProvider } from './provider/dashscope.js';
 import {
   applyOfficialOpenAIPromptCaching,
@@ -648,6 +652,12 @@ export class ContentGenerationPipeline {
     // function-call parts from the finish chunk).
     let pendingFinishResponse: GenerateContentResponse | null = null;
     let finishYielded = false;
+    // A retried attempt can reuse this same context object (see the
+    // executeAttempt() retry calls), so a truncation override parked by a
+    // previous stream that never reached its settle point must not be allowed
+    // to downgrade *this* stream's finish reason. The converter re-parks on
+    // this stream's own finish chunk when it has a rewrite to settle.
+    context.pendingTruncationOverride = undefined;
     // Whether any user-visible content (a non-thought part) has been yielded
     // on this stream. The error-path flush below consults it before
     // withholding a parked tool-call finish: it must mirror LlmChat's
@@ -785,6 +795,7 @@ export class ContentGenerationPipeline {
             // into this generator at the yield below never runs the statement
             // that follows it, and the error-path flush re-tests this flag
             // before deciding whether the response still needs delivering.
+            this.settleParkedTruncationOverride(pendingFinishResponse, context);
             finishYielded = true;
             yield pendingFinishResponse;
             // Keep pendingFinishResponse alive so late-arriving usage
@@ -841,6 +852,7 @@ export class ContentGenerationPipeline {
           pendingFinishProtocolTagSanitized,
         );
         // Before the yield, for the reason given at the in-loop one above.
+        this.settleParkedTruncationOverride(pendingFinishResponse, context);
         finishYielded = true;
         yield pendingFinishResponse;
       }
@@ -915,6 +927,9 @@ export class ContentGenerationPipeline {
         if (parkedHasToolCall) {
           markFlushedToolCallPark(pendingFinishResponse);
         }
+        // Same invariant as the two normal delivery paths above: no parked
+        // finish is handed to the consumer with an unsettled rewrite on it.
+        this.settleParkedTruncationOverride(pendingFinishResponse, context);
         yield pendingFinishResponse;
         finishYielded = true;
       }
@@ -1042,6 +1057,45 @@ export class ContentGenerationPipeline {
 
     // Normal chunk
     return true;
+  }
+
+  /**
+   * Settle a finish_reason rewrite the converter parked for want of usage
+   * evidence, immediately before the parked finish response is delivered.
+   *
+   * The pipeline requests `stream_options.include_usage`, and under that
+   * convention the chunk carrying `finish_reason` reports no usage — the
+   * totals arrive on a later `choices: []` chunk, which handleChunkMerging
+   * folds into the parked finish response and only then releases. That merge
+   * is therefore the first point at which the rewrite can be corroborated, and
+   * it happens before the yield, so the consumer only ever observes the
+   * settled reason (QwenLM/qwen-code#12970).
+   *
+   * Downgrade-only and one-shot: the parked verdict is consumed here, and the
+   * candidate is touched only while it still reads MAX_TOKENS, so a
+   * provider-reported `length` is never rewritten.
+   */
+  private settleParkedTruncationOverride(
+    response: GenerateContentResponse,
+    context: RequestContext,
+  ): void {
+    const parked = context.pendingTruncationOverride;
+    if (!parked) {
+      return;
+    }
+    context.pendingTruncationOverride = undefined;
+    const candidate = response.candidates?.[0];
+    if (!candidate || candidate.finishReason !== FinishReason.MAX_TOKENS) {
+      return;
+    }
+    if (
+      corroborateTruncationFromCompletionTokens(
+        response.usageMetadata?.candidatesTokenCount,
+        context.maxOutputTokens,
+      ) === 'disproved'
+    ) {
+      candidate.finishReason = parked.finishReason;
+    }
   }
 
   private async buildRequest(

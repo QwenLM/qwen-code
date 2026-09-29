@@ -4,7 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { GenerateContentParameters, Part } from '@google/genai';
+import type {
+  FinishReason,
+  GenerateContentParameters,
+  Part,
+} from '@google/genai';
 import type { Config } from '../../config/config.js';
 import type {
   ContentGeneratorConfig,
@@ -51,6 +55,20 @@ export interface RequestContext {
    * (QwenLM/qwen-code#12970).
    */
   maxOutputTokens?: number;
+  /**
+   * Set by the converter when it rewrites a provider-reported finish_reason to
+   * "length" on incomplete tool-call JSON while that chunk's own usage could
+   * not decide whether the response really hit the output limit. The pipeline
+   * requests `stream_options.include_usage`, and under that convention usage
+   * arrives on a *later* `choices: []` chunk, so the parked finish response is
+   * where the delayed evidence first exists: the pipeline settles the rewrite
+   * there, before yielding, and restores the provider's own reason when the
+   * merged totals disprove truncation (QwenLM/qwen-code#12970).
+   *
+   * Per-stream and one-shot — the pipeline clears it when a stream starts and
+   * again when it settles it, so it must NOT be read as attempt-scoped state.
+   */
+  pendingTruncationOverride?: { finishReason: FinishReason };
   toolCallParser?: StreamingToolCallParser;
   responseParsingOptions?: OpenAIResponseParsingOptions;
   taggedThinkingParser?: TaggedThinkingParser;
