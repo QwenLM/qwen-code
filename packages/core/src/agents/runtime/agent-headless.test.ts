@@ -619,6 +619,38 @@ describe('subagent.ts', () => {
         ]);
       });
 
+      it('withholds the skills reminder from an agent whose policy denies Skill', async () => {
+        // Pins the consumer wiring, not just the predicate. The skill-gate
+        // suite calls `willHaveSkillTool()` directly, so hardcoding `true` at
+        // the `includeAvailableSkillsReminder` call site keeps that suite green
+        // while every skill-denied subagent receives an `<available_skills>`
+        // listing it cannot act on — the listing-versus-capability
+        // disagreement #12424 exists to remove. A finite allowlist omitting
+        // `skill` is one of the two shapes in #12424's measured scope.
+        const { config } = await createMockConfig();
+
+        vi.mocked(LlmChat).mockClear();
+        vi.mocked(getInitialChatHistory).mockClear();
+        mockSendMessageStream.mockImplementation(createMockStream(['stop']));
+
+        const toolConfig: ToolConfig = { tools: [ToolNames.READ_FILE] };
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          { systemPrompt: 'Test prompt' },
+          defaultModelConfig,
+          defaultRunConfig,
+          toolConfig,
+        );
+
+        await scope.execute(new ContextState());
+
+        expect(getInitialChatHistory).toHaveBeenCalledWith(config, undefined, {
+          includeDeferredToolsReminder: false,
+          includeAvailableSkillsReminder: false,
+        });
+      });
+
       it('should reuse chat and tools for sequential follow-up turns', async () => {
         const { config, toolRegistry } = await createMockConfig();
         mockSendMessageStream.mockImplementation(
