@@ -55,6 +55,7 @@ final class FaultGateRig implements AutoCloseable {
         LOCAL_PROCESS,
         /** Production durable store; test host identity is injected only on non-Linux hosts. */
         DURABLE_LOCAL_PROCESS,
+        TRUSTED_LOCAL_PROCESS,
         /** The production provisioner plus a pid record a restart adopts. */
         RECOVERABLE
     }
@@ -196,7 +197,9 @@ final class FaultGateRig implements AutoCloseable {
         config.put("node", "node");
         config.put("cli", cli.toString());
         config.put("stateDir", root.toString());
-        config.put("durable", provisioner == Provisioner.DURABLE_LOCAL_PROCESS);
+        config.put("durable", provisioner == Provisioner.DURABLE_LOCAL_PROCESS
+                || provisioner == Provisioner.TRUSTED_LOCAL_PROCESS);
+        config.put("trustedReboot", provisioner == Provisioner.TRUSTED_LOCAL_PROCESS);
         config.put("records", provisioner == Provisioner.RECOVERABLE
                 ? root.resolve("records").toString() : null);
         config.put("proxyPort", proxy.port());
