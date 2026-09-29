@@ -290,6 +290,7 @@ import {
   ChatRecordingService,
   type ChatRecordingFailureEvent,
   type ChatRecordingFailureListener,
+  type ManagedSessionRecordWriter,
 } from '../services/chatRecordingService.js';
 import { CHARS_PER_TOKEN } from '../services/tokenEstimation.js';
 import {
@@ -315,14 +316,38 @@ import type {
 } from '../services/session-transcript-reader.js';
 import {
   assertSessionExecutionEngine,
+  SessionExecutionEngineError,
   type SessionExecutionEngine,
 } from '../services/session-execution-engine.js';
+import {
+  openManagedSession,
+  type ManagedSession,
+} from '../managed-runtime/managed-session-assembly.js';
+import {
+  EMPTY_COMMIT_PREFIX_HASH,
+  LocalManagedSessionAuthority,
+  ManagedSessionUncommittedTailError,
+} from '../managed-runtime/managed-session-authority.js';
+import { LocalJsonlManagedSessionJournalStore } from '../managed-runtime/local-jsonl-managed-session-journal-store.js';
+import { LocalManagedSessionResourceStore } from '../managed-runtime/managed-session-resources.js';
+import { readManagedSessionRecords } from '../managed-runtime/managed-session-message-projection.js';
+import {
+  MANAGED_SESSION_FORMAT_VERSION,
+  ManagedSessionRecordError,
+  type ManagedSessionDurableRef,
+} from '../managed-runtime/managed-session-records.js';
+import {
+  isManagedSessionTranscriptSync,
+  localManagedSessionKey,
+  readManagedExecutionEvidenceSync,
+} from '../utils/sessionStorageUtils.js';
 import {
   SessionTranscriptChangedError,
   SessionWriterError,
   SessionWriterLease,
   SessionWriterLostError,
   SessionWriterUnavailableError,
+  type SessionWriterCommitProof,
 } from '../services/session-writer-lease.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { loadServerHierarchicalMemory } from '../memory/memoryDiscovery.js';
@@ -397,6 +422,55 @@ const ACTIVE_TODO_REMINDER_REFRESH_TURNS = 3;
 // deferred tool behind the bridge, which is now affordable because a bridge
 // reveal never rewrites the declaration list.
 const DEFAULT_TOOL_SEARCH_THRESHOLD = 0;
+
+// Horizon a Managed session activation records; it is renewed at a third of
+// it while the session is open. Liveness of a local session is its writer
+// lock, so the horizon only bounds how long a reader treats an activation
+// without a live lock as possibly current.
+const MANAGED_ACTIVATION_LEASE_MS = 5 * 60 * 1000;
+
+/** The recorder's view of a Managed Session log. */
+function managedRecordWriter(
+  managed: ManagedSession,
+  log: { readonly transcriptPath: string; readonly runtimeBaseDir: string },
+): ManagedSessionRecordWriter {
+  return {
+    canCarry: (record) => managed.sink.canCarry(record),
+    write: (record) => managed.sink.write(record),
+    // Every record the reader replays, not only messages: turn results, goal
+    // state and the other records the chain passes through are parents too.
+    project: () =>
+      readManagedSessionRecords({
+        transcriptPath: log.transcriptPath,
+        runtimeBaseDir: log.runtimeBaseDir,
+        sessionKey: managed.authority.sessionHeader.sessionKey,
+      }),
+    stopAdvancing: () => stopAdvancing(managed),
+    commitProof: () => managedCommitProof(managed),
+    logSize: () => {
+      try {
+        return fs.statSync(log.transcriptPath).size;
+      } catch {
+        return undefined;
+      }
+    },
+  };
+}
+
+async function stopAdvancing(managed: ManagedSession): Promise<void> {
+  // Stops renewing the activation. The lease was adopted, so the session's
+  // own close, or the activation that failed, seals it afterwards.
+  await managed.close();
+  await managed.releaseActivation();
+}
+
+function managedCommitProof(managed: ManagedSession): SessionWriterCommitProof {
+  const proof = managed.authority.commitProof;
+  return {
+    last_commit_sequence: proof.lastCommitSequence,
+    committed_prefix_hash: proof.committedPrefixHash,
+  };
+}
 
 import {
   ModelsConfig,
@@ -2625,6 +2699,8 @@ export class Config {
   private provisionalWorkspaceActivation?: Promise<void>;
   private sessionProjectDirRegistered = false;
   private pendingSessionWriterLease?: SessionWriterLease;
+  /** The Managed Session log a Managed session records through. */
+  private managedSession?: ManagedSession;
   private pendingSessionWriterRelease:
     | { lease: SessionWriterLease; promise: Promise<void> }
     | undefined;
@@ -3918,6 +3994,8 @@ export class Config {
       );
       return;
     }
+    // A Managed Session log records its owner itself, before its header.
+    if (this.managedSession) return;
     await this.chatRecordingService?.recordExecutionEngine(engine);
   }
 
@@ -4610,9 +4688,193 @@ export class Config {
     }
   }
 
+  /**
+   * Opens this session's Managed Session log on the writer the recorder is
+   * about to use. The authority adopts that lease, so the session keeps one
+   * writer. Without a header, the log is created: the authority writes the
+   * owner record and then the header, which also completes a create that
+   * stopped after its owner record.
+   */
+  private async openManagedSessionLog(
+    lease: SessionWriterLease,
+  ): Promise<ManagedSession> {
+    const transcriptPath = this.getTranscriptPath();
+    // Keyed the way the reader keys the log it projects.
+    const sessionKey = localManagedSessionKey(
+      this.storage.getProjectRoot(),
+      this.sessionId,
+    );
+    const resources = LocalManagedSessionResourceStore.create({
+      runtimeBaseDir: this.sessionRuntimeBaseDir,
+      sessionKey,
+    });
+    const create = isManagedSessionTranscriptSync(transcriptPath)
+      ? undefined
+      : await this.publishManagedSessionRoot(resources);
+    const open = () =>
+      openManagedSession({
+        runtimeBaseDir: this.sessionRuntimeBaseDir,
+        sessionId: this.sessionId,
+        transcriptPath,
+        sessionKey,
+        // The recorder stamps the same directory on every record it writes.
+        cwd: this.getProjectRoot(),
+        version: this.getCliVersion() || 'unknown',
+        workerId: this.sessionId,
+        activationLeaseDurationMs: MANAGED_ACTIVATION_LEASE_MS,
+        lease,
+        resourceStore: resources,
+        ...(create === undefined ? {} : { create }),
+      });
+    try {
+      return await open();
+    } catch (error) {
+      if (!(error instanceof ManagedSessionUncommittedTailError)) throw error;
+      // A crash left records after the last commit marker. They were never
+      // committed; this writer holds the lease, so it moves them to the
+      // diagnostic file beside the log and opens the log at its last commit.
+      await LocalManagedSessionAuthority.recoverUncommittedTail({
+        lease,
+        sessionKey,
+      });
+      return await open();
+    }
+  }
+
+  /**
+   * Whether the transcript holds records and its head shows no Managed
+   * evidence, which makes it a Legacy session's. A missing or empty
+   * transcript is a new session, and an unreadable head tells nothing.
+   */
+  private isLegacyTranscript(): boolean {
+    const transcriptPath = this.getTranscriptPath();
+    try {
+      if (fs.statSync(transcriptPath).size === 0) return false;
+    } catch {
+      return false;
+    }
+    return readManagedExecutionEvidenceSync(transcriptPath) === false;
+  }
+
+  /**
+   * Ends the writer of a Managed session whose activation failed.
+   *
+   * - A log that was opened is sealed at the authority's position.
+   * - A lease that replaced a sealed lock gets that seal back.
+   * - A transcript that is missing or empty, or whose head shows no Managed
+   *   evidence, has its lock released: it holds nothing to guard.
+   * - Any other log is sealed at the committed position read from it. One
+   *   whose head or log cannot be read keeps its lock held until the process
+   *   exits, since nothing tells what it holds or where to seal it. The lease
+   *   may have reclaimed a crashed Managed writer's lock, which releasing
+   *   would drop.
+   */
+  private async finishManagedWriter(
+    lease: SessionWriterLease,
+    opened: ManagedSession | undefined,
+  ): Promise<void> {
+    if (opened) {
+      try {
+        await stopAdvancing(opened);
+      } catch {
+        // The seal is the at-rest barrier; an activation that reads as
+        // abandoned is the lesser loss.
+      }
+      await lease.sealForHandoff(managedCommitProof(opened));
+      return;
+    }
+    const takenOver = lease.takeoverCommitProof;
+    if (takenOver !== undefined) {
+      // The open checks the log against this seal before it writes anything.
+      // Sealing at the position read from the log instead would accept a log
+      // that changed behind the seal on the next attempt.
+      await lease.sealForHandoff(takenOver);
+      return;
+    }
+    const transcriptPath = this.getTranscriptPath();
+    const evidence = readManagedExecutionEvidenceSync(transcriptPath);
+    if (evidence === false) {
+      await lease.release();
+      return;
+    }
+    if (evidence === undefined) return;
+    let scan: Awaited<
+      ReturnType<typeof LocalJsonlManagedSessionJournalStore.read>
+    >;
+    try {
+      scan = await LocalJsonlManagedSessionJournalStore.read(
+        transcriptPath,
+        localManagedSessionKey(this.storage.getProjectRoot(), this.sessionId),
+      );
+    } catch {
+      return;
+    }
+    await lease.sealForHandoff({
+      last_commit_sequence: scan.committed,
+      committed_prefix_hash: scan.lastMarkerDigest ?? EMPTY_COMMIT_PREFIX_HASH,
+    });
+  }
+
+  /**
+   * Publishes the two resources a new Managed Session header references. They
+   * carry configuration identity only, never credentials.
+   */
+  private async publishManagedSessionRoot(
+    resources: LocalManagedSessionResourceStore,
+  ): Promise<{
+    definitionRef: ManagedSessionDurableRef;
+    rootSnapshotRef: ManagedSessionDurableRef;
+    createdBy: string;
+  }> {
+    const [definitionRef, rootSnapshotRef] = await Promise.all([
+      resources.publish(
+        'managed-session-definition',
+        Buffer.from(
+          JSON.stringify({
+            version: 1,
+            engine: 'managed',
+            model: this.getModel(),
+            approvalMode: this.getApprovalMode(),
+          }),
+          'utf8',
+        ),
+      ),
+      resources.publish(
+        'managed-session-root-snapshot',
+        Buffer.from(JSON.stringify({ version: 1, messages: [] }), 'utf8'),
+      ),
+    ]);
+    return {
+      definitionRef,
+      rootSnapshotRef,
+      createdBy: `qwen-code/${this.getCliVersion() || 'unknown'}`,
+    };
+  }
+
   private async activateChatRecording(): Promise<void> {
+    const managed = this.sessionExecutionEngine === 'managed';
+    if (
+      managed &&
+      (!this.chatRecordingEnabled || !this.sessionWriterLeaseEnabled)
+    ) {
+      // A Managed session is its Managed Session log, which the recorder
+      // writes under the session writer lease.
+      throw new SessionExecutionEngineError(
+        this.sessionId,
+        'managed execution requires chat recording and a writer lease',
+      );
+    }
     if (!this.chatRecordingEnabled || !this.sessionWriterLeaseEnabled) {
       return;
+    }
+    if (managed && this.isLegacyTranscript()) {
+      // Refused before the lease is taken: a certified takeover would retire
+      // a Legacy session's seal, and the owner check after it could refuse
+      // the restore only once that seal was gone.
+      throw new SessionExecutionEngineError(
+        this.sessionId,
+        'belongs to legacy, cannot execute with managed',
+      );
     }
     if (this.sessionWriterShutdownRequested) {
       throw new SessionWriterShutdownError();
@@ -4628,7 +4890,23 @@ export class Config {
         processKind: 'acp',
         qwenVersion: this.cliVersion ?? null,
         reclaimPolicy: this.sessionWriterReclaimPolicy,
-        takeoverPolicy: this.sessionWriterTakeoverPolicy,
+        // A Managed writer pins its log format into the lock: a binary that
+        // does not know the Managed schema and takes the writer lease refuses
+        // the lock instead of writing into the log, and a sealed Managed lock
+        // is reopened only by a certified takeover that checks the log
+        // against the seal. Writers that take no lease, such as the TUI and
+        // the headless CLI, are refused by the log's own header instead.
+        takeoverPolicy: managed
+          ? 'certified'
+          : this.sessionWriterTakeoverPolicy,
+        ...(managed
+          ? {
+              lockSchema: {
+                schemaVersion: 3 as const,
+                formatVersion: MANAGED_SESSION_FORMAT_VERSION,
+              },
+            }
+          : {}),
         onOwnershipAcquired: (acquiredLease) => {
           lease = acquiredLease;
           this.pendingSessionWriterLease = acquiredLease;
@@ -4657,7 +4935,25 @@ export class Config {
           'after_writer_lease',
         );
         projection = await this.sessionRestoreProjectionSource();
+        if (managed) {
+          // Checked before the log is opened, which writes to it.
+          assertSessionExecutionEngine(
+            projection?.executionEngine,
+            this.sessionId,
+            'managed',
+          );
+        }
         this.setSessionRestoreProjection(projection);
+      } else if (
+        managed &&
+        (this.sessionData || lease.transcriptExistedAtAcquire)
+      ) {
+        // A Managed log restores from its projection; the Legacy loader would
+        // read its wrapper records as a conversation.
+        throw new SessionExecutionEngineError(
+          this.sessionId,
+          'managed restore requires a restore projection',
+        );
       } else if (this.sessionData || lease.transcriptExistedAtAcquire) {
         authoritative = await this.getSessionService().loadSession(
           this.sessionId,
@@ -4674,6 +4970,20 @@ export class Config {
         throw new SessionWriterShutdownError();
       }
       this.sessionData = authoritative;
+      if (managed) {
+        // Opened, and the recorder bound to it, before the recorder accepts a
+        // record: a record appended directly would be a raw line in the log.
+        this.managedSession = await this.openManagedSessionLog(lease);
+        if (this.sessionWriterShutdownRequested) {
+          throw new SessionWriterShutdownError();
+        }
+        recorder.bindManagedSink(
+          managedRecordWriter(this.managedSession, {
+            transcriptPath: this.getTranscriptPath(),
+            runtimeBaseDir: this.sessionRuntimeBaseDir,
+          }),
+        );
+      }
       recorder.activate(
         lease,
         authoritative,
@@ -4697,8 +5007,26 @@ export class Config {
       let failure: unknown = error;
       const ownedLease = lease ?? this.pendingSessionWriterLease;
       let releaseFailureAlreadyReported = false;
+      const abandonedManagedSession = this.managedSession;
+      this.managedSession = undefined;
+      if (managed && ownedLease) {
+        // Registered as this lease's release, so the cleanup below and any
+        // close waits for it instead of releasing the lease itself.
+        const finishing = this.finishManagedWriter(
+          ownedLease,
+          abandonedManagedSession,
+        );
+        void finishing.catch(() => undefined);
+        this.pendingSessionWriterRelease = {
+          lease: ownedLease,
+          promise: finishing,
+        };
+      }
       if (
         !(failure instanceof SessionWriterError) &&
+        // A Managed log's own errors say what is wrong with the log; they are
+        // not the writer contention this reports.
+        !(failure instanceof ManagedSessionRecordError) &&
         failure &&
         typeof failure === 'object' &&
         typeof (failure as NodeJS.ErrnoException).code === 'string'
@@ -11182,6 +11510,10 @@ export class Config {
     if (!lease) return undefined;
     const existing = this.pendingSessionWriterRelease;
     if (existing?.lease === lease) return existing.promise;
+    // A Managed writer is ended by its failed activation, which alone knows
+    // whether the log was written; releasing it early could delete the lock of
+    // a log that already holds its header.
+    if (this.sessionExecutionEngine === 'managed') return undefined;
     const promise = lease.release();
     this.pendingSessionWriterRelease = { lease, promise };
     void promise.catch(() => undefined);

@@ -277,6 +277,18 @@ public final class ToolExecutionRecord {
         return isSettled() || state == State.ABANDONED;
     }
 
+    boolean needsReconciliation() {
+        return state == State.EXECUTING || state == State.CANCEL_REQUESTED
+                || state == State.UNKNOWN;
+    }
+
+    boolean belongsTo(RuntimeSessionRecord session) {
+        return bindingId.equals(session.getBindingId())
+                && runtimeGeneration == session.getRuntimeGeneration()
+                && harnessSessionId.equals(session.getSession().getHarnessSessionId())
+                && runtimeSessionId.equals(session.getRuntimeSessionId());
+    }
+
     ToolExecutionRecord abandon(RuntimeBindingRecord binding, Instant time) {
         if (isTerminal() || binding.getState() != RuntimeBindingRecord.State.LOST
                 || !bindingId.equals(binding.getBindingId())
@@ -342,6 +354,14 @@ public final class ToolExecutionRecord {
             Map<String, Object> resolutionResult, Instant resolutionTime) {
         if (state != State.UNKNOWN) {
             throw new IllegalStateException("execution is not unknown");
+        }
+        return resolveUnsettled(resolutionResult, resolutionTime);
+    }
+
+    ToolExecutionRecord resolveUnsettled(
+            Map<String, Object> resolutionResult, Instant resolutionTime) {
+        if (!needsReconciliation()) {
+            throw new IllegalStateException("execution does not require reconciliation");
         }
         if (resolutionTime == null) {
             throw new IllegalArgumentException("resolutionTime is required");
