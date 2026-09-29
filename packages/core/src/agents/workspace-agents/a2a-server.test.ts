@@ -157,8 +157,9 @@ describe('A2A tasks', () => {
       agents.map((agent) => ({ ...agent, instructions: 'Changed later.' })),
     );
 
+    const caller = { callerId: 'share_1', secret };
     await expect(
-      a2aSendMessage(PROJECT_ROOT, { callerId: 'share_1', secret }, {
+      a2aSendMessage(PROJECT_ROOT, caller, {
         agentId: 'ag_lead',
         messageId: 'msg-1',
         title: 'Explain',
