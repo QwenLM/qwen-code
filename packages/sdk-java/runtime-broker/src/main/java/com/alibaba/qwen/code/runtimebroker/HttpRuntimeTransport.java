@@ -5,7 +5,6 @@ import com.alibaba.fastjson2.JSONReader;
 import com.alibaba.fastjson2.JSONWriter;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import java.math.BigDecimal;
-import java.math.BigInteger;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -190,7 +189,15 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
         String isolationKey = "session".equals(
                 session.getScope().getIsolationClass())
                         ? session.getHarnessSessionId() : null;
+        // Acquisition installs the context while the Session is still
+        // ACQUIRING. A Session being released takes none, and neither does
+        // a binding asked to drain, which admits no new Session either.
+        if (!sessionRecord.isAcquirable()) {
+            throw new IllegalArgumentException(
+                    "session must be acquiring or ready");
+        }
         if (runtime.getState() != RuntimeBindingRecord.State.READY
+                || runtime.isDrainRequested()
                 || lease == null || seed == null
                 || !runtime.getBindingId().equals(sessionRecord.getBindingId())
                 || runtime.getGeneration() != sessionRecord.getRuntimeGeneration()
@@ -265,7 +272,7 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("protocolVersion", 2);
         body.put("reference", referenceIdentity(reference));
-        body.put("toolName", referenceString(reference, "toolName"));
+        body.put("toolName", referenceToolName(reference));
         body.put("input", referenceInput(reference));
         byte[] encoded = encodeToolRequest(body, TOOL_REQUEST_LIMIT_BYTES);
         return post(lease, EXECUTE_PATH, encoded, TOOL_RESULT_LIMIT_BYTES)
@@ -325,7 +332,29 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
                         parseToolResponse(bytes, "cancel"), "cancel"));
     }
 
-    /** Explicit local Tool v3 call; production Broker selection remains v2. */
+    public CompletionStage<Void> installPublisherV3(RuntimeLease lease,
+            RuntimeSession session, Map<String, Object> publisher) {
+        requireV3Context(lease, session);
+        requireClosed(publisher, Set.of("url", "token"), "publisher");
+        if (!(publisher.get("url") instanceof String url)
+                || !url.matches("http://127\\.0\\.0\\.1:[1-9][0-9]{0,4}/internal/hosted-shell-publisher/v1")
+                || URI.create(url).getPort() > 65535
+                || !(publisher.get("token") instanceof String token)
+                || !token.matches("[A-Za-z0-9_-]{43}")) {
+            throw new IllegalArgumentException("Output publisher descriptor is invalid");
+        }
+        Map<String, Object> body = Map.of("protocolVersion", 3,
+                "toolResult", "managed-tool-result/1", "sessionId", session.getRuntimeSessionId(),
+                "publisher", publisher);
+        Map<String, Object> expected = Map.of("protocolVersion", 3,
+                "toolResult", "managed-tool-result/1", "sessionId", session.getRuntimeSessionId(),
+                "installed", true);
+        return post(lease, "/internal/managed-runtime/v3/publisher",
+                encodeToolRequest(body, BODY_LIMIT_BYTES), BODY_LIMIT_BYTES)
+                .thenAccept(bytes -> ManagedContextProtocol.verify(ManagedContextProtocol.parse(bytes), expected));
+    }
+
+    /** Explicit Tool v3 call; selection belongs to the saved Broker reference. */
     public CompletionStage<Map<String, Object>> executeV3(RuntimeLease lease,
             RuntimeSession session, Map<String, Object> reference,
             Map<String, Object> capture) {
@@ -341,7 +370,7 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
             }
         }
         Map<String, Object> body = v3Body(reference);
-        body.put("toolName", referenceString(reference, "toolName"));
+        body.put("toolName", referenceToolName(reference));
         body.put("input", referenceInput(reference));
         body.put("capture", capture);
         return post(lease, V3_EXECUTE_PATH,
@@ -507,12 +536,10 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
             throw protocol("Managed Runtime " + operation + " response is invalid.");
         }
         if (fields.containsKey("lastSequence")) {
-            Object cursor = fields.get("lastSequence");
-            if (!"status".equals(operation)
-                    || !(cursor instanceof Number number)
-                    || new BigDecimal(number.toString()).signum() < 0
-                    || new BigDecimal(number.toString()).stripTrailingZeros()
-                            .scale() > 0) {
+            BigDecimal sequence = BrokerValues.exactInteger(
+                    fields.get("lastSequence"));
+            if (!"status".equals(operation) || sequence == null
+                    || sequence.signum() < 0) {
                 throw protocol("Managed Runtime " + operation
                         + " sequence is invalid.");
             }
@@ -521,18 +548,17 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
     }
 
     private static boolean validV3ManifestRef(Object value) {
-        if (!(value instanceof Map<?, ?> ref)
-                || !ref.keySet().equals(V3_MANIFEST_REF_FIELDS)
+        if (!(value instanceof Map<?, ?> ref)) {
+            return false;
+        }
+        Long byteLength = BrokerValues.exactLong(ref.get("byteLength"));
+        if (!ref.keySet().equals(V3_MANIFEST_REF_FIELDS)
                 || !(ref.get("resourceId") instanceof String resourceId)
                 || resourceId.isEmpty()
                 || !"managed-tool-result-manifest".equals(ref.get("kind"))
                 || !Integer.valueOf(1).equals(ref.get("schemaVersion"))
-                || !(ref.get("byteLength") instanceof Number length)
-                || new BigDecimal(length.toString()).signum() <= 0
-                || new BigDecimal(length.toString()).compareTo(
-                        BigDecimal.valueOf(64 * 1024)) > 0
-                || new BigDecimal(length.toString()).stripTrailingZeros()
-                        .scale() > 0
+                || byteLength == null || byteLength <= 0
+                || byteLength > 64 * 1024
                 || !(ref.get("digest") instanceof String digest)
                 || !digest.matches("[0-9a-f]{64}")) {
             return false;
@@ -624,10 +650,21 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
         return text;
     }
 
+    // The writer would send an unpaired surrogate as '?', and the Worker
+    // would run that tool name or input instead of the caller's.
+    private static String referenceToolName(Map<String, Object> reference) {
+        return BrokerValues.requireWellFormed(
+                referenceString(reference, "toolName"), "reference toolName");
+    }
+
     private static Object referenceInput(Map<String, Object> reference) {
         Object input = reference.get("input");
         if (!(input instanceof Map)) {
             throw new IllegalArgumentException("reference input is required");
+        }
+        if (!BrokerValues.isWellFormedJson(input)) {
+            throw new IllegalArgumentException(
+                    "reference input must be JSON with well-formed text");
         }
         return input;
     }
@@ -680,14 +717,10 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
                     + " response is invalid.");
         }
         if (fields.containsKey("lastSequence")) {
-            if (!"status".equals(operation)
-                    || !(fields.get("lastSequence") instanceof Number number)) {
-                throw protocol("Managed Runtime " + operation
-                        + " response is invalid.");
-            }
-            BigDecimal sequence = new BigDecimal(number.toString());
-            if (sequence.signum() < 0
-                    || sequence.stripTrailingZeros().scale() > 0) {
+            BigDecimal sequence = BrokerValues.exactInteger(
+                    fields.get("lastSequence"));
+            if (!"status".equals(operation) || sequence == null
+                    || sequence.signum() < 0) {
                 throw protocol("Managed Runtime " + operation
                         + " response is invalid.");
             }
@@ -968,9 +1001,8 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
 
     private static void requireProtocol(Map<String, Object> response,
             String operation) {
-        BigDecimal version = exactNumber(response.get("protocolVersion"));
-        if (version == null
-                || version.compareTo(BigDecimal.valueOf(2)) != 0) {
+        if (!Long.valueOf(2L).equals(
+                BrokerValues.exactLong(response.get("protocolVersion")))) {
             throw protocol("Managed Runtime " + operation
                     + " response is invalid.");
         }
@@ -978,31 +1010,11 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
 
     private static long requiredPositiveLong(Map<String, Object> response,
             String field) {
-        BigDecimal value = exactNumber(response.get(field));
-        if (value != null) {
-            try {
-                long parsed = value.longValueExact();
-                if (parsed > 0) {
-                    return parsed;
-                }
-            } catch (ArithmeticException exception) {
-                // A fraction or a value beyond a long is not an epoch.
-            }
+        Long value = BrokerValues.exactLong(response.get(field));
+        if (value == null || value <= 0) {
+            throw protocol("Managed Runtime attestation response is invalid.");
         }
-        throw protocol("Managed Runtime attestation response is invalid.");
-    }
-
-    private static BigDecimal exactNumber(Object value) {
-        // A parsed Double or Float may be rounded and a Short or Byte wrapped,
-        // as with 40000000000000001E-16 or 65540S, so an integer written with
-        // a non-zero exponent (40e-1) fails closed. Exact-decimal parsing would
-        // keep it, but fastjson2 2.0.60 then reads 0.020000000000000000000E1
-        // as 2.
-        if (value instanceof Integer || value instanceof Long
-                || value instanceof BigInteger || value instanceof BigDecimal) {
-            return new BigDecimal(value.toString());
-        }
-        return null;
+        return value;
     }
 
     private static boolean jsonContentType(String value) {

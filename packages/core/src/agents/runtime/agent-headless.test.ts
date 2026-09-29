@@ -13,6 +13,11 @@ import type {
 } from '@google/genai';
 import { Type } from '@google/genai';
 import {
+  getHookExecutionOwner,
+  runWithHookExecutionOwner,
+} from '../../hooks/hook-execution-context.js';
+
+import {
   afterEach,
   beforeEach,
   describe,
@@ -59,6 +64,7 @@ import {
   type AgentStreamTextEvent,
   type AgentToolCallEvent,
   type AgentToolResultEvent,
+  type AgentUsageEvent,
 } from './agent-events.js';
 import type {
   ModelConfig,
@@ -564,6 +570,56 @@ describe('subagent.ts', () => {
     });
 
     describe('execute - Initialization and Prompting', () => {
+      it('owns createChat and prepareTools before entering the reasoning loop', async () => {
+        const { config } = await createMockConfig();
+        vi.spyOn(config, 'getHookSystem').mockReturnValue({
+          runtimeId: 'headless-runtime',
+        } as unknown as ReturnType<Config['getHookSystem']>);
+        const scope = await AgentHeadless.create(
+          'A',
+          config,
+          { systemPrompt: '' },
+          defaultModelConfig,
+          defaultRunConfig,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          'explicit-A',
+        );
+        const expected = {
+          runtimeId: 'headless-runtime',
+          sessionId: config.getSessionId(),
+          agentId: scope.getCore().subagentId,
+        };
+        const stages: string[] = [];
+        vi.spyOn(scope.getCore(), 'createChat').mockImplementation(async () => {
+          stages.push('chat');
+          expect(getHookExecutionOwner()).toEqual(expected);
+          return {} as LlmChat;
+        });
+        vi.spyOn(scope.getCore(), 'prepareTools').mockImplementation(
+          async () => {
+            stages.push('prepare');
+            expect(getHookExecutionOwner()).toEqual(expected);
+            throw new Error('stop after preparation');
+          },
+        );
+        const foreign = {
+          runtimeId: 'other',
+          sessionId: 'other',
+          agentId: 'B',
+        };
+        await runWithHookExecutionOwner(foreign, async () => {
+          await expect(scope.execute(new ContextState())).rejects.toThrow(
+            'stop after preparation',
+          );
+          expect(getHookExecutionOwner()).toEqual(foreign);
+        });
+        expect(stages).toEqual(['chat', 'prepare']);
+      });
+
       it('sends an explicit empty tools list for a no-tool agent', async () => {
         const { config } = await createMockConfig();
         mockSendMessageStream.mockImplementation(createMockStream(['stop']));
@@ -632,6 +688,38 @@ describe('subagent.ts', () => {
             ],
           },
         ]);
+      });
+
+      it('withholds the skills reminder from an agent whose policy denies Skill', async () => {
+        // Pins the consumer wiring, not just the predicate. The skill-gate
+        // suite calls `willHaveSkillTool()` directly, so hardcoding `true` at
+        // the `includeAvailableSkillsReminder` call site keeps that suite green
+        // while every skill-denied subagent receives an `<available_skills>`
+        // listing it cannot act on — the listing-versus-capability
+        // disagreement #12424 exists to remove. A finite allowlist omitting
+        // `skill` is one of the two shapes in #12424's measured scope.
+        const { config } = await createMockConfig();
+
+        vi.mocked(LlmChat).mockClear();
+        vi.mocked(getInitialChatHistory).mockClear();
+        mockSendMessageStream.mockImplementation(createMockStream(['stop']));
+
+        const toolConfig: ToolConfig = { tools: [ToolNames.READ_FILE] };
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          { systemPrompt: 'Test prompt' },
+          defaultModelConfig,
+          defaultRunConfig,
+          toolConfig,
+        );
+
+        await scope.execute(new ContextState());
+
+        expect(getInitialChatHistory).toHaveBeenCalledWith(config, undefined, {
+          includeDeferredToolsReminder: false,
+          includeAvailableSkillsReminder: false,
+        });
       });
 
       it('should reuse chat and tools for sequential follow-up turns', async () => {
@@ -735,6 +823,42 @@ describe('subagent.ts', () => {
           { kind: 'notification', text: 'monitor fired' },
         ]);
         expect(scope.getExecutionSummary()).toMatchObject({ rounds: 2 });
+      });
+
+      it('should keep usage rounds unique across finishing input segments', async () => {
+        const { config } = await createMockConfig();
+        mockSendMessageStream.mockImplementation(async () =>
+          (async function* () {
+            yield {
+              type: 'chunk',
+              value: {
+                candidates: [{ content: { parts: [{ text: 'Done.' }] } }],
+                usageMetadata: { totalTokenCount: 1 },
+              },
+            };
+          })(),
+        );
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          { systemPrompt: 'You are a test agent.' },
+          defaultModelConfig,
+          defaultRunConfig,
+        );
+        const usageRounds: number[] = [];
+        scope
+          .getEventEmitter()
+          .on(AgentEventType.USAGE_METADATA, (event: AgentUsageEvent) => {
+            usageRounds.push(event.round);
+          });
+
+        await scope.execute(new ContextState());
+        await scope.executeExternalInputs(['late correction'], undefined, {
+          resetStats: false,
+        });
+
+        expect(usageRounds).toEqual([1, 2]);
       });
 
       it('should preserve statistics for continuation work in the same logical turn', async () => {
