@@ -203,10 +203,11 @@ operation 模型；本变更选择接受它可见。
 
 错误沿用 `ErrorEnvelope` 以及共用的 `BadRequest`、`Forbidden`、`NotFound`、`Conflict` 和
 `CursorExpired` 响应。错误码包括 API 契约已冻结的那些、幂等路由已在返回的 `invalid_idempotency_key`、
-租户过滤器的 `actor_scope_mismatch`，以及三个新增的任务错误码：
+租户过滤器的 `invalid_tenant` 与 `actor_scope_mismatch`，以及三个新增的任务错误码：
 
 | 状态  | 错误码                    | 何时返回                                                                 |
 | ----- | ------------------------- | ------------------------------------------------------------------------ |
+| `400` | `invalid_tenant`          | 缺少 `X-Qwen-Tenant-Id` 或格式错误（租户过滤器）。                       |
 | `400` | `invalid_cursor`          | 任务列表游标格式错误。                                                   |
 | `400` | `invalid_event_cursor`    | `after` 格式错误或属于另一个任务。                                       |
 | `400` | `invalid_limit`           | `limit` 不在 1～100 之间。                                               |
@@ -214,7 +215,7 @@ operation 模型；本变更选择接受它可见。
 | `400` | `invalid_idempotency_key` | `Idempotency-Key` 格式错误，与其他幂等路由相同。                         |
 | `400` | `unsupported_feature`     | 该 Session 不提供任务（`capabilities.tasks` 为 `false`）。               |
 | `403` | `task_forbidden`          | 调用方可以读取该任务，但无权取消它。新增。                               |
-| `403` | `actor_scope_mismatch`    | 已认证的 actor 不属于该租户（租户过滤器）。                              |
+| `403` | `actor_scope_mismatch`    | 已认证的 actor 属于其他租户或其 ID 非法（租户过滤器）。                  |
 | `404` | `session_not_found`       | Session 不存在或不在调用方范围内。                                       |
 | `404` | `task_not_found`          | 任务不存在或不在调用方范围内。新增。                                     |
 | `409` | `cursor_expired`          | `after` 早于保留的事件。                                                 |
@@ -222,7 +223,7 @@ operation 模型；本变更选择接受它可见。
 | `409` | `idempotency_conflict`    | 同一个键用于不同的请求。                                                 |
 
 按 API 契约第 10 节，无权读取任务的调用方收到 `404`，而不是 `403`。只读路由唯一会返回的 `403` 是租户过滤器的
-`actor_scope_mismatch`，针对不属于该租户的已认证 actor。过滤器覆盖每条 `/v1/agents/` 与 WebShell 路由；任务只读路由从
+`actor_scope_mismatch`，针对来自其他租户或 ID 非法的已认证 actor。过滤器覆盖每条 `/v1/agents/` 与 WebShell 路由；任务只读路由从
 `1.21.0` 起声明它，与 Session 和 Turn 的读取路由一致，取消路由另有 `task_forbidden`。`cursor_expired`
 的错误封装中 `replay_floor_sequence` 和 `snapshot_through_sequence` 保持缺省，因为任务游标是不透明的。
 输出事件只有在其文本已进入 Artifact 后才会过期，因此调用方先从头读完保留的事件、再读取任务的 Artifact，
@@ -243,14 +244,15 @@ operation 模型；本变更选择接受它可见。
 任务不变式、禁止字段、每种事件类型只有一种结构、事件版本、列表与分页游标，以及 `task_cancel` operation
 （包括经由 `PublicOperation` 和 `WebShellOperation` union 的校验）。每个实例按公共形状只写一次，
 除仅限公共形状的 `object` 检查外，再改名为 camelCase 后针对 WebShell 镜像校验一遍，因此条件约束在某一个接口面抄错时测试会失败。
-WebShell 的取消请求和事件查询请求也在校验之列。
+WebShell 的取消请求和事件查询请求也在校验之列。从 `1.21.0` 起，它还要求四条 `planned` 任务路由声明租户过滤器的
+`403`，因为 `ManagedAgentApiContractTest` 无法探测它们。
 
 ## 6. 验证
 
 - 在 `packages/web-shell` 中运行 `npm run generate:managed-agent-api`，
   `client/components/managed/generated/managed-agent-api.ts` 没有变化，`managed-agent-api.test.ts` 通过。
 - `ManagedAgentApiContractTest`（5 个测试）、`PlannedTaskContractTest`（5 个测试，103 次校验：
-  50 次公共形状、49 次 WebShell 镜像、4 次 WebShell 请求）和
+  50 次公共形状、49 次 WebShell 镜像、4 次 WebShell 请求；`1.21.0` 增加了第六个测试，见第 5 节）和
   `ManagedSessionStoreContractFixtureTest`（3 个测试）通过，没有新增 gap 行。
 - 变异都会使对应门禁失败：
   - 在同一个接口面上删除任务、任务事件、任务列表的条件约束、`task_cancel` 规则以及输出最小长度后，
