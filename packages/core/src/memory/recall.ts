@@ -21,6 +21,7 @@ import {
 import { selectRelevantAutoMemoryDocumentsByModel } from './relevanceSelector.js';
 import { logMemoryRecall, MemoryRecallEvent } from '../telemetry/index.js';
 import { memoryAge, memoryFreshnessText } from './memoryAge.js';
+import { AUTO_MEMORY_SCOPES } from './types.js';
 import {
   createAutoMemoryTreeSnapshot,
   renderAutoMemoryFocusedSubtree,
@@ -603,7 +604,7 @@ export async function resolveRelevantAutoMemoryPromptForQuery(
         };
       })
     : await scanAutoMemorySnapshot(projectRoot, {
-        scopes: teamMemoryEnabled ? ['project', 'user', 'team'] : undefined,
+        scopes: teamMemoryEnabled ? [...AUTO_MEMORY_SCOPES] : undefined,
         teamMemoryEnabled,
         trustedProject: options.config?.isTrustedFolder?.() ?? false,
         // Match the legacy branch's uncapped universe: capping here would

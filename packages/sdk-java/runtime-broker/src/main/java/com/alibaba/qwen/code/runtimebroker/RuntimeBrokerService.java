@@ -1144,6 +1144,9 @@ public final class RuntimeBrokerService implements AutoCloseable {
         }
         if (record.getState()
                 == RuntimeBindingRecord.State.RECOVERY_BLOCKED) {
+            if (provisioner.supportsStartupRecovery(record.getResourceHandle())) {
+                return reconcileBinding(record);
+            }
             return failed(conflict("runtime_broker_recovery_blocked",
                     "Managed Runtime recovery is blocked."));
         }
@@ -1246,7 +1249,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
         RuntimeProvisionRequest request = claimed.getRequest();
         RuntimeProvisionSeed seed = claimed.getProvisionSeed();
         if (seed == null || (request.isManagedContext()
-                && claimed.getResourceHandle() != null)) {
+                && claimed.getResourceHandle() != null
+                && !provisioner.supportsStartupRecovery(claimed.getResourceHandle()))) {
             blockRecovery(claimed);
             releaseOperationQuietly(claimed.getBindingId(),
                     claimed.getOperationGeneration());
@@ -1433,6 +1437,13 @@ public final class RuntimeBrokerService implements AutoCloseable {
         return created;
     }
 
+    private boolean canReconcile(RuntimeBindingRecord record) {
+        return record.getState() == RuntimeBindingRecord.State.READY
+                || ((record.getState() == RuntimeBindingRecord.State.PROVISIONING
+                        || record.getState() == RuntimeBindingRecord.State.RECOVERY_BLOCKED)
+                        && provisioner.supportsStartupRecovery(record.getResourceHandle()));
+    }
+
     private CompletionStage<BindingContext> startReconciliation(
             RuntimeBindingRecord record) {
         RuntimeBindingRecord claimed = bindingRepository.claimOperation(
@@ -1442,7 +1453,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
             return failed(unavailable("runtime_reconcile_in_progress",
                     "another Broker owns Runtime recovery"));
         }
-        if (claimed.getState() != RuntimeBindingRecord.State.READY) {
+        if (!canReconcile(claimed)) {
             releaseOperationQuietly(claimed.getBindingId(),
                     claimed.getOperationGeneration());
             return failed(unavailable("runtime_binding_unavailable",
@@ -1505,7 +1516,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
         if (current == null || current.getOperationGeneration()
                 != operationGeneration
                 || !brokerOwnerId.equals(current.getOperationOwner())
-                || current.getState() != RuntimeBindingRecord.State.READY) {
+                || !canReconcile(current)) {
             return failed(unavailable("runtime_provision_fenced",
                     "Runtime recovery claim expired"));
         }
@@ -1584,9 +1595,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
                                     bindingRepository.findById(bindingId);
                             if (latest == null || !ownsOperation(latest,
                                     operationGeneration)
-                                    || latest.getState()
-                                            != RuntimeBindingRecord.State
-                                                    .READY) {
+                                    || !canReconcile(latest)) {
                                 return failed(unavailable(
                                         "runtime_provision_fenced",
                                         "Runtime recovery claim expired"));
@@ -1619,7 +1628,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
             long operationGeneration, RuntimeObservation observation) {
         RuntimeBindingRecord current = bindingRepository.findById(bindingId);
         if (current == null || !ownsOperation(current, operationGeneration)
-                || current.getState() != RuntimeBindingRecord.State.READY) {
+                || !canReconcile(current)) {
             return failed(unavailable("runtime_provision_fenced",
                     "Runtime recovery claim expired"));
         }
@@ -1667,8 +1676,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
                             bindingRepository.findById(bindingId);
                     if (latest == null
                             || !ownsOperation(latest, operationGeneration)
-                            || latest.getState()
-                                    != RuntimeBindingRecord.State.READY) {
+                            || !canReconcile(latest)) {
                         return failed(unavailable("runtime_provision_fenced",
                                 "Runtime recovery claim expired"));
                     }

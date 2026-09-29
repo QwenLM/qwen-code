@@ -72,6 +72,7 @@ qwen:
       workspace-cwd: '${QWEN_MANAGED_AGENT_WORKSPACE_CWD:}'
       isolation-class: '${QWEN_MANAGED_AGENT_RUNTIME_ISOLATION:session}'
       state-directory: '${QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY:}'
+      durable-local-process: '${QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS:false}'
       credential-key-id: '${QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY_ID:}'
       credential-key: '${QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY:}'
       node-executable: '${QWEN_MANAGED_AGENT_NODE_EXECUTABLE:}'

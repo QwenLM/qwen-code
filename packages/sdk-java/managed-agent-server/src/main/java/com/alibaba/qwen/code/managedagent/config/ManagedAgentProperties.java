@@ -328,6 +328,7 @@ public class ManagedAgentProperties {
         private List<WorkspaceMount> workspaceMounts = List.of();
         private String isolationClass = "session";
         private String stateDirectory = "";
+        private boolean durableLocalProcess;
         private String credentialKeyId = "";
         private String credentialKey = "";
         private String nodeExecutable = "";
@@ -433,6 +434,14 @@ public class ManagedAgentProperties {
 
         public void setIsolationClass(String isolationClass) {
             this.isolationClass = isolationClass;
+        }
+
+        public boolean isDurableLocalProcess() {
+            return durableLocalProcess;
+        }
+
+        public void setDurableLocalProcess(boolean durableLocalProcess) {
+            this.durableLocalProcess = durableLocalProcess;
         }
 
         public String getStateDirectory() {
