@@ -481,8 +481,7 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
 
   const openInspector = useCallback(() => {
     if (!trajectory || !loadPage || !selectedKey) return;
-    const row = trajectory.rows.find((item) => item.key === selectedKey);
-    if (!row) return;
+    if (!trajectory.rowIndexByKey.has(selectedKey)) return;
     setInspectorSelection({
       of: trajectory,
       loader: loadPage,
@@ -541,9 +540,11 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
     inspectorSelection !== undefined &&
     inspectorSelection.of === trajectory &&
     inspectorSelection.loader === loadPage;
-  const inspectorRow = inspectorCurrent
-    ? trajectory?.rows.find((row) => row.key === inspectorSelection.key)
+  const inspectorIndex = inspectorCurrent
+    ? trajectory?.rowIndexByKey.get(inspectorSelection.key)
     : undefined;
+  const inspectorRow =
+    inspectorIndex === undefined ? undefined : trajectory?.rows[inspectorIndex];
   const selectedTitle = selectedEntry
     ? selectedEntry.kind === 'turn'
       ? t('trajectory.turn', { index: selectedEntry.turn.index })

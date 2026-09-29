@@ -165,6 +165,39 @@ function mountedRows(page: Page): Locator {
 }
 
 test.describe('trajectory panel', () => {
+  test('keeps inspector content and copy reachable in a short window @smoke', async ({
+    page,
+  }, testInfo) => {
+    await page.setViewportSize({ width: 1600, height: 600 });
+    await page.context().grantPermissions(['clipboard-write']);
+    await openTrajectory(page, String(testInfo.project.use.baseURL));
+    const panel = page.getByTestId('trajectory-panel');
+    await panel.getByTestId('trajectory-row-tool').last().click();
+    await panel.getByRole('button', { name: 'View details' }).click();
+    const inspector = panel.getByTestId('trajectory-inspector');
+    await inspector.getByRole('button', { name: 'Input' }).click();
+    const content = inspector.locator('pre');
+    const copy = inspector.getByRole('button', {
+      name: 'Copy displayed content',
+    });
+    expect(
+      await panel.evaluate(
+        (element) => element.scrollHeight - element.clientHeight,
+      ),
+    ).toBeGreaterThan(0);
+    const box = (await panel.boundingBox())!;
+    await page.mouse.move(box.x + 20, box.y + 20);
+    await page.mouse.wheel(0, 600);
+    await expect(content).toBeInViewport();
+    await expect(copy).toBeInViewport();
+    await expect(content).toContainText('/workspace/demo/note-40.txt');
+    await copy.click();
+    await expect(copy).toBeFocused();
+    await expect(inspector.getByRole('status')).toHaveText(
+      'Copied displayed content',
+    );
+  });
+
   test('inspects a selected tool without fetching more transcript data @smoke', async ({
     page,
   }, testInfo) => {

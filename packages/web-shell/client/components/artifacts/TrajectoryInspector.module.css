@@ -1,6 +1,6 @@
 .inspector {
   flex: 0 1 38%;
-  min-height: 120px;
+  min-height: 180px;
   max-height: 320px;
   min-width: 0;
   display: flex;

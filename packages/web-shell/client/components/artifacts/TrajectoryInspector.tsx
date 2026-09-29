@@ -50,7 +50,7 @@ export function TrajectoryInspector({
   onClearRange: () => void;
   onClose: () => void;
 }) {
-  const { t } = useI18n();
+  const { t, language } = useI18n();
   const [tab, setTab] = useState<Tab>('summary');
   const [expanded, setExpanded] = useState(false);
   const [copyStatus, setCopyStatus] = useState<'copied' | 'failed'>();
@@ -66,20 +66,26 @@ export function TrajectoryInspector({
     };
   }, []);
 
+  const rowKind = row?.kind;
+  const tabs = useMemo<Tab[]>(
+    () =>
+      !rowKind
+        ? []
+        : rowKind === 'request'
+          ? ['summary', 'metrics']
+          : rowKind === 'tool'
+            ? ['summary', 'input', 'output', 'metrics']
+            : ['summary', 'body'],
+    [rowKind],
+  );
+
   useEffect(() => {
     copyVersion.current++;
-    setTab('summary');
+    setTab((current) => (tabs.includes(current) ? current : 'summary'));
     setExpanded(false);
     setCopyStatus(undefined);
-  }, [row?.key]);
+  }, [row?.key, tabs]);
 
-  const tabs: Tab[] = !row
-    ? []
-    : row.kind === 'request'
-      ? ['summary', 'metrics']
-      : row.kind === 'tool'
-        ? ['summary', 'input', 'output', 'metrics']
-        : ['summary', 'body'];
   const selectedTab = tabs.includes(tab) ? tab : 'summary';
 
   const fields = useMemo<DetailField[]>(() => {
@@ -102,13 +108,13 @@ export function TrajectoryInspector({
           t('trajectory.inspector.start'),
           startedAt === undefined
             ? undefined
-            : new Date(startedAt).toLocaleString(),
+            : new Date(startedAt).toLocaleString(language),
         ],
         [
           t('trajectory.inspector.end'),
           startedAt === undefined
             ? undefined
-            : new Date(startedAt + durationMs).toLocaleString(),
+            : new Date(startedAt + durationMs).toLocaleString(language),
         ],
         [
           t('trajectory.inspector.ttft'),
@@ -152,7 +158,7 @@ export function TrajectoryInspector({
             t('trajectory.inspector.start'),
             row.timing?.startedAt === undefined
               ? undefined
-              : new Date(row.timing.startedAt).toLocaleString(),
+              : new Date(row.timing.startedAt).toLocaleString(language),
           ],
         ];
       }
@@ -172,6 +178,7 @@ export function TrajectoryInspector({
         return [[t('trajectory.inspector.body'), row.block.text]];
       const images = row.block.images;
       const files = row.block.files;
+      const resourceLinks = row.block.resourceLinks;
       return [
         [t('trajectory.inspector.kind'), row.block.kind],
         [
@@ -192,6 +199,18 @@ export function TrajectoryInspector({
                 `${file.name} (${file.mimeType})${file.attachmentId ? ` · ${file.attachmentId}` : ''}`,
             )
             .join(', '),
+        ],
+        [
+          t('trajectory.inspector.resourceLinks'),
+          resourceLinks?.map((link) => ({
+            name: link.name,
+            uri: link.uri,
+            ...(link.mimeType ? { mimeType: link.mimeType } : {}),
+            ...(link.size !== undefined && link.size !== null
+              ? { size: link.size }
+              : {}),
+            ...(link.description ? { description: link.description } : {}),
+          })),
         ],
       ];
     }
@@ -223,7 +242,7 @@ export function TrajectoryInspector({
       }
     }
     return [];
-  }, [row, selectedTab, t]);
+  }, [row, selectedTab, t, language]);
 
   const formattedFields = useMemo(
     () =>
@@ -257,7 +276,9 @@ export function TrajectoryInspector({
   const canExpand = formattedFields.some(
     ({ formatted }) => (formatted?.length ?? 0) > PREVIEW_LENGTH,
   );
-  const copyText = displayed.map(({ text }) => text).join('\n');
+  const copyText = displayed
+    .map(({ label, text }) => `${label}: ${text}`)
+    .join('\n');
 
   return (
     <section
