@@ -81,6 +81,19 @@ describe('check-flyway-migrations', () => {
     expect(result.status).toBe(1);
   });
 
+  it('sees a collision between two modules of one invocation', () => {
+    // Flyway resolves classpath:db/migration across every jar on the
+    // classpath, so a version claimed in two modules collides exactly like
+    // two files in one module do.
+    const first = module('first', { sql: ['V1__x.sql'] });
+    const second = module('second', { sql: ['V1__y.sql'] });
+    const result = check(first, second);
+    expect(result.output).toContain('2 migrations claim version 1');
+    expect(result.output).toContain('V1__x.sql');
+    expect(result.output).toContain('V1__y.sql');
+    expect(result.status).toBe(1);
+  });
+
   it('compares versions numerically the way Flyway does', () => {
     const dir = module('server', {
       sql: ['V016__a.sql', 'V16.0__c.sql', 'V16__b.sql'],
@@ -92,6 +105,39 @@ describe('check-flyway-migrations', () => {
       sql: ['V16__a.sql', 'V16.1__b.sql'],
     });
     expect(check(distinct).status).toBe(0);
+  });
+
+  it('equates the underscore a Java migration uses for a dotted version', () => {
+    // A Java class name cannot contain a dot, so a Java migration writes
+    // V1_1 for what SQL writes as V1.1; Flyway equates the two.
+    const dir = module('server', {
+      sql: ['V1.1__a.sql'],
+      java: ['V1_1__b.java'],
+    });
+    const result = check(dir);
+    expect(result.output).toContain('2 migrations claim version 1.1');
+    expect(result.status).toBe(1);
+  });
+
+  it('drops every trailing .0 segment, not only the last', () => {
+    const dir = module('server', { sql: ['V1__a.sql', 'V1.0.0__b.sql'] });
+    const result = check(dir);
+    expect(result.output).toContain('2 migrations claim version 1');
+    expect(result.status).toBe(1);
+  });
+
+  it('matches the migration suffix case-insensitively, as Flyway does', () => {
+    const dir = module('server', { sql: ['V1__a.sql', 'V1__b.SQL'] });
+    const result = check(dir);
+    expect(result.output).toContain('2 migrations claim version 1');
+    expect(result.status).toBe(1);
+  });
+
+  it('ignores a versioned name with a suffix Flyway does not scan', () => {
+    const dir = module('server', { sql: ['V1__a.sql', 'V1__b.txt'] });
+    const result = check(dir);
+    expect(result.output).toContain('1 migrations, all versions unique');
+    expect(result.status).toBe(0);
   });
 
   it('ignores files that are not versioned migrations', () => {
@@ -136,6 +182,38 @@ describe('check-flyway-migrations', () => {
     const result = check(dir);
     expect(result.output).toContain('found no migration under');
     expect(result.status).toBe(1);
+  });
+
+  it('fails when the SQL location moved but the Java location stayed', () => {
+    // Only one of the two locations moving must not pass vacuously: the
+    // aggregate count still sees the Java migration, but the renamed-away
+    // SQL population — the one #12940 collided in — is no longer scanned.
+    const dir = module('server', { java: ['V15__event_identity.java'] });
+    const moved = join(dir, 'src/main/resources/db/migrations');
+    mkdirSync(moved, { recursive: true });
+    writeFileSync(join(moved, 'V16__a.sql'), '');
+    writeFileSync(join(moved, 'V16__b.sql'), '');
+    const result = check(dir);
+    expect(result.output).toContain(
+      'found no migration under src/main/resources/db/migration',
+    );
+    expect(result.status).toBe(1);
+  });
+
+  it('escapes a contributor-controlled filename inside the ::error:: command', () => {
+    // git carries LF in filenames and the runner parses workflow commands
+    // from stderr too, so an unescaped newline would emit a second, forged
+    // ::error:: line from a fork PR's filename.
+    const dir = module('server', {
+      sql: ['V16__legit.sql', 'V16__x\n::error::forged.sql'],
+    });
+    const result = check(dir);
+    expect(result.status).toBe(1);
+    expect(
+      result.output
+        .split('\n')
+        .every((line) => !line.startsWith('::error::forged')),
+    ).toBe(true);
   });
 
   it('refuses a missing module or a missing argument', () => {

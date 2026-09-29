@@ -70,10 +70,10 @@ const MAVEN_LOG = [
   '2026-09-28T05:40:26.2115597Z [ERROR] com.alibaba.qwen.code.managedagent.ManagedEventIdentityMigrationTest.backfillsTheIdentityThatTheSnapshotUses -- Time elapsed: 0.058 s <<< ERROR!',
 ].join('\n');
 
-test('extracts surefire failures without the package or the elapsed time', () => {
+test('extracts surefire failures without the elapsed time', () => {
   assert.deepEqual(extractFailingTests(MAVEN_LOG), [
-    'ManagedSessionOperationMigrationTest.finishesLifecycleCommandsThatWaitedBeforeTheUpgrade',
-    'ManagedEventIdentityMigrationTest.backfillsTheIdentityThatTheSnapshotUses',
+    'com.alibaba.qwen.code.managedagent.ManagedSessionOperationMigrationTest.finishesLifecycleCommandsThatWaitedBeforeTheUpgrade',
+    'com.alibaba.qwen.code.managedagent.ManagedEventIdentityMigrationTest.backfillsTheIdentityThatTheSnapshotUses',
   ]);
 });
 
@@ -82,7 +82,81 @@ test('extracts a surefire assertion failure, deduped across matrix legs', () => 
     '[ERROR] com.example.LedgerTest.totals -- Time elapsed: 0.011 s <<< FAILURE!',
     '[ERROR] com.example.LedgerTest.totals -- Time elapsed: 0.009 s <<< FAILURE!',
   ].join('\n');
-  assert.deepEqual(extractFailingTests(log), ['LedgerTest.totals']);
+  assert.deepEqual(extractFailingTests(log), ['com.example.LedgerTest.totals']);
+});
+
+test('keeps two same-named tests from different packages distinct', () => {
+  // The Surefire id is the dedupe identity, so the package prefix must
+  // survive: sdk-java already carries the same simple test class name in two
+  // Maven modules, and reducing to `Class.method` would merge them into one
+  // issue.
+  const log = [
+    '[ERROR] com.a.SessionTest.closes -- Time elapsed: 0.10 s <<< ERROR!',
+    '[ERROR] com.b.SessionTest.closes -- Time elapsed: 0.11 s <<< ERROR!',
+  ].join('\n');
+  assert.deepEqual(extractFailingTests(log), [
+    'com.a.SessionTest.closes',
+    'com.b.SessionTest.closes',
+  ]);
+  const analysis = analyzeLogs('SDK Java', [log]);
+  assert.equal(analysis.markers.length, 2);
+  assert.notEqual(analysis.markers[0], analysis.markers[1]);
+});
+
+test('ignores a Maven error line whose payload is not a Java id', () => {
+  assert.deepEqual(
+    extractFailingTests(
+      '[ERROR] model refused the request -- Time elapsed: 1.2 s <<< ERROR!',
+    ),
+    [],
+  );
+});
+
+test('keeps the parameterized tail of a Surefire id', () => {
+  assert.deepEqual(
+    extractFailingTests(
+      '[ERROR] com.example.FooTest.bar(java.util.List)[1] -- Time elapsed: 0.10 s <<< ERROR!',
+    ),
+    ['com.example.FooTest.bar(java.util.List)[1]'],
+  );
+});
+
+test('a Flyway guard red files one issue, not one per stacked merge', () => {
+  // Verbatim shape of the guard's ::error:: line for a #12940-style
+  // duplicate-version collision.
+  const log =
+    '::error::packages/sdk-java/managed-agent-server: 2 migrations claim version 16: ' +
+    'packages/sdk-java/managed-agent-server/src/main/resources/db/migration/V16__a.sql, ' +
+    'packages/sdk-java/runtime-broker/src/main/resources/db/migration/V16__b.sql';
+  assert.deepEqual(extractFailingTests(log), [
+    'flyway:packages/sdk-java/managed-agent-server:16',
+  ]);
+
+  const dir = mkdtempSync(join(tmpdir(), 'sig-flyway-'));
+  const analysisPath = join(dir, 'analysis.json');
+  writeFileSync(analysisPath, JSON.stringify(analyzeLogs('SDK Java', [log])));
+  const plan = (sha) =>
+    JSON.parse(
+      captureStdout([
+        'plan',
+        '--analysis',
+        analysisPath,
+        '--sha',
+        sha,
+        '--run-url',
+        `https://github.com/QwenLM/qwen-code/actions/runs/${sha}`,
+        '--run-id',
+        sha,
+        '--at',
+        '2026-09-29T00:00:00Z',
+      ]),
+    );
+  // The marker keys on the collision, not the commit: two merges stacked on
+  // the standing red resolve to the same issue.
+  assert.deepEqual(
+    plan('1111111111111').searchMarkers,
+    plan('2222222222222').searchMarkers,
+  );
 });
 
 test('ignores Maven error lines that name no test', () => {
@@ -622,6 +696,30 @@ test('the per-commit body names the failing job and step', () => {
   assert.equal(
     renderIssueTitle({ analysis, occurrence: OCCURRENCE }),
     'Main CI failed: Qwen Code CI on af7a9ec12722',
+  );
+});
+
+test('the test-keyed body names the failed job and step too', () => {
+  // A red that names its tests still needs the lane: a guard's diagnosis (the
+  // colliding files) lives only in the job log, and the per-test bullets
+  // alone do not say which job broke.
+  const analysis = analyzeLogs(
+    'SDK Java',
+    [MAVEN_LOG],
+    [
+      {
+        name: 'Flyway migration version uniqueness',
+        steps: ['Check Flyway migration versions are unique'],
+      },
+    ],
+  );
+  const body = renderIssueBody({ analysis, occurrence: OCCURRENCE });
+
+  assert.ok(body.includes('## Failing tests'));
+  assert.ok(
+    body.includes(
+      '  - `Flyway migration version uniqueness` — failed in step `Check Flyway migration versions are unique`',
+    ),
   );
 });
 

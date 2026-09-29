@@ -50,6 +50,12 @@ const PYTEST_FAIL_PATTERN = /^FAILED\s+(.+?)(?:\s+-\s.*)?$/;
 // method and is not a test.
 const MAVEN_FAIL_PATTERN =
   /^\[ERROR\] (.+?) -- Time elapsed: [\d.]+ s <<< (?:ERROR|FAILURE)!$/;
+// The Flyway version guard (scripts/check-flyway-migrations.js) fails with a
+// ::error:: line, not a test report. Key it on the module and version —
+// stable across every merge stacked on a standing red, so the recurrences
+// land on one issue instead of one per commit.
+const FLYWAY_FAIL_PATTERN =
+  /^::error::(.+?): \d+ migrations claim version ([\d.]+):/;
 const TEST_FILE_PATTERN = /\.(?:test|spec)\.[cm]?[jt]sx?\b|\.py\b/;
 // A Surefire id is a dotted `Class.method`, optionally with the parameter
 // types and invocation index of a parameterized case.
@@ -64,15 +70,16 @@ function cleanLine(line) {
 }
 
 /**
- * Reduce a Surefire id to `Class.method`: the package prefix adds no signal
- * next to the class name and pushes the method out of the issue title, and
- * package segments are lowercase by convention.
+ * The Surefire id is the dedupe identity — the `seen` key, the
+ * `qwen-main-ci-failure-test:` marker, the bullet the body lists — so it is
+ * kept whole: two modules can carry the same simple `Class.method` (sdk-java
+ * already has three such simple-name pairs), and reducing to `Class.method`
+ * would merge them into one issue. The JAVA_ID_PATTERN shape is this lane's
+ * own guard against the phrase appearing in a test's captured stdout.
+ * Cosmetic shortening for the title lives in `shortenForTitle`.
  */
 function javaTestId(raw) {
-  if (!JAVA_ID_PATTERN.test(raw)) return undefined;
-  const segments = raw.split('.');
-  const start = segments.findIndex((segment) => /^[A-Z]/.test(segment));
-  return segments.slice(Math.max(start, 0)).join('.');
+  return JAVA_ID_PATTERN.test(raw) ? raw : undefined;
 }
 
 /**
@@ -87,11 +94,15 @@ export function extractFailingTests(logText) {
     const vitest = VITEST_FAIL_PATTERN.exec(line);
     const pytest = PYTEST_FAIL_PATTERN.exec(line);
     const maven = MAVEN_FAIL_PATTERN.exec(line);
-    if (!vitest && !pytest && !maven) continue;
+    const flyway = FLYWAY_FAIL_PATTERN.exec(line);
+    if (!vitest && !pytest && !maven && !flyway) continue;
+
+    if (flyway) {
+      seen.add(`flyway:${flyway[1]}:${flyway[2]}`);
+      continue;
+    }
 
     if (maven) {
-      // The `Class.method` shape is this lane's own guard against the phrase
-      // appearing in a test's captured stdout.
       const id = javaTestId(maven[1]);
       if (id) seen.add(id);
       continue;
@@ -154,7 +165,15 @@ export function failureSignature(workflowName, testIds) {
  * them (`file > Suite > nested > case` is routinely over 140 characters).
  */
 export function shortenForTitle(testId, limit = 110) {
-  const segments = testId.replace(/\s+/g, ' ').trim().split(' > ');
+  const text = testId.replace(/\s+/g, ' ').trim();
+  // A Surefire id's package prefix adds no signal next to the class name and
+  // pushes the method out of the title budget, and package segments are
+  // lowercase by convention. Only a Java-shaped id is stripped — a vitest
+  // `file > case` id opens with a path that must survive intact.
+  const display = JAVA_ID_PATTERN.test(text)
+    ? text.replace(/^(?:[a-z_$][\w$]*\.)+/, '')
+    : text;
+  const segments = display.split(' > ');
   const collapsed =
     segments.length > 2
       ? [segments[0], '…', segments.at(-1)].join(' > ')
@@ -316,6 +335,12 @@ export function renderIssueBody({
       ...bodyMarkers.map((marker) => `<!-- ${marker} -->`),
       '',
       `A main-branch \`${analysis.workflow}\` run failed on \`main\`.`,
+      // The failing tests name what broke; the failed jobs name which lane
+      // broke — a guard's diagnosis (the colliding files) lives only in its
+      // job log.
+      ...(analysis.failedJobs.length
+        ? ['', '- Failed jobs:', ...failedJobLines(analysis.failedJobs)]
+        : []),
       '',
       '## Failing tests',
       '',
