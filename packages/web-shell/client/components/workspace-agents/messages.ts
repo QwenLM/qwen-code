@@ -48,7 +48,7 @@ export const COLLAB_MESSAGES_EN: Record<string, CollabMessage> = {
   'collab.run.stop': 'Stop',
   'collab.share.title': (v) => `Share ${v?.name}`,
   'collab.share.description':
-    'Anyone with the token can send this agent work over A2A. It keeps running on this computer, in this workspace.',
+    'Anyone with the token can send this agent work over A2A. It keeps running on this computer, in this workspace, with whatever instructions and tools the agent has at the time — later changes to the agent apply to shares already issued.',
   'collab.share.copy': 'Copy',
   'collab.share.copied': 'Copied',
   'collab.share.done': 'Done',
@@ -343,7 +343,7 @@ export const COLLAB_MESSAGES_ZH: Record<string, CollabMessage> = {
   'collab.run.stop': '停止',
   'collab.share.title': (v) => `分享 ${v?.name}`,
   'collab.share.description':
-    '拿到令牌的人可以通过 A2A 给这个 Agent 派活。它仍然运行在这台电脑上、这个工作区里。',
+    '拿到令牌的人可以通过 A2A 给这个 Agent 派活。它仍然运行在这台电脑上、这个工作区里，使用 Agent 当时的指令和工具——之后对 Agent 的修改也会作用于已发出的分享。',
   'collab.share.copy': '复制',
   'collab.share.copied': '已复制',
   'collab.share.done': '完成',
