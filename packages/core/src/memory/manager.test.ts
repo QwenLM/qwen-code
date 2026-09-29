@@ -22,6 +22,7 @@ import {
   getAutoMemoryRoot,
   getTeamAutoMemoryRoot,
   getUserAutoMemoryRoot,
+  getUserAutoMemoryMetadataPath,
 } from './paths.js';
 import type { Config } from '../config/config.js';
 import * as metadataMigration from './metadata-migration.js';
@@ -32,12 +33,14 @@ import { ToolNames } from '../tools/tool-names.js';
 
 const telemetryMocks = vi.hoisted(() => ({
   logMemoryExtract: vi.fn(),
+  logMemoryDream: vi.fn(),
   logMemoryMigration: vi.fn(),
 }));
 
 vi.mock('../telemetry/index.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../telemetry/index.js')>()),
   logMemoryExtract: telemetryMocks.logMemoryExtract,
+  logMemoryDream: telemetryMocks.logMemoryDream,
   logMemoryMigration: telemetryMocks.logMemoryMigration,
 }));
 
@@ -1187,15 +1190,33 @@ describe('MemoryManager', () => {
       for (let index = 0; index < 10; index += 1) {
         await recordUserAutoMemoryMutation(now);
       }
-      vi.mocked(runManagedUserAutoMemoryDream).mockResolvedValueOnce({
-        touchedTopics: ['user'],
-        createdEntries: 0,
-        updatedEntries: 1,
-        deletedEntries: 0,
-        dedupedEntries: 0,
-        splitEntries: 0,
-        keywordBackfilled: 0,
-      });
+      // Distinct, non-zero counters on purpose: this is the only assertion
+      // in the repo on the user-dream MemoryDreamEvent payload, and a
+      // 12-field literal is exactly where a transposed field lands. With
+      // five of six counters at 0 a swap between two zero-valued counters
+      // survives even a full-payload assertion.
+      //
+      // The clock is flipped from inside the dream mock, not by
+      // `mockReturnValueOnce`: a once-value is consumed by whichever code
+      // calls `Date.now()` first, so any timestamp added to the scheduling
+      // prologue would move `startedAt` and fail `duration_ms` from inside
+      // the telemetry payload, far from this setup. Holding the pre-dream
+      // value at 1_000 makes `duration_ms` a property of the flip alone.
+      const dateNow = vi.spyOn(Date, 'now').mockReturnValue(1_000);
+      vi.mocked(runManagedUserAutoMemoryDream).mockImplementationOnce(
+        async () => {
+          dateNow.mockReturnValue(1_025);
+          return {
+            touchedTopics: ['user', 'feedback'],
+            createdEntries: 3,
+            updatedEntries: 5,
+            deletedEntries: 7,
+            dedupedEntries: 11,
+            splitEntries: 13,
+            keywordBackfilled: 17,
+          };
+        },
+      );
       vi.spyOn(userDream, 'completeUserAutoMemoryDream').mockRejectedValueOnce(
         new Error('metadata unavailable'),
       );
@@ -1203,6 +1224,7 @@ describe('MemoryManager', () => {
       const config = makeMockConfig({
         getMemoryRecallMode: vi.fn().mockReturnValue('structured'),
       });
+      telemetryMocks.logMemoryDream.mockClear();
 
       const result = await manager.scheduleUserDream({
         projectRoot,
@@ -1210,11 +1232,32 @@ describe('MemoryManager', () => {
         now,
       });
       await result.promise;
+      dateNow.mockRestore();
 
       expect(manager.getTask(result.taskId!)).toMatchObject({
         status: 'completed',
         metadata: { metadataWriteError: 'metadata unavailable' },
       });
+      expect(telemetryMocks.logMemoryDream).toHaveBeenCalledWith(
+        config,
+        expect.objectContaining({
+          trigger: 'auto',
+          scope: 'user',
+          status: 'updated',
+          created_entries: 3,
+          updated_entries: 5,
+          deleted_entries: 7,
+          deduped_entries: 11,
+          split_entries: 13,
+          keyword_backfilled: 17,
+          dirty_mutations: 10,
+          scheduling_reason: 'dirty_mutations',
+          touched_topics: 'user,feedback',
+          touched_topics_count: 2,
+          duration_ms: 25,
+        }),
+      );
+      expect(telemetryMocks.logMemoryDream).toHaveBeenCalledTimes(1);
       await expect(
         manager.scheduleUserDream({
           projectRoot,
@@ -1225,6 +1268,126 @@ describe('MemoryManager', () => {
         status: 'skipped',
         skippedReason: 'failure_backoff',
       });
+    });
+
+    it('reports a User Dream that consolidated nothing as noop', async () => {
+      // Pins the `noop` arm of
+      // `result.touchedTopics.length > 0 ? 'updated' : 'noop'`. Without it
+      // a constant `'updated'` keeps the suite green and every
+      // consolidated-nothing user dream is reported to telemetry as an
+      // update, inflating the consolidation-effectiveness rate.
+      const now = new Date('2026-08-27T00:00:00.000Z');
+      for (let index = 0; index < 10; index += 1) {
+        await recordUserAutoMemoryMutation(now);
+      }
+      vi.mocked(runManagedUserAutoMemoryDream).mockResolvedValueOnce({
+        touchedTopics: [],
+        createdEntries: 0,
+        updatedEntries: 0,
+        deletedEntries: 0,
+        dedupedEntries: 0,
+        splitEntries: 0,
+        keywordBackfilled: 0,
+      });
+      const manager = new MemoryManager();
+      const config = makeMockConfig({
+        getMemoryRecallMode: vi.fn().mockReturnValue('structured'),
+      });
+      telemetryMocks.logMemoryDream.mockClear();
+
+      const result = await manager.scheduleUserDream({
+        projectRoot,
+        config,
+        now,
+      });
+      await result.promise;
+
+      expect(manager.getTask(result.taskId!)).toMatchObject({
+        status: 'completed',
+      });
+      expect(telemetryMocks.logMemoryDream).toHaveBeenCalledWith(
+        config,
+        expect.objectContaining({
+          scope: 'user',
+          status: 'noop',
+          touched_topics: '',
+          touched_topics_count: 0,
+        }),
+      );
+      expect(telemetryMocks.logMemoryDream).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps a cancelled User Dream cancelled when the dream resolves after abort', async () => {
+      // User-dream mirror of the project-dream case in `cancelTask()`
+      // below. The callee can still return normally with the signal
+      // already aborted: the agent reaches its goal and the cancel lands
+      // during or after the apply, so `dream-operations.ts`'s per-delete
+      // check is already behind it (see `does not rebuild the user index
+      // after cancellation` in user-dream.test.ts). A *cancelled* agent
+      // result never gets that far — the planner throws on any
+      // non-`completed` status. What keeps the
+      // record from flipping to `completed` is the manager's post-await
+      // abort guard plus the `abortSignal.aborted && record.status ===
+      // 'cancelled'` discrimination in runUserDream's catch.
+      const now = new Date('2026-08-27T00:00:00.000Z');
+      for (let index = 0; index < 10; index += 1) {
+        await recordUserAutoMemoryMutation(now);
+      }
+      let resolveDreamStarted!: () => void;
+      const dreamStarted = new Promise<void>((r) => {
+        resolveDreamStarted = r;
+      });
+      vi.mocked(runManagedUserAutoMemoryDream).mockImplementationOnce(
+        async (_projectRoot, _config, signal) => {
+          resolveDreamStarted();
+          await new Promise<void>((resolve) => {
+            signal?.addEventListener('abort', () => resolve());
+          });
+          return {
+            touchedTopics: ['user'],
+            createdEntries: 0,
+            updatedEntries: 1,
+            deletedEntries: 0,
+            dedupedEntries: 0,
+            splitEntries: 0,
+            keywordBackfilled: 0,
+          };
+        },
+      );
+      const manager = new MemoryManager();
+      const config = makeMockConfig({
+        getMemoryRecallMode: vi.fn().mockReturnValue('structured'),
+      });
+      telemetryMocks.logMemoryDream.mockClear();
+
+      const result = await manager.scheduleUserDream({
+        projectRoot,
+        config,
+        now,
+      });
+      const taskId = result.taskId!;
+      // Wait for the dream to actually enter so the cancel does not race
+      // the abort-signal capture.
+      await dreamStarted;
+      expect(manager.cancelTask(taskId)).toBe(true);
+      await result.promise;
+
+      expect(manager.getTask(taskId)).toMatchObject({ status: 'cancelled' });
+      expect(telemetryMocks.logMemoryDream).toHaveBeenCalledWith(
+        config,
+        expect.objectContaining({ scope: 'user', status: 'cancelled' }),
+      );
+      expect(telemetryMocks.logMemoryDream).toHaveBeenCalledTimes(1);
+      // The cancelled run must not bump lastDreamAt — that would suppress
+      // the next legitimate dream for DEFAULT_USER_DREAM_MIN_HOURS.
+      // (lastAttemptAt *is* set for 'cancelled' too, so this case says
+      // nothing about immediate rescheduling.)
+      const metaRaw = await fs.readFile(
+        getUserAutoMemoryMetadataPath(),
+        'utf-8',
+      );
+      const meta = JSON.parse(metaRaw) as { lastDreamAt?: string };
+      expect(meta.lastDreamAt).not.toBe('2026-08-27T00:00:00.000Z');
     });
   });
 

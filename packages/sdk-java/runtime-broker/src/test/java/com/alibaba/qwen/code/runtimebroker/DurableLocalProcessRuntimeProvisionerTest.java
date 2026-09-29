@@ -388,6 +388,69 @@ class DurableLocalProcessRuntimeProvisionerTest {
         assertTrue(LocalRuntimeStore.linuxProcessAbsent(stat, "ticks:987654321"));
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void trustedSameHostRebootAddsStopProofWithoutRelaunch(boolean managed) throws Exception {
+        var request = request(managed);
+        var store = store();
+        try (var first = provisioner(store)) {
+            var handle = await(first.ensureResource(request, SEED, null));
+            var lease = launch(first, store, request);
+            workers.getFirst().destroyForcibly();
+            workers.getFirst().onExit().get(5, TimeUnit.SECONDS);
+            var loss = await(first.reconcile(request, SEED, handle, lease));
+            assertNotNull(loss.getLossEvidence());
+            assertNull(loss.getStopEvidence());
+            var reboot = new LocalRuntimeStore.HostIdentity(HOST.hostId(),
+                    "22222222-2222-2222-2222-222222222222", "pid:[2]", "time:[2]");
+            try (var second = new LocalProcessRuntimeProvisioner(List.of("must-not-run"), directory, TRANSPORT,
+                    null, new LocalRuntimeStore(directory.toRealPath(), reboot), true)) {
+                var stopped = await(second.reconcile(request, SEED, handle, lease));
+                assertEquals(RuntimeObservation.Outcome.NOT_FOUND, stopped.getOutcome());
+                assertTrue(stopped.getStopEvidence().matches(SEED, handle, lease));
+                assertEquals(loss.getLossEvidence().hostDomain(), stopped.getStopEvidence().hostDomain());
+                assertEquals(LocalRuntimeStore.State.RETIRED, registration(store, request, handle).state());
+                assertBlocked(second.provision(request, SEED));
+                assertEquals(stopped.getStopEvidence().evidenceId(),
+                        await(second.reconcile(request, SEED, handle, lease)).getStopEvidence().evidenceId());
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"INTENT", "LAUNCHING", "REGISTERED"})
+    void trustedRebootCanRecoverStartupWithoutInventingALease(String state) throws Exception {
+        var request = request(true);
+        var store = store();
+        try (var first = provisioner(store)) {
+            var handle = await(first.ensureResource(request, SEED, null));
+            if (state.equals("REGISTERED")) {
+                launch(first, store, request);
+                workers.getFirst().destroyForcibly();
+                workers.getFirst().onExit().get(5, TimeUnit.SECONDS);
+            }
+            store.locked(request, SEED, handle, false, (resource, record) -> {
+                resource.save(new LocalRuntimeStore.Registration(handle, LocalRuntimeStore.State.valueOf(state),
+                        record.pid(), record.started(), null));
+                return null;
+            });
+            var reboot = new LocalRuntimeStore.HostIdentity(HOST.hostId(),
+                    "22222222-2222-2222-2222-222222222222", HOST.pidNamespace(), HOST.timeNamespace());
+            try (var second = new LocalProcessRuntimeProvisioner(List.of("must-not-run"), directory, TRANSPORT,
+                    null, new LocalRuntimeStore(directory.toRealPath(), reboot), true)) {
+                var observed = await(second.reconcile(request, SEED, handle, null));
+                assertTrue(observed.getLossEvidence().matches(SEED, handle, null));
+                assertTrue(observed.getStopEvidence().matches(SEED, handle, null));
+                assertNull(observed.getEndpoint());
+                assertBlocked(second.provision(request, SEED));
+                Path record = directory.resolve(handle.getValue().get("resourceId") + ".json");
+                Files.delete(record);
+                assertEquals(RuntimeObservation.Outcome.CONFLICT,
+                        await(second.reconcile(request, SEED, handle, null)).getOutcome());
+            }
+        }
+    }
+
     private RuntimeProvisionRequest request(boolean managed) {
         return new RuntimeProvisionRequest(new RuntimeScope("tenant", "workspace", "1",
                 directory.toAbsolutePath().toString(), "sha256:" + "a".repeat(64), "workspace"),

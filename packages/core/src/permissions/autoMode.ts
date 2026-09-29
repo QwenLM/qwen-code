@@ -529,6 +529,7 @@ export type FallbackToAskReason =
   | 'org_ask_ceiling'
   | 'classifier_unavailable'
   | 'external_write'
+  | 'external_directory'
   | DenialFallbackReason;
 
 /** Outcome of {@link applyAutoModeDecision}. */
@@ -640,6 +641,14 @@ export function applyAutoModeDecision(
           reason: 'external_write',
           message:
             'Writes outside the workspace require manual approval in AUTO mode.',
+        };
+      }
+      if (decision.reason === 'external_directory') {
+        return {
+          kind: 'fallback',
+          reason: 'external_directory',
+          message:
+            'Commands outside the workspace require manual approval in AUTO mode.',
         };
       }
       return {
@@ -860,6 +869,17 @@ export async function evaluateAutoMode(
       .isPathWithinWorkspace(input.ctx.filePath)
   ) {
     return { via: 'fallback', reason: 'external_write' };
+  }
+
+  // L5.2.7: the same floor for a shell-like tool whose `directory` is outside
+  // the workspace. The classifier sees that directory as the call's cwd and is
+  // never told the workspace root, so a build there would read as routine.
+  if (
+    SHELL_LIKE_TOOL_NAMES.has(input.ctx.toolName) &&
+    input.ctx.cwd &&
+    !input.config.getWorkspaceContext().isPathWithinWorkspace(input.ctx.cwd)
+  ) {
+    return { via: 'fallback', reason: 'external_directory' };
   }
 
   // Caller (scheduler) has detected an armed fallback state; surface that

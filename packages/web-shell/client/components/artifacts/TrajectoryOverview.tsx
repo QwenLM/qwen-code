@@ -15,7 +15,7 @@ import {
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
 } from 'react';
-import { Maximize2Icon, ZoomInIcon, ZoomOutIcon } from 'lucide-react';
+import { Maximize2Icon, XIcon, ZoomInIcon, ZoomOutIcon } from 'lucide-react';
 import { useI18n } from '../../i18n';
 import { formatDuration } from '../messages/StatsMessage';
 import type {
@@ -827,7 +827,9 @@ export function TrajectoryOverview({
               {t('trajectory.legend.after')}
             </span>
             <span>
-              <i className={styles.errorKey}>×</i>
+              <i className={styles.errorKey} aria-hidden="true">
+                <XIcon size={11} strokeWidth={2.5} />
+              </i>
               {t('trajectory.legend.error')}
             </span>
           </div>

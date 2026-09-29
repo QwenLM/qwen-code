@@ -2157,6 +2157,24 @@ export class MemoryManager {
           keywordBackfilled: result.keywordBackfilled,
         },
       });
+      logMemoryDream(
+        params.config!,
+        new MemoryDreamEvent({
+          trigger: 'auto',
+          scope: 'user',
+          status: result.touchedTopics.length > 0 ? 'updated' : 'noop',
+          created_entries: result.createdEntries,
+          updated_entries: result.updatedEntries,
+          deleted_entries: result.deletedEntries,
+          deduped_entries: result.dedupedEntries,
+          split_entries: result.splitEntries,
+          keyword_backfilled: result.keywordBackfilled,
+          dirty_mutations: dirtyAtStart,
+          scheduling_reason: runningMetadata.pendingReason,
+          touched_topics: result.touchedTopics,
+          duration_ms: Date.now() - startedAt,
+        }),
+      );
       try {
         const metadata = await completeUserAutoMemoryDream(
           dirtyAtStart,
@@ -2171,24 +2189,6 @@ export class MemoryManager {
             lastDreamAt: metadata.lastDreamAt,
           },
         });
-        logMemoryDream(
-          params.config!,
-          new MemoryDreamEvent({
-            trigger: 'auto',
-            scope: 'user',
-            status: result.touchedTopics.length > 0 ? 'updated' : 'noop',
-            created_entries: result.createdEntries,
-            updated_entries: result.updatedEntries,
-            deleted_entries: result.deletedEntries,
-            deduped_entries: result.dedupedEntries,
-            split_entries: result.splitEntries,
-            keyword_backfilled: result.keywordBackfilled,
-            dirty_mutations: dirtyAtStart,
-            scheduling_reason: runningMetadata.pendingReason,
-            touched_topics: result.touchedTopics,
-            duration_ms: Date.now() - startedAt,
-          }),
-        );
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         debugLogger.warn('Failed to persist User Dream metadata:', error);

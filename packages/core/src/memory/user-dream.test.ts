@@ -31,7 +31,9 @@ vi.mock('./user-dream-agent-planner.js', () => ({
 import { planUserAutoMemoryDreamByAgent } from './user-dream-agent-planner.js';
 import * as memoryScan from './scan.js';
 import { AUTO_MEMORY_SCHEMA_VERSION } from './types.js';
-import { DREAM_OPERATIONS_FILENAME } from './dream-operations.js';
+import * as dreamOperations from './dream-operations.js';
+
+const { DREAM_OPERATIONS_FILENAME } = dreamOperations;
 
 const EMPTY_DREAM_RESULT = {
   touchedTopics: [],
@@ -359,5 +361,104 @@ describe('User Memory dream', () => {
     await expect(fs.readFile(memoryFile, 'utf-8')).resolves.toContain(
       'Keep this preference.',
     );
+  });
+
+  it('does not apply a manifest after the run is cancelled', async () => {
+    const memoryFile = path.join(getUserAutoMemoryRoot(), 'user', 'keep.md');
+    await fs.mkdir(path.dirname(memoryFile), { recursive: true });
+    await fs.writeFile(memoryFile, 'Keep this preference.');
+    const controller = new AbortController();
+    const manifestPath = path.join(
+      getUserAutoMemoryRoot(),
+      DREAM_OPERATIONS_FILENAME,
+    );
+    const apply = vi.spyOn(dreamOperations, 'applyDreamOperations');
+    try {
+      vi.mocked(planUserAutoMemoryDreamByAgent).mockImplementation(async () => {
+        await fs.writeFile(
+          manifestPath,
+          JSON.stringify({
+            version: 1,
+            delete: ['user/keep.md'],
+            operations: [],
+          }),
+        );
+        controller.abort();
+        return {
+          status: 'completed',
+          finalText: 'Cancelled after planning.',
+          filesTouched: [],
+        };
+      });
+
+      await expect(
+        runManagedUserAutoMemoryDream(projectRoot, config, controller.signal),
+      ).rejects.toThrow();
+      expect(apply).not.toHaveBeenCalled();
+      await expect(fs.readFile(memoryFile, 'utf-8')).resolves.toContain(
+        'Keep this preference.',
+      );
+      await expect(fs.stat(manifestPath)).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+    } finally {
+      // Restored here so the next `vi.spyOn` on this member binds the real
+      // export instead of this test's spy, and so a later case asserting a
+      // call count does not inherit this one's records.
+      apply.mockRestore();
+    }
+  });
+
+  it('does not rebuild the user index after cancellation', async () => {
+    const memoryRoot = getUserAutoMemoryRoot();
+    const memoryFile = path.join(memoryRoot, 'user', 'keep.md');
+    await fs.mkdir(path.dirname(memoryFile), { recursive: true });
+    await fs.writeFile(
+      memoryFile,
+      '---\ntype: user\nname: Keep\ndescription: Keep\nkeywords:\n  - keep preference\n---\n\nKeep this preference.\n',
+    );
+    const indexPath = path.join(memoryRoot, 'MEMORY.md');
+    await fs.writeFile(indexPath, 'SENTINEL-INDEX-DO-NOT-OVERWRITE');
+    const controller = new AbortController();
+    // Captured before the spy below is installed, so the wrapper delegates
+    // to the real export rather than to a spy leaked by an earlier case.
+    // The assertion pins that intent: both cancellation cases restore their
+    // spy in a `finally`, and without the earlier restore this capture
+    // silently binds the previous case's spy while every assertion still
+    // passes.
+    const applyDreamOperations = dreamOperations.applyDreamOperations;
+    expect(vi.isMockFunction(applyDreamOperations)).toBe(false);
+    const apply = vi
+      .spyOn(dreamOperations, 'applyDreamOperations')
+      .mockImplementationOnce(async (...args) => {
+        const result = await applyDreamOperations(...args);
+        controller.abort();
+        return result;
+      });
+    try {
+      vi.mocked(planUserAutoMemoryDreamByAgent).mockImplementation(async () => {
+        await fs.writeFile(
+          path.join(memoryRoot, DREAM_OPERATIONS_FILENAME),
+          JSON.stringify({ version: 1, delete: [], operations: [] }),
+        );
+        return {
+          status: 'completed',
+          finalText: 'No changes.',
+          filesTouched: [],
+        };
+      });
+
+      await runManagedUserAutoMemoryDream(
+        projectRoot,
+        config,
+        controller.signal,
+      );
+
+      await expect(fs.readFile(indexPath, 'utf-8')).resolves.toBe(
+        'SENTINEL-INDEX-DO-NOT-OVERWRITE',
+      );
+    } finally {
+      apply.mockRestore();
+    }
   });
 });
