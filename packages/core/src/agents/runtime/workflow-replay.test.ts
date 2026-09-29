@@ -336,7 +336,9 @@ describe('workflow replay of structured results', () => {
   async function journalFromOlderRuntime(schema: unknown, aResult: unknown) {
     const journal = new WorkflowJournal(journalPath);
     await journal.ensureExists();
-    const keyA = deriveAgentKey(deriveArgsSeed(undefined), 'a', { schema });
+    const keyA = deriveAgentKey(deriveArgsSeed(undefined), 'a', {
+      schema: schema as object,
+    });
     const keyB = deriveAgentKey(keyA, 'b', {});
     await journal.append({ type: 'started', key: keyA, agentId: '1' });
     await journal.append({

@@ -6760,7 +6760,7 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
             runWithEmitter: (emitter) =>
               emitSubmissions(
                 emitter,
-                call.options.taskName === 'for-a'
+                call.options?.taskName === 'for-a'
                   ? [{ success: true, args: { a: 1 } }]
                   : [
                       // As if the tool had let the other shape through.
