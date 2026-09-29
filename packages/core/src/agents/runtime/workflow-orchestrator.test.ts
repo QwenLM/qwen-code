@@ -5372,9 +5372,8 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
   // R3 review (wenshao T6 [M2]): when the subagent terminates without
   // ever calling structured_output (model answered in plain text;
   // attempts counter never incremented), the dispatch throws the
-  // accurate "no validation attempt" message — NOT the upstream-
-  // verbatim "after 2 in-conversation nudges" wording (which describes
-  // a different failure mode: 3 validation failures in a row).
+  // accurate "no validation attempt" message — NOT the failed-submission
+  // wording, which describes a different failure mode.
   it('schema-mode: subagent never calls structured_output → "no validation attempt" terminal', async () => {
     const { config } = fakeConfigWithMgr({
       onCreate: async () => ({
@@ -5432,7 +5431,7 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
   // 2-failure recovery transitions had no coverage. A regression
   // inverting the guard, or one where pendingArgs cleanup discards the
   // recovered args, would slip past the previous tests.
-  it('schema-mode: success on 2nd attempt (1 nudge then valid) captures round-2 args', async () => {
+  it('schema-mode: success on 2nd attempt (1 failure then valid) captures round-2 args', async () => {
     const { config } = fakeConfigWithMgr({
       onCreate: async () => ({
         finalText: '',
@@ -5494,7 +5493,7 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     expect(result).toEqual({ ok: true, attempt: 2 });
   });
 
-  it('schema-mode: success on 3rd attempt (2 nudges then valid) captures round-3 args', async () => {
+  it('schema-mode: success on 3rd attempt (2 failures then valid) captures round-3 args', async () => {
     const { config } = fakeConfigWithMgr({
       onCreate: async () => ({
         finalText: '',
@@ -6286,7 +6285,7 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
   // structured_output to the allowlist so prepareTools doesn't filter
   // it out of the subagent's tool surface. Without this fix the
   // SyntheticOutputTool was present in the per-call registry but
-  // invisible to the model, producing the silent "after 2 nudges" dead-end.
+  // invisible to the model, producing a silent structured-output dead-end.
   it('schema-mode + agentType restricted tools: structured_output appended to allowlist', async () => {
     const { config, calls } = fakeConfigWithMgr({
       findSubagentByName: async () => ({

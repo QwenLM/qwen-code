@@ -1107,7 +1107,7 @@ async function runOverridePath(
   // inherit the resolved agentType's `tools` allowlist verbatim — so
   // `structured_output` was present in the per-call ToolRegistry but
   // filtered OUT by prepareTools when the agentType allowlist didn't
-  // include it, producing the silent "after 2 nudges" dead-end with no
+  // include it, producing a silent structured-output dead-end with no
   // hint that the tool was invisible; and (b) replace the resolved
   // agentType's systemPrompt outright with WORKFLOW_SUBAGENT_SYSTEM_PROMPT_WITH_SCHEMA,
   // silently dropping the agentType's persona (e.g. Explore's

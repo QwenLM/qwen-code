@@ -107,7 +107,7 @@ describe('bundled workflow-authoring skill', () => {
     ['is not an agent dispatch'],
     ['nests one level only'],
     ['read `budget.total`'],
-    ['failed structured_output submissions without a valid result'],
+    ['the third failed submission stops it'],
     ['makes agent() resolve to null without starting the agent'],
     ['Unresolved names make the admitted agent() resolve to null'],
   ])('moved out of the tool description: %s', (anchor) => {
