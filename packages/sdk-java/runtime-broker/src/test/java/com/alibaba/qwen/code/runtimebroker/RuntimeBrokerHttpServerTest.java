@@ -50,7 +50,7 @@ class RuntimeBrokerHttpServerTest {
     }
 
     @Test
-    void unknownExecutionDoesNotBecomeKnownExecuting() throws Exception {
+    void v2UnknownExecutionReconcilesOnlyWhenExplicitlyRequested() throws Exception {
         try (Fixture fixture = new Fixture()) {
             fixture.service.acquire("harness", "runtime", "bootstrap")
                     .toCompletableFuture().join();
@@ -65,15 +65,63 @@ class RuntimeBrokerHttpServerTest {
                     HttpResponse.BodyHandlers.ofString());
             assertEquals(409, response.statusCode(), response.body());
             assertTrue(response.body().contains("runtime_broker_execution_unknown"));
+            assertEquals(0, fixture.transport.statusRequests.get());
             assertEquals(1, fixture.transport.executions.get());
             fixture.transport.runtimeStatus = Map.of("state", "settled", "result",
                     Map.of("executionStatus", "success", "responseParts", java.util.List.of()));
-            HttpResponse<String> late = fixture.client.send(request, HttpResponse.BodyHandlers.ofString());
+            HttpResponse<String> passive = fixture.client.send(request, HttpResponse.BodyHandlers.ofString());
+            assertEquals(409, passive.statusCode(), passive.body());
+            assertEquals(0, fixture.transport.statusRequests.get());
+            HttpRequest disabled = HttpRequest.newBuilder(fixture.uri(path + "&reconcile=false"))
+                    .header("Authorization", "Bearer secret").GET().build();
+            assertEquals(409, fixture.client.send(disabled, HttpResponse.BodyHandlers.ofString()).statusCode());
+            HttpRequest invalid = HttpRequest.newBuilder(fixture.uri(path + "&reconcile=invalid"))
+                    .header("Authorization", "Bearer secret").GET().build();
+            assertEquals(400, fixture.client.send(invalid, HttpResponse.BodyHandlers.ofString()).statusCode());
+            HttpRequest foreign = HttpRequest.newBuilder(fixture.uri(
+                    path.replace("harnessSessionId=harness", "harnessSessionId=other") + "&reconcile=true"))
+                    .header("Authorization", "Bearer secret").GET().build();
+            HttpResponse<String> denied = fixture.client.send(foreign, HttpResponse.BodyHandlers.ofString());
+            assertEquals(409, denied.statusCode(), denied.body());
+            assertTrue(denied.body().contains("runtime_execution_conflict"));
+            assertEquals(0, fixture.transport.statusRequests.get());
+            HttpRequest reconcile = HttpRequest.newBuilder(fixture.uri(path + "&reconcile=true"))
+                    .header("Authorization", "Bearer secret").GET().build();
+            HttpResponse<String> late = fixture.client.send(reconcile, HttpResponse.BodyHandlers.ofString());
             assertEquals(200, late.statusCode(), late.body());
             assertEquals("settled", JSON.parseObject(late.body()).getJSONObject("status").getString("state"));
             assertEquals(ToolExecutionRecord.State.SETTLED,
                     fixture.service.getExecution("harness", "runtime", created.getExecutionCallId())
                             .toCompletableFuture().join().getState());
+            assertEquals(1, fixture.transport.executions.get());
+            assertEquals(1, fixture.transport.statusRequests.get());
+        }
+    }
+
+    @Test
+    void v2PassiveStatusDoesNotContactAnUnavailableWorker() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            fixture.service.acquire("harness", "runtime", "bootstrap").toCompletableFuture().join();
+            ToolExecutionRecord created = fixture.service.createExecution("harness", "runtime", "key", reference())
+                    .toCompletableFuture().join();
+            fixture.transport.statusUnavailable = true;
+            String path = "/executions/" + created.getExecutionCallId()
+                    + "?requestId=read&harnessSessionId=harness&runtimeSessionId=runtime";
+            HttpRequest passive = HttpRequest.newBuilder(fixture.uri(path))
+                    .header("Authorization", "Bearer secret").GET().build();
+            HttpResponse<String> response = fixture.client.send(passive, HttpResponse.BodyHandlers.ofString());
+            assertEquals(409, response.statusCode(), response.body());
+            assertTrue(response.body().contains("runtime_broker_execution_unknown"));
+            assertEquals(0, fixture.transport.statusRequests.get());
+            HttpRequest reconcile = HttpRequest.newBuilder(fixture.uri(path + "&reconcile=true"))
+                    .header("Authorization", "Bearer secret").GET().build();
+            HttpResponse<String> unavailable = fixture.client.send(reconcile, HttpResponse.BodyHandlers.ofString());
+            assertEquals(503, unavailable.statusCode(), unavailable.body());
+            assertTrue(unavailable.body().contains("managed_runtime_unavailable"));
+            assertEquals(ToolExecutionRecord.State.UNKNOWN,
+                    fixture.service.getExecution("harness", "runtime", created.getExecutionCallId())
+                            .toCompletableFuture().join().getState());
+            assertEquals(1, fixture.transport.statusRequests.get());
             assertEquals(1, fixture.transport.executions.get());
         }
     }
@@ -308,6 +356,8 @@ class RuntimeBrokerHttpServerTest {
     private static final class FailingTransport implements RuntimeTransport {
         private final AtomicInteger executions = new AtomicInteger();
         private final AtomicInteger cancellations = new AtomicInteger();
+        private final AtomicInteger statusRequests = new AtomicInteger();
+        private boolean statusUnavailable;
         private boolean fail = true;
         private Map<String, Object> lastReference;
         private Map<String, Object> runtimeStatus = Map.of("state", "unknown");
@@ -326,6 +376,11 @@ class RuntimeBrokerHttpServerTest {
         @Override
         public CompletionStage<Map<String, Object>> status(RuntimeLease lease, RuntimeSession session,
                 Map<String, Object> reference, long afterSequence) {
+            statusRequests.incrementAndGet();
+            if (statusUnavailable) {
+                return CompletableFuture.failedFuture(new RuntimeBrokerException(503,
+                        "managed_runtime_unavailable", "Runtime is unavailable", true));
+            }
             return CompletableFuture.completedFuture(runtimeStatus);
         }
 

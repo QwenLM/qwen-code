@@ -82,7 +82,7 @@ Runtime 只允许目标 workspace 已配置的定义，以及 Session 已安装�
 }
 ```
 
-`streamable-http` 或 `sse` 使用 `url` 和可选 `headers`，不能同时提供 `command`、`args`、`env`。定义在 Runtime 启动时装载；修改连接配方必须提供新的 `serverRevision` 和对应 digest。替换活动 binding 时应同时保留两个修订。可选 `timeoutMs` 为 1 至 600000 的整数，调用响应默认等待 600000 毫秒；连接和发现仍为 25 秒上限。Hosted 工具观察窗口为 630 秒，在临时 UNKNOWN 后继续查询原 execution；Java 对两种工具协议均持久接受明确的迟到 Runtime 结果。轮询复用已取得的 owner，状态查询失败时仅重建原 owner 路由。
+`streamable-http` 或 `sse` 使用 `url` 和可选 `headers`，不能同时提供 `command`、`args`、`env`。定义在 Runtime 启动时装载；修改连接配方必须提供新的 `serverRevision` 和对应 digest。替换活动 binding 时应同时保留两个修订。可选 `timeoutMs` 为 1 至 600000 的整数，调用响应默认等待 600000 毫秒；连接和发现仍为 25 秒上限。Hosted 工具观察窗口为 630 秒，在临时 UNKNOWN 后继续查询原 execution；MCP 轮询通过 `GET /executions/:id?reconcile=true` 显式请求原 execution 对账，Java 仅持久接受明确的迟到 Runtime 结果。未显式请求对账的 v2 状态查询保持被动读取，v3 保留既有自动对账。可选查询参数接受 `true` 或 `false`，不改变 execution 归属，也不允许派发。轮询复用已取得的 owner，状态查询失败时仅重建原 owner 路由。
 
 创建或加载私有 Hosted Session 时，在原有 `managedSessionStore` 字段之外提供 `toolProfile: "hosted-workspace-mcp/1"` 和 `mcpServers: [{serverId, serverRevision, definitionDigest}]`。Session 保留初始准入 pin，后续替换单独提交。首个 prompt 或资源/提示操作会先初始化 binding，再受理工作。Hosted 请求沿用现有 Harness protocol/boot 与 client 身份 headers。
 
@@ -101,12 +101,12 @@ Runtime 只允许目标 workspace 已配置的定义，以及 Session 已安装�
 
 H1 明确保留每个 tenant/storage lease 同时仅一个 attached MCP owner 的限制。同一 Workspace 的其他 Session，以及共享该 storage 的其他 Workspace，即使在两次 turn 之间也不能执行；detach 后释放租约。stdio server 仍能访问 Workspace 时提前释放租约会允许并发写入；连接寿命与存储所有权解耦属于生产启用前的后续工作。
 
-存在未决请求时物理连接丢失仍保持 recovery-blocked。工具在 630 秒 Hosted 观察窗口结束后才结算，或 Harness 在 turn 中途重启，仍需要本私有阶段尚未实现的 checkpoint 恢复。原始资源/提示操作可通过原 ID 的状态接口或 close 接受迟到结果。Runtime 回执历史及已关闭连接的 tombstone 仍保留至进程结束，随历史增长；基于持久 ACK 的回收，以及永久丢失请求的 release 等待者清理，留作后续工作。并发配额不代表历史内存有上限。
+存在未决请求时物理连接丢失仍保持 recovery-blocked。连接丢失或 server 永不回复可能耗尽整个 630 秒 Hosted 观察窗口；更短的 Runtime 超时或取消不会缩短该窗口。模型请求前必须成功刷新所有固定 server，因此一个 server 不可用也会阻塞纯文本 turn 和健康 server 的调用，直到它恢复。工具在 630 秒 Hosted 观察窗口结束后才结算，或 Harness 在 turn 中途重启，仍需要本私有阶段尚未实现的 checkpoint 恢复。原始资源/提示操作可通过原 ID 的状态接口或 close 接受迟到结果。Runtime 回执历史及已关闭连接的 tombstone 仍保留至进程结束，随历史增长；基于持久 ACK 的回收，以及永久丢失请求的 release 等待者清理，留作后续工作。并发配额不代表历史内存有上限。
 
 模型工具名有意包含目录和连接身份，防止旧广告调用静默使用新 binding；重新加载的历史可能保留旧名字。stdio HOME/USERPROFILE 为 Workspace；会写 HOME 缓存的 server 应通过部署定义显式设置独立 HOME。
 
 Session 存储全局识别这两个记录 domain；实际执行仍由显式私有 profile 和限定范围的 Runtime 定义控制。共享 Broker acquire 有意对原 owner 幂等，并返回 workspace generation 与 Runtime binding/generation；普通文件/Shell prepare 保留实际 prompt 和 call 身份。
 
-尚未发布的 MCP migration 使用 V21，避免与 #12894 的 V19/V20 publication migration 重号。部署应按递增顺序执行，后合并分支必须再次对照 main 检查。#12868 的通用 control 需要语义合并，保留撤权后的 MCP 原 owner 恢复，以及先 drain 再释放存储租约的顺序。
+尚未发布的 MCP migration 使用 V21，避免与 #12894 的 V19/V20 publication migration 重号。部署应按递增顺序执行，后合并分支必须再次对照 main 检查。如果 MCP V21 已先执行，后到达且尚未应用的 publication migration 必须重新编号到已部署版本之后，不能靠启用 out-of-order migration 绕过检查。#12868 的通用 control 需要语义合并，保留撤权后的 MCP 原 owner 恢复，以及先 drain 再释放存储租约的顺序。
 
 公开配置管理和生产 AgentBundle 能力发布另行部署。没有查询或幂等支持的远端系统不能自动恢复未知副作用。Runtime 的代内回执不能跨物理 Runtime 丢失持久保留；此时已提交的 Session intent 保持阻塞结果。配额按 Runtime 实例计算，不跨独立 Runtime 进程汇总。私有配置沿用现有 inline Session Store：每类发现列表限制为 16 KiB，保留部分条目时标记 partial，无法保留有效条目时标记 failed；原始操作响应限制为 60 KiB，超限以 output-limit 错误结算。本阶段不启用 SDK 反向客户端、生产 profile 公告、跨进程总预算或对象存储结果。

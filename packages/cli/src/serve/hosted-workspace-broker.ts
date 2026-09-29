@@ -194,7 +194,9 @@ export class HostedWorkspaceBroker {
           cancellationSent = true;
           response = await this.request(`${path}:cancel`, {});
         }
-        response ??= await this.request(path);
+        response ??= await this.request(
+          waitForUnknown ? `${path}?reconcile=true` : path,
+        );
       } catch (cause) {
         if (
           !waitForUnknown ||

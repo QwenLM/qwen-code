@@ -261,7 +261,7 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
                 throw new RuntimeBrokerException(400, "runtime_payload_invalid", "payloadJson is required", false);
             }
             complete(exchange, service.startExecution(harnessSessionId, runtimeSessionId, executionCallId, payload)
-                    .thenCompose(record -> observe(harnessSessionId, runtimeSessionId, record)),
+                    .thenCompose(record -> observe(harnessSessionId, runtimeSessionId, record, false)),
                     observation -> observedExecutionEnvelope(harnessSessionId, runtimeSessionId, observation));
             return;
         }
@@ -278,7 +278,7 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
             String runtimeSessionId = JsonCodec.requiredString(body,
                     "runtimeSessionId", "cancel request");
             complete(exchange, service.cancelExecution(harnessSessionId, runtimeSessionId, executionCallId)
-                    .thenCompose(record -> observe(harnessSessionId, runtimeSessionId, record)),
+                    .thenCompose(record -> observe(harnessSessionId, runtimeSessionId, record, false)),
                     observation -> observedExecutionEnvelope(harnessSessionId, runtimeSessionId, observation));
             return;
         }
@@ -296,8 +296,14 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
             if (query.containsKey("afterSeq")) {
                 parseSequence(query.get("afterSeq"));
             }
+            String reconcile = query.getOrDefault("reconcile", "false");
+            if (!"true".equals(reconcile) && !"false".equals(reconcile)) {
+                throw new RuntimeBrokerException(400, "runtime_broker_invalid_request",
+                        "reconcile must be true or false.", false);
+            }
             complete(exchange, service.getExecution(harnessSessionId, runtimeSessionId, executionCallId)
-                    .thenCompose(record -> observe(harnessSessionId, runtimeSessionId, record)),
+                    .thenCompose(record -> observe(harnessSessionId, runtimeSessionId, record,
+                            Boolean.parseBoolean(reconcile))),
                     observation -> observedExecutionEnvelope(harnessSessionId, runtimeSessionId, observation));
             return;
         }
@@ -305,8 +311,9 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
     }
 
     private CompletionStage<ExecutionReconciliation> observe(String harnessSessionId,
-            String runtimeSessionId, ToolExecutionRecord record) {
+            String runtimeSessionId, ToolExecutionRecord record, boolean reconcile) {
         return record.getState() == ToolExecutionRecord.State.UNKNOWN
+                && (reconcile || Integer.valueOf(3).equals(record.getReference().get("runtimeProtocol")))
                 ? service.reconcileExecution(harnessSessionId, runtimeSessionId, record.getExecutionCallId())
                 : CompletableFuture.completedFuture(new ExecutionReconciliation(record,
                         ExecutionReconciliation.Outcome.IN_FLIGHT, null));
