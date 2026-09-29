@@ -7,6 +7,7 @@
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import type { Content } from '@google/genai';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   globalMemoryManager,
@@ -1389,6 +1390,250 @@ describe('MemoryManager', () => {
         expect(vi.mocked(runAutoMemoryExtract)).not.toHaveBeenCalled();
       },
     );
+
+    it('skips only the turn containing a successful manage_memory call', async () => {
+      vi.mocked(runAutoMemoryExtract).mockResolvedValue({
+        touchedTopics: [],
+        cursor: { sessionId: 'sess-1', updatedAt: new Date().toISOString() },
+      });
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'Remember my unit preference.' }] },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'manage-memory',
+                name: ToolNames.MANAGE_MEMORY,
+                args: { action: 'remember', content: 'Use microseconds.' },
+              },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'manage-memory',
+                name: ToolNames.MANAGE_MEMORY,
+                response: { output: '{"updated":1}' },
+              },
+            },
+          ],
+        },
+        { role: 'model', parts: [{ text: 'Remembered.' }] },
+        { role: 'user', parts: [{ text: 'The release window is Friday.' }] },
+        { role: 'model', parts: [{ text: 'Understood.' }] },
+      ];
+      const mgr = new MemoryManager();
+      const sameTurn = await mgr.scheduleExtract({
+        projectRoot,
+        sessionId: 'sess-1',
+        history: history.slice(0, 3),
+      });
+
+      expect(sameTurn.skippedReason).toBe('memory_tool');
+      expect(runAutoMemoryExtract).not.toHaveBeenCalled();
+      const laterTurn = await mgr.scheduleExtract({
+        projectRoot,
+        sessionId: 'sess-1',
+        history: [...history],
+      });
+
+      expect(laterTurn.skippedReason).toBeUndefined();
+      expect(runAutoMemoryExtract).toHaveBeenCalledOnce();
+    });
+
+    it('does not skip extraction after manage_memory fails', async () => {
+      vi.mocked(runAutoMemoryExtract).mockResolvedValue({
+        touchedTopics: [],
+        cursor: { sessionId: 'sess-1', updatedAt: new Date().toISOString() },
+      });
+      const mgr = new MemoryManager();
+      const result = await mgr.scheduleExtract({
+        projectRoot,
+        sessionId: 'sess-1',
+        history: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'manage-memory',
+                  name: ToolNames.MANAGE_MEMORY,
+                  args: { action: 'remember', content: 'Use microseconds.' },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'manage-memory',
+                  name: ToolNames.MANAGE_MEMORY,
+                  response: { error: 'failed' },
+                },
+              },
+            ],
+          },
+        ],
+      });
+
+      expect(result.skippedReason).toBeUndefined();
+      expect(runAutoMemoryExtract).toHaveBeenCalledOnce();
+    });
+
+    it('does not skip extraction after a direct memory write is rejected', async () => {
+      // Same invariant as `manage_memory` above, applied to the other arm of
+      // the predicate: prior-read enforcement, a `permissions.deny` rule on a
+      // memory path, EISDIR or ENOSPC all reject a `write_file` before anything
+      // reaches memory, so the turn's content still needs extracting.
+      vi.mocked(runAutoMemoryExtract).mockResolvedValue({
+        touchedTopics: [],
+        cursor: { sessionId: 'sess-1', updatedAt: new Date().toISOString() },
+      });
+      const mgr = new MemoryManager();
+      const rejected = await mgr.scheduleExtract({
+        projectRoot,
+        sessionId: 'sess-1',
+        history: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'write-1',
+                  name: 'write_file',
+                  args: {
+                    file_path: path.join(
+                      projectRoot,
+                      '.qwen/memory/user/test.md',
+                    ),
+                  },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'write-1',
+                  name: 'write_file',
+                  response: { error: 'permission denied by rule' },
+                },
+              },
+            ],
+          },
+        ],
+      });
+
+      expect(rejected.skippedReason).toBeUndefined();
+      expect(runAutoMemoryExtract).toHaveBeenCalledOnce();
+
+      // Control: the same shape with a successful response still suppresses,
+      // so the gate is absence-of-failure and not "always extract".
+      vi.mocked(runAutoMemoryExtract).mockClear();
+      const succeeded = await mgr.scheduleExtract({
+        projectRoot,
+        sessionId: 'sess-2',
+        history: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'write-2',
+                  name: 'write_file',
+                  args: {
+                    file_path: path.join(
+                      projectRoot,
+                      '.qwen/memory/user/test.md',
+                    ),
+                  },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'write-2',
+                  name: 'write_file',
+                  response: { output: 'wrote file' },
+                },
+              },
+            ],
+          },
+        ],
+      });
+
+      expect(succeeded.skippedReason).toBe('memory_tool');
+      expect(runAutoMemoryExtract).not.toHaveBeenCalled();
+    });
+
+    it('does not skip extraction after a no-op manage_memory forget', async () => {
+      vi.mocked(runAutoMemoryExtract).mockResolvedValue({
+        touchedTopics: [],
+        cursor: { sessionId: 'sess-1', updatedAt: new Date().toISOString() },
+      });
+      const mgr = new MemoryManager();
+      const result = await mgr.scheduleExtract({
+        projectRoot,
+        sessionId: 'sess-1',
+        history: [
+          {
+            role: 'user',
+            parts: [
+              {
+                text: 'Forget the old deploy rule - and note deploys now need two approvals.',
+              },
+            ],
+          },
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'manage-memory',
+                  name: ToolNames.MANAGE_MEMORY,
+                  args: { action: 'forget', content: 'old deploy rule' },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'manage-memory',
+                  name: ToolNames.MANAGE_MEMORY,
+                  // manage_memory reports forget success with removed: 0 when
+                  // nothing matched - no error key, no throw.
+                  response: {
+                    output:
+                      '{"action":"forget","removed":0,"touchedScopes":[]}',
+                  },
+                },
+              },
+            ],
+          },
+          { role: 'model', parts: [{ text: 'Nothing matched that rule.' }] },
+        ],
+      });
+
+      // A successful call does not imply a write, so skipping here would
+      // silently drop the new durable fact stated in the same turn.
+      expect(result.skippedReason).toBeUndefined();
+      expect(runAutoMemoryExtract).toHaveBeenCalledOnce();
+    });
 
     it('does not treat an unrelated bridged call as a memory write', async () => {
       vi.mocked(runAutoMemoryExtract).mockResolvedValue({
