@@ -89,6 +89,77 @@ describe('resolveEnvVars', () => {
 });
 
 describe('parseChannelConfig', () => {
+  it('accepts independent session rotation bounds', async () => {
+    const config = await parseChannelConfig('bot', {
+      type: 'bare',
+      sessionRotation: { maxTurns: 200, maxAgeHours: 24 },
+    });
+    expect(config.sessionRotation).toEqual({ maxTurns: 200, maxAgeHours: 24 });
+    expect(
+      (await parseChannelConfig('bot', { type: 'bare' })).sessionRotation,
+    ).toBeUndefined();
+  });
+
+  it.each([
+    null,
+    [],
+    {},
+    { maxTurns: 0 },
+    { maxTurns: 1.5 },
+    { maxAgeHours: -1 },
+    { maxAgeHours: Infinity },
+    { maxTurns: 1, unknown: 2 },
+  ])('rejects invalid session rotation %j', async (sessionRotation) => {
+    await expect(
+      parseChannelConfig('bot', { type: 'bare', sessionRotation }),
+    ).rejects.toThrow('sessionRotation');
+  });
+
+  it('rejects rotation with named tasks', async () => {
+    await expect(
+      parseChannelConfig('bot', {
+        type: 'bare',
+        sessionScope: 'user',
+        multiSession: true,
+        sessionRotation: { maxTurns: 2 },
+      }),
+    ).rejects.toThrow('cannot use sessionRotation');
+  });
+
+  it('normalizes message routes and resolves the default route', async () => {
+    const config = await parseChannelConfig('bot', {
+      type: 'bare',
+      messageRoutes: { ' /review ': ' Review code. ', '/QA': '' },
+      defaultMessageRoute: ' /QA ',
+    });
+    expect(config.messageRoutes).toEqual({
+      '/review': 'Review code.',
+      '/QA': '',
+    });
+    expect(config.defaultMessageRoute).toBe('/QA');
+  });
+
+  it.each([
+    { messageRoutes: null },
+    { messageRoutes: [] },
+    { messageRoutes: '/review' },
+    { messageRoutes: {} },
+    { messageRoutes: { ' ': 'instructions' } },
+    { messageRoutes: { ' constructor ': 'instructions' } },
+    { messageRoutes: { '/review': 1 } },
+    { messageRoutes: { '/review': '', ' /review ': '' } },
+    { messageRoutes: { '/review': '' }, multiSession: true },
+    { defaultMessageRoute: '/review' },
+    { messageRoutes: { '/review': '' }, defaultMessageRoute: '/missing' },
+    { defaultMessageRoute: '' },
+    { defaultMessageRoute: null },
+    { defaultMessageRoute: 1 },
+  ])('rejects invalid message routing %j', async (routing) => {
+    await expect(
+      parseChannelConfig('bot', { type: 'bare', ...routing }),
+    ).rejects.toThrow(/messageRoutes|defaultMessageRoute/);
+  });
+
   it('throws when type is missing', async () => {
     await expect(parseChannelConfig('bot', {})).rejects.toThrow(
       'missing required field "type"',

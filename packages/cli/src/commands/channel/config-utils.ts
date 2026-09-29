@@ -98,6 +98,7 @@ const KNOWN_CREDENTIAL_FIELDS = new Set(['token', 'clientId', 'clientSecret']);
 
 interface MultiSessionCompatibilityConfig {
   multiSession?: boolean;
+  sessionRotation?: ChannelConfig['sessionRotation'];
   sessionScope: ChannelConfig['sessionScope'];
   groupHistoryLimit?: unknown;
   groups?: Record<string, unknown>;
@@ -109,6 +110,9 @@ export function multiSessionCompatibilityError(
   config: MultiSessionCompatibilityConfig,
 ): string | undefined {
   if (!config.multiSession) return undefined;
+  if (config.sessionRotation) {
+    return `Channel "${name}" cannot use sessionRotation when multiSession is enabled.`;
+  }
   if (config.sessionScope !== 'user') {
     return `Channel "${name}" requires sessionScope "user" when multiSession is enabled.`;
   }
@@ -131,6 +135,57 @@ export function multiSessionCompatibilityError(
     return `Channel "${name}" cannot use webhooks when multiSession is enabled.`;
   }
   return undefined;
+}
+
+export function parseSessionRotationConfig(
+  name: string,
+  value: unknown,
+): ChannelConfig['sessionRotation'] {
+  if (value === undefined) return undefined;
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(
+      `Channel "${name}" field "sessionRotation" must be an object.`,
+    );
+  }
+  const rotation = value as Record<string, unknown>;
+  if (
+    Object.keys(rotation).some(
+      (key) => !['maxTurns', 'maxAgeHours'].includes(key),
+    )
+  ) {
+    throw new Error(
+      `Channel "${name}" field "sessionRotation" has an unknown bound.`,
+    );
+  }
+  const maxTurns = rotation['maxTurns'];
+  const maxAgeHours = rotation['maxAgeHours'];
+  if (maxTurns === undefined && maxAgeHours === undefined) {
+    throw new Error(`Channel "${name}" field "sessionRotation" needs a bound.`);
+  }
+  if (
+    maxTurns !== undefined &&
+    (!Number.isSafeInteger(maxTurns) || Number(maxTurns) <= 0)
+  ) {
+    throw new Error(
+      `Channel "${name}" field "sessionRotation.maxTurns" must be a positive integer.`,
+    );
+  }
+  if (
+    maxAgeHours !== undefined &&
+    (typeof maxAgeHours !== 'number' ||
+      !Number.isFinite(maxAgeHours) ||
+      maxAgeHours <= 0)
+  ) {
+    throw new Error(
+      `Channel "${name}" field "sessionRotation.maxAgeHours" must be a positive number.`,
+    );
+  }
+  return {
+    ...(maxTurns !== undefined ? { maxTurns: maxTurns as number } : {}),
+    ...(maxAgeHours !== undefined
+      ? { maxAgeHours: maxAgeHours as number }
+      : {}),
+  };
 }
 
 function resolveConfigEnvVar(value: string, mode: EnvResolution): string {
@@ -191,6 +246,72 @@ function parseObjectStringFields<Field extends string>(
     result[field] = fieldValue;
   }
   return Object.keys(result).length > 0 ? result : undefined;
+}
+
+export function parseMessageRoutingConfig(
+  name: string,
+  rawConfig: Record<string, unknown>,
+): { messageRoutes?: Record<string, string>; defaultMessageRoute?: string } {
+  const value = rawConfig['messageRoutes'];
+  let messageRoutes: Record<string, string> | undefined;
+  if (value !== undefined) {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+      throw new Error(
+        `Channel "${name}" field "messageRoutes" must be an object.`,
+      );
+    }
+    messageRoutes = {};
+    for (const [rawPrefix, instructions] of Object.entries(value)) {
+      const prefix = rawPrefix.trim();
+      if (!prefix) {
+        throw new Error(
+          `Channel "${name}" field "messageRoutes" contains an empty prefix.`,
+        );
+      }
+      if (['__proto__', 'constructor', 'prototype'].includes(prefix)) {
+        throw new Error(
+          `Channel "${name}" field "messageRoutes" contains a reserved prefix.`,
+        );
+      }
+      if (typeof instructions !== 'string') {
+        throw new Error(
+          `Channel "${name}" field "messageRoutes.${prefix}" must be a string.`,
+        );
+      }
+      if (Object.hasOwn(messageRoutes, prefix)) {
+        throw new Error(
+          `Channel "${name}" field "messageRoutes" contains duplicate prefix "${prefix}".`,
+        );
+      }
+      messageRoutes[prefix] = instructions.trim();
+    }
+    if (Object.keys(messageRoutes).length === 0) {
+      throw new Error(
+        `Channel "${name}" field "messageRoutes" must not be empty.`,
+      );
+    }
+    if (rawConfig['multiSession'] === true) {
+      throw new Error(
+        `Channel "${name}" cannot use "messageRoutes" with "multiSession".`,
+      );
+    }
+  }
+  const rawDefault = rawConfig['defaultMessageRoute'];
+  let defaultMessageRoute: string | undefined;
+  if (rawDefault !== undefined) {
+    if (typeof rawDefault !== 'string' || !rawDefault.trim()) {
+      throw new Error(
+        `Channel "${name}" field "defaultMessageRoute" must be a non-empty string.`,
+      );
+    }
+    defaultMessageRoute = rawDefault.trim();
+    if (!Object.hasOwn(messageRoutes ?? {}, defaultMessageRoute)) {
+      throw new Error(
+        `Channel "${name}" field "defaultMessageRoute" must name a configured message route.`,
+      );
+    }
+  }
+  return { messageRoutes, defaultMessageRoute };
 }
 
 function parseMemoryScopeConfig(
@@ -584,11 +705,16 @@ export async function parseChannelConfig(
     'multiSession',
     rawConfig['multiSession'],
   );
+  const sessionRotation = parseSessionRotationConfig(
+    name,
+    rawConfig['sessionRotation'],
+  );
   const groups = parseGroups(name, rawConfig);
   const webhooks = parseWebhookConfig(name, rawConfig);
 
   const multiSessionError = multiSessionCompatibilityError(name, {
     multiSession,
+    sessionRotation,
     sessionScope: configuredSessionScope,
     groupHistoryLimit: rawConfig['groupHistoryLimit'],
     groups,
@@ -609,9 +735,11 @@ export async function parseChannelConfig(
     allowedUsers: (rawConfig['allowedUsers'] as string[]) || [],
     sessionScope: configuredSessionScope,
     multiSession,
+    sessionRotation,
     cwd: resolveChannelCwd(rawConfig['cwd'] as string | undefined, defaultCwd),
     approvalMode: parseApprovalModeConfig(name, rawConfig),
     instructions: rawConfig['instructions'] as string | undefined,
+    ...parseMessageRoutingConfig(name, rawConfig),
     identity: parseObjectStringFields(name, rawConfig, 'identity', [
       'id',
       'displayName',

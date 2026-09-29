@@ -5,6 +5,8 @@
  */
 
 import { expect, test, type Locator, type Page } from '@playwright/test';
+import { mkdirSync } from 'node:fs';
+import { resolve } from 'node:path';
 import type { DaemonEvent } from '@qwen-code/sdk/daemon';
 import {
   createWebShellDaemonScenario,
@@ -134,7 +136,9 @@ async function openTrajectory(
     page.locator('[data-web-shell-root]:not([data-web-shell-gate])'),
   ).toBeVisible();
 
-  await page.getByRole('button', { name: 'Toggle right panel' }).click();
+  await page
+    .getByRole('button', { name: /Toggle right panel|切换右侧扩展区/ })
+    .click();
   await page.getByTestId('right-panel-open-trajectory').click();
   const grid = page.getByTestId('trajectory-rows');
   await expect(grid).toBeVisible();
@@ -161,6 +165,135 @@ function mountedRows(page: Page): Locator {
 }
 
 test.describe('trajectory panel', () => {
+  for (const { language, theme } of [
+    { language: 'en', theme: 'dark' },
+    { language: 'zh-CN', theme: 'light' },
+  ]) {
+    test(`fits 320, 480 and 960px panel widths in ${language} ${theme}`, async ({
+      page,
+    }, testInfo) => {
+      await page.setViewportSize({ width: 2400, height: 900 });
+      await page.addInitScript(
+        ({ language, theme }) => {
+          localStorage.setItem('qwen-code-web-shell-language', language);
+          localStorage.setItem('qwen-code-web-shell-theme', theme);
+        },
+        { language, theme },
+      );
+      await openTrajectory(page, String(testInfo.project.use.baseURL));
+      const panel = page.getByTestId('trajectory-panel');
+      const resizeHandle = page
+        .locator('[role="separator"][aria-orientation="vertical"]')
+        .last();
+      const output = resolve(
+        process.cwd(),
+        '../../.qwen/e2e-tests/trajectory-pr1',
+      );
+      mkdirSync(output, { recursive: true });
+      for (const width of [320, 480, 960]) {
+        const current = (await panel.boundingBox())!.width;
+        const handle = (await resizeHandle.boundingBox())!;
+        const x = handle.x + handle.width / 2;
+        const y = handle.y + handle.height / 2;
+        await page.mouse.move(x, y);
+        await page.mouse.down();
+        await page.mouse.move(x + current - width, y, { steps: 5 });
+        await page.mouse.up();
+        await expect
+          .poll(async () => Math.round((await panel.boundingBox())!.width))
+          .toBe(width);
+        await expect(panel.getByTestId('trajectory-mode-active')).toBeVisible();
+        await expect(panel.getByTestId('trajectory-mode-clock')).toBeVisible();
+        const overflow = await panel.evaluate(
+          (element) => element.scrollWidth - element.clientWidth,
+        );
+        expect(overflow).toBeLessThanOrEqual(1);
+        await panel.screenshot({
+          path: resolve(output, `${language}-${theme}-${width}.png`),
+        });
+        if (width === 320) {
+          const gridY = (await panel
+            .getByTestId('trajectory-rows')
+            .boundingBox())!.y;
+          const help = panel.locator('details summary');
+          await help.click();
+          await expect(panel.locator('details[open]')).toBeVisible();
+          expect(
+            (await panel.getByTestId('trajectory-rows').boundingBox())!.y,
+          ).toBe(gridY);
+          await panel.screenshot({
+            path: resolve(output, `${language}-${theme}-metric-help.png`),
+          });
+          await help.click();
+        }
+      }
+      const metricsBefore = await panel
+        .getByTestId('trajectory-metrics')
+        .innerText();
+      await panel.getByTestId('trajectory-mode-clock').focus();
+      await page.keyboard.press('Enter');
+      await expect(panel.getByTestId('trajectory-mode-clock')).toHaveAttribute(
+        'aria-pressed',
+        'true',
+      );
+      expect(await panel.getByTestId('trajectory-metrics').innerText()).toBe(
+        metricsBefore,
+      );
+      await panel.getByTestId('trajectory-zoom-in').click();
+      expect(await panel.getByTestId('trajectory-metrics').innerText()).toBe(
+        metricsBefore,
+      );
+    });
+  }
+
+  test('explains timed rows with no start and a failed refresh over retained data', async ({
+    page,
+  }, testInfo) => {
+    const events = transcriptEvents(1).map((event) => {
+      const update = event.data as Record<string, unknown>;
+      const meta = update['_meta'] as Record<string, unknown> | undefined;
+      const timing = meta?.['timing'] as Record<string, unknown> | undefined;
+      if (timing) delete timing['startedAt'];
+      return event;
+    });
+    await openTrajectory(page, String(testInfo.project.use.baseURL), {
+      transcriptPage: { events },
+    });
+    const panel = page.getByTestId('trajectory-panel');
+    await expect(panel.getByTestId('trajectory-overview')).toContainText(
+      'Recorded durations have no start time',
+    );
+    await expect(panel.getByTestId('trajectory-context-notice')).toContainText(
+      'without start',
+    );
+    const output = resolve(
+      process.cwd(),
+      '../../.qwen/e2e-tests/trajectory-pr1',
+    );
+    mkdirSync(output, { recursive: true });
+    await panel.screenshot({ path: resolve(output, 'all-starts-missing.png') });
+    const gridY = (await panel.getByTestId('trajectory-rows').boundingBox())!.y;
+
+    await page.route('**/session/*/transcript*', async (route) => {
+      await route.fulfill({
+        status: 500,
+        contentType: 'application/json',
+        body: '{"error":"refresh unavailable"}',
+      });
+    });
+    await panel.getByRole('button', { name: 'Refresh' }).click();
+    await expect(panel.getByRole('alert')).toContainText(
+      'Refresh failed; showing the last successful read',
+    );
+    await expect(panel.getByTestId('trajectory-rows')).toBeVisible();
+    expect((await panel.getByTestId('trajectory-rows').boundingBox())!.y).toBe(
+      gridY,
+    );
+    await panel.screenshot({
+      path: resolve(output, 'refresh-failed-retained.png'),
+    });
+  });
+
   test('shows what each request and tool cost @smoke', async ({
     page,
   }, testInfo) => {
@@ -212,6 +345,14 @@ test.describe('trajectory panel', () => {
     await page.getByRole('button', { name: 'Fullscreen' }).click();
     await expect(mountedRows(page).first()).toBeVisible();
     expect(await mountedRows(page).count()).toBeGreaterThan(0);
+    const output = resolve(
+      process.cwd(),
+      '../../.qwen/e2e-tests/trajectory-pr1',
+    );
+    mkdirSync(output, { recursive: true });
+    await page.getByTestId('trajectory-panel').screenshot({
+      path: resolve(output, 'fullscreen.png'),
+    });
 
     await page.getByRole('button', { name: 'Exit fullscreen' }).click();
     await expect(mountedRows(page).first()).toBeVisible();
@@ -373,8 +514,8 @@ test.describe('trajectory panel', () => {
     ]);
     // The overview is a flex sibling of the scrolled rows: if its height moved
     // at all, so would every row under the reader.
-    expect(before[0]!.height).toBe(64);
-    expect(after[0]!.height).toBe(64);
+    expect(before[0]!.height).toBe(128);
+    expect(after[0]!.height).toBe(128);
     expect(after[1]!.y).toBe(before[1]!.y);
   });
 
@@ -590,14 +731,13 @@ test.describe('trajectory panel', () => {
           .toBeGreaterThan(before!.width * 5);
         const after = (await target.boundingBox())!;
         // The span that was under the pointer is still under it.
-        expect(
-          Math.abs(after.x + after.width / 2 - point.x),
-        ).toBeLessThanOrEqual(2);
+        expect(after.x).toBeLessThanOrEqual(point.x);
+        expect(after.x + after.width).toBeGreaterThanOrEqual(point.x);
         await expectValueAtTrackEnd(page);
         // Zooming happens inside the strip: nothing below it moves.
         expect(
           (await page.getByTestId('trajectory-overview').boundingBox())!.height,
-        ).toBe(64);
+        ).toBe(128);
         expect((await grid.boundingBox())!.y).toBe(gridBefore!.y);
       });
 
@@ -693,6 +833,176 @@ test.describe('trajectory panel', () => {
           'true',
         );
         await expectValueAtTrackEnd(page);
+      });
+    });
+
+    test.describe('real time', () => {
+      /**
+       * Real time runs from turn 1's request to turn 40's tool: 39 idle-laden
+       * minutes plus the last turn's 1100 ms. Worked out from the fixture
+       * apart from the code, so a change to the projection shows up here.
+       */
+      const CLOCK_TOTAL_MS = 39 * 60_000 + 1100;
+
+      async function switchToClock(page: Page) {
+        const toggle = page.getByTestId('trajectory-mode-clock');
+        await toggle.click();
+        await expect(toggle).toHaveAttribute('aria-pressed', 'true');
+        return toggle;
+      }
+
+      const plotBox = async (page: Page) => {
+        const box = await page.getByTestId('trajectory-plot').boundingBox();
+        expect(box).not.toBeNull();
+        return box!;
+      };
+
+      /** Halfway between two turns' request spans: in the idle minute. */
+      async function between(page: Page, turn: number) {
+        const [a, b] = await Promise.all([
+          requestSpan(page, turn).boundingBox(),
+          requestSpan(page, turn + 1).boundingBox(),
+        ]);
+        return { x: (a!.x + b!.x) / 2, y: a!.y + a!.height / 2 };
+      }
+
+      test('spreads the run over real time when switched @smoke', async ({
+        page,
+      }, testInfo) => {
+        const grid = await openTrajectory(
+          page,
+          String(testInfo.project.use.baseURL),
+        );
+        await expect(overviewSpans(page)).toHaveCount(2 * TURNS);
+        const gridBefore = (await grid.boundingBox())!;
+
+        await switchToClock(page);
+
+        await expect(overviewSpans(page)).toHaveCount(2 * TURNS);
+        const plot = await plotBox(page);
+        const first = (await requestSpan(page, 1).boundingBox())!;
+        const lastTool = (await overviewSpans(page).last().boundingBox())!;
+        expect(Math.abs(first.x - plot.x)).toBeLessThanOrEqual(2);
+        expect(
+          Math.abs(lastTool.x + lastTool.width - (plot.x + plot.width)),
+        ).toBeLessThanOrEqual(4);
+        // A minute between turns is a minute of track.
+        const [t20, t21] = await Promise.all([
+          requestSpan(page, 20).boundingBox(),
+          requestSpan(page, 21).boundingBox(),
+        ]);
+        expect(
+          Math.abs(t21!.x - t20!.x - (plot.width * 60_000) / CLOCK_TOTAL_MS),
+        ).toBeLessThanOrEqual(2);
+        await expect(page.getByTestId('trajectory-overview-from')).toHaveText(
+          /^\d{2}:\d{2}:\d{2}$/,
+        );
+        await expect(grid).toHaveAttribute(
+          'aria-rowcount',
+          String(TURNS * ROWS_PER_TURN),
+        );
+        expect((await grid.boundingBox())!.y).toBe(gridBefore.y);
+      });
+
+      test('a selection in idle time empties the table and can be cleared @smoke', async ({
+        page,
+      }, testInfo) => {
+        await openTrajectory(page, String(testInfo.project.use.baseURL));
+        await expect(overviewSpans(page)).toHaveCount(2 * TURNS);
+        await switchToClock(page);
+
+        // At full width the idle minute is a few pixels; zoom in on turn 20
+        // until it is wide enough to drag inside.
+        const anchor = await centreOf(requestSpan(page, 20));
+        await page.mouse.move(anchor.x, anchor.y);
+        for (let i = 0; i < 3; i += 1) await page.mouse.wheel(0, -600);
+        await expect(page.getByTestId('trajectory-domain')).toHaveAttribute(
+          'data-zoomed',
+          'true',
+        );
+        const tool20 = (await overviewSpans(page)
+          .nth(2 * (20 - 1) + 1)
+          .boundingBox())!;
+        const request21 = (await requestSpan(page, 21).boundingBox())!;
+        const from = { x: tool20.x + tool20.width + 6, y: anchor.y };
+        const to = { x: request21.x - 6, y: anchor.y };
+        expect(to.x - from.x).toBeGreaterThanOrEqual(20);
+
+        await dragBetween(page, from, to);
+
+        const empty = page.getByTestId('trajectory-range-empty');
+        await expect(empty).toContainText(
+          'No request or tool ran in the selected time.',
+        );
+        await expect(page.getByTestId('trajectory-range-status')).toHaveText(
+          `Showing 0 of ${TURNS * (ROWS_PER_TURN - 1)} rows in the selected time`,
+        );
+        await expect(page.getByTestId('trajectory-rows')).toHaveCount(0);
+
+        await empty.getByRole('button').click();
+
+        await expect(empty).toHaveCount(0);
+        await expect(page.getByTestId('trajectory-rows')).toHaveAttribute(
+          'aria-rowcount',
+          String(TURNS * ROWS_PER_TURN),
+        );
+      });
+
+      test('keeps the turns a real-time selection covers @smoke', async ({
+        page,
+      }, testInfo) => {
+        const grid = await openTrajectory(
+          page,
+          String(testInfo.project.use.baseURL),
+        );
+        await expect(overviewSpans(page)).toHaveCount(2 * TURNS);
+        await switchToClock(page);
+
+        // From the idle minute before turn 12 to the one after turn 15:
+        // turns 12–15 whole, each with its header, prompt, request and tool.
+        await dragBetween(
+          page,
+          await between(page, 11),
+          await between(page, 15),
+        );
+
+        await expect(grid).toHaveAttribute('aria-rowcount', String(4 * 4));
+      });
+
+      test('switching back cuts idle out again and drops the selection @smoke', async ({
+        page,
+      }, testInfo) => {
+        const grid = await openTrajectory(
+          page,
+          String(testInfo.project.use.baseURL),
+        );
+        await expect(overviewSpans(page)).toHaveCount(2 * TURNS);
+        const toggle = await switchToClock(page);
+        await dragBetween(
+          page,
+          await between(page, 11),
+          await between(page, 15),
+        );
+        await expect(grid).toHaveAttribute('aria-rowcount', String(4 * 4));
+
+        const active = page.getByTestId('trajectory-mode-active');
+        await active.click();
+
+        await expect(toggle).toHaveAttribute('aria-pressed', 'false');
+        await expect(active).toHaveAttribute('aria-pressed', 'true');
+        await expect(page.getByTestId('trajectory-range')).toHaveCount(0);
+        await expect(page.getByTestId('trajectory-overview-from')).toHaveText(
+          '0',
+        );
+        await expect(grid).toHaveAttribute(
+          'aria-rowcount',
+          String(TURNS * ROWS_PER_TURN),
+        );
+        const plot = await plotBox(page);
+        const lastTool = (await overviewSpans(page).last().boundingBox())!;
+        expect(
+          Math.abs(lastTool.x + lastTool.width - (plot.x + plot.width)),
+        ).toBeLessThanOrEqual(4);
       });
     });
   });

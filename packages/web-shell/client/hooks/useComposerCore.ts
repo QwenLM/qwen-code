@@ -873,10 +873,20 @@ class ComposerTagWidget extends WidgetType {
   }
 
   destroy() {
-    this.contentRoot?.unmount();
-    this.tooltipRoot?.unmount();
+    const contentRoot = this.contentRoot;
+    const tooltipRoot = this.tooltipRoot;
     this.contentRoot = null;
     this.tooltipRoot = null;
+    if (!contentRoot && !tooltipRoot) return;
+    // WidgetType.destroy() runs inside CodeMirror's update cycle. React's
+    // Root.unmount() flushes pending sync work across ALL roots
+    // (flushSyncWorkAcrossRoots), which would re-enter the editor mid-update
+    // ("Calls to EditorView.update are not allowed while an update is in
+    // progress", #12826). Defer the unmount out of the update cycle.
+    queueMicrotask(() => {
+      contentRoot?.unmount();
+      tooltipRoot?.unmount();
+    });
   }
 
   ignoreEvent(): boolean {

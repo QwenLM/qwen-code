@@ -83,6 +83,8 @@ import * as fsSync from 'node:fs';
 import {
   collectAvailableSkillEntries,
   renderAvailableSkillsBlock,
+  sessionSkillManager,
+  SKILLS_ACTIVATED_OPENER,
   type AvailableSkillEntry,
 } from '../tools/skill-utils.js';
 import { escapeSystemReminderTags } from '../utils/xml.js';
@@ -274,6 +276,7 @@ const GATE_EXEMPT_TOOLS = new Set<string>([
   ToolNames.READ_FILE,
   ToolNames.READ_MCP_RESOURCE,
   ToolNames.ENTER_PLAN_MODE,
+  ToolNames.SEARCH_MEMORY,
 ]);
 
 // The tri-state persistedOutputFiles mapping every truncation pass reports
@@ -583,6 +586,7 @@ type CoreToolCallResponseInfo = ToolCallResponseInfo & {
 
 export type ErroredToolCall = {
   status: 'error';
+  invocation?: AnyToolInvocation;
   request: ToolCallRequestInfo;
   response: ToolCallResponseInfo;
   tool?: AnyDeclarativeTool;
@@ -1373,6 +1377,7 @@ function withPostToolBatchStop(
     request: lastCall.request,
     tool: lastCall.tool,
     response,
+    startTime: lastCall.startTime,
     durationMs: lastCall.durationMs,
     outcome: undefined,
   } as ErroredToolCall;
@@ -1398,20 +1403,21 @@ interface CoreToolSchedulerOptions {
    * Whether the model this scheduler serves was DECLARED the Skill tool.
    *
    * The skill-activation reminder must not announce a skill to a model that
-   * cannot invoke one, and the registry cannot answer that: `SKILL` is
-   * registered unconditionally, including for subagents, while a subagent
-   * running an explicit `tools` list may never have it declared — nor is
-   * being declared sufficient, since a fork can keep a declaration it is
-   * forbidden to execute. An owner that filters either passes its own
+   * cannot invoke one, and the registry cannot answer that: `SKILL` stays
+   * registered while a `tools.eager` allowlist defers its schema, and a
+   * subagent running an explicit `tools` list may never have it declared —
+   * nor is being declared sufficient, since a fork can keep a declaration it
+   * is forbidden to execute. An owner that filters either passes its own
    * predicate here.
    *
    * It is NOT the predicate behind the startup `<available_skills>` snapshot,
    * and the two are independent rather than ordered. The snapshot is decided
    * before any declarations exist, so it answers from configuration; this
    * answers from the declarations that were sent. Either can say yes where
-   * the other says no — `tools: ['*'], disallowedTools: ['skill']` announces
-   * at startup and is refused here, while a string list carrying an inline
-   * `skill` declaration is the reverse. Do not reason from one to the other.
+   * the other says no: a string list carrying an inline `skill` declaration
+   * is declared here but invisible to the snapshot, and a `skill` the
+   * permission layer kept unregistered is the reverse. Do not reason from one
+   * to the other.
    *
    * Omitted, the scheduler falls back to the registry, which is correct for
    * an owner that declares whatever it registers.
@@ -1997,6 +2003,7 @@ export class CoreToolScheduler {
             request: currentCall.request,
             status: 'error',
             tool: toolInstance,
+            invocation,
             response: auxiliaryData as CoreToolCallResponseInfo,
             durationMs,
             ...(durationMs !== undefined
@@ -2161,6 +2168,7 @@ export class CoreToolScheduler {
           args as Record<string, unknown>,
           targetCallId,
           call.request.prompt_id,
+          call.request.executionOrigin?.kind === 'client',
         ),
       );
       if (invocationOrError instanceof Error) {
@@ -2461,24 +2469,31 @@ export class CoreToolScheduler {
 
   /**
    * Builds a tool invocation and threads optional context (callId,
-   * promptId) into it via duck-typed setters when the invocation
-   * exposes them. Both setters are intentionally optional:
+   * promptId, completion delivery) through the setters it exposes.
+   * Client tools need completion delivery because they do not continue
+   * the model's tool-result turn; code-mode calls return to their parent.
+   * The setters are intentionally optional:
    * - Existing tools whose invocations do not implement these setters
    *   stay compatible without any change.
    * - Future contexts (subagent / direct buildAndExecute / non-scheduler
    *   callers) may invoke this with fewer arguments and still get a
    *   valid invocation back.
-   * Production call sites in this scheduler always pass both — see
-   * the setArgs path at L1036 and the schedule path at L1497.
+   * Scheduling and argument rebuilds pass the request's client provenance;
+   * a missing origin (including nested code-mode calls) does not opt in.
    */
   private buildInvocation(
     tool: AnyDeclarativeTool,
     args: object,
     callId?: string,
     promptId?: string,
+    notifyOnCompletion = false,
   ): AnyToolInvocation | Error {
     try {
       const invocation = tool.build(structuredClone(args));
+      const notificationAware = invocation as {
+        setCompletionNotificationEnabled?: (enabled: boolean) => void;
+      };
+      notificationAware.setCompletionNotificationEnabled?.(notifyOnCompletion);
       if (callId) {
         const maybeAware = invocation as { setCallId?: (id: string) => void };
         if (typeof maybeAware.setCallId === 'function') {
@@ -2623,7 +2638,14 @@ export class CoreToolScheduler {
       distance: levenshtein.get(unknownToolName, toolName),
     }));
 
-    matches.sort((a, b) => a.distance - b.distance);
+    matches.sort((a, b) => {
+      const aIsPrefix = unknownToolName.startsWith(a.name);
+      const bIsPrefix = unknownToolName.startsWith(b.name);
+      if (aIsPrefix !== bIsPrefix) {
+        return aIsPrefix ? -1 : 1;
+      }
+      return a.distance - b.distance;
+    });
 
     const topNResults = matches.slice(0, topN);
 
@@ -3181,6 +3203,7 @@ export class CoreToolScheduler {
               policyGate.args,
               reqInfo.callId,
               reqInfo.prompt_id,
+              reqInfo.executionOrigin?.kind === 'client',
             ),
           );
           if (recordPrevalidationCancellation()) continue;
@@ -3738,7 +3761,8 @@ export class CoreToolScheduler {
                       formatDenialStateLog(denialState),
                   );
                 } else if (
-                  outcome.reason === 'external_write' &&
+                  (outcome.reason === 'external_write' ||
+                    outcome.reason === 'external_directory') &&
                   outcome.message
                 ) {
                   this.autoModeFallbackCallIds.add(reqInfo.callId);
@@ -3747,7 +3771,7 @@ export class CoreToolScheduler {
                     message: outcome.message,
                   };
                   debugLogger.warn(
-                    `Auto mode fallback to manual approval (external_write): Write attempted outside workspace.`,
+                    `Auto mode fallback to manual approval (${outcome.reason}): target outside workspace.`,
                   );
                 }
                 break;
@@ -5627,7 +5651,8 @@ export class CoreToolScheduler {
                 setPromoteAbortControllerCallback,
                 canPromoteForegroundShell,
               );
-            return scheduledCall.request.name === ToolNames.EXEC
+            return scheduledCall.request.name === ToolNames.EXEC ||
+              scheduledCall.request.name === ToolNames.TOOL_SEARCH
               ? runWithToolCallRuntime(
                   {
                     parentCallId: callId,
@@ -5668,7 +5693,8 @@ export class CoreToolScheduler {
                 liveOutputCallback,
                 shellExecutionConfig,
               );
-            return scheduledCall.request.name === ToolNames.EXEC
+            return scheduledCall.request.name === ToolNames.EXEC ||
+              scheduledCall.request.name === ToolNames.TOOL_SEARCH
               ? runWithToolCallRuntime(
                   {
                     parentCallId: callId,
@@ -6071,7 +6097,14 @@ export class CoreToolScheduler {
           !this.config.getExecutionEnvironment?.()
         ) {
           const rulesRegistry = this.config.getConditionalRulesRegistry();
-          const skillManager = this.config.getSkillManager();
+          // Activation, unlike every other skill surface, is session-shared
+          // state: a subagent whose tool policy withholds the Skill tool must
+          // still feed it, or its file reads stop activating path-gated skills
+          // for a parent that can invoke them, and the one-shot rule is never
+          // consumed by anyone. The announcement below stays gated on
+          // `hasSkillTool`, and the bundled-reference route still reads
+          // `getSkillManager()`, so a withheld agent still gets no listing.
+          const skillManager = sessionSkillManager(this.config);
 
           // Collect every reminder block produced by this tool call, then
           // emit them as a single `<system-reminder>` envelope at the end.
@@ -6141,7 +6174,7 @@ export class CoreToolScheduler {
               }
               if (activatedEntries.length > 0) {
                 reminderBlocks.push(
-                  `The following skill(s) became available via the Skill tool based on the file you just accessed; invoke a skill by passing its name to the Skill tool:\n<available_skills>\n${renderAvailableSkillsBlock(
+                  `${SKILLS_ACTIVATED_OPENER}; invoke a skill by passing its name to the Skill tool:\n<available_skills>\n${renderAvailableSkillsBlock(
                     activatedEntries,
                   )}\n</available_skills>`,
                 );
@@ -7433,9 +7466,12 @@ export class CoreToolScheduler {
                 debugLogger.warn(
                   `Auto mode fallback for pending tool (${outcome.reason}): consecutiveBlock=${denialState.consecutiveBlock}, consecutiveUnavailable=${denialState.consecutiveUnavailable}`,
                 );
-              } else if (outcome.reason === 'external_write') {
+              } else if (
+                outcome.reason === 'external_write' ||
+                outcome.reason === 'external_directory'
+              ) {
                 debugLogger.warn(
-                  `Auto mode fallback to manual approval (external_write): Write attempted outside workspace.`,
+                  `Auto mode fallback to manual approval (${outcome.reason}): target outside workspace.`,
                 );
               }
 
@@ -7443,7 +7479,8 @@ export class CoreToolScheduler {
                 outcome.message &&
                 (isDenialFallbackReason(outcome.reason) ||
                   outcome.reason === 'classifier_unavailable' ||
-                  outcome.reason === 'external_write')
+                  outcome.reason === 'external_write' ||
+                  outcome.reason === 'external_directory')
               ) {
                 const autoModeFallback: AutoModeFallbackConfirmation = {
                   reason: outcome.reason,

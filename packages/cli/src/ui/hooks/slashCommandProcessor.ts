@@ -180,6 +180,7 @@ export interface SlashCommandProcessorActions {
   openStatusLineDialog: () => void;
   openModelDialog: (options?: {
     fastModelMode?: boolean;
+    advisorModelMode?: boolean;
     voiceModelMode?: boolean;
     visionModelMode?: boolean;
     compactionModelMode?: boolean;
@@ -1245,6 +1246,9 @@ export const useSlashCommandProcessor = (
                         fastModelMode: true,
                         persistScope: result.persistScope,
                       });
+                      return { type: 'handled' };
+                    case 'advisor-model':
+                      actions.openModelDialog({ advisorModelMode: true });
                       return { type: 'handled' };
                     case 'voice-model':
                       actions.openModelDialog({

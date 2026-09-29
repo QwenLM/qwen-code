@@ -24,6 +24,8 @@ import type {
   ToolRegistry,
 } from '../index.js';
 import type { PermissionDecision } from '../permissions/types.js';
+import { ToolCallEvent } from '../telemetry/types.js';
+import { QwenLogger } from '../telemetry/qwen-logger/qwen-logger.js';
 import { DEFAULT_MAX_SUBAGENT_DEPTH } from '../config/config.js';
 import {
   ApprovalMode,
@@ -103,6 +105,7 @@ import {
 } from '../utils/invocation-context.js';
 import { getPlanModeSystemReminder } from './prompts.js';
 import { PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE } from './plan-mode-entry-policy.js';
+import { SESSION_SKILL_MANAGER } from '../tools/skill-utils.js';
 import {
   promptIdContext,
   todoWorkChainContext,
@@ -1175,6 +1178,77 @@ describe('CoreToolScheduler', () => {
       onToolCallsUpdate,
     };
   }
+
+  it.each(['success', 'error', 'cancelled'] as const)(
+    'preserves each %s call start when telemetry is constructed later',
+    async (status) => {
+      let now = 1_760_000_000_000;
+      const clock = vi.spyOn(Date, 'now').mockImplementation(() => now);
+      const telemetry = vi
+        .spyOn(QwenLogger, 'getInstance')
+        .mockReturnValue(undefined);
+      let controller = new AbortController();
+      const tool = new MockTool({
+        name: 'timed_tool',
+        execute: async () => {
+          now += 4_000;
+          if (status === 'error') throw new Error('execution failed');
+          if (status === 'cancelled') controller.abort();
+          return { llmContent: 'done', returnDisplay: 'done' };
+        },
+      });
+      const { scheduler, onAllToolCallsComplete } =
+        createSchedulerForLegacyToolTests({
+          toolsByName: new Map([[tool.name, tool]]),
+        });
+      const completed: CompletedToolCall[] = [];
+      try {
+        for (const [index, startedAt] of [
+          1_760_000_000_000, 1_760_000_010_000,
+        ].entries()) {
+          now = startedAt;
+          controller = new AbortController();
+          onAllToolCallsComplete.mockClear();
+          await scheduler.schedule(
+            {
+              callId: `timed-${index}`,
+              name: tool.name,
+              args: {},
+              isClientInitiated: false,
+              prompt_id: 'timed-prompt',
+            },
+            controller.signal,
+          );
+          await vi.waitFor(() =>
+            expect(onAllToolCallsComplete).toHaveBeenCalled(),
+          );
+          const call = onAllToolCallsComplete.mock
+            .calls[0][0][0] as CompletedToolCall;
+          expect(call).toMatchObject({
+            status,
+            startTime: startedAt,
+            durationMs: 4_000,
+          });
+          completed.push(call);
+        }
+        now += 60_000;
+        expect(
+          completed.map((call) => {
+            const event = new ToolCallEvent(call);
+            return [event.started_at_ms, event.duration_ms];
+          }),
+        ).toEqual([
+          [1_760_000_000_000, 4_000],
+          [1_760_000_010_000, 4_000],
+        ]);
+        const { startTime: _startTime, ...legacy } = completed[0]!;
+        expect(new ToolCallEvent(legacy).started_at_ms).toBeUndefined();
+      } finally {
+        telemetry.mockRestore();
+        clock.mockRestore();
+      }
+    },
+  );
 
   it('routes tool_call through the underlying tool while preserving the model-facing response name', async () => {
     boundaryDiagnosticsEnabled.value = true;
@@ -4461,53 +4535,56 @@ describe('CoreToolScheduler', () => {
     },
   );
 
-  it('exempts read_mcp_resource from the persistence spill gate', async () => {
-    // The gate fires above DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD (25k) +
-    // GATE_HEADROOM (3k) ≈ 28k and is keyed by tool NAME (not maxOutputChars),
-    // so a self-capped read_mcp_resource result above that size must NOT be
-    // spilled to a stub — the model has to receive the framed body the tool
-    // reports as injected.
-    const content = 'a'.repeat(40_000);
-    const execute = vi.fn().mockResolvedValue({
-      llmContent: content,
-      returnDisplay: 'x',
-    });
-    const toolsByName = new Map<string, MockTool>([
-      [
-        'read_mcp_resource',
-        new MockTool({
-          name: 'read_mcp_resource',
-          execute,
-          maxOutputChars: Number.POSITIVE_INFINITY,
-        }),
-      ],
-    ]);
-    const { scheduler, onAllToolCallsComplete } =
-      createSchedulerForLegacyToolTests({ toolsByName });
+  it.each(['read_mcp_resource', 'search_memory'])(
+    'exempts %s from the persistence spill gate',
+    async (toolName) => {
+      // The gate fires above DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD (25k) +
+      // GATE_HEADROOM (3k) ≈ 28k and is keyed by tool NAME (not maxOutputChars),
+      // so a self-capped result above that size must NOT be
+      // spilled to a stub — the model has to receive the framed body the tool
+      // reports as injected.
+      const content = 'a'.repeat(40_000);
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: content,
+        returnDisplay: 'x',
+      });
+      const toolsByName = new Map<string, MockTool>([
+        [
+          toolName,
+          new MockTool({
+            name: toolName,
+            execute,
+            maxOutputChars: Number.POSITIVE_INFINITY,
+          }),
+        ],
+      ]);
+      const { scheduler, onAllToolCallsComplete } =
+        createSchedulerForLegacyToolTests({ toolsByName });
 
-    await scheduler.schedule(
-      [
-        {
-          callId: 'c',
-          name: 'read_mcp_resource',
-          args: {},
-          isClientInitiated: false,
-          prompt_id: 'p',
-        },
-      ],
-      new AbortController().signal,
-    );
+      await scheduler.schedule(
+        [
+          {
+            callId: 'c',
+            name: toolName,
+            args: {},
+            isClientInitiated: false,
+            prompt_id: 'p',
+          },
+        ],
+        new AbortController().signal,
+      );
 
-    await vi.waitFor(() => {
-      expect(onAllToolCallsComplete).toHaveBeenCalled();
-    });
+      await vi.waitFor(() => {
+        expect(onAllToolCallsComplete).toHaveBeenCalled();
+      });
 
-    const output = outputOfFirstCall(onAllToolCallsComplete);
-    expect(output).not.toContain(
-      'Tool output was too large and has been truncated',
-    );
-    expect(output).toBe(content);
-  });
+      const output = outputOfFirstCall(onAllToolCallsComplete);
+      expect(output).not.toContain(
+        'Tool output was too large and has been truncated',
+      );
+      expect(output).toBe(content);
+    },
+  );
 
   describe('producer-applied output budgets', () => {
     // These exercise the window between the generic spill gate
@@ -8446,6 +8523,45 @@ describe('CoreToolScheduler', () => {
       expect(suggestionMultiple).toBe(
         ' Did you mean one of: "list_files", "read_file", "write_file"?',
       );
+    });
+
+    it('prioritizes a registered prefix of an unknown tool name', () => {
+      const mockToolRegistry = {
+        getAllToolNames: () => [
+          'edit',
+          'write_file',
+          'read_file',
+          'exit_plan_mode',
+        ],
+        getTool: () => undefined,
+        ensureTool: async () => undefined,
+      } as unknown as ToolRegistry;
+      const mockConfig = {
+        getToolRegistry: () => mockToolRegistry,
+        getUseModelRouter: () => false,
+        getLlmClient: () => null,
+        getPermissionsDeny: () => undefined,
+        isInteractive: () => true,
+        getMessageBus: vi.fn().mockReturnValue(undefined),
+        getDisableAllHooks: vi.fn().mockReturnValue(true),
+      } as unknown as Config;
+      const scheduler = new CoreToolScheduler({
+        config: mockConfig,
+        getPreferredEditor: () => 'vscode',
+        onEditorClose: vi.fn(),
+      });
+
+      for (const [unknownName, expected] of [
+        ['edit_file_path', 'edit'],
+        ['edit_file', 'edit'],
+        ['read_file_path', 'read_file'],
+        ['write_file_path', 'write_file'],
+      ]) {
+        // @ts-expect-error accessing private method
+        expect(scheduler.getToolSuggestion(unknownName, 1)).toBe(
+          ` Did you mean "${expected}"?`,
+        );
+      }
     });
 
     it('should use Levenshtein suggestions for excluded tools (getToolSuggestion only handles non-excluded)', () => {
@@ -13828,6 +13944,9 @@ describe('CoreToolScheduler telemetry spans', () => {
       throw new Error('expected an errored tool call');
     }
     expect(completedCall.response.resultDisplay).toBe('sensitive /secret/path');
+    expect(completedCall.invocation?.getDescription()).toBe(
+      'A mock tool invocation for mockTool',
+    );
     expectSanitizedFailure(spanRecord, 'Tool execution failed', 'tool_error');
   });
 
@@ -20414,6 +20533,26 @@ describe('extractToolFilePaths', () => {
 });
 
 describe('CoreToolScheduler activation wiring', () => {
+  function buildMockSkillManager(opts: {
+    matchAndActivateByPaths: ReturnType<typeof vi.fn>;
+    availableSkillNames?: string[];
+  }) {
+    const names = opts.availableSkillNames ?? ['tsx-helper'];
+    return {
+      matchAndActivateByPaths: opts.matchAndActivateByPaths,
+      listSkills: vi.fn().mockResolvedValue(
+        names.map((n) => ({
+          name: n,
+          description: `Description of ${n}`,
+          level: 'project' as const,
+          filePath: `/p/.qwen/skills/${n}/SKILL.md`,
+          body: '',
+        })),
+      ),
+      isSkillActive: vi.fn().mockReturnValue(true),
+    };
+  }
+
   // Integration coverage for the scheduler-side hook that ties
   // extractToolFilePaths → matchAndActivateByPaths → system-reminder
   // append. Unit tests on extractToolFilePaths alone don't catch
@@ -20435,6 +20574,12 @@ describe('CoreToolScheduler activation wiring', () => {
     // omitted, defaults to ["tsx-helper"] which satisfies the common case.
     availableSkillNames?: string[];
     containerExecution?: boolean;
+    /**
+     * The #12424 shape: `getSkillManager()` answers `null` because this
+     * agent's tool policy withheld it, while the session's own manager stays
+     * reachable through the recorded symbol.
+     */
+    withheldFromConfig?: boolean;
   }): {
     scheduler: CoreToolScheduler;
     onAllToolCallsComplete: ReturnType<typeof vi.fn>;
@@ -20505,22 +20650,14 @@ describe('CoreToolScheduler activation wiring', () => {
       getMessageBus: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
       getConditionalRulesRegistry: () => undefined,
-      getSkillManager: () => {
-        const names = opts.availableSkillNames ?? ['tsx-helper'];
-        return {
-          matchAndActivateByPaths: opts.matchAndActivateByPaths,
-          listSkills: vi.fn().mockResolvedValue(
-            names.map((n) => ({
-              name: n,
-              description: `Description of ${n}`,
-              level: 'project' as const,
-              filePath: `/p/.qwen/skills/${n}/SKILL.md`,
-              body: '',
-            })),
-          ),
-          isSkillActive: vi.fn().mockReturnValue(true),
-        };
-      },
+      getSkillManager: () =>
+        opts.withheldFromConfig ? null : buildMockSkillManager(opts),
+      // What `SubagentManager` records on a Config whose tool policy withheld
+      // the manager: the session's own instance, which `sessionSkillManager`
+      // reads back through the prototype chain.
+      ...(opts.withheldFromConfig
+        ? { [SESSION_SKILL_MANAGER]: buildMockSkillManager(opts) }
+        : {}),
       getDisabledSkillNames: () => new Set<string>(),
       getExecutionEnvironment: () => (opts.containerExecution ? {} : undefined),
       isSkillEnabled: () => true,
@@ -20603,10 +20740,11 @@ describe('CoreToolScheduler activation wiring', () => {
 
   it('stays silent when SkillTool is registered but was never declared', async () => {
     // The defect this gate was written for, and the shape the registry cannot
-    // see. `SKILL` is registered unconditionally — no `forSubAgent` guard —
-    // so a subagent running an explicit `tools` list that omits it still has
-    // `getTool(SKILL)` return a tool. Reading the registry therefore held the
-    // gate permanently open, and the agent got a reminder naming a tool
+    // see: `getTool(SKILL)` answers for the Config this scheduler holds, which
+    // can carry the tool while this agent's declarations omit it — a
+    // `tools.eager` allowlist defers the schema without unregistering the
+    // tool. Reading the registry therefore held the gate permanently open,
+    // and the agent got a reminder naming a tool
     // absent from its declarations: a wasted turn on `Tool "skill" not
     // found`, and an announcement marked consumed on the shared Config, so
     // the parent that CAN invoke it never learns the skill activated.
@@ -20640,6 +20778,48 @@ describe('CoreToolScheduler activation wiring', () => {
     // while leaving the text inside passes every other assertion here: the
     // subagent stays silent AND the orchestrator's drain finds the key
     // already consumed, so nobody announces the activation.
+    expect(addInlineAnnouncedSkillKeys).not.toHaveBeenCalled();
+  });
+
+  it('still feeds session-wide activation for a subagent whose Config withholds the manager', async () => {
+    // Activation is session-shared state, and withholding the manager from a
+    // restricted subagent's Config used to switch it off for paths only that
+    // subagent reads. `matchAndConsume` is one-shot, so the rule was then
+    // never consumed by anyone and the parent — which CAN invoke skills —
+    // silently lost the activation its delegated work produced. Measured on a
+    // real bundle for a `paths: ['src/**/*.tsx']` skill and for the shipped
+    // `statusline-setup` built-in, neither of which needs a user agent file.
+    const matchAndActivateByPaths = vi.fn().mockResolvedValue(['tsx-helper']);
+    const { scheduler, onAllToolCallsComplete, addInlineAnnouncedSkillKeys } =
+      buildSchedulerWithSkillManager({
+        matchAndActivateByPaths,
+        skillToolPresent: false,
+        declaredHasSkillTool: false,
+        withheldFromConfig: true,
+      });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: '1',
+          name: ToolNames.READ_FILE,
+          args: { file_path: '/proj/src/App.tsx' },
+          isClientInitiated: false,
+          prompt_id: 'p1',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    // The session registry is fed even though this Config answers `null`.
+    expect(matchAndActivateByPaths).toHaveBeenCalledWith(['/proj/src/App.tsx']);
+    const completed = onAllToolCallsComplete.mock.calls[0][0] as ToolCall[];
+    expect(completed[0].status).toBe('success');
+    // ...while #12424's own fix holds: this agent declared no Skill tool, so
+    // it still gets no listing and does not consume the parent's announcement.
+    expect(getResponseText(completed[0])).not.toContain(
+      'became available via the Skill tool',
+    );
     expect(addInlineAnnouncedSkillKeys).not.toHaveBeenCalled();
   });
 
@@ -21548,6 +21728,11 @@ describe('CoreToolScheduler prompt_id propagation', () => {
     ToolResult
   > {
     capturedPromptId?: string;
+    notifyOnCompletion = false;
+
+    setCompletionNotificationEnabled(enabled: boolean): void {
+      this.notifyOnCompletion = enabled;
+    }
 
     constructor(params: Record<string, unknown>) {
       super(params);
@@ -21558,7 +21743,7 @@ describe('CoreToolScheduler prompt_id propagation', () => {
     }
 
     override async getDefaultPermission(): Promise<PermissionDecision> {
-      return 'allow';
+      return this.params['needsApproval'] ? 'ask' : 'allow';
     }
 
     getDescription(): string {
@@ -21567,7 +21752,7 @@ describe('CoreToolScheduler prompt_id propagation', () => {
 
     async execute(): Promise<ToolResult> {
       return {
-        llmContent: `captured prompt_id=${this.capturedPromptId ?? '<unset>'}`,
+        llmContent: `captured prompt_id=${this.capturedPromptId ?? '<unset>'}; notify=${this.notifyOnCompletion}; args=${JSON.stringify(this.params)}`,
         returnDisplay: '',
       };
     }
@@ -21598,82 +21783,161 @@ describe('CoreToolScheduler prompt_id propagation', () => {
     }
   }
 
-  it('passes request.prompt_id to invocation.setPromptId via buildInvocation', async () => {
-    const tool = new PromptIdAwareTool();
-    const mockToolRegistry = {
-      getTool: () => tool,
-      ensureTool: async () => tool,
-      getFunctionDeclarations: () => [],
-      tools: new Map(),
-      discovery: {},
-      registerTool: () => {},
-      getToolByName: () => tool,
-      getToolByDisplayName: () => tool,
-      getTools: () => [],
-      discoverTools: async () => {},
-      getAllTools: () => [],
-      getToolsByServer: () => [],
-    } as unknown as ToolRegistry;
-
-    const mockConfig = {
-      getSessionId: () => 'test-session-id',
-      getUsageStatisticsEnabled: () => true,
-      getDebugMode: () => false,
-      getApprovalMode: () => ApprovalMode.DEFAULT,
-      getPermissionsAllow: () => [],
-      getContentGeneratorConfig: () => ({
-        model: 'test-model',
-        authType: 'gemini',
-      }),
-      getShellExecutionConfig: () => ({
-        terminalWidth: 90,
-        terminalHeight: 30,
-      }),
-      storage: {
-        getProjectTempDir: () => '/tmp',
+  it.each(
+    [
+      {
+        isClientInitiated: false,
+        source: undefined,
+        executionOrigin: { kind: 'model' } as const,
+        notify: false,
       },
-      getToolRegistry: () => mockToolRegistry,
-      getUseModelRouter: () => false,
-      getLlmClient: () => null,
-      isInteractive: () => true,
-      getIdeMode: () => false,
-      getExperimentalZedIntegration: () => false,
-      getChatRecordingService: () => undefined,
-      getMessageBus: vi.fn().mockReturnValue(undefined),
-      getDisableAllHooks: vi.fn().mockReturnValue(true),
-    } as unknown as Config;
+      {
+        isClientInitiated: true,
+        source: undefined,
+        executionOrigin: { kind: 'client' } as const,
+        notify: true,
+      },
+      {
+        isClientInitiated: true,
+        source: 'code_mode' as const,
+        executionOrigin: undefined,
+        notify: false,
+      },
+      {
+        isClientInitiated: true,
+        source: undefined,
+        executionOrigin: { kind: 'model' } as const,
+        notify: false,
+      },
+      {
+        isClientInitiated: true,
+        source: undefined,
+        executionOrigin: undefined,
+        notify: false,
+      },
+      {
+        isClientInitiated: false,
+        source: undefined,
+        executionOrigin: { kind: 'client' } as const,
+        notify: true,
+      },
+    ].flatMap((testCase) => [
+      { ...testCase, rebuild: false },
+      { ...testCase, rebuild: true },
+    ]),
+  )(
+    'passes request provenance to the executing invocation: %j',
+    async ({ isClientInitiated, source, executionOrigin, notify, rebuild }) => {
+      const tool = new PromptIdAwareTool();
+      const mockToolRegistry = {
+        getTool: () => tool,
+        ensureTool: async () => tool,
+        getFunctionDeclarations: () => [],
+        tools: new Map(),
+        discovery: {},
+        registerTool: () => {},
+        getToolByName: () => tool,
+        getToolByDisplayName: () => tool,
+        getTools: () => [],
+        discoverTools: async () => {},
+        getAllTools: () => [],
+        getToolsByServer: () => [],
+      } as unknown as ToolRegistry;
 
-    const onAllToolCallsComplete = vi.fn();
-    const scheduler = new CoreToolScheduler({
-      config: mockConfig,
-      onAllToolCallsComplete,
-      onToolCallsUpdate: vi.fn(),
-      getPreferredEditor: () => 'vscode',
-      onEditorClose: vi.fn(),
-    });
-
-    const abortController = new AbortController();
-    await scheduler.schedule(
-      [
-        {
-          callId: 'call-1',
-          name: 'promptIdAwareTool',
-          args: {},
-          isClientInitiated: false,
-          prompt_id: 'expected-prompt-id-xyz',
+      const messageBus = {
+        request: vi.fn().mockImplementation(
+          async (request: {
+            eventName: string;
+          }): Promise<HookExecutionResponse> => ({
+            type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+            correlationId: `${request.eventName}-hook`,
+            success: true,
+            output:
+              request.eventName === 'PermissionRequest'
+                ? {
+                    hookSpecificOutput: {
+                      decision: {
+                        behavior: 'allow',
+                        updatedInput: { updated: true },
+                      },
+                    },
+                  }
+                : {},
+          }),
+        ),
+      };
+      const mockConfig = {
+        getSessionId: () => 'test-session-id',
+        getUsageStatisticsEnabled: () => true,
+        getDebugMode: () => false,
+        getTruncateToolOutputThreshold: () => 100_000,
+        getTruncateToolOutputLines: () => 1_000,
+        getApprovalMode: () => ApprovalMode.DEFAULT,
+        getPermissionsAllow: () => [],
+        getContentGeneratorConfig: () => ({
+          model: 'test-model',
+          authType: 'gemini',
+        }),
+        getShellExecutionConfig: () => ({
+          terminalWidth: 90,
+          terminalHeight: 30,
+        }),
+        storage: {
+          getProjectTempDir: () => '/tmp',
         },
-      ],
-      abortController.signal,
-    );
+        getToolRegistry: () => mockToolRegistry,
+        getUseModelRouter: () => false,
+        getLlmClient: () => null,
+        isInteractive: () => true,
+        getIdeMode: () => false,
+        getExperimentalZedIntegration: () => false,
+        getChatRecordingService: () => undefined,
+        getMessageBus: () => messageBus,
+        getDisableAllHooks: () => !rebuild,
+      } as unknown as Config;
 
-    await vi.waitFor(() => {
-      expect(onAllToolCallsComplete).toHaveBeenCalled();
-    });
+      const onAllToolCallsComplete = vi.fn();
+      const scheduler = new CoreToolScheduler({
+        config: mockConfig,
+        onAllToolCallsComplete,
+        onToolCallsUpdate: vi.fn(),
+        getPreferredEditor: () => 'vscode',
+        onEditorClose: vi.fn(),
+      });
 
-    expect(tool.lastBuiltInvocation?.capturedPromptId).toBe(
-      'expected-prompt-id-xyz',
-    );
-  });
+      const abortController = new AbortController();
+      await scheduler.schedule(
+        [
+          {
+            callId: 'call-1',
+            name: 'promptIdAwareTool',
+            args: { needsApproval: rebuild },
+            isClientInitiated,
+            source,
+            executionOrigin,
+            prompt_id: 'expected-prompt-id-xyz',
+          },
+        ],
+        abortController.signal,
+      );
+
+      await vi.waitFor(() => {
+        expect(onAllToolCallsComplete).toHaveBeenCalled();
+      });
+
+      expect(tool.lastBuiltInvocation?.capturedPromptId).toBe(
+        'expected-prompt-id-xyz',
+      );
+      expect(JSON.stringify(onAllToolCallsComplete.mock.calls[0])).toContain(
+        `notify=${notify}`,
+      );
+      if (rebuild) {
+        expect(JSON.stringify(onAllToolCallsComplete.mock.calls[0])).toContain(
+          'args={\\"updated\\":true}',
+        );
+      }
+    },
+  );
 
   it('buildInvocation calls setPromptId when promptId is provided (covers both setArgs and schedule call sites)', () => {
     // Directly exercises the private buildInvocation method so that both

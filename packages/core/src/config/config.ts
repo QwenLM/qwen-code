@@ -240,7 +240,10 @@ import type { GoalRecoveryRecord } from '../goals/goal-persistence.js';
 import { GOAL_DEFAULT_TOKEN_BUDGET } from '../goals/goal-protocol.js';
 import { createGoalVerifier } from '../goals/goal-verifier.js';
 import type { ToolInvocationGuard } from '../core/tool-invocation-guard.js';
-import type { BwrapPolicy } from '../sandbox/bwrap-execution.js';
+import type {
+  ExecutionSandboxPolicy,
+  ResolvedExecutionSandboxPolicy,
+} from '../sandbox/sandbox-execution.js';
 import {
   admitShellSandbox,
   probeShellSandbox,
@@ -311,6 +314,10 @@ import type {
   SessionRuntimeResumeState,
 } from '../services/session-transcript-reader.js';
 import {
+  assertSessionExecutionEngine,
+  type SessionExecutionEngine,
+} from '../services/session-execution-engine.js';
+import {
   SessionTranscriptChangedError,
   SessionWriterError,
   SessionWriterLease,
@@ -341,12 +348,21 @@ import {
   readUserAutoMemoryIndexWithStats,
 } from '../memory/store.js';
 import {
+  rebuildAutoMemoryIndexAtRoot,
+  rebuildManagedAutoMemoryIndex,
   rebuildTeamAutoMemoryIndex,
+  rebuildUserAutoMemoryIndex,
   TeamMemoryRootSecurityError,
 } from '../memory/indexer.js';
 import { syncTeamMemory } from '../memory/team-memory-sync.js';
 import { getTeamMemoryShareabilityWarning } from '../memory/team-memory-git-status.js';
 import { MemoryManager } from '../memory/manager.js';
+import {
+  getProjectMetadataMigrationRoots,
+  scanMemoryMetadataCorpusStatus,
+  type MemoryMetadataCorpusStatus,
+} from '../memory/metadata-migration.js';
+import { buildStructuredAutoMemoryPrompt } from '../memory/prompt.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
 import { isSafeModeEnv } from '../utils/safe-mode.js';
 
@@ -354,6 +370,17 @@ const gitCoAuthorLogger = createDebugLogger('GIT_CO_AUTHOR');
 const memoryPressureConfigLogger = createDebugLogger('MEMORY_PRESSURE');
 
 const MEMORY_CONTEXT_WARNING_RATIO = 0.15;
+
+export type MemoryRecallMode = 'legacy' | 'structured';
+
+export interface PreparedMemoryRecallTransition {
+  from: MemoryRecallMode;
+  to: MemoryRecallMode;
+  revision: string;
+  autoMemoryPrompt: string;
+  previousRevision: string;
+  previousAutoMemoryPrompt: string;
+}
 
 // Absolute ceiling on the same warning: 15% of a 1M window is 150,000 tokens,
 // so the ratio alone means a large-window session can carry an enormous
@@ -402,6 +429,16 @@ export function parseVisionModelSetting(setting: string | undefined):
 
 function formatVisionModelSettingForLog(setting: string): string {
   return setting.replace(/\0/g, '\\0');
+}
+
+export function isValidAdvisorMaxUses(value: unknown): value is number {
+  return Number.isSafeInteger(value) && (value as number) >= 0;
+}
+
+function normalizeAdvisorModel(model: string | undefined): string | undefined {
+  const trimmed = model?.trim();
+  if (!trimmed || trimmed.toLowerCase() === 'off') return undefined;
+  return trimmed;
 }
 
 // Re-export types
@@ -966,6 +1003,12 @@ export interface ConfigParameters {
   sessionRestoreProjectionSource?: () => Promise<
     SessionRestoreProjection | undefined
   >;
+  /**
+   * Engine a paired host selected for this session. Initialization records it
+   * as the owner of a new transcript, or requires the restored transcript to
+   * prove it, before hooks, MCP or tools start.
+   */
+  sessionExecutionEngine?: SessionExecutionEngine;
   embeddingModel?: string;
   sandbox?: SandboxConfig;
   targetDir: string;
@@ -1415,6 +1458,15 @@ export interface ConfigParameters {
    */
   enableTeamMemory?: boolean;
   enableTeamMemorySync?: boolean;
+  /**
+   * Enable the structured on-demand memory recall protocol. Defaults to false
+   * (opt-in): while it is off the corpus stays on the legacy flat-MEMORY.md
+   * protocol and the metadata migration that would make it structured-ready is
+   * never scheduled. Overridable at runtime by
+   * `QWEN_CODE_MEMORY_STRUCTURED_RECALL` ('0'/'1') via
+   * {@link Config.getStructuredMemoryRecallEnabled}.
+   */
+  enableStructuredMemoryRecall?: boolean;
   /** Enable automatic project skill review after tool-heavy sessions. Defaults to false. */
   enableAutoSkill?: boolean;
   /** Require user confirmation before persisting an auto-activated skill. Defaults to true. */
@@ -1437,6 +1489,12 @@ export interface ConfigParameters {
    * Corresponds to the `fastModel` setting (configurable via `/model --fast`).
    */
   fastModel?: string;
+  /**
+   * Explicit model selector for the native Advisor tool. Empty, whitespace,
+   * and "off" disable Advisor and do not fall back to the primary model.
+   */
+  advisorModel?: string;
+  advisorMaxUses?: number;
   /**
    * Built-in WebSearch settings. `enabled: false` disables the tool; when the
    * setting is omitted, the tool may derive a backend from the active provider
@@ -1541,9 +1599,7 @@ export interface ConfigParameters {
   settingsWatcher?: { stopWatching(): void };
 }
 
-export interface ShellExecutionSandboxPolicy extends BwrapPolicy {
-  requestedBackend?: 'auto' | 'bwrap';
-}
+export type ShellExecutionSandboxPolicy = ExecutionSandboxPolicy;
 
 export type TerminalImageRenderSupport =
   | { available: true }
@@ -2255,6 +2311,8 @@ export type DerivedConfigOverrides = Partial<
     | 'getPlanFilePath'
     | 'getWorkspaceContext'
     | 'getFileService'
+    | 'getEffectiveInputModalities'
+    | 'getFileReadCache'
     | 'getToolRegistry'
     | 'getPermissionManager'
     | 'getApprovalMode'
@@ -2544,8 +2602,9 @@ export function deriveConfig(
 }
 
 export class Config {
-  private readonly shellExecutionSandbox:
+  private shellExecutionSandbox:
     | Readonly<ShellExecutionSandboxPolicy>
+    | Readonly<ResolvedExecutionSandboxPolicy>
     | undefined;
   private sessionId: string;
   private sessionSourceType?: string;
@@ -2556,6 +2615,7 @@ export class Config {
   private readonly sessionRestoreProjectionSource?: () => Promise<
     SessionRestoreProjection | undefined
   >;
+  private readonly sessionExecutionEngine?: SessionExecutionEngine;
   private restoredFileHistory = false;
   private goalRestoreActivation?: () => Promise<void>;
   private rejectGoalRestoreActivation?: (reason?: unknown) => void;
@@ -2760,6 +2820,9 @@ export class Config {
    * the shortest possible cached prompt prefix.
    */
   private autoMemoryPrompt = '';
+  private memoryRecallMode: MemoryRecallMode = 'legacy';
+  private memoryCorpusRevision = '';
+  private memoryRecallModeInitialized = false;
   private sdkMode: boolean;
   private memoryFileCount: number;
   private loadedContextFilePaths: string[] = [];
@@ -3014,6 +3077,7 @@ export class Config {
   private readonly enableManagedAutoDream: boolean;
   private readonly enableTeamMemory: boolean;
   private readonly enableTeamMemorySync: boolean;
+  private readonly enableStructuredMemoryRecall: boolean;
   // Latch (keyed by projectRoot) so the "team memory enabled but not shareable"
   // warning is emitted at most once per repo, even though refreshHierarchicalMemory
   // may re-run. Keyed rather than a single boolean so entering a new repo (/cd)
@@ -3024,6 +3088,9 @@ export class Config {
   private readonly memoryAgentTimeoutMinutes: number | undefined;
   private readonly memoryAgentMaxTurns: number | undefined;
   private fastModel?: string;
+  private advisorModel?: string;
+  private readonly advisorMaxUses: number;
+  private readonly advisorUsage = { calls: 0 };
   private readonly webSearchSettings?: WebSearchSettings;
   private webSearchNoticeEmitted = false;
   /**
@@ -3055,6 +3122,9 @@ export class Config {
   private readonly messageBusListeners = new Set<(bus: MessageBus) => void>();
   private readonly memoryManager: MemoryManager;
   private readonly modelChangeListeners = new Set<(model: string) => void>();
+  private readonly approvalModeChangeListeners = new Set<
+    (mode: ApprovalMode, prePlanMode: ApprovalMode | undefined) => void
+  >();
   // True on the Config that claimed the process-global QWEN_CODE_MODEL slot
   // (first in this process); gates the global write in publishModelEnv so no
   // other instance updates it. Per-session publishing is not gated on it.
@@ -3097,6 +3167,7 @@ export class Config {
     }
     this.sessionData = params.sessionData;
     this.sessionRestoreProjectionSource = params.sessionRestoreProjectionSource;
+    this.sessionExecutionEngine = params.sessionExecutionEngine;
     this.setSessionRestoreProjection(params.sessionRestoreProjection);
     // Daemon Configs use sessionIdContext and must not replace the
     // single-session CLI fallback with whichever session was created last.
@@ -3603,6 +3674,8 @@ export class Config {
     this.enableManagedAutoDream = params.enableManagedAutoDream ?? true;
     this.enableTeamMemory = params.enableTeamMemory ?? false;
     this.enableTeamMemorySync = params.enableTeamMemorySync ?? false;
+    this.enableStructuredMemoryRecall =
+      params.enableStructuredMemoryRecall ?? false;
     this.enableAutoSkill = params.enableAutoSkill ?? false;
     this.autoSkillConfirm = params.autoSkillConfirm ?? true;
     // Clamp: schema validation only runs on interactive edit paths, so a
@@ -3620,6 +3693,14 @@ export class Config {
         ? params.memoryAgentMaxTurns
         : undefined;
     this.fastModel = params.fastModel || undefined;
+    this.advisorModel = normalizeAdvisorModel(params.advisorModel);
+    // Nothing validates settings.json on the load path, so a hand-edited
+    // -1, 1.5 or "5" reaches this constructor. Fall back to the default
+    // (unlimited) like the neighbouring numeric settings instead of refusing
+    // to start; the CLI surfaces a settings warning for the ignored value.
+    this.advisorMaxUses = isValidAdvisorMaxUses(params.advisorMaxUses)
+      ? params.advisorMaxUses
+      : 0;
     this.webSearchSettings = params.webSearch;
     this.visionModel = params.visionModel || undefined;
     this.compactionModel = params.compactionModel || undefined;
@@ -3770,7 +3851,10 @@ export class Config {
   ): Promise<void> {
     try {
       if (this.shellExecutionSandbox)
-        await probeShellSandbox(this.shellExecutionSandbox, options?.signal);
+        this.shellExecutionSandbox = await probeShellSandbox(
+          this.shellExecutionSandbox,
+          options?.signal,
+        );
       const activation = this.activateChatRecording();
       this.sessionWriterActivationPromise = activation;
       try {
@@ -3781,6 +3865,7 @@ export class Config {
         }
       }
       options?.signal?.throwIfAborted();
+      await this.bindSessionExecutionEngine();
       registerSessionProjectDir(this.sessionId, this.storage.getProjectDir());
       this.sessionProjectDirRegistered = true;
       await this.initializeInternal(options);
@@ -3815,6 +3900,25 @@ export class Config {
       }
       throw error;
     }
+  }
+
+  /**
+   * Runs after the writer can take records and before any initialization side
+   * effect. A restore is checked against the owner read from its own snapshot;
+   * without chat recording there is no durable session to own.
+   */
+  private async bindSessionExecutionEngine(): Promise<void> {
+    const engine = this.sessionExecutionEngine;
+    if (engine === undefined) return;
+    if (this.sessionRestoreProjectionSource || this.sessionData) {
+      assertSessionExecutionEngine(
+        this.pendingSessionRestoreProjection?.executionEngine,
+        this.sessionId,
+        engine,
+      );
+      return;
+    }
+    await this.chatRecordingService?.recordExecutionEngine(engine);
   }
 
   private async initializeInternal(
@@ -4435,11 +4539,13 @@ export class Config {
     // Fire-and-forget sweep of stale ephemeral worktrees left behind by
     // earlier `agent` runs that exited before their cleanup helper ran
     // (Ctrl-C, process crash, abrupt shutdown). The sweep only touches
-    // `agent-<7hex>` slugs, skips anything newer than 30 days, and
-    // is fail-closed against tracked changes or unpushed commits — so
-    // running it on every startup cannot destroy user work. We do not
-    // await this: it is a hygiene task that must never delay the
-    // first model turn.
+    // `agent-<7hex>` slugs, skips anything newer than 30 days, and gates
+    // removal on worktreeHasWork — tracked, untracked and ignored content
+    // (minus disposable build output, symlinks whose targets live outside
+    // the checkout, and the session marker) all preserve the worktree, and
+    // any probe error fails closed — so running it on every startup cannot
+    // destroy user work in the checkout. We do not await this: it is a
+    // hygiene task that must never delay the first model turn.
     //
     // Anchor the sweep at the repo top-level so it scans the same
     // directory the worktree creators (`enter_worktree` and
@@ -4927,6 +5033,29 @@ export class Config {
           }
         }
       }
+      // The readiness scan walks the frontmatter of every memory file, so run
+      // it only where its result is consumed — once, when the mode is settled.
+      // Skipping it while the structured protocol is opted out keeps a disabled
+      // feature from costing startup I/O; skipping it afterwards keeps an
+      // enabled one from re-walking the whole corpus on every refresh (this
+      // runs per user query) only to discard the result. Leaving corpusStatus
+      // undefined keeps the initialization below on 'legacy'.
+      if (!this.memoryRecallModeInitialized) {
+        const corpusStatus = this.getStructuredMemoryRecallEnabled()
+          ? await this.scanMemoryRecallCorpusStatus().catch(
+              (error: unknown) => {
+                this.debugLogger.warn(
+                  'memory metadata readiness scan failed; preserving the active recall protocol',
+                  error,
+                );
+                return undefined;
+              },
+            )
+          : undefined;
+        this.memoryRecallMode = corpusStatus?.ready ? 'structured' : 'legacy';
+        this.memoryCorpusRevision = corpusStatus?.revision ?? '';
+        this.memoryRecallModeInitialized = true;
+      }
       const [managedAutoMemoryIndexRead, userAutoMemoryIndexRead] =
         await Promise.all([
           readAutoMemoryIndexWithStats(this.getProjectRoot()),
@@ -4949,20 +5078,29 @@ export class Config {
       // empty" placeholder — the same shape the per-project layer has used
       // since day one — so the cost is one extra index header.
       this.setUserMemory(memoryContent);
-      this.autoMemoryPrompt = this.memoryManager.buildAutoMemoryPrompt(
-        getAutoMemoryRoot(this.getProjectRoot()),
-        managedAutoMemoryIndex,
-        {
-          memoryDir: getUserAutoMemoryRoot(),
-          indexContent: userAutoMemoryIndex,
-        },
-        teamMemoryEnabled
-          ? {
-              memoryDir: getTeamAutoMemoryRoot(this.getProjectRoot()),
-              indexContent: teamAutoMemoryIndex,
-            }
-          : undefined,
-      );
+      this.autoMemoryPrompt =
+        this.memoryRecallMode === 'structured'
+          ? buildStructuredAutoMemoryPrompt(
+              getAutoMemoryRoot(this.getProjectRoot()),
+              getUserAutoMemoryRoot(),
+              teamMemoryEnabled
+                ? getTeamAutoMemoryRoot(this.getProjectRoot())
+                : undefined,
+            )
+          : this.memoryManager.buildAutoMemoryPrompt(
+              getAutoMemoryRoot(this.getProjectRoot()),
+              managedAutoMemoryIndex,
+              {
+                memoryDir: getUserAutoMemoryRoot(),
+                indexContent: userAutoMemoryIndex,
+              },
+              teamMemoryEnabled
+                ? {
+                    memoryDir: getTeamAutoMemoryRoot(this.getProjectRoot()),
+                    indexContent: teamAutoMemoryIndex,
+                  }
+                : undefined,
+            );
     } else {
       this.setUserMemory(memoryContent);
       this.autoMemoryPrompt = '';
@@ -5514,6 +5652,10 @@ export class Config {
       this.permissionManager?.clearSessionAllowRules();
       // The web search budget belongs to the session, like the grants above.
       this.webSearchSessionUsage.calls = 0;
+      // So does the Advisor budget, reset in place for the same reason the
+      // counter is an object: a derived Config must mutate this one, not
+      // shadow it with an own property.
+      this.advisorUsage.calls = 0;
     }
     this.clearSessionRestoreProjection();
     this.pendingRecoveredAgentsNotice = null;
@@ -5950,6 +6092,25 @@ export class Config {
     }
   }
 
+  onApprovalModeChange(
+    listener: (
+      mode: ApprovalMode,
+      prePlanMode: ApprovalMode | undefined,
+    ) => void,
+  ): () => void {
+    this.approvalModeChangeListeners.add(listener);
+    return () => {
+      this.approvalModeChangeListeners.delete(listener);
+    };
+  }
+
+  private notifyApprovalModeChangeListeners(): void {
+    if (isDerivedConfig(this)) return;
+    for (const listener of this.approvalModeChangeListeners) {
+      listener(this.approvalMode, this.prePlanMode);
+    }
+  }
+
   // Keeps QWEN_CODE_MODEL on the model that is actually active. A subprocess
   // has no other authoritative source: settings files miss /model switches and
   // describe the wrong home under QWEN_HOME isolation. Published per session —
@@ -6100,6 +6261,44 @@ export class Config {
    */
   setFastModel(model: string | undefined): void {
     this.fastModel = model || undefined;
+  }
+
+  getAdvisorMaxUses(): number {
+    return this.advisorMaxUses;
+  }
+
+  getAdvisorUseCount(): number {
+    return this.advisorUsage.calls;
+  }
+
+  tryConsumeAdvisorUse(): boolean {
+    if (
+      this.advisorMaxUses > 0 &&
+      this.advisorUsage.calls >= this.advisorMaxUses
+    )
+      return false;
+    this.advisorUsage.calls += 1;
+    return true;
+  }
+
+  getAdvisorModel(): string | undefined {
+    return this.advisorModel;
+  }
+
+  async setAdvisorModel(model: string | undefined): Promise<boolean> {
+    const normalizedModel = normalizeAdvisorModel(model);
+    if (normalizedModel && this.getDisabledTools().has(ToolNames.ADVISOR)) {
+      return false;
+    }
+
+    this.advisorModel = normalizedModel;
+    if (!this.initialized || !this.toolRegistry) {
+      return true;
+    }
+
+    await this.syncAdvisorToolRegistration(this.toolRegistry);
+    await this.llmClient?.setTools();
+    return true;
   }
 
   /**
@@ -6925,6 +7124,14 @@ export class Config {
     }
     this.fileHistoryService = undefined;
     this.getFileReadCache().clear();
+    this.memoryRecallMode = 'legacy';
+    this.memoryCorpusRevision = '';
+    this.memoryRecallModeInitialized = false;
+    // The prompt was built for the previous workspace's roots; when the
+    // refresh below throws (returned as memoryRefreshError), nothing
+    // reassigns it, and the stale text keeps routing to search_memory while
+    // the reset mode leaves that tool undeclared.
+    this.autoMemoryPrompt = '';
 
     let memoryRefreshError: unknown;
     try {
@@ -7097,6 +7304,7 @@ export class Config {
   private async shutdownResourcesOnce(): Promise<void> {
     let resourceError: unknown;
     try {
+      this.memoryManager.cancelMigrations();
       this.clearSessionRestoreProjection();
       // Drop this session's project-dir registry entry. It is registered during
       // initialization, so it is released here whenever that step completed —
@@ -8070,6 +8278,103 @@ export class Config {
     return this.autoMemoryPrompt;
   }
 
+  getMemoryRecallMode(): MemoryRecallMode {
+    return this.memoryRecallMode;
+  }
+
+  async prepareMemoryRecallTransition(): Promise<
+    PreparedMemoryRecallTransition | undefined
+  > {
+    if (!this.getManagedAutoMemoryEnabled()) return undefined;
+    if (!this.getStructuredMemoryRecallEnabled()) return undefined;
+    if (this.memoryRecallMode === 'structured') return undefined;
+    const status = await this.scanMemoryRecallCorpusStatus();
+    if (!status.ready) {
+      this.memoryCorpusRevision = status.revision;
+      return undefined;
+    }
+    const projectRoot = this.getProjectRoot();
+    const teamEnabled = this.getTeamMemoryEnabled() && this.isTrustedFolder();
+    const configuredProjectRoot = getAutoMemoryRoot(projectRoot);
+    // Index rebuilds refresh the legacy MEMORY.md artifacts; the structured
+    // prompt is built from scans, not these indexes, so a tier that cannot be
+    // read or written (EACCES, a rejected root) must not block the
+    // transition — the failed tier's staleness is visible to the next scan.
+    await Promise.all(
+      [
+        ...getProjectMetadataMigrationRoots(
+          projectRoot,
+          this.isTrustedFolder(),
+        ).map((root) =>
+          root === configuredProjectRoot
+            ? rebuildManagedAutoMemoryIndex(projectRoot)
+            : rebuildAutoMemoryIndexAtRoot(root, 'project'),
+        ),
+        rebuildUserAutoMemoryIndex(),
+        ...(teamEnabled ? [rebuildTeamAutoMemoryIndex(projectRoot)] : []),
+      ].map((pending) =>
+        pending.catch((error: unknown) => {
+          this.debugLogger.debug(
+            `Memory index rebuild failed during recall transition: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }),
+      ),
+    );
+    const autoMemoryPrompt = await buildStructuredAutoMemoryPrompt(
+      getAutoMemoryRoot(projectRoot),
+      getUserAutoMemoryRoot(),
+      teamEnabled ? getTeamAutoMemoryRoot(projectRoot) : undefined,
+    );
+    const confirmed = await this.scanMemoryRecallCorpusStatus();
+    if (confirmed.revision !== status.revision) return undefined;
+    return {
+      from: 'legacy',
+      to: 'structured',
+      revision: confirmed.revision,
+      autoMemoryPrompt,
+      previousRevision: this.memoryCorpusRevision,
+      previousAutoMemoryPrompt: this.autoMemoryPrompt,
+    };
+  }
+
+  async confirmMemoryRecallTransition(
+    transition: PreparedMemoryRecallTransition,
+  ): Promise<boolean> {
+    if (transition.from !== this.memoryRecallMode) return false;
+    const status = await this.scanMemoryRecallCorpusStatus();
+    return (
+      status.revision === transition.revision &&
+      (status.ready ? 'structured' : 'legacy') === transition.to
+    );
+  }
+
+  commitMemoryRecallTransition(
+    transition: PreparedMemoryRecallTransition,
+  ): void {
+    if (transition.from !== this.memoryRecallMode) return;
+    this.memoryRecallMode = transition.to;
+    this.memoryCorpusRevision = transition.revision;
+    this.autoMemoryPrompt = transition.autoMemoryPrompt;
+    this.memoryRecallModeInitialized = true;
+  }
+
+  rollbackMemoryRecallTransition(
+    transition: PreparedMemoryRecallTransition,
+  ): void {
+    if (this.memoryRecallMode !== transition.to) return;
+    this.memoryRecallMode = transition.from;
+    this.memoryCorpusRevision = transition.previousRevision;
+    this.autoMemoryPrompt = transition.previousAutoMemoryPrompt;
+  }
+
+  private scanMemoryRecallCorpusStatus(): Promise<MemoryMetadataCorpusStatus> {
+    return scanMemoryMetadataCorpusStatus({
+      projectRoot: this.getProjectRoot(),
+      teamMemoryEnabled: this.getTeamMemoryEnabled(),
+      trustedProject: this.isTrustedFolder(),
+    });
+  }
+
   getOutputLanguageFilePath(): string | undefined {
     return this.outputLanguageFilePath;
   }
@@ -8289,8 +8594,22 @@ export class Config {
         'Cannot enable privileged approval modes in an untrusted folder.',
       );
     }
-    this.setApprovalMode(enabled ? ApprovalMode.PLAN : executionMode);
-    this.planExecutionMode = enabled ? executionMode : undefined;
+    const previousMode = this.approvalMode;
+    const previousExecutionMode = this.planExecutionMode;
+    if (enabled) this.planExecutionMode = executionMode;
+    try {
+      this.setApprovalMode(enabled ? ApprovalMode.PLAN : executionMode);
+    } catch (error) {
+      this.planExecutionMode = previousExecutionMode;
+      throw error;
+    }
+    if (
+      enabled &&
+      previousMode === ApprovalMode.PLAN &&
+      previousExecutionMode !== executionMode
+    ) {
+      this.notifyApprovalModeChangeListeners();
+    }
   }
 
   getApprovalModeRevision(): number {
@@ -8339,6 +8658,8 @@ export class Config {
        * model was never told about, and queues a one-shot system reminder.
        */
       fromApprovedPlanExit?: boolean;
+      /** Suppress a synthetic restore exit notice without approving the plan. */
+      fromSessionRestore?: boolean;
     },
   ): void {
     // Specialized execution overlays install an own method that owns
@@ -8391,9 +8712,10 @@ export class Config {
     } else if (mode !== ApprovalMode.PLAN && fromMode === ApprovalMode.PLAN) {
       this.prePlanMode = undefined;
       noticeEvent.version++;
-      noticeEvent.kind = options?.fromApprovedPlanExit
-        ? 'clear'
-        : 'manual-exit';
+      noticeEvent.kind =
+        options?.fromApprovedPlanExit || options?.fromSessionRestore
+          ? 'clear'
+          : 'manual-exit';
       if (
         options?.fromApprovedPlanExit &&
         Object.getPrototypeOf(this) === Config.prototype
@@ -8434,6 +8756,9 @@ export class Config {
     if (mode !== ApprovalMode.PLAN) this.planExecutionMode = undefined;
     if (fromMode !== mode) {
       this.approvalModeRevision++;
+      if (!isDerivedConfig(this)) {
+        this.notifyApprovalModeChangeListeners();
+      }
     }
   }
 
@@ -9857,6 +10182,32 @@ export class Config {
     return this.enableTeamMemorySync;
   }
 
+  /**
+   * Whether the structured on-demand memory recall protocol may activate.
+   * Opt-in: off unless the `memory.enableStructuredRecall` setting is on.
+   * `QWEN_CODE_MEMORY_STRUCTURED_RECALL` overrides for tests / power users
+   * ('0' forces off, '1' forces on).
+   *
+   * While this is off the corpus stays on the legacy protocol *and* the
+   * metadata migration that would make it structured-ready is never
+   * scheduled, so a disabled feature costs no forked-agent calls. Callers
+   * that gate on it must not treat "off" as "migration still owed" — see the
+   * `migration_pending` dream gates, which would otherwise suppress
+   * consolidation for the life of the process.
+   */
+  getStructuredMemoryRecallEnabled(): boolean {
+    if (this.shellExecutionSandbox) return false;
+    if (this.getBareMode() || this.isSafeMode()) return false;
+    const override = process.env['QWEN_CODE_MEMORY_STRUCTURED_RECALL'];
+    if (override === '0') {
+      return false;
+    }
+    if (override === '1') {
+      return true;
+    }
+    return this.enableStructuredMemoryRecall;
+  }
+
   isManagedMemoryAvailable(): boolean {
     if (this.shellExecutionSandbox) return false;
     return this.enableManagedAutoMemory && !this.getBareMode();
@@ -11197,6 +11548,25 @@ export class Config {
     }
   }
 
+  private async syncAdvisorToolRegistration(
+    registry: ToolRegistry,
+  ): Promise<void> {
+    if (!this.getAdvisorModel() || this.getBareMode() || this.isSafeMode()) {
+      registry.unregisterTool(ToolNames.ADVISOR);
+      return;
+    }
+
+    if (this.getDisabledTools().has(ToolNames.ADVISOR)) return;
+
+    registry.unregisterTool(ToolNames.ADVISOR);
+    await this.registerLazyTool(registry, ToolNames.ADVISOR, async () => {
+      const { AdvisorTool } = await import('../tools/advisor.js');
+      return new AdvisorTool(this);
+    });
+    // Consume the factory so disabling Advisor removes its registration completely.
+    await registry.ensureTool(ToolNames.ADVISOR);
+  }
+
   async registerSessionSourceTool(
     registry: ToolRegistry = this.toolRegistry,
   ): Promise<void> {
@@ -11478,6 +11848,7 @@ export class Config {
     await registerHostSessionTools();
     await registerExecIfEnabled();
     await registerGoalWorkerTools();
+    await this.syncAdvisorToolRegistration(registry);
     await registerLazy(ToolNames.TOOL_CALL, async () => {
       const { ToolCallTool } = await import('../tools/tool-call.js');
       return new ToolCallTool(registry);
@@ -11508,10 +11879,17 @@ export class Config {
       const { SendMessageTool } = await import('../tools/send-message.js');
       return new SendMessageTool(this);
     });
-    await registerLazy(ToolNames.SKILL, async () => {
-      const { SkillTool } = await import('../tools/skill.js');
-      return new SkillTool(this);
-    });
+    // A subagent whose tool policy withholds skills gets a Config with no
+    // SkillManager (#12424, SubagentManager.buildSubagentContextOverride).
+    // SkillTool cannot be constructed without one, and a factory that throws
+    // stays pending, so every warmAll() of that agent's registry would retry
+    // and log it. The agent cannot declare the tool anyway.
+    if (!options?.forSubAgent || this.getSkillManager()) {
+      await registerLazy(ToolNames.SKILL, async () => {
+        const { SkillTool } = await import('../tools/skill.js');
+        return new SkillTool(this);
+      });
+    }
     // list_directory is opt-in (disabled by default): glob covers directory
     // listing in most cases, so the tool only registers when explicitly
     // enabled via `tools.listDirectory.enabled` or the coreTools allowlist.
@@ -11524,6 +11902,14 @@ export class Config {
     await registerLazy(ToolNames.READ_FILE, async () => {
       const { ReadFileTool } = await import('../tools/read-file.js');
       return new ReadFileTool(this);
+    });
+    await registerLazy(ToolNames.MANAGE_MEMORY, async () => {
+      const { ManageMemoryTool } = await import('../tools/manage-memory.js');
+      return new ManageMemoryTool(this);
+    });
+    await registerLazy(ToolNames.SEARCH_MEMORY, async () => {
+      const { SearchMemoryTool } = await import('../tools/search-memory.js');
+      return new SearchMemoryTool(this);
     });
     await registerLazy(ToolNames.ZOOM_IMAGE, async () => {
       const { ZoomImageTool } = await import('../tools/zoom-image.js');

@@ -1719,6 +1719,7 @@ export function ChatPane({
               <TranscriptViewport
                 ref={transcriptViewportRef}
                 messages={messages}
+                sourceSessionId={connection.sessionId}
                 pendingApproval={pendingToolApproval}
                 loadingTranscript={connection.loadingTranscript}
                 catchingUp={connection.catchingUp}

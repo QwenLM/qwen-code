@@ -224,6 +224,10 @@ describe('TrajectoryPanel', () => {
       text(container.querySelector('[data-testid="trajectory-totals"]')),
     ).toContain('1 turn ·');
     expect(
+      text(container.querySelector('[data-testid="trajectory-metrics"]')),
+    ).toContain('Main model total10.4s');
+    expect(container.querySelector('[data-has-failures="true"]')).toBeNull();
+    expect(
       container.querySelectorAll('[data-testid="trajectory-turn"]'),
     ).toHaveLength(1);
     expect(
@@ -234,7 +238,7 @@ describe('TrajectoryPanel', () => {
     // the recorded frame rather than any client clock.
     const body = container.textContent ?? '';
     expect(body).toContain('7.8s');
-    expect(body).toContain('TTFT');
+    expect(body).toContain('First token');
   });
 
   it('shows a dash where no duration was recorded', async () => {
@@ -285,6 +289,64 @@ describe('TrajectoryPanel', () => {
     expect(container.textContent).not.toContain(
       'No request or tool durations are recorded',
     );
+    expect(
+      text(container.querySelector('[data-testid="trajectory-overview"]')),
+    ).toContain('Recorded durations have no start time');
+    expect(
+      container
+        .querySelector('[data-testid="trajectory-metrics"] strong')
+        ?.getAttribute('aria-label'),
+    ).toBe('unrecorded');
+    expect(
+      text(
+        container.querySelector('[data-testid="trajectory-context-notice"]'),
+      ),
+    ).toContain('1 without start');
+  });
+
+  it('shows measured zero separately from unrecorded time', async () => {
+    const container = await render(async () =>
+      page([
+        userText('go', 'rec-1'),
+        timingFrame(
+          { kind: 'request', startedAt: 1_700_000_000_000, durationMs: 0 },
+          'rec-2',
+        ),
+        toolCall('call-1', 'read_file', 'Read note.txt', 'rec-3'),
+      ]),
+    );
+    const metrics = text(
+      container.querySelector('[data-testid="trajectory-metrics"]'),
+    );
+    expect(metrics).toContain('Elapsed span0s');
+    expect(metrics).toContain('Active coverage0s');
+    expect(metrics).toContain('Main model total0s');
+    expect(
+      text(
+        container.querySelector('[data-testid="trajectory-context-notice"]'),
+      ),
+    ).toContain('1 without duration');
+  });
+
+  it('updates the selected timing and clears it for a prompt', async () => {
+    const container = await render(async () => page(REAL_EVENTS));
+    const request = container.querySelector<HTMLElement>(
+      '[data-testid="trajectory-row-request"]',
+    )!;
+    const user = container.querySelector<HTMLElement>(
+      '[data-testid="trajectory-row-user"]',
+    )!;
+    act(() => request.click());
+    expect(
+      text(container.querySelector('[data-testid="trajectory-selected"]')),
+    ).toContain('7.8s');
+    act(() => user.click());
+    expect(
+      text(container.querySelector('[data-testid="trajectory-selected"]')),
+    ).toContain('no request or tool timing');
+    expect(
+      text(container.querySelector('[data-testid="trajectory-selected"]')),
+    ).not.toContain('7.8s');
   });
 
   it('marks a failed request', async () => {
@@ -299,6 +361,9 @@ describe('TrajectoryPanel', () => {
     );
 
     expect(container.textContent).toContain('Request failed');
+    expect(
+      container.querySelector('[data-has-failures="true"]'),
+    ).not.toBeNull();
   });
 
   it('says a request failed even when it names its model', async () => {
@@ -587,8 +652,8 @@ describe('TrajectoryPanel', () => {
           ),
         ).toBe('Showing 2 of 5 rows in the selected time');
         expect(
-          container.querySelector('[data-testid="trajectory-totals"]'),
-        ).toBeNull();
+          text(container.querySelector('[data-testid="trajectory-totals"]')),
+        ).toContain('Loaded window · 2 turns · 2 requests · 1 tool');
       });
 
       it('keeps a turn prompt but drops what ran outside the time', async () => {
@@ -669,6 +734,107 @@ describe('TrajectoryPanel', () => {
       });
     });
 
+    describe('real time', () => {
+      // On a real-time axis the same two turns span 60 500 ms: the first
+      // turn's request and tool fill 0–1250, then nothing until the second
+      // request at 60 000.
+      const UNFILTERED_ROWS = 7;
+      const switchMode = async (container: HTMLElement) => {
+        const toggle = container.querySelector<HTMLButtonElement>(
+          '[data-testid="trajectory-mode-clock"]',
+        )!;
+        await act(async () => toggle.click());
+        return toggle;
+      };
+      const axisFrom = (container: HTMLElement) =>
+        container.querySelector('[data-testid="trajectory-overview-from"]')!
+          .textContent;
+
+      it('switches the axis to clock time and keeps every row', async () => {
+        const container = await render(async () => page(timedTurns()));
+        expect(axisFrom(container)).toBe('0');
+
+        const toggle = await switchMode(container);
+
+        expect(toggle.getAttribute('aria-pressed')).toBe('true');
+        expect(axisFrom(container)).toMatch(/^\d{2}:\d{2}:\d{2}$/);
+        expect(rowCount(container)).toBe(UNFILTERED_ROWS);
+        // The second request now starts most of the way along the track.
+        const second = spansIn(container).find(
+          (el) => el.dataset['lane'] === '0' && el.dataset['error'] === 'true',
+        )!;
+        expect(second.style.getPropertyValue('--left')).toBe('99.17355372%');
+      });
+
+      it('says so when a stretch of idle time has nothing in it', async () => {
+        const container = await render(async () => page(timedTurns()));
+        await switchMode(container);
+
+        // 6050–30 250 ms: inside the idle minute.
+        await drag(container, 0.1, 0.5);
+
+        const empty = container.querySelector(
+          '[data-testid="trajectory-range-empty"]',
+        )!;
+        expect(text(empty)).toContain(
+          'No request or tool ran in the selected time.',
+        );
+        expect(container.querySelector('[role="grid"]')).toBeNull();
+        expect(
+          text(
+            container.querySelector('[data-testid="trajectory-range-status"]'),
+          ),
+        ).toBe('Showing 0 of 5 rows in the selected time');
+        // Said once: the header's count is the live region, the message is not.
+        expect(empty.getAttribute('role')).toBeNull();
+        expect(empty.closest('[role="status"]')).toBeNull();
+
+        await act(async () =>
+          empty.querySelector<HTMLButtonElement>('button')!.click(),
+        );
+        expect(
+          container.querySelector('[data-testid="trajectory-range-empty"]'),
+        ).toBeNull();
+        expect(rowCount(container)).toBe(UNFILTERED_ROWS);
+      });
+
+      it('drops a selection made on the other axis', async () => {
+        const container = await render(async () => page(timedTurns()));
+        // 1312–1662 ms of active time: the second request alone.
+        await drag(container, 0.75, 0.95);
+        expect(rowCount(container)).toBe(3);
+
+        await switchMode(container);
+
+        // The same numbers on the real-time axis fall in the idle minute.
+        // Kept, they would empty the table; dropped, it is whole again.
+        expect(rowCount(container)).toBe(UNFILTERED_ROWS);
+        expect(
+          container.querySelector('[data-testid="trajectory-range"]'),
+        ).toBeNull();
+        expect(
+          container.querySelector('[data-testid="trajectory-range-status"]'),
+        ).toBeNull();
+      });
+
+      it('cuts idle time out again when switched back', async () => {
+        const container = await render(async () => page(timedTurns()));
+        await switchMode(container);
+        await drag(container, 0.1, 0.5);
+        const toggle = container.querySelector<HTMLButtonElement>(
+          '[data-testid="trajectory-mode-active"]',
+        )!;
+        await act(async () => toggle.click());
+
+        expect(toggle.getAttribute('aria-pressed')).toBe('true');
+        expect(axisFrom(container)).toBe('0');
+        expect(rowCount(container)).toBe(UNFILTERED_ROWS);
+        expect(
+          container.querySelector('[data-testid="trajectory-range-empty"]'),
+        ).toBeNull();
+      });
+    });
+
     it('lights the span of the row the keyboard selected', async () => {
       const container = await render(async () => page(timedTurns()));
       const grid = container.querySelector('[role="grid"]') as HTMLElement;
@@ -697,9 +863,11 @@ describe('TrajectoryPanel', () => {
       const container = await render(async () => page(timedTurns()));
       const [first, , failed] = spansIn(container);
 
-      expect(first!.title).toBe('qwen3.8-max · 1.0s · TTFT 400ms');
+      expect(first!.title).toContain('qwen3.8-max · ');
+      expect(first!.title).toContain('1.0s · First token 400ms');
       expect(failed!.dataset['error']).toBe('true');
-      expect(failed!.title).toBe('qwen3.8-max · Request failed · 500ms');
+      expect(failed!.title).toContain('qwen3.8-max · Request failed');
+      expect(failed!.title).toContain('500ms');
     });
   });
 

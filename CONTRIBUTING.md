@@ -138,7 +138,7 @@ To start the Qwen Code application from the source code (after building), run th
 npm start
 ```
 
-If you'd like to run the source build outside of the qwen-code folder, you can utilize `npm link path/to/qwen-code/packages/cli` (see: [docs](https://docs.npmjs.com/cli/v9/commands/npm-link)) to run with `qwen-code`
+If you'd like to run the source build outside of the qwen-code folder, you can utilize `npm link path/to/qwen-code/packages/cli` (see: [docs](https://docs.npmjs.com/cli/v9/commands/npm-link)) to run with `qwen`
 
 ### Running Tests
 
@@ -283,10 +283,10 @@ Alternatively, you can use the "Launch Program" configuration in VS Code if you 
 To hit a breakpoint inside the sandbox container run:
 
 ```bash
-DEBUG=1 qwen-code
+DEBUG=1 qwen
 ```
 
-**Note:** If you have `DEBUG=true` in a project's `.env` file, it won't affect qwen-code due to automatic exclusion. Use `.qwen-code/.env` files for qwen-code specific debug settings.
+**Note:** If you have `DEBUG=true` in a project's `.env` file, it won't affect qwen-code due to automatic exclusion. Use `.qwen/.env` files for qwen-code specific debug settings.
 
 ### React DevTools
 
