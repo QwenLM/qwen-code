@@ -16,6 +16,7 @@ import type { ToolCallRequestInfo } from '../core/turn.js';
 import { makeFakeConfig } from '../test-utils/config.js';
 import { MockTool } from '../test-utils/mock-tool.js';
 import { ExecTool } from '../tools/exec.js';
+import { ToolSearchTool } from '../tools/tool-search.js';
 import { getToolCallRuntime } from './tool-call-runtime.js';
 import {
   Kind,
@@ -100,6 +101,93 @@ const findUpdate = (updates: ToolCall[][], name: string, status?: string) =>
     );
 
 describe('CodeModeOnly scheduler dispatch', () => {
+  it('searches a scoped deferred tool, executes it, and still validates arguments', async () => {
+    const config = makeFakeConfig({
+      codeModeOnly: true,
+      targetDir: '/tmp',
+      cwd: '/tmp',
+    });
+    const registry = new ToolRegistry(config);
+    vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+    const execute = vi.fn(async () => ({
+      llmContent: 'DEFERRED_RESULT',
+      returnDisplay: 'read',
+    }));
+    registry.registerTool(new ExecTool(config));
+    registry.registerTool(new ToolSearchTool(config));
+    registry.registerTool(
+      new MockTool({
+        name: 'deferred-read',
+        shouldDefer: true,
+        kind: Kind.Read,
+        params: {
+          type: 'object',
+          properties: { path: { type: 'string' } },
+          required: ['path'],
+        },
+        execute,
+      }),
+    );
+    registry.registerTool(
+      new MockTool({ name: 'secret_read', shouldDefer: true }),
+    );
+    const completed = vi.fn();
+    const scheduler = new CoreToolScheduler({
+      config,
+      onAllToolCallsComplete: async (calls) => completed(calls),
+      onToolCallsUpdate: vi.fn(),
+      getPreferredEditor: () => undefined,
+      onEditorClose: vi.fn(),
+    });
+    const declarations = registry.getFunctionDeclarationsFiltered([
+      'tool_search',
+      'deferred-read',
+    ]);
+    const run = async (name: string, args: Record<string, unknown>) => {
+      await scheduler.schedule(
+        {
+          callId: `${name}-${completed.mock.calls.length}`,
+          name,
+          args,
+          isClientInitiated: false,
+          prompt_id: 'lazy-code',
+          codeModeAllowedToolNames: ['deferred-read'],
+        },
+        new AbortController().signal,
+      );
+      return completed.mock.calls.at(-1)![0][0];
+    };
+    const search = await run('tool_search', {
+      query: 'select:deferred-read,secret_read',
+    });
+    expect(search.status).toBe('success');
+    const content = JSON.stringify(search.response.responseParts);
+    expect(content).toContain('tools.deferred_read(args:');
+    expect(content).not.toContain('tools.secret_read(args:');
+    const valid = await run('exec', {
+      source: 'text(await tools.deferred_read({path: "/tmp/test"}));',
+    });
+    expect(valid.status).toBe('success');
+    expect(JSON.stringify(valid.response.responseParts)).toContain(
+      'DEFERRED_RESULT',
+    );
+    expect(execute).toHaveBeenCalledOnce();
+    const invalid = await run('exec', {
+      source: 'text(await tools.deferred_read({}));',
+    });
+    expect(invalid.status).toBe('error');
+    expect(JSON.stringify(invalid.response.responseParts)).toContain(
+      "required property 'path'",
+    );
+    expect(execute).toHaveBeenCalledOnce();
+    expect(
+      registry.getFunctionDeclarationsFiltered([
+        'tool_search',
+        'deferred-read',
+      ]),
+    ).toEqual(declarations);
+  }, 15_000);
+
   it('keeps the Goal permit and termination metadata for a nested proposal', async () => {
     const permit = {
       goalId: 'goal-nested',

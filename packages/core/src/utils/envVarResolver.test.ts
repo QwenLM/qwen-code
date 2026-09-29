@@ -108,9 +108,47 @@ describe('resolveEnvVarsInString', () => {
       'value and $UNDEFINED mixed',
     );
   });
+
+  it('resolves only from customEnv without the process.env fallback', () => {
+    process.env['FROM_PROCESS'] = 'process-value';
+    process.env['FROM_BOTH'] = 'process-value';
+
+    const result = resolveEnvVarsInString(
+      '$FROM_PROCESS ${FROM_PROCESS} $FROM_BOTH',
+      { FROM_BOTH: 'custom-value' },
+      { processEnvFallback: false },
+    );
+
+    expect(result).toBe('$FROM_PROCESS ${FROM_PROCESS} custom-value');
+  });
 });
 
 describe('resolveEnvVarsInObject', () => {
+  let originalEnv: NodeJS.ProcessEnv;
+
+  beforeEach(() => {
+    originalEnv = { ...process.env };
+  });
+
+  afterEach(() => {
+    process.env = originalEnv;
+  });
+
+  it('passes the process.env fallback option to nested values', () => {
+    process.env['FROM_PROCESS'] = 'process-value';
+
+    const result = resolveEnvVarsInObject(
+      { list: ['$FROM_PROCESS'], nested: { value: '$FROM_CUSTOM' } },
+      { FROM_CUSTOM: 'custom-value' },
+      { processEnvFallback: false },
+    );
+
+    expect(result).toEqual({
+      list: ['$FROM_PROCESS'],
+      nested: { value: 'custom-value' },
+    });
+  });
+
   it('should resolve variables in nested objects', () => {
     process.env['API_KEY'] = 'secret-123';
     process.env['DB_URL'] = 'postgresql://localhost/test';

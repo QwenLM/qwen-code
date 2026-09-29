@@ -133,12 +133,19 @@ function compileOnce(validator: Ajv, schema: AnySchema): ValidateFunction {
   if (!validate) {
     try {
       validate = validator.compile(JSON.parse(key) as AnySchema);
-    } catch {
-      // Ajv keeps a schema object even when its first compile fails, and
-      // compiles it on a later call, so such schemas keep that behavior.
+    } catch (copyError) {
+      // Ajv keeps a schema object whose compile fails after its references
+      // were collected, and compiles it on a later call, so such schemas
+      // keep that behavior.
       compiled.failedTexts.add(key);
       compiled.direct.add(schema);
-      return validator.compile(schema);
+      try {
+        return validator.compile(schema);
+      } catch {
+        // The object fails as its copy did, or as a duplicate of the $id its
+        // copy claimed first. Either way the copy's error is its own.
+        throw copyError;
+      }
     }
     compiled.byText.set(key, validate);
   }
@@ -146,7 +153,10 @@ function compileOnce(validator: Ajv, schema: AnySchema): ValidateFunction {
   return validate;
 }
 
-/** The JSON text of a value, if it describes the value exactly. */
+/**
+ * The JSON text of a value, if it describes the value exactly. The value is
+ * read as data, so a Proxy or a getter is taken at what its text records.
+ */
 function exactJsonText(value: object): string | undefined {
   try {
     return JSON.stringify(value, function (this: unknown, key, converted) {
@@ -167,6 +177,7 @@ function isExactJsonValue(value: unknown): boolean {
     case 'boolean':
       return true;
     case 'number':
+      // The text writes -0 as 0, which Ajv validates alike.
       return Number.isFinite(value);
     case 'object': {
       if (value === null) {
@@ -175,14 +186,15 @@ function isExactJsonValue(value: unknown): boolean {
       const array = Array.isArray(value);
       const prototype: unknown = Object.getPrototypeOf(value);
       return (
-        (array
-          ? prototype === Array.prototype
-          : prototype === Object.prototype || prototype === null) &&
+        // Ajv's const and enum tell an object without a prototype from a
+        // plain one.
+        prototype === (array ? Array.prototype : Object.prototype) &&
         typeof (value as Record<string, unknown>)['toJSON'] !== 'function' &&
-        // Only enumerable string keys reach the text; an array also has its
-        // length.
+        // Only enumerable string keys reach the text, and of an array only its
+        // indexes, which with its length must be all its keys: a JSON pointer
+        // in a $ref can reach any key.
         Reflect.ownKeys(value).length ===
-          Object.keys(value).length + (array ? 1 : 0)
+          (array ? (value as unknown[]).length + 1 : Object.keys(value).length)
       );
     }
     default:
@@ -272,6 +284,9 @@ export class SchemaValidator {
   /**
    * Returns null if the data conforms to the schema described by schema (or if schema
    *  is null). Otherwise, returns a string describing the error.
+   *
+   * Once a schema object has compiled, its validator is reused, so a schema
+   * object must not be changed after it has been passed here.
    */
   static validate(schema: unknown | undefined, data: unknown): string | null {
     if (!schema) {

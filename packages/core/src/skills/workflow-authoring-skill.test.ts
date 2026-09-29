@@ -183,12 +183,13 @@ describe('resolveWorkflowAuthoringRoute', () => {
     );
   });
 
-  // R1-21: CodeModeOnly hides both bridge tools (`code-mode.ts` HIDDEN_TOOLS),
-  // so a deferred Skill tool is reached through the `exec` binding and the
-  // route must stay `skill`: a bridge pointer would name uncallable tools, and
-  // a tool that freezes its surface at construction (AgentTool) would carry the
-  // dead instruction all session. Mutation check: dropping the CodeModeOnly
-  // guard in bundled-reference.ts turns this red.
+  // R1-21: CodeModeOnly hides `tool_call` (`code-mode.ts` HIDDEN_TOOLS), so
+  // a deferred Skill tool there is reached through the `exec` binding, not
+  // the bridge — the route must stay `skill`, because a bridge pointer would
+  // send the model to `tool_call`, which it cannot call, and a tool that
+  // freezes its surface at construction (AgentTool) would carry the dead
+  // instruction for the whole session. Mutation check: dropping the
+  // CodeModeOnly guard in bundled-reference.ts turns this red.
   it('points straight at the skill when CodeModeOnly hides the bridge', () => {
     expect(
       route({ toolMode: ToolMode.CodeModeOnly, deferred: [ToolNames.SKILL] }),

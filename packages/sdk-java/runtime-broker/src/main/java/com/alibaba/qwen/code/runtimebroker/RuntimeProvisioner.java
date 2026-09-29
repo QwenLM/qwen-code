@@ -17,6 +17,12 @@ public interface RuntimeProvisioner extends AutoCloseable {
         return "legacy";
     }
 
+    /** Creates placement identity from trusted embedding configuration. */
+    default RuntimeProvisionRequest createRequest(RuntimeScope scope,
+            String isolationKey) {
+        return new RuntimeProvisionRequest(scope, isolationKey, kind());
+    }
+
     /**
      * Provisions with credentials the Broker created and persisted, so a
      * later Broker process can prove the same identity. The default ignores
@@ -54,6 +60,11 @@ public interface RuntimeProvisioner extends AutoCloseable {
                 RuntimeObservation.unknown(handle));
     }
 
+    /** Whether saved startup identity can be observed without relaunching it. */
+    default boolean supportsStartupRecovery(RuntimeResourceHandle handle) {
+        return false;
+    }
+
     /**
      * Proves a lease this process already treats as ready still answers
      * attestation. The default accepts the in-memory lease.
@@ -61,6 +72,14 @@ public interface RuntimeProvisioner extends AutoCloseable {
     default CompletionStage<Void> confirm(RuntimeProvisionRequest request,
             RuntimeLease lease) {
         return CompletableFuture.completedFuture(null);
+    }
+
+    /**
+     * Whether a failed confirmation can be retried against the same owned,
+     * still-live resource. Unknown implementations keep the binding fenced.
+     */
+    default boolean canRetryFailedConfirm(RuntimeLease lease) {
+        return false;
     }
 
     /**

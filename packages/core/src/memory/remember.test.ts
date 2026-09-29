@@ -37,6 +37,8 @@ vi.mock('./indexer.js', () => ({
   rebuildUserAutoMemoryIndex: vi.fn(),
 }));
 
+const recordUserMutation = vi.fn();
+
 function createConfig(
   projectRoot: string,
   managed = true,
@@ -48,6 +50,7 @@ function createConfig(
     getUserMemory: vi.fn().mockReturnValue('QWEN/AGENTS guidance'),
     getMemoryAgentTimeoutMinutes: vi.fn().mockReturnValue(undefined),
     getMemoryAgentMaxTurns: vi.fn().mockReturnValue(undefined),
+    getMemoryManager: vi.fn().mockReturnValue({ recordUserMutation }),
     ...overrides,
   } as unknown as Config;
 }
@@ -66,6 +69,7 @@ describe('remember memory helper', () => {
     vi.mocked(runForkedAgent).mockReset();
     vi.mocked(rebuildManagedAutoMemoryIndex).mockReset();
     vi.mocked(rebuildUserAutoMemoryIndex).mockReset();
+    recordUserMutation.mockReset();
     vi.mocked(rebuildManagedAutoMemoryIndex).mockResolvedValue('');
     vi.mocked(rebuildUserAutoMemoryIndex).mockResolvedValue('');
   });
@@ -231,9 +235,11 @@ describe('remember memory helper', () => {
       'edit',
     ]);
     expect(params.config.getUserMemory()).toBe('');
-    // The remember system prompt already embeds the full auto-memory section,
-    // so the forked config must report an empty one or AgentCore appends it
-    // again (duplication / blank-slate leak; see buildChatSystemPrompt).
+    expect(recordUserMutation).not.toHaveBeenCalled();
+    // The remember system prompt already embeds the full auto-memory section;
+    // the forked-agent config must report an empty auto-memory prompt so
+    // AgentCore does not append it a second time (duplication / blank-slate
+    // leak). See buildChatSystemPrompt in agent-core.ts.
     expect(params.config.getAutoMemoryPrompt()).toBe('');
     expect(params.config.getDisableAllHooks()).toBe(true);
     expect(params.config.getHookSystem()).toBeUndefined();
@@ -585,7 +591,7 @@ describe('remember memory helper', () => {
     expect(params.suppressChatRecording).toBe(true);
   });
 
-  it('rebuilds touched project indexes and best-effort user indexes', async () => {
+  it('records a user mutation before a best-effort user index rebuild', async () => {
     vi.mocked(rebuildUserAutoMemoryIndex).mockRejectedValue(
       new Error('user index unavailable'),
     );
@@ -595,6 +601,13 @@ describe('remember memory helper', () => {
 
     expect(result.touchedScopes).toEqual(['project', 'user']);
     expectRebuilt(true, true);
+    expect(recordUserMutation).toHaveBeenCalledWith(
+      projectRoot,
+      expect.any(Object),
+    );
+    expect(recordUserMutation.mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(rebuildUserAutoMemoryIndex).mock.invocationCallOrder[0]!,
+    );
   });
 
   it('classifies symlinked project memory paths by realpath', async () => {
@@ -699,10 +712,17 @@ describe('remember memory helper', () => {
 
     const { systemPrompt } = forkParams();
     // Full-protocol markers must be present (forceFullProtocol: true)
+    expect(systemPrompt).toContain('category:');
+    expect(systemPrompt).toContain('keywords:');
+    expect(systemPrompt).toContain('usage_scenarios:');
+    expect(systemPrompt).toContain('## Existing keyword vocabulary');
     expect(systemPrompt).toContain('## Types of memory');
     expect(systemPrompt).toContain('## What NOT to save in memory');
     expect(systemPrompt).toContain('## When to access memories');
     expect(systemPrompt).toContain('## Before recommending from memory');
+    expect(systemPrompt).toContain('category:');
+    expect(systemPrompt).toContain('keywords:');
+    expect(systemPrompt).toContain('usage_scenarios:');
     // Condensed-only markers must NOT appear
     expect(systemPrompt).not.toContain('## Memory types');
     expect(systemPrompt).not.toContain('## Do not save');

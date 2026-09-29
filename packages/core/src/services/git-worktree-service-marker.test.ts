@@ -15,8 +15,10 @@ import {
   createWorktreeSessionMarkerExclusive,
   readWorktreeSessionMarkerStrict,
   readWorktreeSessionMarkerStrictSync,
+  replaceWorktreeSessionMarker,
   transferWorktreeSessionMarkerOwner,
   WorktreeMarkerCommittedError,
+  WorktreeSessionMarkerOwnerChangedError,
   WORKTREE_SESSION_FILE,
 } from './gitWorktreeService.js';
 
@@ -110,7 +112,7 @@ describe('daemon worktree session markers', () => {
     const { repo, worktree } = await linkedWorktree();
 
     await createWorktreeSessionMarkerExclusive(worktree, 'session-123');
-    expect(await excludeRules(repo)).toContain(WORKTREE_SESSION_FILE);
+    expect(await excludeRules(repo)).toContain(`/${WORKTREE_SESSION_FILE}`);
     expect(await stagedAfterAddAll(worktree)).toBe('');
   });
 
@@ -469,14 +471,18 @@ describe('transferWorktreeSessionMarkerOwner', () => {
   it('aborts when the opening read does not name the expected owner', async () => {
     const dir = await ownedDir('session-other');
 
-    await expect(transfer(dir)).rejects.toThrow('does not match');
+    await expect(transfer(dir)).rejects.toBeInstanceOf(
+      WorktreeSessionMarkerOwnerChangedError,
+    );
     await expectOwner(dir, 'session-other');
   });
 
   it('aborts when the marker expected by the transfer is missing', async () => {
     const dir = await tempDir();
 
-    await expect(transfer(dir)).rejects.toThrow('does not match');
+    await expect(transfer(dir)).rejects.toBeInstanceOf(
+      WorktreeSessionMarkerOwnerChangedError,
+    );
     await expectMissing(dir);
   });
 
@@ -504,8 +510,8 @@ describe('transferWorktreeSessionMarkerOwner', () => {
     await transfer(worktree);
 
     const rules = await excludeRules(repo);
-    expect(rules).toContain(WORKTREE_SESSION_FILE);
-    expect(rules).toContain(`${WORKTREE_SESSION_FILE}.*.tmp`);
+    expect(rules).toContain(`/${WORKTREE_SESSION_FILE}`);
+    expect(rules).toContain(`/${WORKTREE_SESSION_FILE}.*.tmp`);
     expect(await stagedAfterAddAll(worktree)).toBe('');
   });
 
@@ -550,7 +556,7 @@ describe('transferWorktreeSessionMarkerOwner', () => {
     },
   );
 
-  it('aborts the rename when the marker is swapped in the commit window', async () => {
+  it('types a replace race when the marker is swapped in the commit window', async () => {
     const dir = await ownedDir('session-old');
     const markerPath = path.join(dir, WORKTREE_SESSION_FILE);
 
@@ -570,11 +576,11 @@ describe('transferWorktreeSessionMarkerOwner', () => {
       });
 
     try {
-      await expect(transfer(dir)).rejects.toThrow(
-        'Worktree marker changed during ownership transfer',
-      );
-      // The aborted rename leaves the raced marker (never the stale owner
-      // this call was about to commit) and cleans up the staged temp file.
+      await expect(
+        replaceWorktreeSessionMarker(dir, 'session-old', 'session-new'),
+      ).rejects.toBeInstanceOf(WorktreeSessionMarkerOwnerChangedError);
+      // The aborted rename leaves the raced marker — never the stale owner
+      // this call was about to commit — and cleans up the staged temp file.
       await expect(fs.readFile(markerPath, 'utf8')).resolves.toBe(
         'session-raced',
       );

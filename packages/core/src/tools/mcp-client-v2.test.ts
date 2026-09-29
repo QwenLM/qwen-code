@@ -605,7 +605,7 @@ describe('configured MCP SDK v2 negotiation', () => {
       [{ _meta: { ui: { resourceUri: 'ui://demo/dashboard' } } }, true],
       [{ _meta: { ui: { visibility: ['model', 'app'] } } }, true],
       [{ _meta: { ui: { visibility: ['app'] } } }, false],
-      [{ _meta: { ui: { visibility: null } } }, true],
+      [{ _meta: { ui: { visibility: null } } }, false],
     ] as const) {
       expect(isMcpToolVisibleToModel(tool)).toBe(visible);
     }

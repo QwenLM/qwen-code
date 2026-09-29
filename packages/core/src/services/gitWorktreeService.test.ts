@@ -14,6 +14,7 @@ import { isCommandAvailable } from '../utils/shell-utils.js';
 
 const hoistedMockSimpleGit = vi.hoisted(() => vi.fn());
 const git = {
+  env: vi.fn(),
   checkIsRepo: vi.fn(),
   init: vi.fn(),
   add: vi.fn(),
@@ -100,7 +101,11 @@ describe('GitWorktreeService', () => {
     hoistedMockGetGlobalQwenDir.mockReturnValue('/mock-qwen');
     (isCommandAvailable as Mock).mockReturnValue({ available: true });
 
-    hoistedMockSimpleGit.mockImplementation(() => ({ ...git }));
+    hoistedMockSimpleGit.mockImplementation(() => {
+      const instance = { ...git };
+      git.env.mockReturnValue(instance);
+      return instance;
+    });
 
     git.checkIsRepo.mockResolvedValue(true);
     git.init.mockResolvedValue(undefined);

@@ -117,9 +117,11 @@ describe('SubagentManager', () => {
         { name: 'write_file', displayName: 'Write File' },
         { name: 'grep', displayName: 'Search Files' },
       ]),
-      // buildSubagentContextOverride copies discovered tools from this parent
-      // registry via `source.tools.values()`, so the stub needs a `tools` Map.
+      // `buildSubagentContextOverride` now rebuilds the tool registry on
+      // its override and copies discovered tools from this parent
+      // registry. Mirror both discovered-tool maps read by that copy.
       tools: new Map(),
+      mcpAppTools: new Map(),
     } as unknown as ToolRegistry;
 
     mockConfig = makeFakeConfig({});
@@ -2082,6 +2084,73 @@ describe('SubagentManager', () => {
         expect((await convert({ tools: [tool] })).toolConfig?.tools).toEqual([
           tool,
         ]);
+      });
+
+      it('keeps inherit-all for an empty tools array combined with disallowedTools', async () => {
+        // An empty allow-list is the documented "inherit everything" marker
+        // for definition files, not a request for a zero-tool agent. `[]` is
+        // truthy, so testing only for presence produced `tools: []` here, and
+        // AgentCore reads an explicit empty list as deny-all: an agent defined
+        // with `tools: []` plus `disallowedTools: [write_file]` declared 16
+        // tools on the merge base and 0 on this branch, with no warning.
+        const runtimeConfig = await manager.convertToRuntimeConfig({
+          ...validConfig,
+          tools: [],
+          disallowedTools: ['write_file'],
+        });
+
+        expect(runtimeConfig.toolConfig?.tools).toEqual(['*']);
+        expect(runtimeConfig.toolConfig?.disallowedTools).toEqual([
+          'write_file',
+        ]);
+      });
+
+      it('should transform display names to tool names in tool configuration', async () => {
+        const configWithDisplayNames: SubagentConfig = {
+          ...validConfig,
+          tools: ['Read File', 'write_file', 'Search Files', 'unknown_tool'],
+        };
+
+        const runtimeConfig = await manager.convertToRuntimeConfig(
+          configWithDisplayNames,
+        );
+
+        expect(runtimeConfig.toolConfig).toBeDefined();
+        expect(runtimeConfig.toolConfig!.tools).toEqual([
+          'read_file', // 'Read File' -> 'read_file' (display name match)
+          'write_file', // 'write_file' -> 'write_file' (exact name match)
+          'grep', // 'Search Files' -> 'grep' (display name match)
+          'unknown_tool', // 'unknown_tool' -> 'unknown_tool' (preserved as-is)
+        ]);
+      });
+
+      it('fails closed when the allow-list is only the unavailable WebSearch', async () => {
+        // The unresolved name stays a dead, restrictive entry: the agent
+        // runs tool-less rather than inheriting shell/write it was not
+        // configured for. Deliberate — supersedes the earlier inherit-all
+        // compatibility fallback for converted Claude agents.
+        const configWithUnregistered: SubagentConfig = {
+          ...validConfig,
+          tools: ['WebSearch'],
+        };
+
+        const runtimeConfig = await manager.convertToRuntimeConfig(
+          configWithUnregistered,
+        );
+
+        expect(runtimeConfig.toolConfig?.tools).toEqual(['WebSearch']);
+      });
+
+      it('does not widen an allow-list whose names simply fail to resolve', async () => {
+        // A typo'd or temporarily-unavailable tool set must stay a dead,
+        // restrictive list — never silently become inherit-all (that would
+        // grant shell/write to an agent configured without them).
+        const runtimeConfig = await manager.convertToRuntimeConfig({
+          ...validConfig,
+          tools: ['Sheell'],
+        });
+
+        expect(runtimeConfig.toolConfig?.tools).toEqual(['Sheell']);
       });
 
       it('should set modelConfig.model from model selector and merge run configurations', async () => {

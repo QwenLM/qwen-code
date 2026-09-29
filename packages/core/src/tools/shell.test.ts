@@ -11,6 +11,8 @@ import {
   describe,
   it,
   expect,
+  beforeAll,
+  afterAll,
   beforeEach,
   afterEach,
   onTestFinished,
@@ -90,8 +92,10 @@ import {
 import {
   type ShellExecutionResult,
   type ShellOutputEvent,
+  type ShellRawCaptureSink,
 } from '../services/shellExecutionService.js';
 import * as fs from 'node:fs';
+import { mkdtemp, rm } from 'node:fs/promises';
 import * as os from 'node:os';
 import * as crypto from 'node:crypto';
 import path from 'node:path';
@@ -149,6 +153,7 @@ function shellResult(
 }
 
 describe('ShellTool', () => {
+  let outputDirectory: string;
   let shellTool: ShellTool;
   let mockConfig: Config;
   let mockShellOutputCallback: (event: ShellOutputEvent) => void;
@@ -287,6 +292,17 @@ describe('ShellTool', () => {
     });
   };
 
+  beforeAll(async () => {
+    const realOs = await vi.importActual<typeof import('node:os')>('node:os');
+    outputDirectory = await mkdtemp(
+      path.join(realOs.tmpdir(), 'qwen-shell-test-'),
+    );
+  });
+
+  afterAll(async () => {
+    await rm(outputDirectory, { recursive: true, force: true });
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
 
@@ -345,7 +361,7 @@ describe('ShellTool', () => {
         .mockReturnValue(createMockWorkspaceContext('/test/dir')),
       storage: {
         getUserSkillsDirs: vi.fn().mockReturnValue(['/test/dir/.qwen/skills']),
-        getProjectTempDir: vi.fn().mockReturnValue('/tmp/qwen-temp'),
+        getProjectTempDir: vi.fn().mockReturnValue(outputDirectory),
         getProjectDir: vi.fn().mockReturnValue('/test/proj'),
       },
       getTruncateToolOutputThreshold: vi.fn().mockReturnValue(0),
@@ -2942,6 +2958,55 @@ describe('ShellTool', () => {
         expect(result.persistedOutputFiles).toBeUndefined();
       });
 
+      it('does not persist a raw capture preview as full output', async () => {
+        const truncationModule = await import('./truncation.js');
+        const spy = vi
+          .spyOn(truncationModule, 'truncateToolOutput')
+          .mockResolvedValue({
+            content: 'Full output saved to /tmp/preview.output; use read_file.',
+            outputFile: '/tmp/preview.output',
+          });
+        const capture: ShellRawCaptureSink = {
+          write: vi.fn().mockResolvedValue(undefined),
+          finish: vi.fn().mockResolvedValue(undefined),
+          setStarted: vi.fn(),
+          setProcessResult: vi.fn(),
+        };
+        const output = 'x'.repeat(64 * 1024);
+        try {
+          const invocation = shellTool.build({
+            command: 'large-output-cmd',
+            is_background: false,
+          }) as ShellToolInvocation;
+          const pending = invocation.execute(
+            mockAbortSignal,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            capture,
+          );
+          resolveShellExecution({ output, exitCode: 0 });
+          const result = await pending;
+
+          expect(spy).not.toHaveBeenCalled();
+          expect(result.llmContent).toContain(output);
+          expect(result.llmContent).not.toContain('/tmp/preview.output');
+          expect(result.llmContent).not.toContain('read_file');
+          expect(result.persistedOutputFiles).toBeUndefined();
+          expect(result.returnDisplay).toMatchObject({ outputFiles: [] });
+          expect(mockShellExecutionService.mock.calls[0][5]).toMatchObject({
+            maxBufferedOutputBytes: 64 * 1024,
+          });
+          expect(capture.setProcessResult).toHaveBeenCalledWith(
+            expect.objectContaining({ output, exitCode: 0 }),
+          );
+        } finally {
+          spy.mockRestore();
+        }
+      });
+
       it('passes an explicit low threshold to output truncation', async () => {
         setExplicitThreshold(10_000);
         const outputFile = '/tmp/qwen-temp/shell-output.txt';
@@ -4924,11 +4989,11 @@ describe('ShellTool', () => {
         number,
       ]
     > = [
-      ['bash on linux', 'linux', undefined, undefined, 5_300],
-      ['Git Bash on win32', 'win32', CMD, 'MINGW64', 5_120],
-      ['powershell.exe', 'win32', WIN_PS, undefined, 4_810],
-      ['pwsh.exe', 'win32', PWSH, undefined, 4_700],
-      ['cmd.exe', 'win32', CMD, undefined, 4_560],
+      ['bash on linux', 'linux', undefined, undefined, 4_670],
+      ['Git Bash on win32', 'win32', CMD, 'MINGW64', 4_490],
+      ['powershell.exe', 'win32', WIN_PS, undefined, 4_390],
+      ['pwsh.exe', 'win32', PWSH, undefined, 4_290],
+      ['cmd.exe', 'win32', CMD, undefined, 4_150],
     ];
 
     it.each(SHAPES)(

@@ -325,6 +325,12 @@ function memoryJournal() {
   const entries: JournalEntry[] = [];
   const journal = {
     path: 'mem',
+    retainReplayPrefix: async (keys: ReadonlySet<string>) => {
+      const kept = entries.filter(
+        (entry) => entry.type !== 'result' || keys.has(entry.key),
+      );
+      entries.splice(0, entries.length, ...kept);
+    },
     append: async (e: JournalEntry) => {
       entries.push(e);
     },

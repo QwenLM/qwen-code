@@ -25,6 +25,14 @@ describe('bundled workflow-authoring skill', () => {
     );
   });
 
+  it.each([
+    "interactive TUI's ink renderer",
+    'OpenTUI renderer does not yet run client-scheduled tools',
+    "Workflow({ name: '<name>' })",
+  ])('states the script contract: %s', (anchor) => {
+    expect(loadSkill().body.replace(/\s+/g, ' ')).toContain(anchor);
+  });
+
   it('names exactly the tools a workflow subagent can never use', () => {
     const prose = loadSkill().body.replace(/\s+/g, ' ');
     const lead = 'Workflow subagents can never use ';

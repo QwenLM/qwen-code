@@ -104,6 +104,25 @@ function chatHistorySetup() {
   const toolRegistry = {
     warmAll: vi.fn().mockResolvedValue(undefined),
     ...registryStubs(),
+    getFunctionDeclarations: vi
+      .fn()
+      .mockReturnValue([{ name: ToolNames.SKILL }]),
+    getAllToolNames: vi
+      .fn()
+      .mockReturnValue([
+        ToolNames.SKILL,
+        ToolNames.TOOL_SEARCH,
+        ToolNames.TOOL_CALL,
+      ]),
+    getTool: vi
+      .fn()
+      .mockImplementation((name: string) =>
+        name === ToolNames.SKILL ||
+        name === ToolNames.TOOL_SEARCH ||
+        name === ToolNames.TOOL_CALL
+          ? {}
+          : null,
+      ),
   };
   const config: Partial<Config> = {
     getSkipStartupContext: vi.fn().mockReturnValue(false),
@@ -368,6 +387,175 @@ describe('getInitialChatHistory', () => {
     const bridge = 'reachable through `tool_search` and `tool_call`';
     expectContains(parts[parts.length - 1]?.text, bridge, 'web_fetch');
     expect(parts[0]?.text).not.toContain(bridge);
+  });
+
+  describe('skills listing gating on the Skill tool (#12835)', () => {
+    const entries: AvailableSkillEntry[] = [
+      { name: 'test-skill', description: 'A test skill', level: 'project' },
+    ];
+
+    beforeEach(() => {
+      mockConfig.getSkillManager = vi
+        .fn()
+        .mockReturnValue({ listSkills: vi.fn() });
+      vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
+        availableSkills: [],
+        pendingConditionalSkillNames: new Set(),
+        modelInvocableCommands: [],
+        entries,
+      });
+    });
+
+    it('omits the skills listing when the Skill tool is not registered', async () => {
+      // e.g. `--exclude-tools skill` or a coreTools allowlist without skill:
+      // the Skill factory never reaches the registry, while its siblings stay
+      // registered. Stubbing a non-empty list is what keeps this from
+      // degenerating into an emptiness check — `--core-tools read_file`
+      // (#12835's repro) yields ['read_file'], not [].
+      mockToolRegistry.getAllToolNames.mockReturnValue([
+        ToolNames.READ_FILE,
+        ToolNames.GREP,
+      ]);
+      // An excluded tool is absent from the declared schemas as well. Keeping
+      // the two in step here is what leaves the deferred case below as the
+      // only fixture where they disagree.
+      mockToolRegistry.getFunctionDeclarations.mockReturnValue([
+        { name: ToolNames.READ_FILE },
+        { name: ToolNames.GREP },
+      ]);
+      // ...and absent from `getTool()` too, which reads `this.tools` — a subset
+      // of the union `getAllToolNames()` returns (tool-registry.ts:1243 vs
+      // :1203-1206), so a registry that does not list Skill cannot answer for
+      // it. Dropping the two bridge halves with it changes no reminder here:
+      // `getDeferredToolSummary()` is empty in this fixture, and
+      // `buildDeferredToolsReminder` returns null before it checks them.
+      mockToolRegistry.getTool.mockImplementation((name: string) =>
+        name === ToolNames.READ_FILE || name === ToolNames.GREP ? {} : null,
+      );
+
+      const [history, snapshotEntries] = await getInitialChatHistory(
+        mockConfig as Config,
+      );
+
+      const text = JSON.stringify(history);
+      expect(text).not.toContain('<available_skills>');
+      expect(text).not.toContain('test-skill');
+      expect(snapshotEntries).toEqual([]);
+    });
+
+    it('omits even the no-skills fallback when the Skill tool is not registered', async () => {
+      // Siblings registered, Skill absent — same shape as above, so the
+      // `NO_SKILLS_OPENER` fallback is suppressed for the same reason.
+      mockToolRegistry.getAllToolNames.mockReturnValue([
+        ToolNames.READ_FILE,
+        ToolNames.GREP,
+      ]);
+      mockToolRegistry.getFunctionDeclarations.mockReturnValue([
+        { name: ToolNames.READ_FILE },
+        { name: ToolNames.GREP },
+      ]);
+      // Same three-read coherence as the case above: excluded means `getTool()`
+      // cannot answer for Skill either.
+      mockToolRegistry.getTool.mockImplementation((name: string) =>
+        name === ToolNames.READ_FILE || name === ToolNames.GREP ? {} : null,
+      );
+      vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
+        availableSkills: [],
+        pendingConditionalSkillNames: new Set(),
+        modelInvocableCommands: [],
+        entries: [],
+      });
+
+      const [history] = await getInitialChatHistory(mockConfig as Config);
+
+      expect(JSON.stringify(history)).not.toContain(
+        'No skills are currently available',
+      );
+    });
+
+    it('includes the skills listing when the Skill tool is registered', async () => {
+      // Eagerly registered — the default fixture: the Skill tool is in the
+      // declared schemas *and* in `getAllToolNames()`.
+      const [history, snapshotEntries] = await getInitialChatHistory(
+        mockConfig as Config,
+      );
+
+      const text = JSON.stringify(history);
+      expect(text).toContain('<available_skills>');
+      expect(text).toContain('test-skill');
+      expect(snapshotEntries).toHaveLength(1);
+      expect(snapshotEntries[0].name).toBe('test-skill');
+    });
+
+    it('keeps the listing for a deferred-but-registered Skill tool', async () => {
+      // A Skill tool demoted behind `tool_search` by an active `tools.eager`
+      // allowlist stays registered, and `getAllToolNames()` unions factory
+      // registrations, so it is still listed — while `getFunctionDeclarations()`
+      // skips permission-deferred tools. That demoted state is defined by both
+      // bridge halves being registered (`bundled-reference.ts`: without them the
+      // Skill tool is registered but unreachable, which is no route at all), so
+      // the stub lists them too rather than pinning a shape that cannot occur.
+      // `getInitialChatHistory` awaits `warmAll()` before the gate and
+      // `warmAll()` materializes every factory (`ensureTool` -> `this.tools.set`),
+      // so the default `getTool()` stub already returns the instance here; a
+      // listed name with a null from `getTool()` means the warm rejected, which
+      // is a different state and must not be modelled as deferral. The listing
+      // has to survive the demotion, so this is the case a declarations-based
+      // gate wrongly drops — and the only one in the suite where the Skill tool
+      // is listed but not declared.
+      mockToolRegistry.getAllToolNames.mockReturnValue([
+        ToolNames.SKILL,
+        ToolNames.TOOL_SEARCH,
+        ToolNames.TOOL_CALL,
+      ]);
+      // Registered bridges stay declared, so an empty list here would model a
+      // state that cannot occur: `isExemptFromEagerAllowList`
+      // (permission-manager.ts) exempts `tool_search` / `tool_call` from the
+      // `tools.eager` allowlist, so `registerLazyTool` (config.ts) routes them
+      // through plain `registerFactory`, they never enter `permissionDeferred`,
+      // and neither is `shouldDefer` — `getFunctionDeclarations()` keeps them
+      // and drops only the demoted Skill tool. `[]` would need the bridges
+      // denied too, i.e. the "no route at all" state ruled out above.
+      mockToolRegistry.getFunctionDeclarations.mockReturnValue([
+        { name: ToolNames.TOOL_SEARCH },
+        { name: ToolNames.TOOL_CALL },
+      ]);
+
+      const [history] = await getInitialChatHistory(mockConfig as Config);
+
+      expect(JSON.stringify(history)).toContain('<available_skills>');
+      // Assert the gate consulted the registration union rather than reading
+      // the stubbed values back: Skill is absent from the declaration list
+      // above, so this is what a declarations-based gate drops. `getAllToolNames`
+      // has exactly one caller on this path (the gate in
+      // `getInitialChatHistory`), so the call is attributable to it.
+      expect(mockToolRegistry.getAllToolNames).toHaveBeenCalled();
+    });
+
+    it('keeps the no-skills fallback when the Skill tool is registered but no skills exist', async () => {
+      vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
+        availableSkills: [],
+        pendingConditionalSkillNames: new Set(),
+        modelInvocableCommands: [],
+        entries: [],
+      });
+
+      const [history] = await getInitialChatHistory(mockConfig as Config);
+
+      expect(JSON.stringify(history)).toContain(
+        'No skills are currently available',
+      );
+    });
+
+    it('still honors includeAvailableSkillsReminder: false even when the Skill tool is registered', async () => {
+      const [history] = await getInitialChatHistory(
+        mockConfig as Config,
+        undefined,
+        { includeAvailableSkillsReminder: false },
+      );
+
+      expect(JSON.stringify(history)).not.toContain('<available_skills>');
+    });
   });
 });
 

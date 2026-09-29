@@ -223,7 +223,7 @@ describe('SubagentValidator', () => {
     it('should warn about empty arrays', () => {
       expectWarning(
         validator.validateTools([]),
-        'Empty tools array - subagent will inherit all available tools',
+        'Empty tools array - subagent will inherit all available tools (any disallowedTools still apply)',
       );
     });
 

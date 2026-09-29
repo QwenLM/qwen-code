@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import { runAutoMemoryExtractionByAgent } from './extractionAgentPlanner.js';
 import { runManagedAutoMemoryDream } from './dream.js';
+import { DREAM_OPERATIONS_FILENAME } from './dream-operations.js';
 import { planManagedAutoMemoryDreamByAgent } from './dreamAgentPlanner.js';
 import { MemoryManager } from './manager.js';
 import { rebuildManagedAutoMemoryIndex } from './indexer.js';
@@ -18,6 +19,7 @@ import {
   clearAutoMemoryRootCache,
   getAutoMemoryFilePath,
   getAutoMemoryIndexPath,
+  getAutoMemoryRoot,
 } from './paths.js';
 import {
   forgetManagedAutoMemoryMatches,
@@ -66,6 +68,7 @@ async function writeMemoryDoc(
 const userTurn = (text: string) => ({ role: 'user', parts: [{ text }] });
 
 describe('managed auto-memory lifecycle integration', () => {
+  const originalMemoryBase = process.env['QWEN_CODE_MEMORY_BASE_DIR'];
   let tempDir: string;
   let projectRoot: string;
   let mockConfig: Config;
@@ -77,6 +80,8 @@ describe('managed auto-memory lifecycle integration', () => {
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'memory-lifecycle-int-'));
     projectRoot = path.join(tempDir, 'project');
     await fs.mkdir(projectRoot, { recursive: true });
+    process.env['QWEN_CODE_MEMORY_BASE_DIR'] = path.join(tempDir, 'memory');
+    clearAutoMemoryRootCache();
     await ensureAutoMemoryScaffold(
       projectRoot,
       new Date('2026-04-01T00:00:00.000Z'),
@@ -84,6 +89,9 @@ describe('managed auto-memory lifecycle integration', () => {
     mockConfig = {
       getSessionId: () => 'session-1',
       getModel: () => 'qwen3-coder-plus',
+      getMemoryRecallMode: () => 'structured',
+      getStructuredMemoryRecallEnabled: () => true,
+      isTrustedFolder: () => true,
     } as Config;
     vi.clearAllMocks();
     extractionCount = 0;
@@ -120,20 +128,55 @@ describe('managed auto-memory lifecycle integration', () => {
         };
       },
     );
-    vi.mocked(planManagedAutoMemoryDreamByAgent).mockResolvedValue({
-      status: 'completed',
-      finalText: 'Consolidated memory files and updated the index.',
-      filesTouched: [
-        getAutoMemoryFilePath(
+    vi.mocked(planManagedAutoMemoryDreamByAgent).mockImplementation(
+      async () => {
+        const canonicalPath = getAutoMemoryFilePath(
           projectRoot,
           path.join('user', 'terse-responses.md'),
-        ),
-        getAutoMemoryFilePath(
-          projectRoot,
-          path.join('reference', 'latency-dashboard.md'),
-        ),
-      ],
-    });
+        );
+        await fs.writeFile(
+          canonicalPath,
+          [
+            '---',
+            'type: user',
+            'name: Terse Responses',
+            'description: I prefer terse responses.',
+            'category: communication_preference',
+            'keywords:',
+            '  - concise responses',
+            '  - response style',
+            'usage_scenarios:',
+            '  - Writing responses',
+            '---',
+            '',
+            'I prefer terse responses.',
+            '',
+            'Why: User repeatedly asks for concise replies.',
+          ].join('\n'),
+          'utf-8',
+        );
+        await fs.writeFile(
+          path.join(getAutoMemoryRoot(projectRoot), DREAM_OPERATIONS_FILENAME),
+          `${JSON.stringify({
+            version: 1,
+            delete: ['user/terse-duplicate.md'],
+            operations: [
+              {
+                type: 'dedupe',
+                sources: ['user/terse-duplicate.md'],
+                target: 'user/terse-responses.md',
+              },
+            ],
+          })}\n`,
+          'utf-8',
+        );
+        return {
+          status: 'completed',
+          finalText: 'Consolidated duplicate terse-response memories.',
+          filesTouched: [canonicalPath],
+        };
+      },
+    );
   });
 
   /**
@@ -180,6 +223,12 @@ describe('managed auto-memory lifecycle integration', () => {
 
   afterEach(async () => {
     mgr.resetExtractStateForTests();
+    if (originalMemoryBase === undefined) {
+      delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+    } else {
+      process.env['QWEN_CODE_MEMORY_BASE_DIR'] = originalMemoryBase;
+    }
+    clearAutoMemoryRootCache();
     await fs.rm(tempDir, {
       recursive: true,
       force: true,
@@ -235,7 +284,7 @@ describe('managed auto-memory lifecycle integration', () => {
     );
     await rebuildManagedAutoMemoryIndex(projectRoot);
 
-    await writeMemoryDoc(
+    const duplicateUserPath = await writeMemoryDoc(
       projectRoot,
       path.join('user', 'terse-duplicate.md'),
       memoryDoc(
@@ -255,7 +304,10 @@ describe('managed auto-memory lifecycle integration', () => {
       mockConfig,
     );
     expect(dreamResult.touchedTopics).toContain('user');
-    expect(dreamResult.dedupedEntries).toBe(0);
+    expect(dreamResult.dedupedEntries).toBe(1);
+    await expect(fs.stat(duplicateUserPath)).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
 
     const indexContent = await fs.readFile(
       getAutoMemoryIndexPath(projectRoot),
@@ -277,11 +329,14 @@ describe('managed auto-memory lifecycle integration', () => {
     const recall = await resolveRelevantAutoMemoryPromptForQuery(
       projectRoot,
       'Check the latency dashboard and use a terse answer.',
+      { config: mockConfig },
     );
     expect(recall.strategy).toBe('heuristic');
-    expect(recall.prompt).toContain('## Relevant memory');
-    expect(recall.prompt).toContain('user/');
-    expect(recall.prompt).toContain('reference/');
+    expect(recall.prompt).toContain('## Memory focus for this turn');
+    expect(recall.prompt).toContain('project:user/terse-responses.md');
+    expect(recall.prompt).toContain('project:reference/latency-dashboard.md');
+    expect(recall.prompt).not.toContain('This is temporary for this task.');
+    expect(recall.prompt).not.toContain('Why: User repeatedly asks');
   });
 
   it('recalls a relevant topic beyond the general 200-document scan cap', async () => {
@@ -293,6 +348,9 @@ describe('managed auto-memory lifecycle integration', () => {
     const recall = await resolveRelevantAutoMemoryPromptForQuery(
       projectRoot,
       'What is the overflow zephyr codeword?',
+      // No trust answer now reads as untrusted (empty project universe in
+      // local-memory mode); declare the trusted folder as production does.
+      { config: { isTrustedFolder: () => true } as Config },
     );
 
     expect(recall.strategy).toBe('heuristic');
@@ -323,6 +381,9 @@ describe('managed auto-memory lifecycle integration', () => {
       const recall = await resolveRelevantAutoMemoryPromptForQuery(
         projectRoot,
         'What is the overflow zephyr codeword?',
+        // No trust answer now reads as untrusted (empty project universe in
+        // local-memory mode); declare the trusted folder as production does.
+        { config: { isTrustedFolder: () => true } as Config },
       );
       expect(recall.selectedDocs.map((doc) => doc.filePath)).toContain(
         targetPath,

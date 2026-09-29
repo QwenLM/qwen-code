@@ -1,0 +1,214 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { describe, expect, it } from 'vitest';
+import {
+  MANAGED_EXTENSION_DELIVERY_TARGETS,
+  isExtensionRunStart,
+  isExtensionRunSuccessor,
+  isMonitorRunStart,
+  parseExtensionRun,
+} from './managed-extension-record.js';
+import {
+  MANAGED_EXTENSION_RECORD_BODIES,
+  MANAGED_TASK_STATES,
+  extensionExecutionOf,
+  isExtensionDeliveryPending,
+  managedExtensionRecordKey,
+  managedTaskId,
+  projectManagedTask,
+  type ManagedRuntimeExecutionView,
+  type ManagedTaskProjection,
+} from './managed-extension-projection.js';
+import type { ManagedSessionDomain } from './managed-session-records.js';
+
+interface Revision {
+  readonly occurredAt: number;
+  readonly run: unknown;
+  readonly view: ManagedTaskProjection;
+  readonly deliveryPending: boolean;
+}
+
+interface FixtureSuite {
+  readonly contractVersion: 1;
+  readonly recordBodies: Record<string, string>;
+  readonly taskStates: readonly string[];
+  readonly pendingDeliveryStates: readonly string[];
+  readonly taskIdCases: ReadonlyArray<{
+    readonly id: string;
+    readonly sessionId: string;
+    readonly domain: ManagedSessionDomain;
+    readonly recordId: string;
+    readonly recordKey: string;
+    readonly taskId: string;
+  }>;
+  readonly runStartCases: ReadonlyArray<{
+    readonly id: string;
+    readonly valid: boolean;
+    readonly run: unknown;
+  }>;
+  readonly monitorRunStartCases: ReadonlyArray<{
+    readonly id: string;
+    readonly valid: boolean;
+    readonly monitorRun: unknown;
+  }>;
+  readonly viewCases: ReadonlyArray<
+    { readonly id: string } & Omit<Revision, 'view'> & {
+        readonly view: ManagedTaskProjection;
+      }
+  >;
+  readonly historyCases: ReadonlyArray<{
+    readonly id: string;
+    readonly kind: string;
+    readonly revisions: readonly Revision[];
+  }>;
+  readonly brokerExecutionCases: ReadonlyArray<{
+    readonly id: string;
+    readonly execution: string;
+    readonly inspection: ManagedRuntimeExecutionView;
+    readonly harnessExecution: string;
+  }>;
+  readonly inspectionExecutionCases: ReadonlyArray<{
+    readonly id: string;
+    readonly inspection: ManagedRuntimeExecutionView;
+    readonly execution: string;
+  }>;
+}
+
+const fixtures = JSON.parse(
+  fs.readFileSync(
+    path.join(
+      path.dirname(fileURLToPath(import.meta.url)),
+      'contracts',
+      'managed-extension-projection-v1.fixtures.json',
+    ),
+    'utf8',
+  ),
+) as FixtureSuite;
+
+describe('managed-extension-projection/1 fixtures', () => {
+  it('pins the record bodies, task states and outbox states', () => {
+    expect(fixtures.contractVersion).toBe(1);
+    expect(
+      Object.fromEntries(
+        Object.entries(MANAGED_EXTENSION_RECORD_BODIES).map(
+          ([domain, body]) => [domain, body?.taskKind],
+        ),
+      ),
+    ).toEqual(fixtures.recordBodies);
+    expect([...MANAGED_TASK_STATES]).toEqual(fixtures.taskStates);
+    const pending = new Set<string>();
+    for (const [target, states] of Object.entries(
+      MANAGED_EXTENSION_DELIVERY_TARGETS,
+    )) {
+      for (const state of states) {
+        const run = parseExtensionRun({
+          state: 'settled',
+          reason: null,
+          definition: null,
+          executionCallId: null,
+          effectId: null,
+          dispatchId: null,
+          deliveryId: target === 'channel' ? 'delivery-1' : null,
+          execution: null,
+          runtime: null,
+          delivery: { target, state },
+        });
+        if (isExtensionDeliveryPending(run)) pending.add(state);
+      }
+    }
+    expect([...pending].sort()).toEqual(fixtures.pendingDeliveryStates);
+  });
+
+  it('keeps every case id unique', () => {
+    const lists = Object.entries(fixtures).filter(([name]) =>
+      name.endsWith('Cases'),
+    );
+    expect(lists).toHaveLength(9);
+    for (const [, list] of lists) {
+      const ids = (list as ReadonlyArray<{ readonly id: string }>).map(
+        (each) => each.id,
+      );
+      expect(new Set(ids).size).toBe(ids.length);
+    }
+  });
+
+  it.each(fixtures.taskIdCases)('derives the task id: $id', (each) => {
+    const key = managedExtensionRecordKey(
+      each.sessionId,
+      each.domain,
+      each.recordId,
+    );
+    expect(key).toBe(each.recordKey);
+    expect(managedTaskId(key)).toBe(each.taskId);
+  });
+
+  it.each(fixtures.runStartCases)('judges a run start: $id', (each) => {
+    expect(isExtensionRunStart(each.run)).toBe(each.valid);
+  });
+
+  it.each(fixtures.monitorRunStartCases)(
+    'judges a monitor start: $id',
+    (each) => {
+      expect(isMonitorRunStart(each.monitorRun)).toBe(each.valid);
+      expect(
+        MANAGED_EXTENSION_RECORD_BODIES.monitor_run?.isStart(each.monitorRun),
+      ).toBe(each.valid);
+    },
+  );
+
+  it.each(fixtures.viewCases)('projects one revision: $id', (each) => {
+    const run = parseExtensionRun(each.run);
+    expect(projectManagedTask(null, run, each.occurredAt)).toEqual(each.view);
+    expect(isExtensionDeliveryPending(run)).toBe(each.deliveryPending);
+  });
+
+  it.each(fixtures.historyCases)('projects a history: $id', (each) => {
+    const [first, ...later] = each.revisions;
+    expect(isExtensionRunStart(first.run)).toBe(true);
+    let previous: ManagedTaskProjection | null = null;
+    let previousRun: unknown = null;
+    for (const revision of [first, ...later]) {
+      if (previousRun !== null) {
+        expect(isExtensionRunSuccessor(previousRun, revision.run)).toBe(true);
+      }
+      const run = parseExtensionRun(revision.run);
+      const view = projectManagedTask(previous, run, revision.occurredAt);
+      expect(view).toEqual(revision.view);
+      expect(isExtensionDeliveryPending(run)).toBe(revision.deliveryPending);
+      previous = view;
+      previousRun = revision.run;
+    }
+  });
+
+  it.each(fixtures.inspectionExecutionCases)(
+    'reads a Broker report: $id',
+    (each) => {
+      expect(extensionExecutionOf(each.inspection)).toBe(each.execution);
+    },
+  );
+
+  // Java maps the Broker state; the Harness sees only what the Broker's HTTP
+  // API reports for it, which the Broker's own contract test pins to these
+  // cases.
+  it.each(fixtures.brokerExecutionCases)(
+    'reads what the Broker reports for a $id execution',
+    (each) => {
+      expect(extensionExecutionOf(each.inspection)).toBe(each.harnessExecution);
+    },
+  );
+
+  it('reads the Broker as Java does except where the wire hides a claim', () => {
+    expect(
+      fixtures.brokerExecutionCases
+        .filter((each) => each.harnessExecution !== each.execution)
+        .map((each) => each.id),
+    ).toEqual(['dispatching']);
+  });
+});

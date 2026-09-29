@@ -108,12 +108,44 @@ describe('MCP App host helpers', () => {
     expect(applySandboxCspQuery(sandboxUrl, encodedOverflow)).toBe(sandboxUrl);
   });
 
-  it('rejects non-loopback hosts', () => {
+  it('uses the existing HTTPS connection and preserves proxy path prefixes', () => {
     expect(
       resolveMcpAppSandboxUrl(
-        'https://daemon.example.com',
-        'https://host.example.com',
+        'https://daemon.example.com/instance/42/',
+        'https://host.example.com/session/1',
       ),
+    ).toBe(
+      'https://daemon.example.com/instance/42/mcp-app-sandbox?hostOrigin=https%3A%2F%2Fhost.example.com&mode=data',
+    );
+    expect(
+      resolveMcpAppSandboxUrl(
+        '/instance/42',
+        'https://host.example.com/session/1',
+      ),
+    ).toBe(
+      'https://host.example.com/instance/42/mcp-app-sandbox?hostOrigin=https%3A%2F%2Fhost.example.com&mode=data',
+    );
+  });
+
+  it('keeps the reachable hostname for a single-port fallback', () => {
+    expect(
+      resolveMcpAppSandboxUrl(
+        'http://127.0.0.1:4170/prefix',
+        'http://127.0.0.1:4170/',
+        true,
+      ),
+    ).toBe(
+      'http://127.0.0.1:4170/prefix/mcp-app-sandbox?hostOrigin=http%3A%2F%2F127.0.0.1%3A4170&mode=data',
+    );
+  });
+
+  it.each([
+    'data:text/html,x',
+    'file:///tmp/app',
+    'https://user:secret@example.com',
+  ])('rejects invalid daemon URLs %s', (url) => {
+    expect(
+      resolveMcpAppSandboxUrl(url, 'https://host.example.com'),
     ).toBeUndefined();
   });
 });

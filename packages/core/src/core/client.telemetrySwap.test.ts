@@ -90,14 +90,11 @@ function makeEnv() {
   const config: any = {
     getSessionId: () => sessionId,
     getResumedSessionData: () => resumedData,
+    getToolRegistry: () => ({ getTool: () => undefined }),
     swap(id: string, data?: ResumedSessionData) {
       sessionId = id;
       resumedData = data;
     },
-    // `initialize()` calls restoreLoadedSkillsFromHistory, which resolves the
-    // SKILL tool through the registry: an empty one makes that restore a
-    // no-op instead of throwing `getToolRegistry is not a function`.
-    getToolRegistry: () => ({ getTool: () => undefined }),
   };
   const client = new LlmClient(config as Config);
   const fakeChat = {

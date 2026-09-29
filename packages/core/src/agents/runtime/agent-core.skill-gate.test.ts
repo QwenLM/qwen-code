@@ -12,6 +12,7 @@ import { makeFakeConfig } from '../../test-utils/config.js';
 import { ToolRegistry } from '../../tools/tool-registry.js';
 import { ExecTool } from '../../tools/exec.js';
 import { MockTool } from '../../test-utils/mock-tool.js';
+import { ToolSearchTool } from '../../tools/tool-search.js';
 
 // The skill-announcement gate asks whether the model can INVOKE a skill, and
 // that is two conditions, not one.
@@ -291,6 +292,78 @@ describe('AgentCore skill-gate inputs', () => {
   });
 
   describe('executable', () => {
+    it.each([
+      { tools: ['read_file'] },
+      { tools: ['exec'], executionAllowedTools: ['read_file'] },
+      { tools: ['*'], disallowedTools: ['write_file'] },
+    ])(
+      'offers scoped discovery for deferred Code Mode tools: %j',
+      async (toolConfig) => {
+        const config = makeFakeConfig({ codeModeOnly: true });
+        const registry = new ToolRegistry(config);
+        vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+        registry.registerTool(new ExecTool(config));
+        registry.registerTool(new ToolSearchTool(config));
+        registry.registerTool(
+          new MockTool({ name: 'read_file', shouldDefer: true }),
+        );
+        registry.registerTool(
+          new MockTool({ name: 'write_file', shouldDefer: true }),
+        );
+        vi.spyOn(registry, 'isPermissionDeferred').mockReturnValue(true);
+        const core = new AgentCore(
+          'lazy-agent',
+          config,
+          { systemPrompt: '' },
+          { model: 'test-model' },
+          { max_turns: 1 },
+          toolConfig,
+        );
+        const declarations = await core.prepareTools();
+        expect(declarations.map((d) => d.name)).toEqual([
+          'exec',
+          'tool_search',
+        ]);
+        expect(declarations[0].description).not.toContain(
+          'tools.read_file(args:',
+        );
+        expect(executable(core, 'tool_search')).toBe(true);
+        expect(
+          (core as unknown as { codeModeAllowedToolNames: string[] })
+            .codeModeAllowedToolNames,
+        ).toEqual(['read_file']);
+      },
+    );
+
+    it('falls back to scoped signatures when the agent disallows search', async () => {
+      const config = makeFakeConfig({ codeModeOnly: true });
+      const registry = new ToolRegistry(config);
+      vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+      registry.registerTool(new ExecTool(config));
+      registry.registerTool(new ToolSearchTool(config));
+      registry.registerTool(
+        new MockTool({ name: 'read_file', shouldDefer: true }),
+      );
+      registry.registerTool(
+        new MockTool({ name: 'write_file', shouldDefer: true }),
+      );
+      const core = new AgentCore(
+        'lazy-agent',
+        config,
+        { systemPrompt: '' },
+        { model: 'test-model' },
+        { max_turns: 1 },
+        { tools: ['read_file'], disallowedTools: ['tool_search'] },
+      );
+      const declarations = await core.prepareTools();
+      expect(declarations.map((d) => d.name)).toEqual(['exec']);
+      expect(declarations[0].description).toContain('tools.read_file(args:');
+      expect(declarations[0].description).not.toContain(
+        'tools.write_file(args:',
+      );
+      expect(executable(core, 'tool_search')).toBe(false);
+    });
+
     it('allows everything when no execution allowlist is set', () => {
       const core = makeCore({ tools: ['*'] });
       expect(executable(core, ToolNames.SKILL)).toBe(true);

@@ -517,11 +517,23 @@ describe('toolResultDisplayCompaction', () => {
   // The recording purpose feeds the replayed transcript, and the Web Shell
   // mounts the MCP App iframe only when `html` is non-empty (it never
   // re-fetches the `ui://` resource). See #10369.
-  it('keeps MCP App HTML and tool results in recorded displays', () => {
-    const display = mcpAppDisplay();
+  it('keeps maximum escaped MCP App HTML within the replay byte budget', () => {
+    const display: McpAppResultDisplay = {
+      type: 'mcp_app',
+      serverName: 'demo',
+      resourceUri: 'ui://demo/dashboard',
+      html: `<main>${'\u0001'.repeat(4 * 1024 * 1024 - 13)}</main>`,
+      toolResult: { content: [{ type: 'text', text: 'Dashboard ready' }] },
+      toolArguments: { region: 'APAC' },
+      fallbackText: 'Dashboard ready',
+    };
 
     const compacted = compactToolResultDisplayForRecording(display);
 
+    expect(Buffer.byteLength(display.html, 'utf8')).toBe(4 * 1024 * 1024);
+    expect(Buffer.byteLength(JSON.stringify(compacted), 'utf8')).toBeLessThan(
+      32 * 1024 * 1024,
+    );
     expect(compacted.html).toBe(display.html);
     expect(compacted.toolResult).toEqual(display.toolResult);
     expect(compacted.toolArguments).toEqual(display.toolArguments);
@@ -570,7 +582,7 @@ describe('toolResultDisplayCompaction', () => {
     expect(compacted.toolResult).toEqual({});
     expect(JSON.stringify(compacted)).not.toContain(marker);
     // The mounted iframe only needs `html`, which the producer already caps at
-    // 1 MiB, so replay can still render the app.
+    // the configured resource limit, so replay can still render the app.
     expect(compacted.html).toBe(display.html);
     expect(JSON.stringify(compacted).length).toBeLessThanOrEqual(
       DISPLAY_MAX * 2,
