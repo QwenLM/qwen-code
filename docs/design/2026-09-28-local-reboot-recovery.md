@@ -12,13 +12,13 @@ This slice supports explicitly opted-in trusted workloads on one Linux host with
 
 ## Trusted reboot proof
 
-The default remains disabled. Enabling trusted local reboot recovery requires durable local provisioning. Production reads machine ID and kernel boot ID; a different boot on the same saved host establishes that writers from the original boot cannot survive within the supported local-storage contract. The original registration must still validate against its complete provision seed, placement and saved handle. Missing, corrupt or old-format records cannot be reconstructed. Same-boot PID/time namespace changes remain uncertain.
+The default remains disabled. Enabling trusted local reboot recovery requires durable local provisioning. Production reads machine ID and kernel boot ID; a different boot on the same saved host establishes that writers from the original boot cannot survive within the supported local-storage contract. A systemd soft reboot does not change the kernel boot ID and is not stop proof. The original registration must still validate against its complete provision seed, placement and saved handle. Missing, corrupt or old-format records cannot be reconstructed. Same-boot PID/time namespace changes remain uncertain.
 
 Before returning evidence, the provisioner atomically tombstones the original record under its permanent per-seed lock. It returns JOURNAL_LOST and WRITERS_STOPPED for the same original host/boot/resource domain. Earlier process-exit loss evidence stays immutable; later reboot evidence closes only the physical uncertainty. A saved seed and handle suffice for interrupted startup, without inventing a missing endpoint or lease. Observation never relaunches the original seed.
 
 ## Ordered cleanup
 
-The Broker first persists loss evidence and abandons at most 100 nonterminal executions per transaction. SETTLED receipts retain their results; ABANDONED remains terminal uncertainty and is never replayed. Loss-only cleanup leaves all physical pins intact.
+The Broker first persists loss evidence and abandons at most 100 nonterminal executions per transaction. SETTLED receipts retain their results, but a successful receipt does not prove that tool-written files were fsynced before a power cut. ABANDONED remains terminal uncertainty and is never replayed. Loss-only cleanup leaves all physical pins intact.
 
 Once all executions are terminal and writer-stop evidence is durable, a trusted provisioner cleanup callback handles the original saved binding. The Workspace wrapper clears its SQL storage holder using only the original tenant, storage ID, binding ID, generation and holder identity. It does not consult current actor grants, product Session status, Registry, mounts, filesystem or worker HTTP.
 
@@ -42,6 +42,6 @@ Tests must cover both boot protocols, interrupted registration without a lease, 
 
 Run Java HTTP/H2 tests, the existing MySQL integration profile, real-worker Stage F gates, build/typecheck, formatting and two consecutive clean full-diff audits. Synthetic boot identities prove decisions only. Physical acceptance requires a dedicated supported Linux host: record the original worker and escaped writer, reboot while preserving local disk and SQL, restart the same configuration, then verify old receipts, holder retirement and a new authorized generation. Never reboot a shared development machine as a substitute.
 
-## Open validation
+## Acceptance evidence and limits
 
-A dedicated rebootable Linux host has been requested and is not yet available. Report production Linux identity and physical reboot evidence separately from portable macOS process tests. W0e source implementation and local tests are not a claim that the physical reboot acceptance gate has passed.
+An independent reviewer completed the physical gate on a dedicated Debian 12 Linux VM at W0e-3 head `8c2b626c`, including real reboot, power-cut controls, escaped writers, holder cleanup and receipt preservation ([round 3 report](https://github.com/QwenLM/qwen-code/pull/12869#issuecomment-5877187325)). Portable macOS tests and synthetic boot transitions remain separate evidence. Changes after that head require their own exact-head validation; the earlier physical run is not evidence that every later patch was reboot-tested.

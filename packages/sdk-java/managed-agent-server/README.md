@@ -338,7 +338,8 @@ writers, restored/cloned snapshots and external jobs that recreate writers are
 outside this contract. The option remains disabled by default. The
 [reboot recovery design](../../../docs/design/2026-09-28-local-reboot-recovery.md)
 distinguishes portable test evidence from the dedicated Linux reboot acceptance
-gate, which is still pending.
+gate completed at W0e-3 head `8c2b626c`. A systemd soft reboot is not stop
+proof because it does not change the kernel boot ID.
 
 The Kubernetes adapter's real-cluster fault matrix remains a production gate. This
 standalone reference keeps the one configured directory for legacy unbound

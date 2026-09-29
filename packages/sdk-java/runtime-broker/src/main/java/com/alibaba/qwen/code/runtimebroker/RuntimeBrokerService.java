@@ -1604,6 +1604,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
             return CompletableFuture.completedFuture(record);
         }
         CompletableFuture<BindingContext> reservation = new CompletableFuture<>();
+        AtomicReference<BindingContext> adopted = new AtomicReference<>();
         if (bindingOperations.putIfAbsent(bindingId, reservation) != null) {
             return failed(unavailable("runtime_reconcile_in_progress", "Runtime recovery is already in progress"));
         }
@@ -1643,7 +1644,10 @@ public final class RuntimeBrokerService implements AutoCloseable {
                         if (observed.getOutcome() == RuntimeObservation.Outcome.READY
                                 && current.getState() != RuntimeBindingRecord.State.DRAINING) {
                             return adoptObservation(bindingId, claimed.getOperationGeneration(), observed)
-                                    .thenApply(BindingContext::record);
+                                    .thenApply(context -> {
+                                        adopted.set(context);
+                                        return context.record();
+                                    });
                         }
                         if (observed.getOutcome() == RuntimeObservation.Outcome.CONFLICT) {
                             blockRecovery(current);
@@ -1660,8 +1664,13 @@ public final class RuntimeBrokerService implements AutoCloseable {
                         liveBindings.remove(bindingId);
                     }
                     bindingOperations.remove(bindingId, reservation);
-                    reservation.completeExceptionally(unavailable("runtime_reconciliation_required",
-                            "Maintenance observation completed; retry using current authorization"));
+                    BindingContext healthy = error == null ? adopted.get() : null;
+                    if (healthy != null) {
+                        reservation.complete(healthy);
+                    } else {
+                        reservation.completeExceptionally(unavailable("runtime_reconciliation_required",
+                                "Maintenance observation completed; retry using current authorization"));
+                    }
                 });
     }
 

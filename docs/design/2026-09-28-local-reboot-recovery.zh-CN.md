@@ -12,13 +12,13 @@ Runtime journal 丢失可以结束未知执行，却不能证明写入者已停�
 
 ## 可信重启证明
 
-默认关闭。启用可信本地重启恢复必须同时启用本地持久 provisioning。生产读取 machine ID 和内核 boot ID；在上述本地存储契约内，同一保存宿主的 boot 改变证明原 boot 写入者不再存活。原登记必须仍能验证完整 provision seed、placement 和保存 handle；缺失、损坏或旧格式记录不能重建。同 boot 的 PID/time namespace 变化仍是不确定状态。
+默认关闭。启用可信本地重启恢复必须同时启用本地持久 provisioning。生产读取 machine ID 和内核 boot ID；在上述本地存储契约内，同一保存宿主的 boot 改变证明原 boot 写入者不再存活。systemd soft reboot 不改变内核 boot ID，不能充当停止证据。原登记必须仍能验证完整 provision seed、placement 和保存 handle；缺失、损坏或旧格式记录不能重建。同 boot 的 PID/time namespace 变化仍是不确定状态。
 
 产生证据前，provisioner 在永久 per-seed 锁内原子写入原记录墓碑，然后对同一原 host/boot/resource 域返回 JOURNAL_LOST 和 WRITERS_STOPPED。此前进程死亡的 loss 证据保持不变，后来的重启证据只解除物理不确定性。启动中断时，已保存 seed 和 handle 足够核验，无需编造缺失 endpoint 或 lease。观察永不重新启动原 seed。
 
 ## 有序清理
 
-Broker 先持久化 loss 证据，每次事务最多放弃 100 个非终态执行。SETTLED 保留结果；ABANDONED 始终表示终态不确定性，不能重放。只有 loss 的清理保留全部物理占用。
+Broker 先持久化 loss 证据，每次事务最多放弃 100 个非终态执行。SETTLED 保留结果，但成功回执不能证明工具写入的文件在断电前已 fsync。ABANDONED 始终表示终态不确定性，不能重放。只有 loss 的清理保留全部物理占用。
 
 全部执行进入终态且 stop 证据持久化后，由可信 provisioner 回调清理原保存 Binding。Workspace wrapper 仅用原 tenant、storage ID、Binding ID、generation 和 holder 身份清理 SQL storage holder，不读取当前 actor grant、产品 Session 状态、Registry、mounts、文件系统或 worker HTTP。
 
@@ -42,6 +42,6 @@ Spring 仅在启用可信本地恢复时调度有界扫描。轮转的 Binding I
 
 执行 Java HTTP/H2、现有 MySQL 集成通道、真实 worker Stage F、build/typecheck、格式检查和连续两轮干净全量 diff 审计。模拟 boot 身份只能证明决策。物理验收需要专用受支持 Linux 主机：记录原 worker 与逃逸写入者，保留本地磁盘和 SQL 进行重启，以相同配置恢复服务，再核对旧回执、holder 退休和新授权代数。不能重启共享开发机充当验收。
 
-## 待验证事项
+## 验收证据与边界
 
-已请求专用可重启 Linux 主机，目前尚未获得。生产 Linux 身份和物理重启证据必须与可移植 macOS 进程测试分别报告。W0e 源码实现和本地测试不代表物理重启验收已经通过。
+独立评审者已在专用 Debian 12 Linux 虚拟机上对 W0e-3 head `8c2b626c` 完成物理门禁，包括真实重启、断电对照、逃逸写入者、holder 清理和回执保留（[第三轮报告](https://github.com/QwenLM/qwen-code/pull/12869#issuecomment-5877187325)）。可移植 macOS 测试和模拟 boot 变化是独立证据。之后的改动仍需对应 head 的验证；此前的物理实测不能证明每个后续补丁也经历了重启测试。

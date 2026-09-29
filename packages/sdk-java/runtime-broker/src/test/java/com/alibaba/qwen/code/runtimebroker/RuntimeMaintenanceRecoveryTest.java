@@ -106,6 +106,35 @@ class RuntimeMaintenanceRecoveryTest {
         }
     }
 
+    @org.junit.jupiter.api.Test
+    void managedGenerationWithoutCleanupCallbackStaysPinned() throws Exception {
+        var bindings = new InMemoryRuntimeBindingRepository();
+        var sessions = new InMemoryRuntimeSessionRepository();
+        var executions = new InMemoryToolExecutionRepository();
+        var fixture = new Fixture(bindings, sessions, executions, "missing-cleanup");
+        var lost = fixture.lose();
+        bindings.releaseOperation(lost.getBindingId(), "fixture", lost.getOperationGeneration());
+        RuntimeProvisioner withoutCleanup = new RuntimeProvisioner() {
+            @Override
+            public String kind() { return "local-process"; }
+            @Override
+            public CompletionStage<RuntimeLease> provision(RuntimeProvisionRequest request) {
+                throw new AssertionError("Maintenance cannot provision");
+            }
+            @Override
+            public boolean supportsStartupRecovery(RuntimeResourceHandle handle) { return true; }
+        };
+        try (var service = service(bindings, sessions, executions, withoutCleanup, Duration.ofSeconds(5))) {
+            var error = assertThrows(java.util.concurrent.ExecutionException.class,
+                    () -> service.recoverBinding(lost.getBindingId(), lost.getGeneration())
+                            .toCompletableFuture().get(5, TimeUnit.SECONDS));
+            assertEquals("runtime_broker_recovery_blocked",
+                    assertInstanceOf(RuntimeBrokerException.class, error.getCause()).getCode());
+            assertEquals(RuntimeBindingRecord.State.LOST, bindings.findById(lost.getBindingId()).getState());
+            assertEquals(1, sessions.countActiveByBinding(lost.getBindingId(), lost.getGeneration()));
+        }
+    }
+
     static RuntimeProvisioner provisioner(java.util.function.Function<RuntimeBindingRecord, CompletionStage<Void>> cleanup) {
         return new RuntimeProvisioner() {
             @Override
