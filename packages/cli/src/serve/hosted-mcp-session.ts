@@ -155,7 +155,7 @@ export class HostedMcpSession {
         grant: this.grant('mcp_configuration', configuration.configurationId),
       });
       if (response.state !== 'settled')
-        throw new HostedMcpRecoveryRequiredError();
+        throw new Error('Runtime MCP discovery failed.');
       if (response.catalog && digest(response.catalog) === digest(catalog))
         continue;
       if (
@@ -164,7 +164,7 @@ export class HostedMcpSession {
           response.error.code,
         )
       )
-        throw new HostedMcpRecoveryRequiredError();
+        throw new Error('Runtime MCP discovery failed.');
       await this.configure(
         randomUUID(),
         {
@@ -307,7 +307,13 @@ export class HostedMcpSession {
       operation = await this.lookup(configuration.configurationId);
     }
     if (operation.state !== 'settled') {
-      if (configuration.run.state !== 'settled')
+      if (
+        configuration.run.state !== 'settled' &&
+        !(
+          configuration.run.execution === 'outcome_unknown' &&
+          operation.state === 'running'
+        )
+      )
         await this.commitConfiguration({
           ...configuration,
           run: {

@@ -400,6 +400,93 @@ describe('Hosted Harness no-tool session', () => {
     },
   );
 
+  it.each(['unknown', 'failed'] as const)(
+    'settles a turn after %s discovery and can retry and reload',
+    async (failure) => {
+      const { server, authorize } = await mcpApp();
+      const physical = vi
+        .mocked(HostedWorkspaceBroker.prototype.control)
+        .getMockImplementation()!;
+      let fail = true;
+      vi.mocked(HostedWorkspaceBroker.prototype.control).mockImplementation(
+        async function (this: HostedWorkspaceBroker, operation) {
+          if (operation.kind === 'mcp-discover' && fail) {
+            fail = false;
+            if (failure === 'unknown') throw new Error('Broker 503');
+            return {
+              operationId: operation.operationId,
+              state: 'settled',
+              error: { code: 'managed_mcp_connection_failed' },
+            };
+          }
+          return physical.call(this, operation);
+        },
+      );
+      let modelRequests = 0;
+      state.model.mockImplementation(async ({ toolTurn }) => {
+        await toolTurn!.declarations();
+        modelRequests++;
+        return { text: 'done', model: 'test-model' };
+      });
+      const send = (promptId: string) => {
+        const prompt = [{ type: 'text', text: 'hello' }];
+        return authorize(
+          supertest(server).post(`/session/${SESSION_ID}/prompt`),
+        ).send({
+          prompt,
+          promptId,
+          payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+        });
+      };
+      expect((await send(PROMPT_ID)).status).toBe(202);
+      await vi.waitFor(async () => {
+        const transcript = await authorize(
+          supertest(server).get(`/session/${SESSION_ID}/transcript`),
+        );
+        expect(transcript.body.events).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              type: 'turn_error',
+              promptId: PROMPT_ID,
+            }),
+          ]),
+        );
+      });
+      expect(modelRequests).toBe(0);
+      expect((await send(randomUUID())).status).toBe(202);
+      await vi.waitFor(async () => {
+        const status = await authorize(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        );
+        expect(status.body.hasActivePrompt).toBe(false);
+        expect(status.body.recoveryBlocked).toBe(false);
+      });
+      expect(modelRequests).toBe(1);
+      expect(
+        (
+          await authorize(
+            supertest(server).post(`/session/${SESSION_ID}/detach`),
+          )
+        ).status,
+      ).toBe(204);
+      const loaded = await headers(
+        supertest(server).post(`/session/${SESSION_ID}/load`),
+      ).send({
+        toolProfile: 'hosted-workspace-mcp/1',
+        mcpServers: [
+          {
+            serverId: 'demo',
+            serverRevision: 1,
+            definitionDigest: 'a'.repeat(64),
+          },
+        ],
+        managedSessionStore: store(),
+      });
+      expect(loaded.status).toBe(200);
+      await headers(supertest(server).delete(`/session/${SESSION_ID}`));
+    },
+  );
+
   it.each([
     [16, 200],
     [17, 400],

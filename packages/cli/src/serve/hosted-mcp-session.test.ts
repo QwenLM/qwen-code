@@ -412,6 +412,16 @@ it('reconciles a temporarily unknown configuration without repeating its effect'
     return { operationId: operation.operationId, state: 'outcome_unknown' };
   });
   await expect(mcp.ensureReady()).rejects.toThrow('reconciliation');
+  const unknownRecord =
+    session.authority.extensionRecordsInDomain('mcp_configuration')[0];
+  vi.mocked(control).mockImplementationOnce(async (operation) => ({
+    operationId: operation.operationId,
+    state: 'running',
+  }));
+  await expect(mcp.ensureReady()).rejects.toThrow('reconciliation');
+  expect(
+    session.authority.extensionRecordsInDomain('mcp_configuration')[0],
+  ).toEqual(unknownRecord);
   await mcp.ensureReady();
   expect(
     requests.filter((entry) => entry.kind === 'mcp-configure'),

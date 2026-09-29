@@ -42,7 +42,7 @@ MCP 需要独立配置与操作记录、不可变目录修订、由 Runtime 持�
 
 网络发送或进程启动前必须已有提交的 intent。尚未进入 `dispatch_started` 的资源/提示 intent 可以保留原 pin 恢复首次派发，也可以在本地取消并证明从未开始；状态查询不能把这种未发送的 intent 变成未知副作用。已提交结果的重放无需重新连接 Runtime。发送后的响应失败为 `outcome_unknown`，恢复只查询原身份，重连路径不能再次发送。未发送请求可立即取消；派发后的取消延迟到原响应到达。Runtime 不发送原生取消通知，因为 SDK server 会抑制后续响应，导致结算证据永久丢失。仍记录原响应；取消绝不证明远端副作用未执行。可验证的迟到响应可以结算原调用。Runtime 丢失时，未决副作用保持阻塞。
 
-发现期间收到的列表变更通知会使对应类别保持 stale，并发列表响应不能清除该失效信息。每次模型请求和新资源/提示命令之前，Harness 检查发现状态。未变化且可用的目录保留修订；目录变化或连接退休后，安装新的不可变配置与连接代数。已准入请求保留原 pin，绝不重发。公开目录仍是已提交快照，不是 Runtime 实时健康或可用性检查。
+发现期间收到的列表变更通知会使对应类别保持 stale，并发列表响应不能清除该失效信息。每次模型请求和新资源/提示命令之前，Harness 检查发现状态。未变化且可用的目录保留修订；目录变化或连接退休后，安装新的不可变配置与连接代数。已准入请求保留原 pin，绝不重发。未确认或失败的 discovery 以错误结束当前 turn，不会永久阻塞 Session；下一轮可以重新刷新。配置或调用结果未知时仍必须对账原操作。公开目录仍是已提交快照，不是 Runtime 实时健康或可用性检查。
 
 Harness 空闲重载后，先推进现有配置记录的持久修订，再为新 writer 签发 grant；目录和连接 pin 保持不变。Runtime grant gate 仍拒绝同一修订更换 owner。初始发现失败后，显式替换命令可安装允许的新定义，无需先让失败的初始定义恢复。
 
@@ -50,7 +50,7 @@ Harness 空闲重载后，先推进现有配置记录的持久修订，再为新
 
 Runtime 只允许目标 workspace 已配置的定义，以及 Session 已安装的 server binding。配置凭据留在 Runtime。公开目录不包含连接配方、环境、headers、endpoint、进程标识、grant 或内部 binding ID。错误使用有界稳定代码，不回显可能带凭据的底层连接异常。
 
-每个 Runtime 实例最多允许 16 个连接和 32 个在途请求，包括等待 drain 的旧连接；替换不能临时超额。Hosted Session 创建只接受 1–16 个 server pin，超限配置在创建 Session 前拒绝。旧版本已保存且最多含 32 个 pin 的 Session 保留原定义，仍可加载并 detach 以清理资源。已有连接仍可能耗尽 Runtime 容量；prompt 准入、配置替换或原始操作初始化期间的配额失败返回 HTTP 409 和 `managed_mcp_connection_quota`，不会准入模型 turn。prompt 已准入后才发现的配额失败仍以 turn 错误报告。release 前封闭新准入；活动操作保留原 transport 直到结算。空闲退休连接立即关闭；繁忙退休连接仅在原请求结算后关闭。Streamable HTTP DELETE 采用一秒上限的尽力清理；release 表示全部请求结算后本地 transport 已关闭，不保证远端 server Session 被删除。本地关闭有时间上限，不能确认 drain 时不能 ACK release。Runtime/Session release 等待这些 hold。未进入派发的配置可用 `not_started_proven` 取消；close 随后完成并释放原 Broker 所有权，包括此前因 Workspace busy 留下的未完成 acquire，期间不配置 MCP。
+每个 Runtime 实例最多允许 16 个连接和 32 个在途请求，包括等待 drain 的旧连接；替换不能临时超额。Hosted Session 创建只接受 1–16 个 server pin，超限配置在创建 Session 前拒绝。旧版本已保存且最多含 32 个 pin 的 Session 保留原定义，仍可加载并 detach 以清理资源。替换先打开新连接，再退役旧连接。正好有 16 个活动连接时没有替换余量：目录变更或显式替换持续返回配额错误，直到 detach/load 关闭旧连接并重新获取。需要实时目录刷新的部署必须留出一个空位（没有其他旧连接等待 drain 时，最多固定 15 个 server）。已有连接仍可能耗尽 Runtime 容量；prompt 准入、配置替换或原始操作初始化期间的配额失败返回 HTTP 409 和 `managed_mcp_connection_quota`，不会准入模型 turn。prompt 已准入后才发现的配额失败仍以 turn 错误报告。release 前封闭新准入；活动操作保留原 transport 直到结算。空闲退休连接立即关闭；繁忙退休连接仅在原请求结算后关闭。Streamable HTTP DELETE 采用一秒上限的尽力清理；release 表示全部请求结算后本地 transport 已关闭，不保证远端 server Session 被删除。本地关闭有时间上限，不能确认 drain 时不能 ACK release。Runtime/Session release 等待这些 hold。未进入派发的配置可用 `not_started_proven` 取消；close 随后完成并释放原 Broker 所有权，包括此前因 Workspace busy 留下的未完成 acquire，期间不配置 MCP。
 
 ## 文件与接线点
 

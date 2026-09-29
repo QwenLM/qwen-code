@@ -608,7 +608,7 @@ export class ManagedMcpRuntime {
                 HOME: directory!,
                 USERPROFILE: directory!,
                 ...(process.env['SystemRoot']
-                  ? { SystemRoot: process.env['SystemRoot'] }
+                  ? { SYSTEMROOT: process.env['SystemRoot'] }
                   : {}),
                 ...definition.env,
               },
@@ -705,10 +705,8 @@ export class ManagedMcpRuntime {
             !('method' in message)
           ) {
             const pending = connection.pending.get(message.id);
-            if (pending) {
-              this.receive(pending, message);
-              return;
-            }
+            if (pending) this.receive(pending, message);
+            return;
           }
           onmessage(message);
         };

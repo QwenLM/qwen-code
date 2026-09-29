@@ -51,8 +51,9 @@ createInterface({input:process.stdin}).on('line', line => {
  else if (request.method==='prompts/get') send(request.id,{messages:[{role:'user',content:{type:'text',text:'first'}},{role:'assistant',content:{type:'text',text:'second'}}]});
  else if (request.method==='tools/call') {
    if(request.params.name==='drop') process.exit(0);
+   if(request.params.arguments.duplicateId) send(request.params.arguments.duplicateId,{content:[{type:'text',text:'duplicate'}]});
    if(request.params.arguments.notify) process.stdout.write(JSON.stringify({jsonrpc:'2.0',method:'notifications/tools/list_changed'})+'\n');
-   const respond=()=>send(request.id,{content:[{type:'text',text:request.params.arguments.large?'x'.repeat(61*1024):JSON.stringify({args:request.params.arguments,hasScopedSecret:process.env.MCP_SECRET==='runtime-only-secret',ambient:process.env.MCP_AMBIENT_SECRET??null,logname:process.env.LOGNAME??null,cwd:process.cwd()})}]});
+   const respond=()=>send(request.id,{content:[{type:'text',text:request.params.arguments.large?'x'.repeat(61*1024):JSON.stringify({args:request.params.arguments,hasScopedSecret:process.env.MCP_SECRET==='runtime-only-secret',ambient:process.env.MCP_AMBIENT_SECRET??null,logname:process.env.LOGNAME??null,cwd:process.cwd(),systemRoot:process.env.SYSTEMROOT??null})}]});
    if (request.params.arguments.releaseFile) {
      const timer=setInterval(()=>{if(existsSync(request.params.arguments.releaseFile)){clearInterval(timer);respond();}},10);
    } else request.params.name==='delayed'?setTimeout(respond,1000):respond();
@@ -225,6 +226,7 @@ describe('Managed MCP Runtime', () => {
   it('runs a real stdio server, preserves resource/prompt unions and never inherits ambient secrets', async () => {
     vi.stubEnv('MCP_AMBIENT_SECRET', 'must-not-reach-child');
     vi.stubEnv('LOGNAME', 'private-runtime-user');
+    vi.stubEnv('SystemRoot', 'C:\\Windows');
     const instance = runtime();
     const configured = await settled(instance, configure());
     expect(configured.error).toBeUndefined();
@@ -255,6 +257,15 @@ describe('Managed MCP Runtime', () => {
     expect(JSON.stringify(result)).not.toContain('private-runtime-user');
     expect(result.response).toMatchObject({
       content: [{ text: expect.stringContaining('"hasScopedSecret":true') }],
+    });
+    expect(result.response).toMatchObject({
+      content: [
+        {
+          text: expect.stringContaining(
+            JSON.stringify({ systemRoot: 'C:\\Windows' }).slice(1, -1),
+          ),
+        },
+      ],
     });
     const resource = await settled(
       instance,
@@ -632,6 +643,59 @@ describe('Managed MCP Runtime', () => {
         .split('\n')
         .filter((line) => line === 'tools/call'),
     ).toHaveLength(32);
+  });
+
+  it('ignores duplicate settled responses without disrupting other requests', async () => {
+    const instance = runtime();
+    const catalog = (await settled(instance, configure())).catalog!;
+    const original = invoke(catalog, 'completed-call', {
+      kind: 'tool_call',
+      name: 'echo',
+      arguments: {},
+    });
+    const receipt = await instance.invokeTool(runtimeSessionId, original);
+    expect(receipt.state).toBe('settled');
+    const releaseFile = path.join(directory, 'release');
+    const waiting = invoke(catalog, 'waiting-call', {
+      kind: 'tool_call',
+      name: 'echo',
+      arguments: { releaseFile },
+    });
+    const pending = instance.invokeTool(runtimeSessionId, waiting);
+    try {
+      await vi.waitFor(async () => {
+        const calls = await readFile(path.join(directory, 'calls-1'), 'utf8');
+        expect(calls.split('tools/call')).toHaveLength(3);
+      });
+      const duplicate = await instance.invokeTool(
+        runtimeSessionId,
+        invoke(catalog, 'duplicate-trigger', {
+          kind: 'tool_call',
+          name: 'echo',
+          arguments: { duplicateId: original.operationId },
+        }),
+      );
+      expect(duplicate.state).toBe('settled');
+      expect(instance.toolStatus(runtimeSessionId, waiting).state).toBe(
+        'running',
+      );
+      expect(instance.toolStatus(runtimeSessionId, original)).toEqual(receipt);
+      expect(
+        (
+          await instance.invokeTool(
+            runtimeSessionId,
+            invoke(catalog, 'still-usable', {
+              kind: 'tool_call',
+              name: 'echo',
+              arguments: {},
+            }),
+          )
+        ).error,
+      ).toBeUndefined();
+    } finally {
+      await writeFile(releaseFile, 'done');
+    }
+    expect((await pending).state).toBe('settled');
   });
 
   it('counts replacement and retiring connections against the connection quota', async () => {
