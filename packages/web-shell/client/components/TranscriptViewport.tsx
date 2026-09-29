@@ -116,9 +116,7 @@ export const TranscriptViewport = forwardRef<
   const appliedTarget = useRef<number | undefined>(undefined);
   const scrollIntent = useRef(0);
   const restoring = useRef(false);
-  const restoreOwner = useRef<symbol | undefined>(undefined);
   const loadFrame = useRef<number | undefined>(undefined);
-  const restoredScrollTop = useRef<number | undefined>(undefined);
   useLayoutEffect(
     () => () => {
       if (loadFrame.current !== undefined)
@@ -270,8 +268,8 @@ export const TranscriptViewport = forwardRef<
     ref,
     () => ({
       scrollToSearchHit: (hit, isCurrent) => selectSearchHit(hit, isCurrent),
-      scrollToMessage: (id, callId, onSettled) => {
-        if (list.current?.scrollToMessage(id, callId, onSettled)) return true;
+      scrollToMessage: (id, callId) => {
+        if (list.current?.scrollToMessage(id, callId)) return true;
         if (!historical && !loading) return false;
         const blockId = props.messages.find((message) => message.id === id)
           ?.sourceBlockIds?.[0];
@@ -294,100 +292,6 @@ export const TranscriptViewport = forwardRef<
     ],
   );
 
-  const restoreReadingAnchor = useCallback(
-    (saved: ReadingAnchor, onSettled: () => void) => {
-      const scroll = scroller();
-      if (!scroll) return true;
-      const child = saved.callId
-        ? [
-            ...(root.current?.querySelectorAll<HTMLElement>(
-              '[data-transcript-tool-call-id]',
-            ) ?? []),
-          ].find(
-            (candidate) =>
-              candidate.dataset.transcriptToolCallId === saved.callId &&
-              candidate.getBoundingClientRect().height > 0,
-          )
-        : undefined;
-      const row =
-        child ??
-        (saved.rowKey
-          ? rows().find(
-              (candidate) => candidate.dataset.messageRowKey === saved.rowKey,
-            )
-          : undefined) ??
-        rows().find((candidate) =>
-          candidate.dataset.sourceBlockIds?.split(',').includes(saved.source),
-        );
-      if (row) {
-        scroll.scrollTop +=
-          row.getBoundingClientRect().top -
-          scroll.getBoundingClientRect().top -
-          saved.offset;
-        restoredScrollTop.current = scroll.scrollTop;
-        return true;
-      }
-      const message = messages.find((candidate) =>
-        candidate.sourceBlockIds?.includes(saved.source),
-      );
-      return message &&
-        list.current?.scrollToMessage(message.id, saved.callId, onSettled)
-        ? 'pending'
-        : true;
-    },
-    [messages, rows, scroller],
-  );
-
-  const restoreOverFrames = useCallback(
-    (
-      step: (
-        onSettled: () => void,
-        retryAfterSettled: () => void,
-      ) => boolean | 'pending',
-    ) => {
-      const owner = Symbol();
-      restoreOwner.current = owner;
-      restoring.current = true;
-      const intent = scrollIntent.current;
-      let frame = 0;
-      let remaining = 8;
-      const finish = (updateFollow = true) => {
-        if (restoreOwner.current !== owner) return;
-        restoreOwner.current = undefined;
-        restoring.current = false;
-        if (updateFollow) updateFollowRef.current();
-      };
-      const retry = () => {
-        if (restoreOwner.current !== owner) return;
-        if (--remaining > 0) frame = requestAnimationFrame(restore);
-        else finish();
-      };
-      const restore = () => {
-        if (restoreOwner.current !== owner || intent !== scrollIntent.current) {
-          finish();
-          return;
-        }
-        const result = step(finish, retry);
-        if (restoreOwner.current !== owner || intent !== scrollIntent.current) {
-          finish();
-          return;
-        }
-        if (result === 'pending') return;
-        if (!result) {
-          finish();
-          return;
-        }
-        retry();
-      };
-      restore();
-      return () => {
-        cancelAnimationFrame(frame);
-        finish(false);
-      };
-    },
-    [],
-  );
-
   useLayoutEffect(() => {
     const changedView = lastView.current !== viewKey;
     const changedMessages = lastMessages.current !== messages;
@@ -401,9 +305,14 @@ export const TranscriptViewport = forwardRef<
     if (!changedView && !changedMessages && !targetBlockId) return;
     if (changedView) anchor.current = undefined;
     if (!historical && !targetBlockId) return;
-    return restoreOverFrames((onSettled, retryAfterSettled) => {
+    restoring.current = true;
+    let frame = 0;
+    let remaining = 8;
+    const intent = scrollIntent.current;
+    const restore = () => {
+      if (intent !== scrollIntent.current) return;
       const scroll = scroller();
-      if (!scroll) return false;
+      if (!scroll) return;
       const saved = anchor.current;
       const target =
         targetBlockId &&
@@ -411,67 +320,56 @@ export const TranscriptViewport = forwardRef<
           message.sourceBlockIds?.includes(targetBlockId),
         );
       if (target) {
-        anchor.current = undefined;
-        if (list.current?.scrollToMessage(target.id, undefined, onSettled))
-          return 'pending';
+        list.current?.scrollToMessage(target.id);
       } else if (saved) {
-        return restoreReadingAnchor(saved, retryAfterSettled);
+        const child = saved.callId
+          ? [
+              ...(root.current?.querySelectorAll<HTMLElement>(
+                '[data-transcript-tool-call-id]',
+              ) ?? []),
+            ].find(
+              (child) =>
+                child.dataset.transcriptToolCallId === saved.callId &&
+                child.getBoundingClientRect().height > 0,
+            )
+          : undefined;
+        const row =
+          child ??
+          (saved.rowKey
+            ? rows().find((row) => row.dataset.messageRowKey === saved.rowKey)
+            : undefined) ??
+          rows().find((row) =>
+            row.dataset.sourceBlockIds?.split(',').includes(saved.source),
+          );
+        if (row)
+          scroll.scrollTop +=
+            row.getBoundingClientRect().top -
+            scroll.getBoundingClientRect().top -
+            saved.offset;
+        else {
+          const message = messages.find((message) =>
+            message.sourceBlockIds?.includes(saved.source),
+          );
+          if (message) list.current?.scrollToMessage(message.id, saved.callId);
+        }
       } else if (changedView) {
         scroll.scrollTop =
           entryDirection.current === 'newer' ? 0 : scroll.scrollHeight;
       }
       capture();
-      return true;
-    });
-  }, [
-    messages,
-    viewKey,
-    historical,
-    viewport.target,
-    capture,
-    restoreReadingAnchor,
-    restoreOverFrames,
-    scroller,
-  ]);
-
-  useLayoutEffect(() => {
-    if (!historical || typeof ResizeObserver === 'undefined') return;
-    const scroll = scroller();
-    const content = scroll?.firstElementChild;
-    if (!scroll || !content) return;
-    let frame = 0;
-    let cancelRestore: (() => void) | undefined;
-    const observer = new ResizeObserver(() => {
-      if (!anchor.current || restoring.current || frame) return;
-      const intent = scrollIntent.current;
-      frame = requestAnimationFrame(() => {
-        frame = 0;
-        const saved = anchor.current;
-        if (!saved || restoring.current || intent !== scrollIntent.current)
-          return;
-        cancelRestore = restoreOverFrames((_onSettled, retryAfterSettled) => {
-          const current = anchor.current;
-          if (!current || intent !== scrollIntent.current) return false;
-          const result = restoreReadingAnchor(current, retryAfterSettled);
-          capture();
-          return result;
-        });
-      });
-    });
-    observer.observe(content);
-    return () => {
-      observer.disconnect();
-      cancelAnimationFrame(frame);
-      cancelRestore?.();
+      if (--remaining > 0) frame = requestAnimationFrame(restore);
+      else {
+        anchor.current = undefined;
+        restoring.current = false;
+        updateFollowRef.current();
+      }
     };
-  }, [
-    capture,
-    historical,
-    restoreReadingAnchor,
-    restoreOverFrames,
-    scroller,
-    viewKey,
-  ]);
+    restore();
+    return () => {
+      cancelAnimationFrame(frame);
+      restoring.current = false;
+    };
+  }, [messages, viewKey, historical, viewport.target, capture, rows, scroller]);
 
   const load = (direction: 'older' | 'newer') => {
     if (loadFrame.current !== undefined) return;
@@ -509,7 +407,6 @@ export const TranscriptViewport = forwardRef<
     loadFrame.current = undefined;
     viewport.cancelSelection();
     if (!loading) anchor.current = undefined;
-    restoreOwner.current = undefined;
     restoring.current = false;
   };
   const loadAtEdge = (direction?: 'older' | 'newer') => {
@@ -591,11 +488,9 @@ export const TranscriptViewport = forwardRef<
             handleScrollIntent();
         }}
         onScrollCapture={(event) => {
-          const scroll = scroller();
-          if (event.target !== scroll || restoring.current) return;
-          if (restoredScrollTop.current === scroll.scrollTop) return;
-          restoredScrollTop.current = undefined;
-          anchor.current = capture();
+          if (event.target !== scroller() || restoring.current) return;
+          const current = capture();
+          if (loading) anchor.current = current;
           loadAtEdge();
           scheduleFollow();
         }}
