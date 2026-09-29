@@ -7,6 +7,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.ZoneOffset;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.UUID;
@@ -29,7 +32,7 @@ public final class WorkspaceOperatorRecoveryStore {
 
     public record Operation(String recoveryId, String bindingId, long generation,
             String storageKey, String holderKey, String runtimeSessionId,
-            String attestationHash, boolean completed) {
+            Instant preparedAt, String attestationHash, boolean completed) {
     }
 
     private record Holder(String storageKey, String holderKey, String bindingId,
@@ -119,12 +122,13 @@ public final class WorkspaceOperatorRecoveryStore {
                     + " (recovery_id, binding_id, runtime_generation, storage_key, holder_key,"
                     + " runtime_session_id, provision_request_id, resource_handle_json,"
                     + " runtime_lease_id, runtime_epoch, blocked_execution_call_id,"
-                    + " operator_id, reason, prepared_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP(6))",
+                    + " operator_id, reason, prepared_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     recoveryId, bindingId, generation, current.storageKey(), current.holderKey(),
                     current.runtimeSessionId(), saved.getProvisionSeed().getProvisionRequestId(),
                     json.valueToTree(saved.getResourceHandle().getValue()).toString(),
                     saved.getLease().getLeaseId(), saved.getLease().getEpoch(),
-                    blockedCapture.callId(), operator, reason);
+                    blockedCapture.callId(), operator, reason,
+                    LocalDateTime.ofInstant(Instant.now(), ZoneOffset.UTC));
             if (jdbc.update("UPDATE qwen_runtime_binding SET binding_state = ?,"
                     + " drain_requested = TRUE, operation_owner = NULL, operation_lease_until = NULL,"
                     + " operation_generation = operation_generation + 1, record_version = record_version + 1"
@@ -139,12 +143,14 @@ public final class WorkspaceOperatorRecoveryStore {
 
     public Operation operation(String recoveryId) {
         List<Operation> found = jdbc.query("SELECT recovery_id, binding_id, runtime_generation,"
-                + " storage_key, holder_key, runtime_session_id, attestation_sha256, completed_at"
+                + " storage_key, holder_key, runtime_session_id, prepared_at,"
+                + " attestation_sha256, completed_at"
                 + " FROM managed_workspace_operator_recovery"
                 + " WHERE recovery_id = ?", (row, index) -> new Operation(
                         row.getString("recovery_id"), row.getString("binding_id"),
                         row.getLong("runtime_generation"), row.getString("storage_key"),
                         row.getString("holder_key"), row.getString("runtime_session_id"),
+                        row.getObject("prepared_at", LocalDateTime.class).toInstant(ZoneOffset.UTC),
                         row.getString("attestation_sha256"), row.getTimestamp("completed_at") != null),
                 recoveryId);
         if (found.size() != 1) {
@@ -171,9 +177,10 @@ public final class WorkspaceOperatorRecoveryStore {
             requireHeld(operation);
             jdbc.update("UPDATE managed_workspace_operator_recovery"
                     + " SET attestation_json = ?, attestation_sha256 = ?,"
-                    + " attested_at = CURRENT_TIMESTAMP(6) WHERE recovery_id = ?"
+                    + " attested_at = ? WHERE recovery_id = ?"
                     + " AND attestation_sha256 IS NULL",
-                    new String(evidence, StandardCharsets.UTF_8), digest, operation.recoveryId());
+                    new String(evidence, StandardCharsets.UTF_8), digest,
+                    LocalDateTime.ofInstant(Instant.now(), ZoneOffset.UTC), operation.recoveryId());
         });
     }
 
@@ -233,8 +240,8 @@ public final class WorkspaceOperatorRecoveryStore {
                 throw blocked();
             }
             jdbc.update("UPDATE managed_workspace_operator_recovery SET completed_at ="
-                    + " COALESCE(completed_at, CURRENT_TIMESTAMP(6)) WHERE recovery_id = ?",
-                    operation.recoveryId());
+                    + " COALESCE(completed_at, ?) WHERE recovery_id = ?",
+                    LocalDateTime.ofInstant(Instant.now(), ZoneOffset.UTC), operation.recoveryId());
         });
     }
 

@@ -8,6 +8,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
+import java.time.Instant;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -29,27 +30,31 @@ class WorkspaceRecoveryCommandTest {
         Files.setPosixFilePermissions(evidence,
                 PosixFilePermissions.fromString("rw-------"));
         ObjectMapper mapper = new ObjectMapper();
+        Instant preparedAt = Instant.parse("2026-09-29T02:00:00Z");
         assertThat(WorkspaceRecoveryCommand.readEvidence(directory, evidence,
-                recoveryId, mapper)).isEqualTo(valid.getBytes(StandardCharsets.UTF_8));
+                recoveryId, preparedAt, mapper)).isEqualTo(valid.getBytes(StandardCharsets.UTF_8));
         assertThatThrownBy(() -> WorkspaceRecoveryCommand.readEvidence(directory, evidence,
-                UUID.randomUUID().toString(), mapper)).isInstanceOf(IllegalArgumentException.class);
+                recoveryId, Instant.parse("2026-09-29T04:00:00Z"), mapper))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> WorkspaceRecoveryCommand.readEvidence(directory, evidence,
+                UUID.randomUUID().toString(), preparedAt, mapper)).isInstanceOf(IllegalArgumentException.class);
 
         Files.writeString(evidence, valid.replace("\"version\":1", "\"version\":\"1\""));
         assertThatThrownBy(() -> WorkspaceRecoveryCommand.readEvidence(directory, evidence,
-                recoveryId, mapper)).isInstanceOf(IllegalArgumentException.class);
+                recoveryId, preparedAt, mapper)).isInstanceOf(IllegalArgumentException.class);
         Files.writeString(evidence, valid.replace("\"method\":\"host inspection\"", "\"method\":123"));
         assertThatThrownBy(() -> WorkspaceRecoveryCommand.readEvidence(directory, evidence,
-                recoveryId, mapper)).isInstanceOf(IllegalArgumentException.class);
+                recoveryId, preparedAt, mapper)).isInstanceOf(IllegalArgumentException.class);
         Files.writeString(evidence, valid);
         Files.setPosixFilePermissions(evidence,
                 PosixFilePermissions.fromString("rw-r--r--"));
         assertThatThrownBy(() -> WorkspaceRecoveryCommand.readEvidence(directory, evidence,
-                recoveryId, mapper)).isInstanceOf(IllegalArgumentException.class);
+                recoveryId, preparedAt, mapper)).isInstanceOf(IllegalArgumentException.class);
         Files.setPosixFilePermissions(evidence,
                 PosixFilePermissions.fromString("rw-------"));
         Path link = directory.resolve("evidence-link.json");
         Files.createSymbolicLink(link, evidence);
         assertThatThrownBy(() -> WorkspaceRecoveryCommand.readEvidence(directory, link,
-                recoveryId, mapper)).isInstanceOf(IllegalArgumentException.class);
+                recoveryId, preparedAt, mapper)).isInstanceOf(IllegalArgumentException.class);
     }
 }

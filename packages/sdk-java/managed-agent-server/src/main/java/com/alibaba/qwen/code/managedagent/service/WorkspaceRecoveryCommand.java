@@ -91,7 +91,7 @@ public final class WorkspaceRecoveryCommand {
                 }
                 WorkspaceOperatorRecoveryStore.Operation operation = operator.operation(args[1]);
                 byte[] evidence = readEvidence(stateDirectory, Path.of(args[2]),
-                        operation.recoveryId(), context.getBean(ObjectMapper.class));
+                        operation.recoveryId(), operation.preparedAt(), context.getBean(ObjectMapper.class));
                 RuntimeBindingRecord saved = bindings.findById(operation.bindingId());
                 if (saved == null || saved.getGeneration() != operation.generation()) {
                     throw new IllegalStateException("Original Runtime generation changed.");
@@ -174,7 +174,7 @@ public final class WorkspaceRecoveryCommand {
     }
 
     static byte[] readEvidence(Path stateDirectory, Path source,
-            String recoveryId, ObjectMapper mapper) throws Exception {
+            String recoveryId, Instant preparedAt, ObjectMapper mapper) throws Exception {
         Path file = source.toAbsolutePath().normalize();
         if (!stateDirectory.equals(file.getParent()) || Files.isSymbolicLink(file)
                 || !Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)
@@ -199,8 +199,9 @@ public final class WorkspaceRecoveryCommand {
             throw new IllegalArgumentException("Operator evidence is incomplete.");
         }
         Instant verifiedAt = Instant.parse(value.path("verifiedAt").asText());
-        if (verifiedAt.isAfter(Instant.now().plus(Duration.ofMinutes(5)))) {
-            throw new IllegalArgumentException("Operator evidence time is in the future.");
+        if (verifiedAt.isBefore(preparedAt)
+                || verifiedAt.isAfter(Instant.now().plus(Duration.ofMinutes(5)))) {
+            throw new IllegalArgumentException("Operator evidence time is outside recovery window.");
         }
         return evidence;
     }

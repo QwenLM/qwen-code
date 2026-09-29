@@ -22,7 +22,7 @@
    }
    ```
 
-   `verifiedAt` 必须是真实的 UTC 核实时间。记录具体操作和阻止重启的依据；完成核实前不得写下该声明。证明文件及事故记录应保持私密。
+   `verifiedAt` 必须是不早于 `prepare` 的真实 UTC 核实时间。记录具体操作和阻止重启的依据；完成核实前不得写下该声明。证明文件及事故记录应保持私密。
 
 5. 运行 `java -jar qwen-managed-agent-server-*-operator-recovery.jar complete <recoveryId> <absoluteEvidenceFile>`。命令核对保存的原 worker 身份；同次启动时核实其已退出，原主机重启后核实启动身份已变化。然后封存注册记录，持久保存不可覆盖的声明，并仅回收原 holder。崩溃或临时数据库失败后可用**相同文件**重试；更改声明会被拒绝。成功时输出 `completed`。
 

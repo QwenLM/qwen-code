@@ -22,7 +22,7 @@ The maintenance command is shipped as `qwen-managed-agent-server-*-operator-reco
    }
    ```
 
-   `verifiedAt` must be an actual UTC verification time. Record concrete steps and the source of restart prevention; never write the statement before completing those checks. Keep the file and the incident record private.
+   `verifiedAt` must be an actual UTC verification time no earlier than `prepare`. Record concrete steps and the source of restart prevention; never write the statement before completing those checks. Keep the file and the incident record private.
 
 5. Run `java -jar qwen-managed-agent-server-*-operator-recovery.jar complete <recoveryId> <absoluteEvidenceFile>`. The command checks the exact saved worker identity and, on the same boot, its absence; after a reboot of the original host, it checks the changed boot identity. It then tombstones the registration, persists the immutable statement, and reclaims only the original holder. It may be retried with the **same file** after a crash or a temporary database failure. A changed statement is rejected. Successful output is `completed`.
 

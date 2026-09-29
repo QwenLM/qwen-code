@@ -18,7 +18,9 @@
 
 `prepare <bindingId> <generation> <holderKey> <reason>` 在同一事务中为精确 holder 保存唯一审计操作，并将 READY、DRAINING 或 RECOVERY_BLOCKED binding 置为 `OPERATOR_RECOVERY`。已经 LOST 的 binding 保持原状态和失联证据，未完成的审计记录将其排除在后台恢复扫描之外。准备操作清除现有短期 claim、递增 claim 代数，阻止旧 Broker 回调将 binding 恢复为 READY。新准入、普通释放和 placement 替换继续被阻止。holder 仍保留。重复的完全相同请求返回原 recovery ID。
 
-运维人员停止旧 worker，核实所有潜在写入者和重新启动来源。证明文件是管理员拥有的 Runtime 状态目录中的私有 0600 JSON 文件，包含 version 1、recovery ID、核实时间、方法、具体操作和 `restartPrevention: true`。文件内容及摘要保存在审计行中；之后提交不同内容会被拒绝。
+受管 `LOST` binding 在运维准备恢复之前，也会阻止同一 storage ID 或规范化目录的替换。这是刻意的安全边界：重命名 Workspace 不得绕过仍可能存在的物理写入者。Broker 扫描恢复候选时读取共享审计表；若迁移缺失，会拒绝扫描，而不会在看不到运维围栏时继续自动恢复。服务迁移与独立 Broker schema 都创建该表。
+
+运维人员停止旧 worker，核实所有潜在写入者和重新启动来源。证明文件是管理员拥有的 Runtime 状态目录中的私有 0600 JSON 文件，包含 version 1、recovery ID、不早于 `prepare` 的核实时间、方法、具体操作和 `restartPrevention: true`。文件内容及摘要保存在审计行中；之后提交不同内容会被拒绝。
 
 `complete <recoveryId> <evidenceFile>` 在永久跨进程锁下核对原代数及注册记录，要求同次启动中的原进程身份已消失，或原主机的启动身份已变化，然后持久封存注册记录。准备后的恢复围栏跨重启保留；只有携带运维证明的显式命令可完成它。提交运维证明后，为原始写入域记录 `JOURNAL_LOST` 和 `WRITERS_STOPPED`。状态转换及后续清理由共享 owner 的短期 claim 保护。随后复用 W0e-3：保留 SETTLED 结果、不重放未知执行，将未知执行终结为 ABANDONED，仅条件清理原 holder，释放 Runtime Sessions 并退休代数。每个步骤的崩溃均留下仍被围栏保护或已精确清理的状态，待先前 claim 到期后可用相同命令安全重试。即使已完成，提交不同证明的重试也会被拒绝。旧恢复操作不能清除新 holder。
 
@@ -26,7 +28,7 @@
 
 ## 存储与失败规则
 
-每个 binding 代数只有一条审计记录，保存 recovery ID、原 holder 与 storage 哈希、Runtime Session 和 provision 身份、Shell 执行引用、操作人、原因、时间、证明及完成标记。准备阶段的围栏和审计插入同属一个 SQL 事务。SQL 事务不跨主机观察。缺少证明、身份不符、原进程仍存活、本地记录不确定或数据库失败时继续占用 Workspace。只有带持久停止证据的精确原 `LOST` 代数可以执行 W0e-3 holder 清理。
+每个 binding 代数只有一条审计记录，保存 recovery ID、原 holder 与 storage 哈希、Runtime Session 和 provision 身份、Shell 执行引用、操作人、原因、UTC 时间、证明及完成标记。准备阶段的围栏和审计插入同属一个 SQL 事务。SQL 事务不跨主机观察。缺少证明、身份不符、原进程仍存活、本地记录不确定或数据库失败时继续占用 Workspace。只有带持久停止证据的精确原 `LOST` 代数可以执行 W0e-3 holder 清理。
 
 ## 验证
 

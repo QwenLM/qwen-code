@@ -23,4 +23,9 @@ class WorkspaceRecoveryTest {
     void cleanupUsesOriginalPhysicalOwnershipAndFencesLateAcquisition() throws Exception {
         WorkspaceRecoveryContract.verify(source, jdbc, store, authority);
     }
+
+    @Test
+    void operatorPreparationBlocksPlacementAndOrdinaryRecovery() {
+        WorkspaceRecoveryContract.verifyOperatorPrepare(source, jdbc, store, authority);
+    }
 }

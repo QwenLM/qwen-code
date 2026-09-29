@@ -51,13 +51,40 @@ public final class WorkspaceRecoveryContract {
         var inspection = recovery.inspect(original.binding().getBindingId(), original.binding().getGeneration());
         assertThat(inspection.captureReason()).isEqualTo("producer_lost");
         assertThat(inspection.eligibleForPrepare()).isTrue();
+        Instant beforePrepare = Instant.now();
         String recoveryId = recovery.prepare(original.binding().getBindingId(),
                 original.binding().getGeneration(), inspection.holderKey(), "operator", "incident");
+        assertThat(recovery.operation(recoveryId).preparedAt())
+                .isBetween(beforePrepare.minusSeconds(1), Instant.now());
         assertThat(recovery.prepare(original.binding().getBindingId(),
                 original.binding().getGeneration(), inspection.holderKey(), "operator", "incident"))
                 .isEqualTo(recoveryId);
-        assertThat(fixture.bindings.findById(original.binding().getBindingId()).getState())
-                .isEqualTo(RuntimeBindingRecord.State.OPERATOR_RECOVERY);
+        var fenced = fixture.bindings.findById(original.binding().getBindingId());
+        assertThat(fenced.getState()).isEqualTo(RuntimeBindingRecord.State.OPERATOR_RECOVERY);
+        var claimed = fixture.bindings.claimOperation(fenced.getBindingId(),
+                "fence-test", Duration.ofSeconds(10));
+        assertThat(claimed).isNotNull();
+        assertThatThrownBy(() -> fixture.bindings.compareAndSet(claimed,
+                claimed.withState(RuntimeBindingRecord.State.READY, claimed.getLease(), Instant.now())))
+                .isInstanceOf(IllegalArgumentException.class);
+        fixture.bindings.releaseOperation(claimed.getBindingId(), "fence-test",
+                claimed.getOperationGeneration());
+        var scope = original.binding().getRequest().getScope();
+        var renamedWorkspace = new RuntimeScope(scope.getTenantId(), "renamed-workspace",
+                scope.getWorkspaceGeneration(), scope.getCanonicalCwd(),
+                scope.getCapabilityDigest(), scope.getIsolationClass());
+        assertThatThrownBy(() -> fixture.bindings.findOrCreate(new RuntimeProvisionRequest(
+                renamedWorkspace, "other-session", "local-process", "other-storage")))
+                .isInstanceOf(RuntimeBrokerException.class);
+        var renamedDirectory = new RuntimeScope(scope.getTenantId(), "renamed-workspace",
+                scope.getWorkspaceGeneration(), "/other-directory",
+                scope.getCapabilityDigest(), scope.getIsolationClass());
+        assertThatThrownBy(() -> fixture.bindings.findOrCreate(new RuntimeProvisionRequest(
+                renamedDirectory, "other-session", "local-process",
+                original.binding().getRequest().getStorageId())))
+                .isInstanceOf(RuntimeBrokerException.class);
+        assertThat(fixture.bindings.findRecoveryCandidates("local-process", null, 100))
+                .noneMatch(candidate -> candidate.getBindingId().equals(fenced.getBindingId()));
         assertThatThrownBy(() -> authority.release(fixture.session.workspace(), original.session()))
                 .isInstanceOf(RuntimeBrokerException.class);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_operator_recovery"
