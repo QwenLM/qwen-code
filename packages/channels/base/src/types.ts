@@ -50,6 +50,11 @@ export interface GroupConfig {
   allowedUsers?: string[];
 }
 
+export interface SessionRotationConfig {
+  maxTurns?: number;
+  maxAgeHours?: number;
+}
+
 export interface ChannelConfig {
   type: ChannelType;
   token: string;
@@ -61,6 +66,7 @@ export interface ChannelConfig {
   allowedUsers: string[];
   /** Channel routing scope. `thread` is retained for existing configurations only. */
   sessionScope: SessionScope;
+  sessionRotation?: SessionRotationConfig;
   /** Retain an owner-scoped catalog of named sessions in daemon-managed mode. */
   multiSession?: boolean;
   cwd: string;

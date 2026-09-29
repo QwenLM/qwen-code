@@ -260,7 +260,7 @@ jobs:
         run: 'node scripts/check-failsafe-reports.js non-hosted packages/sdk-java/runtime-broker packages/sdk-java/managed-agent-server'
 
   hosted-harness-mysql:
-    name: 'Hosted no-tool processes / MySQL 8.4 / Java 21'
+    name: 'Hosted process fault gates / MySQL 8.4 / Java 21'
     runs-on: 'ubuntu-latest'
     timeout-minutes: 30
     services:
@@ -304,7 +304,7 @@ jobs:
           mvn --batch-mode --no-transfer-progress -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
           mvn --batch-mode --no-transfer-progress -f packages/sdk-java/runtime-broker/pom.xml -DskipTests install
       - name: 'Verify Hosted Java, Spring and MySQL processes'
-        timeout-minutes: 5
+        timeout-minutes: 12
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
           MYSQL_PORT: "${{ job.services.mysql.ports['3306'] }}"
