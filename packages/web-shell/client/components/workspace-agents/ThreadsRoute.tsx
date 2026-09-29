@@ -46,7 +46,12 @@ function applyProgress(
       status: run.status === 'queued' ? 'running' : run.status,
       progress: {
         attempt: event.attempt,
-        receivedAt: Date.now(),
+        // The daemon stamps `receivedAt` with its own clock and `ThreadChat`
+        // sorts it against daemon-written `post.at` / `run.startedAt`. Using the
+        // browser clock here would order one transcript by two clocks, which a
+        // remote daemon makes visible. `activityAt` is refreshed by the daemon
+        // on exactly this frame, so it is the same instant on the same clock.
+        receivedAt: event.activityAt,
         activityAt: event.activityAt,
         stage: event.stage,
         detail: event.detail,
