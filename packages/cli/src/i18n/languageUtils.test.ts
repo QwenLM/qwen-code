@@ -515,6 +515,33 @@ Always use formal tone.
       expect(fs.writeFileSync).not.toHaveBeenCalled();
     });
 
+    it('should preserve non-empty rule files with an unrecognized language marker', () => {
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(
+        '<!-- qwen-code:llm-output-language: English/中文 -->\n\nKeep this custom guidance.\n',
+      );
+
+      initializeLlmOutputLanguage('Russian');
+
+      expect(fs.writeFileSync).not.toHaveBeenCalled();
+    });
+
+    it.each(['', ' \n\t'])(
+      'should regenerate an empty rule file with the configured language (%j)',
+      (content) => {
+        vi.mocked(fs.existsSync).mockReturnValue(true);
+        vi.mocked(fs.readFileSync).mockReturnValue(content);
+
+        initializeLlmOutputLanguage('Russian');
+
+        expect(fs.writeFileSync).toHaveBeenCalledWith(
+          expect.stringContaining('output-language.md'),
+          expect.stringContaining('Russian'),
+          'utf-8',
+        );
+      },
+    );
+
     it('should preserve a valid marker at the start of an oversized file', () => {
       vi.mocked(fs.existsSync).mockReturnValue(true);
       const customContent =
