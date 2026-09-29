@@ -104,6 +104,10 @@ const api: ModelsDevApi = {
       'foo-v4': chat('foo-v4', { context: 4000 }),
       // Invalid limits must not become catalog defaults.
       'nothing-known': chat('nothing-known', { context: -1, output: 0 }),
+      'tiny-context': chat('tiny-context', {
+        context: 8_192,
+        output: 4_096,
+      }),
     },
   },
   alibaba: {
@@ -140,6 +144,7 @@ const trimmed = {
   },
   'gpt-x': { context: 272000, output: 128000, modalities: { image: true } },
   inkling: { modalities: { image: true } },
+  'tiny-context': { output: 4_096 },
   'qwen-x': {
     context: 1000000,
     output: 65536,

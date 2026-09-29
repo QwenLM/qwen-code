@@ -13,6 +13,11 @@ export type TokenLimitType = 'input' | 'output';
 export const DEFAULT_TOKEN_LIMIT: TokenCount = 200_000; // 200K tokens
 export const DEFAULT_OUTPUT_TOKEN_LIMIT: TokenCount = 32_000; // 32K tokens
 
+// Below this window, the 85% auto-compaction threshold can leave less than
+// the 4K minimum output budget. Keep those catalog values from becoming
+// automatic defaults; existing family tables remain the fallback.
+export const MIN_AUTO_DETECTED_CONTEXT_WINDOW: TokenCount = 32_000;
+
 export const ESCALATED_MAX_TOKENS: TokenCount = 64_000;
 
 /**
@@ -333,7 +338,11 @@ function findTokenLimit(
   const norm = normalize(model);
   const catalog = lookupModelCatalog(norm);
   const fromCatalog = type === 'output' ? catalog?.output : catalog?.context;
-  if (type === 'input' && fromCatalog !== undefined) {
+  const usableCatalogContext =
+    type === 'input' &&
+    fromCatalog !== undefined &&
+    fromCatalog >= MIN_AUTO_DETECTED_CONTEXT_WINDOW;
+  if (usableCatalogContext) {
     return fromCatalog;
   }
   const patterns = type === 'output' ? OUTPUT_PATTERNS : PATTERNS;
@@ -344,7 +353,7 @@ function findTokenLimit(
     }
   }
 
-  return fromCatalog;
+  return type === 'input' ? undefined : fromCatalog;
 }
 
 /**

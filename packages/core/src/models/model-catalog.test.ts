@@ -12,6 +12,7 @@ import type { Config } from '../config/config.js';
 import { DefaultOpenAICompatibleProvider } from '../core/openaiContentGenerator/provider/default.js';
 import { AuthType } from '../core/contentGenerator.js';
 import {
+  clampOutputTokensToWindow,
   defaultOutputCeiling,
   hasExplicitOutputLimit,
   tokenLimit,
@@ -206,6 +207,31 @@ describe('model catalog', () => {
     expect(tokenLimit('qwen-vl-max', 'output')).toBe(32_768);
     expect(tokenLimit('claude-sonnet-4-6')).toBe(1_000_000);
     expect(tokenLimit('claude-sonnet-5')).toBe(1_000_000);
+  });
+
+  it('keeps bundled automatic windows safe at the compaction threshold', () => {
+    const unsafe: Array<{ id: string; total: number; window: number }> = [];
+    for (const id of Object.keys(bundled.models)) {
+      const window = tokenLimit(id);
+      const prompt = computeThresholds(window).auto;
+      const output = clampOutputTokensToWindow(
+        defaultOutputCeiling(id),
+        window,
+        prompt,
+      );
+      if (prompt + output > window) {
+        unsafe.push({ id, total: prompt + output, window });
+      }
+    }
+    expect(unsafe).toEqual([]);
+    expect(tokenLimit('gpt-4-1106-preview')).toBe(131_072);
+    expect(tokenLimit('qwen-math-plus')).toBe(262_144);
+  });
+
+  it('ships the current modality-only projection for offline startup', () => {
+    expect(lookupModelCatalog('inkling')).toEqual({
+      modalities: { image: true },
+    });
   });
 
   it('keys every bundled entry by a usable model id', () => {

@@ -18,7 +18,8 @@ import {
 vi.mock('../models/model-catalog.js', () => {
   const entries: Record<string, { context?: number; output?: number }> = {
     'catalog-model': { context: 123_456, output: 7_890 },
-    'qwen-catalog-context-only': { context: 5 },
+    'qwen-catalog-context-only': { context: 50_000 },
+    'qwen-catalog-tiny': { context: 5 },
   };
   return { lookupModelCatalog: (model: string) => entries[model] };
 });
@@ -668,9 +669,13 @@ describe('models.dev catalog', () => {
   });
 
   it('falls back per field when the catalog entry is partial', () => {
-    expect(tokenLimit('qwen-catalog-context-only', 'input')).toBe(5);
+    expect(tokenLimit('qwen-catalog-context-only', 'input')).toBe(50_000);
     expect(tokenLimit('qwen-catalog-context-only', 'output')).toBe(32_768);
     expect(hasExplicitOutputLimit('qwen-catalog-context-only')).toBe(true);
+  });
+
+  it('ignores catalog windows too small for the agent loop', () => {
+    expect(tokenLimit('qwen-catalog-tiny', 'input')).toBe(262_144);
   });
 
   it('looks the catalog up by normalized id', () => {

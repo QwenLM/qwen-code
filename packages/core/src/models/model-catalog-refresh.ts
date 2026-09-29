@@ -7,7 +7,10 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { InputModalities } from '../core/contentGenerator.js';
-import { normalize } from '../core/tokenLimits.js';
+import {
+  MIN_AUTO_DETECTED_CONTEXT_WINDOW,
+  normalize,
+} from '../core/tokenLimits.js';
 import { atomicWriteJSON } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
@@ -78,7 +81,11 @@ type Limits = Pick<ModelCatalogEntry, 'context' | 'output'>;
 function toLimits(model: ModelsDevModel): Limits | undefined {
   const limits: Limits = {};
   const context = model.limit?.input || model.limit?.context;
-  if (context !== undefined && Number.isSafeInteger(context) && context > 0) {
+  if (
+    context !== undefined &&
+    Number.isSafeInteger(context) &&
+    context >= MIN_AUTO_DETECTED_CONTEXT_WINDOW
+  ) {
     limits.context = context;
   }
   if (

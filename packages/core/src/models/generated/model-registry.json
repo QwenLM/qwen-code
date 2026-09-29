@@ -1,6 +1,6 @@
 {
   "source": "https://models.dev/api.json",
-  "fetchedAt": "2026-09-26T08:57:50.330Z",
+  "fetchedAt": "2026-09-29T16:36:09.530Z",
   "models": {
     "claude-fable-5": {
       "context": 1000000,
@@ -98,6 +98,14 @@
         "pdf": true
       }
     },
+    "claude-sonnet-5-5": {
+      "context": 1000000,
+      "output": 128000,
+      "modalities": {
+        "image": true,
+        "pdf": true
+      }
+    },
     "deep-research-04": {
       "context": 131072,
       "output": 65536,
@@ -160,6 +168,11 @@
     "deepseek-v3.1-terminus": {
       "context": 163840,
       "output": 65536
+    },
+    "deepseek-v4-flash": {
+      "modalities": {
+        "image": true
+      }
     },
     "deepseek-v4-flash-0731": {
       "context": 1000000,
@@ -550,7 +563,6 @@
       }
     },
     "gpt-4": {
-      "context": 8192,
       "output": 8192
     },
     "gpt-4-turbo": {
@@ -800,6 +812,21 @@
         "pdf": true
       }
     },
+    "gpt-daybreak-blue": {
+      "context": 922000,
+      "output": 128000,
+      "modalities": {
+        "image": true,
+        "pdf": true
+      }
+    },
+    "gpt-daybreak-red": {
+      "context": 272000,
+      "output": 128000,
+      "modalities": {
+        "image": true
+      }
+    },
     "gpt-realtime": {
       "context": 96000,
       "output": 32000,
@@ -864,9 +891,26 @@
         "pdf": true
       }
     },
+    "inkling": {
+      "modalities": {
+        "image": true
+      }
+    },
     "kimi-k2-thinking": {
       "context": 262144,
       "output": 16384
+    },
+    "kimi-k2.5": {
+      "modalities": {
+        "image": true,
+        "video": true
+      }
+    },
+    "kimi-k2.6": {
+      "modalities": {
+        "image": true,
+        "video": true
+      }
     },
     "kimi-k2.7-code": {
       "context": 262144,
@@ -879,6 +923,14 @@
     "kimi-k2.7-code-highspeed": {
       "context": 262144,
       "output": 262144,
+      "modalities": {
+        "image": true,
+        "video": true
+      }
+    },
+    "kimi-k3": {
+      "context": 1048576,
+      "output": 1048576,
       "modalities": {
         "image": true,
         "video": true
@@ -985,11 +1037,9 @@
       "output": 8192
     },
     "qwen-math-plus": {
-      "context": 4096,
       "output": 3072
     },
     "qwen-math-turbo": {
-      "context": 4096,
       "output": 3072
     },
     "qwen-omni-turbo": {
@@ -1018,7 +1068,6 @@
       "output": 4096
     },
     "qwen-plus-character-ja": {
-      "context": 8192,
       "output": 512
     },
     "qwen-turbo": {
@@ -1064,11 +1113,9 @@
       "output": 8192
     },
     "qwen2-5-math-72b-instruct": {
-      "context": 4096,
       "output": 3072
     },
     "qwen2-5-math-7b-instruct": {
-      "context": 4096,
       "output": 3072
     },
     "qwen2-5-omni-7b": {
@@ -1163,6 +1210,15 @@
         "video": true
       }
     },
+    "qwen3-omni-flash-realtime": {
+      "context": 65536,
+      "output": 16384,
+      "modalities": {
+        "image": true,
+        "audio": true,
+        "video": true
+      }
+    },
     "qwen3-vl-235b-a22b": {
       "context": 131072,
       "output": 32768,
@@ -1203,6 +1259,15 @@
       }
     },
     "qwen3.5-35b-a3b": {
+      "context": 262144,
+      "output": 65536,
+      "modalities": {
+        "image": true,
+        "audio": true,
+        "video": true
+      }
+    },
+    "qwen3.5-397b-a17b": {
       "context": 262144,
       "output": 65536,
       "modalities": {
@@ -1262,8 +1327,14 @@
       }
     },
     "qwen3.7-flash": {
-      "context": 991000,
-      "output": 65536,
+      "context": 991808,
+      "output": 131072,
+      "modalities": {
+        "image": true,
+        "video": true
+      }
+    },
+    "qwen3.7-plus": {
       "modalities": {
         "image": true,
         "video": true
@@ -1283,6 +1354,15 @@
       "modalities": {
         "image": true,
         "pdf": true,
+        "video": true
+      }
+    },
+    "qwen3.8-omni-flash": {
+      "context": 1000000,
+      "output": 131072,
+      "modalities": {
+        "image": true,
+        "audio": true,
         "video": true
       }
     },
