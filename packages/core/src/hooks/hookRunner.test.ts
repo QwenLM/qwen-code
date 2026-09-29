@@ -806,6 +806,78 @@ describe('HookRunner', () => {
         'failed closed',
       );
     });
+
+    // Review follow-up on #12875: the test above proves the fail-closed
+    // deny survives a competitor that answers with the *legacy*
+    // `decision: "allow"` field. It does not cover the competitor shape
+    // that actually wins the merge - `hookSpecificOutput.permissionDecision`
+    // - because PreToolUseHookOutput.getPermissionDecision() reads
+    // hookSpecificOutput first and HookAggregator ranks most-restrictive
+    // only among hooks that participate in that field. A denial that
+    // carries `decision: "deny"` alone never enters the ranking, so a
+    // single healthy permissive hook could overturn it. That is precisely
+    // the outcome failMode "closed" exists to prevent.
+    it('multi-hook: a failMode "closed" transport failure denies even when another hook allows via hookSpecificOutput.permissionDecision', async () => {
+      mockSpawn.mockImplementationOnce(() => createMockProcess(1, '', ''));
+      const closedResult = await hookRunner.executeHook(
+        closedHookConfig,
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+      expect(closedResult.output?.decision).toBe('deny');
+
+      mockSpawn.mockImplementationOnce(() =>
+        createMockProcess(
+          0,
+          JSON.stringify({
+            hookSpecificOutput: {
+              hookEventName: 'PreToolUse',
+              permissionDecision: 'allow',
+              permissionDecisionReason: 'healthy hook says this tool is fine',
+            },
+          }),
+        ),
+      );
+      const permissiveHookConfig: HookConfig = {
+        type: HookType.Command,
+        command: 'always-allow',
+        name: 'permissive-hook',
+        source: HooksConfigSource.Project,
+      };
+      const allowResult = await hookRunner.executeHook(
+        permissiveHookConfig,
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+
+      const aggregated = new HookAggregator().aggregateResults(
+        [closedResult, allowResult],
+        HookEventName.PreToolUse,
+      );
+      const finalOutput = aggregated.finalOutput as PreToolUseHookOutput;
+
+      expect(finalOutput.getPermissionDecision()).toBe('deny');
+      expect(finalOutput.isDenied()).toBe(true);
+      expect(finalOutput.getPermissionDecisionReason()).toContain(
+        'failed closed',
+      );
+    });
+
+    // Guard on the narrowing above: only PreToolUse reads permission
+    // decisions, so the denial must not grow a permissionDecision field on
+    // events that have no such concept (it would land in the aggregator's
+    // pass-through hookSpecificOutput fields and mean nothing to anyone).
+    it('does not attach a permission decision to a fail-closed denial on a non-PreToolUse event', async () => {
+      mockSpawn.mockImplementationOnce(() => createMockProcess(1, '', ''));
+      const result = await hookRunner.executeHook(
+        closedHookConfig,
+        HookEventName.Stop,
+        createMockInput(),
+      );
+
+      expect(result.output?.decision).toBe('deny');
+      expect(result.output?.hookSpecificOutput).toBeUndefined();
+    });
   });
 
   describe('executeHooksParallel', () => {

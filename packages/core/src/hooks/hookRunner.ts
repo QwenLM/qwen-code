@@ -832,14 +832,36 @@ export class HookRunner {
    * error). The reason names the hook and states plainly that it failed
    * closed, so the resulting denial reads as a fail-safe, not a generic
    * block (design requirement from qwen-code#12457).
+   *
+   * For {@link HookEventName.PreToolUse} the denial ALSO carries
+   * `hookSpecificOutput.permissionDecision: 'deny'`, not only the legacy
+   * `decision` field. This is load-bearing rather than belt-and-braces:
+   * {@link PreToolUseHookOutput.getPermissionDecision} reads
+   * `hookSpecificOutput` first, and HookAggregator ranks most-restrictive
+   * only among the outputs that populate that field. A denial carrying
+   * `decision: 'deny'` alone sits outside that ranking, so one healthy
+   * hook answering `permissionDecision: 'allow'` would overturn it and the
+   * tool call would proceed - the exact outcome `failMode: "closed"`
+   * exists to prevent. Other events do not read permission decisions, so
+   * they keep the plain shape.
    */
   private buildFailClosedDenial(
     hookConfig: CommandHookConfig,
     detail: string,
+    eventName?: HookEventName,
   ): HookOutput {
+    const reason = `Hook "${this.getHookId(hookConfig)}" failed closed (failMode: "closed"): ${detail}`;
+    if (eventName !== HookEventName.PreToolUse) {
+      return { decision: 'deny', reason };
+    }
     return {
       decision: 'deny',
-      reason: `Hook "${this.getHookId(hookConfig)}" failed closed (failMode: "closed"): ${detail}`,
+      reason,
+      hookSpecificOutput: {
+        hookEventName: eventName,
+        permissionDecision: 'deny',
+        permissionDecisionReason: reason,
+      },
     };
   }
 
@@ -1439,6 +1461,7 @@ export class HookRunner {
               output: this.buildFailClosedDenial(
                 hookConfig,
                 `timed out after ${timeout / 1000}s`,
+                eventName,
               ),
             }),
         });
@@ -1615,6 +1638,7 @@ export class HookRunner {
               output = this.buildFailClosedDenial(
                 hookConfig,
                 'printed a JSON object with no recognisable HookOutput field (e.g. "decision")',
+                eventName,
               );
             }
           } else if (
@@ -1660,6 +1684,7 @@ export class HookRunner {
                   looksLikeJson
                     ? 'printed output that starts like a JSON object but is not valid JSON'
                     : 'printed output that looks like broken JSON but does not parse',
+                  eventName,
                 ),
               }),
             });
@@ -1691,13 +1716,15 @@ export class HookRunner {
                   : EXIT_CODE_NON_BLOCKING_ERROR,
               parsedFromStdout ? eventName : undefined,
               hookConfig,
+              eventName,
             );
           }
         }
 
         const killedBySignal = exitCode === null;
         // Reached only when this close event is neither our own timeout nor
-        // an abort (both return above, at line 1515, before this point) nor
+        // an abort (both return above, at the `aborted || timedOut` early
+        // return, before this point) nor
         // the surviving-hook-supervisor timeout (which also returns above).
         // So `killedBySignal` here means something OUTSIDE this runner ended
         // the process — the OOM killer, a supervisor, a crash (SIGSEGV) —
@@ -1721,6 +1748,7 @@ export class HookRunner {
             killedBySignal
               ? 'was killed by a signal (crashed or was terminated externally)'
               : `exited with code ${exitCode}`,
+            eventName,
           );
         }
         finish({
@@ -1766,6 +1794,7 @@ export class HookRunner {
             output: this.buildFailClosedDenial(
               hookConfig,
               `failed to start: ${error.message}`,
+              eventName,
             ),
           }),
         });
@@ -1818,6 +1847,7 @@ export class HookRunner {
     exitCode: number,
     stdoutEvent: HookEventName | undefined,
     hookConfig: CommandHookConfig,
+    eventName?: HookEventName,
   ): HookOutput {
     if (exitCode === EXIT_CODE_SUCCESS) {
       if (stdoutEvent && PLAIN_TEXT_CONTEXT_EVENTS.has(stdoutEvent)) {
@@ -1846,6 +1876,7 @@ export class HookRunner {
         return this.buildFailClosedDenial(
           hookConfig,
           `exited with a non-blocking error: ${text}`,
+          eventName,
         );
       }
       return {
