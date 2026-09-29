@@ -20,6 +20,21 @@ export const AGENT_HOST_SESSION_SOURCE_TYPE = 'agent-host';
  */
 export const AGENT_SESSION_SOURCE_TYPE = 'agent';
 
+/**
+ * Machine-owned sessions no session listing or count shows: the agent host
+ * and each agent's task sessions. A person still opens one by id.
+ */
+export const HIDDEN_CATALOG_SOURCE_TYPES: readonly string[] = [
+  AGENT_HOST_SESSION_SOURCE_TYPE,
+  AGENT_SESSION_SOURCE_TYPE,
+];
+
+export function isHiddenCatalogSource(sourceType: string | undefined): boolean {
+  return (
+    sourceType !== undefined && HIDDEN_CATALOG_SOURCE_TYPES.includes(sourceType)
+  );
+}
+
 /** Deterministic per agent and thread, matching Multica's agent × issue scope. */
 export function agentThreadSessionId(
   agentId: string,

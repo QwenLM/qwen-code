@@ -8717,6 +8717,11 @@ hello
         mockInteractionTelemetry.endInteractionSpan,
       ).not.toHaveBeenCalled();
 
+      // MockTurn does not copy emitted tool calls into pendingToolCalls.
+      mockMemoryManager.scheduleMetadataMigration.mockClear();
+      mockMemoryManager.scheduleExtract.mockClear();
+      mockMemoryManager.scheduleDream.mockClear();
+
       mockTurnRunFn.mockReturnValueOnce(
         (async function* () {
           yield { type: LlmEventType.Content, value: 'done' };
@@ -8743,6 +8748,66 @@ hello
         'ok',
         { promptId },
       );
+      expect(mockMemoryManager.scheduleMetadataMigration).toHaveBeenCalledTimes(
+        2,
+      );
+      expect(mockMemoryManager.scheduleExtract).toHaveBeenCalledOnce();
+      expect(mockMemoryManager.scheduleDream).toHaveBeenCalledOnce();
+    });
+
+    it('schedules memory work after a tool-result completion without telemetry', async () => {
+      const promptId = 'prompt-tool-loop-without-telemetry';
+      mockInteractionTelemetry.getActiveInteractionSpan.mockReturnValue(
+        undefined,
+      );
+      mockTurnRunFn.mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: LlmEventType.ToolCallRequest,
+            value: {
+              callId: 'call-1',
+              name: 'read_file',
+              args: {},
+              isClientInitiated: false,
+              prompt_id: promptId,
+            },
+          };
+        })(),
+      );
+
+      await fromAsync(
+        client.sendMessageStream(
+          [{ text: 'use a tool' }],
+          new AbortController().signal,
+          promptId,
+          { type: SendMessageType.UserQuery },
+        ),
+      );
+
+      // MockTurn does not copy emitted tool calls into pendingToolCalls.
+      mockMemoryManager.scheduleMetadataMigration.mockClear();
+      mockMemoryManager.scheduleExtract.mockClear();
+      mockMemoryManager.scheduleDream.mockClear();
+      mockTurnRunFn.mockReturnValueOnce(
+        (async function* () {
+          yield { type: LlmEventType.Content, value: 'done' };
+        })(),
+      );
+
+      await fromAsync(
+        client.sendMessageStream(
+          [{ functionResponse: { name: 'read_file', response: { ok: true } } }],
+          new AbortController().signal,
+          promptId,
+          { type: SendMessageType.ToolResult },
+        ),
+      );
+
+      expect(mockMemoryManager.scheduleMetadataMigration).toHaveBeenCalledTimes(
+        2,
+      );
+      expect(mockMemoryManager.scheduleExtract).toHaveBeenCalledOnce();
+      expect(mockMemoryManager.scheduleDream).toHaveBeenCalledOnce();
     });
 
     it('starts Retry as a fresh agent invocation', async () => {
@@ -11001,6 +11066,58 @@ hello
         2,
       );
       finishMigration({ status: 'skipped', skippedReason: 'complete' });
+    });
+
+    it('runs only metadata migration after a completed tool-result turn', () => {
+      const runBackgroundTasks = (
+        client as unknown as {
+          runManagedAutoMemoryBackgroundTasks: (type: SendMessageType) => void;
+        }
+      ).runManagedAutoMemoryBackgroundTasks.bind(client);
+
+      runBackgroundTasks(SendMessageType.ToolResult);
+
+      expect(mockMemoryManager.scheduleMetadataMigration).toHaveBeenCalledTimes(
+        2,
+      );
+      expect(mockMemoryManager.scheduleExtract).not.toHaveBeenCalled();
+      expect(mockMemoryManager.scheduleDream).not.toHaveBeenCalled();
+    });
+
+    it('runs tool-result migration after a next-speaker continuation', async () => {
+      const { checkNextSpeaker } = await import(
+        '../utils/nextSpeakerChecker.js'
+      );
+      vi.mocked(checkNextSpeaker)
+        .mockResolvedValueOnce({
+          reasoning: 'continue',
+          next_speaker: 'model',
+        })
+        .mockResolvedValue(null);
+      mockTurnRunFn.mockImplementation(() =>
+        (async function* () {
+          yield { type: LlmEventType.Content, value: 'Done' };
+        })(),
+      );
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      } as unknown as LlmChat;
+
+      await fromAsync(
+        client.sendMessageStream(
+          [{ text: 'Tool finished' }],
+          new AbortController().signal,
+          'prompt-id-tool-result-continuation',
+          { type: SendMessageType.ToolResult },
+        ),
+      );
+
+      expect(mockMemoryManager.scheduleMetadataMigration).toHaveBeenCalledTimes(
+        2,
+      );
+      expect(mockMemoryManager.scheduleExtract).not.toHaveBeenCalled();
+      expect(mockMemoryManager.scheduleDream).not.toHaveBeenCalled();
     });
 
     it('activates a prepared memory protocol before starting UserQuery recall', async () => {

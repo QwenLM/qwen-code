@@ -1791,6 +1791,34 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     });
   });
 
+  it.each(['agent-host', 'agent'])(
+    'session/new rejects the reserved %s source',
+    async (sourceType) => {
+      const connId = await initialize();
+      const connStream = await openStream(connId);
+      const got = takeFrames(connStream, 1);
+      await new Promise((r) => setTimeout(r, 50));
+      const ack = await post(connId, {
+        jsonrpc: '2.0',
+        id: 91,
+        method: 'session/new',
+        params: { cwd: '/ws', sourceType, sourceId: 'ag_x' },
+      });
+      expect(ack.status).toBe(202);
+      const [frame] = (await got) as Array<{
+        id: number;
+        error: { code: number; data?: { errorKind?: string } };
+      }>;
+      expect(frame).toMatchObject({
+        id: 91,
+        error: {
+          code: -32602,
+          data: { errorKind: 'reserved_session_source' },
+        },
+      });
+    },
+  );
+
   it('maps workspace session admission failures to retryable RPC error data', async () => {
     bridge.spawnOrAttach = async () => {
       throw new SessionLimitExceededError(20);

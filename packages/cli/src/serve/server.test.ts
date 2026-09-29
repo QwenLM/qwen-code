@@ -13919,22 +13919,26 @@ describe('createServeApp', () => {
       expect(bridge.calls).toHaveLength(0);
     });
 
-    it('rejects the reserved agent host source', async () => {
-      const bridge = fakeBridge();
-      const app = createServeApp(
-        { ...baseOpts, workspace: WS_BOUND },
-        undefined,
-        { bridge },
-      );
-      const res = await request(app)
-        .post('/session')
-        .set('Host', `127.0.0.1:${baseOpts.port}`)
-        .send({ sourceType: 'agent-host' });
+    // Only the daemon's dispatcher creates these, in-process.
+    it.each(['agent-host', 'agent'])(
+      'rejects the reserved %s source',
+      async (sourceType) => {
+        const bridge = fakeBridge();
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+        const res = await request(app)
+          .post('/session')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ sourceType, sourceId: 'ag_x' });
 
-      expect(res.status).toBe(400);
-      expect(res.body.code).toBe('reserved_session_source');
-      expect(bridge.calls).toHaveLength(0);
-    });
+        expect(res.status).toBe(400);
+        expect(res.body.code).toBe('reserved_session_source');
+        expect(bridge.calls).toHaveLength(0);
+      },
+    );
 
     it('forwards a valid UUID sessionId to the bridge', async () => {
       const bridge = fakeBridge();
@@ -18030,6 +18034,30 @@ describe('createServeApp', () => {
           .post(`/session/persisted-channel/${action}`)
           .set('Host', `127.0.0.1:${baseOpts.port}`)
           .send({ sourceType: 'standalone' });
+
+        expect(res.status).toBe(400);
+        expect(res.body.code).toBe('reserved_session_source');
+        expect(bridge.loadCalls).toHaveLength(0);
+        expect(bridge.resumeCalls).toHaveLength(0);
+      },
+    );
+
+    // A restore that adopted the body's source would relabel the session so
+    // the dispatcher sends a real agent run into it.
+    it.each(['load', 'resume'] as const)(
+      'rejects the reserved agent source on %s',
+      async (action) => {
+        const bridge = fakeBridge();
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        const res = await request(app)
+          .post(`/session/persisted-channel/${action}`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ sourceType: 'agent', sourceId: 'ag_x' });
 
         expect(res.status).toBe(400);
         expect(res.body.code).toBe('reserved_session_source');

@@ -792,9 +792,16 @@ function parseRequestedSessionSource(
   body: Record<string, unknown>,
   res: Response,
 ): { sourceType?: string; sourceId?: string } | null {
-  if (body['sourceType'] === AGENT_HOST_SESSION_SOURCE_TYPE) {
+  // Agent sessions are created by the dispatcher in-process, never through
+  // this route. Accepting the source here would let a client relabel a
+  // session it restores so the dispatcher sends a real run into it.
+  if (
+    body['sourceType'] === AGENT_HOST_SESSION_SOURCE_TYPE ||
+    body['sourceType'] === AGENT_SESSION_SOURCE_TYPE
+  ) {
     res.status(400).json({
-      error: 'The requested session source is reserved for agent hosts.',
+      error:
+        'The requested session source is reserved for daemon-owned agent sessions.',
       code: 'reserved_session_source',
     });
     return null;
