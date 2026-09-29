@@ -27,7 +27,7 @@ const WRITE_BLOCK_MESSAGE =
   'Plan mode blocked this shell command because it was classified as state-modifying. Do not retry it through wrappers or obfuscation; continue read-only investigation and include the action in the plan.';
 const NO_APPROVAL_MESSAGE =
   'Plan mode could not determine whether this shell command is read-only, and no approval surface is available. The command was not run; Plan mode remains active.';
-const STALE_APPROVAL_MESSAGE =
+export const STALE_APPROVAL_MESSAGE =
   'Plan-mode shell approval is no longer valid because the mode, permission policy, or exact invocation changed. Submit a new tool call.';
 
 interface PlanModeShellContextSnapshot {
