@@ -736,6 +736,7 @@ export interface BridgeClientSessionEntry {
   /** Admitted id for the prompt currently executing on this session. */
   activePromptId?: string;
   activePromptOriginatorClientId?: string;
+  mcpAppCalls?: Map<string, { clientId: string; cancel: () => void }>;
   /**
    * True while the bridge drives a model roundtrip; the
    * `current_model_update` extNotification demux reads it to suppress
@@ -745,6 +746,11 @@ export interface BridgeClientSessionEntry {
   modelRoundtripInFlight?: boolean;
   /** A2: mirrors `modelRoundtripInFlight` for approval-mode roundtrips. */
   approvalModeRoundtripInFlight?: boolean;
+  /**
+   * Set while the session's channel is quarantined for a missing workspace
+   * change that tightened permissions: permission requests are refused.
+   */
+  workspaceChangeFence?: number;
 }
 
 export interface BridgeClientDeferredArtifactBatch {
@@ -969,13 +975,17 @@ export class BridgeClient implements Client {
       turn: BackgroundNotificationTurn,
       afterPromptId?: string,
     ) => Promise<boolean>,
+    /** Invoked after the child reports that it started a Goal turn. */
+    private readonly onGoalTurnStart?: (sessionId: string) => void,
   ) {}
 
   async requestPermission(
     params: RequestPermissionRequest,
   ): Promise<RequestPermissionResponse> {
     const entry = this.resolveEntry(params.sessionId);
-    if (!entry) return { outcome: { outcome: 'cancelled' } };
+    if (!entry || entry.workspaceChangeFence !== undefined) {
+      return { outcome: { outcome: 'cancelled' } };
+    }
 
     const explicitBackgroundTurn = parseBackgroundNotificationTurn(
       params._meta?.['backgroundTurn'],
@@ -986,13 +996,38 @@ export class BridgeClient implements Client {
     ) {
       return { outcome: { outcome: 'cancelled' } };
     }
-    const backgroundTurn =
-      explicitBackgroundTurn ??
-      (entry.promptActive ? undefined : entry.backgroundTurn);
-    const permissionPromptId = backgroundTurn?.turnId ?? entry.activePromptId;
-    const permissionOriginator = backgroundTurn
+    const appCallId =
+      typeof params._meta?.['mcpAppCallId'] === 'string'
+        ? params._meta['mcpAppCallId']
+        : undefined;
+    const appClientId = appCallId
+      ? entry.mcpAppCalls?.get(appCallId)?.clientId
+      : undefined;
+    if (
+      appCallId &&
+      (!appClientId || appCallId !== params.toolCall.toolCallId)
+    ) {
+      return { outcome: { outcome: 'cancelled' } };
+    }
+    const backgroundTurn = appClientId
       ? undefined
-      : entry.activePromptOriginatorClientId;
+      : (explicitBackgroundTurn ??
+        (entry.promptActive ? undefined : entry.backgroundTurn));
+    const permissionPromptId = appClientId
+      ? undefined
+      : (backgroundTurn?.turnId ?? entry.activePromptId);
+    const permissionOriginator =
+      appClientId ??
+      (backgroundTurn ? undefined : entry.activePromptOriginatorClientId);
+    // Reserve model permission capacity within the existing session cap.
+    if (
+      appClientId &&
+      entry.pendingPermissionIds.size >=
+        Math.min(8, Math.max(0, this.maxPendingPerSession - 1))
+    ) {
+      return { outcome: { outcome: 'cancelled' } };
+    }
+
     // Bd1z5: per-session cap. Reject before issuing so we never
     // grow `pendingPermissionIds` past the limit.
     if (entry.pendingPermissionIds.size >= this.maxPendingPerSession) {
@@ -1072,7 +1107,7 @@ export class BridgeClient implements Client {
       const record: PermissionRequestRecord = {
         requestId,
         sessionId: entry.sessionId,
-        promptId: permissionPromptId,
+        promptId: appClientId ? appCallId : permissionPromptId,
         originatorClientId: permissionOriginator,
         allowedOptionIds,
         issuedAtMs: Date.now(),
@@ -1544,6 +1579,10 @@ export class BridgeClient implements Client {
     }
     const entry = this.resolveEntry(sessionId);
     if (!entry) return { messages: [], items: [], hasQueuedPrompt: false };
+    // A turn cancelled by a permission fence takes no new input.
+    if (entry.workspaceChangeFence !== undefined) {
+      return { messages: [], items: [], hasQueuedPrompt: false };
+    }
     const requestedPromptId = params['promptId'];
     if (
       requestedPromptId !== undefined &&
@@ -2441,6 +2480,7 @@ export class BridgeClient implements Client {
       const entry = this.resolveEntry(sessionId);
       if (!entry || !this.ownsSession(sessionId)) return;
       entry.goalTurnActive = true;
+      this.onGoalTurnStart?.(sessionId);
       return;
     }
     if (method === '_qwencode/end_turn') {

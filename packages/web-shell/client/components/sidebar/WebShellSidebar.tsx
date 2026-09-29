@@ -32,6 +32,7 @@ import {
   FolderKanbanIcon,
   ActivityIcon,
   BlocksIcon,
+  BotIcon,
   CalendarClockIcon,
   ChevronDownIcon,
   ChevronRightIcon,
@@ -136,6 +137,7 @@ import {
   SIDEBAR_SESSION_PREVIEW_LIMIT,
 } from '../../constants/sessions';
 import styles from './WebShellSidebar.module.css';
+import { UpdateControl } from './UpdateControl';
 import {
   useSessionCatalogController,
   useSessionCatalogPolling,
@@ -146,6 +148,7 @@ import { type SessionCatalogQuery } from '../../session-catalog/session-catalog-
 import { useWorkspaceSessionLiveState } from '../../session-catalog/workspace-session-live-state';
 import { StandaloneRecents } from './StandaloneRecents';
 import { LocalFilesControl } from '../LocalFilesControl';
+import { DesktopRelayControl } from '../DesktopRelayControl';
 import { workspaceLabelForCwd } from '../../utils/workspace';
 
 const SIDEBAR_WIDTH_STORAGE_KEY = 'qwen-code-web-shell-sidebar-width';
@@ -229,6 +232,7 @@ function comparePinnedSectionSessions(
 
 export type WebShellSidebarFooterItem =
   | 'settings'
+  | 'update'
   | 'version'
   | 'theme'
   | 'sessionsOverview'
@@ -236,6 +240,7 @@ export type WebShellSidebarFooterItem =
   | 'splitView'
   | 'daemonStatus'
   | 'localFiles'
+  | 'desktopRelay'
   | 'collapse';
 
 export interface WebShellSidebarBranding {
@@ -259,7 +264,8 @@ export type WebShellSidebarPrimaryNavItem =
   | 'channels'
   | 'scheduledTasks'
   | 'workflows'
-  | 'goals';
+  | 'goals'
+  | 'managed';
 
 export interface WebShellSidebarPrimaryNavOptions {
   /** Built-in primary nav entries to show. Defaults to all. */
@@ -277,21 +283,25 @@ export interface WebShellSidebarFooterOptions {
 
 const DEFAULT_FOOTER_ITEMS: readonly WebShellSidebarFooterItem[] = [
   'settings',
+  'update',
   'version',
   'theme',
   'sessionsOverview',
   'splitView',
   'daemonStatus',
   'localFiles',
+  'desktopRelay',
   'collapse',
 ];
 
 // The desktop shell always spawns its own loopback daemon, whose regular tools
-// already reach the local disk, so the bridge has nothing to add there — and on
-// WebKit webviews it could only ever render a dead entry. An explicit
-// `footer.items` still wins, so the entry stays reachable by choice.
+// already reach the local disk and desktop, so neither bridge has anything to
+// add there — and on WebKit webviews the local-files one could only ever render
+// a dead entry. An explicit `footer.items` still wins, so both stay reachable.
 const DESKTOP_DEFAULT_FOOTER_ITEMS: readonly WebShellSidebarFooterItem[] =
-  DEFAULT_FOOTER_ITEMS.filter((item) => item !== 'localFiles');
+  DEFAULT_FOOTER_ITEMS.filter(
+    (item) => item !== 'localFiles' && item !== 'desktopRelay',
+  );
 
 const DEFAULT_PRIMARY_NAV_ITEMS: readonly WebShellSidebarPrimaryNavItem[] = [
   'newTask',
@@ -300,6 +310,7 @@ const DEFAULT_PRIMARY_NAV_ITEMS: readonly WebShellSidebarPrimaryNavItem[] = [
   'scheduledTasks',
   'workflows',
   'goals',
+  'managed',
 ];
 
 export type WebShellSidebarSessionActionItem =
@@ -403,6 +414,7 @@ interface WebShellSidebarProps {
   onOpenSettings: () => void;
   onOpenPlugins: () => void;
   onOpenChannels: () => void;
+  onOpenManagedSessions?: () => void;
   onOpenDaemonStatus: () => void;
   onOpenScheduledTasks: () => void;
   onOpenWorkflows: () => void;
@@ -946,6 +958,7 @@ export function WebShellSidebar({
   onOpenSettings,
   onOpenPlugins,
   onOpenChannels,
+  onOpenManagedSessions,
   onOpenDaemonStatus,
   onOpenScheduledTasks,
   onOpenWorkflows,
@@ -1015,6 +1028,10 @@ export function WebShellSidebar({
     () => new Set(primaryNavOptions?.items ?? DEFAULT_PRIMARY_NAV_ITEMS),
     [primaryNavOptions?.items],
   );
+  const showUpdate =
+    footerItems.has('update') &&
+    !isDesktopShell() &&
+    connection.capabilities?.features?.includes('daemon_update');
   const hasScrollingPrimaryNav =
     (projectFeaturesEnabled &&
       (primaryNavItems.has('plugins') ||
@@ -1022,6 +1039,7 @@ export function WebShellSidebar({
         primaryNavItems.has('scheduledTasks') ||
         primaryNavItems.has('workflows') ||
         primaryNavItems.has('goals'))) ||
+    (primaryNavItems.has('managed') && Boolean(onOpenManagedSessions)) ||
     Boolean(primaryNavOptions?.render);
   const sessionActionItems = useMemo(
     () => new Set(sessionActionsOptions?.items ?? DEFAULT_SESSION_ACTION_ITEMS),
@@ -2124,11 +2142,7 @@ export function WebShellSidebar({
       ? `v${qwenCodeVersion}`
       : qwenCodeVersion
     : '';
-  // One breakpoint degrades the whole footer: below it the settings button
-  // drops its text label, every footer button becomes a fixed 26px icon, and the
-  // version label leaves the row. That label can neither shrink nor truncate
-  // (`flex: 0 0 auto; white-space: nowrap`), so keeping it rendered past this
-  // point overflowed `.footerPrimary` into the action icons (#11453).
+  // Keep action buttons compact; the version and update share a separate row.
   const footerCompact =
     !collapsed && sidebarWidth < SIDEBAR_FOOTER_COMPACT_WIDTH;
   const sidebarStyle = {
@@ -5298,6 +5312,7 @@ export function WebShellSidebar({
         ref={sidebarRef}
         className={cx(
           styles.sidebar,
+          (footerItems.has('version') || showUpdate) && styles.withVersion,
           collapsed && styles.collapsed,
           isResizing && styles.resizing,
           mobileOpen && styles.mobileOpen,
@@ -5739,6 +5754,20 @@ export function WebShellSidebar({
                     <TargetIcon size={16} strokeWidth={1.2} />
                   </span>
                   {!collapsed && <span>{t('sidebar.goals')}</span>}
+                </button>
+              )}
+              {primaryNavItems.has('managed') && onOpenManagedSessions && (
+                <button
+                  className={styles.pluginButton}
+                  type="button"
+                  title={t('managed.title')}
+                  aria-label={t('managed.title')}
+                  onClick={onOpenManagedSessions}
+                >
+                  <span className={styles.navIcon}>
+                    <BotIcon size={16} strokeWidth={1.2} />
+                  </span>
+                  {!collapsed && <span>{t('managed.title')}</span>}
                 </button>
               )}
               {primaryNavOptions?.render?.()}
@@ -6416,6 +6445,24 @@ export function WebShellSidebar({
           <div
             className={cx(styles.footer, footerCompact && styles.footerCompact)}
           >
+            <div className={styles.footerVersion}>
+              {!collapsed && versionLabel && footerItems.has('version') && (
+                <span
+                  className={styles.version}
+                  title={`${brandName} ${versionLabel}`}
+                >
+                  {versionLabel}
+                </span>
+              )}
+              {showUpdate && (
+                <UpdateControl
+                  client={workspace.client}
+                  collapsed={collapsed && !mobileOpen}
+                  currentVersion={qwenCodeVersion}
+                  onError={onError}
+                />
+              )}
+            </div>
             <div className={styles.footerPrimary}>
               {footer && typeof footer === 'object' && footer.render?.()}
               {projectFeaturesEnabled && footerItems.has('settings') && (
@@ -6436,17 +6483,6 @@ export function WebShellSidebar({
                   )}
                 </button>
               )}
-              {!collapsed &&
-                !footerCompact &&
-                versionLabel &&
-                footerItems.has('version') && (
-                  <span
-                    className={styles.version}
-                    title={`${brandName} ${versionLabel}`}
-                  >
-                    {versionLabel}
-                  </span>
-                )}
             </div>
             <div className={styles.footerActions}>
               {footerItems.has('theme') && (
@@ -6536,6 +6572,20 @@ export function WebShellSidebar({
                   <LocalFilesControl
                     triggerClassName={styles.collapseButton}
                     workspaces={workspaces}
+                  />
+                )}
+              {footerItems.has('desktopRelay') &&
+                isPageOriginDaemon(workspace.baseUrl) && (
+                  <DesktopRelayControl
+                    triggerClassName={styles.collapseButton}
+                    workspaces={workspaces}
+                    showWhenIdle={Boolean(
+                      (footer !== false &&
+                        footer?.items?.includes('desktopRelay')) ||
+                        workspace.capabilities?.features?.includes(
+                          'client_mcp_over_ws',
+                        ),
+                    )}
                   />
                 )}
               {(mobileOpen || footerItems.has('collapse')) && (

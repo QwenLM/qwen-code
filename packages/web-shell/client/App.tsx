@@ -196,11 +196,21 @@ import {
   type ModelDialogMode,
 } from './components/dialogs/ModelDialog';
 import { ModelFallbacksDialog } from './components/dialogs/ModelFallbacksDialog';
+import { ManagedSessionsPage } from './components/managed/ManagedSessionsPage';
+import type { ManagedAgentProvider } from './components/managed/managed-agent-provider';
+import {
+  managedSelectionFromUrl,
+  saveManagedSelection,
+} from './components/managed/managed-session-storage';
 import { AgentsManagerPage } from './components/agents/AgentsManagerPage';
 import { MemoryMessage } from './components/messages/MemoryMessage';
 import { AuthMessage } from './components/messages/AuthMessage';
 import { ToolsDialog } from './components/dialogs/ToolsDialog';
 import { GitDialog, type GitDialogView } from './components/dialogs/GitDialog';
+import {
+  BranchSessionDialog,
+  type BranchSessionIsolation,
+} from './components/dialogs/BranchSessionDialog';
 import { SkillsManagerPage } from './components/skills/SkillsManagerPage';
 import {
   DaemonConnectionsSettings,
@@ -1200,6 +1210,8 @@ export interface WebShellProps {
   }) => void;
   /** Called after a new session is created. Session setup waits up to 30 seconds. */
   onSessionCreated?: (sessionId: string) => Promise<void> | void;
+  /** Explicit Managed Agent backend. Omit to keep the daemon provider unchanged. */
+  managedAgentProvider?: ManagedAgentProvider;
   /** Visual theme for the embedded shell. */
   theme?: WebShellTheme;
   /** Called when `/theme` changes the web-shell theme. */
@@ -3133,7 +3145,8 @@ function isSameGitStatus(
     current.ahead === next.ahead &&
     current.behind === next.behind &&
     current.stashCount === next.stashCount &&
-    current.operation === next.operation
+    current.operation === next.operation &&
+    current.worktreeSupported === next.worktreeSupported
   );
 }
 
@@ -3161,6 +3174,7 @@ export function App({
   onSessionIdChange,
   onSessionInfoChange,
   onSessionCreated,
+  managedAgentProvider,
   theme: providedTheme,
   onThemeChange,
   onThemeResolved,
@@ -3841,6 +3855,7 @@ export function App({
     ordinaryWorkspaces.length > 0 ||
     (workspace.capabilities?.workspaces === undefined &&
       Boolean(workspace.capabilities?.workspaceCwd));
+  const externalManagedAgentAvailable = managedAgentProvider !== undefined;
   const [pendingSessionContext, setPendingSessionContextState] = useState<
     DaemonProductSessionContext | undefined
   >(undefined);
@@ -4198,7 +4213,17 @@ export function App({
     const status = connection.gitStatus;
     if (!status || sessionWorktree) return;
     if (status.workspaceCwd !== activeWorkspaceCwd) return;
-    setSelectedWorkspaceGitStatus(status);
+    setSelectedWorkspaceGitStatus((current) => {
+      const next =
+        status.worktreeSupported === undefined &&
+        current?.worktreeSupported !== undefined
+          ? {
+              ...status,
+              worktreeSupported: current.worktreeSupported,
+            }
+          : status;
+      return isSameGitStatus(current, next) ? current : next;
+    });
   }, [connection.gitStatus, activeWorkspaceCwd, sessionWorktree]);
   const onToastRef = useRef(onToast);
   onToastRef.current = onToast;
@@ -8737,8 +8762,20 @@ export function App({
   // it — the composer git chip / `/diff` (current workspace) or a sidebar
   // folder's git chip (that workspace) — so each can target its own repo.
   const [gitDialog, setGitDialog] = useState<
-    { workspaceCwd: string; gitCwd?: string; view: GitDialogView } | undefined
+    | {
+        workspaceCwd: string;
+        gitCwd?: string;
+        gitSessionId?: string;
+        view: GitDialogView;
+      }
+    | undefined
   >(undefined);
+  const [branchSessionDialog, setBranchSessionDialog] = useState<
+    { sourceSessionId: string; atRecordId?: string } | undefined
+  >(undefined);
+  const branchSessionDialogRef = useRef(branchSessionDialog);
+  branchSessionDialogRef.current = branchSessionDialog;
+  const [branchSessionDialogBusy, setBranchSessionDialogBusy] = useState(false);
   // Main content view. The scheduled-tasks page replaces the chat pane inline
   // (not a modal overlay), mirroring the reference design; creating or opening
   // a chat returns to 'chat'. (Daemon Status is no longer a boolean dialog — it
@@ -9075,12 +9112,26 @@ export function App({
     | 'plugins'
     | 'agents'
     | 'channels'
+    | 'managed'
     | 'workspaces'
     | null
-  >(initialConnectionsSettingsCategory ? 'settings' : null);
+  >(() =>
+    initialConnectionsSettingsCategory
+      ? 'settings'
+      : managedAgentProvider && managedSelectionFromUrl().open
+        ? 'managed'
+        : null,
+  );
+  const [managedSessionId, setManagedSessionId] = useState<string | undefined>(
+    () => managedSelectionFromUrl().sessionId,
+  );
+  useEffect(() => {
+    saveManagedSelection(activePanel === 'managed', managedSessionId);
+  }, [activePanel, managedSessionId]);
   const chatActive =
     !activePanel && mainView === 'chat' && !artifactPanelFullscreen;
   const navigateToMessage = useMessageNavigation(messageListRef, chatActive);
+
   const activePanelRef = useRef(activePanel);
   // Deep-link target for the Settings panel (e.g. 'Daemon' from the Local
   // Control QR popover). Cleared on any panel close/switch, not just
@@ -9114,7 +9165,8 @@ export function App({
     if (
       !projectFeaturesAvailable &&
       activePanel !== 'status' &&
-      !(activePanel === 'settings' && initialConnectionsSettingsCategory)
+      !(activePanel === 'settings' && initialConnectionsSettingsCategory) &&
+      !(activePanel === 'managed' && externalManagedAgentAvailable)
     ) {
       setActivePanel(null);
     }
@@ -9145,6 +9197,7 @@ export function App({
     }
   }, [
     activePanel,
+    externalManagedAgentAvailable,
     mainView,
     modelDialogMode,
     projectFeaturesAvailable,
@@ -9179,6 +9232,7 @@ export function App({
         | 'plugins'
         | 'agents'
         | 'channels'
+        | 'managed'
         | 'workspaces',
     ) => {
       splitClassificationGenerationRef.current += 1;
@@ -10974,6 +11028,17 @@ export function App({
       activeWorkspaceTrusted &&
       selectedWorkspaceGitStatus?.branch,
   );
+  const branchWorktreeEligible = Boolean(
+    connection.sessionId &&
+      workspace.capabilities?.features?.includes('session_branch_worktree') ===
+        true &&
+      workspaces.some(
+        (entry) =>
+          entry.cwd === connection.workspaceCwd &&
+          entry.primary &&
+          entry.trusted,
+      ),
+  );
   // An armed branch/worktree intent survives a transient status gap (a
   // failed poll round, a refetch still in flight); only a definitive answer
   // clears it. The chip stays hidden meanwhile because it keys on
@@ -11004,17 +11069,19 @@ export function App({
     setGitDialog({
       workspaceCwd: gitDiffWorkspaceCwd,
       gitCwd: sessionWorktree?.path,
+      gitSessionId: sessionWorktree ? connection.sessionId : undefined,
       view: 'diff',
     });
-  }, [gitDiffWorkspaceCwd, sessionWorktree?.path]);
+  }, [connection.sessionId, gitDiffWorkspaceCwd, sessionWorktree]);
   const handleOpenCommit = useCallback(() => {
     if (!gitDiffWorkspaceCwd) return;
     setGitDialog({
       workspaceCwd: gitDiffWorkspaceCwd,
       gitCwd: sessionWorktree?.path,
+      gitSessionId: sessionWorktree ? connection.sessionId : undefined,
       view: 'commit',
     });
-  }, [gitDiffWorkspaceCwd, sessionWorktree?.path]);
+  }, [connection.sessionId, gitDiffWorkspaceCwd, sessionWorktree]);
   const handleOpenWorktrees = useCallback(() => {
     if (!gitDiffWorkspaceCwd) return;
     // The dialog's tab bar reaches Changes and History from here, and both
@@ -11031,9 +11098,10 @@ export function App({
     setGitDialog({
       workspaceCwd: gitDiffWorkspaceCwd,
       gitCwd: sessionWorktree?.path,
+      gitSessionId: sessionWorktree ? connection.sessionId : undefined,
       view: 'log',
     });
-  }, [gitDiffWorkspaceCwd, sessionWorktree?.path]);
+  }, [connection.sessionId, gitDiffWorkspaceCwd, sessionWorktree]);
   const dialogOpen =
     capacityRecovery !== undefined ||
     showResumeDialog ||
@@ -11044,6 +11112,7 @@ export function App({
     showThemeDialog ||
     showToolsDialog ||
     gitDialog !== undefined ||
+    branchSessionDialog !== undefined ||
     modelDialogMode !== null ||
     showApprovalModeDialog ||
     tasksDialogMessage !== null ||
@@ -12043,7 +12112,12 @@ export function App({
       modelSettingScope,
       'fastModel',
     );
-    return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+    // The CLI picker may persist `authType:id\0<baseUrl>` (#12760); decode
+    // like the vision sibling so the dialog highlights the pinned row
+    // instead of falling to the list head. The persisted value keeps the
+    // suffix — this is a read-side strip only.
+    if (typeof value !== 'string' || !value.trim()) return undefined;
+    return decodeVisionModelForPicker(value.trim());
   })();
   const currentAdvisorModel = readScopedModelSetting(
     workspaceSettings,
@@ -13274,7 +13348,11 @@ export function App({
 
   const pendingBranchRequestsRef = useRef(new Map<string, Promise<void>>());
   const branchCurrentSession = useCallback(
-    (name?: string, atRecordId?: string) => {
+    (options: {
+      name?: string;
+      atRecordId?: string;
+      worktree?: { slug?: string };
+    }) => {
       if (!workspaceContextActive) {
         pushToast('info', t('session.workspaceActionUnavailable'));
         return;
@@ -13282,16 +13360,32 @@ export function App({
       if (sessionWriteBlocked) return;
       if (!requireActiveSessionForLocalCommand()) return;
       const sourceSessionId = connectionRef.current.sessionId;
+      const sourceWorkspaceCwd = connectionRef.current.workspaceCwd;
       const requestKey = JSON.stringify([
         sourceSessionId,
-        name ?? null,
-        atRecordId ?? null,
+        options.name ?? null,
+        options.atRecordId ?? null,
+        options.worktree !== undefined,
       ]);
       const pending = pendingBranchRequestsRef.current.get(requestKey);
       if (pending) return pending;
 
-      const request = sessionActions
-        .branchSession(name || undefined, atRecordId)
+      const branchRequest =
+        options.worktree !== undefined
+          ? sessionActions.branchSession({
+              name: options.name,
+              ...(options.atRecordId !== undefined
+                ? { atRecordId: options.atRecordId }
+                : {}),
+              worktree: options.worktree,
+            })
+          : options.atRecordId !== undefined
+            ? sessionActions.branchSession({
+                name: options.name,
+                atRecordId: options.atRecordId,
+              })
+            : sessionActions.branchSession({ name: options.name });
+      const request = branchRequest
         .then((result) => {
           if (!result.switchStarted) return;
           if (result.sourceWarnings?.length)
@@ -13341,6 +13435,27 @@ export function App({
             );
             return;
           }
+          if (error instanceof DaemonHttpError) {
+            const body =
+              typeof error.body === 'object' && error.body !== null
+                ? (error.body as Record<string, unknown>)
+                : undefined;
+            const code = body?.['code'];
+            if (
+              code === 'branch_worktree_activation_failed' ||
+              code === 'branch_worktree_outcome_unknown'
+            ) {
+              if (sourceWorkspaceCwd) {
+                sessionCatalogController.invalidateWorkspace(
+                  sourceWorkspaceCwd,
+                );
+              }
+            }
+            if (code === 'branch_worktree_activation_failed') {
+              pushToast('error', t('branch.worktreeActivationFailed'));
+              return;
+            }
+          }
           reportError(error, t('branch.failed'));
         })
         .finally(() => {
@@ -13357,6 +13472,7 @@ export function App({
       requireActiveSessionForLocalCommand,
       sessionWriteBlocked,
       sessionActions,
+      sessionCatalogController,
       store,
       t,
       transcriptReloadSupported,
@@ -13365,9 +13481,74 @@ export function App({
   );
   const handleBranchCurrentSession = useCallback(
     (atRecordId?: string) => {
-      return branchCurrentSession(undefined, atRecordId);
+      const sourceSessionId = connectionRef.current.sessionId;
+      const sourceWorkspaceCwd = connectionRef.current.workspaceCwd;
+      if (!branchWorktreeEligible || !sourceSessionId || !sourceWorkspaceCwd) {
+        return branchCurrentSession({ atRecordId });
+      }
+      return (async () => {
+        try {
+          const status = await workspace.client
+            .workspaceByCwd(sourceWorkspaceCwd)
+            .workspaceGit({
+              cwd: sessionWorktree?.path,
+              sessionId: sourceSessionId,
+            });
+          if (connectionRef.current.sessionId !== sourceSessionId) return;
+          setSelectedWorkspaceGitStatus(status);
+          if (status.worktreeSupported !== true) {
+            return branchCurrentSession({ atRecordId });
+          }
+        } catch {
+          if (connectionRef.current.sessionId !== sourceSessionId) return;
+          return branchCurrentSession({ atRecordId });
+        }
+        setBranchSessionDialog({ sourceSessionId, atRecordId });
+        setBranchSessionDialogBusy(false);
+      })();
     },
-    [branchCurrentSession],
+    [
+      branchCurrentSession,
+      branchWorktreeEligible,
+      sessionWorktree?.path,
+      workspace.client,
+    ],
+  );
+
+  useEffect(() => {
+    if (
+      branchSessionDialog &&
+      (connection.sessionId !== branchSessionDialog.sourceSessionId ||
+        !branchWorktreeEligible)
+    ) {
+      setBranchSessionDialog(undefined);
+      setBranchSessionDialogBusy(false);
+    }
+  }, [branchSessionDialog, branchWorktreeEligible, connection.sessionId]);
+
+  const confirmBranchSession = useCallback(
+    (isolation: BranchSessionIsolation) => {
+      if (!branchSessionDialog || branchSessionDialogBusy) return;
+      if (
+        connectionRef.current.sessionId !== branchSessionDialog.sourceSessionId
+      ) {
+        setBranchSessionDialog(undefined);
+        setBranchSessionDialogBusy(false);
+        return;
+      }
+      const confirmedDialog = branchSessionDialog;
+      setBranchSessionDialogBusy(true);
+      const result = branchCurrentSession({
+        atRecordId: confirmedDialog.atRecordId,
+        ...(isolation === 'worktree' ? { worktree: {} } : {}),
+      });
+      Promise.resolve(result).finally(() => {
+        if (branchSessionDialogRef.current !== confirmedDialog) return;
+        setBranchSessionDialogBusy(false);
+        setBranchSessionDialog(undefined);
+      });
+    },
+    [branchCurrentSession, branchSessionDialog, branchSessionDialogBusy],
   );
 
   const composerFocusRequestRef = useRef(0);
@@ -16082,6 +16263,7 @@ export function App({
             setGitDialog({
               workspaceCwd: gitDiffWorkspaceCwd,
               gitCwd: sessionWorktree?.path,
+              gitSessionId: sessionWorktree ? connection.sessionId : undefined,
               view: 'diff',
             });
             return true;
@@ -16094,6 +16276,7 @@ export function App({
             setGitDialog({
               workspaceCwd: gitDiffWorkspaceCwd,
               gitCwd: sessionWorktree?.path,
+              gitSessionId: sessionWorktree ? connection.sessionId : undefined,
               view: 'log',
             });
             return true;
@@ -16279,7 +16462,7 @@ export function App({
           if (cmd === 'branch') {
             if (commandBlocked) return blockCommand();
             const branchName = text.slice(match[0].length).trim();
-            branchCurrentSession(branchName || undefined);
+            branchCurrentSession({ name: branchName || undefined });
             return true;
           }
           if (cmd === 'fork') {
@@ -17115,6 +17298,7 @@ export function App({
       echoLocalCommandIfIdle,
       dispatchReadOnlyStatus,
       branchCurrentSession,
+      connection.sessionId,
       closeMobileDrawer,
       openPanel,
       openScheduledTasks,
@@ -17941,6 +18125,24 @@ export function App({
     (modelId: string) => {
       if (!projectFeaturesAvailable) return;
       if (!workspaceContextActive) {
+        // This picker cannot distinguish same-id rows by endpoint, so writing
+        // the bare id would erase a live `authType:id\0<baseUrl>` pin the CLI
+        // picker made (#12760). Confirming the already-pinned row leaves the
+        // setting untouched.
+        const existingFast = readScopedModelSetting(
+          workspaceSettings,
+          modelSettingScope,
+          'fastModel',
+        );
+        if (
+          typeof existingFast === 'string' &&
+          existingFast.includes('\0') &&
+          extractBareModelId(
+            decodeVisionModelForPicker(existingFast.trim()),
+          ) === modelId
+        ) {
+          return;
+        }
         void setWorkspaceSetting(modelSettingScope, 'fastModel', modelId)
           .then(() => {
             void reloadWorkspaceSettings().catch((error: unknown) => {
@@ -18019,6 +18221,7 @@ export function App({
       projectFeaturesAvailable,
       setWorkspaceSetting,
       workspaceContextActive,
+      workspaceSettings,
     ],
   );
 
@@ -18435,15 +18638,17 @@ export function App({
   // Worktree sessions query git status with the worktree path (?cwd=
   // parameter); the chip prefers the live branch from that status, falling
   // back to the creation-time sessionWorktree.branch.
+  const gitStatusTarget = activeWorkspaceCwd
+    ? `${connection.sessionId ?? ''}:${sessionWorktree?.path ?? activeWorkspaceCwd}`
+    : undefined;
   useEffect(() => {
     if (!activeWorkspaceCwd || isKnownLiveWorkspaceCwd(activeWorkspaceCwd)) {
       gitStatusWorkspaceCwdRef.current = undefined;
       setSelectedWorkspaceGitStatus(undefined);
       return;
     }
-    const statusTarget = sessionWorktree?.path ?? activeWorkspaceCwd;
-    if (gitStatusWorkspaceCwdRef.current !== statusTarget) {
-      gitStatusWorkspaceCwdRef.current = statusTarget;
+    if (gitStatusWorkspaceCwdRef.current !== gitStatusTarget) {
+      gitStatusWorkspaceCwdRef.current = gitStatusTarget;
       setSelectedWorkspaceGitStatus(undefined);
     }
     if (!workspaceGitStatusEnabled) return;
@@ -18453,7 +18658,10 @@ export function App({
       // Fast path: last-known cache (branch-only on a cold start) paints the
       // chip immediately.
       void git
-        .workspaceGit({ cwd: sessionWorktree?.path })
+        .workspaceGit({
+          cwd: sessionWorktree?.path,
+          sessionId: connection.sessionId,
+        })
         .then((status) => {
           if (!cancelled) {
             setSelectedWorkspaceGitStatus((current) =>
@@ -18473,7 +18681,7 @@ export function App({
       // directly, so a second request would be a duplicate there.
       if (!sessionWorktree) {
         void git
-          .workspaceGit({ wait: true })
+          .workspaceGit({ wait: true, sessionId: connection.sessionId })
           .then((status) => {
             if (!cancelled) {
               setSelectedWorkspaceGitStatus((current) =>
@@ -18505,10 +18713,12 @@ export function App({
   }, [
     activeWorkspaceCwd,
     connection.gitBranch,
+    connection.sessionId,
     workspaceGitStatusEnabled,
     isKnownLiveWorkspaceCwd,
     workspace.client,
     sessionWorktree,
+    gitStatusTarget,
   ]);
   const handleEnvironmentPanelOpenChange = useCallback(
     (open: boolean) => {
@@ -19118,11 +19328,11 @@ export function App({
           )}
           {projectFeaturesAvailable && gitDialog && (
             <GitDialog
-              key={`${gitDialog.workspaceCwd}:${gitDialog.gitCwd ?? ''}:${gitDialog.view}`}
+              key={`${gitDialog.workspaceCwd}:${gitDialog.gitCwd ?? ''}:${gitDialog.gitSessionId ?? ''}:${gitDialog.view}`}
               workspaceCwd={gitDialog.workspaceCwd}
               gitCwd={gitDialog.gitCwd}
               initialView={gitDialog.view}
-              sessionId={connection.sessionId}
+              sessionId={gitDialog.gitSessionId ?? connection.sessionId}
               resolveSessionForWorkspace={resolveSessionForWorkspace}
               onOpenSession={(sessionId) => {
                 const { workspaceCwd } = gitDialog;
@@ -19136,6 +19346,23 @@ export function App({
               }}
               onClose={() => setGitDialog(undefined)}
             />
+          )}
+          {branchSessionDialog && (
+            <DialogShell
+              title={t('branch.dialog.title')}
+              size="sm"
+              onClose={() => {
+                if (!branchSessionDialogBusy) {
+                  setBranchSessionDialog(undefined);
+                }
+              }}
+            >
+              <BranchSessionDialog
+                busy={branchSessionDialogBusy}
+                onCancel={() => setBranchSessionDialog(undefined)}
+                onConfirm={confirmBranchSession}
+              />
+            </DialogShell>
           )}
           {tasksDialogMessage && (
             <DialogShell
@@ -19497,6 +19724,14 @@ export function App({
                     closeMobileDrawer();
                     openPanel('channels');
                   }}
+                  onOpenManagedSessions={
+                    managedAgentProvider
+                      ? () => {
+                          closeMobileDrawer();
+                          openPanel('managed');
+                        }
+                      : undefined
+                  }
                   onOpenDaemonStatus={() => {
                     closeMobileDrawer();
                     openPanel('status');
@@ -19894,7 +20129,10 @@ export function App({
                   </button>
                 )}
               {activePanel &&
-                (projectFeaturesAvailable || activePanel === 'status') && (
+                (projectFeaturesAvailable ||
+                  activePanel === 'status' ||
+                  (activePanel === 'managed' &&
+                    externalManagedAgentAvailable)) && (
                 <section
                   className={styles.panelHost}
                   role="region"
@@ -19916,8 +20154,10 @@ export function App({
                               ? t('plugins.title')
                             : activePanel === 'channels'
                               ? t('channels.title')
-                            : activePanel === 'workspaces'
-                              ? t('workspacesOverview.title')
+                            : activePanel === 'managed'
+                              ? t('managed.title')
+                              : activePanel === 'workspaces'
+                                ? t('workspacesOverview.title')
                               : t('sessionsOverview.title')
                   }
                 >
@@ -20004,11 +20244,13 @@ export function App({
                         ? t('settings.title')
                         : activePanel === 'status'
                           ? t('daemon.title')
-                          : t('sessionsOverview.title')}
+                          : activePanel === 'managed'
+                            ? t('managed.title')
+                            : t('sessionsOverview.title')}
                     </div>
                     </div>
                   )}
-                  <div className={styles.panelBody} key={activePanel}>
+                  <div className={`${styles.panelBody} ${activePanel === 'managed' ? styles.managedPanelBody : ''}`} key={activePanel}>
                     <ShadowDomBoundary
                       enabled={
                         shadowDomOptions.plugins &&
@@ -20128,6 +20370,16 @@ export function App({
                       <SkillsManagerPage
                         onClose={closePanel}
                         onUseSkill={handleUseSkill}
+                      />
+                    ) : activePanel === 'managed' ? (
+                      <ManagedSessionsPage
+                        key={
+                          managedAgentProvider?.storageKey ?? workspace.baseUrl
+                        }
+                        sessionId={managedSessionId}
+                        onSelectSession={setManagedSessionId}
+                        workspaceCwd={lockedWorkspaceCwd}
+                        managedAgentProvider={managedAgentProvider}
                       />
                     ) : activePanel === 'agents' ? (
                       <AgentsManagerPage
@@ -21273,6 +21525,10 @@ export function App({
                           onAttachmentsChange={
                             handleComposerAttachmentsChange
                           }
+                          btwEnabled={
+                            Boolean(connection.sessionId) &&
+                            !hiddenCommands.has('btw')
+                          }
                           onImageIngestionNotice={pushToast}
                           onImagePreview={openImagePanel}
                           onAttachmentPreview={openAttachmentPanel}
@@ -21657,6 +21913,11 @@ export function App({
                 }
                 gitCwd={
                   workspaceContextActive ? sessionWorktree?.path : undefined
+                }
+                gitSessionId={
+                  workspaceContextActive && sessionWorktree
+                    ? connection.sessionId
+                    : undefined
                 }
                 branch={workspaceContextActive ? activeGitBranch : undefined}
                 gitStatus={

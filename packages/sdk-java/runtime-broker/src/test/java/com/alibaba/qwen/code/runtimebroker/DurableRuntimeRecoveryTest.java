@@ -414,7 +414,7 @@ class DurableRuntimeRecoveryTest {
             assertEquals("runtime_provision_failed",
                     brokerFailure(failure).getCode());
             assertTrue(brokerFailure(failure).isRetryable());
-            assertEquals(RuntimeBindingRecord.State.FAILED,
+            assertEquals(RuntimeBindingRecord.State.RECOVERY_BLOCKED,
                     bindings.findById("binding-1").getState());
         }
     }
@@ -559,7 +559,7 @@ class DurableRuntimeRecoveryTest {
     }
 
     @Test
-    void sessionsLeftAcquiringOrReleasingSettleAgainstALostBinding()
+    void sessionsLeftAcquiringOrReleasingStillNeedStopProof()
             throws Exception {
         InMemoryRuntimeBindingRepository bindings =
                 new InMemoryRuntimeBindingRepository();
@@ -598,22 +598,15 @@ class DurableRuntimeRecoveryTest {
             assertEquals("runtime_broker_runtime_lost",
                     brokerFailure(lost).getCode());
 
-            assertTrue(service.release("harness", "sess-acquiring")
-                    .toCompletableFuture().get(2, TimeUnit.SECONDS));
-            assertEquals(RuntimeSessionRecord.State.RELEASED,
+            for (String sessionId : List.of("sess-acquiring", "sess-releasing")) {
+                assertThrows(Exception.class, () -> service.release("harness", sessionId)
+                        .toCompletableFuture().join());
+            }
+            assertEquals(RuntimeSessionRecord.State.ACQUIRING,
                     sessions.findById(SCOPE, "sess-acquiring").getState());
-            assertTrue(service.release("harness", "sess-releasing")
-                    .toCompletableFuture().get(2, TimeUnit.SECONDS));
-            assertEquals(RuntimeSessionRecord.State.RELEASED,
+            assertEquals(RuntimeSessionRecord.State.RELEASING,
                     sessions.findById(SCOPE, "sess-releasing").getState());
-
-            service.warm("harness").toCompletableFuture()
-                    .get(2, TimeUnit.SECONDS);
-            RuntimeBindingRecord replacement = bindings.findActive(
-                    request(recovered));
-            assertEquals(2, replacement.getGeneration());
-            assertEquals(RuntimeBindingRecord.State.READY,
-                    replacement.getState());
+            assertEquals(0, recovered.ensures.get());
         }
     }
 
@@ -878,7 +871,7 @@ class DurableRuntimeRecoveryTest {
     }
 
     @Test
-    void retryableEnsureFailureFailsAFreshBindingForRetry()
+    void ambiguousEnsureFailurePinsTheGeneration()
             throws Exception {
         AtomicInteger bindingIds = new AtomicInteger();
         InMemoryRuntimeBindingRepository bindings =
@@ -893,20 +886,13 @@ class DurableRuntimeRecoveryTest {
                 new InMemoryToolExecutionRepository(), "broker-one")) {
             assertThrows(Exception.class, () -> service.warm("harness")
                     .toCompletableFuture().get(2, TimeUnit.SECONDS));
-            assertEquals(RuntimeBindingRecord.State.FAILED,
+            assertEquals(RuntimeBindingRecord.State.RECOVERY_BLOCKED,
                     bindings.findById("binding-1").getState());
 
             provisioner.ensureFailure = null;
-            service.warm("harness").toCompletableFuture()
-                    .get(2, TimeUnit.SECONDS);
-
-            RuntimeBindingRecord replacement = bindings.findById(
-                    "binding-2");
-            assertEquals(2, replacement.getGeneration());
-            assertEquals(RuntimeBindingRecord.State.READY,
-                    replacement.getState());
-            assertEquals(RuntimeBindingRecord.State.FAILED,
-                    bindings.findById("binding-1").getState());
+            assertThrows(Exception.class, () -> service.warm("harness").toCompletableFuture().join());
+            assertNull(bindings.findById("binding-2"));
+            assertEquals(1, provisioner.ensures.get());
         }
     }
 
@@ -1009,23 +995,17 @@ class DurableRuntimeRecoveryTest {
                     .get(2, TimeUnit.SECONDS);
         }
 
-        CountDownLatch reclaimGate = new CountDownLatch(1);
-        GatedSessionRepository gated = new GatedSessionRepository(sessions,
-                reclaimGate);
         DurableProvisioner recovered = new DurableProvisioner();
-        recovered.notFoundOnce = true;
+        recovered.reconcileGate = new CompletableFuture<>();
         try (RuntimeBrokerService service = service(recovered,
-                new TestTransport(), bindings, gated, executions,
+                new TestTransport(), bindings, sessions, executions,
                 "broker-two")) {
-            CompletableFuture<RuntimeBindingRecord> firstWarm =
-                    CompletableFuture.supplyAsync(
-                            () -> service.warm("harness")
-                                    .toCompletableFuture().join());
-            await(() -> gated.counts.get() == 1, Duration.ofSeconds(1));
-            CompletableFuture<RuntimeBindingRecord> secondWarm =
-                    service.warm("harness").toCompletableFuture();
-            reclaimGate.countDown();
-
+            CompletableFuture<RuntimeBindingRecord> firstWarm = service.warm("harness").toCompletableFuture();
+            CompletableFuture<RuntimeBindingRecord> secondWarm = service.warm("harness").toCompletableFuture();
+            RuntimeBindingRecord original = bindings.findActive(request(initial));
+            recovered.reconcileGate.complete(RuntimeObservation.notFound(
+                    RuntimeRecoveryContract.evidence(original, RuntimeRecoveryEvidence.Fact.JOURNAL_LOST),
+                    RuntimeRecoveryContract.evidence(original, RuntimeRecoveryEvidence.Fact.WRITERS_STOPPED)));
             RuntimeBindingRecord firstRecord = firstWarm.get(2,
                     TimeUnit.SECONDS);
             RuntimeBindingRecord secondRecord = secondWarm.get(2,
@@ -1089,7 +1069,7 @@ class DurableRuntimeRecoveryTest {
     }
 
     @Test
-    void authoritativeLossCreatesANewGenerationOnlyWhenIdle()
+    void lossAndStopEvidencePermitANewGeneration()
             throws Exception {
         InMemoryRuntimeBindingRepository bindings =
                 new InMemoryRuntimeBindingRepository();
@@ -1110,6 +1090,7 @@ class DurableRuntimeRecoveryTest {
 
         DurableProvisioner recovered = new DurableProvisioner();
         recovered.notFoundOnce = true;
+        recovered.stopProved = true;
         try (RuntimeBrokerService service = service(recovered,
                 new TestTransport(), bindings, sessions, executions,
                 "broker-two")) {
@@ -1177,19 +1158,74 @@ class DurableRuntimeRecoveryTest {
             executions.requestCancel(active.getExecutionCallId(),
                     active.getVersion());
 
-            assertTrue(service.release("harness", "active-session")
-                    .toCompletableFuture().get(2, TimeUnit.SECONDS));
+            assertThrows(Exception.class, () -> service.release("harness", "active-session")
+                    .toCompletableFuture().join());
+            recovered.notFoundOnce = true;
+            recovered.stopProved = true;
+            service.warm("harness").toCompletableFuture().get(2, TimeUnit.SECONDS);
+            assertTrue(service.release("harness", "active-session").toCompletableFuture().join());
             assertEquals(RuntimeSessionRecord.State.RELEASED,
                     sessions.findById(SCOPE, "active-session").getState());
-
-            service.warm("harness").toCompletableFuture()
-                    .get(2, TimeUnit.SECONDS);
             RuntimeBindingRecord replacement = bindings.findActive(
                     request(recovered));
             assertEquals(2, replacement.getGeneration());
             assertEquals(RuntimeBindingRecord.State.READY,
                     replacement.getState());
             assertEquals(1, recovered.ensures.get());
+        }
+    }
+
+    @Test
+    void cachedReleaseHonorsLossAndAcknowledgesCompletedRecovery() {
+        var bindings = new InMemoryRuntimeBindingRepository();
+        var sessions = new InMemoryRuntimeSessionRepository();
+        var executions = new InMemoryToolExecutionRepository();
+        var provisioner = new DurableProvisioner();
+        var transport = new TestTransport();
+        try (RuntimeBrokerService service = service(provisioner, transport, bindings, sessions, executions, "broker")) {
+            RuntimeSessionRecord session = service.acquire("harness", "cached", "bootstrap").toCompletableFuture().join();
+            ToolExecutionRecord execution = executions.findOrCreate(ToolExecutionRecord.prepared(
+                    "call", "key", session.getBindingId(), session.getRuntimeGeneration(), "harness", "cached",
+                    "turn", "call", "digest", Map.of("sessionId", "cached", "promptId", "turn",
+                            "callId", "call", "argsDigest", "digest")));
+            RuntimeBindingRecord claimed = bindings.claimOperation(session.getBindingId(), "recovery", Duration.ofMinutes(1));
+            RuntimeBindingRecord lost = bindings.compareAndSet(claimed, claimed.withRecoveryEvidence(
+                    RuntimeRecoveryContract.evidence(claimed, RuntimeRecoveryEvidence.Fact.JOURNAL_LOST), null, Instant.now()));
+            bindings.recoverLost(sessions, executions, lost);
+            assertEquals(ToolExecutionRecord.State.ABANDONED,
+                    executions.findByExecutionCallId(execution.getExecutionCallId()).getState());
+            assertEquals("runtime_reconciliation_required", brokerFailure(assertThrows(Exception.class,
+                    () -> service.release("harness", "cached").toCompletableFuture().join())).getCode());
+            assertEquals(RuntimeSessionRecord.State.READY, sessions.findById(SCOPE, "cached").getState());
+            assertEquals(0, transport.releases.get());
+            RuntimeBindingRecord stopped = bindings.compareAndSet(lost, lost.withRecoveryEvidence(null,
+                    RuntimeRecoveryContract.evidence(lost, RuntimeRecoveryEvidence.Fact.WRITERS_STOPPED), Instant.now()));
+            assertEquals(RuntimeBindingRecord.State.RELEASED, bindings.recoverLost(sessions, executions, stopped).getState());
+            provisioner.usable = false;
+            assertTrue(service.release("harness", "cached").toCompletableFuture().join());
+            assertTrue(service.release("harness", "cached").toCompletableFuture().join());
+            assertEquals(0, transport.releases.get());
+        }
+    }
+
+    @Test
+    void lateReleaseReplyKeepsALostSessionPinned() {
+        var bindings = new InMemoryRuntimeBindingRepository();
+        var sessions = new InMemoryRuntimeSessionRepository();
+        var executions = new InMemoryToolExecutionRepository();
+        var provisioner = new DurableProvisioner();
+        var transport = new TestTransport();
+        transport.releaseResult = new CompletableFuture<>();
+        try (RuntimeBrokerService service = service(provisioner, transport, bindings, sessions, executions, "broker")) {
+            RuntimeSessionRecord session = service.acquire("harness", "cached", "bootstrap").toCompletableFuture().join();
+            var releasing = service.release("harness", "cached").toCompletableFuture();
+            RuntimeBindingRecord claimed = bindings.claimOperation(session.getBindingId(), "recovery", Duration.ofMinutes(1));
+            bindings.compareAndSet(claimed, claimed.withRecoveryEvidence(
+                    RuntimeRecoveryContract.evidence(claimed, RuntimeRecoveryEvidence.Fact.JOURNAL_LOST), null, Instant.now()));
+            transport.releaseResult.complete(true);
+            assertEquals("runtime_reconciliation_required", brokerFailure(assertThrows(Exception.class,
+                    releasing::join)).getCode());
+            assertEquals(RuntimeSessionRecord.State.RELEASING, sessions.findById(SCOPE, "cached").getState());
         }
     }
 
@@ -1341,6 +1377,41 @@ class DurableRuntimeRecoveryTest {
         }
 
         @Override
+        public RuntimeSessionRecord completeSessionRelease(RuntimeSessionRepository sessions,
+                RuntimeSessionRecord expected) {
+            return delegate.completeSessionRelease(sessions, expected);
+        }
+
+        @Override
+        public java.util.List<RuntimeBindingRecord> findRecoveryCandidates(String kind, String after, int limit) {
+            return delegate.findRecoveryCandidates(kind, after, limit);
+        }
+
+        @Override
+        public RuntimeBindingRecord finishLostRecovery(RuntimeSessionRepository sessions,
+                ToolExecutionRepository executions, RuntimeBindingRecord expected) {
+            return delegate.finishLostRecovery(sessions, executions, expected);
+        }
+
+        @Override
+        public RuntimeBindingRecord recoverLost(RuntimeSessionRepository sessions,
+                ToolExecutionRepository executions, RuntimeBindingRecord expected) {
+            return delegate.recoverLost(sessions, executions, expected);
+        }
+
+        @Override
+        public RuntimeSessionRecord admitSession(RuntimeSessionRepository sessions,
+                RuntimeSessionRecord candidate) {
+            return delegate.admitSession(sessions, candidate);
+        }
+
+        @Override
+        public ToolExecutionRecord admitExecution(RuntimeSessionRepository sessions,
+                ToolExecutionRepository executions, ToolExecutionRecord candidate) {
+            return delegate.admitExecution(sessions, executions, candidate);
+        }
+
+        @Override
         public RuntimeBindingRecord findOrCreate(
                 RuntimeProvisionRequest request) {
             return delegate.findOrCreate(request);
@@ -1418,6 +1489,21 @@ class DurableRuntimeRecoveryTest {
         private RuntimeLease provisionedLease;
         private RuntimeLease releasedLease;
         private boolean notFoundOnce;
+        private boolean stopProved;
+        private boolean usable = true;
+
+        @Override
+        public boolean isUsable(RuntimeLease lease) {
+            return usable;
+        }
+
+        private RuntimeRecoveryEvidence proof(RuntimeProvisionSeed seed, RuntimeResourceHandle handle,
+                RuntimeRecoveryEvidence.Fact fact) {
+            return new RuntimeRecoveryEvidence(java.util.UUID.randomUUID().toString(), fact,
+                    "test-supervisor", Instant.now(), "test-host/domain", seed.getProvisionRequestId(),
+                    seed.getProvisionalRuntimeId(), seed.getGatewayIncarnation(), seed.getLeaseId(),
+                    seed.getEpoch(), handle);
+        }
 
         @Override
         public CompletionStage<RuntimeLease> provision(
@@ -1482,8 +1568,12 @@ class DurableRuntimeRecoveryTest {
             }
             if (notFoundOnce) {
                 notFoundOnce = false;
-                return CompletableFuture.completedFuture(
-                        RuntimeObservation.notFound());
+                if (stopProved) {
+                    return CompletableFuture.completedFuture(RuntimeObservation.notFound(
+                            proof(seed, handle, RuntimeRecoveryEvidence.Fact.JOURNAL_LOST),
+                            proof(seed, handle, RuntimeRecoveryEvidence.Fact.WRITERS_STOPPED)));
+                }
+                return CompletableFuture.completedFuture(RuntimeObservation.notFound());
             }
             if (outcome == RuntimeObservation.Outcome.READY) {
                 return CompletableFuture.completedFuture(
@@ -1526,6 +1616,8 @@ class DurableRuntimeRecoveryTest {
         private String attestedProvisionRequestId;
         private final AtomicInteger attestations = new AtomicInteger();
         private final AtomicInteger acquisitions = new AtomicInteger();
+        private final AtomicInteger releases = new AtomicInteger();
+        private CompletableFuture<Boolean> releaseResult = CompletableFuture.completedFuture(true);
 
         TestTransport() {
             this(CompletableFuture.completedFuture(null), false, null);
@@ -1604,7 +1696,8 @@ class DurableRuntimeRecoveryTest {
         @Override
         public CompletionStage<Boolean> release(RuntimeLease lease,
                 RuntimeSession session) {
-            return CompletableFuture.completedFuture(true);
+            releases.incrementAndGet();
+            return releaseResult;
         }
     }
 

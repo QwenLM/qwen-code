@@ -12,6 +12,12 @@ import java.util.Map;
 
 final class BrokerValues {
     private static final int MAXIMUM_ID_LENGTH = 512;
+    private static final int MAXIMUM_DECIMAL_SCALE = 2048;
+    // The JDBC codec's reader (fastjson2 2.0.65) refuses a number literal
+    // with more digits than this, whatever its scale.
+    private static final int MAXIMUM_NUMBER_DIGITS = 10_000;
+    private static final BigInteger MAXIMUM_INTEGER_EXCLUSIVE =
+            BigInteger.TEN.pow(MAXIMUM_NUMBER_DIGITS);
 
     private BrokerValues() {
     }
@@ -22,6 +28,20 @@ final class BrokerValues {
                 || value.indexOf('\0') >= 0) {
             throw new IllegalArgumentException(name
                     + " must be a bounded non-empty string");
+        }
+        return value;
+    }
+
+    /**
+     * Text without an unpaired surrogate: the JSON writer turns one into
+     * '?', so two identifiers could reach the Runtime as one.
+     */
+    static String requireWellFormed(String value, String name) {
+        if (value.codePoints().anyMatch(point ->
+                point >= Character.MIN_SURROGATE
+                        && point <= Character.MAX_SURROGATE)) {
+            throw new IllegalArgumentException(name
+                    + " must be well-formed text");
         }
         return value;
     }
@@ -40,6 +60,45 @@ final class BrokerValues {
                     + " must be an HTTP(S) origin");
         }
         return value.resolve("/");
+    }
+
+    /**
+     * The exact integer a parsed JSON number denotes, of any magnitude, or
+     * null. A parsed Double or Float may be rounded and a Short or Byte
+     * wrapped, as with 40000000000000001E-16 or 65540S, so neither counts.
+     * Under the default parse an integer written with a non-zero exponent,
+     * such as 40e-1, can arrive as a Double and is then rejected too. A
+     * cursor is validated exactly but never narrowed to a long.
+     */
+    static BigDecimal exactInteger(Object value) {
+        if (value instanceof Integer || value instanceof Long) {
+            return BigDecimal.valueOf(((Number) value).longValue());
+        }
+        if (value instanceof BigInteger integer) {
+            return new BigDecimal(integer);
+        }
+        if (value instanceof BigDecimal decimal
+                && decimal.stripTrailingZeros().scale() <= 0) {
+            return decimal;
+        }
+        return null;
+    }
+
+    /**
+     * The exact long a parsed JSON integer denotes, or null: an
+     * {@link #exactInteger(Object) exact integer} that fits in a long.
+     */
+    static Long exactLong(Object value) {
+        BigDecimal integer = exactInteger(value);
+        if (integer == null) {
+            return null;
+        }
+        try {
+            return integer.longValueExact();
+        } catch (ArithmeticException exception) {
+            // A value beyond a long is not an exact long.
+            return null;
+        }
     }
 
     static Map<String, Object> immutableMap(Map<String, ?> source) {
@@ -72,6 +131,28 @@ final class BrokerValues {
             throw new IllegalArgumentException(
                     "JSON number must be finite");
         }
+        // The JDBC codec writes BigDecimal in plain form, so the digit
+        // count grows with the scale's magnitude on both sides: a scale
+        // of -N persists as an N-digit integer literal that the same
+        // codec then refuses to read back.
+        if (value instanceof BigDecimal decimal
+                && (decimal.scale() > MAXIMUM_DECIMAL_SCALE
+                        || decimal.scale() < -MAXIMUM_DECIMAL_SCALE)) {
+            throw new IllegalArgumentException(
+                    "JSON number scale must be within ±"
+                            + MAXIMUM_DECIMAL_SCALE);
+        }
+        // Precision grows the plain form too, so the scale bound alone does
+        // not keep a persisted literal inside the reader's digit budget.
+        if ((value instanceof BigDecimal decimal
+                        && plainDigits(decimal) > MAXIMUM_NUMBER_DIGITS)
+                || (value instanceof BigInteger integer
+                        && integer.abs().compareTo(
+                                MAXIMUM_INTEGER_EXCLUSIVE) >= 0)) {
+            throw new IllegalArgumentException(
+                    "JSON number must have at most "
+                            + MAXIMUM_NUMBER_DIGITS + " digits");
+        }
         // Mutable Number subtypes (AtomicLong, adders) would alias caller
         // state into a record, so only immutable JSON scalars pass.
         if (value == null || value instanceof String || value instanceof Boolean
@@ -82,6 +163,16 @@ final class BrokerValues {
             return value;
         }
         throw new IllegalArgumentException("unsupported JSON value");
+    }
+
+    // Digits of the plain form: integer digits plus fraction digits, with a
+    // leading zero when the magnitude is below one. Called once the scale
+    // is known to be within ±MAXIMUM_DECIMAL_SCALE.
+    private static long plainDigits(BigDecimal decimal) {
+        long precision = decimal.precision();
+        long scale = decimal.scale();
+        return scale <= 0 ? precision - scale
+                : Math.max(precision, scale + 1);
     }
 
     // JSON has a single number type, but a persistence round-trip picks Java

@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/web-shell",
-  "version": "0.24.5",
+  "version": "0.24.6",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/QwenLM/qwen-code.git",
@@ -39,6 +39,7 @@
     "lint:fix": "cd ../.. && eslint packages/web-shell --ext .ts,.tsx --fix",
     "format:check": "cd ../.. && prettier --experimental-cli --check packages/web-shell",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "generate:managed-agent-api": "node scripts/generate-managed-agent-api.mjs",
     "test": "vitest run --config vitest.config.ts",
     "test:ci": "vitest run --config vitest.config.ts",
     "test:coverage": "vitest run --config vitest.config.ts --coverage",
@@ -98,6 +99,7 @@
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^4.2.0",
     "jsdom": "^26.1.0",
+    "openapi-typescript": "^7.13.0",
     "postcss": "^8.5.17",
     "postcss-selector-parser": "^7.1.4",
     "react": "^19.2.0",

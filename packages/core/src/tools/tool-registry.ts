@@ -228,6 +228,7 @@ Signal: Signal number or \`(none)\` if no signal was received.
 export class ToolRegistry {
   // The tools keyed by tool name as seen by the LLM.
   private tools: Map<string, AnyDeclarativeTool> = new Map();
+  private mcpAppTools = new Map<string, DiscoveredMCPTool>();
   // Lazy tool factories keyed by tool name — resolved on first use.
   private factories: Map<string, ToolFactory> = new Map();
   // In-flight factory promises — ensures concurrent ensureTool() calls for the
@@ -396,6 +397,15 @@ export class ToolRegistry {
       );
       return;
     }
+    if (tool instanceof DiscoveredMCPTool) {
+      if (tool.isAppVisible) {
+        this.mcpAppTools.set(
+          JSON.stringify([tool.serverName, tool.serverToolName]),
+          tool,
+        );
+      }
+      if (!tool.isModelVisible) return;
+    }
     this.tools.set(tool.name, tool);
   }
 
@@ -411,6 +421,10 @@ export class ToolRegistry {
       return;
     }
     this.factories.set(name, factory);
+  }
+
+  unregisterTool(name: string): void {
+    this.tools.delete(name);
   }
 
   /**
@@ -524,6 +538,14 @@ export class ToolRegistry {
    * that were built with skipDiscovery.
    */
   copyDiscoveredToolsFrom(source: ToolRegistry): void {
+    for (const [key, tool] of source.mcpAppTools) {
+      if (
+        !this.mcpAppTools.has(key) &&
+        !this.isToolDisabled(tool.name, tool.permissionAliases)
+      ) {
+        this.mcpAppTools.set(key, tool);
+      }
+    }
     for (const tool of source.tools.values()) {
       if (
         (tool instanceof DiscoveredTool || tool instanceof DiscoveredMCPTool) &&
@@ -538,6 +560,7 @@ export class ToolRegistry {
   }
 
   private removeDiscoveredTools(): void {
+    this.mcpAppTools.clear();
     for (const tool of this.tools.values()) {
       if (tool instanceof DiscoveredTool || tool instanceof DiscoveredMCPTool) {
         this.tools.delete(tool.name);
@@ -554,6 +577,9 @@ export class ToolRegistry {
    * @param serverName The name of the server to remove tools from.
    */
   removeMcpToolsByServer(serverName: string): void {
+    for (const [key, tool] of this.mcpAppTools) {
+      if (tool.serverName === serverName) this.mcpAppTools.delete(key);
+    }
     for (const [name, tool] of this.tools.entries()) {
       if (tool instanceof DiscoveredMCPTool && tool.serverName === serverName) {
         this.tools.delete(name);
@@ -562,7 +588,8 @@ export class ToolRegistry {
         // the same name would inherit `revealed: true` from the prior
         // session — `getFunctionDeclarations` would emit it (since it
         // checks reveal state) before the model has any way to know
-        // the tool exists this session.
+        // the tool exists this session. The reviewed-declaration record
+        // is deliberately left alone: see `reviewedDeferredDeclarations`.
         this.revealedDeferred.delete(name);
       }
     }
@@ -683,19 +710,11 @@ export class ToolRegistry {
    * Discover or re-discover tools for a single MCP server.
    * @param serverName - The name of the server to discover tools from.
    */
-  async discoverToolsForServer(serverName: string): Promise<void> {
-    // Remove any previously discovered tools from this server
-    for (const [name, tool] of this.tools.entries()) {
-      if (tool instanceof DiscoveredMCPTool && tool.serverName === serverName) {
-        this.tools.delete(name);
-        // Drop reveal state too so a re-discovered tool of the same
-        // name doesn't inherit a `revealed: true` from before the
-        // disconnect (would surface in declarations immediately after
-        // reconnection). The reviewed-declaration record is deliberately
-        // left alone: see `reviewedDeferredDeclarations`.
-        this.revealedDeferred.delete(name);
-      }
-    }
+  async discoverToolsForServer(
+    serverName: string,
+    reconnect = false,
+  ): Promise<void> {
+    this.removeMcpToolsByServer(serverName);
 
     this.config.getPromptRegistry().removePromptsByServer(serverName);
     this.config.getResourceRegistry().removeResourcesByServer(serverName);
@@ -703,6 +722,7 @@ export class ToolRegistry {
     await this.mcpClientManager.discoverMcpToolsForServer(
       serverName,
       this.config,
+      reconnect,
     );
   }
 
@@ -890,6 +910,7 @@ export class ToolRegistry {
     return Array.from(this.tools.values())
       .filter((tool) => this.isToolAvailable(tool.name))
       .filter((tool) => this.isToolDeclared(tool.name))
+      .filter((tool) => this.isMemoryRecallToolDeclared(tool.name))
       .filter(
         (tool) =>
           includeDeferred ||
@@ -901,10 +922,28 @@ export class ToolRegistry {
       .map((tool) => tool.schema);
   }
 
+  /**
+   * `search_memory` / `manage_memory` only work under the structured recall
+   * protocol; under the legacy protocol both deny every call. Advertising them
+   * anyway hands the model tools that can only fail, so they are withheld.
+   * Shared by both declaration paths — the direct one and the code-mode exec
+   * bindings — because a code-mode session reaches them through the binding
+   * plan rather than through `getFunctionDeclarations`.
+   */
+  private isMemoryRecallToolDeclared(name: string): boolean {
+    if (name !== ToolNames.SEARCH_MEMORY && name !== ToolNames.MANAGE_MEMORY) {
+      return true;
+    }
+    return (this.config.getMemoryRecallMode?.() ?? 'legacy') === 'structured';
+  }
+
   private getCodeModeFunctionDeclarations(
     allowedNames?: ReadonlySet<string>,
   ): FunctionDeclaration[] {
     const plan = this.getCodeModeBindingPlan(allowedNames);
+    const searchAvailable =
+      !!this.getTool(ToolNames.TOOL_SEARCH) &&
+      (!allowedNames || allowedNames.has(ToolNames.TOOL_SEARCH));
     return Array.from(this.tools.values())
       .filter((tool) => {
         const exposure = getToolExposure(tool.name);
@@ -917,7 +956,7 @@ export class ToolRegistry {
       .sort(ToolRegistry.compareCodeModeTools)
       .map((tool) =>
         tool.name === ToolNames.EXEC
-          ? buildExecDeclaration(tool, plan)
+          ? buildExecDeclaration(tool, plan, searchAvailable)
           : tool.schema,
       );
   }
@@ -928,7 +967,9 @@ export class ToolRegistry {
     const plan = planCodeModeBindings(
       Array.from(this.tools.values()).filter(
         (tool) =>
-          this.isToolAvailable(tool.name) && this.isToolDeclared(tool.name),
+          this.isToolAvailable(tool.name) &&
+          this.isToolDeclared(tool.name) &&
+          this.isMemoryRecallToolDeclared(tool.name),
       ),
       (name) => this.isDeferredAndHidden(name),
       allowedNames,
@@ -1047,9 +1088,8 @@ export class ToolRegistry {
    * reachable via ToolSearch + ToolCall. `alwaysLoad` tools and tools listed in
    * {@link Config.getVisibleTools} are excluded.
    *
-   * Always empty in CodeModeOnly: every schema is already bound into the `exec`
-   * description and ToolSearch is hidden, so a reminder built from this summary
-   * would offer a lookup step the model has no way to take.
+   * Empty in CodeModeOnly: exec describes on-demand discovery without a full
+   * startup catalog or the Direct-mode reminders' tool_call instructions.
    */
   getDeferredToolSummary(): DeferredToolSummary[] {
     if (this.config.getToolMode?.() === ToolMode.CodeModeOnly) {
@@ -1147,6 +1187,7 @@ export class ToolRegistry {
    * tools that have not yet been loaded will be silently omitted.
    */
   getFunctionDeclarationsFiltered(toolNames: string[]): FunctionDeclaration[] {
+    if (toolNames.length === 0) return [];
     if (this.factories.size > 0) {
       debugLogger.warn(
         `getFunctionDeclarationsFiltered() called with ${this.factories.size} unloaded ` +
@@ -1223,6 +1264,26 @@ export class ToolRegistry {
     return this.isToolAvailable(name) ? this.tools.get(name) : undefined;
   }
 
+  getMcpAppTool(
+    serverName: string,
+    rawName: string,
+  ): DiscoveredMCPTool | undefined {
+    const tool = this.mcpAppTools.get(JSON.stringify([serverName, rawName]));
+    return tool && !this.isToolDisabled(tool.name, tool.permissionAliases)
+      ? tool
+      : undefined;
+  }
+
+  hasMcpAppResource(serverName: string, uri: string): boolean {
+    return [...this.tools.values(), ...this.mcpAppTools.values()].some(
+      (tool) =>
+        tool instanceof DiscoveredMCPTool &&
+        tool.serverName === serverName &&
+        tool.appResourceUri === uri &&
+        !this.isToolDisabled(tool.name, tool.permissionAliases),
+    );
+  }
+
   async readMcpResource(
     serverName: string,
     uri: string,
@@ -1240,6 +1301,7 @@ export class ToolRegistry {
    * This method is idempotent and safe to call multiple times.
    */
   async stop(): Promise<void> {
+    this.mcpAppTools.clear();
     // Wait for any in-flight factory promises to settle before disposing, so
     // that tools which finish loading after stop() is called are still cleaned
     // up rather than leaking their listeners and resources.
