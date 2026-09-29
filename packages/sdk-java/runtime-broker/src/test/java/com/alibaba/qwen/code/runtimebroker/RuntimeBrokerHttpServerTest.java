@@ -265,6 +265,44 @@ class RuntimeBrokerHttpServerTest {
     }
 
     @Test
+    void providerCancelsTheOriginalExecutionAfterResponseLoss() throws Exception {
+        // Provider references carry a UUID Runtime Session id.
+        String runtime = "550e8400-e29b-41d4-a716-446655440303";
+        try (Fixture fixture = new Fixture()) {
+            fixture.service.acquire("harness", runtime, "bootstrap").toCompletableFuture().join();
+            Map<String, Object> reference = Map.of("sessionId", runtime, "promptId", "turn",
+                    "callId", "worker-call", "capabilityDigest", "a".repeat(64),
+                    "policyRevision", "policy", "invocationId", "invocation", "argsDigest", "b".repeat(64));
+            String id = fixture.service.prepareExecution("harness", runtime, "provider", reference)
+                    .toCompletableFuture().join().getExecutionCallId();
+            // The worker started the call, but its execute answer is lost.
+            fixture.service.startExecution("harness", runtime, id).toCompletableFuture().join();
+            assertEquals(ToolExecutionRecord.State.UNKNOWN,
+                    fixture.service.getExecution("harness", runtime, id).toCompletableFuture().join().getState());
+            fixture.transport.runtimeStatus = Map.of("state", "cancel_requested");
+            HttpResponse<String> cancelling = fixture.post("/executions/" + id + ":cancel", Map.of(
+                    "protocolVersion", 1, "requestId", "cancel", "harnessSessionId", "harness",
+                    "runtimeSessionId", runtime));
+            assertEquals(200, cancelling.statusCode(), cancelling.body());
+            assertEquals("cancel_requested",
+                    JSON.parseObject(cancelling.body()).getJSONObject("status").getString("state"));
+            // The cancellation reached the worker still running the call.
+            assertEquals(1, fixture.transport.cancellations.get());
+            fixture.transport.runtimeStatus = Map.of("state", "settled",
+                    "result", Map.of("executionStatus", "cancelled"));
+            HttpRequest read = HttpRequest.newBuilder(fixture.uri("/executions/" + id
+                    + "?requestId=read&harnessSessionId=harness&runtimeSessionId=" + runtime))
+                    .header("Authorization", "Bearer secret").GET().build();
+            HttpResponse<String> settled = fixture.client.send(read, HttpResponse.BodyHandlers.ofString());
+            assertEquals(200, settled.statusCode(), settled.body());
+            assertEquals("settled", JSON.parseObject(settled.body()).getJSONObject("status").getString("state"));
+            assertEquals("cancelled", fixture.service.getExecution("harness", runtime, id)
+                    .toCompletableFuture().join().getExecutionStatus());
+            assertEquals(1, fixture.transport.executions.get());
+        }
+    }
+
+    @Test
     void v3UsesSavedSelectionAndObservesTheOriginalExecutionAfterResponseLoss() throws Exception {
         try (Fixture fixture = new Fixture()) {
             fixture.service.acquire("harness", "runtime", "bootstrap").toCompletableFuture().join();

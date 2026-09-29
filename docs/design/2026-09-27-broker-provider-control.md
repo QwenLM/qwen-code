@@ -179,8 +179,9 @@ recovery may fence an uncertain execution as ABANDONED: it remains permanently
 unknown, can be read through its persisted owner, and cannot be replayed.
 Broker HTTP start, read and cancel ask the original worker about a provider
 execution left UNKNOWN, as they do for a tool v3 one, so its retained result
-settles the execution without a second dispatch. Existing immediate Tool v2
-behavior stays available independently.
+settles the execution without a second dispatch, and a cancellation reaches the
+invocation the worker is still running. Existing immediate Tool v2 behavior
+stays available independently.
 
 The raw reserve/start path from #12831 remains available on the same Broker
 routes. It reserves a four-field reference and supplies the exact `payloadJson`

@@ -319,12 +319,10 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
 
     private CompletionStage<ExecutionReconciliation> observe(String harnessSessionId,
             String runtimeSessionId, ToolExecutionRecord record) {
-        // Tool v3 and provider references can ask the original Runtime what
-        // became of a lost dispatch; a tool v2 reference keeps its UNKNOWN.
-        Map<String, Object> reference = record.getReference();
+        // A lost dispatch is asked of the original Runtime when it can answer;
+        // a tool v2 reference keeps its UNKNOWN.
         return record.getState() == ToolExecutionRecord.State.UNKNOWN
-                && (Integer.valueOf(3).equals(reference.get("runtimeProtocol"))
-                        || ProviderRuntimeProtocol.isReference(reference))
+                && record.observableAfterLoss()
                 ? service.reconcileExecution(harnessSessionId, runtimeSessionId, record.getExecutionCallId())
                 : CompletableFuture.completedFuture(new ExecutionReconciliation(record,
                         ExecutionReconciliation.Outcome.IN_FLIGHT, null));

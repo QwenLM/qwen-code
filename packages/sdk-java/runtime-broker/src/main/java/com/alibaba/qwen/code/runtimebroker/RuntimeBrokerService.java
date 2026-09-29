@@ -459,15 +459,16 @@ public final class RuntimeBrokerService implements AutoCloseable {
                                 return cancelPreparedProvider(context, requested);
                             }
                             // An UNKNOWN record may still have an invocation
-                            // running in this process; it gets the physical
-                            // cancel below but is never settled from here.
+                            // running in this process, or be one its original
+                            // Runtime can still answer for; it gets the
+                            // physical cancel below but is never settled from
+                            // here.
                             if (requested.isTerminal()
                                     || (requested.getState()
                                             == ToolExecutionRecord.State.UNKNOWN
                                             && !invocations.contains(
                                                     executionId)
-                                            && !Integer.valueOf(3).equals(
-                                                    requested.getReference().get("runtimeProtocol")))) {
+                                            && !requested.observableAfterLoss())) {
                                 return CompletableFuture.completedFuture(
                                         requested);
                             }
