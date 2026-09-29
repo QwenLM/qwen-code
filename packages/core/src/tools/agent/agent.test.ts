@@ -91,6 +91,29 @@ function escapeRegExp(value: string): string {
 vi.mock('../../subagents/subagent-manager.js');
 vi.mock('../../agents/runtime/agent-headless.js');
 
+// Records the AGENT-tagged debugLogger.warn() calls so tests can assert which
+// refresh-failure label a rejection was reported under. Wraps the real logger
+// instead of replacing it, so nothing else in this file changes behaviour —
+// same shape as goals/goal-persistence.test.ts.
+const agentWarnCalls = vi.hoisted(() => [] as unknown[][]);
+vi.mock('../../utils/debugLogger.js', async (importOriginal) => {
+  const original =
+    await importOriginal<typeof import('../../utils/debugLogger.js')>();
+  return {
+    ...original,
+    createDebugLogger: (tag?: string) => {
+      const logger = original.createDebugLogger(tag);
+      return {
+        ...logger,
+        warn: (...args: unknown[]) => {
+          if (tag === 'AGENT') agentWarnCalls.push(args);
+          logger.warn(...args);
+        },
+      };
+    },
+  };
+});
+
 // Spies for the subagent-span layer so tests can assert what status taxonomy
 // was published. The real runInSubagentSpanContext sets up OTel context-with,
 // which is irrelevant here — we just need the body to run. Review wenshao
@@ -2928,10 +2951,13 @@ describe('AgentTool', () => {
     it('absorbs a setTools rejection from an armed follow-up refresh', async () => {
       // runRefreshSubagents can reject (its finally awaits
       // llmClient.setTools()), and .finally() propagates that rejection into
-      // the armed follow-up chain — without a .catch at the void boundary it
-      // floats as an unhandledRejection, which this file's own contract
-      // forbids. The follow-up scan must still run. Mutation check: dropping
-      // the armed chain's .catch(...) turns the rejection assertion red.
+      // the armed chain — without a .catch at the void boundary it floats as
+      // an unhandledRejection, which this file's own contract forbids. The
+      // follow-up scan must still run. Mutation checks: dropping the armed
+      // chain's .catch(...) turns the rejection assertion red, and moving it
+      // back AFTER the .finally() turns the label assertions red (the
+      // in-flight rejection would be reported as a follow-up failure).
+      agentWarnCalls.length = 0;
       const setTools = vi.fn().mockRejectedValue(new Error('setTools failed'));
       vi.mocked(config.getLlmClient).mockReturnValue({
         setTools,
@@ -2965,6 +2991,72 @@ describe('AgentTool', () => {
         // again), and no rejection escaped either void boundary.
         expect(listSpy).toHaveBeenCalledTimes(2);
         expect(unhandledRejections).toEqual([]);
+        // Each rejection is reported under its own label: the in-flight one by
+        // the armed chain's .catch, the follow-up's own by requestRefresh's.
+        const labels = agentWarnCalls.map((args) => args[0]);
+        expect(labels).toContain('In-flight subagent refresh failed:');
+        expect(labels).toContain('Subagent refresh failed:');
+        expect(labels).not.toContain('Follow-up subagent refresh failed:');
+      } finally {
+        process.removeListener('unhandledRejection', onUnhandledRejection);
+      }
+    });
+
+    it('reports an in-flight refresh rejection under the in-flight label only', async () => {
+      // The label half of the armed chain: .finally() propagates the ORIGINAL
+      // rejection and its callback is synchronous, so a .catch placed after
+      // it can only ever see the in-flight refresh's error — and would name
+      // it "Follow-up ... failed" even when the follow-up scan succeeded.
+      // Here setTools rejects once (the in-flight refresh) and then resolves
+      // (the follow-up). Mutation check: reordering the armed chain back to
+      // .finally(...).catch('Follow-up subagent refresh failed:') turns the
+      // in-flight label assertion red.
+      agentWarnCalls.length = 0;
+      const setTools = vi
+        .fn()
+        .mockRejectedValueOnce(new Error('IN-FLIGHT-setTools-rejected'))
+        .mockResolvedValue(undefined);
+      vi.mocked(config.getLlmClient).mockReturnValue({
+        setTools,
+      } as unknown as ReturnType<Config['getLlmClient']>);
+      const unhandledRejections: unknown[] = [];
+      const onUnhandledRejection = (reason: unknown) => {
+        unhandledRejections.push(reason);
+      };
+      process.on('unhandledRejection', onUnhandledRejection);
+      try {
+        const listSpy = vi.mocked(mockSubagentManager.listSubagents);
+        listSpy.mockClear();
+        let releaseScan!: () => void;
+        listSpy.mockImplementationOnce(
+          () =>
+            new Promise<SubagentConfig[]>((resolve) => {
+              releaseScan = () => resolve(mockSubagents);
+            }),
+        );
+
+        const inFlight = agentTool.refreshSubagents();
+        void inFlight.catch(() => {});
+        changeListeners[0]?.();
+
+        releaseScan();
+        await vi.runAllTimersAsync();
+
+        // The follow-up scan ran and its setTools succeeded.
+        expect(listSpy).toHaveBeenCalledTimes(2);
+        expect(setTools).toHaveBeenCalledTimes(2);
+        expect(unhandledRejections).toEqual([]);
+
+        const labels = agentWarnCalls.map((args) => args[0]);
+        expect(labels).toContain('In-flight subagent refresh failed:');
+        expect(labels).not.toContain('Follow-up subagent refresh failed:');
+        expect(labels).not.toContain('Subagent refresh failed:');
+        const inFlightCall = agentWarnCalls.find(
+          (args) => args[0] === 'In-flight subagent refresh failed:',
+        );
+        expect((inFlightCall?.[1] as Error).message).toBe(
+          'IN-FLIGHT-setTools-rejected',
+        );
       } finally {
         process.removeListener('unhandledRejection', onUnhandledRejection);
       }

@@ -927,6 +927,12 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
    * arm exactly one follow-up refresh instead of coalescing into the stale
    * read. The voided chains are .catch()-guarded per this file's contract:
    * runRefreshSubagents can reject (its finally awaits llmClient.setTools()).
+   * The armed chain's .catch() sits BEFORE its .finally(): .finally()
+   * propagates the original rejection and its own callback is synchronous, so
+   * a handler placed after it could only ever receive the IN-FLIGHT refresh's
+   * rejection while labelling it a follow-up failure. The follow-up started
+   * inside that callback reports its own rejection through the
+   * requestRefresh() handler below.
    */
   private requestRefresh(): void {
     if (this.disposed) {
@@ -936,13 +942,13 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
       if (!this.listenerRefreshArmed) {
         this.listenerRefreshArmed = true;
         void this.refreshInFlight
+          .catch((error) =>
+            debugLogger.warn('In-flight subagent refresh failed:', error),
+          )
           .finally(() => {
             this.listenerRefreshArmed = false;
             this.requestRefresh();
-          })
-          .catch((error) =>
-            debugLogger.warn('Follow-up subagent refresh failed:', error),
-          );
+          });
       }
       return;
     }
