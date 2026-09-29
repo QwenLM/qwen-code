@@ -598,7 +598,7 @@ export interface components {
         };
     };
     responses: {
-        /** @description The authenticated actor does not belong to the X-Qwen-Tenant-Id tenant (actor_scope_mismatch, which the tenant filter answers on every /v1/agents and WebShell route), or the resource is readable but the actor lacks this operation or the original Action responder permission. */
+        /** @description The authenticated actor does not belong to the X-Qwen-Tenant-Id tenant (actor_scope_mismatch, which the tenant filter answers on every /v1/agents/ and WebShell route), or the resource is readable but the actor lacks this operation or the original Action responder permission. */
         Forbidden: {
             headers: {
                 [name: string]: unknown;
