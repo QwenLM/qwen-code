@@ -642,6 +642,11 @@ type RunToolResult = {
    * when verification or evidence checkpointing needs a turn boundary.
    */
   terminateTurn?: boolean;
+  /**
+   * Hook additionalContext of a code-mode nested call. Its parts are a value
+   * for the exec script, so the parent exec delivers this to the model.
+   */
+  hookContext?: string;
 };
 
 type MidTurnDrainResult = {
@@ -13229,24 +13234,36 @@ export class Session implements SessionContext {
     let toolType: 'native' | 'mcp' = 'native';
     let mcpServerName: string | undefined = undefined;
     const guardContext: { policyToolName?: string } = {};
-    // Sanitized hook additionalContext for this call, appended to the
-    // model-facing functionResponse only (never to UI/error projections).
+    // Sanitized hook additionalContext for this call (and, for exec, its
+    // nested calls), appended to the model-facing functionResponse only —
+    // never to UI/error projections. A nested call hands it to its parent
+    // exec instead, and an MCP App call has no model consumer at all.
     let preToolUseContext: string | undefined;
     let failureContext: string | undefined;
+    const nestedHookContexts: string[] = [];
+    const hookContextFor = (
+      status: 'success' | 'error' | 'cancelled',
+    ): string | undefined =>
+      status === 'cancelled' ||
+      (!preToolUseContext && !failureContext && nestedHookContexts.length === 0)
+        ? undefined
+        : boundToolHookContext(
+            [preToolUseContext, failureContext, ...nestedHookContexts],
+            this.config.getTruncateToolOutputThreshold(),
+          );
     const withHookContext = (
       parts: Part[],
       status: 'success' | 'error' | 'cancelled',
     ): Part[] =>
-      status === 'cancelled' || (!preToolUseContext && !failureContext)
+      codeModeContext || appExecution
         ? parts
-        : appendToolHookContextToParts(
-            parts,
-            callId,
-            boundToolHookContext(
-              [preToolUseContext, failureContext],
-              this.config.getTruncateToolOutputThreshold(),
-            ),
-          );
+        : appendToolHookContextToParts(parts, callId, hookContextFor(status));
+    const nestedHookContextField = (
+      status: 'success' | 'error' | 'cancelled',
+    ): Pick<RunToolResult, 'hookContext'> => {
+      const hookContext = codeModeContext ? hookContextFor(status) : undefined;
+      return hookContext ? { hookContext } : {};
+    };
     if (toolLoopState?.loopDetected) {
       return {
         parts: [
@@ -13468,6 +13485,7 @@ export class Session implements SessionContext {
         parts: modelErrorParts,
         stopAfterPermissionCancel: opts.stopAfterPermissionCancel ?? false,
         loopDetected,
+        ...nestedHookContextField(opts.status),
       };
     };
 
@@ -15079,6 +15097,9 @@ export class Session implements SessionContext {
                         { parentCallId: callId, source: 'code_mode' },
                       ),
                     );
+                    if (nested.hookContext) {
+                      nestedHookContexts.push(nested.hookContext);
+                    }
                     const nestedParts = finalizeCodeModeToolResult
                       ? await finalizeCodeModeToolResult(nested)
                       : nested.parts;
@@ -15649,6 +15670,7 @@ export class Session implements SessionContext {
           }
           return {
             parts: modelResponseParts,
+            ...nestedHookContextField(status),
             ...('modelOverride' in toolResult && succeeded
               ? { modelOverride: toolResult.modelOverride }
               : {}),

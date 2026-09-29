@@ -64,37 +64,42 @@ export function appendToolHookContextToParts(
     index = candidates[0];
   }
 
-  const part = parts[index];
-  const functionResponse = part.functionResponse!;
+  const updated = [...parts];
+  updated[index] = appendTextToFunctionResponse(parts[index], context);
+  return updated;
+}
+
+/**
+ * Appends `text` after a blank line to a functionResponse part's `output`
+ * (or its string `error`), without mutating the part. A structured output is
+ * serialized first; a response with neither gets `output` set to `text`.
+ * Parts without a functionResponse are returned unchanged.
+ */
+export function appendTextToFunctionResponse(part: Part, text: string): Part {
+  const functionResponse = part.functionResponse;
+  if (!functionResponse) return part;
   const response = functionResponse.response ?? {};
   const output = response['output'];
   const error = response['error'];
-  let key: 'output' | 'error';
-  let currentText: string;
+  let key: 'output' | 'error' = 'output';
+  let currentText = '';
   if (typeof output === 'string') {
-    key = 'output';
     currentText = output;
   } else if (typeof error === 'string') {
     key = 'error';
     currentText = error;
   } else if (output !== undefined) {
-    key = 'output';
     currentText = JSON.stringify(output) ?? '';
-  } else {
-    key = 'output';
-    currentText = '';
   }
 
-  const updated = [...parts];
-  updated[index] = {
+  return {
     ...part,
     functionResponse: {
       ...functionResponse,
       response: {
         ...response,
-        [key]: currentText ? `${currentText}\n\n${context}` : context,
+        [key]: currentText ? `${currentText}\n\n${text}` : text,
       },
     },
   };
-  return updated;
 }

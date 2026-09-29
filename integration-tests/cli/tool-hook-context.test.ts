@@ -71,6 +71,10 @@ describe('tool hook additionalContext delivery', () => {
     toolName: string,
     fileName: string,
     callId: string,
+    buildArgs: (filePath: string) => Record<string, unknown> = (filePath) => ({
+      file_path: filePath,
+    }),
+    extraSettings: Record<string, unknown> = {},
   ): Promise<FakeOpenAIServer> {
     rig = new TestRig();
     const hookGroup = [
@@ -82,6 +86,7 @@ describe('tool hook additionalContext delivery', () => {
     await rig.setup(testName, {
       settings: {
         hooks: { PreToolUse: hookGroup, PostToolUseFailure: hookGroup },
+        ...extraSettings,
       },
     });
     writeFileSync(join(rig.testDir!, HOOK_SCRIPT), hookSource);
@@ -95,7 +100,7 @@ describe('tool hook additionalContext delivery', () => {
             toolCalls: [
               fakeToolCall(
                 toolName,
-                { file_path: join(rig.testDir!, fileName) },
+                buildArgs(join(rig.testDir!, fileName)),
                 callId,
               ),
             ],
@@ -176,6 +181,32 @@ describe('tool hook additionalContext delivery', () => {
     expect(result).toContain('p02a policy');
     expect(result).not.toContain('hello from note');
     expect(count(result, 'P02A_PreToolUse_call_deny')).toBe(1);
+  });
+
+  it('headless: delivers nested exec PreToolUse context with the exec result', async () => {
+    const server = await setup(
+      'hook context headless nested exec',
+      'exec',
+      'note.txt',
+      'call_exec',
+      (filePath) => ({
+        // Consumes the nested result without printing it.
+        source: `const r = await tools.read_file({ file_path: ${JSON.stringify(filePath)} }); text(String(r).includes('P02A_') ? 'changed' : 'raw')`,
+      }),
+      { tools: { codeModeOnly: true } },
+    );
+    await rig.run('run the script', ...fakeModelLaunchArgs(server));
+
+    expect(hookHits()).toEqual(
+      expect.arrayContaining([
+        { event: 'PreToolUse', call: 'call_exec' },
+        { event: 'PreToolUse', call: 'call_exec:code:1' },
+      ]),
+    );
+    const result = toolResultFor(server, 'call_exec');
+    expect(result).toContain('raw');
+    expect(result).not.toContain('changed');
+    expect(count(result, 'P02A_PreToolUse_call_exec:code:1')).toBe(1);
   });
 
   it('interactive: delivers the first PreToolUse ask context once after approval', async () => {

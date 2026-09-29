@@ -1218,6 +1218,34 @@ describe('Session', () => {
       expect(callTool).not.toHaveBeenCalled();
     });
 
+    it('keeps PreToolUse context out of the App error result', async () => {
+      const { callTool } = installAppTool();
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+      mockConfig.getMessageBus = vi.fn().mockReturnValue({
+        request: vi.fn().mockImplementation(async () => ({
+          success: true,
+          output: {
+            hookSpecificOutput: {
+              hookEventName: 'PreToolUse',
+              permissionDecision: 'deny',
+              permissionDecisionReason: 'blocked by probe',
+              additionalContext: 'APP_HOOK_MARKER',
+            },
+          },
+        })),
+      });
+      mockConfig.getTruncateToolOutputThreshold = vi
+        .fn()
+        .mockReturnValue(25_000);
+
+      expect(await session.callMcpAppTool('mcp-app-hook', request)).toEqual({
+        isError: true,
+        content: [{ type: 'text', text: 'blocked by probe' }],
+      });
+      expect(callTool).not.toHaveBeenCalled();
+      expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+    });
+
     it('honors explicit permission deny before YOLO and rejects unknown origins and targets', async () => {
       const { callTool } = installAppTool();
       vi.mocked(mockConfig.getApprovalMode).mockReturnValue(ApprovalMode.YOLO);
@@ -39327,6 +39355,99 @@ describe('Session', () => {
         };
       }>;
     };
+
+    it('delivers nested PreToolUse context with the exec result, not the script value', async () => {
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+      mockConfig.getMessageBus = vi.fn().mockReturnValue({
+        request: vi
+          .fn()
+          .mockImplementation(
+            async (request: {
+              eventName: string;
+              input?: { tool_name?: string; tool_call_id?: string };
+            }) => ({
+              success: true,
+              output:
+                request.eventName === 'PreToolUse' &&
+                request.input?.tool_name === 'read_file'
+                  ? {
+                      hookSpecificOutput: {
+                        hookEventName: 'PreToolUse',
+                        additionalContext: `NESTED_CTX_${request.input.tool_call_id}`,
+                      },
+                    }
+                  : {},
+            }),
+          ),
+      });
+      mockConfig.getTruncateToolOutputThreshold = vi
+        .fn()
+        .mockReturnValue(25_000);
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      mockConfig.getToolMode = vi
+        .fn()
+        .mockReturnValue(core.ToolMode.CodeModeOnly);
+      const nestedTool = {
+        name: 'read_file',
+        kind: core.Kind.Read,
+        displayName: 'Read file',
+        description: 'Read file',
+        build: vi.fn().mockReturnValue({
+          params: { path: '/tmp/example.txt' },
+          execute: vi.fn().mockResolvedValue({
+            llmContent: 'NESTED_RAW',
+            returnDisplay: 'NESTED_RAW',
+          }),
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          getDescription: vi.fn().mockReturnValue('Read file'),
+          toolLocations: vi.fn().mockReturnValue([]),
+        }),
+        canUpdateOutput: false,
+        isOutputMarkdown: true,
+      };
+      let scriptValue: string | undefined;
+      const outerTool = {
+        name: core.ToolNames.EXEC,
+        kind: core.Kind.Other,
+        displayName: 'Exec',
+        description: 'Exec',
+        build: vi.fn().mockReturnValue({
+          params: { source: 'probe' },
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          getDescription: vi.fn().mockReturnValue('Exec'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          execute: vi.fn().mockImplementation(async (signal: AbortSignal) => {
+            const nested = await core
+              .getToolCallRuntime()!
+              .dispatch('read_file', { path: '/tmp/example.txt' }, signal);
+            // The script consumes the value without printing it.
+            scriptValue = nested.output;
+            return { llmContent: 'done', returnDisplay: 'done' };
+          }),
+        }),
+        canUpdateOutput: false,
+        isOutputMarkdown: true,
+      };
+      mockToolRegistry.getTool.mockImplementation((name: string) =>
+        name === core.ToolNames.EXEC ? outerTool : nestedTool,
+      );
+
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(new AbortController().signal, 'prompt-nested-ctx', [
+        {
+          id: 'exec-ctx',
+          name: core.ToolNames.EXEC,
+          args: { source: 'probe' },
+        },
+      ]);
+
+      expect(scriptValue).toBe('NESTED_RAW');
+      expect(result.parts).toHaveLength(1);
+      expect(result.parts[0].functionResponse?.response).toEqual({
+        output: 'done\n\nNESTED_CTX_exec-ctx:code:1',
+      });
+    });
 
     it('allows top-level discovery then re-enters the ACP tool chain with native result metadata', async () => {
       const onResult = vi.fn();

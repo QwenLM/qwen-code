@@ -15600,6 +15600,70 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(responseText(next[0])).not.toContain('P02A_ASK_CANCEL');
   });
 
+  it('drops PreToolUse context when the turn is cancelled during PostToolBatch', async () => {
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'done',
+      returnDisplay: 'done',
+    });
+    const abortController = new AbortController();
+    const messageBus = {
+      request: vi.fn(async (req: { eventName?: string }) => {
+        if (req.eventName === 'PostToolBatch') abortController.abort();
+        return {
+          type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+          correlationId: 'hook',
+          success: true,
+          output:
+            req.eventName === 'PreToolUse'
+              ? {
+                  hookSpecificOutput: {
+                    hookEventName: 'PreToolUse',
+                    additionalContext: 'P02A_POSTBATCH_CANCEL',
+                  },
+                }
+              : {},
+        };
+      }),
+    };
+    const { scheduler, onAllToolCallsComplete } = buildScheduler({
+      execute,
+      messageBus,
+      disableHooks: false,
+      hasPostToolBatchHook: true,
+    });
+    await scheduler.schedule(
+      [
+        {
+          callId: 'postbatch-call',
+          name: 'mockTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-postbatch',
+        },
+      ],
+      abortController.signal,
+    );
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+
+    expect(
+      messageBus.request.mock.calls.some(
+        ([req]) =>
+          (req as { eventName?: string }).eventName === 'PostToolBatch',
+      ),
+    ).toBe(true);
+    const [call] = onAllToolCallsComplete.mock.calls.at(-1)?.[0] as ToolCall[];
+    // The tool really completed; only the hook context is withheld.
+    expect(call.status).toBe('success');
+    expect(execute).toHaveBeenCalledTimes(1);
+    const fr = (call as SuccessfulToolCall).response.responseParts.find(
+      (p) => p.functionResponse,
+    )?.functionResponse;
+    expect(fr?.id).toBe('postbatch-call');
+    expect(fr?.response?.['output']).toBe('done');
+  });
+
   it('keeps PreToolUse context on its own call within a batch and bounds it', async () => {
     const execute = vi.fn().mockResolvedValue({
       llmContent: 'ok',

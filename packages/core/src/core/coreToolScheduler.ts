@@ -50,6 +50,7 @@ import {
   appendAdditionalContext,
 } from './toolHookTriggers.js';
 import {
+  appendTextToFunctionResponse,
   appendToolHookContextToParts,
   boundToolHookContext,
 } from './tool-hook-context.js';
@@ -1257,32 +1258,7 @@ function appendContextToResponsePart(
     );
     return part;
   }
-
-  const response = part.functionResponse.response ?? {};
-  const output = response['output'];
-  const error = response['error'];
-  const hasOutput = Object.prototype.hasOwnProperty.call(response, 'output');
-  const useOutputKey =
-    typeof output === 'string' || (hasOutput && typeof error !== 'string');
-  const key = useOutputKey ? 'output' : 'error';
-  const currentText = useOutputKey
-    ? typeof output === 'string'
-      ? output
-      : JSON.stringify(output)
-    : typeof error === 'string'
-      ? error
-      : JSON.stringify(response);
-
-  return {
-    ...part,
-    functionResponse: {
-      ...part.functionResponse,
-      response: {
-        ...response,
-        [key]: `${currentText}\n\n${additionalContext}`,
-      },
-    },
-  };
+  return appendTextToFunctionResponse(part, additionalContext);
 }
 
 function appendContextToToolResponse(
@@ -1679,6 +1655,16 @@ export class CoreToolScheduler {
   // batch's terminal assembly (it must survive an 'ask' bounce, whose
   // re-execution skips the hook) and cleared with the batch's hook owners.
   private readonly preToolUseContexts = new Map<string, string>();
+  // PreToolUse context of code-mode nested calls, keyed by the parent exec
+  // callId. A nested result is a value for the script, not for the model, so
+  // its context is delivered with the parent's result instead.
+  private readonly nestedPreToolUseContexts = new Map<string, string[]>();
+  // Set on a nested scheduler: receives the context of its calls instead of
+  // appending it to their (program-visible) results.
+  private preToolUseContextSink?: (
+    request: ToolCallRequestInfo,
+    context: string,
+  ) => void;
   private readonly askUserQuestionResponseClaims = new Set<string>();
   private readonly runtimeContentGeneratorViews = new Map<
     string,
@@ -1773,6 +1759,23 @@ export class CoreToolScheduler {
         this.notifyToolCallsUpdate();
       },
     });
+    this.nestedToolScheduler.preToolUseContextSink = (request, context) => {
+      const parentCallId = request.parentCallId;
+      // Only a parent still executing can deliver it; a late nested call
+      // must not leave an entry nothing will consume.
+      if (
+        !parentCallId ||
+        !this.toolCalls.some(
+          (call) =>
+            call.request.callId === parentCallId && call.status === 'executing',
+        )
+      ) {
+        return;
+      }
+      const contexts = this.nestedPreToolUseContexts.get(parentCallId) ?? [];
+      contexts.push(context);
+      this.nestedPreToolUseContexts.set(parentCallId, contexts);
+    };
     return this.nestedToolScheduler;
   }
 
@@ -2830,6 +2833,7 @@ export class CoreToolScheduler {
       for (const item of items) {
         this.hookOwners.delete(item.callId);
         this.preToolUseContexts.delete(item.callId);
+        this.nestedPreToolUseContexts.delete(item.callId);
       }
       throw error;
     });
@@ -7055,6 +7059,12 @@ export class CoreToolScheduler {
           .filter((call) => call.status !== 'cancelled')
           .map((call) => call.request.callId),
       );
+      const callSignals = new Map(
+        completedCalls.map((call) => [
+          call.request.callId,
+          this.callIdToPostToolBatchSignal.get(call.request.callId),
+        ]),
+      );
       const batchSignal = completedCalls
         .map((call) =>
           this.callIdToPostToolBatchSignal.get(call.request.callId),
@@ -7177,9 +7187,13 @@ export class CoreToolScheduler {
 
         // After PostToolBatch so a batch stop cannot erase it, and before the
         // final budget so the batch/send caps still bound it.
+        // Recheck cancellation: the turn may have been aborted while
+        // post-processing (PostToolBatch) was awaited.
         completedCalls = this.withPreToolUseContext(
           completedCalls,
-          preToolUseContextCallIds,
+          (callId) =>
+            preToolUseContextCallIds.has(callId) &&
+            !callSignals.get(callId)?.aborted,
         );
 
         // Hooks may replace responses or append context, so enforce the same
@@ -7217,6 +7231,7 @@ export class CoreToolScheduler {
           for (const call of completedCalls) {
             this.hookOwners.delete(call.request.callId);
             this.preToolUseContexts.delete(call.request.callId);
+            this.nestedPreToolUseContexts.delete(call.request.callId);
             this.finalizeToolSpan(call.request.callId, true);
           }
           this.postToolBatchEnabledForBatch = false;
@@ -7287,16 +7302,29 @@ export class CoreToolScheduler {
 
   private withPreToolUseContext(
     completedCalls: CompletedToolCall[],
-    deliverableCallIds: ReadonlySet<string>,
+    isDeliverable: (callId: string) => boolean,
   ): CompletedToolCall[] {
-    if (this.preToolUseContexts.size === 0) return completedCalls;
+    if (
+      this.preToolUseContexts.size === 0 &&
+      this.nestedPreToolUseContexts.size === 0
+    ) {
+      return completedCalls;
+    }
     const maxChars = this.config.getTruncateToolOutputThreshold();
     return completedCalls.map((call) => {
       const callId = call.request.callId;
-      const stored = this.preToolUseContexts.get(callId);
+      const segments = [
+        this.preToolUseContexts.get(callId),
+        ...(this.nestedPreToolUseContexts.get(callId) ?? []),
+      ];
       this.preToolUseContexts.delete(callId);
-      if (!stored || !deliverableCallIds.has(callId)) return call;
-      const context = boundToolHookContext([stored], maxChars);
+      this.nestedPreToolUseContexts.delete(callId);
+      if (!segments.some(Boolean) || !isDeliverable(callId)) return call;
+      const context = boundToolHookContext(segments, maxChars);
+      if (this.preToolUseContextSink) {
+        if (context) this.preToolUseContextSink(call.request, context);
+        return call;
+      }
       const responseParts = appendToolHookContextToParts(
         call.response.responseParts,
         callId,
