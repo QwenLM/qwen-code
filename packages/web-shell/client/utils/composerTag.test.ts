@@ -425,13 +425,17 @@ describe('composer tag input annotations', () => {
     // not steal the chip's annotation.
     const content = 'literal @foo then @foo';
     expect(
-      createInputAnnotationsFromComposerTags(content, [], [
-        {
-          start: 18,
-          end: 22,
-          tag: { id: 'file:@foo', kind: 'file', value: '@foo' },
-        },
-      ]),
+      createInputAnnotationsFromComposerTags(
+        content,
+        [],
+        [
+          {
+            start: 18,
+            end: 22,
+            tag: { id: 'file:@foo', kind: 'file', value: '@foo' },
+          },
+        ],
+      ),
     ).toEqual([
       {
         type: 'reference',
@@ -466,18 +470,22 @@ describe('composer tag input annotations', () => {
   it('skips known placements whose range does not match the prompt text', () => {
     const content = 'literal @foo then @foo';
     expect(
-      createInputAnnotationsFromComposerTags(content, [], [
-        {
-          start: 0,
-          end: 4,
-          tag: { id: 'file:@foo', kind: 'file', value: '@foo' },
-        },
-        {
-          start: 8,
-          end: 30,
-          tag: { id: 'file:@bar', kind: 'file', value: '@bar' },
-        },
-      ]),
+      createInputAnnotationsFromComposerTags(
+        content,
+        [],
+        [
+          {
+            start: 0,
+            end: 4,
+            tag: { id: 'file:@foo', kind: 'file', value: '@foo' },
+          },
+          {
+            start: 8,
+            end: 30,
+            tag: { id: 'file:@bar', kind: 'file', value: '@bar' },
+          },
+        ],
+      ),
     ).toEqual([]);
   });
 

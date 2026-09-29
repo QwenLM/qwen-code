@@ -23,10 +23,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import type { DaemonInputAnnotation } from '@qwen-code/sdk/daemon';
 import { I18nProvider } from '../i18n';
 import { splitComposerTagContentByAnnotations } from '../utils/composerTag';
-import {
-  useComposerCore,
-  type UseComposerCoreReturn,
-} from './useComposerCore';
+import { useComposerCore, type UseComposerCoreReturn } from './useComposerCore';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -78,6 +75,21 @@ function addFileChipAtEnd(serialized: string) {
       [{ id: `file:${serialized}`, kind: 'file', value: serialized }],
       { placement: 'inline', position: 'end' },
     );
+  });
+}
+
+function addTopFileChip(serialized: string) {
+  act(() => {
+    latest!.handle.addTags(
+      [{ id: `file:${serialized}`, kind: 'file', value: serialized }],
+      { placement: 'top' },
+    );
+  });
+}
+
+function setShellMode(enabled: boolean) {
+  act(() => {
+    latest!.setShellMode(enabled);
   });
 }
 
@@ -155,5 +167,57 @@ describe('useComposerCore issue #12980 inline chip annotation offsets', () => {
 
     expect(submittedText).toBe('@foo then @foo');
     expect(annotationRanges()).toEqual([[0, 4]]);
+  });
+
+  it('shifts the chip past a top tag prefix', async () => {
+    await mount();
+    addTopFileChip('@top');
+    appendPlainText('literal @foo then ');
+    addFileChipAtEnd('@foo');
+    expect(latest!.viewRef.current!.state.doc.toString()).toBe(
+      'literal @foo then @foo ',
+    );
+
+    await submit();
+
+    // The top tag is serialized ahead of the editor text, so the prompt is
+    // '@top' + blank separator + text and promptPrefixLength is 6. The chip's
+    // editor range [18, 22) must land on [24, 28), not on the plain-text
+    // look-alike at [14, 18).
+    expect(submittedText).toBe('@top\n\nliteral @foo then @foo');
+    expect(annotationRanges()).toEqual([
+      [0, 4],
+      [24, 28],
+    ]);
+    expect(
+      splitComposerTagContentByAnnotations(
+        submittedText!,
+        submittedAnnotations,
+      ),
+    ).toEqual([
+      {
+        type: 'reference',
+        tag: expect.objectContaining({ id: 'file:@top' }),
+      },
+      { type: 'text', text: '\n\nliteral @foo then ' },
+      {
+        type: 'reference',
+        tag: expect.objectContaining({ id: 'file:@foo' }),
+      },
+    ]);
+  });
+
+  it('shifts the chip past the shell-mode "!" prefix', async () => {
+    await mount();
+    setShellMode(true);
+    appendPlainText('literal @foo then ');
+    addFileChipAtEnd('@foo');
+
+    await submit();
+
+    // Shell mode prepends '!', so promptPrefixLength is 1 and the chip's
+    // editor range [18, 22) must land on [19, 23).
+    expect(submittedText).toBe('!literal @foo then @foo');
+    expect(annotationRanges()).toEqual([[19, 23]]);
   });
 });
