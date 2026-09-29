@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 import {
   LEGACY_MARKER_PREFIX,
@@ -121,41 +123,105 @@ test('keeps the parameterized tail of a Surefire id', () => {
   );
 });
 
-test('a Flyway guard red files one issue, not one per stacked merge', () => {
-  // Verbatim shape of the guard's ::error:: line for a #12940-style
-  // duplicate-version collision.
-  const log =
-    '::error::packages/sdk-java/managed-agent-server: 2 migrations claim version 16: ' +
-    'packages/sdk-java/managed-agent-server/src/main/resources/db/migration/V16__a.sql, ' +
-    'packages/sdk-java/runtime-broker/src/main/resources/db/migration/V16__b.sql';
-  assert.deepEqual(extractFailingTests(log), [
-    'flyway:packages/sdk-java/managed-agent-server:16',
-  ]);
+const FLYWAY_GUARD = join(
+  dirname(fileURLToPath(import.meta.url)),
+  '../../../scripts/check-flyway-migrations.js',
+);
 
-  const dir = mkdtempSync(join(tmpdir(), 'sig-flyway-'));
+// The Flyway fixtures are CAPTURED from the guard, never typed by hand: a
+// drift between the producer's message and this consumer's pattern must
+// redden here — silently surviving a reworded producer is the failure this
+// module exists to end. The captured stderr is then rendered the way a
+// downloaded Actions log carries it: the runner consumes the ::error::
+// command, writes ##[error] in its place, and timestamps every line.
+function captureGuardLog(moduleDir) {
+  const result = spawnSync(process.execPath, [FLYWAY_GUARD, moduleDir], {
+    encoding: 'utf8',
+  });
+  assert.equal(result.status, 1, `guard stderr: ${result.stderr}`);
+  const raw = result.stderr
+    .split('\n')
+    .filter((line) => line.startsWith('::error::'))
+    .map((line) => `2026-09-29T00:00:00.0000000Z ${line}`)
+    .join('\n');
+  return { raw, tagged: raw.replaceAll('::error::', '##[error]') };
+}
+
+function planSearchMarkers(log, sha) {
+  const dir = mkdtempSync(join(tmpdir(), 'sig-flyway-plan-'));
   const analysisPath = join(dir, 'analysis.json');
   writeFileSync(analysisPath, JSON.stringify(analyzeLogs('SDK Java', [log])));
-  const plan = (sha) =>
-    JSON.parse(
-      captureStdout([
-        'plan',
-        '--analysis',
-        analysisPath,
-        '--sha',
-        sha,
-        '--run-url',
-        `https://github.com/QwenLM/qwen-code/actions/runs/${sha}`,
-        '--run-id',
-        sha,
-        '--at',
-        '2026-09-29T00:00:00Z',
-      ]),
-    );
+  return JSON.parse(
+    captureStdout([
+      'plan',
+      '--analysis',
+      analysisPath,
+      '--sha',
+      sha,
+      '--run-url',
+      `https://github.com/QwenLM/qwen-code/actions/runs/${sha}`,
+      '--run-id',
+      sha,
+      '--at',
+      '2026-09-29T00:00:00Z',
+    ]),
+  ).searchMarkers;
+}
+
+test('a Flyway guard red files one issue, not one per stacked merge', () => {
+  // Two SQL files claiming one version in one module: the #12940 shape.
+  const dir = mkdtempSync(join(tmpdir(), 'sig-flyway-'));
+  const moduleDir = join(dir, 'managed-agent-server');
+  const migrationDir = join(moduleDir, 'src/main/resources/db/migration');
+  mkdirSync(migrationDir, { recursive: true });
+  writeFileSync(join(migrationDir, 'V16__a.sql'), '');
+  writeFileSync(join(migrationDir, 'V16__b.sql'), '');
+
+  const log = captureGuardLog(moduleDir);
+  const id = `flyway duplicate version 16 in ${moduleDir}`;
+  // The ##[error] form is what a downloaded job log carries; the raw
+  // ::error:: form is what the guard prints. Both must extract.
+  assert.deepEqual(extractFailingTests(log.tagged), [id]);
+  assert.deepEqual(extractFailingTests(log.raw), [id]);
+
   // The marker keys on the collision, not the commit: two merges stacked on
   // the standing red resolve to the same issue.
   assert.deepEqual(
-    plan('1111111111111').searchMarkers,
-    plan('2222222222222').searchMarkers,
+    planSearchMarkers(log.tagged, '1111111111111'),
+    planSearchMarkers(log.tagged, '2222222222222'),
+  );
+});
+
+test('a Flyway guard blind-spot red also files one issue, not one per stacked merge', () => {
+  // A renamed migration location and a missing module directory are standing
+  // reds that name no test: without their own stable identity the plan falls
+  // back to the sha-keyed per-commit marker and each stacked merge opens a
+  // fresh issue.
+  const dir = mkdtempSync(join(tmpdir(), 'sig-flyway-moved-'));
+  const moduleDir = join(dir, 'managed-agent-server');
+  // A db/migration* sibling marks the module as owning migrations while the
+  // configured SQL location stays empty — the guard's "location moved" mode.
+  mkdirSync(join(moduleDir, 'src/main/resources/db/migrations'), {
+    recursive: true,
+  });
+
+  const moved = captureGuardLog(moduleDir);
+  assert.deepEqual(extractFailingTests(moved.tagged), [
+    `flyway found no migration under src/main/resources/db/migration in ${moduleDir}`,
+  ]);
+  assert.deepEqual(
+    planSearchMarkers(moved.tagged, '1111111111111'),
+    planSearchMarkers(moved.tagged, '2222222222222'),
+  );
+
+  const absentDir = join(dir, 'absent-module');
+  const absent = captureGuardLog(absentDir);
+  assert.deepEqual(extractFailingTests(absent.tagged), [
+    `flyway no such Maven module directory in ${absentDir}`,
+  ]);
+  assert.deepEqual(
+    planSearchMarkers(absent.tagged, '1111111111111'),
+    planSearchMarkers(absent.tagged, '2222222222222'),
   );
 });
 
@@ -720,6 +786,72 @@ test('the test-keyed body names the failed job and step too', () => {
     body.includes(
       '  - `Flyway migration version uniqueness` — failed in step `Check Flyway migration versions are unique`',
     ),
+  );
+});
+
+test('a test-keyed body with no reported jobs has no dangling heading', () => {
+  // The failed-jobs conditional's false branch: an unconditional spread
+  // would leave a "- Failed jobs:" heading with no bullets under it.
+  const analysis = analyzeLogs('SDK Java', [MAVEN_LOG]);
+  assert.deepEqual(analysis.failedJobs, []);
+  const body = renderIssueBody({ analysis, occurrence: OCCURRENCE });
+  assert.ok(body.includes('## Failing tests'));
+  assert.ok(!body.includes('- Failed jobs:'));
+});
+
+test('merge rebuilds the failed-jobs block from the current run', () => {
+  // The block is machine-owned like "## Also failing": a later recurrence of
+  // the same failure can break in a different lane, and the body must point
+  // at the lane whose log holds THAT run's diagnosis.
+  const flywayLane = {
+    name: 'Flyway migration version uniqueness',
+    steps: ['Check Flyway migration versions are unique'],
+  };
+  const databaseLane = {
+    name: 'Runtime Broker and Managed Agent MariaDB / Java 21',
+    steps: ['Run Managed Agent tests, Checkstyle, and MySQL integration'],
+  };
+  const created = renderIssueBody({
+    analysis: analyzeLogs('SDK Java', [MAVEN_LOG], [flywayLane]),
+    occurrence: OCCURRENCE,
+  });
+  assert.ok(created.includes('`Flyway migration version uniqueness`'));
+
+  const merged = renderIssueBody({
+    analysis: analyzeLogs('SDK Java', [MAVEN_LOG], [databaseLane]),
+    existingBody: created,
+    occurrence: { ...OCCURRENCE, runId: '302', runUrl: '.../runs/302' },
+  });
+  assert.ok(
+    merged.includes(
+      '  - `Runtime Broker and Managed Agent MariaDB / Java 21` — failed in step `Run Managed Agent tests, Checkstyle, and MySQL integration`',
+    ),
+  );
+  assert.ok(!merged.includes('Flyway migration version uniqueness'));
+  assert.equal(merged.split('- Failed jobs:').length - 1, 1);
+
+  // A recurrence whose failed-job list is unknown drops the block rather
+  // than freezing a stale lane name.
+  const unknown = renderIssueBody({
+    analysis: analyzeLogs('SDK Java', [MAVEN_LOG]),
+    existingBody: merged,
+    occurrence: { ...OCCURRENCE, runId: '303', runUrl: '.../runs/303' },
+  });
+  assert.ok(!unknown.includes('- Failed jobs:'));
+
+  // And a run filed without the data gains the block once a recurrence
+  // reports it.
+  const gained = renderIssueBody({
+    analysis: analyzeLogs('SDK Java', [MAVEN_LOG], [databaseLane]),
+    existingBody: renderIssueBody({
+      analysis: analyzeLogs('SDK Java', [MAVEN_LOG]),
+      occurrence: OCCURRENCE,
+    }),
+    occurrence: { ...OCCURRENCE, runId: '304', runUrl: '.../runs/304' },
+  });
+  assert.ok(gained.includes('- Failed jobs:'));
+  assert.ok(
+    gained.includes('`Runtime Broker and Managed Agent MariaDB / Java 21`'),
   );
 });
 

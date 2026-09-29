@@ -17,12 +17,13 @@
 
 import { existsSync, readdirSync } from 'node:fs';
 import path from 'node:path';
+import { escapeWorkflowCommand } from './release-script-utils.js';
 
 // Both locations resolve into Flyway's classpath:db/migration, so their
-// versions share one namespace. The SQL location is required: it is where
-// this module's migration sequence lives, so finding no migration there means
-// the location moved and the guard went blind. The Java location is optional
-// — a module may carry SQL migrations only.
+// versions share one namespace. The SQL location is required of a module
+// that owns migrations: finding none there means the location moved and the
+// guard went blind. The Java location is optional — a module may carry SQL
+// migrations only.
 const LOCATIONS = [
   {
     dir: ['src', 'main', 'resources', 'db', 'migration'],
@@ -69,22 +70,35 @@ const migrationFiles = (dir, suffix) => {
   );
 };
 
-// The CI job runs on pull_request — fork PRs included — so the scanned
-// filenames are contributor-controlled, and the runner parses workflow
-// commands from stderr too: a raw LF in a filename would emit a second,
-// forged ::error:: command from this step. Same idiom as
-// escapeWorkflowCommand in scripts/generate-release-notes.js.
-const escapeWorkflowCommand = (text) =>
-  String(text).replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A');
+// A db/migration* directory under either db root — including a renamed-away
+// sibling such as db/migrations — marks the module as owning a migration
+// sequence. Only then does an empty SQL location mean the location moved;
+// a module with no such directory at all (runtime-broker today) simply has
+// no sequence to check, which is what lets one invocation cover every module
+// that shares the classpath namespace below.
+const hasMigrationDir = (module) =>
+  ['src/main/resources/db', 'src/main/java/db'].some((dbRoot) => {
+    const dir = path.join(module, dbRoot);
+    return (
+      existsSync(dir) &&
+      readdirSync(dir, { withFileTypes: true }).some(
+        (entry) => entry.isDirectory() && entry.name.startsWith('migration'),
+      )
+    );
+  });
 
 let failed = false;
 // Flyway resolves classpath:db/migration across every jar on the classpath,
 // and managed-agent-server depends on runtime-broker, so the modules given in
 // one invocation share one version namespace — a version claimed in two
-// modules collides exactly like two files in one module do. The summary count
-// and the required-location check stay per module.
+// modules collides exactly like two files in one module do. Collisions are
+// reported only after every module is scanned: one ::error:: line per
+// collided version names EVERY claimant (the consumer keys its issue on the
+// module and version in this line, so a second line for the same version
+// would file a second issue), and a claimant module never prints an
+// "all versions unique" summary.
 const claimants = new Map();
-const reported = new Set();
+const scanned = [];
 for (const module of modules) {
   if (!existsSync(module)) {
     failed = true;
@@ -102,6 +116,10 @@ for (const module of modules) {
     ({ required, files }) => required && files.length === 0,
   );
   if (moved) {
+    if (!hasMigrationDir(module)) {
+      console.log(`${module}: no migration directories`);
+      continue;
+    }
     failed = true;
     console.error(
       `::error::${escapeWorkflowCommand(module)}: found no migration under ` +
@@ -109,35 +127,30 @@ for (const module of modules) {
     );
     continue;
   }
-  const mine = new Set();
   let count = 0;
   for (const { files } of found) {
     for (const file of files) {
       count += 1;
       const version = normalize(MIGRATION_NAME.exec(path.basename(file))[1]);
-      mine.add(version);
       const group = claimants.get(version) ?? [];
-      group.push(file);
+      group.push({ module, file });
       claimants.set(version, group);
     }
   }
-  let duplicated = false;
-  for (const version of mine) {
-    const group = claimants.get(version);
-    if (group.length > 1) {
-      duplicated = true;
-      // A collision already named for an earlier module is not repeated.
-      if (reported.has(version)) continue;
-      reported.add(version);
-      failed = true;
-      console.error(
-        `::error::${escapeWorkflowCommand(module)}: ${group.length} migrations claim version ` +
-          `${escapeWorkflowCommand(version)}: ${group.map(escapeWorkflowCommand).join(', ')}`,
-      );
-    }
-  }
-  if (!duplicated) {
-    console.log(`${module}: ${count} migrations, all versions unique`);
-  }
+  scanned.push({ module, count });
+}
+const collided = new Set();
+for (const [version, group] of claimants) {
+  if (group.length < 2) continue;
+  failed = true;
+  console.error(
+    `::error::${escapeWorkflowCommand(group[0].module)}: ${group.length} migrations claim version ` +
+      `${escapeWorkflowCommand(version)}: ${group.map(({ file }) => escapeWorkflowCommand(file)).join(', ')}`,
+  );
+  for (const { module } of group) collided.add(module);
+}
+for (const { module, count } of scanned) {
+  if (collided.has(module)) continue;
+  console.log(`${module}: ${count} migrations, all versions unique`);
 }
 process.exitCode = failed ? 1 : 0;

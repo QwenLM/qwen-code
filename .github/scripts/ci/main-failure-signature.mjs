@@ -53,9 +53,19 @@ const MAVEN_FAIL_PATTERN =
 // The Flyway version guard (scripts/check-flyway-migrations.js) fails with a
 // ::error:: line, not a test report. Key it on the module and version —
 // stable across every merge stacked on a standing red, so the recurrences
-// land on one issue instead of one per commit.
+// land on one issue instead of one per commit. The runner consumes the
+// ::error:: command and writes ##[error] into the downloadable log (stderr is
+// wired to the same interceptor), so the anchor accepts both forms; the raw
+// form is what the guard prints and keeps the unit fixtures readable.
 const FLYWAY_FAIL_PATTERN =
-  /^::error::(.+?): \d+ migrations claim version ([\d.]+):/;
+  /^(?:##\[error\]|::error::)(.+?): \d+ migrations claim version ([\d.]+):/;
+// The guard's two other failure modes — a migration location that moved and
+// a module directory that does not exist — are standing reds too, so they get
+// their own stable identity keyed on the module and the mode; without one
+// they fall back to the sha-keyed per-commit issue and each stacked merge
+// opens a fresh one.
+const FLYWAY_CONFIG_PATTERN =
+  /^(?:##\[error\]|::error::)(.+?): (no such Maven module directory|found no migration under [^;]+)/;
 const TEST_FILE_PATTERN = /\.(?:test|spec)\.[cm]?[jt]sx?\b|\.py\b/;
 // A Surefire id is a dotted `Class.method`, optionally with the parameter
 // types and invocation index of a parameterized case.
@@ -95,10 +105,18 @@ export function extractFailingTests(logText) {
     const pytest = PYTEST_FAIL_PATTERN.exec(line);
     const maven = MAVEN_FAIL_PATTERN.exec(line);
     const flyway = FLYWAY_FAIL_PATTERN.exec(line);
-    if (!vitest && !pytest && !maven && !flyway) continue;
+    const flywayConfig = FLYWAY_CONFIG_PATTERN.exec(line);
+    if (!vitest && !pytest && !maven && !flyway && !flywayConfig) continue;
 
+    // The flyway id doubles as the issue title and body bullet, so it is
+    // written to be read, not only to be hashed.
     if (flyway) {
-      seen.add(`flyway:${flyway[1]}:${flyway[2]}`);
+      seen.add(`flyway duplicate version ${flyway[2]} in ${flyway[1]}`);
+      continue;
+    }
+
+    if (flywayConfig) {
+      seen.add(`flyway ${flywayConfig[2]} in ${flywayConfig[1]}`);
       continue;
     }
 
@@ -226,6 +244,12 @@ const ALSO_FAILING_HEADING = '## Also failing';
 // is the heading plus its contiguous bullet list — nothing else is ever written
 // under it.
 const ALSO_FAILING_BLOCK = /\n*##\s+Also failing\s*\n+(?:- [^\n]*\n?)+/;
+// The "- Failed jobs:" block is machine-owned the same way: on merge it is
+// stripped and re-emitted from the CURRENT run's failed jobs, so the lane the
+// body points at never freezes at filing time. The bullets it owns are the
+// two-space ones failedJobLines emits — the strip stops at the first line
+// that is not one, never consuming a human bullet that starts with `- `.
+const FAILED_JOBS_BLOCK = /\n*- Failed jobs:\n(?: {2}- [^\n]*\n?)+/;
 
 // The same split/merge contract — head / recorded occurrences / tail around
 // the marker, human text kept verbatim, occurrences newest-first and capped —
@@ -369,8 +393,13 @@ export function renderIssueBody({
 
   // The "## Also failing" list is rebuilt from the current failure set below,
   // so strip the previous one first: a test that has since been fixed must
-  // disappear instead of being listed forever.
-  const strippedProse = prose.replace(ALSO_FAILING_BLOCK, '').trimEnd();
+  // disappear instead of being listed forever. The "- Failed jobs:" block is
+  // rebuilt from the current run the same way; the '\n' replacement keeps the
+  // blank line that separated a mid-prose block from what followed it.
+  const strippedProse = prose
+    .replace(ALSO_FAILING_BLOCK, '')
+    .replace(FAILED_JOBS_BLOCK, '\n')
+    .trimEnd();
 
   // Record markers for tests that joined the failure set after the issue was
   // opened, so the next run still matches this issue on either test.
@@ -383,9 +412,14 @@ export function renderIssueBody({
   const withMarkers = missingMarkers.length
     ? `${missingMarkers.map((marker) => `<!-- ${marker} -->`).join('\n')}\n${strippedProse}`
     : strippedProse;
-  const withTests = missingTests.length
-    ? `${withMarkers}\n\n${ALSO_FAILING_HEADING}\n\n${missingTests.join('\n')}`
+  // A run whose failed-job list came back empty drops the block entirely
+  // rather than freezing the lanes an earlier run happened to report.
+  const withJobs = analysis.failedJobs.length
+    ? `${withMarkers}\n\n- Failed jobs:\n${failedJobLines(analysis.failedJobs).join('\n')}`
     : withMarkers;
+  const withTests = missingTests.length
+    ? `${withJobs}\n\n${ALSO_FAILING_HEADING}\n\n${missingTests.join('\n')}`
+    : withJobs;
 
   // A re-run of the same run must not add a second line for it. Match the
   // `[run <id>]` link text, not the run URL: `/301` is a substring of `/3010`,

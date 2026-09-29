@@ -1,4 +1,5 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { parse } from 'yaml';
 import { describe, expect, it } from 'vitest';
 
@@ -96,8 +97,35 @@ describe('SDK Java Flyway migration version guard', () => {
     expect(block).toContain('actions/checkout@');
     expect(block).not.toContain('if:');
     expect(block).toContain(
-      "run: 'node scripts/check-flyway-migrations.js packages/sdk-java/managed-agent-server'",
+      "run: 'node scripts/check-flyway-migrations.js packages/sdk-java/managed-agent-server packages/sdk-java/runtime-broker'",
     );
+  });
+
+  it('scans every sdk-java module that owns a db/migration directory', () => {
+    // The guard's premise is the shared classpath:db/migration namespace —
+    // managed-agent-server depends on runtime-broker, so one invocation must
+    // name every module that owns a migration sequence. Derive the
+    // expectation from the tree: a module that grows a db/migration without
+    // joining the invocation turns this red.
+    const owners = new Set();
+    for (const entry of readdirSync('packages/sdk-java', {
+      withFileTypes: true,
+    })) {
+      if (!entry.isDirectory()) continue;
+      for (const location of [
+        'src/main/resources/db/migration',
+        'src/main/java/db/migration',
+      ]) {
+        if (existsSync(join('packages/sdk-java', entry.name, location))) {
+          owners.add(`packages/sdk-java/${entry.name}`);
+        }
+      }
+    }
+    expect(owners.size).toBeGreaterThan(0);
+    const block = job('flyway-migrations');
+    for (const owner of owners) {
+      expect(block).toContain(owner);
+    }
   });
 
   it('triggers the workflow when the guard script itself changes', () => {

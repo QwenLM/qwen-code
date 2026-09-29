@@ -48,6 +48,22 @@ function check(...args) {
   return { status: result.status, output: result.stdout + result.stderr };
 }
 
+// The forgery fixtures below create filenames only the POSIX lanes allow
+// (LF, `:`) — both un-creatable on the Windows lane, where this suite still
+// runs. Gate on the CAPABILITY, not the platform, probing once at module
+// scope; scripts/tests/review-artifact-upload.test.js sets the precedent.
+const newlineNamesWork = (() => {
+  const probe = mkdtempSync(join(tmpdir(), 'flyway-name-probe-'));
+  try {
+    writeFileSync(join(probe, 'a\nb:c'), '');
+    return true;
+  } catch {
+    return false;
+  } finally {
+    rmSync(probe, { recursive: true, force: true });
+  }
+})();
+
 describe('check-flyway-migrations', () => {
   it('passes when every version is claimed once across both locations', () => {
     const dir = module('server', {
@@ -200,20 +216,80 @@ describe('check-flyway-migrations', () => {
     expect(result.status).toBe(1);
   });
 
-  it('escapes a contributor-controlled filename inside the ::error:: command', () => {
-    // git carries LF in filenames and the runner parses workflow commands
-    // from stderr too, so an unescaped newline would emit a second, forged
-    // ::error:: line from a fork PR's filename.
-    const dir = module('server', {
-      sql: ['V16__legit.sql', 'V16__x\n::error::forged.sql'],
-    });
-    const result = check(dir);
+  it.skipIf(!newlineNamesWork)(
+    'escapes a contributor-controlled filename inside the ::error:: command',
+    () => {
+      // git carries LF in filenames and the runner parses workflow commands
+      // from stderr too, so an unescaped newline would emit a second, forged
+      // ::error:: line from a fork PR's filename.
+      const dir = module('server', {
+        sql: ['V16__legit.sql', 'V16__x\n::error::forged.sql'],
+      });
+      const result = check(dir);
+      expect(result.status).toBe(1);
+      expect(
+        result.output
+          .split('\n')
+          .every((line) => !line.startsWith('::error::forged')),
+      ).toBe(true);
+    },
+  );
+
+  it.skipIf(!newlineNamesWork)(
+    'escapes a percent-encoded forgery the runner would decode',
+    () => {
+      // The runner percent-decodes a workflow command's data when rendering
+      // the annotation, so the forgery this defends against appears only
+      // AFTER decoding: an unescaped %0A in a filename renders as a second
+      // ::error:: line no file contained, while the raw-byte oracle above
+      // still passes. Decode the way the runner does — %25 LAST, or the
+      // %0A/%0D the escaper emitted would decode twice.
+      const dir = module('server', {
+        sql: ['V16__legit.sql', 'V16__x%0A::error::forged.sql'],
+      });
+      const result = check(dir);
+      expect(result.status).toBe(1);
+      const decoded = result.output
+        .replace(/%0D/g, '\r')
+        .replace(/%0A/g, '\n')
+        .replace(/%25/g, '%');
+      expect(
+        decoded
+          .split('\n')
+          .every((line) => !line.startsWith('::error::forged')),
+      ).toBe(true);
+    },
+  );
+
+  it('reports a three-way collision once, naming every claimant', () => {
+    // One version claimed in three modules of one invocation is ONE
+    // collision: the consumer keys its issue on the module and version in
+    // this line, so a second line naming another module would file a second
+    // issue — and a claimant must never print a clean summary.
+    const first = module('first', { sql: ['V1__x.sql'] });
+    const second = module('second', { sql: ['V1__y.sql'] });
+    const third = module('third', { sql: ['V1__z.sql'] });
+    const result = check(first, second, third);
     expect(result.status).toBe(1);
-    expect(
-      result.output
-        .split('\n')
-        .every((line) => !line.startsWith('::error::forged')),
-    ).toBe(true);
+    const errorLines = result.output
+      .split('\n')
+      .filter((line) => line.startsWith('::error::'));
+    expect(errorLines).toHaveLength(1);
+    expect(errorLines[0]).toContain('3 migrations claim version 1');
+    expect(errorLines[0]).toContain('V1__x.sql');
+    expect(errorLines[0]).toContain('V1__y.sql');
+    expect(errorLines[0]).toContain('V1__z.sql');
+    expect(result.output).not.toContain('all versions unique');
+  });
+
+  it('passes a module that owns no migrations', () => {
+    // runtime-broker shares the classpath namespace but carries no migration
+    // sequence; requiring its SQL location would fail the whole invocation.
+    const dir = module('broker');
+    mkdirSync(join(dir, 'src/main/java/com/example'), { recursive: true });
+    const result = check(dir);
+    expect(result.output).toContain('no migration directories');
+    expect(result.status).toBe(0);
   });
 
   it('refuses a missing module or a missing argument', () => {
