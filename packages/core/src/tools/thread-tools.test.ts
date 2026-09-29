@@ -233,6 +233,52 @@ describe('thread tools', () => {
     expect(child.rootThreadId).toBe(parent.rootThreadId);
   });
 
+  // Dedupe exists so a retry cannot duplicate a live hand-off. It must not
+  // also swallow a *different* delegation that happens to reuse the title.
+  it("delivers a reused title's new hand-off details instead of dropping them", async () => {
+    const parent = await seedThread();
+
+    const first = await runWithAgentRunContext(frame(parent), () =>
+      new ThreadCreateTool(config)
+        .build({
+          title: 'Review tests',
+          assignee: '@bob',
+          body: 'check the auth suite',
+          acceptanceCriteria: 'auth e2e green',
+        })
+        .execute(new AbortController().signal),
+    );
+    expect(first.llmContent).toContain('Created sub-thread');
+
+    const second = await runWithAgentRunContext(frame(parent), () =>
+      new ThreadCreateTool(config)
+        .build({
+          title: 'Review tests',
+          assignee: '@bob',
+          body: 'check the billing suite',
+          acceptanceCriteria: 'billing e2e green',
+        })
+        .execute(new AbortController().signal),
+    );
+
+    const { threads } = await import(
+      '../agents/workspace-agents/store.js'
+    ).then((m) => m.listThreads(PROJECT_ROOT));
+    const children = threads.filter(
+      (thread) => thread.parentThreadId === parent.id,
+    );
+    // Still one thread: the duplicate was not created.
+    expect(children).toHaveLength(1);
+    // And the caller is not told the hand-off happened when nothing was written.
+    expect(second.llmContent).toContain('Reused existing sub-thread');
+    expect(second.llmContent).toContain('posted to it');
+    const posted = children[0]!.messages
+      .map((message) => message.text)
+      .join('\n');
+    expect(posted).toContain('check the billing suite');
+    expect(posted).toContain('billing e2e green');
+  });
+
   it('rejects an unknown or disabled assignee by name', async () => {
     const parent = await seedThread();
 
