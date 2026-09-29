@@ -247,6 +247,15 @@ class RuntimeBrokerHttpServerTest {
                 assertEquals("runtime_broker_execution_unknown",
                         JSON.parseObject(started.body()).getString("code"));
             }
+            // The cancel route shares the envelope: the call never started,
+            // but the physical cancellation still reaches the worker.
+            HttpResponse<String> cancelled = fixture.post("/executions/" + id + ":cancel", Map.of(
+                    "protocolVersion", 1, "requestId", "cancel", "harnessSessionId", "harness",
+                    "runtimeSessionId", runtime));
+            assertEquals(409, cancelled.statusCode(), cancelled.body());
+            assertEquals("runtime_broker_execution_unknown",
+                    JSON.parseObject(cancelled.body()).getString("code"));
+            assertEquals(1, fixture.transport.cancellations.get());
             HttpRequest read = HttpRequest.newBuilder(fixture.uri("/executions/" + id
                     + "?requestId=read&harnessSessionId=harness&runtimeSessionId=" + runtime))
                     .header("Authorization", "Bearer secret").GET().build();
