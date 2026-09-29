@@ -11,6 +11,7 @@ import { theme } from '../semantic-colors.js';
 import type { LoadedSettings, Settings } from '../../config/settings.js';
 import { SettingScope } from '../../config/settings.js';
 import { getScopeMessageForSetting } from '../../config/dialogScopeUtils.js';
+import { formatSettingRowValue } from '../../utils/aux-model-selector.js';
 import { ScopeSelector } from './shared/ScopeSelector.js';
 import { t } from '../../i18n/index.js';
 import { ICON } from '../constants.js';
@@ -39,7 +40,6 @@ import {
   useVimModeActions,
 } from '../contexts/VimModeContext.js';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
-import { parseVisionModelSetting } from '@qwen-code/qwen-code-core/config/config.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import {
@@ -1301,16 +1301,14 @@ export function SettingsDialog({
                 effectiveCurrentValue !== undefined &&
                 effectiveCurrentValue !== null
               ) {
-                // Aux model selectors may persist as `authType:id\0<baseUrl>`
-                // (#12760); display the selector half only, never the raw NUL
-                // byte or the provider endpoint.
-                displayValue =
-                  (item.value === 'fastModel' ||
-                    item.value === 'compactionModel') &&
-                  typeof effectiveCurrentValue === 'string'
-                    ? (parseVisionModelSetting(effectiveCurrentValue)
-                        ?.selector ?? effectiveCurrentValue)
-                    : String(effectiveCurrentValue);
+                // Aux-model selectors persist as `authType:id\0baseUrl`; the
+                // suffix can embed userinfo credentials, so the row value goes
+                // through the shared scrub-aware formatter instead of a
+                // dialog-local copy of the rule.
+                displayValue = formatSettingRowValue(
+                  item.value,
+                  effectiveCurrentValue,
+                );
               } else {
                 displayValue = '';
               }

@@ -9,7 +9,6 @@ import {
   APPROVAL_MODES,
   createDebugLogger,
   ModelsConfig,
-  parseVisionModelSetting,
   tokenLimit,
 } from '@qwen-code/qwen-code-core';
 import { resolveReasoningCapabilities } from '@qwen-code/qwen-code-core/core/reasoning-overrides.js';
@@ -38,6 +37,7 @@ import {
   parseAcpBaseModelId,
   sanitizeProviderBaseUrl,
 } from '../utils/acpModelUtils.js';
+import { publicAuxModelSelectorValue } from '../utils/aux-model-selector.js';
 import { buildModelReasoningRoutePreview } from '../acp-integration/model-configuration.js';
 import { snapshotProcessEnv } from './env-snapshot.js';
 import { getModelConfigurationKey } from './model-configuration.js';
@@ -140,13 +140,9 @@ function buildWorkspaceProvidersStatus(
           currentRegistryBaseUrl,
         )
       : undefined;
-    // The picker may persist `authType:id\0<baseUrl>` (#12760); the status
-    // payload ships the selector half only, never the raw NUL byte or the
-    // provider endpoint.
     const fastModelId =
       typeof settings.fastModel === 'string' && settings.fastModel.length > 0
-        ? (parseVisionModelSetting(settings.fastModel)?.selector ??
-          settings.fastModel)
+        ? settings.fastModel
         : undefined;
     const visionModelId =
       typeof settings.visionModel === 'string' &&
@@ -380,7 +376,13 @@ function buildCurrent(
     ...(authType ? { authType: String(authType) } : {}),
     ...(modelId ? { modelId } : {}),
     ...(baseUrl ? { baseUrl: sanitizeProviderBaseUrl(baseUrl) } : {}),
-    ...(fastModelId ? { fastModelId } : {}),
-    ...(visionModelId ? { visionModelId } : {}),
+    // The aux selectors persist as `authType:id\0baseUrl`; publish the
+    // credential-stripped form like the neighbouring baseUrl field.
+    ...(fastModelId
+      ? { fastModelId: publicAuxModelSelectorValue(fastModelId) }
+      : {}),
+    ...(visionModelId
+      ? { visionModelId: publicAuxModelSelectorValue(visionModelId) }
+      : {}),
   };
 }

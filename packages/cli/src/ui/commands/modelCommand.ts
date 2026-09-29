@@ -20,7 +20,6 @@ import {
   type Config,
   isImageCapable,
   isImageGenerationCapable,
-  parseVisionModelSetting,
   resolveModelId,
 } from '@qwen-code/qwen-code-core';
 import { SettingScope, type LoadedSettings } from '../../config/settings.js';
@@ -28,6 +27,7 @@ import {
   isInlineModelOverrideAllowed,
   parseAcpModelOption,
 } from '../../utils/acpModelUtils.js';
+import { formatAuxModelSelectorForDisplay } from '../../utils/aux-model-selector.js';
 import { recordDaemonSessionModelFromConfig } from '../../acp-integration/session-model-persistence.js';
 import {
   formatUnsupportedVoiceModelMessage,
@@ -109,14 +109,6 @@ function persistScopeSpread(
   if (scopeOverride === SettingScope.User)
     return { persistScope: 'user' as const };
   return {};
-}
-
-function formatVisionModelSettingForDisplay(setting: string): string {
-  const parsed = parseVisionModelSetting(setting);
-  if (!parsed) return setting.replace(/\0/g, '\\0');
-  return parsed.baseUrl
-    ? `${parsed.selector} (${parsed.baseUrl})`
-    : parsed.selector;
 }
 
 /**
@@ -763,7 +755,7 @@ export const modelCommand: SlashCommand = {
               'Current vision model: {{visionModel}}\nUse "/model --vision <model-id>" to set the vision bridge model.',
               {
                 visionModel: visionModel
-                  ? formatVisionModelSettingForDisplay(visionModel)
+                  ? formatAuxModelSelectorForDisplay(visionModel)
                   : t('not set'),
               },
             ),
@@ -994,7 +986,7 @@ export const modelCommand: SlashCommand = {
               'Current image model: {{imageModel}}\nUse "/model --image <model-id>" to set the image generation model.',
               {
                 imageModel: imageModel
-                  ? formatVisionModelSettingForDisplay(imageModel)
+                  ? formatAuxModelSelectorForDisplay(imageModel)
                   : t('not set'),
               },
             ),

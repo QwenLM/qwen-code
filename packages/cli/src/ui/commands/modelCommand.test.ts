@@ -1577,6 +1577,62 @@ describe('modelCommand', () => {
     });
   });
 
+  it('should redact userinfo from the vision model baseUrl in non-interactive readback', async () => {
+    mockContext = createMockCommandContext({
+      executionMode: 'non_interactive',
+      invocation: { args: '--vision' },
+      services: {
+        config: createMockConfig({
+          model: 'qwen-max',
+          authType: AuthType.USE_OPENAI,
+        }),
+        settings: {
+          merged: {
+            visionModel:
+              'qwen-vl-max\0https://user:sk-secret@vision.example.com/v1',
+          } as Record<string, unknown>,
+        },
+      },
+    });
+
+    const result = await modelCommand.action!(mockContext, '--vision');
+
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content:
+        'Current vision model: qwen-vl-max (https://vision.example.com/v1)\nUse "/model --vision <model-id>" to set the vision bridge model.',
+    });
+  });
+
+  it('should redact userinfo from the image model baseUrl in non-interactive readback', async () => {
+    mockContext = createMockCommandContext({
+      executionMode: 'non_interactive',
+      invocation: { args: '--image' },
+      services: {
+        config: createMockConfig({
+          model: 'qwen-max',
+          authType: AuthType.USE_OPENAI,
+        }),
+        settings: {
+          merged: {
+            imageModel:
+              'openai:dall-e\0https://user:sk-secret@image.example.com/v1',
+          } as Record<string, unknown>,
+        },
+      },
+    });
+
+    const result = await modelCommand.action!(mockContext, '--image');
+
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content:
+        'Current image model: openai:dall-e (https://image.example.com/v1)\nUse "/model --image <model-id>" to set the image generation model.',
+    });
+  });
+
   it('should show a malformed vision model setting without hiding the empty selector', async () => {
     mockContext = createMockCommandContext({
       executionMode: 'non_interactive',

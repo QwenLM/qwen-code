@@ -1433,7 +1433,13 @@ describe('<ModelDialog />', () => {
   it('keeps the selected baseUrl for same-provider duplicate vision model ids', async () => {
     const switchModel = vi.fn();
     const setVisionModel = vi.fn();
-    const selectedBaseUrl = 'https://token-plan.example.com/v1';
+    // Credential-bearing on purpose. This dialog's `encodeVisionModelSelector`
+    // is a private twin of the OpenTUI one, so no unit test can import it: the
+    // only row that can pin its registry-exact persist is this one, and it can
+    // only do so if the fixture carries a userinfo suffix. Re-adding a
+    // write-path strip here (as this PR briefly did, then reverted in
+    // `03ee72d7d7`) must red the assertions below.
+    const selectedBaseUrl = 'https://user:sk-secret@token-plan.example.com/v1';
     const { props, mockSettings } = renderComponent(
       { isVisionModelMode: true },
       {

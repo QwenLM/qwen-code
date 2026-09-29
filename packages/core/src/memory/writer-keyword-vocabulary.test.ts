@@ -112,7 +112,7 @@ describe('writer keyword vocabulary snapshot', () => {
     expect(snapshot).toContain('team policy (1)');
   });
 
-  it('keeps the truncation warning inside the total character budget', () => {
+  it('reserves structural overhead for every scope', () => {
     const docs = (['project', 'user', 'team'] as const).flatMap((scope) => {
       const stable = Array.from(
         { length: 100 },
@@ -133,6 +133,9 @@ describe('writer keyword vocabulary snapshot', () => {
     const snapshot = renderWriterKeywordVocabularySnapshot(docs);
 
     expect(snapshot.length).toBeLessThanOrEqual(8_000);
-    expect(snapshot).toContain('snapshot was truncated');
+    expect(snapshot).not.toContain('snapshot was truncated');
+    expect(snapshot.match(/omitted: \d+ keywords due to budget/g)).toHaveLength(
+      3,
+    );
   });
 });

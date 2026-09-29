@@ -298,6 +298,7 @@ const codeModeHostBuild = esbuild.build({
 const sandboxWorkersBuild = esbuild.build({
   entryPoints: {
     sandboxBwrapRelay: 'packages/core/src/sandbox/bwrap-relay.ts',
+    sandboxLandlockRelay: 'packages/core/src/sandbox/landlock-relay.ts',
     sandboxFileWorker: 'packages/core/src/sandbox/file-worker.ts',
   },
   bundle: true,

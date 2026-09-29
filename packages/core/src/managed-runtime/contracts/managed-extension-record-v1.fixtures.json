@@ -8438,6 +8438,38 @@
         "runtime": null,
         "delivery": null
       }
+    },
+    {
+      "id": "running-on-an-execution-that-never-started",
+      "valid": false,
+      "run": {
+        "state": "running",
+        "reason": null,
+        "definition": null,
+        "executionCallId": "call-1",
+        "effectId": null,
+        "dispatchId": null,
+        "deliveryId": null,
+        "execution": "not_started_proven",
+        "runtime": null,
+        "delivery": null
+      }
+    },
+    {
+      "id": "waiting-on-an-execution-that-never-started",
+      "valid": false,
+      "run": {
+        "state": "waiting",
+        "reason": null,
+        "definition": null,
+        "executionCallId": "call-1",
+        "effectId": null,
+        "dispatchId": null,
+        "deliveryId": null,
+        "execution": "not_started_proven",
+        "runtime": null,
+        "delivery": null
+      }
     }
   ],
   "runSuccessorCases": [
@@ -16501,6 +16533,42 @@
           "delivery": null
         }
       }
+    },
+    {
+      "id": "running-on-a-watch-that-never-started",
+      "valid": false,
+      "monitorRun": {
+        "monitorId": "monitor-1",
+        "ownerScopeId": "scope-main",
+        "commandRef": {
+          "resourceId": "args-monitor-1",
+          "kind": "managed-tool-args",
+          "schemaVersion": 1,
+          "byteLength": 96,
+          "digest": "340601d2ac8c6a56866fb7076a83f265768be2cf64a2d70f0b1b1fad691b64b1"
+        },
+        "maxEvents": 1000,
+        "idleTimeoutMs": 300000,
+        "debounceMs": 1000,
+        "startReceiptRef": null,
+        "observationSequence": 0,
+        "lastObservationRef": null,
+        "notifiedThrough": 0,
+        "stopReason": null,
+        "outputRef": null,
+        "run": {
+          "state": "running",
+          "reason": null,
+          "definition": null,
+          "executionCallId": "call-monitor-1",
+          "effectId": null,
+          "dispatchId": null,
+          "deliveryId": null,
+          "execution": "not_started_proven",
+          "runtime": null,
+          "delivery": null
+        }
+      }
     }
   ],
   "monitorRunSuccessorCases": [
@@ -20886,6 +20954,74 @@
             "runtimeBindingId": "binding-1",
             "generation": "1"
           },
+          "delivery": null
+        }
+      }
+    },
+    {
+      "id": "runs-on-a-watch-that-never-started",
+      "valid": false,
+      "previous": {
+        "monitorId": "monitor-1",
+        "ownerScopeId": "scope-main",
+        "commandRef": {
+          "resourceId": "args-monitor-1",
+          "kind": "managed-tool-args",
+          "schemaVersion": 1,
+          "byteLength": 96,
+          "digest": "340601d2ac8c6a56866fb7076a83f265768be2cf64a2d70f0b1b1fad691b64b1"
+        },
+        "maxEvents": 1000,
+        "idleTimeoutMs": 300000,
+        "debounceMs": 1000,
+        "startReceiptRef": null,
+        "observationSequence": 0,
+        "lastObservationRef": null,
+        "notifiedThrough": 0,
+        "stopReason": null,
+        "outputRef": null,
+        "run": {
+          "state": "admitted",
+          "reason": null,
+          "definition": null,
+          "executionCallId": "call-monitor-1",
+          "effectId": null,
+          "dispatchId": null,
+          "deliveryId": null,
+          "execution": "intent",
+          "runtime": null,
+          "delivery": null
+        }
+      },
+      "next": {
+        "monitorId": "monitor-1",
+        "ownerScopeId": "scope-main",
+        "commandRef": {
+          "resourceId": "args-monitor-1",
+          "kind": "managed-tool-args",
+          "schemaVersion": 1,
+          "byteLength": 96,
+          "digest": "340601d2ac8c6a56866fb7076a83f265768be2cf64a2d70f0b1b1fad691b64b1"
+        },
+        "maxEvents": 1000,
+        "idleTimeoutMs": 300000,
+        "debounceMs": 1000,
+        "startReceiptRef": null,
+        "observationSequence": 0,
+        "lastObservationRef": null,
+        "notifiedThrough": 0,
+        "stopReason": null,
+        "outputRef": null,
+        "run": {
+          "state": "running",
+          "reason": null,
+          "definition": null,
+          "executionCallId": "call-monitor-1",
+          "effectId": null,
+          "dispatchId": null,
+          "deliveryId": null,
+          "execution": "not_started_proven",
+          "runtime": null,
           "delivery": null
         }
       }

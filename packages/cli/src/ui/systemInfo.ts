@@ -10,12 +10,12 @@ import os from 'node:os';
 import { execFile } from 'node:child_process';
 import type { CommandContext } from './commands/types.js';
 import { getCliVersion } from '../utils/version.js';
+import { formatAuxModelSelectorForDisplay } from '../utils/aux-model-selector.js';
 import {
   IdeClient,
   AuthType,
   createDebugLogger,
   formatMemoryUsage,
-  parseVisionModelSetting,
   type LspStatusSnapshot,
 } from '@qwen-code/qwen-code-core';
 import { GIT_COMMIT_INFO } from '../generated/git-commit.js';
@@ -234,15 +234,13 @@ export async function getExtendedSystemInfo(
       ? GIT_COMMIT_INFO
       : undefined;
 
-  // Get fast model from settings. The picker may persist
-  // `authType:id\0<baseUrl>` (#12760); report the selector half only — the
-  // persisted value keeps the endpoint, but status display must not emit the
-  // raw NUL byte or the provider endpoint.
-  const rawFastModel = context.services.settings?.merged?.fastModel;
-  const fastModel =
-    (typeof rawFastModel === 'string'
-      ? (parseVisionModelSetting(rawFastModel)?.selector ?? rawFastModel)
-      : rawFastModel) || undefined;
+  // Get fast model from settings. The persisted selector can carry a
+  // userinfo-bearing baseUrl suffix — bug reports must not embed it.
+  const fastModelSetting =
+    context.services.settings?.merged?.fastModel || undefined;
+  const fastModel = fastModelSetting
+    ? formatAuxModelSelectorForDisplay(fastModelSetting)
+    : undefined;
   const lspStatus = getLspStatus(context);
 
   return {

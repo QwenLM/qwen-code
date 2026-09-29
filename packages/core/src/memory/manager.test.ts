@@ -7,6 +7,7 @@
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import type { Content } from '@google/genai';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   globalMemoryManager,
@@ -30,11 +31,13 @@ import { ToolNames } from '../tools/tool-names.js';
 
 const telemetryMocks = vi.hoisted(() => ({
   logMemoryExtract: vi.fn(),
+  logMemoryMigration: vi.fn(),
 }));
 
 vi.mock('../telemetry/index.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../telemetry/index.js')>()),
   logMemoryExtract: telemetryMocks.logMemoryExtract,
+  logMemoryMigration: telemetryMocks.logMemoryMigration,
 }));
 
 vi.mock('./extract.js', () => ({
@@ -828,6 +831,73 @@ describe('MemoryManager', () => {
       }
     });
 
+    it('preserves committed counts when the index rebuild fails', async () => {
+      telemetryMocks.logMemoryMigration.mockClear();
+      await writeLegacy(getAutoMemoryRoot(projectRoot), 'project.md');
+      vi.spyOn(
+        metadataMigration,
+        'runMemoryMetadataMigration',
+      ).mockResolvedValue({
+        filesScanned: 1,
+        legacyFiles: 1,
+        remainingLegacyFiles: 0,
+        attempted: 1,
+        committed: 1,
+        conflicts: 0,
+        failed: 0,
+        agentDurationMs: 1,
+        inputTokens: 1,
+        outputTokens: 1,
+        totalTokens: 2,
+        indexRebuildError: 'Index rebuild failed',
+      });
+      const manager = new MemoryManager();
+      const params = {
+        projectRoot,
+        scope: 'project' as const,
+        config: makeMockConfig(),
+      };
+      const scheduled = await manager.scheduleMetadataMigration(params);
+
+      expect(scheduled.status).toBe('scheduled');
+      if (scheduled.status !== 'scheduled') return;
+      const record = await scheduled.promise;
+      expect(record).toMatchObject({
+        status: 'failed',
+        error: 'Index rebuild failed',
+        metadata: {
+          attempted: 1,
+          committed: 1,
+          remainingLegacyFiles: 0,
+          indexRebuildError: 'Index rebuild failed',
+        },
+      });
+      // The telemetry event must agree with the task record: a failed run
+      // with the committed counts intact and the reason attached.
+      expect(telemetryMocks.logMemoryMigration).toHaveBeenCalledTimes(1);
+      expect(
+        telemetryMocks.logMemoryMigration.mock.calls[0]?.[1],
+      ).toMatchObject({
+        status: 'failed',
+        failure_reason: 'Index rebuild failed',
+        committed: 1,
+        failed: 0,
+        remaining_legacy_files: 0,
+      });
+      for (let attempt = 1; attempt < 3; attempt++) {
+        const retry = await manager.scheduleMetadataMigration(params);
+        expect(retry.status).toBe('scheduled');
+        await retry.promise;
+      }
+      await expect(manager.scheduleMetadataMigration(params)).resolves.toEqual({
+        status: 'skipped',
+        skippedReason: 'stalled',
+      });
+      expect(
+        metadataMigration.runMemoryMetadataMigration,
+      ).toHaveBeenCalledTimes(3);
+    });
+
     it('tells the manual dream gate that the migration has stalled', async () => {
       // dream.ts owns the manual migration gate but cannot read the stall
       // counter, so the manager has to hand it over. Without the flag a
@@ -1389,6 +1459,250 @@ describe('MemoryManager', () => {
         expect(vi.mocked(runAutoMemoryExtract)).not.toHaveBeenCalled();
       },
     );
+
+    it('skips only the turn containing a successful manage_memory call', async () => {
+      vi.mocked(runAutoMemoryExtract).mockResolvedValue({
+        touchedTopics: [],
+        cursor: { sessionId: 'sess-1', updatedAt: new Date().toISOString() },
+      });
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'Remember my unit preference.' }] },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'manage-memory',
+                name: ToolNames.MANAGE_MEMORY,
+                args: { action: 'remember', content: 'Use microseconds.' },
+              },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'manage-memory',
+                name: ToolNames.MANAGE_MEMORY,
+                response: { output: '{"updated":1}' },
+              },
+            },
+          ],
+        },
+        { role: 'model', parts: [{ text: 'Remembered.' }] },
+        { role: 'user', parts: [{ text: 'The release window is Friday.' }] },
+        { role: 'model', parts: [{ text: 'Understood.' }] },
+      ];
+      const mgr = new MemoryManager();
+      const sameTurn = await mgr.scheduleExtract({
+        projectRoot,
+        sessionId: 'sess-1',
+        history: history.slice(0, 3),
+      });
+
+      expect(sameTurn.skippedReason).toBe('memory_tool');
+      expect(runAutoMemoryExtract).not.toHaveBeenCalled();
+      const laterTurn = await mgr.scheduleExtract({
+        projectRoot,
+        sessionId: 'sess-1',
+        history: [...history],
+      });
+
+      expect(laterTurn.skippedReason).toBeUndefined();
+      expect(runAutoMemoryExtract).toHaveBeenCalledOnce();
+    });
+
+    it('does not skip extraction after manage_memory fails', async () => {
+      vi.mocked(runAutoMemoryExtract).mockResolvedValue({
+        touchedTopics: [],
+        cursor: { sessionId: 'sess-1', updatedAt: new Date().toISOString() },
+      });
+      const mgr = new MemoryManager();
+      const result = await mgr.scheduleExtract({
+        projectRoot,
+        sessionId: 'sess-1',
+        history: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'manage-memory',
+                  name: ToolNames.MANAGE_MEMORY,
+                  args: { action: 'remember', content: 'Use microseconds.' },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'manage-memory',
+                  name: ToolNames.MANAGE_MEMORY,
+                  response: { error: 'failed' },
+                },
+              },
+            ],
+          },
+        ],
+      });
+
+      expect(result.skippedReason).toBeUndefined();
+      expect(runAutoMemoryExtract).toHaveBeenCalledOnce();
+    });
+
+    it('does not skip extraction after a direct memory write is rejected', async () => {
+      // Same invariant as `manage_memory` above, applied to the other arm of
+      // the predicate: prior-read enforcement, a `permissions.deny` rule on a
+      // memory path, EISDIR or ENOSPC all reject a `write_file` before anything
+      // reaches memory, so the turn's content still needs extracting.
+      vi.mocked(runAutoMemoryExtract).mockResolvedValue({
+        touchedTopics: [],
+        cursor: { sessionId: 'sess-1', updatedAt: new Date().toISOString() },
+      });
+      const mgr = new MemoryManager();
+      const rejected = await mgr.scheduleExtract({
+        projectRoot,
+        sessionId: 'sess-1',
+        history: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'write-1',
+                  name: 'write_file',
+                  args: {
+                    file_path: path.join(
+                      projectRoot,
+                      '.qwen/memory/user/test.md',
+                    ),
+                  },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'write-1',
+                  name: 'write_file',
+                  response: { error: 'permission denied by rule' },
+                },
+              },
+            ],
+          },
+        ],
+      });
+
+      expect(rejected.skippedReason).toBeUndefined();
+      expect(runAutoMemoryExtract).toHaveBeenCalledOnce();
+
+      // Control: the same shape with a successful response still suppresses,
+      // so the gate is absence-of-failure and not "always extract".
+      vi.mocked(runAutoMemoryExtract).mockClear();
+      const succeeded = await mgr.scheduleExtract({
+        projectRoot,
+        sessionId: 'sess-2',
+        history: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'write-2',
+                  name: 'write_file',
+                  args: {
+                    file_path: path.join(
+                      projectRoot,
+                      '.qwen/memory/user/test.md',
+                    ),
+                  },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'write-2',
+                  name: 'write_file',
+                  response: { output: 'wrote file' },
+                },
+              },
+            ],
+          },
+        ],
+      });
+
+      expect(succeeded.skippedReason).toBe('memory_tool');
+      expect(runAutoMemoryExtract).not.toHaveBeenCalled();
+    });
+
+    it('does not skip extraction after a no-op manage_memory forget', async () => {
+      vi.mocked(runAutoMemoryExtract).mockResolvedValue({
+        touchedTopics: [],
+        cursor: { sessionId: 'sess-1', updatedAt: new Date().toISOString() },
+      });
+      const mgr = new MemoryManager();
+      const result = await mgr.scheduleExtract({
+        projectRoot,
+        sessionId: 'sess-1',
+        history: [
+          {
+            role: 'user',
+            parts: [
+              {
+                text: 'Forget the old deploy rule - and note deploys now need two approvals.',
+              },
+            ],
+          },
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'manage-memory',
+                  name: ToolNames.MANAGE_MEMORY,
+                  args: { action: 'forget', content: 'old deploy rule' },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'manage-memory',
+                  name: ToolNames.MANAGE_MEMORY,
+                  // manage_memory reports forget success with removed: 0 when
+                  // nothing matched - no error key, no throw.
+                  response: {
+                    output:
+                      '{"action":"forget","removed":0,"touchedScopes":[]}',
+                  },
+                },
+              },
+            ],
+          },
+          { role: 'model', parts: [{ text: 'Nothing matched that rule.' }] },
+        ],
+      });
+
+      // A successful call does not imply a write, so skipping here would
+      // silently drop the new durable fact stated in the same turn.
+      expect(result.skippedReason).toBeUndefined();
+      expect(runAutoMemoryExtract).toHaveBeenCalledOnce();
+    });
 
     it('does not treat an unrelated bridged call as a memory write', async () => {
       vi.mocked(runAutoMemoryExtract).mockResolvedValue({

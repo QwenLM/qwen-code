@@ -159,6 +159,9 @@ export function encodeAuxModelSelector(selected: string): string {
   if (selected.includes('::')) {
     const parsed = parseModelSelectionKey(selected);
     const selector = `${parsed.authType}:${parsed.modelId}`;
+    // Parity of the ink dialog: the suffix is persisted registry-exact because
+    // it is the routing key consumers compare with `===`. Egress surfaces scrub
+    // it through `aux-model-selector.ts`.
     return parsed.baseUrl ? `${selector}\0${parsed.baseUrl}` : selector;
   }
   if (selected.startsWith('$runtime|')) {

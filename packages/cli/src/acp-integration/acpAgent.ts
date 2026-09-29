@@ -173,7 +173,6 @@ import {
   getLastPeerInboxFailure,
   SessionSourceService,
   SessionSourceError,
-  parseVisionModelSetting,
 } from '@qwen-code/qwen-code-core';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
@@ -300,6 +299,7 @@ import {
 } from './extension-skills.js';
 import { Session, registerCreateSubSessionTool } from './session/Session.js';
 import { restoreSessionModelThenAuthenticate } from './session-model-persistence.js';
+import { applyRestoredSessionApprovalMode } from './session-approval-mode-persistence.js';
 import { HistoryReplayer } from './session/history-replayer.js';
 import { renderPreparedGoalUpdate } from './session/recovered-goal-update.js';
 import { ActiveWorkReporter } from './active-work-reporter.js';
@@ -352,6 +352,10 @@ import {
   sanitizeProviderBaseUrl,
 } from '../utils/acpModelUtils.js';
 import {
+  isAuxModelSelectorSettingKey,
+  publicAuxModelSelectorValue,
+} from '../utils/aux-model-selector.js';
+import {
   updateOutputLanguageFile,
   resolveOutputLanguageOrPreserveAuto,
   getOutputLanguageFilePath,
@@ -363,7 +367,7 @@ import { registerCleanup, runExitCleanup } from '../utils/cleanup.js';
 import { QWEN_CODE_SERVE_ENV } from '../config/acp-channel-fallback.js';
 import { isSshWorkspaceExtMethodAllowed } from './ssh-workspace-guards.js';
 import { PeerMessaging } from '../peerMessaging/peer-messaging.js';
-import { isCrossSessionMessagingEnabled } from '../peerMessaging/enabled.js';
+import { isCrossSessionMessagingActive } from '../peerMessaging/enabled.js';
 import { startNonInteractiveOpenAILogHousekeeping } from '../services/housekeeping/scheduler.js';
 import { appEvents, AppEvent } from '../utils/events.js';
 import {
@@ -725,6 +729,7 @@ type AcpSessionProfileStage =
   | 'live_restore'
   | 'existence_check'
   | 'config_setup'
+  | 'restore_approval_mode'
   | 'restore_session_model'
   | 'auth'
   | 'file_system_setup'
@@ -2102,7 +2107,12 @@ function readCoreSettingValues(
   for (const key of QWEN_CORE_SETTING_KEYS) {
     const value = getNestedSettingValue(source, key);
     if (value !== undefined) {
-      values[key] = value;
+      // Aux-model selectors persist as `authType:id\0baseUrl`; the suffix
+      // can embed userinfo credentials and must not reach the ACP client.
+      values[key] =
+        typeof value === 'string' && isAuxModelSelectorSettingKey(key)
+          ? publicAuxModelSelectorValue(value)
+          : value;
     }
   }
   return values;
@@ -3896,8 +3906,8 @@ class QwenAgent implements Agent {
    * converged on, seeded with the session's boot-derived mode at
    * publication. `workspaceReload` compares the reloaded disk value against
    * this — not against each session's live mode — because approval mode has
-   * runtime-only writers (`ExitPlanModeTool` approved plan exits, ACP
-   * `session/set_mode`, the `sessionApprovalMode` ext) that never persist,
+   * writers (`ExitPlanModeTool` approved plan exits, ACP `session/set_mode`,
+   * the `sessionApprovalMode` ext) that do not update workspace settings,
    * so a live session legitimately diverges from the file mid-workflow and
    * an unchanged file must not clobber those transitions. The record lives
    * on the daemon so it survives a `this.settings` cache swap, and per
@@ -5010,7 +5020,7 @@ class QwenAgent implements Agent {
   /**
    * Give a newly published session a registry record of its own.
    *
-   * Only when that session's own settings turn messaging on. A record
+   * Only when that session itself takes part in messaging. A record
    * with no inbox behind it would put a name in every peer's listing
    * that can be addressed and never answered, which is worse than not
    * appearing at all — the interactive UI registers unconditionally
@@ -5022,11 +5032,15 @@ class QwenAgent implements Agent {
     config: Config,
     settings: LoadedSettings,
   ): void {
-    // Each session's own settings decide: one process can host sessions
-    // from more than one workspace, and a record exists to be addressed,
-    // so it is written only when that session's settings turn messaging
-    // on. The process's startup settings answer for nobody else.
-    if (!isCrossSessionMessagingEnabled(settings.merged)) return;
+    // Each session decides for itself: one process can host sessions from
+    // more than one workspace, and a record exists to be addressed, so it
+    // is written only when that session takes part. Read off this session's
+    // own `config`, never a process-startup one. The suppressions count
+    // here exactly as they do in the interactive UI: without them a hosted
+    // safe-mode or bare session binds an inbox and publishes its `ipcPath`,
+    // advertising itself as reachable from the mode that exists to close
+    // that surface — and, having an `ipcPath`, is also allowed to send.
+    if (!isCrossSessionMessagingActive(settings.merged, config)) return;
     // Bound by the first session that needs it rather than at startup: an
     // ACP process with no session has nothing to advertise and nobody to
     // receive for, and this is also the first moment the agent exists.
@@ -5992,6 +6006,10 @@ class QwenAgent implements Agent {
         config.suppressRestorableAskUserQuestionPreservation();
       }
       const projection = config.consumeSessionRestoreProjection?.();
+      const fileDerivedApprovalMode = config.getApprovalMode();
+      profiler.timeSync('restore_approval_mode', () =>
+        applyRestoredSessionApprovalMode(config, projection),
+      );
       const suppressRecoveredGoalPresentation =
         projection?.runtime.goalRecoverySourceUuid !== undefined &&
         projection.runtime.goalRecoverySourceUuid !==
@@ -6039,6 +6057,7 @@ class QwenAgent implements Agent {
           this.createAndStoreSession(config, settings, undefined, {
             deferWorkspaceActivation: provisionalStandalone,
             configProviderRevision,
+            fileDerivedApprovalMode,
             ...(provisionalStandalone
               ? {
                   beforeDeferredWorkspaceActivation: () =>
@@ -6407,6 +6426,10 @@ class QwenAgent implements Agent {
         config.suppressRestorableAskUserQuestionPreservation();
       }
       const projection = config.consumeSessionRestoreProjection?.();
+      const fileDerivedApprovalMode = config.getApprovalMode();
+      profiler.timeSync('restore_approval_mode', () =>
+        applyRestoredSessionApprovalMode(config, projection),
+      );
       let response: ResumeSessionResponse | undefined;
       try {
         if (!provisionalStandalone) {
@@ -6425,6 +6448,7 @@ class QwenAgent implements Agent {
           this.createAndStoreSession(config, settings, undefined, {
             deferWorkspaceActivation: provisionalStandalone,
             configProviderRevision,
+            fileDerivedApprovalMode,
             ...(provisionalStandalone
               ? {
                   beforeDeferredWorkspaceActivation: () =>
@@ -8307,15 +8331,7 @@ class QwenAgent implements Agent {
 
       const cgConfig = config.getContentGeneratorConfig?.();
       const baseUrl = cgConfig?.baseUrl || undefined;
-      // The picker may persist `authType:id\0<baseUrl>` (#12760); the ACP
-      // status payload ships the selector half only, never the raw NUL byte
-      // or the provider endpoint.
-      const rawFastModelId = this.settings.merged?.fastModel;
-      const fastModelId =
-        (typeof rawFastModelId === 'string'
-          ? (parseVisionModelSetting(rawFastModelId)?.selector ??
-            rawFastModelId)
-          : rawFastModelId) || undefined;
+      const fastModelId = this.settings.merged?.fastModel || undefined;
 
       return {
         v: STATUS_SCHEMA_VERSION,
@@ -8329,7 +8345,11 @@ class QwenAgent implements Agent {
                 ...(baseUrl
                   ? { baseUrl: sanitizeProviderBaseUrl(baseUrl) }
                   : {}),
-                ...(fastModelId ? { fastModelId } : {}),
+                // The persisted selector can carry a userinfo-bearing
+                // baseUrl suffix; publish the credential-stripped form.
+                ...(fastModelId
+                  ? { fastModelId: publicAuxModelSelectorValue(fastModelId) }
+                  : {}),
               },
             }
           : {}),
@@ -15782,6 +15802,7 @@ class QwenAgent implements Agent {
       enableLiveScreenContext?: boolean;
       deferWorkspaceActivation?: boolean;
       configProviderRevision?: number;
+      fileDerivedApprovalMode?: ApprovalMode;
       beforeDeferredWorkspaceActivation?: () => Promise<void>;
       prepareBeforeSessionCreate?: () => Promise<void>;
       beforeSessionPublish?: () => void;
@@ -15988,12 +16009,11 @@ class QwenAgent implements Agent {
       }
       this.sessions.set(sessionId, session);
       this.registerHostedSession(sessionId, config, settings);
-      // The session boots converged on the mode its settings derived; later
-      // reloads track convergence from here. Restricted sessions derive
-      // DEFAULT, mirroring the fold the reload loop applies to them.
+      // Track the file-derived mode, not a mode restored from the transcript.
+      // An unchanged settings reload must not overwrite session-local state.
       this.sessionApprovalModeConverged.set(
         sessionId,
-        config.getApprovalMode(),
+        options.fileDerivedApprovalMode ?? config.getApprovalMode(),
       );
       published = true;
       // The Session set itself is part of the snapshot: publish so the daemon

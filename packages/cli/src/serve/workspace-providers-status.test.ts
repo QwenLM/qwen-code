@@ -871,10 +871,11 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     expect(withEmptyFastModel.current).not.toHaveProperty('fastModelId');
   });
 
-  it('strips the endpoint disambiguator from a pinned fast model (#12760)', async () => {
+  it('passes a clean endpoint pin through registry-exact (#12760)', async () => {
     const provider = createWorkspaceProvidersStatusProvider({ env: {} });
-    // What the CLI picker persists for a same-id endpoint pin; the status
-    // payload must carry the selector only, not the NUL byte or endpoint.
+    // What the CLI picker persists for a same-id endpoint pin: a clean,
+    // credential-free suffix is published unchanged — the scrub path only
+    // rewrites values that carry userinfo, query, or hash.
     await writeUserSettings({
       security: { auth: { selectedType: 'openai' } },
       model: { name: 'main-model' },
@@ -885,7 +886,9 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     });
 
     const result = await provider(workspace, false);
-    expect(result.current?.fastModelId).toBe('openai:shared-fast');
+    expect(result.current?.fastModelId).toBe(
+      'openai:shared-fast\0https://free-quota.example.com/v1',
+    );
   });
 
   it('includes only non-empty vision model settings in current selection', async () => {
@@ -913,6 +916,29 @@ describe('createWorkspaceProvidersStatusProvider', () => {
 
     const withEmptyVisionModel = await provider(workspace, false);
     expect(withEmptyVisionModel.current).not.toHaveProperty('visionModelId');
+  });
+
+  it('redacts userinfo from aux-model selector ids in the current selection', async () => {
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      model: { name: 'main-model' },
+      fastModel: 'openai:fast\0https://user:sk-secret@fast.example/v1',
+      visionModel: 'openai:vis\0https://user:sk-secret@vision.example/v1',
+      modelProviders: {
+        openai: [{ id: 'main-model', name: 'Main Model' }],
+      },
+    });
+
+    const result = await provider(workspace, false);
+
+    expect(JSON.stringify(result)).not.toContain('sk-secret');
+    expect(result.current?.fastModelId).toBe(
+      'openai:fast\0https://fast.example/v1',
+    );
+    expect(result.current?.visionModelId).toBe(
+      'openai:vis\0https://vision.example/v1',
+    );
   });
 
   it('does not include runtime models in the workspace provider catalog', async () => {
