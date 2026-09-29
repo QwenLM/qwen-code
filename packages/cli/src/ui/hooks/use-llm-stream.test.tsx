@@ -14356,6 +14356,99 @@ describe('useLlmStream', () => {
             )
             .map(([item]) => (item as { text: string }).text);
 
+        it.each(['admission', 'requeue'])(
+          'reports model delivery loss after a displayed result is evicted during %s',
+          async (eviction) => {
+            const { goalQueueRef, activateGoal, release } = blockedDrain();
+            const { rerender, client } = renderTestHook(
+              [],
+              undefined,
+              undefined,
+              undefined,
+              undefined,
+              goalQueueRef as never,
+            );
+            const shellCallback =
+              mockBackgroundShellRegistry.setNotificationCallback.mock
+                .lastCall![0];
+            const workflowCallback =
+              mockWorkflowRunRegistry.setCompletionCallback.mock.lastCall![0];
+            act(() => {
+              for (let i = 0; i < 6; i++) {
+                shellCallback(`shell ${i} done`, `<shell-${i} />`, {
+                  shellId: `bg_${i}`,
+                  status: 'completed',
+                });
+              }
+              workflowCallback('foreground result', '<fg/>', {
+                runId: 'wf_fg',
+                status: 'completed',
+                isBackgrounded: false,
+              });
+            });
+            expect(notificationTexts()).toContain('shell 0 done');
+            expect(mockSendMessageStream).not.toHaveBeenCalled();
+            act(() => {
+              for (let i = 6; i < MAX_BACKGROUND_NOTIFICATION_QUEUE - 1; i++) {
+                shellCallback(`shell ${i} done`, `<shell-${i} />`, {
+                  shellId: `bg_${i}`,
+                  status: 'completed',
+                });
+              }
+            });
+            const overflow = () => {
+              shellCallback('last shell', '<shell-last />', {
+                shellId: 'bg_last',
+                status: 'completed',
+              });
+            };
+            if (eviction === 'requeue') {
+              goalQueueRef.current.waitForReservationSettlement.mockImplementationOnce(
+                async () => overflow(),
+              );
+              activateGoal();
+            } else {
+              act(overflow);
+            }
+            release();
+            rerender(rerenderProps(client));
+            if (eviction === 'requeue') {
+              await waitFor(() =>
+                expect(
+                  goalQueueRef.current.claimGoalTurn,
+                ).toHaveBeenCalledOnce(),
+              );
+              expect(mockSendMessageStream).not.toHaveBeenCalled();
+              release();
+              rerender(rerenderProps(client));
+            }
+            await waitFor(() =>
+              expect(mockSendMessageStream).toHaveBeenCalledOnce(),
+            );
+            const delivered = String(mockSendMessageStream.mock.calls[0][0]);
+            expect(delivered).not.toContain('<shell-0 />');
+            expect(delivered).toContain('<shell-1 />');
+            expect(delivered).toContain('<shell-last />');
+            expect(delivered).toContain('<fg/>');
+            expect(delivered).toContain('<kind>queue</kind>');
+            expect(delivered).toContain('1 shell result (bg_0)');
+            expect(delivered).toContain('dropped before delivery');
+            const texts = notificationTexts();
+            expect(
+              texts.filter((text) => text === 'shell 0 done'),
+            ).toHaveLength(1);
+            expect(
+              texts.filter((text) => text === 'foreground result'),
+            ).toHaveLength(1);
+            const loss =
+              '1 background notification not delivered to the model (queue full): 1 shell result (bg_0).';
+            expect(texts).toContain(loss);
+            expect(texts.indexOf('shell 0 done')).toBeLessThan(
+              texts.indexOf(loss),
+            );
+          },
+        );
+
         it('keeps foreground results visible while model admission is refused', async () => {
           const { goalQueueRef, release } = blockedDrain();
           const { rerender, client, mockSendMessageStream } = renderTestHook(
@@ -14521,7 +14614,7 @@ describe('useLlmStream', () => {
           expect(submitted).toContain('<shell-last />');
           expect(submitted).toContain('1 shell result (bg_0)');
           expect(notificationTexts()).toContain(
-            'Dropped 1 background notification (queue full): 1 shell result (bg_0).',
+            '1 background notification not delivered to the model (queue full): 1 shell result (bg_0).',
           );
         });
 
@@ -14628,9 +14721,134 @@ describe('useLlmStream', () => {
           expect(submitted).not.toContain('<cancelled-pulse />');
           expect(submitted).not.toContain('<kind>queue</kind>');
           expect(notificationTexts()).not.toContainEqual(
-            expect.stringContaining('Dropped'),
+            expect.stringContaining('not delivered to the model (queue full)'),
           );
           expect(submitted).toContain('<shell-last />');
+        });
+
+        it('skips requeue-evicted background displays while preserving the foreground result', async () => {
+          const { goalQueueRef, activateGoal, release } = blockedDrain();
+          mockHandleSlashCommand.mockResolvedValue({
+            type: 'schedule_tool',
+            toolName: 'workflow',
+            toolArgs: { script: 'return 42;' },
+          });
+          const {
+            result,
+            rerender,
+            client,
+            rerenderWithToolCalls,
+            completeToolRound,
+          } = renderTestHook(
+            [],
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            goalQueueRef as never,
+          );
+          await act(async () => {
+            await result.current.submitQuery('/audit');
+          });
+          const request = mockScheduleToolCalls.mock.calls[0][0][0];
+          const completed = {
+            request,
+            status: 'success',
+            responseSubmittedToLlm: false,
+            tool: { name: 'workflow', displayName: 'Workflow' },
+            invocation: { getDescription: () => 'audit' },
+            response: {
+              callId: request.callId,
+              responseParts: [{ text: '42' }],
+              resultDisplay: '42',
+              error: undefined,
+              errorType: undefined,
+            },
+          } as unknown as TrackedCompletedToolCall;
+          // scheduleToolCalls starts scheduler.schedule without awaiting it.
+          // CoreToolScheduler resolves bridge/permission work before publishing
+          // the tracked tools; a notification drain can begin in that window.
+          expect(result.current.streamingState).toBe(StreamingState.Idle);
+          const workflow =
+            mockWorkflowRunRegistry.setCompletionCallback.mock.lastCall![0];
+          const shell =
+            mockBackgroundShellRegistry.setNotificationCallback.mock
+              .lastCall![0];
+          act(() => {
+            for (let i = 0; i < MAX_BACKGROUND_NOTIFICATION_QUEUE; i++) {
+              workflow(`background ${i}`, `<background-${i}/>`, {
+                runId: `wf_bg_${i}`,
+                status: 'completed',
+                isBackgrounded: true,
+              });
+            }
+          });
+          let settleReservation!: () => void;
+          goalQueueRef.current.waitForReservationSettlement.mockImplementationOnce(
+            () =>
+              new Promise<void>((resolve) => {
+                settleReservation = resolve;
+              }),
+          );
+          activateGoal();
+          release();
+          rerender(rerenderProps(client));
+          await waitFor(() =>
+            expect(
+              goalQueueRef.current.waitForReservationSettlement,
+            ).toHaveBeenCalledOnce(),
+          );
+          expect(mockSendMessageStream).not.toHaveBeenCalled();
+          // The already-started drain remains parked while scheduler setup
+          // finishes and the foreground workflow starts executing.
+          rerenderWithToolCalls([
+            { ...completed, status: 'executing' } as TrackedExecutingToolCall,
+          ]);
+          expect(result.current.streamingState).toBe(StreamingState.Responding);
+          mockWorkflowRunRegistry.get.mockReturnValue({
+            toolUseId: request.callId,
+          });
+          act(() => {
+            shell('late shell done', '<shell-late/>', {
+              shellId: 'bg_late',
+              status: 'completed',
+            });
+            workflow('foreground result', '<foreground/>', {
+              runId: 'wf_fg',
+              status: 'completed',
+              isBackgrounded: false,
+            });
+          });
+          expect(notificationTexts()).toEqual([]);
+          // The Goal permit disappears while submission is parked. Restoring
+          // the twenty protected entries evicts the late shell, then the
+          // foreground result; both are captured by the deferred display.
+          await act(async () => {
+            settleReservation();
+          });
+          await waitFor(() =>
+            expect(goalQueueRef.current.claimGoalTurn).toHaveBeenCalledOnce(),
+          );
+          expect(mockSendMessageStream).not.toHaveBeenCalled();
+          expect(notificationTexts()).toEqual([]);
+          await completeToolRound([completed]);
+          expect(notificationTexts()).not.toContain('late shell done');
+          expect(
+            notificationTexts().filter((text) => text === 'foreground result'),
+          ).toHaveLength(1);
+          release();
+          rerenderWithToolCalls([]);
+          await waitFor(() =>
+            expect(mockSendMessageStream).toHaveBeenCalledOnce(),
+          );
+          const payload = String(mockSendMessageStream.mock.calls[0][0]);
+          expect(payload).not.toContain('<shell-late/>');
+          expect(payload).not.toContain('<foreground/>');
+          expect(payload).toContain('bg_late');
+          expect(payload).toContain('wf_fg');
+          for (let i = 0; i < MAX_BACKGROUND_NOTIFICATION_QUEUE; i++) {
+            expect(payload).toContain(`<background-${i}/>`);
+          }
         });
 
         it('restores a deferred batch without discarding a late protected result', async () => {
@@ -14856,7 +15074,7 @@ describe('useLlmStream', () => {
           );
           expect(mockSendMessageStream).not.toHaveBeenCalled();
           expect(notificationTexts().slice(0, 2)).toEqual([
-            'Dropped 1 background notification (queue full): 1 shell result (bg_dropped).',
+            '1 background notification not delivered to the model (queue full): 1 shell result (bg_dropped).',
             'Cron: /loop check status',
           ]);
 
@@ -14875,7 +15093,9 @@ describe('useLlmStream', () => {
           expect(submitted).toContain('<wf-0 />');
           expect(submitted).not.toContain('<shell-dropped />');
           expect(
-            notificationTexts().filter((text) => text.startsWith('Dropped')),
+            notificationTexts().filter((text) =>
+              text.includes('not delivered to the model (queue full)'),
+            ),
           ).toHaveLength(1);
         });
 
@@ -14937,7 +15157,7 @@ describe('useLlmStream', () => {
           );
 
           expect(notificationTexts()).not.toContainEqual(
-            expect.stringContaining('Dropped'),
+            expect.stringContaining('not delivered to the model (queue full)'),
           );
           expect(mockSendMessageStream).not.toHaveBeenCalled();
         });
@@ -15069,7 +15289,7 @@ describe('useLlmStream', () => {
           expect(second).toContain('<shell-later />');
           expect(second).not.toContain('<kind>queue</kind>');
           expect(notificationTexts()).not.toContainEqual(
-            expect.stringContaining('Dropped'),
+            expect.stringContaining('not delivered to the model (queue full)'),
           );
 
           block();
@@ -15173,7 +15393,9 @@ describe('useLlmStream', () => {
             [first, second].join('').match(/<kind>queue<\/kind>/g),
           ).toHaveLength(1);
           expect(
-            notificationTexts().filter((text) => text.startsWith('Dropped')),
+            notificationTexts().filter((text) =>
+              text.includes('not delivered to the model (queue full)'),
+            ),
           ).toHaveLength(1);
         });
 

@@ -208,7 +208,7 @@ describe('DroppedNotificationTally', () => {
     const summary = tally.take();
 
     expect(summary?.displayText).toBe(
-      'Dropped 2 background notifications (queue full): 2 shell results ' +
+      '2 background notifications not delivered to the model (queue full): 2 shell results ' +
         '(bg_ef56, bg_gh78). 5 superseded monitor pulses (mon_ab12, ' +
         'mon_cd34, +3) were not delivered.',
     );
@@ -231,7 +231,7 @@ describe('DroppedNotificationTally', () => {
     }
 
     expect(tally.take()?.displayText).toBe(
-      'Dropped 4 background notifications (queue full): 4 shell results ' +
+      '4 background notifications not delivered to the model (queue full): 4 shell results ' +
         '(bg_1, bg_2, bg_3, +1).',
     );
   });
@@ -247,7 +247,7 @@ describe('DroppedNotificationTally', () => {
 
     const summary = tally.take();
     expect(summary?.displayText).toBe(
-      'Dropped 5 background notifications (queue full): 1 agent result ' +
+      '5 background notifications not delivered to the model (queue full): 1 agent result ' +
         '(a_1), 1 workflow result (w_1), 1 shell result (bg_1), 1 monitor ' +
         'result (mon_done), 1 scheduled prompt (cron_1). 1 superseded ' +
         'monitor pulse (mon_live) was not delivered.',
@@ -306,7 +306,7 @@ describe('DroppedNotificationTally', () => {
     const summary = tally.take();
 
     expect(summary?.displayText).toBe(
-      'Dropped 1 background notification (queue full): 1 shell result (bg_only).',
+      '1 background notification not delivered to the model (queue full): 1 shell result (bg_only).',
     );
     expect(summary?.modelText).toContain(
       '1 background notification was dropped before delivery',
@@ -323,7 +323,7 @@ describe('DroppedNotificationTally', () => {
 
     tally.record(shell('bg_2'));
     expect(tally.take()?.displayText).toBe(
-      'Dropped 1 background notification (queue full): 1 shell result (bg_2).',
+      '1 background notification not delivered to the model (queue full): 1 shell result (bg_2).',
     );
   });
 
@@ -338,7 +338,7 @@ describe('DroppedNotificationTally', () => {
 
     tally.record(shell('bg_2'));
     expect(tally.take()?.displayText).toBe(
-      'Dropped 1 background notification (queue full): 1 shell result (bg_2).',
+      '1 background notification not delivered to the model (queue full): 1 shell result (bg_2).',
     );
   });
 
@@ -348,7 +348,7 @@ describe('DroppedNotificationTally', () => {
     tally.record({ kind: 'monitor', taskId: 'mon_2' });
 
     expect(tally.take()?.displayText).toBe(
-      'Dropped 1 background notification (queue full): 1 monitor result ' +
+      '1 background notification not delivered to the model (queue full): 1 monitor result ' +
         '(mon_2). 1 superseded monitor pulse (mon_1) was not delivered.',
     );
   });
@@ -359,7 +359,7 @@ describe('DroppedNotificationTally', () => {
 
     const summary = tally.take();
     expect(summary?.displayText).toBe(
-      'Dropped 1 background notification (queue full): 1 scheduled prompt.',
+      '1 background notification not delivered to the model (queue full): 1 scheduled prompt.',
     );
     expect(summary?.modelText).toContain(
       'The scheduled prompts were not delivered and will not be retried.',
@@ -374,7 +374,7 @@ describe('DroppedNotificationTally', () => {
 
     const summary = tally.take();
     expect(summary?.displayText).toBe(
-      'Dropped 2 background notifications (queue full): 2 cross-session ' +
+      '2 background notifications not delivered to the model (queue full): 2 cross-session ' +
         'messages (msg_1, msg_2).',
     );
     expect(summary?.modelText).toContain(

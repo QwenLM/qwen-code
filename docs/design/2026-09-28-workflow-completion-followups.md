@@ -18,12 +18,15 @@ This separates the display barrier from model admission: a refused or failed mod
 
 Queue overflow marks discarded notification objects at admission or requeue. Deferred displays skip those objects, except for their own foreground completion, whose display remains required even if its model notification is discarded. This prevents a captured background result from being displayed after eviction while retaining the foreground visibility guarantee.
 
+A result displayed before eviction remains in visible history even if its model notification is later discarded. The shared overflow summary explicitly reports notifications not delivered to the model. Both the visible summary and model loss record retain the task IDs; displaying a result does not protect it from eviction or suppress its loss record. This wording applies to the existing Ink and ACP summary consumers without changing queue admission, model payloads, or persisted-result accounting.
+
 ## Validation and acceptance
 
 - Named failures preserve name and run ID in foreground/model notices, including registry settlement before script completion; background labels and explicit descriptions are correct.
 - Cross-VM aggregate/cause results keep inner reasons; unrenderable members preserve other result fields and sibling reasons; ordinary Error output stays compatible. Tests pin both sides of the depth, member, and visit limits, along with cycles, length, getter avoidance, and stack omission.
 - Explicit false enablement returns the tool result without notifying; true enablement provides a positive control. Removing the enabled guard must fail the new test.
 - A scheduled workflow's card precedes the earlier background notice and foreground notice. Model failure leaves each notice visible once. Overflow and session reset must not leak or lose a deferred foreground display. Evicted background results and cancelled interim monitor pulses must not appear during the foreground flush.
+- If a result is displayed before admission or requeue eviction, it remains visible once, its content is absent from the model payload, and both summaries report the model delivery loss.
 - Run focused core and CLI tests, build, typecheck, formatting/lint, and the mock-provider interactive workflow completion suite. A global qwen E2E baseline is unavailable on this host; baseline test-script reproductions are recorded separately.
 
 ## Risks
