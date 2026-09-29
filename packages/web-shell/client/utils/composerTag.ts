@@ -162,9 +162,43 @@ export function isBuiltinComposerTagIconUrl(
   return iconUrl !== undefined && builtinTagIconUrlSet.has(iconUrl);
 }
 
+// An inline chip's editor-known range, expressed in final prompt offsets.
+// The composer already knows where each inline chip lives; carrying the
+// range through submit keeps the annotation on the chip instead of an
+// earlier plain-text look-alike (#12980).
+export interface ComposerTagKnownPlacement {
+  start: number;
+  end: number;
+  tag: WebShellComposerTag;
+}
+
+function createReferenceAnnotation(
+  tag: WebShellComposerTag,
+  start: number,
+  end: number,
+  serialized: string,
+): DaemonInputAnnotation {
+  return {
+    type: 'reference',
+    start,
+    end,
+    text: serialized,
+    reference: {
+      id: tag.id,
+      ...(tag.kind ? { kind: tag.kind } : {}),
+      ...(tag.label ? { label: tag.label } : {}),
+      ...(tag.value ? { value: tag.value } : {}),
+      ...(tag.metadata !== undefined ? { metadata: tag.metadata } : {}),
+      ...(tag.serialized ? { serialized: tag.serialized } : {}),
+      ...(tag.removable !== undefined ? { removable: tag.removable } : {}),
+    },
+  };
+}
+
 export function createInputAnnotationsFromComposerTags(
   content: string,
   tags: readonly WebShellComposerTag[],
+  knownPlacements?: readonly ComposerTagKnownPlacement[],
 ): DaemonInputAnnotation[] {
   const annotations: DaemonInputAnnotation[] = [];
   let cursor = 0;
@@ -174,22 +208,26 @@ export function createInputAnnotationsFromComposerTags(
     const start = content.indexOf(serialized, cursor);
     if (start < 0) continue;
     const end = start + serialized.length;
-    annotations.push({
-      type: 'reference',
-      start,
-      end,
-      text: serialized,
-      reference: {
-        id: tag.id,
-        ...(tag.kind ? { kind: tag.kind } : {}),
-        ...(tag.label ? { label: tag.label } : {}),
-        ...(tag.value ? { value: tag.value } : {}),
-        ...(tag.metadata !== undefined ? { metadata: tag.metadata } : {}),
-        ...(tag.serialized ? { serialized: tag.serialized } : {}),
-        ...(tag.removable !== undefined ? { removable: tag.removable } : {}),
-      },
-    });
+    annotations.push(createReferenceAnnotation(tag, start, end, serialized));
     cursor = end;
+  }
+  for (const placement of knownPlacements ?? []) {
+    const serialized = getComposerTagSerialized(placement.tag);
+    if (!serialized) continue;
+    const { start, end } = placement;
+    // Offsets cross a coordinate-space boundary here (editor document vs
+    // final prompt); never emit an annotation whose text does not match.
+    if (
+      start < 0 ||
+      end <= start ||
+      end > content.length ||
+      content.slice(start, end) !== serialized
+    ) {
+      continue;
+    }
+    annotations.push(
+      createReferenceAnnotation(placement.tag, start, end, serialized),
+    );
   }
   return annotations;
 }

@@ -420,6 +420,67 @@ describe('composer tag input annotations', () => {
     ]);
   });
 
+  it('uses known placements instead of matching earlier identical text', () => {
+    // Issue #12980: plain text spelled like a chip's serialized text must
+    // not steal the chip's annotation.
+    const content = 'literal @foo then @foo';
+    expect(
+      createInputAnnotationsFromComposerTags(content, [], [
+        {
+          start: 18,
+          end: 22,
+          tag: { id: 'file:@foo', kind: 'file', value: '@foo' },
+        },
+      ]),
+    ).toEqual([
+      {
+        type: 'reference',
+        start: 18,
+        end: 22,
+        text: '@foo',
+        reference: { id: 'file:@foo', kind: 'file', value: '@foo' },
+      },
+    ]);
+  });
+
+  it('combines searched tags with known inline placements', () => {
+    const content = '@ctx\n\nliteral @foo then @foo';
+    expect(
+      createInputAnnotationsFromComposerTags(
+        content,
+        [{ id: 'file:@ctx', kind: 'file', value: '@ctx' }],
+        [
+          {
+            start: 24,
+            end: 28,
+            tag: { id: 'file:@foo', kind: 'file', value: '@foo' },
+          },
+        ],
+      ).map(({ start, end }) => [start, end]),
+    ).toEqual([
+      [0, 4],
+      [24, 28],
+    ]);
+  });
+
+  it('skips known placements whose range does not match the prompt text', () => {
+    const content = 'literal @foo then @foo';
+    expect(
+      createInputAnnotationsFromComposerTags(content, [], [
+        {
+          start: 0,
+          end: 4,
+          tag: { id: 'file:@foo', kind: 'file', value: '@foo' },
+        },
+        {
+          start: 8,
+          end: 30,
+          tag: { id: 'file:@bar', kind: 'file', value: '@bar' },
+        },
+      ]),
+    ).toEqual([]);
+  });
+
   it('uses annotations for custom provider references', () => {
     expect(
       splitComposerTagContentByAnnotations('open @dataset:users now', [
