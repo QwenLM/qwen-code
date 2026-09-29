@@ -7,7 +7,7 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { SDKTestHelper } from './test-helper.js';
+import { E2E_MEMORY_SETTINGS_DEFAULTS, SDKTestHelper } from './test-helper.js';
 
 describe('SDKTestHelper settings file', () => {
   let helper: SDKTestHelper;
@@ -23,10 +23,7 @@ describe('SDKTestHelper settings file', () => {
     const written = JSON.parse(
       await readFile(join(dir, '.qwen', 'settings.json'), 'utf-8'),
     ) as { memory?: Record<string, unknown> };
-    expect(written.memory).toEqual({
-      enableManagedAutoMemory: false,
-      enableManagedAutoDream: false,
-    });
+    expect(written.memory).toEqual(E2E_MEMORY_SETTINGS_DEFAULTS);
   });
 
   it('lets a suite opt back in via settings', async () => {
@@ -38,6 +35,9 @@ describe('SDKTestHelper settings file', () => {
     const written = JSON.parse(
       await readFile(join(dir, '.qwen', 'settings.json'), 'utf-8'),
     ) as { memory?: Record<string, unknown> };
-    expect(written.memory).toEqual({ enableManagedAutoMemory: true });
+    expect(written.memory).toEqual({
+      ...E2E_MEMORY_SETTINGS_DEFAULTS,
+      enableManagedAutoMemory: true,
+    });
   });
 });

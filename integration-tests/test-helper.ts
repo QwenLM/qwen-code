@@ -25,6 +25,7 @@ import {
   pickE2eRenderer,
   resolveE2eCliCommand,
 } from './renderer-matrix.js';
+import type { Settings } from '../packages/cli/src/config/settings.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -199,6 +200,18 @@ interface ParsedLog {
   }[];
 }
 
+// Since #12913 the managed-memory extractor fires a forked-agent model
+// request on every tool-completing turn and the headless CLI awaits it before
+// exit — dead latency and extra endpoint load for runs that never assert
+// memory behavior. Suites that need it opt back in per key via
+// options.settings. The `satisfies` tie to the settings schema turns a key
+// rename into a typecheck:integration failure instead of silently
+// re-enabling the extractor.
+export const E2E_MEMORY_SETTINGS_DEFAULTS = {
+  enableManagedAutoMemory: false,
+  enableManagedAutoDream: false,
+} satisfies Settings['memory'];
+
 export class TestRig {
   bundlePath: string;
   testDir: string | null;
@@ -243,6 +256,13 @@ export class TestRig {
     // The container mounts the test directory at the same path as the host
     const telemetryPath = join(this.testDir, 'telemetry.log'); // Always use test directory for telemetry
 
+    const optionsSettings = options.settings ?? {};
+    const memorySettings =
+      typeof optionsSettings['memory'] === 'object' &&
+      optionsSettings['memory'] !== null
+        ? (optionsSettings['memory'] as Record<string, unknown>)
+        : {};
+
     const settings = {
       telemetry: {
         enabled: true,
@@ -251,16 +271,9 @@ export class TestRig {
         outfile: telemetryPath,
       },
       sandbox: env.QWEN_SANDBOX !== 'false' ? env.QWEN_SANDBOX : false,
-      // Since #12913 the managed-memory extractor fires a forked-agent model
-      // request on every tool-completing turn and the headless CLI awaits it
-      // before exit — dead latency and extra endpoint load for runs that
-      // never assert memory behavior. Suites that need it opt back in via
-      // options.settings.
-      memory: {
-        enableManagedAutoMemory: false,
-        enableManagedAutoDream: false,
-      },
       ...options.settings, // Allow tests to override/add settings
+      // Per-key merge: a suite opting back into one flag keeps the other off.
+      memory: { ...E2E_MEMORY_SETTINGS_DEFAULTS, ...memorySettings },
     };
     writeFileSync(
       join(qwenDir, 'settings.json'),

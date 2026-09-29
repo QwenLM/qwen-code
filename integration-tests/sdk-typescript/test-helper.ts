@@ -27,6 +27,7 @@ import {
   isSDKSystemMessage,
   isSDKResultMessage,
 } from '@qwen-code/sdk';
+import type { Settings } from '../../packages/cli/src/config/settings.js';
 
 // ============================================================================
 // Core Test Helper Class
@@ -49,6 +50,14 @@ export interface SDKTestHelperOptions {
    */
   chatRecording?: boolean;
 }
+
+// Same default and rationale as TestRig.setup (see
+// integration-tests/test-helper.ts); the `satisfies` tie to the schema keeps
+// this copy honest under a key rename.
+export const E2E_MEMORY_SETTINGS_DEFAULTS = {
+  enableManagedAutoMemory: false,
+  enableManagedAutoDream: false,
+} satisfies Settings['memory'];
 
 /**
  * Helper class for SDK E2E tests
@@ -98,15 +107,17 @@ export class SDKTestHelper {
           ? (optionsSettings['general'] as Record<string, unknown>)
           : {};
 
+      const memorySettings =
+        typeof optionsSettings['memory'] === 'object' &&
+        optionsSettings['memory'] !== null
+          ? (optionsSettings['memory'] as Record<string, unknown>)
+          : {};
+
       const settings = {
-        // Same default as TestRig.setup: the managed-memory extractor adds a
-        // forked-agent model request to every tool-completing turn (#12913),
-        // which E2E suites neither need nor assert. Opt back in per suite.
-        memory: {
-          enableManagedAutoMemory: false,
-          enableManagedAutoDream: false,
-        },
         ...optionsSettings,
+        // Per-key merge: a suite opting back into one flag keeps the other
+        // off.
+        memory: { ...E2E_MEMORY_SETTINGS_DEFAULTS, ...memorySettings },
         telemetry: {
           enabled: false, // SDK tests don't need telemetry
         },

@@ -7,7 +7,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { TestRig } from './test-helper.js';
+import { E2E_MEMORY_SETTINGS_DEFAULTS, TestRig } from './test-helper.js';
 
 function isProcessAlive(pid: number): boolean {
   try {
@@ -49,10 +49,7 @@ describe('TestRig', () => {
     const written = JSON.parse(
       readFileSync(join(rig.testDir!, '.qwen', 'settings.json'), 'utf-8'),
     ) as { memory?: Record<string, unknown> };
-    expect(written.memory).toEqual({
-      enableManagedAutoMemory: false,
-      enableManagedAutoDream: false,
-    });
+    expect(written.memory).toEqual(E2E_MEMORY_SETTINGS_DEFAULTS);
 
     const override = new TestRig();
     await override.setup('managed memory opted back in', {
@@ -61,7 +58,10 @@ describe('TestRig', () => {
     const overridden = JSON.parse(
       readFileSync(join(override.testDir!, '.qwen', 'settings.json'), 'utf-8'),
     ) as { memory?: Record<string, unknown> };
-    expect(overridden.memory).toEqual({ enableManagedAutoMemory: true });
+    expect(overridden.memory).toEqual({
+      ...E2E_MEMORY_SETTINGS_DEFAULTS,
+      enableManagedAutoMemory: true,
+    });
   });
 
   it('removes the test directory during cleanup', async () => {
