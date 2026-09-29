@@ -30,12 +30,17 @@ import {
   acceptExternalSubmission,
   cancelExternalThreadForCaller,
   getExternalThreadForCaller,
-  listExternalThreadsForCaller,
   ExternalIntakeConflictError,
   ExternalIntakeRefusedError,
 } from './external-intake.js';
-import { isAgentAddressable, isValidId, readWorkspaceAgents } from './store.js';
-import type { Thread, WorkspaceAgent } from './types.js';
+import {
+  isAgentAddressable,
+  isValidId,
+  readWorkspaceAgents,
+  withAgentStoreTransaction,
+  type AgentStoreTransaction,
+} from './store.js';
+import { isThreadTerminal, type Thread, type WorkspaceAgent } from './types.js';
 
 /**
  * What the transport is told to answer.
@@ -71,25 +76,56 @@ export interface A2ACaller {
   secret: string;
 }
 
-function taskView(thread: Thread): A2ATaskView {
-  // Only the granted agent answers: a post by anyone else a local person
-  // brought into the thread is not the caller's to read.
-  const answer = thread.messages.findLast(
-    (message) =>
-      message.authorKind === 'agent' &&
-      message.from === thread.externalIntake?.targetAgentId,
-  )?.text;
+async function taskView(
+  transaction: AgentStoreTransaction,
+  threadId: string,
+  listedThreads?: readonly Thread[],
+): Promise<A2ATaskView> {
+  const thread = await transaction.readThread(threadId);
+  if (!thread?.externalIntake) throw new Error('External task disappeared.');
+  let result = thread.externalIntake.result;
+  let state: A2ATaskState;
+  let at: number;
+  let answer: string | undefined;
+  if (result) {
+    ({ state, at, answer } = result);
+  } else {
+    if (isThreadTerminal(thread.status)) {
+      listedThreads = [];
+    } else if (!listedThreads) {
+      const listing = await transaction.listThreads();
+      if (listing.unreadable.length > 0)
+        throw new Error('Thread records are unreadable.');
+      listedThreads = listing.threads;
+    }
+    const descendants = listedThreads.filter(
+      (member) => member.rootThreadId === thread.id && member.id !== thread.id,
+    );
+    state = toExternalA2ATaskState(thread, descendants);
+    at = Math.max(lastActivityAt(thread), ...descendants.map(lastActivityAt));
+    // Local people may invite other agents; only the granted agent's root
+    // answer belongs to the external caller.
+    answer = thread.messages.findLast(
+      (message) =>
+        message.authorKind === 'agent' &&
+        message.from === thread.externalIntake?.targetAgentId,
+    )?.text;
+    if (
+      state === 'TASK_STATE_COMPLETED' ||
+      state === 'TASK_STATE_FAILED' ||
+      state === 'TASK_STATE_CANCELED'
+    ) {
+      result = { state, at, ...(answer ? { answer } : {}) };
+      await transaction.writeThread({
+        ...thread,
+        externalIntake: { ...thread.externalIntake, result },
+      });
+    }
+  }
   return {
     id: thread.id,
-    // The thread tree, not the thread: A2A calls contextId "the contextual
-    // collection of interactions", which is what a parent and its splits are.
     contextId: thread.rootThreadId,
-    status: {
-      state: toExternalA2ATaskState(thread),
-      timestamp: new Date(lastActivityAt(thread)).toISOString(),
-    },
-    // Namespaced by the extension URI so a client that does not implement the
-    // extension has no reason to read it, and two extensions cannot collide.
+    status: { state, timestamp: new Date(at).toISOString() },
     metadata: { [QWEN_A2A_EXTENSION_URI]: toQwenA2ATaskMetadata(thread) },
     ...(answer ? { answer } : {}),
   };
@@ -177,7 +213,12 @@ export async function a2aSendMessage(
         ? { acceptanceCriteria: request.acceptanceCriteria }
         : {}),
     });
-    return { ok: true, value: taskView(accepted.thread) };
+    return {
+      ok: true,
+      value: await withAgentStoreTransaction(projectRoot, (transaction) =>
+        taskView(transaction, accepted.thread.id),
+      ),
+    };
   } catch (error) {
     if (error instanceof ExternalIntakeConflictError) {
       return {
@@ -222,7 +263,12 @@ export async function a2aGetTask(
   // A revoked caller loses its own history too. Otherwise revocation would
   // stop new work while leaving the old readable indefinitely.
   if (!auth.ok) return { ok: false, kind: 'not_found' };
-  return { ok: true, value: taskView(thread) };
+  return {
+    ok: true,
+    value: await withAgentStoreTransaction(projectRoot, (transaction) =>
+      taskView(transaction, thread.id),
+    ),
+  };
 }
 
 /** `listTasks` — this caller's tasks and no one else's. */
@@ -233,18 +279,21 @@ export async function a2aListTasks(
 ): Promise<A2AResult<A2ATaskView[]>> {
   const auth = await authorize(projectRoot, caller, agentId, 'read');
   if (!auth.ok) return { ok: false, kind: 'refused' };
-  const threads = await listExternalThreadsForCaller(
-    projectRoot,
-    caller.callerId,
-  );
-  return {
-    ok: true,
-    // Scoped twice: to the caller by the store, and to the agent the grant
-    // names. One caller holding two grants must not see across them.
-    value: threads
-      .filter((thread) => thread.externalIntake?.targetAgentId === agentId)
-      .map(taskView),
-  };
+  return withAgentStoreTransaction(projectRoot, async (transaction) => {
+    const { threads, unreadable } = await transaction.listThreads();
+    if (unreadable.length > 0)
+      throw new Error('Thread records are unreadable.');
+    const value: A2ATaskView[] = [];
+    for (const thread of threads) {
+      if (
+        thread.externalIntake?.callerId === caller.callerId &&
+        thread.externalIntake.targetAgentId === agentId
+      ) {
+        value.push(await taskView(transaction, thread.id, threads));
+      }
+    }
+    return { ok: true as const, value };
+  });
 }
 
 /**
@@ -282,7 +331,9 @@ export async function a2aCancelTask(
   return {
     ok: true,
     value: {
-      task: taskView(cancelled.thread),
+      task: await withAgentStoreTransaction(projectRoot, (transaction) =>
+        taskView(transaction, cancelled.thread.id),
+      ),
       runsStillLive: cancelled.runsStillLive,
     },
   };

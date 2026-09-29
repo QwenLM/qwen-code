@@ -14,7 +14,10 @@ import {
   issueA2AGrant,
   revokeA2AGrant,
 } from '@qwen-code/qwen-code-core/agents/workspace-agents/a2a-grants.js';
-import { updateWorkspaceAgents } from '@qwen-code/qwen-code-core/agents/workspace-agents/store.js';
+import {
+  listThreads,
+  updateWorkspaceAgents,
+} from '@qwen-code/qwen-code-core/agents/workspace-agents/store.js';
 import { Storage } from '@qwen-code/qwen-code-core';
 import {
   createWorkspaceRegistry,
@@ -229,3 +232,56 @@ describe('A2A transport', () => {
     });
   });
 });
+
+it.each(['replaced', 'untrusted', 'disabled'] as const)(
+  'refuses a request whose workspace becomes %s during authentication',
+  async (change) => {
+    const { secret } = await issueA2AGrant(PROJECT_ROOT, {
+      callerId: 'share_1',
+      agentId: 'ag_lead',
+    });
+    let trusted = true;
+    const selected = {
+      ...runtime(true),
+      get trusted() {
+        return trusted;
+      },
+    };
+    const registry = createWorkspaceRegistry([selected]);
+    let enabled = true;
+    const checkRate = vi.fn((key: string) => {
+      if (key === 'a2a:caller:share_1') {
+        if (change === 'replaced') {
+          const entry = registry.primaryEntry;
+          registry.beginReplacement(entry, 'new');
+          registry.activateReplacement(entry, runtime(true), 'new');
+        } else if (change === 'untrusted') trusted = false;
+        else enabled = false;
+      }
+      return true;
+    });
+    const app = express();
+    registerA2ATransportRoutes(app, registry, { checkRate }, () => enabled);
+    const response = await request(app)
+      .post('/a2a/v1')
+      .set({
+        ...headers,
+        authorization: `Bearer ${secret}`,
+        'A2A-Version': '1.0',
+      })
+      .send({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'SendMessage',
+        params: {
+          message: {
+            role: 'ROLE_USER',
+            messageId: 'msg-removed',
+            parts: [{ text: 'Do not admit stale work.' }],
+          },
+        },
+      });
+    expect(response.body.error).toBeDefined();
+    expect((await listThreads(PROJECT_ROOT)).threads).toEqual([]);
+  },
+);

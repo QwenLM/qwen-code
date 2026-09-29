@@ -426,6 +426,12 @@ export interface ExternalIntake {
    */
   contentHash: string;
   receivedAt: number;
+  /** First terminal reply published to the caller; local follow-ups cannot reopen it. */
+  result?: {
+    state: 'TASK_STATE_COMPLETED' | 'TASK_STATE_FAILED' | 'TASK_STATE_CANCELED';
+    at: number;
+    answer?: string;
+  };
 }
 
 /**

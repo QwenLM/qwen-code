@@ -22,7 +22,7 @@ import {
   LIVE_RUN_STATUSES,
   outstandingCloseObligations,
 } from './thread-status.js';
-import type { Thread, ThreadStatus } from './types.js';
+import { isThreadTerminal, type Thread, type ThreadStatus } from './types.js';
 
 /**
  * Wire version, sent and matched in the `A2A-Version` header. `Major.Minor`
@@ -136,18 +136,34 @@ export function toA2ATaskState(status: ThreadStatus): A2ATaskState {
  * local person can still reply afterwards; the caller sees that as new work
  * only through the extension metadata.
  */
-export function toExternalA2ATaskState(thread: Thread): A2ATaskState {
+export function toExternalA2ATaskState(
+  thread: Thread,
+  descendants: readonly Thread[] = [],
+): A2ATaskState {
   if (thread.status === 'done' || thread.status === 'cancelled')
     return toA2ATaskState(thread.status);
-  if (thread.runs.length === 0) return 'TASK_STATE_SUBMITTED';
-  if (thread.runs.some((run) => LIVE_RUN_STATUSES.has(run.status)))
+  const tree = [thread, ...descendants];
+  if (
+    tree.some((member) =>
+      member.runs.some((run) => LIVE_RUN_STATUSES.has(run.status)),
+    ) ||
+    descendants.some((member) =>
+      member.outbox.some(
+        (event) => event.kind === 'parent_report' && event.status === 'pending',
+      ),
+    )
+  )
     return 'TASK_STATE_WORKING';
-  const outstanding = outstandingCloseObligations(thread);
+  if (thread.runs.length === 0) return 'TASK_STATE_SUBMITTED';
+  const outstanding = tree
+    .filter((member) => !isThreadTerminal(member.status))
+    .flatMap(outstandingCloseObligations);
   const failed = outstanding.some(
     (obligation) =>
       obligation.kind === 'failure' ||
       obligation.kind === 'cancelled' ||
-      obligation.kind === 'stranded',
+      obligation.kind === 'stranded' ||
+      obligation.kind === 'unclosed',
   );
   if (failed) return 'TASK_STATE_FAILED';
   // Decided from the obligations, not the status: `blocked` is also what a

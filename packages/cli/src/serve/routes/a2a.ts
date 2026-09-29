@@ -75,6 +75,7 @@ class AuthenticatedA2AUser implements User {
     readonly caller: A2ACaller,
     readonly agentId: string,
     readonly baseUrl: string,
+    readonly assertCurrent: () => void,
   ) {}
 
   get userName(): string {
@@ -131,6 +132,9 @@ function authenticateA2A(
       next();
       return;
     }
+    const generation = registry.getEntryByWorkspaceId(
+      runtime.workspaceId,
+    )?.current;
     // Trust first: the opt-in check below reads the workspace's settings, and
     // an unauthenticated request must not make the daemon read an untrusted
     // workspace's files.
@@ -168,11 +172,29 @@ function authenticateA2A(
       rateLimitExceeded(res);
       return;
     }
+    const isCurrent = () => {
+      const entry = registry.getEntryByWorkspaceId(runtime.workspaceId);
+      return (
+        entry?.state === 'active' &&
+        entry.current === generation &&
+        entry.current?.runtime === runtime &&
+        !entry.current.guard.closed &&
+        runtime.trusted &&
+        (isEnabledFor?.(runtime.workspaceCwd) ?? true)
+      );
+    };
+    if (!isCurrent()) {
+      next();
+      return;
+    }
     req.a2aUser = new AuthenticatedA2AUser(
       runtime.workspaceCwd,
       caller,
       agentId,
       baseUrl(req),
+      () => {
+        if (!isCurrent()) fail({ kind: 'refused' });
+      },
     );
     next();
   };
@@ -189,6 +211,7 @@ function authenticated(context: ServerCallContext): AuthenticatedA2AUser {
       message: 'Request refused.',
     });
   }
+  context.user.assertCurrent();
   return context.user;
 }
 
@@ -452,7 +475,7 @@ function withoutInternalDetail(handler: A2ARequestHandler): A2ARequestHandler {
   return wrapped as unknown as A2ARequestHandler;
 }
 
-function requestHandler(_registry: WorkspaceRegistry): A2ARequestHandler {
+function requestHandler(): A2ARequestHandler {
   return withoutInternalDetail({
     getAgentCard: async () => publicCard('http://localhost'),
 
@@ -603,7 +626,7 @@ export function registerA2ATransportRoutes(
       next();
     },
     jsonRpcHandler({
-      requestHandler: requestHandler(workspaceRegistry),
+      requestHandler: requestHandler(),
       userBuilder: buildUser,
     }),
   );

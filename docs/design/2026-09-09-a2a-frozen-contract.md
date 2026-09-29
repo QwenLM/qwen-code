@@ -76,3 +76,5 @@ One additional decision from architecture §5 is needed before P3: what signal a
 ## 8. Implementation Status
 
 The daemon publishes the Agent Card and authenticated polling JSON-RPC routes for submit, get, list, and cancel. Grants store only secret digests, intake is idempotent and caller-scoped, and transport tests cover admission plus the successful task lifecycle. Streaming, push notifications, task continuation, and cross-implementation acceptance with the Python client remain out of scope.
+
+The external task stays working while any descendant run or parent report is pending. Unclosed turns fail. The first terminal response (state, timestamp and granted-agent answer) is persisted under the intake record and reused by submit retries, get, list and cancel. Local follow-ups remain visible in extension metadata but cannot reopen that external result; canceling an already published terminal task does not cancel later local work.
