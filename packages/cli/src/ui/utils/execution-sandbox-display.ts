@@ -11,5 +11,9 @@ export function formatExecutionSandbox(
 ): string | undefined {
   const policy = config?.getShellExecutionSandbox?.();
   if (!policy) return undefined;
-  return `tools / ${policy.requestedBackend ?? 'auto'} → bwrap / ${policy.filesystem} / command network: ${policy.network}`;
+  const effective = policy.effectiveBackend ?? 'unresolved';
+  const enforcement = policy.enforcement
+    ? ` (${policy.enforcement}${policy.landlockAbi ? `, ABI ${policy.landlockAbi}` : ''})`
+    : '';
+  return `tools / ${policy.requestedBackend ?? 'auto'} → ${effective}${enforcement} / ${policy.filesystem} / command network: ${policy.network}`;
 }

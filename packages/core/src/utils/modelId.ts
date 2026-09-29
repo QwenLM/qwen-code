@@ -80,7 +80,11 @@ export function buildModelIdContext(config: Config): ModelIdResolutionContext {
 }
 
 function parseModelIdSelector(model: string | undefined): ModelIdSelector {
-  const trimmed = model?.trim();
+  const raw = model?.trim();
+  // Persisted selectors may carry a `\0<baseUrl>` endpoint disambiguator
+  // (written by the model picker for same-id endpoints, #12760). It is
+  // routing metadata for the registry, not part of the model id.
+  const trimmed = raw?.split('\0', 1)[0];
   if (!trimmed || trimmed === 'inherit') {
     return { kind: 'inherit' };
   }

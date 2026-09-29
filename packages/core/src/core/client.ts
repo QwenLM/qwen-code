@@ -4,6 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  captureHookExecutionOwner,
+  runWithHookExecutionOwner,
+} from '../hooks/hook-execution-context.js';
+
 // External dependencies
 import type {
   Content,
@@ -416,6 +421,8 @@ export function getMainSessionBaseSystemPrompt(
           declaredTools: config.getPromptToolSnapshot?.(),
           executionSandboxFilesystem:
             config.getShellExecutionSandbox?.()?.filesystem,
+          executionSandboxBackend:
+            config.getShellExecutionSandbox?.()?.effectiveBackend,
         },
       );
 }
@@ -1826,6 +1833,15 @@ export class LlmClient {
   }
 
   async resetChat(): Promise<void> {
+    const hookSystem = this.config.getHookSystem();
+    // /clear has switched Config sessions while its caller still owns the old turn.
+    const hookOwner = hookSystem
+      ? Object.freeze({
+          runtimeId: hookSystem.runtimeId,
+          sessionId: this.config.getSessionId(),
+          agentId: null,
+        })
+      : undefined;
     const memBefore = process.memoryUsage();
     const historyLength = this.chat?.getHistoryLength() ?? 0;
     if (debugLogger.isEnabled()) {
@@ -1863,7 +1879,9 @@ export class LlmClient {
     // compression should keep session-setup reveals so the declaration list
     // does not change mid-session.
     this.config.getToolRegistry().clearRevealedDeferredTools();
-    await this.startChat(undefined, SessionStartSource.Clear);
+    await runWithHookExecutionOwner(hookOwner, () =>
+      this.startChat(undefined, SessionStartSource.Clear),
+    );
     this.initializedSessionId = this.config.getSessionId();
 
     const memAfter = process.memoryUsage();
@@ -1972,7 +1990,9 @@ export class LlmClient {
       return;
     }
 
-    const currentHistory = this.getChat().getHistory();
+    // A deep clone drops Symbol-keyed prompt identities before reinstall.
+    const currentHistory =
+      this.getChat().getHistoryShallow?.() ?? this.getChat().getHistory();
     const startupLength = getStartupContextLength(currentHistory);
     if (startupLength === 0) {
       return;
@@ -2014,7 +2034,9 @@ export class LlmClient {
       return;
     }
 
-    const currentHistory = this.getChat().getHistory();
+    // Preserve the in-flight turn's Symbol-keyed prompt identity.
+    const currentHistory =
+      this.getChat().getHistoryShallow?.() ?? this.getChat().getHistory();
     if (getStartupContextLength(currentHistory) !== 0) {
       return;
     }
@@ -3798,6 +3820,7 @@ export class LlmClient {
         >(
           {
             type: MessageBusType.HOOK_EXECUTION_REQUEST,
+            owner: captureHookExecutionOwner(this.config),
             eventName: 'UserPromptSubmit',
             input: {
               prompt: promptText,
@@ -4151,15 +4174,12 @@ export class LlmClient {
             );
         } else {
           const recorder = this.config.getChatRecordingService();
-          if (userPromptRecordPayload) {
-            recorder?.recordUserMessage(
-              request,
-              goalPermit,
-              userPromptRecordPayload,
-            );
-          } else {
-            recorder?.recordUserMessage(request, goalPermit);
-          }
+          recorder?.recordUserMessage(
+            request,
+            goalPermit,
+            userPromptRecordPayload,
+            prompt_id,
+          );
         }
       }
 
@@ -4409,7 +4429,14 @@ export class LlmClient {
         }
       }
 
-      const turn = new Turn(this.getChat(), prompt_id, goalPermit);
+      const turn = new Turn(
+        this.getChat(),
+        prompt_id,
+        goalPermit,
+        // Only a first-party user prompt opens a rewindable identity. Re-entry
+        // stays unmarked, so a replaced identified turn fails closed.
+        messageType === SendMessageType.UserQuery ? prompt_id : undefined,
+      );
 
       // Assemble the outgoing request. IDE context is merged into the
       // user prompt's first text part, then on UserQuery / Cron turns
@@ -4700,8 +4727,12 @@ export class LlmClient {
         hooksEnabled &&
         messageBus &&
         this.config.hasHooksForEvent('MessageDisplay')
-          ? new MessageDisplayDispatcher(messageBus, signal, (message) =>
-              this.config.getDebugLogger().warn(message),
+          ? new MessageDisplayDispatcher(
+              messageBus,
+              signal,
+              (message) => this.config.getDebugLogger().warn(message),
+              undefined,
+              captureHookExecutionOwner(this.config),
             )
           : null;
 
@@ -5047,6 +5078,7 @@ export class LlmClient {
         >(
           {
             type: MessageBusType.HOOK_EXECUTION_REQUEST,
+            owner: captureHookExecutionOwner(this.config),
             eventName: 'Stop',
             input: {
               // True while this prompt is continuing because a Stop hook
