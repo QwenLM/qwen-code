@@ -43,7 +43,9 @@ function isDeliveredNotificationTurn(content: Content): boolean {
   let sawEnvelope = false;
   for (const part of content.parts ?? []) {
     if (!('text' in part) || typeof part.text !== 'string') return false;
-    if (isWrappedText(part.text, TASK_NOTIFICATION_OPEN, TASK_NOTIFICATION_CLOSE)) {
+    if (
+      isWrappedText(part.text, TASK_NOTIFICATION_OPEN, TASK_NOTIFICATION_CLOSE)
+    ) {
       sawEnvelope = true;
     } else if (
       !isWrappedText(part.text, SYSTEM_REMINDER_OPEN, SYSTEM_REMINDER_CLOSE)
@@ -153,7 +155,10 @@ export function isApiUserPrompt(
   // truncation index and silently drop a real turn's context.
   if (isSystemReminderContent(content)) return false;
 
-  if (options?.excludeTaskNotifications && isDeliveredNotificationTurn(content)) {
+  if (
+    options?.excludeTaskNotifications &&
+    isDeliveredNotificationTurn(content)
+  ) {
     return false;
   }
 

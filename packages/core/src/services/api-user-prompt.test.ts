@@ -168,9 +168,9 @@ describe('isApiUserPrompt', () => {
           { text: 'the real prompt' },
         ],
       };
-      expect(
-        isApiUserPrompt(content, { excludeTaskNotifications: true }),
-      ).toBe(true);
+      expect(isApiUserPrompt(content, { excludeTaskNotifications: true })).toBe(
+        true,
+      );
     });
 
     it('keeps a real prompt that a mid-turn drain merged an envelope into', () => {
