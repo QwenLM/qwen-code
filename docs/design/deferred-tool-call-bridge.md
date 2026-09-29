@@ -90,7 +90,8 @@ warning. When search is unavailable in the current scope, `exec` includes all
 allowed tool signatures. Permission allowlists
 keep both bridge tools registered unless an explicit deny rule removes them.
 
-An explicit subagent `tools` list does not implicitly add the bridge tools.
+In direct tool mode, an explicit subagent `tools` list does not implicitly add
+the bridge tools (Code Mode adds `tool_search` beside `exec`).
 Naming an ordinary deferred target declares it directly, but `tools.eager`
 demotion still applies. Using discovery and bridge invocation together needs the target and both bridge
 tools in the allowed surface; existing subagent exclusions and deny rules still win.
