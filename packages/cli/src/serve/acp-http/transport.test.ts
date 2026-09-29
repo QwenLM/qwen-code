@@ -5235,15 +5235,16 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     },
   );
 
-  it.each(['session/load', 'session/resume'] as const)(
-    '%s restores reserved-source transcripts on the generic surface',
-    async (method) => {
+  it.each([
+    ['session/load', 'standalone', '550e8400-e29b-41d4-a716-446655440133'],
+    ['session/resume', 'standalone', '550e8400-e29b-41d4-a716-446655440134'],
+    ['session/load', 'agent', '550e8400-e29b-41d4-a716-446655440135'],
+    ['session/resume', 'agent', '550e8400-e29b-41d4-a716-446655440136'],
+  ] as const)(
+    '%s strips %s source metadata on the generic surface',
+    async (method, sourceType, sessionId) => {
       await withRuntimeDir(async () => {
-        const sessionId =
-          method === 'session/load'
-            ? '550e8400-e29b-41d4-a716-446655440133'
-            : '550e8400-e29b-41d4-a716-446655440134';
-        await writeStoredSession(sessionId, 'active', undefined, 'standalone');
+        await writeStoredSession(sessionId, 'active', undefined, sourceType);
         const loadCount = bridge.loadRequests.length;
         const resumeCount = bridge.resumeRequests.length;
 

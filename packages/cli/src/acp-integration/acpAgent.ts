@@ -5622,6 +5622,15 @@ class QwenAgent implements Agent {
       initializationDeadline?.signal.throwIfAborted();
       const sessionSource = getSessionSource(params);
       if (
+        sessionSource?.sourceType === AGENT_SESSION_SOURCE_TYPE &&
+        !this.isTrustedManagedParent()
+      ) {
+        throw RequestError.invalidParams(
+          undefined,
+          '`agent` is reserved for daemon-owned workspace agent creation',
+        );
+      }
+      if (
         sessionSource?.sourceType === AGENT_HOST_SESSION_SOURCE_TYPE &&
         !this.isTrustedManagedParent()
       ) {
@@ -5772,6 +5781,15 @@ class QwenAgent implements Agent {
   ): Promise<LoadSessionResponse> {
     let sessionId = initialSessionId;
     const sessionSource = getSessionSource(params);
+    if (
+      sessionSource?.sourceType === AGENT_SESSION_SOURCE_TYPE &&
+      !this.isTrustedManagedParent()
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        '`agent` is reserved for daemon-owned workspace agent restore',
+      );
+    }
     if (
       sessionSource?.sourceType === AGENT_HOST_SESSION_SOURCE_TYPE &&
       !this.isTrustedManagedParent()
@@ -6335,6 +6353,15 @@ class QwenAgent implements Agent {
   ): Promise<ResumeSessionResponse> {
     let sessionId = initialSessionId;
     const sessionSource = getSessionSource(params);
+    if (
+      sessionSource?.sourceType === AGENT_SESSION_SOURCE_TYPE &&
+      !this.isTrustedManagedParent()
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        '`agent` is reserved for daemon-owned workspace agent restore',
+      );
+    }
     if (
       sessionSource?.sourceType === AGENT_HOST_SESSION_SOURCE_TYPE &&
       !this.isTrustedManagedParent()
