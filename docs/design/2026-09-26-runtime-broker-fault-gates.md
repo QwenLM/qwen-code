@@ -236,7 +236,7 @@ With the bundle built at the repository root (`npm run build && npm run
 bundle`), run in `packages/sdk-java/runtime-broker`:
 
 ```bash
-mvn -Pfault-gates test   # the 32 gates, about 3 minutes
+mvn -Pfault-gates test   # every fault gate (44 today), about 4 minutes
 mvn test                 # the default suite, gates excluded
 mvn checkstyle:check
 ```

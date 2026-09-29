@@ -122,7 +122,7 @@ FG4 存储门禁还钉住：数据库恢复后，没有任何东西重试失败�
 在仓库根目录构建好打包产物（`npm run build && npm run bundle`）后，在 `packages/sdk-java/runtime-broker` 中运行：
 
 ```bash
-mvn -Pfault-gates test   # 32 个门禁，约 3 分钟
+mvn -Pfault-gates test   # 全部门禁（目前 44 个），约 4 分钟
 mvn test                 # 默认测试集，不含门禁
 mvn checkstyle:check
 ```
