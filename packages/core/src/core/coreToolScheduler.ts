@@ -450,8 +450,8 @@ const TOOL_CANCELLED_BEFORE_EXECUTION_MESSAGE = `This tool call was cancelled be
 //
 // Both messages include an explicit stop directive so the model does not
 // misattribute the cancellation as a transient fault and retry (#10170).
-const TOOL_CANCELLED_BEFORE_COMPLETION_MESSAGE = `User intentionally cancelled this tool call. ${TOOL_CANCELLATION_STOP_DIRECTIVE}`;
-const TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE = `The tool had already completed; its output was discarded. User intentionally cancelled. ${TOOL_CANCELLATION_STOP_DIRECTIVE}`;
+const TOOL_CANCELLED_BEFORE_COMPLETION_MESSAGE = `This tool call was cancelled before it completed. ${TOOL_CANCELLATION_STOP_DIRECTIVE}`;
+const TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE = `The tool had already completed; its output was discarded. ${TOOL_CANCELLATION_STOP_DIRECTIVE}`;
 
 /**
  * Builds the failure ToolResult surfaced when a tool call exceeds the
@@ -4583,9 +4583,12 @@ export class CoreToolScheduler {
     this.recordAutoModeFallbackResolution(callId, outcome);
 
     if (outcome === ToolConfirmationOutcome.Cancel || signal.aborted) {
-      // Use custom cancel message from payload if provided, otherwise use default
-      const cancelMessage =
-        payload?.cancelMessage || 'User did not allow tool call';
+      const reason =
+        payload?.cancelMessage ||
+        (outcome === ToolConfirmationOutcome.Cancel
+          ? 'User did not allow tool call.'
+          : 'This tool call was cancelled before it ran.');
+      const cancelMessage = `${reason} ${TOOL_CANCELLATION_STOP_DIRECTIVE}`;
       this.setStatusInternal(callId, 'cancelled', cancelMessage, 'not_started');
       // Tool span is cancelled too — finalize it via setToolSpanCancelled
       // before pulling it out of the map so the status survives end().

@@ -12571,7 +12571,7 @@ describe('CoreToolScheduler plan mode with ask_user_question', () => {
     const functionResponse =
       completedCall.response.responseParts[0].functionResponse;
     expect(functionResponse?.response?.['error']).toBe(
-      `[Operation Cancelled] Reason: ${cancellationReason}`,
+      `[Operation Cancelled] Reason: ${cancellationReason} Stop and await further instructions; do not retry or work around it.`,
     );
   });
 });
@@ -14837,9 +14837,10 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(completedCall.response.executionStatus).toBe('cancelled');
     const responseText = JSON.stringify(completedCall.response.responseParts);
     expect(responseText).toContain(
-      'User intentionally cancelled this tool call.',
+      'This tool call was cancelled before it completed.',
     );
     expect(responseText).not.toContain('had already completed');
+    expect(responseText).not.toContain('User intentionally cancelled');
     expect(responseText).toContain(
       'Stop and await further instructions; do not retry or work around it.',
     );
@@ -14860,9 +14861,7 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(completedCall.response.executionStatus).toBe('cancelled');
     const responseText = JSON.stringify(completedCall.response.responseParts);
     expect(responseText).toContain('The tool had already completed');
-    expect(responseText).not.toContain(
-      'User intentionally cancelled this tool call. Stop',
-    );
+    expect(responseText).not.toContain('User intentionally cancelled');
     expect(responseText).toContain(
       'Stop and await further instructions; do not retry or work around it.',
     );
@@ -15295,6 +15294,83 @@ describe('CoreToolScheduler telemetry spans', () => {
       (call) => (call[0] as { eventName?: string })?.eventName === 'PreToolUse',
     ).length;
   }
+
+  it.each([
+    ['explicit cancellation', ToolConfirmationOutcome.Cancel, undefined],
+    [
+      'host cancellation',
+      ToolConfirmationOutcome.Cancel,
+      'Approval timed out.',
+    ],
+  ] as const)(
+    'adds the stop directive after %s at confirmation',
+    async (_label, outcome, reason) => {
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: 'unexpected',
+        returnDisplay: 'unexpected',
+      });
+      const { onToolCallsUpdate, onAllToolCallsComplete } =
+        await scheduleWithAsk({
+          messageBus: askMessageBus(),
+          execute,
+        });
+      const waiting = (await waitForStatus(
+        onToolCallsUpdate,
+        'awaiting_approval',
+      )) as WaitingToolCall;
+      await waiting.confirmationDetails.onConfirm(
+        outcome,
+        reason ? { cancelMessage: reason } : undefined,
+      );
+      await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+      const completed = onAllToolCallsComplete.mock.calls.at(
+        -1,
+      )?.[0] as CompletedToolCall[];
+      expect(completed[0].status).toBe('cancelled');
+      expect(completed[0].response.executionStatus).toBe('not_started');
+      expect(execute).not.toHaveBeenCalled();
+      const text = JSON.stringify(completed[0].response.responseParts);
+      expect(text).toContain(reason ?? 'User did not allow tool call');
+      expect(text).toContain(
+        'Stop and await further instructions; do not retry or work around it.',
+      );
+    },
+  );
+
+  it('does not attribute a confirmation-time system abort to the user', async () => {
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'unexpected',
+      returnDisplay: 'unexpected',
+    });
+    const abortController = new AbortController();
+    const { onToolCallsUpdate, onAllToolCallsComplete } = await scheduleWithAsk(
+      {
+        messageBus: askMessageBus(),
+        execute,
+        abortController,
+      },
+    );
+    const waiting = (await waitForStatus(
+      onToolCallsUpdate,
+      'awaiting_approval',
+    )) as WaitingToolCall;
+    abortController.abort(new Error('run budget exhausted'));
+    await waiting.confirmationDetails.onConfirm(
+      ToolConfirmationOutcome.ProceedOnce,
+    );
+    await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+    const completed = onAllToolCallsComplete.mock.calls.at(
+      -1,
+    )?.[0] as CompletedToolCall[];
+    expect(completed[0].status).toBe('cancelled');
+    expect(execute).not.toHaveBeenCalled();
+    const text = JSON.stringify(completed[0].response.responseParts);
+    expect(text).not.toContain('User did not allow');
+    expect(text).not.toContain('User intentionally cancelled');
+    expect(text).toContain(
+      'Stop and await further instructions; do not retry or work around it.',
+    );
+  });
 
   it('bounces a PreToolUse ask to awaiting_approval with an info confirmation', async () => {
     const messageBus = askMessageBus('confirm deploy 38111');
