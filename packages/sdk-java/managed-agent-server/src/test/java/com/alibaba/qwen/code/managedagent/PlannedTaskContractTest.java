@@ -86,6 +86,11 @@ class PlannedTaskContractTest {
                 event("artifact").put("artifact_id", "artifact-1"), true);
         check("PublicTaskEvent", "a later event type",
                 event("input_received"), true);
+        check("PublicTaskEvent", "unknown field on a later type",
+                event("input_received").put("future_field", "x"), false);
+        check("PublicTaskEvent", "unknown field on a known type",
+                event("output").put("text", "x")
+                        .put("future_field", "x"), false);
 
         check("PublicTaskEvent", "state_changed without state",
                 event("state_changed"), false);
@@ -133,6 +138,49 @@ class PlannedTaskContractTest {
         events.put("next_cursor", "cursor-1");
         check("PublicTaskEventList", "last page keeps its position", events,
                 true);
+        events.putArray("data");
+        check("PublicTaskEventList", "empty page keeps its position", events,
+                true);
+        events.putNull("next_cursor");
+        check("PublicTaskEventList", "empty page with null cursor", events,
+                false);
+        events.remove("next_cursor");
+        check("PublicTaskEventList", "empty page without cursor", events,
+                false);
+        assertThat(failures).isEmpty();
+    }
+
+    @Test
+    void taskCancelOutcomesDescribeTheCommand() {
+        for (String schema : List.of("PublicCommandOperation",
+                "PublicOperation")) {
+            for (String status : List.of("pending", "running",
+                    "recovery_blocked")) {
+                check(schema, "task_cancel " + status,
+                        operation("task_cancel").put("task_id", "task-1")
+                                .put("status", status), true);
+            }
+            ObjectNode completed = operation("task_cancel")
+                    .put("task_id", "task-1").put("status", "completed")
+                    .put("receipt_id", "receipt-1");
+            check(schema, "recorded task_cancel", completed, true);
+            completed.remove("receipt_id");
+            check(schema, "completed task_cancel without receipt",
+                    completed, false);
+
+            ObjectNode failed = operation("task_cancel")
+                    .put("task_id", "task-1").put("status", "failed")
+                    .put("failure_code", "task_action_unavailable");
+            check(schema, "definitively failed task_cancel", failed, true);
+            failed.remove("failure_code");
+            check(schema, "failed task_cancel without reason", failed, false);
+            check(schema, "task_cancel cannot itself be cancelled",
+                    operation("task_cancel").put("task_id", "task-1")
+                            .put("status", "cancelled"), false);
+            check(schema, "another command keeps its status shape",
+                    operation("submit_input").put("status", "cancelled"),
+                    true);
+        }
         assertThat(failures).isEmpty();
     }
 

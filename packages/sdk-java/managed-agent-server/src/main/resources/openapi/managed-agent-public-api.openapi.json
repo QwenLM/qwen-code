@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Qwen Managed Agent Public and WebShell API",
-    "version": "1.21.0",
-    "description": "Canonical contract for the public Managed Agent resources and the WebShell adapter. partial means that the route exists but generated types and full contract tests are pending; planned means that the route or field is not implemented. Workspace context and cwd operations are v1.9 target contracts, not current server capabilities. v1.10 adds planned command admission, Actions, lifecycle and actor authorization. v1.12 refines planned W0 creation discovery, actor-specific create hints and explicit default selection. Full tool-result descriptors from the v1.11 design are not yet included. Filter planned fields as well as routes from production SDKs. v1.13 moves this contract into the Qwen Code repository as its single source and records the shipped rename, archive, unarchive and delete routes as partial. v1.14 integrates W0d workspace discovery, the WebShell workspace lookup, and empty-session binding as partial; workspace_binding/workspaceBinding advertises this narrow flow without enabling workspace execution or context switching. v1.15 adds the archived, archiving and deleting Session statuses and the cancelling Turn status, requires request_id in error envelopes, declares the error responses that the server returns, and marks Session create, list and get on both surfaces implemented. v1.16 adds the planned Stage H task contract (SessionTaskView as PublicTask, task list, detail, events and cancel) and names the MCP catalog, hook catalog, automation and channel resources as planned; their shapes arrive with Stages H1 to H6. v1.17 implements event replay: events carry their schema and projection versions and a top-level Item and Part identity, JSON event pages return has_more and next_cursor and accept limits up to 1000, and a persisted replay floor answers expired cursors with 409 cursor_expired in JSON and one agent.session.resync_required frame over SSE; it marks the public event query and stream, the WebShell event stream and the WebShell transcript implemented. v1.18 implements the durable Session lifecycle (Stage D4): close, archive and delete answer 202 with a command operation on both surfaces, an archive requires a closed Session, a deleted Session leaves a tombstone whose operations stay readable, and the operation query serves them; unarchive restores a closed Session, and Session capabilities advertise session_lifecycle. v1.19 serves the task list and detail on both surfaces as partial (Stage H0c): the Session store projects them from the Stage H records the Session authority commits, a task.updated Session event announces each change of a task's view, and Session capabilities advertise tasks. Task events and cancel stay planned until a slice's tasks produce output and accept a cancel. v1.20 implements the Turn read model (Stage D5): the public Turn list and detail read a Session's Turns without their input, newest first by creation time in milliseconds and then Turn ID, with an opaque cursor; a deleted Session's Turns are not readable, and the durable admission fields of a Turn stay planned until D7. v1.21 declares on the task list, detail and event routes of both surfaces the 403 actor_scope_mismatch that the tenant filter answers on every /v1/agents/ and WebShell route, as the Session and Turn reads already do, and the shared Forbidden response names it; a caller that cannot read a task still gets 404."
+    "version": "1.22.0",
+    "description": "Canonical contract for the public Managed Agent resources and the WebShell adapter. partial means that the route exists but generated types and full contract tests are pending; planned means that the route or field is not implemented. Workspace context and cwd operations are v1.9 target contracts, not current server capabilities. v1.10 adds planned command admission, Actions, lifecycle and actor authorization. v1.12 refines planned W0 creation discovery, actor-specific create hints and explicit default selection. Full tool-result descriptors from the v1.11 design are not yet included. Filter planned fields as well as routes from production SDKs. v1.13 moves this contract into the Qwen Code repository as its single source and records the shipped rename, archive, unarchive and delete routes as partial. v1.14 integrates W0d workspace discovery, the WebShell workspace lookup, and empty-session binding as partial; workspace_binding/workspaceBinding advertises this narrow flow without enabling workspace execution or context switching. v1.15 adds the archived, archiving and deleting Session statuses and the cancelling Turn status, requires request_id in error envelopes, declares the error responses that the server returns, and marks Session create, list and get on both surfaces implemented. v1.16 adds the planned Stage H task contract (SessionTaskView as PublicTask, task list, detail, events and cancel) and names the MCP catalog, hook catalog, automation and channel resources as planned; their shapes arrive with Stages H1 to H6. v1.17 implements event replay: events carry their schema and projection versions and a top-level Item and Part identity, JSON event pages return has_more and next_cursor and accept limits up to 1000, and a persisted replay floor answers expired cursors with 409 cursor_expired in JSON and one agent.session.resync_required frame over SSE; it marks the public event query and stream, the WebShell event stream and the WebShell transcript implemented. v1.18 implements the durable Session lifecycle (Stage D4): close, archive and delete answer 202 with a command operation on both surfaces, an archive requires a closed Session, a deleted Session leaves a tombstone whose operations stay readable, and the operation query serves them; unarchive restores a closed Session, and Session capabilities advertise session_lifecycle. v1.19 serves the task list and detail on both surfaces as partial (Stage H0c): the Session store projects them from the Stage H records the Session authority commits, a task.updated Session event announces each change of a task's view, and Session capabilities advertise tasks. Task events and cancel stay planned until a slice's tasks produce output and accept a cancel. v1.20 implements the Turn read model (Stage D5): the public Turn list and detail read a Session's Turns without their input, newest first by creation time in milliseconds and then Turn ID, with an opaque cursor; a deleted Session's Turns are not readable, and the durable admission fields of a Turn stay planned until D7. v1.21 declares on the task list, detail and event routes of both surfaces the 403 actor_scope_mismatch that the tenant filter answers on every /v1/agents/ and WebShell route, as the Session and Turn reads already do, and the shared Forbidden response names it; a caller that cannot read a task still gets 404. v1.22 settles the planned task event and cancel semantics: a durable retention floor, committed-prefix publication, stable cursors, Artifact visibility before expiry, bounded backlog under archival failure, ordered idempotent cancellation and command outcomes. Clients tolerate unknown optional event fields across minor versions. Task events and cancel remain planned."
   },
   "servers": [
     {
@@ -1891,7 +1891,7 @@
         "x-qwen-implementation-status": "planned",
         "responses": {
           "200": {
-            "description": "Task events after the cursor, oldest first. 400 invalid_event_cursor rejects a malformed cursor or one from another task. Events expire only from the oldest end, so the retained events have no gaps, and 409 cursor_expired means that the cursor is older than the oldest retained event; its replay_floor_sequence and snapshot_through_sequence stay absent. An output event expires only after its text is in an Artifact, so a caller that first reads the retained events from the start (without after) and only then the task Artifacts misses no output, as long as artifact_refs still lists every Artifact of the task; reading the Artifacts first can miss an event archived and expired between the two reads. Joining the two without overlap is defined with output segmentation in Stage H3. 400 unsupported_feature when the Session does not serve tasks (capabilities.tasks is false).",
+            "description": "Task events strictly after the cursor, oldest first, published as a committed prefix per task: no event may become visible at or before any previously returned event, page or output_cursor position. 400 invalid_event_cursor rejects a malformed cursor or one from another task. The durable retention floor is the position after the newest expired event, initially the stream start; only an oldest prefix expires. 409 cursor_expired means strictly below that floor, even when no events remain; equality is valid. Its replay_floor_sequence and snapshot_through_sequence stay absent because task cursors are opaque. Cursor identity, logical position, payload and accepted schema/projection versions survive rebuilds, restarts and archival; retention may still expire a cursor. Any output-producing task requires capabilities.artifacts. An output event holds back its own expiry and every later event until its full text is durably readable in an Artifact and discoverable by subsequent recovery reads, including through a potentially lagging task projection. Time retention is a target under healthy archival, not an unconditional deletion deadline. Archival failure pins the floor; H3 must bound durable backlog and apply producer backpressure and admission blocking before capacity is exhausted, or leave output-producing tasks disabled. Never silently discard accepted output. After cursor_expired, read one event page from the floor without after and save next_cursor; do not wait for has_more=false because an active producer may never catch up. Then read a fresh task view and discover/read its Artifacts, then resume from the saved page cursor, including events held back by the first page limit, not the new view's output_cursor. If the floor overtakes the reader, restart recovery; never treat another 409 as an empty page. Until older Artifacts can be enumerated and attributed to the task, H3 must prevent rotation beyond the 100 artifact_refs entries; afterward recovery must also enumerate older Artifacts. Recovery is guaranteed while the task and its Artifacts remain readable under their retention and authorization rules. Stage H3 defines stable output segments for joining Artifacts and events without overlap. 400 unsupported_feature when the Session does not serve tasks (capabilities.tasks is false).",
             "content": {
               "application/json": {
                 "schema": {
@@ -1938,7 +1938,7 @@
         "x-qwen-implementation-status": "planned",
         "responses": {
           "202": {
-            "description": "Cancel durably recorded for the task owner. Checks run in this order: access (404, then 403 task_forbidden when the caller can read the task but may not cancel it), idempotent replay, then task state. A retry by the same actor with the same Idempotency-Key and request therefore replays the original operation while its idempotency record is retained, even after the task settled. 202 and a completed operation mean acceptance, not a stop: the task becomes cancelled only after its physical execution settles, and an unknown outcome becomes recovery_blocked. 400 invalid_request when Idempotency-Key is missing and invalid_idempotency_key when it is malformed, as on the other idempotent routes. A new key gets 409 task_action_unavailable when action_capabilities lacks cancel, which includes every settled task; a reused key with another request gets 409 idempotency_conflict. 400 unsupported_feature when the Session does not serve tasks (capabilities.tasks is false).",
+            "description": "Java durably accepted the cancellation and owns delivery; 202 does not prove owner acceptance or physical stop. After the tenant/actor filter and request decoding, validate Idempotency-Key (missing: 400 invalid_request; malformed: 400 invalid_idempotency_key), then current access (404 for an unreadable Session/task, then 403 task_forbidden for a readable task the actor may not cancel), then idempotent replay. The domain is tenant/session/operation-kind/actor/key; the digest includes task_id and excludes trace-only request IDs. While the record is retained and access remains valid, the same key and digest returns the same operation with its latest durable state and replayed=true; another digest returns 409 idempotency_conflict. Only new requests check capabilities.tasks (400 unsupported_feature), then Session active state (409 session_not_active otherwise, including closing, closed, archived and deleting), then action_capabilities containing cancel (409 task_action_unavailable otherwise). Atomically recheck admission and create the operation, serializing with Session/task transitions; a concurrent same-key winner replays before new-request state checks. Different keys that each pass admission create different operations, although physical stop requests may be coalesced or repeated safely; each operation gets its own recorded outcome. completed means the task authority durably recorded cancellation and returned a receipt; failed proves it was not accepted and will not be delivered again, with failure_code; recovery_blocked means acceptance is unknown and requires reconciliation before any re-execution. Retryable delivery failures remain pending/running. task_cancel never has status cancelled because cancellation commands cannot be withdrawn. Only physical cancellation settlement makes the task cancelled; a natural terminal outcome is preserved and an unknown physical outcome makes the task recovery_blocked independently of operation acceptance. Capability or state changes do not invalidate replay, but missing/deleted resources or revoked access may still return 404/403.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2050,7 +2050,7 @@
         "x-qwen-implementation-status": "planned",
         "responses": {
           "200": {
-            "description": "Same authorized task semantics as the public API.",
+            "description": "Same authorized task semantics as the public task events route, including the durable retention floor, committed-prefix publication, Artifact recovery order and client tolerance of unknown optional fields and event types.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2091,7 +2091,7 @@
         "x-qwen-implementation-status": "planned",
         "responses": {
           "202": {
-            "description": "Same authorized task semantics as the public API.",
+            "description": "Same authorized task cancellation semantics as the public API: key validation, current access, idempotent replay, then new-request capability, Session and task checks. Replay returns the same operation and latest durable state. 202 is durable admission, completed is authority acceptance, and neither proves physical stop.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2384,7 +2384,7 @@
         "name": "after",
         "in": "query",
         "required": false,
-        "description": "Opaque task event cursor: an event cursor, a page next_cursor or a task output_cursor. Omit it to read from the oldest retained event.",
+        "description": "Opaque task event cursor: an event cursor, a page next_cursor or a task output_cursor. Omit it to read from the durable retention floor. Strictly below the floor is 409 cursor_expired; equality is valid, including with no retained events.",
         "schema": {
           "type": "string",
           "minLength": 1,
@@ -4987,7 +4987,7 @@
             "minLength": 1,
             "maxLength": 128,
             "x-qwen-implementation-status": "planned",
-            "description": "Why the operation failed. Close, archive and delete retry until they complete, so they never report one."
+            "description": "Why the operation failed. Required for a failed task_cancel, which proves non-acceptance and no further delivery. Close, archive and delete retry until they complete, so they never report one."
           },
           "replayed": {
             "type": "boolean"
@@ -5083,9 +5083,44 @@
                 "required": ["task_id"]
               }
             }
+          },
+          {
+            "x-qwen-implementation-status": "planned",
+            "if": {
+              "properties": {
+                "type": {
+                  "const": "task_cancel"
+                }
+              },
+              "required": ["type"]
+            },
+            "then": {
+              "properties": {
+                "status": {
+                  "not": {
+                    "const": "cancelled"
+                  }
+                }
+              },
+              "allOf": [
+                {
+                  "if": {
+                    "properties": {
+                      "status": {
+                        "const": "failed"
+                      }
+                    },
+                    "required": ["status"]
+                  },
+                  "then": {
+                    "required": ["failure_code"]
+                  }
+                }
+              ]
+            }
           }
         ],
-        "description": "Receipt IDs are opaque authorized product handles, not private journal or storage refs. Input/cancel completion is command acceptance, not Turn completion or physical stop. Action completion may only record one vote. Lifecycle completion requires its cleanup facts; archive may remain java_durable because Java is its authority. Task cancel completion means that the authority recorded the cancel, not that the task stopped: the task becomes cancelled only after its physical execution settles."
+        "description": "Receipt IDs are opaque authorized product handles, not private journal or storage refs. Input/cancel completion is command acceptance, not Turn completion or physical stop. Action completion may only record one vote. Lifecycle completion requires its cleanup facts; archive may remain java_durable because Java is its authority. Task cancel 202 is Java durable admission; completion means the authority durably recorded cancellation and returned a receipt, not that the task stopped. Task cancel failed proves non-acceptance and no further delivery, with a failure code; recovery_blocked means acceptance is unknown and needs reconciliation before re-execution. Its status is never cancelled. Physical settlement and an unknown physical outcome belong to the task, independently of operation acceptance."
       },
       "PublicOperation": {
         "oneOf": [
@@ -5299,7 +5334,7 @@
             "minLength": 1,
             "maxLength": 128,
             "x-qwen-implementation-status": "planned",
-            "description": "Why the operation failed. Close, archive and delete retry until they complete, so they never report one."
+            "description": "Why the operation failed. Required for a failed task_cancel, which proves non-acceptance and no further delivery. Close, archive and delete retry until they complete, so they never report one."
           },
           "replayed": {
             "type": "boolean"
@@ -5395,9 +5430,44 @@
                 "required": ["taskId"]
               }
             }
+          },
+          {
+            "x-qwen-implementation-status": "planned",
+            "if": {
+              "properties": {
+                "type": {
+                  "const": "task_cancel"
+                }
+              },
+              "required": ["type"]
+            },
+            "then": {
+              "properties": {
+                "status": {
+                  "not": {
+                    "const": "cancelled"
+                  }
+                }
+              },
+              "allOf": [
+                {
+                  "if": {
+                    "properties": {
+                      "status": {
+                        "const": "failed"
+                      }
+                    },
+                    "required": ["status"]
+                  },
+                  "then": {
+                    "required": ["failureCode"]
+                  }
+                }
+              ]
+            }
           }
         ],
-        "description": "Receipt IDs are opaque authorized product handles, not private journal or storage refs. Input/cancel completion is command acceptance, not Turn completion or physical stop. Action completion may only record one vote. Lifecycle completion requires its cleanup facts; archive may remain java_durable because Java is its authority. Task cancel completion means that the authority recorded the cancel, not that the task stopped: the task becomes cancelled only after its physical execution settles."
+        "description": "Receipt IDs are opaque authorized product handles, not private journal or storage refs. Input/cancel completion is command acceptance, not Turn completion or physical stop. Action completion may only record one vote. Lifecycle completion requires its cleanup facts; archive may remain java_durable because Java is its authority. Task cancel 202 is Java durable admission; completion means the authority durably recorded cancellation and returned a receipt, not that the task stopped. Task cancel failed proves non-acceptance and no further delivery, with a failure code; recovery_blocked means acceptance is unknown and needs reconciliation before re-execution. Its status is never cancelled. Physical settlement and an unknown physical outcome belong to the task, independently of operation acceptance."
       },
       "WebShellQuestionAction": {
         "type": "object",
@@ -5916,7 +5986,7 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 512,
-            "description": "Task event cursor positioned after the newest event at read time; pass it as after on the task events route to follow only new events.",
+            "description": "Stable task event cursor after the committed tail at view read time. No event can later appear at or before it. Pass it as after to follow only new events; recovery must instead keep its saved event page cursor so it does not skip intervening output. Normal retention may expire it.",
             "x-qwen-implementation-status": "planned"
           },
           "artifact_refs": {
@@ -6103,7 +6173,7 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 512,
-            "description": "Task event cursor positioned after this event. A consumer that stores it with each applied event resumes without applying an event twice."
+            "description": "Stable opaque position after this event and its identity. Atomically apply the event and save this cursor to avoid duplicate application after a crash. It is never reassigned; normal retention can expire it."
           },
           "created_at": {
             "type": "integer",
@@ -6122,7 +6192,7 @@
           },
           "truncated": {
             "type": "boolean",
-            "description": "True when the chunk was cut to the event limit; the full output is in the task Artifacts."
+            "description": "True when the chunk was cut to the event limit; its full output is already durably readable and discoverable in the task Artifacts when the event is published."
           },
           "artifact_id": {
             "type": "string",
@@ -6214,7 +6284,7 @@
             }
           }
         ],
-        "description": "One task event: a logical state change, a bounded output chunk, or a reference to an Artifact that received task output. High-volume logs and Monitor raw lines are aggregated into Artifacts and never become one event per line."
+        "description": "One task event: a logical state change, a bounded output chunk, or an Artifact reference. High-volume output goes to Artifacts or bounded chunks in this paged stream, never one Session event per raw line. The closed schema validates the server's own version; clients ignore unknown optional fields and unknown types and checkpoint their cursors. Strict response validation against an older minor version is not supported. Event identity, position, payload and accepted schema/projection versions are immutable across restart, projection rebuild and archival."
       },
       "WebShellTask": {
         "type": "object",
@@ -6272,7 +6342,7 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 512,
-            "description": "Task event cursor positioned after the newest event at read time; pass it as after on the task events route to follow only new events.",
+            "description": "Stable task event cursor after the committed tail at view read time. No event can later appear at or before it. Pass it as after to follow only new events; recovery must instead keep its saved event page cursor so it does not skip intervening output. Normal retention may expire it.",
             "x-qwen-implementation-status": "planned"
           },
           "artifactRefs": {
@@ -6456,7 +6526,7 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 512,
-            "description": "Task event cursor positioned after this event. A consumer that stores it with each applied event resumes without applying an event twice."
+            "description": "Stable opaque position after this event and its identity. Atomically apply the event and save this cursor to avoid duplicate application after a crash. It is never reassigned; normal retention can expire it."
           },
           "createdAt": {
             "type": "integer",
@@ -6475,7 +6545,7 @@
           },
           "truncated": {
             "type": "boolean",
-            "description": "True when the chunk was cut to the event limit; the full output is in the task Artifacts."
+            "description": "True when the chunk was cut to the event limit; its full output is already durably readable and discoverable in the task Artifacts when the event is published."
           },
           "artifactId": {
             "type": "string",
@@ -6567,7 +6637,7 @@
             }
           }
         ],
-        "description": "One task event: a logical state change, a bounded output chunk, or a reference to an Artifact that received task output. High-volume logs and Monitor raw lines are aggregated into Artifacts and never become one event per line."
+        "description": "One task event: a logical state change, a bounded output chunk, or an Artifact reference. High-volume output goes to Artifacts or bounded chunks in this paged stream, never one Session event per raw line. The closed schema validates the server's own version; clients ignore unknown optional fields and unknown types and checkpoint their cursors. Strict response validation against an older minor version is not supported. Event identity, position, payload and accepted schema/projection versions are immutable across restart, projection rebuild and archival."
       },
       "WebShellTaskEventPage": {
         "type": "object",
@@ -6588,7 +6658,7 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 512,
-            "description": "The cursor of the last returned event, so an event held back by limit is never passed; on an empty page, the requested position, or the start of the retained events when after was omitted. Pass it back to continue. It is never null because a running task can produce more events."
+            "description": "The last returned event cursor, never passing an event held back by limit. On an empty page, the requested position, or the durable retention floor if after was omitted. Required and never null, including when no events remain. No event may later become visible at or before this position."
           }
         },
         "x-qwen-implementation-status": "planned"
@@ -6649,7 +6719,8 @@
           "after": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 512
+            "maxLength": 512,
+            "description": "Opaque task event cursor: an event cursor, a page nextCursor or a task outputCursor. Omit it to read from the durable retention floor. Strictly below the floor is 409 cursor_expired; equality is valid, including with no retained events."
           },
           "limit": {
             "type": "integer",
@@ -6687,7 +6758,7 @@
         "minLength": 1,
         "maxLength": 128,
         "x-qwen-implementation-status": "planned",
-        "description": "state_changed, output or artifact. The set is open: a later minor version may add a type together with the optional fields it needs, and clients ignore types they do not know."
+        "description": "state_changed, output or artifact. The set is open: a later minor version may add types and optional fields. Clients ignore unknown optional fields and unknown types, while still checkpointing event cursors; strict validation against an older minor response schema is not supported. Existing fields forbidden for a known type cannot be repurposed on that type."
       },
       "PublicTaskEventList": {
         "type": "object",
@@ -6711,7 +6782,7 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 512,
-            "description": "The cursor of the last returned event, so an event held back by limit is never passed; on an empty page, the requested position, or the start of the retained events when after was omitted. Pass it back to continue. It is never null because a running task can produce more events."
+            "description": "The last returned event cursor, never passing an event held back by limit. On an empty page, the requested position, or the durable retention floor if after was omitted. Required and never null, including when no events remain. No event may later become visible at or before this position."
           }
         },
         "x-qwen-implementation-status": "planned"
