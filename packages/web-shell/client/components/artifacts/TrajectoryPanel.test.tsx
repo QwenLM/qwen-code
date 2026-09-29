@@ -224,6 +224,10 @@ describe('TrajectoryPanel', () => {
       text(container.querySelector('[data-testid="trajectory-totals"]')),
     ).toContain('1 turn ·');
     expect(
+      text(container.querySelector('[data-testid="trajectory-metrics"]')),
+    ).toContain('Main model total10.4s');
+    expect(container.querySelector('[data-has-failures="true"]')).toBeNull();
+    expect(
       container.querySelectorAll('[data-testid="trajectory-turn"]'),
     ).toHaveLength(1);
     expect(
@@ -234,7 +238,7 @@ describe('TrajectoryPanel', () => {
     // the recorded frame rather than any client clock.
     const body = container.textContent ?? '';
     expect(body).toContain('7.8s');
-    expect(body).toContain('TTFT');
+    expect(body).toContain('First token');
   });
 
   it('shows a dash where no duration was recorded', async () => {
@@ -285,6 +289,64 @@ describe('TrajectoryPanel', () => {
     expect(container.textContent).not.toContain(
       'No request or tool durations are recorded',
     );
+    expect(
+      text(container.querySelector('[data-testid="trajectory-overview"]')),
+    ).toContain('Recorded durations have no start time');
+    expect(
+      container
+        .querySelector('[data-testid="trajectory-metrics"] strong')
+        ?.getAttribute('aria-label'),
+    ).toBe('unrecorded');
+    expect(
+      text(
+        container.querySelector('[data-testid="trajectory-context-notice"]'),
+      ),
+    ).toContain('1 without start');
+  });
+
+  it('shows measured zero separately from unrecorded time', async () => {
+    const container = await render(async () =>
+      page([
+        userText('go', 'rec-1'),
+        timingFrame(
+          { kind: 'request', startedAt: 1_700_000_000_000, durationMs: 0 },
+          'rec-2',
+        ),
+        toolCall('call-1', 'read_file', 'Read note.txt', 'rec-3'),
+      ]),
+    );
+    const metrics = text(
+      container.querySelector('[data-testid="trajectory-metrics"]'),
+    );
+    expect(metrics).toContain('Elapsed span0s');
+    expect(metrics).toContain('Active coverage0s');
+    expect(metrics).toContain('Main model total0s');
+    expect(
+      text(
+        container.querySelector('[data-testid="trajectory-context-notice"]'),
+      ),
+    ).toContain('1 without duration');
+  });
+
+  it('updates the selected timing and clears it for a prompt', async () => {
+    const container = await render(async () => page(REAL_EVENTS));
+    const request = container.querySelector<HTMLElement>(
+      '[data-testid="trajectory-row-request"]',
+    )!;
+    const user = container.querySelector<HTMLElement>(
+      '[data-testid="trajectory-row-user"]',
+    )!;
+    act(() => request.click());
+    expect(
+      text(container.querySelector('[data-testid="trajectory-selected"]')),
+    ).toContain('7.8s');
+    act(() => user.click());
+    expect(
+      text(container.querySelector('[data-testid="trajectory-selected"]')),
+    ).toContain('no request or tool timing');
+    expect(
+      text(container.querySelector('[data-testid="trajectory-selected"]')),
+    ).not.toContain('7.8s');
   });
 
   it('marks a failed request', async () => {
@@ -299,6 +361,9 @@ describe('TrajectoryPanel', () => {
     );
 
     expect(container.textContent).toContain('Request failed');
+    expect(
+      container.querySelector('[data-has-failures="true"]'),
+    ).not.toBeNull();
   });
 
   it('says a request failed even when it names its model', async () => {
@@ -587,8 +652,8 @@ describe('TrajectoryPanel', () => {
           ),
         ).toBe('Showing 2 of 5 rows in the selected time');
         expect(
-          container.querySelector('[data-testid="trajectory-totals"]'),
-        ).toBeNull();
+          text(container.querySelector('[data-testid="trajectory-totals"]')),
+        ).toContain('Loaded window · 2 turns · 2 requests · 1 tool');
       });
 
       it('keeps a turn prompt but drops what ran outside the time', async () => {
@@ -756,9 +821,12 @@ describe('TrajectoryPanel', () => {
         const container = await render(async () => page(timedTurns()));
         await switchMode(container);
         await drag(container, 0.1, 0.5);
-        const toggle = await switchMode(container);
+        const toggle = container.querySelector<HTMLButtonElement>(
+          '[data-testid="trajectory-mode-active"]',
+        )!;
+        await act(async () => toggle.click());
 
-        expect(toggle.getAttribute('aria-pressed')).toBe('false');
+        expect(toggle.getAttribute('aria-pressed')).toBe('true');
         expect(axisFrom(container)).toBe('0');
         expect(rowCount(container)).toBe(UNFILTERED_ROWS);
         expect(
@@ -795,9 +863,11 @@ describe('TrajectoryPanel', () => {
       const container = await render(async () => page(timedTurns()));
       const [first, , failed] = spansIn(container);
 
-      expect(first!.title).toBe('qwen3.8-max · 1.0s · TTFT 400ms');
+      expect(first!.title).toContain('qwen3.8-max · ');
+      expect(first!.title).toContain('1.0s · First token 400ms');
       expect(failed!.dataset['error']).toBe('true');
-      expect(failed!.title).toBe('qwen3.8-max · Request failed · 500ms');
+      expect(failed!.title).toContain('qwen3.8-max · Request failed');
+      expect(failed!.title).toContain('500ms');
     });
   });
 

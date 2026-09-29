@@ -1752,6 +1752,8 @@ describe('CodeModeOnly tool guidance', () => {
     const prompt = codeModePrompt();
 
     expect(prompt).toContain('as `tools.<name>(args)`');
+    expect(prompt).toContain("use the top-level 'tool_search' when available");
+    expect(prompt).toContain('Read its returned schema and JavaScript name');
     expect(prompt).toContain('To read files use `tools.read_file`');
     expect(prompt).not.toContain("To read files use 'read_file'");
   });

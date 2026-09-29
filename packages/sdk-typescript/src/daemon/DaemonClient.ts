@@ -4198,8 +4198,9 @@ export class DaemonClient {
    * The daemon applies the change in the ACP child's per-session
    * `Config` and publishes an `approval_mode_changed` event. Pass
    * `opts.persist: true` to also write `tools.approvalMode` to the
-   * workspace settings file (default is ephemeral so a remote caller
-   * does not pollute the user's host settings unless asked).
+   * workspace settings file. Without it, the change remains session-local
+   * and is restored from that session's transcript when recording is
+   * available, without polluting the user's host settings.
    *
    * Pre-flight `caps.features.session_approval_mode_control` before
    * calling — older daemons reject the route with 404.

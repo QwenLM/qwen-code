@@ -3190,8 +3190,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
       0,
     );
 
-    // Truncate large output and save full content to a temp file.
-    if (typeof llmContent === 'string') {
+    // Raw capture owns full output; result.output is only a bounded preview.
+    // Otherwise truncate large output and save full content to a temp file.
+    if (!rawCapture && typeof llmContent === 'string') {
       const originalLlmContent = llmContent;
       const outputThreshold = getShellOutputThreshold(this.config);
       // Clamp at 1: truncateToolOutput returns the body untouched on
