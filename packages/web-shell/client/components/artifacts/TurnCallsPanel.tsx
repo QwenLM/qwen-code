@@ -48,8 +48,7 @@ import {
 import { formatDurationMs } from '../messages/tools/toolDisplay';
 import { ToolFilePreviewButton } from '../messages/ToolFilePreviewButton';
 import {
-  extractDiff,
-  isDiffRebuiltFromArgs,
+  resolveDiffAnnotation,
   fencedCodeBlock,
   ToolSummaryIcon,
 } from '../messages/ToolGroup';
@@ -689,9 +688,17 @@ const TurnCallRowItem = memo(function TurnCallRowItem({
   const isShell = isShellToolName(tool.toolName);
   const { diff, diffRebuilt, shell, argumentsText, resultText } =
     useMemo(() => {
-      if (!expanded) return { diff: '', argumentsText: '', resultText: '' };
-      const diff = editTool ? extractDiff(tool) : '';
-      const diffRebuilt = diff ? isDiffRebuiltFromArgs(tool) : false;
+      if (!expanded)
+        return {
+          diff: '',
+          diffRebuilt: false,
+          argumentsText: '',
+          resultText: '',
+        };
+      // One ladder walk for both the rendered diff and the note verdict.
+      const resolved = editTool ? resolveDiffAnnotation(tool) : null;
+      const diff = resolved?.diff ?? '';
+      const diffRebuilt = resolved?.rebuilt ?? false;
       const shell = isShell ? shellDetails(tool) : undefined;
       return {
         diff,

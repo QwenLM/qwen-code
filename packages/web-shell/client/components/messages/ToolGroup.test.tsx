@@ -3114,7 +3114,7 @@ describe('rebuilt edit diff annotation', () => {
     );
   });
 
-  it('renders a failed edit diff without the annotation', () => {
+  it('annotates a failed edit diff that arrived as a content block', () => {
     const container = expandCompletedEdit({
       status: 'failed',
       content: [
@@ -3122,7 +3122,7 @@ describe('rebuilt edit diff annotation', () => {
       ],
     });
     expect(container.textContent).toContain('const a = 2;');
-    expect(container.textContent).not.toContain(
+    expect(container.textContent).toContain(
       'Diff rebuilt from the tool call arguments',
     );
   });
@@ -3139,8 +3139,27 @@ describe('rebuilt edit diff annotation', () => {
     const container = expandCompletedEdit({
       args: {},
       content: [
-        { type: 'diff', path: '/repo/app.ts', newText: 'const a = 2;\n' },
+        {
+          type: 'diff',
+          path: '/repo/app.ts',
+          newText: 'const a = 2;\n',
+          oldText: '',
+        },
       ],
+    });
+    expect(container.textContent).toContain('const a = 2;');
+    expect(container.textContent).not.toContain(
+      'Diff rebuilt from the tool call arguments',
+    );
+  });
+
+  it('does not annotate a file creation rebuilt from an empty old_string', () => {
+    const container = expandCompletedEdit({
+      args: {
+        file_path: '/repo/app.ts',
+        old_string: '',
+        new_string: 'const a = 2;\nconst b = 3;\n',
+      },
     });
     expect(container.textContent).toContain('const a = 2;');
     expect(container.textContent).not.toContain(
