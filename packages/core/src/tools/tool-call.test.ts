@@ -870,7 +870,7 @@ describe('ToolCallTool', () => {
       const schema = target.schema.parametersJsonSchema as {
         properties: Record<string, unknown>;
       };
-      schema.properties.model = { type: 'string', enum: ['fast', 'pro'] };
+      schema.properties['model'] = { type: 'string', enum: ['fast', 'pro'] };
 
       const result = await resolveDeferredToolCall(registry, {
         name: 'agent_like',
