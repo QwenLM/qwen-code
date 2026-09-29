@@ -21,14 +21,23 @@ const mockUploadCacheCtor = vi.hoisted(() => vi.fn());
 const mockObjectStoreCtor = vi.hoisted(() => vi.fn());
 
 vi.mock('openai');
-vi.mock('./converter.js', () => ({
-  OpenAIContentConverter: {
-    convertLlmRequestToOpenAI: vi.fn(),
-    convertOpenAIResponseToGemini: vi.fn(),
-    convertOpenAIChunkToLlm: vi.fn(),
-    convertGeminiToolsToOpenAI: vi.fn(),
-  },
-}));
+vi.mock('./converter.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./converter.js')>();
+  return {
+    // `settleParkedTruncationOverride` calls this directly, so a stub-only
+    // factory turns the first parked-override case added here into a
+    // mock-plumbing failure that reads as a converter bug. Keep it real, as
+    // pipeline.test.ts does.
+    corroborateTruncationFromCompletionTokens:
+      actual.corroborateTruncationFromCompletionTokens,
+    OpenAIContentConverter: {
+      convertLlmRequestToOpenAI: vi.fn(),
+      convertOpenAIResponseToGemini: vi.fn(),
+      convertOpenAIChunkToLlm: vi.fn(),
+      convertGeminiToolsToOpenAI: vi.fn(),
+    },
+  };
+});
 vi.mock('../../telemetry/loggers.js', () => ({
   logProtocolTagSanitized: vi.fn(),
 }));
