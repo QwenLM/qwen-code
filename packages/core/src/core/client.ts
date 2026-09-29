@@ -1491,9 +1491,9 @@ export class LlmClient {
 
   /** @internal */
   /**
-   * Whether the last prompt sits below the compaction warn threshold, so the
-   * next send cannot auto-compact the conversation an extraction has yet to
-   * read (#13004). Unknown counts as not below.
+   * Whether the last prompt sits below the compaction warn threshold (#13004).
+   * This is a cooldown heuristic, not a guarantee against compaction on the
+   * next send (which can add a large input). Unknown counts as not below.
    */
   private isBelowCompactionWarn(): boolean {
     const promptTokens = this.chat?.getLastPromptTokenCount() ?? 0;

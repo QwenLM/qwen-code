@@ -1499,18 +1499,22 @@ describe('MemoryManager', () => {
 
     describe('no-op cooldown (#13004)', () => {
       const history: Content[] = [{ role: 'user', parts: [{ text: 'hi' }] }];
-      const completedNoop = () => ({
+      const completedNoop = (sessionId = 'sess-1') => ({
         touchedTopics: [],
         extractorRan: true as const,
         cursor: {
-          sessionId: 'sess-1',
+          sessionId,
           processedOffset: history.length,
           updatedAt: new Date().toISOString(),
         },
       });
       const turn = (
         mgr: MemoryManager,
-        extra: { isBelowCompactionWarn?: () => boolean; config?: Config } = {
+        extra: {
+          isBelowCompactionWarn?: () => boolean;
+          config?: Config;
+          sessionId?: string;
+        } = {
           isBelowCompactionWarn: () => true,
         },
       ) =>
@@ -1564,6 +1568,45 @@ describe('MemoryManager', () => {
             .filter((t) => t.metadata?.['skippedReason'] === 'cooldown'),
         ).toHaveLength(2);
       });
+
+      it.each([false, true])(
+        "does not inherit another session's cooldown (completion after switch: %s)",
+        async (completeAfterSwitch) => {
+          process.env[EXTRACT_NOOP_COOLDOWN_TURNS_ENV] = '2';
+          let complete!: (result: ReturnType<typeof completedNoop>) => void;
+          vi.mocked(runAutoMemoryExtract)
+            .mockImplementationOnce(
+              () =>
+                new Promise((resolve) => {
+                  complete = resolve;
+                }),
+            )
+            .mockResolvedValue(completedNoop('sess-2'));
+          const mgr = new MemoryManager();
+          const config = makeMockConfig({
+            getSessionId: vi.fn().mockReturnValue('sess-1'),
+          });
+          const first = turn(mgr, { config });
+
+          if (!completeAfterSwitch) {
+            complete(completedNoop());
+            await first;
+          }
+          vi.mocked(config.getSessionId).mockReturnValue('sess-2');
+          if (completeAfterSwitch) {
+            complete(completedNoop());
+            await first;
+          }
+          const next = await turn(mgr, {
+            config,
+            sessionId: 'sess-2',
+            isBelowCompactionWarn: () => true,
+          });
+
+          expect(next.skippedReason).toBeUndefined();
+          expect(runAutoMemoryExtract).toHaveBeenCalledTimes(2);
+        },
+      );
 
       it.each([
         [

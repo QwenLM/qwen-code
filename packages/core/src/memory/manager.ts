@@ -691,9 +691,12 @@ export class MemoryManager {
     string,
     { taskId: string; params: ScheduleExtractParams }
   >();
-  // User turns still to skip after a completed no-op, per project (#13004).
+  // User turns still to skip after a completed no-op in this session (#13004).
   // Process-local on purpose: a restart resets it to "run", the safe side.
-  private readonly extractCooldownRemaining = new Map<string, number>();
+  private readonly extractCooldownRemaining = new Map<
+    string,
+    { sessionId: string; remaining: number }
+  >();
 
   // ── Skill-review in-flight dedup ─────────────────────────────────────────────
   private readonly skillReviewInFlightByProject = new Map<string, string>();
@@ -1171,14 +1174,21 @@ export class MemoryManager {
       } as never;
     }
 
-    const cooldown = this.extractCooldownRemaining.get(params.projectRoot) ?? 0;
-    if (cooldown > 0) {
-      if (params.isBelowCompactionWarn?.() === true) {
-        this.extractCooldownRemaining.set(params.projectRoot, cooldown - 1);
-        return this.recordExtractCooldownSkip(params, cooldown - 1) as never;
+    const cooldown = this.extractCooldownRemaining.get(params.projectRoot);
+    if (cooldown) {
+      if (
+        cooldown.sessionId === params.sessionId &&
+        cooldown.remaining > 0 &&
+        params.isBelowCompactionWarn?.() === true
+      ) {
+        cooldown.remaining--;
+        return this.recordExtractCooldownSkip(
+          params,
+          cooldown.remaining,
+        ) as never;
       }
-      // Near compaction, or no way to tell: run now so the turns this
-      // cooldown skipped reach an extractor before a summary replaces them.
+      // A different session cannot inherit a no-op from the previous history.
+      // Near compaction, or with an unknown position, also run normally.
       this.extractCooldownRemaining.delete(params.projectRoot);
     }
 
@@ -1341,7 +1351,10 @@ export class MemoryManager {
       result.cursor.processedOffset === params.history.length;
     const turns = completedNoop ? resolveExtractNoopCooldownTurns() : 0;
     if (turns > 0) {
-      this.extractCooldownRemaining.set(params.projectRoot, turns);
+      this.extractCooldownRemaining.set(params.projectRoot, {
+        sessionId: params.sessionId,
+        remaining: turns,
+      });
     } else {
       this.extractCooldownRemaining.delete(params.projectRoot);
     }
