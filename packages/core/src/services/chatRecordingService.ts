@@ -101,7 +101,7 @@ const SESSION_FILE_CONTENT_CHAR_LIMIT = 16_000;
  * content have been written since its last anchor. Half of the reader's 64KB
  * tail window leaves room for the anchor record itself.
  */
-export const METADATA_REANCHOR_BYTES = 32 * 1024;
+const METADATA_REANCHOR_BYTES = 32 * 1024;
 
 function isFileDiffDisplay(resultDisplay: unknown): resultDisplay is FileDiff {
   if (

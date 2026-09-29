@@ -22,7 +22,6 @@ import { Config, type ConfigParameters } from './config.js';
 import { Storage } from './storage.js';
 import {
   ManagedSessionRecordRefusedError,
-  METADATA_REANCHOR_BYTES,
   type ChatRecord,
 } from '../services/chatRecordingService.js';
 import { SessionExecutionEngineError } from '../services/session-execution-engine.js';
@@ -50,6 +49,9 @@ import {
 } from '../utils/sessionStorageUtils.js';
 
 const SESSION_ID = '3f2504e0-4f89-41d3-9a0c-0305e82c3301';
+
+// Mirrors METADATA_REANCHOR_BYTES in chatRecordingService.ts.
+const REANCHOR_GROWTH_BYTES = 32 * 1024 + 2 * 1024;
 
 let root: string;
 let projectDir: string;
@@ -741,10 +743,7 @@ describe('Managed Session log recording', () => {
     const { authority } = (
       config as unknown as { managedSession: ManagedSession }
     ).managedSession;
-    while (
-      (await stat(transcriptPath)).size - from <
-      METADATA_REANCHOR_BYTES + 2 * 1024
-    ) {
+    while ((await stat(transcriptPath)).size - from < REANCHOR_GROWTH_BYTES) {
       await authority.renewActivation({ leaseDurationMs: 5 * 60 * 1000 });
     }
     const write = ManagedSessionRecordSink.prototype.write;
