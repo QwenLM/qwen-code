@@ -17,6 +17,7 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.HarnessEvent;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.ProjectedEvent;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnRecord;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import jakarta.annotation.PreDestroy;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
@@ -190,6 +191,10 @@ public class HarnessCoordinator {
                 terminal = transientFailure(claimed,
                         submissionAttempted.get(), error);
             }
+        } catch (RuntimeBrokerException error) {
+            terminal = !submissionAttempted.get() && !error.isRetryable()
+                    ? fail(claimed, error.getCode(), error.getMessage())
+                    : transientFailure(claimed, submissionAttempted.get(), error);
         } catch (RuntimeException error) {
             terminal = transientFailure(claimed,
                     submissionAttempted.get(), error);
@@ -205,7 +210,7 @@ public class HarnessCoordinator {
             AtomicBoolean leaseLost, AtomicBoolean submissionAttempted) {
         SessionRecord session = store.requireSession(claimed.tenantId(),
                 claimed.sessionId());
-        if (session.workspace() != null) {
+        if (session.workspace() != null && !harness.isWorkspaceFilesAvailable()) {
             return fail(claimed, "workspace_unavailable",
                     "Hosted Workspace execution is not available.");
         }
@@ -579,7 +584,8 @@ public class HarnessCoordinator {
                     "Hosted Harness remained unavailable before Turn"
                             + " admission.");
         }
-        long delay = retryDelay(turn.retryCount());
+        long delay = retryDelay(retryInitialDelay, retryMaxDelay,
+                turn.retryCount());
         long retryAfter = Math.addExact(clock.millis(), delay);
         store.scheduleTurnRetry(turn.tenantId(), turn.sessionId(),
                 turn.turnId(), owner, retryAfter);
@@ -591,9 +597,10 @@ public class HarnessCoordinator {
         return true;
     }
 
-    private long retryDelay(int retryCount) {
-        long initial = retryInitialDelay.toMillis();
-        long maximum = retryMaxDelay.toMillis();
+    static long retryDelay(Duration initialDelay, Duration maxDelay,
+            int retryCount) {
+        long initial = initialDelay.toMillis();
+        long maximum = maxDelay.toMillis();
         int shift = Math.min(retryCount, 62);
         if (initial > (Long.MAX_VALUE >> shift)) {
             return maximum;

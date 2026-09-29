@@ -39,6 +39,7 @@ import {
 import { computeManagedContextDigest } from './managed-workspace-binding.js';
 import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import { getShellConfiguration } from '@qwen-code/qwen-code-core/utils/shell-utils.js';
+import { managedToolDigest } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
 import {
   WORKSPACE_ACTIVATION_ROUTE,
   WORKSPACE_CAPABILITY_DIGEST,
@@ -340,6 +341,40 @@ describe('Managed context worker boot', () => {
       })),
     );
     expect(toolStatuses).toEqual([400, 400, 400]);
+  });
+
+  it('mounts Tool v3 only when a local publisher is injected', async () => {
+    const worker = await startManagedRuntimeAttestationWorker(BOOT, {
+      prepare: async () => {
+        throw new Error('unexpected capture');
+      },
+      accept: async () => {
+        throw new Error('unexpected receipt');
+      },
+    });
+    openWorkers.add(worker);
+    const response = await post(
+      worker.ready.url,
+      '/internal/managed-runtime/v3/status',
+      {
+        protocolVersion: 3,
+        toolResult: 'managed-tool-result/1',
+        reference: {
+          sessionId: 'runtime-session-a',
+          promptId: 'turn-a',
+          callId: 'call-a',
+          argsDigest:
+            '424b16b9aa8d9f0648c8b2e91ecd9fb09faba205685214a7ccb01702b3dd0ce8',
+        },
+      },
+    );
+    expect(response.status).toBe(200);
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(await response.json()).toEqual({
+      protocolVersion: 3,
+      toolResult: 'managed-tool-result/1',
+      state: 'unknown',
+    });
   });
 
   it('answers 404 to the v3 routes under boot v1', async () => {
@@ -1134,6 +1169,73 @@ describe('Managed context tool gate', () => {
         .split(/\r?\n/),
     ).toHaveLength(1);
   });
+
+  it.each(['v2 tools', 'v3 tools', 'v3 capture'] as const)(
+    'refuses a legacy call whose Session the provider claimed while it awaited %s',
+    async (point) => {
+      // The entry checks pass before the claim; only the re-check after each
+      // await stands between the raw call and a provider-owned Session.
+      const root = workspace();
+      const input = { command: 'echo run > ran.txt' };
+      const reference: ManagedToolReference = {
+        sessionId: 'session-1',
+        promptId: 'prompt-1',
+        callId: 'call-1',
+        argsDigest: managedToolDigest(input),
+      };
+      const capture = {
+        tenantId: 'tenant-a',
+        sessionId: 'session-a',
+        turnId: 'turn-a',
+        executionCallId: 'execution-a',
+        bindingGeneration: '1',
+        capturePolicy: 'complete_required' as const,
+      };
+      let enter!: () => void;
+      let release!: () => void;
+      const entered = new Promise<void>((resolve) => (enter = resolve));
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      const suspend = async () => {
+        enter();
+        await gate;
+      };
+      const accept = vi.fn();
+      const prepare = vi.fn(async () => {
+        if (point === 'v3 capture') await suspend();
+        return { identity: {} as never, sink: {} as never };
+      });
+      const executor = new ManagedToolExecutor(
+        async () => {
+          if (point !== 'v3 capture') await suspend();
+          return tools(root);
+        },
+        { prepare, accept },
+      );
+      const legacy =
+        point === 'v2 tools'
+          ? executor.execute(reference, 'run_shell_command', input)
+          : executor.executeV3({
+              reference,
+              capture,
+              toolName: 'run_shell_command',
+              input,
+            });
+      await entered;
+      executor.claimProviderSession(reference.sessionId);
+      release();
+
+      await expect(legacy).rejects.toThrow(
+        'Managed Runtime protocol conflicts.',
+      );
+      expect(executor.hasActiveSession(reference.sessionId)).toBe(false);
+      if (point === 'v2 tools') expect(executor.status(reference)).toBeNull();
+      else expect(executor.statusV3(reference)).toEqual({ state: 'unknown' });
+      expect(prepare).toHaveBeenCalledTimes(point === 'v3 capture' ? 1 : 0);
+      expect(accept).not.toHaveBeenCalled();
+      expect(fs.existsSync(path.join(root, 'ran.txt'))).toBe(false);
+      await executor.close();
+    },
+  );
 });
 
 describe('Managed Workspace execution activation', () => {

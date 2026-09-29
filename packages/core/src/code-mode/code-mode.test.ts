@@ -50,6 +50,7 @@ function runtime(
 
 describe('CodeModeOnly exposure', () => {
   const directTools = [
+    'tool_search',
     'ask_user_question',
     'agent',
     'enter_plan_mode',
@@ -111,8 +112,8 @@ describe('CodeModeOnly exposure', () => {
     },
   );
 
-  it('keeps discovery hidden and exec non-nestable', () => {
-    for (const name of ['tool_search', 'tool_call']) {
+  it('keeps tool_call hidden and exec non-nestable', () => {
+    for (const name of ['tool_call']) {
       expect(getToolExposure(name)).toBe('hidden');
       expect(isCodeModeToolCallAllowed(name, 'model')).toBe(false);
       expect(isCodeModeToolCallAllowed(name, 'code_mode')).toBe(false);
@@ -182,6 +183,7 @@ describe('CodeModeOnly exposure', () => {
       'agent',
       'ask_user_question',
       'exec',
+      'tool_search',
     ]);
     expect(
       declarations.find((item) => item.name === 'exec')?.description,
@@ -270,6 +272,8 @@ describe('CodeModeOnly exposure', () => {
     );
     expect(buildExecDescription(first)).toContain('ImageContent');
     expect(buildExecDescription(first)).toContain('generatedImage');
+    expect(buildExecDescription(first)).toContain('text(result.value.output)');
+    expect(buildExecDescription(first)).not.toContain('text(result.value)');
     expect(buildExecDescription(first)).toContain(
       'setTimeout(callback: () => void, delayMs?: number)',
     );
@@ -281,7 +285,7 @@ describe('CodeModeOnly exposure', () => {
     );
   });
 
-  it('expands deferred tool schemas because nothing can reveal them later', () => {
+  it('keeps deferred tool schemas when search is unavailable', () => {
     const deferredPlan = planCodeModeBindings(
       [
         new MockTool({
@@ -307,6 +311,63 @@ describe('CodeModeOnly exposure', () => {
     );
     expect(description).not.toContain('mcp__server__fetch(args: Record');
     expect(description).toContain('"deferred":true');
+  });
+
+  it('omits deferred metadata while retaining callable bindings and stable declarations', () => {
+    const config = makeFakeConfig({ codeModeOnly: true });
+    const registry = new ToolRegistry(config);
+    for (const name of ['exec', 'tool_search', 'read_file']) {
+      registry.registerTool(new MockTool({ name }));
+    }
+    registry.registerTool(
+      new MockTool({
+        name: 'remote_lookup',
+        shouldDefer: true,
+        description: 'PRIVATE_DEFERRED_DESCRIPTION',
+        params: {
+          type: 'object',
+          properties: { query: { type: 'string' } },
+          required: ['query'],
+        },
+      }),
+    );
+    const before = registry.getFunctionDeclarations();
+    const description = before.find((d) => d.name === 'exec')!.description!;
+    expect(description).toContain('tools.read_file(args:');
+    expect(description).toContain('tool_search');
+    expect(description).not.toContain('remote_lookup');
+    expect(description).not.toContain('PRIVATE_DEFERRED_DESCRIPTION');
+    expect(
+      registry.getCodeModeBindingPlan().bindings.map((b) => b.name),
+    ).toContain('remote_lookup');
+
+    registry.registerTool(
+      new MockTool({ name: 'another_deferred', shouldDefer: true }),
+    );
+    expect(registry.getFunctionDeclarations()).toEqual(before);
+    const scoped = registry.getFunctionDeclarationsFiltered(['remote_lookup']);
+    expect(scoped.map((d) => d.name)).toEqual(['exec']);
+    expect(scoped[0].description).toContain('tools.remote_lookup(args:');
+    expect(scoped[0].description).not.toContain('tools.read_file(args:');
+  });
+
+  it('keeps visible deferred signatures and omits hidden collision names', () => {
+    const config = makeFakeConfig({ codeModeOnly: true });
+    vi.spyOn(config, 'getVisibleTools').mockReturnValue(
+      new Set(['visible_tool']),
+    );
+    const registry = new ToolRegistry(config);
+    for (const name of ['exec', 'tool_search'])
+      registry.registerTool(new MockTool({ name }));
+    for (const name of ['visible_tool', 'hidden-tool', 'hidden_tool']) {
+      registry.registerTool(new MockTool({ name, shouldDefer: true }));
+    }
+    const description = registry
+      .getFunctionDeclarations()
+      .find((d) => d.name === 'exec')!.description!;
+    expect(description).toContain('tools.visible_tool(args:');
+    expect(description).not.toContain('hidden-tool');
+    expect(description).not.toContain('hidden_tool');
   });
 
   it('keeps numeric schema limits visible in nested tool declarations', () => {
@@ -383,6 +444,48 @@ describe('code mode protocol', () => {
 });
 
 describe('isolated code mode host', () => {
+  it('keeps a pending sibling result when allSettled handles a rejection', async () => {
+    let releaseSibling!: () => void;
+    const siblingGate = new Promise<void>((resolve) => {
+      releaseSibling = resolve;
+    });
+    const siblingStarted = vi.fn();
+    const siblingAborted = vi.fn();
+    const execution = executeCodeMode(
+      `const results = await Promise.allSettled([
+        tools.fail({}),
+        tools.read({}),
+      ]);
+      for (const result of results) {
+        text(result.status === 'fulfilled' ? result.value.output : String(result.reason));
+      }
+      return results.map(result => result.status);`,
+      plan('fail', 'read'),
+      runtime(async (name, _args, signal) => {
+        if (name === 'fail') throw new Error('read failed');
+        signal.addEventListener('abort', siblingAborted, { once: true });
+        siblingStarted();
+        await siblingGate;
+        signal.removeEventListener('abort', siblingAborted);
+        return { callId: 'read', name, status: 'success', output: 'retained' };
+      }),
+      new AbortController().signal,
+    );
+    try {
+      await vi.waitFor(() => expect(siblingStarted).toHaveBeenCalledOnce(), {
+        timeout: 10_000,
+      });
+      expect(siblingAborted).not.toHaveBeenCalled();
+    } finally {
+      releaseSibling();
+    }
+    const result = await execution;
+    expect(result.value).toEqual(['rejected', 'fulfilled']);
+    expect(result.output).toContain('read failed');
+    expect(result.output).toContain('retained');
+    expect(siblingAborted).not.toHaveBeenCalled();
+  });
+
   it('runs async tool calls, Promise.all, helpers, and return values', async () => {
     const dispatch = vi.fn(async (name, args) => ({
       callId: String(args['value']),

@@ -64,9 +64,12 @@ import {
   DEFAULT_LIGHT_THEME_NAME,
 } from './default-theme-names.js';
 import {
+  getGlobalQwenDirLite,
   getSystemDefaultsPath,
   getSystemSettingsPath,
+  spawnedEnvironmentView,
 } from './storage-paths-lite.js';
+import { readConfigFile } from './read-config-file.js';
 
 export {
   DEFAULT_EXCLUDED_ENV_VARS,
@@ -1033,6 +1036,12 @@ export interface LoadSettingsOptions {
   skipLoadEnvironment?: boolean;
   skipWorkspaceSettings?: boolean;
   workspaceTrusted?: boolean;
+  /**
+   * Throw on invalid workspace-scope JSON instead of recovering it. Recovery
+   * rewrites the file to `{}`, which a caller polling a setting would read as
+   * the user having turned it off — and the rewrite makes that permanent.
+   */
+  preserveInvalidWorkspaceSettings?: boolean;
 }
 
 export function loadSettings(
@@ -1043,30 +1052,90 @@ export function loadSettings(
     typeof consumeCorruptionEnvVars === 'object'
       ? consumeCorruptionEnvVars
       : { consumeCorruptionEnvVars };
+  return readSettingsLayers(workspaceDir, opts);
+}
+
+/**
+ * Reads every settings layer with the merge, migration, trust and variable
+ * rules of `loadSettings`, but writes nothing: no migration, version
+ * normalization, backup, corruption recovery or environment change. A layer
+ * that cannot be read whole, is not a JSON object or carries a version this
+ * build cannot migrate throws, where `loadSettings` repairs, skips or accepts
+ * some of these. `environment` locates the user and system files and is the
+ * only source for `${VAR}` placeholders; without one, nothing is read. It is
+ * read as a spawned session host receives it, and one that the host would not
+ * receive as it is throws.
+ */
+export function readSettingsSnapshot(
+  workspaceDir: string,
+  options: {
+    environment: Readonly<NodeJS.ProcessEnv>;
+    workspaceTrusted: boolean;
+  },
+): LoadedSettings {
+  const { environment } = options;
+  if (typeof environment !== 'object' || environment === null) {
+    throw new TypeError('A settings snapshot needs an environment.');
+  }
+  return readSettingsLayers(
+    workspaceDir,
+    {
+      consumeCorruptionEnvVars: false,
+      skipLoadEnvironment: true,
+      skipWorkspaceSettings: !options.workspaceTrusted,
+      workspaceTrusted: options.workspaceTrusted,
+    },
+    { environment },
+  );
+}
+
+/**
+ * The real path of the home directory, as settings loading resolves it to tell
+ * whether the workspace is the home directory. Throws when it cannot be
+ * resolved, for example because it does not exist.
+ */
+export function resolveHomeDirectory(home: string = homedir()): string {
+  return fs.realpathSync(path.resolve(home));
+}
+
+function readSettingsLayers(
+  workspaceDir: string,
+  opts: LoadSettingsOptions,
+  snapshotOf?: { readonly environment: Readonly<NodeJS.ProcessEnv> },
+): LoadedSettings {
+  // A snapshot reads through the given environment and writes nothing. Every
+  // step below that writes a file or `process.env` must be skipped when
+  // `snapshot` is set; the snapshot tests compare the whole tree to hold it.
+  const snapshot = snapshotOf !== undefined;
+  const snapshotEnvironment = snapshotOf?.environment;
   // Apply any QWEN_HOME / QWEN_RUNTIME_DIR set in user-level `.env` files
   // BEFORE any code reads a path derived from them. After this call, the
   // lazy `getUserSettingsPath()` / `Storage.getGlobalQwenDir()` getters
   // return the post-bootstrap value.
-  preResolveHomeEnvOverrides();
+  if (!snapshot) preResolveHomeEnvOverrides();
   // A malformed operator file cannot silently reset a confinement policy.
   // Validate literals before environment substitution and corruption recovery.
-  const operatorSandbox = readOperatorSandboxSettings().tools?.executionSandbox;
-  const userSettingsPath = getUserSettingsPath();
-  const qwenHomeRedirectWarning =
-    detectQwenHomeRedirectWithoutMigration(userSettingsPath);
+  const operatorSandbox = snapshot
+    ? undefined
+    : readOperatorSandboxSettings().tools?.executionSandbox;
+  const userSettingsPath = snapshot
+    ? path.join(getGlobalQwenDirLite(snapshotEnvironment), 'settings.json')
+    : getUserSettingsPath();
+  const qwenHomeRedirectWarning = snapshot
+    ? null
+    : detectQwenHomeRedirectWithoutMigration(userSettingsPath);
 
   let systemSettings: Settings = {};
   let systemDefaultSettings: Settings = {};
   let userSettings: Settings = {};
   let workspaceSettings: Settings = {};
   const settingsErrors: SettingsError[] = [];
-  const systemSettingsPath = getSystemSettingsPath();
-  const systemDefaultsPath = getSystemDefaultsPath();
+  const systemSettingsPath = getSystemSettingsPath(snapshotEnvironment);
+  const systemDefaultsPath = getSystemDefaultsPath(snapshotEnvironment);
   const migratedInMemoryScopes = new Set<SettingScope>();
 
   // Resolve paths to their canonical representation to handle symlinks
   const resolvedWorkspaceDir = path.resolve(workspaceDir);
-  const resolvedHomeDir = path.resolve(homedir());
 
   let realWorkspaceDir = resolvedWorkspaceDir;
   try {
@@ -1077,7 +1146,7 @@ export function loadSettings(
   }
 
   // We expect homedir to always exist and be resolvable.
-  const realHomeDir = fs.realpathSync(resolvedHomeDir);
+  const realHomeDir = resolveHomeDirectory();
 
   const workspaceSettingsPath = new Storage(
     workspaceDir,
@@ -1094,8 +1163,12 @@ export function loadSettings(
     wasRecovered?: boolean;
   } => {
     try {
-      if (fs.existsSync(filePath)) {
-        const content = fs.readFileSync(filePath, 'utf-8');
+      const content = snapshot
+        ? readConfigFile(filePath)
+        : fs.existsSync(filePath)
+          ? fs.readFileSync(filePath, 'utf-8')
+          : undefined;
+      if (content !== undefined) {
         let rawSettings: unknown;
         // Carry corruption state through to the final return so it
         // can be attached after the migration pipeline runs.
@@ -1106,7 +1179,12 @@ export function loadSettings(
         try {
           rawSettings = JSON.parse(stripJsonComments(stripUtf8Bom(content)));
         } catch (parseError: unknown) {
-          if (scope !== SettingScope.Workspace || operatorSandbox)
+          if (
+            snapshot ||
+            scope !== SettingScope.Workspace ||
+            operatorSandbox ||
+            opts.preserveInvalidWorkspaceSettings
+          )
             throw parseError;
           // ===== JSON parse failed — enter corruption recovery =====
           // Strategy: save corrupted file as .corrupted → reset to empty →
@@ -1201,9 +1279,19 @@ export function loadSettings(
           hasVersionKey && typeof versionValue !== 'number';
         const hasLegacyNumericVersion =
           typeof versionValue === 'number' && versionValue < SETTINGS_VERSION;
+        if (
+          snapshot &&
+          hasVersionKey &&
+          !(Number.isInteger(versionValue) && (versionValue as number) >= 1)
+        ) {
+          throw new Error(
+            `Settings file has an unsupported ${SETTINGS_VERSION_KEY}.`,
+          );
+        }
         let migrationWarnings: string[] | undefined;
 
         const persistSettingsObject = (warningPrefix: string) => {
+          if (snapshot) return;
           if (operatorSandbox && scope === SettingScope.Workspace) return;
           try {
             // Use sync mode to remove deprecated keys (zombie key prevention)
@@ -1261,6 +1349,14 @@ export function loadSettings(
           // that would create a .orig file from the freshly reset settings.
           settingsObject[SETTINGS_VERSION_KEY] = SETTINGS_VERSION;
           persistSettingsObject('Error normalizing settings version on disk');
+        }
+        if (
+          snapshot &&
+          settingsObject[SETTINGS_VERSION_KEY] !== SETTINGS_VERSION
+        ) {
+          throw new Error(
+            `Settings file has an unsupported ${SETTINGS_VERSION_KEY}.`,
+          );
         }
 
         // Attach corruption state propagated from the parent via env vars.
@@ -1320,21 +1416,32 @@ export function loadSettings(
   // effective precedence is: process.env > home .env > unresolved placeholder.
   // The resolver checks customEnv before process.env, but since customEnv
   // never contains a process.env key, process.env always wins.
-  const homeEnvFallback = getHomeEnvFallbackVars((message) =>
-    debugLogger.warn(message),
-  );
+  // A snapshot environment is the environment of the session hosts it
+  // describes and carries the user-level `.env` values its runtime applied, so
+  // it is the only source, read as a host spawned with it sees it.
+  const homeEnvFallback = snapshotOf
+    ? spawnedEnvironmentView(snapshotOf.environment)
+    : getHomeEnvFallbackVars((message) => debugLogger.warn(message));
+  const resolveOptions = { processEnvFallback: !snapshot };
   systemSettings = resolveEnvVarsInObject(
     systemResult.settings,
     homeEnvFallback,
+    resolveOptions,
   );
   systemDefaultSettings = resolveEnvVarsInObject(
     systemDefaultsResult.settings,
     homeEnvFallback,
+    resolveOptions,
   );
-  userSettings = resolveEnvVarsInObject(userResult.settings, homeEnvFallback);
+  userSettings = resolveEnvVarsInObject(
+    userResult.settings,
+    homeEnvFallback,
+    resolveOptions,
+  );
   workspaceSettings = resolveEnvVarsInObject(
     workspaceResult.settings,
     homeEnvFallback,
+    resolveOptions,
   );
 
   // Support legacy theme names

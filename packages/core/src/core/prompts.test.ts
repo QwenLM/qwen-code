@@ -130,6 +130,13 @@ describe('Core System Prompt (prompts.ts)', () => {
     );
   });
 
+  it('leaves mode-specific managed-memory access out of the core prompt', () => {
+    const prompt = getCoreSystemPrompt();
+
+    expect(prompt).not.toContain('search_memory');
+    expect(prompt).not.toContain('Managed Memory Access');
+  });
+
   it('identifies UserPromptSubmit hook context as distinct from user input', () => {
     vi.stubEnv('SANDBOX', undefined);
     const prompt = getCoreSystemPrompt();
@@ -1111,6 +1118,42 @@ describe('main-session style: reminder decision matches prompt section', () => {
     expect(prompt).toContain('workspace is read-only');
     expect(prompt).not.toContain('# Outside of Sandbox');
   });
+
+  it.each(['read-only', 'workspace-write'] as const)(
+    'describes resolved Landlock restrictions for %s',
+    (filesystem) => {
+      const config = {
+        ...makeConfig({ interactive: false, acp: false }),
+        getShellExecutionSandbox: () => ({
+          filesystem,
+          workspace: '/workspace',
+          installation: '/installation',
+          state: '/state',
+          network: 'open' as const,
+          requestedBackend: 'auto' as const,
+          effectiveBackend: 'landlock' as const,
+          enforcement: 'partial' as const,
+          landlockAbi: 3,
+        }),
+      };
+
+      const prompt = getMainSessionBaseSystemPrompt(config);
+      expect(prompt).toContain('# Tool Execution Sandbox (Landlock, partial)');
+      expect(prompt).toContain(
+        `workspace is ${filesystem === 'workspace-write' ? 'writable' : 'read-only'}`,
+      );
+      expect(prompt).toContain('Treat EACCES as a possible sandbox refusal');
+      expect(prompt).toContain(
+        'report it to the user and name the refused path',
+      );
+      expect(prompt).toContain('Do NOT work around a refusal');
+      expect(prompt).toContain('metadata operations');
+      expect(prompt).toContain('does not create PID or network namespaces');
+      expect(prompt).not.toContain('EROFS');
+      expect(prompt).not.toContain('# Tool Execution Sandbox (bwrap)');
+      expect(prompt).not.toContain('# Outside of Sandbox');
+    },
+  );
 });
 
 describe('main-session style: project trust gate', () => {
@@ -1687,7 +1730,7 @@ describe('resident tool gating (#12032)', () => {
         declaredTools ? { declaredTools } : undefined,
       );
 
-    // Reverse check: in code mode the tools are reached as `tools.<name>`
+    // Reverse check: in code mode the tools are reached as `tools.<jsName>`
     // inside `exec` and are not declarations, so a narrow declared set must not
     // strip that guidance.
     expect(codeModePrompt(new Set([ToolNames.EXEC]))).toBe(codeModePrompt());
@@ -1741,10 +1784,12 @@ describe('CodeModeOnly tool guidance', () => {
       true,
     );
 
-  it('points the dedicated-tool guidance at tools.<name>', () => {
+  it('points the dedicated-tool guidance at tools.<jsName>', () => {
     const prompt = codeModePrompt();
 
-    expect(prompt).toContain('as `tools.<name>(args)`');
+    expect(prompt).toContain('as `tools.<jsName>(args)`');
+    expect(prompt).toContain("use the top-level 'tool_search' when available");
+    expect(prompt).toContain('Read its returned schema and JavaScript name');
     expect(prompt).toContain('To read files use `tools.read_file`');
     expect(prompt).not.toContain("To read files use 'read_file'");
   });
@@ -1789,7 +1834,13 @@ describe('CodeModeOnly tool guidance', () => {
     const prompt = codeModePrompt();
 
     expect(prompt).toContain('**Batch Into One Program:**');
-    expect(prompt).toContain('await them together with `Promise.all`');
+    expect(prompt).toContain('await Promise.allSettled([...])');
+    expect(prompt).toContain('Inspect every result');
+    expect(prompt).toContain('String(result.reason)');
+    expect(prompt).toContain(
+      'Keep dependent actions, mutations, and approvals sequential',
+    );
+    expect(prompt).not.toContain('await Promise.all([');
     expect(prompt).not.toContain(
       'Call independent tools in parallel; run dependent calls sequentially',
     );
@@ -1825,7 +1876,7 @@ describe('CodeModeOnly tool guidance', () => {
       'Call independent tools in parallel; run dependent calls sequentially',
     );
     expect(prompt).toContain('[tool_call: run_shell_command for');
-    expect(prompt).not.toContain('tools.<name>(args)');
+    expect(prompt).not.toContain('tools.<jsName>(args)');
     expect(prompt).not.toContain('**Batch Into One Program:**');
   });
 });

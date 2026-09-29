@@ -4,8 +4,14 @@
 
 ## 状态
 
+**优先级更新（2026-09-28）：** 保留已合入的 B2d 基础。普通宿主 Managed 引擎的
+剩余工作（M2、M4–M6）后置到 Hosted Managed 首个可交付闭环之后，不是该闭环的
+前置条件。M1 与 M3 已实现并保留，本地引擎仍未注册。排期与按需子进程宿主决定见
+[引擎状态](./2026-09-27-ordinary-host-managed-engine.zh-CN.md#状态)及 #12737。
+本决定不推迟 Hosted 的 Runtime/Broker 工作与恢复验证。
+
 #12737 的 B2d 切片设计，属于 #12380 的 Stage B 宿主接入，基于上游 `663d98eac5`。
-本文为提案，尚未实现。它把 #12737 中已决定的选择与范围规则
+已由 #12828 在 `--experimental-paired-engines` 开关之后实现，未注册 Managed 引擎。它把 #12737 中已决定的选择与范围规则
 （[Q1/Q4](https://github.com/QwenLM/qwen-code/issues/12737#issuecomment-5846602143)）
 记录到本仓库，使 B2d 以本文而不是
 [外部引擎选择设计](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-session-execution-engine.md)
@@ -13,6 +19,9 @@
 （B2a）。#12737 要求在普通宿主配对之前完成的切片均已合入：工作区契约（B2b，#12776
 与 #12807）和按引擎的运维行为（B2c，#12795），它们落实了
 [Q2/Q3 决定](https://github.com/QwenLM/qwen-code/issues/12737#issuecomment-5846370487)。
+Managed 引擎本身的设计见[普通宿主的 Managed 引擎](./2026-09-27-ordinary-host-managed-engine.zh-CN.md)。
+其 M1 切片完成下文 Managed 引擎接口中的 Legacy 拒绝与用途标记两项，该设计也确定了
+该接口的待解问题。
 
 ## 问题与当前行为
 
@@ -89,7 +98,14 @@ Bridge；Java 承载的 Managed WebShell 产品链路；Managed 分支（仍保�
   强制 writer lease 才被认证；双引擎 Bridge 会把这一要求扩展到一个它永远用不上的
   Managed factory。
 - 通过 `deps.bridge` 注入的 Bridge 或注入的工作区 registry 仍由调用方控制；开关既不
-  包装也不替换它们。
+  包装也不替换它们。`qwen serve` 自身会把工作区 registry 注入 serve app，因此在其中
+  起作用的是 `runQwenServe` 的三处构造点；嵌入式默认 Bridge 由两者都不注入、并设置了
+  该选项的嵌入方配对。
+- 嵌入式默认 Bridge 从嵌入进程的 runtime 目录读取 owner，与它读取 artifact 快照和
+  附件的位置相同；而它的子进程根据自身环境与工作区 settings 解析 runtime 目录。如果
+  嵌入方的工作区 settings 改变了 runtime 目录，嵌入方需为自身进程设置
+  `QWEN_RUNTIME_DIR`，使两者一致；否则双引擎嵌入式宿主会到错误的目录读取 owner，冷
+  恢复返回 404。daemon 的各 runtime 会为其子进程设置该变量。
 - Channels 没有自己的 Bridge。Channel worker 通过 daemon 创建会话，并带上
   `sourceType: 'channel'`，用途规则会让这些会话保持 Legacy。
 
@@ -122,7 +138,9 @@ Bridge；Java 承载的 Managed WebShell 产品链路；Managed 分支（仍保�
   Managed。否则选择器抛出 `SessionExecutionEngineError`，在任何通道启动之前以 409
   `session_execution_engine_unavailable` 应答；owner 记录保持原样。创建用途不再重新
   评估，因为 owner 已经反映了它们。
-- 无法读取、冲突或不完整的归属会被拒绝，与 B2a 相同。
+- 无法读取、冲突或不完整的归属会被拒绝，与 B2a 相同。这包括含有无法完整解析的行
+  （例如写入中途崩溃留下的行）的 transcript，以及含有 daemon 当前版本不认识的记录
+  类型的 transcript；见“风险与待定问题”。
 
 **热 attach** 复用存活的 entry，不调用选择器。
 
@@ -152,10 +170,20 @@ Bridge；Java 承载的 Managed WebShell 产品链路；Managed 分支（仍保�
 - Legacy 拒绝：在创建任何会话之前，确保每个未配对的、会恢复或 fork transcript 的
   Legacy 入口都拒绝它的会话——要么它的 transcript 带有这些入口已经拒绝的 Managed
   Session header，要么把拒绝扩展到它的 owner 记录。否则关闭开关会让 Managed 会话在
-  Legacy 上运行；
+  Legacy 上运行。引擎设计的 M1 把拒绝扩展到了 owner 记录；
 - 工作区控制：权限规则与 Skills 变更需要 Legacy 工作区控制通道（B2b），因此只有
   Managed 存活时无法应用。由引擎切片决定宿主是否为这些路由启动工作区控制；B2d 中
-  不会启动 Managed 通道，所以不会出现这种情况。
+  不会启动 Managed 通道，所以不会出现这种情况。引擎设计决定启动它（决定 3）；
+- 有界的评估：Bridge 以其 initialize 超时限制每次选择（包括 owner 读取），超时的
+  选择会使创建或恢复失败，而不是选择 Legacy。因此评估必须在该预算内充分提前完成。
+  抛出异常或 reject 的评估按 `unknown` 处理；选择器不保留失败细节，因此由引擎按兼容
+  契约中的日志规则自行记录其失败；
+- 用途标记：在注册引擎之前，每个延期用途的内部创建方都要标记其会话，或以其他方式
+  保持 Legacy。worktree 重置产生的替代会话目前没有标记：它创建时不带 `worktree`，
+  之后才移入 checkout。Live 对话在项目中启动的任务也以无来源的方式创建线程，由引擎
+  切片决定该线程是否属于 Live 用途。按上述规则，二者都是普通创建。引擎设计的 M1
+  用 worktree 元数据标记 reset 的替代会话，引擎设计把 Live 线程保留为普通创建
+  （决定 6）。
 
 B2d 不注册任何引擎。此时双引擎的 `managed` factory 以“不可用”错误拒绝。没有注册引擎
 时选择器永远不会返回 `managed`，因此不会走到这个 factory；它存在只是因为双引擎 Bridge
@@ -209,7 +237,8 @@ owner 固定、不跨引擎回退。
 关闭开关时，每个双引擎 Legacy 会话保留其 owner 记录，未配对的 Legacy 宿主照常恢复
 这类会话。没有 Managed 引擎时，双引擎宿主只会创建 Legacy 会话，因此打开或关闭开关都
 不会把会话移到另一个引擎。Managed 引擎接口中的 Legacy 拒绝一项，保证 Managed 会话
-出现之后这一点仍然成立。
+出现之后这一点仍然成立。在此之前，如果双引擎宿主因 transcript 无法证明 owner 而拒绝
+某个 Legacy 会话，运维人员也可以通过关闭开关来恢复它。
 
 ## 文件与使用方
 
@@ -218,6 +247,7 @@ owner 固定、不跨引擎回退。
 | 开关       | CLI `commands/serve.ts`；`serve/types.ts`；`serve/hosted-harness-profile.ts`                                    |
 | 配对与选择 | `serve/session-execution-engine-selector.ts`                                                                    |
 | 构造点     | `serve/run-qwen-serve.ts`（primary、启动时 secondary、dynamic 与 replacement）；`serve/server.ts`（嵌入式默认） |
+| owner 证据 | core `utils/transcript-records.ts`（owner 读取接受的记录类型）                                                  |
 | 设计链接   | 本文；[ACP Bridge 执行引擎](./acp-bridge-execution-engines.zh-CN.md)                                            |
 
 不新增 daemon 路由。工作区路由保持各自的作用域；会话路由保持存活会话 owner 或所选
@@ -245,18 +275,36 @@ runtime 的作用域，其错误分类沿用 B2a。
 
 ## 风险与待定问题
 
-- 在 Managed 引擎落地之前，开关不会在 Managed 上运行任何内容，但仍会在两方面改变
+- 在 Managed 引擎落地之前，开关不会在 Managed 上运行任何内容，但仍会在三方面改变
   Legacy 的行为。Legacy 会话从创建起就是持久的，并带来 B2a 所述的未使用会话只含 owner
   的 transcript。被隔离的 Legacy 通道遵循 B2c 的策略：拒绝新 prompt、关闭已结算的
   会话，并在排空期限内退役；而未配对的通道允许其会话继续 prompt 直至排空。因此，B2c
   批准时要求在 B2d 启用配对之前完成的后续项（#12811：隔离期间结束的后台任务不能卡住
-  排空，退出核验须在开始终止时启动）同样适用于只有 Legacy 的双引擎宿主。
+  排空，退出核验须在开始终止时启动）同样适用于只有 Legacy 的双引擎宿主。此外，冷恢复
+  会再读一遍 transcript 以核验 owner，因此更严格，见下面几项。
 - 在引擎切片落地之前，serve app 的 Managed 引擎依赖项没有生产调用方；测试用它注册
   替身。
-- 用途规则依赖创建方标注的来源，而这些来源只能让会话失去资格。如果某个延期用途的
-  内部创建方不再标记其会话，那么引擎出现后这些会话就会变得有资格，因此引擎切片要
-  重新审计内部创建方。
-- 目前未配对的 Legacy 宿主不识别 Managed owner 记录。在没有普通宿主创建 Managed 会话
-  时这没有影响；Managed 引擎接口把补上这一点列为引擎切片的前置条件，该切片也会确定
-  `session_execution_engine` 与 Managed Session header 的关系。
-- 引擎如何把评估所用的输入交给其宿主做重新核验，与引擎一起决定。
+- 双引擎宿主的恢复比未配对宿主更严格。transcript 如果因为某行无法完整解析、或某条
+  记录的类型不为 daemon 所知而无法证明 owner，会以 409 被拒绝，而未配对宿主会恢复
+  它。写入中途崩溃会留下这样的行；writer lease 关闭时（这是默认值），之后的写入方会
+  在它后面继续追加。原地升级的 daemon 在重启之前一直使用旧的记录类型列表，而它新启动
+  的子进程可能已经写入更新的类型。目前没有任何机制修复这类 transcript；B2c 恢复的是
+  通道，不是 transcript。B2d 仍允许在 lease 关闭时配对：该开关是实验性的且默认关闭，
+  拒绝是准确的且不改动字节，关闭开关即可在 Legacy 上恢复该会话。已知记录类型与子类型
+  列表现在覆盖 chat 记录类型的全部成员；该类型新增列表缺少的成员时，一个经过 typecheck
+  的测试会失败；不以该类型构造记录的写入方不在其覆盖范围内。在此之前，记录过 text
+  elements 的 Legacy 会话无法在双引擎宿主上恢复。
+- owner 读取在选择预算（initialize 超时，默认 10 秒）内进行，而不是在恢复预算（默认
+  60 秒）内。transcript 过大或存储过慢、无法在该预算内读完时，双引擎宿主上的恢复会
+  失败。测试中读取 100 MB 的 transcript 远少于 1 秒。
+- daemon 不清理旧 transcript，因此从未使用的会话留下的纯 owner transcript 会在双引擎
+  宿主上累积（B2a）。默认启用之前需要给出处理方案。
+- 用途规则依赖创建方标注的来源，而这些来源只能让会话失去资格。不标记其会话的延期
+  用途内部创建方，在引擎出现后其会话就会变得有资格；Managed 引擎接口的用途标记一项
+  列出了已知情况，引擎切片还要重新审计其余创建方。引擎设计的 M1 记录了这次审计。
+- 在引擎设计的 M1 之前，未配对的 Legacy 宿主不识别 Managed owner 记录。在没有普通
+  宿主创建 Managed 会话时这没有影响；Managed 引擎接口把补上这一点列为引擎切片的前置
+  条件，该切片也确定 `session_execution_engine` 与 Managed Session header 的关系
+  （引擎设计，决定 1）。
+- 引擎如何把评估所用的输入交给其宿主做重新核验，与引擎一起决定：宿主重新读取并重新
+  评估同一份严格快照（引擎设计，决定 5）。

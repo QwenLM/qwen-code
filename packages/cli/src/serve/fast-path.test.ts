@@ -740,6 +740,7 @@ describe('serve fast path argument parsing', () => {
         'hosted-harness-capability-digest',
         ['--hosted-harness-capability-digest', `sha256:${'a'.repeat(64)}`],
       ],
+      ['experimental-paired-engines', ['--experimental-paired-engines']],
       ['experimental-managed-agents', ['--experimental-managed-agents']],
       [
         'experimental-managed-runtime-worker',
@@ -783,6 +784,7 @@ describe('serve fast path argument parsing', () => {
       'channel',
       'profile',
       'hosted-harness-capability-digest',
+      'experimental-paired-engines',
       'experimental-managed-agents',
       'experimental-managed-runtime-worker',
       'experimental-managed-runtime-auto-local',

@@ -84,7 +84,11 @@ export type ManagedRuntimeExecutionInspection =
       readonly outcome: 'known';
       readonly status: ManagedToolInvocationStatus;
     }
-  | { readonly outcome: 'unknown' };
+  | {
+      readonly outcome: 'unknown';
+      readonly terminal?: true;
+      readonly reason?: 'runtime_lost';
+    };
 
 export type ManagedRuntimeUnknownResolution =
   | 'confirmed_not_executed'
