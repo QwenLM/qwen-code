@@ -269,8 +269,8 @@ describe('bundled agent-delegation skill', () => {
   });
 
   /**
-   * The same deferral under `ToolMode.CodeModeOnly`, where both bridge tools
-   * are hidden (`code-mode.ts` `HIDDEN_TOOLS`) and the deferred Skill tool is
+   * The same deferral under `ToolMode.CodeModeOnly`, where `tool_call` is
+   * hidden (`code-mode.ts` `HIDDEN_TOOLS`) and the deferred Skill tool is
    * reached through the `exec` binding. The guard that keeps the bridge
    * sentence out of the route exists for this tool above all: `AgentTool`
    * freezes its surface in the constructor, so a dead instruction here is

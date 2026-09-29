@@ -18,9 +18,9 @@ import {
 } from 'vitest';
 
 const mockShellExecutionService = vi.hoisted(() => vi.fn());
-const mockExecuteBwrap = vi.hoisted(() => vi.fn());
-vi.mock('../sandbox/bwrap-execution.js', () => ({
-  executeBwrap: mockExecuteBwrap,
+const mockExecuteSandbox = vi.hoisted(() => vi.fn());
+vi.mock('../sandbox/execute-sandbox.js', () => ({
+  executeSandbox: mockExecuteSandbox,
 }));
 vi.mock('../sandbox/runtime-shell-policy.js', () => ({
   assertShellSandboxCwd: vi.fn(),
@@ -322,7 +322,7 @@ describe('ShellTool', () => {
         filesystem: 'workspace-write',
         network: 'closed',
       });
-      mockExecuteBwrap.mockResolvedValue({
+      mockExecuteSandbox.mockResolvedValue({
         pid: 12345,
         result: Promise.resolve({
           rawOutput: Buffer.alloc(0),
@@ -348,7 +348,7 @@ describe('ShellTool', () => {
           .type,
       ).toBe('exec');
       await invocation.execute(new AbortController().signal);
-      expect(mockExecuteBwrap).toHaveBeenCalledOnce();
+      expect(mockExecuteSandbox).toHaveBeenCalledOnce();
       expect(mockFileSystemService.readTextFile).not.toHaveBeenCalled();
       expect(mockFileSystemService.writeTextFile).not.toHaveBeenCalled();
       expect(mockShellExecutionService).not.toHaveBeenCalled();
@@ -375,16 +375,16 @@ describe('ShellTool', () => {
             is_background: true,
           })
           .execute(new AbortController().signal);
-        expect(mockExecuteBwrap).toHaveBeenCalledTimes(3);
-        expect(mockExecuteBwrap.mock.calls[0][1].args).toEqual([
+        expect(mockExecuteSandbox).toHaveBeenCalledTimes(3);
+        expect(mockExecuteSandbox.mock.calls[0][1].args).toEqual([
           '-c',
           'git commit -m test',
         ]);
-        expect(mockExecuteBwrap.mock.calls[1][1].args).toEqual([
+        expect(mockExecuteSandbox.mock.calls[1][1].args).toEqual([
           '-c',
           'gh pr create --title test --body test',
         ]);
-        expect(mockExecuteBwrap.mock.calls[2][1].args).toEqual([
+        expect(mockExecuteSandbox.mock.calls[2][1].args).toEqual([
           '-c',
           'gh pr create --title background --body background',
         ]);
@@ -402,13 +402,15 @@ describe('ShellTool', () => {
         on: vi.fn(),
         destroy,
       } as unknown as fs.WriteStream);
-      mockExecuteBwrap.mockRejectedValueOnce(new Error('sandbox setup failed'));
+      mockExecuteSandbox.mockRejectedValueOnce(
+        new Error('sandbox setup failed'),
+      );
       await expect(
         shellTool
           .build({ command: 'echo test', is_background: true })
           .execute(new AbortController().signal),
       ).rejects.toThrow('sandbox setup failed');
-      expect(mockExecuteBwrap.mock.calls[0][4]).toBe(false);
+      expect(mockExecuteSandbox.mock.calls[0][4]).toBe(false);
       expect(destroy).toHaveBeenCalledOnce();
       expect(fs.rmSync).toHaveBeenCalledWith(
         expect.stringMatching(/\.output$/),
