@@ -59,6 +59,14 @@ Four things to know before you use it:
 
 `tools.visible` is the escape hatch for one tool you want declared up front even though it is deferred by default.
 
+Agent and Goal coordination (`agent`, `list_agents`, `get_goal`, `update_goal`,
+and `propose_goal`) is deferred by default; no `tools.eager` configuration is
+needed. The model sees short discovery entries instead of the full schemas.
+Their first use needs discovery through the bridge, so compare whole-task cost
+and successful delegation/Goal completion as well as the first request. These
+are ordinary deferred tools: `tools.visible`, preloading, and the incomplete-
+bridge eager fallback described above still apply.
+
 ### 3. Move scenario guidance out of context files into skills
 
 A context file is concatenated into every request of every session it applies to, with no relevance gating. A [skill](skills.md) is listed by its name and description only — in one measured sample, 84 skills averaged about 55 tokens each — and loads its body when invoked, and a skill [gated on `paths:`](skills.md#optional-gate-a-skill-on-file-paths-paths) is not even listed until a matching file is touched.

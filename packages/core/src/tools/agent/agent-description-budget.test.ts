@@ -159,6 +159,12 @@ function surfaceLength(tool: AgentTool): number {
 }
 
 describe('AgentTool per-turn size budgets', () => {
+  it('keeps the refreshed agent declaration deferred by default', async () => {
+    const tool = await buildTool();
+    expect(tool.shouldDefer).toBe(true);
+    expect(tool.alwaysLoad).toBe(false);
+  });
+
   it('keeps the description within its budget in the default shape', async () => {
     // Two subagents, team off, todo on, a pointer at the delegation
     // reference. The catalogue itself is covered by the proportional-growth

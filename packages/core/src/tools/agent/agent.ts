@@ -881,6 +881,7 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
       initialSchema,
       true, // isOutputMarkdown
       true, // canUpdateOutput - Enable live output updates for real-time progress
+      true, // shouldDefer
     );
 
     this.delegationSurface = resolveAgentDelegationSurface(config);

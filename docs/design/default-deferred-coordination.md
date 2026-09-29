@@ -1,0 +1,44 @@
+# Default deferred coordination tools
+
+[English](default-deferred-coordination.md) | [简体中文](default-deferred-coordination.zh-CN.md)
+
+## Status and problem
+
+Candidate for #12326 under #12028. Agent and Goal declarations are paid for even
+in sessions that never delegate or use a Goal. Earlier explicit `tools.eager`
+experiments do not measure this candidate's savings or natural discovery rate.
+
+## Decision and scope
+
+Mark `agent`, `list_agents`, `get_goal`, `update_goal`, and `propose_goal` as
+natively deferred. Reuse the existing short discovery catalog and
+`tool_search` → `tool_call` bridge; do not introduce settings, change schemas,
+remove tool instructions, or change execution and approval semantics.
+
+Common file tools remain unchanged. `tools.eager` retains its existing meaning;
+listing a natively deferred tool there does not force it resident. `tools.visible`
+can force a declaration up front. Existing preload behavior and eager fallback
+when either bridge half is unavailable still apply. Code Mode keeps its existing
+discovery path. This does not shrink system prompts, memory, history, or the
+schemas that subagents receive.
+
+## Risks and acceptance
+
+An extra discovery request can offset the first-request saving. Natural
+delegation and Goal completion must not become less reliable. Before this
+candidate leaves Draft, compare the same model, settings, workspace, memory,
+and prompts on the base and candidate, with no `tools.eager` override:
+
+1. A greeting and an ordinary read-only file question: compare actual first
+   request schemas, provider input/cache usage, and total per-task input.
+2. An independent multi-part investigation, without naming tools: verify Agent
+   discovery, launch, result retrieval, and successful final answer.
+3. A user-requested Goal: verify proposal consent, progress, completion evidence,
+   and verifier outcome through the bridge; refusal must not start a Goal.
+4. `tools.visible`, a disabled bridge, denied tools, and a resumed direct-call
+   history: verify the existing visibility and permission contracts.
+
+Keep raw requests and task outcomes, not only declaration character counts.
+Report regressions and discovery overhead separately; do not claim a percentage
+from the earlier allowlist experiment. #12333's external benchmark-pool overlay
+is separate infrastructure, not a new unused input in this repository.

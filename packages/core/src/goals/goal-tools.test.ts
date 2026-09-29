@@ -110,29 +110,48 @@ describe('GetGoalTool', () => {
     expect(ToolDisplayNames.GET_GOAL).toBe('Goal');
     expect(tool.name).toBe(ToolNames.GET_GOAL);
     expect(tool.displayName).toBe(ToolDisplayNames.GET_GOAL);
-    expect(tool.shouldDefer).toBe(false);
+    expect(tool.shouldDefer).toBe(true);
     expect(tool.build({}).getDescription()).toBe('Read the current goal');
   });
 
-  it('keeps both Goal tools visible and out of deferred search', () => {
+  it('keeps Goal tools discoverable without declaring their schemas up front', () => {
+    const visibleTools = new Set<string>();
     const config = {
       getMcpTransportPool: () => undefined,
       getDisabledTools: () => new Set<string>(),
-      getVisibleTools: () => new Set<string>(),
+      getVisibleTools: () => visibleTools,
       getGoalRuntime: () => undefined as never,
     } as unknown as Config & GoalToolConfig;
     const registry = new ToolRegistry(config);
     const getGoal = new GetGoalTool(config);
     const updateGoal = new UpdateGoalTool(config);
+    const proposeGoal = new ProposeGoalTool(
+      config as unknown as ProposeGoalToolConfig,
+    );
     registry.registerTool(getGoal);
     registry.registerTool(updateGoal);
+    registry.registerTool(proposeGoal);
 
-    expect(getGoal.shouldDefer).toBe(false);
-    expect(updateGoal.shouldDefer).toBe(false);
+    const names = [
+      ToolNames.GET_GOAL,
+      ToolNames.PROPOSE_GOAL,
+      ToolNames.UPDATE_GOAL,
+    ];
+    expect(registry.getFunctionDeclarations()).toEqual([]);
+    expect(registry.getDeferredToolSummary().map((tool) => tool.name)).toEqual(
+      names,
+    );
+    for (const name of names) {
+      expect(registry.getTool(name)).toBeDefined();
+      visibleTools.add(name);
+    }
     expect(registry.getDeferredToolSummary()).toEqual([]);
     expect(
-      registry.getFunctionDeclarations().map((declaration) => declaration.name),
-    ).toEqual([ToolNames.GET_GOAL, ToolNames.UPDATE_GOAL]);
+      registry
+        .getFunctionDeclarations()
+        .map((declaration) => declaration.name)
+        .sort(),
+    ).toEqual(names);
   });
 
   it('reports no active Goal outside a permitted Goal turn', async () => {
@@ -1229,11 +1248,11 @@ describe('ProposeGoalTool', () => {
     return { invocation, details };
   }
 
-  it('uses the canonical name, stays visible, and always goes through the dialog', async () => {
+  it('uses the canonical name, stays deferred, and always goes through the dialog', async () => {
     const tool = new ProposeGoalTool(proposeConfig(idleRuntime().runtime));
     expect(tool.name).toBe(ToolNames.PROPOSE_GOAL);
     expect(tool.displayName).toBe(ToolDisplayNames.PROPOSE_GOAL);
-    expect(tool.shouldDefer).toBe(false);
+    expect(tool.shouldDefer).toBe(true);
 
     const invocation = tool.build({ objective });
     // Consent for an autonomous loop cannot come from a rule or an approval

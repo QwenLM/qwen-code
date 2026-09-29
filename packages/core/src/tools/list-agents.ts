@@ -193,6 +193,9 @@ export class ListAgentsTool extends BaseDeclarativeTool<
         properties: {},
         additionalProperties: false,
       },
+      true,
+      false,
+      true,
     );
   }
 

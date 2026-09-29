@@ -169,6 +169,9 @@ export class GetGoalTool extends BaseDeclarativeTool<
         properties: {},
         additionalProperties: false,
       },
+      true,
+      false,
+      true,
     );
   }
 
@@ -361,6 +364,9 @@ export class UpdateGoalTool extends BaseDeclarativeTool<
         required: ['status', 'reason'],
         additionalProperties: false,
       },
+      true,
+      false,
+      true,
     );
   }
 
@@ -843,6 +849,9 @@ export class ProposeGoalTool extends BaseDeclarativeTool<
         required: ['objective'],
         additionalProperties: false,
       },
+      true,
+      false,
+      true,
     );
   }
 
