@@ -99,6 +99,13 @@ export class SDKTestHelper {
           : {};
 
       const settings = {
+        // Same default as TestRig.setup: the managed-memory extractor adds a
+        // forked-agent model request to every tool-completing turn (#12913),
+        // which E2E suites neither need nor assert. Opt back in per suite.
+        memory: {
+          enableManagedAutoMemory: false,
+          enableManagedAutoDream: false,
+        },
         ...optionsSettings,
         telemetry: {
           enabled: false, // SDK tests don't need telemetry

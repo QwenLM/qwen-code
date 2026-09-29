@@ -251,6 +251,15 @@ export class TestRig {
         outfile: telemetryPath,
       },
       sandbox: env.QWEN_SANDBOX !== 'false' ? env.QWEN_SANDBOX : false,
+      // Since #12913 the managed-memory extractor fires a forked-agent model
+      // request on every tool-completing turn and the headless CLI awaits it
+      // before exit — dead latency and extra endpoint load for runs that
+      // never assert memory behavior. Suites that need it opt back in via
+      // options.settings.
+      memory: {
+        enableManagedAutoMemory: false,
+        enableManagedAutoDream: false,
+      },
       ...options.settings, // Allow tests to override/add settings
     };
     writeFileSync(
