@@ -15,6 +15,7 @@ import {
   lookupModelCatalog,
 } from './model-catalog.js';
 import {
+  MODELS_DEV_PROVIDERS,
   MODELS_DEV_URL,
   refreshModelCatalog,
   trimModelsDevCatalog,
@@ -35,7 +36,23 @@ const chat = (
   modalities: { input, output: ['text'] },
 });
 
+const providerStubs = Object.fromEntries(
+  MODELS_DEV_PROVIDERS.map((provider) => [
+    provider,
+    {
+      models: {
+        placeholder: {
+          id: `${provider}-placeholder`,
+          tool_call: false,
+          modalities: { input: ['text'], output: ['text'] },
+        },
+      },
+    },
+  ]),
+) as ModelsDevApi;
+
 const api: ModelsDevApi = {
+  ...providerStubs,
   anthropic: {
     models: {
       'claude-x': chat('claude-x', { context: 200000, output: 64000 }, [
@@ -434,6 +451,46 @@ describe('refreshModelCatalog', () => {
     expect(lookupModelCatalog('claude-fable-5')).toEqual(
       bundled.models['claude-fable-5'],
     );
+  });
+
+  it('rejects an incomplete 200 response with one valid model', async () => {
+    writeJson(getModelCatalogCachePath(), {
+      source: MODELS_DEV_URL,
+      fetchedAt: LONG_AGO,
+      models: { kept: { context: 7 } },
+    });
+    fetchMock.mockResolvedValue(
+      jsonResponse({
+        openai: {
+          models: {
+            'gpt-x': chat('gpt-x', { context: 128000 }, ['text', 'image']),
+          },
+        },
+      }),
+    );
+
+    await refreshModelCatalog();
+
+    expect(readJson(getModelCatalogCachePath())).toMatchObject({
+      fetchedAt: LONG_AGO,
+      models: { kept: { context: 7 } },
+    });
+  });
+
+  it('rejects a complete provider shape that projects to nothing', async () => {
+    writeJson(getModelCatalogCachePath(), {
+      source: MODELS_DEV_URL,
+      fetchedAt: LONG_AGO,
+      models: { kept: { context: 7 } },
+    });
+    fetchMock.mockResolvedValue(jsonResponse(providerStubs));
+
+    await refreshModelCatalog();
+
+    expect(readJson(getModelCatalogCachePath())).toMatchObject({
+      fetchedAt: LONG_AGO,
+      models: { kept: { context: 7 } },
+    });
   });
 
   it('does not reuse an empty cache: fetches without the ETag and heals', async () => {

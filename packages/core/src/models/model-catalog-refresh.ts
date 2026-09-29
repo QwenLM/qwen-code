@@ -260,11 +260,14 @@ async function refreshRemote(url: string, cachePath: string): Promise<void> {
   if (response.status === 304 && reusable) {
     next = { ...reusable, fetchedAt };
   } else if (response.ok) {
-    next = trimModelsDevCatalog(
-      (await response.json()) as ModelsDevApi,
-      fetchedAt,
-      url,
+    const api = (await response.json()) as ModelsDevApi;
+    const missingProvider = MODELS_DEV_PROVIDERS.find(
+      (provider) => Object.keys(api[provider]?.models ?? {}).length === 0,
     );
+    if (missingProvider) {
+      throw new Error(`catalog is missing provider ${missingProvider}`);
+    }
+    next = trimModelsDevCatalog(api, fetchedAt, url);
     // A 200 that projects to nothing is not a catalog (a renamed upstream
     // field or a gateway error body); keep the previous data instead of
     // shadowing the bundled snapshot with an empty one for a day.
