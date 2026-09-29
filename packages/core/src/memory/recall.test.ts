@@ -41,7 +41,9 @@ vi.mock('./scan.js', async (importOriginal) => {
     ...actual,
     scanAutoMemorySnapshot: vi.fn(),
     scanAllAutoMemoryTopicDocuments: vi.fn(),
-    scanAllUserAutoMemoryTopicDocuments: vi.fn(),
+    // Explicit mock: the real implementation silently scans the user's
+    // memory directory when it exists, so the empty pool must stay hermetic.
+    scanAllUserAutoMemoryTopicDocuments: vi.fn().mockResolvedValue([]),
     rereadAutoMemoryDocument: vi.fn(),
   };
 });
@@ -901,6 +903,7 @@ describe('auto-memory relevant recall', () => {
   it('does not treat a short keyword as a substring of a larger word', async () => {
     const shortKeyword = {
       ...docs[0]!,
+      description: 'Explain notes',
       keywords: ['ai'],
     };
     mockSnapshot([shortKeyword]);

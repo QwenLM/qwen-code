@@ -33,8 +33,11 @@ same file by `npm run generate:managed-agent-api` in `packages/web-shell`.
 Sessions record the agent revision from `QWEN_MANAGED_AGENT_REVISION` (default
 `1`) when they are created. Every response carries `X-Request-Id`, which error
 envelopes repeat as `request_id` and the logs print. Events keep the schema and
-projection versions and the Item and Part identity they were accepted with,
-except that a `stream.reconciled` event announces retracted deltas. A
+projection versions they were accepted with. They keep their Item and Part
+identity too, except after Harness recovery retracts output: the retracted
+deltas lose their text and identity, later deltas may name other Parts, and a
+`stream.reconciled` event announces it. A client that sees one reloads the
+Items and resumes after their `snapshot_through_sequence`. A
 cursor below a Session's replay floor gets `409 cursor_expired` from the JSON
 event query and one `agent.session.resync_required` frame from either stream.
 `GET /v1/agents/sessions/{id}/turns` lists a Session's Turns newest first with
@@ -476,9 +479,9 @@ npm run test:e2e:managed-agent-server -- \
 ```
 
 That run additionally requires the first model event to precede Runtime
-readiness. Real provider TTFT varies, so the deterministic CI proof of the same
-ordering remains `npx tsx scripts/run-managed-hosted-runtime-e2e.ts`, which
-uses a controlled model server and a 15-second Runtime delay.
+readiness whenever the delay reaches the 15 seconds the acceptance criterion
+names. A deterministic controlled-model proof of the same ordering is tracked
+in #12941.
 
 The real-model check extracts only the selected model provider, its referenced
 environment credential, the selected model, and the authentication policy

@@ -83,12 +83,15 @@ In direct tool mode, disabling `tools.toolSearch` also disables `tool_call`;
 the existing fallback declares ordinary deferred schemas eagerly. Tools demoted
 by `tools.eager` stay hidden unless separately revealed, and a per-session
 warning explains that the bridge is unavailable; a direct call by name still
-undergoes normal validation and permission checks. CodeModeOnly instead hides
-both bridge tools, keeps full nested schemas for callable deferred tools in
-`exec`, and skips deferred reminders and this warning. Permission allowlists
+undergoes normal validation and permission checks. CodeModeOnly instead
+discovers deferred schemas through top-level `tool_search` and invokes them
+through `exec`; `tool_call` stays hidden. It skips deferred reminders and this
+warning. When search is unavailable in the current scope, `exec` includes all
+allowed tool signatures. Permission allowlists
 keep both bridge tools registered unless an explicit deny rule removes them.
 
-An explicit subagent `tools` list does not implicitly add the bridge tools.
+In direct tool mode, an explicit subagent `tools` list does not implicitly add
+the bridge tools (Code Mode adds `tool_search` beside `exec`).
 Naming an ordinary deferred target declares it directly, but `tools.eager`
 demotion still applies. Using discovery and bridge invocation together needs the target and both bridge
 tools in the allowed surface; existing subagent exclusions and deny rules still win.

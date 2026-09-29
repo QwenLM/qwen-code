@@ -11,6 +11,7 @@ import java.time.Clock;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.stream.IntStream;
 import java.util.stream.LongStream;
 import org.flywaydb.core.Flyway;
 import org.flywaydb.core.api.MigrationVersion;
@@ -55,11 +56,35 @@ class ManagedEventIdentityMigrationTest {
                                 "evt_long_" + sequence, "turn_long",
                                 "item.output_text.delta",
                                 "{\"text\":\"x\"}"}).toList());
+        // More Sessions than a page of the enumeration, split over two
+        // tenants so that the page boundary falls inside a tenant.
+        List<String[]> many = IntStream.range(0, 1500).mapToObj(index ->
+                new String[] {index < 700 ? "legacy-a" : "legacy-b",
+                        "many-" + index}).toList();
+        jdbc.batchUpdate("INSERT INTO managed_agent_session (tenant_id,"
+                        + " session_id, agent_id, status, created_at,"
+                        + " updated_at, last_sequence) VALUES (?, ?,"
+                        + " 'qwen-code', 'IDLE', 1, 1, 1)",
+                many.stream().map(key -> new Object[] {key[0], key[1]})
+                        .toList());
+        jdbc.batchUpdate("INSERT INTO managed_agent_event (tenant_id,"
+                        + " session_id, sequence_id, event_id, turn_id,"
+                        + " event_type, data_json, terminal, created_at)"
+                        + " VALUES (?, ?, 1, ?, 'turn_many',"
+                        + " 'item.output_text.delta', '{\"text\":\"x\"}',"
+                        + " FALSE, 1)",
+                many.stream().map(key -> new Object[] {key[0], key[1],
+                        "evt_" + key[1]}).toList());
 
         Flyway.configure().dataSource(dataSource)
                 .locations("classpath:db/migration").load().migrate();
 
         LegacyEvents.assertBackfilled(jdbc, tenant, session);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
+                        + " managed_agent_event WHERE session_id LIKE 'many-%'"
+                        + " AND content_part_id ="
+                        + " 'part_turn_many_output_text_1'",
+                Integer.class)).isEqualTo(1500);
         assertThat(jdbc.queryForList("SELECT DISTINCT item_id,"
                         + " content_part_id FROM managed_agent_event WHERE"
                         + " session_id = 'long-session'"))
