@@ -353,7 +353,6 @@ import {
 import { loadChannelsConfig } from '../commands/channel/runtime.js';
 import { writeStderrLine, writeStderrLineSafe } from '../utils/stdioHelpers.js';
 import { loadSettings, SettingScope } from '../config/settings.js';
-import { loadSettingsCached } from '../config/settings-cache.js';
 import { runWithoutDebugLogSession } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { getModelProvidersOwnerScope } from '../config/modelProvidersScope.js';
 import { registerLiveRoutes } from './routes/live.js';
@@ -1602,10 +1601,10 @@ export function createServeApp(
       return true;
     try {
       // A daemon-level probe, evaluated at boot and per request: its settings
-      // cache hit/miss lines belong to no session, and writing them into
-      // whichever one is ambient breaks untrusted-read log isolation.
+      // diagnostics belong to no session, and writing them into whichever one
+      // is ambient breaks untrusted-read log isolation.
       const settings = runWithoutDebugLogSession(() =>
-        loadSettingsCached(workspaceCwd, {
+        loadSettings(workspaceCwd, {
           preserveInvalidWorkspaceSettings: true,
         }),
       );

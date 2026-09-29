@@ -49,6 +49,7 @@ describe('agent capability boundary', () => {
     expect(wildcard).toEqual(full);
     expect(full.tools).not.toContain(ToolNames.SHELL);
     expect(full.tools).not.toContain(ToolNames.MEMORY);
+    expect(full.tools).not.toContain(ToolNames.SKILL);
     expect(full.disallowedTools).toEqual(
       expect.arrayContaining([
         ToolNames.EDIT,
@@ -98,6 +99,14 @@ describe('agent capability boundary', () => {
         ...base,
         toolName: ToolNames.SHELL,
         args: { command: 'git status' },
+        cwd: process.cwd(),
+      }),
+    ).resolves.toEqual(expect.objectContaining({ allowed: false }));
+    await expect(
+      guard({
+        ...base,
+        toolName: ToolNames.SKILL,
+        args: { skill: 'project-hook' },
         cwd: process.cwd(),
       }),
     ).resolves.toEqual(expect.objectContaining({ allowed: false }));

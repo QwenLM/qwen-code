@@ -60,10 +60,17 @@ describe('collaboration messages', () => {
     );
   });
 
-  it('hold only collab keys, translated one for one', () => {
+  it('hold only workspace-agent keys, translated one for one', () => {
     const en = Object.keys(COLLAB_MESSAGES_EN);
     expect(en.length).toBeGreaterThan(0);
-    expect(en.every((key) => key.startsWith('collab.'))).toBe(true);
+    expect(
+      en.every(
+        (key) =>
+          key.startsWith('collab.') ||
+          key.startsWith('toolName.thread_') ||
+          key === 'agents.description',
+      ),
+    ).toBe(true);
     expect(Object.keys(COLLAB_MESSAGES_ZH).sort()).toEqual([...en].sort());
   });
 
@@ -81,5 +88,7 @@ describe('collaboration messages', () => {
     // of here would ship to every exported document.
     const dictionary = readFileSync(join(CLIENT_DIR, 'i18n.tsx'), 'utf8');
     expect(dictionary).not.toMatch(/^ {2}'collab\./m);
+    expect(dictionary).not.toMatch(/^ {2}'toolName\.thread_/m);
+    expect(dictionary).not.toMatch(/^ {2}'agents\.description'/m);
   });
 });

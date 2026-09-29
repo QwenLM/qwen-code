@@ -74,6 +74,10 @@ import {
 import type { MediaPolicyToolDescriptor } from '../tools/tools.js';
 import { shellResultText } from '../utils/shell-result.js';
 import { LlmChat } from './llm-chat.js';
+import {
+  getHookExecutionOwner,
+  runWithHookExecutionOwner,
+} from '../hooks/hook-execution-context.js';
 import { MessageBusType } from '../confirmation-bus/types.js';
 import type { HookExecutionResponse } from '../confirmation-bus/types.js';
 import { type NotificationType } from '../hooks/types.js';
@@ -105,6 +109,7 @@ import {
 } from '../utils/invocation-context.js';
 import { getPlanModeSystemReminder } from './prompts.js';
 import { PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE } from './plan-mode-entry-policy.js';
+import { SESSION_SKILL_MANAGER } from '../tools/skill-utils.js';
 import {
   promptIdContext,
   todoWorkChainContext,
@@ -1004,6 +1009,7 @@ describe('CoreToolScheduler', () => {
     getPermissionsDeny?: () => string[] | undefined;
     messageBus?: { request: ReturnType<typeof vi.fn> };
     hookSystem?: {
+      runtimeId?: string;
       firePermissionDeniedEvent: ReturnType<typeof vi.fn>;
     };
     disableHooks?: boolean;
@@ -1931,7 +1937,74 @@ describe('CoreToolScheduler', () => {
     ).toBe(ToolNames.TOOL_CALL);
   });
 
+  it('keeps the queued tool owner after another agent drains the scheduler', async () => {
+    const owner = {
+      runtimeId: 'runtime',
+      sessionId: 'test-session-id',
+      agentId: 'A',
+    };
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const execute = vi.fn(async (args: Record<string, unknown>) => {
+      if (args['tag'] === 'first') await gate;
+      return { llmContent: 'ok', returnDisplay: 'ok' };
+    });
+    const tool = new MockTool({ name: 'owner-tool', execute });
+    const messageBus = {
+      request: vi.fn().mockResolvedValue({ success: true, result: {} }),
+    };
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName: new Map([[tool.name, tool]]),
+        messageBus,
+        disableHooks: false,
+        hookSystem: {
+          runtimeId: owner.runtimeId,
+          firePermissionDeniedEvent: vi.fn(),
+        },
+      });
+    const request = (tag: string): ToolCallRequestInfo => ({
+      callId: tag,
+      name: tool.name,
+      args: { tag },
+      isClientInitiated: false,
+      prompt_id: 'prompt',
+    });
+    const first = runWithHookExecutionOwner(owner, () =>
+      scheduler.schedule(request('first'), new AbortController().signal),
+    );
+    await vi.waitFor(() => expect(execute).toHaveBeenCalledTimes(1));
+    const other = { ...owner, agentId: 'B' };
+    const second = runWithHookExecutionOwner(other, () =>
+      scheduler.schedule(request('second'), new AbortController().signal),
+    );
+    release();
+    await Promise.all([first, second]);
+    await vi.waitFor(() =>
+      expect(onAllToolCallsComplete).toHaveBeenCalledTimes(2),
+    );
+    const events = messageBus.request.mock.calls
+      .map(([event]) => event)
+      .filter(
+        (event) =>
+          event.eventName === 'PreToolUse' || event.eventName === 'PostToolUse',
+      );
+    expect(events).toHaveLength(4);
+    for (const event of events) {
+      expect(event.owner).toEqual(
+        event.input.tool_input.tag === 'first' ? owner : other,
+      );
+    }
+  });
+
   it('restores the invocation context when a delayed confirmation executes', async () => {
+    const hookOwner = {
+      runtimeId: 'runtime',
+      sessionId: 'session-context',
+      agentId: 'A',
+    };
     const invocationContext: InvocationContextV1 = {
       version: 1,
       sessionId: 'session-context',
@@ -1955,6 +2028,7 @@ describe('CoreToolScheduler', () => {
         onConfirm: vi.fn().mockResolvedValue(undefined),
       }),
       execute: async () => {
+        expect(getHookExecutionOwner()).toEqual(hookOwner);
         observedContext = getInvocationContext();
         observedPromptId = promptIdContext.getStore();
         observedTodoWorkChainId = todoWorkChainContext.getStore();
@@ -1964,21 +2038,27 @@ describe('CoreToolScheduler', () => {
     const { scheduler, onToolCallsUpdate } = createSchedulerForLegacyToolTests({
       toolsByName: new Map([[tool.name, tool]]),
       approvalMode: ApprovalMode.DEFAULT,
+      hookSystem: {
+        runtimeId: hookOwner.runtimeId,
+        firePermissionDeniedEvent: vi.fn(),
+      },
       getActiveTodoWorkChainOwner: () => 'mapped-work-chain',
     });
 
-    await runWithInvocationContext(invocationContext, () =>
-      scheduler.schedule(
-        [
-          {
-            callId: 'approval-context-call',
-            name: tool.name,
-            args: {},
-            isClientInitiated: false,
-            prompt_id: invocationContext.promptId,
-          },
-        ],
-        new AbortController().signal,
+    await runWithHookExecutionOwner(hookOwner, () =>
+      runWithInvocationContext(invocationContext, () =>
+        scheduler.schedule(
+          [
+            {
+              callId: 'approval-context-call',
+              name: tool.name,
+              args: {},
+              isClientInitiated: false,
+              prompt_id: invocationContext.promptId,
+            },
+          ],
+          new AbortController().signal,
+        ),
       ),
     );
     const waiting = (await waitForStatus(
@@ -1986,10 +2066,12 @@ describe('CoreToolScheduler', () => {
       'awaiting_approval',
     )) as WaitingToolCall;
 
-    await todoWorkChainContext.run('stale-work-chain', () =>
-      runWithInvocationContext(unrelatedContext, () =>
-        waiting.confirmationDetails.onConfirm(
-          ToolConfirmationOutcome.ProceedOnce,
+    await runWithHookExecutionOwner({ ...hookOwner, agentId: 'B' }, () =>
+      todoWorkChainContext.run('stale-work-chain', () =>
+        runWithInvocationContext(unrelatedContext, () =>
+          waiting.confirmationDetails.onConfirm(
+            ToolConfirmationOutcome.ProceedOnce,
+          ),
         ),
       ),
     );
@@ -7503,6 +7585,10 @@ describe('CoreToolScheduler', () => {
     await vi.waitFor(() => {
       expect(executeB).toHaveBeenCalled();
       expect(onAllToolCallsComplete).toHaveBeenCalledTimes(2);
+      expect(
+        (scheduler as unknown as { hookOwners: Map<string, unknown> })
+          .hookOwners.size,
+      ).toBe(0);
     });
   });
 
@@ -20532,6 +20618,26 @@ describe('extractToolFilePaths', () => {
 });
 
 describe('CoreToolScheduler activation wiring', () => {
+  function buildMockSkillManager(opts: {
+    matchAndActivateByPaths: ReturnType<typeof vi.fn>;
+    availableSkillNames?: string[];
+  }) {
+    const names = opts.availableSkillNames ?? ['tsx-helper'];
+    return {
+      matchAndActivateByPaths: opts.matchAndActivateByPaths,
+      listSkills: vi.fn().mockResolvedValue(
+        names.map((n) => ({
+          name: n,
+          description: `Description of ${n}`,
+          level: 'project' as const,
+          filePath: `/p/.qwen/skills/${n}/SKILL.md`,
+          body: '',
+        })),
+      ),
+      isSkillActive: vi.fn().mockReturnValue(true),
+    };
+  }
+
   // Integration coverage for the scheduler-side hook that ties
   // extractToolFilePaths → matchAndActivateByPaths → system-reminder
   // append. Unit tests on extractToolFilePaths alone don't catch
@@ -20553,6 +20659,12 @@ describe('CoreToolScheduler activation wiring', () => {
     // omitted, defaults to ["tsx-helper"] which satisfies the common case.
     availableSkillNames?: string[];
     containerExecution?: boolean;
+    /**
+     * The #12424 shape: `getSkillManager()` answers `null` because this
+     * agent's tool policy withheld it, while the session's own manager stays
+     * reachable through the recorded symbol.
+     */
+    withheldFromConfig?: boolean;
   }): {
     scheduler: CoreToolScheduler;
     onAllToolCallsComplete: ReturnType<typeof vi.fn>;
@@ -20623,22 +20735,14 @@ describe('CoreToolScheduler activation wiring', () => {
       getMessageBus: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
       getConditionalRulesRegistry: () => undefined,
-      getSkillManager: () => {
-        const names = opts.availableSkillNames ?? ['tsx-helper'];
-        return {
-          matchAndActivateByPaths: opts.matchAndActivateByPaths,
-          listSkills: vi.fn().mockResolvedValue(
-            names.map((n) => ({
-              name: n,
-              description: `Description of ${n}`,
-              level: 'project' as const,
-              filePath: `/p/.qwen/skills/${n}/SKILL.md`,
-              body: '',
-            })),
-          ),
-          isSkillActive: vi.fn().mockReturnValue(true),
-        };
-      },
+      getSkillManager: () =>
+        opts.withheldFromConfig ? null : buildMockSkillManager(opts),
+      // What `SubagentManager` records on a Config whose tool policy withheld
+      // the manager: the session's own instance, which `sessionSkillManager`
+      // reads back through the prototype chain.
+      ...(opts.withheldFromConfig
+        ? { [SESSION_SKILL_MANAGER]: buildMockSkillManager(opts) }
+        : {}),
       getDisabledSkillNames: () => new Set<string>(),
       getExecutionEnvironment: () => (opts.containerExecution ? {} : undefined),
       isSkillEnabled: () => true,
@@ -20721,10 +20825,11 @@ describe('CoreToolScheduler activation wiring', () => {
 
   it('stays silent when SkillTool is registered but was never declared', async () => {
     // The defect this gate was written for, and the shape the registry cannot
-    // see. `SKILL` is registered unconditionally — no `forSubAgent` guard —
-    // so a subagent running an explicit `tools` list that omits it still has
-    // `getTool(SKILL)` return a tool. Reading the registry therefore held the
-    // gate permanently open, and the agent got a reminder naming a tool
+    // see: `getTool(SKILL)` answers for the Config this scheduler holds, which
+    // can carry the tool while this agent's declarations omit it — a
+    // `tools.eager` allowlist defers the schema without unregistering the
+    // tool. Reading the registry therefore held the gate permanently open,
+    // and the agent got a reminder naming a tool
     // absent from its declarations: a wasted turn on `Tool "skill" not
     // found`, and an announcement marked consumed on the shared Config, so
     // the parent that CAN invoke it never learns the skill activated.
@@ -20758,6 +20863,48 @@ describe('CoreToolScheduler activation wiring', () => {
     // while leaving the text inside passes every other assertion here: the
     // subagent stays silent AND the orchestrator's drain finds the key
     // already consumed, so nobody announces the activation.
+    expect(addInlineAnnouncedSkillKeys).not.toHaveBeenCalled();
+  });
+
+  it('still feeds session-wide activation for a subagent whose Config withholds the manager', async () => {
+    // Activation is session-shared state, and withholding the manager from a
+    // restricted subagent's Config used to switch it off for paths only that
+    // subagent reads. `matchAndConsume` is one-shot, so the rule was then
+    // never consumed by anyone and the parent — which CAN invoke skills —
+    // silently lost the activation its delegated work produced. Measured on a
+    // real bundle for a `paths: ['src/**/*.tsx']` skill and for the shipped
+    // `statusline-setup` built-in, neither of which needs a user agent file.
+    const matchAndActivateByPaths = vi.fn().mockResolvedValue(['tsx-helper']);
+    const { scheduler, onAllToolCallsComplete, addInlineAnnouncedSkillKeys } =
+      buildSchedulerWithSkillManager({
+        matchAndActivateByPaths,
+        skillToolPresent: false,
+        declaredHasSkillTool: false,
+        withheldFromConfig: true,
+      });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: '1',
+          name: ToolNames.READ_FILE,
+          args: { file_path: '/proj/src/App.tsx' },
+          isClientInitiated: false,
+          prompt_id: 'p1',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    // The session registry is fed even though this Config answers `null`.
+    expect(matchAndActivateByPaths).toHaveBeenCalledWith(['/proj/src/App.tsx']);
+    const completed = onAllToolCallsComplete.mock.calls[0][0] as ToolCall[];
+    expect(completed[0].status).toBe('success');
+    // ...while #12424's own fix holds: this agent declared no Skill tool, so
+    // it still gets no listing and does not consume the parent's announcement.
+    expect(getResponseText(completed[0])).not.toContain(
+      'became available via the Skill tool',
+    );
     expect(addInlineAnnouncedSkillKeys).not.toHaveBeenCalled();
   });
 

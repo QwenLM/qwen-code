@@ -1599,9 +1599,9 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
         // createProductionDispatch → SubagentManager.createAgentHeadless.
         // The dispatch surfaces descriptive errors for "agent type not found",
         // "isolation:'remote' is not available in this build", parent-dirty
-        // refuse, worktree creation failures, and StructuredOutput contract
-        // violations ("completed without calling StructuredOutput after 2
-        // in-conversation nudges").
+        // refuse, worktree creation failures, schemas refused before dispatch,
+        // and structured_output contract violations (no valid result after
+        // the failed submissions it names).
         if (
           agentOpts.isolation !== undefined &&
           agentOpts.isolation !== 'worktree' &&

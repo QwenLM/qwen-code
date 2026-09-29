@@ -918,8 +918,25 @@ export function isManagedSessionTranscriptSync(
  * {@link isManagedSessionTranscriptSync}: an owner record alone is no log.
  */
 export function isManagedExecutionTranscriptSync(filePath: string): boolean {
-  const head = readTranscriptHeadSync(filePath);
-  if (head === undefined) return false;
+  return readManagedExecutionEvidenceSync(filePath) === true;
+}
+
+/**
+ * The evidence {@link isManagedExecutionTranscriptSync} looks for, telling a
+ * transcript whose head cannot be read (`undefined`) apart from one that is
+ * missing or empty (`false`).
+ */
+export function readManagedExecutionEvidenceSync(
+  filePath: string,
+): boolean | undefined {
+  let head: string;
+  try {
+    head = readTranscriptHeadOrThrowSync(filePath);
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT'
+      ? false
+      : undefined;
+  }
   return (
     head.includes(MANAGED_HEADER_MARKER) ||
     head
@@ -957,10 +974,23 @@ function readTranscriptHeadSync(
   filePath: string,
   scratchBuffer?: Buffer,
 ): string | undefined {
+  try {
+    const head = readTranscriptHeadOrThrowSync(filePath, scratchBuffer);
+    return head === '' ? undefined : head;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The head window, or `''` for an empty transcript; throws when unreadable. */
+function readTranscriptHeadOrThrowSync(
+  filePath: string,
+  scratchBuffer?: Buffer,
+): string {
   let fd: number | undefined;
   try {
     const fileSize = fs.statSync(filePath).size;
-    if (fileSize === 0) return undefined;
+    if (fileSize === 0) return '';
     fd = openSyncNoFollow(filePath);
     const buffer =
       scratchBuffer && scratchBuffer.length >= LITE_READ_BUF_SIZE
@@ -969,8 +999,6 @@ function readTranscriptHeadSync(
     const length = Math.min(fileSize, LITE_READ_BUF_SIZE);
     const read = fs.readSync(fd, buffer, 0, length, 0);
     return buffer.toString('utf-8', 0, read);
-  } catch {
-    return undefined;
   } finally {
     if (fd !== undefined) {
       try {
