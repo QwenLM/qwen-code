@@ -870,6 +870,13 @@ describe('AgentCore approval response deduplication', () => {
     expect(toolResultEvents[0].responseParts?.[0]?.functionResponse?.name).toBe(
       ToolNames.TOOL_CALL,
     );
+    expect(
+      toolResultEvents[0].responseParts?.[0]?.functionResponse?.response?.[
+        'error'
+      ],
+    ).toBe(
+      'This tool call was cancelled before it ran. Stop and await further instructions; do not retry or work around it.',
+    );
   });
 
   it('emits a wrapper TOOL_CALL before a bridge cancellation on abort', async () => {
