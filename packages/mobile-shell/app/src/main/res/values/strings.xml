@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Qwen Code</string>
+    <string name="file_picker_unavailable">No document picker is available. Enable a file manager and try again.</string>
     <string name="retry">Retry</string>
     <string name="connections">Connections</string>
     <string name="development_notice">Development client. Per-device credential revocation is not yet available.</string>

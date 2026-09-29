@@ -5,8 +5,11 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import type { RequestHandler } from 'express';
+import type { Application, RequestHandler } from 'express';
+import type { HostedHarnessCapabilities } from './types.js';
 
+export const HOSTED_HARNESS_CAPABILITY_DIGEST_ENV =
+  'QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST';
 export const HOSTED_HARNESS_PROTOCOL_VERSION = 1 as const;
 export const HOSTED_HARNESS_PROTOCOL_HEADER = 'X-Qwen-Harness-Protocol-Version';
 export const HOSTED_HARNESS_BOOT_ID_HEADER = 'X-Qwen-Harness-Boot-Id';
@@ -16,14 +19,7 @@ const CAPABILITY_DIGEST_PATTERN = /^sha256:[0-9a-f]{64}$/u;
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 
-export interface HostedHarnessContract {
-  readonly protocolVersions: {
-    readonly current: typeof HOSTED_HARNESS_PROTOCOL_VERSION;
-    readonly supported: readonly [typeof HOSTED_HARNESS_PROTOCOL_VERSION];
-  };
-  readonly bootId: string;
-  readonly capabilityDigest: string;
-}
+export type HostedHarnessContract = HostedHarnessCapabilities;
 
 export function isHostedHarnessCapabilityDigest(value: string): boolean {
   return CAPABILITY_DIGEST_PATTERN.test(value);
@@ -35,13 +31,12 @@ export function createHostedHarnessContract(
 ): HostedHarnessContract {
   if (!isHostedHarnessCapabilityDigest(capabilityDigest)) {
     throw new Error(
-      'Hosted Harness capability digest must be sha256:<64 lowercase hex characters>.',
+      `${HOSTED_HARNESS_CAPABILITY_DIGEST_ENV} must be sha256:<64 lowercase hex characters>.`,
     );
   }
   if (!UUID_PATTERN.test(bootId)) {
     throw new Error('Hosted Harness bootId must be an RFC UUID v1-v5.');
   }
-
   return Object.freeze({
     protocolVersions: Object.freeze({
       current: HOSTED_HARNESS_PROTOCOL_VERSION,
@@ -85,7 +80,14 @@ export function hostedHarnessContractMiddleware(
       });
       return;
     }
-
     next();
   };
+}
+
+export function installHostedHarnessContractMiddleware(
+  app: Application,
+  contract: HostedHarnessContract | undefined,
+): void {
+  if (!contract) return;
+  app.use('/session', hostedHarnessContractMiddleware(contract));
 }

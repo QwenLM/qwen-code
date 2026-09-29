@@ -9,12 +9,14 @@ public final class ExecutionReconciliation {
         UNRESOLVED,
         /** The record was already settled; polling can stop. */
         ALREADY_SETTLED,
+        /** The original journal is permanently lost; no result is invented. */
+        ABANDONED,
         /**
          * The record is neither settled nor UNKNOWN, so there is nothing to
          * reconcile yet. This does not prove a dispatcher is still working
          * on it. A lapsed EXECUTING or CANCEL_REQUESTED record stays here
          * until a same-key retry or a cancel fences it as UNKNOWN, or a
-         * takeover scan does; a same-key retry re-dispatches a PREPARED or
+         * takeover scan settles it from Runtime evidence; a same-key retry re-dispatches a PREPARED or
          * lapsed DISPATCHING record, which never reached the Runtime.
          */
         IN_FLIGHT

@@ -13,7 +13,7 @@ import {
   type ExtensionSetting,
 } from '@qwen-code/qwen-code-core';
 import type { Request, Response } from 'express';
-import { loadSettings } from '../../config/settings.js';
+import { loadSettings, type Settings } from '../../config/settings.js';
 import { getWorkspaceTrustStatus } from '../../config/trustedFolders.js';
 import {
   detectSystemLanguage,
@@ -59,19 +59,10 @@ const EXTENSION_PREPARATION_CONCURRENCY = 2;
 const EXTENSION_REFRESH_TIMEOUT_MS = 30_000;
 const RECONCILE_SLOW_MS = 30_000;
 
-const resolveExtensionLocale = (
-  workspaceDir: string,
-  workspaceTrusted?: boolean,
-): string => {
-  const configuredLanguage = loadSettings(
-    workspaceDir,
-    workspaceTrusted === undefined
-      ? true
-      : {
-          skipWorkspaceSettings: !workspaceTrusted,
-          workspaceTrusted,
-        },
-  ).merged.general?.language as string | undefined;
+const resolveExtensionLocale = (mergedSettings: Settings): string => {
+  const configuredLanguage = mergedSettings.general?.language as
+    | string
+    | undefined;
   const requestedLocale = resolveLanguageSetting(configuredLanguage);
   if (requestedLocale === 'auto') {
     return detectSystemLanguage();
@@ -312,13 +303,33 @@ export function createExtensionsController(
     interactions?: ExtensionInteractionHandlers,
   ) => {
     const workspaceTrusted = trustedOverride ?? deps.isWorkspaceTrusted?.();
+    // One trust-gated load per call, shared by the locale and the trust
+    // fallback below. `skipLoadEnvironment` keeps this workspace's own
+    // `.env` / `settings.env` out of the daemon's shared `process.env`: one
+    // daemon hosts every workspace, so writing there leaks one repo's values
+    // into every other workspace's resolution for the process lifetime.
+    // `consumeCorruptionEnvVars: false` because this load surfaces neither
+    // the corruption marker nor the recovery notice, and the pair is
+    // one-shot: the default would spend it here and leave the load that does
+    // surface it nothing to report for the rest of the daemon's life.
+    const settings = loadSettings(
+      workspaceDir,
+      workspaceTrusted === undefined
+        ? { skipLoadEnvironment: true, consumeCorruptionEnvVars: false }
+        : {
+            skipLoadEnvironment: true,
+            skipWorkspaceSettings: !workspaceTrusted,
+            workspaceTrusted,
+            consumeCorruptionEnvVars: false,
+          },
+    ).merged;
     return new ExtensionManager({
       workspaceDir,
-      locale: resolveExtensionLocale(workspaceDir, workspaceTrusted),
+      locale: resolveExtensionLocale(settings),
       isWorkspaceTrusted:
         workspaceTrusted ??
-        getWorkspaceTrustStatus(loadSettings(workspaceDir).merged, workspaceDir)
-          .effective.state === 'trusted',
+        getWorkspaceTrustStatus(settings, workspaceDir).effective.state ===
+          'trusted',
       requestConsent: () => Promise.resolve(),
       requestSetting:
         interactions?.requestSetting ??
@@ -422,10 +433,24 @@ export function createExtensionsController(
   let extensionsStatusCache:
     | {
         locale: string;
+        trusted: boolean;
         expiresAt: number;
         value: ServeWorkspaceExtensionsStatus;
       }
     | undefined;
+
+  let extensionsStatusInFlight:
+    | {
+        locale: string;
+        trusted: boolean;
+        promise: Promise<ServeWorkspaceExtensionsStatus>;
+      }
+    | undefined;
+
+  const invalidateExtensionsStatus = (): void => {
+    extensionsStatusCache = undefined;
+    extensionsStatusInFlight = undefined;
+  };
 
   const refreshExtensionsForAllSessions = async (): Promise<{
     refreshed: number;
@@ -436,7 +461,7 @@ export function createExtensionsController(
     const refresh = commitQueue.runUntilReleased(
       async (release) => {
         releaseCommitLane = release;
-        extensionsStatusCache = undefined;
+        invalidateExtensionsStatus();
         return await workspace.refreshExtensionsForAllSessions();
       },
       { signal: queueAbort.signal },
@@ -677,7 +702,7 @@ export function createExtensionsController(
         );
         mutationEvent = event;
         if (deadline) clearTimeout(deadline);
-        extensionsStatusCache = undefined;
+        invalidateExtensionsStatus();
         if (options.skipRefresh || event.updated === false) {
           reconciliationReservation?.release();
           reconciliationReservation = undefined;
@@ -904,7 +929,7 @@ export function createExtensionsController(
             ? (err as { code: string }).code
             : undefined;
         if (committedGeneration !== undefined) {
-          extensionsStatusCache = undefined;
+          invalidateExtensionsStatus();
           const error =
             `Commit succeeded but post-commit work failed: ${message}`.slice(
               0,
@@ -1014,104 +1039,178 @@ export function createExtensionsController(
     })();
   };
 
+  const loadLocalExtensionsStatus = async (
+    trusted: boolean,
+  ): Promise<ServeWorkspaceExtensionsStatus> => {
+    const extensionManager = createExtensionManager(boundWorkspace, trusted);
+    await extensionManager.refreshCache();
+    const entries: ServeExtensionEntry[] = extensionManager
+      .getLoadedExtensions()
+      .map((ext): ServeExtensionEntry => {
+        const capabilities: ServeExtensionCapabilities = {
+          mcpServerCount: ext.mcpServers
+            ? Object.keys(ext.mcpServers).length
+            : 0,
+          skillCount: ext.skills?.length ?? 0,
+          agentCount: ext.agents?.length ?? 0,
+          hookCount: ext.hooks
+            ? Object.values(ext.hooks).reduce(
+                (sum, defs) => sum + (defs?.length ?? 0),
+                0,
+              )
+            : 0,
+          commandCount: ext.commands?.length ?? 0,
+          contextFileCount: ext.contextFiles.length,
+          channelCount: ext.channels ? Object.keys(ext.channels).length : 0,
+          hasSettings: (ext.settings?.length ?? 0) > 0,
+        };
+        return {
+          kind: 'extension',
+          id: ext.id,
+          name: ext.name,
+          ...(ext.displayName ? { displayName: ext.displayName } : {}),
+          ...(ext.config.description
+            ? { description: ext.config.description }
+            : {}),
+          version: ext.version,
+          isActive: ext.isActive,
+          path: ext.path,
+          ...(ext.installMetadata?.source &&
+          ext.installMetadata.type !== 'snapshot'
+            ? {
+                source: redactExtensionDisplaySource(
+                  ext.installMetadata.source,
+                ),
+              }
+            : {}),
+          ...(ext.installMetadata?.type
+            ? { installType: ext.installMetadata.type }
+            : {}),
+          ...(ext.installMetadata?.originSource
+            ? { originSource: ext.installMetadata.originSource }
+            : {}),
+          ...(ext.installMetadata?.ref ? { ref: ext.installMetadata.ref } : {}),
+          ...(ext.installMetadata?.autoUpdate !== undefined
+            ? { autoUpdate: ext.installMetadata.autoUpdate }
+            : {}),
+          ...(ext.installMetadata?.type === 'snapshot'
+            ? { credentialPersistence: 'one_time' as const }
+            : ext.installMetadata?.credentialPersistence === 'stored'
+              ? { credentialPersistence: 'stored' as const }
+              : {}),
+          updateState:
+            ext.installMetadata?.type === 'snapshot'
+              ? 'not updatable'
+              : ext.installMetadata
+                ? 'unknown'
+                : 'not updatable',
+          capabilities,
+          details: {
+            mcpServers: ext.mcpServers ? Object.keys(ext.mcpServers) : [],
+            commands: ext.commands ?? [],
+            skills: ext.skills?.map((skill) => skill.name) ?? [],
+            agents: ext.agents?.map((agent) => agent.name) ?? [],
+            contextFiles: ext.contextFiles,
+            settings:
+              ext.resolvedSettings?.map((setting) => setting.name) ?? [],
+          },
+        };
+      });
+    const status = {
+      v: STATUS_SCHEMA_VERSION,
+      workspaceCwd: boundWorkspace,
+      initialized: true,
+      extensions: entries,
+    };
+    return status;
+  };
+
   const buildLocalExtensionsStatus =
     async (): Promise<ServeWorkspaceExtensionsStatus> => {
-      const locale = resolveExtensionLocale(boundWorkspace);
-      const now = Date.now();
+      // `skipLoadEnvironment` for the same reason as the load in
+      // `createExtensionManager`: this route is trust-free and reachable with
+      // a single GET, so writing the bound workspace's `.env` /
+      // `settings.env` into the daemon's shared `process.env` would publish
+      // one repo's values to every other workspace the daemon hosts for the
+      // process lifetime. `consumeCorruptionEnvVars: false` for the reason
+      // stated there too: this poll is the most frequently hit load in the
+      // daemon, so letting it spend the one-shot marker it never surfaces
+      // would drop the signal for every hosted workspace.
+      //
+      // The probe stays ungated only where it is actually read. An
+      // authoritative `false` from `isWorkspaceTrusted` short-circuits
+      // `trusted`, so probing there would parse an untrusted workspace's own
+      // `.qwen/settings.json` and then throw the result away — and parsing
+      // runs the migration / corruption-recovery path, which REWRITES that
+      // file (injecting `$version`, or resetting invalid JSON to `{}` beside
+      // a `.corrupted` sibling). A trust-free, read-only-by-contract status
+      // poll must not mutate the workspace it reports on, so that arm
+      // performs exactly one load: the gated one below.
+      const trustedFromDeps = deps.isWorkspaceTrusted?.();
+      const probeSettings =
+        trustedFromDeps === false
+          ? undefined
+          : loadSettings(boundWorkspace, {
+              skipLoadEnvironment: true,
+              consumeCorruptionEnvVars: false,
+            }).merged;
+      const trusted =
+        trustedFromDeps ??
+        (probeSettings !== undefined &&
+          getWorkspaceTrustStatus(probeSettings, boundWorkspace).effective
+            .state === 'trusted');
+      // An untrusted workspace must not select the locale through its own
+      // `general.language`: `loadSettings` merges the workspace scope for
+      // any directory unless told otherwise, while the entries behind this
+      // key are built by `createExtensionManager(boundWorkspace, trusted)`,
+      // which does gate it. Re-resolving on the gated merge keeps the cache
+      // key and the cached payload on one view of the same file. A trusted
+      // workspace reuses the probe, so that path is still a single load.
+      const mergedSettings =
+        trusted && probeSettings
+          ? probeSettings
+          : loadSettings(boundWorkspace, {
+              skipLoadEnvironment: true,
+              consumeCorruptionEnvVars: false,
+              skipWorkspaceSettings: true,
+              workspaceTrusted: false,
+            }).merged;
+      const locale = resolveExtensionLocale(mergedSettings);
       if (
         extensionsStatusCache?.locale === locale &&
-        extensionsStatusCache.expiresAt > now
+        extensionsStatusCache.trusted === trusted &&
+        extensionsStatusCache.expiresAt > Date.now()
       ) {
         return extensionsStatusCache.value;
       }
-      const extensionManager = createExtensionManager();
-      await extensionManager.refreshCache();
-      const entries: ServeExtensionEntry[] = extensionManager
-        .getLoadedExtensions()
-        .map((ext): ServeExtensionEntry => {
-          const capabilities: ServeExtensionCapabilities = {
-            mcpServerCount: ext.mcpServers
-              ? Object.keys(ext.mcpServers).length
-              : 0,
-            skillCount: ext.skills?.length ?? 0,
-            agentCount: ext.agents?.length ?? 0,
-            hookCount: ext.hooks
-              ? Object.values(ext.hooks).reduce(
-                  (sum, defs) => sum + (defs?.length ?? 0),
-                  0,
-                )
-              : 0,
-            commandCount: ext.commands?.length ?? 0,
-            contextFileCount: ext.contextFiles.length,
-            channelCount: ext.channels ? Object.keys(ext.channels).length : 0,
-            hasSettings: (ext.settings?.length ?? 0) > 0,
-          };
-          return {
-            kind: 'extension',
-            id: ext.id,
-            name: ext.name,
-            ...(ext.displayName ? { displayName: ext.displayName } : {}),
-            ...(ext.config.description
-              ? { description: ext.config.description }
-              : {}),
-            version: ext.version,
-            isActive: ext.isActive,
-            path: ext.path,
-            ...(ext.installMetadata?.source &&
-            ext.installMetadata.type !== 'snapshot'
-              ? {
-                  source: redactExtensionDisplaySource(
-                    ext.installMetadata.source,
-                  ),
-                }
-              : {}),
-            ...(ext.installMetadata?.type
-              ? { installType: ext.installMetadata.type }
-              : {}),
-            ...(ext.installMetadata?.originSource
-              ? { originSource: ext.installMetadata.originSource }
-              : {}),
-            ...(ext.installMetadata?.ref
-              ? { ref: ext.installMetadata.ref }
-              : {}),
-            ...(ext.installMetadata?.autoUpdate !== undefined
-              ? { autoUpdate: ext.installMetadata.autoUpdate }
-              : {}),
-            ...(ext.installMetadata?.type === 'snapshot'
-              ? { credentialPersistence: 'one_time' as const }
-              : ext.installMetadata?.credentialPersistence === 'stored'
-                ? { credentialPersistence: 'stored' as const }
-                : {}),
-            updateState:
-              ext.installMetadata?.type === 'snapshot'
-                ? 'not updatable'
-                : ext.installMetadata
-                  ? 'unknown'
-                  : 'not updatable',
-            capabilities,
-            details: {
-              mcpServers: ext.mcpServers ? Object.keys(ext.mcpServers) : [],
-              commands: ext.commands ?? [],
-              skills: ext.skills?.map((skill) => skill.name) ?? [],
-              agents: ext.agents?.map((agent) => agent.name) ?? [],
-              contextFiles: ext.contextFiles,
-              settings:
-                ext.resolvedSettings?.map((setting) => setting.name) ?? [],
-            },
-          };
-        });
-      const status = {
-        v: STATUS_SCHEMA_VERSION,
-        workspaceCwd: boundWorkspace,
-        initialized: true,
-        extensions: entries,
-      };
-      extensionsStatusCache = {
+      if (
+        extensionsStatusInFlight?.locale === locale &&
+        extensionsStatusInFlight.trusted === trusted
+      ) {
+        return extensionsStatusInFlight.promise;
+      }
+      const load = {
         locale,
-        expiresAt: Date.now() + 2_000,
-        value: status,
+        trusted,
+        promise: loadLocalExtensionsStatus(trusted),
       };
-      return status;
+      extensionsStatusInFlight = load;
+      try {
+        const value = await load.promise;
+        if (extensionsStatusInFlight === load) {
+          extensionsStatusCache = {
+            locale,
+            trusted,
+            expiresAt: Date.now() + 2_000,
+            value,
+          };
+        }
+        return value;
+      } finally {
+        if (extensionsStatusInFlight === load) {
+          extensionsStatusInFlight = undefined;
+        }
+      }
     };
 
   return {

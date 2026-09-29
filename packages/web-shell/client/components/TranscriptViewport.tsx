@@ -526,6 +526,7 @@ export const TranscriptViewport = forwardRef<
               key={viewport.viewKey}
               ref={list}
               messages={viewport.messages}
+              mcpAppSessionId={props.mcpAppSessionId ?? props.sourceSessionId}
               timelineAction={
                 globalNavigation ? undefined : props.timelineAction
               }

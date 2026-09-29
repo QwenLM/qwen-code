@@ -8,6 +8,7 @@ import express from 'express';
 import { registerWorkspaceRuntimeStopRoutes } from './routes/workspace-runtime-stop.js';
 import type { Application } from 'express';
 import * as path from 'node:path';
+import { TLSSocket } from 'node:tls';
 import type { DaemonStatusProvider } from '@qwen-code/acp-bridge';
 import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
 import {
@@ -86,6 +87,7 @@ import {
   canonicalizeWorkspace,
   createAcpSessionBridge,
   createSpawnChannelFactory,
+  defaultSpawnChannelFactory,
   MAX_SESSION_RESTORE_TIMEOUT_MS,
   resolveSessionRestoreTimeoutMs,
   SessionNotFoundError,
@@ -120,6 +122,7 @@ import {
 } from './workspace-agents.js';
 import { mountWorkspaceGenerationRoutes } from './workspace-generation.js';
 import { registerDaemonStatusRoutes } from './routes/daemon-status.js';
+import { registerDaemonUpdateRoutes } from './routes/daemon-update.js';
 import { createHealthRoutes } from './routes/health.js';
 import { registerWorkspaceAuthRoutes } from './routes/workspace-auth.js';
 import { registerWorkspaceExtensionRoutes } from './routes/workspace-extensions.js';
@@ -151,6 +154,10 @@ import {
 } from './session-id-admission.js';
 import { sessionAttachmentsRoots } from './session-attachments-root.js';
 import {
+  createPairedExecutionEngines,
+  type ManagedExecutionEngine,
+} from './session-execution-engine-selector.js';
+import {
   registerScheduledTasksRoutes,
   registerWorkspaceQualifiedScheduledTasksRoutes,
 } from './routes/scheduled-tasks.js';
@@ -179,6 +186,12 @@ import {
 } from './workspace-service/index.js';
 import { registerBrandRoutes } from './routes/brand.js';
 import { registerCapabilitiesRoutes } from './routes/capabilities.js';
+import {
+  createHostedHarnessContract,
+  installHostedHarnessContractMiddleware,
+} from './hosted-harness-contract.js';
+import { validateHostedHarnessProfile } from './hosted-harness-profile.js';
+import { registerHostedHarnessSessionRoutes } from './hosted-harness-session.js';
 import {
   registerWorkspacePermissionsRoutes,
   registerWorkspaceQualifiedPermissionsRoutes,
@@ -492,6 +505,7 @@ function getRuntimeEffectiveEnv(
 }
 
 export interface ServeAppDeps {
+  restartForUpdate?: (launcher: string) => Promise<void>;
   /** Bridge instance; tests inject a fake. Defaults to a fresh real one. */
   bridge?: AcpSessionBridge;
   /**
@@ -619,6 +633,12 @@ export interface ServeAppDeps {
     policy: ChildHeapPolicy;
     ownsBridge?: (bridge: AcpSessionBridge) => boolean;
   };
+  /**
+   * Managed engine for the default Bridge when `experimentalPairedEngines`
+   * pairs it. Without one, paired sessions run on Legacy and Managed owners
+   * are refused on restore.
+   */
+  managedExecutionEngine?: ManagedExecutionEngine;
   /**
    * Sink fed one (durationMs, statusCode) per matched daemon HTTP request, so
    * the metrics ring can bucket request rate and latency for the charts.
@@ -815,6 +835,13 @@ export function createServeApp(
   getPort: () => number = () => opts.port,
   deps: ServeAppDeps = {},
 ): Application {
+  validateHostedHarnessProfile(opts);
+  if (opts.profile === 'hosted-harness' && deps.manageScheduledTaskSessions) {
+    throw new Error(
+      '--profile hosted-harness cannot manage scheduled task sessions.',
+    );
+  }
+  if (opts.profile === 'hosted-harness') opts = { ...opts, requireAuth: true };
   if (
     (opts.childHeapMode === 'admit' || opts.childHeapMode === 'enforce') &&
     deps.managedChildProcesses?.policy.snapshot().mode !== opts.childHeapMode
@@ -1055,7 +1082,8 @@ export function createServeApp(
     webTerminalRegistry.dispose();
   webTerminalLocals.releaseWebTerminalsForWorkspace = (workspaceCwd) =>
     webTerminalRegistry.releaseWorkspace(workspaceCwd);
-  const acpHttpEnabledAtBoot = resolveAcpHttpEnabled(daemonEnvAtBoot);
+  const acpHttpEnabledAtBoot =
+    opts.profile !== 'hosted-harness' && resolveAcpHttpEnabled(daemonEnvAtBoot);
   const runtimePlatform = deps.runtimePlatform ?? process.platform;
   // Live Voice needs a Web Shell to control it. The audio endpoint is the Web
   // Shell page itself (`/live/web`) on every platform; the native macOS Host
@@ -1244,6 +1272,36 @@ export function createServeApp(
     boundWorkspace,
     Storage.getRuntimeBaseDir(),
   );
+  const defaultBridgeChannels = () => {
+    const channelFactory =
+      acpChildArgs || deps.managedChildProcesses
+        ? createSpawnChannelFactory({
+            processRegistry: deps.managedChildProcesses?.registry,
+            childHeapPolicy: deps.managedChildProcesses?.policy,
+            ...(deps.managedChildProcesses
+              ? {
+                  reclaimIdleChild: async (signal?: AbortSignal) => {
+                    await reclaimIdleAcp?.(
+                      hashDaemonWorkspace(boundWorkspace),
+                      signal,
+                    );
+                  },
+                }
+              : {}),
+            extraArgs: acpChildArgs,
+          })
+        : undefined;
+    if (!opts.experimentalPairedEngines) {
+      return channelFactory ? { channelFactory } : {};
+    }
+    return {
+      executionEngines: createPairedExecutionEngines({
+        legacy: channelFactory ?? defaultSpawnChannelFactory,
+        runtimeBaseDir: Storage.getRuntimeBaseDir(),
+        managed: deps.managedExecutionEngine,
+      }),
+    };
+  };
   const bridge =
     injectedWorkspaceRegistry?.primary.bridge ??
     deps.bridge ??
@@ -1272,25 +1330,7 @@ export function createServeApp(
       ...(opts.restoreAskUserQuestion === true
         ? { restoreAskUserQuestion: true }
         : {}),
-      ...(acpChildArgs || deps.managedChildProcesses
-        ? {
-            channelFactory: createSpawnChannelFactory({
-              processRegistry: deps.managedChildProcesses?.registry,
-              childHeapPolicy: deps.managedChildProcesses?.policy,
-              ...(deps.managedChildProcesses
-                ? {
-                    reclaimIdleChild: async (signal?: AbortSignal) => {
-                      await reclaimIdleAcp?.(
-                        hashDaemonWorkspace(boundWorkspace),
-                        signal,
-                      );
-                    },
-                  }
-                : {}),
-              extraArgs: acpChildArgs,
-            }),
-          }
-        : {}),
+      ...defaultBridgeChannels(),
       boundWorkspace,
       sessionShellCommandEnabled,
       // Wire the production status provider so direct embeds / tests
@@ -1399,7 +1439,8 @@ export function createServeApp(
       }),
       ...(primaryEffectiveEnv ? { skillInstallEnv: primaryEffectiveEnv } : {}),
       ...(primaryEffectiveEnv ? { voiceEnv: primaryEffectiveEnv } : {}),
-      isChannelLive: () => bridge.isChannelLive(),
+      isChannelLive: () =>
+        bridge.isWorkspaceControlLive?.() ?? bridge.isChannelLive(),
       persistDisabledTools:
         deps.persistDisabledTools ??
         (async () => {
@@ -2131,6 +2172,18 @@ export function createServeApp(
     opts.token ? credentials : undefined,
   );
   app.use(allowOriginCors(originAllowlist));
+  if (opts.profile === 'hosted-harness') {
+    app.use((req, res, next) => {
+      if (
+        req.path === '/health' ||
+        req.path === '/capabilities' ||
+        req.path === '/session' ||
+        req.path.startsWith('/session/')
+      )
+        next();
+      else res.sendStatus(404);
+    });
+  }
 
   // Pre-auth health sits below the origin wall so matched cross-origin health
   // probes carry CORS headers. It stays unlogged (path-exempt above), so the
@@ -2179,8 +2232,24 @@ export function createServeApp(
         )
       : [];
   if (webShellDir) {
-    mountWebShellAssets(app, webShellDir, webShellFrameAncestors);
-    mountMcpAppSandbox(app);
+    mountWebShellAssets(
+      app,
+      webShellDir,
+      webShellFrameAncestors,
+      opts.clientMcpOverWs === true,
+    );
+    (app.locals as { stopMcpAppSandbox?: () => void }).stopMcpAppSandbox =
+      mountMcpAppSandbox(app, (origin, req) => {
+        if (originAllowlist.allows(origin)) return true;
+        if (!opts.token || listenerIdentityOf(req).kind !== 'primary')
+          return false;
+        const scheme =
+          req.socket instanceof TLSSocket && req.socket.encrypted
+            ? 'https'
+            : 'http';
+        // Match the existing self-origin rule; forwarded headers are not authority.
+        return origin === new URL(`${scheme}://${req.headers.host}`).origin;
+      });
   }
 
   if (deps.enqueueChannelWebhookTask) {
@@ -2253,6 +2322,86 @@ export function createServeApp(
   }
 
   installJsonBodyParser(app);
+
+  const hostedHarness =
+    opts.profile === 'hosted-harness'
+      ? createHostedHarnessContract(opts.hostedHarnessCapabilityDigest!)
+      : undefined;
+  installHostedHarnessContractMiddleware(app, hostedHarness);
+  if (hostedHarness) {
+    registerHostedHarnessSessionRoutes(
+      app,
+      hostedHarness,
+      primaryBoundWorkspace,
+      opts.managedRuntimeBrokerUrl && opts.managedRuntimeBrokerToken
+        ? {
+            baseUrl: opts.managedRuntimeBrokerUrl,
+            token: opts.managedRuntimeBrokerToken,
+          }
+        : undefined,
+    );
+    app.use((req, res, next) => {
+      if (req.path === '/capabilities' || req.path === '/health') next();
+      else res.sendStatus(404);
+    });
+  }
+
+  if (opts.clientMcpOverWs === true) {
+    app.post('/desktop-relay/credential', (req, res) => {
+      if (listenerIdentityOf(req).kind !== 'primary') {
+        res.status(403).json({ error: 'primary_listener_required' });
+        return;
+      }
+      const body = req.body as unknown;
+      if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+        res.status(400).json({ error: 'invalid_request' });
+        return;
+      }
+      const { sessionId, workspace } = body as Record<string, unknown>;
+      if (
+        typeof sessionId !== 'string' ||
+        sessionId.length === 0 ||
+        sessionId.length > 4_096
+      ) {
+        res.status(400).json({ error: 'invalid_session_id' });
+        return;
+      }
+
+      let acpPath = '/acp';
+      if (workspace !== undefined) {
+        if (
+          workspace === null ||
+          typeof workspace !== 'object' ||
+          Array.isArray(workspace)
+        ) {
+          res.status(400).json({ error: 'invalid_workspace' });
+          return;
+        }
+        const selector = workspace as Record<string, unknown>;
+        if (
+          (selector['kind'] !== 'id' && selector['kind'] !== 'cwd') ||
+          typeof selector['value'] !== 'string' ||
+          selector['value'].length === 0 ||
+          selector['value'].length > 4_096
+        ) {
+          res.status(400).json({ error: 'invalid_workspace' });
+          return;
+        }
+        acpPath = `/workspaces/${encodeURIComponent(selector['value'])}/acp`;
+      }
+
+      const credential = credentials.createDesktopRelayCredential({
+        acpPath,
+        sessionId,
+      });
+      res.setHeader('Cache-Control', 'no-store');
+      if (!credential) {
+        res.status(429).json({ error: 'credential_limit' });
+        return;
+      }
+      res.json({ credential });
+    });
+  }
 
   // Mutation-route gate factory. Trusted primary loopback requests have
   // operator authority; strict routes otherwise require verified credentials.
@@ -2353,6 +2502,13 @@ export function createServeApp(
   const cdpTunnelRegistry =
     opts.cdpTunnelOverWs === true ? new CdpTunnelRegistry() : undefined;
 
+  registerDaemonUpdateRoutes(app, {
+    currentVersion: deps.qwenCodeVersion,
+    runtimeToken: opts.token,
+    restartForUpdate: deps.restartForUpdate,
+    mutate,
+  });
+
   registerDaemonStatusRoutes(app, {
     opts,
     boundWorkspace: primaryBoundWorkspace,
@@ -2402,6 +2558,7 @@ export function createServeApp(
     });
   }
   registerCapabilitiesRoutes(app, {
+    hostedHarness,
     qwenCodeVersion: deps.qwenCodeVersion,
     mode: opts.mode,
     currentServeFeatures,
@@ -3746,7 +3903,12 @@ export function createServeApp(
   // is what keeps an attacker-controlled `Accept: text/html` from coaxing the
   // 200 shell out of an authed route.
   if (webShellDir) {
-    mountWebShellSpaFallback(app, webShellDir, webShellFrameAncestors);
+    mountWebShellSpaFallback(
+      app,
+      webShellDir,
+      webShellFrameAncestors,
+      opts.clientMcpOverWs === true,
+    );
   }
 
   installFinalErrorHandler(app);
@@ -3760,6 +3922,7 @@ export function createServeApp(
     serveAppLifecycle.setAppDrain(async () => {
       if (appDrainComplete) return;
       const pendingDrains = [
+        (app.locals['cleanupDaemonUpdate'] as () => Promise<void>)(),
         workspaceManagementHandle.sealAndWait(),
         (
           app.locals as {
@@ -3778,10 +3941,12 @@ export function createServeApp(
         }
       };
       const locals = app.locals as {
+        stopMcpAppSandbox?: () => void;
         stopScheduledTaskKeepalive?: () => void;
         stopWorkspaceGitState?: () => void;
         stopExtensionGenerationReconciler?: () => void;
       };
+      stopAppResource(locals.stopMcpAppSandbox);
       stopAppResource(locals.stopScheduledTaskKeepalive);
       stopAppResource(locals.stopWorkspaceGitState);
       stopAppResource(locals.stopExtensionGenerationReconciler);
