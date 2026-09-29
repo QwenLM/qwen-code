@@ -121,7 +121,9 @@ worker 的原因描述为拒绝，仍保持 UNKNOWN。该状态阻止释放，�
 存储。仅凭错误码不能证明执行从未开始。Broker 的 Runtime 丢失恢复可将不确定执行封存为
 ABANDONED：结果永久未知，可通过持久归属读取，但不能重放。Broker HTTP 的 start、读取与
 取消会像对 tool v3 一样，就停留在 UNKNOWN 的 provider 执行询问原 worker，由其保留的结果
-结算执行，不会再次派发；取消也会送达 worker 上仍在运行的调用。现有即时 Tool v2 行为
+结算执行，不会再次派发；取消也会送达 worker 上仍在运行的调用。询问是尽力而为的：无论
+因为什么原因无法再询问原 Runtime 或无法得到应答，记录都保留自己的
+`runtime_broker_execution_unknown` 应答，而不是这次尝试的错误。现有即时 Tool v2 行为
 独立保留。
 
 #12831 的原始 reserve/start 路径继续使用同一组 Broker 路由：预留四字段 reference，
