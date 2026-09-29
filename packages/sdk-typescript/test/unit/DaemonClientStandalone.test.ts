@@ -35,6 +35,7 @@ function jsonResponse(status: number, body: unknown): Response {
 function capabilityResponse(
   enabled = true,
   optionsEnabled = enabled,
+  transcriptEnabled = false,
 ): Response {
   return jsonResponse(200, {
     v: 1,
@@ -42,6 +43,7 @@ function capabilityResponse(
     features: [
       ...(enabled ? ['standalone_sessions_v1'] : []),
       ...(optionsEnabled ? ['standalone_session_options_v1'] : []),
+      ...(transcriptEnabled ? ['standalone_session_transcript_v1'] : []),
     ],
   });
 }
@@ -1047,6 +1049,298 @@ describe('DaemonClient standalone sessions', () => {
     };
     await expect(
       client.deleteStandaloneSessions([SESSION_ID]),
+    ).rejects.toBeInstanceOf(DaemonStandaloneProtocolError);
+  });
+
+  it('gates standalone transcript reads with the dedicated capability', async () => {
+    const { fetch, calls } = recordingFetch(() => capabilityResponse());
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+    await expect(
+      client.getStandaloneSessionTranscriptPage(SESSION_ID),
+    ).rejects.toMatchObject({
+      name: 'DaemonCapabilityMissingError',
+      capability: 'standalone_session_transcript_v1',
+    });
+    expect(calls.map((call) => new URL(call.url).pathname)).toEqual([
+      '/capabilities',
+    ]);
+  });
+
+  it('serializes transcript page queries exactly and pins the session id', async () => {
+    const transcriptResponse = () => ({
+      v: 1,
+      sessionId: SESSION_ID,
+      events: [],
+      hasMore: false,
+      startTime: '2026-01-01T00:00:00.000Z',
+      lastUpdated: '2026-01-01T00:00:00.000Z',
+    });
+    const { fetch, calls } = recordingFetch((request) =>
+      request.url.endsWith('/capabilities')
+        ? capabilityResponse(true, true, true)
+        : jsonResponse(200, transcriptResponse()),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+    const page = await client.getStandaloneSessionTranscriptPage(
+      UPPER_SESSION_ID,
+      {
+        compactedReplayMode: 'summary',
+        direction: 'backward',
+        limit: 50,
+      },
+    );
+    expect(page).toEqual(transcriptResponse());
+    expect(calls.map((call) => new URL(call.url).pathname)).toEqual([
+      '/capabilities',
+      `/standalone/sessions/${SESSION_ID}/transcript`,
+    ]);
+    // Exact URL equality: the query contract must not drift.
+    expect(new URL(calls[1]!.url).search).toBe(
+      '?compactedReplayMode=summary&direction=backward&limit=50',
+    );
+  });
+
+  it('caches the capability preflight across transcript reads', async () => {
+    const { fetch, calls } = recordingFetch((request) =>
+      request.url.endsWith('/capabilities')
+        ? capabilityResponse(true, true, true)
+        : jsonResponse(200, {
+            v: 1,
+            sessionId: SESSION_ID,
+            events: [],
+            hasMore: false,
+          }),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+    await client.getStandaloneSessionTranscriptPage(SESSION_ID);
+    await client.getStandaloneSessionTranscriptPage(SESSION_ID);
+
+    expect(
+      calls.filter((call) => new URL(call.url).pathname === '/capabilities'),
+    ).toHaveLength(1);
+  });
+
+  it('rejects a transcript page whose session id does not match', async () => {
+    const { fetch } = recordingFetch((request) =>
+      request.url.endsWith('/capabilities')
+        ? capabilityResponse(true, true, true)
+        : jsonResponse(200, {
+            v: 1,
+            sessionId: '00000000-0000-4000-8000-000000000000',
+            events: [],
+            hasMore: false,
+          }),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+    await expect(
+      client.getStandaloneSessionTranscriptPage(SESSION_ID),
+    ).rejects.toBeInstanceOf(DaemonStandaloneProtocolError);
+  });
+
+  it('gates standalone turn-index reads with the dedicated capability', async () => {
+    const { fetch, calls } = recordingFetch(() => capabilityResponse());
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+    await expect(
+      client.getStandaloneSessionTurnIndexPage(SESSION_ID),
+    ).rejects.toMatchObject({
+      name: 'DaemonCapabilityMissingError',
+      capability: 'standalone_session_transcript_v1',
+    });
+    expect(calls.map((call) => new URL(call.url).pathname)).toEqual([
+      '/capabilities',
+    ]);
+  });
+
+  it('caches the capability preflight across turn-index reads', async () => {
+    const { fetch, calls } = recordingFetch((request) =>
+      request.url.endsWith('/capabilities')
+        ? capabilityResponse(true, true, true)
+        : jsonResponse(200, {
+            v: 1,
+            sessionId: SESSION_ID,
+            snapshot: 'snap-1',
+            totalTurns: 0,
+            start: 0,
+            turns: [],
+          }),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+    await client.getStandaloneSessionTurnIndexPage(SESSION_ID);
+    await client.getStandaloneSessionTurnIndexPage(SESSION_ID);
+
+    expect(
+      calls.filter((call) => new URL(call.url).pathname === '/capabilities'),
+    ).toHaveLength(1);
+  });
+
+  it('re-probes capabilities when a cached read is followed by a write', async () => {
+    const { fetch, calls } = recordingFetch((request) =>
+      request.url.endsWith('/capabilities')
+        ? capabilityResponse(true, true, true)
+        : request.method === 'POST'
+          ? jsonResponse(200, {
+              v: 1,
+              archived: [SESSION_ID],
+              alreadyArchived: [],
+              notFound: [],
+              errors: [],
+            })
+          : jsonResponse(200, {
+              v: 1,
+              sessionId: SESSION_ID,
+              snapshot: 'snap-1',
+              totalTurns: 0,
+              start: 0,
+              turns: [],
+            }),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+    await client.getStandaloneSessionTurnIndexPage(SESSION_ID);
+    await client.archiveStandaloneSessions([SESSION_ID]);
+
+    expect(
+      calls.filter((call) => new URL(call.url).pathname === '/capabilities'),
+    ).toHaveLength(2);
+  });
+
+  it('rejects a turn-index page missing the snapshot', async () => {
+    const { fetch } = recordingFetch((request) =>
+      request.url.endsWith('/capabilities')
+        ? capabilityResponse(true, true, true)
+        : jsonResponse(200, {
+            v: 1,
+            sessionId: SESSION_ID,
+            totalTurns: 0,
+            start: 0,
+            turns: [],
+          }),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+    await expect(
+      client.getStandaloneSessionTurnIndexPage(SESSION_ID),
+    ).rejects.toBeInstanceOf(DaemonStandaloneProtocolError);
+  });
+
+  it.each([
+    [
+      'missing totalTurns',
+      { v: 1, sessionId: SESSION_ID, snapshot: 'snap-1', start: 0, turns: [] },
+    ],
+    [
+      'missing start',
+      {
+        v: 1,
+        sessionId: SESSION_ID,
+        snapshot: 'snap-1',
+        totalTurns: 0,
+        turns: [],
+      },
+    ],
+    [
+      'totalTurns wrong type',
+      {
+        v: 1,
+        sessionId: SESSION_ID,
+        snapshot: 'snap-1',
+        totalTurns: 'x',
+        start: 0,
+        turns: [],
+      },
+    ],
+    [
+      'turns not array',
+      {
+        v: 1,
+        sessionId: SESSION_ID,
+        snapshot: 'snap-1',
+        totalTurns: 0,
+        start: 0,
+        turns: null,
+      },
+    ],
+    [
+      'turns contains null',
+      {
+        v: 1,
+        sessionId: SESSION_ID,
+        snapshot: 'snap-1',
+        totalTurns: 0,
+        start: 0,
+        turns: [null],
+      },
+    ],
+  ])('rejects a malformed turn-index page (%s)', async (_label, body) => {
+    const { fetch } = recordingFetch((request) =>
+      request.url.endsWith('/capabilities')
+        ? capabilityResponse(true, true, true)
+        : jsonResponse(200, body),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+    await expect(
+      client.getStandaloneSessionTurnIndexPage(SESSION_ID),
+    ).rejects.toBeInstanceOf(DaemonStandaloneProtocolError);
+  });
+
+  it('rejects a turn-index page from another session', async () => {
+    const { fetch } = recordingFetch((request) =>
+      request.url.endsWith('/capabilities')
+        ? capabilityResponse(true, true, true)
+        : jsonResponse(200, {
+            v: 1,
+            sessionId: '550e8400-e29b-41d4-a716-446655440001',
+            snapshot: 'snap-1',
+            totalTurns: 0,
+            start: 0,
+            turns: [],
+          }),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    await expect(
+      client.getStandaloneSessionTurnIndexPage(SESSION_ID),
+    ).rejects.toBeInstanceOf(DaemonStandaloneProtocolError);
+  });
+
+  it.each([
+    ['missing hasMore', { events: [] }],
+    ['non-boolean hasMore', { events: [], hasMore: 'false' }],
+    ['non-string nextCursor', { events: [], hasMore: true, nextCursor: 42 }],
+    ['non-array events', { events: {}, hasMore: false }],
+  ])('rejects a malformed transcript page (%s)', async (_label, fields) => {
+    const { fetch } = recordingFetch((request) =>
+      request.url.endsWith('/capabilities')
+        ? capabilityResponse(true, true, true)
+        : jsonResponse(200, { v: 1, sessionId: SESSION_ID, ...fields }),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    await expect(
+      client.getStandaloneSessionTranscriptPage(SESSION_ID),
+    ).rejects.toBeInstanceOf(DaemonStandaloneProtocolError);
+  });
+
+  it('rejects a transcript page whose events contain null', async () => {
+    const { fetch } = recordingFetch((request) =>
+      request.url.endsWith('/capabilities')
+        ? capabilityResponse(true, true, true)
+        : jsonResponse(200, {
+            v: 1,
+            sessionId: SESSION_ID,
+            events: [null],
+            hasMore: false,
+          }),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+    await expect(
+      client.getStandaloneSessionTranscriptPage(SESSION_ID),
     ).rejects.toBeInstanceOf(DaemonStandaloneProtocolError);
   });
 });

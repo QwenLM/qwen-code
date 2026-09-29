@@ -13,6 +13,19 @@ import {
   type SessionArchiveState,
 } from '@qwen-code/qwen-code-core';
 import type { Application, Request, RequestHandler, Response } from 'express';
+import {
+  isConflictingTranscriptAnchorCombination,
+  parseReplayMode,
+  parseTranscriptCursorQuery,
+  parseTranscriptDirectionQuery,
+  parseTranscriptLimitQuery,
+  parseTranscriptRecordBoundaryQuery,
+  parseTranscriptSnapshotQuery,
+  parseTranscriptStartQuery,
+  parseTranscriptTurnAnchorQuery,
+  serializeWorkspaceTranscriptResponse,
+  workspaceTranscriptCursorExceedsLimit,
+} from './transcript-query-validation.js';
 import type {
   CreateStandaloneSessionRequest,
   CreatedStandaloneSession,
@@ -22,6 +35,7 @@ import type {
 } from '../conversations/standalone-session-service.js';
 import { omitSkillDetailsFromReplayArrays } from '../skill-details-redaction.js';
 import { redactWorkflowsFromReplayArrays } from '../workflow-session-gate.js';
+import { summarizeReplay } from '@qwen-code/acp-bridge';
 import type { SendBridgeError } from '../server/error-response.js';
 import { InvalidCursorError } from '../server/session-list.js';
 import {
@@ -46,6 +60,21 @@ function sendInvalidRequest(res: Response, message: string): void {
     errorKind: 'invalid_request',
     retryable: false,
   });
+}
+
+// Every query-taking route in this file enforces an exact key set so a
+// misspelled parameter cannot silently degrade into a default page.
+function requireExactQuery(
+  req: Request,
+  res: Response,
+  allowed: readonly string[],
+): boolean {
+  const allowedKeys = new Set(allowed);
+  if (Object.keys(req.query).every((key) => allowedKeys.has(key))) {
+    return true;
+  }
+  sendInvalidRequest(res, 'The request query contains unknown fields.');
+  return false;
 }
 
 function objectBody(
@@ -540,6 +569,140 @@ export function registerStandaloneSessionRoutes(
         `attachment; filename="${exported.filename}"`,
       );
       res.status(200).send(exported.content);
+    }),
+  );
+
+  app.get('/standalone/sessions/:id/turn-index', (req, res) =>
+    handle('GET /standalone/sessions/:id/turn-index', req, res, async () => {
+      if (!requireExactQuery(req, res, ['limit', 'snapshot', 'start'])) return;
+      const limit = parseTranscriptLimitQuery(req.query['limit'], res);
+      if (limit === null) return;
+      const snapshot = parseTranscriptSnapshotQuery(req.query['snapshot'], res);
+      if (snapshot === null) return;
+      const start = parseTranscriptStartQuery(req.query['start'], res);
+      if (start === null) return;
+      if (start !== undefined && snapshot === undefined) {
+        res.status(400).json({
+          error: '`start` requires `snapshot`',
+          code: 'invalid_transcript_cursor',
+        });
+        return;
+      }
+      if (
+        snapshot !== undefined &&
+        workspaceTranscriptCursorExceedsLimit(snapshot)
+      ) {
+        res.status(400).json({
+          error: '`snapshot` exceeds the maximum size',
+          code: 'invalid_transcript_cursor',
+        });
+        return;
+      }
+      const page = await deps.service.getTurnIndexPage(req.params['id'] ?? '', {
+        ...(snapshot !== undefined ? { snapshot } : {}),
+        ...(start !== undefined ? { start } : {}),
+        ...(limit !== undefined ? { limit } : {}),
+      });
+      res
+        .status(200)
+        .set('Cache-Control', 'no-store')
+        .type('application/json')
+        .send(serializeWorkspaceTranscriptResponse(page, page.sessionId));
+    }),
+  );
+
+  app.get('/standalone/sessions/:id/transcript', (req, res) =>
+    handle('GET /standalone/sessions/:id/transcript', req, res, async () => {
+      if (
+        !requireExactQuery(req, res, [
+          'compactedReplayMode',
+          'limit',
+          'cursor',
+          'direction',
+          'beforeRecordId',
+          'atRecordId',
+          'snapshot',
+        ])
+      ) {
+        return;
+      }
+      const compactedReplayMode = parseReplayMode(
+        req.query,
+        res,
+        'compactedReplayMode',
+      );
+      if (compactedReplayMode === null) return;
+      const limit = parseTranscriptLimitQuery(req.query['limit'], res);
+      if (limit === null) return;
+      const cursor = parseTranscriptCursorQuery(req.query['cursor'], res);
+      if (cursor === null) return;
+      const direction = parseTranscriptDirectionQuery(
+        req.query['direction'],
+        res,
+      );
+      if (direction === null) return;
+      const beforeRecordId = parseTranscriptRecordBoundaryQuery(
+        req.query['beforeRecordId'],
+        res,
+      );
+      if (beforeRecordId === null) return;
+      const atRecordId = parseTranscriptTurnAnchorQuery(
+        req.query['atRecordId'],
+        res,
+      );
+      if (atRecordId === null) return;
+      const snapshot = parseTranscriptSnapshotQuery(req.query['snapshot'], res);
+      if (snapshot === null) return;
+      if (
+        isConflictingTranscriptAnchorCombination({
+          direction,
+          cursor,
+          beforeRecordId,
+          atRecordId,
+          snapshot,
+        })
+      ) {
+        res.status(400).json({
+          error: 'Invalid transcript cursor and anchor combination',
+          code: 'invalid_transcript_cursor',
+        });
+        return;
+      }
+      if (
+        (cursor !== undefined &&
+          workspaceTranscriptCursorExceedsLimit(cursor)) ||
+        (snapshot !== undefined &&
+          workspaceTranscriptCursorExceedsLimit(snapshot))
+      ) {
+        res.status(400).json({
+          error: 'Transcript cursor or snapshot exceeds the maximum size',
+          code: 'invalid_transcript_cursor',
+        });
+        return;
+      }
+      const page = await deps.service.getTranscriptPage(
+        req.params['id'] ?? '',
+        {
+          ...(limit !== undefined ? { limit } : {}),
+          ...(cursor !== undefined ? { cursor } : {}),
+          ...(direction !== undefined ? { direction } : {}),
+          ...(beforeRecordId !== undefined ? { beforeRecordId } : {}),
+          ...(atRecordId !== undefined ? { atRecordId } : {}),
+          ...(snapshot !== undefined ? { snapshot } : {}),
+        },
+      );
+      // Match the workspace-qualified transcript route: a `summary` request
+      // receives the summary projection, not the full replayed events.
+      const events =
+        compactedReplayMode === 'summary'
+          ? summarizeReplay(page.events ?? [])
+          : (page.events ?? []);
+      const result = { ...page, events };
+      res
+        .status(200)
+        .set('Cache-Control', 'no-store')
+        .type('application/json')
+        .send(serializeWorkspaceTranscriptResponse(result, result.sessionId));
     }),
   );
 

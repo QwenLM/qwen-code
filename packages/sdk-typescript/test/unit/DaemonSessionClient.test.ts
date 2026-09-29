@@ -320,6 +320,101 @@ describe('DaemonSessionClient', () => {
     expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
   });
 
+  it('routes standalone turn-index and transcript reads through dedicated routes', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440000';
+    const turnIndex = {
+      v: 1 as const,
+      sessionId,
+      snapshot: 'snap-1',
+      totalTurns: 0,
+      start: 0,
+      turns: [],
+    };
+    const transcript = {
+      v: 1 as const,
+      sessionId,
+      events: [
+        {
+          v: 1 as const,
+          type: 'mid_turn_message_injected' as const,
+          data: {
+            items: [
+              {
+                role: 'user',
+                content: [
+                  {
+                    type: 'image',
+                    attachmentId: 'att-1',
+                    mimeType: 'image/png',
+                    size: 1,
+                  },
+                ],
+              },
+            ],
+          },
+        },
+      ],
+      hasMore: false,
+      startTime: '2026-01-01T00:00:00.000Z',
+      lastUpdated: '2026-01-01T00:00:00.000Z',
+    };
+    const { fetch, calls } = recordingFetch((req) => {
+      if (req.url.endsWith('/capabilities')) {
+        return jsonResponse(200, {
+          features: [
+            'standalone_sessions_v1',
+            'standalone_session_transcript_v1',
+          ],
+        });
+      }
+      if (req.url.includes('/turn-index')) return jsonResponse(200, turnIndex);
+      if (req.url.includes('/transcript')) return jsonResponse(200, transcript);
+      // Standalone sessions have no dedicated attachment route, so an image
+      // reference resolves to the 404 placeholder (DaemonHttpError 404).
+      return jsonResponse(404, {});
+    });
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const session = new DaemonSessionClient({
+      client,
+      session: {
+        sessionId,
+        workspaceCwd: '/conversations',
+        attached: true,
+        clientId: 'client-1',
+        sourceType: 'standalone',
+        context: { kind: 'standalone' },
+      },
+    });
+
+    await expect(session.getTurnIndexPage({ limit: 10 })).resolves.toEqual(
+      turnIndex,
+    );
+    const page = await session.getTranscriptPage({
+      atRecordId: 'rec-1',
+      snapshot: 'snap-1',
+    });
+    // The generic session attachment route returns 404, which hydration
+    // turns into the unavailability placeholder.
+    expect(page.events[0]?.data.items[0].content[0]).toEqual({
+      type: 'text',
+      text: '[Attachment is no longer available]',
+    });
+
+    const reads = calls.filter((call) =>
+      /\/(turn-index|transcript)$/u.test(new URL(call.url).pathname),
+    );
+    // Exact URL equality, query included: the query contract must not drift,
+    // and the turn-index suffix must not vanish into the daemon default page.
+    expect(reads.map((call) => call.url)).toEqual([
+      `http://daemon/standalone/sessions/${sessionId}/turn-index?limit=10`,
+      `http://daemon/standalone/sessions/${sessionId}/transcript?atRecordId=rec-1&snapshot=snap-1`,
+    ]);
+    // Both reads carry the client id header, not just the first.
+    expect(
+      reads.every((call) => call.headers['x-qwen-client-id'] === 'client-1'),
+    ).toBe(true);
+  });
+
   it('reads a saved workflow definition for its own session', async () => {
     const status = {
       v: 1 as const,
