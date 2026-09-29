@@ -1734,14 +1734,6 @@ export async function setWorkspaceAgentEnabled(
   return updateWorkspaceAgent(projectRoot, agentId, { enabled });
 }
 
-export async function setWorkspaceAgentExecution(
-  projectRoot: string,
-  agentId: string,
-  execution: WorkspaceAgent['execution'],
-): Promise<WorkspaceAgentRosterChange> {
-  return updateWorkspaceAgent(projectRoot, agentId, { execution });
-}
-
 /**
  * Retires an identity: it takes no new work and keeps everything it did.
  *
