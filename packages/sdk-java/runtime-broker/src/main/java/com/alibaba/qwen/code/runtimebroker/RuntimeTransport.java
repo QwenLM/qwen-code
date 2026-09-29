@@ -48,6 +48,21 @@ public interface RuntimeTransport {
     CompletionStage<Void> acquire(RuntimeLease lease,
             RuntimeSession session);
 
+    default CompletionStage<Void> installPublisher(RuntimeLease lease,
+            RuntimeSession session, Map<String, Object> publisher) {
+        return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
+                "managed_tool_publisher_unavailable",
+                "Runtime transport does not support output publication.", false));
+    }
+
+    default CompletionStage<Map<String, Object>> acknowledge(RuntimeLease lease,
+            RuntimeSession session, Map<String, Object> reference,
+            Map<String, Object> receipt) {
+        return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
+                "managed_tool_result_acknowledge_unsupported",
+                "Runtime transport does not support result acknowledgement.", false));
+    }
+
     CompletionStage<Object> control(RuntimeLease lease,
             RuntimeSession session, Map<String, Object> operation);
 

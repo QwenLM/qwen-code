@@ -19,7 +19,9 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutationCommand;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SnapshotRecord;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnPage;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnRecord;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnSummary;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
@@ -105,6 +107,17 @@ public interface AgentStateStore {
     Optional<TurnRecord> findActiveTurn(String tenantId, String sessionId);
 
     Optional<TurnRecord> findLatestTurn(String tenantId, String sessionId);
+
+    /**
+     * A page of a Session's Turns, newest first: by creation time, then by
+     * Turn ID, both descending. A position excludes the Turn it names and
+     * every newer one.
+     */
+    TurnPage listTurns(String tenantId, String sessionId,
+            Long beforeCreatedAt, String beforeTurnId, int limit);
+
+    Optional<TurnSummary> findTurnSummary(String tenantId, String sessionId,
+            String turnId);
 
     List<EventRecord> findEvents(String tenantId, String sessionId,
             long afterSequence, int limit);

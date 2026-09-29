@@ -133,6 +133,7 @@ import {
   isLeaderOnlyToolUnavailableInSubagent,
   isPlanLifecycleToolUnavailableInSubagent,
   isToolExcludedForCurrentContext,
+  toolConfigAllowsSkill,
 } from './subagent-plan-tool-policy.js';
 
 // The tool-exclusion sets and the context-aware selector now live in
@@ -598,20 +599,18 @@ export class AgentCore {
    * Returns true if this agent's effective tool surface will include the Skill
    * tool. Used before `prepareTools()` to decide whether to inject the
    * `<available_skills>` snapshot.
+   *
+   * Delegates to the predicate `SubagentManager` uses to decide whether this
+   * agent's Config holds a SkillManager, so the listing and a bundled
+   * reference's pointer cannot disagree (#12424). That predicate also honours
+   * `disallowedTools`, which this method used to ignore — a `'*'` agent that
+   * disallowed `skill` was still shown every skill it could not load.
    */
   private willHaveSkillTool(): boolean {
-    if (!this.toolConfig) {
-      return !EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.SKILL);
-    }
-    const asStrings = this.toolConfig.tools.filter(
-      (t): t is string => typeof t === 'string',
+    return toolConfigAllowsSkill(
+      this.toolConfig,
+      this.runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly,
     );
-    const hasWildcard = asStrings.includes('*');
-    if (hasWildcard) {
-      return !EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.SKILL);
-    }
-    // An explicit empty list has no tools at all — and no skill tool.
-    return asStrings.includes(ToolNames.SKILL);
   }
 
   /**
@@ -689,10 +688,20 @@ export class AgentCore {
               (inheritsCodeModeBindings &&
                 getToolExposure(name) === 'code-mode-callable')) &&
             !isExcluded(name) &&
-            !isHiddenByEagerAllowList(name) &&
             !isDisallowed(name) &&
             this.isToolExecutionAllowed(name),
         );
+      if (
+        allowedNames.some(
+          (name) => getToolExposure(name) === 'code-mode-callable',
+        ) &&
+        toolRegistry.getTool(ToolNames.TOOL_SEARCH) &&
+        !allowedNames.includes(ToolNames.TOOL_SEARCH) &&
+        !isExcluded(ToolNames.TOOL_SEARCH) &&
+        this.isToolExecutionAllowed(ToolNames.TOOL_SEARCH)
+      ) {
+        allowedNames.push(ToolNames.TOOL_SEARCH);
+      }
       this.codeModeAllowedToolNames = Object.freeze(
         allowedNames.filter(
           (name) => getToolExposure(name) === 'code-mode-callable',
@@ -1734,13 +1743,9 @@ export class AgentCore {
       return false;
     }
     if (this.executionAllowedTools === undefined) {
-      // Code mode declares exec unconditionally (getCodeModeFunctionDeclarations
-      // keeps exposure 'exec' regardless of the allowed set), so a finite
-      // configured list that omits it must not refuse the only tool the model
-      // was shown — the same carve-out the executionAllowedTools branch
-      // applies below.
+      // Code Mode gateways operate on the agent's scoped nested-tool allowlist.
       if (
-        toolName === ToolNames.EXEC &&
+        (toolName === ToolNames.EXEC || toolName === ToolNames.TOOL_SEARCH) &&
         this.runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly
       ) {
         return true;
@@ -1752,7 +1757,7 @@ export class AgentCore {
       );
     }
     if (
-      toolName === ToolNames.EXEC &&
+      (toolName === ToolNames.EXEC || toolName === ToolNames.TOOL_SEARCH) &&
       this.runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly
     ) {
       return true;
@@ -2391,7 +2396,8 @@ export class AgentCore {
         prompt_id: promptId,
         response_id: responseId,
         wasOutputTruncated,
-        ...(toolName === ToolNames.EXEC &&
+        ...((toolName === ToolNames.EXEC ||
+          toolName === ToolNames.TOOL_SEARCH) &&
         this.runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly
           ? {
               codeModeAllowedToolNames: this.codeModeAllowedToolNames ?? [],

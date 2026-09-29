@@ -885,13 +885,13 @@ export class WorkflowRunner {
               // deletion must win over the stale in-memory copy.
               registry?.notifySnapshotPersisted(entry.runId);
             }
-            await journal?.drain();
             try {
               logWorkflowRun(config, telemetryEvent);
             } catch {
               // Telemetry must not affect workflow execution.
             }
           }
+          await journal?.drain();
           // The run settled, so nothing is left for a later process to
           // claim — even when the snapshot write failed, since a claim would
           // then call a run interrupted that was not.
