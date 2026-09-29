@@ -254,6 +254,26 @@ describe('prepareTranscriptRecords', () => {
     );
   });
 
+  it('accepts session approval metadata as a known record subtype', () => {
+    const prepared = prepareTranscriptRecords([
+      record('approval', null, {
+        type: 'system',
+        subtype: 'session_approval_mode',
+        message: undefined,
+        systemPayload: { mode: 'yolo' },
+      }),
+      record('root', 'approval'),
+    ]);
+
+    expect(prepared.diagnostics).not.toContainEqual(
+      expect.objectContaining({
+        code: 'unknown_record_or_part',
+        recordId: 'approval',
+        path: 'subtype',
+      }),
+    );
+  });
+
   it('accepts the workflow agent retry marker as a known record subtype', () => {
     const prepared = prepareTranscriptRecords([
       record('root', null),
@@ -516,6 +536,7 @@ describe('validateTranscriptRecord', () => {
     session_execution_engine: true,
     omni_recall: true,
     session_model: true,
+    session_approval_mode: true,
     rewind: true,
     agent_bootstrap: true,
     agent_launch_prompt: true,

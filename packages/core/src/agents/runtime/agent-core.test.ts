@@ -5,6 +5,18 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
+import {
+  getHookExecutionOwner,
+  runWithHookExecutionOwner,
+} from '../../hooks/hook-execution-context.js';
+
+import { HookSystem } from '../../hooks/hookSystem.js';
+import {
+  HookEventName,
+  HookType,
+  PermissionMode,
+  type HookInput,
+} from '../../hooks/types.js';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -180,6 +192,173 @@ describe('AgentCore.runInAgentFrames', () => {
       subagentId,
     );
   }
+
+  it.each([
+    { caller: null, explicit: undefined, expected: null },
+    { caller: 'caller-A', explicit: undefined, expected: 'caller-A' },
+    { caller: 'caller-A', explicit: 'child-B', expected: 'child-B' },
+  ])(
+    'dispatches real tool hooks for caller $caller and explicit child $explicit',
+    async ({ caller, explicit, expected }) => {
+      const events: HookInput[] = [];
+      const config = {
+        getSessionId: () => 'session',
+        getAllowedHttpHookUrls: () => [],
+        getAllowPrivateNetworkHooks: () => false,
+        getSystemHooks: () => undefined,
+        getUserHooks: () => ({
+          [HookEventName.PreToolUse]: [
+            {
+              hooks: [
+                {
+                  type: HookType.Function,
+                  id: 'recorder',
+                  errorMessage: 'recorder failed',
+                  callback: async (input: HookInput) => {
+                    events.push(input);
+                    return undefined;
+                  },
+                },
+              ],
+            },
+          ],
+        }),
+        getProjectHooks: () => undefined,
+        getExtensions: () => [],
+        getSessionSourceType: () => undefined,
+        getSessionSourceId: () => undefined,
+        getTranscriptPath: () => '/tmp/transcript',
+        getWorkingDir: () => '/tmp',
+        getProjectRoot: () => '/tmp',
+        getApprovalMode: () => 'default',
+        getMessageBus: () => undefined,
+        getHookSystem: (): HookSystem => system,
+        isTrustedFolder: () => true,
+      } as unknown as Config;
+      const system = new HookSystem(config);
+      await system.initialize();
+      const localEvents: HookInput[] = [];
+      system.getRegistry().addAgentHooks(
+        {
+          [HookEventName.PreToolUse]: [
+            {
+              hooks: [
+                {
+                  type: HookType.Function,
+                  id: 'caller-local',
+                  errorMessage: 'local failed',
+                  callback: async (input: HookInput) => {
+                    localEvents.push(input);
+                    return undefined;
+                  },
+                },
+              ],
+            },
+          ],
+        },
+        'caller-registration',
+        {
+          owner: {
+            sessionId: 'session',
+            agentId: 'caller-A',
+          },
+        },
+      );
+      const owner = {
+        runtimeId: system.runtimeId,
+        sessionId: 'session',
+        agentId: caller,
+      };
+      const core = runWithHookExecutionOwner(
+        owner,
+        () =>
+          new AgentCore(
+            'internal-fork',
+            config,
+            { systemPrompt: '' },
+            { model: 'test' },
+            { max_turns: 1 },
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            explicit,
+          ),
+      );
+      await core.runInAgentFrames(() =>
+        system.firePreToolUseEvent(
+          'read_file',
+          {},
+          'tool',
+          PermissionMode.Default,
+        ),
+      );
+      expect(localEvents).toHaveLength(expected === 'caller-A' ? 1 : 0);
+      expect(events).toHaveLength(1);
+      expect(events[0].session_id).toBe('session');
+      if (expected === null) expect(events[0]).not.toHaveProperty('agent_id');
+      else expect(events[0].agent_id).toBe(expected);
+    },
+  );
+
+  it('pins hook ownership to the core across foreign frames and deferred approval', async () => {
+    let sessionId = 'original-session';
+    const config = {
+      getSessionId: () => sessionId,
+      getHookSystem: () => ({ runtimeId: 'own-runtime' }),
+    } as unknown as Config;
+    const foreign = {
+      runtimeId: 'foreign-runtime',
+      sessionId: 'foreign-session',
+      agentId: 'B',
+    };
+    const core = runWithHookExecutionOwner(
+      foreign,
+      () =>
+        new AgentCore(
+          'A',
+          config,
+          { systemPrompt: '' },
+          { model: 'test' },
+          { max_turns: 1 },
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          'actual-A',
+        ),
+    );
+    const expected = {
+      runtimeId: 'own-runtime',
+      sessionId: 'original-session',
+      agentId: 'actual-A',
+    };
+    sessionId = 'later-session';
+    let resume: (() => Promise<void>) | undefined;
+    await runWithAgentContext('general-parent', () =>
+      runWithHookExecutionOwner(foreign, async () => {
+        const depth = getCurrentAgentDepth();
+        await core.runInHookFrame(async () => {
+          await Promise.resolve();
+          expect(getHookExecutionOwner()).toEqual(expected);
+          expect(getCurrentAgentId()).toBe('general-parent');
+          expect(getCurrentAgentDepth()).toBe(depth);
+          resume = () =>
+            core.runInAgentFrames(async () => {
+              await Promise.resolve();
+              expect(getHookExecutionOwner()).toEqual(expected);
+            });
+        });
+        expect(getHookExecutionOwner()).toEqual(foreign);
+        await resume!();
+        expect(getHookExecutionOwner()).toEqual(foreign);
+        expect(getCurrentAgentDepth()).toBe(depth);
+      }),
+    );
+    expect(getHookExecutionOwner()).toBeUndefined();
+  });
 
   it('binds the running chat for Advisor and restores it during approval continuation', async () => {
     const core = makeCore('child');
@@ -1066,81 +1245,90 @@ describe('AgentCore approval response deduplication', () => {
     expect(capturedPredicate?.(ToolNames.TOOL_CALL)).toBe(true);
   });
 
-  it('keeps exec invocable in CodeModeOnly when the configured tools omit it', async () => {
-    // R30-1: in CodeModeOnly the registry declares exec unconditionally
-    // (getCodeModeFunctionDeclarations keeps exposure 'exec' regardless of
-    // the allowed set), so a finite tools list without exec must not fold
-    // into an execution allowlist that refuses the only declared tool — the
-    // agent would degrade to text-only. Mutation check: removing the exec
-    // carve-out from the executionAllowedTools === undefined branch of
-    // isToolExecutionAllowed turns this red.
-    const config = {
-      getToolRegistry: vi.fn().mockReturnValue({
-        warmAll: vi.fn().mockResolvedValue(undefined),
-        getTool: vi.fn(),
-        getAllToolNames: vi
+  it.each([ToolNames.EXEC, ToolNames.TOOL_SEARCH])(
+    'keeps %s invocable in CodeModeOnly when the configured tools omit it',
+    async (gateway) => {
+      // R30-1: in CodeModeOnly the registry declares exec unconditionally
+      // (getCodeModeFunctionDeclarations keeps exposure 'exec' regardless of
+      // the allowed set), so a finite tools list without exec must not fold
+      // into an execution allowlist that refuses the only declared tool — the
+      // agent would degrade to text-only. Mutation check: removing the exec
+      // carve-out from the executionAllowedTools === undefined branch of
+      // isToolExecutionAllowed turns this red.
+      const config = {
+        getToolRegistry: vi.fn().mockReturnValue({
+          warmAll: vi.fn().mockResolvedValue(undefined),
+          getTool: vi.fn(),
+          getAllToolNames: vi
+            .fn()
+            .mockReturnValue([ToolNames.EXEC, ToolNames.READ_FILE]),
+          getFunctionDeclarationsFiltered: vi
+            .fn()
+            .mockReturnValue([{ name: ToolNames.EXEC }]),
+        }),
+        getDebugLogger: vi
           .fn()
-          .mockReturnValue([ToolNames.EXEC, ToolNames.READ_FILE]),
-        getFunctionDeclarationsFiltered: vi
+          .mockReturnValue({ debug: vi.fn(), error: vi.fn() }),
+        getToolOutputBatchBudget: vi
           .fn()
-          .mockReturnValue([{ name: ToolNames.EXEC }]),
-      }),
-      getDebugLogger: vi
-        .fn()
-        .mockReturnValue({ debug: vi.fn(), error: vi.fn() }),
-      getToolOutputBatchBudget: vi
-        .fn()
-        .mockReturnValue(Number.POSITIVE_INFINITY),
-      getToolResultBytesWritten: vi.fn().mockReturnValue(0),
-      getSessionId: vi.fn().mockReturnValue('code-mode-exec-session'),
-      getMaxSubagentDepth: vi.fn().mockReturnValue(5),
-      getToolMode: vi.fn().mockReturnValue(ToolMode.CodeModeOnly),
-    } as unknown as Config;
-    const core = new AgentCore(
-      'code-mode-exec-agent',
-      config,
-      { systemPrompt: '' },
-      { model: 'test-model' },
-      { max_turns: 1 },
-      { tools: [ToolNames.READ_FILE] },
-    );
+          .mockReturnValue(Number.POSITIVE_INFINITY),
+        getToolResultBytesWritten: vi.fn().mockReturnValue(0),
+        getSessionId: vi.fn().mockReturnValue('code-mode-exec-session'),
+        getMaxSubagentDepth: vi.fn().mockReturnValue(5),
+        getToolMode: vi.fn().mockReturnValue(ToolMode.CodeModeOnly),
+      } as unknown as Config;
+      const core = new AgentCore(
+        'code-mode-exec-agent',
+        config,
+        { systemPrompt: '' },
+        { model: 'test-model' },
+        { max_turns: 1 },
+        { tools: [ToolNames.READ_FILE] },
+      );
 
-    let capturedPredicate: ((name: string) => boolean) | undefined;
-    const scheduleSpy = vi
-      .spyOn(CoreToolScheduler.prototype, 'schedule')
-      .mockImplementation(async function (this: CoreToolScheduler) {
-        capturedPredicate = (
-          this as unknown as {
-            isToolExecutionAllowed?: (name: string) => boolean;
-          }
-        ).isToolExecutionAllowed;
-      });
-    const abortController = new AbortController();
+      let capturedPredicate: ((name: string) => boolean) | undefined;
+      const scheduleSpy = vi
+        .spyOn(CoreToolScheduler.prototype, 'schedule')
+        .mockImplementation(async function (this: CoreToolScheduler) {
+          capturedPredicate = (
+            this as unknown as {
+              isToolExecutionAllowed?: (name: string) => boolean;
+            }
+          ).isToolExecutionAllowed;
+        });
+      const abortController = new AbortController();
 
-    const processing = core.processFunctionCalls(
-      [
-        {
-          id: 'call-code-mode-exec',
-          name: ToolNames.EXEC,
-          args: { source: 'await tools.read_file({ path: "x" })' },
-        },
-      ],
-      abortController,
-      'prompt-code-mode-exec',
-      1,
-      [{ name: ToolNames.EXEC } as FunctionDeclaration],
-    );
-    await vi.waitFor(() => expect(scheduleSpy).toHaveBeenCalledOnce());
-    abortController.abort();
-    await processing;
-    scheduleSpy.mockRestore();
+      const processing = core.processFunctionCalls(
+        [
+          {
+            id: 'call-code-mode-exec',
+            name: gateway,
+            args: { source: 'await tools.read_file({ path: "x" })' },
+          },
+        ],
+        abortController,
+        'prompt-code-mode-exec',
+        1,
+        [{ name: gateway } as FunctionDeclaration],
+      );
+      await vi.waitFor(() => expect(scheduleSpy).toHaveBeenCalledOnce());
+      expect(scheduleSpy.mock.calls[0][0]).toEqual([
+        expect.objectContaining({
+          name: gateway,
+          codeModeAllowedToolNames: [ToolNames.READ_FILE],
+        }),
+      ]);
+      abortController.abort();
+      await processing;
+      scheduleSpy.mockRestore();
 
-    expect(capturedPredicate).toBeDefined();
-    // The one tool code mode always declares stays invocable …
-    expect(capturedPredicate?.(ToolNames.EXEC)).toBe(true);
-    // … without widening the configured list for anything else.
-    expect(capturedPredicate?.('web_fetch')).toBe(false);
-  });
+      expect(capturedPredicate).toBeDefined();
+      // The one tool code mode always declares stays invocable …
+      expect(capturedPredicate?.(gateway)).toBe(true);
+      // … without widening the configured list for anything else.
+      expect(capturedPredicate?.('web_fetch')).toBe(false);
+    },
+  );
 
   it('retries only a transiently failed listener', async () => {
     const { core, errorSpy } = buildApprovalCore();

@@ -511,6 +511,89 @@ class LocalProcessRuntimeProvisionerTest {
     }
 
     @Test
+    void rejectsAReadyNumberThatIsNotAnExactIntegerBeforeSendingTheToken()
+            throws Exception {
+        requireNode();
+        Path script = Path.of("src/test/resources/fake-attestation-worker.mjs")
+                .toAbsolutePath();
+        Path probe = Files.createTempDirectory("runtime-ready-probe");
+        RuntimeScope scope = new RuntimeScope("tenant-a", "workspace-a", "7",
+                "/runtime/workspace", DIGEST, "workspace");
+        RuntimeProvisionRequest legacy = new RuntimeProvisionRequest(scope, null);
+        Set<Long> before = childPids();
+        try {
+            // Each literal would read as the expected version 1 or epoch 1.
+            for (String mode : List.of("--ready-version=1.9",
+                    "--ready-epoch=1.5", "--ready-version=1.0000000000000001",
+                    "--ready-epoch=1.0000000000000001D",
+                    "--ready-version=65537S")) {
+                Path hits = probe.resolve("hits-" + mode.hashCode());
+                RuntimeBrokerException error = readyFailure(script, mode, hits,
+                        legacy, RuntimeProvisionSeed.create("binding-1", 1));
+                assertEquals(503, error.getStatusCode(), mode);
+                assertEquals("runtime_provision_failed", error.getCode(), mode);
+                assertTrue(error.isRetryable(), mode);
+                assertEquals("Managed Runtime ready record is invalid.",
+                        error.getMessage(), mode);
+                assertFalse(Files.exists(hits), mode);
+            }
+            // The managed-context fixture expects version 2 and epoch 4.
+            for (String mode : List.of("--ready-version=2.0000000000000001D",
+                    "--ready-epoch=65540S")) {
+                Path hits = probe.resolve("hits-" + mode.hashCode());
+                RuntimeBrokerException error = readyFailure(script, mode, hits,
+                        ManagedContextProtocolTest.request(),
+                        ManagedContextProtocolTest.seed());
+                assertEquals(503, error.getStatusCode(), mode);
+                assertEquals("runtime_provision_failed", error.getCode(), mode);
+                assertFalse(error.isRetryable(), mode);
+                assertFalse(Files.exists(hits), mode);
+            }
+            Path hits = probe.resolve("hits-exact");
+            try (LocalProcessRuntimeProvisioner provisioner =
+                    new LocalProcessRuntimeProvisioner(
+                            List.of("node", script.toString(),
+                                    "--ready-epoch=1.0", "--probe=" + hits),
+                            Path.of("").toAbsolutePath(),
+                            new HttpRuntimeTransport())) {
+                assertEquals(1, provisioner.provision(legacy,
+                        RuntimeProvisionSeed.create("binding-1", 1))
+                        .toCompletableFuture().get(30, TimeUnit.SECONDS)
+                        .getEpoch());
+                assertTrue(Files.exists(hits));
+            }
+            assertNoNewChildren(before);
+        } finally {
+            Files.walk(probe).sorted(Comparator.reverseOrder())
+                    .forEach(path -> {
+                        try {
+                            Files.deleteIfExists(path);
+                        } catch (Exception ignored) {
+                            // Best-effort cleanup of the probe directory.
+                        }
+                    });
+        }
+    }
+
+    private static RuntimeBrokerException readyFailure(Path script,
+            String mode, Path hits, RuntimeProvisionRequest request,
+            RuntimeProvisionSeed seed) throws Exception {
+        try (LocalProcessRuntimeProvisioner provisioner =
+                new LocalProcessRuntimeProvisioner(
+                        List.of("node", script.toString(), mode,
+                                "--probe=" + hits),
+                        Path.of("").toAbsolutePath(),
+                        new HttpRuntimeTransport())) {
+            ExecutionException failure = org.junit.jupiter.api.Assertions
+                    .assertThrows(ExecutionException.class,
+                            () -> provisioner.provision(request, seed)
+                                    .toCompletableFuture()
+                                    .get(30, TimeUnit.SECONDS), mode);
+            return (RuntimeBrokerException) failure.getCause();
+        }
+    }
+
+    @Test
     void fencedProvisioningReapsTheWorker() throws Exception {
         requireNode();
         Path script = Path.of("src/test/resources/fake-attestation-worker.mjs")
@@ -618,6 +701,17 @@ class LocalProcessRuntimeProvisionerTest {
         public RuntimeSessionRecord completeSessionRelease(RuntimeSessionRepository sessions,
                 RuntimeSessionRecord expected) {
             return delegate.completeSessionRelease(sessions, expected);
+        }
+
+        @Override
+        public java.util.List<RuntimeBindingRecord> findRecoveryCandidates(String kind, String after, int limit) {
+            return delegate.findRecoveryCandidates(kind, after, limit);
+        }
+
+        @Override
+        public RuntimeBindingRecord finishLostRecovery(RuntimeSessionRepository sessions,
+                ToolExecutionRepository executions, RuntimeBindingRecord expected) {
+            return delegate.finishLostRecovery(sessions, executions, expected);
         }
 
         @Override

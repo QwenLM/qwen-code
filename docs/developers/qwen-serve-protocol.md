@@ -3643,7 +3643,7 @@ The tool toggle, skill toggle, init, and MCP restart routes emit **workspace-sco
 
 Capability tag: `session_approval_mode_control`. Bridge → ACP extMethod `qwen/control/session/approval_mode`.
 
-Change the approval mode of a live session. The new mode lands inside the ACP child's per-session `Config` immediately. Settings are NOT written to disk by default — pass `persist: true` to also write `tools.approvalMode` to workspace settings.
+Change the approval mode of a live session. The new mode lands inside the ACP child's per-session `Config` immediately and is restored from that session's transcript when chat recording is available. Plan's selected execution mode is restored with it. Workspace settings are NOT written by default — pass `persist: true` to also write `tools.approvalMode` to workspace settings. If recording is disabled or degraded, the mode remains live-session-only.
 
 Request:
 

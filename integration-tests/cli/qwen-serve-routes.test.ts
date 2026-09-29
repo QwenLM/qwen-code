@@ -1243,6 +1243,108 @@ describe('qwen serve — DELETE /session/:id', () => {
   });
 });
 
+describe('qwen serve — session approval-mode recovery', () => {
+  it('restores Full Access, explicit overrides, and Plan execution mode after cold load', async () => {
+    const session = await client.createOrAttachSession({
+      workspaceCwd: REPO_ROOT,
+      sessionScope: 'thread',
+      sourceType: 'approval-mode-persistence-test',
+      sourceId: `cold-load-${Date.now()}`,
+    });
+    expect(session.clientId).toBeTypeOf('string');
+    expect(session.sourcePersisted).toBe(true);
+
+    try {
+      const waitUntilClosed = async () => {
+        await expect
+          .poll(
+            async () => {
+              try {
+                await client.sessionStatus(session.sessionId);
+                return false;
+              } catch (error) {
+                return error instanceof DaemonHttpError && error.status === 404;
+              }
+            },
+            { timeout: 15_000 },
+          )
+          .toBe(true);
+      };
+      await client.setSessionApprovalMode(session.sessionId, 'yolo');
+      await client.detachSession(session.sessionId, session.clientId);
+      await waitUntilClosed();
+
+      const restored = await client.loadSession(session.sessionId, {
+        workspaceCwd: REPO_ROOT,
+      });
+      const modes = restored.state.modes as { currentModeId?: string };
+      const configOptions = restored.state.configOptions as Array<{
+        id: string;
+        currentValue: string;
+      }>;
+
+      expect(modes.currentModeId).toBe('yolo');
+      expect(
+        configOptions.find((option) => option.id === 'mode'),
+      ).toMatchObject({ currentValue: 'yolo' });
+
+      await client.reload({ clientId: restored.clientId });
+      const afterReload = await client.loadSession(session.sessionId, {
+        workspaceCwd: REPO_ROOT,
+      });
+      expect(
+        (afterReload.state.modes as { currentModeId?: string }).currentModeId,
+      ).toBe('yolo');
+      await client.detachSession(session.sessionId, afterReload.clientId);
+
+      expect(restored.clientId).toBeTypeOf('string');
+      await client.detachSession(session.sessionId, restored.clientId);
+      await waitUntilClosed();
+      const overridden = await client.loadSession(session.sessionId, {
+        workspaceCwd: REPO_ROOT,
+        approvalMode: 'default',
+      });
+      expect(
+        (overridden.state.modes as { currentModeId?: string }).currentModeId,
+      ).toBe('default');
+
+      expect(overridden.clientId).toBeTypeOf('string');
+      await client.detachSession(session.sessionId, overridden.clientId);
+      await waitUntilClosed();
+      const restoredOverride = await client.loadSession(session.sessionId, {
+        workspaceCwd: REPO_ROOT,
+      });
+      expect(
+        (restoredOverride.state.modes as { currentModeId?: string })
+          .currentModeId,
+      ).toBe('default');
+
+      await client.setSessionApprovalMode(session.sessionId, 'yolo');
+      await client.setSessionApprovalMode(session.sessionId, 'yolo', {
+        planMode: true,
+      });
+      await client.setSessionApprovalMode(session.sessionId, 'auto-edit', {
+        planMode: true,
+      });
+      expect(restoredOverride.clientId).toBeTypeOf('string');
+      await client.detachSession(session.sessionId, restoredOverride.clientId);
+      await waitUntilClosed();
+
+      const restoredPlan = await client.loadSession(session.sessionId, {
+        workspaceCwd: REPO_ROOT,
+      });
+      const planModes = restoredPlan.state.modes as {
+        currentModeId?: string;
+        _meta?: { planExecutionMode?: string };
+      };
+      expect(planModes.currentModeId).toBe('plan');
+      expect(planModes._meta?.planExecutionMode).toBe('auto-edit');
+    } finally {
+      await client.closeSession(session.sessionId).catch(() => undefined);
+    }
+  }, 45_000);
+});
+
 describe('qwen serve — PATCH /session/:id/metadata', () => {
   it('updates displayName', async () => {
     const session = await client.createOrAttachSession({

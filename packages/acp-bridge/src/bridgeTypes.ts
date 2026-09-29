@@ -2620,8 +2620,9 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
 
   /**
    * Change the approval mode of a live session and broadcast an
-   * `approval_mode_changed` event. `opts.persist === true` also writes
-   * `tools.approvalMode` to workspace settings.
+   * `approval_mode_changed` event. The mode is session-local and may be
+   * restored from that session's transcript; `opts.persist === true` also
+   * writes `tools.approvalMode` to workspace settings.
    */
   setSessionApprovalMode(
     sessionId: string,

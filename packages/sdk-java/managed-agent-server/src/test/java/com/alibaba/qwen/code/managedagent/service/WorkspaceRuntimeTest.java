@@ -26,6 +26,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.RuntimeResourceHandle;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository;
+import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
@@ -47,6 +48,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.junit.jupiter.api.io.TempDir;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -162,10 +164,10 @@ class WorkspaceRuntimeTest {
             assertBusy(() -> otherClient.claim(binding, loser));
             ContextBinding changedGeneration = new ContextBinding(binding.getTenantId(), "other-workspace", 2,
                     binding.getStorageId(), "child", binding.getContextConfigRef(), 1);
-            assertBusy(() -> otherClient.claim(changedGeneration, loser));
+            assertUnavailable(() -> otherClient.claim(changedGeneration, loser));
             ContextBinding independentStorage = new ContextBinding(binding.getTenantId(), "other-workspace", 1,
                     "other-storage", ".", binding.getContextConfigRef(), 1);
-            otherClient.claim(independentStorage, loser);
+            assertUnavailable(() -> otherClient.claim(independentStorage, loser));
             authority.release(binding, winner);
             otherClient.claim(binding, loser);
             authority.release(binding, winner);
@@ -256,6 +258,48 @@ class WorkspaceRuntimeTest {
     }
 
     @Test
+    void routesCapturedShellAndOriginalCleanupThroughV3AfterRevocation() throws Exception {
+        SessionRecord session = createSession("storage", ".");
+        var fixture = transport(session);
+        var runtimeSession = fixture.record().getSession();
+        authority.claim(session.workspace(), fixture.record());
+        Map<String, Object> publisher = Map.of("url", "http://127.0.0.1:1234/internal/hosted-shell-publisher/v1",
+                "token", "a".repeat(43));
+        when(fixture.http().installPublisherV3(any(), any(), any())).thenReturn(CompletableFuture.completedFuture(null));
+        fixture.transport().installPublisher(fixture.lease(), runtimeSession, publisher).toCompletableFuture().join();
+        Map<String, Object> reference = Map.of("sessionId", runtimeSession.getRuntimeSessionId(), "promptId", "turn",
+                "callId", "worker-call", "argsDigest", "sha256:" + "a".repeat(64), "runtimeProtocol", 3,
+                "inputDigest", "b".repeat(64), "executionCallId", "execution", "toolName", "run_shell_command",
+                "input", Map.of("command", "pwd"));
+        Map<String, Object> result = Map.of("executionStatus", "success", "responseParts", List.of());
+        Map<String, Object> response = Map.of("protocolVersion", 3, "toolResult", "managed-tool-result/1",
+                "state", "settled", "lastSequence", 2, "result", result);
+        when(fixture.http().executeV3(any(), any(), any(), any())).thenReturn(CompletableFuture.completedFuture(response));
+        assertThat(fixture.transport().execute(fixture.lease(), runtimeSession, reference).toCompletableFuture().join())
+                .isEqualTo(result);
+        @SuppressWarnings({"rawtypes", "unchecked"})
+        ArgumentCaptor<Map<String, Object>> wire = ArgumentCaptor.forClass((Class) Map.class);
+        @SuppressWarnings({"rawtypes", "unchecked"})
+        ArgumentCaptor<Map<String, Object>> capture = ArgumentCaptor.forClass((Class) Map.class);
+        verify(fixture.http()).executeV3(eq(fixture.lease()), eq(runtimeSession), wire.capture(), capture.capture());
+        assertThat(wire.getValue()).containsEntry("argsDigest", "b".repeat(64))
+                .doesNotContainKeys("runtimeProtocol", "inputDigest", "executionCallId");
+        assertThat(capture.getValue()).containsEntry("sessionId", session.sessionId())
+                .containsEntry("tenantId", session.tenantId()).containsEntry("bindingGeneration", "1")
+                .containsEntry("executionCallId", "execution");
+        verify(fixture.http(), never()).execute(any(), any(), any());
+        jdbc.update("UPDATE managed_workspace_access SET can_read = FALSE WHERE tenant_id = ?", session.tenantId());
+        assertUnavailable(() -> fixture.transport().installPublisher(fixture.lease(), runtimeSession, publisher));
+        when(fixture.http().statusV3(any(), any(), any(), eq(0L))).thenReturn(CompletableFuture.completedFuture(response));
+        when(fixture.http().cancelV3(any(), any(), any())).thenReturn(CompletableFuture.completedFuture(response));
+        when(fixture.http().acknowledgeV3(any(), any(), any(), any())).thenReturn(CompletableFuture.completedFuture(response));
+        Map<String, Object> status = Map.of("state", "settled", "result", result);
+        assertThat(fixture.transport().status(fixture.lease(), runtimeSession, reference, 0).toCompletableFuture().join()).isEqualTo(status);
+        assertThat(fixture.transport().cancel(fixture.lease(), runtimeSession, reference).toCompletableFuture().join()).isEqualTo(status);
+        assertThat(fixture.transport().acknowledge(fixture.lease(), runtimeSession, reference, Map.of()).toCompletableFuture().join()).isEqualTo(status);
+    }
+
+    @Test
     void rechecksAuthorityBeforeNewDispatchButAllowsOriginalCleanupAfterRevocation() throws Exception {
         SessionRecord session = createSession("storage", ".");
         var fixture = transport(session);
@@ -304,8 +348,8 @@ class WorkspaceRuntimeTest {
         var lease = runtime.getLease();
         var record = new RuntimeSessionRecord(runtimeSession, runtime.getBindingId(), runtime.getGeneration(),
                 RuntimeSessionRecord.State.ACQUIRING, 0, Instant.now());
-        var runtimeSessions = mock(RuntimeSessionRepository.class);
-        when(runtimeSessions.findById(resolved.scope(), runtimeSession.getRuntimeSessionId())).thenReturn(record);
+        var runtimeSessions = new JdbcRuntimeSessionRepository(dataSource);
+        record = bindings.admitSession(runtimeSessions, record);
         var http = mock(HttpRuntimeTransport.class);
         return new TransportFixture(new WorkspaceRuntimeTransport(http, resolver, authority, bindings, runtimeSessions),
                 http, record, lease, runtime, bindings);
@@ -373,8 +417,9 @@ class WorkspaceRuntimeTest {
                 WorkspaceExecutionProfile.CAPABILITY_DIGEST, "session");
         var runtime = readyBinding(bindings(), new RuntimeProvisionRequest(scope, id, "local-process",
                 binding.getStorageId()));
-        return new RuntimeSessionRecord(new RuntimeSession(session.sessionId(), id, "bootstrap", scope),
-                runtime.getBindingId(), runtime.getGeneration(), RuntimeSessionRecord.State.ACQUIRING, 0, Instant.now());
+        return bindings().admitSession(new JdbcRuntimeSessionRepository(dataSource),
+                new RuntimeSessionRecord(new RuntimeSession(session.sessionId(), id, "bootstrap", scope),
+                        runtime.getBindingId(), runtime.getGeneration(), RuntimeSessionRecord.State.ACQUIRING, 0, Instant.now()));
     }
 
     private static String digest(String text) throws Exception {
