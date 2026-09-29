@@ -181,7 +181,12 @@ export function trimModelsDevCatalog(
       if (!isModelCatalogKey(key)) {
         continue;
       }
-      const modalities = toModalities(model);
+      // DeepSeek models are text-only unless the id names a `vision` variant
+      // (#10270); some upstream bare-model records overstate image support.
+      const modalities =
+        key.startsWith('deepseek-') && !key.includes('vision')
+          ? undefined
+          : toModalities(model);
       if (modalities && trustedForModalities) {
         const existing = modalityCandidates.get(key);
         if (existing) {

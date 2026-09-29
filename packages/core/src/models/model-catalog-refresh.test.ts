@@ -190,6 +190,27 @@ describe('trimModelsDevCatalog', () => {
     expect(models).not.toHaveProperty('deepseek-r1');
   });
 
+  it('does not widen non-vision DeepSeek models', () => {
+    const models = trimModelsDevCatalog(
+      {
+        deepseek: {
+          models: {
+            bare: chat('deepseek-v4-flash', {}, ['text', 'image']),
+            next: chat('deepseek-v4.1-flash', {}, ['text', 'image']),
+            vision: chat('deepseek-v4-flash-vision-exp', {}, ['text', 'image']),
+          },
+        },
+      },
+      NOW,
+    ).models;
+
+    expect(models['deepseek-v4-flash']).toBeUndefined();
+    expect(models['deepseek-v4.1-flash']).toBeUndefined();
+    expect(models['deepseek-v4-flash-vision-exp']).toEqual({
+      modalities: { image: true },
+    });
+  });
+
   it('drops an id whose providers disagree instead of picking one', () => {
     // glm-x is served by zai and alibaba-cn with different output limits, so
     // the regex tables keep their current answer.
