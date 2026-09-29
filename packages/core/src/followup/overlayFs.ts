@@ -93,9 +93,15 @@ export class OverlayFs {
   /**
    * Copy all overlay files back to the real filesystem.
    * Returns the list of real paths that were updated.
+   *
+   * Throws when a file could not be copied. The caller reports the speculation
+   * as accepted and injects the tool results that claim the edits landed, so
+   * dropping a file here would tell the user -- and the model reading the
+   * history -- that an edit is on disk when it is not.
    */
   async applyToReal(): Promise<string[]> {
     const applied: string[] = [];
+    const failed: string[] = [];
 
     for (const [rel, overlayPath] of this.writtenFiles) {
       const realPath = join(this.realCwd, rel);
@@ -104,8 +110,15 @@ export class OverlayFs {
         await copyFile(overlayPath, realPath);
         applied.push(realPath);
       } catch {
-        // Best-effort — ignore errors and continue
+        // Keep going so the other files still land, then report this one.
+        failed.push(realPath);
       }
+    }
+
+    if (failed.length > 0) {
+      throw new Error(
+        `Could not apply ${failed.length} of ${this.writtenFiles.size} file(s) to disk: ${failed.join(', ')}`,
+      );
     }
 
     return applied;

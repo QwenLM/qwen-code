@@ -146,6 +146,18 @@ describe('OverlayFs', () => {
       expect(content).toBe('new file content');
     });
 
+    it('reports a file it could not copy back to disk', async () => {
+      // `blocker` is a file, so the directory the child needs cannot be made.
+      await writeFile(join(testDir, 'blocker'), 'not a directory');
+      const realFile = join(testDir, 'blocker', 'file.ts');
+      const overlayPath = await overlay.redirectWrite(realFile);
+      await writeFile(overlayPath, 'modified in overlay');
+
+      // Dropping it silently would let the caller report the edit as accepted
+      // while nothing reached disk.
+      await expect(overlay.applyToReal()).rejects.toThrow(/file\.ts/);
+    });
+
     it('returns empty array when no files written', async () => {
       const applied = await overlay.applyToReal();
 
