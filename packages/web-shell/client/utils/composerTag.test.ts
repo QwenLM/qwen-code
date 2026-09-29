@@ -460,10 +460,10 @@ describe('composer tag input annotations', () => {
             tag: { id: 'file:@foo', kind: 'file', value: '@foo' },
           },
         ],
-      ).map(({ start, end }) => [start, end]),
+      ).map(({ start, end, reference }) => [start, end, reference.id]),
     ).toEqual([
-      [0, 4],
-      [24, 28],
+      [0, 4, 'file:@ctx'],
+      [24, 28, 'file:@foo'],
     ]);
   });
 
@@ -546,10 +546,10 @@ describe('composer tag input annotations', () => {
             tag: { id: 'file:@beta', kind: 'file', value: '@beta' },
           },
         ],
-      ).map(({ start, end }) => [start, end]),
+      ).map(({ start, end, reference }) => [start, end, reference.id]),
     ).toEqual([
-      [0, 6],
-      [9, 14],
+      [0, 6, 'file:@alpha'],
+      [9, 14, 'file:@beta'],
     ]);
   });
 
