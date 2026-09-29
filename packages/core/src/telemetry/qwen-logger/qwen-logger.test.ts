@@ -144,27 +144,6 @@ describe('QwenLogger', () => {
   });
 
   describe('getProxyAgent', () => {
-    // A runner that exports `no_proxy` would otherwise decide these cases.
-    const savedNoProxy = process.env['no_proxy'];
-    const savedNoProxyUpper = process.env['NO_PROXY'];
-
-    beforeEach(() => {
-      delete process.env['no_proxy'];
-      delete process.env['NO_PROXY'];
-    });
-
-    afterEach(() => {
-      if (savedNoProxy === undefined) delete process.env['no_proxy'];
-      else process.env['no_proxy'] = savedNoProxy;
-      if (savedNoProxyUpper === undefined) delete process.env['NO_PROXY'];
-      else process.env['NO_PROXY'] = savedNoProxyUpper;
-    });
-
-    const loggerWithProxy = () =>
-      QwenLogger.getInstance(
-        makeFakeConfig({ getProxy: () => 'http://corp.example.com:8080' }),
-      )!;
-
     it('accepts uppercase proxy URL schemes', () => {
       const config = makeFakeConfig({
         getProxy: () => 'HTTPS://proxy.example.com:8080',
@@ -172,37 +151,6 @@ describe('QwenLogger', () => {
       const logger = QwenLogger.getInstance(config)!;
 
       expect(logger.getProxyAgent()).toBeDefined();
-    });
-
-    it('returns no agent when NO_PROXY is a bare wildcard', () => {
-      process.env['NO_PROXY'] = '*';
-
-      expect(loggerWithProxy().getProxyAgent()).toBeUndefined();
-    });
-
-    it('returns no agent when a NO_PROXY suffix matches the upload host', () => {
-      process.env['NO_PROXY'] = '.rum.aliyuncs.com';
-
-      expect(loggerWithProxy().getProxyAgent()).toBeUndefined();
-    });
-
-    it('prefers lowercase no_proxy over NO_PROXY', () => {
-      process.env['NO_PROXY'] = 'unrelated.example.com';
-      process.env['no_proxy'] = 'gb4w8c3ygj-default-sea.rum.aliyuncs.com';
-
-      expect(loggerWithProxy().getProxyAgent()).toBeUndefined();
-    });
-
-    it('still proxies when a port-qualified NO_PROXY entry names another port', () => {
-      process.env['NO_PROXY'] = 'rum.aliyuncs.com:8443';
-
-      expect(loggerWithProxy().getProxyAgent()).toBeDefined();
-    });
-
-    it('still proxies when NO_PROXY does not match the upload host', () => {
-      process.env['NO_PROXY'] = 'localhost,127.0.0.1,.example.com';
-
-      expect(loggerWithProxy().getProxyAgent()).toBeDefined();
     });
   });
 

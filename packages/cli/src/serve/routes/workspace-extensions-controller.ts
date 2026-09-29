@@ -1179,55 +1179,20 @@ export function createExtensionsController(
 
   const buildLocalExtensionsStatus =
     async (): Promise<ServeWorkspaceExtensionsStatus> => {
-      // `skipLoadEnvironment` for the same reason as the load in
-      // `createExtensionManager`: this route is trust-free and reachable with
-      // a single GET, so writing the bound workspace's `.env` / `settings.env`
-      // into the daemon's shared `process.env` would publish one repo's values
-      // to every other workspace the daemon hosts for the process lifetime.
-      // `consumeCorruptionEnvVars: false` for the reason stated there too:
-      // this poll is the most frequently hit load in the daemon, so letting it
-      // spend the one-shot marker it never surfaces would drop the signal for
-      // every hosted workspace.
-      //
-      // The probe stays ungated only where it is actually read. An
-      // authoritative `false` from `isWorkspaceTrusted` short-circuits
-      // `trusted`, so probing there would parse an untrusted workspace's own
-      // `.qwen/settings.json` and then throw the result away — and parsing
-      // runs the migration / corruption-recovery path, which REWRITES that
-      // file (injecting `$version`, or resetting invalid JSON to `{}` beside a
-      // `.corrupted` sibling). A trust-free, read-only-by-contract status poll
-      // must not mutate the workspace it reports on, so that arm performs
-      // exactly one load: the gated one below.
-      const trustedFromDeps = deps.isWorkspaceTrusted?.();
-      const probeSettings =
-        trustedFromDeps === false
-          ? undefined
-          : loadSettings(boundWorkspace, {
-              skipLoadEnvironment: true,
-              consumeCorruptionEnvVars: false,
-            }).merged;
       const trusted =
-        trustedFromDeps ??
-        (probeSettings !== undefined &&
-          getWorkspaceTrustStatus(probeSettings, boundWorkspace).effective
-            .state === 'trusted');
-      // An untrusted workspace must not select the locale through its own
-      // `general.language`: `loadSettings` merges the workspace scope for any
-      // directory unless told otherwise, while the entries behind this key are
-      // built by `createExtensionManager(boundWorkspace, trusted)`, which does
-      // gate it. Re-resolving on the gated merge keeps the cache key and the
-      // cached payload on one view of the same file. A trusted workspace
-      // reuses the probe, so that path is still a single load.
-      const mergedSettings =
-        trusted && probeSettings
-          ? probeSettings
-          : loadSettings(boundWorkspace, {
-              skipLoadEnvironment: true,
-              consumeCorruptionEnvVars: false,
-              skipWorkspaceSettings: true,
-              workspaceTrusted: false,
-            }).merged;
-      const locale = resolveExtensionLocale(mergedSettings);
+        deps.isWorkspaceTrusted?.() ??
+        getWorkspaceTrustStatus(
+          loadSettings(boundWorkspace).merged,
+          boundWorkspace,
+        ).effective.state === 'trusted';
+      // Same gated load the pre-refactor `resolveExtensionLocale(dir, trusted)`
+      // performed; the status-route hardening is split into its own PR.
+      const locale = resolveExtensionLocale(
+        loadSettings(boundWorkspace, {
+          skipWorkspaceSettings: !trusted,
+          workspaceTrusted: trusted,
+        }).merged,
+      );
       if (
         extensionsStatusCache?.locale === locale &&
         extensionsStatusCache.trusted === trusted &&
