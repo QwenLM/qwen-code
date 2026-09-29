@@ -12,6 +12,15 @@ class JdbcRuntimeBrokerMySqlIT {
     }
 
     @Test
+    void managedRecoveryKeepsPinsUntilTheOriginalHolderCleanupCompletes() throws Exception {
+        DataSource source = dataSource();
+        JdbcRuntimeBrokerSchema.initialize(source);
+        RuntimeMaintenanceRecoveryTest.verifyBatches(new JdbcRuntimeBindingRepository(source,
+                new AesGcmSecretProtector("maintenance", new byte[32])), new JdbcRuntimeSessionRepository(source),
+                new JdbcToolExecutionRepository(source), "mysql-maintenance-" + java.util.UUID.randomUUID());
+    }
+
+    @Test
     void databaseClockIgnoresSessionTimeZone() throws Exception {
         DataSource dataSource = dataSource();
         for (String offset : new String[] {"+00:00", "+08:00", "-04:00"}) {

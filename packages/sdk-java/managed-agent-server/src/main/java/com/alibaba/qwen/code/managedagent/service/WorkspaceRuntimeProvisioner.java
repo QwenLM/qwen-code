@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.service;
 
 import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
 import com.alibaba.qwen.code.runtimebroker.RuntimeObservation;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
@@ -9,15 +10,19 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.RuntimeResourceHandle;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 
 final class WorkspaceRuntimeProvisioner implements RuntimeProvisioner {
     private final RuntimeProvisioner delegate;
     private final WorkspaceRuntimeResolver resolver;
+    private final WorkspaceExecutionStore executionStore;
 
-    WorkspaceRuntimeProvisioner(RuntimeProvisioner delegate, WorkspaceRuntimeResolver resolver) {
+    WorkspaceRuntimeProvisioner(RuntimeProvisioner delegate, WorkspaceRuntimeResolver resolver,
+            WorkspaceExecutionStore executionStore) {
         this.delegate = delegate;
         this.resolver = resolver;
+        this.executionStore = executionStore;
     }
 
     @Override
@@ -62,6 +67,15 @@ final class WorkspaceRuntimeProvisioner implements RuntimeProvisioner {
     @Override
     public boolean supportsStartupRecovery(RuntimeResourceHandle handle) {
         return delegate.supportsStartupRecovery(handle);
+    }
+
+    @Override
+    public CompletionStage<Void> recoverResources(RuntimeBindingRecord binding) {
+        if (!binding.getRequest().isManagedContext()) {
+            return delegate.recoverResources(binding);
+        }
+        executionStore.releaseLost(binding);
+        return CompletableFuture.completedFuture(null);
     }
 
     @Override

@@ -1834,7 +1834,13 @@ describe('CodeModeOnly tool guidance', () => {
     const prompt = codeModePrompt();
 
     expect(prompt).toContain('**Batch Into One Program:**');
-    expect(prompt).toContain('await them together with `Promise.all`');
+    expect(prompt).toContain('await Promise.allSettled([...])');
+    expect(prompt).toContain('Inspect every result');
+    expect(prompt).toContain('String(result.reason)');
+    expect(prompt).toContain(
+      'Keep dependent actions, mutations, and approvals sequential',
+    );
+    expect(prompt).not.toContain('await Promise.all([');
     expect(prompt).not.toContain(
       'Call independent tools in parallel; run dependent calls sequentially',
     );
