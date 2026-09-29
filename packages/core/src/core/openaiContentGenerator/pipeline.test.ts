@@ -62,14 +62,21 @@ const mockReportOpenAiRequest = vi.hoisted(() => vi.fn());
 const mockReportOpenAiResponse = vi.hoisted(() => vi.fn());
 const mockReportOpenAiChunk = vi.hoisted(() => vi.fn());
 
-vi.mock('./converter.js', () => ({
-  OpenAIContentConverter: {
-    convertLlmRequestToOpenAI: vi.fn(),
-    convertOpenAIResponseToLlm: vi.fn(),
-    convertOpenAIChunkToLlm: vi.fn(),
-    convertLlmToolsToOpenAI: vi.fn(),
-  },
-}));
+vi.mock('./converter.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./converter.js')>();
+  return {
+    // The pipeline settles a parked truncation override with this pure numeric
+    // verdict, so it must stay real here — only the converter class is stubbed.
+    corroborateTruncationFromCompletionTokens:
+      actual.corroborateTruncationFromCompletionTokens,
+    OpenAIContentConverter: {
+      convertLlmRequestToOpenAI: vi.fn(),
+      convertOpenAIResponseToLlm: vi.fn(),
+      convertOpenAIChunkToLlm: vi.fn(),
+      convertLlmToolsToOpenAI: vi.fn(),
+    },
+  };
+});
 vi.mock('openai');
 vi.mock('../../telemetry/loggers.js', () => ({
   logProtocolTagSanitized: vi.fn(),
@@ -7222,6 +7229,268 @@ describe('ContentGenerationPipeline', () => {
         verbosity: 'low',
       });
       expect(call).not.toHaveProperty('max_tokens');
+    });
+
+    describe('wire output budget recorded for truncation corroboration', () => {
+      // The converter may only attribute incomplete tool-call JSON to
+      // max_tokens after checking it against the budget that actually went out
+      // on the wire, and getWireOutputBudget has exactly one caller — nothing
+      // downstream can recover the value if this capture regresses.
+      // converter.test.ts pins the reading half; these pin the writing half.
+      async function captureContext(request: GenerateContentParameters) {
+        const seen: Array<{ maxOutputTokens?: number }> = [];
+        (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
+        (mockConverter.convertOpenAIChunkToLlm as Mock).mockImplementation(
+          (_chunk: unknown, ctx: { maxOutputTokens?: number }) => {
+            seen.push(ctx);
+            const response = new GenerateContentResponse();
+            response.candidates = [
+              {
+                content: { parts: [{ text: 'hi' }], role: 'model' },
+                finishReason: FinishReason.STOP,
+              },
+            ];
+            return response;
+          },
+        );
+        (mockClient.chat.completions.create as Mock).mockResolvedValue({
+          async *[Symbol.asyncIterator]() {
+            yield {
+              id: 'chunk-1',
+              choices: [{ delta: { content: 'hi' }, finish_reason: 'stop' }],
+            } as OpenAI.Chat.ChatCompletionChunk;
+          },
+        });
+
+        const generator = await pipeline.executeStream(request, 'prompt-id');
+        const iterator = generator[Symbol.asyncIterator]();
+        let step = await iterator.next();
+        while (!step.done) {
+          step = await iterator.next();
+        }
+
+        const sent = (mockClient.chat.completions.create as Mock).mock
+          .calls[0][0] as Record<string, unknown>;
+        expect(seen.length).toBeGreaterThan(0);
+        return { ctx: seen[0], sent };
+      }
+
+      it('records a budget sent as max_tokens', async () => {
+        mockContentGeneratorConfig.samplingParams = undefined;
+        pipeline = new ContentGenerationPipeline(mockConfig);
+
+        const { ctx, sent } = await captureContext({
+          model: 'test-model',
+          contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+          config: { maxOutputTokens: 8192 },
+        });
+
+        expect(sent.max_tokens).toBe(8192);
+        expect(ctx.maxOutputTokens).toBe(8192);
+      });
+
+      it.each(['max_completion_tokens', 'max_new_tokens'])(
+        'records a budget that travels only under the provider key %s',
+        async (key) => {
+          // The shape this file already builds for GPT-5 / o-series: no
+          // max_tokens is synthesized, so the whole corroboration depends on
+          // the PROVIDER_OUTPUT_BUDGET_KEYS fallback in getWireOutputBudget.
+          // maxOutputTokens (32000) leaves room above 4096, so nothing clamps.
+          mockContentGeneratorConfig.samplingParams = {
+            [key]: 4096,
+          } as ContentGeneratorConfig['samplingParams'];
+          pipeline = new ContentGenerationPipeline(mockConfig);
+
+          const { ctx, sent } = await captureContext({
+            model: 'test-model',
+            contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+            config: { maxOutputTokens: 32000 },
+          });
+
+          expect(sent).not.toHaveProperty('max_tokens');
+          expect(sent[key]).toBe(4096);
+          expect(ctx.maxOutputTokens).toBe(4096);
+        },
+      );
+
+      it('leaves the budget undefined when the request caps output by neither', async () => {
+        // Undefined is the honest answer: the corroboration then stays
+        // inconclusive and keeps the legacy inference rather than inventing a
+        // ceiling to compare against.
+        mockContentGeneratorConfig.samplingParams = {};
+        pipeline = new ContentGenerationPipeline(mockConfig);
+
+        const { ctx, sent } = await captureContext({
+          model: 'test-model',
+          contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+        });
+
+        expect(sent).not.toHaveProperty('max_tokens');
+        expect(ctx.maxOutputTokens).toBeUndefined();
+      });
+    });
+
+    describe('parked truncation override settlement', () => {
+      // QwenLM/qwen-code#12970. The pipeline requests
+      // stream_options.include_usage, and under that convention the chunk
+      // carrying finish_reason reports no usage — the totals arrive on a later
+      // `choices: []` chunk. handleChunkMerging parks the finish response
+      // until then, which makes the merge the first point the rewrite can be
+      // corroborated, and it happens before the yield, so a consumer never
+      // observes the unsettled reason.
+      function arrangeReferenceStream(opts: {
+        trailingCompletionTokens?: number;
+      }) {
+        const argsChunk = {
+          id: 'chunk-args',
+          choices: [
+            {
+              index: 0,
+              delta: {
+                tool_calls: [
+                  {
+                    index: 0,
+                    id: 'call_1',
+                    type: 'function',
+                    function: {
+                      name: 'read_file',
+                      arguments:
+                        '{"file_path": "/tmp/ad01.yml", "limit": {"file_path": "/tmp/node01.yml", "limit": null}',
+                    },
+                  },
+                ],
+              },
+              finish_reason: null,
+            },
+          ],
+        } as unknown as OpenAI.Chat.ChatCompletionChunk;
+        const finishChunk = {
+          id: 'chunk-finish',
+          choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+        } as unknown as OpenAI.Chat.ChatCompletionChunk;
+        const completionTokens = opts.trailingCompletionTokens;
+        const usageChunk = {
+          id: 'chunk-usage',
+          choices: [],
+          usage: {
+            prompt_tokens: 252811,
+            completion_tokens: completionTokens,
+            total_tokens: 252811 + (completionTokens ?? 0),
+          },
+        } as unknown as OpenAI.Chat.ChatCompletionChunk;
+
+        const finishResponse = new GenerateContentResponse();
+        finishResponse.candidates = [
+          {
+            content: { parts: [], role: 'model' },
+            finishReason: FinishReason.MAX_TOKENS,
+          },
+        ];
+        const trailingResponse = new GenerateContentResponse();
+        trailingResponse.candidates = [];
+        trailingResponse.usageMetadata = {
+          promptTokenCount: 252811,
+          candidatesTokenCount: completionTokens ?? 0,
+          totalTokenCount: 252811 + (completionTokens ?? 0),
+        };
+        setGenAiUsageProvenance(trailingResponse.usageMetadata, {
+          cachedInputTokensReported: false,
+        });
+
+        // The real converter emits nothing yieldable for a partial argument
+        // bag, rewrites stop -> length on the incomplete JSON, and parks the
+        // provider's own reason when that chunk carried no usable usage.
+        // converter.test.ts pins the real implementation's side of this
+        // contract; these cases pin the pipeline's.
+        (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
+        (mockConverter.convertOpenAIChunkToLlm as Mock).mockImplementation(
+          (
+            chunk: unknown,
+            ctx: {
+              pendingTruncationOverride?: { finishReason: FinishReason };
+            },
+          ) => {
+            if (chunk === finishChunk) {
+              ctx.pendingTruncationOverride = {
+                finishReason: FinishReason.STOP,
+              };
+              return finishResponse;
+            }
+            if (chunk === usageChunk) {
+              return trailingResponse;
+            }
+            const empty = new GenerateContentResponse();
+            empty.candidates = [];
+            return empty;
+          },
+        );
+        (mockClient.chat.completions.create as Mock).mockResolvedValue({
+          async *[Symbol.asyncIterator]() {
+            yield argsChunk;
+            yield finishChunk;
+            if (completionTokens !== undefined) {
+              yield usageChunk;
+            }
+          },
+        });
+      }
+
+      async function yieldedFinishReason() {
+        mockContentGeneratorConfig.samplingParams = undefined;
+        pipeline = new ContentGenerationPipeline(mockConfig);
+        const generator = await pipeline.executeStream(
+          {
+            model: 'test-model',
+            contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+            config: { maxOutputTokens: 8192 },
+          },
+          'prompt-id',
+        );
+        const first = await generator[Symbol.asyncIterator]().next();
+        if (first.done) {
+          throw new Error('Expected the merged finish response.');
+        }
+        return first.value;
+      }
+
+      it('downgrades the override once trailing usage disproves truncation', async () => {
+        arrangeReferenceStream({ trailingCompletionTokens: 185 });
+
+        const response = await yieldedFinishReason();
+
+        // 185 against an 8192 budget is not a token-limit cut, so the fused
+        // read_file bag from #12970 must reach the scheduler as a plain schema
+        // validation failure instead of carrying the max_tokens note.
+        expect(response.candidates?.[0]?.finishReason).toBe(FinishReason.STOP);
+        expect(response.usageMetadata?.candidatesTokenCount).toBe(185);
+      });
+
+      it('keeps the override when trailing usage corroborates truncation', async () => {
+        arrangeReferenceStream({ trailingCompletionTokens: 8192 });
+
+        const response = await yieldedFinishReason();
+
+        // #4964 must not regress: the delayed totals can just as well confirm
+        // the cut, and then the rewrite stands.
+        expect(response.candidates?.[0]?.finishReason).toBe(
+          FinishReason.MAX_TOKENS,
+        );
+        expect(response.usageMetadata?.candidatesTokenCount).toBe(8192);
+      });
+
+      it('keeps the override when no trailing usage chunk ever arrives', async () => {
+        arrangeReferenceStream({});
+
+        const response = await yieldedFinishReason();
+
+        // Stage 2d releases the parked finish at end of stream. With no totals
+        // the verdict stays inconclusive, so the conservative inference and
+        // the #4964 recovery are preserved rather than cleared on a guess.
+        expect(response.candidates?.[0]?.finishReason).toBe(
+          FinishReason.MAX_TOKENS,
+        );
+        expect(response.usageMetadata).toBeUndefined();
+      });
     });
 
     it('should clamp a provider output-budget key to the window without injecting max_tokens', async () => {
