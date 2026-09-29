@@ -368,7 +368,7 @@ describe('publish-assets', () => {
     );
     expect(repoViewCalls).toHaveLength(0);
     expect(process.exitCode).toBeUndefined();
-    const stderr = (stderrSpy.mock.calls.map((call) => call[0]) as string[]).join(
+    const stderr = (stderrSpy.mock.calls.map((c) => c[0]) as string[]).join(
       '\n',
     );
     expect(stderr).toContain(
@@ -393,7 +393,7 @@ describe('publish-assets', () => {
     );
     expect(repoViewCalls).toHaveLength(0);
     expect(process.exitCode).toBeUndefined();
-    const stderr = (stderrSpy.mock.calls.map((call) => call[0]) as string[]).join(
+    const stderr = (stderrSpy.mock.calls.map((c) => c[0]) as string[]).join(
       '\n',
     );
     expect(stderr).not.toContain('points at the reviewed repository');
