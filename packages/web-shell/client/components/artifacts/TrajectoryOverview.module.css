@@ -239,11 +239,20 @@
 }
 
 .legend i {
-  display: inline-block;
-  width: 8px;
-  height: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 12px;
+  height: 12px;
   flex: none;
   font-style: normal;
+}
+
+.legend .ttftKey,
+.legend .afterKey {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
 }
 
 .ttftKey {

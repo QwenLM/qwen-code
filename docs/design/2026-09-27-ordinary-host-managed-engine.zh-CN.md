@@ -366,6 +366,134 @@ M3 确定了契约中的以下细节：
 只启用更多内置工具或后台功能的 settings（例如 cron、artifact 或自动记忆）不是输入。
 首阶段引擎不注册也不运行它们，这由 M5 和 M6 保证。
 
+### M4：Managed Session log 记录
+
+M4 通过 #12693 的 authority，使用其本地 JSONL 日志与资源存储，把 Managed 会话记录为
+Managed Session log。它改动 core 的 `Config`、`ChatRecordingService`、record sink 与读取器的
+Managed 恢复投影，不增加生产调用方：Managed 宿主在 M6 才开始使用它。它不需要 M2 宿主：宿主选定的
+引擎本来就以 `sessionExecutionEngine` 传到 `Config`，测试也像宿主那样直接驱动
+`Config`。
+
+#### 触发条件
+
+`sessionExecutionEngine` 为 `managed` 的 `Config` 会把会话记录为 Managed Session log。
+只有运行 Managed 会话的宿主才会设置这个值；普通 ACP 宿主在 `Config` 创建之前就会拒绝
+`managed` 请求。这样的 `Config` 需要 chat recording 与会话 writer lease，缺少它们时
+初始化以 `SessionExecutionEngineError` 失败。在 M4 之前，`managed` 引擎只会在普通
+transcript 中写入一条 `managed` owner 记录，而决定 1 排除了这种形态。
+
+#### 写者与打开
+
+- 含有记录、但头部没有 Managed 证据的 transcript 属于 Legacy 会话，Managed 激活会在
+  获取 lease 之前拒绝它：certified 接管会先让 Legacy 会话的 handoff 封存失效，之后的
+  任何检查都来不及拒绝这次恢复。
+- recorder 的 writer lease 以 Managed 写者身份获取：锁 schema 3 并带 Managed 格式版本，
+  且使用 certified 接管。不认识 schema 3、且会获取 writer lease 的程序会拒绝这把锁，
+  而不会写入日志；封存的 Managed 锁只有在日志仍与封存中的提交证明一致时才能重新打开。
+  TUI、无头 CLI 以及未开启 `experimental.sessionWriterLease` 的 daemon 不获取 lease：
+  当前版本凭 header 拒绝 Managed 日志，0.24.6 之前的版本则会向它追加记录，此后该日志
+  在下一次打开时会以失败告终。
+- 持有 lease 之后、recorder 接收任何记录之前，`Config` 用 `openManagedSession` 在这个
+  lease 上打开日志。authority 接管这个 lease，因此会话始终只有一个写者。
+- transcript 没有 header 时，`Config` 发布定义（引擎、模型与审批模式，不含任何凭据）
+  与根快照，authority 先写 owner 记录，再写 header。这同时覆盖新会话，以及在 owner
+  记录之后中断的创建。header 之前如有其他任何记录，打开就会失败。
+- 恢复经由读取器的恢复投影进行，并且在打开日志之前必须确认投影中的 owner 为
+  `managed`。Managed 日志从不使用 Legacy 加载器，没有投影的 Managed 恢复会失败。
+- 如果崩溃中断了写入，使日志的最后一个事务没有提交标记，日志会在打开时被修复：写者持有
+  lease，因此会把最后一个提交标记之后的记录移到 transcript 旁的诊断文件，并在该提交处
+  打开日志。这些记录从未提交过。
+- authority 无法打开的日志，例如已与其封存不再一致的日志，会让激活以 authority 自身的
+  错误失败，而不会被报告为写者不可用。
+- activation 以会话作为其 worker，记录五分钟的期限，并在会话打开期间每过期限的三分之一
+  续期一次。
+
+#### 记录
+
+- recorder 在激活之前绑定 authority 的 record sink。它接收的每条记录都经由 sink 作为
+  Managed 事务提交；不会直接追加原始记录，recorder 也不会再写第二条 owner 记录。
+- sink 能承载的记录包括：消息与工具结果、标题、压缩、goal 状态、文件历史、回合结果、
+  分支检查点、会话来源、斜杠与 `@` 命令、UI 遥测以及归因快照，且每种记录都须符合其映射
+  所需的形态：标题不能为空，回合结果须带 prompt id 与状态，压缩须带历史。
+- 其他任何记录，或形态不符的可承载记录，都会在进入队列之前被 recorder 拒绝，会话继续
+  记录。现在任何一次写入失败都会让 recorder 在会话剩余时间内停止工作，所以拒绝绝不能
+  进入队列。被等待、且不返回值的记录方法会以 `ManagedSessionRecordRefusedError` 拒绝；
+  约定返回布尔值的方法（例如 `recordCustomTitle` 与 `recordParentSession`）会返回
+  `false` 并记录日志，与其他写入失败时相同；不等待结果写入的记录会被丢弃，并记录一条
+  调试日志。在队列中仍然失败的写入，例如 authority 中的冲突或追加失败，照旧会让
+  recorder 停止。
+- sink 在发布摘要之前读取压缩所替换的范围，因为那正是摘要所覆盖的历史；压缩事件则在
+  提交时编号。发布摘要期间可能有续期提交，在此之前编好号的事件会发生冲突，从而让
+  recorder 停止。
+- Managed 标题是日志保存在读取器回放的记录之外的元数据，因此它不会成为下一条记录的父
+  记录。
+- 会话列表在日志两端各 64 KiB 的窗口中查找标题与来源，与 Legacy transcript 相同，
+  因此 recorder 会重新锚定两者。它测量日志增长了多少，因为记录自身的大小无法说明这一点：
+  每条记录都包在事务记录中提交，其内容存入资源，续期也会在记录之间追加。到期的锚点紧跟在
+  使其到期的那条记录之后写入；关闭时会写入已到期的锚点，`finalize()` 会写入已到期的标题，
+  即使只是续期让日志增长也是如此。恢复后的会话把两者都视为已到期，因为它无法知道它们
+  离日志末尾有多远。
+- 恢复从整个日志读取标题，从读取器回放的记录读取来源，因此标题已移出窗口的日志（例如
+  崩溃之后）不会恢复出较早的标题。内容无法读取的标题恢复为没有标题，与会话列表的显示
+  一致。
+- goal 证据从读取器回放的记录中读取活动链。这条链与 Legacy 的相同，只是不含 owner
+  记录与标题。
+
+首期中，以下记录没有映射，或者其形态格式无法承载：
+
+- 模型切换不会被持久化：daemon 会忽略被拒绝的写入，rewind 也会丢弃它本要重新追加的
+  模型记录。恢复后的会话使用其配置所选的模型。
+- Web Shell 文本元素、会话 artifact、来源快照、goal 运行时的回合结束记录，以及 daemon
+  投递的通知，写入时都会失败。清空标题同样会失败。
+- rewind 记录会被丢弃。实时会话及其活动链是正确的，因为后续记录会跳过被移除的回合
+  链接上去；但 Managed 恢复投影把日志当作线性历史读取。记录 A 和 B、rewind 回到 A、
+  再记录 C：恢复后的 Managed 会话给模型的是 A、B 和 C，而 Legacy 给的是 A 和 C。
+- 后台任务、cron 与 omni recall 的记录会被丢弃。首期的 Managed 会话没有这些功能。
+- 子会话的父会话记录与 Live 对话的记录会被拒绝。这两种用途都留在 Legacy。
+
+M6 逐项决定：Managed 会话拒绝该功能，还是为其记录增加映射；后者会改变 Managed Session
+格式，需要格式所有者同意。在投影能够沿记录链读取之前，Managed 会话必须拒绝 rewind；
+`Session.rewindToTurn` 本来就会在做任何改动之前校验请求。
+
+#### 关闭
+
+- recorder 先 flush 并写入已到期的锚点，authority 记录 activation 已停止推进，然后
+  recorder 用 authority 的提交证明封存 lease，而不是释放它。handoff 也以同样方式关闭，
+  尽管它不运行 `finalize()`。
+- 写入失败不会改变这一点：到期的锚点仍会尝试写入，提交证明只覆盖已提交的事务，下一次
+  打开会修复尾部。
+- 激活期间的关闭不会像对 Legacy 写者那样提前释放 Managed 写者：由激活在失败时结束它。
+  - 已经打开的日志按 authority 的提交证明封存。
+  - 接管了已封存锁的 lease 会把那份封存原样恢复。打开会在写入任何内容之前按封存校验
+    日志，而按从日志读出的位置封存，会让一个在封存之后被改动的日志被接受。
+  - 不存在、为空或头部不含 Managed 证据的 transcript 会释放其锁：它没有需要守护的内容。
+  - 其他日志按从中读出的已提交位置封存。头部或日志无法读取的，会一直持有锁直到进程
+    退出，因为无从知道它包含什么、该在哪个位置封存。这个 lease 可能回收的是某个崩溃的
+    Managed 写者的锁，释放它会让那把锁消失。
+- 没有任何内容就被关闭的 Managed 会话会保留其封存的日志。是否丢弃它由 M6 决定。
+
+#### 留给后续切片的风险
+
+- 每次续期都会提交一条 activation 事件，因此打开的会话无论是否空闲，其日志每 100 秒
+  都会增长一个约 2 KB 的事务。会话空闲 25 到 50 分钟后，仅续期就会把标题移出尾部窗口，
+  此后会话列表显示较早的标题或不显示标题，直到下一条记录或关闭将其重新锚定；恢复则读取整个日志。M6 可以为
+  本地会话延长期限；本地会话的存活由其 writer 锁判断。
+- 续期经由 lease 追加写入，不经过 recorder 的写屏障。在该屏障下读取日志、随后检查其
+  大小的实时恢复可能会看到日志变化。M6 在实时恢复 Managed 会话之前必须处理这一点。
+- 修复会丢弃从未提交的记录。M5 必须让 Runtime 工具的结果自身保持持久，这样被丢弃的
+  尾部就不会掩盖已经发生的副作用。
+- `loadCliConfig` 会拒绝 owner 为 `managed` 的恢复。M6 宿主恢复 Managed 会话时必须绕过
+  这项 Legacy 检查，并且必须提供恢复投影。
+- 记录 Managed 会话的开销高于 Legacy transcript。在同一台机器上测 300 个回合：写一个
+  回合的耗时约为 3.4 倍，日志约大 2.8 倍，磁盘占用约为 9 倍；goal 校验每次都要读取的
+  活动链，读取耗时为 30 到 80 倍，并随日志增长。M6 在 Managed 会话上运行 goal 之前必须
+  限制或缓存这次读取。
+- 含有 Managed 证据但无法读取的日志，其锁会由打开失败的那个进程一直持有，因此同一
+  进程内的重试会遇到写者冲突，直到该进程退出。长期运行的 M6 宿主必须能回收这样的锁，
+  例如回收进程内没有任何存活 lease 持有的锁。
+- 0.24.6 之前的版本在 TUI 或无头模式下不获取 writer lease，会向 Managed 日志追加
+  记录，此后该日志会以失败告终。M6 可以为混用多个版本的安装规定最低版本。
+
 ## 文件与消费者
 
 | 切片 | 文件                                                                                                                                                                                                                                                                               |
@@ -373,13 +501,13 @@ M3 确定了契约中的以下细节：
 | M1   | core `utils/sessionStorageUtils.ts`、`services/sessionService.ts`、`services/chatRecordingService.ts`；CLI `serve/routes/session.ts`                                                                                                                                               |
 | M2   | CLI `acp-integration/acpAgent.ts`；既有 daemon ACP spawn factory 与 transport（重新排期时确定最终文件范围）                                                                                                                                                                        |
 | M3   | CLI `config/settings.ts`、`config/mcpJson.ts`、`config/storage-paths-lite.ts`、`config/config.ts`，以及新增的 `config/read-config-file.ts`、`config/approval-mode-value.ts` 与 `config/managed-compatibility.ts`；core `extension/extension-store.ts` 与 `utils/envVarResolver.ts` |
-| M4   | core `config/config.ts`、`services/chatRecordingService.ts`、`managed-runtime/*`                                                                                                                                                                                                   |
+| M4   | core `config/config.ts`、`services/chatRecordingService.ts`、`services/session-transcript-reader.ts` 与 `utils/sessionStorageUtils.ts`；`managed-runtime/managed-session-record-sink.ts`、`managed-session-message-projection.ts` 与 `managed-session-authority.ts`（一处导出）    |
 | M5   | core 工具与调度器；CLI `serve/managed-runtime-*`                                                                                                                                                                                                                                   |
 | M6   | CLI `serve/session-execution-engine-selector.ts`、`serve/run-qwen-serve.ts`、`serve/server.ts`；一个新的 Managed 通道模块                                                                                                                                                          |
 
 任何切片都不改动 daemon 路由或 REST 形态。M1 不改变任何公开分类：它的拒绝使用
 已有的 `session_execution_engine_unavailable`。M3 没有生产调用方：选择器与 Managed
-宿主从 M6 起才调用该评估。
+宿主从 M6 起才调用该评估。M4 同样没有：Managed 宿主从 M6 起才创建 `managed` 会话。
 
 ## 验证与验收标准
 
@@ -410,6 +538,32 @@ M3：
    每种失败下都不改动文件树。
 4. build、typecheck 和定向测试通过；对每条规则或严格读取的每种拒绝做变异，都会使某个
    测试失败。
+
+M4：
+
+1. 新的 Managed 会话先写 owner 记录，再写 header，之后只写已提交的 Managed 事务：没有
+   原始记录，也没有第二条 owner 记录。Legacy 入口拒绝它，它的锁使用 Managed schema。
+2. 关闭时记录 activation 已停止，并用提交证明封存锁。经由投影恢复得到相同的活动链并能
+   继续记录，每次关闭后再恢复都是如此。活动链会经过回合结果与会话来源，并与 Legacy 的
+   活动链相同，只是不含 owner 记录与标题。
+3. 在 owner 记录之后中断的创建会被 Legacy 拒绝，并由下一次 Managed 恢复补完。
+4. 崩溃留下的、缺少提交标记的事务，会在下次打开日志时被移到诊断文件；已提交的前缀
+   保持不变。
+5. 日志无法承载的记录，或形态不符的可承载记录，会在进入队列之前被拒绝，会话继续记录：
+   被等待、且不返回值的方法以带类型的错误拒绝，返回布尔值的方法返回 `false`，不等待
+   结果写入的记录会被丢弃。发布摘要期间有续期提交时，压缩仍能提交，并且只覆盖摘要之前
+   的历史。
+6. 在仅由续期推动日志增长的长会话中，关闭、handoff 或写入失败后的关闭之后，会话列表都能
+   读到最新的标题，崩溃之后恢复也能读到它。到期的锚点紧跟在使其到期的那条记录之后，
+   紧跟锚点的 `finalize()` 不会再追加标题，恢复后的改名只提交一条标题记录。恢复会带回
+   会话来源，恢复后的会话会拒绝另一个来源，内容丢失的标题恢复为没有标题。
+7. 没有 chat recording 或 writer lease 的 `managed` 会话会在写入任何内容之前失败，在写入
+   任何内容之前就失败的会话会释放其锁。没有投影的 Managed 恢复会失败并保持锁为封存状态。
+   Legacy 拥有的 transcript 在获取 lease 之前就被拒绝，因此 Legacy 的 handoff 封存保持
+   不变。接管了与日志不一致的封存的恢复会以 authority 的错误失败，并保留那份封存。恢复或
+   创建期间的关闭会让日志保持封存，最后一次 flush 失败的 handoff 关闭也是如此。含有
+   Managed 证据但无法读取的日志会一直持有锁，回收来的锁在日志头部无法读取时也是如此。
+8. build、typecheck 和定向测试通过；对以上每种行为做变异，都会使某个测试失败。
 
 整个引擎由 M6 的验收检查判定，并同时满足 B2d 中在注册引擎后适用的标准：即使评估
 返回 `compatible`，延期用途仍留在 Legacy；`deferred`、`unknown` 和失败的评估使新会话

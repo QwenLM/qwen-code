@@ -336,6 +336,27 @@ describe('systemInfo', () => {
       expect(extendedInfo.baseUrl).toBe('https://api.openai.com');
     });
 
+    it('renders a pinned fast model without the raw endpoint disambiguator (#12760)', async () => {
+      vi.mocked(IdeClient.getInstance).mockResolvedValue({
+        getDetectedIdeDisplayName: vi.fn().mockReturnValue(''),
+      } as unknown as IdeClient);
+      setExecFileStdout('10.0.0');
+
+      // The picker persists `authType:id\0<baseUrl>`; every display surface
+      // (/about, /status, /bug, settings) consumes ExtendedSystemInfo, so the
+      // scrub-aware rendering happens here at the producer.
+      (mockContext.services.settings.merged as Record<string, unknown>)[
+        'fastModel'
+      ] = 'openai:shared-fast\0https://free-quota.example.com/v1';
+
+      const extendedInfo = await getExtendedSystemInfo(mockContext);
+
+      expect(extendedInfo.fastModel).toBe(
+        'openai:shared-fast (https://free-quota.example.com/v1)',
+      );
+      expect(extendedInfo.fastModel).not.toContain('\0');
+    });
+
     it('should include provider diagnostics for OpenAI Responses auth', async () => {
       vi.mocked(IdeClient.getInstance).mockResolvedValue({
         getDetectedIdeDisplayName: vi.fn().mockReturnValue('test-ide'),
