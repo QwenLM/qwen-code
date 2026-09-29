@@ -60,6 +60,11 @@ public interface RuntimeProvisioner extends AutoCloseable {
                 RuntimeObservation.unknown(handle));
     }
 
+    /** Whether saved startup identity can be observed without relaunching it. */
+    default boolean supportsStartupRecovery(RuntimeResourceHandle handle) {
+        return false;
+    }
+
     /**
      * Proves a lease this process already treats as ready still answers
      * attestation. The default accepts the in-memory lease.

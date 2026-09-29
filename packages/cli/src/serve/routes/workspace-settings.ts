@@ -28,6 +28,10 @@ import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { parseAndValidateWorkspaceClientId } from '../server/request-helpers.js';
 import { SessionNotFoundError } from '../acp-session-bridge.js';
 import {
+  isAuxModelSelectorSettingKey,
+  publicAuxModelSelectorValue,
+} from '../../utils/aux-model-selector.js';
+import {
   requireTrustedWorkspaceRuntime,
   resolveWorkspaceRuntimeFromParam,
   sendGenerationClosedError,
@@ -193,8 +197,14 @@ function buildSettingsResponse(
       key,
     );
 
+    // Aux-model selectors persist as `authType:id\0baseUrl`; the suffix can
+    // embed userinfo credentials, so the served value is the scrubbed one.
     const publicValue = (value: unknown) =>
-      key === 'mcpServers' ? redactMcpServersSetting(value) : value;
+      key === 'mcpServers'
+        ? redactMcpServersSetting(value)
+        : typeof value === 'string' && isAuxModelSelectorSettingKey(key)
+          ? publicAuxModelSelectorValue(value)
+          : value;
     const effective = LIVE_MANAGED_SETTINGS.has(key)
       ? (userVal ?? def.default)
       : (mergedEffective ?? def.default);
@@ -248,7 +258,16 @@ export function prepareSettingWrite(
   workspaceTrusted = true,
 ): { persistedValue: unknown; publicValue: unknown } {
   if (key !== 'mcpServers') {
-    return { persistedValue: value, publicValue: value };
+    return {
+      persistedValue: value,
+      // Aux-model selectors persist with their endpoint suffix (runtime
+      // routing resolves against it), but the value answered to and
+      // broadcast to clients must not carry userinfo credentials.
+      publicValue:
+        typeof value === 'string' && isAuxModelSelectorSettingKey(key)
+          ? publicAuxModelSelectorValue(value)
+          : value,
+    };
   }
   const existing =
     loadSettings(workspace, {

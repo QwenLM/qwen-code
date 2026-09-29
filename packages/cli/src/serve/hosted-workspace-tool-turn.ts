@@ -17,7 +17,10 @@ import {
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import type { ManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
 import { HTTP_MANAGED_SESSION_STORE_CONTRACT } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
-import { normalizeWorkspaceRelativePath } from './managed-workspace-binding.js';
+import {
+  InvalidWorkspaceRelativePathError,
+  normalizeWorkspaceRelativePath,
+} from './managed-workspace-binding.js';
 import { WORKSPACE_CAPABILITY_DIGEST } from './managed-workspace-activation.js';
 import {
   HostedWorkspaceBroker,
@@ -229,12 +232,20 @@ export class HostedWorkspaceToolTurn {
         input = { ...args, is_background: false };
       } else {
         const file = call.args['file_path'];
-        if (typeof file !== 'string')
-          throw new Error('Hosted file tools require a relative file_path.');
-        input = {
-          ...call.args,
-          file_path: normalizeWorkspaceRelativePath(file.trim()),
-        };
+        input = { ...call.args };
+        const filePathError =
+          'Hosted file tools require file_path relative to the saved Session working directory. Absolute paths and ".." traversal are not allowed. Correct file_path and retry.';
+        if (typeof file !== 'string') {
+          validationError = filePathError;
+        } else {
+          try {
+            input['file_path'] = normalizeWorkspaceRelativePath(file.trim());
+          } catch (cause) {
+            if (!(cause instanceof InvalidWorkspaceRelativePathError))
+              throw cause;
+            validationError = filePathError;
+          }
+        }
       }
       const payloadJson = JSON.stringify(
         mcpInput ?? {
@@ -281,7 +292,7 @@ export class HostedWorkspaceToolTurn {
           request.call.callId,
           [],
           request.validationError ??
-            'This tool was not executed because another call in the batch has invalid Shell arguments. Retry the batch with corrected arguments.',
+            'This tool was not executed because another call in the batch has invalid arguments. Retry the batch with corrected arguments.',
         ),
       );
       if (!this.messageFitsInline('tool_result', responses, model))

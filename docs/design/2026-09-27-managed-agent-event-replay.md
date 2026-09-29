@@ -83,7 +83,9 @@ correct `cursor_expired` or resync.
   the frame can be older than the Snapshot the client then reads.
 - The WebShell transcript states what it already returned: without a cursor, a
   Session with a Snapshot gets all of its Items, the events up to the Snapshot
-  other than input, text-delta and tool-call updates, and every later event;
+  other than `turn.accepted`, `item.output_text.delta`,
+  `item.reasoning.delta` and `item.tool_call.updated`, which the Items already
+  hold, and every later event;
   `limit` bounds the event pages otherwise.
 - `PublicEvent` and `WebShellEvent` state that events replay with the versions
   and identity they were accepted with, except after a `stream.reconciled`
@@ -120,8 +122,10 @@ key; other events need no read. `data.contentPartId` is left as it was, and
 clients should use the top-level field.
 
 Flyway V15 is a Java migration that gives the events written before V14 their
-identity with the same rule, one Session at a time in sequence order and in
-pages of 5,000 events, so its memory does not grow with a Session's length. It
+identity with the same rule. It lists the Sessions from their own table in
+pages of 1,000 and reads each Session's events in sequence order in pages of
+5,000, so its memory grows neither with the number of Sessions nor with a
+Session's length. It
 reads `data_json` only for the four event types that have an identity, and it
 writes
 each run of consecutive events with the same identity, such as one text Part,
@@ -209,13 +213,15 @@ reloads the transcript and resumes after its `lastSequence`, as it does after
   - a catch-up that races a writer and hands over to live events without gaps
     or duplicates;
   - a stuck stream that falls behind by 600 events, more than the 512 the hub
-    keeps, and reads the dropped ones back from the store;
+    keeps (the test asserts this), reads the dropped ones back from the store
+    and sends no resync frame;
   - a floor raised past a lagging stream, which then sends one resync frame
     after the last event it delivered;
   - expired cursors on the JSON query and on both streams, and the floor's cap
     and monotonicity.
 
-  The suite sets both the poll and the heartbeat interval to one minute, so an
+  The stuck-stream and lagging-stream cases run on each stream, since each has
+  its own delivery loop, and resume from a non-zero cursor. The suite sets both the poll and the heartbeat interval to one minute, so an
   idle stream does not read the store during a test and live events can reach
   it only through the hub.
 
@@ -228,15 +234,16 @@ reloads the transcript and resumes after its `lastSequence`, as it does after
   `ManagedAgentMySqlIT` runs the same upgrade on MySQL and checks the replay
   floor there.
 - The web-shell tests decode a resync frame and check that the provider yields
-  one `stream_gap` and stops.
+  one `stream_gap` and stops, and that the session hook then reloads the
+  transcript and resubscribes after its `lastSequence`.
 
 ## 6. Compatibility
 
 - Events gain fields and Sessions report the stored floor; nothing is removed.
 - The WebShell stream's `409` response leaves the contract; the server never
   returned it.
-- V14 adds columns with defaults. V15 lists the Sessions that have events,
-  reads each Session's events once in pages, all in the migration's
+- V14 adds columns with defaults. V15 lists the Sessions in pages, reads each
+  Session's events once in pages, all in the migration's
   transaction, and updates each run of events with one statement. On a local MariaDB it migrated 200,000 events in 100 Sessions
   in under three seconds; a table with many short runs takes longer.
 - Upgrade all replicas together. A replica that still runs the previous

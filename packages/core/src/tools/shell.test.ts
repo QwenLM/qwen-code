@@ -18,9 +18,9 @@ import {
 } from 'vitest';
 
 const mockShellExecutionService = vi.hoisted(() => vi.fn());
-const mockExecuteBwrap = vi.hoisted(() => vi.fn());
-vi.mock('../sandbox/bwrap-execution.js', () => ({
-  executeBwrap: mockExecuteBwrap,
+const mockExecuteSandbox = vi.hoisted(() => vi.fn());
+vi.mock('../sandbox/execute-sandbox.js', () => ({
+  executeSandbox: mockExecuteSandbox,
 }));
 vi.mock('../sandbox/runtime-shell-policy.js', () => ({
   assertShellSandboxCwd: vi.fn(),
@@ -102,6 +102,7 @@ import { ToolErrorType } from './tool-error.js';
 import { runWithToolCallSource } from '../code-mode/tool-call-runtime.js';
 import { OUTPUT_UPDATE_INTERVAL_MS, parseNumstat } from './shell.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
+import { assertShellSandboxCwd } from '../sandbox/runtime-shell-policy.js';
 import { PermissionManager } from '../permissions/permission-manager.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
 
@@ -322,7 +323,7 @@ describe('ShellTool', () => {
         filesystem: 'workspace-write',
         network: 'closed',
       });
-      mockExecuteBwrap.mockResolvedValue({
+      mockExecuteSandbox.mockResolvedValue({
         pid: 12345,
         result: Promise.resolve({
           rawOutput: Buffer.alloc(0),
@@ -338,6 +339,21 @@ describe('ShellTool', () => {
       });
     });
 
+    it('rejects a directory the sandbox will not admit at build time', () => {
+      vi.mocked(assertShellSandboxCwd).mockImplementationOnce(() => {
+        throw new Error('outside');
+      });
+      expect(() =>
+        shellTool.build({
+          command: 'ls',
+          directory: '/elsewhere',
+          is_background: false,
+        }),
+      ).toThrow(
+        "Directory '/elsewhere' must be an existing directory inside the execution sandbox workspace.",
+      );
+    });
+
     it('runs sed through the backend without host preview or write', async () => {
       const invocation = shellTool.build({
         command: "sed -i 's/old/new/' file.txt",
@@ -348,7 +364,7 @@ describe('ShellTool', () => {
           .type,
       ).toBe('exec');
       await invocation.execute(new AbortController().signal);
-      expect(mockExecuteBwrap).toHaveBeenCalledOnce();
+      expect(mockExecuteSandbox).toHaveBeenCalledOnce();
       expect(mockFileSystemService.readTextFile).not.toHaveBeenCalled();
       expect(mockFileSystemService.writeTextFile).not.toHaveBeenCalled();
       expect(mockShellExecutionService).not.toHaveBeenCalled();
@@ -375,16 +391,16 @@ describe('ShellTool', () => {
             is_background: true,
           })
           .execute(new AbortController().signal);
-        expect(mockExecuteBwrap).toHaveBeenCalledTimes(3);
-        expect(mockExecuteBwrap.mock.calls[0][1].args).toEqual([
+        expect(mockExecuteSandbox).toHaveBeenCalledTimes(3);
+        expect(mockExecuteSandbox.mock.calls[0][1].args).toEqual([
           '-c',
           'git commit -m test',
         ]);
-        expect(mockExecuteBwrap.mock.calls[1][1].args).toEqual([
+        expect(mockExecuteSandbox.mock.calls[1][1].args).toEqual([
           '-c',
           'gh pr create --title test --body test',
         ]);
-        expect(mockExecuteBwrap.mock.calls[2][1].args).toEqual([
+        expect(mockExecuteSandbox.mock.calls[2][1].args).toEqual([
           '-c',
           'gh pr create --title background --body background',
         ]);
@@ -402,13 +418,15 @@ describe('ShellTool', () => {
         on: vi.fn(),
         destroy,
       } as unknown as fs.WriteStream);
-      mockExecuteBwrap.mockRejectedValueOnce(new Error('sandbox setup failed'));
+      mockExecuteSandbox.mockRejectedValueOnce(
+        new Error('sandbox setup failed'),
+      );
       await expect(
         shellTool
           .build({ command: 'echo test', is_background: true })
           .execute(new AbortController().signal),
       ).rejects.toThrow('sandbox setup failed');
-      expect(mockExecuteBwrap.mock.calls[0][4]).toBe(false);
+      expect(mockExecuteSandbox.mock.calls[0][4]).toBe(false);
       expect(destroy).toHaveBeenCalledOnce();
       expect(fs.rmSync).toHaveBeenCalledWith(
         expect.stringMatching(/\.output$/),
@@ -1213,42 +1231,17 @@ describe('ShellTool', () => {
       ).toThrow('Directory must be an absolute path.');
     });
 
-    it('should throw an error for a directory outside the workspace', async () => {
-      (mockConfig.getWorkspaceContext as Mock).mockReturnValue(
-        createMockWorkspaceContext('/test/dir', ['/another/workspace']),
-      );
-      expect(() =>
+    // The workspace boundary is a permission question (see
+    // getDefaultPermission), so YOLO can approve it instead of the build
+    // rejecting it outright.
+    it('should build an invocation for a directory outside the workspace', async () => {
+      expect(
         shellTool.build({
           command: 'ls',
           directory: '/not/in/workspace',
           is_background: false,
         }),
-      ).toThrow(
-        "Directory '/not/in/workspace' is not within any of the registered workspace directories.",
-      );
-    });
-
-    it('should reject sibling-prefix directories outside the workspace', async () => {
-      const workspaceContext = createMockWorkspaceContext('/test/dir', [
-        '/tmp/project',
-      ]);
-      vi.mocked(workspaceContext.isPathWithinWorkspace).mockReturnValue(false);
-      (mockConfig.getWorkspaceContext as Mock).mockReturnValue(
-        workspaceContext,
-      );
-
-      expect(() =>
-        shellTool.build({
-          command: 'ls',
-          directory: '/tmp/project-other',
-          is_background: false,
-        }),
-      ).toThrow(
-        "Directory '/tmp/project-other' is not within any of the registered workspace directories.",
-      );
-      expect(workspaceContext.isPathWithinWorkspace).toHaveBeenCalledWith(
-        '/tmp/project-other',
-      );
+      ).toBeDefined();
     });
 
     it('should throw an error for a directory within the user skills directory', async () => {
@@ -8844,6 +8837,24 @@ describe('ShellTool', () => {
       const permission = await invocation.getDefaultPermission();
 
       expect(permission).toBe('allow');
+    });
+
+    it('asks for a read-only command only when its directory is outside the workspace', async () => {
+      const build = (directory: string) =>
+        shellTool.build({ command: 'ls -la', directory, is_background: false });
+      expect(await build('/test/dir/subdir').getDefaultPermission()).toBe(
+        'allow',
+      );
+
+      // Sibling prefix of the /test/dir workspace, so still outside it.
+      const outside = build('/test/dir-other');
+      expect(await outside.getDefaultPermission()).toBe('ask');
+      const details = (await outside.getConfirmationDetails(
+        new AbortController().signal,
+      )) as { warnings?: string[] };
+      expect(details.warnings ?? []).toContain(
+        'Runs outside the workspace in /test/dir-other',
+      );
     });
 
     // Regression coverage for PR #4386 round 6 (cid 3298521039): the
