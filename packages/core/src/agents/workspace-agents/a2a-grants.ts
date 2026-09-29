@@ -22,6 +22,7 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 
 import {
+  isValidId,
   readAgentWorkspace,
   updateAgentWorkspaceCallerGrants,
 } from './store.js';
@@ -62,8 +63,13 @@ export async function issueA2AGrant(
   now = Date.now(),
 ): Promise<IssuedGrant> {
   const { callerId, agentId } = input;
-  if (!callerId || !agentId) {
-    throw new Error('A grant needs a caller and an agent.');
+  // The same checks the store applies when it reads the record back: one bad
+  // grant written here would make the whole workspace record unreadable.
+  if (!isValidId(callerId) || !isValidId(agentId)) {
+    throw new Error('A grant needs a valid caller id and agent id.');
+  }
+  if (input.expiresAt !== undefined && !Number.isFinite(input.expiresAt)) {
+    throw new Error('A grant expiry must be a finite timestamp.');
   }
   const secret = randomBytes(32).toString('base64url');
   const grant: A2AGrant = {

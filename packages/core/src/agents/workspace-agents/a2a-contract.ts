@@ -18,7 +18,10 @@
  * exercised before any of that exists.
  */
 
-import { outstandingCloseObligations } from './thread-status.js';
+import {
+  LIVE_RUN_STATUSES,
+  outstandingCloseObligations,
+} from './thread-status.js';
 import type { Thread, ThreadStatus } from './types.js';
 
 /**
@@ -120,13 +123,6 @@ export function toA2ATaskState(status: ThreadStatus): A2ATaskState {
   }
 }
 
-const LIVE_RUN_STATUSES: ReadonlySet<string> = new Set([
-  'queued',
-  'running',
-  'finishing',
-  'cancelling',
-]);
-
 /**
  * The A2A task state an external caller sees.
  *
@@ -147,19 +143,24 @@ export function toExternalA2ATaskState(thread: Thread): A2ATaskState {
   if (thread.runs.some((run) => LIVE_RUN_STATUSES.has(run.status)))
     return 'TASK_STATE_WORKING';
   const outstanding = outstandingCloseObligations(thread);
-  // A wait on a subtask that is still live keeps the task working; one whose
-  // subtask is gone is what the thread status reports as blocked.
-  if (outstanding.some((obligation) => obligation.kind === 'waiting'))
-    return thread.status === 'in_progress'
-      ? 'TASK_STATE_WORKING'
-      : 'TASK_STATE_FAILED';
   const failed = outstanding.some(
     (obligation) =>
       obligation.kind === 'failure' ||
       obligation.kind === 'cancelled' ||
       obligation.kind === 'stranded',
   );
-  return failed ? 'TASK_STATE_FAILED' : 'TASK_STATE_COMPLETED';
+  if (failed) return 'TASK_STATE_FAILED';
+  // Decided from the obligations, not the status: `blocked` is also what a
+  // question or a review outranking a live wait resolves to. A wait keeps the
+  // task working while its subtask is live (`in_progress`); only a wait that
+  // is all that is left, with its subtask gone, is stranded.
+  if (outstanding.some((obligation) => obligation.kind === 'waiting')) {
+    if (thread.status === 'in_progress') return 'TASK_STATE_WORKING';
+    if (outstanding.every((obligation) => obligation.kind === 'waiting')) {
+      return 'TASK_STATE_FAILED';
+    }
+  }
+  return 'TASK_STATE_COMPLETED';
 }
 
 /**

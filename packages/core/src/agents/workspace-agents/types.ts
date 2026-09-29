@@ -399,14 +399,6 @@ export interface ThreadRun {
 }
 
 /**
- * A unit of work several agents and people share.
- *
- * Stored one file per thread under the per-project runtime dir — not the
- * working tree. Thread text is written by agents and fed to other agents, so
- * it is a prompt-injection surface by construction; keeping it out of the
- * repo means it is never committed, pulled, or reviewed as if it were code.
- */
-/**
  * Provenance of a thread raised by an external A2A caller.
  *
  * Lives on the thread rather than in an index of its own so there is one
@@ -436,6 +428,14 @@ export interface ExternalIntake {
   receivedAt: number;
 }
 
+/**
+ * A unit of work several agents and people share.
+ *
+ * Stored one file per thread under the per-project runtime dir — not the
+ * working tree. Thread text is written by agents and fed to other agents, so
+ * it is a prompt-injection surface by construction; keeping it out of the
+ * repo means it is never committed, pulled, or reviewed as if it were code.
+ */
 export interface Thread {
   schemaVersion: typeof AGENTS_SCHEMA_VERSION;
   id: string;

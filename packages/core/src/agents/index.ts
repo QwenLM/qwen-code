@@ -41,11 +41,6 @@ export type {
   HostRunAssignment,
   HostRunResult,
 } from './workspace-agents/host-lease.js';
-export {
-  issueA2AGrant,
-  revokeA2AGrant,
-  listA2AGrants,
-} from './workspace-agents/a2a-grants.js';
 export type {
   A2ATaskView,
   A2AAgentCard,

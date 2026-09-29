@@ -95,7 +95,9 @@ export const COLLAB_MESSAGES_EN: Record<string, CollabMessage> = {
   'collab.share.token': 'Token',
   'collab.share.try': 'Try it',
   'collab.share.once':
-    'The token is shown only now. It expires in 7 days; revoke it here any time.',
+    'The token is shown only now; revoke it here any time.',
+  'collab.share.onceUntil': (v) =>
+    `The token is shown only now. It expires on ${v?.date}; revoke it here any time.`,
   'collab.share.loopback':
     'This address only works on this computer. Open Web Shell through an address the caller can reach, then create the share.',
   'collab.share.active': (v) => `Active shares (${v?.count ?? 0})`,
@@ -463,7 +465,9 @@ export const COLLAB_MESSAGES_ZH: Record<string, CollabMessage> = {
   'collab.share.endpoint': 'A2A 地址',
   'collab.share.token': '令牌',
   'collab.share.try': '试一下',
-  'collab.share.once': '令牌只显示这一次，7 天后失效，随时可以在这里撤销。',
+  'collab.share.once': '令牌只显示这一次，随时可以在这里撤销。',
+  'collab.share.onceUntil': (v) =>
+    `令牌只显示这一次，${v?.date} 失效，随时可以在这里撤销。`,
   'collab.share.loopback':
     '这个地址只在本机可用。请用别人能访问到的地址打开 Web Shell，再生成分享。',
   'collab.share.active': (v) => `已分享（${v?.count ?? 0}）`,

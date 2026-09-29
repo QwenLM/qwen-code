@@ -613,7 +613,9 @@ export function ThreadChat({
     const latest = new Map<string, RunView>();
     for (const run of thread.runs) {
       const seen = latest.get(run.agentId);
-      if (!seen || (run.startedAt ?? 0) >= (seen.startedAt ?? 0))
+      // Same recency as `teamMembers`: a run that failed while still queued
+      // has no `startedAt` and must not lose to an older run that started.
+      if (!seen || runRecency(run) >= runRecency(seen))
         latest.set(run.agentId, run);
     }
     // A retried run waits in the queue without a start time, so "is it

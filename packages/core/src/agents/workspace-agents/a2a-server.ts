@@ -86,7 +86,7 @@ function taskView(thread: Thread): A2ATaskView {
     contextId: thread.rootThreadId,
     status: {
       state: toExternalA2ATaskState(thread),
-      timestamp: new Date().toISOString(),
+      timestamp: new Date(lastActivityAt(thread)).toISOString(),
     },
     // Namespaced by the extension URI so a client that does not implement the
     // extension has no reason to read it, and two extensions cannot collide.
@@ -95,10 +95,32 @@ function taskView(thread: Thread): A2ATaskView {
   };
 }
 
+/**
+ * `admit` gates new work and the card: the agent must still take work.
+ * `read` gates reading, listing and withdrawing tasks already submitted: a
+ * valid grant and an agent record that still exists are enough, so retiring
+ * or disabling an agent does not hide its callers' tasks or leave them
+ * uncancelable. Revoking or expiring the grant still hides them.
+ */
+type AuthorizeMode = 'admit' | 'read';
+
+/**
+ * When the task last changed, not when it was read: a poll must not report
+ * that the status just moved.
+ */
+function lastActivityAt(thread: Thread): number {
+  return Math.max(
+    thread.createdAt,
+    ...thread.messages.map((message) => message.at),
+    ...thread.runs.map((run) => run.endedAt ?? run.startedAt ?? run.queuedAt),
+  );
+}
+
 async function authorize(
   projectRoot: string,
   caller: A2ACaller,
   agentId: string,
+  mode: AuthorizeMode = 'admit',
 ): Promise<{ ok: true; agent: WorkspaceAgent } | { ok: false }> {
   const check = await checkA2AGrant(projectRoot, {
     callerId: caller.callerId,
@@ -111,7 +133,9 @@ async function authorize(
   // A grant naming an agent that is gone, retired or disabled is not a way in.
   // Checked after the secret so a caller with no valid grant learns nothing
   // about which agents exist.
-  if (!agent || !isAgentAddressable(agent)) return { ok: false };
+  if (!agent || (mode === 'admit' && !isAgentAddressable(agent))) {
+    return { ok: false };
+  }
   return { ok: true, agent };
 }
 
@@ -193,6 +217,7 @@ export async function a2aGetTask(
     projectRoot,
     caller,
     thread.externalIntake.targetAgentId,
+    'read',
   );
   // A revoked caller loses its own history too. Otherwise revocation would
   // stop new work while leaving the old readable indefinitely.
@@ -206,7 +231,7 @@ export async function a2aListTasks(
   caller: A2ACaller,
   agentId: string,
 ): Promise<A2AResult<A2ATaskView[]>> {
-  const auth = await authorize(projectRoot, caller, agentId);
+  const auth = await authorize(projectRoot, caller, agentId, 'read');
   if (!auth.ok) return { ok: false, kind: 'refused' };
   const threads = await listExternalThreadsForCaller(
     projectRoot,
@@ -245,6 +270,7 @@ export async function a2aCancelTask(
     projectRoot,
     caller,
     existing.externalIntake.targetAgentId,
+    'read',
   );
   if (!auth.ok) return { ok: false, kind: 'not_found' };
   const cancelled = await cancelExternalThreadForCaller(
