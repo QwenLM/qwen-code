@@ -4661,12 +4661,20 @@ export class CoreToolScheduler {
     this.recordAutoModeFallbackResolution(callId, outcome);
 
     if (outcome === ToolConfirmationOutcome.Cancel || signal.aborted) {
-      const reason =
-        payload?.cancelMessage ||
-        (outcome === ToolConfirmationOutcome.Cancel
+      const suppliedReason = payload?.cancelMessage?.trimEnd();
+      const reason = suppliedReason
+        ? /[.!?]$/.test(suppliedReason)
+          ? suppliedReason
+          : `${suppliedReason}.`
+        : outcome === ToolConfirmationOutcome.Cancel
           ? 'User did not allow tool call.'
-          : 'This tool call was cancelled before it ran.');
-      const cancelMessage = `${reason} ${TOOL_CANCELLATION_STOP_DIRECTIVE}`;
+          : 'This tool call was cancelled before it ran.';
+      // A caller-authored reason owns its next-step instruction. Appending the
+      // generic stop directive can contradict recovery guidance such as the
+      // stale plan-mode approval message, which explicitly asks for a new call.
+      const cancelMessage = suppliedReason
+        ? reason
+        : `${reason} ${TOOL_CANCELLATION_STOP_DIRECTIVE}`;
       this.setStatusInternal(callId, 'cancelled', cancelMessage, 'not_started');
       // Tool span is cancelled too — finalize it via setToolSpanCancelled
       // before pulling it out of the map so the status survives end().
