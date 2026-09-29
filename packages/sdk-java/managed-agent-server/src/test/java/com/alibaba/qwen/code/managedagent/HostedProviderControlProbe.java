@@ -65,6 +65,7 @@ final class HostedProviderControlProbe implements AutoCloseable {
                 forward(exchange);
             } catch (Throwable cause) {
                 failure.compareAndSet(null, cause);
+                cause.printStackTrace(System.err);
             } finally {
                 exchange.close();
             }
@@ -212,6 +213,8 @@ final class HostedProviderControlProbe implements AutoCloseable {
         else assertThat(row.get("execution_status")).isEqualTo("success");
         boolean released = phase.equals("released");
         if (released) {
+            assertThat(releases.getOrDefault(runtimeId, 0)).as("worker closures forwarded")
+                    .isEqualTo(session.get("fault").equals("release-reply") ? dropped + 1 : 1);
             assertThat(owner(session).get("holder_key")).isNull();
             assertThat(deactivations.getOrDefault(runtimeId, 0)).isEqualTo(1);
             assertThat(sessionState(session, runtimeId)).isEqualTo("RELEASED");

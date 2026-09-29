@@ -14,7 +14,10 @@ import {
   type ManagedToolPrepareResponse,
 } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
 import type { ManagedToolInvocationStatus } from '@qwen-code/qwen-code-core/tools/managed-tool-runtime.js';
-import { ManagedRuntimeBrokerClient } from '../../packages/cli/src/serve/broker-managed-runtime-provider.js';
+import {
+  ManagedRuntimeBrokerClient,
+  MANAGED_RUNTIME_BROKER_ROUTE_PREFIX,
+} from '../../packages/cli/src/serve/broker-managed-runtime-provider.js';
 import { waitUntil } from './hosted-harness-process.js';
 
 const configPath = process.argv[2];
@@ -41,7 +44,7 @@ const reports = config.sessions.map((session) => ({
 }));
 let current = reports[0];
 let proxyFailure: unknown;
-const prefix = '/internal/runtime-broker/v1/';
+const prefix = MANAGED_RUNTIME_BROKER_ROUTE_PREFIX + '/';
 const token = 'hosted-tools-broker-token';
 const proxy = createServer(async (req, res) => {
   try {
@@ -54,20 +57,24 @@ const proxy = createServer(async (req, res) => {
       body?.harnessSessionId ?? url.searchParams.get('harnessSessionId'),
       current.sessionId,
     );
-    if (url.pathname.endsWith('/executions:prepare'))
-      current.reservation = structuredClone(body);
     const start = url.pathname.endsWith(':start') && !('payloadJson' in body);
-    if (start) current.starts++;
+    const headers = new Headers();
+    for (const name of ['authorization', 'content-type'] as const) {
+      const value = req.headers[name];
+      if (value !== undefined) headers.set(name, value);
+    }
     const upstream = await fetch(url, {
       method: req.method,
-      headers: {
-        authorization: `Bearer ${token}`,
-        'content-type': 'application/json',
-      },
+      headers,
       ...(bytes.length ? { body: bytes } : {}),
       signal: AbortSignal.timeout(40_000),
     });
     const response = Buffer.from(await upstream.arrayBuffer());
+    if (upstream.status === 200) {
+      if (url.pathname.endsWith('/executions:prepare'))
+        current.reservation = structuredClone(body);
+      if (start) current.starts++;
+    }
     if (
       start &&
       current.fault === 'start-retry' &&
@@ -138,7 +145,6 @@ async function request(route: string, fields: object, expected = 200) {
 }
 
 async function changedReference() {
-  const reservation = structuredClone(current.reservation);
   for (const field of ['policyRevision', 'capabilityDigest', 'invocationId']) {
     const original = current.reference[field] as string;
     const replacement =
@@ -148,14 +154,13 @@ async function changedReference() {
     const rejected = await request(
       'executions:prepare',
       {
-        ...reservation,
+        ...current.reservation,
         reference: { ...current.reference, [field]: replacement },
       },
       409,
     );
     assert.equal(rejected.code, 'runtime_idempotency_conflict');
   }
-  current.reservation = reservation;
 }
 
 try {
@@ -343,7 +348,7 @@ try {
     );
     await evidence('released');
     assert.equal(await readFile(file, 'utf8'), 'xx');
-    if (!raw) assert.equal(current.starts, 2);
+    assert.equal(current.starts, raw ? 0 : 2);
     console.log(
       `FG6F_PROVIDER ${current.fault}: original=${current.executionCallId}, effect=once, released=true`,
     );
@@ -353,7 +358,7 @@ try {
   console.log('HOSTED_PROVIDER_FAULTS_OK');
 } catch (cause) {
   console.error('FG6F_PROVIDER ' + current.fault, JSON.stringify(current));
-  throw cause;
+  throw proxyFailure ?? cause;
 } finally {
   proxy.closeAllConnections();
   await new Promise<void>((resolve) => proxy.close(() => resolve()));

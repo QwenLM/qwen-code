@@ -27,6 +27,8 @@ Use deterministic, short append commands to distinguish duplicate physical
 execution from identical overwrites. Inspect the workspace proof and the SQL
 execution ledger independently of driver success markers. Invalid attempts must
 not change the reference, dispatch generation or original result.
+The same-key substitution probes change `policyRevision`, `capabilityDigest`
+and `invocationId`; the saved-reference assertion compares all seven fields.
 
 ## Fixture design
 
@@ -49,6 +51,8 @@ After uncertain release, retry through the public Broker route. Verify the
 original terminal execution remains readable, the closed worker cannot be
 reacquired, and storage ownership is relinquished only following acknowledged
 closure. All probes select the fixture's original session, lease and generation.
+Forwarded worker closures must equal the number of discarded replies plus one
+acknowledged closure, so a retry cannot skip the worker after a lost response.
 Keep diagnostics and cleanup effective on both successful and failed runs.
 
 ## Files and validation

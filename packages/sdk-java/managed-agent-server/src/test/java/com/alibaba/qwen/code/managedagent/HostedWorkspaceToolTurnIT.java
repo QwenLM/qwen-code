@@ -137,6 +137,7 @@ class HostedWorkspaceToolTurnIT {
     void providerRetriesKeepContractsAndCloseAdmissionOnMySql() throws Exception {
         assertThat(System.getProperty("mysql.url")).as("FG6f provider requires -Dmysql.url").startsWith("jdbc:mysql:");
         assertThat(System.getProperty("mysql.user")).as("FG6f provider requires -Dmysql.user").isNotBlank();
+        assertThat(System.getProperty("os.name").toLowerCase()).doesNotContain("windows");
         List<String> cases = List.of("start-retry", "raw-contract", "release-reply");
         String selected = System.getProperty("qwen.fg6f.provider.case");
         if (selected != null) {
