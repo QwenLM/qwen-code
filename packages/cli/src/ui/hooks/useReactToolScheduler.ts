@@ -32,6 +32,7 @@ import {
   ToolErrorType,
 } from '@qwen-code/qwen-code-core';
 import type { ResolvedGeneratorForModel } from '@qwen-code/qwen-code-core/core/baseLlmClient.js';
+import { TOOL_CANCELLED_BEFORE_EXECUTION_MESSAGE } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
 import * as path from 'node:path';
 import { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type {
@@ -254,7 +255,7 @@ export function useReactToolScheduler(
         error.message === 'Tool call cancelled while in queue.';
       const completeAsCancelled = async () => {
         const reason =
-          '[Operation Cancelled] Reason: Tool call cancelled before execution.';
+          `[Operation Cancelled] Reason: ${TOOL_CANCELLED_BEFORE_EXECUTION_MESSAGE}`;
         const cancelledCalls: CompletedToolCall[] = requests.map(
           (toolRequest) => ({
             status: 'cancelled',
