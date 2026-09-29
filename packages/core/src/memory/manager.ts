@@ -168,6 +168,42 @@ export interface ScheduleExtractParams {
   history: Content[];
   now?: Date;
   config?: Config;
+  /**
+   * Whether the conversation is still below the compaction warn threshold.
+   * Consulted only while a no-op cooldown is active: a skipped turn is safe
+   * only if the next extraction still sees it, and compaction would replace
+   * it with a summary first. Absent means "unknown", which never skips.
+   */
+  isBelowCompactionWarn?: () => boolean;
+}
+
+/**
+ * Internal experiment for #13004: after an extraction that ran, completed and
+ * wrote nothing, skip this many following user turns. The extractor reads the
+ * whole conversation, so the skipped turns are still in front of the next
+ * run. Default 0 keeps today's once-per-turn cadence; not a user setting until
+ * a paired run shows memory quality is unchanged.
+ */
+export const EXTRACT_NOOP_COOLDOWN_TURNS_ENV =
+  'QWEN_CODE_MEMORY_EXTRACT_NOOP_COOLDOWN_TURNS';
+export const MAX_EXTRACT_NOOP_COOLDOWN_TURNS = 5;
+
+/**
+ * Reads {@link EXTRACT_NOOP_COOLDOWN_TURNS_ENV}: a non-negative integer,
+ * clamped to {@link MAX_EXTRACT_NOOP_COOLDOWN_TURNS}. Anything else is ignored
+ * with a debug warning and falls back to 0 (off).
+ */
+export function resolveExtractNoopCooldownTurns(): number {
+  const raw = process.env[EXTRACT_NOOP_COOLDOWN_TURNS_ENV]?.trim();
+  if (!raw) return 0;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 0) {
+    debugLogger.warn(
+      `Ignoring ${EXTRACT_NOOP_COOLDOWN_TURNS_ENV}=${raw}: expected a non-negative integer.`,
+    );
+    return 0;
+  }
+  return Math.min(value, MAX_EXTRACT_NOOP_COOLDOWN_TURNS);
 }
 
 export interface ScheduleSkillReviewParams {
@@ -655,6 +691,9 @@ export class MemoryManager {
     string,
     { taskId: string; params: ScheduleExtractParams }
   >();
+  // User turns still to skip after a completed no-op, per project (#13004).
+  // Process-local on purpose: a restart resets it to "run", the safe side.
+  private readonly extractCooldownRemaining = new Map<string, number>();
 
   // ── Skill-review in-flight dedup ─────────────────────────────────────────────
   private readonly skillReviewInFlightByProject = new Map<string, string>();
@@ -1132,6 +1171,17 @@ export class MemoryManager {
       } as never;
     }
 
+    const cooldown = this.extractCooldownRemaining.get(params.projectRoot) ?? 0;
+    if (cooldown > 0) {
+      if (params.isBelowCompactionWarn?.() === true) {
+        this.extractCooldownRemaining.set(params.projectRoot, cooldown - 1);
+        return this.recordExtractCooldownSkip(params, cooldown - 1) as never;
+      }
+      // Near compaction, or no way to tell: run now so the turns this
+      // cooldown skipped reach an extractor before a summary replaces them.
+      this.extractCooldownRemaining.delete(params.projectRoot);
+    }
+
     if (this.extractRunning.has(params.projectRoot)) {
       const currentTaskId = this.extractCurrentTaskId.get(params.projectRoot);
       if (!currentTaskId) {
@@ -1232,6 +1282,71 @@ export class MemoryManager {
     );
   }
 
+  private recordExtractCooldownSkip(
+    params: ScheduleExtractParams,
+    remaining: number,
+  ): Awaited<ReturnType<typeof runAutoMemoryExtract>> {
+    const record = makeTaskRecord(
+      'extract',
+      params.projectRoot,
+      params.sessionId,
+    );
+    this.storeWith(record, {
+      status: 'skipped',
+      progressText:
+        'Skipped: the last extraction found nothing durable; this turn is left for the next one.',
+      metadata: {
+        skippedReason: 'cooldown',
+        cooldownRemaining: remaining,
+        historyLength: params.history.length,
+      },
+    });
+    if (params.config) {
+      logMemoryExtract(
+        params.config,
+        new MemoryExtractEvent({
+          trigger: 'auto',
+          status: 'skipped',
+          skipped_reason: 'cooldown',
+          patches_count: 0,
+          touched_topics: [],
+          duration_ms: 0,
+        }),
+      );
+    }
+    return {
+      touchedTopics: [],
+      skippedReason: 'cooldown',
+      cursor: {
+        sessionId: params.sessionId,
+        updatedAt: (params.now ?? new Date()).toISOString(),
+      },
+    };
+  }
+
+  /**
+   * Arms the no-op cooldown only after an extraction that ran, completed,
+   * wrote nothing and advanced its cursor. A write, an early return with no
+   * extractor run, or a cursor held back by the zero-tool-call guard all
+   * clear it, so the next turn runs as today. Skipped results leave it as is.
+   */
+  private updateExtractCooldown(
+    params: ScheduleExtractParams,
+    result: Awaited<ReturnType<typeof runAutoMemoryExtract>>,
+  ): void {
+    if (result.skippedReason) return;
+    const completedNoop =
+      result.extractorRan === true &&
+      result.touchedTopics.length === 0 &&
+      result.cursor.processedOffset === params.history.length;
+    const turns = completedNoop ? resolveExtractNoopCooldownTurns() : 0;
+    if (turns > 0) {
+      this.extractCooldownRemaining.set(params.projectRoot, turns);
+    } else {
+      this.extractCooldownRemaining.delete(params.projectRoot);
+    }
+  }
+
   private async runExtract(
     taskId: string,
     params: ScheduleExtractParams,
@@ -1282,6 +1397,7 @@ export class MemoryManager {
       }
 
       const result = await runAutoMemoryExtract(params);
+      this.updateExtractCooldown(params, result);
       if (result.touchedUserScope && params.config) {
         await this.recordUserMutation(
           params.projectRoot,
@@ -1322,6 +1438,8 @@ export class MemoryManager {
       }
       return result;
     } catch (error) {
+      // A failed, aborted or MAX_TURNS run throws; the next turn retries.
+      this.extractCooldownRemaining.delete(params.projectRoot);
       const durationMs = Date.now() - t0;
       this.update(record, {
         status: 'failed',

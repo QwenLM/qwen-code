@@ -41,9 +41,17 @@ export interface AutoMemoryExtractResult {
     | 'queued'
     | 'memory_tool'
     | 'memory_pressure'
-    | 'session_mismatch';
+    | 'session_mismatch'
+    | 'cooldown';
   systemMessage?: string;
   cursor: AutoMemoryExtractCursor;
+  /**
+   * True when the extraction agent actually ran and completed. Absent on every
+   * early return (no new user messages, session mismatch), which otherwise
+   * share a no-op's shape; the cooldown in `MemoryManager` must not treat
+   * those as a completed no-op (#13004).
+   */
+  extractorRan?: true;
 }
 
 function getSessionMismatchResult(
@@ -258,5 +266,6 @@ export async function runAutoMemoryExtract(params: {
     touchedUserScope: agentResult.touchedUserScope,
     cursor,
     systemMessage: agentResult.systemMessage,
+    extractorRan: true,
   };
 }

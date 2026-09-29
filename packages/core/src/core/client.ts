@@ -57,6 +57,7 @@ import {
 import { formatStopHookBlockingCapWarning } from '../hooks/stopHookCap.js';
 import { buildContextUsage } from '../hooks/context-usage.js';
 import { DEFAULT_TOKEN_LIMIT, tokenLimit } from './tokenLimits.js';
+import { computeThresholds } from '../services/chatCompressionService.js';
 import { createSessionStartProfiler } from './session-start-profiler.js';
 
 const debugLogger = createDebugLogger('CLIENT');
@@ -1489,6 +1490,24 @@ export class LlmClient {
   }
 
   /** @internal */
+  /**
+   * Whether the last prompt sits below the compaction warn threshold, so the
+   * next send cannot auto-compact the conversation an extraction has yet to
+   * read (#13004). Unknown counts as not below.
+   */
+  private isBelowCompactionWarn(): boolean {
+    const promptTokens = this.chat?.getLastPromptTokenCount() ?? 0;
+    if (promptTokens <= 0) return false;
+    const window =
+      this.config.getContentGeneratorConfig()?.contextWindowSize ??
+      DEFAULT_TOKEN_LIMIT;
+    const { warn } = computeThresholds(
+      window,
+      this.config.getAutoCompactThreshold(),
+    );
+    return promptTokens < warn;
+  }
+
   resetManagedAutoMemoryAfterCompression(): void {
     this.resetManagedAutoMemoryDeliveryState();
     this.config.getMemoryManager().resetExhaustedBodyRefsForCurrentTurn();
@@ -3125,6 +3144,7 @@ export class LlmClient {
         sessionId,
         history,
         config: this.config,
+        isBelowCompactionWarn: () => this.isBelowCompactionWarn(),
       })
       .then((result) => result.touchedTopics.length)
       .catch((error: unknown) => {
