@@ -30,6 +30,10 @@ import {
 import { ToolNames } from '../tools/tool-names.js';
 import { createMemoryScopedAgentConfig } from './memory-scoped-agent-config.js';
 import { renderWriterKeywordVocabularySnapshot } from './writer-keyword-vocabulary.js';
+import {
+  formatDateForContext,
+  stripSystemReminderBlocks,
+} from '../core/environmentContext.js';
 
 const MAX_TOPIC_SUMMARY_CHARS = 280;
 
@@ -78,32 +82,45 @@ export interface AutoMemoryExtractionExecutionResult {
 }
 
 /**
- * Ensure the history slice ends with a `model` text message so that
- * agent-headless can send the task prompt as the first user turn without
- * creating consecutive user messages (Gemini API constraint).
- *
- * - Trailing `user` message: drop it.
- * - Last `model` message has open function calls: close them with placeholder
- *   responses and append a model ack so the sequence stays valid.
- * - Otherwise: return a shallow copy as-is.
+ * Drop runtime reminders and hidden reasoning while preserving tool traffic,
+ * which tells the extractor when the turn only read existing memory.
+ * The resulting history must end with a model text message.
  */
 function buildAgentHistory(history: Content[]): Content[] {
-  if (history.length === 0) return [];
-  const last = history[history.length - 1];
-  if (last.role !== 'model') {
-    return history.slice(0, -1);
+  const sanitized = history.flatMap((message) => {
+    const parts = (message.parts ?? []).flatMap((part) => {
+      if (part.thought) return [];
+      if (typeof part.text !== 'string') return [part];
+      const text = stripSystemReminderBlocks(part.text).trim();
+      return text ? [{ ...part, text }] : [];
+    });
+    return parts.length > 0 ? [{ ...message, parts }] : [];
+  });
+  if (sanitized.length === 0) return [];
+  const last = sanitized[sanitized.length - 1];
+  if (last.role === 'model') {
+    const openCalls = (last.parts ?? []).filter((part) => part.functionCall);
+    if (openCalls.length === 0) return sanitized;
+    return [
+      ...sanitized,
+      {
+        role: 'user' as const,
+        parts: buildFunctionResponseParts(
+          last,
+          'Background extraction started.',
+        ),
+      },
+      { role: 'model' as const, parts: [{ text: 'Acknowledged.' }] },
+    ];
   }
-  const openCalls = (last.parts ?? []).filter((p) => p.functionCall);
-  if (openCalls.length === 0) {
-    return [...history];
-  }
-  const toolResponses = buildFunctionResponseParts(
-    last,
-    'Background extraction started.',
-  );
+  // The tail is a `user` turn — an unanswered prompt or tool responses.
+  // Sanitization above can delete whole messages, so this turn may be the one
+  // that triggered extraction; popping it would silently cost the extractor
+  // the most recent content and can also leave an earlier `functionCall`
+  // dangling at the tail. Appending the model ack satisfies the same
+  // user/model alternation the task prompt needs without discarding anything.
   return [
-    ...history,
-    { role: 'user' as const, parts: toolResponses },
+    ...sanitized,
     { role: 'model' as const, parts: [{ text: 'Acknowledged.' }] },
   ];
 }
@@ -178,7 +195,14 @@ function buildTaskPrompt(
     '',
     'Scan the recent conversation history in your context and update durable managed memory in whichever directory each memory belongs.',
     '',
-    'Available tools in this run: `read_file`, `grep_search`, `glob`, read-only `run_shell_command`, and `write_file`/`edit` for paths inside EITHER managed memory directory above.',
+    // Inherited history is scrubbed of `<system-reminder>` blocks above, and
+    // those are the only place a date reaches the model (the startup prelude
+    // and the per-turn refresh). Passing extraHistory also suppresses the
+    // fork's own env bootstrap, so the date has to be stated here or the
+    // "convert relative dates to absolute ones" instruction is unanswerable.
+    `Today's date is ${formatDateForContext()} — use it to turn any relative date in the history into an absolute one before saving.`,
+    '',
+    'Available tools in this run: `read_file`, `grep_search`, `glob`, and `write_file`/`edit` for paths inside EITHER managed memory directory above.',
     '- Do not use any other tools.',
     '- You have a limited turn budget. `edit` requires a prior `read_file` of the same file, so the efficient strategy is: first issue all reads in parallel for every file you might update; then issue all `write_file`/`edit` calls in parallel. Do not interleave reads and writes across multiple turns.',
     '- You MUST only use content from the recent conversation history in your context plus the current managed memory files.',
@@ -289,8 +313,15 @@ export async function runAutoMemoryExtractionByAgent(
   const projectMemoryRoot = getAutoMemoryRoot(projectRoot);
   const userMemoryRoot = getUserAutoMemoryRoot();
   const scopedConfig = createMemoryScopedAgentConfig(config, projectRoot, {
-    allowShell: true,
     protectPinnedMemory: true,
+    // Same read confinement the two sibling memory agents pass for this
+    // read-only-memory job (remember.ts, user-dream-agent-planner.ts). The task
+    // prompt already forbids inspecting repository code; without this the
+    // prompt would be the only thing standing between the inherited (untrusted)
+    // history and read_file/grep_search over the whole filesystem. Reads inside
+    // both managed memory roots stay allowed, and `buildExistingMemoryContext`
+    // above runs in the parent, so this does not narrow the parent's own scan.
+    restrictReadsToMemoryPaths: true,
   });
 
   const result = await runForkedAgent({
@@ -309,7 +340,6 @@ export async function runAutoMemoryExtractionByAgent(
       ToolNames.READ_FILE,
       ToolNames.GREP,
       ToolNames.GLOB,
-      ToolNames.SHELL,
       ToolNames.WRITE_FILE,
       ToolNames.EDIT,
     ],

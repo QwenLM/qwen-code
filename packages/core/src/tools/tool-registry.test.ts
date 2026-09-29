@@ -1155,10 +1155,8 @@ describe('ToolRegistry', () => {
     });
 
     it('getDeferredToolSummary is empty in CodeModeOnly', () => {
-      // Both consumers of this summary — the startup deferred-tools reminder
-      // and the added-MCP-tools reminder — tell the model to reach the listed
-      // tools through ToolSearch, which CodeModeOnly hides. The MCP tool below
-      // is the one the previous test proves IS reported in Direct mode.
+      // Code Mode discovers tools without a startup catalog or Direct-mode
+      // bridge reminders.
       const codeModeConfig = new Config({
         ...baseConfigParams,
         codeModeOnly: true,

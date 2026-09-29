@@ -41,6 +41,7 @@ import {
   rowKeysInRange,
   type TimelineRange,
 } from '../../trajectory/timelineRange';
+import { summarizeTrajectory } from '../../trajectory/summarizeTrajectory';
 import { TrajectoryOverview } from './TrajectoryOverview';
 import styles from './TrajectoryPanel.module.css';
 
@@ -200,7 +201,7 @@ function labelOf(
       return {
         badge: row.block.toolName ?? t('trajectory.badge.tool'),
         ...(toolStatusTone(row) ? { badgeTone: toolStatusTone(row)! } : {}),
-        text: row.block.title || (row.block.toolName ?? ''),
+        text: `${row.block.title || (row.block.toolName ?? '')}${toolStatusTone(row) === styles.toneError ? ` · ${t('trajectory.toolFailed')}` : ''}`,
       };
     default:
       return otherLabel(row.block, t);
@@ -476,24 +477,50 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
     [moveSelection, range, selectedIndex, setRange, visualRows],
   );
 
-  const totals = useMemo(() => {
-    if (!trajectory) return undefined;
-    let requests = 0;
-    let tools = 0;
-    let durationMs = 0;
-    for (const turn of trajectory.turns) {
-      requests += turn.requestCount;
-      tools += turn.toolCount;
-      durationMs += turn.requestMs;
-    }
-    return { turns: trajectory.turns.length, requests, tools, durationMs };
-  }, [trajectory]);
+  const summary = useMemo(
+    () => (trajectory ? summarizeTrajectory(trajectory) : undefined),
+    [trajectory],
+  );
+  const selectedEntry = visualRows.find((entry) => entry.key === selectedKey);
+  const selectedText = selectedEntry
+    ? selectedEntry.kind === 'turn'
+      ? t('trajectory.selected.turn', {
+          index: selectedEntry.turn.index,
+          requests: selectedEntry.turn.requestCount,
+          tools: selectedEntry.turn.toolCount,
+          duration:
+            selectedEntry.turn.requestCount > 0
+              ? formatDuration(selectedEntry.turn.requestMs)
+              : t('trajectory.unrecorded'),
+        })
+      : selectedEntry.row.kind === 'request' ||
+          selectedEntry.row.kind === 'tool'
+        ? t('trajectory.selected.timed', {
+            name: labelOf(selectedEntry.row, t).text.slice(0, 80),
+            duration:
+              selectedEntry.row.timing === undefined
+                ? t('trajectory.unrecorded')
+                : formatDuration(selectedEntry.row.timing.durationMs),
+            ttft:
+              selectedEntry.row.kind === 'request' &&
+              selectedEntry.row.timing.ttftMs !== undefined
+                ? ` · ${t('trajectory.ttft', { duration: formatDuration(selectedEntry.row.timing.ttftMs) })}`
+                : '',
+          })
+        : t('trajectory.selected.untimed', {
+            name: labelOf(selectedEntry.row, t).text.slice(0, 80),
+          })
+    : t('trajectory.selected.none');
 
   const empty = status === 'ready' && visualRows.length === 0;
   const timingAbsent =
     trajectory !== undefined &&
     trajectory.rows.length > 0 &&
     !hasAnyTiming(trajectory);
+  const allStartsMissing =
+    summary !== undefined &&
+    summary.plottedCount === 0 &&
+    summary.missingStartCount > 0;
   const rangeCounts = useMemo(() => {
     if (!range || !trajectory) return undefined;
     return {
@@ -548,6 +575,15 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
   const describeSpan = useCallback(
     (span: TimelineSpan) => {
       const parts = [labelOf(span.row, t).text];
+      const startedAt =
+        span.row.kind === 'request' || span.row.kind === 'tool'
+          ? span.row.timing?.startedAt
+          : undefined;
+      if (startedAt !== undefined) {
+        parts.push(
+          `${new Date(startedAt).toLocaleString()}–${new Date(startedAt + span.end - span.start).toLocaleString()}`,
+        );
+      }
       parts.push(formatDuration(span.end - span.start));
       if (span.ttftEnd !== undefined) {
         parts.push(
@@ -565,20 +601,12 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
     <div className={styles.panel} data-testid="trajectory-panel">
       <div className={styles.header}>
         <div className={styles.summary}>
-          {rangeCounts ? (
-            <span data-testid="trajectory-range-status" role="status">
-              {t('trajectory.range.status', rangeCounts)}
-            </span>
-          ) : totals ? (
+          {summary ? (
             <span data-testid="trajectory-totals">
               {t('trajectory.totals', {
-                turns: totals.turns,
-                requests: totals.requests,
-                tools: totals.tools,
-                duration:
-                  totals.durationMs > 0
-                    ? formatDuration(totals.durationMs)
-                    : '—',
+                turns: summary.turnCount,
+                requests: summary.requestCount,
+                tools: summary.toolCount,
               })}
             </span>
           ) : (
@@ -611,13 +639,68 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
         </div>
       </div>
 
+      <div className={styles.metrics} data-testid="trajectory-metrics">
+        {(
+          [
+            ['elapsed', summary?.elapsedMs],
+            ['active', summary?.activeMs],
+            ['main', summary?.mainRequestMs],
+          ] as const
+        ).map(([key, value]) => (
+          <div className={styles.metric} key={key}>
+            <span>{t(`trajectory.metric.${key}`)}</span>
+            <strong
+              aria-label={
+                value === undefined ? t('trajectory.unrecorded') : undefined
+              }
+              title={
+                value === undefined ? t('trajectory.unrecorded') : undefined
+              }
+            >
+              {value === undefined ? '—' : formatDuration(value)}
+            </strong>
+          </div>
+        ))}
+        <div
+          className={styles.failureCounts}
+          data-has-failures={
+            summary && summary.requestFailures + summary.toolFailures > 0
+              ? 'true'
+              : undefined
+          }
+        >
+          {summary
+            ? t('trajectory.failures', {
+                requests: summary.requestFailures,
+                tools: summary.toolFailures,
+              })
+            : '—'}
+        </div>
+        <details className={styles.metricHelp}>
+          <summary>{t('trajectory.metric.help')}</summary>
+          <div className={styles.metricHelpContent}>
+            <p>{t('trajectory.metric.scope')}</p>
+            <p>{t('trajectory.metric.elapsed.help')}</p>
+            <p>{t('trajectory.metric.active.help')}</p>
+            <p>{t('trajectory.metric.main.help')}</p>
+            <p>{t('trajectory.metric.missing.help')}</p>
+          </div>
+        </details>
+      </div>
+
       {/* Mounted from the start at a fixed height, whatever it holds: it is a
           flex sibling of the scrolled rows, so a box that appeared or grew
           would move every row under the reader. The no-timing notice lives
           inside it for the same reason. */}
       <TrajectoryOverview
         model={timeline}
-        {...(timingAbsent ? { notice: t('trajectory.noTiming') } : {})}
+        {...(timingAbsent || allStartsMissing
+          ? {
+              notice: t(
+                allStartsMissing ? 'trajectory.noStart' : 'trajectory.noTiming',
+              ),
+            }
+          : {})}
         selectedKey={selectedKey}
         onSelect={selectSpan}
         describe={describeSpan}
@@ -626,23 +709,77 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
         onModeChange={setMode}
       />
 
-      {error !== undefined && (
-        <div className={styles.error} role="alert">
-          <span>
-            {error.kind === 'partial'
-              ? t('trajectory.partial')
-              : t('trajectory.loadFailed', { message: error.message })}
-          </span>
-          <button
-            type="button"
-            className={styles.headerButton}
-            onClick={refresh}
-            disabled={status === 'loading'}
-          >
-            {t('common.retry')}
-          </button>
+      <div className={styles.context}>
+        <div
+          className={styles.selectedInfo}
+          data-testid="trajectory-selected"
+          aria-live="polite"
+        >
+          {selectedText}
         </div>
-      )}
+        <div
+          className={styles.contextNotice}
+          data-testid="trajectory-context-notice"
+          title={[
+            summary?.missingStartCount
+              ? t('trajectory.missingStart', {
+                  count: summary.missingStartCount,
+                })
+              : '',
+            summary?.missingTimingCount
+              ? t('trajectory.missingTiming', {
+                  count: summary.missingTimingCount,
+                })
+              : '',
+            truncated ? t('trajectory.truncated') : '',
+            error && trajectory ? t('trajectory.refreshStale') : '',
+          ]
+            .filter(Boolean)
+            .join(' · ')}
+        >
+          {rangeCounts && (
+            <span data-testid="trajectory-range-status" role="status">
+              {t('trajectory.range.status', rangeCounts)}
+            </span>
+          )}
+          {rangeCounts ? ' · ' : ''}
+          {[
+            olderFailureText,
+            error && trajectory ? t('trajectory.refreshStale') : '',
+            truncated && !olderFailureText ? t('trajectory.truncated') : '',
+            summary &&
+            (summary.missingStartCount > 0 || summary.missingTimingCount > 0)
+              ? t('trajectory.unplotted', {
+                  starts: summary.missingStartCount,
+                  timing: summary.missingTimingCount,
+                })
+              : '',
+          ]
+            .filter(Boolean)
+            .join(' · ') || (rangeCounts ? '' : '\u00a0')}
+        </div>
+      </div>
+
+      <div className={styles.errorSlot}>
+        {error !== undefined && (
+          <div className={styles.error} role="alert">
+            <span>
+              {trajectory ? `${t('trajectory.refreshStale')} · ` : ''}
+              {error.kind === 'partial'
+                ? t('trajectory.partial')
+                : t('trajectory.loadFailed', { message: error.message })}
+            </span>
+            <button
+              type="button"
+              className={styles.headerButton}
+              onClick={refresh}
+              disabled={status === 'loading'}
+            >
+              {t('common.retry')}
+            </button>
+          </div>
+        )}
+      </div>
 
       <div className={styles.tableWrap}>
         {visualRows.length === 0 ? (
@@ -813,7 +950,8 @@ function TurnHeaderRow({
         {t('trajectory.turnSummary', {
           requests: turn.requestCount,
           tools: turn.toolCount,
-          duration: turn.requestMs > 0 ? formatDuration(turn.requestMs) : '—',
+          duration:
+            turn.requestCount > 0 ? formatDuration(turn.requestMs) : '—',
         })}
       </span>
     </div>

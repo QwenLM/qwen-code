@@ -162,13 +162,11 @@ class ProcessCrashFaultGateTest {
     }
 
     /**
-     * Pins today's production behaviour. {@link LocalProcessRuntimeProvisioner}
+     * Pins the default ephemeral behaviour. {@link LocalProcessRuntimeProvisioner}
      * keeps worker ownership in memory, so a restarted Broker observes its
      * worker as UNKNOWN until the reconciliation deadline: the binding is
      * neither adopted nor retired, and the orphaned worker keeps running.
-     * Recoverable local-process provisioning is follow-up work in the
-     * runtime-binding reconciliation design; this gate flips to adoption
-     * when it lands.
+     * DurableLocalRuntimeFaultGateTest covers the explicitly enabled durable mode.
      */
     @Test
     void theProductionProvisionerCannotAdoptAfterARestart()

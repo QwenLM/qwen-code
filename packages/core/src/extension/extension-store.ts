@@ -1646,7 +1646,7 @@ export class ExtensionStore {
     await fsp.mkdir(this.storeDir, { recursive: true, mode: 0o700 });
     const privateDirectories = [
       this.storeDir,
-      ...['staging', 'rollback', 'transactions'].map((directory) =>
+      ...STORE_TRANSACTION_DIRS.map((directory) =>
         path.join(this.storeDir, directory),
       ),
     ];

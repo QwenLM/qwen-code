@@ -3120,6 +3120,9 @@ export class Config {
   private readonly messageBusListeners = new Set<(bus: MessageBus) => void>();
   private readonly memoryManager: MemoryManager;
   private readonly modelChangeListeners = new Set<(model: string) => void>();
+  private readonly approvalModeChangeListeners = new Set<
+    (mode: ApprovalMode, prePlanMode: ApprovalMode | undefined) => void
+  >();
   // True on the Config that claimed the process-global QWEN_CODE_MODEL slot
   // (first in this process); gates the global write in publishModelEnv so no
   // other instance updates it. Per-session publishing is not gated on it.
@@ -4531,11 +4534,13 @@ export class Config {
     // Fire-and-forget sweep of stale ephemeral worktrees left behind by
     // earlier `agent` runs that exited before their cleanup helper ran
     // (Ctrl-C, process crash, abrupt shutdown). The sweep only touches
-    // `agent-<7hex>` slugs, skips anything newer than 30 days, and
-    // is fail-closed against tracked changes or unpushed commits — so
-    // running it on every startup cannot destroy user work. We do not
-    // await this: it is a hygiene task that must never delay the
-    // first model turn.
+    // `agent-<7hex>` slugs, skips anything newer than 30 days, and gates
+    // removal on worktreeHasWork — tracked, untracked and ignored content
+    // (minus disposable build output, symlinks whose targets live outside
+    // the checkout, and the session marker) all preserve the worktree, and
+    // any probe error fails closed — so running it on every startup cannot
+    // destroy user work in the checkout. We do not await this: it is a
+    // hygiene task that must never delay the first model turn.
     //
     // Anchor the sweep at the repo top-level so it scans the same
     // directory the worktree creators (`enter_worktree` and
@@ -6079,6 +6084,25 @@ export class Config {
     const model = this.getModel();
     for (const listener of this.modelChangeListeners) {
       listener(model);
+    }
+  }
+
+  onApprovalModeChange(
+    listener: (
+      mode: ApprovalMode,
+      prePlanMode: ApprovalMode | undefined,
+    ) => void,
+  ): () => void {
+    this.approvalModeChangeListeners.add(listener);
+    return () => {
+      this.approvalModeChangeListeners.delete(listener);
+    };
+  }
+
+  private notifyApprovalModeChangeListeners(): void {
+    if (isDerivedConfig(this)) return;
+    for (const listener of this.approvalModeChangeListeners) {
+      listener(this.approvalMode, this.prePlanMode);
     }
   }
 
@@ -8604,8 +8628,22 @@ export class Config {
         'Cannot enable privileged approval modes in an untrusted folder.',
       );
     }
-    this.setApprovalMode(enabled ? ApprovalMode.PLAN : executionMode);
-    this.planExecutionMode = enabled ? executionMode : undefined;
+    const previousMode = this.approvalMode;
+    const previousExecutionMode = this.planExecutionMode;
+    if (enabled) this.planExecutionMode = executionMode;
+    try {
+      this.setApprovalMode(enabled ? ApprovalMode.PLAN : executionMode);
+    } catch (error) {
+      this.planExecutionMode = previousExecutionMode;
+      throw error;
+    }
+    if (
+      enabled &&
+      previousMode === ApprovalMode.PLAN &&
+      previousExecutionMode !== executionMode
+    ) {
+      this.notifyApprovalModeChangeListeners();
+    }
   }
 
   getApprovalModeRevision(): number {
@@ -8654,6 +8692,8 @@ export class Config {
        * model was never told about, and queues a one-shot system reminder.
        */
       fromApprovedPlanExit?: boolean;
+      /** Suppress a synthetic restore exit notice without approving the plan. */
+      fromSessionRestore?: boolean;
     },
   ): void {
     // Specialized execution overlays install an own method that owns
@@ -8706,9 +8746,10 @@ export class Config {
     } else if (mode !== ApprovalMode.PLAN && fromMode === ApprovalMode.PLAN) {
       this.prePlanMode = undefined;
       noticeEvent.version++;
-      noticeEvent.kind = options?.fromApprovedPlanExit
-        ? 'clear'
-        : 'manual-exit';
+      noticeEvent.kind =
+        options?.fromApprovedPlanExit || options?.fromSessionRestore
+          ? 'clear'
+          : 'manual-exit';
       if (
         options?.fromApprovedPlanExit &&
         Object.getPrototypeOf(this) === Config.prototype
@@ -8749,6 +8790,9 @@ export class Config {
     if (mode !== ApprovalMode.PLAN) this.planExecutionMode = undefined;
     if (fromMode !== mode) {
       this.approvalModeRevision++;
+      if (!isDerivedConfig(this)) {
+        this.notifyApprovalModeChangeListeners();
+      }
     }
   }
 
