@@ -13564,7 +13564,14 @@ export class Session implements SessionContext {
                 !(await pm.isToolEnabled(targetName)),
             }
           : {}),
-      });
+      }).catch(
+        (
+          error: unknown,
+        ): Awaited<ReturnType<typeof resolveDeferredToolCall>> => ({
+          error: error instanceof Error ? error : new Error(String(error)),
+          errorType: ToolErrorType.UNHANDLED_EXCEPTION,
+        }),
+      );
       const bridgeCancellation = cancelBeforeExecutionIfAborted(toolName);
       if (bridgeCancellation) return bridgeCancellation;
       if ('error' in resolution) {

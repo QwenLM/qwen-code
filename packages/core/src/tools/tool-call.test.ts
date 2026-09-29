@@ -816,6 +816,64 @@ describe('ToolCallTool', () => {
       }
     });
 
+    it('leaves surplus-key enforcement to the target without changing its schema', async () => {
+      class LenientTool extends MockTool {
+        override validateToolParams(): string | null {
+          return null;
+        }
+      }
+      for (const Tool of [MockTool, LenientTool]) {
+        const target = new Tool({
+          name: 'agent_like',
+          shouldDefer: true,
+          params: {
+            type: 'object',
+            properties: { prompt: { type: 'string' } },
+            required: ['prompt'],
+            additionalProperties: false,
+          },
+        });
+        const result = await resolveDeferredToolCall(
+          makeRegistry([target], new Set([target.name])),
+          {
+            name: target.name,
+            arguments: { prompt: 'investigate', name: 'helper' },
+          },
+        );
+        expect(result).not.toHaveProperty('error');
+        expect(target.schema.parametersJsonSchema).toHaveProperty(
+          'additionalProperties',
+          false,
+        );
+        if ('tool' in result) {
+          const build = () => result.tool.build(result.arguments);
+          if (Tool === MockTool) {
+            expect(build).toThrow('must NOT have additional properties');
+          } else {
+            expect(build).not.toThrow();
+          }
+        }
+      }
+    });
+
+    it('still attributes wrong field types when surplus keys are present', async () => {
+      const target = makeWebFetchLike();
+      const result = await resolveDeferredToolCall(
+        makeRegistry([target], new Set([target.name])),
+        {
+          name: target.name,
+          arguments: { url: {}, prompt: 'summarize', extra: true },
+        },
+      );
+      expect(result).toMatchObject({
+        errorType: ToolErrorType.INVALID_TOOL_PARAMS,
+        targetName: 'web_fetch',
+        error: expect.objectContaining({
+          message: expect.stringContaining('must be string'),
+        }),
+      });
+    });
+
     it('returns the model-sent arguments even when validation coerces a clone', async () => {
       // SchemaValidator.validate coerces values in place (numeric strings →
       // numbers, etc.). The pre-check must run on a clone: the resolved
@@ -843,11 +901,9 @@ describe('ToolCallTool', () => {
       // (it adds and removes `model`/`name`), and Ajv caches a compiled
       // schema by object identity for the life of the process. Handing the
       // validator that same object pins every later bridged call to the
-      // shape the first one happened to compile, so a property the target
-      // advertises after that first call is refused forever.
-      // Mutation check: passing target.schema.parametersJsonSchema by
-      // reference instead of a clone turns this red with "must NOT have
-      // additional properties".
+      // shape the first one happened to compile, ignoring changed constraints.
+      // A stale validator would ignore the newly advertised model enum and
+      // accept the unknown grade below.
       const target = new MockTool({
         name: 'agent_like',
         shouldDefer: true,
@@ -871,6 +927,15 @@ describe('ToolCallTool', () => {
         properties: Record<string, unknown>;
       };
       schema.properties['model'] = { type: 'string', enum: ['fast', 'pro'] };
+
+      const invalid = await resolveDeferredToolCall(registry, {
+        name: 'agent_like',
+        arguments: { prompt: 'do the thing', model: 'unknown-grade' },
+      });
+      expect(invalid).toMatchObject({
+        errorType: ToolErrorType.INVALID_TOOL_PARAMS,
+        targetName: 'agent_like',
+      });
 
       const result = await resolveDeferredToolCall(registry, {
         name: 'agent_like',

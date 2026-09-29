@@ -310,10 +310,15 @@ export async function resolveDeferredToolCall(
   if (!options?.wasOutputTruncated && !preCheckSuppressed) {
     try {
       const argsClone = structuredClone(invocation.params.arguments);
-      paramsError = SchemaValidator.validate(
-        structuredClone(target.schema.parametersJsonSchema),
-        argsClone,
-      );
+      const schemaClone = structuredClone(
+        target.schema.parametersJsonSchema,
+      ) as Record<string, unknown>;
+      // Some targets deliberately tolerate surplus keys (for example, Agent's
+      // name outside team mode). Leave that decision to their own build().
+      if (schemaClone['additionalProperties'] === false) {
+        schemaClone['additionalProperties'] = true;
+      }
+      paramsError = SchemaValidator.validate(schemaClone, argsClone);
     } catch {
       // A target whose validation throws under this pre-check must not become
       // a new bridge failure mode: the scheduler's build() reports the same
