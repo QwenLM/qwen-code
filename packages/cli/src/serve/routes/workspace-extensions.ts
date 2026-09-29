@@ -568,9 +568,12 @@ export function registerWorkspaceExtensionRoutes(
       // scoping: that one controller also builds managers for OTHER hosted
       // workspaces (`createExtensionManager(runtime.workspaceCwd, …)`), and it
       // re-checks per manager, applying the env only when `workspaceDir ===
-      // boundWorkspace`. A secondary workspace therefore resolves consent and
-      // proxy from its own settings — never from the primary's env — but it
-      // does not get its own runtime env, which is not visible from here.
+      // boundWorkspace`. A secondary workspace therefore never resolves
+      // anything from the primary's env: its proxy comes from its own settings
+      // alone, and its consent from its own settings plus a daemon-wide
+      // ambient opt-out — an ambient opt-IN is not its choice and is refused
+      // (see `consentEnv` in `workspace-extensions-controller.ts`). It does
+      // not get its own runtime env either, which is not visible from here.
       ...(ws === boundWorkspace && deps.env ? { env: deps.env } : {}),
       ...(maxExtensionOperationHistory === undefined
         ? {}

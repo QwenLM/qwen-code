@@ -7,6 +7,7 @@
 import * as crypto from 'node:crypto';
 import {
   ExtensionManager,
+  parseBooleanEnvFlag,
   redactUrlCredentials,
   resolveExtensionTelemetryProxy,
   resolveUsageStatisticsEnabled,
@@ -216,10 +217,16 @@ export interface CreateExtensionsControllerDeps {
    *
    * Scoped to `boundWorkspace`, not to every manager this controller builds:
    * `createExtensionManager` applies it only when `workspaceDir ===
-   * boundWorkspace`, so a manager built for another hosted workspace resolves
-   * consent and proxy from that directory's own settings instead. A secondary
-   * runtime's own env is not visible here; attributing it would need a
-   * `workspaceDir`-keyed resolver rather than this single field.
+   * boundWorkspace`. A manager with no attributable env — another hosted
+   * workspace, or this one after its runtime left `active` — resolves proxy
+   * from that directory's own settings alone, and resolves consent from those
+   * settings plus an ambient *opt-out* only: `QWEN_USAGE_STATISTICS_ENABLED`
+   * is not in `DEFAULT_EXCLUDED_ENV_VARS`, and `loadEnvironment` writes parsed
+   * `.env` keys into `process.env` without restoring them, so an ambient
+   * opt-IN can belong to some other hosted repo and must not re-open this
+   * one's gate. A secondary runtime's own env is not visible here;
+   * attributing it would need a `workspaceDir`-keyed resolver rather than
+   * this single field.
    */
   env?: Readonly<NodeJS.ProcessEnv>;
 }
@@ -359,6 +366,31 @@ export function createExtensionsController(
         return undefined;
       }
     })();
+    // Consent term for the no-attributable-env case. Passing `undefined`
+    // through would land on `resolveUsageStatisticsEnabled`'s `env =
+    // process.env` default, i.e. resolve the opt-in from the daemon's shared
+    // ambient env — which is not neutral: `loadEnvironment` writes parsed
+    // `.env` keys into `process.env` in no-override mode and never restores
+    // them, `canApplyParsedEnvKey` has no trust gate, and
+    // `QWEN_USAGE_STATISTICS_ENABLED` is excluded from neither
+    // `DEFAULT_EXCLUDED_ENV_VARS` nor `PROJECT_ENV_HARDCODED_EXCLUSIONS`. So
+    // one hosted repo publishing `QWEN_USAGE_STATISTICS_ENABLED=1` would
+    // re-open the gate for a different workspace whose own settings opt out,
+    // and that workspace's extension lifecycle events would upload (#12770).
+    // The narrowing is one-directional on purpose: an ambient *opt-out* is an
+    // operator decision about this daemon and must still close every gate
+    // here, while an ambient *opt-in* is not this workspace's to inherit.
+    const ambientConsent = parseBooleanEnvFlag(
+      process.env['QWEN_USAGE_STATISTICS_ENABLED'],
+    );
+    const consentEnv: Readonly<NodeJS.ProcessEnv> =
+      runtimeEnv ??
+      (ambientConsent === false
+        ? {
+            QWEN_USAGE_STATISTICS_ENABLED:
+              process.env['QWEN_USAGE_STATISTICS_ENABLED'],
+          }
+        : {});
     return new ExtensionManager({
       workspaceDir,
       locale: resolveExtensionLocale(settings),
@@ -366,21 +398,20 @@ export function createExtensionsController(
         workspaceTrusted ??
         getWorkspaceTrustStatus(settings, workspaceDir).effective.state ===
           'trusted',
-      // Consent and proxy resolve against `runtimeEnv` — the bound runtime's
-      // environment — never the daemon's ambient `process.env`, which every
-      // hosted workspace shares and which no workspace's settings load may
-      // write to (see `skipLoadEnvironment` above). The fallbacks differ on
-      // purpose: a consent read with no injected env keeps the ambient
-      // `QWEN_USAGE_STATISTICS_ENABLED` term, because dropping it would
-      // silently re-open telemetry an operator switched off daemon-wide,
-      // while a proxy read with no injected env stays settings-only, because
-      // an ambient proxy is not this workspace's and would route its RUM
-      // uploads through an egress path it never configured. A manager built
-      // for any other directory gets no injected env at all, so both of its
-      // terms resolve from that directory's own settings.
+      // Consent and proxy resolve against the bound runtime's environment
+      // when there is one, never against the ambient `process.env` that every
+      // hosted workspace shares and that no workspace's settings load may
+      // write to (see `skipLoadEnvironment` above). With no attributable env
+      // — a manager built for another hosted directory, or for this one after
+      // its runtime left `active` — proxy stays settings-only, because an
+      // ambient proxy is not this workspace's and would route its RUM uploads
+      // through an egress path it never configured, and consent keeps only the
+      // ambient opt-out (see `consentEnv` above): both terms then resolve from
+      // that directory's own settings, except that an operator's daemon-wide
+      // opt-out still closes the gate.
       usageStatisticsEnabled: resolveUsageStatisticsEnabled(
         settings.privacy?.usageStatisticsEnabled,
-        runtimeEnv,
+        consentEnv,
       ),
       proxy: resolveExtensionTelemetryProxy(settings.proxy, runtimeEnv ?? {}),
       requestConsent: () => Promise.resolve(),

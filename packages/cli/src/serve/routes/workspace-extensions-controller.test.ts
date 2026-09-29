@@ -620,6 +620,150 @@ describe('createExtensionsController', () => {
     }
   });
 
+  it('refuses an ambient opt-in this workspace did not choose, without injected env', async () => {
+    const boundDir = await mkdtemp(join(tmpdir(), 'qwen-ext-ambient-bound-'));
+    const otherDir = await mkdtemp(join(tmpdir(), 'qwen-ext-ambient-other-'));
+    const emptyHome = await mkdtemp(join(tmpdir(), 'qwen-ext-home-'));
+    vi.stubEnv('QWEN_HOME', emptyHome);
+    for (const dir of [boundDir, otherDir]) {
+      await mkdir(join(dir, '.qwen'), { recursive: true });
+      await writeFile(
+        join(dir, '.qwen', 'settings.json'),
+        JSON.stringify({ privacy: { usageStatisticsEnabled: false } }),
+      );
+    }
+    // Deliberately NOT `pinAmbientEnvCleared()`: an ambient opt-in some other
+    // hosted repo published process-wide is exactly the leak being pinned.
+    // `resolveUsageStatisticsEnabled`'s `env` parameter defaults to
+    // `process.env`, so a manager with no attributable runtime env must not be
+    // handed that default — otherwise this workspace's own opt-out loses to a
+    // value that is not its own.
+    vi.stubEnv('QWEN_USAGE_STATISTICS_ENABLED', '1');
+    const readConsent = (manager: unknown): boolean | undefined =>
+      (manager as { usageStatisticsEnabled?: boolean }).usageStatisticsEnabled;
+    try {
+      // A manager for ANOTHER hosted workspace, built by a controller that
+      // does have the primary's env: nothing is attributable to `otherDir`, so
+      // its own settings must decide.
+      expect(
+        readConsent(
+          createExtensionsController({
+            boundWorkspace: boundDir,
+            bridge: {} as AcpSessionBridge,
+            workspace: {} as DaemonWorkspaceService,
+            env: {},
+          }).createExtensionManager(otherDir, true),
+        ),
+      ).toBe(false);
+
+      // The bound workspace whose runtime env delegate throws (the runtime
+      // left `active`): same absence of an attributable env, same answer.
+      const closed = (): never => {
+        throw Object.assign(new Error('Workspace runtime is not active.'), {
+          name: 'WorkspaceGenerationClosedError',
+          code: 'workspace_generation_closed',
+        });
+      };
+      const throwingEnv = new Proxy({} as Readonly<NodeJS.ProcessEnv>, {
+        get: closed,
+        ownKeys: closed,
+        getOwnPropertyDescriptor: closed,
+      });
+      expect(
+        readConsent(
+          createExtensionsController({
+            boundWorkspace: boundDir,
+            bridge: {} as AcpSessionBridge,
+            workspace: {} as DaemonWorkspaceService,
+            env: throwingEnv,
+          }).createExtensionManager(boundDir, true),
+        ),
+      ).toBe(false);
+
+      // The narrowing is one-directional: an ambient OPT-OUT still closes the
+      // gate, because that one is an operator decision about this daemon.
+      vi.stubEnv('QWEN_USAGE_STATISTICS_ENABLED', '0');
+      await writeFile(
+        join(otherDir, '.qwen', 'settings.json'),
+        JSON.stringify({ privacy: { usageStatisticsEnabled: true } }),
+      );
+      expect(
+        readConsent(
+          createExtensionsController({
+            boundWorkspace: boundDir,
+            bridge: {} as AcpSessionBridge,
+            workspace: {} as DaemonWorkspaceService,
+            env: {},
+          }).createExtensionManager(otherDir, true),
+        ),
+      ).toBe(false);
+    } finally {
+      vi.unstubAllEnvs();
+      await rm(boundDir, { recursive: true, force: true });
+      await rm(otherDir, { recursive: true, force: true });
+      await rm(emptyHome, { recursive: true, force: true });
+    }
+  });
+
+  it('delivers the primary runtime env to the controller the routes build', async () => {
+    // Pins the delivery hop in `routes/workspace-extensions.ts`: without
+    // `env: deps.env` in `controllerDeps`, `deps.env` is undefined for the
+    // primary controller, `runtimeEnv` is undefined for every manager it
+    // builds, and consent silently falls back to ambient env — the #12770
+    // leak shape — while the whole suite stays green.
+    const runtimeEnv = Object.freeze({ QWEN_USAGE_STATISTICS_ENABLED: '1' });
+    const controllerDepsSeen: unknown[] = [];
+    vi.doMock(
+      './workspace-extensions-controller.js',
+      async (importOriginal) => {
+        const actual =
+          await importOriginal<
+            typeof import('./workspace-extensions-controller.js')
+          >();
+        return {
+          ...actual,
+          createExtensionsController: (
+            deps: Parameters<typeof actual.createExtensionsController>[0],
+          ) => {
+            controllerDepsSeen.push(deps);
+            return actual.createExtensionsController(deps);
+          },
+        };
+      },
+    );
+    try {
+      const { registerWorkspaceExtensionRoutes } = await import(
+        './workspace-extensions.js'
+      );
+      type RoutesDeps = Parameters<typeof registerWorkspaceExtensionRoutes>[1];
+      const noop = () => undefined;
+      const app = {
+        get: noop,
+        post: noop,
+        put: noop,
+        delete: noop,
+        use: noop,
+        locals: {},
+      } as unknown as Parameters<typeof registerWorkspaceExtensionRoutes>[0];
+      registerWorkspaceExtensionRoutes(app, {
+        boundWorkspace: '/work/bound',
+        bridge: {},
+        workspace: {},
+        mutate: () => noop,
+        safeBody: (req: { body?: unknown }) =>
+          (req.body ?? {}) as Record<string, unknown>,
+        sendBridgeError: noop,
+        env: runtimeEnv,
+      } as unknown as RoutesDeps);
+
+      expect(controllerDepsSeen).toEqual([
+        expect.objectContaining({ env: runtimeEnv }),
+      ]);
+    } finally {
+      vi.doUnmock('./workspace-extensions-controller.js');
+    }
+  });
+
   it('releases the commit lane when a manual refresh times out', async () => {
     vi.useFakeTimers();
     let refreshCalls = 0;
