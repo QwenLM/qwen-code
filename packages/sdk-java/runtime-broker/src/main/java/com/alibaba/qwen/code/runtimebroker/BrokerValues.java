@@ -62,6 +62,30 @@ final class BrokerValues {
         return value.resolve("/");
     }
 
+    /**
+     * The exact long a parsed JSON integer denotes, or null. A parsed Double
+     * or Float may be rounded and a Short or Byte wrapped, as with
+     * 40000000000000001E-16 or 65540S, so neither counts. Under the default
+     * parse an integer written with a non-zero exponent, such as 40e-1, can
+     * arrive as a Double and is then rejected too.
+     */
+    static Long exactLong(Object value) {
+        if (value instanceof Integer || value instanceof Long) {
+            return ((Number) value).longValue();
+        }
+        try {
+            if (value instanceof BigInteger integer) {
+                return integer.longValueExact();
+            }
+            if (value instanceof BigDecimal decimal) {
+                return decimal.longValueExact();
+            }
+        } catch (ArithmeticException exception) {
+            // A fraction or a value beyond a long is not an exact long.
+        }
+        return null;
+    }
+
     static Map<String, Object> immutableMap(Map<String, ?> source) {
         Map<String, Object> copy = new LinkedHashMap<>();
         for (Map.Entry<?, ?> entry : source.entrySet()) {

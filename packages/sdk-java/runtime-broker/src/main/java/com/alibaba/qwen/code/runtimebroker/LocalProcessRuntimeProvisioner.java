@@ -309,13 +309,15 @@ public final class LocalProcessRuntimeProvisioner
             endpoint = ManagedContextProtocol.ready(ready, document);
         } else {
             if (!"ready".equals(ready.get("type"))
-                    || !Long.valueOf(1L).equals(number(ready.get("version")))
+                    || !Long.valueOf(1L).equals(
+                        BrokerValues.exactLong(ready.get("version")))
                     || !seed.getProvisionalRuntimeId().equals(
                         ready.get("runtimeInstanceId"))
                     || !seed.getGatewayIncarnation().equals(
                         ready.get("runtimeIncarnation"))
                     || !seed.getLeaseId().equals(ready.get("leaseId"))
-                    || !Long.valueOf(seed.getEpoch()).equals(number(ready.get("epoch")))) {
+                    || !Long.valueOf(seed.getEpoch()).equals(
+                        BrokerValues.exactLong(ready.get("epoch")))) {
                 throw failed("Managed Runtime ready record is invalid.");
             }
             endpoint = URI.create(String.valueOf(ready.get("url")));
@@ -619,10 +621,6 @@ public final class LocalProcessRuntimeProvisioner
             }
             builder.append((char) value);
         }
-    }
-
-    private static Long number(Object value) {
-        return value instanceof Number number ? number.longValue() : null;
     }
 
     private static RuntimeBrokerException failed(String message) {

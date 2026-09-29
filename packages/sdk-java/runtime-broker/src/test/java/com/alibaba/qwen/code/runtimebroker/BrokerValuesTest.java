@@ -1,6 +1,8 @@
 package com.alibaba.qwen.code.runtimebroker;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -9,11 +11,40 @@ import com.alibaba.fastjson2.JSONReader;
 import com.alibaba.fastjson2.JSONWriter;
 import java.math.BigDecimal;
 import java.math.BigInteger;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.Test;
 
 class BrokerValuesTest {
+    @Test
+    void exactLongReadsOnlyTheIntegerAJsonNumberDenotes() {
+        for (String literal : List.of("4", "4.0", "4E0", "4L")) {
+            assertEquals(4L, BrokerValues.exactLong(parse(literal)), literal);
+        }
+        assertEquals(Long.MIN_VALUE,
+                BrokerValues.exactLong(parse("-9223372036854775808")));
+        // A fraction, a value beyond a long, or a type that may round or
+        // wrap, even when it holds 4.
+        for (String literal : List.of("4.5", "4.0000000000000001",
+                "40000000000000001E-16", "4.0000000000000001D", "4F", "65540S",
+                "260B", "9223372036854775808")) {
+            assertNull(BrokerValues.exactLong(parse(literal)), literal);
+        }
+        // The exponent alone decides these, without expanding the digits.
+        assertNull(BrokerValues.exactLong(new BigDecimal("1E+1000000000")));
+        assertNull(BrokerValues.exactLong(new BigDecimal("1E-1000000000")));
+        assertNull(BrokerValues.exactLong(new AtomicLong(4)));
+        assertNull(BrokerValues.exactLong("4"));
+        assertNull(BrokerValues.exactLong(null));
+    }
+
+    private static Object parse(String literal) {
+        return JsonCodec.parseObject(("{\"value\":" + literal + "}")
+                .getBytes(StandardCharsets.UTF_8), "test").get("value");
+    }
+
     @Test
     void acceptsDecimalScalesWithinTheReadableRange() {
         assertDoesNotThrow(() -> BrokerValues.immutableMap(Map.of(

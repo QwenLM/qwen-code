@@ -5,7 +5,6 @@ import com.alibaba.fastjson2.JSONReader;
 import com.alibaba.fastjson2.JSONWriter;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import java.math.BigDecimal;
-import java.math.BigInteger;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -990,9 +989,8 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
 
     private static void requireProtocol(Map<String, Object> response,
             String operation) {
-        BigDecimal version = exactNumber(response.get("protocolVersion"));
-        if (version == null
-                || version.compareTo(BigDecimal.valueOf(2)) != 0) {
+        if (!Long.valueOf(2L).equals(
+                BrokerValues.exactLong(response.get("protocolVersion")))) {
             throw protocol("Managed Runtime " + operation
                     + " response is invalid.");
         }
@@ -1000,31 +998,11 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
 
     private static long requiredPositiveLong(Map<String, Object> response,
             String field) {
-        BigDecimal value = exactNumber(response.get(field));
-        if (value != null) {
-            try {
-                long parsed = value.longValueExact();
-                if (parsed > 0) {
-                    return parsed;
-                }
-            } catch (ArithmeticException exception) {
-                // A fraction or a value beyond a long is not an epoch.
-            }
+        Long value = BrokerValues.exactLong(response.get(field));
+        if (value == null || value <= 0) {
+            throw protocol("Managed Runtime attestation response is invalid.");
         }
-        throw protocol("Managed Runtime attestation response is invalid.");
-    }
-
-    private static BigDecimal exactNumber(Object value) {
-        // A parsed Double or Float may be rounded and a Short or Byte wrapped,
-        // as with 40000000000000001E-16 or 65540S, so an integer written with
-        // a non-zero exponent (40e-1) fails closed. Exact-decimal parsing would
-        // keep it, but fastjson2 2.0.60 then reads 0.020000000000000000000E1
-        // as 2.
-        if (value instanceof Integer || value instanceof Long
-                || value instanceof BigInteger || value instanceof BigDecimal) {
-            return new BigDecimal(value.toString());
-        }
-        return null;
+        return value;
     }
 
     private static boolean jsonContentType(String value) {
