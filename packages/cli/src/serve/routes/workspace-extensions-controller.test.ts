@@ -4,7 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import {
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -13,7 +20,13 @@ import type { Response } from 'express';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import type { DaemonWorkspaceService } from '../workspace-service/types.js';
 import { resolveLanguageSetting } from '../../i18n/index.js';
-import { loadSettings } from '../../config/settings.js';
+import {
+  CORRUPTED_SUFFIX,
+  ENV_CORRUPTED_PATH,
+  ENV_WAS_RECOVERED,
+  getUserSettingsPath,
+  loadSettings,
+} from '../../config/settings.js';
 import {
   createExtensionsController,
   redactExtensionDisplaySource,
@@ -27,9 +40,9 @@ vi.mock('../../i18n/index.js', async (importOriginal) => {
   };
 });
 
-// Spied (not stubbed) so tests can count createExtensionManager's settings
-// loads. The file-wide afterEach restoreAllMocks clears vi.fn
-// implementations, so the describe beforeEach re-installs the real one.
+// Spied (not stubbed) so tests can count settings loads. The file-wide
+// afterEach restoreAllMocks clears vi.fn implementations, so the describe
+// beforeEach re-installs the real one.
 const actualLoadSettings = vi.hoisted(() => ({
   fn: undefined as unknown as typeof import('../../config/settings.js').loadSettings,
 }));
@@ -58,21 +71,21 @@ describe('redactExtensionDisplaySource', () => {
 });
 
 describe('createExtensionsController', () => {
-  // The consent and proxy resolvers consult the ambient env; pin it out of the
-  // assertions so the test decides the outcome, not the runner's env (same
-  // convention as uninstall.test.ts / utils.test.ts).
-  const TELEMETRY_ENV_KEYS = [
+  // The daemon shares one process.env across every hosted workspace; pin the
+  // keys these tests read out of the assertions so the runner's own env does
+  // not decide the outcome.
+  const AMBIENT_ENV_KEYS = [
     'QWEN_USAGE_STATISTICS_ENABLED',
     'HTTPS_PROXY',
     'https_proxy',
     'HTTP_PROXY',
     'http_proxy',
   ];
-  const pinTelemetryEnv = (): (() => void) => {
-    const saved = TELEMETRY_ENV_KEYS.map(
+  const pinAmbientEnvCleared = (): (() => void) => {
+    const saved = AMBIENT_ENV_KEYS.map(
       (key) => [key, process.env[key]] as [string, string | undefined],
     );
-    for (const key of TELEMETRY_ENV_KEYS) delete process.env[key];
+    for (const key of AMBIENT_ENV_KEYS) delete process.env[key];
     return () => {
       for (const [key, value] of saved) {
         if (value === undefined) delete process.env[key];
@@ -106,13 +119,244 @@ describe('createExtensionsController', () => {
     expect(manager.networkPolicy).toBeUndefined();
   });
 
+  it('does not spend the one-shot settings-corruption markers on the status poll', async () => {
+    const workspaceDir = await mkdtemp(join(tmpdir(), 'qwen-ext-corruption-'));
+    const emptyHome = await mkdtemp(join(tmpdir(), 'qwen-ext-home-'));
+    vi.stubEnv('QWEN_HOME', emptyHome);
+    // The env pair is only read when the user settings file exists, so give it
+    // one, and derive the marker from the same helper `loadSettings` uses.
+    await writeFile(join(emptyHome, 'settings.json'), '{}');
+    const marker = `${getUserSettingsPath()}${CORRUPTED_SUFFIX}`;
+    const saved = [ENV_CORRUPTED_PATH, ENV_WAS_RECOVERED].map(
+      (key) => [key, process.env[key]] as [string, string | undefined],
+    );
+    process.env[ENV_CORRUPTED_PATH] = marker;
+    process.env[ENV_WAS_RECOVERED] = '1';
+    vi.spyOn(ExtensionManager.prototype, 'refreshCache').mockResolvedValue(
+      undefined,
+    );
+    vi.spyOn(ExtensionManager.prototype, 'getLoadedExtensions').mockReturnValue(
+      [],
+    );
+    try {
+      // The status poll is the most frequently hit load in the daemon and it
+      // surfaces neither the corruption marker nor the recovery notice, so it
+      // must not spend the one-shot pair that `acpAgent.ts` reports from.
+      await createExtensionsController({
+        boundWorkspace: workspaceDir,
+        bridge: {} as AcpSessionBridge,
+        workspace: {} as DaemonWorkspaceService,
+        isWorkspaceTrusted: () => true,
+      }).buildLocalExtensionsStatus();
+
+      expect(process.env[ENV_CORRUPTED_PATH]).toBe(marker);
+      expect(process.env[ENV_WAS_RECOVERED]).toBe('1');
+    } finally {
+      for (const [key, value] of saved) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+      vi.unstubAllEnvs();
+      await rm(workspaceDir, { recursive: true, force: true });
+      await rm(emptyHome, { recursive: true, force: true });
+    }
+  });
+
+  it('does not publish the workspace env to the daemon while building status', async () => {
+    const workspaceDir = await mkdtemp(join(tmpdir(), 'qwen-ext-status-env-'));
+    const emptyHome = await mkdtemp(join(tmpdir(), 'qwen-ext-home-'));
+    vi.stubEnv('QWEN_HOME', emptyHome);
+    await mkdir(join(workspaceDir, '.qwen'), { recursive: true });
+    // The status route is trust-free and answers a single GET, so any repo can
+    // ship these values. Loading them without `skipLoadEnvironment` writes
+    // them into the process.env every other hosted workspace resolves against,
+    // for the process lifetime — nothing restores them.
+    await writeFile(
+      join(workspaceDir, '.qwen', '.env'),
+      'HTTPS_PROXY=http://workspace-env:8080\nQWEN_USAGE_STATISTICS_ENABLED=1\n',
+    );
+    vi.spyOn(ExtensionManager.prototype, 'refreshCache').mockResolvedValue(
+      undefined,
+    );
+    vi.spyOn(ExtensionManager.prototype, 'getLoadedExtensions').mockReturnValue(
+      [],
+    );
+    const restoreEnv = pinAmbientEnvCleared();
+    try {
+      const controller = createExtensionsController({
+        boundWorkspace: workspaceDir,
+        bridge: {} as AcpSessionBridge,
+        workspace: {} as DaemonWorkspaceService,
+        isWorkspaceTrusted: () => true,
+      });
+
+      await controller.buildLocalExtensionsStatus();
+
+      expect(process.env['HTTPS_PROXY']).toBeUndefined();
+      expect(process.env['QWEN_USAGE_STATISTICS_ENABLED']).toBeUndefined();
+    } finally {
+      restoreEnv();
+      vi.unstubAllEnvs();
+      await rm(workspaceDir, { recursive: true, force: true });
+      await rm(emptyHome, { recursive: true, force: true });
+    }
+  });
+
+  it('does not let an untrusted workspace pick the status locale', async () => {
+    const workspaceDir = await mkdtemp(join(tmpdir(), 'qwen-ext-locale-'));
+    const emptyHome = await mkdtemp(join(tmpdir(), 'qwen-ext-home-'));
+    vi.stubEnv('QWEN_HOME', emptyHome);
+    await mkdir(join(workspaceDir, '.qwen'), { recursive: true });
+    await writeFile(
+      join(workspaceDir, '.qwen', 'settings.json'),
+      JSON.stringify({ general: { language: 'zh-CN' } }),
+    );
+    vi.spyOn(ExtensionManager.prototype, 'refreshCache').mockResolvedValue(
+      undefined,
+    );
+    vi.spyOn(ExtensionManager.prototype, 'getLoadedExtensions').mockReturnValue(
+      [],
+    );
+    try {
+      const languageSetting = vi.mocked(resolveLanguageSetting);
+      const untrusted = createExtensionsController({
+        boundWorkspace: workspaceDir,
+        bridge: {} as AcpSessionBridge,
+        workspace: {} as DaemonWorkspaceService,
+        isWorkspaceTrusted: () => false,
+      });
+      await untrusted.buildLocalExtensionsStatus();
+      // The untrusted branch re-loads with `skipWorkspaceSettings`, so the
+      // workspace's own `general.language` never reaches the locale resolve.
+      expect(languageSetting).toHaveBeenCalledWith(undefined);
+      expect(languageSetting).not.toHaveBeenCalledWith('zh-CN');
+
+      languageSetting.mockClear();
+      const trusted = createExtensionsController({
+        boundWorkspace: workspaceDir,
+        bridge: {} as AcpSessionBridge,
+        workspace: {} as DaemonWorkspaceService,
+        isWorkspaceTrusted: () => true,
+      });
+      await trusted.buildLocalExtensionsStatus();
+      expect(languageSetting).toHaveBeenCalledWith('zh-CN');
+    } finally {
+      vi.unstubAllEnvs();
+      await rm(workspaceDir, { recursive: true, force: true });
+      await rm(emptyHome, { recursive: true, force: true });
+    }
+  });
+
+  it('never parses or rewrites an untrusted workspace settings file from the status poll', async () => {
+    const workspaceDir = await mkdtemp(
+      join(tmpdir(), 'qwen-ext-untrusted-poll-'),
+    );
+    const emptyHome = await mkdtemp(join(tmpdir(), 'qwen-ext-home-'));
+    vi.stubEnv('QWEN_HOME', emptyHome);
+    await writeFile(join(emptyHome, 'settings.json'), '{}');
+    await mkdir(join(workspaceDir, '.qwen'), { recursive: true });
+    const settingsPath = join(workspaceDir, '.qwen', 'settings.json');
+    // Truncated JSON. Parsing it runs the corruption-recovery path, which
+    // resets the file to `{}` and writes a `.corrupted` sibling beside it — a
+    // recovery designed to run at startup with a dialog, here inside a daemon
+    // that answers a trust-free GET. The poll must not parse it at all.
+    await writeFile(settingsPath, '{');
+    vi.spyOn(ExtensionManager.prototype, 'refreshCache').mockResolvedValue(
+      undefined,
+    );
+    vi.spyOn(ExtensionManager.prototype, 'getLoadedExtensions').mockReturnValue(
+      [],
+    );
+    try {
+      const controller = createExtensionsController({
+        boundWorkspace: workspaceDir,
+        bridge: {} as AcpSessionBridge,
+        workspace: {} as DaemonWorkspaceService,
+        isWorkspaceTrusted: () => false,
+      });
+      const loadSettingsSpy = vi.mocked(loadSettings);
+      const languageSetting = vi.mocked(resolveLanguageSetting);
+      loadSettingsSpy.mockClear();
+      languageSetting.mockClear();
+
+      const status = await controller.buildLocalExtensionsStatus();
+
+      // The poll still answers, with a user-scope locale.
+      expect(status).toBeDefined();
+      expect(languageSetting).toHaveBeenCalledWith(undefined);
+      // The untrusted workspace's own file is byte-identical, with no
+      // `.corrupted` sibling written next to it.
+      expect(await readFile(settingsPath, 'utf8')).toBe('{');
+      expect((await readdir(join(workspaceDir, '.qwen'))).sort()).toEqual([
+        'settings.json',
+      ]);
+      // Two loads, not three: the status builder's own gated load plus the one
+      // `createExtensionManager` performs inside `loadLocalExtensionsStatus`.
+      // The discarded ungated probe is gone (ungating it makes this 3).
+      expect(loadSettingsSpy).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.unstubAllEnvs();
+      await rm(workspaceDir, { recursive: true, force: true });
+      await rm(emptyHome, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the workspace env unpublished and the corruption markers unspent when trust is unresolved', async () => {
+    const workspaceDir = await mkdtemp(
+      join(tmpdir(), 'qwen-ext-undefined-trust-'),
+    );
+    const emptyHome = await mkdtemp(join(tmpdir(), 'qwen-ext-home-'));
+    vi.stubEnv('QWEN_HOME', emptyHome);
+    // The marker pair is only read when the user settings file exists, so give
+    // it one — and derive the marker AFTER the QWEN_HOME stub, since
+    // `getUserSettingsPath()` resolves through it at call time.
+    await writeFile(join(emptyHome, 'settings.json'), '{}');
+    const marker = `${getUserSettingsPath()}${CORRUPTED_SUFFIX}`;
+    await mkdir(join(workspaceDir, '.qwen'), { recursive: true });
+    await writeFile(
+      join(workspaceDir, '.qwen', '.env'),
+      'HTTPS_PROXY=http://workspace-env:8080\n',
+    );
+    const saved = [ENV_CORRUPTED_PATH, ENV_WAS_RECOVERED].map(
+      (key) => [key, process.env[key]] as [string, string | undefined],
+    );
+    process.env[ENV_CORRUPTED_PATH] = marker;
+    process.env[ENV_WAS_RECOVERED] = '1';
+    const restoreEnv = pinAmbientEnvCleared();
+    try {
+      // No `isWorkspaceTrusted` dep — the direct `createServeApp` embed shape —
+      // so a no-override `createExtensionManager()` takes the
+      // `workspaceTrusted === undefined` arm of the load.
+      const controller = createExtensionsController({
+        boundWorkspace: workspaceDir,
+        bridge: {} as AcpSessionBridge,
+        workspace: {} as DaemonWorkspaceService,
+      });
+
+      controller.createExtensionManager(workspaceDir);
+
+      expect(process.env['HTTPS_PROXY']).toBeUndefined();
+      expect(process.env[ENV_CORRUPTED_PATH]).toBe(marker);
+      expect(process.env[ENV_WAS_RECOVERED]).toBe('1');
+    } finally {
+      for (const [key, value] of saved) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+      restoreEnv();
+      vi.unstubAllEnvs();
+      await rm(workspaceDir, { recursive: true, force: true });
+      await rm(emptyHome, { recursive: true, force: true });
+    }
+  });
+
   it('loads settings once per manager and resolves consent and proxy from that same merge', async () => {
     const extensionDir = await mkdtemp(
       join(tmpdir(), 'qwen-ext-controller-telemetry-'),
     );
     const emptyHome = await mkdtemp(join(tmpdir(), 'qwen-ext-home-'));
     vi.stubEnv('QWEN_HOME', emptyHome);
-    const restoreEnv = pinTelemetryEnv();
+    const restoreEnv = pinAmbientEnvCleared();
     try {
       await mkdir(join(extensionDir, '.qwen'));
       await writeFile(
@@ -172,7 +416,7 @@ describe('createExtensionsController', () => {
       'HTTPS_PROXY=http://workspace-env:8080\n',
     );
 
-    const restoreEnv = pinTelemetryEnv();
+    const restoreEnv = pinAmbientEnvCleared();
     try {
       const controller = createExtensionsController({
         boundWorkspace: workspaceDir,
@@ -221,7 +465,7 @@ describe('createExtensionsController', () => {
         JSON.stringify({ privacy: { usageStatisticsEnabled } }),
       );
     }
-    const restoreEnv = pinTelemetryEnv();
+    const restoreEnv = pinAmbientEnvCleared();
     const readConsent = (
       dir: string,
       env?: Readonly<NodeJS.ProcessEnv>,
@@ -273,7 +517,7 @@ describe('createExtensionsController', () => {
       join(workspaceDir, '.qwen', 'settings.json'),
       JSON.stringify({ privacy: { usageStatisticsEnabled: false } }),
     );
-    const restoreEnv = pinTelemetryEnv();
+    const restoreEnv = pinAmbientEnvCleared();
     const readProxy = (env?: Readonly<NodeJS.ProcessEnv>): string | undefined =>
       (
         createExtensionsController({
@@ -316,7 +560,7 @@ describe('createExtensionsController', () => {
         JSON.stringify({ privacy: { usageStatisticsEnabled: false } }),
       );
     }
-    const restoreEnv = pinTelemetryEnv();
+    const restoreEnv = pinAmbientEnvCleared();
     const readTelemetry = (
       env: Readonly<NodeJS.ProcessEnv>,
       dir: string,
