@@ -71,6 +71,9 @@ export async function issueA2AGrant(
   if (input.expiresAt !== undefined && !Number.isFinite(input.expiresAt)) {
     throw new Error('A grant expiry must be a finite timestamp.');
   }
+  if (!Number.isFinite(now)) {
+    throw new Error('A grant creation time must be a finite timestamp.');
+  }
   const secret = randomBytes(32).toString('base64url');
   const grant: A2AGrant = {
     callerId,

@@ -92,6 +92,30 @@ describe('A2A grants', () => {
     });
   });
 
+  it.each([NaN, Infinity, -Infinity])(
+    'rejects creation time %s without damaging existing grants',
+    async (now) => {
+      const { secret } = await issue();
+      const file = getWorkspaceFilePath(PROJECT_ROOT);
+      const before = await fs.readFile(file, 'utf8');
+      await expect(
+        issueA2AGrant(
+          PROJECT_ROOT,
+          { callerId: 'share_1', agentId: 'ag_lead' },
+          now,
+        ),
+      ).rejects.toThrow('finite timestamp');
+      expect(await fs.readFile(file, 'utf8')).toBe(before);
+      await expect(
+        checkA2AGrant(
+          PROJECT_ROOT,
+          { callerId: 'share_1', agentId: 'ag_lead', secret },
+          T0,
+        ),
+      ).resolves.toMatchObject({ ok: true });
+    },
+  );
+
   it('stops working once revoked', async () => {
     const { secret } = await issue();
     const input = {
