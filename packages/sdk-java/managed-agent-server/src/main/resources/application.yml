@@ -39,6 +39,7 @@ qwen:
       enabled: '${QWEN_MANAGED_AGENT_TOOL_PUBLICATION_ENABLED:false}'
     harness:
       enabled: '${QWEN_MANAGED_AGENT_HARNESS_ENABLED:false}'
+      workspace-files-enabled: '${QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED:false}'
       base-url: '${QWEN_MANAGED_AGENT_HARNESS_BASE_URL:http://127.0.0.1:4170}'
       token: '${QWEN_MANAGED_AGENT_HARNESS_TOKEN:}'
       capability-digest: '${QWEN_MANAGED_AGENT_CAPABILITY_DIGEST:}'

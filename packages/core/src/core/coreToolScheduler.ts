@@ -5502,6 +5502,8 @@ export class CoreToolScheduler {
           toolName: canonicalName,
           args: invocation.params as Record<string, unknown>,
           signal,
+          permissionChecked:
+            scheduledCall.request.executionOrigin?.kind !== 'fixed_policy',
           sessionId: this.config.getSessionId(),
           cwd: this.config.getTargetDir(),
           ...(invocationContext ? { invocationContext } : {}),

@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -310,7 +311,11 @@ class WorkspaceRuntimeTest {
                 .containsEntry("executionStatus", "not_started")
                 .containsEntry("error", Map.of("type", "workspace_unavailable",
                         "message", "Workspace execution was refused before dispatch."));
+        assertThat(fixture.transport().execute(fixture.lease(), runtimeSession,
+                Map.of("dispatchMode", "deferred"), Map.of("toolName", "write_file", "input", Map.of()))
+                .toCompletableFuture().join()).containsEntry("executionStatus", "not_started");
         verify(fixture.http(), never()).execute(any(), any(), any());
+        verify(fixture.http(), never()).execute(any(), any(), any(), any());
         when(fixture.http().cancel(any(), any(), any())).thenReturn(CompletableFuture.completedFuture(Map.of("state", "settled")));
         when(fixture.http().status(any(), any(), any(), eq(0L))).thenReturn(CompletableFuture.completedFuture(Map.of("state", "settled")));
         when(fixture.http().activateWorkspace(any(), any(), any(), eq(false))).thenReturn(CompletableFuture.completedFuture(null));
@@ -346,6 +351,35 @@ class WorkspaceRuntimeTest {
     }
 
     @Test
+    void controlsRecheckWorkspaceAuthorityAndReleaseWaitsForProviderCleanup() throws Exception {
+        SessionRecord session = createSession("storage", ".");
+        var fixture = transport(session);
+        var runtimeSession = fixture.record().getSession();
+        authority.claim(session.workspace(), fixture.record());
+        when(fixture.http().control(any(), any(), any())).thenReturn(CompletableFuture.completedFuture(Map.of()));
+        fixture.transport().control(fixture.lease(), runtimeSession, Map.of("kind", "manifest"))
+                .toCompletableFuture().join();
+        jdbc.update("UPDATE managed_workspace_access SET can_read = FALSE WHERE tenant_id = ?", session.tenantId());
+        assertUnavailable(() -> fixture.transport().control(fixture.lease(), runtimeSession, Map.of("kind", "prepare")));
+        verify(fixture.http(), never()).control(any(), any(), eq(Map.of("kind", "prepare")));
+        fixture.transport().control(fixture.lease(), runtimeSession, Map.of("kind", "history"))
+                .toCompletableFuture().join();
+        when(fixture.http().release(any(), any())).thenReturn(CompletableFuture.failedFuture(new IllegalStateException("busy")));
+        assertThatThrownBy(() -> fixture.transport().release(fixture.lease(), runtimeSession).toCompletableFuture().join())
+                .hasRootCauseMessage("busy");
+        verify(fixture.http(), never()).activateWorkspace(any(), any(), any(), eq(false));
+        authority.assertHeld(session.workspace(), fixture.record());
+        when(fixture.http().release(any(), any())).thenReturn(CompletableFuture.completedFuture(true));
+        when(fixture.http().activateWorkspace(any(), any(), any(), eq(false)))
+                .thenReturn(CompletableFuture.completedFuture(null));
+        fixture.transport().release(fixture.lease(), runtimeSession).toCompletableFuture().join();
+        var order = inOrder(fixture.http());
+        order.verify(fixture.http(), org.mockito.Mockito.times(2)).release(fixture.lease(), runtimeSession);
+        order.verify(fixture.http()).activateWorkspace(any(), any(), any(), eq(false));
+        authority.claim(session.workspace(), holder(session, "next"));
+    }
+
+    @Test
     void lateDeactivationCannotClearAHolderAfterTheLossFence() throws Exception {
         SessionRecord session = createSession("storage", ".");
         var fixture = transport(session);
@@ -376,6 +410,7 @@ class WorkspaceRuntimeTest {
         var runtimeSessions = new JdbcRuntimeSessionRepository(dataSource);
         record = bindings.admitSession(runtimeSessions, record);
         var http = mock(HttpRuntimeTransport.class);
+        when(http.release(any(), any())).thenReturn(CompletableFuture.completedFuture(true));
         return new TransportFixture(new WorkspaceRuntimeTransport(http, resolver, authority, bindings, runtimeSessions),
                 http, record, lease, runtime, bindings);
     }

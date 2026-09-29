@@ -8,6 +8,8 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.time.Duration;
@@ -16,6 +18,7 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Comparator;
 import java.util.HashSet;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -244,25 +247,43 @@ final class FaultGateRig implements AutoCloseable {
         ProcessTrees.kill(workers.get(0), WAIT);
     }
 
+    record ToolCall(Map<String, Object> reference, String payloadJson) {
+        /** The raw reference of the immediate route: identity plus payload. */
+        Map<String, Object> immediateReference() {
+            Map<String, Object> raw = new LinkedHashMap<>(reference);
+            raw.putAll(JSON.parseObject(payloadJson));
+            return raw;
+        }
+    }
+
     /** A foreground shell call whose side effects land in the workspace. */
-    static Map<String, Object> shell(String callId, String command) {
+    static ToolCall shell(String callId, String command) {
         return shell(SESSION, callId, command);
     }
 
     /** A foreground shell call of another Runtime Session. */
-    static Map<String, Object> shell(String session, String callId,
+    static ToolCall shell(String session, String callId,
             String command) {
         Map<String, Object> input = new LinkedHashMap<>();
         input.put("command", command);
         input.put("is_background", false);
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("toolName", "run_shell_command");
+        payload.put("input", input);
+        String payloadJson = JSON.toJSONString(payload);
+        String digest;
+        try {
+            digest = "sha256:" + HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
+                    .digest(payloadJson.getBytes(StandardCharsets.UTF_8)));
+        } catch (NoSuchAlgorithmException exception) {
+            throw new IllegalStateException(exception);
+        }
         Map<String, Object> reference = new LinkedHashMap<>();
         reference.put("sessionId", session);
         reference.put("promptId", "prompt-1");
         reference.put("callId", callId);
-        reference.put("argsDigest", "digest-" + callId);
-        reference.put("toolName", "run_shell_command");
-        reference.put("input", input);
-        return reference;
+        reference.put("argsDigest", digest);
+        return new ToolCall(Map.copyOf(reference), payloadJson);
     }
 
     /** The lines a tool appended to a marker file in the workspace. */
