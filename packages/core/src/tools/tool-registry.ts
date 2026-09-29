@@ -556,7 +556,7 @@ export class ToolRegistry {
     for (const [key, tool] of source.mcpAppTools) {
       if (
         !this.mcpAppTools.has(key) &&
-        !this.isToolDisabled(tool.name, tool.permissionAliases)
+        !this.isToolDisabled(tool.name, tool.disabledToolAliases)
       ) {
         this.mcpAppTools.set(key, tool);
       }
@@ -1282,7 +1282,7 @@ export class ToolRegistry {
     rawName: string,
   ): DiscoveredMCPTool | undefined {
     const tool = this.mcpAppTools.get(JSON.stringify([serverName, rawName]));
-    return tool && !this.isToolDisabled(tool.name, tool.permissionAliases)
+    return tool && !this.isToolDisabled(tool.name, tool.disabledToolAliases)
       ? tool
       : undefined;
   }
@@ -1293,7 +1293,7 @@ export class ToolRegistry {
         tool instanceof DiscoveredMCPTool &&
         tool.serverName === serverName &&
         tool.appResourceUri === uri &&
-        !this.isToolDisabled(tool.name, tool.permissionAliases),
+        !this.isToolDisabled(tool.name, tool.disabledToolAliases),
     );
   }
 

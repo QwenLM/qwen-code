@@ -550,6 +550,42 @@ describe('ToolRegistry', () => {
       expect(registry.getTool(mcpTool.name)).toBeUndefined();
     });
 
+    it('keeps a legacy disabledTools entry effective at the app-tool and registry-copy sites after setDisabledTools (R14-3)', () => {
+      // Same 24-char-key / 40-char-tool fixture as R4-2 above: the R12-1
+      // gate withholds this tool's legacy reduction from permissionAliases,
+      // so only the ungated disabledToolAliases channel can suppress it.
+      // Registration happens while disabledTools is empty (the tool lands
+      // in mcpAppTools); the ACP settings-reload path then calls
+      // config.setDisabledTools with the legacy spelling verbatim — no
+      // re-registration — and every consumer site must honor it.
+      const server = 's'.repeat(24);
+      const serverToolName = 't'.repeat(40);
+      const legacyName = generateLegacyMcpToolName(
+        `mcp__${server}__${serverToolName}`,
+      );
+      const registry = new ToolRegistry(config);
+      const mcpTool = appTool(server, serverToolName, ['app']);
+
+      // Premise: the permission channel withholds this reduction, and the
+      // normalize fallback cannot reach it either.
+      expect(mcpTool.permissionAliases).not.toContain(legacyName);
+      expect(normalizeMcpToolName(legacyName)).not.toBe(mcpTool.name);
+
+      registry.registerTool(mcpTool);
+      expect(registry.getMcpAppTool(server, serverToolName)).toBe(mcpTool);
+
+      // Mid-session disable in the pre-normalization legacy spelling, with
+      // no re-registration (acpAgent's settings-reload path).
+      config.setDisabledTools(new Set([legacyName]));
+
+      expect(registry.getMcpAppTool(server, serverToolName)).toBeUndefined();
+      expect(registry.hasMcpAppResource(server, 'ui://app/view')).toBe(false);
+
+      const dest = new ToolRegistry(config);
+      dest.copyDiscoveredToolsFrom(registry);
+      expect(dest.getMcpAppTool(server, serverToolName)).toBeUndefined();
+    });
+
     it('skips lazy factories whose name is in Config.disabledTools', async () => {
       const disabledConfig = new Config({
         ...baseConfigParams,
