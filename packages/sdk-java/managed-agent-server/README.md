@@ -54,9 +54,9 @@ Turn queries: [English](../../../docs/design/2026-09-28-managed-agent-turn-queri
 - Java 21
 - MySQL 8
 
-The `qwen serve --profile hosted-harness` option on current main is reserved
-and rejects startup. The configuration below supports control-plane development,
-but a successful Hosted Harness turn is not available in this split.
+Run the packaged CLI with `qwen serve --profile hosted-harness` as a separate
+process. It supports durable no-tool Sessions and the opt-in initial Workspace
+file Turn described in the G0 section below.
 
 Install the two sibling libraries once when building this module outside a
 Maven reactor:
@@ -203,11 +203,12 @@ export QWEN_MANAGED_AGENT_WORKSPACE_ID='workspace-demo'
 Harness. When both the Harness and Store are enabled, Java includes a scoped
 Store descriptor in each new private Hosted Session request. The ordinary
 daemon rejects that descriptor, while the Hosted Harness uses the TypeScript
-HTTP adapter and generates its own writer secret. The Store scope reuses
-`QWEN_MANAGED_AGENT_WORKSPACE_ID`, so the public Session, private journal, and
-Runtime binding have one `(tenantId, workspaceId, sessionId)` identity. Set
-that ID explicitly when enabling the Session Store; if the Runtime Broker also
-has an explicit ID, startup rejects a mismatch.
+HTTP adapter and generates its own writer secret. Workspace-bound Sessions use
+their persisted Workspace ID for the Store scope; unbound Sessions use
+`QWEN_MANAGED_AGENT_WORKSPACE_ID`. The public Session, private journal and Runtime
+binding retain one `(tenantId, workspaceId, sessionId)` identity. The global ID
+must still be set explicitly when enabling the Session Store; if the Runtime
+Broker also has an explicit ID, startup rejects a mismatch.
 
 This activates the durable create and cold-load paths for newly created Hosted
 Sessions. The load path rebuilds the Harness state from the scoped Store and
@@ -374,7 +375,9 @@ provider and file tools do not confine access to the mount root: Read/Write/Edit
 and Shell can reach other paths allowed by the worker's host permissions.
 Foreground Shell may create detached descendants. Use this only with trusted
 local workloads until physical isolation and W0e cleanup are implemented.
-Public bound Turn/lifecycle gates and the full Hosted tool loop remain closed.
+Public bound Turn admission is limited to the opt-in initial file Turn described
+in G0 above. Later public submit, cancel and lifecycle operations remain gated;
+the private Shell profile is not enabled through public creation.
 See the bilingual [execution design](../../../docs/design/2026-09-26-managed-workspace-execution.md)
 for the exact boundary.
 
@@ -409,9 +412,10 @@ rows within the selected schema.
 ## Real-model end-to-end check
 
 The repository includes copied full-chain scripts for a future integration.
-They cannot run against this split: the Hosted Harness profile rejects startup
-and `dist/managed-runtime-worker.js` is not built. The commands below describe
-the intended verification, not passing evidence for this PR.
+Their expected `dist/managed-runtime-worker.js` artifact is not built, so the
+commands below describe intended verification, not passing evidence for this
+integration. The G0 integration test instead starts the supported Hosted Harness
+and worker modes through the packaged `dist/cli.js`.
 
 Build the required artifacts first, then run:
 

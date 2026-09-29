@@ -17,6 +17,7 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.HarnessEvent;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.ProjectedEvent;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnRecord;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import jakarta.annotation.PreDestroy;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
@@ -190,6 +191,10 @@ public class HarnessCoordinator {
                 terminal = transientFailure(claimed,
                         submissionAttempted.get(), error);
             }
+        } catch (RuntimeBrokerException error) {
+            terminal = !submissionAttempted.get() && !error.isRetryable()
+                    ? fail(claimed, error.getCode(), error.getMessage())
+                    : transientFailure(claimed, submissionAttempted.get(), error);
         } catch (RuntimeException error) {
             terminal = transientFailure(claimed,
                     submissionAttempted.get(), error);
