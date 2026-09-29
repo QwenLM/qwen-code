@@ -1741,19 +1741,22 @@ export function matchesMcpPattern(
 
   // Server-level match: "mcp__puppeteer" matches "mcp__puppeteer__anything"
   // Only when the pattern has exactly 2 parts (mcp + server) and the tool has 3+.
-  // The 3-part test is asked of every spelling, not of the registered name
-  // alone: past the 63-character budget truncation can cut the `__` separator
-  // out of the registered name while the raw identity still exposes the tool
-  // segment, and a whole-server deny that silently matches nothing is a
-  // fail-open.
+  // The comparison is server-SEGMENT equality on each spelling, not a
+  // `${pattern}__` prefix compare: a tool name's leading sanitized underscore
+  // reads as separator continuation under prefixing, so a whole-server rule
+  // for key `foo_` would match server `foo`'s tool `_internal` (registered
+  // verbatim `mcp__foo___internal`, no alias channel needed) — the #10199
+  // defect class re-opened (R4-2). Every advertised spelling keeps its server
+  // boundary intact: the raw identity and the provider-safe registered name
+  // are uncut here (the separator survives the 63-char budget for any key up
+  // to 48 chars), and a legacy reduction is only advertised when its head
+  // window pins the boundary down (R12-1), so segment[1] is trustworthy.
   const patternParts = pattern.split('__');
-  const toolParts = toolName.split('__');
-  if (
-    patternParts.length === 2 &&
-    spellings.some((spelling) => spelling.split('__').length >= 3) &&
-    patternParts[0] === toolParts[0]
-  ) {
-    return matchesPrefixLiterally(`${pattern}__`);
+  if (patternParts.length === 2 && patternParts[0] === 'mcp') {
+    return spellings.some((spelling) => {
+      const spellingParts = spelling.split('__');
+      return spellingParts.length >= 3 && spellingParts[1] === patternParts[1];
+    });
   }
 
   return false;

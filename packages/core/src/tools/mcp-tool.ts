@@ -1208,7 +1208,9 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
   }
 
   /**
-   * Keeps pre-normalization permission and disabled-tool entries effective.
+   * Keeps pre-normalization permission entries effective. (Pre-normalization
+   * `disabledTools` entries ride {@link disabledToolAliases}, the ungated
+   * fail-closed channel.)
    *
    * Publishes the exact raw identity `mcp__<server>__<tool>` first — the only
    * spelling the permission matcher accepts as provenance for legacy unsafe
@@ -1241,6 +1243,28 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
       ...(legacyName === this.name ||
       legacyName === rawName ||
       !legacyVouchesForServer
+        ? []
+        : [legacyName]),
+    ];
+  }
+
+  /**
+   * The spellings `ToolRegistry.isToolDisabled` matches `disabledTools`
+   * entries against — the same list {@link permissionAliases} would publish
+   * WITHOUT the provenance gate on the legacy reduction. That gate keeps a
+   * truncation-collided reduction out of the `allow`/`deny` channel, where a
+   * lost match is fail-open; `disabledTools` is the opposite direction — an
+   * over-match there is the documented, permitted fail-closed side (see
+   * docs/design/mcp-tool-name-provider-compatibility.md) — so withholding
+   * the reduction would silently re-register tools a pre-normalization
+   * entry disabled (R4-2 e2). This channel never feeds permission matching.
+   */
+  get disabledToolAliases(): readonly string[] {
+    const rawName = `mcp__${this.serverName}__${this.serverToolName}`;
+    const legacyName = generateLegacyMcpToolName(rawName);
+    return [
+      ...(rawName === this.name ? [] : [rawName]),
+      ...(legacyName === this.name || legacyName === rawName
         ? []
         : [legacyName]),
     ];

@@ -362,7 +362,7 @@ export class ToolRegistry {
     if (
       this.isToolDisabled(
         tool.name,
-        tool instanceof DiscoveredMCPTool ? tool.permissionAliases : [],
+        tool instanceof DiscoveredMCPTool ? tool.disabledToolAliases : [],
       )
     ) {
       debugLogger.info(
@@ -404,7 +404,7 @@ export class ToolRegistry {
     if (
       this.isToolDisabled(
         tool.name,
-        tool instanceof DiscoveredMCPTool ? tool.permissionAliases : [],
+        tool instanceof DiscoveredMCPTool ? tool.disabledToolAliases : [],
       )
     ) {
       debugLogger.info(

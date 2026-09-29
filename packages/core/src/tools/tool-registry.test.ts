@@ -518,6 +518,38 @@ describe('ToolRegistry', () => {
       expect(registry.getTool(mcpTool.name)).toBeUndefined();
     });
 
+    it('keeps a legacy disabledTools entry effective when the reduction is withheld from permissionAliases (R4-2)', () => {
+      // A 24-char server key: the truncation cut reaches the key segment, so
+      // the R12-1 gate withholds the legacy reduction from the permission
+      // channel — but `disabledTools` over-matching is the permitted
+      // fail-closed direction, and a pre-normalization entry must still
+      // suppress registration (main's behavior, restored via the ungated
+      // disabledToolAliases channel).
+      const server = 's'.repeat(24);
+      const rawName = `mcp__${server}__${'t'.repeat(40)}`;
+      const legacyName = generateLegacyMcpToolName(rawName);
+      const disabledConfig = new Config({
+        ...baseConfigParams,
+        disabledTools: [legacyName],
+      });
+      const registry = new ToolRegistry(disabledConfig);
+      const mcpTool = new DiscoveredMCPTool(
+        {} as CallableTool,
+        server,
+        't'.repeat(40),
+        'description',
+        {},
+      );
+
+      // Premise: the permission channel withholds this reduction, and the
+      // normalize fallback cannot reach it either — only the ungated
+      // disabled-tools channel can.
+      expect(mcpTool.permissionAliases).not.toContain(legacyName);
+      expect(normalizeMcpToolName(legacyName)).not.toBe(mcpTool.name);
+      registry.registerTool(mcpTool);
+      expect(registry.getTool(mcpTool.name)).toBeUndefined();
+    });
+
     it('skips lazy factories whose name is in Config.disabledTools', async () => {
       const disabledConfig = new Config({
         ...baseConfigParams,

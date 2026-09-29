@@ -1480,3 +1480,75 @@ describe('a truncated legacy reduction cannot fabricate a server boundary (R12-2
     );
   });
 });
+
+// A tool whose name starts with a sanitized underscore (server `foo`, tool
+// `_internal`, registered verbatim `mcp__foo___internal`, no alias channel)
+// reads as `mcp__foo_` + `_internal` under a `${pattern}__` prefix compare:
+// a whole-server rule written for the DIFFERENT key `foo_` matched it, so
+// `permissions.allow: ['mcp__foo_']` auto-approved a tool of a server the
+// entry does not name — the #10199 defect class re-opened through the
+// registered name (R4-2 e1). The server-level arm therefore compares the
+// server SEGMENT of each spelling, never a flattened prefix.
+describe('a leading-underscore tool cannot borrow another key boundary (R4-2)', () => {
+  it('refuses a whole-server rule whose key is the server plus a leading underscore', async () => {
+    const tool = prodTool('foo', '_internal');
+    // Premises: verbatim registration, and no alias channel is involved.
+    expect(tool.name).toBe('mcp__foo___internal');
+    expect(tool.permissionAliases).toEqual([]);
+
+    expect(
+      matchesToolPattern('mcp__foo_', tool.name, tool.permissionAliases),
+    ).toBe(false);
+    expect(
+      matchesRule(
+        parseRule('mcp__foo_'),
+        tool.name,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        tool.permissionAliases,
+      ),
+    ).toBe(false);
+    for (const lists of [
+      { permissionsAllow: ['mcp__foo_'] },
+      { permissionsDeny: ['mcp__foo_'] },
+    ]) {
+      const pm = new PermissionManager(makeConfig(lists));
+      pm.initialize();
+      expect(
+        await pm.evaluate({
+          toolName: tool.name,
+          toolAliases: tool.permissionAliases,
+        }),
+      ).toBe('default');
+    }
+
+    // Positive control: the tool's OWN whole-server rule still matches.
+    expect(
+      matchesToolPattern('mcp__foo', tool.name, tool.permissionAliases),
+    ).toBe(true);
+  });
+
+  it('keeps bare-server own-key coverage at key lengths whose legacy reduction is withheld', () => {
+    // Regression guard: the segment-compare arm must not withdraw own-server
+    // coverage — the registered name and raw identity keep the boundary even
+    // where the R12-1 gate withholds the legacy reduction (22 and >=24).
+    for (const keyLength of [21, 22, 23, 24, 30]) {
+      const server = 's'.repeat(keyLength);
+      const tool = prodTool(server, 't'.repeat(40));
+      expect(
+        matchesToolPattern(`mcp__${server}`, tool.name, tool.permissionAliases),
+      ).toBe(true);
+      expect(
+        matchesToolPattern(
+          `mcp__${server}__*`,
+          tool.name,
+          tool.permissionAliases,
+        ),
+      ).toBe(true);
+    }
+  });
+});
