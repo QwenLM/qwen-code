@@ -169,7 +169,9 @@ test.describe('trajectory panel', () => {
     page,
   }, testInfo) => {
     await page.setViewportSize({ width: 1600, height: 600 });
-    await page.context().grantPermissions(['clipboard-write']);
+    await page
+      .context()
+      .grantPermissions(['clipboard-read', 'clipboard-write']);
     await openTrajectory(page, String(testInfo.project.use.baseURL));
     const panel = page.getByTestId('trajectory-panel');
     await panel.getByTestId('trajectory-row-tool').last().click();
@@ -196,6 +198,11 @@ test.describe('trajectory panel', () => {
     await expect(inspector.getByRole('status')).toHaveText(
       'Copied displayed content',
     );
+    const copied = await page.evaluate(() => navigator.clipboard.readText());
+    expect(copied).toBe(await content.textContent());
+    expect(JSON.parse(copied)).toEqual({
+      file_path: `/workspace/demo/note-${TURNS}.txt`,
+    });
   });
 
   test('inspects a selected tool without fetching more transcript data @smoke', async ({

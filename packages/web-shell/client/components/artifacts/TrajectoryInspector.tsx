@@ -277,7 +277,11 @@ export function TrajectoryInspector({
     ({ formatted }) => (formatted?.length ?? 0) > PREVIEW_LENGTH,
   );
   const copyText = displayed
-    .map(({ label, text }) => `${label}: ${text}`)
+    .map(({ label, text }) =>
+      selectedTab === 'summary' || selectedTab === 'metrics'
+        ? `${label}: ${text}`
+        : text,
+    )
     .join('\n');
 
   return (

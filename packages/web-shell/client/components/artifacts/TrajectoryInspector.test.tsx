@@ -16,6 +16,7 @@ import type {
   TrajectoryRequestRow,
   TrajectoryRow,
   TrajectoryToolRow,
+  TrajectoryUserRow,
 } from '../../trajectory/types';
 import { TrajectoryInspector } from './TrajectoryInspector';
 
@@ -119,7 +120,60 @@ it('keeps explicit null output and preserves input whitespace when copied', asyn
   await click(container, 'Input');
   expect(container.querySelector('pre')?.textContent).toBe('  echo ok\n');
   await click(container, 'Copy displayed content');
-  expect(writeText).toHaveBeenCalledWith('Recorded input:   echo ok\n');
+  expect(writeText).toHaveBeenCalledWith('  echo ok\n');
+});
+
+it.each(['Input', 'Output'] as const)(
+  'copies %s JSON without a UI label',
+  async (tab) => {
+    const value = { command: 'echo ok', options: { quiet: true } };
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    });
+    const container = await render(tool(value, value));
+    await click(container, tab);
+    await click(container, 'Copy displayed content');
+    const copied = writeText.mock.lastCall?.[0];
+    expect(copied).toBe(container.querySelector('pre')?.textContent);
+    expect(JSON.parse(copied)).toEqual(value);
+  },
+);
+
+it.each([
+  ['en', 'Body', 'Copy displayed content'],
+  ['zh-CN', '正文', '复制显示内容'],
+] as const)('copies body text unchanged in %s', async (language, tab, copy) => {
+  const writeText = vi.fn().mockResolvedValue(undefined);
+  Object.defineProperty(navigator, 'clipboard', {
+    configurable: true,
+    value: { writeText },
+  });
+  const text = '  note\n';
+  const row: TrajectoryRow = {
+    kind: 'user',
+    key: 'user:1',
+    turnIndex: 1,
+    depth: 0,
+    block: { kind: 'user', text } as TrajectoryUserRow['block'],
+  };
+  const container = await render(row, language);
+  await click(container, tab);
+  await click(container, copy);
+  expect(writeText).toHaveBeenCalledWith(text);
+});
+
+it('keeps labels when copying a summary report', async () => {
+  const writeText = vi.fn().mockResolvedValue(undefined);
+  Object.defineProperty(navigator, 'clipboard', {
+    configurable: true,
+    value: { writeText },
+  });
+  const container = await render(tool('input', 'output'));
+  await click(container, 'Copy displayed content');
+  expect(writeText.mock.lastCall?.[0]).toContain('Tool: Bash');
+  expect(writeText.mock.lastCall?.[0]).toContain('Call ID: call_1');
 });
 
 it('formats request dates in the selected UI language', async () => {
@@ -140,12 +194,21 @@ it('formats request dates in the selected UI language', async () => {
 });
 
 it('bounds a long value before putting it in the DOM', async () => {
+  const writeText = vi.fn().mockResolvedValue(undefined);
+  Object.defineProperty(navigator, 'clipboard', {
+    configurable: true,
+    value: { writeText },
+  });
   const container = await render(tool('x'.repeat(100_000), undefined));
   await click(container, 'Input');
   expect(container.querySelector('pre')?.textContent).toHaveLength(4_000);
   expect(container.textContent).toContain('Content truncated');
+  await click(container, 'Copy displayed content');
+  expect(writeText).toHaveBeenLastCalledWith('x'.repeat(4_000));
   await click(container, 'Show more');
   expect(container.querySelector('pre')?.textContent).toHaveLength(40_000);
+  await click(container, 'Copy displayed content');
+  expect(writeText).toHaveBeenLastCalledWith('x'.repeat(40_000));
 });
 
 it('shows metadata for a resource-link-only user record after transcript projection', async () => {
