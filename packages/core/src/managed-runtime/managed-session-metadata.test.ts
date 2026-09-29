@@ -111,6 +111,38 @@ function renameCommand(commandId: string) {
 }
 
 describe('managed session metadata', () => {
+  async function glueTwoLines(filePath: string, index: number): Promise<void> {
+    const lines = (await fs.readFile(filePath, 'utf8')).split('\n');
+    lines[index] = lines[index] + lines[index + 1];
+    lines.splice(index + 1, 1);
+    await fs.writeFile(filePath, lines.join('\n'), 'utf8');
+  }
+
+  it('still reads a renamed title after a line in the transcript is torn', async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      await authority.commitDomainRecord(
+        renameCommand('cmd-rename-torn'),
+        {
+          domain: 'session_metadata',
+          content: { title: 'Design review notes', titleSource: 'manual' },
+        },
+        { class: 'trusted_entry' },
+      );
+    });
+
+    // A crash mid-append glues the next record onto this one, so the line
+    // holds two JSON objects and JSON.parse throws on it.
+    await glueTwoLines(harness.transcriptPath, 1);
+
+    expect(
+      readManagedSessionTitleInfoSync(
+        harness.transcriptPath,
+        harness.runtimeBaseDir,
+      ),
+    ).toEqual({ title: 'Design review notes', source: 'manual' });
+  });
+
   it('projects a renamed title into the synchronous directory read', async () => {
     const harness = await createHarness();
     await withAuthority(harness, async (authority) => {
