@@ -81,6 +81,7 @@ import {
   type BranchPoint,
   type BranchToolCallIdentity,
 } from './branch-points.js';
+import { getApiHistoryPromptId } from './session-api-history.js';
 
 const debugLogger = createDebugLogger('CHAT_RECORDING');
 
@@ -397,6 +398,8 @@ export interface ChatRecord {
   version: string;
   /** Current git branch, if available */
   gitBranch?: string;
+  /** Stable identity shared with the visible user turn and API history. */
+  promptId?: string;
 
   // Content field - raw API format for history reconstruction
 
@@ -584,6 +587,8 @@ export interface ChatCompressionRecordPayload {
    * resume reconstruction.
    */
   compressedHistory: Content[];
+  /** Prompt identities parallel to compressedHistory. */
+  promptIds?: Array<string | null>;
   completedToolCallIds?: string[];
 }
 
@@ -2241,11 +2246,14 @@ export class ChatRecordingService {
    * @param message The raw PartListUnion object as used with the API
    * @param goalContext Goal identity and turn that own this message
    * @param promptPayload User-authored display text and hook-context provenance
+   * @param promptId Identity shared with this turn's API-history entry
+   * @param daemonPromptId Transport identity replayed to the daemon
    */
   recordUserMessage(
     message: PartListUnion,
     goalContext?: GoalTurnPermit,
     promptPayload?: UserPromptRecordPayload,
+    promptId?: string,
     daemonPromptId?: string,
   ): void {
     try {
@@ -2257,6 +2265,7 @@ export class ChatRecordingService {
         ...(goalContext ? { goalContext: copyGoalContext(goalContext) } : {}),
         message: createUserContent(message),
         ...(promptPayload ? { systemPayload: promptPayload } : {}),
+        ...(promptId ? { promptId } : {}),
       };
       this.appendRecord(record);
     } catch (error) {
@@ -2839,11 +2848,21 @@ export class ChatRecordingService {
    */
   recordChatCompression(payload: ChatCompressionRecordPayload): void {
     try {
+      // Freeze the array so later live-history mutations cannot desynchronize
+      // entries from the parallel promptIds array.
+      const compressedHistory = [...payload.compressedHistory];
+      const promptIds = compressedHistory.map(
+        (content) => getApiHistoryPromptId(content) ?? null,
+      );
       const record: ChatRecord = {
         ...this.createBaseRecord('system'),
         type: 'system',
         subtype: 'chat_compression',
-        systemPayload: payload,
+        systemPayload: {
+          ...payload,
+          compressedHistory,
+          ...(promptIds.some(Boolean) ? { promptIds } : {}),
+        },
       };
 
       this.appendRecord(record);

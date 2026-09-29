@@ -130,6 +130,10 @@ import {
 import { emptyGoalSnapshot } from '../goals/goal-protocol.js';
 import type { GoalRuntime } from '../goals/goal-runtime.js';
 import type { FileHistorySnapshot } from '../services/fileHistoryService.js';
+import {
+  findApiHistoryPromptIndex,
+  markApiHistoryPrompt,
+} from '../services/session-api-history.js';
 import { runWithAgentContext } from '../agents/runtime/agent-context.js';
 import {
   clearCacheSafeParams,
@@ -165,6 +169,7 @@ vi.mock('node:fs', () => {
 
 // --- Mocks ---
 const mockTurnRunFn = vi.fn();
+const mockTurnConstructorFn = vi.fn();
 
 vi.mock('./turn', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./turn.js')>();
@@ -174,8 +179,8 @@ vi.mock('./turn', async (importOriginal) => {
     // The run method is a property that holds our mock function
     run = mockTurnRunFn;
 
-    constructor() {
-      // The constructor can be empty or do some mock setup
+    constructor(...args: unknown[]) {
+      mockTurnConstructorFn(...args);
     }
   }
   // Export the mock class as 'Turn'
@@ -2317,10 +2322,15 @@ describe('Gemini Client (client.ts)', () => {
         role: 'model',
         parts: [{ text: 'Got it. Thanks for the context!' }],
       };
+      const marked: Content = {
+        role: 'user',
+        parts: [{ text: 'hello' }],
+      };
+      markApiHistoryPrompt(marked, 'S########1');
       const currentHistory: Content[] = [
         legacyEnv,
         legacyAck,
-        { role: 'user', parts: [{ text: 'hello' }] },
+        marked,
         { role: 'model', parts: [{ text: 'hi' }] },
       ];
       const newPrelude: Content = {
@@ -2331,7 +2341,8 @@ describe('Gemini Client (client.ts)', () => {
       };
       const mockChat: Partial<LlmChat> = {
         getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
-        getHistory: vi.fn().mockReturnValue(currentHistory),
+        getHistory: vi.fn(() => structuredClone(currentHistory)),
+        getHistoryShallow: vi.fn(() => currentHistory.map((c) => ({ ...c }))),
         setHistory: vi.fn(),
       };
       client['chat'] = mockChat as LlmChat;
@@ -2347,6 +2358,48 @@ describe('Gemini Client (client.ts)', () => {
         [newPrelude, ...currentHistory.slice(2)],
         undefined,
       );
+      const reinstalled = vi.mocked(mockChat.setHistory!).mock
+        .calls[0]![0] as Content[];
+      expect(findApiHistoryPromptIndex(reinstalled, 'S########1')).toBe(1);
+    });
+  });
+
+  describe('restoreStartupContextAfterCompaction', () => {
+    it('preserves prompt-identity marks when re-prepending the prelude', async () => {
+      // Same symbol-strip hazard as refreshStartupContextReminder: the
+      // in-flight turn's entry is the one identity is needed for (every
+      // predecessor was absorbed into the compaction summary), and a deep
+      // getHistory() read would reinstall it unmarked.
+      const marked: Content = {
+        role: 'user',
+        parts: [{ text: 'in-flight prompt' }],
+      };
+      markApiHistoryPrompt(marked, 'S########1');
+      const currentHistory: Content[] = [
+        marked,
+        { role: 'model', parts: [{ text: 'working' }] },
+      ];
+      const prelude: Content = {
+        role: 'user',
+        parts: [
+          { text: '<system-reminder>\nfresh prelude\n</system-reminder>' },
+        ],
+      };
+      const mockChat: Partial<LlmChat> = {
+        getHistory: vi.fn(() => structuredClone(currentHistory)),
+        getHistoryShallow: vi.fn(() => currentHistory.map((c) => ({ ...c }))),
+        getCompletedToolCallIds: vi.fn().mockReturnValue([]),
+        setHistory: vi.fn(),
+      };
+      client['chat'] = mockChat as LlmChat;
+      vi.mocked(getInitialChatHistory).mockResolvedValueOnce([[prelude], []]);
+
+      await client.restoreStartupContextAfterCompaction();
+
+      const reinstalled = vi.mocked(mockChat.setHistory!).mock
+        .calls[0]![0] as Content[];
+      expect(reinstalled[0]).toEqual(prelude);
+      expect(findApiHistoryPromptIndex(reinstalled, 'S########1')).toBe(1);
     });
   });
 
@@ -14013,6 +14066,41 @@ Other open files:
         ).toHaveBeenCalledOnce();
       });
 
+      it('leaves the retried turn unmarked while a user prompt owns its identity', async () => {
+        const mockChat: Partial<LlmChat> = {
+          addHistory: vi.fn(),
+          getHistory: vi.fn().mockReturnValue([]),
+          getHistoryLength: vi.fn().mockReturnValue(0),
+          setHistory: vi.fn(),
+          stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([]),
+          repairOrphanedToolUseTurns: vi.fn().mockReturnValue({ injected: [] }),
+        };
+        client['chat'] = mockChat as LlmChat;
+
+        mockTurnRunFn.mockImplementation(() =>
+          (async function* () {
+            yield { type: 'content', value: 'response' };
+          })(),
+        );
+
+        for (const [type, expectedIdentity] of [
+          [SendMessageType.UserQuery, 'session########4'],
+          [SendMessageType.Retry, undefined],
+        ] as const) {
+          await fromAsync(
+            client.sendMessageStream(
+              [{ text: 'my prompt' }],
+              new AbortController().signal,
+              'session########4',
+              { type },
+            ),
+          );
+          expect(mockTurnConstructorFn.mock.calls.at(-1)?.[3]).toBe(
+            expectedIdentity,
+          );
+        }
+      });
+
       it('restores stripped retry entries when only a concurrent send pushes', async () => {
         const orphanedPrompt: Content = {
           role: 'user',
@@ -15478,6 +15566,7 @@ Other open files:
             displayText: 'raw @file prompt',
             hookContext: '&lt;hook-only context&gt;',
           },
+          'prompt-hook-display-text',
         );
         expect(mockMemoryManager.recall).toHaveBeenCalledWith(
           '/test/project/root',
@@ -15584,6 +15673,7 @@ Other open files:
             displayText: 'my prompt',
             hookContext: 'extra hook context',
           },
+          'prompt-hook-context-tag',
         );
       });
 
