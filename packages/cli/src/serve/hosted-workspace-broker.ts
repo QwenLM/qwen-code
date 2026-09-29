@@ -7,6 +7,8 @@
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { ManagedSessionKey } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
+import type { ToolResultCapture } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
+import type { LocalShellReceipt } from '@qwen-code/qwen-code-core/managed-runtime/local-shell-result-session.js';
 import type { ManagedToolResultPayload } from './managed-runtime-tool-executor.js';
 import { resolveManagedRuntimeBrokerBaseUrl } from './managed-runtime-broker-url.js';
 import { WORKSPACE_CAPABILITY_DIGEST } from './managed-workspace-activation.js';
@@ -67,7 +69,31 @@ export class HostedWorkspaceBroker {
       );
   }
 
-  async prepare(callId: string, digest: string): Promise<string> {
+  async registerPublisher(publisher: {
+    url: string;
+    token: string;
+  }): Promise<string> {
+    const response = await this.request(
+      `/tool-sessions/${encodeURIComponent(this.identity.runtimeSessionId)}:publisher`,
+      { publisher },
+    );
+    const generation = response['bindingGeneration'];
+    if (
+      response['installed'] !== true ||
+      typeof generation !== 'string' ||
+      !/^[1-9][0-9]{0,18}$/.test(generation) ||
+      BigInt(generation) > 2n ** 63n - 1n
+    ) {
+      throw new Error('Runtime did not install the original Shell publisher.');
+    }
+    return generation;
+  }
+
+  async prepare(
+    callId: string,
+    digest: string,
+    inputDigest?: string,
+  ): Promise<string> {
     const reservation = {
       idempotencyKey: `${this.identity.runtimeSessionId}:${callId}`,
       turnId: this.identity.runtimeSessionId,
@@ -78,6 +104,7 @@ export class HostedWorkspaceBroker {
         promptId: this.identity.runtimeSessionId,
         callId,
         argsDigest: digest,
+        ...(inputDigest ? { runtimeProtocol: 3, inputDigest } : {}),
       },
     };
     let response: Record<string, unknown>;
@@ -107,7 +134,10 @@ export class HostedWorkspaceBroker {
     id: string,
     payloadJson: string,
     signal: AbortSignal,
-  ): Promise<ManagedToolResultPayload> {
+    observationMs = 120_000,
+  ): Promise<
+    ManagedToolResultPayload & { capture?: ToolResultCapture | null }
+  > {
     const path = `/executions/${encodeURIComponent(id)}`;
     let response: Record<string, unknown> | undefined;
     let cancellationSent = false;
@@ -125,7 +155,7 @@ export class HostedWorkspaceBroker {
         // A lost start reply is not permission to start another invocation.
       }
     }
-    const end = Date.now() + 120_000;
+    const end = Date.now() + observationMs;
     while (Date.now() < end) {
       if (signal.aborted && !cancellationSent) {
         cancellationSent = true;
@@ -168,6 +198,28 @@ export class HostedWorkspaceBroker {
 
   async cancel(id: string): Promise<void> {
     await this.request(`/executions/${encodeURIComponent(id)}:cancel`, {});
+  }
+
+  async acknowledge(id: string, receipt: LocalShellReceipt): Promise<void> {
+    const response = await this.request(
+      `/executions/${encodeURIComponent(id)}:acknowledge`,
+      {
+        receipt: {
+          executionCallId: receipt.executionCallId,
+          manifest: receipt.manifest,
+          deliveryStatus: receipt.deliveryStatus,
+          historyRevision: receipt.historyRevision,
+        },
+      },
+    );
+    if (
+      response['executionCallId'] !== id ||
+      response['acknowledged'] !== true
+    ) {
+      throw new Error(
+        'Runtime did not acknowledge the original Shell receipt.',
+      );
+    }
   }
 
   async release(): Promise<void> {

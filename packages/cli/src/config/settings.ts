@@ -67,6 +67,7 @@ import {
   getGlobalQwenDirLite,
   getSystemDefaultsPath,
   getSystemSettingsPath,
+  spawnedEnvironmentView,
 } from './storage-paths-lite.js';
 import { readConfigFile } from './read-config-file.js';
 
@@ -1055,7 +1056,9 @@ export function loadSettings(
  * that cannot be read whole, is not a JSON object or carries a version this
  * build cannot migrate throws, where `loadSettings` repairs, skips or accepts
  * some of these. `environment` locates the user and system files and is the
- * only source for `${VAR}` placeholders; without one, nothing is read.
+ * only source for `${VAR}` placeholders; without one, nothing is read. It is
+ * read as a spawned session host receives it, and one that the host would not
+ * receive as it is throws.
  */
 export function readSettingsSnapshot(
   workspaceDir: string,
@@ -1080,12 +1083,23 @@ export function readSettingsSnapshot(
   );
 }
 
+/**
+ * The real path of the home directory, as settings loading resolves it to tell
+ * whether the workspace is the home directory. Throws when it cannot be
+ * resolved, for example because it does not exist.
+ */
+export function resolveHomeDirectory(home: string = homedir()): string {
+  return fs.realpathSync(path.resolve(home));
+}
+
 function readSettingsLayers(
   workspaceDir: string,
   opts: LoadSettingsOptions,
   snapshotOf?: { readonly environment: Readonly<NodeJS.ProcessEnv> },
 ): LoadedSettings {
-  // A snapshot reads through the given environment and writes nothing.
+  // A snapshot reads through the given environment and writes nothing. Every
+  // step below that writes a file or `process.env` must be skipped when
+  // `snapshot` is set; the snapshot tests compare the whole tree to hold it.
   const snapshot = snapshotOf !== undefined;
   const snapshotEnvironment = snapshotOf?.environment;
   // Apply any QWEN_HOME / QWEN_RUNTIME_DIR set in user-level `.env` files
@@ -1116,7 +1130,6 @@ function readSettingsLayers(
 
   // Resolve paths to their canonical representation to handle symlinks
   const resolvedWorkspaceDir = path.resolve(workspaceDir);
-  const resolvedHomeDir = path.resolve(homedir());
 
   let realWorkspaceDir = resolvedWorkspaceDir;
   try {
@@ -1127,7 +1140,7 @@ function readSettingsLayers(
   }
 
   // We expect homedir to always exist and be resolvable.
-  const realHomeDir = fs.realpathSync(resolvedHomeDir);
+  const realHomeDir = resolveHomeDirectory();
 
   const workspaceSettingsPath = new Storage(
     workspaceDir,
@@ -1394,13 +1407,9 @@ function readSettingsLayers(
   // never contains a process.env key, process.env always wins.
   // A snapshot environment is the environment of the session hosts it
   // describes and carries the user-level `.env` values its runtime applied, so
-  // it is the only source.
+  // it is the only source, read as a host spawned with it sees it.
   const homeEnvFallback = snapshotOf
-    ? Object.fromEntries(
-        Object.entries(snapshotOf.environment).filter(
-          (entry): entry is [string, string] => typeof entry[1] === 'string',
-        ),
-      )
+    ? spawnedEnvironmentView(snapshotOf.environment)
     : getHomeEnvFallbackVars((message) => debugLogger.warn(message));
   const resolveOptions = { processEnvFallback: !snapshot };
   systemSettings = resolveEnvVarsInObject(

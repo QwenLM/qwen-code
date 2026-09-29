@@ -12,11 +12,12 @@ import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 /**
- * Checks the planned Stage H task schemas with valid and invalid instances.
- * The API contract test validates only operations that are not planned, so
- * these invariants have no other gate until H0c maps the task routes. Every
- * instance is written in the public shape and also checked, renamed to
- * camelCase, against the WebShell mirror, whose conditionals are copied.
+ * Checks the Stage H task schemas with valid and invalid instances. The API
+ * contract test validates only what the mapped task list and detail return,
+ * so the invalid instances, the planned task events and the cancel operation
+ * have no other gate. Every instance is written in the public shape and also
+ * checked, renamed to camelCase, against the WebShell mirror, whose
+ * conditionals are copied.
  */
 class PlannedTaskContractTest {
     private static final OpenApiContract CONTRACT = OpenApiContract.load();

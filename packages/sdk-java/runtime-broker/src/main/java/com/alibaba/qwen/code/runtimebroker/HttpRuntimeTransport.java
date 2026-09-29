@@ -325,7 +325,29 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
                         parseToolResponse(bytes, "cancel"), "cancel"));
     }
 
-    /** Explicit local Tool v3 call; production Broker selection remains v2. */
+    public CompletionStage<Void> installPublisherV3(RuntimeLease lease,
+            RuntimeSession session, Map<String, Object> publisher) {
+        requireV3Context(lease, session);
+        requireClosed(publisher, Set.of("url", "token"), "publisher");
+        if (!(publisher.get("url") instanceof String url)
+                || !url.matches("http://127\\.0\\.0\\.1:[1-9][0-9]{0,4}/internal/hosted-shell-publisher/v1")
+                || URI.create(url).getPort() > 65535
+                || !(publisher.get("token") instanceof String token)
+                || !token.matches("[A-Za-z0-9_-]{43}")) {
+            throw new IllegalArgumentException("Output publisher descriptor is invalid");
+        }
+        Map<String, Object> body = Map.of("protocolVersion", 3,
+                "toolResult", "managed-tool-result/1", "sessionId", session.getRuntimeSessionId(),
+                "publisher", publisher);
+        Map<String, Object> expected = Map.of("protocolVersion", 3,
+                "toolResult", "managed-tool-result/1", "sessionId", session.getRuntimeSessionId(),
+                "installed", true);
+        return post(lease, "/internal/managed-runtime/v3/publisher",
+                encodeToolRequest(body, BODY_LIMIT_BYTES), BODY_LIMIT_BYTES)
+                .thenAccept(bytes -> ManagedContextProtocol.verify(ManagedContextProtocol.parse(bytes), expected));
+    }
+
+    /** Explicit Tool v3 call; selection belongs to the saved Broker reference. */
     public CompletionStage<Map<String, Object>> executeV3(RuntimeLease lease,
             RuntimeSession session, Map<String, Object> reference,
             Map<String, Object> capture) {
