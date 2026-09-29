@@ -461,9 +461,9 @@ npm run test:e2e:managed-agent-server -- \
 ```
 
 That run additionally requires the first model event to precede Runtime
-readiness. Real provider TTFT varies, so the deterministic CI proof of the same
-ordering remains `npx tsx scripts/run-managed-hosted-runtime-e2e.ts`, which
-uses a controlled model server and a 15-second Runtime delay.
+readiness whenever the delay reaches the 15 seconds the acceptance criterion
+names. A deterministic controlled-model proof of the same ordering is tracked
+in #12941.
 
 The real-model check extracts only the selected model provider, its referenced
 environment credential, the selected model, and the authentication policy
