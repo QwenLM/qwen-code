@@ -269,9 +269,6 @@ export class HostedWorkspaceToolTurn {
         if (this.publication && args['is_background'] !== undefined) {
           validationError = 'Hosted Shell requires one foreground command.';
         }
-        if (this.publication && validationError) {
-          throw new Error(validationError);
-        }
         input = this.publication
           ? { ...args }
           : { ...args, is_background: false };

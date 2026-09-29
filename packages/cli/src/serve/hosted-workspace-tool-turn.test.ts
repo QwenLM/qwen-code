@@ -1133,6 +1133,45 @@ it.each([
   expect(broker.acquire).not.toHaveBeenCalled();
 });
 
+it.each([
+  [{ command: 'pwd', timeout: 0 }, 'timeout must be an integer'],
+  [{ command: 'pwd', is_background: false }, 'foreground command'],
+])(
+  'returns a durable O2 refusal for invalid Shell arguments %j',
+  async (args, message) => {
+    const owner = {
+      owner: vi.fn(),
+      request: vi.fn(),
+      rememberAdmission: vi.fn(),
+    } as unknown as HttpToolPublicationOwner;
+    turn = new HostedWorkspaceToolTurn(
+      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+      session,
+      harness,
+      'prompt',
+      commit,
+      messageFitsInline,
+      { owner, captureBytes: 1024 * 1024 },
+    );
+    const call = { ...calls[0], name: 'run_shell_command', args };
+    const responses = await turn.execute(
+      [call],
+      [{ functionCall: { id: call.callId, name: call.name, args } }],
+      'model',
+      new AbortController().signal,
+    );
+    expect(responses[0].functionResponse?.response?.['error']).toContain(
+      message,
+    );
+    expect((await session.sink.project()).map((record) => record.type)).toEqual(
+      ['assistant', 'tool_result'],
+    );
+    expect(broker.acquire).not.toHaveBeenCalled();
+    expect(broker.prepareV3).not.toHaveBeenCalled();
+    expect(owner.request).not.toHaveBeenCalled();
+  },
+);
+
 it('accepts the runtime foreground spelling is_background false', async () => {
   turn = createTurn(true);
   broker.execute.mockResolvedValue({
