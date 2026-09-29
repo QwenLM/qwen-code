@@ -3988,6 +3988,34 @@ bad`);
         expect(unregisterSpy).toHaveBeenCalledTimes(1);
       });
 
+      it('assigns distinct explicit identities when the caller omits an id', async () => {
+        const addAgentHooks = vi.fn().mockReturnValue(vi.fn());
+        vi.spyOn(mockConfig, 'getHookSystem').mockReturnValue({
+          getRegistry: () => ({ addAgentHooks }),
+        } as unknown as ReturnType<Config['getHookSystem']>);
+        mockAgentHeadlessCreate.mockImplementation(
+          async (...args: unknown[]) => ({
+            getCore: () => ({ subagentId: args[10] }),
+          }),
+        );
+        const config: SubagentConfig = {
+          ...baseConfig,
+          hooks: {
+            PreToolUse: [{ hooks: [{ type: 'command', command: 'echo' }] }],
+          },
+        };
+        const first = await manager.createAgentHeadless(config, mockConfig);
+        const second = await manager.createAgentHeadless(config, mockConfig);
+        const firstId = mockAgentHeadlessCreate.mock.calls[0][10];
+        const secondId = mockAgentHeadlessCreate.mock.calls[1][10];
+        expect(firstId).toMatch(/^cleanup-agent-[a-f0-9]{8}$/);
+        expect(secondId).not.toBe(firstId);
+        expect(addAgentHooks.mock.calls[0][2].owner.agentId).toBe(firstId);
+        expect(addAgentHooks.mock.calls[1][2].owner.agentId).toBe(secondId);
+        await first.dispose();
+        await second.dispose();
+      });
+
       it('keeps the invocation session when construction overlaps a session change', async () => {
         const session = vi
           .spyOn(mockConfig, 'getSessionId')

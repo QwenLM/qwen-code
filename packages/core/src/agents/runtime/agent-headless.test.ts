@@ -580,6 +580,12 @@ describe('subagent.ts', () => {
           { systemPrompt: '' },
           defaultModelConfig,
           defaultRunConfig,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          'explicit-A',
         );
         const expected = {
           runtimeId: 'headless-runtime',

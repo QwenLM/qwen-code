@@ -1174,6 +1174,9 @@ export class SubagentManager {
       disposeSubagentRegistry = cleanup;
 
       try {
+        const subagentId =
+          options?.subagentId ??
+          `${config.name}-${randomUUID().replace(/-/g, '').slice(0, 8)}`;
         const subagent = await AgentHeadless.create(
           config.name,
           subagentContext,
@@ -1185,7 +1188,7 @@ export class SubagentManager {
           options?.hooks,
           runtimeView,
           options?.taskName,
-          options?.subagentId,
+          subagentId,
         );
         const hookRegistry = runtimeContext.getHookSystem()?.getRegistry();
         if (config.hooks && Object.keys(config.hooks).length > 0) {

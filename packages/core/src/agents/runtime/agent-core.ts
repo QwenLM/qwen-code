@@ -475,9 +475,10 @@ export class AgentCore {
   ) {
     this.subagentId =
       subagentId ?? `${name}-${randomUUID().replace(/-/g, '').slice(0, 8)}`;
+    // Internal forks without an explicit identity retain the caller's hook scope.
     this.hookExecutionOwner = captureHookExecutionOwner(
       runtimeContext,
-      this.subagentId,
+      subagentId,
     );
     this.name = name;
     this.taskName = taskName;
