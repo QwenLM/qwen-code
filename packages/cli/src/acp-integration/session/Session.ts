@@ -4,6 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  captureHookExecutionOwner,
+  runWithHookExecutionOwner,
+  type HookExecutionOwner,
+} from '@qwen-code/qwen-code-core/hooks/hook-execution-context.js';
+
 import { shellResultText } from '@qwen-code/qwen-code-core/shellResult';
 import { evaluateMediaPolicyToolCall } from '@qwen-code/qwen-code-core/omni/policy/model-access.js';
 
@@ -376,6 +382,10 @@ import {
   settingExistsInScope,
 } from '../../config/settingsUtils.js';
 import { recordDaemonSessionModel } from '../session-model-persistence.js';
+import {
+  recordDaemonSessionApprovalMode,
+  recordDaemonSessionApprovalModeFromConfig,
+} from '../session-approval-mode-persistence.js';
 import {
   applyReasoningSelection,
   clearReasoningRequestOverrides,
@@ -1793,22 +1803,25 @@ export async function fireSessionPermissionDeniedForAutoMode(
   toolParams: Record<string, unknown>,
   callId: string,
   signal?: AbortSignal,
+  owner = captureHookExecutionOwner(config),
 ): Promise<void> {
   if (
     !config.getDisableAllHooks?.() &&
     shouldFirePermissionDeniedForAutoMode(decision, outcome)
   ) {
     try {
-      await config
-        .getHookSystem?.()
-        ?.firePermissionDeniedEvent(
-          toolName,
-          toolParams,
-          callId,
-          getAutoModePermissionDeniedReason(decision),
-          signal,
-          callId,
-        );
+      await runWithHookExecutionOwner(owner, () =>
+        config
+          .getHookSystem?.()
+          ?.firePermissionDeniedEvent(
+            toolName,
+            toolParams,
+            callId,
+            getAutoModePermissionDeniedReason(decision),
+            signal,
+            callId,
+          ),
+      );
     } catch (hookError) {
       debugLogger.warn(
         `PermissionDenied hook failed for tool ${callId}: ${hookError instanceof Error ? hookError.message : String(hookError)}`,
@@ -2238,6 +2251,7 @@ export class Session implements SessionContext {
   private closeGateCompletion: Promise<void> | null = null;
   private resolveCloseGate: (() => void) | null = null;
   private unsubscribeChatRecordingFailure?: () => void;
+  private unsubscribeApprovalModeChange?: () => void;
   /** The exact status-change callback this Session installed, so dispose can
    *  retract its own and nobody else's. */
   #statusChangeCallback: (() => void) | undefined;
@@ -2434,6 +2448,22 @@ export class Session implements SessionContext {
     this.planEmitter = new PlanEmitter(this);
     this.historyReplayer = new HistoryReplayer(this);
     this.messageEmitter = new MessageEmitter(this);
+
+    this.unsubscribeApprovalModeChange = this.config.onApprovalModeChange?.(
+      (mode, prePlanMode) => {
+        void recordDaemonSessionApprovalMode(this.config, {
+          mode,
+          ...(mode === ApprovalMode.PLAN
+            ? {
+                prePlanMode,
+                ...(this.config.getPlanExecutionMode?.()
+                  ? { planExecutionMode: this.config.getPlanExecutionMode() }
+                  : {}),
+              }
+            : {}),
+        });
+      },
+    );
 
     this.#bindGoalRuntime();
     this.#registerBackgroundNotificationCallbacks();
@@ -4497,6 +4527,8 @@ export class Session implements SessionContext {
     this.notificationAdmissionRetry = undefined;
     this.backgroundTurn = undefined;
     this.clearActiveTodoPlanRevision();
+    this.unsubscribeApprovalModeChange?.();
+    this.unsubscribeApprovalModeChange = undefined;
     this.pendingPrompt?.abort(SESSION_DISPOSE_ABORT_REASON);
     this.pendingPrompt = null;
     this.resolveCloseGate?.();
@@ -4724,12 +4756,25 @@ export class Session implements SessionContext {
       : snapshotsBeforeRewind.slice(0, targetTurnIndex);
     fileHistoryService.restoreFromSnapshots(survivingSnapshots);
 
+    const approvalMode = this.config.getApprovalMode();
     this.config
       .getChatRecordingService()
       ?.rewindRecording(
         targetTurnIndex,
         { truncatedCount: Math.max(0, apiHistory.length - apiTruncateIndex) },
         survivingSnapshots,
+        {
+          mode: approvalMode,
+          ...(approvalMode === ApprovalMode.PLAN
+            ? {
+                prePlanMode:
+                  this.config.getPrePlanMode() ?? ApprovalMode.DEFAULT,
+                ...(this.config.getPlanExecutionMode?.()
+                  ? { planExecutionMode: this.config.getPlanExecutionMode() }
+                  : {}),
+              }
+            : {}),
+        },
       );
 
     if (shouldDrainAutomaticQueues) {
@@ -6063,6 +6108,7 @@ export class Session implements SessionContext {
             let strippedOrphanEntries: Content[] | null = null;
             let orphanPushCountSnapshot = 0;
             if (goalTurn?.origin === 'runtime') {
+              void recordDaemonSessionApprovalModeFromConfig(this.config);
               this.config.getChatRecordingService()?.recordGoalRuntimeMessage(
                 modelPromptBlocks
                   .filter((block) => block.type === 'text')
@@ -6090,6 +6136,7 @@ export class Session implements SessionContext {
                 );
                 return { stopReason: 'end_turn' };
               }
+              void recordDaemonSessionApprovalModeFromConfig(this.config);
               if (recoveryPlan.continuation.mode === 'retry_user_parts') {
                 strippedOrphanEntries =
                   this.config
@@ -6101,6 +6148,8 @@ export class Session implements SessionContext {
               } else {
                 continuationParts = recoveryPlan.continuation.parts;
               }
+            } else if (!isRestoreAskUserQuestion) {
+              void recordDaemonSessionApprovalModeFromConfig(this.config);
             }
 
             if (goalTurn?.origin === 'runtime') {
@@ -6140,6 +6189,7 @@ export class Session implements SessionContext {
                       ...(resourceLinks.length > 0 ? { resourceLinks } : {}),
                     }
                   : undefined,
+                promptId,
                 daemonPromptId,
               );
             }
@@ -6231,6 +6281,7 @@ export class Session implements SessionContext {
                         ...(inputAnnotations ? { inputAnnotations } : {}),
                       }
                     : undefined,
+                  promptId,
                   daemonPromptId,
                 );
               }
@@ -6312,6 +6363,7 @@ export class Session implements SessionContext {
               >(
                 {
                   type: MessageBusType.HOOK_EXECUTION_REQUEST,
+                  owner: captureHookExecutionOwner(this.config),
                   eventName: 'UserPromptSubmit',
                   input: {
                     prompt: promptText,
@@ -7259,6 +7311,7 @@ export class Session implements SessionContext {
           >(
             {
               type: MessageBusType.HOOK_EXECUTION_REQUEST,
+              owner: captureHookExecutionOwner(this.config),
               eventName: 'Stop',
               input: {
                 stop_hook_active: stopHookForcedTurn,
@@ -8552,8 +8605,12 @@ export class Session implements SessionContext {
     }
     // The dispatcher mirrors warnings to console.warn itself; this sink
     // only adds them to the debug-log file.
-    return new MessageDisplayDispatcher(messageBus, signal, (message) =>
-      debugLogger.warn(message),
+    return new MessageDisplayDispatcher(
+      messageBus,
+      signal,
+      (message) => debugLogger.warn(message),
+      undefined,
+      captureHookExecutionOwner(this.config),
     );
   }
 
@@ -10057,6 +10114,7 @@ export class Session implements SessionContext {
             try {
               await this.assertCanStartTurn();
               if (ac.signal.aborted) return;
+              void recordDaemonSessionApprovalModeFromConfig(this.config);
               this.config.startAutomaticActiveTodoWorkChain(
                 promptId,
                 item.todoWorkChainId,
@@ -13148,6 +13206,7 @@ export class Session implements SessionContext {
       onResult: (result: McpAppToolResult) => void;
     },
   ): Promise<RunToolResult> {
+    const hookOwner = captureHookExecutionOwner(this.config);
     const callId = fc.id ?? generatedCallId ?? `${fc.name}-${Date.now()}`;
     const modelFacingToolName = fc.name ?? 'unknown_tool';
     let args = (fc.args ?? {}) as Record<string, unknown>;
@@ -13992,6 +14051,7 @@ export class Session implements SessionContext {
               toolParams,
               callId,
               abortSignal,
+              hookOwner,
             );
             const permissionDeniedHookCancellation =
               cancelBeforeExecutionIfAborted(toolName);
@@ -14021,12 +14081,14 @@ export class Session implements SessionContext {
                 wasAutoModeManualFallback =
                   isDenialFallbackReason(outcome.reason) ||
                   outcome.reason === 'classifier_unavailable' ||
-                  outcome.reason === 'external_write';
+                  outcome.reason === 'external_write' ||
+                  outcome.reason === 'external_directory';
 
                 if (
                   outcome.message &&
                   (outcome.reason === 'classifier_unavailable' ||
                     outcome.reason === 'external_write' ||
+                    outcome.reason === 'external_directory' ||
                     isDenialFallbackReason(outcome.reason))
                 ) {
                   autoModeFallback = {
@@ -14233,6 +14295,7 @@ export class Session implements SessionContext {
                 String(approvalMode),
                 undefined,
                 activeToolAbortSignal,
+                hookOwner,
               );
               const permissionHookCancellation =
                 cancelBeforeExecutionIfAborted(toolName);
@@ -14382,6 +14445,7 @@ export class Session implements SessionContext {
                   `Qwen Code needs your permission to use ${toolName}`,
                   NotificationType.PermissionPrompt,
                   'Permission needed',
+                  hookOwner,
                 );
               }
 
@@ -14736,6 +14800,7 @@ export class Session implements SessionContext {
               permissionMode,
               activeToolAbortSignal,
               callId,
+              hookOwner,
             );
             const preHookCancellation =
               cancelBeforeExecutionIfAborted(toolName);
@@ -15291,6 +15356,7 @@ export class Session implements SessionContext {
               activeToolAbortSignal,
               callId,
               elapsedExecutionMs(),
+              hookOwner,
             );
 
             if (activeToolAbortSignal.aborted) {
@@ -15360,6 +15426,7 @@ export class Session implements SessionContext {
                 activeToolAbortSignal,
                 callId,
                 elapsedExecutionMs(),
+                hookOwner,
               );
               if (failureHookResult.additionalContext) {
                 debugLogger.debug(
@@ -15617,6 +15684,7 @@ export class Session implements SessionContext {
                 activeToolAbortSignal,
                 callId,
                 elapsedExecutionMs(),
+                hookOwner,
               );
               if (failureHookResult.additionalContext) {
                 debugLogger.debug(
@@ -16501,8 +16569,16 @@ export class Session implements SessionContext {
     message: string,
     notificationType: NotificationType,
     title?: string,
+    owner?: HookExecutionOwner,
   ): void {
-    void fireNotificationHook(messageBus, message, notificationType, title)
+    void fireNotificationHook(
+      messageBus,
+      message,
+      notificationType,
+      title,
+      undefined,
+      owner,
+    )
       .then((hookResult) => {
         if (!hookResult.terminalSequence) return;
         return this.client.extNotification(

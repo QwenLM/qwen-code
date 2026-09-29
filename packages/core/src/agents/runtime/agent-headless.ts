@@ -246,7 +246,9 @@ export class AgentHeadless implements SubagentExecutor {
     }
 
     try {
-      await this.executeTurn(context, externalSignal, !resetStats);
+      await this.core.runInHookFrame(() =>
+        this.executeTurn(context, externalSignal, !resetStats),
+      );
     } finally {
       this.executing = false;
     }
