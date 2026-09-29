@@ -11,6 +11,16 @@ public final class ToolExecutionRecord {
     private static final Set<String> EXECUTION_STATUSES = Set.of(
             "not_started", "success", "error", "cancelled");
 
+    /**
+     * Whether the original Runtime can still answer for this execution after
+     * its dispatch answer was lost: tool v3 and provider references can be
+     * observed and cancelled there, a tool v2 reference cannot.
+     */
+    boolean observableAfterLoss() {
+        return Integer.valueOf(3).equals(reference.get("runtimeProtocol"))
+                || ProviderRuntimeProtocol.isReference(reference);
+    }
+
     Map<String, Object> cancellationBeforeDispatch() {
         if (!Integer.valueOf(3).equals(reference.get("runtimeProtocol"))) {
             return Map.of("executionStatus", "cancelled");

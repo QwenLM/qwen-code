@@ -2398,6 +2398,7 @@ export type DerivedConfigOverrides = Partial<
     | 'getFileService'
     | 'getEffectiveInputModalities'
     | 'getFileReadCache'
+    | 'getFileHistoryService'
     | 'getToolRegistry'
     | 'getPermissionManager'
     | 'getApprovalMode'
