@@ -26,7 +26,6 @@ import {
 import type { Config } from '../config/config.js';
 import * as metadataMigration from './metadata-migration.js';
 import { ToolNames } from '../tools/tool-names.js';
-import type { Content } from '@google/genai';
 import { captureAutoMemoryExtractionHistory } from './extractionAgentPlanner.js';
 
 // ─── Mocks ────────────────────────────────────────────────────────────────────
@@ -1599,6 +1598,7 @@ describe('MemoryManager', () => {
       const sameTurn = await mgr.scheduleExtract({
         projectRoot,
         sessionId: 'sess-1',
+        extractionHistory: [],
         history: history.slice(0, 3),
       });
 
@@ -1607,6 +1607,7 @@ describe('MemoryManager', () => {
       const laterTurn = await mgr.scheduleExtract({
         projectRoot,
         sessionId: 'sess-1',
+        extractionHistory: [],
         history: [...history],
       });
 
@@ -1623,6 +1624,7 @@ describe('MemoryManager', () => {
       const result = await mgr.scheduleExtract({
         projectRoot,
         sessionId: 'sess-1',
+        extractionHistory: [],
         history: [
           {
             role: 'model',
@@ -1668,6 +1670,7 @@ describe('MemoryManager', () => {
       const rejected = await mgr.scheduleExtract({
         projectRoot,
         sessionId: 'sess-1',
+        extractionHistory: [],
         history: [
           {
             role: 'model',
@@ -1710,6 +1713,7 @@ describe('MemoryManager', () => {
       const succeeded = await mgr.scheduleExtract({
         projectRoot,
         sessionId: 'sess-2',
+        extractionHistory: [],
         history: [
           {
             role: 'model',
@@ -1756,6 +1760,7 @@ describe('MemoryManager', () => {
       const result = await mgr.scheduleExtract({
         projectRoot,
         sessionId: 'sess-1',
+        extractionHistory: [],
         history: [
           {
             role: 'user',

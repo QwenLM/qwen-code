@@ -128,47 +128,42 @@ describe('runAutoMemoryExtractionByAgent', () => {
   });
 
   it('strips runtime reminders and hidden reasoning from inherited history', async () => {
-    vi.mocked(getCacheSafeParams).mockReturnValue({
-      generationConfig: {},
-      history: [
-        {
-          role: 'user',
-          parts: [
-            {
-              text: '<system-reminder>skill catalog</system-reminder>\n\nRemember that I prefer concise replies.',
+    const inherited: Content[] = [
+      {
+        role: 'user',
+        parts: [
+          {
+            text: '<system-reminder>skill catalog</system-reminder>\n\nRemember that I prefer concise replies.',
+          },
+        ],
+      },
+      {
+        role: 'model',
+        parts: [
+          { thought: true, text: 'hidden reasoning' },
+          { functionCall: { name: 'read_file', args: { path: '/tmp/a' } } },
+        ],
+      },
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              name: 'read_file',
+              response: { output: 'large tool result' },
             },
-          ],
-        },
-        {
-          role: 'model',
-          parts: [
-            { thought: true, text: 'hidden reasoning' },
-            { functionCall: { name: 'read_file', args: { path: '/tmp/a' } } },
-          ],
-        },
-        {
-          role: 'user',
-          parts: [
-            {
-              functionResponse: {
-                name: 'read_file',
-                response: { output: 'large tool result' },
-              },
-            },
-          ],
-        },
-        { role: 'model', parts: [{ text: 'Understood.' }] },
-      ],
-      model: 'qwen3-coder-plus',
-      version: 1,
-    });
+          },
+        ],
+      },
+      { role: 'model', parts: [{ text: 'Understood.' }] },
+    ];
     vi.mocked(runForkedAgent).mockResolvedValue({
       status: 'completed',
       filesTouched: [],
       filesWritten: [],
     });
 
-    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp');
+    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp', inherited);
 
     expect(vi.mocked(runForkedAgent).mock.calls[0]?.[0].extraHistory).toEqual([
       {
@@ -203,35 +198,30 @@ describe('runAutoMemoryExtractionByAgent', () => {
     // this PR's token saving comes from. `parts.length > 0 ? … : []` is the
     // branch doing it: keeping the message would hand the forked agent a
     // `Content` with `parts: []` and put the reminder tokens right back.
-    vi.mocked(getCacheSafeParams).mockReturnValue({
-      generationConfig: {},
-      history: [
-        {
-          role: 'user',
-          parts: [
-            {
-              text: '<system-reminder>\n<available_skills>\n<skill>\n<name>pdf</name>\n<description>Work with PDF files.</description>\n</skill>\n</available_skills>\n</system-reminder>',
-            },
-          ],
-        },
-        { role: 'user', parts: [{ text: 'Remember that I prefer tabs.' }] },
-        {
-          role: 'model',
-          parts: [
-            { text: '<system-reminder>Context refreshed.</system-reminder>' },
-          ],
-        },
-      ],
-      model: 'qwen3-coder-plus',
-      version: 1,
-    });
+    const inherited: Content[] = [
+      {
+        role: 'user',
+        parts: [
+          {
+            text: '<system-reminder>\n<available_skills>\n<skill>\n<name>pdf</name>\n<description>Work with PDF files.</description>\n</skill>\n</available_skills>\n</system-reminder>',
+          },
+        ],
+      },
+      { role: 'user', parts: [{ text: 'Remember that I prefer tabs.' }] },
+      {
+        role: 'model',
+        parts: [
+          { text: '<system-reminder>Context refreshed.</system-reminder>' },
+        ],
+      },
+    ];
     vi.mocked(runForkedAgent).mockResolvedValue({
       status: 'completed',
       filesTouched: [],
       filesWritten: [],
     });
 
-    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp');
+    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp', inherited);
 
     // Both reminder-only messages are gone entirely — no empty-`parts` entry
     // survives — the real turn is kept, and the resulting `user` tail is closed
@@ -243,24 +233,19 @@ describe('runAutoMemoryExtractionByAgent', () => {
   });
 
   it('inherits no history when every message sanitizes away', async () => {
-    vi.mocked(getCacheSafeParams).mockReturnValue({
-      generationConfig: {},
-      history: [
-        {
-          role: 'user',
-          parts: [{ text: '<system-reminder>skill catalog</system-reminder>' }],
-        },
-      ],
-      model: 'qwen3-coder-plus',
-      version: 1,
-    });
+    const inherited: Content[] = [
+      {
+        role: 'user',
+        parts: [{ text: '<system-reminder>skill catalog</system-reminder>' }],
+      },
+    ];
     vi.mocked(runForkedAgent).mockResolvedValue({
       status: 'completed',
       filesTouched: [],
       filesWritten: [],
     });
 
-    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp');
+    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp', inherited);
 
     // The `sanitized.length === 0` guard returns `[]` instead of falling
     // through to the tail handling, which would read `sanitized[-1]`. An empty
@@ -272,22 +257,17 @@ describe('runAutoMemoryExtractionByAgent', () => {
   });
 
   it('keeps the triggering turn when sanitization empties the trailing model message', async () => {
-    vi.mocked(getCacheSafeParams).mockReturnValue({
-      generationConfig: {},
-      history: [
-        { role: 'user', parts: [{ text: 'Remember I prefer tabs.' }] },
-        { role: 'model', parts: [{ thought: true, text: 'reasoning' }] },
-      ],
-      model: 'qwen3-coder-plus',
-      version: 1,
-    });
+    const inherited: Content[] = [
+      { role: 'user', parts: [{ text: 'Remember I prefer tabs.' }] },
+      { role: 'model', parts: [{ thought: true, text: 'reasoning' }] },
+    ];
     vi.mocked(runForkedAgent).mockResolvedValue({
       status: 'completed',
       filesTouched: [],
       filesWritten: [],
     });
 
-    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp');
+    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp', inherited);
 
     // The thought-only model message sanitizes away, leaving a `user` tail.
     // Dropping it would hand the extractor an empty history (forkedAgent
@@ -300,45 +280,40 @@ describe('runAutoMemoryExtractionByAgent', () => {
   });
 
   it('never leaves an unanswered functionCall at the tail of the inherited history', async () => {
-    vi.mocked(getCacheSafeParams).mockReturnValue({
-      generationConfig: {},
-      history: [
-        {
-          role: 'model',
-          parts: [
-            {
-              functionCall: {
-                id: 'call-1',
-                name: 'read_file',
-                args: { path: '/tmp/a' },
-              },
+    const inherited: Content[] = [
+      {
+        role: 'model',
+        parts: [
+          {
+            functionCall: {
+              id: 'call-1',
+              name: 'read_file',
+              args: { path: '/tmp/a' },
             },
-          ],
-        },
-        {
-          role: 'user',
-          parts: [
-            {
-              functionResponse: {
-                id: 'call-1',
-                name: 'read_file',
-                response: { output: 'real tool result' },
-              },
+          },
+        ],
+      },
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'call-1',
+              name: 'read_file',
+              response: { output: 'real tool result' },
             },
-          ],
-        },
-        { role: 'model', parts: [{ thought: true, text: 'reasoning' }] },
-      ],
-      model: 'qwen3-coder-plus',
-      version: 1,
-    });
+          },
+        ],
+      },
+      { role: 'model', parts: [{ thought: true, text: 'reasoning' }] },
+    ];
     vi.mocked(runForkedAgent).mockResolvedValue({
       status: 'completed',
       filesTouched: [],
       filesWritten: [],
     });
 
-    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp');
+    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp', inherited);
 
     // A one-shot trailing trim would delete the real `functionResponse` and
     // leave `functionCall` open at the tail, which the client then closes by
@@ -380,7 +355,7 @@ describe('runAutoMemoryExtractionByAgent', () => {
       filesTouched: [],
     });
 
-    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp');
+    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp', []);
 
     // The inherited history is scrubbed of `<system-reminder>` blocks, and
     // those are the only carrier of the date; passing extraHistory also
@@ -538,7 +513,7 @@ describe('runAutoMemoryExtractionByAgent', () => {
       filesTouched: [],
     });
 
-    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp');
+    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp', []);
 
     const call = vi.mocked(runForkedAgent).mock.calls[0]?.[0];
     const permissionManager = call?.config.getPermissionManager?.();
