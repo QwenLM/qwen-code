@@ -31,6 +31,14 @@ const realReaddirSync = fs.readdirSync;
 const realStatSync = fs.statSync;
 const realRmSync = fs.rmSync;
 
+function reportsMissingArtifact(message, missingArtifact, pathFlavor = path) {
+  const normalized = String(message).split(pathFlavor.sep).join('/');
+  return (
+    normalized.includes('Required package artifact not found') &&
+    normalized.includes(missingArtifact)
+  );
+}
+
 describe('package asset scripts', () => {
   const tempDirs = [];
 
@@ -735,15 +743,23 @@ describe('package asset scripts', () => {
     // normalise the separator before matching; otherwise they pass on POSIX and
     // go red in the test_windows lane (which runs test:scripts).
     expect(
-      console.error.mock.calls
-        .map(([message]) => String(message).split(path.sep).join('/'))
-        .some(
-          (message) =>
-            message.includes('Required package artifact not found') &&
-            message.includes(missingArtifact),
-        ),
+      console.error.mock.calls.some(([message]) =>
+        reportsMissingArtifact(message, missingArtifact),
+      ),
     ).toBe(true);
   });
+
+  it.each(['mem0/main.js', 'mem0/write-confirmation.js'])(
+    'recognizes a Windows missing-artifact error for %s',
+    (missingArtifact) => {
+      const message =
+        'Error: Required package artifact not found: ' +
+        path.win32.join('D:\\publish\\dist', ...missingArtifact.split('/'));
+      expect(reportsMissingArtifact(message, missingArtifact, path.win32)).toBe(
+        true,
+      );
+    },
+  );
 
   it.each(['manifest.webmanifest', 'sw.js'])(
     'rejects a published shell missing %s',
