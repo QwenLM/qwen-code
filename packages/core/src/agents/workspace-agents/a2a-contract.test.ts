@@ -67,6 +67,19 @@ describe('A2A contract', () => {
     expect(state('cancelled', [live])).toBe('TASK_STATE_CANCELED');
   });
 
+  it('reads a wait beside another obligation as an answer, not a failure', () => {
+    // `blocked` / `in_review` is also what a question or a review outranking
+    // a live wait resolves to; only a wait left alone is stranded.
+    const state = (status: ThreadStatus, runs: ThreadRun[]) =>
+      toExternalA2ATaskState(thread(status, runs));
+    const waiting = run({ id: 'rn_wait', closeKind: 'waiting' });
+    const review = run({ id: 'rn_review', closeKind: 'review' });
+    const question = run({ id: 'rn_question', closeKind: 'blocked' });
+    expect(state('in_review', [waiting, review])).toBe('TASK_STATE_COMPLETED');
+    expect(state('blocked', [waiting, question])).toBe('TASK_STATE_COMPLETED');
+    expect(state('blocked', [waiting])).toBe('TASK_STATE_FAILED');
+  });
+
   it('refuses an unmapped local status', () => {
     expect(() => toA2ATaskState('future' as ThreadStatus)).toThrow(
       'Unmapped thread status: future',

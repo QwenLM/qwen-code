@@ -84,10 +84,10 @@ class AuthenticatedA2AUser implements User {
 
 type A2ARequest = Request & { a2aUser?: AuthenticatedA2AUser };
 
+// `list()`, not `listAll()`: internal runtimes (live conversations) are not
+// workspaces an external caller can name.
 function runtimeFor(registry: WorkspaceRegistry, workspaceId: string) {
-  return registry
-    .listAll()
-    .find((runtime) => runtime.workspaceId === workspaceId);
+  return registry.list().find((runtime) => runtime.workspaceId === workspaceId);
 }
 
 function baseUrl(req: Request): string {
@@ -127,24 +127,36 @@ function authenticateA2A(
     const callerId = req.get(HEADER_CALLER);
     const agentId = req.get(HEADER_AGENT);
     const runtime = workspaceId ? runtimeFor(registry, workspaceId) : undefined;
-    // A workspace that has since opted out keeps its grants on disk; they
-    // stop working with the rest of its collaboration surface.
-    if (
-      !authorization ||
-      !callerId ||
-      !agentId ||
-      !runtime ||
-      (isEnabledFor !== undefined && !isEnabledFor(runtime.workspaceCwd))
-    ) {
+    if (!authorization || !callerId || !agentId || !runtime) {
       next();
       return;
     }
+    // Trust first: the opt-in check below reads the workspace's settings, and
+    // an unauthenticated request must not make the daemon read an untrusted
+    // workspace's files.
     if (!requireTrustedWorkspaceRuntime(runtime, res)) return;
+    // A workspace that has since opted out keeps its grants on disk; they
+    // stop working with the rest of its collaboration surface.
+    if (isEnabledFor !== undefined && !isEnabledFor(runtime.workspaceCwd)) {
+      next();
+      return;
+    }
     const caller = { callerId, secret: authorization[1] };
-    const grant = await checkA2AGrant(runtime.workspaceCwd, {
-      ...caller,
-      agentId,
-    });
+    let grant: Awaited<ReturnType<typeof checkA2AGrant>>;
+    try {
+      grant = await checkA2AGrant(runtime.workspaceCwd, {
+        ...caller,
+        agentId,
+      });
+    } catch (error) {
+      // Same boundary as the RPC methods: a damaged grant store is logged,
+      // and the unauthenticated caller learns only that the request failed.
+      writeStderrLine(
+        `qwen serve: A2A authentication failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      res.status(500).json({ error: 'Internal error.' });
+      return;
+    }
     if (!grant.ok) {
       next();
       return;

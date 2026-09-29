@@ -237,12 +237,25 @@ export async function cancelExternalThreadForCaller(
     if (!thread || thread.externalIntake?.callerId !== callerId) {
       return undefined;
     }
-    const runsStillLive = thread.runs.filter(
-      (run) =>
-        run.status === 'running' ||
-        run.status === 'finishing' ||
-        run.status === 'cancelling',
-    ).length;
+    // The whole tree is the caller's task: a sub-thread the granted agent
+    // split off keeps working otherwise, while the caller is told it stopped.
+    const { threads } = await transaction.listThreads();
+    const tree = [
+      thread,
+      ...threads.filter(
+        (candidate) =>
+          candidate.rootThreadId === thread.rootThreadId &&
+          candidate.id !== thread.id,
+      ),
+    ];
+    const runsStillLive = tree
+      .flatMap((member) => member.runs)
+      .filter(
+        (run) =>
+          run.status === 'running' ||
+          run.status === 'finishing' ||
+          run.status === 'cancelling',
+      ).length;
     // Already terminal: report it rather than overwriting a `done` with a
     // `cancelled`, which would rewrite how the work actually ended.
     if (isThreadTerminal(thread.status)) {
@@ -255,10 +268,10 @@ export async function cancelExternalThreadForCaller(
     // is why `runsStillLive` is returned separately, so the receipt can say
     // "no further work will start" without claiming the body has stopped.
     const now = Date.now();
-    const next = await transaction.writeThread({
-      ...thread,
+    const withdraw = (member: Thread): Thread => ({
+      ...member,
       status: 'cancelled' as const,
-      runs: thread.runs.map((run) =>
+      runs: member.runs.map((run) =>
         run.status === 'queued'
           ? { ...run, status: 'cancelled' as const, endedAt: now }
           : run.status === 'running' || run.status === 'finishing'
@@ -266,6 +279,12 @@ export async function cancelExternalThreadForCaller(
             : run,
       ),
     });
+    for (const member of tree.slice(1)) {
+      if (!isThreadTerminal(member.status)) {
+        await transaction.writeThread(withdraw(member));
+      }
+    }
+    const next = await transaction.writeThread(withdraw(thread));
     return { thread: next, runsStillLive };
   });
 }

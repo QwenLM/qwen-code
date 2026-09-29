@@ -13,11 +13,19 @@ import {
   ExternalIntakeConflictError,
   ExternalIntakeRefusedError,
   acceptExternalSubmission,
+  cancelExternalThreadForCaller,
   getExternalThreadForCaller,
   listExternalThreadsForCaller,
   type ExternalSubmission,
 } from './external-intake.js';
-import { getThreadsDir, listThreads, updateWorkspaceAgents } from './store.js';
+import {
+  createThread,
+  getThreadsDir,
+  listThreads,
+  readThread,
+  updateWorkspaceAgents,
+  writeThread,
+} from './store.js';
 import { postMessage } from './thread-actions.js';
 import { HUMAN_AUTHOR_ID } from './types.js';
 
@@ -100,6 +108,40 @@ describe('external intake', () => {
       text: '@other take a look',
     });
     expect(local.dispatched.map((run) => run.agentId)).toEqual(['ag_other']);
+  });
+
+  it('withdraws the whole tree, not only the root', async () => {
+    // A sub-thread the granted agent split off kept working while the caller
+    // was told the task stopped.
+    const { thread } = await acceptExternalSubmission(PROJECT_ROOT, submission);
+    const child = await createThread(PROJECT_ROOT, {
+      title: 'Split',
+      parentThreadId: thread.id,
+    });
+    await writeThread(PROJECT_ROOT, {
+      ...child,
+      status: 'in_progress',
+      runs: [
+        {
+          id: 'rn_child',
+          agentId: 'ag_lead',
+          status: 'queued',
+          triggerMessageIds: [],
+          acceptedMessageIds: [],
+          consumedMessageIds: [],
+          usageByRound: [],
+          queueSequence: 900,
+          queuedAt: 1,
+          attempts: 0,
+        },
+      ],
+    });
+
+    await cancelExternalThreadForCaller(PROJECT_ROOT, 'share_1', thread.id);
+
+    const stored = await readThread(PROJECT_ROOT, child.id);
+    expect(stored?.status).toBe('cancelled');
+    expect(stored?.runs[0]?.status).toBe('cancelled');
   });
 
   it('does not persist an idempotency key when admission fails', async () => {

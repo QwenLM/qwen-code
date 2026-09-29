@@ -426,7 +426,13 @@ class ThreadCreateInvocation extends BaseToolInvocation<
           const grantedAgentId = threads.find(
             (thread) => thread.id === parent?.rootThreadId,
           )?.externalIntake?.targetAgentId;
-          if (grantedAgentId !== undefined && assignee.id !== grantedAgentId) {
+          // Splitting work to itself widens nothing: the agent already works
+          // this tree, whether granted or brought in by a local person.
+          if (
+            grantedAgentId !== undefined &&
+            assignee.id !== grantedAgentId &&
+            assignee.id !== context.agentId
+          ) {
             throw new Error(
               `This thread came from outside the workspace and was shared with one agent only; it cannot be handed to "${assignee.name}".`,
             );

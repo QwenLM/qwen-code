@@ -37,11 +37,6 @@ export {
 export { consumeAgentInput } from './workspace-agents/run-lifecycle.js';
 export { resolveAgentPersona } from './workspace-agents/persona.js';
 export { findAgentSessionBinding } from './workspace-agents/session-binding.js';
-export {
-  issueA2AGrant,
-  revokeA2AGrant,
-  listA2AGrants,
-} from './workspace-agents/a2a-grants.js';
 export type {
   A2ATaskView,
   A2AAgentCard,

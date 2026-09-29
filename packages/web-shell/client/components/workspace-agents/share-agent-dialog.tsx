@@ -172,7 +172,11 @@ export function ShareAgentDialog({
             <Copyable label={t('collab.share.token')} text={share.secret} />
             <Copyable label={t('collab.share.try')} text={curlFor(share)} />
             <p className="text-xs text-muted-foreground">
-              {t('collab.share.once')}
+              {share.expiresAt
+                ? t('collab.share.onceUntil', {
+                    date: new Date(share.expiresAt).toLocaleDateString(),
+                  })
+                : t('collab.share.once')}
             </p>
             {isLoopback(share.endpoint) && (
               <p role="alert" className="text-xs text-destructive">
