@@ -625,7 +625,10 @@ function normalizedToRawOffsets(
  * span's trailing break, else the break immediately after it, else the one
  * before it. A whole-file span keeps the previous writer's file-wide CRLF
  * conversion because there are no outside bytes to preserve. Uniformly
- * terminated files remain byte-identical to the previous path.
+ * terminated files remain byte-identical to the previous path, with one
+ * exception: where the matched span is not followed by a line break, a
+ * `newString` ending in a bare `\r` loses that `\r` here, and the previous path
+ * kept it as a stray character mid-line.
  *
  * Two paths, and which one runs is decided by whether the file contains a CRLF
  * at all. A file with none takes the plain literal replace, so the replacement's
@@ -725,7 +728,19 @@ export function applyReplacementPreservingLineEndings(
     const insertedEnding = ending;
     const inserted = newString
       .split(/\r\n|\n/)
-      .map((text, index) => (index === 0 ? text : `${insertedEnding}${text}`))
+      .map((text, index) => {
+        // A `\r` the split did not consume is the first half of a break. The
+        // second half is `insertedEnding` for every segment but the last, and
+        // for the last one it is whatever break follows the span. Copying it
+        // through as well leaves a doubled `\r` in front of the untouched tail,
+        // so the unpaired one goes. The previous writer absorbed it the same
+        // way, by replacing on LF-normalized text and letting
+        // `ensureCrlfLineEndings` rebuild the breaks -- except where no break
+        // followed the span, in which case it left the `\r` behind as a stray
+        // mid-line character.
+        const body = text.endsWith('\r') ? text.slice(0, -1) : text;
+        return index === 0 ? body : `${insertedEnding}${body}`;
+      })
       .join('');
 
     result += rawContent.slice(copiedUpTo, rawStart) + inserted;

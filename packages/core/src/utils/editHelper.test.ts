@@ -228,6 +228,18 @@ describe('applyReplacementPreservingLineEndings', () => {
       newString,
     );
 
+  /** What `main` did: replace on the LF-normalized copy, then re-expand. */
+  const previous = (raw: string, oldString: string, newString: string) => {
+    const replaced = safeLiteralReplace(
+      raw.replace(/\r\n/g, '\n'),
+      oldString,
+      newString,
+    );
+    return detectLineEnding(raw) === 'crlf'
+      ? ensureCrlfLineEndings(replaced)
+      : replaced;
+  };
+
   it('leaves every line the edit did not touch byte-identical', () => {
     expect(splice('one\ntwo\nthree\r\nfour\n', 'two', 'TWO')).toBe(
       'one\nTWO\nthree\r\nfour\n',
@@ -356,17 +368,6 @@ describe('applyReplacementPreservingLineEndings', () => {
       ['const a', 'const A\nextra = 0;'],
       ['const a = 1;', 'const A = 1;\nconst b = 0;'],
     ];
-
-    const previous = (raw: string, oldString: string, newString: string) => {
-      const replaced = safeLiteralReplace(
-        raw.replace(/\r\n/g, '\n'),
-        oldString,
-        newString,
-      );
-      return detectLineEnding(raw) === 'crlf'
-        ? ensureCrlfLineEndings(replaced)
-        : replaced;
-    };
 
     for (const file of [...uniform, ...uniformCrlf]) {
       for (const [oldString, newString] of edits) {
@@ -547,6 +548,60 @@ describe('applyReplacementPreservingLineEndings', () => {
       // describes two paths instead of one rule.
       expect(splice('one\ntwo\nthree\n', 'two', 'TWO\r\nAGAIN')).toBe(
         'one\nTWO\r\nAGAIN\nthree\n',
+      );
+    });
+  });
+
+  // A `\r` the split does not consume is the first half of a break whose second
+  // half is the resolved `insertedEnding`. Copying it through as well puts two
+  // `\r` in front of the untouched tail. The previous write path never saw this:
+  // it replaced on LF-normalized text and let `ensureCrlfLineEndings` rebuild
+  // the breaks, so a lone `\r` was absorbed into the break that followed it.
+  describe('a new_string that ends in a bare CR', () => {
+    it('does not double the CR of the break that follows the span', () => {
+      expect(splice('A\r\nB\r\n', 'A', 'A\r')).toBe('A\r\nB\r\n');
+      expect(splice('one\r\ntwo\r\nthree\r\n', 'two', 'two\r')).toBe(
+        'one\r\ntwo\r\nthree\r\n',
+      );
+    });
+
+    it('absorbs the CR exactly as the previous write path did', () => {
+      // `main` merged the lone `\r` into whatever break followed the
+      // replacement. Reproduce that path and compare, rather than pinning a
+      // couple of examples. Every case here is a span that a break follows
+      // immediately, which is the shape where the two agree.
+      const cases: Array<[string, string, string]> = [
+        ['A\r\nB\r\n', 'A', 'A\r'],
+        ['one\r\ntwo\r\nthree\r\n', 'two', 'two\r'],
+        ['const a = 1;\r\nconst b = 2;\r\n', 'const b = 2;', 'const b = 2;\r'],
+        ['a\r\n', 'a', 'a\r\nb\r'],
+        // A bare CR in the middle of the replacement, where no break follows
+        // it inside the segment, has to survive untouched.
+        [
+          'const a = 1;\r\nconst b = 2;\r\n',
+          'const a = 1;',
+          'const a = 1;\r\rextra',
+        ],
+      ];
+
+      for (const [file, oldString, newString] of cases) {
+        expect(normalized(file)).toContain(oldString);
+        expect(splice(file, oldString, newString)).toBe(
+          previous(file, oldString, newString),
+        );
+      }
+    });
+
+    it('drops a trailing CR even when no break follows the span', () => {
+      // The one case where this differs from `main`, and where `main` was
+      // itself leaving a lone CR in the middle of a line: it merged the `\r`
+      // into the following break, and with no following break there was
+      // nothing to merge it into, so the `\r` survived as a stray. Pinned so
+      // the difference is a stated behaviour rather than an accident.
+      const file = 'const a = 1;\r\nconst b = 2;\r\n';
+      expect(splice(file, 'const a', 'A\r')).toBe('A = 1;\r\nconst b = 2;\r\n');
+      expect(previous(file, 'const a', 'A\r')).toBe(
+        'A\r = 1;\r\nconst b = 2;\r\n',
       );
     });
   });

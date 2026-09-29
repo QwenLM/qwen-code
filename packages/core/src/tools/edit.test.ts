@@ -1010,6 +1010,75 @@ describe('EditTool', () => {
       );
     });
 
+    // The no-change gate compares `currentContent` with `newContent`, and both
+    // of those are the LF-normalized view. The bytes that reach disk are
+    // `contentForWrite`, and a mixed-ending file can make the two disagree about
+    // whether anything changed: re-joining a span with the ending it already
+    // had reproduces the original bytes exactly. Reporting success there would
+    // bump mtime, take a history backup and record AI attribution for a file that
+    // did not change.
+    describe('an edit whose bytes are unchanged', () => {
+      it('reports no change instead of rewriting identical bytes', async () => {
+        // 'A\r\nB\r\n' is already CRLF throughout, so replacing 'A\nB' with
+        // 'A\r\nB' differs in the normalized view and is identical on disk.
+        const original = 'A\r\nB\r\n';
+        fs.writeFileSync(filePath, original, 'utf8');
+        seedPriorRead(filePath);
+        const writeSpy = vi.spyOn(fsService, 'writeTextFile');
+        const params: EditToolParams = {
+          file_path: filePath,
+          old_string: 'A\nB',
+          new_string: 'A\r\nB',
+        };
+
+        const result = await tool
+          .build(params)
+          .execute(new AbortController().signal);
+
+        expect(result.error?.type).toBe(ToolErrorType.EDIT_NO_CHANGE);
+        expect(writeSpy).not.toHaveBeenCalled();
+        expect(mockFileHistoryService.trackEdit).not.toHaveBeenCalled();
+        expect(fs.readFileSync(filePath, 'utf8')).toBe(original);
+      });
+
+      it('still applies a real byte change inside a mixed span', async () => {
+        // The guard on the guard: a real edit must not be rejected just because
+        // the span it touches is mixed. The splice re-joins this span with the
+        // CRLF that follows it, so the bytes on disk do change.
+        fs.writeFileSync(filePath, 'a\nb\r\nc\nd\r\n', 'utf8');
+        seedPriorRead(filePath);
+        const params: EditToolParams = {
+          file_path: filePath,
+          old_string: 'a\nb',
+          new_string: 'a\nB',
+        };
+
+        const result = await tool
+          .build(params)
+          .execute(new AbortController().signal);
+
+        expect(result.error).toBeUndefined();
+        expect(fs.readFileSync(filePath, 'utf8')).toBe('a\r\nB\r\nc\nd\r\n');
+      });
+
+      it('still applies a real byte change outside a mixed span', async () => {
+        fs.writeFileSync(filePath, 'one\ntwo\r\nthree\n', 'utf8');
+        seedPriorRead(filePath);
+        const params: EditToolParams = {
+          file_path: filePath,
+          old_string: 'two',
+          new_string: 'TWO',
+        };
+
+        const result = await tool
+          .build(params)
+          .execute(new AbortController().signal);
+
+        expect(result.error).toBeUndefined();
+        expect(fs.readFileSync(filePath, 'utf8')).toBe('one\nTWO\r\nthree\n');
+      });
+    });
+
     it('should return error if trying to create a file that already exists (empty old_string)', async () => {
       fs.writeFileSync(filePath, 'Existing content', 'utf8');
       seedPriorRead(filePath);

@@ -360,11 +360,23 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
           )
         : newContent;
 
-    if (!error && fileExists && currentContent === newContent) {
+    // `currentContent` and `newContent` are both the LF-normalized view, but the
+    // bytes that reach disk are `contentForWrite`. Those two can disagree about
+    // whether anything changed: on a mixed-ending file, re-joining a span with
+    // the ending it already carries reproduces the original bytes exactly. Gate
+    // on the bytes as well, or the tool reports success, rewrites an identical
+    // file, and takes a history backup for a change nobody made.
+    if (
+      !error &&
+      fileExists &&
+      (currentContent === newContent ||
+        (rawContent !== null && contentForWrite === rawContent))
+    ) {
       error = {
-        display:
-          'No changes to apply. The new content is identical to the current content.',
-        raw: `No changes to apply. The new content is identical to the current content in file: ${params.file_path}`,
+        // Phrased over the file's contents rather than the normalized view,
+        // because the second branch above fires when only the bytes agree.
+        display: `No changes to apply. The edit does not change the file's contents.`,
+        raw: `No changes to apply. The edit does not change the file's contents in file: ${params.file_path}`,
         type: ToolErrorType.EDIT_NO_CHANGE,
       };
     }
