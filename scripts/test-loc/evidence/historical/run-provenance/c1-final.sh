@@ -1,4 +1,0 @@
-#!/bin/bash
-cd /projects/qwen-code-testloc-base && git checkout -q --detach 6e7d8e6510 && node /projects/knowledge/qwen-code/scripts/test-loc/fault-replay.mjs run --repo /projects/qwen-code-testloc-base --pkg packages/core --corpus "/tmp/claude-502/-projects-qwen-code/aafb13e7-0fe1-4917-8ec7-fdca963d0d78/scratchpad/corpus-core.json" --out "/tmp/claude-502/-projects-qwen-code/aafb13e7-0fe1-4917-8ec7-fdca963d0d78/scratchpad/final-c1.json"
-node /projects/knowledge/qwen-code/scripts/test-loc/fault-replay.mjs run --repo /projects/qwen-code-testloc-base --pkg packages/core --corpus "/tmp/claude-502/-projects-qwen-code/aafb13e7-0fe1-4917-8ec7-fdca963d0d78/scratchpad/corpus-targeted.json" --out "/tmp/claude-502/-projects-qwen-code/aafb13e7-0fe1-4917-8ec7-fdca963d0d78/scratchpad/final-c1-targeted.json"
-echo "C1_FINAL_DONE"

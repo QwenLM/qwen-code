@@ -75,7 +75,6 @@ export default tseslint.config(
       'docs-site/out/**',
       '.qwen/**',
       'scripts/codemod/fixtures/**', // codemod test data; intentionally non-idiomatic ink input/output
-      'scripts/test-loc/evidence/historical/**', // recovered evidence retains original bytes and hashes
       'packages/desktop/runtime/**',
       'packages/core/src/skills/bundled/browser-use/runtime/**',
       'packages/desktop/src-tauri/target/**',
