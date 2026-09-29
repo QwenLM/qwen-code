@@ -125,11 +125,12 @@ export const SERVE_CAPABILITY_REGISTRY = {
   workspace_agent_generate: { since: 'v1' },
   // Persistent workspace Agents collaborating on shared task threads
   // (`/workspaces/:workspace/agent/*`). Conditional on the
-  // `experimental.agentCollaboration` opt-in, resolved once at daemon
-  // startup: when it is off the routes are never mounted, so a client that
-  // sees this tag absent must not render the collaboration surface rather
-  // than render it and let the calls 404. Distinct from `workspace_agents`
-  // above, which is unconditional subagent-definition CRUD.
+  // `experimental.agentCollaboration` opt-in. Whether the routes exist at all
+  // is settled at daemon startup, but the tag is recomputed per response, so a
+  // workspace opting in or out afterwards is seen on the next request. A client
+  // that sees it absent must not render the collaboration surface rather than
+  // render it and let the calls 404. Distinct from `workspace_agents` above,
+  // which is unconditional subagent-definition CRUD.
   agent_collaboration_v1: { since: 'v1' },
   workspace_env: { since: 'v1' },
   workspace_preflight: { since: 'v1' },
@@ -574,9 +575,13 @@ export interface AdvertiseFeatureToggles {
   hostedHarness?: boolean;
   requireAuth?: boolean;
   /**
-   * Whether the daemon mounted the workspace-agent collaboration routes
-   * (`agent_collaboration_v1`). Resolved from `experimental.agentCollaboration`
-   * once at daemon startup, so it does not change over a daemon's lifetime.
+   * Whether the daemon is serving the workspace-agent collaboration routes
+   * (`agent_collaboration_v1`) for this response. Resolved from
+   * `experimental.agentCollaboration` at call time rather than snapshotted at
+   * boot: which routes exist at all is settled at startup, but a workspace
+   * opting in or out afterwards is seen on the next request. Left unset by the
+   * pre-runtime bootstrap envelope, which reads no workspace settings and so
+   * omits the tag even when the runtime envelope will advertise it.
    */
   agentCollaborationEnabled?: boolean;
   mcpPoolActive?: boolean;

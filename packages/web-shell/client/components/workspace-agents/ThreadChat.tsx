@@ -149,6 +149,14 @@ const isLive = (run?: RunView) =>
   run !== undefined && LIVE_STATUSES.has(run.status);
 
 /**
+ * Which of two non-live runs is the latest. A run cancelled or failed while
+ * still queued never got a `startedAt`, so ordering on that alone would always
+ * lose to an older run that did start; every finish writes `endedAt`. Same key
+ * as `lastActivity` in the daemon's workspace-agents routes.
+ */
+const runRecency = (run: RunView) => run.endedAt ?? run.startedAt ?? 0;
+
+/**
  * Who a reply will reach, said before it is sent. Naming who is left out
  * matters as much: an @ to one member must not read like a broadcast.
  */
@@ -187,7 +195,7 @@ function teamMembers(
       !current ||
       (isLive(run) && !isLive(current)) ||
       (isLive(run) === isLive(current) &&
-        (run.startedAt ?? 0) >= (current.startedAt ?? 0));
+        runRecency(run) >= runRecency(current));
     add(run.agentName, {
       ...(run.agentColor ? { color: run.agentColor } : {}),
       ...(newer ? { run } : {}),
@@ -208,9 +216,14 @@ function memberStatus(
   t: (key: string, vars?: Record<string, string | number>) => string,
 ): { text: string; tone: string } {
   const run = member.run;
-  const muted = 'text-muted-foreground';
-  const attention = 'text-[var(--status-attention-fg)]';
-  const running = 'text-[var(--status-running-fg)]';
+  // Module classes, not Tailwind utilities. `.memberStatus` sets its own
+  // `color`, and a single-class utility only ties with it on specificity, so
+  // the CSS-module sheet — injected after the entry sheet, since this component
+  // is reached through a lazy import — wins and the tone never renders. The
+  // muted tone needs no class: `.memberStatus` already carries that colour.
+  const muted = '';
+  const attention = styles.memberStatusAttention;
+  const running = styles.memberStatusRunning;
   if (!run) return { text: t('collab.member.idle'), tone: muted };
   switch (run.status) {
     case 'queued':
@@ -428,7 +441,11 @@ function TeamPanel({
                         </span>
                       )}
                     </span>
-                    <span className={`${styles.memberStatus} ${tone}`}>
+                    <span
+                      className={[styles.memberStatus, tone]
+                        .filter(Boolean)
+                        .join(' ')}
+                    >
                       {text}
                     </span>
                   </span>

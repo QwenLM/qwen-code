@@ -43,6 +43,8 @@ class ManagedSessionStoreContractFixtureTest {
                 limits.required("maxTransactionBytes").intValue());
         assertEquals(ManagedSessionStoreModels.MAX_TRANSACTION_EVENTS,
                 limits.required("maxTransactionEvents").intValue());
+        assertEquals(ManagedSessionStoreModels.MAX_JSON_DEPTH,
+                limits.required("maxJsonDepth").intValue());
         assertEquals(ManagedSessionStoreModels.MIN_WRITER_TOKEN_LENGTH,
                 limits.required("minimumWriterTokenLength").intValue());
         assertEquals(ManagedSessionStoreModels.MAX_WRITER_TOKEN_LENGTH,

@@ -19846,6 +19846,7 @@ export function App({
                 <WebShellSidebar
                   selectedCollaborationId={collaborationThreadId}
                   onOpenCollaboration={(id, cwd) => {
+                    closeMobileDrawer();
                     setCollaborationThread({ id, cwd, server: workspace.baseUrl });
                     setMainView('chat');
                     closePanel();

@@ -171,22 +171,27 @@ export function startAgentHostSessionOwner(options: {
   };
 
   let running = false;
-  let stopped = false;
   let inFlight: Promise<void> | undefined;
   // Declared before `stop` so the closure can clear it, and assigned after so
   // the interval's own callback can call `stop`. The cycle is why this is a
   // `let` that eslint reads as never reassigned before its first use.
   // eslint-disable-next-line prefer-const
   let timer: ReturnType<typeof setInterval> | undefined;
-  const stop = async (): Promise<void> => {
-    if (stopped) return;
-    stopped = true;
-    if (timer) clearInterval(timer);
-    // A tick or dispatch already in flight can still be inside ensure();
-    // releasing the host session before it settles would orphan whatever it
-    // spawns. Drain first — the caller's teardown order depends on it.
-    await Promise.allSettled([inFlight, dispatching, ensuring]);
-  };
+  // Memoized so that every caller awaits the same drain. A boolean flag makes
+  // `stop()` idempotent but not single-flight: the second caller would return
+  // at once and go on to release and close the host session while an `ensure()`
+  // is still inside `spawnOrAttach`, which is what the drain exists to prevent.
+  // `clearInterval` runs before the first await, so a caller that does not
+  // await still stops the ticks synchronously.
+  let stopping: Promise<void> | undefined;
+  const stop = (): Promise<void> =>
+    (stopping ??= (async () => {
+      if (timer) clearInterval(timer);
+      // A tick or dispatch already in flight can still be inside ensure();
+      // releasing the host session before it settles would orphan whatever it
+      // spawns. Drain first — the caller's teardown order depends on it.
+      await Promise.allSettled([inFlight, dispatching, ensuring]);
+    })());
   timer = setInterval(() => {
     if (options.generationGuard?.closed) {
       void stop();

@@ -434,6 +434,13 @@ it('does not mount restored agent activity when collaboration is disabled', asyn
   );
 
   act(() => root.render(render()));
+  // Let the lazy `ThreadsRoute` import settle before asserting absence, the
+  // same way the positive half below does: `<Suspense fallback={null}>`
+  // satisfies `toBeNull()` on its own, so without this flush the negative half
+  // still passes with the collaboration gate deleted and pins nothing.
+  await act(async () => {
+    await Promise.resolve();
+  });
   expect(
     node.querySelector('[data-testid="workspace-agent-thread-route"]'),
   ).toBeNull();

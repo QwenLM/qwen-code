@@ -190,9 +190,17 @@ export interface RunRow {
  * Describes a run the way the reader asks about it.
  *
  * A failed run reports its failure whatever close it managed to record first,
- * because the failure is the thing a person has to act on.
+ * because the failure is the thing a person has to act on. A stranded run is
+ * the exception: nothing the agent did ended it.
  */
 export function describeRun(run: RunView, t: Translate): string {
+  // Read before the failure copy: core writes `stranded` together with a
+  // failed status and a `collaboration-disabled` stage, so testing the status
+  // first would label every stranded run "failed at collaboration-disabled" —
+  // an internal constant inside a localized sentence — and leave the stranded
+  // case unreachable. Core's `obligationFor` in `thread-status.ts` puts
+  // `stranded` ahead of `failed` for the same reason.
+  if (run.closeKind === 'stranded') return t('collab.runState.stranded');
   if (run.status === 'failed') {
     return run.failureStage
       ? t('collab.runState.failedAt', { stage: run.failureStage })
@@ -211,10 +219,7 @@ export function describeRun(run: RunView, t: Translate): string {
       return t('collab.runState.waiting');
     case 'unclosed':
       return t('collab.runState.unclosed');
-    case 'stranded':
-      // Says what happened to it, not what the agent did — nothing the agent
-      // did ended this run, and a person has to decide what happens next.
-      return t('collab.runState.stranded');
+    // `stranded` returns at the top of this function, before the failure copy.
     default:
       return run.status === 'finishing'
         ? t('collab.runState.finishing')

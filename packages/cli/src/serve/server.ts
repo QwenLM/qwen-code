@@ -1590,7 +1590,12 @@ export function createServeApp(
   // Agent Host never serves collaboration itself.
   // A settings file caught mid-edit (half-written JSON) keeps the last answer
   // read for that workspace: reading it as "off" would strand every live run
-  // there within one recovery tick.
+  // there within one recovery tick. This holds for the user and system scopes
+  // only. A *workspace*-scope parse error never reaches this catch: the loader
+  // recovers it instead of rethrowing, and that recovery replaces the invalid
+  // JSON with a valid `{}` before returning — so neither this predicate nor an
+  // after-the-fact re-read can tell corruption from a real opt-out. Only
+  // `LoadedSettings.corruptedPath` knows, and it is wired for user scope alone.
   const lastAgentCollaborationSetting = new Map<string, boolean>();
   const isAgentCollaborationEnabledFor = (workspaceCwd: string): boolean => {
     if (opts.agentHostWorker) return false;
