@@ -94,8 +94,7 @@ export const COLLAB_MESSAGES_EN: Record<string, CollabMessage> = {
   'collab.share.endpoint': 'A2A endpoint',
   'collab.share.token': 'Token',
   'collab.share.try': 'Try it',
-  'collab.share.once':
-    'The token is shown only now; revoke it here any time.',
+  'collab.share.once': 'The token is shown only now; revoke it here any time.',
   'collab.share.onceUntil': (v) =>
     `The token is shown only now. It expires on ${v?.date}; revoke it here any time.`,
   'collab.share.loopback':
