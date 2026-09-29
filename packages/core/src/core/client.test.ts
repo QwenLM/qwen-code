@@ -53,7 +53,19 @@ import {
   createHookOutput,
   PermissionMode,
   SessionStartSource,
+  HookEventName,
+  HookType,
+  type HookInput,
 } from '../hooks/types.js';
+import { HookSystem } from '../hooks/hookSystem.js';
+import {
+  getHookExecutionOwner,
+  runWithHookExecutionOwner,
+} from '../hooks/hook-execution-context.js';
+import {
+  getInvocationContext,
+  runWithInvocationContext,
+} from '../utils/invocation-context.js';
 import type { ModelsConfig } from '../models/modelsConfig.js';
 import { UnauthorizedError } from '../utils/errors.js';
 import { retryWithBackoff } from '../utils/retry.js';
@@ -118,6 +130,10 @@ import {
 import { emptyGoalSnapshot } from '../goals/goal-protocol.js';
 import type { GoalRuntime } from '../goals/goal-runtime.js';
 import type { FileHistorySnapshot } from '../services/fileHistoryService.js';
+import {
+  findApiHistoryPromptIndex,
+  markApiHistoryPrompt,
+} from '../services/session-api-history.js';
 import { runWithAgentContext } from '../agents/runtime/agent-context.js';
 import {
   clearCacheSafeParams,
@@ -153,6 +169,7 @@ vi.mock('node:fs', () => {
 
 // --- Mocks ---
 const mockTurnRunFn = vi.fn();
+const mockTurnConstructorFn = vi.fn();
 
 vi.mock('./turn', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./turn.js')>();
@@ -162,8 +179,8 @@ vi.mock('./turn', async (importOriginal) => {
     // The run method is a property that holds our mock function
     run = mockTurnRunFn;
 
-    constructor() {
-      // The constructor can be empty or do some mock setup
+    constructor(...args: unknown[]) {
+      mockTurnConstructorFn(...args);
     }
   }
   // Export the mock class as 'Turn'
@@ -395,6 +412,7 @@ vi.mock('../telemetry/uiTelemetry.js', () => ({
   uiTelemetryService: mockUiTelemetryService,
 }));
 vi.mock('../telemetry/loggers.js', () => ({
+  logHookCall: vi.fn(),
   logChatCompression: vi.fn(),
   logNextSpeakerCheck: vi.fn(),
   logApiRequest: vi.fn(),
@@ -2304,10 +2322,15 @@ describe('Gemini Client (client.ts)', () => {
         role: 'model',
         parts: [{ text: 'Got it. Thanks for the context!' }],
       };
+      const marked: Content = {
+        role: 'user',
+        parts: [{ text: 'hello' }],
+      };
+      markApiHistoryPrompt(marked, 'S########1');
       const currentHistory: Content[] = [
         legacyEnv,
         legacyAck,
-        { role: 'user', parts: [{ text: 'hello' }] },
+        marked,
         { role: 'model', parts: [{ text: 'hi' }] },
       ];
       const newPrelude: Content = {
@@ -2318,7 +2341,8 @@ describe('Gemini Client (client.ts)', () => {
       };
       const mockChat: Partial<LlmChat> = {
         getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
-        getHistory: vi.fn().mockReturnValue(currentHistory),
+        getHistory: vi.fn(() => structuredClone(currentHistory)),
+        getHistoryShallow: vi.fn(() => currentHistory.map((c) => ({ ...c }))),
         setHistory: vi.fn(),
       };
       client['chat'] = mockChat as LlmChat;
@@ -2334,6 +2358,48 @@ describe('Gemini Client (client.ts)', () => {
         [newPrelude, ...currentHistory.slice(2)],
         undefined,
       );
+      const reinstalled = vi.mocked(mockChat.setHistory!).mock
+        .calls[0]![0] as Content[];
+      expect(findApiHistoryPromptIndex(reinstalled, 'S########1')).toBe(1);
+    });
+  });
+
+  describe('restoreStartupContextAfterCompaction', () => {
+    it('preserves prompt-identity marks when re-prepending the prelude', async () => {
+      // Same symbol-strip hazard as refreshStartupContextReminder: the
+      // in-flight turn's entry is the one identity is needed for (every
+      // predecessor was absorbed into the compaction summary), and a deep
+      // getHistory() read would reinstall it unmarked.
+      const marked: Content = {
+        role: 'user',
+        parts: [{ text: 'in-flight prompt' }],
+      };
+      markApiHistoryPrompt(marked, 'S########1');
+      const currentHistory: Content[] = [
+        marked,
+        { role: 'model', parts: [{ text: 'working' }] },
+      ];
+      const prelude: Content = {
+        role: 'user',
+        parts: [
+          { text: '<system-reminder>\nfresh prelude\n</system-reminder>' },
+        ],
+      };
+      const mockChat: Partial<LlmChat> = {
+        getHistory: vi.fn(() => structuredClone(currentHistory)),
+        getHistoryShallow: vi.fn(() => currentHistory.map((c) => ({ ...c }))),
+        getCompletedToolCallIds: vi.fn().mockReturnValue([]),
+        setHistory: vi.fn(),
+      };
+      client['chat'] = mockChat as LlmChat;
+      vi.mocked(getInitialChatHistory).mockResolvedValueOnce([[prelude], []]);
+
+      await client.restoreStartupContextAfterCompaction();
+
+      const reinstalled = vi.mocked(mockChat.setHistory!).mock
+        .calls[0]![0] as Content[];
+      expect(reinstalled[0]).toEqual(prelude);
+      expect(findApiHistoryPromptIndex(reinstalled, 'S########1')).toBe(1);
     });
   });
 
@@ -3966,6 +4032,99 @@ describe('Gemini Client (client.ts)', () => {
   });
 
   describe('resetChat', () => {
+    it.each([false, true])(
+      'keeps clear session ownership across warmup (rotate again: %s)',
+      async (rotateAgain) => {
+        const events: HookInput[] = [];
+        let sessionId = 'old-session';
+        vi.mocked(mockConfig.getSessionId).mockImplementation(() => sessionId);
+        vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+        vi.mocked(mockConfig.hasHooksForEvent).mockReturnValue(true);
+        Object.assign(mockConfig, {
+          getAllowedHttpHookUrls: () => [],
+          getAllowPrivateNetworkHooks: () => false,
+          getSystemHooks: () => undefined,
+          getUserHooks: () => ({
+            [HookEventName.SessionStart]: [
+              {
+                hooks: [
+                  {
+                    type: HookType.Function,
+                    id: 'clear-recorder',
+                    errorMessage: 'recorder failed',
+                    callback: async (input: HookInput) => {
+                      events.push(input);
+                    },
+                  },
+                ],
+              },
+            ],
+          }),
+          getProjectHooks: () => undefined,
+          getExtensions: () => [],
+          getSessionSourceType: () => undefined,
+          getSessionSourceId: () => undefined,
+          getTranscriptPath: () => '/tmp/clear-transcript',
+          isTrustedFolder: () => true,
+        });
+        const hooks = new HookSystem(mockConfig);
+        vi.mocked(mockConfig.getHookSystem).mockReturnValue(hooks);
+        await hooks.initialize();
+        const invocation = {
+          version: 1 as const,
+          sessionId,
+          promptId: 'clear-prompt',
+        };
+        const owner = { runtimeId: hooks.runtimeId, sessionId, agentId: null };
+        await runWithInvocationContext(invocation, () =>
+          runWithHookExecutionOwner(owner, async () => {
+            sessionId = 'new-session';
+            let releaseWarmup!: () => void;
+            let markWarmup!: () => void;
+            const enteredWarmup = new Promise<void>((resolve) => {
+              markWarmup = resolve;
+            });
+            const warmup = new Promise<void>((resolve) => {
+              releaseWarmup = resolve;
+            });
+            vi.mocked(
+              mockConfig.getToolRegistry().warmAll,
+            ).mockImplementationOnce(() => {
+              markWarmup();
+              return warmup;
+            });
+            const reset = client.resetChat();
+            await enteredWarmup;
+            if (rotateAgain) sessionId = 'later-session';
+            releaseWarmup();
+            await reset;
+            expect(events).toHaveLength(rotateAgain ? 0 : 1);
+            if (!rotateAgain) {
+              expect(events[0]).toMatchObject({
+                hook_event_name: HookEventName.SessionStart,
+                source: SessionStartSource.Clear,
+                session_id: 'new-session',
+              });
+              expect(events[0]).not.toHaveProperty('agent_id');
+            }
+            expect(getInvocationContext()).toBe(invocation);
+            expect(getHookExecutionOwner()).toBe(owner);
+            await expect(
+              hooks.firePreToolUseEvent(
+                'read_file',
+                {},
+                'late-tool',
+                PermissionMode.Default,
+              ),
+            ).rejects.toThrow(
+              'Hook execution owner does not match this runtime/session',
+            );
+            expect(events).toHaveLength(rotateAgain ? 0 : 1);
+          }),
+        );
+      },
+    );
+
     it('refreshes the live system instruction after the working directory changes', async () => {
       vi.mocked(getRecentGitStatus)
         .mockReturnValueOnce('Git snapshot A')
@@ -8717,6 +8876,11 @@ hello
         mockInteractionTelemetry.endInteractionSpan,
       ).not.toHaveBeenCalled();
 
+      // MockTurn does not copy emitted tool calls into pendingToolCalls.
+      mockMemoryManager.scheduleMetadataMigration.mockClear();
+      mockMemoryManager.scheduleExtract.mockClear();
+      mockMemoryManager.scheduleDream.mockClear();
+
       mockTurnRunFn.mockReturnValueOnce(
         (async function* () {
           yield { type: LlmEventType.Content, value: 'done' };
@@ -8743,6 +8907,66 @@ hello
         'ok',
         { promptId },
       );
+      expect(mockMemoryManager.scheduleMetadataMigration).toHaveBeenCalledTimes(
+        2,
+      );
+      expect(mockMemoryManager.scheduleExtract).toHaveBeenCalledOnce();
+      expect(mockMemoryManager.scheduleDream).toHaveBeenCalledOnce();
+    });
+
+    it('schedules memory work after a tool-result completion without telemetry', async () => {
+      const promptId = 'prompt-tool-loop-without-telemetry';
+      mockInteractionTelemetry.getActiveInteractionSpan.mockReturnValue(
+        undefined,
+      );
+      mockTurnRunFn.mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: LlmEventType.ToolCallRequest,
+            value: {
+              callId: 'call-1',
+              name: 'read_file',
+              args: {},
+              isClientInitiated: false,
+              prompt_id: promptId,
+            },
+          };
+        })(),
+      );
+
+      await fromAsync(
+        client.sendMessageStream(
+          [{ text: 'use a tool' }],
+          new AbortController().signal,
+          promptId,
+          { type: SendMessageType.UserQuery },
+        ),
+      );
+
+      // MockTurn does not copy emitted tool calls into pendingToolCalls.
+      mockMemoryManager.scheduleMetadataMigration.mockClear();
+      mockMemoryManager.scheduleExtract.mockClear();
+      mockMemoryManager.scheduleDream.mockClear();
+      mockTurnRunFn.mockReturnValueOnce(
+        (async function* () {
+          yield { type: LlmEventType.Content, value: 'done' };
+        })(),
+      );
+
+      await fromAsync(
+        client.sendMessageStream(
+          [{ functionResponse: { name: 'read_file', response: { ok: true } } }],
+          new AbortController().signal,
+          promptId,
+          { type: SendMessageType.ToolResult },
+        ),
+      );
+
+      expect(mockMemoryManager.scheduleMetadataMigration).toHaveBeenCalledTimes(
+        2,
+      );
+      expect(mockMemoryManager.scheduleExtract).toHaveBeenCalledOnce();
+      expect(mockMemoryManager.scheduleDream).toHaveBeenCalledOnce();
     });
 
     it('starts Retry as a fresh agent invocation', async () => {
@@ -11001,6 +11225,58 @@ hello
         2,
       );
       finishMigration({ status: 'skipped', skippedReason: 'complete' });
+    });
+
+    it('runs only metadata migration after a completed tool-result turn', () => {
+      const runBackgroundTasks = (
+        client as unknown as {
+          runManagedAutoMemoryBackgroundTasks: (type: SendMessageType) => void;
+        }
+      ).runManagedAutoMemoryBackgroundTasks.bind(client);
+
+      runBackgroundTasks(SendMessageType.ToolResult);
+
+      expect(mockMemoryManager.scheduleMetadataMigration).toHaveBeenCalledTimes(
+        2,
+      );
+      expect(mockMemoryManager.scheduleExtract).not.toHaveBeenCalled();
+      expect(mockMemoryManager.scheduleDream).not.toHaveBeenCalled();
+    });
+
+    it('runs tool-result migration after a next-speaker continuation', async () => {
+      const { checkNextSpeaker } = await import(
+        '../utils/nextSpeakerChecker.js'
+      );
+      vi.mocked(checkNextSpeaker)
+        .mockResolvedValueOnce({
+          reasoning: 'continue',
+          next_speaker: 'model',
+        })
+        .mockResolvedValue(null);
+      mockTurnRunFn.mockImplementation(() =>
+        (async function* () {
+          yield { type: LlmEventType.Content, value: 'Done' };
+        })(),
+      );
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      } as unknown as LlmChat;
+
+      await fromAsync(
+        client.sendMessageStream(
+          [{ text: 'Tool finished' }],
+          new AbortController().signal,
+          'prompt-id-tool-result-continuation',
+          { type: SendMessageType.ToolResult },
+        ),
+      );
+
+      expect(mockMemoryManager.scheduleMetadataMigration).toHaveBeenCalledTimes(
+        2,
+      );
+      expect(mockMemoryManager.scheduleExtract).not.toHaveBeenCalled();
+      expect(mockMemoryManager.scheduleDream).not.toHaveBeenCalled();
     });
 
     it('activates a prepared memory protocol before starting UserQuery recall', async () => {
@@ -13790,6 +14066,41 @@ Other open files:
         ).toHaveBeenCalledOnce();
       });
 
+      it('leaves the retried turn unmarked while a user prompt owns its identity', async () => {
+        const mockChat: Partial<LlmChat> = {
+          addHistory: vi.fn(),
+          getHistory: vi.fn().mockReturnValue([]),
+          getHistoryLength: vi.fn().mockReturnValue(0),
+          setHistory: vi.fn(),
+          stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([]),
+          repairOrphanedToolUseTurns: vi.fn().mockReturnValue({ injected: [] }),
+        };
+        client['chat'] = mockChat as LlmChat;
+
+        mockTurnRunFn.mockImplementation(() =>
+          (async function* () {
+            yield { type: 'content', value: 'response' };
+          })(),
+        );
+
+        for (const [type, expectedIdentity] of [
+          [SendMessageType.UserQuery, 'session########4'],
+          [SendMessageType.Retry, undefined],
+        ] as const) {
+          await fromAsync(
+            client.sendMessageStream(
+              [{ text: 'my prompt' }],
+              new AbortController().signal,
+              'session########4',
+              { type },
+            ),
+          );
+          expect(mockTurnConstructorFn.mock.calls.at(-1)?.[3]).toBe(
+            expectedIdentity,
+          );
+        }
+      });
+
       it('restores stripped retry entries when only a concurrent send pushes', async () => {
         const orphanedPrompt: Content = {
           role: 'user',
@@ -15255,6 +15566,7 @@ Other open files:
             displayText: 'raw @file prompt',
             hookContext: '&lt;hook-only context&gt;',
           },
+          'prompt-hook-display-text',
         );
         expect(mockMemoryManager.recall).toHaveBeenCalledWith(
           '/test/project/root',
@@ -15361,6 +15673,7 @@ Other open files:
             displayText: 'my prompt',
             hookContext: 'extra hook context',
           },
+          'prompt-hook-context-tag',
         );
       });
 

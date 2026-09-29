@@ -6,6 +6,7 @@
 
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import {
+  AUTO_MEMORY_SCOPES,
   AUTO_MEMORY_TREE_CATEGORIES,
   AUTO_MEMORY_UNCATEGORIZED,
   type AutoMemoryScope,
@@ -49,12 +50,12 @@ const SEARCH_MATCH_WEIGHT = {
   body: 1,
 } as const;
 
-const SCOPE_ORDER: readonly AutoMemoryScope[] = ['project', 'user', 'team'];
+const SCOPE_ORDER: readonly AutoMemoryScope[] = AUTO_MEMORY_SCOPES;
 const CATEGORY_KEYS = new Set<string>([
   ...AUTO_MEMORY_TREE_CATEGORIES,
   AUTO_MEMORY_UNCATEGORIZED,
 ]);
-const SCOPE_KEYS = new Set<string>(['project', 'user', 'team']);
+const SCOPE_KEYS = new Set<string>(AUTO_MEMORY_SCOPES);
 
 type MemoryCursor = {
   kind: 'memory';
@@ -681,25 +682,23 @@ function selectBodyWindowOffset(
 ): { offset: number; maxChars: number } {
   const searchableBody = body.slice(0, FETCH_TOTAL_BODY_CHARS);
   const normalizedBody = normalizeSearchText(searchableBody);
-  const hits: Array<{ keyword: string; index: number }> = [];
+  const hitsByKeyword = new Map<string, number[]>();
+  const starts = new Set<number>();
   for (const keyword of keywords) {
+    const hits: number[] = [];
     let from = 0;
     while (from < normalizedBody.length) {
       const index = normalizedBody.indexOf(keyword, from);
       if (index < 0) break;
-      hits.push({ keyword, index });
+      hits.push(index);
+      starts.add(Math.max(0, index - SEARCH_BODY_CONTEXT_BEFORE_CHARS));
       from = index + Math.max(1, keyword.length);
     }
+    if (hits.length > 0) hitsByKeyword.set(keyword, hits);
   }
-  if (hits.length === 0) {
+  if (hitsByKeyword.size === 0) {
     return { offset: 0, maxChars: SEARCH_BODY_WINDOW_CHARS };
   }
-
-  const starts = new Set(
-    hits.map(({ index }) =>
-      Math.max(0, index - SEARCH_BODY_CONTEXT_BEFORE_CHARS),
-    ),
-  );
   let bestStart = 0;
   let best:
     | {
@@ -711,10 +710,20 @@ function selectBodyWindowOffset(
     | undefined;
   for (const start of starts) {
     const end = start + SEARCH_BODY_WINDOW_CHARS;
-    const visible = hits.filter(
-      ({ keyword, index }) => index < end && index + keyword.length > start,
-    );
-    const visibleKeywords = new Set(visible.map(({ keyword }) => keyword));
+    const visibleKeywords = new Set<string>();
+    for (const [keyword, hits] of hitsByKeyword) {
+      const firstPossible = start - keyword.length + 1;
+      let low = 0;
+      let high = hits.length;
+      while (low < high) {
+        const middle = Math.floor((low + high) / 2);
+        if (hits[middle]! < firstPossible) low = middle + 1;
+        else high = middle;
+      }
+      if (hits[low] !== undefined && hits[low]! < end) {
+        visibleKeywords.add(keyword);
+      }
+    }
     const score = {
       identifiers: [...visibleKeywords].filter(isExactIdentifier).length,
       coverage: visibleKeywords.size,
