@@ -13546,13 +13546,22 @@ export class Session implements SessionContext {
         // all three frontends (wenshao triage follow-up). Omitting it would
         // fail closed, not open, but the corner case should agree everywhere.
         maxSubagentDepth: this.config.getMaxSubagentDepth(),
-        // The L1 enablement gate below runs after resolution; consult the
-        // same policy inside resolution so a denied target keeps its
-        // EXECUTION_DENIED instead of a parameter pre-check refusal.
+        // Mirror the scheduler's split of the two bridge policy options:
+        // isTargetExecutionAllowed is the OUTER OWNER's execution allowlist
+        // (only agent-core supplies one — this frontend has no such knob),
+        // while the permission manager owns enablement / deny rules. So the pm
+        // goes into suppressArgumentPreCheck: a pm-denied target skips the
+        // argument pre-check (no INVALID_TOOL_PARAMS strike for a call that
+        // could never run) and the L1 enablement gate below stays ACP's only
+        // policy authority, keeping its own denial wording and its
+        // isTrustedLiveTool exemption. Wiring the pm into
+        // isTargetExecutionAllowed instead made resolution short-circuit with
+        // the bridge's scheduler-flavoured message, which names an execution
+        // allowlist and a disallowedTools blocklist that ACP never reads.
         ...(pm
           ? {
-              isTargetExecutionAllowed: (targetName: string) =>
-                pm.isToolEnabled(targetName),
+              suppressArgumentPreCheck: async (targetName: string) =>
+                !(await pm.isToolEnabled(targetName)),
             }
           : {}),
       });

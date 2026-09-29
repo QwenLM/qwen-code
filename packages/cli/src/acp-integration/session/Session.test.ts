@@ -18465,14 +18465,20 @@ describe('Session', () => {
 
       it('keeps EXECUTION_DENIED for a policy-denied bridge target instead of a parameter pre-check refusal', async () => {
         // The ACP half of the resolution-time policy wiring: with the
-        // wrapper allowed but the target denied, resolution must refuse with
-        // the policy denial BEFORE the argument pre-check — otherwise a
-        // denied target with malformed arguments gets INVALID_TOOL_PARAMS
-        // plus an invalid-parameter strike toward the loop stop for a call
-        // that could never run. Mutation check: removing the
-        // `...(pm ? { isTargetExecutionAllowed } : {})` spread in
-        // Session.runTool turns this red (errorType flips to
-        // INVALID_TOOL_PARAMS and invalidToolParamErrors gains an entry).
+        // wrapper allowed but the target denied, the denial must stay with
+        // ACP's own L1 enablement gate and must not become a parameter
+        // pre-check refusal — otherwise a denied target with malformed
+        // arguments gets INVALID_TOOL_PARAMS plus an invalid-parameter strike
+        // toward the loop stop for a call that could never run. The pm is
+        // wired into suppressArgumentPreCheck (not isTargetExecutionAllowed,
+        // which is the outer owner's execution-allowlist hook that this
+        // frontend does not have), so the pre-check is skipped for a denied
+        // target and L1 supplies both the wording and the isTrustedLiveTool
+        // exemption. Mutation check: removing the
+        // `...(pm ? { suppressArgumentPreCheck } : {})` spread in
+        // Session.runTool turns this red (the denial becomes an
+        // INVALID_TOOL_PARAMS bridge refusal naming `required property 'url'`
+        // and invalidToolParamErrors gains an entry).
         mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
         mockConfig.getPermissionManager = vi.fn().mockReturnValue({
           isToolEnabled: vi.fn(async (name: string) => name !== 'web_fetch'),
@@ -18560,10 +18566,11 @@ describe('Session', () => {
         const errorText = String(
           result.parts[0]?.functionResponse?.response?.['error'],
         );
-        expect(
-          errorText.startsWith(core.DEFERRED_TOOL_CALL_REFUSAL_PREFIX),
-        ).toBe(true);
-        expect(errorText).toContain(
+        // ACP's own L1 wording, not the bridge's scheduler-flavoured message
+        // that points an operator at an execution allowlist / disallowedTools
+        // blocklist this frontend never reads.
+        expect(errorText).toContain('Tool "web_fetch" is disabled.');
+        expect(errorText).not.toContain(
           "not permitted by this agent's tool policy",
         );
         expect(errorText).not.toContain("required property 'url'");
