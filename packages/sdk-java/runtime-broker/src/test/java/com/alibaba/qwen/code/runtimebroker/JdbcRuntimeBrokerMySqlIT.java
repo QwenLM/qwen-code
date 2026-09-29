@@ -2,13 +2,15 @@ package com.alibaba.qwen.code.runtimebroker;
 
 import java.sql.Connection;
 import java.sql.PreparedStatement;
+import java.util.UUID;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.Test;
 
 class JdbcRuntimeBrokerMySqlIT {
     @Test
     void repositoriesPreserveTheirContractsOnMySql() throws Exception {
-        JdbcRepositoryContract.verify(dataSource(), "mysql");
+        // The database outlives the run, so each run needs its own prefix.
+        JdbcRepositoryContract.verify(dataSource(), "mysql-" + UUID.randomUUID());
     }
 
     @Test

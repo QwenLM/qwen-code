@@ -190,7 +190,15 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
         String isolationKey = "session".equals(
                 session.getScope().getIsolationClass())
                         ? session.getHarnessSessionId() : null;
+        // Acquisition installs the context while the Session is still
+        // ACQUIRING. A Session being released takes none, and neither does
+        // a binding asked to drain, which admits no new Session either.
+        if (!sessionRecord.isAcquirable()) {
+            throw new IllegalArgumentException(
+                    "session must be acquiring or ready");
+        }
         if (runtime.getState() != RuntimeBindingRecord.State.READY
+                || runtime.isDrainRequested()
                 || lease == null || seed == null
                 || !runtime.getBindingId().equals(sessionRecord.getBindingId())
                 || runtime.getGeneration() != sessionRecord.getRuntimeGeneration()
@@ -265,7 +273,7 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("protocolVersion", 2);
         body.put("reference", referenceIdentity(reference));
-        body.put("toolName", referenceString(reference, "toolName"));
+        body.put("toolName", referenceToolName(reference));
         body.put("input", referenceInput(reference));
         byte[] encoded = encodeToolRequest(body, TOOL_REQUEST_LIMIT_BYTES);
         return post(lease, EXECUTE_PATH, encoded, TOOL_RESULT_LIMIT_BYTES)
@@ -363,7 +371,7 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
             }
         }
         Map<String, Object> body = v3Body(reference);
-        body.put("toolName", referenceString(reference, "toolName"));
+        body.put("toolName", referenceToolName(reference));
         body.put("input", referenceInput(reference));
         body.put("capture", capture);
         return post(lease, V3_EXECUTE_PATH,
@@ -646,10 +654,21 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
         return text;
     }
 
+    // The writer would send an unpaired surrogate as '?', and the Worker
+    // would run that tool name or input instead of the caller's.
+    private static String referenceToolName(Map<String, Object> reference) {
+        return BrokerValues.requireWellFormed(
+                referenceString(reference, "toolName"), "reference toolName");
+    }
+
     private static Object referenceInput(Map<String, Object> reference) {
         Object input = reference.get("input");
         if (!(input instanceof Map)) {
             throw new IllegalArgumentException("reference input is required");
+        }
+        if (!BrokerValues.isWellFormedJson(input)) {
+            throw new IllegalArgumentException(
+                    "reference input must be JSON with well-formed text");
         }
         return input;
     }
