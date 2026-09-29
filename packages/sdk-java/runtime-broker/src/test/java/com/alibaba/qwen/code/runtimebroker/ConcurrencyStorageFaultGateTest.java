@@ -34,9 +34,9 @@ class ConcurrencyStorageFaultGateTest {
     /**
      * A process-level takeover in the spirit of #12477: the dispatching
      * Broker freezes (SIGSTOP) past its dispatch lease, a second Broker
-     * adopts the worker and fences the call, and the stale Broker is then
+     * adopts the worker and settles the call from evidence, and the stale Broker is then
      * thawed and handed the worker's answer it was still waiting for. That
-     * late answer must not settle the fenced record, and nothing the stale
+     * late answer must not overwrite the settled record, and nothing the stale
      * Broker is asked afterwards may reach the Runtime. The unit test for
      * #12477 covers the narrower window between claim and execute, which a
      * signal cannot hit reliably.
@@ -67,26 +67,30 @@ class ConcurrencyStorageFaultGateTest {
 
         freezeBetweenDatabaseCalls(stale, staleDatabase);
         rig.awaitDispatchLapse(execution);
+        ToolExecutionRecord beforeTakeover = rig.execution(execution);
         takeover.acquire(HARNESS, SESSION).requireOk();
         // Before reuse, the takeover Broker re-proves the worker's identity:
         // once as the provisioner observes it, once as the service adopts it.
         assertEquals(2, takeoverProxy.count("attest"));
-        assertEquals("UNKNOWN", takeover.create(HARNESS, SESSION, "key-1",
+        ToolExecutionRecord settled = rig.execution(execution);
+        assertEquals(ToolExecutionRecord.State.SETTLED, settled.getState());
+        assertEquals(beforeTakeover.getVersion() + 1, settled.getVersion());
+        assertEquals(beforeTakeover.getDispatchOwner(), settled.getDispatchOwner());
+        assertEquals(beforeTakeover.getDispatchGeneration(), settled.getDispatchGeneration());
+        assertEquals("SETTLED", takeover.create(HARNESS, SESSION, "key-1",
                 reference).object().getString("state"));
         long thawed = System.nanoTime();
         stale.resume();
 
         // The stale Broker gets the answer it was waiting for only now. Its
-        // claim was fenced, so the record stays UNKNOWN until the takeover
-        // Broker settles it from the Runtime's evidence.
+        // claim cannot overwrite the result committed by the takeover scan.
         answer.release(FaultProxy.Action.PASS);
         answer.awaitDelivered(FaultGateRig.WAIT);
         FaultGateRig.hold(() -> rig.execution(execution).getState(),
-                ToolExecutionRecord.State.UNKNOWN::equals,
-                Duration.ofSeconds(2), "the fenced record");
-        assertEquals("RESOLVED", takeover.reconcile(HARNESS, SESSION,
+                ToolExecutionRecord.State.SETTLED::equals,
+                Duration.ofSeconds(2), "the settled record");
+        assertEquals("ALREADY_SETTLED", takeover.reconcile(HARNESS, SESSION,
                 execution).object().getString("outcome"));
-        ToolExecutionRecord settled = rig.execution(execution);
         assertEquals("success", settled.getExecutionStatus());
 
         // Asked again by the same key, to cancel, or to reconcile, the stale

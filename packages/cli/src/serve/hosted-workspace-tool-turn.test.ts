@@ -297,12 +297,9 @@ it('does not consume an unknown outcome or continue a partly executed batch', as
   ).toHaveLength(0);
 });
 
-it('refuses local paths and Shell before acquiring or reserving work', async () => {
+it('refuses unsupported profile calls before acquiring or reserving work', async () => {
   for (const call of [
     { ...calls[0], name: 'run_shell_command' },
-    { ...calls[0], args: { file_path: '/local/file' } },
-    { ...calls[0], args: { file_path: '../escape' } },
-    { ...calls[0], args: { file_path: ' /local/file ' } },
     { ...calls[0], wasOutputTruncated: true },
   ]) {
     await expect(
@@ -312,6 +309,153 @@ it('refuses local paths and Shell before acquiring or reserving work', async () 
   expect(broker.acquire).not.toHaveBeenCalled();
   expect(broker.prepare).not.toHaveBeenCalled();
 });
+
+it.each(['read_file', 'write_file', 'edit'])(
+  'persists correctable file_path errors for %s without dispatch',
+  async (name) => {
+    const invalidPaths: unknown[] = [
+      undefined,
+      null,
+      '',
+      '   ',
+      123,
+      '/private/secret-host-path',
+      ' /private/secret-host-path ',
+      '../escape',
+      'a\\b',
+      'C:/secret-host-path',
+      'a\u0000b',
+      '\ud800',
+    ];
+    for (const [index, file] of invalidPaths.entries()) {
+      const args = file === undefined ? {} : { file_path: file };
+      const call = { ...calls[0], name, callId: `invalid-${index}`, args };
+      const original = [
+        { functionCall: { id: call.callId, name, args: call.args } },
+      ];
+      const responses = await turn.execute(
+        [call],
+        original,
+        'model',
+        new AbortController().signal,
+      );
+      const error = responses[0].functionResponse?.response?.['error'];
+      expect(responses[0].functionResponse?.id).toBe(call.callId);
+      expect(error).toContain('file_path');
+      expect(error).toContain('retry');
+      expect(error).not.toContain('cwdRelative');
+      expect(error).not.toContain('secret-host-path');
+      const history = await session.sink.project();
+      expect(history.slice(-2).map((record) => record.type)).toEqual([
+        'assistant',
+        'tool_result',
+      ]);
+      expect(history.at(-2)?.message?.parts).toEqual(original);
+      expect(history.at(-1)?.message?.parts).toEqual(responses);
+    }
+    expect(broker.acquire).not.toHaveBeenCalled();
+    expect(broker.prepare).not.toHaveBeenCalled();
+    expect(broker.execute).not.toHaveBeenCalled();
+    await expect(turn.finish()).resolves.toBeUndefined();
+  },
+);
+
+it('preserves trimmed and normalized valid file paths', async () => {
+  const call = { ...calls[0], args: { file_path: ' ./dir//file.txt ' } };
+  await turn.execute(
+    [call],
+    [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
+    'model',
+    new AbortController().signal,
+  );
+  const payload = JSON.parse(broker.execute.mock.calls[0][1]);
+  expect(payload.input.file_path).toBe('dir/file.txt');
+  await turn.consumeResults();
+  await turn.finish();
+});
+
+it.each([
+  ['file-first', false],
+  ['file-last-with-shell', true],
+] as const)(
+  'refuses a mixed %s batch, then executes only the corrected call',
+  async (_scenario, shell) => {
+    turn = createTurn(shell);
+    const invalid = {
+      ...calls[0],
+      callId: 'invalid-path',
+      args: { file_path: '/private/secret-host-path' },
+    };
+    const sibling = shell
+      ? {
+          ...calls[0],
+          callId: 'valid-shell',
+          name: 'run_shell_command',
+          args: { command: 'touch should-not-run' },
+        }
+      : {
+          ...calls[0],
+          callId: 'valid-write',
+          name: 'write_file',
+          args: { file_path: 'valid.txt', content: 'one effect' },
+        };
+    const batch = shell ? [sibling, invalid] : [invalid, sibling];
+    const original = batch.map((call) => ({
+      functionCall: { id: call.callId, name: call.name, args: call.args },
+    }));
+    const responses = await turn.execute(
+      batch,
+      original,
+      'model',
+      new AbortController().signal,
+    );
+    expect(responses.map((part) => part.functionResponse?.id)).toEqual(
+      batch.map((call) => call.callId),
+    );
+    expect(
+      responses.find((part) => part.functionResponse?.id === invalid.callId)
+        ?.functionResponse?.response?.['error'],
+    ).toContain('file_path');
+    expect(
+      responses.find((part) => part.functionResponse?.id === sibling.callId)
+        ?.functionResponse?.response?.['error'],
+    ).toContain('not executed');
+    expect(JSON.stringify(responses)).not.toContain('invalid Shell arguments');
+    expect((await session.sink.project()).map((record) => record.type)).toEqual(
+      ['assistant', 'tool_result'],
+    );
+    expect(broker.acquire).not.toHaveBeenCalled();
+    expect(broker.prepare).not.toHaveBeenCalled();
+    expect(broker.execute).not.toHaveBeenCalled();
+    expect(broker.registerPublisher).not.toHaveBeenCalled();
+    await turn.consumeResults();
+
+    const corrected = {
+      ...sibling,
+      callId: 'corrected-write',
+      name: 'write_file',
+      args: { file_path: 'valid.txt', content: 'one effect' },
+    };
+    await turn.execute(
+      [corrected],
+      [
+        {
+          functionCall: {
+            id: corrected.callId,
+            name: corrected.name,
+            args: corrected.args,
+          },
+        },
+      ],
+      'model',
+      new AbortController().signal,
+    );
+    await turn.consumeResults();
+    await turn.finish();
+    expect(broker.execute).toHaveBeenCalledOnce();
+    expect(broker.release).toHaveBeenCalledOnce();
+  },
+);
 
 it('keeps release failures recovery blocked', async () => {
   await turn.execute(calls, parts, 'model', new AbortController().signal);
@@ -596,6 +740,86 @@ it('blocks recovery if the durable refusal cannot be committed', async () => {
     HostedToolRecoveryRequiredError,
   );
   expect(broker.acquire).not.toHaveBeenCalled();
+});
+
+it.each(['assistant', 'tool_result'] as const)(
+  'blocks recovery when a file_path refusal %s commit fails',
+  async (failedType) => {
+    const original = commit;
+    commit = async (...args) => {
+      if (args[0] === failedType) throw new Error('history write failed');
+      return original(...args);
+    };
+    turn = createTurn();
+    const invalid = {
+      ...calls[0],
+      args: { file_path: '/private/secret-host-path' },
+    };
+    await expect(
+      turn.execute(
+        [invalid],
+        [
+          {
+            functionCall: {
+              id: invalid.callId,
+              name: invalid.name,
+              args: invalid.args,
+            },
+          },
+        ],
+        'model',
+        new AbortController().signal,
+      ),
+    ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+    await expect(turn.finish()).rejects.toBeInstanceOf(
+      HostedToolRecoveryRequiredError,
+    );
+    expect(broker.acquire).not.toHaveBeenCalled();
+    expect(broker.execute).not.toHaveBeenCalled();
+  },
+);
+
+it('keeps an acquired Workspace held when a later file_path refusal cannot commit', async () => {
+  const original = commit;
+  let toolResultCommits = 0;
+  commit = async (...args) => {
+    if (args[0] === 'tool_result' && ++toolResultCommits === 2)
+      throw new Error('history write failed');
+    return original(...args);
+  };
+  turn = createTurn();
+  await turn.execute(
+    [calls[0]],
+    [parts[0]],
+    'model',
+    new AbortController().signal,
+  );
+  await turn.consumeResults();
+  const invalid = {
+    ...calls[0],
+    args: { file_path: '/private/secret-host-path' },
+  };
+  await expect(
+    turn.execute(
+      [invalid],
+      [
+        {
+          functionCall: {
+            id: invalid.callId,
+            name: invalid.name,
+            args: invalid.args,
+          },
+        },
+      ],
+      'model',
+      new AbortController().signal,
+    ),
+  ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+  await expect(turn.finish()).rejects.toBeInstanceOf(
+    HostedToolRecoveryRequiredError,
+  );
+  expect(broker.acquire).toHaveBeenCalledOnce();
+  expect(broker.release).not.toHaveBeenCalled();
 });
 
 it.each([false, true])(

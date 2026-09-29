@@ -6,6 +6,7 @@
 
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { readFile, writeFile, access } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import path from 'node:path';
@@ -21,6 +22,7 @@ const config = JSON.parse(await readFile(process.argv[2], 'utf8')) as {
   storeUrl: string;
   brokerUrl: string;
   resultFile: string;
+  secondarySessionId: string;
   sessions: Array<{
     sessionId: string;
     workspaceId: string;
@@ -339,6 +341,87 @@ const modelReply: FakeOpenAIHandler = ({ body }) => {
     );
     return { content: 'TOOLS_DONE', reasoning: 'PRIVATE_REASONING_MARKER' };
   }
+  if (current === 'INVALID_FILE_PATH') {
+    if (!receipts.length)
+      return {
+        toolCalls: [
+          fakeToolCall(
+            'read_file',
+            { file_path: path.join(config.sessions[0].directory, 'proof.txt') },
+            'invalid-read',
+          ),
+          fakeToolCall(
+            'write_file',
+            { file_path: 'skipped.txt', content: 'must not run' },
+            'skipped-write',
+          ),
+        ],
+      };
+    if (receipts.length === 2) {
+      assert.deepEqual(
+        receipts.map((message) => message.tool_call_id),
+        ['invalid-read', 'skipped-write'],
+      );
+      assert.match(JSON.stringify(receipts[0].content), /file_path/);
+      assert.doesNotMatch(JSON.stringify(receipts[0].content), /cwdRelative/);
+      assert(
+        !JSON.stringify(receipts[0].content).includes(
+          config.sessions[0].directory,
+        ),
+        'The refusal echoed the model-provided absolute path',
+      );
+      assert.match(JSON.stringify(receipts[1].content), /not executed/);
+      assert(
+        !existsSync(path.join(config.sessions[0].directory, 'skipped.txt')),
+        'The valid sibling ran before the model could correct the batch',
+      );
+      return {
+        toolCalls: [
+          fakeToolCall(
+            'write_file',
+            { file_path: 'corrected.txt', content: 'once' },
+            'corrected-write',
+          ),
+        ],
+      };
+    }
+    assert.deepEqual(
+      receipts.map((message) => message.tool_call_id),
+      ['invalid-read', 'skipped-write', 'corrected-write'],
+    );
+    assert.match(JSON.stringify(receipts[2].content), /Successfully created/);
+    return { content: 'CORRECTED_OK' };
+  }
+  if (current === 'HISTORY_AFTER_INVALID') {
+    const previousCalls = messages.flatMap((message) =>
+      (message.tool_calls ?? []).map((call) => call.id),
+    );
+    const previousReceipts = messages
+      .filter((message) => message.role === 'tool')
+      .map((message) => message.tool_call_id);
+    assert.deepEqual(previousCalls.slice(-3), [
+      'invalid-read',
+      'skipped-write',
+      'corrected-write',
+    ]);
+    assert.deepEqual(previousReceipts.slice(-3), previousCalls.slice(-3));
+    return { content: 'HISTORY_OK' };
+  }
+  if (current === 'SECOND_SESSION_FILE') {
+    if (!receipts.length)
+      return {
+        toolCalls: [
+          fakeToolCall(
+            'read_file',
+            { file_path: 'corrected.txt' },
+            'second-read',
+          ),
+        ],
+      };
+    assert.equal(receipts[0].tool_call_id, 'second-read');
+    assert.match(JSON.stringify(receipts[0].content), /once/);
+    return { content: 'SECOND_SESSION_OK' };
+  }
   if (current === 'SHELL_REFUSAL')
     return {
       toolCalls: [
@@ -635,6 +718,57 @@ try {
     });
     clientId = loaded.clientId;
     await prompt('HISTORY_CHECK');
+    if (index === 0) {
+      const before = starts.size;
+      const refusedEvents = await prompt('INVALID_FILE_PATH');
+      const refusedParts = refusedEvents.flatMap(
+        (event) => event.data.record?.message?.parts ?? [],
+      );
+      const callIds = refusedParts.flatMap((part) =>
+        part.functionCall ? [part.functionCall.id] : [],
+      );
+      assert.deepEqual(callIds.slice(-3), [
+        'invalid-read',
+        'skipped-write',
+        'corrected-write',
+      ]);
+      assert.deepEqual(
+        refusedParts
+          .flatMap((part) =>
+            part.functionResponse ? [part.functionResponse.id] : [],
+          )
+          .slice(-3),
+        callIds.slice(-3),
+      );
+      assert.equal(starts.size, before + 1);
+      assert.equal(
+        await readFile(path.join(session.directory, 'corrected.txt'), 'utf8'),
+        'once',
+      );
+      await assert.rejects(access(path.join(session.directory, 'skipped.txt')));
+      await json(`/session/${sessionId}/detach`, {}, 204);
+      const reloaded = await json(`/session/${sessionId}/load`, {
+        managedSessionStore: connection,
+        toolProfile: session.toolProfile,
+      });
+      clientId = reloaded.clientId;
+      await prompt('HISTORY_AFTER_INVALID');
+
+      const originalSessionId = sessionId;
+      const originalClientId = clientId;
+      sessionId = config.secondarySessionId;
+      const secondary = await json('/session', {
+        sessionId,
+        sessionScope: 'thread',
+        managedSessionStore: connection,
+        toolProfile: session.toolProfile,
+      });
+      clientId = secondary.clientId;
+      await prompt('SECOND_SESSION_FILE');
+      await json(`/session/${sessionId}/detach`, {}, 204);
+      sessionId = originalSessionId;
+      clientId = originalClientId;
+    }
     if (index === 1) {
       loseStatus = true;
       const before = modelCalls;
@@ -662,7 +796,7 @@ try {
     } else await json(`/session/${sessionId}/detach`, {}, 204);
   }
   assert(droppedStart);
-  assert.equal(starts.size, 12);
+  assert.equal(starts.size, 14);
   assert.equal(shellExpected.length, 1);
   await writeFile(
     config.resultFile,
@@ -670,7 +804,7 @@ try {
   );
   assert([...starts.values()].every((count) => count === 1));
   console.log(
-    'HOSTED_WORKSPACE_TOOLS_OK: six Workspaces, parallel warmup, file replay, 100 MiB Shell, Shell after text/Shell reload, lost start ACK, publication faults, cancellation, at-most-once effects',
+    'HOSTED_WORKSPACE_TOOLS_OK: six Workspaces, correctable file_path refusal, same-Workspace second Session, parallel warmup, file replay, 100 MiB Shell, Shell after text/Shell reload, lost start ACK, publication faults, cancellation, at-most-once effects',
   );
 } catch (cause) {
   console.error(cli.output);

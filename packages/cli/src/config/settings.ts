@@ -67,7 +67,7 @@ import {
   getGlobalQwenDirLite,
   getSystemDefaultsPath,
   getSystemSettingsPath,
-  readEnvironmentVariable,
+  spawnedEnvironmentView,
 } from './storage-paths-lite.js';
 import { readConfigFile } from './read-config-file.js';
 
@@ -1056,7 +1056,9 @@ export function loadSettings(
  * that cannot be read whole, is not a JSON object or carries a version this
  * build cannot migrate throws, where `loadSettings` repairs, skips or accepts
  * some of these. `environment` locates the user and system files and is the
- * only source for `${VAR}` placeholders; without one, nothing is read.
+ * only source for `${VAR}` placeholders; without one, nothing is read. It is
+ * read as a spawned session host receives it, and one that the host would not
+ * receive as it is throws.
  */
 export function readSettingsSnapshot(
   workspaceDir: string,
@@ -1082,19 +1084,12 @@ export function readSettingsSnapshot(
 }
 
 /**
- * The variables a session host spawned with `environment` sees, for
- * placeholders, when the environment holds string values: on Windows, names
- * are case-insensitive and only one spelling of each is passed on.
+ * The real path of the home directory, as settings loading resolves it to tell
+ * whether the workspace is the home directory. Throws when it cannot be
+ * resolved, for example because it does not exist.
  */
-function spawnedEnvironmentView(
-  environment: Readonly<NodeJS.ProcessEnv>,
-): Record<string, string> {
-  return new Proxy({} as Record<string, string>, {
-    get: (_target, name) =>
-      typeof name === 'string'
-        ? readEnvironmentVariable(environment, name)
-        : undefined,
-  });
+export function resolveHomeDirectory(home: string = homedir()): string {
+  return fs.realpathSync(path.resolve(home));
 }
 
 function readSettingsLayers(
@@ -1135,7 +1130,6 @@ function readSettingsLayers(
 
   // Resolve paths to their canonical representation to handle symlinks
   const resolvedWorkspaceDir = path.resolve(workspaceDir);
-  const resolvedHomeDir = path.resolve(homedir());
 
   let realWorkspaceDir = resolvedWorkspaceDir;
   try {
@@ -1146,7 +1140,7 @@ function readSettingsLayers(
   }
 
   // We expect homedir to always exist and be resolvable.
-  const realHomeDir = fs.realpathSync(resolvedHomeDir);
+  const realHomeDir = resolveHomeDirectory();
 
   const workspaceSettingsPath = new Storage(
     workspaceDir,
