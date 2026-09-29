@@ -115,7 +115,7 @@ Codex 适配器放在 Codex 执行机器上，负责本地任务映射到 `threa
 
 ## 6. 实验开关与关闭契约
 
-**Agent Team 与跨 Agent 协作分别 opt-in，默认关闭，互不隐式开启。** 沿用现有 `experimental.agentTeam` 及其显式环境变量入口；新的协作开关暂称 `experimental.agentCollaboration`，名称尚未落代码。缺失新设置视为 false。resolved off 是完成现有配置优先级计算后的关闭状态，不是忽略显式环境变量。
+**Agent Team 与跨 Agent 协作分别 opt-in，默认关闭，互不隐式开启。** 沿用现有 `experimental.agentTeam` 及其显式环境变量入口；新的协作开关暂称 `experimental.agentCollaboration`，名称尚未落代码。缺失新设置视为 false。resolved off 是完成现有配置优先级计算后的关闭状态，不是忽略显式环境变量。按当前实现，该设置按 workspace 解析（workspace 级优先于用户级）；`QWEN_CODE_ENABLE_AGENT_COLLABORATION=1` 是运维侧的进程级覆盖，会对所有受信任的已注册 workspace 开启协作，不论其自身设置。
 
 允许协作也不等于允许外部访问：开放某个 Agent、信任某个连接、注册 Host 仍需操作者显式配置。仓库提供的未受信设置、远端请求或模型不能自行打开外部授权。daemon 限制是上限，各 workspace 和会话只可缩小范围；不能错误回退到 primary workspace。
 

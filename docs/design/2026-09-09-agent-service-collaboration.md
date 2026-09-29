@@ -115,7 +115,7 @@ Native turn completion maps to execution completion; only an explicit task resul
 
 ## 6. Experimental Flags and the Disabled Contract
 
-**Agent Team and cross-Agent collaboration are separate opt-ins, disabled by default, and neither implicitly enables the other.** Retain `experimental.agentTeam` and its explicit environment-variable entry. The proposed collaboration flag is `experimental.agentCollaboration`; the name is not yet implemented. A missing setting means false. Resolved off means disabled after applying existing configuration precedence, not ignoring an explicit environment variable.
+**Agent Team and cross-Agent collaboration are separate opt-ins, disabled by default, and neither implicitly enables the other.** Retain `experimental.agentTeam` and its explicit environment-variable entry. The proposed collaboration flag is `experimental.agentCollaboration`; the name is not yet implemented. A missing setting means false. Resolved off means disabled after applying existing configuration precedence, not ignoring an explicit environment variable. As implemented, the setting is resolved per workspace (workspace scope over user scope), and `QWEN_CODE_ENABLE_AGENT_COLLABORATION=1` is the operator's process-wide override: it turns collaboration on for every trusted registered workspace regardless of that workspace's setting.
 
 Enabling collaboration does not grant external access. Exposing an Agent, trusting a connection, and registering a Host still require explicit operator configuration. Untrusted repository settings, remote requests, and models cannot enable external authorization themselves. Daemon limits form the ceiling; workspaces and sessions may only narrow them. Never incorrectly fall back to the primary workspace.
 

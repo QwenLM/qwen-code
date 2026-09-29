@@ -574,7 +574,9 @@ async function executeAssignment(
     leaseId: assignment.lease.leaseId,
     attempt: assignment.attempt,
     status: 'completed',
-    close: { kind: 'review', summary },
+    // The coordinator refuses a summary past this bound with a 400, which
+    // this client treats as permanent; sending it bounded keeps the answer.
+    close: { kind: 'review', summary: summary.slice(0, 262_144) },
     ...(tokens !== undefined ? { tokens } : {}),
   };
 }
@@ -663,6 +665,8 @@ export async function startAgentHostConnection(
         );
       return existing.start;
     }
+    // Not stopped here: a different bridge or generation means the old one's
+    // generation guard is already closed, and that is what ends its loop.
     activeConnections.delete(key);
   }
   const start = connectAgentHost(options);
