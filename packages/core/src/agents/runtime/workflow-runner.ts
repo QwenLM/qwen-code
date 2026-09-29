@@ -541,7 +541,7 @@ export class WorkflowRunner {
         toolUseId: options.toolUseId,
         ...(workflowName ? { workflowName } : {}),
         ...(sourceRef ? { sourceRef } : {}),
-        meta: null,
+        meta: scriptMeta,
         status: 'running',
         startTime: Date.now(),
         outputFile: '',
@@ -788,12 +788,7 @@ export class WorkflowRunner {
             resumeReplay,
             scheduler,
           });
-          if (entry) {
-            entry.meta = outcome.meta;
-            if (outcome.meta?.name && entry.description === runId) {
-              entry.description = outcome.meta.name;
-            }
-          }
+          if (entry) entry.meta = outcome.meta;
           registry?.setRecentLogs(runId, outcome.logs);
           // A held successful dispatch resolves its gate on abort, so a
           // run whose entry settled terminal mid-script — cancelled via
@@ -817,9 +812,6 @@ export class WorkflowRunner {
             error instanceof WorkflowExecutionError ? error : undefined;
           const message = extractErrorMessage(error);
           if (entry && details?.meta && !entry.meta) entry.meta = details.meta;
-          if (entry?.meta?.name && entry.description === runId) {
-            entry.description = entry.meta.name;
-          }
           if (details?.logs) registry?.setRecentLogs(runId, details.logs);
           // Mirror of the guard on the success path. When the entry was
           // settled terminal from outside — the dialog's cancel, or the

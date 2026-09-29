@@ -816,7 +816,15 @@ describe('useLlmStream', () => {
     ).toHaveLength(1);
   });
 
-  it.each(['success', 'model failure', 'queue full', 'session reset'])(
+  it.each([
+    'success',
+    'model failure',
+    'queue full',
+    'session reset',
+    'shell eviction',
+    'later shell eviction',
+    'interim monitor',
+  ])(
     'commits the workflow card before ordered notices (%s)',
     async (scenario) => {
       mockHandleSlashCommand.mockResolvedValue({
@@ -856,21 +864,43 @@ describe('useLlmStream', () => {
       });
       const callback =
         mockWorkflowRunRegistry.setCompletionCallback.mock.lastCall![0];
+      const shellEviction =
+        scenario === 'shell eviction' || scenario === 'later shell eviction';
       if (scenario === 'model failure') {
         send.mockImplementation(async function* () {
           yield await Promise.reject(new Error('model unavailable'));
         });
       }
       act(() => {
-        callback(
-          'earlier background',
-          '<task-notification>bg</task-notification>',
-          {
-            runId: 'wf_bg',
-            status: 'completed',
-            isBackgrounded: true,
-          },
-        );
+        if (scenario === 'interim monitor') {
+          mockMonitorRegistry.setNotificationCallback.mock.lastCall![0](
+            'Monitor "logs" event #1',
+            '<pulse-1 />',
+            { monitorId: 'mon_1', status: 'running' },
+          );
+          mockMonitorRegistry.get.mockReturnValue({ status: 'cancelled' });
+        }
+        if (shellEviction) {
+          const shellCallback =
+            mockBackgroundShellRegistry.setNotificationCallback.mock
+              .lastCall![0];
+          for (let i = 0; i < MAX_BACKGROUND_NOTIFICATION_QUEUE; i++) {
+            shellCallback(`shell ${i} done`, `<shell-${i} />`, {
+              shellId: `bg_${i}`,
+              status: 'completed',
+            });
+          }
+        } else {
+          callback(
+            'earlier background',
+            '<task-notification>bg</task-notification>',
+            {
+              runId: 'wf_bg',
+              status: 'completed',
+              isBackgrounded: true,
+            },
+          );
+        }
         if (scenario === 'queue full') {
           for (let i = 1; i < MAX_BACKGROUND_NOTIFICATION_QUEUE; i++) {
             callback(`background ${i}`, `<bg-${i}/>`, {
@@ -889,6 +919,13 @@ describe('useLlmStream', () => {
             isBackgrounded: false,
           },
         );
+        if (scenario === 'later shell eviction') {
+          callback('later background', '<later />', {
+            runId: 'wf_later',
+            status: 'completed',
+            isBackgrounded: true,
+          });
+        }
       });
       expect(mockAddItem.mock.calls.map(([item]) => item.text)).not.toContain(
         'foreground result',
@@ -914,7 +951,19 @@ describe('useLlmStream', () => {
         mockSessionId = 'test-session-id';
         return;
       }
-      const expectedDisplays = ['card', 'earlier background'];
+      const expectedDisplays = ['card'];
+      const firstSurvivingShell = scenario === 'later shell eviction' ? 2 : 1;
+      if (shellEviction) {
+        for (
+          let i = firstSurvivingShell;
+          i < MAX_BACKGROUND_NOTIFICATION_QUEUE;
+          i++
+        ) {
+          expectedDisplays.push(`shell ${i} done`);
+        }
+      } else {
+        expectedDisplays.push('earlier background');
+      }
       if (scenario === 'queue full') {
         for (let i = 1; i < MAX_BACKGROUND_NOTIFICATION_QUEUE; i++) {
           expectedDisplays.push(`background ${i}`);
@@ -932,6 +981,31 @@ describe('useLlmStream', () => {
         // The model queue rejects the extra protected result, but its display
         // still belongs to the completing tool batch.
         expect(send.mock.calls[0][0]).not.toContain(
+          '<task-notification>fg</task-notification>',
+        );
+      } else if (shellEviction) {
+        const modelText = send.mock.calls[0][0];
+        expect(modelText).toContain('<kind>queue</kind>');
+        expect(modelText).toContain('bg_0');
+        expect(modelText).not.toContain('<shell-0 />');
+        expect(relevant().map((item) => item.text)).not.toContain(
+          'shell 0 done',
+        );
+        if (scenario === 'later shell eviction') {
+          expect(modelText).not.toContain('<shell-1 />');
+          expect(relevant().map((item) => item.text)).not.toContain(
+            'shell 1 done',
+          );
+          expect(modelText).toContain('<later />');
+        }
+        for (
+          let i = firstSurvivingShell;
+          i < MAX_BACKGROUND_NOTIFICATION_QUEUE;
+          i++
+        ) {
+          expect(modelText).toContain(`<shell-${i} />`);
+        }
+        expect(modelText).toContain(
           '<task-notification>fg</task-notification>',
         );
       } else {

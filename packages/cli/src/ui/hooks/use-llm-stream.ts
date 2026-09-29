@@ -450,6 +450,7 @@ interface QueuedNotification {
   onDelivered?: () => void;
   onDeliveryFailed?: () => void;
   displayed?: boolean;
+  dropped?: boolean;
 }
 
 function isProtectedNotification(item: QueuedNotification): boolean {
@@ -1091,7 +1092,11 @@ export const useLlmStream = (
   // Keep display ownership separate from model admission: a full model queue
   // must not discard a foreground result, nor may admission failure hide it.
   const pendingWorkflowDisplaysRef = useRef<
-    Array<{ batchId?: string; items: QueuedNotification[] }>
+    Array<{
+      batchId?: string;
+      items: QueuedNotification[];
+      foreground: QueuedNotification;
+    }>
   >([]);
   const flushWorkflowDisplays = useCallback(
     (completedBatchId?: string) => {
@@ -1104,7 +1109,10 @@ export const useLlmStream = (
       while (pending.length > 0 && pending[0].batchId === undefined) {
         const display = pending.shift()!;
         for (const item of display.items) {
-          if (!item.displayed) {
+          if (
+            !item.displayed &&
+            (!item.dropped || item === display.foreground)
+          ) {
             addItem(
               { type: 'notification', text: item.displayText },
               Date.now(),
@@ -6212,6 +6220,7 @@ export const useLlmStream = (
         isProtected: isProtectedNotification,
       });
       if (admission.action === 'drop') {
+        item.dropped = true;
         debugLogger.warn(
           `Notification queue overflow: dropping task=${item.taskId ?? 'unknown'} kind=${item.kind} because ${admission.reason === 'all-protected' ? 'every queued notification is protected' : 'the next monitor pulse will supersede it'}`,
         );
@@ -6224,6 +6233,7 @@ export const useLlmStream = (
           `Notification queue overflow: evicting task=${evicted?.taskId ?? 'unknown'} kind=${evicted?.kind ?? 'unknown'}`,
         );
         if (evicted) {
+          evicted.dropped = true;
           const cancelledPulse =
             evicted.interim &&
             evicted.taskId !== undefined &&
@@ -6445,6 +6455,7 @@ export const useLlmStream = (
         const toolUseId = registry.get(meta.runId)?.toolUseId;
         pendingWorkflowDisplaysRef.current.push({
           batchId: toolUseId ? getToolBatchId(toolUseId) : undefined,
+          foreground: item,
           items: [
             ...notificationQueueRef.current.filter(
               (queued) =>
@@ -6592,7 +6603,10 @@ export const useLlmStream = (
             const victimIndex =
               admission.action === 'evict' ? admission.index : queue.length - 1;
             const [victim] = queue.splice(victimIndex, 1);
-            if (victim) droppedNotificationsRef.current.record(victim);
+            if (victim) {
+              victim.dropped = true;
+              droppedNotificationsRef.current.record(victim);
+            }
           }
         };
 

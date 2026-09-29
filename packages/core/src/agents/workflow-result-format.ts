@@ -25,36 +25,45 @@ function renderError(error: Error): string {
       append('… (truncated)');
       return;
     }
-    if (!types.isNativeError(value)) {
-      append(String(value));
-      return;
-    }
-    if (ancestors.has(value)) {
-      append('[Circular error]');
-      return;
-    }
-    ancestors.add(value);
-    const name = typeof value.name === 'string' ? value.name : 'Error';
-    append(`${name}: ${String(value.message ?? '')}`);
-    // Native cause/errors are data properties. Do not execute user getters.
-    const errors = Object.getOwnPropertyDescriptor(value, 'errors')?.value;
-    if (Array.isArray(errors) && errors.length > 0) {
-      append(' [errors: ');
-      const count = Math.min(errors.length, 8);
-      for (let i = 0; i < count; i++) {
-        if (i > 0) append('; ');
-        visit(errors[i], depth + 1);
+    let enteredError: Error | undefined;
+    try {
+      if (!types.isNativeError(value)) {
+        append(String(value));
+        return;
       }
-      if (errors.length > count) append('; … (truncated)');
-      append(']');
+      if (ancestors.has(value)) {
+        append('[Circular error]');
+        return;
+      }
+      enteredError = value;
+      ancestors.add(value);
+      const name = value.name;
+      append(
+        `${typeof name === 'string' ? name : 'Error'}: ${String(value.message ?? '')}`,
+      );
+      // Native cause/errors are data properties. Do not execute user getters.
+      const errors = Object.getOwnPropertyDescriptor(value, 'errors')?.value;
+      if (Array.isArray(errors) && errors.length > 0) {
+        append(' [errors: ');
+        const count = Math.min(errors.length, 8);
+        for (let i = 0; i < count; i++) {
+          if (i > 0) append('; ');
+          visit(errors[i], depth + 1);
+        }
+        if (errors.length > count) append('; … (truncated)');
+        append(']');
+      }
+      const cause = Object.getOwnPropertyDescriptor(value, 'cause')?.value;
+      if (cause !== undefined) {
+        append(' [cause: ');
+        visit(cause, depth + 1);
+        append(']');
+      }
+    } catch {
+      append(`[unrenderable ${typeof value}]`);
+    } finally {
+      if (enteredError) ancestors.delete(enteredError);
     }
-    const cause = Object.getOwnPropertyDescriptor(value, 'cause')?.value;
-    if (cause !== undefined) {
-      append(' [cause: ');
-      visit(cause, depth + 1);
-      append(']');
-    }
-    ancestors.delete(value);
   };
   visit(error, 0);
   return text;

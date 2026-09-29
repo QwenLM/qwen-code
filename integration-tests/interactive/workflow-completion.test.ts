@@ -78,6 +78,19 @@ describe.skipIf(pickE2eRenderer() === 'opentui')(
         ],
       },
       {
+        source: 'slash',
+        status: 'completed',
+        script:
+          'return { marker: "WORKFLOW_UNRENDERABLE_RESULT_12912", failed: ["fr"], error: new AggregateError([new Error("BEFORE_UNRENDERABLE_12912"), Object.create(null), new Error("AFTER_UNRENDERABLE_12912")], "BATCH_FAILED_12912") };',
+        marker: 'WORKFLOW_UNRENDERABLE_RESULT_12912',
+        resultDetails: [
+          'BATCH_FAILED_12912',
+          'BEFORE_UNRENDERABLE_12912',
+          '[unrenderable object]',
+          'AFTER_UNRENDERABLE_12912',
+        ],
+      },
+      {
         source: 'model',
         status: 'completed',
         script:

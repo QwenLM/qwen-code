@@ -5,7 +5,7 @@
  */
 
 import { createContext, runInContext } from 'node:vm';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   stringifyWorkflowResult,
   truncateWorkflowText,
@@ -67,6 +67,8 @@ describe('workflow result formatting', () => {
       deep = new Error(`level ${i}`, { cause: deep });
     const deepText = stringifyWorkflowResult(deep);
     expect(deepText).toContain('level 19');
+    expect(deepText).toContain('level 15');
+    expect(deepText).not.toContain('level 14');
     expect(deepText).toContain('truncated');
     expect(deepText).not.toContain('unreachable tail');
     const wide = new AggregateError(
@@ -74,9 +76,105 @@ describe('workflow result formatting', () => {
       'batch failed',
     );
     expect(stringifyWorkflowResult(wide)).toContain('reason 0');
+    expect(stringifyWorkflowResult(wide)).toContain('reason 7');
+    expect(stringifyWorkflowResult(wide)).not.toContain('reason 8');
     expect(stringifyWorkflowResult(wide)).toContain('truncated');
     expect(stringifyWorkflowResult(wide)).not.toContain('reason 99');
   });
+
+  it('limits traversal to 32 values independently of depth and member bounds', () => {
+    const error = new AggregateError(
+      Array.from(
+        { length: 8 },
+        (_, group) =>
+          new AggregateError(
+            Array.from(
+              { length: 8 },
+              (_, member) => new Error(`reason-${group}-${member}`),
+            ),
+            `group-${group}`,
+          ),
+      ),
+      'root',
+    );
+    const text = stringifyWorkflowResult(error);
+    expect(text).toContain('Error: reason-3-2');
+    expect(text).not.toContain('reason-3-3');
+    expect(text).toContain('truncated');
+    expect(text.length).toBeLessThan(4_096);
+  });
+
+  it.each([
+    ['null-prototype record', () => Object.create(null)],
+    [
+      'throwing toString',
+      () => ({
+        toString() {
+          throw new Error('cannot convert');
+        },
+      }),
+    ],
+    [
+      'throwing Symbol.toPrimitive',
+      () => ({
+        [Symbol.toPrimitive]() {
+          throw new Error('cannot convert');
+        },
+      }),
+    ],
+    [
+      'revoked proxy',
+      () => {
+        const { proxy, revoke } = Proxy.revocable({}, {});
+        revoke();
+        return proxy;
+      },
+    ],
+    ...['name', 'message'].map(
+      (field) =>
+        [
+          `throwing ${field} getter`,
+          () =>
+            Object.defineProperty(new Error('unreadable'), field, {
+              get() {
+                throw new Error('cannot read');
+              },
+            }),
+        ] as const,
+    ),
+  ] as const)(
+    'preserves the surrounding result when a nested reason is a %s',
+    (_label, makeReason) => {
+      const reason = makeReason();
+      const aggregate = new AggregateError(
+        [new Error('before'), reason, new Error('after')],
+        'batch failed',
+      );
+      const cause = new Error('sync failed', { cause: reason });
+      for (const pretty of [false, true]) {
+        for (const error of [aggregate, cause]) {
+          const text = stringifyWorkflowResult(error, pretty);
+          expect(text).toContain(error.message);
+          expect(text).toContain('[unrenderable object]');
+          expect(text).not.toContain('non-JSON-serializable');
+          const result = JSON.parse(
+            stringifyWorkflowResult(
+              { marker: 'DONE', failed: ['fr'], error },
+              pretty,
+            ),
+          );
+          expect(result).toEqual({
+            marker: 'DONE',
+            failed: ['fr'],
+            error: text,
+          });
+        }
+        const text = stringifyWorkflowResult(aggregate, pretty);
+        expect(text).toContain('Error: before');
+        expect(text).toContain('Error: after');
+      }
+    },
+  );
 
   it('caps rendered errors without splitting Unicode and skips cause getters', () => {
     const error = new Error('🙂'.repeat(5_000));
@@ -85,12 +183,13 @@ describe('workflow result formatting', () => {
     expect(text).toContain('truncated');
     expect(text).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/);
     const withGetter = new Error('outer');
-    Object.defineProperty(withGetter, 'cause', {
-      get() {
-        throw new Error('must not run');
-      },
+    const getter = vi.fn(() => {
+      throw new Error('must not run');
     });
+    Object.defineProperty(withGetter, 'cause', { get: getter });
+    Object.defineProperty(withGetter, 'errors', { get: getter });
     expect(stringifyWorkflowResult(withGetter)).toBe('Error: outer');
+    expect(getter).not.toHaveBeenCalled();
   });
 
   it('retains repeated reasons that are not cycles and primitive causes', () => {
