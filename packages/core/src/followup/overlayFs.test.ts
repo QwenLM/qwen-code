@@ -158,6 +158,33 @@ describe('OverlayFs', () => {
       await expect(overlay.applyToReal()).rejects.toThrow(/file\.ts/);
     });
 
+    it('lands the files it can and reports the one it cannot', async () => {
+      // A file that cannot be copied must not stop the others: the point of
+      // collecting the failures is that the writable ones still land.
+      await writeFile(join(testDir, 'blocker'), 'not a directory');
+      const blocked = join(testDir, 'blocker', 'file.ts');
+      const writable = join(testDir, 'writable.ts');
+      await writeFile(await overlay.redirectWrite(blocked), 'blocked edit');
+      await writeFile(await overlay.redirectWrite(writable), 'applied edit');
+
+      await expect(overlay.applyToReal()).rejects.toThrow(/file\.ts/);
+
+      // The file that could be copied is on disk with the edit in it.
+      expect(await readFile(writable, 'utf-8')).toBe('applied edit');
+    });
+
+    it('carries the underlying failure as the cause', async () => {
+      await writeFile(join(testDir, 'blocker'), 'not a directory');
+      const blocked = join(testDir, 'blocker', 'file.ts');
+      await writeFile(await overlay.redirectWrite(blocked), 'blocked edit');
+
+      // A bare `catch` would leave the caller unable to tell EACCES from
+      // ENOSPC from ENOTDIR.
+      const error = await overlay.applyToReal().catch((err: unknown) => err);
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).cause).toBeDefined();
+    });
+
     it('returns empty array when no files written', async () => {
       const applied = await overlay.applyToReal();
 
