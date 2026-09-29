@@ -965,6 +965,70 @@ describe('modelCommand', () => {
     });
   });
 
+  it('keeps the live endpoint pin when --fast re-enters the displayed selector (#12760)', async () => {
+    const setValue = vi.fn();
+    const setFastModel = vi.fn();
+    const pinned = 'openai:shared-fast\0https://free-quota.example.com/v1';
+    mockContext = createMockCommandContext({
+      invocation: {
+        raw: '/model --fast openai:shared-fast',
+        name: 'model',
+        args: '--fast openai:shared-fast',
+      },
+      services: {
+        config: {
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'qwen-max',
+            authType: AuthType.USE_OPENAI,
+          }),
+          getAvailableModelsForAuthType: vi.fn().mockReturnValue([
+            {
+              id: 'shared-fast',
+              label: 'shared-fast (token plan)',
+              authType: AuthType.USE_OPENAI,
+              baseUrl: 'https://exhausted-plan.example.com/v1',
+            },
+            {
+              id: 'shared-fast',
+              label: 'shared-fast (free quota)',
+              authType: AuthType.USE_OPENAI,
+              baseUrl: 'https://free-quota.example.com/v1',
+            },
+          ]),
+          setFastModel,
+        },
+        settings: {
+          ...createMockSettings(setValue),
+          merged: { fastModel: pinned } as Record<string, unknown>,
+        },
+      },
+    });
+
+    const result = await modelCommand.action!(
+      mockContext,
+      '--fast openai:shared-fast',
+    );
+
+    // The bare re-entry must not overwrite the pin and rebind the first
+    // same-id entry.
+    expect(setValue).not.toHaveBeenCalledWith(
+      expect.any(String),
+      'fastModel',
+      'openai:shared-fast',
+    );
+    expect(setValue).toHaveBeenCalledWith(
+      expect.any(String),
+      'fastModel',
+      pinned,
+    );
+    expect(setFastModel).toHaveBeenCalledWith(pinned);
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'Fast Model: openai:shared-fast',
+    });
+  });
+
   it('should reject unavailable fast models across all auth types', async () => {
     const setValue = vi.fn();
     const setFastModel = vi.fn();
@@ -2176,6 +2240,68 @@ describe('modelCommand', () => {
       });
     });
 
+    it('keeps the live endpoint pin when --compaction re-enters the displayed selector (#12760)', async () => {
+      const setValue = vi.fn();
+      const setCompactionModel = vi.fn();
+      const pinned = 'openai:shared-compact\0https://free-quota.example.com/v1';
+      mockContext = createMockCommandContext({
+        invocation: {
+          raw: '/model --compaction openai:shared-compact',
+          name: 'model',
+          args: '--compaction openai:shared-compact',
+        },
+        services: {
+          config: {
+            getContentGeneratorConfig: vi.fn().mockReturnValue({
+              model: 'gpt-4',
+              authType: AuthType.USE_OPENAI,
+            }),
+            getAvailableModelsForAuthType: vi.fn().mockReturnValue([
+              {
+                id: 'shared-compact',
+                label: 'shared-compact (token plan)',
+                authType: AuthType.USE_OPENAI,
+                baseUrl: 'https://exhausted-plan.example.com/v1',
+              },
+              {
+                id: 'shared-compact',
+                label: 'shared-compact (free quota)',
+                authType: AuthType.USE_OPENAI,
+                baseUrl: 'https://free-quota.example.com/v1',
+              },
+            ]),
+            setCompactionModel,
+          },
+          settings: {
+            ...createMockSettings(setValue),
+            merged: { compactionModel: pinned } as Record<string, unknown>,
+          },
+        },
+      });
+
+      const result = await modelCommand.action!(
+        mockContext,
+        '--compaction openai:shared-compact',
+      );
+
+      expect(setValue).not.toHaveBeenCalledWith(
+        expect.any(String),
+        'compactionModel',
+        'openai:shared-compact',
+      );
+      expect(setValue).toHaveBeenCalledWith(
+        expect.any(String),
+        'compactionModel',
+        pinned,
+      );
+      expect(setCompactionModel).toHaveBeenCalledWith(pinned);
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: 'Compaction Model: openai:shared-compact',
+      });
+    });
+
     it('should reject unavailable compaction models', async () => {
       const setCompactionModel = vi.fn();
       mockContext = createMockCommandContext({
@@ -2236,6 +2362,62 @@ describe('modelCommand', () => {
         messageType: 'info',
         content:
           'Current compaction model: compaction-model\nUse "/model --compaction <model-id>" to set compaction model, or "/model --compaction clear" to clear the override.',
+      });
+    });
+
+    it('strips the endpoint disambiguator from a pinned compaction model (#12760)', async () => {
+      mockContext = createMockCommandContext({
+        executionMode: 'non_interactive',
+        invocation: { args: '--compaction' },
+        services: {
+          config: createMockConfig({
+            model: 'gpt-4',
+            authType: AuthType.USE_OPENAI,
+          }),
+          settings: {
+            merged: {
+              compactionModel:
+                'openai:shared-compact\0https://free-quota.example.com/v1',
+            } as Record<string, unknown>,
+          },
+        },
+      });
+
+      const result = await modelCommand.action!(mockContext, '--compaction');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: expect.stringMatching(
+          /^Current compaction model: openai:shared-compact\n/,
+        ),
+      });
+      expect((result as { content: string }).content).not.toContain('\0');
+    });
+
+    it('reports a non-string compactionModel setting as not set instead of throwing (#12760)', async () => {
+      mockContext = createMockCommandContext({
+        executionMode: 'non_interactive',
+        invocation: { args: '--compaction' },
+        services: {
+          config: createMockConfig({
+            model: 'gpt-4',
+            authType: AuthType.USE_OPENAI,
+          }),
+          settings: {
+            merged: { compactionModel: 5 } as Record<string, unknown>,
+          },
+        },
+      });
+
+      const result = await modelCommand.action!(mockContext, '--compaction');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: expect.stringContaining(
+          'Current compaction model: not set (falls back to the main model)',
+        ),
       });
     });
 
@@ -2395,6 +2577,69 @@ describe('modelCommand', () => {
         type: 'message',
         messageType: 'info',
         content: expect.stringContaining('qwen-turbo'),
+      });
+    });
+
+    it('strips the endpoint disambiguator from a pinned fast model (#12760)', async () => {
+      mockContext = createMockCommandContext({
+        executionMode: 'non_interactive',
+        invocation: { args: '--fast' },
+        services: {
+          config: {
+            getContentGeneratorConfig: vi.fn().mockReturnValue({
+              model: 'qwen-max',
+              authType: AuthType.QWEN_OAUTH,
+            }),
+            getModel: vi.fn().mockReturnValue('qwen-max'),
+          },
+          settings: {
+            merged: {
+              // What the picker persists for a same-id endpoint pin.
+              fastModel:
+                'openai:shared-fast\0https://free-quota.example.com/v1',
+            } as Record<string, unknown>,
+          },
+        },
+      });
+
+      const result = await modelCommand.action!(mockContext, '--fast');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: expect.stringMatching(
+          /^Current fast model: openai:shared-fast\n/,
+        ),
+      });
+      expect((result as { content: string }).content).not.toContain('\0');
+    });
+
+    it('reports a non-string fastModel setting as not set instead of throwing (#12760)', async () => {
+      mockContext = createMockCommandContext({
+        executionMode: 'non_interactive',
+        invocation: { args: '--fast' },
+        services: {
+          config: {
+            getContentGeneratorConfig: vi.fn().mockReturnValue({
+              model: 'qwen-max',
+              authType: AuthType.QWEN_OAUTH,
+            }),
+            getModel: vi.fn().mockReturnValue('qwen-max'),
+          },
+          settings: {
+            // A hand-edited settings.json shape the workspace-models routes
+            // already test for.
+            merged: { fastModel: { id: 'model' } } as Record<string, unknown>,
+          },
+        },
+      });
+
+      const result = await modelCommand.action!(mockContext, '--fast');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: expect.stringContaining('Current fast model: not set'),
       });
     });
   });
