@@ -147,6 +147,10 @@ final class FaultGateBroker {
                     .thenCompose(record -> service.startExecution(harness, session,
                             record.getExecutionCallId(), command.getString("payloadJson")))
                     .thenApply(FaultGateBroker::execution);
+            // One step, as Broker HTTP's POST /executions.
+            case "createImmediate" -> service.createExecution(harness, session,
+                    command.getString("key"), command.getJSONObject("reference"))
+                    .thenApply(FaultGateBroker::execution);
             case "get" -> service.getExecution(harness, session, execution)
                     .thenApply(FaultGateBroker::execution);
             case "cancel" -> service.cancelExecution(harness, session,

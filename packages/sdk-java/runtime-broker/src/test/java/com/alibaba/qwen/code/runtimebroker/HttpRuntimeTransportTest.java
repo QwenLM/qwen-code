@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.runtimebroker;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
@@ -20,6 +21,7 @@ import java.math.BigDecimal;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.http.HttpClient;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -36,7 +38,9 @@ import java.util.concurrent.CompletionStage;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Flow;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -1562,6 +1566,79 @@ class HttpRuntimeTransportTest {
             release.countDown();
             endless.stop(0);
         }
+    }
+
+    @Test
+    void growsTheResponseBufferWithTheBodyInsteadOfReservingTheCap() {
+        // A checkpoint answer is a few hundred bytes under an 8 MiB cap.
+        byte[] answer = pattern(183);
+        AtomicBoolean cancelled = new AtomicBoolean();
+        HttpRuntimeTransport.BoundedBodySubscriber subscriber = deliver(
+                ProviderRuntimeProtocol.limit("checkpoint"), answer,
+                answer.length, cancelled);
+
+        assertTrue(subscriber.capacity() <= 64 * 1024,
+                "capacity " + subscriber.capacity());
+        HttpRuntimeTransport.BoundedBody body = subscriber.getBody()
+                .toCompletableFuture().join();
+        assertArrayEquals(answer, body.bytes());
+        assertFalse(body.overflow());
+        assertFalse(cancelled.get());
+    }
+
+    @Test
+    void keepsExactlyTheCapOfAnOversizedBodyAndCancelsTheRest() {
+        // The delivery that crosses the cap fits only in part: without
+        // growth, after doubling, and in one delivery past double.
+        assertTruncatedAtTheCap(10, 12, 6);
+        assertTruncatedAtTheCap(20_000, 3 * 8192, 8192);
+        assertTruncatedAtTheCap(100_000, 100_001, 100_001);
+    }
+
+    private static void assertTruncatedAtTheCap(int limit, int length,
+            int chunk) {
+        byte[] sent = pattern(length);
+        AtomicBoolean cancelled = new AtomicBoolean();
+        HttpRuntimeTransport.BoundedBodySubscriber subscriber = deliver(limit,
+                sent, chunk, cancelled);
+
+        HttpRuntimeTransport.BoundedBody body = subscriber.getBody()
+                .toCompletableFuture().join();
+        assertArrayEquals(Arrays.copyOf(sent, limit), body.bytes());
+        assertTrue(body.overflow());
+        assertTrue(cancelled.get());
+        assertEquals(limit, subscriber.capacity());
+    }
+
+    private static HttpRuntimeTransport.BoundedBodySubscriber deliver(
+            int limit, byte[] body, int chunk, AtomicBoolean cancelled) {
+        HttpRuntimeTransport.BoundedBodySubscriber subscriber =
+                new HttpRuntimeTransport.BoundedBodySubscriber(limit);
+        subscriber.onSubscribe(new Flow.Subscription() {
+            @Override
+            public void request(long count) {
+            }
+
+            @Override
+            public void cancel() {
+                cancelled.set(true);
+            }
+        });
+        for (int offset = 0; offset < body.length; offset += chunk) {
+            subscriber.onNext(List.of(ByteBuffer.wrap(body, offset,
+                    Math.min(chunk, body.length - offset))));
+        }
+        subscriber.onComplete();
+        return subscriber;
+    }
+
+    private static byte[] pattern(int length) {
+        // Period 251 divides no chunk size here, so a misplaced chunk shows.
+        byte[] bytes = new byte[length];
+        for (int index = 0; index < length; index++) {
+            bytes[index] = (byte) (index % 251);
+        }
+        return bytes;
     }
 
     @Test

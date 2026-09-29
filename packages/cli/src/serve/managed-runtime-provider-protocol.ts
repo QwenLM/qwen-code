@@ -133,12 +133,13 @@ function id(value: unknown): string {
  * owner's directory name, both of which are interpolated into file names and
  * log lines, so they are an allow-list rather than a list of known-bad
  * characters: 1-512 ASCII letters, digits, `.`, `_` or `-`, never `.`/`..` and
- * never containing `..`. The Broker refuses the same ids at acquire, since
- * every Runtime Session is released through this envelope. The wire contract
- * deliberately does not require the UUID form — the Broker's own fault gates
- * drive this route with opaque ids, and non-identity operations
- * (acquire/release/manifest) stay available to them. Identity-bearing
- * operations keep requiring core's UUID form through `checkSession`.
+ * never containing `..`. The Broker refuses the same ids, the Harness Session id
+ * already at warm and both at acquire, since every Runtime Session is released
+ * through this envelope. The wire contract deliberately does not require the
+ * UUID form — the Broker's own fault gates drive this route with opaque ids,
+ * and non-identity operations (acquire/release/manifest) stay available to
+ * them. Identity-bearing operations keep requiring core's UUID form through
+ * `checkSession`.
  */
 const SESSION_ID = /^[A-Za-z0-9._-]{1,512}$/;
 
@@ -401,13 +402,29 @@ export function parseManagedRuntimeProviderResult(
       id(result['toolUseId']);
       break;
     }
-    case 'confirmation':
+    case 'confirmation': {
       if (
         !oneOf(result['type'], ['edit', 'exec', 'mcp', 'info']) ||
         typeof result['title'] !== 'string'
       )
         throw new ManagedRuntimeProviderProtocolError();
+      // The fields core's serializer always emits for each variant; optional
+      // ones stay open, since the variants carry more than these.
+      const required = {
+        edit: ['fileName', 'filePath', 'fileDiff', 'newContent'],
+        exec: ['command', 'rootCommand'],
+        mcp: ['serverName', 'toolName', 'toolDisplayName'],
+        info: ['prompt'],
+      }[result['type'] as 'edit' | 'exec' | 'mcp' | 'info'];
+      if (
+        required.some((key) => typeof result[key] !== 'string') ||
+        (result['type'] === 'edit' &&
+          result['originalContent'] !== null &&
+          typeof result['originalContent'] !== 'string')
+      )
+        throw new ManagedRuntimeProviderProtocolError();
       break;
+    }
     case 'preflight':
       if (typeof result['shouldProceed'] !== 'boolean')
         throw new ManagedRuntimeProviderProtocolError();

@@ -7,6 +7,8 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import v8 from 'node:v8';
+import { runInNewContext } from 'node:vm';
 import {
   afterEach,
   beforeEach,
@@ -16,6 +18,7 @@ import {
   onTestFinished,
   vi,
 } from 'vitest';
+import { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import { ToolConfirmationOutcome } from '@qwen-code/qwen-code-core/tools/tools.js';
 import { managedToolDigest } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
@@ -33,8 +36,14 @@ import type {
   ManagedToolInvocationReference,
   ManagedToolPrepareResponse,
 } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
-import type { ManagedToolFileHistoryState } from '@qwen-code/qwen-code-core/tools/managed-tool-file-history.js';
-import type { ManagedToolInvocationStatus } from '@qwen-code/qwen-code-core/tools/managed-tool-runtime.js';
+import {
+  ManagedToolFileHistory,
+  type ManagedToolFileHistoryState,
+} from '@qwen-code/qwen-code-core/tools/managed-tool-file-history.js';
+import {
+  ManagedToolRuntime,
+  type ManagedToolInvocationStatus,
+} from '@qwen-code/qwen-code-core/tools/managed-tool-runtime.js';
 import {
   startManagedRuntimeAttestationWorker,
   type ManagedRuntimeAttestationWorkerHandle,
@@ -46,6 +55,7 @@ import {
   type ManagedRuntimeProviderSession,
 } from './managed-runtime-provider-protocol.js';
 import { MANAGED_CONTEXT_PROTOCOL } from './managed-context-envelope.js';
+import { ManagedContextMount } from './managed-context-worker.js';
 import { computeManagedContextDigest } from './managed-workspace-binding.js';
 import {
   WORKSPACE_ACTIVATION_ROUTE,
@@ -111,6 +121,8 @@ describe('Managed Runtime provider worker', () => {
   let storage: string;
   let worker: ManagedRuntimeAttestationWorkerHandle;
   let identity: ManagedToolCallIdentity;
+  /** Releases of held calls, opened before the worker closes. */
+  const holds: Array<() => void> = [];
 
   beforeEach(async () => {
     workspace = fs.realpathSync(
@@ -125,6 +137,8 @@ describe('Managed Runtime provider worker', () => {
     });
   });
   afterEach(async () => {
+    // A test that failed while holding a call must not hold up the close.
+    for (const release of holds.splice(0)) release();
     await worker?.close();
     vi.restoreAllMocks();
     fs.rmSync(workspace, { recursive: true, force: true });
@@ -969,6 +983,290 @@ describe('Managed Runtime provider worker', () => {
     await worker.close();
     expect(getSessionProjectDir(other.runtimeSessionId)).toBeUndefined();
     expect(getSessionModel(other.runtimeSessionId)).toBeUndefined();
+  });
+
+  it('retires released Sessions beyond the most recent few', async () => {
+    const shutdown = vi.spyOn(Config.prototype, 'shutdown');
+    const dispose = vi.spyOn(ManagedToolRuntime.prototype, 'dispose');
+    const drain = vi.spyOn(ManagedToolFileHistory.prototype, 'drain');
+    await begin();
+    const read = reference(
+      await prepare('read_file', {
+        file_path: path.join(workspace, 'input.txt'),
+      }),
+    );
+    await execute(read);
+    expect(await control({ kind: 'release' })).toBe(true);
+    const status = () =>
+      control({ kind: 'status', reference: read, afterSequence: 0 });
+    // Just released, the Session still answers for its calls.
+    expect(await status()).toMatchObject({ state: 'settled' });
+    expect(await control({ kind: 'history' })).toMatchObject({
+      revision: expect.any(Number),
+    });
+    const others = Array.from({ length: 8 }, (_, index) => ({
+      ...SESSION,
+      runtimeSessionId: `runtime-released-${index}`,
+    }));
+    let disposed = 0;
+    let drained = 0;
+    for (const [index, other] of others.entries()) {
+      if (index === 7) {
+        // Seven later releases still leave it observable.
+        expect(await status()).toMatchObject({ state: 'settled' });
+        disposed = dispose.mock.calls.length;
+        drained = drain.mock.calls.length;
+      }
+      expect(await control({ kind: 'acquire' }, other)).toBe(true);
+      expect(await control({ kind: 'release' }, other)).toBe(true);
+    }
+    // The eighth retires it to a tombstone.
+    expect(dispose).toHaveBeenCalledTimes(disposed + 1);
+    expect(drain).toHaveBeenCalledTimes(drained + 1);
+    const own = (config: unknown) =>
+      (config as Config).getSessionId() === SESSION.runtimeSessionId;
+    expect(shutdown.mock.contexts.filter(own).length).toBe(1);
+    expect(shutdown).toHaveBeenCalledWith({
+      shutdownTelemetry: false,
+      skipSessionWriter: true,
+    });
+    expect(await status()).toEqual({ state: 'unknown' });
+    expect(await control({ kind: 'cancel', reference: read })).toEqual({
+      state: 'unknown',
+    });
+    expect((await post({ kind: 'history' })).status).toBe(409);
+    expect(await control({ kind: 'release' })).toBe(true);
+    expect((await post({ kind: 'acquire' })).status).toBe(409);
+    // Nothing keeps the retired Session's Config reachable any more.
+    const retired = new WeakRef(shutdown.mock.contexts.find(own) as object);
+    for (const spy of [shutdown, dispose, drain]) {
+      spy.mockClear();
+      spy.mockRestore();
+    }
+    v8.setFlagsFromString('--expose_gc');
+    const gc = runInNewContext('gc') as () => void;
+    // deref() keeps its target alive until the current job ends, so collect
+    // in a job that has not dereferenced it.
+    const tick = () => new Promise((resolve) => setTimeout(resolve, 10));
+    let collected = false;
+    for (let attempt = 0; attempt < 10 && !collected; attempt++) {
+      await tick();
+      gc();
+      await tick();
+      collected = retired.deref() === undefined;
+    }
+    expect(collected).toBe(true);
+    // Worker shutdown retires the Sessions still held.
+    const closing = vi.spyOn(Config.prototype, 'shutdown');
+    await worker.close();
+    expect(
+      closing.mock.contexts
+        .map((config) => (config as Config).getSessionId())
+        .sort(),
+    ).toEqual(others.map((other) => other.runtimeSessionId).sort());
+  });
+
+  /**
+   * Holds the first `count` calls of a prototype method until the returned
+   * release; `entered(n)` resolves once n of them are held.
+   */
+  function hold<T extends object>(
+    target: T,
+    method: keyof T & string,
+    count = 1,
+  ) {
+    const original = target[method] as unknown as (
+      this: unknown,
+      ...args: unknown[]
+    ) => unknown;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    holds.push(release);
+    let held = 0;
+    const waiters: Array<[number, () => void]> = [];
+    vi.spyOn(target, method as never).mockImplementation(function (
+      this: unknown,
+      ...args: unknown[]
+    ) {
+      if (held === count) return original.apply(this, args);
+      held++;
+      for (const [n, resolve] of waiters) if (n <= held) resolve();
+      return gate.then(() => original.apply(this, args));
+    } as never);
+    const entered = (n = 1) =>
+      new Promise<void>((resolve) => {
+        if (held >= n) resolve();
+        else waiters.push([n, resolve]);
+      });
+    return { entered, release };
+  }
+
+  function releasedSessions(count: number) {
+    return Array.from({ length: count }, (_, index) => ({
+      ...SESSION,
+      runtimeSessionId: `runtime-retiring-${index}`,
+    }));
+  }
+
+  it('keeps answering for a live Session while the worker shuts it down', async () => {
+    const dispose = hold(ManagedToolRuntime.prototype, 'dispose');
+    await begin();
+    const read = reference(
+      await prepare('read_file', {
+        file_path: path.join(workspace, 'input.txt'),
+      }),
+    );
+    await execute(read);
+    const closing = worker.close();
+    await dispose.entered();
+    expect(
+      await control({ kind: 'status', reference: read, afterSequence: 0 }),
+    ).toMatchObject({ state: 'settled' });
+    dispose.release();
+    await closing;
+  });
+
+  it('answers a release after the retirement it triggers, and a retry at once', async () => {
+    const sessions = releasedSessions(9);
+    for (const session of sessions.slice(0, 8)) {
+      expect(await control({ kind: 'acquire' }, session)).toBe(true);
+      expect(await control({ kind: 'release' }, session)).toBe(true);
+    }
+    expect(await control({ kind: 'acquire' }, sessions[8])).toBe(true);
+    const dispose = hold(ManagedToolRuntime.prototype, 'dispose');
+    // The ninth release retires the first Session, whose disposal is held.
+    let released = false;
+    const ninth = control({ kind: 'release' }, sessions[8]).then((result) => {
+      released = true;
+      return result;
+    });
+    await dispose.entered();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(released).toBe(false);
+    // A retry, as after a Broker timeout, answers without waiting.
+    expect(await control({ kind: 'release' }, sessions[8])).toBe(true);
+    expect(released).toBe(false);
+    dispose.release();
+    expect(await ninth).toBe(true);
+  });
+
+  it('waits in close() for a retirement in flight and shuts each Config down once', async () => {
+    const shutdown = vi.spyOn(Config.prototype, 'shutdown');
+    const sessions = releasedSessions(9);
+    for (const session of sessions.slice(0, 8)) {
+      expect(await control({ kind: 'acquire' }, session)).toBe(true);
+      expect(await control({ kind: 'release' }, session)).toBe(true);
+    }
+    expect(await control({ kind: 'acquire' }, sessions[8])).toBe(true);
+    const dispose = hold(ManagedToolRuntime.prototype, 'dispose');
+    // The worker closes under the ninth release, which may cut its answer.
+    const ninth = post({ kind: 'release' }, sessions[8]).catch(() => undefined);
+    await dispose.entered();
+    let closed = false;
+    const closing = worker.close().then(() => {
+      closed = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(closed).toBe(false);
+    dispose.release();
+    await closing;
+    await ninth;
+    expect(
+      shutdown.mock.contexts
+        .map((config) => (config as Config).getSessionId())
+        .sort(),
+    ).toEqual(sessions.map((session) => session.runtimeSessionId).sort());
+  });
+
+  it('waits in close() for an acquire in flight and shuts its Config down', async () => {
+    const shutdown = vi.spyOn(Config.prototype, 'shutdown');
+    const resolve = hold(ManagedContextMount.prototype, 'resolve');
+    // The worker closes under the acquire, which may cut its answer.
+    const acquiring = post({ kind: 'acquire' }).catch(() => undefined);
+    await resolve.entered();
+    let closed = false;
+    const closing = worker.close().then(() => {
+      closed = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(closed).toBe(false);
+    resolve.release();
+    await closing;
+    await acquiring;
+    expect(
+      shutdown.mock.contexts.map((config) => (config as Config).getSessionId()),
+    ).toEqual([SESSION.runtimeSessionId]);
+  });
+
+  it('finishes a retirement whose first step fails without failing the release', async () => {
+    vi.spyOn(ManagedToolRuntime.prototype, 'dispose').mockRejectedValueOnce(
+      new Error('dispose failed'),
+    );
+    const shutdown = vi.spyOn(Config.prototype, 'shutdown');
+    const sessions = releasedSessions(9);
+    for (const session of sessions) {
+      expect(await control({ kind: 'acquire' }, session)).toBe(true);
+      expect(await control({ kind: 'release' }, session)).toBe(true);
+    }
+    // The later steps still ran, and the Session is a tombstone.
+    expect(
+      shutdown.mock.contexts.map((config) => (config as Config).getSessionId()),
+    ).toEqual([sessions[0].runtimeSessionId]);
+    const history = await post({ kind: 'history' }, sessions[0]);
+    expect(history.status).toBe(409);
+    expect(await history.json()).toMatchObject({
+      error: 'Managed Runtime Session is closed.',
+    });
+  });
+
+  it('retires the oldest released Session that is not being observed', async () => {
+    await begin();
+    expect(await control({ kind: 'release' })).toBe(true);
+    const sessions = releasedSessions(8);
+    for (const session of sessions.slice(0, 7)) {
+      expect(await control({ kind: 'acquire' }, session)).toBe(true);
+      expect(await control({ kind: 'release' }, session)).toBe(true);
+    }
+    // A history read of the oldest Session is still in flight.
+    const drain = hold(ManagedToolFileHistory.prototype, 'drain');
+    const observed = control({ kind: 'history' });
+    await drain.entered();
+    const shutdown = vi.spyOn(Config.prototype, 'shutdown');
+    expect(await control({ kind: 'acquire' }, sessions[7])).toBe(true);
+    expect(await control({ kind: 'release' }, sessions[7])).toBe(true);
+    expect(
+      shutdown.mock.contexts.map((config) => (config as Config).getSessionId()),
+    ).toEqual([sessions[0].runtimeSessionId]);
+    drain.release();
+    expect(await observed).toMatchObject({ revision: expect.any(Number) });
+  });
+
+  it('answers a release that came before any acquire with a forgetful tombstone', async () => {
+    await acquire();
+    const fresh = {
+      ...SESSION,
+      runtimeSessionId: '550e8400-e29b-41d4-a716-446655440099',
+    };
+    expect(await control({ kind: 'release' }, fresh)).toBe(true);
+    const unknown = {
+      sessionId: fresh.runtimeSessionId,
+      promptId: 'prompt-1',
+      callId: 'call-1',
+      capabilityDigest: identity.capabilityDigest,
+      policyRevision: identity.policyRevision,
+      invocationId: '550e8400-e29b-41d4-a716-446655440098',
+      argsDigest: managedToolDigest({}),
+    };
+    expect(
+      await control(
+        { kind: 'status', reference: unknown, afterSequence: 0 },
+        fresh,
+      ),
+    ).toEqual({ state: 'unknown' });
+    expect(
+      await control({ kind: 'cancel', reference: unknown }, fresh),
+    ).toEqual({ state: 'unknown' });
+    expect((await post({ kind: 'acquire' }, fresh)).status).toBe(409);
   });
 
   it('refuses content modification on this profile and routes media context to read_file only', async () => {

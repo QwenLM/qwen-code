@@ -30,14 +30,16 @@ against an allow-list: 1 to 512 characters, each an ASCII letter, digit, `.`,
 `_` or `-`. An id may not be `.` or `..`, and may not contain `..` anywhere.
 The worker rejects any other id at the envelope, before it can become core's
 session id or a file-history directory name. The Broker refuses the same ids
-at `acquire` with 400 `runtime_broker_invalid_request`: every Runtime Session
-is released through this envelope, so an id the worker refuses would leave the
-Session stuck RELEASING with its storage held. The UUID form is not required:
+with 400 `runtime_broker_invalid_request`, the Harness Session id already at
+`warm` and both at `acquire`: every Runtime Session is released through this
+envelope, so an id the worker refuses would leave the Session stuck RELEASING
+with its storage held. The UUID form is not required:
 identity-bearing operations additionally require it through core's identity
 check, while acquire, release and manifest stay available to opaque ids.
 Every successful response repeats the version, protocol and Session and
-contains `result`; void results are null. Existing bearer, lease and epoch
-headers fence the selected physical Runtime.
+contains `result`; void results are null, and `acquire`/`release` results
+are exactly `true`. Existing bearer, lease and epoch headers fence the selected
+physical Runtime.
 
 The operation is a closed discriminated union. Public Broker controls are
 `manifest`, `begin-turn`, `prepare`, `confirmation`, `confirm`, `preflight`,
@@ -92,7 +94,8 @@ Acquisition and release are idempotent for the same complete
 Session identity. Reusing a Runtime Session for another Harness or turn kind
 is a conflict. Release refuses running work, cancels preparations that have not
 been reserved, and permanently closes admission without clearing the current
-turn's status/cancellation evidence. It also drops the process-global entries
+turn's status/cancellation evidence (kept until the Session is retired, see
+below). It also drops the process-global entries
 core keeps under the Runtime Session id (its project directory, model and
 model identity); worker shutdown drops them too. Starting a new turn retains
 the runtime's existing eviction policy; earlier dispatched invocations remain
@@ -209,16 +212,18 @@ state. The deferred reserve/start path and this protocol are the
 payload-separated routes; extending that separation to the immediate route is
 follow-up work.
 
-After release, the private worker route retains status/cancellation evidence
-for the current turn and any bound file-history state; earlier turns' invocation
-entries remain subject to eviction. After release, Broker execution inspection
-can return persisted terminal receipts without reopening the worker; private
-history and live invocation observations remain unavailable through the closed
-provider tool client. Release drops the process-global entries core keeps
-under the Runtime Session id, but the worker's Session table keeps a closed entry for every
-released Session, so a repeated release stays idempotent and a re-acquire is
-refused. For an acquired Session that entry still holds the Session's Config,
-tools and runtime until worker shutdown, because status, cancellation and
-history after release read them, so memory can grow with released provider
-Sessions. Reducing that retention while preserving private observation
-semantics is follow-up work.
+After release, until the Session is retired, the private worker route retains
+status/cancellation evidence for the current turn and any bound file-history
+state; earlier turns' invocation entries remain subject to eviction. After
+release, Broker execution inspection can return persisted terminal receipts
+without reopening the worker; private history and live invocation observations
+remain unavailable through the closed provider tool client. Release drops the
+process-global entries core keeps under the Runtime Session id. The worker keeps
+the Config, tools, runtime and file history of up to eight released Sessions, so
+status, cancellation and history still answer for them; when another is
+released, the oldest one not being observed is retired (its runtime disposed,
+its file history drained and its Config shut down) to a closed tombstone whose
+calls answer `unknown`, the same tombstone a release that came before any
+acquire leaves. The tombstone keeps a repeated release idempotent and a
+re-acquire refused; tombstones, like the executor's closed-Session set, still
+grow by one small entry per released Session.

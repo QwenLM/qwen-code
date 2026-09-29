@@ -141,7 +141,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
     public CompletionStage<RuntimeBindingRecord> warm(
             String harnessSessionId) {
         requireOpen();
-        String harnessId = BrokerValues.requireId(harnessSessionId,
+        String harnessId = BrokerValues.requirePathSafe(
+                BrokerValues.requireId(harnessSessionId, "harnessSessionId"),
                 "harnessSessionId");
         return resolveScope(harnessId)
                 .thenCompose(scope -> ensureBinding(
@@ -408,20 +409,19 @@ public final class RuntimeBrokerService implements AutoCloseable {
         String executionId = BrokerValues.requireId(executionCallId,
                 "executionCallId");
         return safeStage(() -> {
-            ToolExecutionRecord stored = requireOwnedExecution(harnessSessionId,
+            OwnedExecution owned = requireOwnership(harnessSessionId,
                     runtimeSessionId, executionId);
+            ToolExecutionRecord stored = owned.record();
             if (stored.isTerminal()) {
                 if (!isPreparedProviderCancellation(stored)) {
                     return CompletableFuture.completedFuture(stored);
                 }
-                RuntimeBindingRecord binding = bindingRepository.findById(stored.getBindingId());
-                RuntimeSessionRecord owner = binding == null ? null : sessionRepository.findById(
-                        binding.getRequest().getScope(), runtimeSessionId);
+                RuntimeBindingRecord binding = owned.binding();
                 // Only a READY Session whose binding can still answer may hold
                 // the worker's preparation; anywhere else the terminal receipt
                 // stands alone, the same rule that lets Broker HTTP read
                 // terminal receipts without a READY Session.
-                if (owner == null || owner.getState() != RuntimeSessionRecord.State.READY
+                if (owned.session().getState() != RuntimeSessionRecord.State.READY
                         || binding.getState() != RuntimeBindingRecord.State.READY
                                 && binding.getState() != RuntimeBindingRecord.State.DRAINING) {
                     return CompletableFuture.completedFuture(stored);
@@ -2142,6 +2142,17 @@ public final class RuntimeBrokerService implements AutoCloseable {
     private ToolExecutionRecord requireOwnedExecution(
             String harnessSessionId, String runtimeSessionId,
             String executionCallId) {
+        return requireOwnership(harnessSessionId, runtimeSessionId,
+                executionCallId).record();
+    }
+
+    /**
+     * A terminal record comes back with the saved binding and Session rows
+     * that prove its ownership; any other record comes back without them.
+     */
+    private OwnedExecution requireOwnership(
+            String harnessSessionId, String runtimeSessionId,
+            String executionCallId) {
         ToolExecutionRecord record = executionRepository
                 .findByExecutionCallId(executionCallId);
         if (record == null) {
@@ -2153,9 +2164,11 @@ public final class RuntimeBrokerService implements AutoCloseable {
             throw conflict("runtime_execution_conflict",
                     "Runtime execution belongs to another Session");
         }
+        RuntimeBindingRecord binding = null;
+        RuntimeSessionRecord session = null;
         if (record.isTerminal()) {
-            RuntimeBindingRecord binding = bindingRepository.findById(record.getBindingId());
-            RuntimeSessionRecord session = binding == null ? null : sessionRepository.findById(
+            binding = bindingRepository.findById(record.getBindingId());
+            session = binding == null ? null : sessionRepository.findById(
                     binding.getRequest().getScope(), runtimeSessionId);
             if (binding == null || binding.getGeneration() != record.getRuntimeGeneration()
                     || session == null || !session.getBindingId().equals(record.getBindingId())
@@ -2164,7 +2177,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 throw conflict("runtime_execution_conflict", "Saved execution ownership differs");
             }
         }
-        return record;
+        return new OwnedExecution(record, binding, session);
     }
 
     /**
@@ -2657,6 +2670,10 @@ public final class RuntimeBrokerService implements AutoCloseable {
 
     private record BindingContext(RuntimeBindingRecord record,
             RuntimeLease lease) {
+    }
+
+    private record OwnedExecution(ToolExecutionRecord record,
+            RuntimeBindingRecord binding, RuntimeSessionRecord session) {
     }
 
     private static final class SessionContext {

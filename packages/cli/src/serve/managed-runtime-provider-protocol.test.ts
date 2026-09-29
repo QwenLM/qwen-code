@@ -115,6 +115,12 @@ describe('managed-runtime-provider/1', () => {
       'a\u202eb',
       'a\u200bb',
       'a\uff0fb',
+      // Letters and digits outside ASCII.
+      'a\u00e9b',
+      'a\u4e2db',
+      'a\u0430b',
+      'a\u0663b',
+      'a\uff11b',
       'a\ud83d\ude00b',
       'a\ud800b',
       'x'.repeat(513),
@@ -406,6 +412,61 @@ describe('managed-runtime-provider/1', () => {
         ),
       ),
     );
+  });
+
+  it('requires the fields of each confirmation variant', () => {
+    const confirmation = { kind: 'confirmation', reference } as const;
+    const complete = [
+      { type: 'exec', title: 'Run', command: 'rm -rf /w', rootCommand: 'rm' },
+      {
+        type: 'edit',
+        title: 'Edit',
+        fileName: 'a.txt',
+        filePath: '/w/a.txt',
+        fileDiff: '',
+        originalContent: null,
+        newContent: 'x',
+        isModifying: false,
+      },
+      {
+        type: 'mcp',
+        title: 'MCP',
+        serverName: 'server',
+        toolName: 'tool',
+        toolDisplayName: 'Tool',
+      },
+      { type: 'info', title: 'Info', prompt: 'Fetch it?', urls: ['https://x'] },
+    ];
+    for (const value of complete)
+      expect(
+        parseManagedRuntimeProviderResult(confirmation, value, session),
+      ).toEqual(value);
+    const required: Record<string, string[]> = {
+      exec: ['title', 'command', 'rootCommand'],
+      edit: [
+        'title',
+        'fileName',
+        'filePath',
+        'fileDiff',
+        'originalContent',
+        'newContent',
+      ],
+      mcp: ['title', 'serverName', 'toolName', 'toolDisplayName'],
+      info: ['title', 'prompt'],
+    };
+    // Each required field, missing or of the wrong type, is refused.
+    const incomplete = complete.flatMap((value) =>
+      required[value.type].flatMap((field) => [
+        Object.fromEntries(
+          Object.entries(value).filter(([key]) => key !== field),
+        ),
+        { ...value, [field]: 7 },
+      ]),
+    );
+    for (const value of incomplete)
+      expect(() =>
+        parseManagedRuntimeProviderResult(confirmation, value, session),
+      ).toThrow();
   });
 
   it('ties the declared response bound to the enforced per-kind limits', () => {

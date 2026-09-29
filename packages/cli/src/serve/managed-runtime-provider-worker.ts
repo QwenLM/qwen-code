@@ -36,6 +36,7 @@ import {
   unregisterSessionModel,
   unregisterSessionProjectDir,
 } from '@qwen-code/qwen-code-core/utils/sessionIdContext.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import {
   authorizeManagedRuntime,
   handleManagedRuntimeJsonError,
@@ -86,7 +87,10 @@ interface ProviderSession {
   pending: number;
   closed: boolean;
   release?: Promise<boolean>;
+  retirement?: Promise<void>;
 }
+
+const debugLogger = createDebugLogger('MANAGED_RUNTIME_PROVIDER');
 
 function conflict(
   message: string,
@@ -106,6 +110,49 @@ function forgetSession(runtimeSessionId: string): void {
   unregisterSessionModel(runtimeSessionId);
 }
 
+/**
+ * Released Sessions stay fully observable (status, cancellation and history)
+ * only while they are among the most recent ones; the Broker answers settled
+ * receipts from its own journal, so older ones keep just a tombstone.
+ */
+const RETAINED_RELEASED_SESSIONS = 8;
+
+/**
+ * Disposes a Session's runtime, drains its file history and shuts its Config
+ * down, then drops them, leaving the entry as a tombstone. Every step runs even
+ * if an earlier one fails, calls keep reaching the runtime until the end, and
+ * every caller waits for the same retirement.
+ */
+function retire(entry: ProviderSession): Promise<void> {
+  entry.retirement ??= (async () => {
+    const value = entry.value;
+    const errors: unknown[] = [];
+    for (const step of [
+      () => value?.runtime.dispose(),
+      () => value?.history?.drain(),
+      () =>
+        value?.config.shutdown({
+          shutdownTelemetry: false,
+          skipSessionWriter: true,
+        }),
+    ]) {
+      try {
+        await step();
+      } catch (error) {
+        errors.push(error);
+      }
+    }
+    entry.value = undefined;
+    entry.ready = undefined;
+    if (errors.length > 0)
+      throw new AggregateError(
+        errors,
+        'Retiring a Managed Runtime Session failed.',
+      );
+  })();
+  return entry.retirement;
+}
+
 function history(value: ProviderRuntime): ManagedToolFileHistory {
   return (
     value.history ?? conflict('Managed Runtime file history is not bound.')
@@ -114,6 +161,8 @@ function history(value: ProviderRuntime): ManagedToolFileHistory {
 
 class ManagedRuntimeProviderWorker {
   private readonly sessions = new Map<string, ProviderSession>();
+  /** Released Sessions that still hold their runtime, oldest first. */
+  private readonly released: ProviderSession[] = [];
   private closing = false;
 
   constructor(
@@ -169,6 +218,8 @@ class ManagedRuntimeProviderWorker {
         this.executor.closeSessionAdmission(identity.runtimeSessionId);
         forgetSession(identity.runtimeSessionId);
         entry.closed = true;
+        this.released.push(entry);
+        await this.retireReleased();
         return true;
       })().catch((error: unknown) => {
         entry.release = undefined;
@@ -204,6 +255,12 @@ class ManagedRuntimeProviderWorker {
       await session.ready;
       return true;
     }
+    if (session?.closed && !session.ready) {
+      // A tombstone holds no runtime: its calls are forgotten.
+      if (operation.kind === 'status' || operation.kind === 'cancel')
+        return { state: 'unknown' };
+      conflict('Managed Runtime Session is closed.');
+    }
     if (!session?.ready)
       conflict('Managed Runtime Session has not been acquired.');
     const observes = ['status', 'cancel', 'history'].includes(operation.kind);
@@ -218,6 +275,23 @@ class ManagedRuntimeProviderWorker {
       );
     } finally {
       session.pending--;
+    }
+  }
+
+  /**
+   * Retires released Sessions beyond the retained few, oldest idle first. The
+   * Session just released is always idle (admission refuses to close over a
+   * call in flight), so at most the retained few stay. A failed retirement
+   * still leaves a tombstone and never fails the release.
+   */
+  private async retireReleased(): Promise<void> {
+    while (this.released.length > RETAINED_RELEASED_SESSIONS) {
+      const index = this.released.findIndex((entry) => entry.pending === 0);
+      if (index < 0) return;
+      const [entry] = this.released.splice(index, 1);
+      await retire(entry).catch((error: unknown) =>
+        debugLogger.warn('Retiring a released Session failed:', error),
+      );
     }
   }
 
@@ -423,10 +497,12 @@ class ManagedRuntimeProviderWorker {
     this.closing = true;
     await Promise.allSettled(
       [...this.sessions.values()].map(async (session) => {
-        const value = await session.ready;
-        await value?.runtime.dispose();
-        await value?.history?.drain();
-        forgetSession(session.identity.runtimeSessionId);
+        try {
+          await session.ready;
+          await retire(session);
+        } finally {
+          forgetSession(session.identity.runtimeSessionId);
+        }
       }),
     );
   }

@@ -367,6 +367,40 @@ class RuntimeBrokerServiceTest {
     }
 
     @Test
+    void terminalProviderCancellationRefusesAReceiptWhoseSavedOwnershipDiffers() {
+        var bindings = new InMemoryRuntimeBindingRepository();
+        var sessions = new InMemoryRuntimeSessionRepository();
+        var executions = new InMemoryToolExecutionRepository();
+        var recovery = new RuntimeRecoveryContract.Fixture(bindings, sessions, executions,
+                "provider-terminal-cancel-foreign", PROVIDER_SESSION);
+        String harness = recovery.session.getSession().getHarnessSessionId();
+        Map<String, Object> reference = providerReference();
+        // Saved against another generation of the binding than its Session's.
+        ToolExecutionRecord prepared = executions.findOrCreate(ToolExecutionRecord.prepared(
+                "provider-call", "provider-key", recovery.binding.getBindingId(),
+                recovery.binding.getGeneration() + 1, harness, PROVIDER_SESSION,
+                (String) reference.get("promptId"), (String) reference.get("callId"),
+                (String) reference.get("argsDigest"), reference));
+        ToolExecutionRecord settled = executions.requestCancel(
+                prepared.getExecutionCallId(), prepared.getVersion());
+        assertTrue(settled.isTerminal());
+        // The Session is releasing, where a receipt it owns would stand alone.
+        sessions.compareAndSet(recovery.session, recovery.session.withState(
+                RuntimeSessionRecord.State.RELEASING, Instant.now()));
+        var transport = new FakeTransport();
+        try (var service = new RuntimeBrokerService(
+                ignored -> { throw new AssertionError("Saved ownership must not resolve current scope"); },
+                new StaticRuntimeProvisioner(recovery.binding.getLease()), transport, bindings, sessions, executions,
+                "restarted", Duration.ofSeconds(10), Duration.ofSeconds(10))) {
+            RuntimeBrokerException conflict = failure(service.cancelExecution(
+                    harness, PROVIDER_SESSION, settled.getExecutionCallId()));
+            assertEquals(409, conflict.getStatusCode());
+            assertEquals("runtime_execution_conflict", conflict.getCode());
+            assertEquals(0, transport.cancelCalls.get());
+        }
+    }
+
+    @Test
     void terminalProviderCancellationStandsOnceTheWorkerIsLost() {
         try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
             join(fixture.service.acquire("harness", PROVIDER_SESSION, "bootstrap"));
@@ -587,6 +621,33 @@ class RuntimeBrokerServiceTest {
             assertEquals(2, fixture.transport.cancelCalls.get());
             assertSame(cancelled, join(fixture.service.getExecution(
                     "harness", PROVIDER_SESSION, prepared.getExecutionCallId())));
+        }
+    }
+
+    @Test
+    void repeatedCancellationOfADispatchedProviderExecutionReturnsItsReceipt() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            join(fixture.service.acquire("harness", PROVIDER_SESSION, "bootstrap"));
+            CompletableFuture<Map<String, Object>> result = new CompletableFuture<>();
+            fixture.transport.executeResult = result;
+            ToolExecutionRecord prepared = join(fixture.service.prepareExecution(
+                    "harness", PROVIDER_SESSION, "key", providerReference()));
+            join(fixture.service.startExecution("harness", PROVIDER_SESSION, prepared.getExecutionCallId()));
+            assertEquals(ToolExecutionRecord.State.CANCEL_REQUESTED, join(fixture.service.cancelExecution(
+                    "harness", PROVIDER_SESSION, prepared.getExecutionCallId())).getState());
+            result.complete(Map.of("executionStatus", "cancelled"));
+            ToolExecutionRecord cancelled = awaitExecution(fixture.executionRepository,
+                    prepared.getExecutionCallId(), ToolExecutionRecord.State.SETTLED);
+            assertEquals("cancelled", cancelled.getExecutionStatus());
+            assertTrue(cancelled.isCancelRequested());
+            assertTrue(cancelled.getDispatchGeneration() >= 1);
+            int cancels = fixture.transport.cancelCalls.get();
+            // The execute answer settled it, so the receipt stands on its
+            // own; the worker, which forgets settled calls, is not asked.
+            fixture.transport.cancelResult = CompletableFuture.completedFuture(Map.of("state", "unknown"));
+            assertSame(cancelled, join(fixture.service.cancelExecution(
+                    "harness", PROVIDER_SESSION, prepared.getExecutionCallId())));
+            assertEquals(cancels, fixture.transport.cancelCalls.get());
         }
     }
 
@@ -1860,6 +1921,23 @@ class RuntimeBrokerServiceTest {
     }
 
     @Test
+    void warmRefusesHarnessIdsBeforeResolvingOrProvisioning() {
+        String rule = " must be 1-512 ASCII letters, digits, '.', '_' or '-', without '..'";
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            for (String id : List.of("a/b", "a\\b", "a..b", ".", "..", "a\u0001b",
+                    "a😀b", "a b", "a:b")) {
+                assertEquals("harnessSessionId" + rule, assertThrows(IllegalArgumentException.class,
+                        () -> fixture.service.warm(id), id).getMessage());
+            }
+            assertNull(fixture.resolver.lastHarness.get());
+            assertEquals(0, fixture.provisioner.calls.get());
+            join(fixture.service.warm("harness-1"));
+            assertEquals("harness-1", fixture.resolver.lastHarness.get());
+            assertEquals(1, fixture.provisioner.calls.get());
+        }
+    }
+
+    @Test
     void pathSafeIdsAdmitExactlyTheWorkersAsciiAllowList() {
         // The worker's envelope rule, character by character (TypeScript
         // pins the same set in managed-runtime-provider-protocol.test.ts).
@@ -1874,6 +1952,11 @@ class RuntimeBrokerServiceTest {
         }
         assertEquals("-.0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz",
                 admitted.toString());
+        // Letters and digits outside ASCII stay outside it too.
+        for (String id : List.of("a\u00e9b", "a\u4e2db", "a\u0430b", "a\u0663b", "a\uff11b")) {
+            assertThrows(IllegalArgumentException.class,
+                    () -> BrokerValues.requirePathSafe(id, "id"), id);
+        }
     }
 
     @Test

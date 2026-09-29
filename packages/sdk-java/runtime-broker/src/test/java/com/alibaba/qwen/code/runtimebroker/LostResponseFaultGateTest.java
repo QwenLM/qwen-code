@@ -54,6 +54,20 @@ class LostResponseFaultGateTest {
             names = {"DROP", "RESET", "DELAY"})
     void aLostExecuteResponseIsReconciledAndNeverReplayed(
             FaultProxy.Action loss) throws Exception {
+        lostExecuteResponse(loss, false);
+    }
+
+    /** The same loss where one call creates and dispatches the execution. */
+    @ParameterizedTest
+    @EnumSource(value = FaultProxy.Action.class,
+            names = {"DROP", "RESET", "DELAY"})
+    void aLostImmediateExecuteResponseIsReconciledAndNeverReplayed(
+            FaultProxy.Action loss) throws Exception {
+        lostExecuteResponse(loss, true);
+    }
+
+    private void lostExecuteResponse(FaultProxy.Action loss,
+            boolean immediate) throws Exception {
         proxy.schedule("execute", loss == FaultProxy.Action.DELAY
                 ? FaultProxy.Fault.delay(FaultGateRig.REQUEST_TIMEOUT
                         .plusSeconds(3))
@@ -61,16 +75,17 @@ class LostResponseFaultGateTest {
         acquire();
         FaultGateRig.ToolCall reference = FaultGateRig.shell("call-1",
                 "echo ran >> marker");
-        String execution = broker.create(HARNESS, SESSION, "key-1",
-                reference).object().getString("executionCallId");
+        String execution = create(immediate, reference).object()
+                .getString("executionCallId");
+        assertEquals(immediate ? null : "deferred", rig.execution(execution)
+                .getReference().get("dispatchMode"));
 
         rig.awaitExecution(execution, record -> record.getState()
                 == ToolExecutionRecord.State.UNKNOWN, "UNKNOWN execution");
         rig.awaitMarker("marker", List.of("ran"));
 
         // A same-key retry joins the UNKNOWN record and dispatches nothing.
-        JSONObject retried = broker.create(HARNESS, SESSION, "key-1",
-                reference).object();
+        JSONObject retried = create(immediate, reference).object();
         assertEquals(execution, retried.getString("executionCallId"));
         assertEquals("UNKNOWN", retried.getString("state"));
         // The Runtime joins a retry of the same identity to the call it
@@ -227,6 +242,13 @@ class LostResponseFaultGateTest {
         assertEquals("READY", broker.warm(HARNESS).object()
                 .getString("state"), rig.logs());
         broker.acquire(HARNESS, SESSION).requireOk();
+    }
+
+    private BrokerProcess.Reply create(boolean immediate,
+            FaultGateRig.ToolCall call) {
+        return immediate
+                ? broker.createImmediate(HARNESS, SESSION, "key-1", call)
+                : broker.create(HARNESS, SESSION, "key-1", call);
     }
 
     @SuppressWarnings("unchecked")

@@ -24,12 +24,14 @@ reference 和原始参数；provider 使用七字段的已准备调用 reference
 `turnKind`（`bootstrap` 或 `continuation`）。两个 Session id 都按白名单校验：
 长度为 1 到 512 个字符，每个字符只能是 ASCII 字母、数字、`.`、`_` 或 `-`；id 不能
 是 `.` 或 `..`，任何位置也不能出现 `..`。worker 在信封处拒绝其他任何 id，早于它
-成为 core 会话 id 或文件历史目录名。Broker 在 `acquire` 时以 400
-`runtime_broker_invalid_request` 拒绝同样的 id：每个 Runtime Session 都要经这个信封
+成为 core 会话 id 或文件历史目录名。Broker 以 400
+`runtime_broker_invalid_request` 拒绝同样的 id，Harness Session id 在 `warm` 时就会
+被拒，两个 id 在 `acquire` 时都会被拒：每个 Runtime Session 都要经这个信封
 释放，worker 拒绝的 id 会让 Session 卡在 RELEASING，并一直占用其存储。线上契约不要求
 UUID 形式：携带身份的操作还会通过 core 的身份检查要求 UUID，而 acquire、release 和
 manifest 对不透明 id 保持可用。成功响应重复版本、协议与 Session，并包含 `result`；
-无返回值时为 null。现有 bearer、lease 和 epoch 请求头隔离选中的物理 Runtime。
+无返回值时为 null，`acquire`/`release` 的结果恰为 `true`。现有 bearer、lease 和 epoch
+请求头隔离选中的物理 Runtime。
 
 operation 是封闭的判别联合。公开 Broker 控制为 `manifest`、`begin-turn`、
 `prepare`、`confirmation`、`confirm`、`preflight`、`bind-history`、`checkpoint`
@@ -64,8 +66,9 @@ Content-Encoding。TypeScript 客户端保留限长原因。这些诊断信息�
 释放也始终可应答。Broker 自身无法编码的超大操作，在发送前即以确定且不可重试的 413
 拒绝。相同完整 Session 身份的获取与释放幂等。同一 Runtime Session 换用 Harness 或
 turn kind 会产生冲突。释放拒绝运行中的工作，取消尚未预留的准备调用，并永久关闭新操作
-准入，不清除当前回合的状态/取消证据。释放还会删除 core 以该 Runtime Session id 为键
-保存的进程级记录（项目目录、模型与模型标识）；worker 关闭时同样删除。开始新回合仍
+准入，不清除当前回合的状态/取消证据（保留到该 Session 被退役为止，见下文）。释放还会
+删除 core 以该 Runtime Session id 为键保存的进程级记录（项目目录、模型与模型标识）；
+worker 关闭时同样删除。开始新回合仍
 遵循 runtime 既有清理策略；较早已派发的调用仍保留在 Broker 持久日志中。Broker HTTP
 可在 Session 非 READY 时读取归属已验证的终态执行回执；实时观察与文件历史控制仍要求
 READY。对已结算的准备调用重复取消时，若 Session 已非 READY，或该调用准备时所在的
@@ -74,7 +77,8 @@ Session 的 Broker 进程就返回可重试的 503 `runtime_reconciliation_requi
 一致）：调用方重新获取 Session，待 worker 确认后才确认这次取消。本进程中若同一 id
 下是另一个 Harness 的 Session，则是冲突（409 `runtime_session_conflict`）。worker
 会在下一回合忘掉已结算的调用；它对重复取消回答 `unknown` 时，与首次取消一样以不可
-重试的 409 `runtime_execution_cancel_unconfirmed` 拒绝，回执仍可读取。释放不删除持久证据。已持久化的 Broker 预留必须在释放前显式取消。
+重试的 409 `runtime_execution_cancel_unconfirmed` 拒绝，回执仍可读取。释放不删除持久证据。
+已持久化的 Broker 预留必须在释放前显式取消。
 
 ## Runtime 与持久化
 
@@ -145,11 +149,13 @@ immediate `POST /executions` 路由仍从已保存的 reference 读取 `toolName
 持久状态的形态。deferred reserve/start 路径与本协议才是负载分离的路由；把同样的
 分离扩展到 immediate 路由是后续工作。
 
-释放后，私有 worker 路由保留当前回合的状态/取消证据及已绑定的文件历史状态；较早回合的
-调用条目仍可能被清理。释放后，Broker 执行检查可返回持久终态回执，无需重开 worker；
-已关闭的 provider 工具客户端仍不提供私有历史和实时调用观察。释放会删除 core 以该
-Runtime Session id 为键保存的进程级记录，但 worker 的 Session 表会为每个已释放的 Session 保留一条已
-关闭记录，使重复释放保持幂等，并拒绝再次获取。对已获取过的 Session，这条记录仍持有其
-Config、工具与 runtime，直到 worker 关闭，因为释放后的状态、取消与历史查询都要读取
-它们，所以内存可能随已释放的 provider Session 数量增长。在保留私有观察语义的前提下
-减少这部分保留是后续工作。
+释放后、该 Session 被退役之前，私有 worker 路由保留当前回合的状态/取消证据及已绑定的
+文件历史状态；较早回合的调用条目仍可能被清理。释放后，Broker 执行检查可返回持久终态
+回执，无需重开 worker；已关闭的 provider 工具客户端仍不提供私有历史和实时调用观察。
+释放会删除 core 以该 Runtime Session id 为键保存的进程级记录。worker 最多为八个已释放
+的 Session 保留其 Config、工具、runtime 与文件历史，释放后的状态、取消与历史查询仍能
+作答；再有 Session 释放时，其中最早的、当前没有查询在进行的那个会被退役（处置
+runtime、排空文件历史、关闭 Config），只留下一条已关闭记录，其调用查询回答
+`unknown`；未经获取就释放的 Session 留下的也是这种记录。这条记录使重复释放保持幂等，
+并拒绝再次获取；与 executor 的已关闭 Session 集合一样，每个已释放的 Session 仍会留下
+一条很小的记录。

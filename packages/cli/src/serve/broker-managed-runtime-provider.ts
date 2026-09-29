@@ -562,10 +562,17 @@ export class ManagedRuntimeBrokerClient {
         ) {
           code = body['code'];
         }
+        // The Broker's envelope is error, code and retryable, plus details
+        // when there are any (a terminal ABANDONED answer carries them).
+        const details = body['details'];
         if (
           code !== undefined &&
           typeof body['retryable'] === 'boolean' &&
-          Object.keys(body).length === 3 &&
+          Object.keys(body).filter((key) => key !== 'details').length === 3 &&
+          (details === undefined ||
+            (details !== null &&
+              typeof details === 'object' &&
+              !Array.isArray(details))) &&
           response.headers
             .get('content-type')
             ?.split(';')[0]

@@ -8,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.sun.net.httpserver.Headers;
 import com.sun.net.httpserver.HttpServer;
 import java.net.InetSocketAddress;
 import java.net.URI;
@@ -34,6 +35,7 @@ class ProviderRuntimeTransportTest {
     private final RuntimeSession session = new RuntimeSession(HARNESS, SESSION, "bootstrap",
             new RuntimeScope("tenant", "workspace", "1", "/workspace", "capability", "workspace"));
     private final List<Map<String, Object>> requests = new CopyOnWriteArrayList<>();
+    private final List<Headers> headers = new CopyOnWriteArrayList<>();
     private HttpServer server;
     private RuntimeLease lease;
     private volatile int status = 200;
@@ -49,12 +51,11 @@ class ProviderRuntimeTransportTest {
     void start() throws Exception {
         server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         server.createContext(ProviderRuntimeProtocol.PATH, exchange -> {
-            assertEquals("Bearer secret", exchange.getRequestHeaders().getFirst("Authorization"));
-            assertEquals("lease", exchange.getRequestHeaders().getFirst("X-Qwen-Managed-Lease-Id"));
-            assertEquals("3", exchange.getRequestHeaders().getFirst("X-Qwen-Managed-Lease-Epoch"));
+            // Headers are asserted on the test thread; a failure here only drops the exchange.
             Map<String, Object> request = JsonCodec.parseObject(
                     exchange.getRequestBody().readAllBytes(), "request");
             requests.add(request);
+            headers.add(exchange.getRequestHeaders());
             Map<String, Object> operation = ProviderRuntimeProtocol.object(request.get("operation"));
             Object value = "acquire".equals(operation.get("kind")) ? acquireAnswer : result;
             Map<String, Object> answer = new LinkedHashMap<>();
@@ -80,6 +81,12 @@ class ProviderRuntimeTransportTest {
     @AfterEach
     void stop() {
         server.stop(0);
+        // Every request any test sent carried the Broker's credentials.
+        for (Headers sent : headers) {
+            assertEquals("Bearer secret", sent.getFirst("Authorization"), "Authorization");
+            assertEquals("lease", sent.getFirst("X-Qwen-Managed-Lease-Id"), "X-Qwen-Managed-Lease-Id");
+            assertEquals("3", sent.getFirst("X-Qwen-Managed-Lease-Epoch"), "X-Qwen-Managed-Lease-Epoch");
+        }
     }
 
     @Test
@@ -289,6 +296,7 @@ class ProviderRuntimeTransportTest {
         result = true;
         assertTrue(transport.release(lease, session).toCompletableFuture().join());
         assertEquals(4, requests.size());
+        assertEquals(4, headers.size());
     }
 
     @Test

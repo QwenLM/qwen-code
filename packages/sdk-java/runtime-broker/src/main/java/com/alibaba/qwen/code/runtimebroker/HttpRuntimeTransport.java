@@ -13,6 +13,7 @@ import java.net.http.HttpResponse;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -1283,7 +1284,7 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
         return new RuntimeBrokerException(status, code, message, retryable);
     }
 
-    private static final class BoundedBody {
+    static final class BoundedBody {
         private final byte[] bytes;
         private final boolean overflow;
 
@@ -1292,32 +1293,37 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
             this.overflow = overflow;
         }
 
-        private byte[] bytes() {
+        byte[] bytes() {
             return bytes;
         }
 
-        private boolean overflow() {
+        boolean overflow() {
             return overflow;
         }
     }
 
     /**
-     * Stops reading once the cap is crossed. A body that stalls after the
-     * response headers is bounded by the stage deadline ({@code orTimeout}),
-     * not by {@code HttpRequest.timeout}.
+     * Stops reading once the cap is crossed. The buffer grows with the body,
+     * so a small answer under a large cap stays small. A body that stalls
+     * after the response headers is bounded by the stage deadline
+     * ({@code orTimeout}), not by {@code HttpRequest.timeout}.
      */
-    private static final class BoundedBodySubscriber
+    static final class BoundedBodySubscriber
             implements HttpResponse.BodySubscriber<BoundedBody> {
         private final int limit;
-        private final byte[] bytes;
+        private byte[] bytes;
         private int size;
         private final CompletableFuture<BoundedBody> body =
                 new CompletableFuture<>();
         private Flow.Subscription subscription;
 
-        private BoundedBodySubscriber(int limit) {
+        BoundedBodySubscriber(int limit) {
             this.limit = limit;
-            this.bytes = new byte[limit];
+            this.bytes = new byte[Math.min(limit, 8192)];
+        }
+
+        int capacity() {
+            return bytes.length;
         }
 
         @Override
@@ -1366,9 +1372,12 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
             if (count <= 0) {
                 return;
             }
-            byte[] chunk = new byte[count];
-            buffer.get(chunk);
-            System.arraycopy(chunk, 0, bytes, size, count);
+            // onNext never passes more than limit - size.
+            if (count > bytes.length - size) {
+                bytes = Arrays.copyOf(bytes, (int) Math.min(limit,
+                        Math.max(2L * bytes.length, (long) size + count)));
+            }
+            buffer.get(bytes, size, count);
             size += count;
         }
 

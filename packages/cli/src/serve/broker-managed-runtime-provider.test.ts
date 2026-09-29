@@ -109,7 +109,7 @@ describe('BrokerManagedRuntimeProvider', () => {
     });
   });
 
-  it.each([
+  it.each<[Record<string, unknown>, string]>([
     [{ error: 'untrusted' }, 'application/json'],
     [{ code: '', error: 'untrusted', retryable: false }, 'application/json'],
     [
@@ -137,6 +137,17 @@ describe('BrokerManagedRuntimeProvider', () => {
       },
       'text/plain',
     ],
+    ...['not an object', null, []].map(
+      (details): [Record<string, unknown>, string] => [
+        {
+          code: 'managed_runtime_tool_invalid',
+          error: 'untrusted',
+          retryable: false,
+          details,
+        },
+        'application/json',
+      ],
+    ),
   ])(
     'does not display a reason outside the Broker error envelope (%#)',
     async (body, contentType) => {
@@ -581,6 +592,38 @@ describe('BrokerManagedRuntimeProvider', () => {
       outcome: 'unknown',
     });
     expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps the reason of an error that carries details, such as a terminal answer', async () => {
+    const provider = new BrokerManagedRuntimeProvider({
+      baseUrl: 'http://127.0.0.1:8080',
+      token: 'secret',
+      fetch: vi.fn<typeof fetch>(
+        async () =>
+          new Response(
+            JSON.stringify({
+              error: 'Runtime execution outcome is permanently unknown.',
+              code: 'runtime_broker_execution_unknown',
+              retryable: false,
+              details: {
+                terminal: true,
+                reason: 'runtime_lost',
+                executionCallId: 'abandoned',
+              },
+            }),
+            { status: 409, headers: { 'content-type': 'application/json' } },
+          ),
+      ),
+    });
+    await expect(
+      provider.getToolV2Client(request(), { harnessSessionId }),
+    ).rejects.toMatchObject({
+      message:
+        'Managed Runtime Broker returned HTTP 409. Runtime execution outcome is permanently unknown.',
+      code: 'runtime_broker_execution_unknown',
+      retryable: false,
+      abandoned: true,
+    });
   });
 
   it.each([

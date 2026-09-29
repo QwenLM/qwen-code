@@ -237,6 +237,12 @@ final class FaultGateRig implements AutoCloseable {
     }
 
     record ToolCall(Map<String, Object> reference, String payloadJson) {
+        /** The raw reference of the immediate route: identity plus payload. */
+        Map<String, Object> immediateReference() {
+            Map<String, Object> raw = new LinkedHashMap<>(reference);
+            raw.putAll(JSON.parseObject(payloadJson));
+            return raw;
+        }
     }
 
     /** A foreground shell call whose side effects land in the workspace. */
