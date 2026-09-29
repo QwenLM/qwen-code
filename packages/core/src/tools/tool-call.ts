@@ -277,9 +277,14 @@ export async function resolveDeferredToolCall(
   // envelope-valid even when the target requires fields. Pre-validate against
   // the target's model-visible schema so the refusal names the target and the
   // missing field, instead of surfacing a bare Ajv message after the call has
-  // been unwrapped (#12889). Validate a clone: SchemaValidator coerces values
-  // in place, and the scheduler re-validates the returned arguments at build
-  // time.
+  // been unwrapped (#12889). Validate clones of both sides: SchemaValidator
+  // coerces argument values in place and the scheduler re-validates them at
+  // build time; and Ajv caches a compiled schema by object identity, so a
+  // target that mutates its own schema object in place (AgentTool's refresh
+  // adds and removes `model`/`name`) would otherwise stay pinned to whatever
+  // shape it had on the first bridged call. A per-call copy resolves through
+  // the JSON-text tier, which still shares one compiled validator per
+  // distinct schema text.
   //
   // Only the schema layer runs here — never the target's full
   // validateToolParams: its value-level rules (fs stats, content scans, the
@@ -306,7 +311,7 @@ export async function resolveDeferredToolCall(
     try {
       const argsClone = structuredClone(invocation.params.arguments);
       paramsError = SchemaValidator.validate(
-        target.schema.parametersJsonSchema,
+        structuredClone(target.schema.parametersJsonSchema),
         argsClone,
       );
     } catch {

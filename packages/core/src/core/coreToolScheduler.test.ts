@@ -1709,6 +1709,84 @@ describe('CoreToolScheduler', () => {
     }
   });
 
+  it('logs the policy lookup failure and still pre-checks a bridged target', async () => {
+    // The try/catch around the permission-manager lookup is the only thing
+    // keeping a policy-store rejection out of _schedule's Promise.all, whose
+    // try closes with a bare finally: an uncaught rejection there rejects the
+    // public schedule() and fails the whole batch instead of one call. The
+    // guard returns false ("do not suppress"), so the pre-check still runs and
+    // still names the missing field. The swallow is logged because _schedule
+    // pushes the bridge refusal and continues ahead of the permission gate, so
+    // nothing else records that the lookup failed. Mutation check: inlining
+    // !(await permissionManager.isToolEnabled(...)) without the try turns this
+    // red — schedule() rejects, or the call completes EXECUTION_DENIED instead
+    // of INVALID_TOOL_PARAMS. Deleting only the debugLogger.warn turns the log
+    // assertion red.
+    const execute = vi.fn();
+    const policyError = new Error('policy store unavailable');
+    const bridge = new MockTool({ name: ToolNames.TOOL_CALL });
+    const deferred = new MockTool({
+      name: 'web_fetch',
+      shouldDefer: true,
+      params: {
+        type: 'object',
+        properties: {
+          url: { type: 'string' },
+          prompt: { type: 'string' },
+        },
+        required: ['url', 'prompt'],
+        additionalProperties: false,
+      },
+      execute,
+    });
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName: new Map([
+          [bridge.name, bridge],
+          [deferred.name, deferred],
+        ]),
+        deferredHiddenNames: new Set([deferred.name]),
+        permissionManager: {
+          isToolEnabled: async (name: string) => {
+            if (name === 'web_fetch') {
+              throw policyError;
+            }
+            return true;
+          },
+          findMatchingDenyRule: () => undefined,
+        },
+      });
+    debugLoggerWarnSpy.mockClear();
+
+    await scheduler.schedule(
+      {
+        callId: 'bridge-policy-lookup-throws',
+        name: ToolNames.TOOL_CALL,
+        args: { name: deferred.name, arguments: {} },
+        isClientInitiated: false,
+        prompt_id: 'prompt-bridge-policy-lookup-throws',
+      },
+      new AbortController().signal,
+    );
+
+    expect(execute).not.toHaveBeenCalled();
+    expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Bridge pre-check policy lookup failed for'),
+      deferred.name,
+      policyError,
+    );
+    const completed = onAllToolCallsComplete.mock.calls[0][0][0] as ToolCall;
+    expect(completed.status).toBe('error');
+    if (completed.status === 'error') {
+      expect(completed.response.errorType).toBe(
+        ToolErrorType.INVALID_TOOL_PARAMS,
+      );
+      expect(completed.response.error?.message).toContain(
+        "required property 'url'",
+      );
+    }
+  });
+
   it('accrues bridge argument refusals per target for retry-loop detection', async () => {
     // The refusal carries the validated targetName for exactly this
     // accounting: alternating broken bridged calls against two distinct

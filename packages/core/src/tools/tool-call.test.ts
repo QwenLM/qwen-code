@@ -838,6 +838,51 @@ describe('ToolCallTool', () => {
       expect(result).toMatchObject({ arguments: { count: '3' } });
     });
 
+    it('re-reads a target schema the target mutates in place after the first call', async () => {
+      // AgentTool's refresh mutates its own parameterSchema object in place
+      // (it adds and removes `model`/`name`), and Ajv caches a compiled
+      // schema by object identity for the life of the process. Handing the
+      // validator that same object pins every later bridged call to the
+      // shape the first one happened to compile, so a property the target
+      // advertises after that first call is refused forever.
+      // Mutation check: passing target.schema.parametersJsonSchema by
+      // reference instead of a clone turns this red with "must NOT have
+      // additional properties".
+      const target = new MockTool({
+        name: 'agent_like',
+        shouldDefer: true,
+        params: {
+          type: 'object',
+          properties: { prompt: { type: 'string' } },
+          required: ['prompt'],
+          additionalProperties: false,
+        },
+      });
+      const registry = makeRegistry([target], new Set([target.name]));
+
+      // The first bridged call compiles the pre-refresh schema.
+      await resolveDeferredToolCall(registry, {
+        name: 'agent_like',
+        arguments: { prompt: 'do the thing' },
+      });
+
+      // The refresh then advertises a new property on that SAME object.
+      const schema = target.schema.parametersJsonSchema as {
+        properties: Record<string, unknown>;
+      };
+      schema.properties.model = { type: 'string', enum: ['fast', 'pro'] };
+
+      const result = await resolveDeferredToolCall(registry, {
+        name: 'agent_like',
+        arguments: { prompt: 'do the thing', model: 'fast' },
+      });
+
+      expect(result).not.toHaveProperty('error');
+      expect(result).toMatchObject({
+        arguments: { prompt: 'do the thing', model: 'fast' },
+      });
+    });
+
     it('pre-checks only the schema layer, leaving value-level rules to build()', async () => {
       // The pre-check exists to name the target and the missing field in
       // the refusal (#12889); a target's value-level rules (fs stats,

@@ -2744,9 +2744,15 @@ export class CoreToolScheduler {
           ? async (targetName: string) => {
               try {
                 return !(await permissionManager.isToolEnabled(targetName));
-              } catch {
-                // A policy lookup failure must not swallow the argument
-                // pre-check; the loop's permission gate reports the error.
+              } catch (error) {
+                // Do not let a policy lookup failure swallow the pre-check.
+                // On the refusal path _schedule continues ahead of the
+                // permission gate, so this is the lookup's only record.
+                debugLogger.warn(
+                  'Bridge pre-check policy lookup failed for',
+                  targetName,
+                  error,
+                );
                 return false;
               }
             }
