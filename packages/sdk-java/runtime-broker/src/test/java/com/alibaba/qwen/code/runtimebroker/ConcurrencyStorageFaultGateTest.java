@@ -9,7 +9,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.time.Duration;
 import java.util.List;
-import java.util.Map;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Tag;
@@ -59,7 +58,7 @@ class ConcurrencyStorageFaultGateTest {
         stale.acquire(HARNESS, SESSION).requireOk();
         FaultProxy.Fault answer = staleProxy.schedule("execute",
                 FaultProxy.Action.HOLD_RESPONSE);
-        Map<String, Object> reference = FaultGateRig.shell("call-1",
+        FaultGateRig.ToolCall reference = FaultGateRig.shell("call-1",
                 "echo ran >> marker");
         String execution = stale.create(HARNESS, SESSION, "key-1", reference)
                 .object().getString("executionCallId");
@@ -126,7 +125,7 @@ class ConcurrencyStorageFaultGateTest {
         broker.acquire(HARNESS, SESSION).requireOk();
         FaultProxy.Fault answer = proxy.schedule("execute",
                 FaultProxy.Action.HOLD_RESPONSE);
-        Map<String, Object> reference = FaultGateRig.shell("call-1",
+        FaultGateRig.ToolCall reference = FaultGateRig.shell("call-1",
                 "echo ran >> marker");
         String execution = broker.create(HARNESS, SESSION, "key-1", reference)
                 .object().getString("executionCallId");
