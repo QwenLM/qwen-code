@@ -309,6 +309,7 @@ public class ManagedAgentProperties {
         private String isolationClass = "session";
         private String stateDirectory = "";
         private boolean durableLocalProcess;
+        private boolean trustedLocalRebootRecovery;
         private String credentialKeyId = "";
         private String credentialKey = "";
         private String nodeExecutable = "";
@@ -422,6 +423,14 @@ public class ManagedAgentProperties {
 
         public void setDurableLocalProcess(boolean durableLocalProcess) {
             this.durableLocalProcess = durableLocalProcess;
+        }
+
+        public boolean isTrustedLocalRebootRecovery() {
+            return trustedLocalRebootRecovery;
+        }
+
+        public void setTrustedLocalRebootRecovery(boolean trustedLocalRebootRecovery) {
+            this.trustedLocalRebootRecovery = trustedLocalRebootRecovery;
         }
 
         public String getStateDirectory() {
