@@ -289,12 +289,19 @@ function parseManifest(value: unknown): ManagedMcpManifest {
       if (
         typeof definition['command'] !== 'string' ||
         !definition['command'] ||
+        definition['command'].includes('\0') ||
         definition['url'] !== undefined ||
         definition['headers'] !== undefined ||
         (definition['args'] !== undefined &&
           (!Array.isArray(definition['args']) ||
-            !definition['args'].every((arg) => typeof arg === 'string'))) ||
-        (definition['env'] !== undefined && !strings(definition['env']))
+            !definition['args'].every(
+              (arg) => typeof arg === 'string' && !arg.includes('\0'),
+            ))) ||
+        (definition['env'] !== undefined &&
+          (!strings(definition['env']) ||
+            Object.entries(definition['env']).some(
+              ([key, value]) => key.includes('\0') || value.includes('\0'),
+            )))
       )
         throw new ManagedMcpError('managed_mcp_manifest_invalid');
     } else if (
@@ -773,7 +780,13 @@ export class ManagedMcpRuntime {
       this.list(connection.client, 'prompts', ListPromptsResultSchema),
     ]);
     const values = lists.map((result, index) =>
-      result.state === 'failed' && previous
+      result.state === 'failed' &&
+      previous &&
+      [
+        previous.discovery.tools,
+        previous.discovery.resources,
+        previous.discovery.prompts,
+      ][index] !== 'failed'
         ? {
             values: [previous.tools, previous.resources, previous.prompts][
               index
@@ -782,13 +795,13 @@ export class ManagedMcpRuntime {
           }
         : result,
     );
-    connection.catalog = {
+    const catalog: ManagedMcpCatalog = {
       serverId: connection.definition.serverId,
       serverRevision: connection.definition.serverRevision,
       definitionDigest: connection.definition.definitionDigest,
       configRevision: connection.configRevision,
       connectionGeneration: connection.generation,
-      catalogRevision: (connection.catalog?.catalogRevision ?? 0) + 1,
+      catalogRevision: connection.catalog?.catalogRevision ?? 0,
       tools: values[0].values as ManagedMcpCatalog['tools'],
       resources: values[1].values as ManagedMcpCatalog['resources'],
       prompts: values[2].values as ManagedMcpCatalog['prompts'],
@@ -807,6 +820,11 @@ export class ManagedMcpRuntime {
             : 'stale',
       },
     };
+    if (fingerprint(catalog) !== fingerprint(connection.catalog ?? null))
+      connection.catalog = {
+        ...catalog,
+        catalogRevision: catalog.catalogRevision + 1,
+      };
   }
 
   private async list(

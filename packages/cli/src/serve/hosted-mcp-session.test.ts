@@ -430,6 +430,92 @@ it('reconciles a temporarily unknown configuration without repeating its effect'
   await mcp.close();
 });
 
+it.each(['settled', 'failed'] as const)(
+  'reconciles an unknown initial configuration during close after its original result is %s',
+  async (outcome) => {
+    const control = HostedWorkspaceBroker.prototype.control;
+    const physical = vi.mocked(control).getMockImplementation()!;
+    vi.mocked(control).mockImplementationOnce(async (operation) => {
+      await physical(operation);
+      if (outcome === 'failed')
+        replies.set(operation.operationId, {
+          operationId: operation.operationId,
+          state: 'settled',
+          error: { code: 'managed_mcp_connection_failed' },
+        });
+      return { operationId: operation.operationId, state: 'outcome_unknown' };
+    });
+    await expect(mcp.ensureReady()).rejects.toThrow('reconciliation');
+    const initialId = requests[0].operationId;
+    const original = replies.get(initialId)!;
+    replies.set(initialId, { operationId: initialId, state: 'running' });
+    await expect(mcp.close()).rejects.toThrow('reconciliation');
+    expect(HostedWorkspaceBroker.prototype.release).not.toHaveBeenCalled();
+    replies.set(initialId, original);
+    await mcp.close();
+    expect(
+      requests.filter((entry) => entry.kind === 'mcp-configure'),
+    ).toHaveLength(1);
+    expect(
+      requests.filter((entry) => entry.kind === 'mcp-release'),
+    ).toHaveLength(outcome === 'settled' ? 1 : 0);
+    expect(
+      parseMcpConfiguration(
+        session.authority.extensionRecordsInDomain('mcp_configuration')[0]
+          .record,
+      ),
+    ).toMatchObject({
+      releaseState: 'released',
+      run: { state: outcome, execution: 'settled' },
+    });
+  },
+);
+
+it('reconciles an older unknown configuration during close after a legacy writer installed a newer revision', async () => {
+  const control = HostedWorkspaceBroker.prototype.control;
+  const physical = vi.mocked(control).getMockImplementation()!;
+  vi.mocked(control).mockImplementationOnce(async (operation) => {
+    await physical(operation);
+    return { operationId: operation.operationId, state: 'outcome_unknown' };
+  });
+  await expect(mcp.ensureReady()).rejects.toThrow('reconciliation');
+  const initialId = requests[0].operationId;
+  // Reproduce history accepted before the pending-configuration admission gate.
+  await (
+    mcp as unknown as {
+      install: (
+        server: typeof pin,
+        previous: undefined,
+        id: string,
+        revision: number,
+      ) => Promise<void>;
+    }
+  ).install(pin, undefined, randomUUID(), 2);
+  const reloaded = new HostedMcpSession(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    [pin],
+  );
+  await reloaded.close();
+  expect(
+    requests.filter((entry) => entry.kind === 'mcp-configure'),
+  ).toHaveLength(2);
+  expect(
+    requests.some(
+      (entry) =>
+        entry.kind === 'mcp-status' && entry.targetOperationId === initialId,
+    ),
+  ).toBe(true);
+  expect(requests.filter((entry) => entry.kind === 'mcp-release')).toHaveLength(
+    2,
+  );
+  expect(
+    session.authority
+      .extensionRecordsInDomain('mcp_configuration')
+      .map((entry) => parseMcpConfiguration(entry.record).releaseState),
+  ).toEqual(['released', 'released']);
+});
+
 it('closes a never-dispatched configuration after workspace admission is refused', async () => {
   vi.mocked(HostedWorkspaceBroker.prototype.acquire).mockRejectedValueOnce(
     new HostedWorkspaceBrokerRejection(409, 'workspace_busy'),

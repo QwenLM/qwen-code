@@ -722,6 +722,10 @@ export function registerHostedHarnessSessionRoutes(
       .then(
         () => res.status(202).json({ operationId, state: 'settled' }),
         (cause: unknown) => {
+          if (cause instanceof HostedMcpRecoveryRequiredError) {
+            error(res, 503, 'hosted_mcp_recovery_required');
+            return;
+          }
           error(
             res,
             409,

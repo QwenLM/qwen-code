@@ -241,6 +241,14 @@ export class HostedMcpSession {
     );
     if (currentRevision !== expectedRevision)
       throw new HostedMcpConflictError('MCP configuration revision conflicts.');
+    if (
+      this.configurations().some(
+        (entry) =>
+          entry.serverId === pin.serverId &&
+          !['settled', 'failed', 'cancelled'].includes(entry.run.state),
+      )
+    )
+      throw new HostedMcpRecoveryRequiredError();
     try {
       await this.install(pin, undefined, operationId, expectedRevision + 1);
     } catch (cause) {
@@ -659,7 +667,31 @@ export class HostedMcpSession {
     }
     if (this.hasPendingOperations()) throw new HostedMcpRecoveryRequiredError();
     for (const configuration of this.configurations()) {
-      if (configuration.run.execution !== 'intent') continue;
+      if (['settled', 'failed', 'cancelled'].includes(configuration.run.state))
+        continue;
+      if (configuration.run.execution !== 'intent') {
+        try {
+          await this.install(
+            {
+              serverId: configuration.serverId,
+              serverRevision: configuration.serverRevision,
+              definitionDigest: configuration.run.definition!.definitionDigest,
+            },
+            configuration,
+          );
+        } catch (cause) {
+          const current = this.session.authority.extensionRecord(
+            'mcp_configuration',
+            configuration.configurationId,
+          )!;
+          if (
+            current.run.state !== 'failed' ||
+            current.run.execution !== 'settled'
+          )
+            throw cause;
+        }
+        continue;
+      }
       const cancelled: McpConfiguration = {
         ...configuration,
         run: {

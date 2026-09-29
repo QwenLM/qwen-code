@@ -686,6 +686,21 @@ describe('Hosted Harness no-tool session', () => {
     expect(state.model).not.toHaveBeenCalled();
     expect(requests.map((request) => request.kind)).toEqual(['mcp-configure']);
 
+    const replacement = await authorize(
+      supertest(server).post(`/session/${SESSION_ID}/mcp/configurations`),
+    ).send({
+      operationId: randomUUID(),
+      expectedRevision: 1,
+      server: {
+        serverId: 'demo',
+        serverRevision: 1,
+        definitionDigest: 'a'.repeat(64),
+      },
+    });
+    expect(replacement.status).toBe(503);
+    expect(replacement.body.error).toBe('hosted_mcp_recovery_required');
+    expect(requests.map((request) => request.kind)).toEqual(['mcp-configure']);
+
     const admitted = await send();
     expect(admitted.status).toBe(202);
     await vi.waitFor(async () => {

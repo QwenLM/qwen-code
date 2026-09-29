@@ -199,6 +199,17 @@ function invoke(
 }
 
 describe('Managed MCP Runtime', () => {
+  it.each<Partial<ManagedMcpDefinition>>([
+    { command: 'node\0' },
+    { args: ['\0'] },
+    { env: { KEY: '\0' } },
+    { env: { ['KEY\0']: 'value' } },
+  ])('rejects stdio NUL inputs before allocating a connection: %j', (input) => {
+    expect(() => runtime([{ ...stdioDefinition(), ...input }])).toThrow(
+      'managed_mcp_manifest_invalid',
+    );
+  });
+
   it('treats method-not-found catalogs as authoritative empty lists', async () => {
     const definition = stdioDefinition();
     const instance = runtime([
@@ -850,6 +861,7 @@ describe('Managed MCP Runtime', () => {
     'runs real %s discovery and raw resource requests',
     async (transport) => {
       let events: ServerResponse | undefined;
+      let failPrompts = true;
       const methods: string[] = [];
       const server = createServer(async (request, response) => {
         expect(request.headers['authorization']).toBe(
@@ -888,7 +900,9 @@ describe('Managed MCP Runtime', () => {
               : body.method === 'resources/list'
                 ? { resources: [{ uri: 'data://binary', name: 'binary' }] }
                 : body.method === 'prompts/list'
-                  ? undefined
+                  ? failPrompts
+                    ? undefined
+                    : { prompts: [{ name: 'recovered' }] }
                   : body.method === 'resources/read'
                     ? { contents: [{ uri: 'data://binary', blob: 'AQID' }] }
                     : {};
@@ -945,9 +959,38 @@ describe('Managed MCP Runtime', () => {
       });
       expect(configured.catalog!.tools).toEqual([]);
       expect(JSON.stringify(configured)).not.toContain('scoped-test-secret');
+      const discover = (operationId: string) =>
+        settled(instance, {
+          kind: 'mcp-discover',
+          sessionKey,
+          operationId,
+          serverId: 'fixture',
+          serverRevision: 1,
+          connectionGeneration: configured.catalog!.connectionGeneration,
+          grant: grant('configuration-1'),
+        });
+      for (const operationId of ['refresh-first', 'refresh-second']) {
+        expect((await discover(operationId)).catalog).toEqual(
+          configured.catalog,
+        );
+      }
+      failPrompts = false;
+      const recovered = await discover('refresh-recovered');
+      expect(recovered.catalog).toMatchObject({
+        connectionGeneration: configured.catalog!.connectionGeneration,
+        catalogRevision: configured.catalog!.catalogRevision + 1,
+        prompts: [{ name: 'recovered' }],
+        discovery: { prompts: 'complete' },
+      });
+      expect((await discover('refresh-unchanged')).catalog).toEqual(
+        recovered.catalog,
+      );
+      expect(methods.filter((method) => method === 'initialize')).toHaveLength(
+        1,
+      );
       const result = await settled(
         instance,
-        invoke(configured.catalog!, 'read-http', {
+        invoke(recovered.catalog!, 'read-http', {
           kind: 'resource_read',
           uri: 'data://binary',
         }),
