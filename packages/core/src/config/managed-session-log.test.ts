@@ -22,6 +22,7 @@ import { Config, type ConfigParameters } from './config.js';
 import { Storage } from './storage.js';
 import {
   ManagedSessionRecordRefusedError,
+  METADATA_REANCHOR_BYTES,
   type ChatRecord,
 } from '../services/chatRecordingService.js';
 import { SessionExecutionEngineError } from '../services/session-execution-engine.js';
@@ -740,7 +741,10 @@ describe('Managed Session log recording', () => {
     const { authority } = (
       config as unknown as { managedSession: ManagedSession }
     ).managedSession;
-    while ((await stat(transcriptPath)).size - from < 34 * 1024) {
+    while (
+      (await stat(transcriptPath)).size - from <
+      METADATA_REANCHOR_BYTES + 2 * 1024
+    ) {
       await authority.renewActivation({ leaseDurationMs: 5 * 60 * 1000 });
     }
     const write = ManagedSessionRecordSink.prototype.write;
@@ -763,6 +767,13 @@ describe('Managed Session log recording', () => {
       state: 'sealed',
       schema_version: 3,
     });
+    // The failed anchor does not skip the stop: the log records that the
+    // session stopped advancing before the seal.
+    const scan = await LocalJsonlManagedSessionJournalStore.read(
+      sessionService().getSessionTranscriptPath(SESSION_ID),
+      localManagedSessionKey(projectDir, SESSION_ID),
+    );
+    expect(scan.activation?.phase).toBe('released');
     const restored = await start(restoringConfig());
     expect(await activeChatTexts(restored)).toEqual(['committed prompt']);
     await restored.closeSessionWriter();
