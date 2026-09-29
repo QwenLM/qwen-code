@@ -12,6 +12,7 @@ import {
   isInlineModelOverrideAllowed,
   parseAcpBaseModelId,
   parseAcpModelOption,
+  publicProviderBaseUrl,
   resolveAcpModelOption,
   sanitizeProviderBaseUrl,
 } from './acpModelUtils.js';
@@ -251,6 +252,39 @@ describe('acpModelUtils', () => {
     ['https://user:secret@api.example', 'https://api.example'],
   ])('sanitizes provider base URL credentials for %s', (input, expected) => {
     expect(sanitizeProviderBaseUrl(input)).toBe(expected);
+  });
+
+  describe('publicProviderBaseUrl', () => {
+    it.each([
+      ['a clean endpoint byte-identically', 'https://api.example/v1'],
+      ['userinfo stripped', 'https://user:sk-secret@api.example/v1'],
+      ['query and hash dropped', 'https://api.example/v1?a=sk-secret#frag'],
+    ])('publishes %s without the credential', (_label, input) => {
+      expect(publicProviderBaseUrl(input) ?? '').not.toContain('sk-secret');
+    });
+
+    it.each([
+      ['a plain slash', 'https://gw.example/v1/https://user:sk-secret@o.e/v1'],
+      ['a semicolon', 'https://gw.example/v1;https://user:sk-secret@o.e/v1'],
+      ['a brace', 'https://gw.example/v1{https://user:sk-secret@o.e/v1'],
+    ])('refuses a second authority joined behind %s', (_label, input) => {
+      // Clearing username/password/search/hash never touches `pathname`, so
+      // all four read empty on these shapes while the credential is still in
+      // the string `url.href` returns. A caller that reads a defined result as
+      // "provably public" — `shareableAuxSelector`'s identity check at the
+      // workspace-scope persist point — would then keep the suffix and write
+      // the secret into the committable `.qwen/settings.json`. Enumerating
+      // join characters does not converge: the slash case involves no folding
+      // at all, and the brace case only differed by percent-encoding luck.
+      expect(publicProviderBaseUrl(input)).toBeUndefined();
+    });
+
+    it.each(['localhost:11434', 'ftp://user:sk@host/v1', 'not a url'])(
+      'refuses the non-http(s) shape %s',
+      (input) => {
+        expect(publicProviderBaseUrl(input)).toBeUndefined();
+      },
+    );
   });
 
   describe('isInlineModelOverrideAllowed', () => {
