@@ -114,7 +114,6 @@ function findByKey(
 export async function acceptExternalSubmission(
   projectRoot: string,
   submission: ExternalSubmission,
-  now = Date.now(),
 ): Promise<ExternalAcceptance> {
   const key = externalRequestKey({
     callerId: submission.callerId,
@@ -146,7 +145,7 @@ export async function acceptExternalSubmission(
       targetAgentId: submission.targetAgentId,
       messageId: submission.messageId,
       contentHash,
-      receivedAt: now,
+      receivedAt: Date.now(),
     };
     const created = await prepareThreadInTransaction(transaction, {
       title: submission.title,
@@ -189,28 +188,6 @@ export async function acceptExternalSubmission(
 }
 
 /**
- * The threads one caller may see.
- *
- * Scoped by `callerId`, not merely filtered for convenience: B serves several
- * authorized clients over one queue, and a second client must not be able to
- * read — or cancel, or add to — the first client's work. Locally raised threads
- * have no intake record and so belong to no external caller; they are not
- * listed to any of them.
- */
-export async function listExternalThreadsForCaller(
-  projectRoot: string,
-  callerId: string,
-): Promise<Thread[]> {
-  if (!callerId) return [];
-  const { threads } = await withAgentStoreTransaction(projectRoot, (t) =>
-    t.listThreads(),
-  );
-  return threads.filter(
-    (thread) => thread.externalIntake?.callerId === callerId,
-  );
-}
-
-/**
  * Withdraw one of this caller's tasks.
  *
  * Two writes are deliberately NOT collapsed into one here: this marks the
@@ -239,7 +216,9 @@ export async function cancelExternalThreadForCaller(
     }
     // The whole tree is the caller's task: a sub-thread the granted agent
     // split off keeps working otherwise, while the caller is told it stopped.
-    const { threads } = await transaction.listThreads();
+    const { threads, unreadable } = await transaction.listThreads();
+    if (unreadable.length > 0)
+      throw new Error('Thread records are unreadable.');
     const tree = [
       thread,
       ...threads.filter(
@@ -258,7 +237,7 @@ export async function cancelExternalThreadForCaller(
       ).length;
     // Already terminal: report it rather than overwriting a `done` with a
     // `cancelled`, which would rewrite how the work actually ended.
-    if (isThreadTerminal(thread.status)) {
+    if (isThreadTerminal(thread.status) || thread.externalIntake.result) {
       return { thread, runsStillLive };
     }
     // Retires the runs the same way the "mark done" path does: a queued run

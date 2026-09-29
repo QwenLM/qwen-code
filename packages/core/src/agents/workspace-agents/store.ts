@@ -429,7 +429,18 @@ function isValidExternalIntake(value: unknown): boolean {
     isValidId(value['targetAgentId']) &&
     isNonEmptyString(value['messageId']) &&
     isNonEmptyString(value['contentHash']) &&
-    isFiniteTimestamp(value['receivedAt'])
+    isFiniteTimestamp(value['receivedAt']) &&
+    (value['result'] === undefined ||
+      (isRecord(value['result']) &&
+        typeof value['result']['state'] === 'string' &&
+        [
+          'TASK_STATE_COMPLETED',
+          'TASK_STATE_FAILED',
+          'TASK_STATE_CANCELED',
+        ].includes(value['result']['state']) &&
+        isFiniteTimestamp(value['result']['at']) &&
+        (value['result']['answer'] === undefined ||
+          typeof value['result']['answer'] === 'string')))
   );
 }
 

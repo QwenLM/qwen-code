@@ -15,7 +15,6 @@ import {
   acceptExternalSubmission,
   cancelExternalThreadForCaller,
   getExternalThreadForCaller,
-  listExternalThreadsForCaller,
   type ExternalSubmission,
 } from './external-intake.js';
 import {
@@ -193,13 +192,22 @@ describe('external intake', () => {
     const { thread } = await acceptExternalSubmission(PROJECT_ROOT, submission);
 
     await expect(
-      listExternalThreadsForCaller(PROJECT_ROOT, 'share_2'),
-    ).resolves.toEqual([]);
-    await expect(
       getExternalThreadForCaller(PROJECT_ROOT, 'share_2', thread.id),
     ).resolves.toBeUndefined();
     await expect(
       getExternalThreadForCaller(PROJECT_ROOT, 'share_1', thread.id),
     ).resolves.toMatchObject({ id: thread.id });
   });
+});
+
+it('refuses cancellation before changing runs when a thread record is unreadable', async () => {
+  const { thread } = await acceptExternalSubmission(PROJECT_ROOT, submission);
+  await fs.writeFile(
+    path.join(getThreadsDir(PROJECT_ROOT), 'th_broken.json'),
+    '{',
+  );
+  await expect(
+    cancelExternalThreadForCaller(PROJECT_ROOT, submission.callerId, thread.id),
+  ).rejects.toThrow('Thread records are unreadable');
+  expect(await readThread(PROJECT_ROOT, thread.id)).toEqual(thread);
 });
