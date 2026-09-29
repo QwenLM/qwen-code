@@ -19,7 +19,7 @@ import {
   getUserSettingsPath,
   loadSettings,
 } from './settings.js';
-import type { LoadedSettings } from './settings.js';
+import type { LoadedSettings, LoadSettingsOptions } from './settings.js';
 
 /**
  * Process-level cache for `loadSettings()`, keyed by workspace directory.
@@ -155,17 +155,25 @@ function isEntryFresh(key: string, entry: CacheEntry): boolean {
 
 /**
  * Drop-in replacement for `loadSettings(workspaceDir)` on hot paths that use
- * its default options. Callers needing `LoadSettingsOptions` must keep using
- * `loadSettings()` directly.
+ * its default options. Callers needing other `LoadSettingsOptions` must keep
+ * using `loadSettings()` directly. The one option accepted here,
+ * `preserveInvalidWorkspaceSettings`, is cached apart from the default mode:
+ * a default load that recovered a broken workspace file must never answer a
+ * caller that asked for the break to be reported.
  */
-export function loadSettingsCached(workspaceDir: string): LoadedSettings {
+export function loadSettingsCached(
+  workspaceDir: string,
+  options?: Pick<LoadSettingsOptions, 'preserveInvalidWorkspaceSettings'>,
+): LoadedSettings {
   // Idempotent process-level latch (loadSettings runs it internally too);
   // running it up front makes the QWEN_HOME-derived paths below stable from
   // the very first call instead of only after the first miss.
   preResolveHomeEnvOverrides();
   const key = path.resolve(workspaceDir);
+  const strict = options?.preserveInvalidWorkspaceSettings === true;
+  const cacheKey = strict ? `strict:${key}` : key;
 
-  const entry = cache.get(key);
+  const entry = cache.get(cacheKey);
   if (entry) {
     let isFresh = false;
     try {
@@ -180,12 +188,12 @@ export function loadSettingsCached(workspaceDir: string): LoadedSettings {
     }
     if (isFresh) {
       // Refresh LRU position (Map preserves insertion order).
-      cache.delete(key);
-      cache.set(key, entry);
+      cache.delete(cacheKey);
+      cache.set(cacheKey, entry);
       debugLogger.debug(`hit ${key}`);
       return entry.settings;
     }
-    cache.delete(key);
+    cache.delete(cacheKey);
   }
   debugLogger.debug(`miss ${key}`);
 
@@ -203,11 +211,13 @@ export function loadSettingsCached(workspaceDir: string): LoadedSettings {
 
   // Load errors (FatalConfigError etc.) propagate unchanged and uncached;
   // the stale entry was already dropped above.
-  const settings = loadSettings(key);
+  const settings = strict
+    ? loadSettings(key, { preserveInvalidWorkspaceSettings: true })
+    : loadSettings(key);
 
   if (preLoadSigs) {
     try {
-      cache.set(key, {
+      cache.set(cacheKey, {
         settings,
         fingerprint: {
           settingsFiles: preLoadSigs,
@@ -228,7 +238,7 @@ export function loadSettingsCached(workspaceDir: string): LoadedSettings {
       }
     } catch (error) {
       // Fail open: serve the freshly loaded settings uncached.
-      cache.delete(key);
+      cache.delete(cacheKey);
       debugLogger.warn(`caching failed for ${key}; serving uncached:`, error);
     }
   }

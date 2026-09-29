@@ -16628,6 +16628,14 @@ describe('applyWorkspaceAgentPersona', () => {
     expect(config.getWorkspaceAgentName()).toBe('alice');
   });
 
+  it('is a workspace-agent session only with the opt-in and the agent source', () => {
+    expect(agentSession().isWorkspaceAgentSession()).toBe(true);
+    const optedOut = new Config(baseParams);
+    optedOut.setSessionSource('agent', 'ag_alice');
+    expect(optedOut.isWorkspaceAgentSession()).toBe(false);
+    expect(new Config(baseParams).isWorkspaceAgentSession()).toBe(false);
+  });
+
   it('registers collaboration tools for top-level agents, not ordinary sessions', async () => {
     // `registerFactory` is a single mock on the prototype, so every registry
     // shares one call log. Snapshot and clear between the two, or the ordinary

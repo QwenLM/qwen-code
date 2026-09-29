@@ -11504,11 +11504,19 @@ export class Config {
     return this.permissionManager;
   }
 
+  /**
+   * Whether this session runs as a workspace agent, inside the read-only
+   * capability boundary. The one source of truth for the tool registry, the
+   * invocation guard and skill side effects.
+   */
+  isWorkspaceAgentSession(): boolean {
+    return (
+      this.isAgentCollaborationEnabled() && this.sessionSourceType === 'agent'
+    );
+  }
+
   getToolInvocationGuard(): ToolInvocationGuard | undefined {
-    // Same gate as the tool registry above, so there is one source of truth
-    // for whether this session is a collaboration execution context.
-    return this.isAgentCollaborationEnabled() &&
-      this.sessionSourceType === 'agent'
+    return this.isWorkspaceAgentSession()
       ? createAgentToolInvocationGuard(
           this.toolInvocationGuard,
           this.workspaceAgentExecutionAllowedTools,
@@ -12142,10 +12150,7 @@ export class Config {
     // run context" on first use. Observed both ways with the six-combination
     // probe: dropping the clause takes the plain-subagent row from six tools
     // to zero and leaves the agent-subagent row at six.
-    if (
-      this.isAgentCollaborationEnabled() &&
-      this.sessionSourceType === 'agent'
-    ) {
+    if (this.isWorkspaceAgentSession()) {
       await registerLazy(ToolNames.THREAD_POST, async () => {
         const { ThreadPostTool } = await import('../tools/thread-tools.js');
         return new ThreadPostTool(this);
