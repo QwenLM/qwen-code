@@ -6,6 +6,7 @@ import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
+import com.alibaba.qwen.code.managedagent.store.WorkspaceOperatorRecoveryStore;
 import com.alibaba.qwen.code.runtimebroker.*;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
@@ -23,6 +24,44 @@ import org.springframework.jdbc.core.JdbcTemplate;
 /** Same physical-holder assertions run on Spring/H2 and the MySQL integration channel. */
 public final class WorkspaceRecoveryContract {
     private WorkspaceRecoveryContract() { }
+
+    public static void verifyOperatorPrepare(DataSource source, JdbcTemplate jdbc, ManagedAgentStore store,
+            WorkspaceExecutionStore authority) {
+        var fixture = new Fixture(source, jdbc, store);
+        var original = fixture.runtime("operator");
+        authority.claim(fixture.session.workspace(), original.session());
+        String callId = UUID.randomUUID().toString();
+        var prepared = fixture.executions.findOrCreate(ToolExecutionRecord.prepared(callId,
+                UUID.randomUUID().toString(), original.binding().getBindingId(),
+                original.binding().getGeneration(), fixture.session.sessionId(),
+                original.session().getRuntimeSessionId(), "turn", "call", "digest",
+                Map.of("sessionId", original.session().getRuntimeSessionId(), "promptId", "turn",
+                        "callId", "call", "argsDigest", "digest", "toolName", "run_shell_command")));
+        var dispatched = fixture.executions.claimDispatch(prepared.getExecutionCallId(),
+                "dispatcher", Duration.ofMinutes(1));
+        assertThat(dispatched).isNotNull();
+        assertThat(fixture.executions.compareAndSet(dispatched,
+                dispatched.withResult(Map.of("executionStatus", "success", "responseParts", List.of(),
+                        "capture", Map.of("captureStatus", "partial", "captureReason", "producer_lost")),
+                        1, Instant.now()), "dispatcher", dispatched.getDispatchGeneration())).isNotNull();
+        var recovery = new WorkspaceOperatorRecoveryStore(jdbc,
+                new org.springframework.jdbc.datasource.DataSourceTransactionManager(source),
+                fixture.bindings, new com.fasterxml.jackson.databind.ObjectMapper());
+        var inspection = recovery.inspect(original.binding().getBindingId(), original.binding().getGeneration());
+        assertThat(inspection.captureReason()).isEqualTo("producer_lost");
+        assertThat(inspection.eligibleForPrepare()).isTrue();
+        String recoveryId = recovery.prepare(original.binding().getBindingId(),
+                original.binding().getGeneration(), inspection.holderKey(), "operator", "incident");
+        assertThat(recovery.prepare(original.binding().getBindingId(),
+                original.binding().getGeneration(), inspection.holderKey(), "operator", "incident"))
+                .isEqualTo(recoveryId);
+        assertThat(fixture.bindings.findById(original.binding().getBindingId()).getState())
+                .isEqualTo(RuntimeBindingRecord.State.OPERATOR_RECOVERY);
+        assertThatThrownBy(() -> authority.release(fixture.session.workspace(), original.session()))
+                .isInstanceOf(RuntimeBrokerException.class);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_operator_recovery"
+                + " WHERE binding_id = ?", Long.class, original.binding().getBindingId())).isEqualTo(1);
+    }
 
     public static void verify(DataSource source, JdbcTemplate jdbc, ManagedAgentStore store,
             WorkspaceExecutionStore authority) throws Exception {

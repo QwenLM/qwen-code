@@ -338,6 +338,10 @@ public final class JdbcRuntimeBindingRepository
                     + " FROM qwen_runtime_binding WHERE provisioner_kind = ? AND binding_id > ?"
                     + " AND resource_handle_version = 2"
                     + " AND binding_state IN ('PROVISIONING', 'READY', 'DRAINING', 'RECOVERY_BLOCKED', 'LOST')"
+                    + " AND NOT EXISTS (SELECT 1 FROM managed_workspace_operator_recovery recovery"
+                    + " WHERE recovery.binding_id = qwen_runtime_binding.binding_id"
+                    + " AND recovery.runtime_generation = qwen_runtime_binding.runtime_generation"
+                    + " AND recovery.completed_at IS NULL)"
                     + " ORDER BY binding_id LIMIT ?")) {
                 statement.setString(1, kind);
                 statement.setString(2, afterBindingId == null ? "" : afterBindingId);
@@ -597,7 +601,7 @@ public final class JdbcRuntimeBindingRepository
             throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement(
                 "SELECT " + BINDING_COLUMNS + " FROM qwen_runtime_binding WHERE tenant_id = ? "
-                        + "AND binding_state IN ('LOST', 'RECOVERY_BLOCKED', 'FAILED')")) {
+                        + "AND binding_state IN ('LOST', 'RECOVERY_BLOCKED', 'OPERATOR_RECOVERY', 'FAILED')")) {
             statement.setString(1, request.getScope().getTenantId());
             try (ResultSet result = statement.executeQuery()) {
                 while (result.next()) {

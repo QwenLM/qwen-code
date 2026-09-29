@@ -11,6 +11,7 @@ public final class RuntimeBindingRecord {
         DRAINING,
         LOST,
         RECOVERY_BLOCKED,
+        OPERATOR_RECOVERY,
         FAILED,
         RELEASED
     }
@@ -150,7 +151,8 @@ public final class RuntimeBindingRecord {
         this.lastActiveAt = lastActiveAt;
         requireEvidence(lossEvidence, RuntimeRecoveryEvidence.Fact.JOURNAL_LOST);
         requireEvidence(stopEvidence, RuntimeRecoveryEvidence.Fact.WRITERS_STOPPED);
-        if (lossEvidence != null && state != State.LOST && state != State.RELEASED) {
+        if (lossEvidence != null && state != State.LOST && state != State.RELEASED
+                && state != State.OPERATOR_RECOVERY) {
             throw new IllegalArgumentException("Loss evidence requires a fenced binding");
         }
         if (stopEvidence != null && (lossEvidence == null
@@ -324,6 +326,7 @@ public final class RuntimeBindingRecord {
         // A local worker without a lease or attested generation never
         // admitted a Session; failed startup still blocks its own slot.
         boolean unreclaimed = state == State.LOST
+                || state == State.OPERATOR_RECOVERY
                 || state == State.RECOVERY_BLOCKED
                         && (!LocalProcessRuntimeProvisioner.KIND.equals(
                                         request.getProvisionerKind())
@@ -333,6 +336,10 @@ public final class RuntimeBindingRecord {
         return unreclaimed
                 && request.getScope().getTenantId().equals(candidate.getScope().getTenantId())
                 && (!request.isManagedContext()
+                        || (state == State.OPERATOR_RECOVERY || state == State.LOST)
+                                && (request.getStorageId().equals(candidate.getStorageId())
+                                        || request.getScope().getCanonicalCwd().equals(
+                                                candidate.getScope().getCanonicalCwd()))
                         || request.getScope().getWorkspaceId().equals(
                                 candidate.getScope().getWorkspaceId()));
     }
@@ -344,8 +351,15 @@ public final class RuntimeBindingRecord {
                         && stopEvidence != null) {
             throw new IllegalArgumentException("Recovery evidence cannot be overwritten");
         }
-        if (state == State.LOST && replacement.state != State.LOST) {
+        if ((state == State.LOST && replacement.state != State.LOST)
+                || state == State.OPERATOR_RECOVERY
+                        && replacement.state != State.OPERATOR_RECOVERY
+                        && replacement.state != State.LOST) {
             throw new IllegalArgumentException("Lost binding requires atomic recovery");
+        }
+        if (state == State.OPERATOR_RECOVERY && replacement.state == State.LOST
+                && !replacement.hasStoppedWriters()) {
+            throw new IllegalArgumentException("Operator recovery requires stopped-writer evidence");
         }
         if ((state == State.READY || state == State.RECOVERY_BLOCKED
                 || state == State.DRAINING) && replacement.state == State.FAILED) {
