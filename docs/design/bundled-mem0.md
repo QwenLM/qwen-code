@@ -2,7 +2,7 @@
 
 [English](bundled-mem0.md) | [简体中文](bundled-mem0.zh-CN.md)
 
-Status: local implementation; live-provider acceptance remains a separate gate.
+Status: implemented; PolarDB V2 was verified through a private tunnel, not public-direct access. Other provider contracts remain bounded by their recorded evidence.
 
 ## Problem and scope
 
@@ -43,7 +43,7 @@ Add to user settings (`~/.qwen/settings.json`), then restart Qwen Code. As with 
 
 The default is the PolarDB-style v1-write/v2-search contract, not a guarantee for every “Mem0 v2” service or Hologres. The OSS contract is pinned to the existing integration; fake-server acceptance does not prove compatibility with every upstream OSS release.
 
-Legacy IDs `mem0-platform-v3` and `mem0-oss-rest-2026-08` remain aliases. `aliyun-polardb-mysql-2026-08` remains accepted with its historical `top_k` field, not silently remapped to `limit`. Live verification of limit handling and slash behavior is still required. The adapter always caps final search results at five.
+Legacy IDs `mem0-platform-v3` and `mem0-oss-rest-2026-08` remain aliases. `aliyun-polardb-mysql-2026-08` remains accepted with its historical `top_k` field and raw search content, not silently remapped to `limit` or V2 normalization. Private-tunnel acceptance verified `mem0-v2` limit handling and direct-import text; this does not certify public routing or every service. The adapter always caps final search results at five.
 
 ## Binding and lifecycle
 

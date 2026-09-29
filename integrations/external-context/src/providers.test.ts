@@ -776,7 +776,7 @@ describe('Mem0CompatibleAdapter', () => {
     {
       preset: 'aliyun-polardb-mysql-2026-08' as const,
       scope: { userId: 'fixed-user' },
-      unwrap: true,
+      unwrap: false,
     },
     {
       preset: 'mem0-platform-v3' as const,

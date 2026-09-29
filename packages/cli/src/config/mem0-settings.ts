@@ -75,7 +75,10 @@ export function createBundledMem0Server(
   }
   const envKey = settings.envKey ?? settings.credentialEnv ?? 'MEM0_API_KEY';
   const enableWrites = settings.enableWrites && allowWrites;
-  if (envKey === 'QWEN_BUNDLED_MEM0_CONFIG' || isInternalSecretEnvVar(envKey)) {
+  if (
+    envKey.toUpperCase() === 'QWEN_BUNDLED_MEM0_CONFIG' ||
+    isInternalSecretEnvVar(envKey)
+  ) {
     throw new Error('memory.mem0.envKey must refer to a Mem0 credential.');
   }
   if (

@@ -2,7 +2,7 @@
 
 [English](bundled-mem0.md) | [简体中文](bundled-mem0.zh-CN.md)
 
-状态：本地实现；真实服务验收仍是独立门槛。
+状态：已实现；PolarDB V2 已经通过私网隧道验证，并未验证公网直连。其他 provider 契约仍以各自记录的证据为界。
 
 ## 问题与范围
 
@@ -43,7 +43,7 @@
 
 默认是 PolarDB 风格的 v1 写入/v2 搜索合同，不保证兼容所有标称“Mem0 v2”的服务或 Hologres。OSS 合同固定为现有集成定义；假服务验收不等于兼容所有上游 OSS 版本。
 
-保留旧 ID `mem0-platform-v3` 和 `mem0-oss-rest-2026-08` 作为别名。`aliyun-polardb-mysql-2026-08` 也继续接受并保留历史 `top_k` 字段，不会默默映射成 `limit`。仍需真实验证 limit 处理和斜杠行为。适配器始终把最终搜索结果限制为五条。
+保留旧 ID `mem0-platform-v3` 和 `mem0-oss-rest-2026-08` 作为别名。`aliyun-polardb-mysql-2026-08` 也继续接受并保留历史 `top_k` 字段及原样搜索内容，不会默默映射成 `limit` 或 V2 规范化行为。私网隧道验收验证了 `mem0-v2` 的 limit 处理和直接导入文本；这不证明公网路由或所有服务都可用。适配器始终把最终搜索结果限制为五条。
 
 ## 绑定与生命周期
 

@@ -29,7 +29,7 @@ Use the endpoint origin, optionally with a reverse-proxy prefix; do not append `
 - `mem0-v3`: Mem0 Platform V3, `Authorization: Token`, V3 search/add.
 - `mem0-oss-2026-08`: pinned OSS REST contract, `X-API-Key`, `/search` and `/memories`.
 
-These are complete contracts, not universal version compatibility. Unknown versions and different request/response shapes need a verified adapter, not a renamed URL. Historical preset IDs remain accepted; `aliyun-polardb-mysql-2026-08` preserves its historical `top_k` search field.
+These are complete contracts, not universal version compatibility. Unknown versions and different request/response shapes need a verified adapter, not a renamed URL. Historical preset IDs remain accepted; `aliyun-polardb-mysql-2026-08` preserves its historical `top_k` search field and raw search content.
 
 A trusted PolarDB address such as `http://your-endpoint:8080` additionally needs `"allowInsecureHttp": true`. Plain HTTP sends the credential unencrypted. This setting does not make a private endpoint reachable or bypass IP whitelists.
 
@@ -41,7 +41,7 @@ The default user/repository scope survives restart and starting from Git subdire
 
 Search is read-only by default. To enable saving, add `"enableWrites": true` inside `memory.mem0`, restart the interactive CLI, and ask Qwen to save specific content. The automatically installed Hook asks you to approve the exact content, including in YOLO mode. Rejecting sends no write request. Writes use `infer: false`.
 
-PolarDB can return a single-user message array encoded as JSON for these direct imports. Its presets restore that message's exact text when the result is marked `infer: false`; ordinary text and other protocols are left unchanged.
+PolarDB can return a single-user message array encoded as JSON for these direct imports. `mem0-v2` restores that message's exact text when the result is marked `infer: false`; the historical `aliyun-polardb-mysql-2026-08` preset, ordinary text, and other protocols are left unchanged.
 
 Noninteractive/ACP sessions and sessions with Hooks disabled keep search only. Bare/safe mode, untrusted/provisional folders and SSH workspaces do not activate this local binding. Workspace settings cannot configure the binding.
 

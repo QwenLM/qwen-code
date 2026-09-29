@@ -2386,7 +2386,7 @@ export async function loadCliConfig(
     sshWorkspace ||
     provisionalWorkspace ||
     !trustedFolder ||
-    settings.memory?.mem0 === undefined
+    settings.memory?.mem0 == null
       ? undefined
       : createBundledMem0Server(
           settings.memory.mem0,

@@ -1342,6 +1342,16 @@ describe('loadCliConfig', () => {
     );
   });
 
+  it('does not create a bundled server for an explicitly disabled Mem0', async () => {
+    const createServer = vi.spyOn(Mem0Settings, 'createBundledMem0Server');
+    process.argv = ['node', 'script.js', '-p', 'hello'];
+    await loadCliConfig(
+      { memory: { mem0: null } } as unknown as Settings,
+      await parseArguments(),
+    );
+    expect(createServer).not.toHaveBeenCalled();
+  });
+
   it('overrides a workspace-scoped external-context server instead of aborting startup', async () => {
     const server = {
       command: process.execPath,

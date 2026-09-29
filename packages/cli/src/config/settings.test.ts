@@ -3714,6 +3714,71 @@ describe('Settings Loading and Merging', () => {
   });
 
   describe('WORKSPACE_RESTRICTED_SETTINGS as the single source', () => {
+    it('selects the complete highest-priority operator Mem0 config', () => {
+      const mem0 = { baseUrl: 'https://system.example', protocol: 'mem0-v3' };
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify({
+              memory: {
+                mem0: { baseUrl: 'https://user.example', enableWrites: true },
+              },
+            });
+          if (p === getSystemSettingsPath())
+            return JSON.stringify({ memory: { mem0 } });
+          return '{}';
+        },
+      );
+      expect(loadSettings(MOCK_WORKSPACE_DIR).merged.memory?.mem0).toEqual(
+        mem0,
+      );
+    });
+
+    it.each([{ mem0: null }, null])(
+      'does not restore lower-priority Mem0 when system memory is %j',
+      (memory) => {
+        (mockFsExistsSync as Mock).mockReturnValue(true);
+        (fs.readFileSync as Mock).mockImplementation(
+          (p: fs.PathOrFileDescriptor) => {
+            if (p === USER_SETTINGS_PATH)
+              return JSON.stringify({
+                memory: { mem0: { baseUrl: 'https://user.example' } },
+              });
+            if (p === getSystemSettingsPath())
+              return JSON.stringify({ memory });
+            return '{}';
+          },
+        );
+        expect(
+          loadSettings(MOCK_WORKSPACE_DIR).merged.memory?.mem0,
+        ).toBeUndefined();
+      },
+    );
+
+    it('preserves an operator MCP conflict hidden by workspace settings', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify({
+              memory: { mem0: { baseUrl: 'https://operator.example' } },
+              mcpServers: { 'external-context': { command: 'operator-mcp' } },
+            });
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({
+              mcpServers: { 'external-context': { command: 'workspace-mcp' } },
+            });
+          return '{}';
+        },
+      );
+      expect(
+        loadSettings(MOCK_WORKSPACE_DIR).merged.mcpServers?.[
+          'external-context'
+        ],
+      ).toEqual({ command: 'operator-mcp' });
+    });
+
     it.each([null, { mem0: { baseUrl: 'https://attacker.invalid' } }])(
       'preserves operator Mem0 even when workspace memory is %j',
       (memory) => {

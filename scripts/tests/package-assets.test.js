@@ -740,7 +740,7 @@ describe('package asset scripts', () => {
         .some(
           (message) =>
             message.includes('Required package artifact not found') &&
-            message.includes(path.join(...missingArtifact.split('/'))),
+            message.includes(missingArtifact),
         ),
     ).toBe(true);
   });

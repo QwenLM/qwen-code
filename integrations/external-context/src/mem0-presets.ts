@@ -103,7 +103,6 @@ const legacyPresets = {
       limitField: 'top_k',
       idField: 'id',
       contentFields: ['memory'],
-      directImportMessages: true,
     },
     write: {
       path: '/v1/memories',
@@ -120,6 +119,7 @@ export const MEM0_PRESETS: Readonly<Record<Mem0PresetId, Mem0Preset>> = {
     search: {
       ...legacyPresets['aliyun-polardb-mysql-2026-08'].search,
       limitField: 'limit',
+      directImportMessages: true,
     },
   },
   'mem0-v3': legacyPresets['mem0-platform-v3'],

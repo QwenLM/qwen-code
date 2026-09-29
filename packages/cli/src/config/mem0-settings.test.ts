@@ -238,6 +238,11 @@ describe('bundled Mem0 settings', () => {
       baseUrl: 'https://mem0.example',
       credentialEnv: 'QWEN_BUNDLED_MEM0_CONFIG',
     },
+    { baseUrl: 'https://mem0.example', envKey: 'qwen_bundled_mem0_config' },
+    {
+      baseUrl: 'https://mem0.example',
+      credentialEnv: 'Qwen_Bundled_Mem0_Config',
+    },
     { baseUrl: 'https://mem0.example', credentialEnv: 'QWEN_SERVER_TOKEN' },
     {
       baseUrl: 'https://mem0.example',
