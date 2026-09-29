@@ -59,8 +59,9 @@ registry 保留现有 reveal 状态，用于启动预加载、显式可见工具
 在直接工具模式下，禁用 `tools.toolSearch` 也会禁用 `tool_call`；现有回退会即时
 声明普通延迟工具的 schema。由 `tools.eager` 降级的工具仍保持隐藏，除非另有暴露
 规则；每会话警告说明桥接不可用，但按名称直接调用仍经过正常校验和权限检查。
-CodeModeOnly 则隐藏两个桥接工具，在 `exec` 中保留可调用延迟工具的完整嵌套
-schema，并跳过延迟提醒和这条警告。权限 allowlist 会保留两个桥接工具，除非有
+CodeModeOnly 则通过顶层 `tool_search` 发现延迟工具的 schema，并通过 `exec`
+调用它们；`tool_call` 保持隐藏。它会跳过延迟提醒和这条警告。当前作用域无法搜索
+时，`exec` 会包含所有允许工具的签名。权限 allowlist 会保留两个桥接工具，除非有
 显式 deny 规则移除它们。
 
 子智能体显式 `tools` 列表不会隐式加入桥接工具。列出普通延迟目标会直接声明它，

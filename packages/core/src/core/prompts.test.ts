@@ -1730,7 +1730,7 @@ describe('resident tool gating (#12032)', () => {
         declaredTools ? { declaredTools } : undefined,
       );
 
-    // Reverse check: in code mode the tools are reached as `tools.<name>`
+    // Reverse check: in code mode the tools are reached as `tools.<jsName>`
     // inside `exec` and are not declarations, so a narrow declared set must not
     // strip that guidance.
     expect(codeModePrompt(new Set([ToolNames.EXEC]))).toBe(codeModePrompt());
@@ -1784,10 +1784,10 @@ describe('CodeModeOnly tool guidance', () => {
       true,
     );
 
-  it('points the dedicated-tool guidance at tools.<name>', () => {
+  it('points the dedicated-tool guidance at tools.<jsName>', () => {
     const prompt = codeModePrompt();
 
-    expect(prompt).toContain('as `tools.<name>(args)`');
+    expect(prompt).toContain('as `tools.<jsName>(args)`');
     expect(prompt).toContain("use the top-level 'tool_search' when available");
     expect(prompt).toContain('Read its returned schema and JavaScript name');
     expect(prompt).toContain('To read files use `tools.read_file`');
@@ -1870,7 +1870,7 @@ describe('CodeModeOnly tool guidance', () => {
       'Call independent tools in parallel; run dependent calls sequentially',
     );
     expect(prompt).toContain('[tool_call: run_shell_command for');
-    expect(prompt).not.toContain('tools.<name>(args)');
+    expect(prompt).not.toContain('tools.<jsName>(args)');
     expect(prompt).not.toContain('**Batch Into One Program:**');
   });
 });

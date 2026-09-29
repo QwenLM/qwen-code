@@ -1743,7 +1743,12 @@ export class AgentCore {
       return false;
     }
     if (this.executionAllowedTools === undefined) {
-      // Code Mode gateways operate on the agent's scoped nested-tool allowlist.
+      // Code mode declares exec unconditionally (getCodeModeFunctionDeclarations
+      // keeps exposure 'exec' regardless of the allowed set), and prepareTools
+      // adds tool_search beside it, so a finite configured list that omits
+      // them must not refuse the tools the model was shown — the same
+      // carve-out the executionAllowedTools branch applies below. Both
+      // gateways apply the agent's scoped nested-tool allowlist themselves.
       if (
         (toolName === ToolNames.EXEC || toolName === ToolNames.TOOL_SEARCH) &&
         this.runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly

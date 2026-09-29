@@ -1090,6 +1090,9 @@ export class ToolRegistry {
    *
    * Empty in CodeModeOnly: exec describes on-demand discovery without a full
    * startup catalog or the Direct-mode reminders' tool_call instructions.
+   * The empty result also keeps the client's incomplete-bridge fallback, which
+   * reveals every summarized tool, from rewriting the exec declaration and
+   * breaking the prompt cache when a deny rule removes tool_call.
    */
   getDeferredToolSummary(): DeferredToolSummary[] {
     if (this.config.getToolMode?.() === ToolMode.CodeModeOnly) {
