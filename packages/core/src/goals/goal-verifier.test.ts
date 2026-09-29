@@ -133,12 +133,13 @@ describe('createGoalVerifier', () => {
       promptId: 'side-query:goal-verifier',
       maxAttempts: 1,
       config: {
-        // #12928: hard-coded temperature removed; field omitted unless caller supplied.
+        // temperature: 0 preserved for the goal-verifier deterministic
+        // verdict; see Risk & Scope in PR #12958.
+        temperature: 0,
         responseMimeType: 'application/json',
         thinkingConfig: { thinkingBudget: 0, includeThoughts: false },
       },
     });
-    expect(request.config).not.toHaveProperty('temperature');
     expect(request).not.toHaveProperty('tools');
     const payload = JSON.parse(
       request.contents[0]?.parts?.[0]?.text ?? '',

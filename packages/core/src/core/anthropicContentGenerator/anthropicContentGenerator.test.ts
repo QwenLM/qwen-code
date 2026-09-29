@@ -176,10 +176,13 @@ describe('AnthropicContentGenerator', () => {
         output_config: { effort: 'medium' },
       });
       if (profile === 'anthropic-manual') {
-        // #12928: caller supplied temperature: 0 in samplingParams flows
-        // through (no longer overridden to 1 with manual thinking).
+        // anthropic-manual + thinking-enabled (the default for an unparseable
+        // alias like 'company-alias') forces temperature: 1 — see the
+        // restored guard in buildRequest. PR #12958 round-1 review caught
+        // that removing this guard introduced a 400 on Claude <4.6 for
+        // callers who set samplingParams.temperature: 0.
         expect(anthropicState.lastCreateArgs?.[0]).toMatchObject({
-          temperature: 0,
+          temperature: 1,
         });
         await generator.generateContent({
           model: 'company-alias',

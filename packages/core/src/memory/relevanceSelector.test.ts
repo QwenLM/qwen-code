@@ -73,8 +73,12 @@ describe('selectRelevantAutoMemoryDocumentsByModel', () => {
       mockConfig,
       expect.objectContaining({
         purpose: 'auto-memory-recall',
-        config: expect.objectContaining({}),
-        // #12928: hard-coded temperature removed; field omitted unless caller supplied.
+        config: expect.not.objectContaining({
+          temperature: expect.anything(),
+        }),
+        // #12928: literal temperature removed; assert the key is absent
+        // (objectContaining({}) would accept any object including one with
+        // temperature, so use the not-form for a real pin).
       }),
     );
   });
@@ -227,8 +231,12 @@ describe('selectRelevantAutoMemoryDocumentsByModel', () => {
       mockConfig,
       expect.objectContaining({
         purpose: 'auto-memory-recall',
-        config: expect.objectContaining({}),
-        // #12928: hard-coded temperature removed; field omitted unless caller supplied.
+        config: expect.not.objectContaining({
+          temperature: expect.anything(),
+        }),
+        // #12928: literal temperature removed; assert the key is absent
+        // (objectContaining({}) would accept any object including one with
+        // temperature, so use the not-form for a real pin).
       }),
     );
     expect(
@@ -253,8 +261,12 @@ describe('selectRelevantAutoMemoryDocumentsByModel', () => {
       mockConfig,
       expect.objectContaining({
         purpose: 'auto-memory-recall',
-        config: expect.objectContaining({}),
-        // #12928: hard-coded temperature removed; field omitted unless caller supplied.
+        config: expect.not.objectContaining({
+          temperature: expect.anything(),
+        }),
+        // #12928: literal temperature removed; assert the key is absent
+        // (objectContaining({}) would accept any object including one with
+        // temperature, so use the not-form for a real pin).
       }),
     );
     expect(

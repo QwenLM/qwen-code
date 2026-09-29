@@ -751,6 +751,14 @@ export class AnthropicContentGenerator implements ContentGenerator {
       const budget = Math.min(thinking.budget_tokens, sampling.max_tokens - 1);
       thinking =
         budget >= 1024 ? { ...thinking, budget_tokens: budget } : undefined;
+      // Anthropic requires temperature to be unset OR exactly 1 when extended
+      // thinking is enabled. `anthropic-manual` is the fallback profile for
+      // Claude 4.5 / 4.1 / 3.x and unparseable aliases; none of those are
+      // covered by `modelRejectsTemperature`, so a caller who sets
+      // `samplingParams.temperature: 0` (common for determinism) would get a
+      // hard 400 on every request without this override. Restored after
+      // round-1 review on #12928.
+      if (thinking) sampling.temperature = 1;
     }
     const isDeepSeek =
       isDeepSeekAnthropicHostname(this.contentGeneratorConfig) ||

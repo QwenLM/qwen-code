@@ -146,8 +146,7 @@ export async function selectRelevantAutoMemoryDocumentsByModel(
     // Uses runSideQuery's default side-query model policy: fast model first,
     // then main session model when no fast model is configured.
     systemInstruction: SELECT_MEMORIES_SYSTEM_PROMPT,
-    config: {
-    },
+    config: {},
     validate: (value) => {
       if (!Array.isArray(value.selected_memories)) {
         return 'Recall selector must return selected_memories array';
