@@ -455,8 +455,9 @@ describe('managed session record sink', () => {
       (event) => event.kind === 'context.compacted',
     );
     expect(compacted).toHaveLength(1);
+    // Numbered after the renewal, covering only the history before it.
     expect(compacted[0].sequence).toBe(renewedAt + 1);
-    expect(compacted[0].payload['toSequence']).toBe(renewedAt);
+    expect(compacted[0].payload['toSequence']).toBe(renewedAt - 1);
     expect(compacted[0].payload['replacedMessageIds']).toEqual(['rec-user-1']);
     await harness.close();
   });

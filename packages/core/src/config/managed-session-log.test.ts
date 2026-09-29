@@ -44,6 +44,7 @@ import { readManagedSessionRecords } from '../managed-runtime/managed-session-me
 import {
   isManagedSessionTranscriptSync,
   localManagedSessionKey,
+  managedSessionResourceRoot,
 } from '../utils/sessionStorageUtils.js';
 
 const SESSION_ID = '3f2504e0-4f89-41d3-9a0c-0305e82c3301';
@@ -57,14 +58,27 @@ beforeEach(async () => {
   projectDir = path.join(root, 'project');
   runtimeDir = path.join(root, 'runtime');
   await mkdir(projectDir, { recursive: true });
+  // An exported QWEN_RUNTIME_DIR outranks the static override.
+  vi.stubEnv('QWEN_RUNTIME_DIR', runtimeDir);
   Storage.setRuntimeBaseDir(runtimeDir);
 });
 
 afterEach(async () => {
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
   Storage.setRuntimeBaseDir(null);
   await rm(root, { recursive: true, force: true });
 });
+
+/** What a crash leaves: the writer's lock, naming a process that is gone. */
+async function crashWriterLock(): Promise<Record<string, unknown>> {
+  const crashed = await lockRecord();
+  await writeFile(
+    getSessionWriterLockPath(runtimeDir, SESSION_ID),
+    JSON.stringify({ ...crashed, pid: 999_999 }),
+  );
+  return crashed;
+}
 
 function sessionService(): SessionService {
   return new SessionService(projectDir, { runtimeBaseDir: runtimeDir });
@@ -189,6 +203,28 @@ describe('Managed Session log recording', () => {
       localManagedSessionKey(projectDir, SESSION_ID),
     );
     expect(scan.uncommitted).toBe(0);
+    // The session is the activation's worker, with a five-minute horizon.
+    expect(scan.activation?.workerId).toBe(SESSION_ID);
+    expect(
+      scan.events.find((event) => event.kind === 'activation.changed')?.payload[
+        'leaseDurationMs'
+      ],
+    ).toBe(5 * 60 * 1000);
+    // The definition carries configuration identity only.
+    const definition = JSON.parse(
+      (
+        await LocalManagedSessionResourceStore.create({
+          runtimeBaseDir: runtimeDir,
+          sessionKey: localManagedSessionKey(projectDir, SESSION_ID),
+        }).read(scan.header!.definitionRef)
+      ).toString('utf8'),
+    ) as Record<string, unknown>;
+    expect(definition).toEqual({
+      version: 1,
+      engine: 'managed',
+      model: 'test-model',
+      approvalMode: config.getApprovalMode(),
+    });
     expect(records.some((record) => record['type'] === 'user')).toBe(false);
     expect(
       records.filter(
@@ -306,7 +342,7 @@ describe('Managed Session log recording', () => {
       .flush()
       .catch(() => undefined);
     append.mockRestore();
-    await rm(getSessionWriterLockPath(runtimeDir, SESSION_ID));
+    await crashWriterLock();
     expect((await readFile(transcriptPath)).length).toBeGreaterThan(
       committedBytes.length,
     );
@@ -436,10 +472,20 @@ describe('Managed Session log recording', () => {
     await config.closeSessionWriter();
   });
 
-  it.each(['a handoff close', 'a crash'] as const)(
+  it.each([
+    'a handoff close',
+    'a close after a failed write',
+    'a crash',
+  ] as const)(
     'keeps a rename that renewals moved out of the list windows through %s',
     async (ending) => {
-      const config = await start(managedConfig());
+      const building = managedConfig();
+      // The takeover policy the ACP host sets; without it a handoff close is
+      // an ordinary one.
+      if (ending === 'a handoff close') {
+        building.setSessionWriterTakeoverPolicy('certified');
+      }
+      const config = await start(building);
       const recorder = config.getChatRecordingService()!;
       await recorder.recordCustomTitle('Early title', 'auto');
       for (let index = 0; index < 40; index++) {
@@ -469,9 +515,27 @@ describe('Managed Session log recording', () => {
         expect(sessionService().getSessionTitleInfo(SESSION_ID)).toMatchObject({
           title: 'Renamed title',
         });
+      } else if (ending === 'a close after a failed write') {
+        const write = ManagedSessionRecordSink.prototype.write;
+        const failing = vi
+          .spyOn(ManagedSessionRecordSink.prototype, 'write')
+          .mockImplementation(async function (
+            this: ManagedSessionRecordSink,
+            record: ChatRecord,
+          ) {
+            if (record.type === 'user') throw new Error('disk full');
+            return write.call(this, record);
+          });
+        recordUser(config, 'not recorded');
+        await expect(recorder.flush()).rejects.toThrow('disk full');
+        failing.mockRestore();
+        await config.closeSessionWriter().catch(() => undefined);
+        expect(sessionService().getSessionTitleInfo(SESSION_ID)).toMatchObject({
+          title: 'Renamed title',
+        });
       } else {
         // The process dies; its lock is reclaimed afterwards.
-        await rm(getSessionWriterLockPath(runtimeDir, SESSION_ID));
+        await crashWriterLock();
       }
 
       const restored = await start(restoringConfig());
@@ -549,44 +613,44 @@ describe('Managed Session log recording', () => {
     await restored.closeSessionWriter();
   });
 
-  it('keeps a reclaimed lock when it cannot read the log', async () => {
-    const first = await start(managedConfig());
-    recordUser(first, 'first prompt');
-    await first.getChatRecordingService()!.flush();
-    const transcriptPath =
-      sessionService().getSessionTranscriptPath(SESSION_ID);
-    // The writer crashed: its active Managed lock names a process that is gone.
-    const crashed = await lockRecord();
-    await writeFile(
-      getSessionWriterLockPath(runtimeDir, SESSION_ID),
-      JSON.stringify({ ...crashed, pid: 999_999 }),
-    );
-    try {
-      // The lock is reclaimed first; then the log becomes unreadable and the
-      // restore fails.
-      const config = managedConfig({
-        sessionRestoreProjectionSource: async () => {
-          await chmod(transcriptPath, 0o000);
-          throw new Error('projection unavailable');
-        },
-      });
-      vi.spyOn(
-        config as unknown as { initializeInternal(): Promise<void> },
-        'initializeInternal',
-      ).mockResolvedValue(undefined);
-      await expect(config.initialize()).rejects.toThrow(
-        'projection unavailable',
-      );
-      await config.closeSessionWriter().catch(() => undefined);
-      // Nothing tells whether the log holds Managed records, so the Managed
-      // lock it took over stays in place rather than being dropped.
-      const kept = await lockRecord();
-      expect(kept).toMatchObject({ state: 'active', schema_version: 3 });
-      expect(kept['owner_id']).not.toBe(crashed['owner_id']);
-    } finally {
-      await chmod(transcriptPath, 0o644);
-    }
-  });
+  // An unreadable file is made with chmod, which neither Windows nor root
+  // honours.
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'keeps a reclaimed lock when it cannot read the log',
+    async () => {
+      const first = await start(managedConfig());
+      recordUser(first, 'first prompt');
+      await first.getChatRecordingService()!.flush();
+      const transcriptPath =
+        sessionService().getSessionTranscriptPath(SESSION_ID);
+      const crashed = await crashWriterLock();
+      try {
+        // The lock is reclaimed first; then the log becomes unreadable and the
+        // restore fails.
+        const config = managedConfig({
+          sessionRestoreProjectionSource: async () => {
+            await chmod(transcriptPath, 0o000);
+            throw new Error('projection unavailable');
+          },
+        });
+        vi.spyOn(
+          config as unknown as { initializeInternal(): Promise<void> },
+          'initializeInternal',
+        ).mockResolvedValue(undefined);
+        await expect(config.initialize()).rejects.toThrow(
+          'projection unavailable',
+        );
+        await config.closeSessionWriter().catch(() => undefined);
+        // Nothing tells whether the log holds Managed records, so the Managed
+        // lock it took over stays in place rather than being dropped.
+        const kept = await lockRecord();
+        expect(kept).toMatchObject({ state: 'active', schema_version: 3 });
+        expect(kept['owner_id']).not.toBe(crashed['owner_id']);
+      } finally {
+        await chmod(transcriptPath, 0o644);
+      }
+    },
+  );
 
   it('writes a due anchor right behind the record that made it due', async () => {
     const config = await start(managedConfig());
@@ -681,6 +745,13 @@ describe('Managed Session log recording', () => {
     vi.restoreAllMocks();
     await restored.closeSessionWriter().catch(() => undefined);
     expect(await lockRecord()).toMatchObject({ state: 'sealed' });
+    const projection = await sessionService().readRestoreProjection(
+      SESSION_ID,
+      { replay: { kind: 'none' } },
+    );
+    expect(projection?.runtime.recording).toMatchObject({
+      sourceType: 'test-source',
+    });
   });
 
   it('keeps the chain through records that are not messages', async () => {
@@ -948,6 +1019,115 @@ describe('Managed Session log recording', () => {
     await expect(
       stat(getSessionWriterLockPath(runtimeDir, SESSION_ID)),
     ).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it("leaves a Legacy session's handoff seal in place", async () => {
+    const legacy = managedConfig({ sessionExecutionEngine: 'legacy' });
+    legacy.setSessionWriterTakeoverPolicy('certified');
+    await start(legacy);
+    recordUser(legacy, 'legacy prompt');
+    await legacy.closeSessionWriter({ handoff: true });
+    const sealed = await lockRecord();
+    expect(sealed).toMatchObject({ state: 'sealed', schema_version: 2 });
+    const before = await readFile(
+      sessionService().getSessionTranscriptPath(SESSION_ID),
+    );
+
+    // Refused before the lease is taken, so the seal a Legacy successor
+    // checks the transcript against is never retired.
+    const config = restoringConfig();
+    vi.spyOn(
+      config as unknown as { initializeInternal(): Promise<void> },
+      'initializeInternal',
+    ).mockResolvedValue(undefined);
+    await expect(config.initialize()).rejects.toThrow(
+      SessionExecutionEngineError,
+    );
+    await config.closeSessionWriter().catch(() => undefined);
+    expect(await lockRecord()).toEqual(sealed);
+    expect(
+      await readFile(sessionService().getSessionTranscriptPath(SESSION_ID)),
+    ).toEqual(before);
+  });
+
+  it('releases the lock of a new session that fails before writing anything', async () => {
+    vi.spyOn(
+      LocalManagedSessionResourceStore.prototype,
+      'publish',
+    ).mockRejectedValue(new Error('resource store unavailable'));
+    const config = managedConfig();
+    vi.spyOn(
+      config as unknown as { initializeInternal(): Promise<void> },
+      'initializeInternal',
+    ).mockResolvedValue(undefined);
+    await expect(config.initialize()).rejects.toThrow(
+      'resource store unavailable',
+    );
+    await config.closeSessionWriter().catch(() => undefined);
+    // Nothing was written, so there is nothing for a lock to guard.
+    await expect(
+      stat(sessionService().getSessionTranscriptPath(SESSION_ID)),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(
+      stat(getSessionWriterLockPath(runtimeDir, SESSION_ID)),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('seals a handoff close whose last flush failed', async () => {
+    const building = managedConfig();
+    building.setSessionWriterTakeoverPolicy('certified');
+    const config = await start(building);
+    recordUser(config, 'committed prompt');
+    await config.getChatRecordingService()!.flush();
+    const write = ManagedSessionRecordSink.prototype.write;
+    vi.spyOn(ManagedSessionRecordSink.prototype, 'write').mockImplementation(
+      async function (this: ManagedSessionRecordSink, record: ChatRecord) {
+        if (record.type === 'user') throw new Error('disk full');
+        return write.call(this, record);
+      },
+    );
+    recordUser(config, 'not recorded');
+
+    // A Legacy handoff keeps its lock active here; a Managed log is sealed at
+    // its committed position, which the failed record is not part of.
+    await config.closeSessionWriter({ handoff: true }).catch(() => undefined);
+    vi.restoreAllMocks();
+    expect(await lockRecord()).toMatchObject({
+      state: 'sealed',
+      schema_version: 3,
+    });
+    const restored = await start(restoringConfig());
+    expect(await activeChatTexts(restored)).toEqual(['committed prompt']);
+    await restored.closeSessionWriter();
+  });
+
+  it('restores a session whose title body is missing', async () => {
+    const first = await start(managedConfig());
+    await first
+      .getChatRecordingService()!
+      .recordCustomTitle('Managed title', 'manual');
+    recordUser(first, 'first prompt');
+    await first.closeSessionWriter();
+    await rm(
+      path.join(
+        managedSessionResourceRoot(runtimeDir, SESSION_ID),
+        'managed-session_metadata',
+      ),
+      { recursive: true },
+    );
+
+    // A damaged title costs the title, not the session.
+    await expect(
+      sessionService().readLiveRestoreProjection(SESSION_ID, {
+        replay: { kind: 'none' },
+      }),
+    ).resolves.toBeDefined();
+    const restored = await start(restoringConfig());
+    expect(
+      restored.getChatRecordingService()!.getCurrentCustomTitle(),
+    ).toBeUndefined();
+    expect(await activeChatTexts(restored)).toEqual(['first prompt']);
+    await restored.closeSessionWriter();
   });
 
   it('gives back the seal it took over when the log does not match it', async () => {

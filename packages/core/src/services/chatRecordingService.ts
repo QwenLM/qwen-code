@@ -1992,9 +1992,9 @@ export class ChatRecordingService {
         // Due anchors land first: a close without finalize(), such as a
         // handoff, still leaves the title and source where the session list
         // reads them, however far renewals moved the log since the last one.
-        if (flushFailure === undefined && !this.writeFailure) {
-          await this.anchorManagedMetadata(managedSink);
-        }
+        // A failed write does not skip them: an anchor the authority cannot
+        // take fails on its own, and the seal below still follows.
+        await this.anchorManagedMetadata(managedSink);
         try {
           // After the last record and before the seal: the authority refuses
           // a record that names a stopped activation.

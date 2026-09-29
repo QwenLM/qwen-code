@@ -413,15 +413,22 @@ export class ManagedSessionRecordSink {
     if (!payload?.compressedHistory) {
       throw new ManagedSessionUnmappedRecordError(record);
     }
+    // The range is the history the summary covers, read before the summary
+    // is published. The event itself is numbered where it commits: another
+    // writer, such as an activation renewal, can commit meanwhile, and the
+    // event must continue whatever sequence stands then.
+    const fromSequence = this.authority.compactedThroughSequence + 1;
+    const toSequence = this.authority.committedSequence;
+    const replacedMessageIds = this.authority
+      .eventsInSequenceRange(fromSequence, toSequence)
+      .filter((event) => event.kind === 'message.committed')
+      .map((event) => event.payload['messageId'] as string);
     const summaryRef = await this.resources.publish(
       'managed-compaction-summary',
       Buffer.from(JSON.stringify(record), 'utf8'),
     );
     const actor = this.actor();
     const held = actor.activation;
-    // The range is read where the event is numbered. An activation renewal
-    // can commit while the summary is published, and a range read before it
-    // would leave the event one short of the sequence it must continue.
     await this.authority.appendExecutionEvent(
       {
         operation: 'compactContext',
@@ -429,40 +436,32 @@ export class ManagedSessionRecordSink {
         sessionKey: this.authority.sessionHeader.sessionKey,
         contentDigest: summaryRef.digest,
       },
-      (sequence) => {
-        const fromSequence = this.authority.compactedThroughSequence + 1;
-        const toSequence = sequence - 1;
-        const replacedMessageIds = this.authority
-          .eventsInSequenceRange(fromSequence, toSequence)
-          .filter((event) => event.kind === 'message.committed')
-          .map((event) => event.payload['messageId'] as string);
-        return {
-          v: 1,
-          sequence,
-          eventId: `compaction:${record.uuid}`,
-          sessionKey: this.authority.sessionHeader.sessionKey,
-          kind: 'context.compacted',
-          occurredAt: Date.parse(record.timestamp) || Date.now(),
-          ...(held === undefined
-            ? {}
-            : {
-                subject: {
-                  type: 'activation',
-                  scopeId: held.activationId,
-                  activationId: held.activationId,
-                  epoch: held.epoch,
-                },
-              }),
-          payload: {
-            compactionId: record.uuid,
-            fromSequence,
-            toSequence,
-            summaryRef,
-            replacedMessageIds,
-            tokenCountsRef: null,
-          },
-        };
-      },
+      (sequence) => ({
+        v: 1,
+        sequence,
+        eventId: `compaction:${record.uuid}`,
+        sessionKey: this.authority.sessionHeader.sessionKey,
+        kind: 'context.compacted',
+        occurredAt: Date.parse(record.timestamp) || Date.now(),
+        ...(held === undefined
+          ? {}
+          : {
+              subject: {
+                type: 'activation',
+                scopeId: held.activationId,
+                activationId: held.activationId,
+                epoch: held.epoch,
+              },
+            }),
+        payload: {
+          compactionId: record.uuid,
+          fromSequence,
+          toSequence,
+          summaryRef,
+          replacedMessageIds,
+          tokenCountsRef: null,
+        },
+      }),
       actor,
     );
   }

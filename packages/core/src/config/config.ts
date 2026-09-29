@@ -4734,6 +4734,21 @@ export class Config {
   }
 
   /**
+   * Whether the transcript holds records and its head shows no Managed
+   * evidence, which makes it a Legacy session's. A missing or empty
+   * transcript is a new session, and an unreadable head tells nothing.
+   */
+  private isLegacyTranscript(): boolean {
+    const transcriptPath = this.getTranscriptPath();
+    try {
+      if (fs.statSync(transcriptPath).size === 0) return false;
+    } catch {
+      return false;
+    }
+    return readManagedExecutionEvidenceSync(transcriptPath) === false;
+  }
+
+  /**
    * Ends the writer of a Managed session whose activation failed.
    *
    * - A log that was opened is sealed at the authority's position.
@@ -4844,6 +4859,15 @@ export class Config {
     if (!this.chatRecordingEnabled || !this.sessionWriterLeaseEnabled) {
       return;
     }
+    if (managed && this.isLegacyTranscript()) {
+      // Refused before the lease is taken: a certified takeover would retire
+      // a Legacy session's seal, and the owner check after it could refuse
+      // the restore only once that seal was gone.
+      throw new SessionExecutionEngineError(
+        this.sessionId,
+        'belongs to legacy, cannot execute with managed',
+      );
+    }
     if (this.sessionWriterShutdownRequested) {
       throw new SessionWriterShutdownError();
     }
@@ -4859,9 +4883,11 @@ export class Config {
         qwenVersion: this.cliVersion ?? null,
         reclaimPolicy: this.sessionWriterReclaimPolicy,
         // A Managed writer pins its log format into the lock: a binary that
-        // does not know the Managed schema refuses the lock instead of
-        // writing into the log, and a sealed Managed lock is reopened only by
-        // a certified takeover that checks the log against the seal.
+        // does not know the Managed schema and takes the writer lease refuses
+        // the lock instead of writing into the log, and a sealed Managed lock
+        // is reopened only by a certified takeover that checks the log
+        // against the seal. Writers that take no lease, such as the TUI and
+        // the headless CLI, are refused by the log's own header instead.
         takeoverPolicy: managed
           ? 'certified'
           : this.sessionWriterTakeoverPolicy,
