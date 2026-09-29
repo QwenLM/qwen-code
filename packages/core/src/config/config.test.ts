@@ -22,6 +22,7 @@ import {
   APPROVAL_MODE_INFO,
   MCPServerConfig,
   deriveAgentConfig,
+  deriveApprovalModeConfig,
   deriveConfig,
   deriveWorktreeConfig,
   TrustGateError,
@@ -3110,20 +3111,24 @@ describe('Server Config (config.ts)', () => {
     });
 
     it('keeps pure skill reads and registers only admitted tools after a successful probe', async () => {
+      const resolvedPolicy = {
+        ...parameters().shellExecutionSandbox,
+        effectiveBackend: 'bwrap' as const,
+        enforcement: 'full' as const,
+      };
       const probe = vi
         .spyOn(sandboxPolicy, 'probeShellSandbox')
-        .mockResolvedValue();
+        .mockResolvedValue(resolvedPolicy);
       try {
         const config = new Config(parameters());
+        const admittedPolicy = config.getShellExecutionSandbox();
         const refreshExtensions = vi.spyOn(
           config.getExtensionManager(),
           'refreshCache',
         );
         await config.initialize();
-        expect(probe).toHaveBeenCalledWith(
-          config.getShellExecutionSandbox(),
-          undefined,
-        );
+        expect(probe).toHaveBeenCalledWith(admittedPolicy, undefined);
+        expect(config.getShellExecutionSandbox()).toBe(resolvedPolicy);
         expect(HookSystem).not.toHaveBeenCalled();
         expect(maybeRunAutoSkillCurator).not.toHaveBeenCalled();
         expect(refreshExtensions).not.toHaveBeenCalled();
@@ -3154,7 +3159,11 @@ describe('Server Config (config.ts)', () => {
     it('omits user-interaction tools from the admitted headless registry', async () => {
       const probe = vi
         .spyOn(sandboxPolicy, 'probeShellSandbox')
-        .mockResolvedValue();
+        .mockResolvedValue({
+          ...parameters().shellExecutionSandbox,
+          effectiveBackend: 'bwrap',
+          enforcement: 'full',
+        });
       try {
         const config = new Config({
           ...parameters(),
@@ -10083,34 +10092,42 @@ describe('Server Config (config.ts)', () => {
     vi.spyOn(config, 'getManagedAutoMemoryEnabled').mockReturnValue(true);
     vi.spyOn(config, 'getStructuredMemoryRecallEnabled').mockReturnValue(true);
     vi.spyOn(config, 'getProjectRoot').mockReturnValue('/tmp/project');
-    vi.spyOn(config, 'getTeamMemoryEnabled').mockReturnValue(false);
-    vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+    vi.spyOn(config, 'getTeamMemoryEnabled').mockReturnValue(true);
+    vi.spyOn(config, 'isTrustedFolder').mockReturnValue(false);
     const scan = vi
       .fn()
       .mockResolvedValue({ ready: true, revision: 'structured-revision' });
-    Object.assign(config, {
-      scanMemoryRecallCorpusStatus: scan,
-      buildAutoMemoryPromptForMode: vi
-        .fn()
-        .mockResolvedValue('structured prompt'),
+    Object.assign(config, { scanMemoryRecallCorpusStatus: scan });
+
+    scan.mockResolvedValueOnce({
+      ready: false,
+      revision: 'not-ready-revision',
     });
+    await expect(config.prepareMemoryRecallTransition()).resolves.toBe(
+      undefined,
+    );
+    expect(config.getMemoryRecallMode()).toBe('legacy');
 
     const transition = await config.prepareMemoryRecallTransition();
     expect(transition).toMatchObject({
       from: 'legacy',
       to: 'structured',
       revision: 'structured-revision',
-      autoMemoryPrompt: 'structured prompt',
-      previousRevision: 'legacy-revision',
+      previousRevision: 'not-ready-revision',
       previousAutoMemoryPrompt: 'legacy prompt',
     });
+    expect(transition?.autoMemoryPrompt).toContain(
+      'Use the complete tree and focused metadata for routing.',
+    );
+    expect(transition?.autoMemoryPrompt).not.toContain('TEAM:');
+    expect(rebuildTeamAutoMemoryIndex).not.toHaveBeenCalled();
     await expect(
       config.confirmMemoryRecallTransition(transition!),
     ).resolves.toBe(true);
 
     config.commitMemoryRecallTransition(transition!);
     expect(config.getMemoryRecallMode()).toBe('structured');
-    expect(config.getAutoMemoryPrompt()).toBe('structured prompt');
+    expect(config.getAutoMemoryPrompt()).toBe(transition?.autoMemoryPrompt);
 
     config.rollbackMemoryRecallTransition(transition!);
     expect(config.getMemoryRecallMode()).toBe('legacy');
@@ -10143,9 +10160,6 @@ describe('Server Config (config.ts)', () => {
       scanMemoryRecallCorpusStatus: vi
         .fn()
         .mockResolvedValue({ ready: true, revision: 'structured-revision' }),
-      buildAutoMemoryPromptForMode: vi
-        .fn()
-        .mockResolvedValue('structured prompt'),
     });
     vi.mocked(rebuildUserAutoMemoryIndex).mockRejectedValueOnce(
       new Error('EACCES: cannot read user root'),
@@ -10157,8 +10171,10 @@ describe('Server Config (config.ts)', () => {
       from: 'legacy',
       to: 'structured',
       revision: 'structured-revision',
-      autoMemoryPrompt: 'structured prompt',
     });
+    expect(transition?.autoMemoryPrompt).toContain(
+      'Use the complete tree and focused metadata for routing.',
+    );
   });
 
   it('prepareMemoryRecallTransition stays inert in safe mode', async () => {
@@ -10177,12 +10193,7 @@ describe('Server Config (config.ts)', () => {
     const scan = vi
       .fn()
       .mockResolvedValue({ ready: true, revision: 'structured-revision' });
-    Object.assign(config, {
-      scanMemoryRecallCorpusStatus: scan,
-      buildAutoMemoryPromptForMode: vi
-        .fn()
-        .mockResolvedValue('structured prompt'),
-    });
+    Object.assign(config, { scanMemoryRecallCorpusStatus: scan });
 
     await expect(config.prepareMemoryRecallTransition()).resolves.toBe(
       undefined,
@@ -10207,12 +10218,7 @@ describe('Server Config (config.ts)', () => {
     const scan = vi
       .fn()
       .mockResolvedValue({ ready: true, revision: 'structured-revision' });
-    Object.assign(config, {
-      scanMemoryRecallCorpusStatus: scan,
-      buildAutoMemoryPromptForMode: vi
-        .fn()
-        .mockResolvedValue('structured prompt'),
-    });
+    Object.assign(config, { scanMemoryRecallCorpusStatus: scan });
 
     await expect(config.prepareMemoryRecallTransition()).resolves.toBe(
       undefined,
@@ -13890,6 +13896,41 @@ describe('setApprovalMode with folder trust', () => {
   });
 
   describe('DAC plan workflow', () => {
+    it('notifies after a Plan execution mode is selected or changed', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+      config.setApprovalMode(ApprovalMode.YOLO);
+      const states: Array<{
+        mode: ApprovalMode;
+        prePlanMode: ApprovalMode;
+        executionMode: ApprovalMode | undefined;
+      }> = [];
+      config.onApprovalModeChange((mode, prePlanMode) => {
+        states.push({
+          mode,
+          prePlanMode: prePlanMode ?? ApprovalMode.DEFAULT,
+          executionMode: config.getPlanExecutionMode(),
+        });
+      });
+
+      config.setPlanMode(true, ApprovalMode.YOLO);
+      config.setPlanMode(true, ApprovalMode.AUTO_EDIT);
+      config.setPlanMode(true, ApprovalMode.AUTO_EDIT);
+
+      expect(states).toEqual([
+        {
+          mode: ApprovalMode.PLAN,
+          prePlanMode: ApprovalMode.YOLO,
+          executionMode: ApprovalMode.YOLO,
+        },
+        {
+          mode: ApprovalMode.PLAN,
+          prePlanMode: ApprovalMode.YOLO,
+          executionMode: ApprovalMode.AUTO_EDIT,
+        },
+      ]);
+    });
+
     it.each([
       ApprovalMode.DEFAULT,
       ApprovalMode.AUTO_EDIT,
@@ -13963,6 +14004,43 @@ describe('setApprovalMode with folder trust', () => {
   });
 
   describe('prePlanMode tracking', () => {
+    it('notifies canonical listeners after approval state changes', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+      const listener = vi.fn();
+      const unsubscribe = config.onApprovalModeChange(listener);
+
+      config.setApprovalMode(ApprovalMode.YOLO);
+      config.setApprovalMode(ApprovalMode.PLAN);
+      config.setApprovalMode(ApprovalMode.PLAN);
+      unsubscribe();
+      config.setApprovalMode(ApprovalMode.DEFAULT);
+
+      expect(listener).toHaveBeenNthCalledWith(1, ApprovalMode.YOLO, undefined);
+      expect(listener).toHaveBeenNthCalledWith(
+        2,
+        ApprovalMode.PLAN,
+        ApprovalMode.YOLO,
+      );
+      expect(listener).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not notify when trust rejects a mode or a derived config changes', () => {
+      const config = new Config(baseParams);
+      const listener = vi.fn();
+      config.onApprovalModeChange(listener);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(false);
+
+      expect(() => config.setApprovalMode(ApprovalMode.YOLO)).toThrow(
+        TrustGateError,
+      );
+      const derived = deriveApprovalModeConfig(config, ApprovalMode.PLAN);
+      derived.config.setApprovalMode(ApprovalMode.DEFAULT);
+
+      expect(listener).not.toHaveBeenCalled();
+      derived.cleanup();
+    });
+
     it('should save pre-plan mode when entering plan mode', () => {
       const config = new Config(baseParams);
       vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);

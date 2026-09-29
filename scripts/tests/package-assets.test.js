@@ -707,9 +707,12 @@ describe('package asset scripts', () => {
 
   it.each([
     'execution-worker.js',
-    'export-transcript-document.css',
     'mem0/main.js',
     'mem0/write-confirmation.js',
+    'sandboxBwrapRelay.js',
+    'sandboxLandlockRelay.js',
+    'sandboxFileWorker.js',
+    'export-transcript-document.css',
   ])('fails packaging when the published %s is missing', (missingArtifact) => {
     const rootDir = createFixtureRoot();
     createBundleArtifacts(rootDir);
@@ -1570,6 +1573,9 @@ describe('package asset scripts', () => {
     writeFile(rootDir, 'dist/mem0/write-confirmation.js', '');
     writeFile(rootDir, 'dist/cli.js', '');
     writeFile(rootDir, 'dist/execution-worker.js', '');
+    writeFile(rootDir, 'dist/sandboxBwrapRelay.js', '');
+    writeFile(rootDir, 'dist/sandboxLandlockRelay.js', '');
+    writeFile(rootDir, 'dist/sandboxFileWorker.js', '');
     mkdirSync(path.join(rootDir, 'dist', 'vendor'), { recursive: true });
     mkdirSync(path.join(rootDir, 'dist', 'bundled', 'qc-helper', 'docs'), {
       recursive: true,
