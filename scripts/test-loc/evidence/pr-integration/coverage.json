@@ -1,0 +1,235 @@
+{
+  "schemaVersion": 1,
+  "kind": "paired-current-main-to-pr-core-coverage",
+  "baselineRevision": "d5a157c45e6a41e79cb74968e1313c5f883054f5",
+  "candidateSourceRevision": "6fd7ccda75f5141ff722d6593f3f293209d52741",
+  "scope": "packages/core production source classified outside test/support paths; byte-identical in both revisions",
+  "measurement": {
+    "host": "local macOS",
+    "node": "v22.18.0 darwin-x64",
+    "vitest": "3.2.7",
+    "workers": 2,
+    "coverageProvider": "v8",
+    "reportOnFailure": true,
+    "runOrder": ["baseline", "candidate"]
+  },
+  "rawV8": {
+    "baselineFiles": 908,
+    "candidateFiles": 910,
+    "candidateOnlyTestSupportFiles": [
+      "src/core/openaiContentGenerator/provider/test-utils/reasoning-wire-contract.ts",
+      "src/test-utils/model-fixtures.ts"
+    ],
+    "baselineLines": {
+      "total": 272106,
+      "covered": 246968,
+      "skipped": 0,
+      "pct": 90.76
+    },
+    "candidateLines": {
+      "total": 272351,
+      "covered": 246463,
+      "skipped": 0,
+      "pct": 90.49
+    }
+  },
+  "productionCoverage": {
+    "filesBefore": 894,
+    "filesAfter": 894,
+    "fileSetsEqual": true,
+    "lineSetsEqual": true,
+    "before": {
+      "lines": 271090,
+      "coveredLines": 246183,
+      "branches": 84781,
+      "coveredBranches": 75110,
+      "linePercent": 90.8123,
+      "branchPercent": 88.593
+    },
+    "after": {
+      "lines": 271090,
+      "coveredLines": 245440,
+      "branches": 83947,
+      "coveredBranches": 73923,
+      "linePercent": 90.5382,
+      "branchPercent": 88.0591
+    },
+    "lostOldCoveredLines": 748,
+    "newCoveredLines": 5,
+    "lostLinePercentagePoints": 0.2759,
+    "netLinePercentagePointDrop": 0.2741,
+    "lostMatchedBranches": 250,
+    "branchShapeChangeLocations": 933,
+    "coverageBudgetMet": true,
+    "topLocalLosses": [
+      {
+        "file": "src/services/microcompaction/microcompact.ts",
+        "lost": 48,
+        "previouslyCovered": 760,
+        "lossPercentOfFormerlyCovered": 6.32
+      },
+      {
+        "file": "src/memory/memoryDiscovery.ts",
+        "lost": 43,
+        "previouslyCovered": 428,
+        "lossPercentOfFormerlyCovered": 10.05
+      },
+      {
+        "file": "src/core/openaiContentGenerator/streamingToolCallParser.ts",
+        "lost": 34,
+        "previouslyCovered": 339,
+        "lossPercentOfFormerlyCovered": 10.03
+      },
+      {
+        "file": "src/services/compactionInputSlimming.ts",
+        "lost": 33,
+        "previouslyCovered": 344,
+        "lossPercentOfFormerlyCovered": 9.59
+      },
+      {
+        "file": "src/services/postCompactAttachments.ts",
+        "lost": 33,
+        "previouslyCovered": 416,
+        "lossPercentOfFormerlyCovered": 7.93
+      },
+      {
+        "file": "src/core/openaiResponsesContentGenerator/responses-reasoning-rejection.ts",
+        "lost": 24,
+        "previouslyCovered": 336,
+        "lossPercentOfFormerlyCovered": 7.14
+      },
+      {
+        "file": "src/models/modelRegistry.ts",
+        "lost": 23,
+        "previouslyCovered": 360,
+        "lossPercentOfFormerlyCovered": 6.39
+      },
+      {
+        "file": "src/memory/extract.ts",
+        "lost": 18,
+        "previouslyCovered": 168,
+        "lossPercentOfFormerlyCovered": 10.71
+      },
+      {
+        "file": "src/services/visionBridge/tool-result-vision-bridge.ts",
+        "lost": 18,
+        "previouslyCovered": 155,
+        "lossPercentOfFormerlyCovered": 11.61
+      },
+      {
+        "file": "src/telemetry/resource-attributes.ts",
+        "lost": 18,
+        "previouslyCovered": 100,
+        "lossPercentOfFormerlyCovered": 18
+      },
+      {
+        "file": "src/services/chatRecordingService.ts",
+        "lost": 17,
+        "previouslyCovered": 1898,
+        "lossPercentOfFormerlyCovered": 0.9
+      },
+      {
+        "file": "src/utils/quotaErrorDetection.ts",
+        "lost": 15,
+        "previouslyCovered": 74,
+        "lossPercentOfFormerlyCovered": 20.27
+      },
+      {
+        "file": "src/utils/sideQuery.ts",
+        "lost": 15,
+        "previouslyCovered": 112,
+        "lossPercentOfFormerlyCovered": 13.39
+      },
+      {
+        "file": "src/services/media-memory/service.ts",
+        "lost": 14,
+        "previouslyCovered": 462,
+        "lossPercentOfFormerlyCovered": 3.03
+      },
+      {
+        "file": "src/tools/mcp-workspace-budget.ts",
+        "lost": 14,
+        "previouslyCovered": 144,
+        "lossPercentOfFormerlyCovered": 9.72
+      }
+    ]
+  },
+  "budget": {
+    "oldCoveredLineLossMaxPercentagePoints": 0.5,
+    "lineLossUsesFixedBaselineInstrumentedLines": true
+  },
+  "suiteHealth": {
+    "baseline": {
+      "files": 852,
+      "total": 33287,
+      "passed": 33234,
+      "failed": 13,
+      "pending": 40
+    },
+    "candidate": {
+      "files": 710,
+      "total": 30359,
+      "passed": 30313,
+      "failed": 13,
+      "pending": 33
+    },
+    "sharedFailedNames": [
+      "BackgroundAgentResumeService matches the launch-time skill listing when the definition declares a non-array disallowedTools value",
+      "BackgroundAgentResumeService matches the launch-time skill listing when the definition declares a null tools value",
+      "BackgroundAgentResumeService matches the launch-time skill listing when the definition declares a wildcard tools string",
+      "BackgroundAgentResumeService matches the launch-time skill listing when the definition declares an empty tools list",
+      "BackgroundAgentResumeService matches the launch-time skill listing when the definition declares an empty tools string",
+      "BackgroundAgentResumeService matches the launch-time skill listing when the definition inherits every tool",
+      "BackgroundAgentResumeService matches the launch-time skill listing when the definition names exec without skill under CodeModeOnly",
+      "auto-memory recall scan latency publishes the cold-scan fast result inside the initial budget",
+      "gitPull dirty-tree flows against a concurrent terminal pulls again once a pruned upstream branch is recreated on the remote",
+      "isolated code mode host does not charge nested tool wait time against the guest CPU budget",
+      "isolated code mode host does not charge timer wait time against the guest CPU budget",
+      "isolated code mode host does not keep exec alive for an unawaited timer"
+    ],
+    "baselineOnlyFailedNames": [
+      "a planted git program reaches no automatic git call the post-index-change fixture is a live attack: an ungated status runs it"
+    ],
+    "candidateOnlyFailedNames": [
+      "ShellTool session commit tracking (issue #12460) registers a commit spelled with a Windows `.exe` git path (issue #12514)"
+    ],
+    "candidateOnlyFailureFocusedBaselineReproduction": {
+      "name": "ShellTool session commit tracking (issue #12460) registers a commit spelled with a Windows `.exe` git path (issue #12514)",
+      "reproducedWithOriginalMainTest": true,
+      "observation": "A copied /usr/bin/git executed as git.exe receives SIGKILL before creating the commit on this macOS host; copying and executing Homebrew Git succeeds."
+    }
+  },
+  "rawArtifacts": {
+    "base-tests.json": {
+      "bytes": 51894612,
+      "sha256": "06e543127a3df8f896c663948b590e7e3f6f6f9e926207a60ba23db22e9eff80"
+    },
+    "candidate-tests.json": {
+      "bytes": 50802628,
+      "sha256": "ee743ae8c928aeaf771a9c16899e2cbb57e2e32ebf0a92396dddd4310d712d81"
+    },
+    "base-lcov.info": {
+      "bytes": 4954578,
+      "sha256": "897b0ef9396a4b72d1c2bf2088e455155f78ae71bd1142aa7a4186237adb264b"
+    },
+    "candidate-lcov.info": {
+      "bytes": 4938549,
+      "sha256": "2895886cd87126a1eb0faebf47a7ae5879d9ea98abb78fafe2f3ce33f1a51a0a"
+    },
+    "base-coverage-summary.json": {
+      "bytes": 351705,
+      "sha256": "1e61eeac61210ea42d1cfa7d2e50ca2fd431718e946993209d2ad9a33d62c4a1"
+    },
+    "candidate-coverage-summary.json": {
+      "bytes": 320716,
+      "sha256": "7a259f33f86d1c1661d362c0ccc0485a04c6deacdf41629c9c0b64dac2af5494"
+    }
+  },
+  "limitations": [
+    "One paired run on macOS; A/A coverage variability was not measured.",
+    "Two candidate-only test support files in the raw V8 reports are excluded from the production-only coverage comparison.",
+    "Branch totals and shape changed; branch percentages are descriptive, and matched branch losses are reported separately.",
+    "The newest-main-to-PR historical fault and mutation replays have not been run.",
+    "Windows and Linux were not run for this latest integration."
+  ]
+}
