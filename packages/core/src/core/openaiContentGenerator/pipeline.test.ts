@@ -7285,7 +7285,7 @@ describe('ContentGenerationPipeline', () => {
           config: { maxOutputTokens: 8192 },
         });
 
-        expect(sent.max_tokens).toBe(8192);
+        expect(sent['max_tokens']).toBe(8192);
         expect(ctx.maxOutputTokens).toBe(8192);
       });
 
