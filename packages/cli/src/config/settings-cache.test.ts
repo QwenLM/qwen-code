@@ -278,6 +278,36 @@ describe('loadSettingsCached', () => {
     expect(loadSettingsCached(workspaceDir)).toBe(recovered);
   });
 
+  it('reports a half-written workspace file in strict mode instead of resetting it', () => {
+    const strict = { preserveInvalidWorkspaceSettings: true };
+    writeJson(
+      workspaceSettingsPath(),
+      versioned({ model: { name: 'ws-app' } }),
+    );
+    expect(loadSettingsCached(workspaceDir, strict).merged.model?.name).toBe(
+      'ws-app',
+    );
+
+    const torn = '{"model":{"na';
+    fs.writeFileSync(workspaceSettingsPath(), torn);
+    expect(() => loadSettingsCached(workspaceDir, strict)).toThrow();
+    // Nothing was rewritten, so the setting comes back once the write lands.
+    expect(fs.readFileSync(workspaceSettingsPath(), 'utf8')).toBe(torn);
+    expect(fs.existsSync(`${workspaceSettingsPath()}.corrupted`)).toBe(false);
+
+    // The default mode still recovers the file, and its entry never answers
+    // a strict caller.
+    expect(loadSettingsCached(workspaceDir).merged.model?.name).toBeUndefined();
+    expect(fs.existsSync(`${workspaceSettingsPath()}.corrupted`)).toBe(true);
+    writeJson(
+      workspaceSettingsPath(),
+      versioned({ model: { name: 'ws-fixed' } }),
+    );
+    expect(loadSettingsCached(workspaceDir, strict).merged.model?.name).toBe(
+      'ws-fixed',
+    );
+  });
+
   it('keeps independent entries per workspace directory', () => {
     const otherWorkspace = path.join(tmpRoot, 'project', 'other');
     fs.mkdirSync(otherWorkspace, { recursive: true });

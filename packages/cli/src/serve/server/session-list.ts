@@ -38,8 +38,8 @@ import { laterActivityTimestamp } from './activity-timestamp.js';
 import { classifyTopLevelConversationSource } from '../../runtime/live-session-source.js';
 import { parseCallerSuppliedSessionId } from '../../config/session-id.js';
 import {
-  AGENT_HOST_SESSION_SOURCE_TYPE,
-  AGENT_SESSION_SOURCE_TYPE,
+  HIDDEN_CATALOG_SOURCE_TYPES,
+  isHiddenCatalogSource,
 } from '../../runtime/agent-session-source.js';
 
 const DEFAULT_SESSION_PAGE_SIZE = 20;
@@ -733,10 +733,7 @@ async function loadAllPersistedSummaries(
       size: 10_000,
       archiveState,
       signal,
-      excludeSourceTypes: [
-        AGENT_HOST_SESSION_SOURCE_TYPE,
-        AGENT_SESSION_SOURCE_TYPE,
-      ],
+      excludeSourceTypes: [...HIDDEN_CATALOG_SOURCE_TYPES],
     });
     signal.throwIfAborted();
     const remaining = MAX_ORGANIZED_SESSIONS - sessions.length;
@@ -1101,7 +1098,7 @@ async function listOrganizedWorkspaceSessionsForResponse(
   }
 
   const filtered = [...bySessionId.values()].filter((session) => {
-    if (session.sourceType === AGENT_HOST_SESSION_SOURCE_TYPE) return false;
+    if (isHiddenCatalogSource(session.sourceType)) return false;
     if (!matchesSessionMetadataSource(session, options)) return false;
     if (group === 'all') return true;
     if (group === 'pinned') return session.isPinned === true;
@@ -1303,7 +1300,7 @@ async function listWorkspaceSessionsByMetadataForResponse(
   const matches = [...bySessionId.values()]
     .filter(
       (session) =>
-        session.sourceType !== AGENT_HOST_SESSION_SOURCE_TYPE &&
+        !isHiddenCatalogSource(session.sourceType) &&
         (filter.parentSessionId === undefined ||
           session.parentSessionId === filter.parentSessionId) &&
         matchesSessionMetadataSource(session, filter),
@@ -1471,10 +1468,7 @@ async function listWorkspaceSessionsForResponseInRuntime(
     cursor: numericCursor,
     size: pageSize,
     archiveState,
-    excludeSourceTypes: [
-      AGENT_HOST_SESSION_SOURCE_TYPE,
-      AGENT_SESSION_SOURCE_TYPE,
-    ],
+    excludeSourceTypes: [...HIDDEN_CATALOG_SOURCE_TYPES],
     ...(readOptions.signal ? { signal: readOptions.signal } : {}),
   });
   readOptions.signal?.throwIfAborted();
@@ -1507,7 +1501,7 @@ async function listWorkspaceSessionsForResponseInRuntime(
 
   const liveSessions = bridge
     .listWorkspaceSessions(workspaceCwd)
-    .filter((session) => session.sourceType !== AGENT_HOST_SESSION_SOURCE_TYPE);
+    .filter((session) => !isHiddenCatalogSource(session.sourceType));
   for (const live of liveSessions) {
     const existing = bySessionId.get(live.sessionId);
     if (existing) {
@@ -1574,9 +1568,7 @@ export async function listLiveWorkspaceSessionsForResponse(
         : undefined;
     const sessions = bridge
       .listWorkspaceSessions(workspaceCwd)
-      .filter(
-        (session) => session.sourceType !== AGENT_HOST_SESSION_SOURCE_TYPE,
-      )
+      .filter((session) => !isHiddenCatalogSource(session.sourceType))
       .sort((a, b) =>
         compareLiveSessionCursorKeys(
           getLiveSessionCursorKey(a),
@@ -1657,7 +1649,7 @@ export async function searchWorkspaceSessionsForResponse(
     for (const hit of hits) {
       readOptions.signal?.throwIfAborted();
       const item = await sessionService.getSessionListItem(hit.sessionId);
-      if (item && item.sourceType !== AGENT_HOST_SESSION_SOURCE_TYPE)
+      if (item && !isHiddenCatalogSource(item.sourceType))
         bySessionId.set(
           hit.sessionId,
           applyOrganization(
@@ -1701,10 +1693,7 @@ export async function getWorkspaceSessionInfoForResponse(
   options: { includeLive?: boolean } = {},
 ): Promise<WorkspaceSessionInfoResult> {
   const counts = await new SessionService(workspaceCwd).getSessionInfoCounts({
-    excludeSourceTypes: [
-      AGENT_HOST_SESSION_SOURCE_TYPE,
-      AGENT_SESSION_SOURCE_TYPE,
-    ],
+    excludeSourceTypes: [...HIDDEN_CATALOG_SOURCE_TYPES],
   });
   return {
     active: counts.active,
@@ -1715,10 +1704,8 @@ export async function getWorkspaceSessionInfoForResponse(
       : {
           live: bridge
             .listWorkspaceSessions(workspaceCwd)
-            .filter(
-              (session) =>
-                session.sourceType !== AGENT_HOST_SESSION_SOURCE_TYPE,
-            ).length,
+            .filter((session) => !isHiddenCatalogSource(session.sourceType))
+            .length,
         }),
     expensive: true,
     cost: 'disk_scan',

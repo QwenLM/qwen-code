@@ -1588,12 +1588,11 @@ export function createServeApp(
   // without a daemon restart.
   // A settings file caught mid-edit (half-written JSON) keeps the last answer
   // read for that workspace: reading it as "off" would strand every live run
-  // there within one recovery tick. This holds for the user and system scopes
-  // only. A *workspace*-scope parse error never reaches this catch: the loader
-  // recovers it instead of rethrowing, and that recovery replaces the invalid
-  // JSON with a valid `{}` before returning — so neither this predicate nor an
-  // after-the-fact re-read can tell corruption from a real opt-out. Only
-  // `LoadedSettings.corruptedPath` knows, and it is wired for user scope alone.
+  // there within one recovery tick. The load asks the loader to report a
+  // broken workspace file rather than recover it — recovery rewrites the file
+  // to `{}`, which this predicate could not tell from a real opt-out, and the
+  // rewrite would make the opt-out permanent. User and system scopes already
+  // throw on a parse error.
   const lastAgentCollaborationSetting = new Map<string, boolean>();
   const isAgentCollaborationEnabledFor = (workspaceCwd: string): boolean => {
     if (process.env['QWEN_CODE_ENABLE_AGENT_COLLABORATION'] === '1')
@@ -1603,7 +1602,9 @@ export function createServeApp(
       // cache hit/miss lines belong to no session, and writing them into
       // whichever one is ambient breaks untrusted-read log isolation.
       const settings = runWithoutDebugLogSession(() =>
-        loadSettingsCached(workspaceCwd),
+        loadSettingsCached(workspaceCwd, {
+          preserveInvalidWorkspaceSettings: true,
+        }),
       );
       const enabled = settings.merged.experimental?.agentCollaboration === true;
       lastAgentCollaborationSetting.set(workspaceCwd, enabled);

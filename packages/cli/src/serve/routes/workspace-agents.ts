@@ -406,15 +406,31 @@ export function registerWorkspaceAgentRoutes(
   let recovering = false;
   let recoveryStopped = false;
 
-  // Shared by the no-addressable-agents path and the opted-out path: deliver
-  // what needs no agent, stop the owner (draining its in-flight tick first),
-  // then release and close the claimed host session.
+  // Shared by the no-addressable-agents path and the opted-out path: stop the
+  // owner, close its agent sessions, deliver what needs no agent, then release
+  // the claimed host session. Turning the feature off also cancels active turns
+  // before closing them; otherwise their models keep running after the stored
+  // runs have already been marked stranded.
   const teardownWorkspaceOwner = async (
     runtime: WorkspaceRuntime,
+    cancelAgentSessions = false,
   ): Promise<void> => {
-    await deliverParentReports(runtime.workspaceCwd);
     await owners.get(runtime.workspaceCwd)?.owner.stop();
     owners.delete(runtime.workspaceCwd);
+    await Promise.all(
+      runtime.bridge
+        .listWorkspaceSessions(runtime.workspaceCwd)
+        .filter((session) => session.sourceType === AGENT_SESSION_SOURCE_TYPE)
+        .map(async (session) => {
+          if (cancelAgentSessions) {
+            await runtime.bridge
+              .cancelSession(session.sessionId)
+              .catch(() => {});
+          }
+          await runtime.bridge.closeSession(session.sessionId).catch(() => {});
+        }),
+    );
+    await deliverParentReports(runtime.workspaceCwd);
     const workspace = await readAgentWorkspace(runtime.workspaceCwd);
     if (workspace.hostSessionId) {
       await releaseAgentHostSession(
@@ -451,8 +467,8 @@ export function registerWorkspaceAgentRoutes(
             ) {
               continue;
             }
+            await teardownWorkspaceOwner(runtime, true);
             await strandLocalRuns(runtime.workspaceCwd);
-            await teardownWorkspaceOwner(runtime);
             continue;
           }
           const [agents, { threads }] = await Promise.all([
@@ -476,11 +492,19 @@ export function registerWorkspaceAgentRoutes(
             ),
           );
           const hasWork = hasLiveRuns || hasPendingReports;
-          if (!hasRoster && !hasWork) continue;
           if (!hasRoster && !hasLiveRuns) {
             // Nobody here can take work anymore. Deliver what needs no agent,
-            // then tear the owner down exactly as the DELETE route does.
-            await teardownWorkspaceOwner(runtime);
+            // then tear the owner down exactly as the DELETE route does. An
+            // unused workspace has nothing to tear down and must not require a
+            // bridge call merely because recovery observed its empty store.
+            const workspace = await readAgentWorkspace(runtime.workspaceCwd);
+            if (
+              hasPendingReports ||
+              owners.has(runtime.workspaceCwd) ||
+              workspace.hostSessionId
+            ) {
+              await teardownWorkspaceOwner(runtime);
+            }
             continue;
           }
           const owner = owners.get(runtime.workspaceCwd);
@@ -1286,43 +1310,33 @@ export function registerWorkspaceAgentRoutes(
           res.status(409).json({ error: 'agent_has_live_work' });
           return;
         }
-        await Promise.all(
-          runtime.bridge
-            .listWorkspaceSessions(runtime.workspaceCwd)
-            .filter(
-              (session) =>
-                session.sourceType === AGENT_SESSION_SOURCE_TYPE &&
-                session.sourceId === agentId,
-            )
-            .map((session) =>
-              runtime.bridge.closeSession(session.sessionId).catch(() => {}),
-            ),
-        );
         // Retiring keeps the roster entry, so "is anyone left" is a question
         // about who can still take work, not about how many rows exist.
-        const remainingAgents = (
-          await readWorkspaceAgents(runtime.workspaceCwd)
-        ).filter(isAgentAddressable);
+        const [agents, { threads }] = await Promise.all([
+          readWorkspaceAgents(runtime.workspaceCwd),
+          listThreads(runtime.workspaceCwd),
+        ]);
+        const remainingAgents = agents.filter(isAgentAddressable);
+        const hasLiveRuns = threads.some((thread) => liveRunCount(thread) > 0);
         const dispatchError =
           remainingAgents.length > 0
             ? await startBookedRuns(runtime)
             : undefined;
-        if (remainingAgents.length === 0) {
-          // Drain the owner's in-flight tick before releasing the host
-          // session, or a concurrent ensure() can spawn a replacement that
-          // nothing heartbeats or closes.
-          await owners.get(runtime.workspaceCwd)?.owner.stop();
-          owners.delete(runtime.workspaceCwd);
-          const workspace = await readAgentWorkspace(runtime.workspaceCwd);
-          if (workspace.hostSessionId) {
-            await releaseAgentHostSession(
-              runtime.workspaceCwd,
-              workspace.hostSessionId,
-            );
-            await runtime.bridge
-              .closeSession(workspace.hostSessionId)
-              .catch(() => {});
-          }
+        if (remainingAgents.length === 0 && !hasLiveRuns) {
+          await teardownWorkspaceOwner(runtime);
+        } else {
+          await Promise.all(
+            runtime.bridge
+              .listWorkspaceSessions(runtime.workspaceCwd)
+              .filter(
+                (session) =>
+                  session.sourceType === AGENT_SESSION_SOURCE_TYPE &&
+                  session.sourceId === agentId,
+              )
+              .map((session) =>
+                runtime.bridge.closeSession(session.sessionId).catch(() => {}),
+              ),
+          );
         }
         res.json({
           id: agentId,
@@ -1508,7 +1522,18 @@ export function registerWorkspaceAgentRoutes(
             return;
           }
         }
-        const dispatchError = await startBookedRuns(runtime);
+        const [agents, { threads }] = await Promise.all([
+          readWorkspaceAgents(runtime.workspaceCwd),
+          listThreads(runtime.workspaceCwd),
+        ]);
+        const hasAddressableAgent = agents.some(isAgentAddressable);
+        const hasLiveRuns = threads.some((thread) => liveRunCount(thread) > 0);
+        const dispatchError = hasAddressableAgent
+          ? await startBookedRuns(runtime)
+          : undefined;
+        if (!hasAddressableAgent && !hasLiveRuns) {
+          await teardownWorkspaceOwner(runtime);
+        }
         res.json({
           id: agentId,
           ...(enabled !== undefined ? { enabled } : {}),
