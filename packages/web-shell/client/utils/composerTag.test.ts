@@ -489,6 +489,41 @@ describe('composer tag input annotations', () => {
     ).toEqual([]);
   });
 
+  it('falls back to a unique textual match when a known placement is stale', () => {
+    // The editor range no longer matches the prompt text (the document text
+    // under a chip drifted from its serialized form, e.g. an edit inside the
+    // chip's range): a serialized form occurring exactly once can still be
+    // annotated without risking the wrong span, while a repeated one stays
+    // plain text.
+    const content = 'open @foo and @bar then @foo';
+    expect(
+      createInputAnnotationsFromComposerTags(
+        content,
+        [],
+        [
+          {
+            start: 0,
+            end: 3,
+            tag: { id: 'file:@bar', kind: 'file', value: '@bar' },
+          },
+          {
+            start: 0,
+            end: 3,
+            tag: { id: 'file:@foo', kind: 'file', value: '@foo' },
+          },
+        ],
+      ),
+    ).toEqual([
+      {
+        type: 'reference',
+        start: 14,
+        end: 18,
+        text: '@bar',
+        reference: { id: 'file:@bar', kind: 'file', value: '@bar' },
+      },
+    ]);
+  });
+
   it('uses annotations for custom provider references', () => {
     expect(
       splitComposerTagContentByAnnotations('open @dataset:users now', [

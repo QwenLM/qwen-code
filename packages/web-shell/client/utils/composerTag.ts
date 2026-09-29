@@ -218,15 +218,31 @@ export function createInputAnnotationsFromComposerTags(
     // Offsets cross a coordinate-space boundary here (editor document vs
     // final prompt); never emit an annotation whose text does not match.
     if (
-      start < 0 ||
-      end <= start ||
-      end > content.length ||
-      content.slice(start, end) !== serialized
+      start >= 0 &&
+      end > start &&
+      end <= content.length &&
+      content.slice(start, end) === serialized
     ) {
+      annotations.push(
+        createReferenceAnnotation(placement.tag, start, end, serialized),
+      );
       continue;
     }
+    // A stale range (the document text under a chip can drift from its
+    // serialized form, which also shifts every later chip) must not drop the
+    // annotation outright: fall back to the text, but only when the
+    // serialized form occurs exactly once. A unique match cannot annotate
+    // the wrong span; a repeated one stays plain text rather than guessing
+    // (#12980).
+    const first = content.indexOf(serialized);
+    if (first < 0 || first !== content.lastIndexOf(serialized)) continue;
     annotations.push(
-      createReferenceAnnotation(placement.tag, start, end, serialized),
+      createReferenceAnnotation(
+        placement.tag,
+        first,
+        first + serialized.length,
+        serialized,
+      ),
     );
   }
   return annotations;

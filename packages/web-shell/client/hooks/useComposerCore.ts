@@ -2861,10 +2861,13 @@ export function useComposerCore(
     const prompt = buildComposerPrompt(text, tags);
     const isShellMode = shellModeRef.current;
     const promptText = isShellMode && prompt ? `!${prompt}` : prompt;
-    // Inline chip placements are offsets into `text`; shift them past the
-    // prompt prefix (top tags plus the blank separator, and the shell-mode
-    // `!`) so annotations land on the chips instead of earlier plain text
-    // spelled the same (#12980).
+    // Inline chip placements are offsets into the pre-substitution editor
+    // document; they stay valid for `text` only while substitution preserves
+    // their length, and the annotation generator validates each range (with
+    // a unique-match fallback) for anything else. Shift them past the prompt
+    // prefix (top tags plus the blank separator, and the shell-mode `!`) so
+    // annotations land on the chips instead of earlier plain text spelled
+    // the same (#12980).
     const promptPrefixLength = promptText.length - text.length;
     const generatedInputAnnotations = createInputAnnotationsFromComposerTags(
       promptText,
