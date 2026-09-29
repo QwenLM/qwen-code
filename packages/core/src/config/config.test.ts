@@ -2677,13 +2677,10 @@ describe('Server Config (config.ts)', () => {
       ToolNames.LS,
     ];
     /** Run `body` with the sandbox probe rejecting with `failure` (or resolving). */
-    async function withProbe(
-      failure: Error | undefined,
-      body: () => Promise<void>,
-    ) {
-      const probe = vi.spyOn(sandboxPolicy, 'probeShellSandbox');
-      if (failure) probe.mockRejectedValue(failure);
-      else probe.mockResolvedValue();
+    async function withProbe(failure: Error, body: () => Promise<void>) {
+      const probe = vi
+        .spyOn(sandboxPolicy, 'probeShellSandbox')
+        .mockRejectedValue(failure);
       try {
         await body();
       } finally {
@@ -2702,18 +2699,25 @@ describe('Server Config (config.ts)', () => {
         expect(ToolRegistry.prototype.registerFactory).not.toHaveBeenCalled();
       }));
 
-    it('keeps pure skill reads and registers only admitted tools after a successful probe', () =>
-      withProbe(undefined, async () => {
+    it('keeps pure skill reads and registers only admitted tools after a successful probe', async () => {
+      const resolvedPolicy = {
+        ...parameters().shellExecutionSandbox,
+        effectiveBackend: 'bwrap' as const,
+        enforcement: 'full' as const,
+      };
+      const probe = vi
+        .spyOn(sandboxPolicy, 'probeShellSandbox')
+        .mockResolvedValue(resolvedPolicy);
+      try {
         const config = new Config(parameters());
+        const admittedPolicy = config.getShellExecutionSandbox();
         const refreshExtensions = vi.spyOn(
           config.getExtensionManager(),
           'refreshCache',
         );
         await config.initialize();
-        expect(sandboxPolicy.probeShellSandbox).toHaveBeenCalledWith(
-          config.getShellExecutionSandbox(),
-          undefined,
-        );
+        expect(probe).toHaveBeenCalledWith(admittedPolicy, undefined);
+        expect(config.getShellExecutionSandbox()).toBe(resolvedPolicy);
         expect(HookSystem).not.toHaveBeenCalled();
         expect(maybeRunAutoSkillCurator).not.toHaveBeenCalled();
         expect(refreshExtensions).not.toHaveBeenCalled();
@@ -2724,10 +2728,20 @@ describe('Server Config (config.ts)', () => {
           ToolNames.ASK_USER_QUESTION,
         ]);
         expect(ToolRegistry.prototype.discoverAllTools).not.toHaveBeenCalled();
-      }));
+      } finally {
+        probe.mockRestore();
+      }
+    });
 
-    it('omits user-interaction tools from the admitted headless registry', () =>
-      withProbe(undefined, async () => {
+    it('omits user-interaction tools from the admitted headless registry', async () => {
+      const probe = vi
+        .spyOn(sandboxPolicy, 'probeShellSandbox')
+        .mockResolvedValue({
+          ...parameters().shellExecutionSandbox,
+          effectiveBackend: 'bwrap',
+          enforcement: 'full',
+        });
+      try {
         const config = new Config({
           ...parameters(),
           interactive: false,
@@ -2735,7 +2749,10 @@ describe('Server Config (config.ts)', () => {
         });
         await config.initialize();
         expect(registeredToolNames()).toEqual(ADMITTED_TOOLS);
-      }));
+      } finally {
+        probe.mockRestore();
+      }
+    });
   });
 
   describe('derived Config ownership', () => {
@@ -7450,34 +7467,42 @@ describe('Server Config (config.ts)', () => {
     vi.spyOn(config, 'getManagedAutoMemoryEnabled').mockReturnValue(true);
     vi.spyOn(config, 'getStructuredMemoryRecallEnabled').mockReturnValue(true);
     vi.spyOn(config, 'getProjectRoot').mockReturnValue('/tmp/project');
-    vi.spyOn(config, 'getTeamMemoryEnabled').mockReturnValue(false);
-    vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+    vi.spyOn(config, 'getTeamMemoryEnabled').mockReturnValue(true);
+    vi.spyOn(config, 'isTrustedFolder').mockReturnValue(false);
     const scan = vi
       .fn()
       .mockResolvedValue({ ready: true, revision: 'structured-revision' });
-    Object.assign(config, {
-      scanMemoryRecallCorpusStatus: scan,
-      buildAutoMemoryPromptForMode: vi
-        .fn()
-        .mockResolvedValue('structured prompt'),
+    Object.assign(config, { scanMemoryRecallCorpusStatus: scan });
+
+    scan.mockResolvedValueOnce({
+      ready: false,
+      revision: 'not-ready-revision',
     });
+    await expect(config.prepareMemoryRecallTransition()).resolves.toBe(
+      undefined,
+    );
+    expect(config.getMemoryRecallMode()).toBe('legacy');
 
     const transition = await config.prepareMemoryRecallTransition();
     expect(transition).toMatchObject({
       from: 'legacy',
       to: 'structured',
       revision: 'structured-revision',
-      autoMemoryPrompt: 'structured prompt',
-      previousRevision: 'legacy-revision',
+      previousRevision: 'not-ready-revision',
       previousAutoMemoryPrompt: 'legacy prompt',
     });
+    expect(transition?.autoMemoryPrompt).toContain(
+      'Use the complete tree and focused metadata for routing.',
+    );
+    expect(transition?.autoMemoryPrompt).not.toContain('TEAM:');
+    expect(rebuildTeamAutoMemoryIndex).not.toHaveBeenCalled();
     await expect(
       config.confirmMemoryRecallTransition(transition!),
     ).resolves.toBe(true);
 
     config.commitMemoryRecallTransition(transition!);
     expect(config.getMemoryRecallMode()).toBe('structured');
-    expect(config.getAutoMemoryPrompt()).toBe('structured prompt');
+    expect(config.getAutoMemoryPrompt()).toBe(transition?.autoMemoryPrompt);
 
     config.rollbackMemoryRecallTransition(transition!);
     expect(config.getMemoryRecallMode()).toBe('legacy');
@@ -7510,9 +7535,6 @@ describe('Server Config (config.ts)', () => {
       scanMemoryRecallCorpusStatus: vi
         .fn()
         .mockResolvedValue({ ready: true, revision: 'structured-revision' }),
-      buildAutoMemoryPromptForMode: vi
-        .fn()
-        .mockResolvedValue('structured prompt'),
     });
     vi.mocked(rebuildUserAutoMemoryIndex).mockRejectedValueOnce(
       new Error('EACCES: cannot read user root'),
@@ -7524,8 +7546,10 @@ describe('Server Config (config.ts)', () => {
       from: 'legacy',
       to: 'structured',
       revision: 'structured-revision',
-      autoMemoryPrompt: 'structured prompt',
     });
+    expect(transition?.autoMemoryPrompt).toContain(
+      'Use the complete tree and focused metadata for routing.',
+    );
   });
 
   it('prepareMemoryRecallTransition stays inert in safe mode', async () => {
@@ -7544,12 +7568,7 @@ describe('Server Config (config.ts)', () => {
     const scan = vi
       .fn()
       .mockResolvedValue({ ready: true, revision: 'structured-revision' });
-    Object.assign(config, {
-      scanMemoryRecallCorpusStatus: scan,
-      buildAutoMemoryPromptForMode: vi
-        .fn()
-        .mockResolvedValue('structured prompt'),
-    });
+    Object.assign(config, { scanMemoryRecallCorpusStatus: scan });
 
     await expect(config.prepareMemoryRecallTransition()).resolves.toBe(
       undefined,
@@ -7574,12 +7593,7 @@ describe('Server Config (config.ts)', () => {
     const scan = vi
       .fn()
       .mockResolvedValue({ ready: true, revision: 'structured-revision' });
-    Object.assign(config, {
-      scanMemoryRecallCorpusStatus: scan,
-      buildAutoMemoryPromptForMode: vi
-        .fn()
-        .mockResolvedValue('structured prompt'),
-    });
+    Object.assign(config, { scanMemoryRecallCorpusStatus: scan });
 
     await expect(config.prepareMemoryRecallTransition()).resolves.toBe(
       undefined,

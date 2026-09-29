@@ -922,6 +922,10 @@ class ManagedAgentApiContractTest {
         exchange(drift, "listSessionTasks", 404,
                 get("/v1/agents/sessions/{id}/tasks", sessionId)
                         .header(TENANT, otherTenant), null);
+        exchange(drift, "listSessionTasks", 403,
+                get("/v1/agents/sessions/{id}/tasks", sessionId)
+                        .header(TENANT, tenant)
+                        .principal(actor(otherTenant)), null);
         exchange(drift, "getSessionTask", 200,
                 get("/v1/agents/sessions/{id}/tasks/{task}", sessionId,
                         rest.at("/data/0/id").asText()).header(TENANT, tenant),
@@ -932,6 +936,10 @@ class ManagedAgentApiContractTest {
         exchange(drift, "getSessionTask", 400,
                 get("/v1/agents/sessions/{id}/tasks/{task}", sessionId,
                         taskId), null);
+        exchange(drift, "getSessionTask", 403,
+                get("/v1/agents/sessions/{id}/tasks/{task}", sessionId,
+                        taskId).header(TENANT, tenant)
+                        .principal(actor(otherTenant)), null);
         exchange(drift, "queryWebShellTasks", 200,
                 post(WEB_SHELL + "/tasks/query").header(TENANT, tenant),
                 "{\"sessionId\":\"%s\",\"limit\":1}".formatted(sessionId));
@@ -940,6 +948,10 @@ class ManagedAgentApiContractTest {
                 "{\"sessionId\":\"%s\",\"limit\":0}".formatted(sessionId));
         exchange(drift, "queryWebShellTasks", 404,
                 post(WEB_SHELL + "/tasks/query").header(TENANT, otherTenant),
+                "{\"sessionId\":\"%s\"}".formatted(sessionId));
+        exchange(drift, "queryWebShellTasks", 403,
+                post(WEB_SHELL + "/tasks/query").header(TENANT, tenant)
+                        .principal(actor(otherTenant)),
                 "{\"sessionId\":\"%s\"}".formatted(sessionId));
         exchange(drift, "getWebShellTask", 200,
                 post(WEB_SHELL + "/tasks/get").header(TENANT, tenant),
@@ -952,6 +964,11 @@ class ManagedAgentApiContractTest {
         exchange(drift, "getWebShellTask", 400,
                 post(WEB_SHELL + "/tasks/get").header(TENANT, tenant),
                 "{\"sessionId\":\"%s\"}".formatted(sessionId));
+        exchange(drift, "getWebShellTask", 403,
+                post(WEB_SHELL + "/tasks/get").header(TENANT, tenant)
+                        .principal(actor(otherTenant)),
+                "{\"sessionId\":\"%s\",\"taskId\":\"%s\"}"
+                        .formatted(sessionId, taskId));
     }
 
     /**

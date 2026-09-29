@@ -982,6 +982,42 @@ describe('main-session style: reminder decision matches prompt section', () => {
       ['# Outside of Sandbox'],
     );
   });
+
+  it.each(['read-only', 'workspace-write'] as const)(
+    'describes resolved Landlock restrictions for %s',
+    (filesystem) => {
+      const config = {
+        ...makeConfig({ interactive: false, acp: false }),
+        getShellExecutionSandbox: () => ({
+          filesystem,
+          workspace: '/workspace',
+          installation: '/installation',
+          state: '/state',
+          network: 'open' as const,
+          requestedBackend: 'auto' as const,
+          effectiveBackend: 'landlock' as const,
+          enforcement: 'partial' as const,
+          landlockAbi: 3,
+        }),
+      };
+
+      const prompt = getMainSessionBaseSystemPrompt(config);
+      expect(prompt).toContain('# Tool Execution Sandbox (Landlock, partial)');
+      expect(prompt).toContain(
+        `workspace is ${filesystem === 'workspace-write' ? 'writable' : 'read-only'}`,
+      );
+      expect(prompt).toContain('Treat EACCES as a possible sandbox refusal');
+      expect(prompt).toContain(
+        'report it to the user and name the refused path',
+      );
+      expect(prompt).toContain('Do NOT work around a refusal');
+      expect(prompt).toContain('metadata operations');
+      expect(prompt).toContain('does not create PID or network namespaces');
+      expect(prompt).not.toContain('EROFS');
+      expect(prompt).not.toContain('# Tool Execution Sandbox (bwrap)');
+      expect(prompt).not.toContain('# Outside of Sandbox');
+    },
+  );
 });
 
 describe('main-session style: project trust gate', () => {

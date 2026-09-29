@@ -97,6 +97,8 @@ function advisorSelector(
   model: NonNullable<OpenTuiModelEntry['model']>,
 ): string {
   const selector = `${model.authType}:${model.id}`;
+  // Registry-exact, matching the ink dialog's list key: this selector is both
+  // the row key and the persisted value, and consumers compare it with `===`.
   return model.isRuntimeModel
     ? selector
     : `${selector}\0${model.registryBaseUrl ?? ''}`;

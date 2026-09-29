@@ -33,6 +33,7 @@ import type { PermissionCheckContext, PermissionRule } from './types.js';
 import { extractShellOperationsAcrossCommand } from './shell-semantics.js';
 import { normalizeToolNameForProvider } from '../utils/tool-name-utils.js';
 import { ToolNames, ToolDisplayNames } from '../tools/tool-names.js';
+import { ToolMode } from '../tools/code-mode.js';
 
 const debugLoggerMock = vi.hoisted(() => ({
   isEnabled: vi.fn().mockReturnValue(false),
@@ -2209,6 +2210,44 @@ describe('PermissionManager', () => {
   });
 
   describe('tools.eager allowlist (#9827, #10075)', () => {
+    it.each([
+      [ToolMode.Direct, undefined, 'registered'],
+      [ToolMode.CodeModeOnly, undefined, 'deferred'],
+      [ToolMode.CodeModeOnly, [], 'deferred'],
+      [ToolMode.CodeModeOnly, ['Read'], 'deferred'],
+      [ToolMode.CodeModeOnly, ['workflow'], 'registered'],
+      [ToolMode.CodeModeOnly, ['Workflow'], 'registered'],
+    ] as const)(
+      'registers workflow in %s with eager=%j as %s',
+      async (toolMode, eagerTools, expected) => {
+        pm = new PermissionManager({
+          ...makeConfig(),
+          getToolMode: () => toolMode,
+          getEagerTools: () => eagerTools,
+        });
+        pm.initialize();
+        expect(await pm.getToolRegistrationStatus(ToolNames.WORKFLOW)).toBe(
+          expected,
+        );
+        expect(await pm.isToolEnabled(ToolNames.WORKFLOW)).toBe(true);
+      },
+    );
+
+    it('keeps workflow deny rules ahead of Code Mode deferral and eager settings', async () => {
+      for (const eagerTools of [undefined, ['workflow']]) {
+        pm = new PermissionManager({
+          ...makeConfig({ permissionsDeny: ['Workflow'] }),
+          getToolMode: () => ToolMode.CodeModeOnly,
+          getEagerTools: () => eagerTools,
+        });
+        pm.initialize();
+        expect(await pm.getToolRegistrationStatus(ToolNames.WORKFLOW)).toBe(
+          'disabled',
+        );
+        expect(await pm.isToolEnabled(ToolNames.WORKFLOW)).toBe(false);
+      }
+    });
+
     it('unlisted built-in tools are deferred, not disabled', async () => {
       // The #9827 reporter's config: only these ride in the eager request;
       // send_message / update_goal / loop_wakeup / read_mcp_resource (whose

@@ -835,6 +835,44 @@ describe('evaluateAutoMode — fast-path gating', () => {
     expect(decision).toEqual({ via: 'fallback', reason: 'external_write' });
   });
 
+  it.each([ToolNames.SHELL, ToolNames.MONITOR])(
+    'routes %s with a directory outside the workspace to manual fallback before classifier',
+    async (toolName) => {
+      const decision = await evaluateAutoMode({
+        ctx: {
+          toolName,
+          command: 'npm run build',
+          cwd: '/Users/test/other-project',
+        },
+        pmForcedAsk: false,
+        toolParams: {},
+        messages: [],
+        config: makeConfig([cwd]),
+        signal: new AbortController().signal,
+      });
+      expect(decision).toEqual({
+        via: 'fallback',
+        reason: 'external_directory',
+      });
+    },
+  );
+
+  it('routes a shell directory inside the workspace to classifier', async () => {
+    const decision = await evaluateAutoMode({
+      ctx: {
+        toolName: ToolNames.SHELL,
+        command: 'npm run build',
+        cwd: `${cwd}/packages/app`,
+      },
+      pmForcedAsk: false,
+      toolParams: {},
+      messages: [],
+      config: makeConfig([cwd]),
+      signal: new AbortController().signal,
+    });
+    expect(decision.via).toBe('classifier');
+  });
+
   it('routes in-workspace protected writes to classifier', async () => {
     const decision = await evaluate(
       onFile(ToolNames.EDIT, `${cwd}/.qwen/settings.json`),
@@ -921,6 +959,22 @@ describe('applyAutoModeDecision — blocked reason mapping', () => {
       reason: 'consecutive_block',
     });
     expect(setAutoModeDenialState).not.toHaveBeenCalled();
+  });
+
+  it('explains an outside-directory fallback in the approval prompt', () => {
+    const setAutoModeDenialState = vi.fn();
+    const result = applyAutoModeDecision(
+      { via: 'fallback', reason: 'external_directory' },
+      { setAutoModeDenialState } as unknown as Config,
+      denialState,
+    );
+
+    expect(result).toEqual({
+      kind: 'fallback',
+      reason: 'external_directory',
+      message:
+        'Commands outside the workspace require manual approval in AUTO mode.',
+    });
   });
 
   it('consumes a matching retry token when a threshold fallback takes precedence', () => {

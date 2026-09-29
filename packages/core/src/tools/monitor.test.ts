@@ -370,6 +370,15 @@ describe('MonitorTool', () => {
       expect(mockSpawn).not.toHaveBeenCalled();
     });
 
+    it('rejects a directory the sandbox will not admit', () => {
+      vi.mocked(mockConfig.getShellExecutionSandbox).mockReturnValue({
+        workspace: '/test/dir',
+      } as NonNullable<ReturnType<Config['getShellExecutionSandbox']>>);
+      expect(validate({ command: 'tail -f log', directory: '/' })).toContain(
+        'inside the execution sandbox workspace',
+      );
+    });
+
     it('does not run host AST permission probes', async () => {
       const invocation = createInvocation({ command: 'git status' });
       expect(await invocation.getDefaultPermission()).toBe('ask');
@@ -527,6 +536,26 @@ describe('MonitorTool', () => {
       ).resolves.toBe('allow');
     });
 
+    it('asks for a read-only command in a directory outside the workspace', async () => {
+      mockIsShellCommandReadOnlyAST.mockResolvedValue(true);
+      mockIsPathWithinWorkspace.mockReturnValue(false);
+      const invocation = createInvocation({
+        command: 'tail -f log',
+        directory: '/elsewhere/project-a-evil/x',
+      });
+
+      await expect(invocation.getDefaultPermission()).resolves.toBe('ask');
+      expect(mockIsPathWithinWorkspace).toHaveBeenCalledWith(
+        '/elsewhere/project-a-evil/x',
+      );
+      const details = (await invocation.getConfirmationDetails(
+        new AbortController().signal,
+      )) as { warnings?: string[] };
+      expect(details.warnings ?? []).toContain(
+        'Runs outside the workspace in /elsewhere/project-a-evil/x',
+      );
+    });
+
     it('surfaces a command-substitution warning via getConfirmationDetails (issue #4093)', async () => {
       const details = await confirm('echo $(cat secret.txt)');
       expect(details.warnings?.[0]).toMatch(/command substitution/i);
@@ -624,31 +653,13 @@ describe('MonitorTool', () => {
       expect(result).toContain('user skills directory is not allowed');
     });
 
-    it('rejects directory outside workspace (delegates to WorkspaceContext)', () => {
-      mockIsPathWithinWorkspace.mockReturnValueOnce(false);
-      const result = validate({
-        command: 'tail -f log',
-        directory: '/tmp/project-a-evil/x',
-      });
-      expect(result).toContain('not within any of the registered workspace');
-      expect(mockIsPathWithinWorkspace).toHaveBeenCalledWith(
-        '/tmp/project-a-evil/x',
-      );
-    });
-
-    it('rejects directory with parent-reference traversal', () => {
-      mockIsPathWithinWorkspace.mockReturnValueOnce(false);
-      const result = validate({
-        command: 'tail -f log',
-        directory: '/tmp/project-a/../etc',
-      });
-      expect(result).toContain('not within any of the registered workspace');
-    });
-
-    it('accepts directory within workspace', () => {
-      mockIsPathWithinWorkspace.mockReturnValueOnce(true);
+    it('leaves a directory outside the workspace to the permission check', () => {
+      mockIsPathWithinWorkspace.mockReturnValue(false);
       expect(
-        validate({ command: 'tail -f log', directory: '/test/dir/sub' }),
+        validate({
+          command: 'tail -f log',
+          directory: '/tmp/project-a/../etc',
+        }),
       ).toBeNull();
     });
   });

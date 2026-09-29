@@ -112,6 +112,7 @@ import {
   firePreToolUseHook,
 } from './toolHookTriggers.js';
 import { PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE } from './plan-mode-entry-policy.js';
+import { SESSION_SKILL_MANAGER } from '../tools/skill-utils.js';
 import {
   promptIdContext,
   todoWorkChainContext,
@@ -3446,11 +3447,14 @@ describe('CoreToolScheduler', () => {
     },
   );
 
-  it('exempts read_mcp_resource from the persistence spill gate', async () => {
-    // The name-keyed spill gate (≈28k: 25k + 3k headroom) must not stub a
-    // self-capped read_mcp_resource body: the model gets the framed body.
-    await expectDeliveredWhole('read_mcp_resource', 'a'.repeat(40_000));
-  });
+  it.each(['read_mcp_resource', 'search_memory'])(
+    'exempts %s from the persistence spill gate',
+    async (toolName) => {
+      // The name-keyed spill gate (≈28k: 25k + 3k headroom) must not stub a
+      // self-capped read_mcp_resource body: the model gets the framed body.
+      await expectDeliveredWhole(toolName, 'a'.repeat(40_000));
+    },
+  );
 
   describe('producer-applied output budgets', () => {
     // The window between the generic spill gate (25k + 3k headroom ≈ 28k) and
@@ -12506,6 +12510,7 @@ describe('CoreToolScheduler activation wiring', () => {
     declaredHasSkillTool?: boolean;
     toolResult?: ToolResult;
     containerExecution?: boolean;
+    withheldFromConfig?: boolean;
   };
 
   /** The single read_file request most activation cases schedule. */
@@ -12545,6 +12550,20 @@ describe('CoreToolScheduler activation wiring', () => {
             getExecutionEnvironment: () =>
               opts.containerExecution ? {} : undefined,
             addInlineAnnouncedSkillKeys,
+            ...(opts.withheldFromConfig
+              ? {
+                  getSkillManager: () => null,
+                  [SESSION_SKILL_MANAGER]: {
+                    matchAndActivateByPaths: opts.matchAndActivateByPaths,
+                    listSkills: vi
+                      .fn()
+                      .mockResolvedValue([
+                        tsxHelperSkill('Description of tsx-helper'),
+                      ]),
+                    isSkillActive: vi.fn().mockReturnValue(true),
+                  },
+                }
+              : {}),
           },
         ),
       ),
@@ -12645,6 +12664,21 @@ describe('CoreToolScheduler activation wiring', () => {
     // The half that starves the parent: moving this call outside the gate
     // (text still inside) passes everything else, yet the orchestrator's
     // drain finds the key consumed and nobody announces the activation.
+    expect(addInlineAnnouncedSkillKeys).not.toHaveBeenCalled();
+  });
+
+  it('still feeds session-wide activation for a subagent whose Config withholds the manager', async () => {
+    const matchAndActivateByPaths = vi.fn().mockResolvedValue(['tsx-helper']);
+    const { completedCall, responseText, addInlineAnnouncedSkillKeys } =
+      await runWithSkillManager({
+        matchAndActivateByPaths,
+        skillToolPresent: false,
+        declaredHasSkillTool: false,
+        withheldFromConfig: true,
+      });
+    expect(matchAndActivateByPaths).toHaveBeenCalledWith(['/proj/src/App.tsx']);
+    expect(completedCall().status).toBe('success');
+    expect(responseText()).not.toContain('became available via the Skill tool');
     expect(addInlineAnnouncedSkillKeys).not.toHaveBeenCalled();
   });
 
