@@ -6,10 +6,15 @@ import {
 } from './QQChannel.js';
 import type { ToolCallEvent } from '@qwen-code/channel-base';
 
-const { mockSendQQMessage, mockFetchAccessToken } = vi.hoisted(() => ({
-  mockSendQQMessage: vi.fn(),
-  mockFetchAccessToken: vi.fn(),
-}));
+const { mockSendQQMessage, mockFetchAccessToken, responseMessageIdRef } =
+  vi.hoisted(() => ({
+    mockSendQQMessage: vi.fn(),
+    mockFetchAccessToken: vi.fn(),
+    // Mutable so a test can make the mocked ChannelBase report the messageId of
+    // the turn a response belongs to, and change it mid-flight to simulate a
+    // successor turn taking the slot.
+    responseMessageIdRef: { current: undefined as string | undefined },
+  }));
 
 vi.mock('node:fs', () => ({
   mkdirSync: vi.fn(),
@@ -57,7 +62,7 @@ vi.mock('@qwen-code/channel-base', () => ({
       return Promise.resolve();
     }
     protected getResponseMessageId(_sessionId: string): string | undefined {
-      return undefined;
+      return responseMessageIdRef.current;
     }
     protected getResponseSourceLabel(_sessionId: string): undefined {
       return undefined;
@@ -5271,6 +5276,187 @@ describe('boundary suppressed from the adapter hook still seals the stash', () =
     await onResponseComplete(ch, 'test-chat', 'T2-POST', 's1');
     expect(sentContents().at(-1)).toBe('T2-HEAD T2-POST');
     resolveSend(mockResponse(true));
+    await drain();
+  });
+});
+
+// onPromptEnd deletes the cancelled turn's stash from streamOrphanBuffer before
+// handing it to deliverCancelledStash (and handOffSealedPre clears sealedPre
+// before the same call), so that text has no second copy anywhere. RATE_LIMITED
+// is the code the flush path treats as transient, so the cancelled-stash
+// delivery must re-attempt it under the existing maxFlushRetries bound instead
+// of dropping it; the permanent codes must still drop.
+describe('R17-1 acceptance: cancelled-stash delivery failure classification', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockSendQQMessage.mockResolvedValue(mockResponse(true));
+    responseMessageIdRef.current = undefined;
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    responseMessageIdRef.current = undefined;
+    vi.useRealTimers();
+  });
+
+  const callsCarrying = (text: string) =>
+    mockSendQQMessage.mock.calls.filter((c) => {
+      const markdown = (c[3] as Record<string, unknown>)['markdown'] as
+        | { content?: string }
+        | undefined;
+      return markdown?.content === text;
+    });
+
+  const attemptsCarrying = (text: string) => callsCarrying(text).length;
+
+  const msgIdsCarrying = (text: string) =>
+    callsCarrying(text).map((c) => (c[3] as Record<string, unknown>)['msg_id']);
+
+  it('re-sends a cancelled stash that a 429 rejected (RATE_LIMITED is transient)', async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const sessionAnchors = chp['sessionReplyMsgId'] as Map<string, unknown>;
+    const inFlight = chp['inFlightMsgSeqSends'] as Map<string, number>;
+    const { resolveSend } = await reachStaleStash(ch);
+
+    // Only the stash delivery is rate-limited; the re-attempt succeeds.
+    mockSendQQMessage.mockReturnValueOnce(mockResponse(false, 429));
+    onPromptEnd(ch, 'test-chat', 's1');
+    await drain();
+
+    // The 429 is the only attempt so far, and it failed: the anchor is still
+    // held, because only the success path releases it.
+    expect(attemptsCarrying('T2-HEAD ')).toBe(1);
+    expect(sessionAnchors.has('s1')).toBe(true);
+    // The in-flight guard is released on the failure path too, so a re-attempt
+    // does not stack a second guard on the same msgId.
+    expect(inFlight.size).toBe(0);
+
+    // The re-attempt is armed off the idle-flush cadence.
+    await vi.advanceTimersByTimeAsync(10_000);
+    await drain();
+
+    // Exactly one more attempt, and it was accepted: the anchor is released
+    // only on success, so the stash reached the API exactly once.
+    expect(attemptsCarrying('T2-HEAD ')).toBe(2);
+    expect(sessionAnchors.has('s1')).toBe(false);
+    expect(inFlight.size).toBe(0);
+
+    resolveSend(mockResponse(true));
+    await vi.advanceTimersByTimeAsync(20_000);
+    await drain();
+  });
+
+  it.each([
+    'RETRY_EXHAUSTED',
+    'ACTIVE_MSG_DISABLED',
+    'FALLBACK_FAILED',
+  ] as const)('does not retry a %s rejection (permanent)', async (code) => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const sessionAnchors = chp['sessionReplyMsgId'] as Map<string, unknown>;
+    const { resolveSend } = await reachStaleStash(ch);
+
+    mockSendQQMessage.mockRejectedValueOnce(
+      new DeliveryError(code, 'permanent failure'),
+    );
+    onPromptEnd(ch, 'test-chat', 's1');
+    await drain();
+    expect(attemptsCarrying('T2-HEAD ')).toBe(1);
+
+    // A permanent code arms no re-attempt.
+    await vi.advanceTimersByTimeAsync(60_000);
+    await drain();
+    expect(attemptsCarrying('T2-HEAD ')).toBe(1);
+    expect(sessionAnchors.has('s1')).toBe(true);
+
+    resolveSend(mockResponse(true));
+    await vi.advanceTimersByTimeAsync(20_000);
+    await drain();
+  });
+
+  it('exhausts the re-attempts at the default maxFlushRetries', async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const sessionAnchors = chp['sessionReplyMsgId'] as Map<string, unknown>;
+    const { resolveSend } = await reachStaleStash(ch);
+
+    // The default bound is 3: the first attempt plus two re-attempts.
+    mockSendQQMessage
+      .mockReturnValueOnce(mockResponse(false, 429))
+      .mockReturnValueOnce(mockResponse(false, 429))
+      .mockReturnValueOnce(mockResponse(false, 429));
+    onPromptEnd(ch, 'test-chat', 's1');
+    await drain();
+    expect(attemptsCarrying('T2-HEAD ')).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(2_000);
+    await drain();
+    expect(attemptsCarrying('T2-HEAD ')).toBe(2);
+
+    await vi.advanceTimersByTimeAsync(4_000);
+    await drain();
+    expect(attemptsCarrying('T2-HEAD ')).toBe(3);
+
+    // Exhausted: the text is dropped, and the anchor stays held because no
+    // attempt succeeded.
+    await vi.advanceTimersByTimeAsync(60_000);
+    await drain();
+    expect(attemptsCarrying('T2-HEAD ')).toBe(3);
+    expect(sessionAnchors.has('s1')).toBe(true);
+
+    resolveSend(mockResponse(true));
+    await vi.advanceTimersByTimeAsync(20_000);
+    await drain();
+  });
+
+  it('reuses the captured reply context when a re-attempt crosses into a successor turn', async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const { resolveSend } = await reachStaleStash(ch);
+    // No session anchor within TTL: the delivery takes the entry-less branch,
+    // whose reply context is what a successor turn can change underneath it.
+    (chp['sessionReplyMsgId'] as Map<string, unknown>).clear();
+    responseMessageIdRef.current = 'msg-B';
+    (chp['replyContextByMessageId'] as Map<string, unknown>).set('msg-B', {
+      chatId: 'test-chat',
+      msgId: 'msg-B',
+      timestamp: Date.now(),
+    });
+
+    mockSendQQMessage.mockReturnValueOnce(mockResponse(false, 429));
+    onPromptEnd(ch, 'test-chat', 's1');
+    await drain();
+    expect(msgIdsCarrying('T2-HEAD ')).toEqual(['msg-B']);
+
+    // A successor turn now owns the slot, so a re-derived reply context would
+    // be the successor's (or absent). The re-attempt must stay on msg-B.
+    responseMessageIdRef.current = 'msg-successor';
+    await vi.advanceTimersByTimeAsync(10_000);
+    await drain();
+    expect(msgIdsCarrying('T2-HEAD ')).toEqual(['msg-B', 'msg-B']);
+
+    resolveSend(mockResponse(true));
+    await vi.advanceTimersByTimeAsync(20_000);
+    await drain();
+  });
+
+  it('bounds the re-attempts by maxFlushRetries', async () => {
+    const ch = makeChannel({ maxFlushRetries: 1 });
+    const { resolveSend } = await reachStaleStash(ch);
+
+    mockSendQQMessage.mockReturnValueOnce(mockResponse(false, 429));
+    onPromptEnd(ch, 'test-chat', 's1');
+    await drain();
+    expect(attemptsCarrying('T2-HEAD ')).toBe(1);
+
+    // maxFlushRetries: 1 means the single attempt is already the bound.
+    await vi.advanceTimersByTimeAsync(60_000);
+    await drain();
+    expect(attemptsCarrying('T2-HEAD ')).toBe(1);
+
+    resolveSend(mockResponse(true));
+    await vi.advanceTimersByTimeAsync(20_000);
     await drain();
   });
 });

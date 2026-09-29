@@ -568,11 +568,109 @@ describe('purgeSingleScopeOrphans', () => {
     expect(removeSessionId).not.toHaveBeenCalledWith('sibling-live');
     expect(removeSessionId).not.toHaveBeenCalledWith('normal-1');
     expect(removeSessionId).not.toHaveBeenCalledWith('sibling-3part');
-    // The purge reports what it dropped on stderr (thread 57 gate).
+    // The purge reports what it dropped on stderr (thread 57 gate), split by
+    // kind: the user-scope line is the one that says persisted conversations
+    // were deleted, so the two must not be merged under one label.
     const logged = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
     expect(logged).toContain(
-      'Purged 2 orphaned single-scope session mapping(s)',
+      'Purged 1 orphaned single-scope session mapping(s)',
     );
+    expect(logged).toContain('Purged 1 orphaned user-scope session mapping(s)');
+    // The rescue copy is announced with its path, so an operator can find the
+    // file that holds the routes about to be deleted.
+    expect(logged).toContain('Saved 2 session route(s) about to be purged to');
+    expect(logged).toContain(
+      join('/tmp/test-qwen', 'channels', 'test-bot-sessions-purged.json'),
+    );
+  });
+
+  it('writes the rescue copy of the doomed routes before deleting any of them', () => {
+    vi.mocked(writeFileSync).mockClear();
+    const removeSessionId = vi.fn(() => true);
+    const router = {
+      getAll: () => [
+        // Doomed: legacy single-scope orphan.
+        {
+          key: 'test-bot:__single__',
+          sessionId: 'single-era-1',
+          target: { channelName: 'test-bot' },
+        },
+        // Doomed: this channel's unroutable user-scope key under thread scope.
+        {
+          key: 'test-bot:u1:c1',
+          sessionId: 'user-era-1',
+          target: { channelName: 'test-bot', senderId: 'u1', chatId: 'c1' },
+        },
+        // Live thread route and a sibling channel's route: not doomed.
+        {
+          key: 'test-bot:g1',
+          sessionId: 'live-thread',
+          target: { channelName: 'test-bot', senderId: 'u1', chatId: 'g1' },
+        },
+        {
+          key: 'other-bot:u9:c9',
+          sessionId: 'sibling',
+          target: { channelName: 'other-bot', senderId: 'u9', chatId: 'c9' },
+        },
+      ],
+      removeSessionId,
+    };
+    callPurge(makeChannelWithRouter(router));
+
+    const calls = vi.mocked(writeFileSync).mock.calls;
+    const rescueIndex = calls.findIndex((c) =>
+      String(c[0]).endsWith('test-bot-sessions-purged.json'),
+    );
+    expect(rescueIndex).toBeGreaterThanOrEqual(0);
+    const write = calls[rescueIndex];
+    expect(write[2]).toEqual({ mode: 0o600 });
+    const rescue = JSON.parse(write[1] as string) as {
+      purgedAt: string;
+      sessionScope: string;
+      routes: unknown[];
+    };
+    expect(rescue.sessionScope).toBe('thread');
+    expect(Number.isNaN(Date.parse(rescue.purgedAt))).toBe(false);
+    // Exactly the doomed routes, each tagged with the predicate that matched —
+    // the live/sibling routes must not appear.
+    expect(rescue.routes).toEqual([
+      {
+        kind: 'single',
+        key: 'test-bot:__single__',
+        sessionId: 'single-era-1',
+        target: { channelName: 'test-bot' },
+      },
+      {
+        kind: 'user',
+        key: 'test-bot:u1:c1',
+        sessionId: 'user-era-1',
+        target: { channelName: 'test-bot', senderId: 'u1', chatId: 'c1' },
+      },
+    ]);
+    // Written before the first deletion: removeSessionId() persists, so a
+    // rescue copy that only landed afterwards could not save anything. Compared
+    // against this call's own index, not the first writeFileSync of the test.
+    expect(
+      vi.mocked(writeFileSync).mock.invocationCallOrder[rescueIndex],
+    ).toBeLessThan(removeSessionId.mock.invocationCallOrder[0]);
+  });
+
+  it('writes no rescue file when nothing is purged', () => {
+    vi.mocked(writeFileSync).mockClear();
+    const removeSessionId = vi.fn(() => true);
+    const router = {
+      getAll: () => [
+        {
+          key: 'test-bot:g1',
+          sessionId: 'live-thread',
+          target: { channelName: 'test-bot', senderId: 'u1', chatId: 'g1' },
+        },
+      ],
+      removeSessionId,
+    };
+    callPurge(makeChannelWithRouter(router));
+    expect(removeSessionId).not.toHaveBeenCalled();
+    expect(writeFileSync).not.toHaveBeenCalled();
   });
 
   it('does NOT purge live user-shaped routes when sessionScope is unrecognized', () => {

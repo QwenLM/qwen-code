@@ -28,6 +28,7 @@ import type {
   ChannelOutputSegmentContext,
   Envelope,
   ToolCallEvent,
+  SessionTarget,
 } from '@qwen-code/channel-base';
 import WebSocket from 'ws';
 import { AsyncLocalStorage } from 'node:async_hooks';
@@ -85,6 +86,17 @@ interface QQReplyContext {
   chatId: string;
   msgId: string;
   timestamp: number;
+}
+
+/**
+ * A persisted route as the session router reports it. `target` stays optional
+ * because the purge scans whatever router object it was given, and an entry
+ * without one has to be skipped rather than abort the scan.
+ */
+interface RouterRoute {
+  key: string;
+  sessionId: string;
+  target?: SessionTarget;
 }
 
 interface QQStreamState {
@@ -352,6 +364,11 @@ export class QQChannel extends ChannelBase {
   private readonly globalSessionsPath: string;
   /** Backup of sessions.json so conversations survive daemon restarts. */
   private readonly sessionsBackupPath: string;
+  /**
+   * Rescue copy of the routes the orphan purge deletes, written before the
+   * first deletion so an operator can restore a legacy conversation by hand.
+   */
+  private readonly sessionsPurgedPath: string;
 
   constructor(
     name: string,
@@ -435,6 +452,10 @@ export class QQChannel extends ChannelBase {
     this.sessionsBackupPath = join(
       stateDir,
       `${safeName}-sessions-backup.json`,
+    );
+    this.sessionsPurgedPath = join(
+      stateDir,
+      `${safeName}-sessions-purged.json`,
     );
 
     // Permanent textChunk listener for cron/non-prompt messages.
@@ -824,20 +845,30 @@ export class QQChannel extends ChannelBase {
     );
   }
 
+  /**
+   * The reply context a session's next response would carry: the inbound
+   * message the turn is answering, resolved through the turn-scoped
+   * activePrompts entry. Read by sendResponseMessage and captured once by
+   * deliverCancelledStash, which re-attempts a delivery after that entry may
+   * already belong to a successor turn.
+   */
+  private resolveResponseReplyContext(
+    sessionId: string,
+  ): QQReplyContext | undefined {
+    const messageId = this.getResponseMessageId(sessionId);
+    return messageId ? this.replyContextByMessageId.get(messageId) : undefined;
+  }
+
   protected override async sendResponseMessage(
     chatId: string,
     text: string,
     sessionId: string,
     sourceLabel?: string,
   ): Promise<void> {
-    const messageId = this.getResponseMessageId(sessionId);
-    const replyContext = messageId
-      ? this.replyContextByMessageId.get(messageId)
-      : undefined;
     await this.sendMessageWithReplyContext(
       chatId,
       text,
-      replyContext,
+      this.resolveResponseReplyContext(sessionId),
       sourceLabel ?? this.getResponseSourceLabel(sessionId),
     );
   }
@@ -1436,51 +1467,115 @@ export class QQChannel extends ChannelBase {
    * parked in pendingStreamDelete while a predecessor turn's deferred chain
    * settles, so ChannelBase skips onResponseComplete and onPromptEnd's park
    * early-return would otherwise leave this turn's stash for the next turn to
-   * discard as superseded. Fire-and-forget — onPromptEnd is sync — and swallow
-   * a rejection so a failed delivery cannot become an unhandled rejection. The
+   * discard as superseded. Fire-and-forget — onPromptEnd is sync — and never
+   * rejects, so a failed delivery cannot become an unhandled rejection. The
    * park flag and the predecessor's streamState entry/buffer are deliberately
    * untouched: that chain still owns them and must settle and release its own
    * anchor, and this text must not go out under the predecessor's msgId.
+   *
+   * This is the only delivery for a stash that onPromptEnd already deleted from
+   * streamOrphanBuffer (or a sealed head handOffSealedPre cleared from
+   * sealedPre), so a transient failure must not drop the text. RATE_LIMITED is
+   * the one code the flush path classifies as transient, and no copy survives
+   * for a later turn, so the send is re-attempted here under the same
+   * maxFlushRetries bound flushAndTrack uses (<= 0 means unlimited). A
+   * re-attempt is not routed through streamState/idleFlush: the turn is over,
+   * so a state entry for it would be dropped as stale by the next prompt, and
+   * the entry-less in-flight guard below (R11-2) would be lost. Every attempt
+   * reuses the anchor, the attribution label and the reply context captured
+   * before the first one. Permanent codes and exhaustion drop with a log, as
+   * the other paths do.
    */
   private async deliverCancelledStash(
     chatId: string,
     sessionId: string,
     text: string,
   ): Promise<void> {
-    try {
-      const anchorEntry = this.sessionReplyMsgId.get(sessionId);
-      const captured =
-        anchorEntry &&
-        Date.now() - anchorEntry.timestamp < QQChannel.REPLY_MSG_ID_TTL_MS
-          ? anchorEntry.msgId
-          : undefined;
-      const sourceLabel = this.getResponseSourceLabel(sessionId);
-      if (captured) {
-        // Mark the send in flight for the release guard: this session owns no
-        // streamState entry for the cancelled turn, so a successor's
-        // onPromptStart release (or the 60s sweep) would otherwise drop the
-        // msg_seq counter while the send is suspended in resolveRoute and it
-        // would resolve msg_seq 1 again.
-        this.beginMsgSeqSend(captured);
-        try {
+    // Capture the anchor once, before the first attempt: a successor turn can
+    // overwrite sessionReplyMsgId while a re-attempt is pending, and this
+    // turn's text must not go out under the successor's anchor.
+    const anchorEntry = this.sessionReplyMsgId.get(sessionId);
+    const captured =
+      anchorEntry &&
+      Date.now() - anchorEntry.timestamp < QQChannel.REPLY_MSG_ID_TTL_MS
+        ? anchorEntry.msgId
+        : undefined;
+    // The attribution label and the reply context are read from per-turn state
+    // the successor turn replaces (activePrompts, and the reply context map via
+    // getResponseMessageId), so both are captured for the same reason as the
+    // anchor: a re-attempt must not describe this text as the successor's turn.
+    const sourceLabel = this.getResponseSourceLabel(sessionId);
+    const replyContext = this.resolveResponseReplyContext(sessionId);
+    for (let attempt = 1; ; attempt++) {
+      try {
+        if (captured) {
+          // Mark the send in flight for the release guard: this session owns no
+          // streamState entry for the cancelled turn, so a successor's
+          // onPromptStart release (or the 60s sweep) would otherwise drop the
+          // msg_seq counter while the send is suspended in resolveRoute and it
+          // would resolve msg_seq 1 again.
+          this.beginMsgSeqSend(captured);
+          try {
+            await this.sendMessageWithReplyContext(
+              chatId,
+              text,
+              undefined,
+              sourceLabel,
+              captured,
+            );
+          } finally {
+            this.endMsgSeqSend(captured);
+          }
+        } else {
+          // Same entry point sendResponseMessage uses, with the reply context
+          // already captured: its own lookup would run against a successor's
+          // activePrompts entry on a re-attempt.
           await this.sendMessageWithReplyContext(
             chatId,
             text,
-            undefined,
+            replyContext,
             sourceLabel,
-            captured,
           );
-        } finally {
-          this.endMsgSeqSend(captured);
         }
-        this.releaseSessionReplyAnchor(sessionId, captured);
-      } else {
-        await this.sendResponseMessage(chatId, text, sessionId, sourceLabel);
+      } catch (e: unknown) {
+        // RETRY_EXHAUSTED / ACTIVE_MSG_DISABLED / FALLBACK_FAILED are permanent
+        // (see flushAndTrack); everything else — RATE_LIMITED and a plain
+        // network error — is transient and re-attempted under the bound.
+        if (
+          e instanceof DeliveryError &&
+          (e.code === 'RETRY_EXHAUSTED' ||
+            e.code === 'ACTIVE_MSG_DISABLED' ||
+            e.code === 'FALLBACK_FAILED')
+        ) {
+          process.stderr.write(
+            `[QQ:${this.name}] cancelled-stash delivery failed (${e.code}): ${sanitizeLogText(e.message, 200)}, dropping ${text.length} chars\n`,
+          );
+          return;
+        }
+        if (this.maxFlushRetries <= 0 || attempt < this.maxFlushRetries) {
+          const delay =
+            attempt > 1
+              ? QQChannel.IDLE_FLUSH_BACKOFF_MS
+              : QQChannel.IDLE_FLUSH_MS;
+          process.stderr.write(
+            `[QQ:${this.name}] cancelled-stash delivery failed (attempt ${attempt}): ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}, retrying in ${delay}ms\n`,
+          );
+          await new Promise<void>((resolve) => {
+            const timer = setTimeout(resolve, delay);
+            timer.unref?.();
+          });
+          continue;
+        }
+        process.stderr.write(
+          `[QQ:${this.name}] cancelled-stash delivery failed: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}, retries exhausted, dropping ${text.length} chars\n`,
+        );
+        return;
       }
-    } catch (e: unknown) {
-      process.stderr.write(
-        `[QQ:${this.name}] cancelled-stash delivery failed: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,
-      );
+      // Delivered. The release is synchronous and cannot throw (saveQQState
+      // swallows write errors), and it sits outside the retry try/catch so a
+      // throw here can never be mistaken for a failed send and re-send text.
+      if (captured) this.releaseSessionReplyAnchor(sessionId, captured);
+      return;
     }
   }
 
@@ -2933,6 +3028,11 @@ export class QQChannel extends ChannelBase {
    * bridge.loadSession and then released here; afterwards they are gone from
    * the persisted file.
    *
+   * Before the first deletion this purge performs, the doomed routes are copied
+   * to `<name>-sessions-purged.json` in the channel state directory so an
+   * operator can restore a legacy conversation by hand. That rescue file is
+   * best-effort and is never read back automatically.
+   *
    * Runs AFTER restoreSessions(): SessionRouter exposes no public API to drop
    * persisted entries before restore (readPersistedEntries/deleteByKey are
    * private), and rewriting the persist file from here would be fragile and
@@ -2962,18 +3062,13 @@ export class QQChannel extends ChannelBase {
       const all =
         (
           this.router as unknown as {
-            getAll?: () => Array<{
-              key: string;
-              sessionId: string;
-              target?: {
-                channelName?: string;
-                senderId?: string;
-                chatId?: string;
-              };
-            }>;
+            getAll?: () => RouterRoute[];
           }
         ).getAll?.() ?? [];
-      let purged = 0;
+      // Phase 1: collect what would be deleted, with the predicate that doomed
+      // it. Nothing is torn down yet — the rescue copy below must reach disk
+      // before the first removeSessionId(), because that call persists.
+      const doomed: Array<RouterRoute & { kind: 'single' | 'user' }> = [];
       for (const entry of all) {
         // Exact-match only this channel's own keys: in daemon mode the router
         // is shared across channels, so a suffix match on ':__single__' would
@@ -3004,26 +3099,76 @@ export class QQChannel extends ChannelBase {
           entry.key ===
             `${entry.target.channelName}:${entry.target.senderId}:${entry.target.chatId}`;
         if (isSingleOrphan || isOwnLegacyUserKey) {
-          // Release the daemon-side session too: restoreSessions() already
-          // re-attached it via bridge.loadSession, so without this the orphan
-          // stays alive in the daemon until the process ends. removeSessionId
-          // below only clears the router maps. Best-effort — a bridge without
-          // discardSession (or a failed discard) must not break the purge.
-          // No binding token: the orphan is no longer routed to, and purge
-          // runs before any new route can reference it.
-          try {
-            void this.bridge
-              .discardSession?.(entry.sessionId)
-              .catch(() => undefined);
-          } catch {
-            // Best-effort cleanup must not abort the purge.
-          }
-          if (this.router.removeSessionId(entry.sessionId)) purged++;
+          doomed.push({
+            kind: isSingleOrphan ? 'single' : 'user',
+            key: entry.key,
+            sessionId: entry.sessionId,
+            target: entry.target,
+          });
         }
       }
-      if (purged > 0) {
+      if (doomed.length > 0) {
+        // Self-describing so an operator can restore a route by hand; there is
+        // no automatic restore, and no other path overwrites this file.
+        // Best-effort — a failed write must not abort the purge (same spirit as
+        // backupGlobalSessions).
+        try {
+          writeFileSync(
+            this.sessionsPurgedPath,
+            JSON.stringify(
+              {
+                purgedAt: new Date().toISOString(),
+                sessionScope: scope,
+                routes: doomed,
+              },
+              null,
+              2,
+            ),
+            { mode: 0o600 },
+          );
+          process.stderr.write(
+            `[QQ:${this.name}] Saved ${doomed.length} session route(s) about to be purged to ${this.sessionsPurgedPath}\n`,
+          );
+        } catch (e) {
+          process.stderr.write(
+            `[QQ:${this.name}] purgeSingleScopeOrphans rescue write failed: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,
+          );
+        }
+      }
+      // Phase 2: perform the deletions exactly as before, one entry at a time.
+      let singlePurged = 0;
+      let userPurged = 0;
+      for (const entry of doomed) {
+        // Release the daemon-side session too: restoreSessions() already
+        // re-attached it via bridge.loadSession, so without this the orphan
+        // stays alive in the daemon until the process ends. removeSessionId
+        // below only clears the router maps. Best-effort — a bridge without
+        // discardSession (or a failed discard) must not break the purge.
+        // No binding token: the orphan is no longer routed to, and purge
+        // runs before any new route can reference it.
+        try {
+          void this.bridge
+            .discardSession?.(entry.sessionId)
+            .catch(() => undefined);
+        } catch {
+          // Best-effort cleanup must not abort the purge.
+        }
+        if (this.router.removeSessionId(entry.sessionId)) {
+          if (entry.kind === 'single') singlePurged++;
+          else userPurged++;
+        }
+      }
+      // Report the two kinds separately: the user-scope branch deletes persisted
+      // conversations that a reader may still want to recover, so it must not be
+      // reported as single-scope housekeeping.
+      if (singlePurged > 0) {
         process.stderr.write(
-          `[QQ:${this.name}] Purged ${purged} orphaned single-scope session mapping(s)\n`,
+          `[QQ:${this.name}] Purged ${singlePurged} orphaned single-scope session mapping(s)\n`,
+        );
+      }
+      if (userPurged > 0) {
+        process.stderr.write(
+          `[QQ:${this.name}] Purged ${userPurged} orphaned user-scope session mapping(s)\n`,
         );
       }
     } catch (e) {
