@@ -407,19 +407,9 @@ export function isBlockingHookOutput(
   data: Partial<HookOutput>,
 ): boolean {
   const output = createHookOutput(eventName, data);
-  if (output instanceof PreToolUseHookOutput) {
-    return output.isDenied();
-  }
-  if (output instanceof PermissionRequestHookOutput) {
-    return output.isPermissionDenied();
-  }
-  if (
-    eventName === HookEventName.TodoCreated ||
-    eventName === HookEventName.TodoCompleted
-  ) {
-    return output.decision === 'block';
-  }
-  return output.isBlockingDecision();
+  return output instanceof PreToolUseHookOutput
+    ? output.isDenied()
+    : output.isBlockingDecision();
 }
 
 /**

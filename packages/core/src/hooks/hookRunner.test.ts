@@ -23,15 +23,12 @@ import {
   resolvePowerShellExecutable,
 } from './hookRunner.js';
 import * as shellUtils from '../utils/shell-utils.js';
-import { HookAggregator } from './hookAggregator.js';
 import {
-  createHookOutput,
   HookEventName,
   HookType,
   HooksConfigSource,
   MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH,
 } from './types.js';
-import type { PreToolUseHookOutput } from './types.js';
 import type {
   HookConfig,
   HookInput,
@@ -435,95 +432,6 @@ describe('HookRunner', () => {
         additionalContext: '[Hook] Tool execution blocked with context',
       });
     });
-
-    it('blocks when an exit code 2 hook fell back to its stdout payload', async () => {
-      const mockProcess = createMockProcess(
-        2,
-        JSON.stringify({ decision: 'deny', reason: 'blocked by policy' }),
-        '',
-      );
-      mockSpawn.mockImplementation(() => mockProcess);
-
-      const result = await hookRunner.executeHook(
-        {
-          type: HookType.Command,
-          command: 'gate',
-          source: HooksConfigSource.Project,
-        },
-        HookEventName.PreToolUse,
-        createMockInput(),
-      );
-
-      expect(result.outcome).toBe('blocking');
-      expect(result.output?.decision).toBe('deny');
-      expect(result.output?.reason).toBe('blocked by policy');
-    });
-
-    it('blocks when an exit code 2 hook wrote no output at all', async () => {
-      mockSpawn.mockImplementation(() => createMockProcess(2, '', ''));
-
-      const result = await hookRunner.executeHook(
-        {
-          type: HookType.Command,
-          command: 'gate',
-          source: HooksConfigSource.Project,
-        },
-        HookEventName.PreToolUse,
-        createMockInput(),
-      );
-
-      expect(result.outcome).toBe('blocking');
-      expect(result.output).toBeUndefined();
-
-      const aggregated = new HookAggregator().aggregateResults(
-        [result],
-        HookEventName.PreToolUse,
-      );
-      const hookOutput = createHookOutput(
-        HookEventName.PreToolUse,
-        aggregated.finalOutput ?? {},
-      ) as PreToolUseHookOutput;
-      expect(hookOutput.isDenied()).toBe(true);
-      expect(hookOutput.reason).toContain('blocking error');
-    });
-
-    it.each([
-      ['an empty object', '{}'],
-      ['an explicit allow', '{"decision":"allow"}'],
-      ['an explicit ask', '{"decision":"ask"}'],
-      ['only a system message', '{"systemMessage":"report"}'],
-      [
-        'a nested permission allow',
-        '{"hookSpecificOutput":{"permissionDecision":"allow"}}',
-      ],
-    ])(
-      'denies when exit code 2 carries %s on stdout',
-      async (_label, payload) => {
-        mockSpawn.mockImplementation(() => createMockProcess(2, payload, ''));
-        const result = await hookRunner.executeHook(
-          {
-            type: HookType.Command,
-            command: 'gate',
-            source: HooksConfigSource.Project,
-          },
-          HookEventName.PreToolUse,
-          createMockInput(),
-        );
-        expect(result.outcome).toBe('blocking');
-
-        const aggregated = new HookAggregator().aggregateResults(
-          [result],
-          HookEventName.PreToolUse,
-        );
-        const output = createHookOutput(
-          HookEventName.PreToolUse,
-          aggregated.finalOutput ?? {},
-        ) as PreToolUseHookOutput;
-        expect(output.isDenied()).toBe(true);
-        // A blocking hook's stdout is never promoted as model context.
-        expect(output.getAdditionalContext()).toBeUndefined();
-      },
-    );
 
     it('should fall back to plain text when stderr JSON is invalid on exit code 2', async () => {
       const mockProcess = createMockProcess(2, '', 'plain blocking error');
@@ -3232,6 +3140,7 @@ describe('HookRunner', () => {
         );
         expect(result.success).toBe(true);
         expect(mockSpawn).toHaveBeenCalled();
+        expect(mockSpawn.mock.calls[0][1][2]).toContain(command);
       },
     );
 
@@ -3312,134 +3221,6 @@ describe('HookRunner', () => {
       expect(output.systemMessage).toMatch(
         /cannot be retrieved|VariableIsUndefined/,
       );
-      expect(output.systemMessage).not.toContain('\u001b');
-      expect(output.reason).not.toContain('\u001b');
-    });
-
-    it('warns once per command about a bare project-dir reference under the PowerShell wrapper', async () => {
-      mockSpawn.mockImplementation(() => createMockProcess(0, '', ''));
-      const runGate = (command: string) =>
-        hookRunner.executeHook(
-          {
-            type: HookType.Command,
-            command,
-            source: HooksConfigSource.Project,
-            shell: 'powershell',
-          },
-          HookEventName.PreToolUse,
-          createMockInput(),
-        );
-      const marker = 'bare $QWEN/CLAUDE/GEMINI_PROJECT_DIR';
-      const warnCount = () =>
-        mockDebugLogger.warn.mock.calls.filter(([text]) =>
-          String(text).includes(marker),
-        ).length;
-
-      await runGate('Write-Output "$QWEN_PROJECT_DIR/gate-warn-a"');
-      await runGate('Write-Output "$QWEN_PROJECT_DIR/gate-warn-a"');
-      expect(warnCount()).toBe(1);
-      await runGate('Write-Output "$QWEN_PROJECT_DIR/gate-warn-b"');
-      expect(warnCount()).toBe(2);
-    });
-
-    it('strips escapes from exit-0 messages and blocking deny reasons', async () => {
-      mockSpawn.mockImplementation(() =>
-        createMockProcess(0, '\u001b[31mred\u001b[0m ok', ''),
-      );
-      const okRes = await hookRunner.executeHook(
-        {
-          type: HookType.Command,
-          command: 'Write-Output colored',
-          source: HooksConfigSource.Project,
-          shell: 'powershell',
-        },
-        HookEventName.PreToolUse,
-        createMockInput(),
-      );
-      expect((okRes.output as { systemMessage?: string }).systemMessage).toBe(
-        'red ok',
-      );
-
-      mockSpawn.mockImplementation(() =>
-        createMockProcess(2, '', '\u001b[31mno\u001b[0m'),
-      );
-      const denyRes = await hookRunner.executeHook(
-        {
-          type: HookType.Command,
-          command: 'gate',
-          source: HooksConfigSource.Project,
-          shell: 'powershell',
-        },
-        HookEventName.PreToolUse,
-        createMockInput(),
-      );
-      expect((denyRes.output as { reason?: string }).reason).toBe('no');
-    });
-
-    it('strips escapes from promoted fields of parsed JSON output', async () => {
-      mockSpawn.mockImplementation(() =>
-        createMockProcess(
-          2,
-          '',
-          '{"decision":"deny","reason":"\\u001b[31mno\\u001b[0m","systemMessage":"\\u001b[2Jmsg","stopReason":"\\u001b[31mstop\\tA\\nnext\\u001b[0m","hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecisionReason":"\\u001b[31mwhy\\u001b[0m","additionalContext":"a\\tb\\u001b[31mred\\u001b[0m"},"terminalSequence":"\\u001b]0;t\\u0007"}',
-        ),
-      );
-      const result = await hookRunner.executeHook(
-        {
-          type: HookType.Command,
-          command: 'npm test 2>&1 | Out-String | ConvertTo-Json',
-          source: HooksConfigSource.Project,
-          shell: 'powershell',
-        },
-        HookEventName.PreToolUse,
-        createMockInput(),
-      );
-      const output = result.output as {
-        reason?: string;
-        systemMessage?: string;
-        stopReason?: string;
-        terminalSequence?: string;
-        hookSpecificOutput?: Record<string, unknown>;
-      };
-      expect(output.reason).toBe('no');
-      expect(output.systemMessage).toBe('msg');
-      expect(output.stopReason).toBe('stop\tA\nnext');
-      expect(output.hookSpecificOutput?.['permissionDecisionReason']).toBe(
-        'why',
-      );
-      expect(output.hookSpecificOutput?.['additionalContext']).toBe('a\tbred');
-      // terminalSequence is an escape channel by contract; it survives.
-      expect(output.terminalSequence).toBe('\u001b]0;t\u0007');
-    });
-
-    it('strips escapes from a PermissionRequest deny message', async () => {
-      mockSpawn.mockImplementation(() =>
-        createMockProcess(
-          0,
-          '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"\\u001b[31mdenied\\u001b[0m","updatedInput":{"note":"\\u001b[31mkeep\\u001b[0m"}}}}',
-          '',
-        ),
-      );
-      const result = await hookRunner.executeHook(
-        {
-          type: HookType.Command,
-          command: 'gate',
-          source: HooksConfigSource.Project,
-          shell: 'powershell',
-        },
-        HookEventName.PermissionRequest,
-        createMockInput(),
-      );
-      const decision = (
-        result.output?.hookSpecificOutput as {
-          decision?: { message?: string; updatedInput?: { note?: string } };
-        }
-      )?.decision;
-      expect(decision?.message).toBe('denied');
-      // updatedInput is forwarded as tool input, not promoted text.
-      expect(decision?.updatedInput).toEqual({
-        note: '\u001b[31mkeep\u001b[0m',
-      });
     });
   });
 

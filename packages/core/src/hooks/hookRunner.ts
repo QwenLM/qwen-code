@@ -9,7 +9,6 @@ import { randomUUID } from 'node:crypto';
 import { rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { stripVTControlCharacters } from 'node:util';
 import { createHookOutput, HookEventName, HookType } from './types.js';
 import { resolveCommandHookTimeoutMs } from './hook-timeout.js';
 import type {
@@ -90,62 +89,6 @@ export function resolvePowerShellExecutable(): string {
  */
 const MAX_OUTPUT_LENGTH = 1024 * 1024;
 
-// Model-bound text: strip escapes and non-whitespace controls, keep tab/CR.
-const PROMOTED_CONTROL_RE =
-  // eslint-disable-next-line no-control-regex
-  /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g;
-
-/** Strip escapes line-wise so newlines and author tabs survive. */
-function stripPromotedText(text: string): string {
-  return text
-    .split('\n')
-    .map((line) =>
-      stripVTControlCharacters(line).replace(PROMOTED_CONTROL_RE, ''),
-    )
-    .join('\n');
-}
-
-/** Strip escapes from every text field a hook can promote to the model or
- * transcript; terminalSequence is an escape channel by contract */
-function stripPromotedFields(out: HookOutput): HookOutput {
-  const cleaned: HookOutput = { ...out };
-  if (typeof cleaned.reason === 'string') {
-    cleaned.reason = stripPromotedText(cleaned.reason);
-  }
-  if (typeof cleaned.systemMessage === 'string') {
-    cleaned.systemMessage = stripPromotedText(cleaned.systemMessage);
-  }
-  if (typeof cleaned.stopReason === 'string') {
-    cleaned.stopReason = stripPromotedText(cleaned.stopReason);
-  }
-  const specific = cleaned.hookSpecificOutput;
-  if (specific) {
-    const next = { ...specific };
-    if (typeof next['additionalContext'] === 'string') {
-      next['additionalContext'] = stripPromotedText(
-        next['additionalContext'] as string,
-      );
-    }
-    if (typeof next['permissionDecisionReason'] === 'string') {
-      next['permissionDecisionReason'] = stripPromotedText(
-        next['permissionDecisionReason'] as string,
-      );
-    }
-    // PermissionRequest deny messages reach the model and the terminal; copy
-    // before mutating so the parsed object the aggregator reads is untouched.
-    const decision = next['decision'];
-    if (decision && typeof decision === 'object' && !Array.isArray(decision)) {
-      const copied = { ...(decision as Record<string, unknown>) };
-      if (typeof copied['message'] === 'string') {
-        copied['message'] = stripPromotedText(copied['message'] as string);
-      }
-      next['decision'] = copied;
-    }
-    cleaned.hookSpecificOutput = next;
-  }
-  return cleaned;
-}
-
 const HOOK_TERMINATE_GRACE_MS = 2000;
 const HOOK_PROCESS_GROUP_POLL_MS = 50;
 const HOOK_CHILD_CLOSE_WAIT_MS = 1000;
@@ -154,18 +97,6 @@ const WINDOWS_TASKKILL = `${process.env['SystemRoot'] || 'C:\\Windows'}\\System3
 const SURVIVING_HOOK_TIMEOUT_EXIT_CODE = 124;
 const SURVIVING_HOOK_SUPERVISOR_GRACE_MS =
   HOOK_TERMINATE_GRACE_MS + HOOK_PROCESS_GROUP_POLL_MS * 2;
-
-// A legacy $..._PROJECT_DIR reference inside a quoted string expands to
-// nothing and exits 0 under the wrapper; warn so it is not silent.
-const LEGACY_PROJECT_DIR_REF_RE =
-  /(?<!\$env:)\$(?:QWEN|CLAUDE|GEMINI)_PROJECT_DIR\b/;
-const warnedLegacyProjectDirRefs = new Set<string>();
-
-// A bare-quoted program path evaluates as a string and exits 0 under the
-// wrapper; warn so it is not silent. The shape check is best-effort.
-const BARE_QUOTED_PROGRAM_PATH_RE =
-  /^(?!&)\s*["'][^"'\n]*\.(?:cmd|bat|exe|ps1)(?![\w.\n])(?![ \t]*["']\s*\|)(?![\s\S]*\n)/i;
-const warnedBareQuotedProgramPaths = new Set<string>();
 
 // An eval source works in both TypeScript development and the single-file CLI
 // bundle without shipping a second executable asset beside the entry point.
@@ -1077,7 +1008,7 @@ export class HookRunner {
         );
       } else {
         const error = result.error || new Error('Unknown error');
-        this.asyncRegistry.fail(hookId, error, result.output);
+        this.asyncRegistry.fail(hookId, error);
         debugLogger.warn(
           `Async hook failed: ${hookId} (${hookName}): ${error.message}`,
         );
@@ -1349,35 +1280,6 @@ export class HookRunner {
         process.platform === 'win32'
           ? '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;'
           : '';
-      if (
-        shellConfig.shell === 'powershell' &&
-        LEGACY_PROJECT_DIR_REF_RE.test(hookConfig.command) &&
-        !warnedLegacyProjectDirRefs.has(hookConfig.command)
-      ) {
-        warnedLegacyProjectDirRefs.add(hookConfig.command);
-        debugLogger.warn(
-          `PowerShell hook command uses a bare $QWEN/CLAUDE/GEMINI_PROJECT_DIR ` +
-            `reference. Under the hook wrapper an undefined variable inside a ` +
-            `quoted string expands to nothing and the hook exits 0, so a gate ` +
-            `written this way silently never runs. Use the environment scope, ` +
-            `e.g. "$env:QWEN_PROJECT_DIR", and prefix a quoted invocation with ` +
-            `the call operator '&'.`,
-        );
-      }
-      if (
-        shellConfig.shell === 'powershell' &&
-        BARE_QUOTED_PROGRAM_PATH_RE.test(hookConfig.command) &&
-        !warnedBareQuotedProgramPaths.has(hookConfig.command)
-      ) {
-        warnedBareQuotedProgramPaths.add(hookConfig.command);
-        debugLogger.warn(
-          `PowerShell hook command begins with a bare-quoted Windows program ` +
-            `path. Under the hook wrapper it evaluates as a string and the ` +
-            `hook exits 0 without running the program, so a gate written this ` +
-            `way silently never runs. Prefix the invocation with the call ` +
-            `operator, e.g. "& ${stripAnsiAndControl(hookConfig.command)}".`,
-        );
-      }
       const command =
         shellConfig.shell === 'powershell'
           ? `${utf8Prefix}${strictPrefix}${hookConfig.command}`
@@ -1660,15 +1562,14 @@ export class HookRunner {
         }
 
         // Parse output
+        // Exit code 2 is a blocking error - ignore stdout, use stderr only
         let output: HookOutput | undefined;
         const isBlockingError = exitCode === 2;
 
-        // Exit 2 carries its reason on stderr; falling back to stdout keeps a
-        // deny payload written there from being discarded. The blocking
-        // outcome itself is enforced as a deny in HookAggregator.
+        // For exit code 2, only use stderr (ignore stdout)
         const stdoutText = stdout.trim();
         const textToParse = isBlockingError
-          ? stderr.trim() || stdoutText
+          ? stderr.trim()
           : stdoutText || stderr.trim();
         // Only stdout is promoted as plain-text context; the stderr fallback
         // stays a system message. JSON on stderr is still parsed as structured
@@ -1695,7 +1596,7 @@ export class HookRunner {
             typeof parsed === 'object' &&
             !Array.isArray(parsed)
           ) {
-            output = stripPromotedFields(parsed as HookOutput);
+            output = parsed as HookOutput;
           } else if (
             parseFailed &&
             !isBlockingError &&
@@ -1790,7 +1691,6 @@ export class HookRunner {
     exitCode: number,
     stdoutEvent?: HookEventName,
   ): HookOutput {
-    const cleanText = stripPromotedText(text);
     if (exitCode === EXIT_CODE_SUCCESS) {
       if (stdoutEvent && PLAIN_TEXT_CONTEXT_EVENTS.has(stdoutEvent)) {
         return {
@@ -1798,27 +1698,32 @@ export class HookRunner {
           reason: 'Hook executed successfully',
           hookSpecificOutput: {
             hookEventName: stdoutEvent,
-            additionalContext: cleanText,
+            // Terminal escapes from colored tool output must not reach the
+            // model; strip per line so newlines survive.
+            additionalContext: text
+              .split('\n')
+              .map((line) => stripAnsiAndControl(line))
+              .join('\n'),
           },
         };
       }
       return {
         decision: 'allow',
         reason: 'Hook executed successfully',
-        systemMessage: cleanText,
+        systemMessage: text,
       };
     } else if (exitCode === EXIT_CODE_NON_BLOCKING_ERROR) {
       // Non-blocking error (EXIT_CODE_NON_BLOCKING_ERROR = 1)
       return {
         decision: 'allow',
-        reason: `Non-blocking error: ${cleanText}`,
-        systemMessage: `Warning: ${cleanText}`,
+        reason: `Non-blocking error: ${text}`,
+        systemMessage: `Warning: ${text}`,
       };
     } else {
       // All other non-zero exit codes (including 2) are blocking
       return {
         decision: 'deny',
-        reason: cleanText,
+        reason: text,
       };
     }
   }
