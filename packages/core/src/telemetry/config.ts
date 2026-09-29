@@ -65,9 +65,13 @@ export function resolveUsageStatisticsEnabled(
  * `ExtensionManager.getTelemetryConfig`, which drops an unsupported value
  * instead of aborting the extension mutation.
  *
- * `env` is injectable so long-lived hosts (the `qwen serve` daemon) pass
- * the owning runtime's resolved environment rather than an ambient
- * `process.env` that per-workspace settings loads may have polluted.
+ * `env` is injectable so a long-lived host (the `qwen serve` daemon) can pass
+ * the resolved environment of the runtime that owns the workspace being
+ * resolved, rather than an ambient `process.env` that per-workspace settings
+ * loads may have polluted. A host that cannot attribute an env to the
+ * workspace in hand must pass `{}` rather than fall back to the ambient one —
+ * the daemon's extensions controller does exactly that for every workspace
+ * other than the one it is bound to.
  */
 export function resolveExtensionTelemetryProxy(
   settingsProxy: string | undefined,

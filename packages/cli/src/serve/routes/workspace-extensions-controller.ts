@@ -208,13 +208,18 @@ export interface CreateExtensionsControllerDeps {
   isWorkspaceTrusted?: () => boolean;
   captureGenerationAssertion?: () => (() => void) | undefined;
   /**
-   * The owning runtime's resolved environment — `buildRuntimeEnvironment`'s
-   * `effectiveEnv` for this workspace, the same value
+   * The resolved environment of the runtime that owns `boundWorkspace` —
+   * `buildRuntimeEnvironment`'s `effectiveEnv`, the same value
    * `resolveSetupGithubProxy(boundWorkspace, deps.env, ...)` receives. It is
    * never the daemon's ambient `process.env`: one daemon hosts every
-   * workspace, so an ambient value is not attributable to this one. Absent
-   * for a non-primary workspace controller, whose runtime env the extensions
-   * route cannot see; telemetry resolution then falls back per read site.
+   * workspace, so an ambient value is not attributable to this one.
+   *
+   * Scoped to `boundWorkspace`, not to every manager this controller builds:
+   * `createExtensionManager` applies it only when `workspaceDir ===
+   * boundWorkspace`, so a manager built for another hosted workspace resolves
+   * consent and proxy from that directory's own settings instead. A secondary
+   * runtime's own env is not visible here; attributing it would need a
+   * `workspaceDir`-keyed resolver rather than this single field.
    */
   env?: Readonly<NodeJS.ProcessEnv>;
 }
@@ -338,6 +343,21 @@ export function createExtensionsController(
             consumeCorruptionEnvVars: false,
           },
     ).merged;
+    // `deps.env` is the bound runtime's LIVE env delegate: every read goes
+    // through `requirePrimaryRuntime()`, which throws once that entry leaves
+    // `active` — something the trust reconciler does in normal operation. So
+    // bind the term to the one workspace this controller owns (a manager built
+    // for another directory must not inherit its consent or proxy), and
+    // tolerate a non-active runtime so a property read cannot throw out of a
+    // route that is serving a different workspace.
+    const runtimeEnv = ((): Readonly<NodeJS.ProcessEnv> | undefined => {
+      if (workspaceDir !== boundWorkspace || !deps.env) return undefined;
+      try {
+        return { ...deps.env };
+      } catch {
+        return undefined;
+      }
+    })();
     return new ExtensionManager({
       workspaceDir,
       locale: resolveExtensionLocale(settings),
@@ -345,7 +365,7 @@ export function createExtensionsController(
         workspaceTrusted ??
         getWorkspaceTrustStatus(settings, workspaceDir).effective.state ===
           'trusted',
-      // Consent and proxy resolve against `deps.env` — the owning runtime's
+      // Consent and proxy resolve against `runtimeEnv` — the bound runtime's
       // environment — never the daemon's ambient `process.env`, which every
       // hosted workspace shares and which no workspace's settings load may
       // write to (see `skipLoadEnvironment` above). The fallbacks differ on
@@ -354,12 +374,14 @@ export function createExtensionsController(
       // silently re-open telemetry an operator switched off daemon-wide,
       // while a proxy read with no injected env stays settings-only, because
       // an ambient proxy is not this workspace's and would route its RUM
-      // uploads through an egress path it never configured.
+      // uploads through an egress path it never configured. A manager built
+      // for any other directory gets no injected env at all, so both of its
+      // terms resolve from that directory's own settings.
       usageStatisticsEnabled: resolveUsageStatisticsEnabled(
         settings.privacy?.usageStatisticsEnabled,
-        deps.env,
+        runtimeEnv,
       ),
-      proxy: resolveExtensionTelemetryProxy(settings.proxy, deps.env ?? {}),
+      proxy: resolveExtensionTelemetryProxy(settings.proxy, runtimeEnv ?? {}),
       requestConsent: () => Promise.resolve(),
       requestSetting:
         interactions?.requestSetting ??
@@ -1166,29 +1188,45 @@ export function createExtensionsController(
       // this poll is the most frequently hit load in the daemon, so letting it
       // spend the one-shot marker it never surfaces would drop the signal for
       // every hosted workspace.
-      const probeSettings = loadSettings(boundWorkspace, {
-        skipLoadEnvironment: true,
-        consumeCorruptionEnvVars: false,
-      }).merged;
+      //
+      // The probe stays ungated only where it is actually read. An
+      // authoritative `false` from `isWorkspaceTrusted` short-circuits
+      // `trusted`, so probing there would parse an untrusted workspace's own
+      // `.qwen/settings.json` and then throw the result away — and parsing
+      // runs the migration / corruption-recovery path, which REWRITES that
+      // file (injecting `$version`, or resetting invalid JSON to `{}` beside a
+      // `.corrupted` sibling). A trust-free, read-only-by-contract status poll
+      // must not mutate the workspace it reports on, so that arm performs
+      // exactly one load: the gated one below.
+      const trustedFromDeps = deps.isWorkspaceTrusted?.();
+      const probeSettings =
+        trustedFromDeps === false
+          ? undefined
+          : loadSettings(boundWorkspace, {
+              skipLoadEnvironment: true,
+              consumeCorruptionEnvVars: false,
+            }).merged;
       const trusted =
-        deps.isWorkspaceTrusted?.() ??
-        getWorkspaceTrustStatus(probeSettings, boundWorkspace).effective
-          .state === 'trusted';
+        trustedFromDeps ??
+        (probeSettings !== undefined &&
+          getWorkspaceTrustStatus(probeSettings, boundWorkspace).effective
+            .state === 'trusted');
       // An untrusted workspace must not select the locale through its own
       // `general.language`: `loadSettings` merges the workspace scope for any
       // directory unless told otherwise, while the entries behind this key are
       // built by `createExtensionManager(boundWorkspace, trusted)`, which does
       // gate it. Re-resolving on the gated merge keeps the cache key and the
       // cached payload on one view of the same file. A trusted workspace
-      // reuses the probe, so the common path is still a single load.
-      const mergedSettings = trusted
-        ? probeSettings
-        : loadSettings(boundWorkspace, {
-            skipLoadEnvironment: true,
-            consumeCorruptionEnvVars: false,
-            skipWorkspaceSettings: true,
-            workspaceTrusted: false,
-          }).merged;
+      // reuses the probe, so that path is still a single load.
+      const mergedSettings =
+        trusted && probeSettings
+          ? probeSettings
+          : loadSettings(boundWorkspace, {
+              skipLoadEnvironment: true,
+              consumeCorruptionEnvVars: false,
+              skipWorkspaceSettings: true,
+              workspaceTrusted: false,
+            }).merged;
       const locale = resolveExtensionLocale(mergedSettings);
       if (
         extensionsStatusCache?.locale === locale &&

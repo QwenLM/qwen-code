@@ -563,10 +563,14 @@ export function registerWorkspaceExtensionRoutes(
       ...(ws === boundWorkspace && deps.captureGenerationAssertion
         ? { captureGenerationAssertion: deps.captureGenerationAssertion }
         : {}),
-      // `deps.env` is the PRIMARY runtime's environment, so it may only be
-      // attributed to the primary workspace's controller. A secondary
-      // workspace's runtime env is not visible here; handing it the primary's
-      // would resolve one repo's consent and proxy values for another.
+      // `deps.env` is the PRIMARY runtime's environment. Restricting it to the
+      // primary controller is a construction-time guard, not the whole
+      // scoping: that one controller also builds managers for OTHER hosted
+      // workspaces (`createExtensionManager(runtime.workspaceCwd, …)`), and it
+      // re-checks per manager, applying the env only when `workspaceDir ===
+      // boundWorkspace`. A secondary workspace therefore resolves consent and
+      // proxy from its own settings — never from the primary's env — but it
+      // does not get its own runtime env, which is not visible from here.
       ...(ws === boundWorkspace && deps.env ? { env: deps.env } : {}),
       ...(maxExtensionOperationHistory === undefined
         ? {}
