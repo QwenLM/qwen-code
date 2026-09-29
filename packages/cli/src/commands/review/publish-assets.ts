@@ -37,7 +37,13 @@ import { createHash } from 'node:crypto';
 import { readFileSync, statSync, writeFileSync, mkdirSync } from 'node:fs';
 import { basename, dirname, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
-import { gh, ghWithInputRetried, resolveGhHost, setGhHost } from './lib/gh.js';
+import {
+  gh,
+  ghWithInputRetried,
+  isOwnerRepo,
+  resolveGhHost,
+  setGhHost,
+} from './lib/gh.js';
 import { reviewWriteAuthorization } from './lib/authorization.js';
 import { operatorReviewSettings } from './lib/review-settings.js';
 import { resolveGithubRepo } from './lib/platform/github.js';
@@ -71,8 +77,18 @@ interface PublishAssetsArgs {
 function resolveReviewedRepoForSelfTargetWarning(
   args: PublishAssetsArgs,
 ): string | undefined {
+  if (args.reviewedRepo !== undefined) {
+    if (!isOwnerRepo(args.reviewedRepo)) {
+      writeStderrLine(
+        'publish-assets: warning — could not determine the reviewed repository; ' +
+          'the self-target check was skipped. Publication is still authorised.',
+      );
+      return undefined;
+    }
+    return args.reviewedRepo;
+  }
   try {
-    return resolveGithubRepo(args.reviewedRepo).groupPath;
+    return resolveGithubRepo().groupPath;
   } catch {
     writeStderrLine(
       'publish-assets: warning — could not determine the reviewed repository; ' +
