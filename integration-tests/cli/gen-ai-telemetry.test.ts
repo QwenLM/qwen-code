@@ -565,6 +565,9 @@ describeLocal('GenAI telemetry fields', () => {
           },
         },
         ui: { enableFollowupSuggestions: false },
+        // The background memory extractor fires after tool-completing
+        // turns and would add a third llm_request span and request.
+        memory: { enableManagedAutoMemory: false },
       },
     });
 
