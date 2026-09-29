@@ -1080,10 +1080,12 @@ describe('managed session authority log integrity', () => {
 
     // Releasing the lease under the authority makes the next append fail for
     // real rather than through an injected stub.
+    expect(authority.writesStopped).toBe(false);
     await lease.release();
     await expect(
       authority.submitInput(inputCommand(fixture), inputRequest),
     ).rejects.toThrow();
+    expect(authority.writesStopped).toBe(true);
 
     await expect(
       authority.submitInput(

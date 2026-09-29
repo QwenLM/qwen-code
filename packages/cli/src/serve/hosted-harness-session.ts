@@ -38,6 +38,14 @@ import {
   type HostedShellTurnOptions,
 } from './hosted-workspace-tool-turn.js';
 import type { HostedHarnessContract } from './hosted-harness-contract.js';
+import {
+  HostedApprovalWaiters,
+  hostedApprovalDefinition,
+  parseHostedApprovalSettings,
+  readHostedApprovalDefinition,
+  resolveHostedAction,
+  type HostedApprovalSettings,
+} from './hosted-tool-approval.js';
 
 const UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
@@ -54,6 +62,8 @@ interface HostedSession {
   blocked: boolean;
   toolProfile?: HostedWorkspaceToolProfile;
   shell?: HostedShellTurnOptions;
+  approval?: HostedApprovalSettings;
+  waiters: HostedApprovalWaiters;
 }
 
 function object(value: unknown): Record<string, unknown> | null {
@@ -250,6 +260,19 @@ export function registerHostedHarnessSessionRoutes(
       error(res, 400, 'hosted_tool_profile_unavailable');
       return;
     }
+    // The mode is pinned at creation, so a deployment's later mode affects
+    // only new Sessions; a load uses the saved one.
+    const approval =
+      create && toolProfile !== undefined
+        ? parseHostedApprovalSettings(
+            body?.['approvalMode'],
+            body?.['approvalTimeoutMs'],
+          )
+        : undefined;
+    if (create && toolProfile !== undefined && !approval) {
+      error(res, 400, 'invalid_hosted_approval');
+      return;
+    }
     if (
       typeof sessionId !== 'string' ||
       !UUID.test(sessionId) ||
@@ -296,6 +319,7 @@ export function registerHostedHarnessSessionRoutes(
                   engine: 'managed',
                   sessionId,
                   ...(toolProfile ? { toolProfile } : {}),
+                  ...(approval ? hostedApprovalDefinition(approval) : {}),
                 }),
               ),
             ),
@@ -326,6 +350,7 @@ export function registerHostedHarnessSessionRoutes(
         streams: new Set(),
         admissions: new Map(),
         blocked: false,
+        waiters: new HostedApprovalWaiters(),
         ...(toolProfile ? { toolProfile } : {}),
         ...(toolProfile === HOSTED_WORKSPACE_SHELL_PROFILE
           ? {
@@ -345,11 +370,18 @@ export function registerHostedHarnessSessionRoutes(
           ).toString('utf8'),
         ),
       );
-      if (definition?.['toolProfile'] !== toolProfile) {
+      const pinned = toolProfile
+        ? readHostedApprovalDefinition(definition)
+        : undefined;
+      if (
+        definition?.['toolProfile'] !== toolProfile ||
+        (toolProfile && !pinned)
+      ) {
         await managed.close();
         error(res, 409, 'hosted_tool_profile_conflict');
         return;
       }
+      if (pinned) session.approval = pinned;
       const restore = await managed.authority.restoreBundle();
       if (restore.recoveryStatus !== 'ok' || hasUnsettledInput(session)) {
         await managed.close();
@@ -363,6 +395,8 @@ export function registerHostedHarnessSessionRoutes(
         workspaceCwd: cwd,
         lastEventId: managed.authority.committedSequence,
         eventEpoch: epoch,
+        // A Harness older than approvals omits this, so a caller can tell.
+        ...(pinned ? { approvalMode: pinned.mode } : {}),
       });
     } catch (cause) {
       await managed?.close().catch(() => undefined);
@@ -558,6 +592,10 @@ export function registerHostedHarnessSessionRoutes(
                     ) <=
                     HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes,
                   session.shell,
+                  session.approval && {
+                    settings: session.approval,
+                    waiters: session.waiters,
+                  },
                 )
               : undefined;
           let state: 'completed' | 'cancelled' | 'error' = 'completed';
@@ -758,6 +796,37 @@ export function registerHostedHarnessSessionRoutes(
     if (!session) return error(res, 404, 'hosted_session_not_found');
     session.active?.abort.abort();
     res.sendStatus(204);
+  });
+  app.post('/session/:id/actions/:requestId/resolve', (req, res) => {
+    const session = identity(req, sessions);
+    if (!session) return error(res, 404, 'hosted_session_not_found');
+    const requestId = req.params['requestId'];
+    const stopped = session.managed.authority.writesStopped;
+    void resolveHostedAction(
+      session.managed,
+      session.waiters,
+      requestId,
+      req.body,
+      () => session.blocked,
+    ).then(
+      (result) =>
+        result.status === 200
+          ? res.json(result.body)
+          : error(res, result.status, result.code),
+      (cause) => {
+        writeStderrLineSafe(
+          `qwen serve: Hosted Action ${requestId} could not be resolved: ${String(cause)}`,
+        );
+        // Only this answer's own write can have stopped the writes; any
+        // earlier failure wrote nothing and stays retryable.
+        if (stopped || !session.managed.authority.writesStopped)
+          return error(res, 503, 'action_resolution_failed');
+        // A failed append stops every later write, so no retry can succeed.
+        // Wake the waiting Turn so it blocks the Session now, not at expiry.
+        session.waiters.notify(requestId);
+        error(res, 409, 'hosted_turn_recovery_required');
+      },
+    );
   });
   app.post('/session/:id/title', (req, res) => {
     const session = identity(req, sessions);

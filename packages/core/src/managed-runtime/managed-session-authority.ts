@@ -391,6 +391,14 @@ export class LocalManagedSessionAuthority {
   }
 
   /**
+   * True after an append failed. Its records may already be on disk, so this
+   * authority accepts no further writes and the Session needs recovery.
+   */
+  get writesStopped(): boolean {
+    return this.writeFailure !== undefined;
+  }
+
+  /**
    * Whether the log records anything beyond activation bookkeeping, which is
    * all a Session that never received input ever writes.
    */
