@@ -3321,6 +3321,10 @@ async function evaluateBuiltInGuard(
     }
   }
 
+  // Normal tool permission already admitted this call. Keep the fallback
+  // containment check for speculative calls that never run that flow.
+  if (request.permissionChecked === true) return { allowed: true };
+
   // A model-supplied `directory` becomes the containment basis, so it must
   // itself stay inside the effective working directory before it is trusted.
   let startDirectory = canonicalEffectiveCwd;

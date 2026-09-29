@@ -36412,6 +36412,7 @@ describe('Session', () => {
             toolName: 'read_file',
             args: { path: '/normalized/final.txt' },
             signal: expect.any(AbortSignal),
+            permissionChecked: true,
             // The daemon policy falls back to the session and needs to know
             // where the tool will run.
             sessionId: 'test-session-id',
@@ -36480,6 +36481,7 @@ describe('Session', () => {
             toolName: 'read_file',
             args: { path: '/normalized/final.txt' },
             signal: expect.any(AbortSignal),
+            permissionChecked: true,
             // The daemon policy falls back to the session and needs to know
             // where the tool will run.
             sessionId: 'test-session-id',

@@ -35532,6 +35532,38 @@ describe('createManagedExternalToolGuard', () => {
     );
   });
 
+  it.each([true, false, undefined])(
+    'forwards only the true runtime permissionChecked marker (%s)',
+    async (permissionChecked) => {
+      const extMethod = vi.fn().mockResolvedValue({ allowed: true });
+      const guard = createManagedExternalToolGuard({
+        extMethod,
+      } as unknown as AgentSideConnection);
+      const args = { command: 'pwd', permissionChecked: true };
+
+      await expect(
+        guard({
+          callId: 'call-1',
+          toolName: 'run_shell_command',
+          args,
+          signal: new AbortController().signal,
+          sessionId: 'session-1',
+          ...(permissionChecked === undefined ? {} : { permissionChecked }),
+        }),
+      ).resolves.toEqual({ allowed: true });
+      expect(extMethod).toHaveBeenCalledExactlyOnceWith(
+        SERVE_CONTROL_EXT_METHODS.externalToolGuardPrepare,
+        {
+          sessionId: 'session-1',
+          toolCallId: 'call-1',
+          toolName: 'run_shell_command',
+          arguments: args,
+          ...(permissionChecked === true ? { permissionChecked: true } : {}),
+        },
+      );
+    },
+  );
+
   it('preserves a validated denial reason from the provider', async () => {
     const extMethod = vi.fn().mockResolvedValue({
       allowed: false,

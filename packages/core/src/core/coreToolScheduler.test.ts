@@ -12799,6 +12799,7 @@ describe('CoreToolScheduler Plan shell routing', () => {
       toolName: ToolNames.SHELL,
       args: { command: 'git status', directory: '/workspace' },
       signal: expect.any(AbortSignal),
+      permissionChecked: true,
       sessionId: 'plan-shell-session',
       cwd: '/workspace',
     });
@@ -12837,6 +12838,7 @@ describe('CoreToolScheduler Plan shell routing', () => {
       toolName: ToolNames.SHELL,
       args: { command: 'git status', directory: '/workspace' },
       signal: expect.any(AbortSignal),
+      permissionChecked: true,
       sessionId: 'plan-shell-session',
       cwd: '/workspace',
     });

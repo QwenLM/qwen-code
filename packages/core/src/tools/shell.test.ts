@@ -104,6 +104,7 @@ import { OUTPUT_UPDATE_INTERVAL_MS, parseNumstat } from './shell.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
 import { PermissionManager } from '../permissions/permission-manager.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
+import { assertShellSandboxCwd } from '../sandbox/runtime-shell-policy.js';
 
 interface ShellToolParameterJsonSchema {
   properties: {
@@ -422,6 +423,28 @@ describe('ShellTool', () => {
         mockConfig.getBackgroundShellRegistry().register,
       ).not.toHaveBeenCalled();
       expect(mockShellExecutionService).not.toHaveBeenCalled();
+    });
+
+    it('rejects an outside cwd at build time when the sandbox rejects it', () => {
+      vi.mocked(assertShellSandboxCwd).mockImplementationOnce(() => {
+        throw new Error(
+          'Shell sandbox cwd must remain inside the admitted workspace.',
+        );
+      });
+
+      expect(() =>
+        shellTool.build({
+          command: 'ls',
+          directory: '/outside',
+          is_background: false,
+        }),
+      ).toThrow(
+        "Directory '/outside' must be an existing directory inside the execution sandbox workspace.",
+      );
+      expect(assertShellSandboxCwd).toHaveBeenCalledWith(
+        mockConfig.getShellExecutionSandbox(),
+        '/outside',
+      );
     });
 
     it('uses a conservative permission default without host git probes', async () => {
@@ -1215,43 +1238,39 @@ describe('ShellTool', () => {
       ).toThrow('Directory must be an absolute path.');
     });
 
-    it('should throw an error for a directory outside the workspace', async () => {
-      (mockConfig.getWorkspaceContext as Mock).mockReturnValue(
-        createMockWorkspaceContext('/test/dir', ['/another/workspace']),
-      );
-      expect(() =>
-        shellTool.build({
-          command: 'ls',
-          directory: '/not/in/workspace',
-          is_background: false,
-        }),
-      ).toThrow(
-        "Directory '/not/in/workspace' is not within any of the registered workspace directories.",
-      );
-    });
+    it.each([
+      '/not/in/workspace',
+      '/tmp/project-other',
+      '/tmp/project/../project-other',
+    ])(
+      'should ask and warn for a read-only command outside the workspace in %s',
+      async (directory) => {
+        const workspaceContext = createMockWorkspaceContext('/test/dir', [
+          '/tmp/project',
+        ]);
+        (mockConfig.getWorkspaceContext as Mock).mockReturnValue(
+          workspaceContext,
+        );
 
-    it('should reject sibling-prefix directories outside the workspace', async () => {
-      const workspaceContext = createMockWorkspaceContext('/test/dir', [
-        '/tmp/project',
-      ]);
-      vi.mocked(workspaceContext.isPathWithinWorkspace).mockReturnValue(false);
-      (mockConfig.getWorkspaceContext as Mock).mockReturnValue(
-        workspaceContext,
-      );
-
-      expect(() =>
-        shellTool.build({
+        const invocation = shellTool.build({
           command: 'ls',
-          directory: '/tmp/project-other',
+          directory,
           is_background: false,
-        }),
-      ).toThrow(
-        "Directory '/tmp/project-other' is not within any of the registered workspace directories.",
-      );
-      expect(workspaceContext.isPathWithinWorkspace).toHaveBeenCalledWith(
-        '/tmp/project-other',
-      );
-    });
+        });
+
+        await expect(invocation.getDefaultPermission()).resolves.toBe('ask');
+        const details = await invocation.getConfirmationDetails(
+          new AbortController().signal,
+        );
+        expect(details.type).toBe('exec');
+        expect(details).toHaveProperty('warnings', [
+          `Runs outside the workspace in ${directory}`,
+        ]);
+        expect(workspaceContext.isPathWithinWorkspace).toHaveBeenCalledWith(
+          directory,
+        );
+      },
+    );
 
     it('should throw an error for a directory within the user skills directory', async () => {
       expect(() =>
@@ -8837,16 +8856,24 @@ describe('ShellTool', () => {
   });
 
   describe('getDefaultPermission and getConfirmationDetails', () => {
-    it('should not request confirmation for read-only commands', async () => {
-      const invocation = shellTool.build({
-        command: 'ls -la',
-        is_background: false,
-      });
+    it.each([undefined, '/test/dir/subdir', '/test/dir/subdir/..'])(
+      'should allow read-only commands within the workspace in %s',
+      async (directory) => {
+        const invocation = shellTool.build({
+          command: 'ls -la',
+          directory,
+          is_background: false,
+        });
 
-      const permission = await invocation.getDefaultPermission();
+        const permission = await invocation.getDefaultPermission();
 
-      expect(permission).toBe('allow');
-    });
+        expect(permission).toBe('allow');
+        const details = await invocation.getConfirmationDetails(
+          new AbortController().signal,
+        );
+        expect(details).not.toHaveProperty('warnings');
+      },
+    );
 
     // Regression coverage for PR #4386 round 6 (cid 3298521039): the
     // env-prefix wrapper substitution bypass. `getDefaultPermission`

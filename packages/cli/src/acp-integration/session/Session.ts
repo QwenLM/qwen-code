@@ -14826,6 +14826,7 @@ export class Session implements SessionContext {
                 toolName: policyToolName,
                 args: invocation.params as Record<string, unknown>,
                 signal: activeToolAbortSignal,
+                permissionChecked: true,
                 // Same identity and execution scope `CoreToolScheduler`
                 // supplies. This is the path daemon ACP sessions actually
                 // take, so without them a host policy that falls back to the
