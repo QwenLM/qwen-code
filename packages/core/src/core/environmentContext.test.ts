@@ -1310,6 +1310,39 @@ describe('buildAvailableSkillsReminder', () => {
       'Second line that should be dropped',
     );
   });
+
+  // Pins the behaviour #12472 reports: over budget, the trim never shortens a
+  // bundled entry, so the recovered room always comes out of the others.
+  it('keeps bundled entries verbatim and trims only the others when over budget', async () => {
+    const bundled: AvailableSkillEntry = {
+      name: 'bundled-skill',
+      description: 'Bundled first line\nBundled second line',
+      whenToUse: 'Bundled when-to-use',
+      level: 'bundled',
+    };
+    const project: AvailableSkillEntry[] = Array.from(
+      { length: 30 },
+      (_, i) => ({
+        name: `project-skill-${i}`,
+        description: 'P'.repeat(300) + '\nProject second line',
+        whenToUse: 'Project when-to-use',
+        level: 'project' as const,
+      }),
+    );
+    vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
+      availableSkills: [],
+      pendingConditionalSkillNames: new Set(),
+      modelInvocableCommands: [],
+      entries: [bundled, ...project],
+    });
+
+    const result = await buildAvailableSkillsReminder(mockConfig as Config);
+
+    expect(result!.reminder).toContain('Bundled second line');
+    expect(result!.reminder).toContain('Bundled when-to-use');
+    expect(result!.reminder).not.toContain('Project second line');
+    expect(result!.reminder).not.toContain('Project when-to-use');
+  });
 });
 
 describe('buildAddedSkillsReminder', () => {
