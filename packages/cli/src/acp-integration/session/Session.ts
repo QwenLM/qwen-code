@@ -15020,7 +15020,38 @@ export class Session implements SessionContext {
                   this.config.getShellExecutionConfig(),
                 );
               if (toolName !== ToolNames.EXEC) {
-                toolResult = await execute();
+                if (codeModeContext) {
+                  let cancelExecution: (() => void) | undefined;
+                  try {
+                    toolResult = await new Promise<ToolResult>(
+                      (resolve, reject) => {
+                        cancelExecution = () => {
+                          toolSettled = true;
+                          reject(new Error(TOOL_EXECUTION_CANCELLED_MESSAGE));
+                        };
+                        if (activeToolAbortSignal.aborted) {
+                          cancelExecution();
+                          return;
+                        }
+                        activeToolAbortSignal.addEventListener(
+                          'abort',
+                          cancelExecution,
+                          { once: true },
+                        );
+                        void execute().then(resolve, reject);
+                      },
+                    );
+                  } finally {
+                    if (cancelExecution) {
+                      activeToolAbortSignal.removeEventListener(
+                        'abort',
+                        cancelExecution,
+                      );
+                    }
+                  }
+                } else {
+                  toolResult = await execute();
+                }
               } else {
                 let admissionTail = Promise.resolve();
                 const executing = new Set<Promise<void>>();

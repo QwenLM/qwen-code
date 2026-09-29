@@ -45,6 +45,13 @@ when the program catches the rejection. The existing host
 behavior for uncaught program failures, timeouts, and unawaited calls remains
 authoritative.
 
+Cancellation ends the wait for a nested tool's execution even if its implementation
+ignores the abort signal. The call still finishes its cancellation hooks and
+terminal recording before the parent completes. Late fulfillment, rejection, and
+progress cannot publish a second result. A file read checks cancellation after
+awaiting content, before updating its cache. Tool implementations remain responsible
+for stopping their underlying work; cancelling the wait cannot undo side effects.
+
 ## Scope and decisions
 
 Changes cover Code Mode guidance and examples, the shared skill safety
@@ -81,7 +88,10 @@ Build, typecheck, run relevant package tests, and review the complete diff.
 Acceptance requires safe calls to overlap within the cap, unsafe calls to
 preserve submission barriers, each result to retain its call ID and output,
 ordinary failures to leave independent results available, and user cancellation
-to prevent queued tool execution. Code Mode remains experimental and opt-in.
+to prevent queued tool execution. With an ACP read reply held, user cancellation
+and guest completion must settle the parent and allow the next turn before the
+reply is released. A late success or failure must not change terminal records or
+populate the read cache. Code Mode remains experimental and opt-in.
 
 ## Open questions
 

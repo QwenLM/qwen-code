@@ -39227,6 +39227,7 @@ describe('Session', () => {
         execute: (
           signal: AbortSignal,
           args: Record<string, unknown>,
+          updateOutput?: (chunk: core.ToolResultDisplay) => void,
         ) => Promise<core.ToolResult>,
         permission: 'allow' | 'ask' | 'deny' = 'allow',
       ) => ({
@@ -39244,8 +39245,10 @@ describe('Session', () => {
               prompt: 'Allow?',
               onConfirm: vi.fn(),
             }),
-            execute: (signal: AbortSignal) =>
-              execute(signal, invocation.params),
+            execute: (
+              signal: AbortSignal,
+              updateOutput?: (chunk: core.ToolResultDisplay) => void,
+            ) => execute(signal, invocation.params, updateOutput),
           };
           return invocation;
         },
@@ -39621,6 +39624,111 @@ describe('Session', () => {
           ),
         ).toEqual(['exec-parent:code:1', 'exec-parent:code:2', 'exec-parent']);
       });
+
+      it.each([
+        ['parent', 'success'],
+        ['parent', 'error'],
+        ['host', 'success'],
+        ['host', 'error'],
+        ['unawaited', 'success'],
+        ['unawaited', 'error'],
+      ] as const)(
+        'settles unresponsive nested execution on %s cancellation and discards late %s',
+        async (source, outcome) => {
+          const controller = new AbortController();
+          const started = deferred();
+          const release = deferred();
+          let executionFinished = false;
+          const queued = vi.fn().mockResolvedValue(output('should not run'));
+          const onResult = vi.fn();
+          mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+          mockConfig.getMessageBus = vi.fn().mockReturnValue({});
+          vi.spyOn(core, 'firePreToolUseHook').mockResolvedValue({
+            shouldProceed: true,
+          });
+          const postHook = vi
+            .spyOn(core, 'firePostToolUseHook')
+            .mockResolvedValue({ shouldStop: false });
+          const failureHook = vi
+            .spyOn(core, 'firePostToolUseFailureHook')
+            .mockResolvedValue({});
+          const active = nestedTool(
+            'read_unresponsive',
+            core.Kind.Read,
+            async (_signal, _args, updateOutput) => {
+              started.resolve();
+              try {
+                await release.promise;
+                updateOutput?.({ type: 'shell_progress', elapsedMs: 1000 });
+                if (outcome === 'error') throw new Error('late failure');
+                return output('late success');
+              } finally {
+                executionFinished = true;
+              }
+            },
+          );
+          let dispatched: Promise<unknown> | undefined;
+          let finished = false;
+          const running = runCode(
+            [active, nestedTool('edit_queued', core.Kind.Edit, queued)],
+            async (runtime, signal) => {
+              const nestedSignal =
+                source === 'host' ? controller.signal : signal;
+              dispatched = Promise.allSettled([
+                runtime.dispatch(active.name, {}, nestedSignal, onResult),
+                runtime.dispatch('edit_queued', {}, nestedSignal),
+              ]);
+              await started.promise;
+              if (source === 'unawaited') return 'finished';
+              return dispatched;
+            },
+            source === 'parent' ? controller.signal : undefined,
+          ).then((result) => {
+            finished = true;
+            return result;
+          });
+          try {
+            await started.promise;
+            if (source !== 'unawaited') controller.abort();
+            await vi.waitFor(() => expect(finished).toBe(true));
+            await running;
+            await dispatched;
+            expect(executionFinished).toBe(false);
+            expect(queued).not.toHaveBeenCalled();
+            expect(onResult).toHaveBeenCalledOnce();
+            expect(onResult.mock.calls[0][0].error).toBeInstanceOf(Error);
+            const records =
+              mockChatRecordingService.recordToolResult.mock.calls;
+            expect(records).toHaveLength(3);
+            expect(records.at(-1)?.[1].callId).toBe('exec-parent');
+            expect(records.slice(0, 2).map(([, meta]) => meta.status)).toEqual([
+              'cancelled',
+              'cancelled',
+            ]);
+            const updatesBeforeRelease = vi.mocked(mockClient.sessionUpdate)
+              .mock.calls.length;
+            const hooksBeforeRelease = failureHook.mock.calls.length;
+            release.resolve();
+            await vi.waitFor(() => expect(executionFinished).toBe(true));
+            await new Promise<void>((resolve) => setImmediate(resolve));
+            expect(mockClient.sessionUpdate).toHaveBeenCalledTimes(
+              updatesBeforeRelease,
+            );
+            expect(
+              mockChatRecordingService.recordToolResult,
+            ).toHaveBeenCalledTimes(3);
+            expect(onResult).toHaveBeenCalledOnce();
+            expect(failureHook).toHaveBeenCalledTimes(hooksBeforeRelease);
+            expect(
+              postHook.mock.calls.filter(([, name]) => name === active.name),
+            ).toHaveLength(0);
+          } finally {
+            release.resolve();
+            await running;
+            await dispatched;
+          }
+        },
+      );
 
       it('waits for skill hook registration before admitting shell calls whose hooks rewrite their arguments', async () => {
         mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
