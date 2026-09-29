@@ -1879,6 +1879,9 @@ export class LlmClient {
     // compression should keep session-setup reveals so the declaration list
     // does not change mid-session.
     this.config.getToolRegistry().clearRevealedDeferredTools();
+    // tool_search results leave with the history, so tool_call must not
+    // run a hidden tool on a review the new session never saw (#12569).
+    this.config.getToolRegistry().clearReviewedDeclarations?.();
     await runWithHookExecutionOwner(hookOwner, () =>
       this.startChat(undefined, SessionStartSource.Clear),
     );
@@ -5707,6 +5710,8 @@ export class LlmClient {
       // Reads re-emit bytes the model can no longer see in history.
       debugLogger.debug('[FILE_READ_CACHE] clear after tryCompressChat');
       this.config.getFileReadCache().clear();
+      // The summary does not carry tool_search schemas either (#12569).
+      this.config.getToolRegistry()?.clearReviewedDeclarations?.();
       this.getChat().setLastPromptTokenCount(
         info.newTokenCount,
         info.newTokenCountIsEstimated ?? true,

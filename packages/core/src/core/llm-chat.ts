@@ -5661,6 +5661,9 @@ export class LlmChat {
     // body costs at most one duplicate injection on the next invoke.
     if (!this.isForkedChat) {
       clearLoadedSkillTracking(this.config.getToolRegistry(), 'setHistory');
+      // Same reasoning for tool_search results: the replacement may not
+      // carry the schema a recorded review stands for (#12569).
+      this.config.getToolRegistry()?.clearReviewedDeclarations?.();
     }
   }
 
@@ -5681,6 +5684,7 @@ export class LlmChat {
         this.config.getToolRegistry(),
         'truncateHistory',
       );
+      this.config.getToolRegistry()?.clearReviewedDeclarations?.();
     }
     this.clearPendingPartialState();
   }
@@ -5752,6 +5756,7 @@ export class LlmChat {
         this.config.getToolRegistry(),
         'stripOrphanedUserEntries',
       );
+      this.config.getToolRegistry()?.clearReviewedDeclarations?.();
     }
     this.clearPendingPartialState();
     return strippedEntries;

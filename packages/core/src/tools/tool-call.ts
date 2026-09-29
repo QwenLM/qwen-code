@@ -213,11 +213,25 @@ export async function resolveDeferredToolCall(
     };
   }
 
+  // The arguments must be written against a schema the model currently has.
+  // A review is recorded when tool_search returns the schema and cleared
+  // whenever history is replaced (see `clearReviewedDeclarations`), so a tool
+  // never reviewed here, or whose review left context with a compaction,
+  // clear or rewind, is refused rather than run by name (#12569). Registries
+  // without the optional lookup (test stubs) keep the ungated behaviour.
+  const reviewed = registry.getReviewedDeclaration?.(target.name);
+  if (registry.getReviewedDeclaration && reviewed === undefined) {
+    return {
+      error: bridgeRefusal(
+        `Deferred tool "${target.name}" has no schema in the current context. Run tool_search with select:${target.name} and call it with the returned schema.`,
+      ),
+      errorType: ToolErrorType.INVALID_TOOL_PARAMS,
+      targetName: target.name,
+    };
+  }
   // A hidden tool whose declaration or MCP server changed since tool_search
   // returned it would run arguments written against a schema the model no
-  // longer has, possibly on a replacement server. A tool never reviewed in
-  // this session keeps working by name.
-  const reviewed = registry.getReviewedDeclaration?.(target.name);
+  // longer has, possibly on a replacement server.
   if (
     reviewed !== undefined &&
     reviewed !== deferredDeclarationFingerprint(target)

@@ -1203,41 +1203,43 @@ describe('ToolRegistry', () => {
       expect(toolRegistry.isDeferredToolRevealed(toolName)).toBe(false);
     });
 
-    it('keeps the reviewed declaration after removal so a changed replacement is refused (#11321)', () => {
-      const declaration = {
-        type: 'object',
-        properties: { text: { type: 'string' } },
-      };
+    it('drops the reviewed declaration with the tool, so a replacement must be reviewed again (#12569)', () => {
       const tool = new DiscoveredMCPTool(
         {} as CallableTool,
         'slack',
         'send_message',
         'send a message',
-        declaration,
+        { type: 'object', properties: { text: { type: 'string' } } },
       );
       toolRegistry.registerTool(tool);
       toolRegistry.recordReviewedDeclaration(tool);
-      const recorded = toolRegistry.getReviewedDeclaration(tool.name);
-      expect(recorded).toBe(deferredDeclarationFingerprint(tool));
+      expect(toolRegistry.getReviewedDeclaration(tool.name)).toBe(
+        deferredDeclarationFingerprint(tool),
+      );
 
       toolRegistry.removeMcpToolsByServer('slack');
 
-      // Deliberately NOT pruned. A dropped entry reads as "never reviewed" and
-      // passes a replacement through, while a retained one can only match the
-      // same server, schema name and parameter schema — so it either still
-      // describes the live tool or forces a re-review. No removal route has to
-      // remember to touch this map, which is the point.
-      expect(toolRegistry.getReviewedDeclaration(tool.name)).toBe(recorded);
+      // tool_call refuses a hidden tool with no review, so pruning is the
+      // strict direction: a same-named replacement, changed or not, has to go
+      // through tool_search before it runs.
+      expect(toolRegistry.getReviewedDeclaration(tool.name)).toBeUndefined();
+    });
 
-      // A replacement republishing a changed contract does not match it.
-      const replacement = new DiscoveredMCPTool(
-        {} as CallableTool,
-        'slack',
-        'send_message',
-        'send a message',
-        { type: 'object', properties: { channel: { type: 'string' } } },
-      );
-      expect(deferredDeclarationFingerprint(replacement)).not.toBe(recorded);
+    it('clearReviewedDeclarations forgets every review (#12569)', () => {
+      const first = new MockTool({ name: 'first_deferred', shouldDefer: true });
+      const second = new MockTool({
+        name: 'second_deferred',
+        shouldDefer: true,
+      });
+      toolRegistry.registerTool(first);
+      toolRegistry.registerTool(second);
+      toolRegistry.recordReviewedDeclaration(first);
+      toolRegistry.recordReviewedDeclaration(second);
+
+      toolRegistry.clearReviewedDeclarations();
+
+      expect(toolRegistry.getReviewedDeclaration(first.name)).toBeUndefined();
+      expect(toolRegistry.getReviewedDeclaration(second.name)).toBeUndefined();
     });
 
     it('includes deferred tools listed in visibleTools in function declarations', () => {

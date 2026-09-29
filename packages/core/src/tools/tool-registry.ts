@@ -242,13 +242,11 @@ export class ToolRegistry {
   // pinDeferredToolReveal): they survive the `/clear` reset that
   // intentionally drops transient reveals so the new session starts clean.
   private pinnedDeferredReveals: Set<string> = new Set();
-  // Fingerprint of each tool as tool_search last returned it, kept across
-  // `/clear` and deliberately never pruned: an entry can only match the same
-  // server, schema name and parameter schema, so a stale one either still
-  // describes the live tool or makes tool_call ask for a fresh review.
-  // Pruning it on removal would invert that — a dropped entry reads as "never
-  // reviewed" and passes a replacement through. Bounded by the distinct tool
-  // names reviewed in this process.
+  // Fingerprint of each tool as tool_search last returned it into the current
+  // history. tool_call refuses a hidden tool with no entry, so an entry is
+  // the claim "the model has this schema in context": it is dropped with the
+  // tool and cleared wherever the FileReadCache is cleared for replaced
+  // history (see `clearReviewedDeclarations`, #12569).
   private reviewedDeferredDeclarations: Map<string, string> = new Map();
   private codeModeCollisionWarnings = new Set<string>();
   // Built-in tools demoted to deferred by an active `settings.tools.eager`
@@ -568,6 +566,7 @@ export class ToolRegistry {
         // this a re-discovered tool of the same name would inherit
         // stale "revealed" state across the disconnect/reconnect.
         this.revealedDeferred.delete(tool.name);
+        this.reviewedDeferredDeclarations.delete(tool.name);
       }
     }
   }
@@ -588,9 +587,10 @@ export class ToolRegistry {
         // the same name would inherit `revealed: true` from the prior
         // session — `getFunctionDeclarations` would emit it (since it
         // checks reveal state) before the model has any way to know
-        // the tool exists this session. The reviewed-declaration record
-        // is deliberately left alone: see `reviewedDeferredDeclarations`.
+        // the tool exists this session. A re-registered tool of the same
+        // name must also be reviewed again before tool_call runs it.
         this.revealedDeferred.delete(name);
+        this.reviewedDeferredDeclarations.delete(name);
       }
     }
   }
@@ -1031,8 +1031,20 @@ export class ToolRegistry {
   }
 
   /**
+   * Forgets every recorded review. Call it wherever the FileReadCache is
+   * cleared because history was replaced (compaction, `/clear`, rewind,
+   * restore, session reset): the tool_search results those reviews stand for
+   * may no longer be in context. A new history-replacement site must clear
+   * both.
+   */
+  clearReviewedDeclarations(): void {
+    this.reviewedDeferredDeclarations.clear();
+  }
+
+  /**
    * The fingerprint recorded by {@link recordReviewedDeclaration}, or
-   * `undefined` when tool_search has not returned this tool in the session.
+   * `undefined` when tool_search has not returned this tool into the current
+   * history.
    */
   getReviewedDeclaration(name: string): string | undefined {
     return this.reviewedDeferredDeclarations.get(name);
