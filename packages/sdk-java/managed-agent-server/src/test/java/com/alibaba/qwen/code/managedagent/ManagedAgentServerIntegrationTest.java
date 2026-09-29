@@ -116,11 +116,9 @@ class ManagedAgentServerIntegrationTest {
         harness.setAvailable(true);
     }
 
-    /**
-     * Keeps the dispatch recovery scanner from claiming a Turn that the
-     * test drives directly through the store: the scanner backs off while
-     * the Harness is unavailable.
-     */
+    // Keeps the dispatch recovery scanner from claiming a Turn that the
+    // test drives directly through the store: the scanner backs off while
+    // the Harness is unavailable.
     private void pauseRecoveryScanning() {
         harness.setAvailable(false);
     }
