@@ -34,6 +34,7 @@ import java.util.function.Supplier;
 import org.junit.jupiter.api.Test;
 
 class RuntimeBrokerServiceTest {
+    private static final String PROVIDER_SESSION = "550e8400-e29b-41d4-a716-446655440302";
     private static final Instant START = Instant.parse(
             "2026-09-22T00:00:00Z");
     private static final RuntimeScope WORKSPACE_SCOPE = new RuntimeScope(
@@ -161,6 +162,542 @@ class RuntimeBrokerServiceTest {
             assertEquals(1, fixture.transport.executeCalls.get());
             assertEquals(reference, fixture.transport.lastReference);
         }
+    }
+
+    @Test
+    void reservesProviderReferencesWithoutEffectsAndStartsTheOriginalOnce() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            join(fixture.service.acquire("harness", PROVIDER_SESSION, "bootstrap"));
+            Map<String, Object> reference = providerReference();
+            ToolExecutionRecord first = join(fixture.service.prepareExecution(
+                    "harness", PROVIDER_SESSION, "key", reference));
+            ToolExecutionRecord duplicate = join(fixture.service.prepareExecution(
+                    "harness", PROVIDER_SESSION, "key", reference));
+            assertEquals(first.getExecutionCallId(), duplicate.getExecutionCallId());
+            assertEquals(ToolExecutionRecord.State.PREPARED, duplicate.getState());
+            assertEquals(reference, duplicate.getReference());
+            assertEquals(0, fixture.transport.executeCalls.get());
+            assertEquals("runtime_reference_invalid", failure(fixture.service.createExecution(
+                    "harness", PROVIDER_SESSION, "key", reference)).getCode());
+            ToolExecutionRecord started = join(fixture.service.startExecution(
+                    "harness", PROVIDER_SESSION, first.getExecutionCallId()));
+            join(fixture.service.startExecution("harness", PROVIDER_SESSION, first.getExecutionCallId()));
+            join(fixture.service.prepareExecution("harness", PROVIDER_SESSION, "key", reference));
+            assertEquals(ToolExecutionRecord.State.SETTLED, started.getState());
+            assertEquals(1, fixture.transport.executeCalls.get());
+            assertEquals(reference, fixture.transport.lastReference);
+        }
+    }
+
+    @Test
+    void providerStartNeverReplaysAnUnknownExecution() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            join(fixture.service.acquire("harness", PROVIDER_SESSION, "bootstrap"));
+            fixture.transport.executeResult = CompletableFuture.failedFuture(
+                    new IllegalStateException("lost response"));
+            ToolExecutionRecord prepared = join(fixture.service.prepareExecution(
+                    "harness", PROVIDER_SESSION, "key", providerReference()));
+            ToolExecutionRecord unknown = join(fixture.service.startExecution(
+                    "harness", PROVIDER_SESSION, prepared.getExecutionCallId()));
+            assertEquals(ToolExecutionRecord.State.UNKNOWN, unknown.getState());
+            join(fixture.service.startExecution("harness", PROVIDER_SESSION, prepared.getExecutionCallId()));
+            assertEquals(1, fixture.transport.executeCalls.get());
+        }
+    }
+
+    @Test
+    void preparedProviderCancellationClosesWorkerAdmissionBeforeRelease() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            join(fixture.service.acquire("harness", PROVIDER_SESSION, "bootstrap"));
+            ToolExecutionRecord prepared = join(fixture.service.prepareExecution(
+                    "harness", PROVIDER_SESSION, "key", providerReference()));
+            fixture.transport.cancelResult = new CompletableFuture<>();
+            CompletionStage<ToolExecutionRecord> cancellation = fixture.service.cancelExecution(
+                    "harness", PROVIDER_SESSION, prepared.getExecutionCallId());
+            CompletionStage<ToolExecutionRecord> repeated = fixture.service.cancelExecution(
+                    "harness", PROVIDER_SESSION, prepared.getExecutionCallId());
+            assertFalse(repeated.toCompletableFuture().isDone());
+            assertEquals("runtime_session_busy", failure(fixture.service.release(
+                    "harness", PROVIDER_SESSION)).getCode());
+            join(fixture.service.startExecution("harness", PROVIDER_SESSION, prepared.getExecutionCallId()));
+            assertEquals(0, fixture.transport.executeCalls.get());
+            fixture.transport.cancelResult.completeExceptionally(new IllegalStateException("lost cancel"));
+            assertEquals("runtime_execution_cancel_failed", failure(cancellation).getCode());
+            assertEquals("runtime_execution_cancel_failed", failure(repeated).getCode());
+            fixture.transport.cancelResult = CompletableFuture.completedFuture(Map.of(
+                    "state", "settled", "result", Map.of("executionStatus", "cancelled")));
+            ToolExecutionRecord cancelled = join(fixture.service.cancelExecution(
+                    "harness", PROVIDER_SESSION, prepared.getExecutionCallId()));
+            assertEquals("cancelled", cancelled.getExecutionStatus());
+            assertEquals(3, fixture.transport.cancelCalls.get());
+            assertTrue(join(fixture.service.release("harness", PROVIDER_SESSION)));
+            assertSame(cancelled, join(fixture.service.cancelExecution(
+                    "harness", PROVIDER_SESSION, prepared.getExecutionCallId())));
+            assertSame(cancelled, join(fixture.service.getExecution(
+                    "harness", PROVIDER_SESSION, prepared.getExecutionCallId())));
+            assertSame(cancelled, join(fixture.service.prepareExecution(
+                    "harness", PROVIDER_SESSION, "key", providerReference())));
+            assertEquals(3, fixture.transport.cancelCalls.get());
+        }
+    }
+
+    @Test
+    void abandonedProviderReceiptsKeepTheirSavedOwnershipAfterRestartAndRelease() {
+        var bindings = new InMemoryRuntimeBindingRepository();
+        var sessions = new InMemoryRuntimeSessionRepository();
+        var executions = new InMemoryToolExecutionRepository();
+        var recovery = new RuntimeRecoveryContract.Fixture(bindings, sessions, executions,
+                "provider-terminal", PROVIDER_SESSION);
+        String harness = recovery.session.getSession().getHarnessSessionId();
+        Map<String, Object> reference = providerReference();
+        var prepared = bindings.admitExecution(sessions, executions,
+                ToolExecutionRecord.prepared("provider-call", "provider-key", recovery.binding.getBindingId(),
+                        recovery.binding.getGeneration(), harness, PROVIDER_SESSION,
+                        (String) reference.get("promptId"), (String) reference.get("callId"),
+                        (String) reference.get("argsDigest"), reference));
+        RuntimeBindingRecord lost = recovery.lose(false);
+        bindings.recoverLost(sessions, executions, lost);
+        var transport = new FakeTransport();
+        try (var service = new RuntimeBrokerService(
+                ignored -> { throw new AssertionError("Saved ownership must not resolve current scope"); },
+                new StaticRuntimeProvisioner(recovery.binding.getLease()), transport, bindings, sessions, executions,
+                "restarted", Duration.ofSeconds(10), Duration.ofSeconds(10))) {
+            for (boolean released : new boolean[] {false, true}) {
+                if (released) {
+                    var proof = bindings.compareAndSet(lost, lost.withRecoveryEvidence(null,
+                            RuntimeRecoveryContract.evidence(lost, RuntimeRecoveryEvidence.Fact.WRITERS_STOPPED),
+                            Instant.now()));
+                    bindings.recoverLost(sessions, executions, proof);
+                }
+                ToolExecutionRecord receipt = join(service.prepareExecution(
+                        harness, PROVIDER_SESSION, prepared.getIdempotencyKey(), reference));
+                assertEquals(ToolExecutionRecord.State.ABANDONED, receipt.getState());
+                assertEquals(reference, receipt.getReference());
+                assertSame(receipt, join(service.getExecution(harness, PROVIDER_SESSION, receipt.getExecutionCallId())));
+                assertSame(receipt, join(service.cancelExecution(harness, PROVIDER_SESSION, receipt.getExecutionCallId())));
+                assertEquals("runtime_execution_conflict", failure(service.prepareExecution(
+                        "other-harness", PROVIDER_SESSION, prepared.getIdempotencyKey(), reference)).getCode());
+                var changed = new HashMap<>(reference);
+                changed.put("invocationId", "another-invocation");
+                assertEquals("runtime_idempotency_conflict", failure(service.prepareExecution(
+                        harness, PROVIDER_SESSION, prepared.getIdempotencyKey(), changed)).getCode());
+            }
+            assertEquals(0, transport.acquireCalls.get());
+            assertEquals(0, transport.executeCalls.get());
+            assertEquals(0, transport.cancelCalls.get());
+        }
+    }
+
+    @Test
+    void terminalProviderCancellationAnswersFromTheReceiptWhenTheSessionCannotAnswer() {
+        var bindings = new InMemoryRuntimeBindingRepository();
+        var sessions = new InMemoryRuntimeSessionRepository();
+        var executions = new InMemoryToolExecutionRepository();
+        var recovery = new RuntimeRecoveryContract.Fixture(bindings, sessions, executions,
+                "provider-terminal-cancel", PROVIDER_SESSION);
+        String harness = recovery.session.getSession().getHarnessSessionId();
+        Map<String, Object> reference = providerReference();
+        var prepared = bindings.admitExecution(sessions, executions,
+                ToolExecutionRecord.prepared("provider-call", "provider-key", recovery.binding.getBindingId(),
+                        recovery.binding.getGeneration(), harness, PROVIDER_SESSION,
+                        (String) reference.get("promptId"), (String) reference.get("callId"),
+                        (String) reference.get("argsDigest"), reference));
+        ToolExecutionRecord settled = executions.requestCancel(
+                prepared.getExecutionCallId(), prepared.getVersion());
+        assertEquals(ToolExecutionRecord.State.SETTLED, settled.getState());
+        assertTrue(settled.isCancelRequested());
+        // A Session the Broker is releasing cannot be re-driven for fresh
+        // worker evidence; the terminal receipt must stand alone.
+        sessions.compareAndSet(recovery.session, recovery.session.withState(
+                RuntimeSessionRecord.State.RELEASING, Instant.now()));
+        var transport = new FakeTransport();
+        try (var service = new RuntimeBrokerService(
+                ignored -> { throw new AssertionError("Saved ownership must not resolve current scope"); },
+                new StaticRuntimeProvisioner(recovery.binding.getLease()), transport, bindings, sessions, executions,
+                "restarted", Duration.ofSeconds(10), Duration.ofSeconds(10))) {
+            assertSame(settled, join(service.cancelExecution(
+                    harness, PROVIDER_SESSION, settled.getExecutionCallId())));
+            assertSame(settled, join(service.cancelExecution(
+                    harness, PROVIDER_SESSION, settled.getExecutionCallId())));
+            assertSame(settled, join(service.getExecution(
+                    harness, PROVIDER_SESSION, settled.getExecutionCallId())));
+            assertEquals(0, transport.cancelCalls.get());
+        }
+    }
+
+    @Test
+    void terminalProviderCancellationAsksForAdoptionUntilItsGenerationCannotAnswer() {
+        var bindings = new InMemoryRuntimeBindingRepository();
+        var sessions = new InMemoryRuntimeSessionRepository();
+        var executions = new InMemoryToolExecutionRepository();
+        var recovery = new RuntimeRecoveryContract.Fixture(bindings, sessions, executions,
+                "provider-terminal-cancel-restart", PROVIDER_SESSION);
+        String harness = recovery.session.getSession().getHarnessSessionId();
+        Map<String, Object> reference = providerReference();
+        var prepared = bindings.admitExecution(sessions, executions,
+                ToolExecutionRecord.prepared("provider-call", "provider-key", recovery.binding.getBindingId(),
+                        recovery.binding.getGeneration(), harness, PROVIDER_SESSION,
+                        (String) reference.get("promptId"), (String) reference.get("callId"),
+                        (String) reference.get("argsDigest"), reference));
+        // Persisted before the worker heard of it, as when the process
+        // dies between the two.
+        ToolExecutionRecord settled = executions.requestCancel(
+                prepared.getExecutionCallId(), prepared.getVersion());
+        assertEquals("cancelled", settled.getExecutionStatus());
+        // A replaced Broker process finds the stored Session still READY and
+        // holds no live Session to ask the worker with.
+        assertEquals(RuntimeSessionRecord.State.READY,
+                sessions.findById(recovery.binding.getRequest().getScope(), PROVIDER_SESSION).getState());
+        var transport = new FakeTransport();
+        try (var service = new RuntimeBrokerService(
+                ignored -> { throw new AssertionError("Saved ownership must not resolve current scope"); },
+                new StaticRuntimeProvisioner(recovery.binding.getLease()), transport, bindings, sessions, executions,
+                "restarted", Duration.ofSeconds(10), Duration.ofSeconds(10))) {
+            // The worker may still hold the preparation: adopt, then retry.
+            RuntimeBrokerException adopt = failure(service.cancelExecution(
+                    harness, PROVIDER_SESSION, settled.getExecutionCallId()));
+            assertEquals(503, adopt.getStatusCode());
+            assertEquals("runtime_reconciliation_required", adopt.getCode());
+            assertTrue(adopt.isRetryable());
+            assertSame(settled, join(service.getExecution(
+                    harness, PROVIDER_SESSION, settled.getExecutionCallId())));
+            // Once that generation can no longer answer, the receipt stands.
+            recovery.lose(false);
+            assertSame(settled, join(service.cancelExecution(
+                    harness, PROVIDER_SESSION, settled.getExecutionCallId())));
+            assertEquals(0, transport.cancelCalls.get());
+        }
+    }
+
+    @Test
+    void terminalProviderCancellationRefusesAReceiptWhoseSavedOwnershipDiffers() {
+        var bindings = new InMemoryRuntimeBindingRepository();
+        var sessions = new InMemoryRuntimeSessionRepository();
+        var executions = new InMemoryToolExecutionRepository();
+        var recovery = new RuntimeRecoveryContract.Fixture(bindings, sessions, executions,
+                "provider-terminal-cancel-foreign", PROVIDER_SESSION);
+        String harness = recovery.session.getSession().getHarnessSessionId();
+        Map<String, Object> reference = providerReference();
+        // Saved against another generation of the binding than its Session's.
+        ToolExecutionRecord prepared = executions.findOrCreate(ToolExecutionRecord.prepared(
+                "provider-call", "provider-key", recovery.binding.getBindingId(),
+                recovery.binding.getGeneration() + 1, harness, PROVIDER_SESSION,
+                (String) reference.get("promptId"), (String) reference.get("callId"),
+                (String) reference.get("argsDigest"), reference));
+        ToolExecutionRecord settled = executions.requestCancel(
+                prepared.getExecutionCallId(), prepared.getVersion());
+        assertTrue(settled.isTerminal());
+        // The Session is releasing, where a receipt it owns would stand alone.
+        sessions.compareAndSet(recovery.session, recovery.session.withState(
+                RuntimeSessionRecord.State.RELEASING, Instant.now()));
+        var transport = new FakeTransport();
+        try (var service = new RuntimeBrokerService(
+                ignored -> { throw new AssertionError("Saved ownership must not resolve current scope"); },
+                new StaticRuntimeProvisioner(recovery.binding.getLease()), transport, bindings, sessions, executions,
+                "restarted", Duration.ofSeconds(10), Duration.ofSeconds(10))) {
+            RuntimeBrokerException conflict = failure(service.cancelExecution(
+                    harness, PROVIDER_SESSION, settled.getExecutionCallId()));
+            assertEquals(409, conflict.getStatusCode());
+            assertEquals("runtime_execution_conflict", conflict.getCode());
+            assertEquals(0, transport.cancelCalls.get());
+        }
+    }
+
+    @Test
+    void terminalProviderCancellationStandsOnceTheWorkerIsLost() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            join(fixture.service.acquire("harness", PROVIDER_SESSION, "bootstrap"));
+            ToolExecutionRecord prepared = join(fixture.service.prepareExecution(
+                    "harness", PROVIDER_SESSION, "key", providerReference()));
+            fixture.transport.cancelResult = CompletableFuture.completedFuture(Map.of(
+                    "state", "settled", "result", Map.of("executionStatus", "cancelled")));
+            ToolExecutionRecord cancelled = join(fixture.service.cancelExecution(
+                    "harness", PROVIDER_SESSION, prepared.getExecutionCallId()));
+            assertEquals("cancelled", cancelled.getExecutionStatus());
+            // The worker dies: this process still holds the Session, whose
+            // record stays READY until recovery, but its binding is lost.
+            fixture.provisioner.usable = false;
+            RuntimeBrokerException lost = failure(fixture.service.cancelExecution(
+                    "harness", PROVIDER_SESSION, prepared.getExecutionCallId()));
+            assertTrue(lost.isRetryable(), lost.getCode());
+            assertEquals(RuntimeBindingRecord.State.LOST,
+                    fixture.bindingRepository.findById(prepared.getBindingId()).getState());
+            assertEquals(RuntimeSessionRecord.State.READY,
+                    fixture.sessionRepository.findById(WORKSPACE_SCOPE, PROVIDER_SESSION).getState());
+            for (int attempt = 0; attempt < 2; attempt++) {
+                assertSame(cancelled, join(fixture.service.cancelExecution(
+                        "harness", PROVIDER_SESSION, prepared.getExecutionCallId())));
+            }
+            assertEquals(1, fixture.transport.cancelCalls.get());
+        }
+    }
+
+    @Test
+    void terminalProviderCancellationDoesNotWaitOnAnAcquireStillAdopting() {
+        var bindings = new InMemoryRuntimeBindingRepository();
+        var sessions = new InMemoryRuntimeSessionRepository();
+        var executions = new InMemoryToolExecutionRepository();
+        var recovery = new RuntimeRecoveryContract.Fixture(bindings, sessions, executions,
+                "provider-terminal-cancel-adopting", PROVIDER_SESSION);
+        String harness = recovery.session.getSession().getHarnessSessionId();
+        Map<String, Object> reference = providerReference();
+        var prepared = bindings.admitExecution(sessions, executions,
+                ToolExecutionRecord.prepared("provider-call", "provider-key", recovery.binding.getBindingId(),
+                        recovery.binding.getGeneration(), harness, PROVIDER_SESSION,
+                        (String) reference.get("promptId"), (String) reference.get("callId"),
+                        (String) reference.get("argsDigest"), reference));
+        ToolExecutionRecord settled = executions.requestCancel(
+                prepared.getExecutionCallId(), prepared.getVersion());
+        // A replaced Broker adopts the binding again; the adoption hangs.
+        bindings.releaseOperation(recovery.binding.getBindingId(), "recovery",
+                recovery.binding.getOperationGeneration());
+        CompletableFuture<RuntimeObservation> adoption = new CompletableFuture<>();
+        RuntimeProvisioner provisioner = new RuntimeProvisioner() {
+            @Override
+            public CompletionStage<RuntimeLease> provision(RuntimeProvisionRequest request) {
+                return CompletableFuture.failedFuture(new AssertionError("no provision"));
+            }
+
+            @Override
+            public String kind() {
+                return "test-supervisor";
+            }
+
+            @Override
+            public CompletionStage<RuntimeObservation> reconcile(RuntimeProvisionRequest request,
+                    RuntimeProvisionSeed seed, RuntimeResourceHandle handle, RuntimeLease lastLease) {
+                return adoption;
+            }
+        };
+        var transport = new FakeTransport();
+        RuntimeScope scope = recovery.binding.getRequest().getScope();
+        try (var service = new RuntimeBrokerService(ignored -> CompletableFuture.completedFuture(scope),
+                provisioner, transport, bindings, sessions, executions, "restarted",
+                Duration.ofSeconds(10), Duration.ofSeconds(10))) {
+            CompletableFuture<RuntimeSessionRecord> acquire = service.acquire(
+                    harness, PROVIDER_SESSION, "bootstrap").toCompletableFuture();
+            assertFalse(acquire.isDone());
+            // Answered at once instead of borrowing the acquire's outcome.
+            CompletableFuture<ToolExecutionRecord> cancel = service.cancelExecution(
+                    harness, PROVIDER_SESSION, settled.getExecutionCallId()).toCompletableFuture();
+            assertTrue(cancel.isDone());
+            assertEquals("runtime_reconciliation_required", failure(cancel).getCode());
+            adoption.completeExceptionally(new RuntimeBrokerException(409, "adoption_refused",
+                    "adoption refused", false));
+            assertThrows(CompletionException.class, acquire::join);
+            assertEquals(0, transport.cancelCalls.get());
+        }
+    }
+
+    @Test
+    void terminalProviderCancellationReportsAnotherHarnessSessionAsAConflict() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            join(fixture.service.acquire("harness", PROVIDER_SESSION, "bootstrap"));
+            ToolExecutionRecord prepared = join(fixture.service.prepareExecution(
+                    "harness", PROVIDER_SESSION, "key", providerReference()));
+            ToolExecutionRecord settled = fixture.executionRepository.requestCancel(
+                    prepared.getExecutionCallId(), prepared.getVersion());
+            try (RuntimeBrokerService restarted = restartedService(fixture)) {
+                // Another scope reuses the Runtime Session id in this process.
+                fixture.resolver.result = CompletableFuture.completedFuture(SESSION_SCOPE);
+                join(restarted.acquire("harness-b", PROVIDER_SESSION, "bootstrap"));
+                fixture.resolver.result = CompletableFuture.completedFuture(WORKSPACE_SCOPE);
+                // Acquiring again cannot help here, so this is no request for
+                // adoption.
+                RuntimeBrokerException conflict = failure(restarted.cancelExecution(
+                        "harness", PROVIDER_SESSION, settled.getExecutionCallId()));
+                assertEquals("runtime_session_conflict", conflict.getCode());
+                assertFalse(conflict.isRetryable());
+            }
+            assertEquals(0, fixture.transport.cancelCalls.get());
+        }
+    }
+
+    @Test
+    void rejectsForeignOrPayloadBearingProviderReservationsAndControls() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            join(fixture.service.acquire("harness", PROVIDER_SESSION, "bootstrap"));
+            Map<String, Object> reference = new HashMap<>(providerReference());
+            reference.put("input", Map.of());
+            RuntimeBrokerException reserveFailure = assertThrows(RuntimeBrokerException.class,
+                    () -> fixture.service.prepareExecution(
+                            "harness", PROVIDER_SESSION, "key", reference));
+            assertEquals("runtime_reference_invalid", reserveFailure.getCode());
+            assertNull(fixture.executionRepository.findByIdempotencyKey("key"));
+            assertFalse(fixture.executionRepository.hasActiveByRuntimeSession(PROVIDER_SESSION));
+            reference.remove("input");
+            reference.put("sessionId", "other");
+            RuntimeBrokerException controlFailure = assertThrows(RuntimeBrokerException.class,
+                    () -> fixture.service.control(
+                            "harness", PROVIDER_SESSION, Map.of("kind", "preflight", "reference", reference)));
+            assertEquals("runtime_control_operation_invalid", controlFailure.getCode());
+            assertNull(fixture.transport.lastControl);
+            assertEquals(0, fixture.transport.executeCalls.get());
+        }
+    }
+
+    @Test
+    void rejectsANullValuedDeferredReferenceOnTheStageChannel() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            join(fixture.service.acquire("harness", PROVIDER_SESSION, "bootstrap"));
+            Map<String, Object> reference = new HashMap<>();
+            reference.put("sessionId", null);
+            reference.put("promptId", "turn-1");
+            reference.put("callId", "call-1");
+            reference.put("argsDigest", "sha256:" + "a".repeat(64));
+            // The rejection must arrive on the returned stage, not as a
+            // synchronous throw escaping the method.
+            CompletionStage<ToolExecutionRecord> stage = fixture.service.prepareExecution(
+                    "harness", PROVIDER_SESSION, "key", reference);
+            assertEquals("runtime_reference_invalid", failure(stage).getCode());
+            assertNull(fixture.executionRepository.findByIdempotencyKey("key"));
+        }
+    }
+
+    @Test
+    void reconcileSettlesAnUnknownProviderExecutionOnTerminalEvidence() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            join(fixture.service.acquire("harness", PROVIDER_SESSION, "bootstrap"));
+            fixture.transport.executeResult = CompletableFuture.failedFuture(
+                    new IllegalStateException("lost response"));
+            ToolExecutionRecord prepared = join(fixture.service.prepareExecution(
+                    "harness", PROVIDER_SESSION, "key", providerReference()));
+            ToolExecutionRecord unknown = join(fixture.service.startExecution(
+                    "harness", PROVIDER_SESSION, prepared.getExecutionCallId()));
+            assertEquals(ToolExecutionRecord.State.UNKNOWN, unknown.getState());
+            fixture.transport.statusResult = CompletableFuture.completedFuture(Map.of("state", "settled",
+                    "result", Map.of("executionStatus", "success", "result", Map.of("llmContent", "done"))));
+            ExecutionReconciliation reconciled = join(fixture.service.reconcileExecution(
+                    "harness", PROVIDER_SESSION, unknown.getExecutionCallId()));
+            assertEquals(ExecutionReconciliation.Outcome.RESOLVED, reconciled.getOutcome());
+            assertEquals(ToolExecutionRecord.State.SETTLED, fixture.executionRepository
+                    .findByExecutionCallId(unknown.getExecutionCallId()).getState());
+            assertEquals(providerReference(), fixture.transport.lastReference);
+            assertEquals(1, fixture.transport.statusCalls.get());
+        }
+    }
+
+    @Test
+    void preparedProviderCancellationRejectsUnknownOrSuccessfulEvidence() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            join(fixture.service.acquire("harness", PROVIDER_SESSION, "bootstrap"));
+            ToolExecutionRecord prepared = join(fixture.service.prepareExecution(
+                    "harness", PROVIDER_SESSION, "key", providerReference()));
+            fixture.transport.cancelResult = CompletableFuture.completedFuture(Map.of("state", "unknown"));
+            RuntimeBrokerException unknown = failure(fixture.service.cancelExecution(
+                    "harness", PROVIDER_SESSION, prepared.getExecutionCallId()));
+            assertEquals("runtime_execution_cancel_unconfirmed", unknown.getCode());
+            assertFalse(unknown.isRetryable());
+            fixture.transport.cancelResult = CompletableFuture.completedFuture(Map.of("state", "settled",
+                    "result", Map.of("executionStatus", "success")));
+            RuntimeBrokerException executed = failure(fixture.service.cancelExecution(
+                    "harness", PROVIDER_SESSION, prepared.getExecutionCallId()));
+            assertEquals("runtime_execution_cancel_unconfirmed", executed.getCode());
+            assertFalse(executed.isRetryable());
+            // Neither failed observation rewrote the cancelled receipt.
+            assertEquals("cancelled", fixture.executionRepository
+                    .findByExecutionCallId(prepared.getExecutionCallId()).getResult().get("executionStatus"));
+            fixture.transport.cancelResult = CompletableFuture.completedFuture(Map.of("state", "settled",
+                    "result", Map.of("executionStatus", "not_started")));
+            assertEquals("cancelled", join(fixture.service.cancelExecution(
+                    "harness", PROVIDER_SESSION, prepared.getExecutionCallId())).getExecutionStatus());
+        }
+    }
+
+    @Test
+    void repeatedPreparedProviderCancellationStaysUnconfirmedOnceTheWorkerForgotTheCall() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            join(fixture.service.acquire("harness", PROVIDER_SESSION, "bootstrap"));
+            ToolExecutionRecord prepared = join(fixture.service.prepareExecution(
+                    "harness", PROVIDER_SESSION, "key", providerReference()));
+            fixture.transport.cancelResult = CompletableFuture.completedFuture(Map.of(
+                    "state", "settled", "result", Map.of("executionStatus", "not_started")));
+            ToolExecutionRecord cancelled = join(fixture.service.cancelExecution(
+                    "harness", PROVIDER_SESSION, prepared.getExecutionCallId()));
+            // The worker forgets settled calls when the next turn begins; its
+            // unknown is no confirmation, on a repeat as on a first cancel.
+            fixture.transport.cancelResult = CompletableFuture.completedFuture(Map.of("state", "unknown"));
+            RuntimeBrokerException unconfirmed = failure(fixture.service.cancelExecution(
+                    "harness", PROVIDER_SESSION, prepared.getExecutionCallId()));
+            assertEquals("runtime_execution_cancel_unconfirmed", unconfirmed.getCode());
+            assertFalse(unconfirmed.isRetryable());
+            assertEquals(2, fixture.transport.cancelCalls.get());
+            assertSame(cancelled, join(fixture.service.getExecution(
+                    "harness", PROVIDER_SESSION, prepared.getExecutionCallId())));
+        }
+    }
+
+    @Test
+    void repeatedCancellationOfADispatchedProviderExecutionReturnsItsReceipt() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            join(fixture.service.acquire("harness", PROVIDER_SESSION, "bootstrap"));
+            CompletableFuture<Map<String, Object>> result = new CompletableFuture<>();
+            fixture.transport.executeResult = result;
+            ToolExecutionRecord prepared = join(fixture.service.prepareExecution(
+                    "harness", PROVIDER_SESSION, "key", providerReference()));
+            join(fixture.service.startExecution("harness", PROVIDER_SESSION, prepared.getExecutionCallId()));
+            assertEquals(ToolExecutionRecord.State.CANCEL_REQUESTED, join(fixture.service.cancelExecution(
+                    "harness", PROVIDER_SESSION, prepared.getExecutionCallId())).getState());
+            result.complete(Map.of("executionStatus", "cancelled"));
+            ToolExecutionRecord cancelled = awaitExecution(fixture.executionRepository,
+                    prepared.getExecutionCallId(), ToolExecutionRecord.State.SETTLED);
+            assertEquals("cancelled", cancelled.getExecutionStatus());
+            assertTrue(cancelled.isCancelRequested());
+            assertTrue(cancelled.getDispatchGeneration() >= 1);
+            int cancels = fixture.transport.cancelCalls.get();
+            // The execute answer settled it, so the receipt stands on its
+            // own; the worker, which forgets settled calls, is not asked.
+            fixture.transport.cancelResult = CompletableFuture.completedFuture(Map.of("state", "unknown"));
+            assertSame(cancelled, join(fixture.service.cancelExecution(
+                    "harness", PROVIDER_SESSION, prepared.getExecutionCallId())));
+            assertEquals(cancels, fixture.transport.cancelCalls.get());
+        }
+    }
+
+    @Test
+    void preparedProviderCancellationWaitsForOriginalNotStartedEvidence() throws Exception {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            join(fixture.service.acquire("harness", PROVIDER_SESSION, "bootstrap"));
+            ToolExecutionRecord prepared = join(fixture.service.prepareExecution(
+                    "harness", PROVIDER_SESSION, "key", providerReference()));
+            fixture.transport.cancelResult = CompletableFuture.completedFuture(Map.of("state", "cancel_requested"));
+            fixture.transport.statusResult = new CompletableFuture<>();
+            CompletionStage<ToolExecutionRecord> cancellation = fixture.service.cancelExecution(
+                    "harness", PROVIDER_SESSION, prepared.getExecutionCallId());
+            assertEquals("runtime_session_busy", failure(fixture.service.release(
+                    "harness", PROVIDER_SESSION)).getCode());
+            fixture.transport.statusResult.complete(Map.of("state", "settled",
+                    "result", Map.of("executionStatus", "not_started")));
+            assertEquals("cancelled", cancellation.toCompletableFuture().get(2, TimeUnit.SECONDS).getExecutionStatus());
+            assertEquals(1, fixture.transport.cancelCalls.get());
+            assertEquals(1, fixture.transport.statusCalls.get());
+            assertEquals(providerReference(), fixture.transport.lastReference);
+            assertEquals(0, fixture.transport.executeCalls.get());
+            assertTrue(join(fixture.service.release("harness", PROVIDER_SESSION)));
+        }
+    }
+
+    @Test
+    void preparedProviderCancellationHasABoundedObservationDeadline() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE, new MutableClock(START),
+                Duration.ofMillis(100), Duration.ofMinutes(1))) {
+            join(fixture.service.acquire("harness", PROVIDER_SESSION, "bootstrap"));
+            ToolExecutionRecord prepared = join(fixture.service.prepareExecution(
+                    "harness", PROVIDER_SESSION, "key", providerReference()));
+            fixture.transport.cancelResult = CompletableFuture.completedFuture(Map.of("state", "cancel_requested"));
+            fixture.transport.statusResult = new CompletableFuture<>();
+            assertTimeoutPreemptively(Duration.ofSeconds(2), () -> assertEquals("runtime_execution_cancel_failed",
+                    failure(fixture.service.cancelExecution("harness", PROVIDER_SESSION,
+                            prepared.getExecutionCallId())).getCode()));
+            assertEquals(0, fixture.transport.executeCalls.get());
+            assertEquals(0, fixture.transport.releaseCalls.get());
+        }
+    }
+
+    private static Map<String, Object> providerReference() {
+        return Map.of("sessionId", PROVIDER_SESSION, "promptId", "turn", "callId", "call",
+                "argsDigest", "a".repeat(64), "capabilityDigest", "b".repeat(64),
+                "policyRevision", "policy", "invocationId", "invocation");
     }
 
     @Test
@@ -393,7 +930,7 @@ class RuntimeBrokerServiceTest {
 
             CompletionStage<Object> status = fixture.service.control(
                     "harness", "runtime",
-                    Map.of("kind", "preflight"));
+                    Map.of("kind", "manifest"));
             RuntimeBrokerException busy = failure(
                     fixture.service.release("harness", "runtime"));
 
@@ -1366,6 +1903,68 @@ class RuntimeBrokerServiceTest {
     }
 
     @Test
+    void acquireRefusesSessionIdsTheWorkerWouldRefuseToRelease() {
+        String rule = " must be 1-512 ASCII letters, digits, '.', '_' or '-', without '..'";
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            for (String id : List.of("a/b", "a\\b", "a..b", ".", "..", "a\u0001b",
+                    "a\uD83D\uDE00b", "a b", "a:b")) {
+                assertEquals("runtimeSessionId" + rule, assertThrows(IllegalArgumentException.class,
+                        () -> fixture.service.acquire("harness", id, "bootstrap"), id).getMessage());
+                assertEquals("harnessSessionId" + rule, assertThrows(IllegalArgumentException.class,
+                        () -> fixture.service.acquire(id, "runtime", "bootstrap"), id).getMessage());
+            }
+            assertNull(fixture.resolver.lastHarness.get());
+            assertEquals(0, fixture.transport.acquireCalls.get());
+            // Opaque ids inside the worker's alphabet stay admitted in both positions.
+            for (String id : List.of("harness-1", "runtime-session-1", PROVIDER_SESSION,
+                    "turn_0123abcd", "v1.2")) {
+                join(fixture.service.acquire(id, id, "bootstrap"));
+                assertTrue(join(fixture.service.release(id, id)), id);
+            }
+            assertEquals(5, fixture.transport.acquireCalls.get());
+        }
+    }
+
+    @Test
+    void warmRefusesHarnessIdsBeforeResolvingOrProvisioning() {
+        String rule = " must be 1-512 ASCII letters, digits, '.', '_' or '-', without '..'";
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            for (String id : List.of("a/b", "a\\b", "a..b", ".", "..", "a\u0001b",
+                    "a😀b", "a b", "a:b")) {
+                assertEquals("harnessSessionId" + rule, assertThrows(IllegalArgumentException.class,
+                        () -> fixture.service.warm(id), id).getMessage());
+            }
+            assertNull(fixture.resolver.lastHarness.get());
+            assertEquals(0, fixture.provisioner.calls.get());
+            join(fixture.service.warm("harness-1"));
+            assertEquals("harness-1", fixture.resolver.lastHarness.get());
+            assertEquals(1, fixture.provisioner.calls.get());
+        }
+    }
+
+    @Test
+    void pathSafeIdsAdmitExactlyTheWorkersAsciiAllowList() {
+        // The worker's envelope rule, character by character (TypeScript
+        // pins the same set in managed-runtime-provider-protocol.test.ts).
+        StringBuilder admitted = new StringBuilder();
+        for (char character = 0; character < 0x80; character++) {
+            try {
+                BrokerValues.requirePathSafe("a" + character + "b", "id");
+                admitted.append(character);
+            } catch (IllegalArgumentException refused) {
+                // Outside the allow-list.
+            }
+        }
+        assertEquals("-.0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz",
+                admitted.toString());
+        // Letters and digits outside ASCII stay outside it too.
+        for (String id : List.of("a\u00e9b", "a\u4e2db", "a\u0430b", "a\u0663b", "a\uff11b")) {
+            assertThrows(IllegalArgumentException.class,
+                    () -> BrokerValues.requirePathSafe(id, "id"), id);
+        }
+    }
+
+    @Test
     void invalidExecutionInputsUseTheCodedErrorChannel() {
         try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
             join(fixture.service.acquire("harness", "runtime",
@@ -1532,7 +2131,7 @@ class RuntimeBrokerServiceTest {
                     new IllegalStateException("connection lost"));
 
             RuntimeBrokerException error = failure(fixture.service.control(
-                    "harness", "runtime", Map.of("kind", "preflight")));
+                    "harness", "runtime", Map.of("kind", "manifest")));
 
             assertEquals("runtime_control_failed", error.getCode());
             assertEquals(503, error.getStatusCode());
@@ -1550,7 +2149,7 @@ class RuntimeBrokerServiceTest {
             fixture.transport.controlError = new AssertionError("boom");
 
             RuntimeBrokerException error = failure(fixture.service.control(
-                    "harness", "runtime", Map.of("kind", "preflight")));
+                    "harness", "runtime", Map.of("kind", "manifest")));
 
             assertEquals("runtime_control_failed", error.getCode());
             assertTrue(join(fixture.service.release(
@@ -1574,7 +2173,7 @@ class RuntimeBrokerServiceTest {
             fixture.transport.continueControl = new CountDownLatch(1);
             CompletableFuture<Object> control = CompletableFuture.supplyAsync(
                     () -> join(fixture.service.control("harness", "runtime",
-                            Map.of("kind", "preflight"))));
+                            Map.of("kind", "manifest"))));
             assertTrue(fixture.transport.controlEntered.await(2,
                     TimeUnit.SECONDS));
 

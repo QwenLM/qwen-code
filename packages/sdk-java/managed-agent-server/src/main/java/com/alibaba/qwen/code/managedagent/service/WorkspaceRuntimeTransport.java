@@ -212,6 +212,10 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
     @Override
     public CompletionStage<Object> control(RuntimeLease lease, RuntimeSession session,
             Map<String, Object> operation) {
+        if (managed(session) && !"history".equals(operation.get("kind"))) {
+            Context context = context(lease, session, true);
+            ownership.assertHeld(context.binding(), context.session());
+        }
         return delegate.control(lease, session, operation);
     }
 
@@ -221,7 +225,12 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
             return delegate.release(lease, session);
         }
         Context context = context(lease, session, false);
-        return delegate.activateWorkspace(context.runtime(), context.session(), context.binding(), false)
+        return delegate.release(lease, session).thenCompose(released -> {
+            if (!Boolean.TRUE.equals(released)) {
+                throw WorkspaceExecutionStore.unavailable();
+            }
+            return delegate.activateWorkspace(context.runtime(), context.session(), context.binding(), false);
+        })
                 .thenApply(ignored -> {
                     ownership.release(context.binding(), context.session());
                     return true;
