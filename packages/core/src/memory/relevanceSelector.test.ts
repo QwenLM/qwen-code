@@ -73,12 +73,10 @@ describe('selectRelevantAutoMemoryDocumentsByModel', () => {
       mockConfig,
       expect.objectContaining({
         purpose: 'auto-memory-recall',
-        config: expect.not.objectContaining({
-          temperature: expect.anything(),
-        }),
-        // #12928: literal temperature removed; assert the key is absent
-        // (objectContaining({}) would accept any object including one with
-        // temperature, so use the not-form for a real pin).
+        config: { temperature: 0 },
+        // Deterministic recall selection preserved (round-2 review on PR #12958).
+        // Without the explicit value, the same recall against unchanged state
+        // could inject different document sets across identical turns.
       }),
     );
   });
@@ -231,12 +229,10 @@ describe('selectRelevantAutoMemoryDocumentsByModel', () => {
       mockConfig,
       expect.objectContaining({
         purpose: 'auto-memory-recall',
-        config: expect.not.objectContaining({
-          temperature: expect.anything(),
-        }),
-        // #12928: literal temperature removed; assert the key is absent
-        // (objectContaining({}) would accept any object including one with
-        // temperature, so use the not-form for a real pin).
+        config: { temperature: 0 },
+        // Deterministic recall selection preserved (round-2 review on PR #12958).
+        // Without the explicit value, the same recall against unchanged state
+        // could inject different document sets across identical turns.
       }),
     );
     expect(
@@ -261,12 +257,10 @@ describe('selectRelevantAutoMemoryDocumentsByModel', () => {
       mockConfig,
       expect.objectContaining({
         purpose: 'auto-memory-recall',
-        config: expect.not.objectContaining({
-          temperature: expect.anything(),
-        }),
-        // #12928: literal temperature removed; assert the key is absent
-        // (objectContaining({}) would accept any object including one with
-        // temperature, so use the not-form for a real pin).
+        config: { temperature: 0 },
+        // Deterministic recall selection preserved (round-2 review on PR #12958).
+        // Without the explicit value, the same recall against unchanged state
+        // could inject different document sets across identical turns.
       }),
     );
     expect(

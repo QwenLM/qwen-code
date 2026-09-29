@@ -87,6 +87,8 @@ describe('selectManagedAutoMemoryForgetCandidates', () => {
         // must run on the main model — never silently fall through to the
         // runSideQuery fast-model default.
         model: 'main-model',
+        // Deterministic selection preserved (round-2 review on PR #12958).
+        config: { temperature: 0 },
       }),
     );
   });

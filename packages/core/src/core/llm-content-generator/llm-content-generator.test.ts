@@ -152,7 +152,8 @@ describe('LlmContentGenerator', () => {
     );
     // #12928: hard-coded temperature default removed; the field is omitted
     // unless the caller supplied a temperature via configSamplingParams.
-    const llmCallArgs = mockGoogleGenAI.models.generateContent.mock.calls[0]?.[0];
+    const llmCallArgs =
+      mockGoogleGenAI.models.generateContent.mock.calls[0]?.[0];
     expect(llmCallArgs?.config).not.toHaveProperty('temperature');
     expect(mockReportLlmRequest).toHaveBeenCalledWith(
       mockGoogleGenAI.models.generateContent.mock.calls[0][0],

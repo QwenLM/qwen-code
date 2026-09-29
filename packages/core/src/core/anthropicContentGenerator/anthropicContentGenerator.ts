@@ -758,7 +758,11 @@ export class AnthropicContentGenerator implements ContentGenerator {
       // `samplingParams.temperature: 0` (common for determinism) would get a
       // hard 400 on every request without this override. Restored after
       // round-1 review on #12928.
-      if (thinking) sampling.temperature = 1;
+      // Round-2 review (#12958 R1-2): also skip when modelRejectsTemperature
+      // (a declared `profile: 'anthropic-manual'` on a Claude 4.8+ id is a
+      // legal capability declaration and buildRequest spreads ...sampling
+      // onto the wire without stripping).
+      if (thinking && !this.modelRejectsTemperature()) sampling.temperature = 1;
     }
     const isDeepSeek =
       isDeepSeekAnthropicHostname(this.contentGeneratorConfig) ||
