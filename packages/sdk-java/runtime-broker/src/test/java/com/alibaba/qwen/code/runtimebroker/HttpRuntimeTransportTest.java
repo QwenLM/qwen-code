@@ -1293,7 +1293,8 @@ class HttpRuntimeTransportTest {
     @Test
     void validatesSequenceNumbersWithoutRoundingOrLongTruncation()
             throws Exception {
-        for (String invalid : List.of("1.000000000000000001", "-1e-999")) {
+        for (String invalid : List.of("1.000000000000000001", "-1e-999",
+                "65540S", "1.0000000000000001D")) {
             reply.set(json(200, ("{\"protocolVersion\":2,\"state\":\"unknown\","
                     + "\"lastSequence\":" + invalid + "}")
                     .getBytes(StandardCharsets.UTF_8)));
@@ -1315,6 +1316,64 @@ class HttpRuntimeTransportTest {
         reply.set(json(200, ("{\"protocolVersion\":2.000000000000000001,"
                 + "\"state\":\"unknown\"}").getBytes(StandardCharsets.UTF_8)));
         assertEquals(400, awaitToolFailure("status").getStatusCode());
+    }
+
+    @Test
+    void rejectsALossyV3StatusSequence() throws Exception {
+        RuntimeLease lease = toolLease(server.getAddress().getPort());
+        RuntimeSession session = toolSession();
+        Map<String, Object> reference = toolReference();
+        for (String invalid : List.of("65540S", "1.0000000000000001D")) {
+            reply.set(json(200, ("{\"protocolVersion\":3,\"toolResult\":"
+                    + "\"managed-tool-result/1\",\"state\":\"unknown\","
+                    + "\"lastSequence\":" + invalid + "}")
+                    .getBytes(StandardCharsets.UTF_8)));
+            assertThrows(ExecutionException.class, () -> transport.statusV3(
+                    lease, session, reference, 0).toCompletableFuture()
+                    .get(2, TimeUnit.SECONDS), invalid);
+        }
+        // An exact cursor of any magnitude stays valid.
+        reply.set(json(200, ("{\"protocolVersion\":3,\"toolResult\":"
+                + "\"managed-tool-result/1\",\"state\":\"unknown\","
+                + "\"lastSequence\":18446744073709551616}")
+                .getBytes(StandardCharsets.UTF_8)));
+        assertEquals("unknown", transport.statusV3(lease, session, reference,
+                0).toCompletableFuture().get(2, TimeUnit.SECONDS)
+                .get("state"));
+    }
+
+    @Test
+    void validatesTheV3ManifestByteLengthExactly() throws Exception {
+        RuntimeLease lease = toolLease(server.getAddress().getPort());
+        RuntimeSession session = toolSession();
+        Map<String, Object> reference = toolReference();
+        for (String invalid : List.of("65540S", "1.0000000000000001D", "0",
+                "65537", "1.5")) {
+            reply.set(json(200, v3SettledWithManifestLength(invalid)));
+            assertThrows(ExecutionException.class, () -> transport.statusV3(
+                    lease, session, reference, 0).toCompletableFuture()
+                    .get(2, TimeUnit.SECONDS), invalid);
+        }
+        for (String valid : List.of("1", "4.0", "65536")) {
+            reply.set(json(200, v3SettledWithManifestLength(valid)));
+            assertEquals("settled", transport.statusV3(lease, session,
+                    reference, 0).toCompletableFuture().get(2, TimeUnit.SECONDS)
+                    .get("state"), valid);
+        }
+    }
+
+    private static byte[] v3SettledWithManifestLength(String byteLength) {
+        return ("{\"protocolVersion\":3,\"toolResult\":"
+                + "\"managed-tool-result/1\",\"state\":\"settled\",\"result\":"
+                + "{\"executionStatus\":\"success\",\"responseParts\":[],"
+                + "\"capture\":{\"captureStatus\":\"complete\","
+                + "\"captureReason\":null,\"previewTruncated\":false,"
+                + "\"deliveryStatus\":\"committed\",\"manifest\":{"
+                + "\"resourceId\":\"res-1\","
+                + "\"kind\":\"managed-tool-result-manifest\","
+                + "\"schemaVersion\":1,\"byteLength\":" + byteLength + ","
+                + "\"digest\":\"" + "a".repeat(64) + "\"}}}}")
+                .getBytes(StandardCharsets.UTF_8);
     }
 
     @Test
