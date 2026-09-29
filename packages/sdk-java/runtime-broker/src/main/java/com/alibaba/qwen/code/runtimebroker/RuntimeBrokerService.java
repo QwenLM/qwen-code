@@ -1125,16 +1125,16 @@ public final class RuntimeBrokerService implements AutoCloseable {
                                     handle));
                 })
                 .handle((outcome, error) -> {
+                    Throwable cause = unwrap(error);
                     // Published before taking the claim, which a renewal can
                     // hold across a database round trip.
-                    if (unwrap(error) instanceof RuntimeBrokerException failure
+                    if (cause instanceof RuntimeBrokerException failure
                             && !failure.isRetryable()) {
                         nonRetryable.set(failure);
                     }
                     RuntimeBindingRecord currentClaim = renewal.stopAndGet();
                     try {
                         if (error != null) {
-                            Throwable cause = unwrap(error);
                             boolean retryable = !(cause instanceof RuntimeBrokerException
                                     brokerFailure) || brokerFailure.isRetryable();
                             if (currentClaim != null) {
