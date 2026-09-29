@@ -340,6 +340,24 @@ export interface BuildMemoryPromptOptions {
   keywordVocabularySnapshot?: string;
 }
 
+export function buildStructuredAutoMemoryPrompt(
+  memoryDir: string,
+  userMemoryDir: string,
+  teamMemoryDir?: string,
+): string {
+  const scopes = [
+    `PROJECT: \`${memoryDir}\``,
+    `USER: \`${userMemoryDir}\``,
+    ...(teamMemoryDir ? [`TEAM: \`${teamMemoryDir}\``] : []),
+  ].join('; ');
+  return [
+    '# auto memory',
+    '',
+    `Managed memory scopes: ${scopes}.`,
+    'Use the complete tree and focused metadata for routing. Use search_memory only when a task needs body details not already present in metadata or conversation history. Use manage_memory only when the user explicitly asks to remember, update, or forget something. Never use read_file, grep_search, list_directory, glob, or shell commands to access managed-memory paths directly.',
+  ].join('\n');
+}
+
 function allIndexesEmpty(
   indexContent: string | null | undefined,
   userSection: UserAutoMemorySection | undefined,
@@ -409,7 +427,7 @@ export function buildManagedAutoMemoryPrompt(
       '- Keep each memory body near or below 1,200 characters.',
       '- Organize memories semantically by topic, not chronologically.',
       '- Update or remove memories that turn out to be wrong or outdated.',
-      `- Every \`MEMORY.md\` index is always loaded into your conversation context \u2014 lines after ${MAX_MANAGED_AUTO_MEMORY_INDEX_LINES} will be truncated, so keep each index concise.`,
+      `- Every \`MEMORY.md\` index is available to memory maintenance agents \u2014 lines after ${MAX_MANAGED_AUTO_MEMORY_INDEX_LINES} will be truncated, so keep each index concise.`,
     ];
 
     const condensedSave = multiTier
@@ -508,7 +526,7 @@ export function buildManagedAutoMemoryPrompt(
         '',
         '**Step 2** — add a pointer to that file in the `MEMORY.md` index that lives in the SAME directory you wrote to (each directory has its own index — never cross-reference). Each entry should be one line, under ~150 characters: `- [Title](file.md) — one-line hook`. It has no frontmatter. Never write memory content directly into `MEMORY.md`.',
         '',
-        `- Every \`MEMORY.md\` index is always loaded into your conversation context — lines after ${MAX_MANAGED_AUTO_MEMORY_INDEX_LINES} will be truncated, so keep each index concise`,
+        `- Every \`MEMORY.md\` index is available to memory maintenance agents — lines after ${MAX_MANAGED_AUTO_MEMORY_INDEX_LINES} will be truncated, so keep each index concise`,
         '- Keep the name, description, type, category, keywords, and usage_scenarios fields in memory files up-to-date with the complete content',
         '- Use one fixed category and 1-3 usage_scenarios for every memory.',
         '- Use 2-6 discriminative retrieval terms or short phrases; prefer domain-qualified phrases over generic single words, with at most 2 exact identifiers last.',
@@ -529,7 +547,7 @@ export function buildManagedAutoMemoryPrompt(
         '',
         `**Step 2** — add a pointer to that file in \`${memoryDir}/MEMORY.md\` (the full absolute path). This index file is an index, not a memory — each entry should be one line, under ~150 characters: \`- [Title](file.md) — one-line hook\`. It has no frontmatter. Never write memory content directly into \`${memoryDir}/MEMORY.md\`.`,
         '',
-        `- \`${memoryDir}/MEMORY.md\` is always loaded into your conversation context — lines after ${MAX_MANAGED_AUTO_MEMORY_INDEX_LINES} will be truncated, so keep the index concise`,
+        `- \`${memoryDir}/MEMORY.md\` is available to memory maintenance agents — lines after ${MAX_MANAGED_AUTO_MEMORY_INDEX_LINES} will be truncated, so keep the index concise`,
         '- Keep the name, description, type, category, keywords, and usage_scenarios fields in memory files up-to-date with the complete content',
         '- Use one fixed category and 1-3 usage_scenarios for every memory.',
         '- Use 2-6 discriminative retrieval terms or short phrases; prefer domain-qualified phrases over generic single words, with at most 2 exact identifiers last.',

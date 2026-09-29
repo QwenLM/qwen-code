@@ -16,8 +16,9 @@ import type { ShellToolInvocation } from '@qwen-code/qwen-code-core/tools/shell.
 import type { ToolResultEnvelope } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
 import type {
   LocalShellCaptureRequest,
-  LocalShellResultSession,
-} from '@qwen-code/qwen-code-core/managed-runtime/local-shell-result-session.js';
+  LocalShellReceipt,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-shell-result-session.js';
+import type { ToolResultExpectedIdentity } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result-store.js';
 import type { LocalShellResultCapture } from '@qwen-code/qwen-code-core/managed-runtime/local-shell-result-capture.js';
 import { MANAGED_TOOL_RESULT_PROTOCOL } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
 import type { ManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
@@ -85,6 +86,11 @@ export interface ManagedToolSet {
   readonly sessionId: string;
   readonly directory?: string;
   readonly tools: ReadonlyMap<string, AnyDeclarativeTool>;
+  /**
+   * Whether a shell `directory` lies inside the tools' workspace. Calls run
+   * without approval, so the executor enforces this boundary itself.
+   */
+  readonly admitsDirectory: (directory: string) => boolean;
   readonly isActive?: () => boolean;
 }
 
@@ -114,7 +120,7 @@ interface JournalEntry {
   result?: ManagedToolResultPayload;
   v3Result?: ToolResultEnvelope;
   readonly v3Capture?: LocalShellCaptureRequest['capture'];
-  readonly captureSink?: LocalShellResultCapture;
+  readonly captureSink?: ManagedShellCaptureSink;
   acknowledgement?: ToolResultAcknowledgement;
   readonly controller: AbortController;
   promise?: Promise<void>;
@@ -133,6 +139,22 @@ export interface ManagedToolV3View {
   readonly result?: ToolResultEnvelope;
 }
 
+export type ManagedShellCaptureSink = Pick<
+  LocalShellResultCapture,
+  keyof LocalShellResultCapture
+>;
+
+export interface ManagedShellCapturePublisher {
+  prepare(request: LocalShellCaptureRequest): Promise<{
+    identity: ToolResultExpectedIdentity;
+    sink: ManagedShellCaptureSink;
+  }>;
+  accept(
+    identity: ToolResultExpectedIdentity,
+    envelope: ToolResultEnvelope,
+  ): Promise<LocalShellReceipt>;
+}
+
 /**
  * Executes the admitted ordinary tools for one Managed Runtime worker and
  * journals every invocation so `status` and `cancel` can answer by the
@@ -147,10 +169,7 @@ export class ManagedToolExecutor {
 
   constructor(
     private readonly toolsFor: ManagedToolSetResolver,
-    private readonly capturePublisher?: Pick<
-      LocalShellResultSession,
-      'prepare' | 'accept'
-    >,
+    private readonly capturePublisher?: ManagedShellCapturePublisher,
   ) {}
 
   static forWorkspace(workspaceCwd: string, runtimeInstanceId: string) {
@@ -245,7 +264,7 @@ export class ManagedToolExecutor {
       controller: new AbortController(),
     };
     this.entries.set(reference.callId, entry);
-    entry.promise = this.run(entry, tool, tools.sessionId, tools.directory);
+    entry.promise = this.run(entry, tool, tools, tools.directory);
     await entry.promise;
     return entry.result!;
   }
@@ -317,7 +336,7 @@ export class ManagedToolExecutor {
         'Background Shell capture is unavailable.',
       );
     }
-    let prepared: Awaited<ReturnType<LocalShellResultSession['prepare']>>;
+    let prepared: Awaited<ReturnType<ManagedShellCapturePublisher['prepare']>>;
     try {
       prepared = await this.capturePublisher.prepare({ reference, capture });
     } catch (cause) {
@@ -344,7 +363,7 @@ export class ManagedToolExecutor {
       controller: new AbortController(),
     };
     this.entries.set(reference.callId, entry);
-    entry.promise = this.run(entry, tool, tools.sessionId);
+    entry.promise = this.run(entry, tool, tools);
     await entry.promise;
     return v3View(entry);
   }
@@ -499,9 +518,10 @@ export class ManagedToolExecutor {
   private async run(
     entry: JournalEntry,
     tool: AnyDeclarativeTool,
-    sessionId: string,
+    tools: ManagedToolSet,
     directory?: string,
   ): Promise<void> {
+    const { sessionId } = tools;
     entry.state = 'executing';
     entry.lastSequence += 1;
     let payload: ManagedToolResultPayload;
@@ -516,6 +536,16 @@ export class ManagedToolExecutor {
         params['file_path'] = path.resolve(
           directory,
           params['file_path'].trim(),
+        );
+      }
+      if (
+        entry.toolName === ShellTool.Name &&
+        typeof params['directory'] === 'string' &&
+        params['directory'] !== '' &&
+        !tools.admitsDirectory(params['directory'])
+      ) {
+        throw new Error(
+          `Directory '${params['directory']}' is not within any of the registered workspace directories.`,
         );
       }
       const result: ToolResult = await sessionIdContext.run(sessionId, () => {
@@ -650,6 +680,8 @@ export function createManagedToolSet(
   return {
     sessionId,
     directory,
+    admitsDirectory: (candidate) =>
+      config.getWorkspaceContext().isPathWithinWorkspace(candidate),
     tools: new Map(
       [
         new ReadFileTool(config),

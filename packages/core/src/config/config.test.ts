@@ -4,6 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  captureHookExecutionOwner,
+  getHookExecutionOwner,
+} from '../hooks/hook-execution-context.js';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Mock } from 'vitest';
 import { mkdir, mkdtemp, open, rm, stat, writeFile } from 'node:fs/promises';
@@ -22,6 +26,7 @@ import {
   APPROVAL_MODE_INFO,
   MCPServerConfig,
   deriveAgentConfig,
+  deriveApprovalModeConfig,
   deriveConfig,
   deriveWorktreeConfig,
   TrustGateError,
@@ -82,6 +87,7 @@ import {
   createDebugLogger,
   resetDebugLoggingState,
   setDebugLogSession,
+  type DebugLogger,
 } from '../utils/debugLogger.js';
 import { logGoalState, logRipgrepFallback } from '../telemetry/loggers.js';
 import { RipgrepFallbackEvent } from '../telemetry/types.js';
@@ -109,6 +115,7 @@ import {
 } from '../memory/paths.js';
 import {
   rebuildTeamAutoMemoryIndex,
+  rebuildUserAutoMemoryIndex,
   TeamMemoryRootSecurityError,
 } from '../memory/indexer.js';
 import { syncTeamMemory } from '../memory/team-memory-sync.js';
@@ -161,6 +168,7 @@ import {
 import * as jsonl from '../utils/jsonl-utils.js';
 import { checkPriorRead } from '../tools/priorReadEnforcement.js';
 import { ToolErrorType } from '../tools/tool-error.js';
+import { scanMemoryMetadataCorpusStatus } from '../memory/metadata-migration.js';
 
 function createToolMock(toolName: string) {
   const ToolMock = vi.fn();
@@ -194,6 +202,31 @@ vi.mock('node:fs', async (importOriginal) => {
     default: mocked, // Required for ESM default imports (import fs from 'node:fs')
   };
 });
+
+vi.mock('../memory/metadata-migration.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../memory/metadata-migration.js')>()),
+  scanMemoryMetadataCorpusStatus: vi.fn().mockResolvedValue({
+    ready: false,
+    revision: 'legacy-revision',
+    files: 1,
+    legacyFiles: 1,
+    legacyByScope: { project: 1, user: 0, team: 0 },
+  }),
+}));
+
+vi.mock('../memory/scan.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../memory/scan.js')>()),
+  scanAutoMemorySnapshot: vi.fn().mockResolvedValue({
+    docs: [],
+    sourceStatus: {
+      requestedScopes: ['project', 'user'],
+      searchedScopes: ['project', 'user'],
+      unavailableScopes: [],
+      complete: true,
+      incompleteScopes: [],
+    },
+  }),
+}));
 
 // Mock dependencies that might be called during Config construction or createServerConfig
 vi.mock('../tools/tool-registry', () => {
@@ -259,7 +292,10 @@ vi.mock('../memory/indexer.js', async (importActual) => ({
   // Keep the real exports (notably TeamMemoryRootSecurityError, which the sync
   // gate distinguishes via instanceof) and override only the rebuild.
   ...(await importActual<typeof import('../memory/indexer.js')>()),
+  rebuildAutoMemoryIndexAtRoot: vi.fn().mockResolvedValue(null),
+  rebuildManagedAutoMemoryIndex: vi.fn().mockResolvedValue(null),
   rebuildTeamAutoMemoryIndex: vi.fn().mockResolvedValue(null),
+  rebuildUserAutoMemoryIndex: vi.fn().mockResolvedValue(null),
 }));
 vi.mock('../memory/team-memory-sync.js', () => ({
   syncTeamMemory: vi
@@ -278,6 +314,7 @@ vi.mock('../memory/team-memory-git-status.js', () => ({
 
 vi.mock('../hooks/index.js', () => {
   const HookSystemMock = vi.fn();
+  HookSystemMock.prototype.runtimeId = 'test-hook-runtime';
   HookSystemMock.prototype.initialize = vi.fn().mockResolvedValue(undefined);
   HookSystemMock.prototype.hasHooksForEvent = vi.fn().mockReturnValue(false);
   HookSystemMock.prototype.getAllHooks = vi.fn().mockReturnValue([]);
@@ -882,6 +919,13 @@ describe('Server Config (config.ts)', () => {
   beforeEach(() => {
     // Reset mocks if necessary
     vi.clearAllMocks();
+    vi.mocked(scanMemoryMetadataCorpusStatus).mockResolvedValue({
+      ready: false,
+      revision: 'legacy-revision',
+      files: 1,
+      legacyFiles: 1,
+      legacyByScope: { project: 1, user: 0, team: 0 },
+    });
     mockAutoMemoryInode = 1;
     for (const envName of MEMORY_PRESSURE_ENV_KEYS) {
       delete process.env[envName];
@@ -2358,6 +2402,55 @@ describe('Server Config (config.ts)', () => {
     });
   });
 
+  describe('getStructuredMemoryRecallEnabled', () => {
+    const prevEnv = process.env['QWEN_CODE_MEMORY_STRUCTURED_RECALL'];
+    afterEach(() => {
+      if (prevEnv === undefined) {
+        delete process.env['QWEN_CODE_MEMORY_STRUCTURED_RECALL'];
+      } else {
+        process.env['QWEN_CODE_MEMORY_STRUCTURED_RECALL'] = prevEnv;
+      }
+    });
+
+    it('is off by default and follows the enableStructuredMemoryRecall setting', () => {
+      delete process.env['QWEN_CODE_MEMORY_STRUCTURED_RECALL'];
+      expect(new Config(baseParams).getStructuredMemoryRecallEnabled()).toBe(
+        false,
+      );
+      expect(
+        new Config({
+          ...baseParams,
+          enableStructuredMemoryRecall: true,
+        }).getStructuredMemoryRecallEnabled(),
+      ).toBe(true);
+    });
+
+    it('QWEN_CODE_MEMORY_STRUCTURED_RECALL overrides the setting', () => {
+      process.env['QWEN_CODE_MEMORY_STRUCTURED_RECALL'] = '1';
+      expect(new Config(baseParams).getStructuredMemoryRecallEnabled()).toBe(
+        true,
+      );
+      process.env['QWEN_CODE_MEMORY_STRUCTURED_RECALL'] = '0';
+      expect(
+        new Config({
+          ...baseParams,
+          enableStructuredMemoryRecall: true,
+        }).getStructuredMemoryRecallEnabled(),
+      ).toBe(false);
+    });
+
+    it('bareMode forces off even with the setting and env both on', () => {
+      process.env['QWEN_CODE_MEMORY_STRUCTURED_RECALL'] = '1';
+      expect(
+        new Config({
+          ...baseParams,
+          bareMode: true,
+          enableStructuredMemoryRecall: true,
+        }).getStructuredMemoryRecallEnabled(),
+      ).toBe(false);
+    });
+  });
+
   describe('getCronRecurringMaxAgeDays', () => {
     const prevEnv = process.env['QWEN_CODE_CRON_MAX_AGE_DAYS'];
     afterEach(() => {
@@ -3024,20 +3117,24 @@ describe('Server Config (config.ts)', () => {
     });
 
     it('keeps pure skill reads and registers only admitted tools after a successful probe', async () => {
+      const resolvedPolicy = {
+        ...parameters().shellExecutionSandbox,
+        effectiveBackend: 'bwrap' as const,
+        enforcement: 'full' as const,
+      };
       const probe = vi
         .spyOn(sandboxPolicy, 'probeShellSandbox')
-        .mockResolvedValue();
+        .mockResolvedValue(resolvedPolicy);
       try {
         const config = new Config(parameters());
+        const admittedPolicy = config.getShellExecutionSandbox();
         const refreshExtensions = vi.spyOn(
           config.getExtensionManager(),
           'refreshCache',
         );
         await config.initialize();
-        expect(probe).toHaveBeenCalledWith(
-          config.getShellExecutionSandbox(),
-          undefined,
-        );
+        expect(probe).toHaveBeenCalledWith(admittedPolicy, undefined);
+        expect(config.getShellExecutionSandbox()).toBe(resolvedPolicy);
         expect(HookSystem).not.toHaveBeenCalled();
         expect(maybeRunAutoSkillCurator).not.toHaveBeenCalled();
         expect(refreshExtensions).not.toHaveBeenCalled();
@@ -3068,7 +3165,11 @@ describe('Server Config (config.ts)', () => {
     it('omits user-interaction tools from the admitted headless registry', async () => {
       const probe = vi
         .spyOn(sandboxPolicy, 'probeShellSandbox')
-        .mockResolvedValue();
+        .mockResolvedValue({
+          ...parameters().shellExecutionSandbox,
+          effectiveBackend: 'bwrap',
+          enforcement: 'full',
+        });
       try {
         const config = new Config({
           ...parameters(),
@@ -8727,6 +8828,9 @@ describe('Server Config (config.ts)', () => {
       });
       // Set messageBus using the setter
       config.setMessageBus(mockMessageBus as unknown as MessageBus);
+      vi.spyOn(config, 'getHookSystem').mockReturnValue({
+        runtimeId: 'auth-runtime',
+      } as unknown as NonNullable<ReturnType<Config['getHookSystem']>>);
 
       const authType = AuthType.USE_GEMINI;
       const mockContentConfig = {
@@ -8748,6 +8852,12 @@ describe('Server Config (config.ts)', () => {
         `Successfully authenticated with ${authType}`,
         'auth_success',
         'Authentication successful',
+        undefined,
+        {
+          runtimeId: 'auth-runtime',
+          sessionId: config.getSessionId(),
+          agentId: null,
+        },
       );
     });
 
@@ -8998,6 +9108,148 @@ describe('Server Config (config.ts)', () => {
       expect(config.getFastModel()).toBe('openai:shared-model');
     });
 
+    it.each(['fastModel', 'compactionModel'] as const)(
+      'drops a stale auxiliary endpoint instead of unconfiguring %s',
+      (key) => {
+        const config = new Config({
+          ...baseParams,
+          authType: AuthType.USE_OPENAI,
+          model: 'main',
+          [key]: 'openai:shared\0https://removed.example/v1',
+          modelProvidersConfig: {
+            openai: [{ id: 'shared', baseUrl: 'https://moved.example/v1' }],
+          },
+        });
+        // The pin no longer names a configured endpoint, so the selector falls
+        // back to the bare form and the registry's first same-id match — the
+        // pre-#12760 behaviour — instead of reporting the model as unset.
+        const read = () =>
+          key === 'fastModel'
+            ? config.getFastModel()
+            : config.getCompactionModel();
+        expect(read()).toBe('openai:shared');
+      },
+    );
+
+    it.each(['fastModel', 'compactionModel'] as const)(
+      'warns when a stale auxiliary endpoint pin is dropped (%s)',
+      (key) => {
+        const config = new Config({
+          ...baseParams,
+          authType: AuthType.USE_OPENAI,
+          model: 'main',
+          [key]: 'openai:shared\0https://removed.example/v1',
+          modelProvidersConfig: {
+            openai: [{ id: 'shared', baseUrl: 'https://moved.example/v1' }],
+          },
+        });
+        const warn = vi.spyOn(
+          (config as unknown as { debugLogger: DebugLogger }).debugLogger,
+          'warn',
+        );
+        const read = () =>
+          key === 'fastModel'
+            ? config.getFastModel()
+            : config.getCompactionModel();
+        expect(read()).toBe('openai:shared');
+        expect(warn).toHaveBeenCalledWith(
+          expect.stringContaining('Aux endpoint pin dropped for "shared"'),
+        );
+        // The escaped form must reach the log, never a raw NUL byte.
+        expect(warn).not.toHaveBeenCalledWith(expect.stringContaining('\0'));
+      },
+    );
+
+    it('keeps the pin when a same-id sibling declares the colliding default URL (#12760)', () => {
+      // The first row declares no baseUrl, so its effective URL is the
+      // provider default — the same URL the second row declares. Matching the
+      // pin on effective baseUrl with first-hit semantics would return the
+      // first row's undefined registryBaseUrl and silently drop the pin,
+      // rebinding every fast-model call to the personal key.
+      const config = new Config({
+        ...baseParams,
+        authType: AuthType.USE_OPENAI,
+        model: 'main',
+        fastModel: 'openai:gpt-4o\0https://api.openai.com/v1',
+        modelProvidersConfig: {
+          openai: [
+            { id: 'gpt-4o', envKey: 'OPENAI_API_KEY_PERSONAL' },
+            {
+              id: 'gpt-4o',
+              baseUrl: 'https://api.openai.com/v1',
+              envKey: 'OPENAI_API_KEY_WORK',
+            },
+          ],
+        },
+      });
+
+      expect(config.getFastModel()).toBe(
+        'openai:gpt-4o\0https://api.openai.com/v1',
+      );
+    });
+
+    it.each(['fastModel', 'compactionModel'] as const)(
+      'keeps %s bare when the pinned entry declares no endpoint of its own',
+      (key) => {
+        const config = new Config({
+          ...baseParams,
+          authType: AuthType.USE_OPENAI,
+          model: 'main',
+          // What the picker persists for a row whose provider entry has no
+          // `baseUrl`: the registry's effective (default) URL.
+          [key]: 'openai:shared\0https://api.openai.com/v1',
+          modelProvidersConfig: { openai: [{ id: 'shared' }] },
+        });
+        // Such an entry is registered under the plain id, which a bare
+        // selector already resolves to; re-attaching the effective URL would
+        // hand consumers a registry key that does not exist.
+        const read = () =>
+          key === 'fastModel'
+            ? config.getFastModel()
+            : config.getCompactionModel();
+        expect(read()).toBe('openai:shared');
+      },
+    );
+
+    it('keeps the endpoint disambiguator on a persisted fast model selector (#12760)', () => {
+      // Two providers expose the same model id over the openai protocol; the
+      // picker pins the second one as `authType:id\0baseUrl`. Dropping the
+      // suffix would rebind the fast model to the first registered endpoint
+      // (registry first-match fallback) — e.g. an exhausted token plan.
+      const config = new Config({
+        ...baseParams,
+        authType: AuthType.USE_OPENAI,
+        model: 'qwen3.7-max',
+        fastModel: 'openai:shared-fast\0https://free-quota.example.com/v1',
+        modelProvidersConfig: {
+          [AuthType.USE_OPENAI]: [
+            {
+              id: 'qwen3.7-max',
+              name: 'qwen3.7-max',
+              baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+              envKey: 'DASHSCOPE_API_KEY',
+            },
+            {
+              id: 'shared-fast',
+              name: 'shared-fast (token plan)',
+              baseUrl: 'https://exhausted-plan.example.com/v1',
+              envKey: 'TOKEN_PLAN_API_KEY',
+            },
+            {
+              id: 'shared-fast',
+              name: 'shared-fast (free quota)',
+              baseUrl: 'https://free-quota.example.com/v1',
+              envKey: 'FREE_QUOTA_API_KEY',
+            },
+          ],
+        },
+      });
+
+      expect(config.getFastModel()).toBe(
+        'openai:shared-fast\0https://free-quota.example.com/v1',
+      );
+    });
+
     it('preserves authType-qualified fast model selectors across auth types', () => {
       const config = new Config({
         ...baseParams,
@@ -9187,6 +9439,48 @@ describe('Server Config (config.ts)', () => {
     });
 
     describe('getCompactionModel', () => {
+      it('keeps the endpoint disambiguator on a persisted compaction model selector (#12760)', async () => {
+        // Twin of the getFastModel case: the picker pins the second of two
+        // same-id endpoints and runSideQuery's resolveForModel consumes the
+        // suffix. Dropping it would rebind compaction to the first registered
+        // endpoint (registry first-match fallback).
+        const config = new Config({
+          ...baseParams,
+          authType: AuthType.USE_OPENAI,
+          model: 'qwen3.7-max',
+          compactionModel:
+            'openai:shared-compact\0https://free-quota.example.com/v1',
+          modelProvidersConfig: {
+            [AuthType.USE_OPENAI]: [
+              {
+                id: 'qwen3.7-max',
+                name: 'qwen3.7-max',
+                baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+                envKey: 'DASHSCOPE_API_KEY',
+              },
+              {
+                id: 'shared-compact',
+                name: 'shared-compact (token plan)',
+                baseUrl: 'https://exhausted-plan.example.com/v1',
+                envKey: 'TOKEN_PLAN_API_KEY',
+              },
+              {
+                id: 'shared-compact',
+                name: 'shared-compact (free quota)',
+                baseUrl: 'https://free-quota.example.com/v1',
+                envKey: 'FREE_QUOTA_API_KEY',
+              },
+            ],
+          },
+        });
+
+        await config.refreshAuth(AuthType.USE_OPENAI);
+
+        expect(config.getCompactionModel()).toBe(
+          'openai:shared-compact\0https://free-quota.example.com/v1',
+        );
+      });
+
       it('returns the compaction model when set', async () => {
         const config = new Config({
           ...baseParams,
@@ -9985,6 +10279,199 @@ describe('Server Config (config.ts)', () => {
     expect(config.getContextFilePaths()).toEqual([]);
   });
 
+  it('guards and rolls back the memory recall mode transition by revision', async () => {
+    const config = Object.create(Config.prototype) as Config;
+    Object.assign(config, {
+      memoryRecallMode: 'legacy',
+      memoryRecallModeInitialized: true,
+      memoryCorpusRevision: 'legacy-revision',
+      autoMemoryPrompt: 'legacy prompt',
+    });
+    vi.spyOn(config, 'isManagedMemoryAvailable').mockReturnValue(true);
+    vi.spyOn(config, 'getManagedAutoMemoryEnabled').mockReturnValue(true);
+    vi.spyOn(config, 'getStructuredMemoryRecallEnabled').mockReturnValue(true);
+    vi.spyOn(config, 'getProjectRoot').mockReturnValue('/tmp/project');
+    vi.spyOn(config, 'getTeamMemoryEnabled').mockReturnValue(true);
+    vi.spyOn(config, 'isTrustedFolder').mockReturnValue(false);
+    const scan = vi
+      .fn()
+      .mockResolvedValue({ ready: true, revision: 'structured-revision' });
+    Object.assign(config, { scanMemoryRecallCorpusStatus: scan });
+
+    scan.mockResolvedValueOnce({
+      ready: false,
+      revision: 'not-ready-revision',
+    });
+    await expect(config.prepareMemoryRecallTransition()).resolves.toBe(
+      undefined,
+    );
+    expect(config.getMemoryRecallMode()).toBe('legacy');
+
+    const transition = await config.prepareMemoryRecallTransition();
+    expect(transition).toMatchObject({
+      from: 'legacy',
+      to: 'structured',
+      revision: 'structured-revision',
+      previousRevision: 'not-ready-revision',
+      previousAutoMemoryPrompt: 'legacy prompt',
+    });
+    expect(transition?.autoMemoryPrompt).toContain(
+      'Use the complete tree and focused metadata for routing.',
+    );
+    expect(transition?.autoMemoryPrompt).not.toContain('TEAM:');
+    expect(rebuildTeamAutoMemoryIndex).not.toHaveBeenCalled();
+    await expect(
+      config.confirmMemoryRecallTransition(transition!),
+    ).resolves.toBe(true);
+
+    config.commitMemoryRecallTransition(transition!);
+    expect(config.getMemoryRecallMode()).toBe('structured');
+    expect(config.getAutoMemoryPrompt()).toBe(transition?.autoMemoryPrompt);
+
+    config.rollbackMemoryRecallTransition(transition!);
+    expect(config.getMemoryRecallMode()).toBe('legacy');
+    expect(config.getAutoMemoryPrompt()).toBe('legacy prompt');
+
+    scan.mockResolvedValueOnce({ ready: true, revision: 'changed-revision' });
+    await expect(
+      config.confirmMemoryRecallTransition(transition!),
+    ).resolves.toBe(false);
+  });
+
+  it('prepareMemoryRecallTransition tolerates a failed tier index rebuild', async () => {
+    // A tier that cannot be read or written (EACCES, a rejected root) leaves
+    // its legacy MEMORY.md stale, but the structured prompt is built from
+    // scans — the rebuild must not block the protocol transition.
+    const config = Object.create(Config.prototype) as Config;
+    Object.assign(config, {
+      memoryRecallMode: 'legacy',
+      memoryRecallModeInitialized: true,
+      memoryCorpusRevision: 'legacy-revision',
+      autoMemoryPrompt: 'legacy prompt',
+      debugLogger: createDebugLogger('TEST'),
+    });
+    vi.spyOn(config, 'getManagedAutoMemoryEnabled').mockReturnValue(true);
+    vi.spyOn(config, 'getStructuredMemoryRecallEnabled').mockReturnValue(true);
+    vi.spyOn(config, 'getProjectRoot').mockReturnValue('/tmp/project');
+    vi.spyOn(config, 'getTeamMemoryEnabled').mockReturnValue(false);
+    vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+    Object.assign(config, {
+      scanMemoryRecallCorpusStatus: vi
+        .fn()
+        .mockResolvedValue({ ready: true, revision: 'structured-revision' }),
+    });
+    vi.mocked(rebuildUserAutoMemoryIndex).mockRejectedValueOnce(
+      new Error('EACCES: cannot read user root'),
+    );
+
+    const transition = await config.prepareMemoryRecallTransition();
+
+    expect(transition).toMatchObject({
+      from: 'legacy',
+      to: 'structured',
+      revision: 'structured-revision',
+    });
+    expect(transition?.autoMemoryPrompt).toContain(
+      'Use the complete tree and focused metadata for routing.',
+    );
+  });
+
+  it('prepareMemoryRecallTransition stays inert in safe mode', async () => {
+    const config = Object.create(Config.prototype) as Config;
+    Object.assign(config, {
+      memoryRecallMode: 'legacy',
+      memoryRecallModeInitialized: true,
+      memoryCorpusRevision: 'legacy-revision',
+      autoMemoryPrompt: '',
+    });
+    vi.spyOn(config, 'isManagedMemoryAvailable').mockReturnValue(true);
+    // The production predicate adds `&& !isSafeMode()`; keep the mock pointed
+    // at it so the gate being exercised is the one client.ts relies on.
+    vi.spyOn(config, 'getManagedAutoMemoryEnabled').mockReturnValue(false);
+    vi.spyOn(config, 'getProjectRoot').mockReturnValue('/tmp/project');
+    const scan = vi
+      .fn()
+      .mockResolvedValue({ ready: true, revision: 'structured-revision' });
+    Object.assign(config, { scanMemoryRecallCorpusStatus: scan });
+
+    await expect(config.prepareMemoryRecallTransition()).resolves.toBe(
+      undefined,
+    );
+    expect(scan).not.toHaveBeenCalled();
+    expect(config.getMemoryRecallMode()).toBe('legacy');
+  });
+
+  it('prepareMemoryRecallTransition stays inert while the structured protocol is opted out', async () => {
+    // A ready corpus must not flip the protocol on by itself: activation is
+    // opt-in, so the readiness scan is never even consulted.
+    const config = Object.create(Config.prototype) as Config;
+    Object.assign(config, {
+      memoryRecallMode: 'legacy',
+      memoryRecallModeInitialized: true,
+      memoryCorpusRevision: 'legacy-revision',
+      autoMemoryPrompt: 'legacy prompt',
+    });
+    vi.spyOn(config, 'getManagedAutoMemoryEnabled').mockReturnValue(true);
+    vi.spyOn(config, 'getStructuredMemoryRecallEnabled').mockReturnValue(false);
+    vi.spyOn(config, 'getProjectRoot').mockReturnValue('/tmp/project');
+    const scan = vi
+      .fn()
+      .mockResolvedValue({ ready: true, revision: 'structured-revision' });
+    Object.assign(config, { scanMemoryRecallCorpusStatus: scan });
+
+    await expect(config.prepareMemoryRecallTransition()).resolves.toBe(
+      undefined,
+    );
+    expect(scan).not.toHaveBeenCalled();
+    expect(config.getMemoryRecallMode()).toBe('legacy');
+  });
+
+  it('runs the corpus readiness scan once, not on every refresh', async () => {
+    // The scan walks the frontmatter of every memory file, and its result is
+    // consumed only while the mode is still uninitialized. Since
+    // refreshHierarchicalMemory runs per user query, re-walking the whole
+    // corpus after the mode has settled would put a full-corpus read on the
+    // prompt critical path and then throw the result away.
+    const previousEnv = process.env['QWEN_CODE_MEMORY_STRUCTURED_RECALL'];
+    process.env['QWEN_CODE_MEMORY_STRUCTURED_RECALL'] = '1';
+    try {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isManagedMemoryAvailable').mockReturnValue(true);
+      vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
+        memoryContent: '',
+        fileCount: 0,
+        contextFilePaths: [],
+        ruleCount: 0,
+        conditionalRules: [],
+        projectRoot: '/tmp',
+      });
+      vi.mocked(scanMemoryMetadataCorpusStatus).mockResolvedValue({
+        ready: true,
+        revision: 'structured-revision',
+        files: 1,
+        legacyFiles: 0,
+        legacyByScope: { project: 0, user: 0, team: 0 },
+      });
+
+      await config.refreshHierarchicalMemory();
+      expect(config.getMemoryRecallMode()).toBe('structured');
+      expect(scanMemoryMetadataCorpusStatus).toHaveBeenCalledTimes(1);
+
+      await config.refreshHierarchicalMemory();
+      await config.refreshHierarchicalMemory();
+
+      // Settled: the mode is not re-derived, so the scan must not re-run.
+      expect(scanMemoryMetadataCorpusStatus).toHaveBeenCalledTimes(1);
+      expect(config.getMemoryRecallMode()).toBe('structured');
+    } finally {
+      if (previousEnv === undefined) {
+        delete process.env['QWEN_CODE_MEMORY_STRUCTURED_RECALL'];
+      } else {
+        process.env['QWEN_CODE_MEMORY_STRUCTURED_RECALL'] = previousEnv;
+      }
+    }
+  });
+
   it('refreshHierarchicalMemory should include appended auto-memory in the context warning estimate', async () => {
     const config = new Config({
       ...baseParams,
@@ -10105,6 +10592,18 @@ describe('Server Config (config.ts)', () => {
 
   it('relocateWorkingDirectory should update the session working roots', async () => {
     const config = new Config(baseParams);
+    Object.assign(config, {
+      memoryRecallMode: 'structured',
+      memoryRecallModeInitialized: true,
+      memoryCorpusRevision: 'old-project-revision',
+    });
+    vi.mocked(scanMemoryMetadataCorpusStatus).mockResolvedValueOnce({
+      ready: false,
+      revision: 'new-project-revision',
+      files: 1,
+      legacyFiles: 1,
+      legacyByScope: { project: 1, user: 0, team: 0 },
+    });
     const disposeResidentAgents = vi.spyOn(
       config.getBackgroundTaskRegistry(),
       'disposeResidentAgents',
@@ -10125,6 +10624,7 @@ describe('Server Config (config.ts)', () => {
     expect(config.getProjectRoot()).toBe(newDir);
     expect(config.getCwd()).toBe(newDir);
     expect(config.getWorkingDir()).toBe(newDir);
+    expect(config.getMemoryRecallMode()).toBe('legacy');
     expect(config.getWorkspaceContext()).toBe(workspaceContext);
     expect(config.getWorkspaceContext().getDirectories()[0]).toBe(newDir);
     expect(config.storage.getProjectRoot()).toBe(newDir);
@@ -11082,6 +11582,34 @@ describe('Server Config (config.ts)', () => {
     cwdSpy.mockRestore();
   });
 
+  it('relocateWorkingDirectory should drop the stale structured memory prompt when the refresh fails', async () => {
+    // The reset below clears the recall mode; the prompt paired with it must
+    // go too, or a failed refresh leaves the session routing to search_memory
+    // while the legacy mode leaves that tool undeclared.
+    const config = new Config(baseParams);
+    const newDir = path.resolve('/path/to/other');
+    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
+      // Keep the test process in its original directory.
+    });
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(newDir);
+    Object.assign(config, {
+      autoMemoryPrompt: 'structured prompt naming the old workspace',
+      memoryRecallMode: 'structured',
+    });
+    vi.mocked(loadServerHierarchicalMemory).mockRejectedValueOnce(
+      new Error('memory failed'),
+    );
+
+    const result = await config.relocateWorkingDirectory(newDir);
+
+    expect(result.memoryRefreshError).toEqual(new Error('memory failed'));
+    expect(config.getMemoryRecallMode()).toBe('legacy');
+    expect(config.getAutoMemoryPrompt()).toBe('');
+
+    chdirSpy.mockRestore();
+    cwdSpy.mockRestore();
+  });
+
   it('relocateWorkingDirectory should report both memory and MCP refresh failures after moving', async () => {
     const config = new Config({
       ...baseParams,
@@ -11239,6 +11767,7 @@ describe('Server Config (config.ts)', () => {
     const fireInstructionsLoadedEvent = vi.fn().mockResolvedValue(undefined);
     const signal = new AbortController().signal;
     config['hookSystem'] = {
+      runtimeId: 'test-hook-runtime',
       fireInstructionsLoadedEvent,
     } as unknown as HookSystem;
 
@@ -12160,6 +12689,26 @@ describe('Server Config (config.ts)', () => {
         ToolNames.GET_GOAL,
         ToolNames.UPDATE_GOAL,
       ]);
+      expect(
+        (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+      ).not.toContain(ToolNames.SEARCH_MEMORY);
+    });
+
+    it('should register structured memory tools in the normal tool registry', async () => {
+      const config = new Config(baseParams);
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+
+      const registeredNames = (registerToolMock as Mock).mock.calls.map(
+        (call) => call[0],
+      );
+      expect(registeredNames).toContain(ToolNames.SEARCH_MEMORY);
+      expect(registeredNames).toContain(ToolNames.MANAGE_MEMORY);
     });
 
     it('registers structured_output in bare mode when jsonSchema is set', async () => {
@@ -13547,6 +14096,41 @@ describe('setApprovalMode with folder trust', () => {
   });
 
   describe('DAC plan workflow', () => {
+    it('notifies after a Plan execution mode is selected or changed', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+      config.setApprovalMode(ApprovalMode.YOLO);
+      const states: Array<{
+        mode: ApprovalMode;
+        prePlanMode: ApprovalMode;
+        executionMode: ApprovalMode | undefined;
+      }> = [];
+      config.onApprovalModeChange((mode, prePlanMode) => {
+        states.push({
+          mode,
+          prePlanMode: prePlanMode ?? ApprovalMode.DEFAULT,
+          executionMode: config.getPlanExecutionMode(),
+        });
+      });
+
+      config.setPlanMode(true, ApprovalMode.YOLO);
+      config.setPlanMode(true, ApprovalMode.AUTO_EDIT);
+      config.setPlanMode(true, ApprovalMode.AUTO_EDIT);
+
+      expect(states).toEqual([
+        {
+          mode: ApprovalMode.PLAN,
+          prePlanMode: ApprovalMode.YOLO,
+          executionMode: ApprovalMode.YOLO,
+        },
+        {
+          mode: ApprovalMode.PLAN,
+          prePlanMode: ApprovalMode.YOLO,
+          executionMode: ApprovalMode.AUTO_EDIT,
+        },
+      ]);
+    });
+
     it.each([
       ApprovalMode.DEFAULT,
       ApprovalMode.AUTO_EDIT,
@@ -13620,6 +14204,43 @@ describe('setApprovalMode with folder trust', () => {
   });
 
   describe('prePlanMode tracking', () => {
+    it('notifies canonical listeners after approval state changes', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+      const listener = vi.fn();
+      const unsubscribe = config.onApprovalModeChange(listener);
+
+      config.setApprovalMode(ApprovalMode.YOLO);
+      config.setApprovalMode(ApprovalMode.PLAN);
+      config.setApprovalMode(ApprovalMode.PLAN);
+      unsubscribe();
+      config.setApprovalMode(ApprovalMode.DEFAULT);
+
+      expect(listener).toHaveBeenNthCalledWith(1, ApprovalMode.YOLO, undefined);
+      expect(listener).toHaveBeenNthCalledWith(
+        2,
+        ApprovalMode.PLAN,
+        ApprovalMode.YOLO,
+      );
+      expect(listener).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not notify when trust rejects a mode or a derived config changes', () => {
+      const config = new Config(baseParams);
+      const listener = vi.fn();
+      config.onApprovalModeChange(listener);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(false);
+
+      expect(() => config.setApprovalMode(ApprovalMode.YOLO)).toThrow(
+        TrustGateError,
+      );
+      const derived = deriveApprovalModeConfig(config, ApprovalMode.PLAN);
+      derived.config.setApprovalMode(ApprovalMode.DEFAULT);
+
+      expect(listener).not.toHaveBeenCalled();
+      derived.cleanup();
+    });
+
     it('should save pre-plan mode when entering plan mode', () => {
       const config = new Config(baseParams);
       vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
@@ -15444,13 +16065,17 @@ describe('Model Switching and Config Updates', () => {
 
       const fireUserPromptSubmitEvent = vi.fn().mockResolvedValue(undefined);
       // @ts-expect-error - accessing private for testing
-      config['hookSystem'] = { fireUserPromptSubmitEvent };
+      config['hookSystem'] = {
+        runtimeId: 'test-hook-runtime',
+        fireUserPromptSubmitEvent,
+      };
 
       const response = await config
         .getMessageBus()!
         .request<HookExecutionRequest, HookExecutionResponse>(
           {
             type: MessageBusType.HOOK_EXECUTION_REQUEST,
+            owner: captureHookExecutionOwner(config),
             eventName: 'UserPromptSubmit',
             input: {
               prompt: 'model prompt',
@@ -15466,6 +16091,80 @@ describe('Model Switching and Config Updates', () => {
         expected,
       );
       expect(response.success).toBe(true);
+    });
+  });
+
+  describe('hook execution bridge ownership', () => {
+    it.each(['missing', 'runtime', 'session', 'agent'] as const)(
+      'rejects %s ownership before dispatch',
+      async (invalid) => {
+        const config = new Config({ ...baseParams });
+        await config.initialize();
+        const fire = vi.fn();
+        // @ts-expect-error - a focused dispatcher test double
+        config['hookSystem'] = {
+          runtimeId: 'runtime-A',
+          firePreToolUseEvent: fire,
+        };
+        const owner = captureHookExecutionOwner(config)!;
+        const invalidOwner =
+          invalid === 'missing'
+            ? undefined
+            : {
+                ...owner,
+                ...(invalid === 'runtime' ? { runtimeId: 'runtime-B' } : {}),
+                ...(invalid === 'session' ? { sessionId: 'old-session' } : {}),
+                ...(invalid === 'agent' ? { agentId: '' } : {}),
+              };
+        const response = await config
+          .getMessageBus()!
+          .request<HookExecutionRequest, HookExecutionResponse>(
+            {
+              type: MessageBusType.HOOK_EXECUTION_REQUEST,
+              owner: invalidOwner,
+              eventName: 'PreToolUse',
+              input: { tool_name: 'read_file' },
+            },
+            MessageBusType.HOOK_EXECUTION_RESPONSE,
+          );
+        expect(response.success).toBe(false);
+        expect(response.error?.message).toContain('owner');
+        expect(fire).not.toHaveBeenCalled();
+      },
+    );
+
+    it('dispatches with the captured owner rather than untrusted input metadata', async () => {
+      const config = new Config({ ...baseParams });
+      await config.initialize();
+      const observed: unknown[] = [];
+      const fire = vi.fn(async () => {
+        observed.push(getHookExecutionOwner());
+        return undefined;
+      });
+      // @ts-expect-error - a focused dispatcher test double
+      config['hookSystem'] = {
+        runtimeId: 'runtime-A',
+        firePreToolUseEvent: fire,
+      };
+      const owner = captureHookExecutionOwner(config, 'A');
+      const response = await config
+        .getMessageBus()!
+        .request<HookExecutionRequest, HookExecutionResponse>(
+          {
+            type: MessageBusType.HOOK_EXECUTION_REQUEST,
+            owner,
+            eventName: 'PreToolUse',
+            input: {
+              tool_name: 'read_file',
+              agent_id: 'B',
+              session_id: 'other-session',
+            },
+          },
+          MessageBusType.HOOK_EXECUTION_RESPONSE,
+        );
+      expect(response.success).toBe(true);
+      expect(observed).toEqual([owner]);
+      expect(getHookExecutionOwner()).toBeUndefined();
     });
   });
 
@@ -15485,6 +16184,7 @@ describe('Model Switching and Config Updates', () => {
           {},
           {
             get: (_target, prop) => {
+              if (prop === 'runtimeId') return 'test-hook-runtime';
               if (typeof prop !== 'string' || prop === 'then') {
                 return undefined;
               }
@@ -15510,6 +16210,7 @@ describe('Model Switching and Config Updates', () => {
           .request<HookExecutionRequest, HookExecutionResponse>(
             {
               type: MessageBusType.HOOK_EXECUTION_REQUEST,
+              owner: captureHookExecutionOwner(config),
               eventName,
               input: {},
             },
@@ -15536,12 +16237,13 @@ describe('Model Switching and Config Updates', () => {
       const config = new Config({ ...baseParams });
       await config.initialize();
       // @ts-expect-error - accessing private for testing
-      config['hookSystem'] = { [method]: fire };
+      config['hookSystem'] = { runtimeId: 'test-hook-runtime', [method]: fire };
       return config
         .getMessageBus()!
         .request<HookExecutionRequest, HookExecutionResponse>(
           {
             type: MessageBusType.HOOK_EXECUTION_REQUEST,
+            owner: captureHookExecutionOwner(config),
             eventName,
             input,
             signal,
@@ -15771,7 +16473,7 @@ describe('Model Switching and Config Updates', () => {
         allOutputs: [blockingOutput, secondOutput],
       });
       // @ts-expect-error - accessing private for testing
-      config['hookSystem'] = { fireStopEvent };
+      config['hookSystem'] = { runtimeId: 'test-hook-runtime', fireStopEvent };
 
       const controller = new AbortController();
       const response = await config
@@ -15779,6 +16481,7 @@ describe('Model Switching and Config Updates', () => {
         .request<HookExecutionRequest, HookExecutionResponse>(
           {
             type: MessageBusType.HOOK_EXECUTION_REQUEST,
+            owner: captureHookExecutionOwner(config),
             eventName: 'Stop',
             input: {
               stop_hook_active: true,
@@ -15826,13 +16529,14 @@ describe('Model Switching and Config Updates', () => {
         allOutputs: [],
       });
       // @ts-expect-error - accessing private for testing
-      config['hookSystem'] = { fireStopEvent };
+      config['hookSystem'] = { runtimeId: 'test-hook-runtime', fireStopEvent };
 
       const response = await config
         .getMessageBus()!
         .request<HookExecutionRequest, HookExecutionResponse>(
           {
             type: MessageBusType.HOOK_EXECUTION_REQUEST,
+            owner: captureHookExecutionOwner(config),
             eventName: 'Stop',
             input: { stop_hook_active: false },
           },
@@ -15864,7 +16568,10 @@ describe('Model Switching and Config Updates', () => {
         .fn()
         .mockResolvedValue({ finalOutput: undefined, allOutputs: [] });
       // @ts-expect-error - accessing private for testing
-      config['hookSystem'] = { fireMessageDisplayEvent };
+      config['hookSystem'] = {
+        runtimeId: 'test-hook-runtime',
+        fireMessageDisplayEvent,
+      };
 
       const messageBus = config.getMessageBus();
       expect(messageBus).toBeDefined();
@@ -15875,6 +16582,7 @@ describe('Model Switching and Config Updates', () => {
       >(
         {
           type: MessageBusType.HOOK_EXECUTION_REQUEST,
+          owner: captureHookExecutionOwner(config),
           eventName: 'MessageDisplay',
           input: {
             message_id: 'msg-123',
@@ -15902,7 +16610,10 @@ describe('Model Switching and Config Updates', () => {
         .fn()
         .mockResolvedValue({ finalOutput: undefined, allOutputs: [] });
       // @ts-expect-error - accessing private for testing
-      config['hookSystem'] = { fireMessageDisplayEvent };
+      config['hookSystem'] = {
+        runtimeId: 'test-hook-runtime',
+        fireMessageDisplayEvent,
+      };
 
       const messageBus = config.getMessageBus();
       const response = await messageBus!.request<
@@ -15911,6 +16622,7 @@ describe('Model Switching and Config Updates', () => {
       >(
         {
           type: MessageBusType.HOOK_EXECUTION_REQUEST,
+          owner: captureHookExecutionOwner(config),
           eventName: 'MessageDisplay',
           input: {},
         },

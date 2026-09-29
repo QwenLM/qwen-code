@@ -9,6 +9,7 @@ import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -209,8 +210,10 @@ public final class RuntimeBrokerService implements AutoCloseable {
         requireOpen();
         String key = BrokerValues.requireId(idempotencyKey,
                 "idempotencyKey");
-        if (reference == null || reference.containsKey("dispatchMode")) {
-            throw invalid("runtime_reference_invalid", "dispatchMode is reserved");
+        if (reference == null || reference.containsKey("dispatchMode")
+                || reference.containsKey("runtimeProtocol") || reference.containsKey("inputDigest")
+                || reference.containsKey("executionCallId")) {
+            throw invalid("runtime_reference_invalid", "Deferred execution fields are reserved");
         }
         return createExecutionReceipt(harnessSessionId, runtimeSessionId, key, reference, true);
     }
@@ -220,9 +223,15 @@ public final class RuntimeBrokerService implements AutoCloseable {
             String idempotencyKey, Map<String, Object> reference) {
         requireOpen();
         String key = BrokerValues.requireId(idempotencyKey, "idempotencyKey");
-        if (reference == null || !reference.keySet().equals(Set.of("sessionId", "promptId", "callId", "argsDigest"))
+        boolean v3 = reference != null && Integer.valueOf(3).equals(reference.get("runtimeProtocol"));
+        Set<String> fields = v3
+                ? Set.of("sessionId", "promptId", "callId", "argsDigest", "runtimeProtocol", "inputDigest")
+                : Set.of("sessionId", "promptId", "callId", "argsDigest");
+        if (reference == null || !reference.keySet().equals(fields)
                 || !(reference.get("argsDigest") instanceof String digest)
-                || !digest.matches("sha256:[0-9a-f]{64}")) {
+                || !digest.matches("sha256:[0-9a-f]{64}")
+                || v3 && (!(reference.get("inputDigest") instanceof String inputDigest)
+                    || !inputDigest.matches("[0-9a-f]{64}"))) {
             throw invalid("runtime_reference_invalid", "Deferred execution reference is invalid");
         }
         Map<String, Object> deferred = new LinkedHashMap<>(reference);
@@ -257,7 +266,9 @@ public final class RuntimeBrokerService implements AutoCloseable {
             Map<String, Object> payload = JsonCodec.parseObject(bytes, "tool payload");
             if (!payload.keySet().equals(Set.of("toolName", "input"))
                     || !(payload.get("toolName") instanceof String toolName) || toolName.isEmpty()
-                    || !(payload.get("input") instanceof Map)) {
+                    || !(payload.get("input") instanceof Map)
+                    || Integer.valueOf(3).equals(record.getReference().get("runtimeProtocol"))
+                        && !"run_shell_command".equals(toolName)) {
                 throw invalid("runtime_payload_invalid", "Tool payload is invalid");
             }
             if (shouldDriveDispatch(record)) {
@@ -305,6 +316,52 @@ public final class RuntimeBrokerService implements AutoCloseable {
         });
     }
 
+    public CompletionStage<Map<String, Object>> installPublisher(String harnessSessionId,
+            String runtimeSessionId, Map<String, Object> publisher) {
+        requireOpen();
+        Map<String, Object> descriptor = immutableMap(publisher, "publisher");
+        return requireReadySession(harnessSessionId, runtimeSessionId).thenCompose(context -> {
+            synchronized (context) {
+                requireReadySessionRecord(context);
+                context.beginControl();
+            }
+            return safeStage(() -> {
+                requireUsableLease(context);
+                return transport.installPublisher(context.lease(), context.session(), descriptor);
+            }).thenApply(ignored -> Map.<String, Object>of("installed", true,
+                    "bindingGeneration", Long.toString(context.binding().getGeneration())))
+                    .whenComplete((ignored, error) -> context.endControl());
+        });
+    }
+
+    public CompletionStage<Map<String, Object>> acknowledgeExecution(String harnessSessionId,
+            String runtimeSessionId, String executionCallId, Map<String, Object> receipt) {
+        requireOpen();
+        Map<String, Object> savedReceipt = immutableMap(receipt, "receipt");
+        return requireReadySession(harnessSessionId, runtimeSessionId).thenCompose(context -> {
+            ToolExecutionRecord record;
+            synchronized (context) {
+                requireReadySessionRecord(context);
+                record = requireExecution(context, executionCallId);
+                if (!record.isSettled()
+                        || !Integer.valueOf(3).equals(record.getReference().get("runtimeProtocol"))
+                        || !record.getExecutionCallId().equals(savedReceipt.get("executionCallId"))) {
+                    throw conflict("runtime_execution_conflict", "Only the original settled Tool v3 result can be acknowledged");
+                }
+                context.beginControl();
+            }
+            return safeStage(() -> {
+                requireUsableLease(context);
+                return transport.acknowledge(context.lease(), context.session(), record.getReference(), savedReceipt);
+            }).thenApply(status -> {
+                if (!"settled".equals(status.get("state"))) {
+                    throw conflict("runtime_execution_conflict", "Runtime did not confirm the result acknowledgement");
+                }
+                return status;
+            }).whenComplete((ignored, error) -> context.endControl());
+        });
+    }
+
     public CompletionStage<ToolExecutionRecord> cancelExecution(
             String harnessSessionId, String runtimeSessionId,
             String executionCallId) {
@@ -332,7 +389,9 @@ public final class RuntimeBrokerService implements AutoCloseable {
                                     || (requested.getState()
                                             == ToolExecutionRecord.State.UNKNOWN
                                             && !invocations.contains(
-                                                    executionId))) {
+                                                    executionId)
+                                            && !Integer.valueOf(3).equals(
+                                                    requested.getReference().get("runtimeProtocol")))) {
                                 return CompletableFuture.completedFuture(
                                         requested);
                             }
@@ -445,6 +504,12 @@ public final class RuntimeBrokerService implements AutoCloseable {
                                         + "and acquire the Session again");
                     });
         }
+        return reconcileInContext(context, unknown, false);
+    }
+
+    private CompletionStage<ExecutionReconciliation> reconcileInContext(
+            SessionContext context, ToolExecutionRecord unknown, boolean takeover) {
+        requireOpen();
         requireAnswerableBinding(unknown);
         synchronized (context) {
             requireReadySessionRecord(context);
@@ -476,11 +541,11 @@ public final class RuntimeBrokerService implements AutoCloseable {
         // the one this Session was acquired with; that stale route must not be
         // used, so the lookup fails as runtime_reconciliation_required.
         requireLiveBinding(context.binding());
-        return lookupOnce(context, unknown);
+        return lookupOnce(context, unknown, takeover);
     }
 
     private CompletionStage<ExecutionReconciliation> lookupOnce(
-            SessionContext context, ToolExecutionRecord unknown) {
+            SessionContext context, ToolExecutionRecord unknown, boolean takeover) {
         String executionId = unknown.getExecutionCallId();
         CompletableFuture<ExecutionReconciliation> created =
                 new CompletableFuture<>();
@@ -512,7 +577,27 @@ public final class RuntimeBrokerService implements AutoCloseable {
         lookup.orTimeout(operationLeaseDuration.toMillis(),
                 TimeUnit.MILLISECONDS);
         // Every caller, joined or not, maps failures in reconcileExecution.
-        lookup.thenApply(status -> absorbRuntimeStatus(unknown, status))
+        lookup.handle((status, error) -> {
+            if (takeover) {
+                requireOpen();
+            }
+            if (error != null) {
+                if (takeover && !(unwrap(error) instanceof Error)) {
+                    return new ExecutionReconciliation(unknown,
+                            ExecutionReconciliation.Outcome.UNRESOLVED, null);
+                }
+                throw new CompletionException(unwrap(error));
+            }
+            try {
+                return absorbRuntimeStatus(unknown, status, takeover);
+            } catch (RuntimeBrokerException failure) {
+                if (takeover && "runtime_execution_status_invalid".equals(failure.getCode())) {
+                    return new ExecutionReconciliation(unknown,
+                            ExecutionReconciliation.Outcome.UNRESOLVED, null);
+                }
+                throw failure;
+            }
+        })
                 .whenComplete((reconciled, error) -> {
                     reconciliations.remove(executionId, created);
                     if (error == null) {
@@ -522,6 +607,30 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     }
                 });
         return created;
+    }
+
+    private CompletionStage<SessionContext> scanExecutions(SessionContext context,
+            RuntimeSessionRecord session, String afterExecutionCallId) {
+        requireOpen();
+        List<ToolExecutionRecord> batch = executionRepository.findUnsettled(
+                session, afterExecutionCallId, 100);
+        CompletionStage<Void> scanned = CompletableFuture.completedFuture(null);
+        for (ToolExecutionRecord candidate : batch) {
+            // A timed-out lookup completes on the JVM's timeout thread;
+            // the next repository read must not block that thread.
+            scanned = scanned.thenComposeAsync(ignored -> {
+                requireOpen();
+                ToolExecutionRecord current = requireExecution(context, candidate.getExecutionCallId());
+                return current.needsReconciliation()
+                        ? reconcileInContext(context, current, true).thenApply(result -> null)
+                        : CompletableFuture.completedFuture(null);
+            });
+        }
+        // Yield between pages even when every status completes synchronously.
+        return scanned.thenComposeAsync(ignored -> batch.size() < 100
+                ? CompletableFuture.completedFuture(context)
+                : scanExecutions(context, session,
+                        batch.get(batch.size() - 1).getExecutionCallId()));
     }
 
     public CompletionStage<Boolean> release(String harnessSessionId,
@@ -774,7 +883,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
             SessionContext context = new SessionContext(session,
                     binding.record(), binding.lease());
             if (stored.getState() == RuntimeSessionRecord.State.READY) {
-                return CompletableFuture.completedFuture(context);
+                return scanExecutions(context, stored, null);
             }
             if (stored.getState()
                     != RuntimeSessionRecord.State.ACQUIRING) {
@@ -875,6 +984,9 @@ public final class RuntimeBrokerService implements AutoCloseable {
         }
         if (record.getState()
                 == RuntimeBindingRecord.State.RECOVERY_BLOCKED) {
+            if (provisioner.supportsStartupRecovery(record.getResourceHandle())) {
+                return reconcileBinding(record);
+            }
             return failed(conflict("runtime_broker_recovery_blocked",
                     "Managed Runtime recovery is blocked."));
         }
@@ -977,7 +1089,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
         RuntimeProvisionRequest request = claimed.getRequest();
         RuntimeProvisionSeed seed = claimed.getProvisionSeed();
         if (seed == null || (request.isManagedContext()
-                && claimed.getResourceHandle() != null)) {
+                && claimed.getResourceHandle() != null
+                && !provisioner.supportsStartupRecovery(claimed.getResourceHandle()))) {
             blockRecovery(claimed);
             releaseOperationQuietly(claimed.getBindingId(),
                     claimed.getOperationGeneration());
@@ -1164,6 +1277,13 @@ public final class RuntimeBrokerService implements AutoCloseable {
         return created;
     }
 
+    private boolean canReconcile(RuntimeBindingRecord record) {
+        return record.getState() == RuntimeBindingRecord.State.READY
+                || ((record.getState() == RuntimeBindingRecord.State.PROVISIONING
+                        || record.getState() == RuntimeBindingRecord.State.RECOVERY_BLOCKED)
+                        && provisioner.supportsStartupRecovery(record.getResourceHandle()));
+    }
+
     private CompletionStage<BindingContext> startReconciliation(
             RuntimeBindingRecord record) {
         RuntimeBindingRecord claimed = bindingRepository.claimOperation(
@@ -1173,7 +1293,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
             return failed(unavailable("runtime_reconcile_in_progress",
                     "another Broker owns Runtime recovery"));
         }
-        if (claimed.getState() != RuntimeBindingRecord.State.READY) {
+        if (!canReconcile(claimed)) {
             releaseOperationQuietly(claimed.getBindingId(),
                     claimed.getOperationGeneration());
             return failed(unavailable("runtime_binding_unavailable",
@@ -1236,7 +1356,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
         if (current == null || current.getOperationGeneration()
                 != operationGeneration
                 || !brokerOwnerId.equals(current.getOperationOwner())
-                || current.getState() != RuntimeBindingRecord.State.READY) {
+                || !canReconcile(current)) {
             return failed(unavailable("runtime_provision_fenced",
                     "Runtime recovery claim expired"));
         }
@@ -1315,9 +1435,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
                                     bindingRepository.findById(bindingId);
                             if (latest == null || !ownsOperation(latest,
                                     operationGeneration)
-                                    || latest.getState()
-                                            != RuntimeBindingRecord.State
-                                                    .READY) {
+                                    || !canReconcile(latest)) {
                                 return failed(unavailable(
                                         "runtime_provision_fenced",
                                         "Runtime recovery claim expired"));
@@ -1350,7 +1468,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
             long operationGeneration, RuntimeObservation observation) {
         RuntimeBindingRecord current = bindingRepository.findById(bindingId);
         if (current == null || !ownsOperation(current, operationGeneration)
-                || current.getState() != RuntimeBindingRecord.State.READY) {
+                || !canReconcile(current)) {
             return failed(unavailable("runtime_provision_fenced",
                     "Runtime recovery claim expired"));
         }
@@ -1398,8 +1516,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
                             bindingRepository.findById(bindingId);
                     if (latest == null
                             || !ownsOperation(latest, operationGeneration)
-                            || latest.getState()
-                                    != RuntimeBindingRecord.State.READY) {
+                            || !canReconcile(latest)) {
                         return failed(unavailable("runtime_provision_fenced",
                                 "Runtime recovery claim expired"));
                     }
@@ -1743,7 +1860,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
         invocations.add(executing.getExecutionCallId());
         return safeStage(() -> payload == null
                 ? transport.execute(context.lease(), context.session(), executing.getReference())
-                : transport.execute(context.lease(), context.session(), executing.getReference(), payload))
+                : transport.execute(context.lease(), context.session(), dispatchReference(executing), payload))
                 .<Void>handle((result, error) -> {
                     // Stop counting as running before the outcome is
                     // written, so a cancel that reads that outcome does not
@@ -1765,6 +1882,15 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 }).whenComplete((ignored, error) -> renewal.close());
     }
 
+    private static Map<String, Object> dispatchReference(ToolExecutionRecord record) {
+        if (!Integer.valueOf(3).equals(record.getReference().get("runtimeProtocol"))) {
+            return record.getReference();
+        }
+        Map<String, Object> reference = new LinkedHashMap<>(record.getReference());
+        reference.put("executionCallId", record.getExecutionCallId());
+        return Map.copyOf(reference);
+    }
+
     private ToolExecutionRecord enterExecuting(
             ToolExecutionRecord claimed) {
         ToolExecutionRecord current = claimed;
@@ -1778,7 +1904,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
             ToolExecutionRecord replacement;
             if (current.isCancelRequested()) {
                 replacement = current.withResult(
-                        Map.of("executionStatus", "cancelled"),
+                        current.cancellationBeforeDispatch(),
                         current.getLastSequence(), clock.instant());
             } else {
                 replacement = current.withState(
@@ -1991,7 +2117,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
     }
 
     private ExecutionReconciliation absorbRuntimeStatus(
-            ToolExecutionRecord unknown, Map<String, Object> status) {
+            ToolExecutionRecord unknown, Map<String, Object> status, boolean takeover) {
         if (status == null) {
             throw invalidStatus(null);
         }
@@ -2026,7 +2152,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
             // the Runtime's fault rather than as a repository failure. A
             // not_started status is accepted only as the Runtime's own
             // terminal answer; the Broker never derives it.
-            unknown.resolveUnknown(result, clock.instant());
+            unknown.resolveUnsettled(result, clock.instant());
         } catch (IllegalArgumentException | RuntimeBrokerException exception) {
             throw invalidStatus(exception);
         }
@@ -2036,12 +2162,20 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 throw notFound("runtime_execution_not_found",
                         "Runtime execution was not found");
             }
-            if (current.getState() != ToolExecutionRecord.State.UNKNOWN) {
+            if (!current.needsReconciliation()
+                    || !takeover && current.getState() != ToolExecutionRecord.State.UNKNOWN) {
                 return notUnknown(current, runtimeState);
             }
+            if (takeover) {
+                requireOpen();
+            }
+            if (!current.sameIdentity(unknown)) {
+                throw conflict("runtime_execution_conflict", "Execution identity changed while reconciling");
+            }
             // A racing cancel advances the version; re-read and retry.
-            ToolExecutionRecord resolved = executionRepository
-                    .resolveUnknown(current, result, clock.instant());
+            ToolExecutionRecord resolved = takeover
+                    ? executionRepository.resolveUnsettled(current, result, clock.instant())
+                    : executionRepository.resolveUnknown(current, result, clock.instant());
             if (resolved != null) {
                 return new ExecutionReconciliation(resolved,
                         ExecutionReconciliation.Outcome.RESOLVED,

@@ -48,6 +48,99 @@ function readWorkflow(relativePath) {
 const releaseStepScript = readWorkflow('.github/scripts/run-release-step.sh');
 
 describe('package scripts', () => {
+  it('keeps documented CI variable defaults in sync with workflows', () => {
+    const guide = readWorkflow('docs/developers/development/ci-variables.md');
+    const docRows = new Map(
+      [
+        ...guide.matchAll(
+          /^\|\s*`(QWEN_\w+)`\s*\|\s*`([^`]+)`\s*\|\s*([^|]+)\s*\|/gm,
+        ),
+      ].map(([, name, value, usedIn]) => [
+        name,
+        {
+          defaultVal: value,
+          files: [...usedIn.matchAll(/`([^`]+\.yml)`/g)].map(([, f]) => f),
+        },
+      ]),
+    );
+
+    // These variables are documented below the test-execution table.
+    const excludedNonTestVariables = new Set([
+      'QWEN_RELEASE_STATIC_TIMEOUT_MINUTES',
+      'QWEN_RELEASE_BUILD_TIMEOUT_MINUTES',
+    ]);
+    const relatedRows = new Map(
+      [...guide.matchAll(/`(QWEN_RELEASE_\w+)` \(default `([^`]+)`/g)].map(
+        ([, name, value]) => [name, value],
+      ),
+    );
+
+    const workflowFiles = ['ci.yml', 'release.yml'];
+    const workflowVars = new Map();
+
+    for (const file of workflowFiles) {
+      const workflow = readWorkflow(`.github/workflows/${file}`);
+      for (const [, name] of workflow.matchAll(/vars\.(QWEN_\w+)/g)) {
+        if (!workflowVars.has(name)) {
+          workflowVars.set(name, { fallbacks: new Set(), files: new Set() });
+        }
+        const entry = workflowVars.get(name);
+        entry.files.add(file);
+      }
+      for (const [, name, fallback] of workflow.matchAll(
+        /vars\.(QWEN_\w+)\s*\|\|\s*'([^']+)'/g,
+      )) {
+        workflowVars.get(name).fallbacks.add(fallback);
+      }
+    }
+
+    // Every workflow variable must have a known fallback and a matching doc.
+    for (const [name, info] of workflowVars.entries()) {
+      expect(info.fallbacks.size, `No fallback found for ${name}`).toBe(1);
+      const [fallback] = info.fallbacks;
+      if (excludedNonTestVariables.has(name)) {
+        expect(info.files, `Unexpected workflow for ${name}`).toEqual(
+          new Set(['release.yml']),
+        );
+        expect(relatedRows.get(name), `Related variable ${name} drifted`).toBe(
+          fallback,
+        );
+        expect(docRows.has(name), `${name} is outside the test table`).toBe(
+          false,
+        );
+        continue;
+      }
+      const docEntry = docRows.get(name);
+      expect(
+        docEntry,
+        `Workflow variable ${name} missing from docs`,
+      ).toBeDefined();
+      expect(docEntry.defaultVal, `Default mismatch for ${name}`).toBe(
+        fallback,
+      );
+      expect(new Set(docEntry.files), `Used-in mismatch for ${name}`).toEqual(
+        info.files,
+      );
+    }
+
+    // A deleted workflow variable must not linger in the documentation.
+    for (const [name, docEntry] of docRows.entries()) {
+      expect(
+        workflowVars.has(name),
+        `Documented variable ${name} not found in test workflows`,
+      ).toBe(true);
+      expect(
+        docEntry.files.length,
+        `No workflow listed for ${name}`,
+      ).toBeGreaterThan(0);
+    }
+    for (const name of excludedNonTestVariables) {
+      expect(workflowVars.has(name), `Missing related variable ${name}`).toBe(
+        true,
+      );
+    }
+  });
+
   it('accepts only an exact pnpm package-manager version', () => {
     expect(getPinnedPnpmPackage({ packageManager: 'pnpm@11.24.0' })).toBe(
       'pnpm@11.24.0',

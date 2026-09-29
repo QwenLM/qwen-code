@@ -15,7 +15,10 @@ import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import * as path from 'node:path';
 import { getProjectHash } from './paths.js';
-import { _recoverObjectsFromLine } from './jsonl-utils.js';
+import {
+  _recoverObjectsFromLine,
+  parseLineTolerantWithIntegrity,
+} from './jsonl-utils.js';
 import { openSyncNoFollow } from './no-follow-open.js';
 
 /** Size of the head/tail buffer for lite metadata reads (64KB). */
@@ -904,27 +907,58 @@ export function isManagedSessionTranscriptSync(
  * record naming `managed`. A Managed owner is written before anything else,
  * so the head window holds it.
  *
- * Gates executing, recording and forking a session with Legacy. Operations
- * that depend on the Managed Session log format use
+ * Lines are parsed the way the owner reader parses them, so an owner record
+ * that parses whole counts even when another record shares its line. A line
+ * is parsed only when it could name the owner subtype: literally, or through a
+ * `\u` escape, the only JSON escape that can spell its letters and
+ * underscores.
+ *
+ * Gates executing, recording, renaming and forking a session with Legacy.
+ * Operations that depend on the Managed Session log format use
  * {@link isManagedSessionTranscriptSync}: an owner record alone is no log.
  */
 export function isManagedExecutionTranscriptSync(filePath: string): boolean {
-  const head = readTranscriptHeadSync(filePath);
-  if (head === undefined) return false;
+  return readManagedExecutionEvidenceSync(filePath) === true;
+}
+
+/**
+ * The evidence {@link isManagedExecutionTranscriptSync} looks for, telling a
+ * transcript whose head cannot be read (`undefined`) apart from one that is
+ * missing or empty (`false`).
+ */
+export function readManagedExecutionEvidenceSync(
+  filePath: string,
+): boolean | undefined {
+  let head: string;
+  try {
+    head = readTranscriptHeadOrThrowSync(filePath);
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT'
+      ? false
+      : undefined;
+  }
   return (
     head.includes(MANAGED_HEADER_MARKER) ||
-    head.split('\n').some(isManagedOwnerRecordLine)
+    head
+      .split('\n')
+      .some(
+        (line) =>
+          (line.includes(EXECUTION_ENGINE_SUBTYPE) || line.includes('\\u')) &&
+          parseLineTolerantWithIntegrity(line, filePath).records.some(
+            isManagedOwnerRecord,
+          ),
+      )
   );
 }
 
-function isManagedOwnerRecordLine(line: string): boolean {
-  if (!line.includes(EXECUTION_ENGINE_SUBTYPE)) return false;
-  let record: unknown;
-  try {
-    record = JSON.parse(line);
-  } catch {
-    return false;
-  }
+/**
+ * True for a parsed transcript record that names the Managed engine as the
+ * owner: a system record of the execution-engine subtype whose payload
+ * engine is `managed`. It is the one definition of that positive evidence.
+ * The owner reader validates owner records more strictly and reports one it
+ * rejects as unavailable, never as Legacy.
+ */
+export function isManagedOwnerRecord(record: unknown): boolean {
   if (!record || typeof record !== 'object') return false;
   const { type, subtype, systemPayload } = record as Record<string, unknown>;
   return (
@@ -940,10 +974,23 @@ function readTranscriptHeadSync(
   filePath: string,
   scratchBuffer?: Buffer,
 ): string | undefined {
+  try {
+    const head = readTranscriptHeadOrThrowSync(filePath, scratchBuffer);
+    return head === '' ? undefined : head;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The head window, or `''` for an empty transcript; throws when unreadable. */
+function readTranscriptHeadOrThrowSync(
+  filePath: string,
+  scratchBuffer?: Buffer,
+): string {
   let fd: number | undefined;
   try {
     const fileSize = fs.statSync(filePath).size;
-    if (fileSize === 0) return undefined;
+    if (fileSize === 0) return '';
     fd = openSyncNoFollow(filePath);
     const buffer =
       scratchBuffer && scratchBuffer.length >= LITE_READ_BUF_SIZE
@@ -952,8 +999,6 @@ function readTranscriptHeadSync(
     const length = Math.min(fileSize, LITE_READ_BUF_SIZE);
     const read = fs.readSync(fd, buffer, 0, length, 0);
     return buffer.toString('utf-8', 0, read);
-  } catch {
-    return undefined;
   } finally {
     if (fd !== undefined) {
       try {

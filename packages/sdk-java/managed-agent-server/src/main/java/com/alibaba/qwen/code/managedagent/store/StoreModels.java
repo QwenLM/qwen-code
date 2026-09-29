@@ -115,6 +115,14 @@ public final class StoreModels {
             boolean hasMore) {
     }
 
+    /** The fields of a Turn that its public view shows, without its input. */
+    public record TurnSummary(String sessionId, String turnId, String status,
+            long createdAt, Long completedAt, String errorCode) {
+    }
+
+    public record TurnPage(List<TurnSummary> turns, boolean hasMore) {
+    }
+
     public record EventPage(List<EventRecord> events, boolean hasMore) {
     }
 

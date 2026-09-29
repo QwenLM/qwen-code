@@ -42,7 +42,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description Without a cursor, a Session that has a Snapshot returns all of its Items, the events up to the Snapshot other than input, text-delta and tool-call updates, and every event after it. Otherwise, and for an olderCursor, limit bounds the page of events. */
+        /** @description Without a cursor, a Session that has a Snapshot returns all of its Items, the events up to the Snapshot other than turn.accepted, item.output_text.delta, item.reasoning.delta and item.tool_call.updated, which the Items already hold, and every event after it. Otherwise, and for an olderCursor, limit bounds the page of events. */
         post: operations["webShellTranscript"];
         delete?: never;
         options?: never;
@@ -214,6 +214,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/agent/web-shell/v1/tasks/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["queryWebShellTasks"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/tasks/get": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["getWebShellTask"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -319,6 +351,10 @@ export interface components {
             /** Format: int64 */
             lastSequence: number;
             workspace?: components["schemas"]["WebShellWorkspaceContext"];
+            capabilities?: components["schemas"]["WebShellSessionCapabilities"];
+        };
+        WebShellSessionCapabilities: {
+            tasks: boolean;
         };
         WebShellSessionPage: {
             data: components["schemas"]["WebShellSession"][];
@@ -494,9 +530,75 @@ export interface components {
         WebShellWorkspaceGetRequest: {
             workspaceId: string;
         };
+        /** @enum {string} */
+        TaskKind: "child_agent" | "workflow" | "background_shell" | "monitor" | "automation_run";
+        /**
+         * @description Logical run state. completed, failed and cancelled are terminal and are set only after the physical execution has settled. degraded means that the task still runs with reduced guarantees, such as a Monitor that lost its observation source. recovery_blocked means that recovery cannot prove the physical outcome: it is not settled, is never reported as success and is never re-run automatically.
+         * @enum {string}
+         */
+        TaskState: "pending" | "running" | "waiting" | "completed" | "failed" | "cancelled" | "degraded" | "recovery_blocked";
+        /**
+         * @description Redacted state of the Runtime that hosts the task, without binding identity or generation.
+         * @enum {string}
+         */
+        TaskRuntimeState: "unbound" | "provisioning" | "ready" | "draining" | "lost";
+        /**
+         * @description Actions the task supports now, the same for every caller. cancel: the cancel route accepts a new command for this task; whether a caller may use it is an authorization check (403 on the cancel route). send_input: reserved for a later capability route. read_output: the task events route returns output events for this task to any caller that can read it. read_output does not change during the task's life, and a task without it produces no output events: its output goes only to Artifacts, so the events route never filters out events that exist.
+         * @enum {string}
+         */
+        TaskActionCapability: "cancel" | "send_input" | "read_output";
+        /** @description Read-only projection of one asynchronous task of a Session (SessionTaskView). It is rebuilt from the Session's durable domain records and is never their source of truth. It never carries a Runtime binding ID, generation, Runtime endpoint, Pod, absolute path, raw PID, SecretHandle or local sidecar; diagnostics are authorized Artifact references. */
+        WebShellTask: {
+            taskId: string;
+            /** Format: uuid */
+            sessionId: string;
+            kind: components["schemas"]["TaskKind"];
+            state: components["schemas"]["TaskState"];
+            /**
+             * Format: int64
+             * @description Immutable definition revision this run is pinned to, when the kind has a definition.
+             */
+            definitionRevision?: number;
+            runtimeState?: components["schemas"]["TaskRuntimeState"];
+            /**
+             * Format: int64
+             * @description Unix epoch milliseconds.
+             */
+            createdAt: number;
+            /**
+             * Format: int64
+             * @description Unix epoch milliseconds.
+             */
+            startedAt?: number;
+            /**
+             * Format: int64
+             * @description Unix epoch milliseconds.
+             */
+            settledAt?: number;
+            /** @description The newest Artifacts that hold durable task output, at most 100, oldest first; older Artifacts stay readable through the Session artifact routes. */
+            artifactRefs: string[];
+            actionCapabilities: components["schemas"]["TaskActionCapability"][];
+        } & (unknown & unknown & unknown & unknown);
+        WebShellTaskPage: {
+            data: components["schemas"]["WebShellTask"][];
+            hasMore: boolean;
+            nextCursor?: string | null;
+        } & unknown;
+        WebShellTaskQueryRequest: {
+            /** Format: uuid */
+            sessionId: string;
+            cursor?: string;
+            /** @default 20 */
+            limit?: number;
+        };
+        WebShellTaskGetRequest: {
+            /** Format: uuid */
+            sessionId: string;
+            taskId: string;
+        };
     };
     responses: {
-        /** @description Resource is readable but actor lacks this operation or original Action responder permission. */
+        /** @description The authenticated actor belongs to another tenant than X-Qwen-Tenant-Id or has an invalid ID (actor_scope_mismatch, which the tenant filter answers on every /v1/agents/ and WebShell route), or the resource is readable but the actor lacks this operation or the original Action responder permission. */
         Forbidden: {
             headers: {
                 [name: string]: unknown;
@@ -914,6 +1016,60 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    queryWebShellTasks: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellTaskQueryRequest"];
+            };
+        };
+        responses: {
+            /** @description Same authorized task semantics as the public API. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellTaskPage"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    getWebShellTask: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellTaskGetRequest"];
+            };
+        };
+        responses: {
+            /** @description Same authorized task semantics as the public API. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellTask"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
         };
     };
