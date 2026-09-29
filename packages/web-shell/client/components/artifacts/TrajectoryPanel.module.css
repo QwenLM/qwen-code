@@ -101,13 +101,14 @@
   flex-direction: column;
   justify-content: center;
   gap: 2px;
-  padding: 2px 6px;
+  padding: 3px 8px;
   border-bottom: 1px solid var(--border);
-  font-size: 11px;
+  background: color-mix(in srgb, var(--muted) 28%, var(--background));
+  font-size: 10px;
 }
 
-.selectedInfo,
 .contextNotice {
+  color: var(--muted-foreground);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -117,15 +118,73 @@
   display: flex;
   min-width: 0;
   align-items: center;
+  gap: 8px;
 }
 
-.selectedLine .selectedInfo {
+.selectedInfo {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   flex: 1;
   min-width: 0;
 }
 
-.contextNotice {
+.selectedLabel {
+  flex: none;
   color: var(--muted-foreground);
+  font-weight: 600;
+}
+
+.selectedName {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--foreground);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.selectedMeta {
+  flex: none;
+  max-width: 32%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 6px;
+  background: var(--background);
+  color: var(--muted-foreground);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-variant-numeric: tabular-nums;
+}
+
+.detailsButton {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 3px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 7px;
+  background: var(--background);
+  color: var(--foreground);
+  font-size: 10px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.detailsButton:hover:not(:disabled),
+.detailsButton:focus-visible {
+  border-color: color-mix(in srgb, var(--foreground) 30%, var(--border));
+  background: var(--muted);
+}
+
+.detailsButton:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 .headerActions {

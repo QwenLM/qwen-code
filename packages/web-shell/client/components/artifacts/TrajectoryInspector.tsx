@@ -5,6 +5,7 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { CopyIcon, XIcon } from 'lucide-react';
 import { useI18n } from '../../i18n';
 import { formatDuration } from '../messages/StatsMessage';
 import type { TrajectoryRow } from '../../trajectory/types';
@@ -23,6 +24,13 @@ function formatValue(value: unknown): string | undefined | null {
   } catch {
     return null;
   }
+}
+
+function statusTone(value: unknown): 'success' | 'error' | undefined {
+  if (value === 'ok' || value === 'success' || value === 'completed')
+    return 'success';
+  if (value === 'error' || value === 'failed') return 'error';
+  return undefined;
 }
 
 export function TrajectoryInspector({
@@ -222,13 +230,18 @@ export function TrajectoryInspector({
       fields.map(([label, value]) => ({
         label,
         formatted: formatValue(value),
+        tone:
+          label === t('trajectory.inspector.status')
+            ? statusTone(value)
+            : undefined,
       })),
-    [fields],
+    [fields, t],
   );
   const limit = expanded ? EXPANDED_LENGTH : PREVIEW_LENGTH;
-  const displayed = formattedFields.map(({ label, formatted }) => {
+  const displayed = formattedFields.map(({ label, formatted, tone }) => {
     return {
       label,
+      tone,
       text:
         formatted === undefined
           ? t('trajectory.unrecorded')
@@ -259,15 +272,22 @@ export function TrajectoryInspector({
       }}
     >
       <div className={styles.header}>
-        <h3 ref={headingRef} tabIndex={-1}>
-          {title ?? t('trajectory.inspector.title')}
-        </h3>
+        <div className={styles.heading}>
+          <span className={styles.eyebrow}>
+            {t('trajectory.inspector.title')}
+          </span>
+          <h3 ref={headingRef} tabIndex={-1} title={title}>
+            {title ?? t('trajectory.inspector.selectRecord')}
+          </h3>
+        </div>
         <button
           type="button"
+          className={styles.closeButton}
           onClick={onClose}
           aria-label={t('trajectory.inspector.close')}
+          title={t('trajectory.inspector.close')}
         >
-          {t('trajectory.inspector.close')}
+          <XIcon size={15} aria-hidden="true" />
         </button>
       </div>
       {hiddenByRange && row && (
@@ -312,30 +332,57 @@ export function TrajectoryInspector({
             ))}
           </div>
           <div className={styles.content}>
-            {displayed.map(({ label, text, truncated }, index) => (
-              <div className={styles.field} key={`${label}-${index}`}>
-                <div className={styles.fieldLabel}>{label}</div>
-                <pre>{text}</pre>
-                {truncated && (
-                  <span>{t('trajectory.inspector.truncated')}</span>
-                )}
-              </div>
-            ))}
-            {canExpand && !expanded && (
+            <div
+              className={styles.fields}
+              data-layout={
+                selectedTab === 'summary' || selectedTab === 'metrics'
+                  ? 'grid'
+                  : 'reading'
+              }
+            >
+              {displayed.map(({ label, text, truncated, tone }, index) => (
+                <div
+                  className={styles.field}
+                  data-tone={tone}
+                  key={`${label}-${index}`}
+                >
+                  <div className={styles.fieldLabel}>{label}</div>
+                  <pre>{text}</pre>
+                  {truncated && (
+                    <span className={styles.truncated}>
+                      {t('trajectory.inspector.truncated')}
+                    </span>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+          {displayed.length > 0 && (
+            <div className={styles.footer}>
+              {copyStatus && (
+                <span role="status" className={styles.copyStatus}>
+                  {t(
+                    copyStatus === 'copied'
+                      ? 'trajectory.inspector.copied'
+                      : 'trajectory.inspector.copyFailed',
+                  )}
+                </span>
+              )}
+              {canExpand && !expanded && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    copyVersion.current++;
+                    setExpanded(true);
+                    setCopyStatus(undefined);
+                  }}
+                >
+                  {t('trajectory.inspector.expand')}
+                </button>
+              )}
               <button
                 type="button"
-                onClick={() => {
-                  copyVersion.current++;
-                  setExpanded(true);
-                  setCopyStatus(undefined);
-                }}
-              >
-                {t('trajectory.inspector.expand')}
-              </button>
-            )}
-            {displayed.length > 0 && (
-              <button
-                type="button"
+                className={styles.copyButton}
                 onClick={async () => {
                   const version = copyVersion.current;
                   try {
@@ -348,19 +395,11 @@ export function TrajectoryInspector({
                   }
                 }}
               >
+                <CopyIcon size={12} aria-hidden="true" />
                 {t('trajectory.inspector.copy')}
               </button>
-            )}
-            {copyStatus && (
-              <span role="status">
-                {t(
-                  copyStatus === 'copied'
-                    ? 'trajectory.inspector.copied'
-                    : 'trajectory.inspector.copyFailed',
-                )}
-              </span>
-            )}
-          </div>
+            </div>
+          )}
         </>
       )}
     </section>

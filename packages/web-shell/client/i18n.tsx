@@ -3272,7 +3272,9 @@ const EN: Messages = {
   'trajectory.noStart':
     'Recorded durations have no start time, so no bars can be plotted.',
   'trajectory.refreshStale': 'Refresh failed; showing the last successful read',
-  'trajectory.selected.none': 'Selected record: none',
+  'trajectory.selected.label': 'Selected',
+  'trajectory.selected.none': 'Choose a record',
+  'trajectory.selected.noTiming': 'no request or tool timing',
   'trajectory.inspector.title': 'Record details',
   'trajectory.inspector.open': 'View details',
   'trajectory.inspector.close': 'Close details',
@@ -3325,12 +3327,6 @@ const EN: Messages = {
   'trajectory.inspector.copy': 'Copy displayed content',
   'trajectory.inspector.copied': 'Copied displayed content',
   'trajectory.inspector.copyFailed': 'Could not copy content',
-  'trajectory.selected.turn': (v) =>
-    `Selected: turn ${v?.index ?? 0} · ${v?.requests ?? 0} main requests · ${v?.tools ?? 0} main tools · main model total ${v?.duration ?? ''}`,
-  'trajectory.selected.timed': (v) =>
-    `Selected: ${v?.name ?? ''} · ${v?.duration ?? ''}${v?.ttft ?? ''}`,
-  'trajectory.selected.untimed': (v) =>
-    `Selected: ${v?.name ?? ''} · no request or tool timing`,
   'trajectory.mode.group': 'Time scale',
   'trajectory.mode.active': 'Active time, idle removed',
   'trajectory.mode.active.short': 'Active time',
@@ -7286,7 +7282,9 @@ const ZH: Messages = {
   'trajectory.missingTiming': (v) => `${v?.count ?? 0} 条工具记录无耗时`,
   'trajectory.noStart': '已记录耗时，但均无起点，无法绘制条带。',
   'trajectory.refreshStale': '刷新失败，当前为上次成功读取的数据',
-  'trajectory.selected.none': '所选记录：无',
+  'trajectory.selected.label': '所选',
+  'trajectory.selected.none': '请选择一条记录',
+  'trajectory.selected.noTiming': '无请求或工具计时',
   'trajectory.inspector.title': '记录详情',
   'trajectory.inspector.open': '查看详情',
   'trajectory.inspector.close': '关闭详情',
@@ -7333,12 +7331,6 @@ const ZH: Messages = {
   'trajectory.inspector.copy': '复制显示内容',
   'trajectory.inspector.copied': '已复制显示内容',
   'trajectory.inspector.copyFailed': '无法复制内容',
-  'trajectory.selected.turn': (v) =>
-    `所选：第 ${v?.index ?? 0} 轮 · 主请求 ${v?.requests ?? 0} · 主工具 ${v?.tools ?? 0} · 主模型累计 ${v?.duration ?? ''}`,
-  'trajectory.selected.timed': (v) =>
-    `所选：${v?.name ?? ''} · ${v?.duration ?? ''}${v?.ttft ?? ''}`,
-  'trajectory.selected.untimed': (v) =>
-    `所选：${v?.name ?? ''} · 无请求或工具计时`,
   'trajectory.mode.group': '时间模式',
   'trajectory.mode.active': '活跃时间，去除间隔',
   'trajectory.mode.active.short': '活跃时间',

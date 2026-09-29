@@ -13,7 +13,12 @@ import {
   useRef,
   useState,
 } from 'react';
-import { CornerDownRightIcon, RefreshCwIcon, XIcon } from 'lucide-react';
+import {
+  ChevronRightIcon,
+  CornerDownRightIcon,
+  RefreshCwIcon,
+  XIcon,
+} from 'lucide-react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import type {
   DaemonTranscriptBlock,
@@ -539,10 +544,23 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
   const inspectorRow = inspectorCurrent
     ? trajectory?.rows.find((row) => row.key === inspectorSelection.key)
     : undefined;
-  const selectedText = selectedEntry
+  const selectedTitle = selectedEntry
     ? selectedEntry.kind === 'turn'
-      ? t('trajectory.selected.turn', {
-          index: selectedEntry.turn.index,
+      ? t('trajectory.turn', { index: selectedEntry.turn.index })
+      : labelOf(selectedEntry.row, t).text
+    : t('trajectory.selected.none');
+  const selectedTiming =
+    selectedEntry?.kind === 'row' &&
+    (selectedEntry.row.kind === 'request' || selectedEntry.row.kind === 'tool')
+      ? selectedEntry.row.timing
+      : undefined;
+  const selectedTtft =
+    selectedEntry?.kind === 'row' && selectedEntry.row.kind === 'request'
+      ? selectedTiming?.ttftMs
+      : undefined;
+  const selectedMeta = selectedEntry
+    ? selectedEntry.kind === 'turn'
+      ? t('trajectory.turnSummary', {
           requests: selectedEntry.turn.requestCount,
           tools: selectedEntry.turn.toolCount,
           duration:
@@ -552,22 +570,9 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
         })
       : selectedEntry.row.kind === 'request' ||
           selectedEntry.row.kind === 'tool'
-        ? t('trajectory.selected.timed', {
-            name: labelOf(selectedEntry.row, t).text.slice(0, 80),
-            duration:
-              selectedEntry.row.timing === undefined
-                ? t('trajectory.unrecorded')
-                : formatDuration(selectedEntry.row.timing.durationMs),
-            ttft:
-              selectedEntry.row.kind === 'request' &&
-              selectedEntry.row.timing.ttftMs !== undefined
-                ? ` · ${t('trajectory.ttft', { duration: formatDuration(selectedEntry.row.timing.ttftMs) })}`
-                : '',
-          })
-        : t('trajectory.selected.untimed', {
-            name: labelOf(selectedEntry.row, t).text.slice(0, 80),
-          })
-    : t('trajectory.selected.none');
+        ? `${selectedTiming === undefined ? t('trajectory.unrecorded') : formatDuration(selectedTiming.durationMs)}${selectedTtft === undefined ? '' : ` · ${t('trajectory.ttft', { duration: formatDuration(selectedTtft) })}`}`
+        : t('trajectory.selected.noTiming')
+    : undefined;
 
   const empty = status === 'ready' && visualRows.length === 0;
   const timingAbsent =
@@ -773,11 +778,21 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
             data-testid="trajectory-selected"
             aria-live="polite"
           >
-            {selectedText}
+            <span className={styles.selectedLabel}>
+              {t('trajectory.selected.label')}
+            </span>
+            <span className={styles.selectedName} title={selectedTitle}>
+              {selectedTitle}
+            </span>
+            {selectedMeta && (
+              <span className={styles.selectedMeta} title={selectedMeta}>
+                {selectedMeta}
+              </span>
+            )}
           </div>
           <button
             type="button"
-            className={styles.headerButton}
+            className={styles.detailsButton}
             onClick={openInspector}
             disabled={
               !trajectory ||
@@ -787,6 +802,7 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
             }
           >
             {t('trajectory.inspector.open')}
+            <ChevronRightIcon size={13} aria-hidden="true" />
           </button>
         </div>
         <div

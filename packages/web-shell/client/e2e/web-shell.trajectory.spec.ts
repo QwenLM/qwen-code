@@ -173,6 +173,14 @@ test.describe('trajectory panel', () => {
       page,
       String(testInfo.project.use.baseURL),
     );
+    const failedLegend = page.getByText('Failed', { exact: true });
+    const legendBox = (await failedLegend.boundingBox())!;
+    const iconBox = (await failedLegend.locator('svg').boundingBox())!;
+    expect(
+      Math.abs(
+        iconBox.y + iconBox.height / 2 - (legendBox.y + legendBox.height / 2),
+      ),
+    ).toBeLessThanOrEqual(1);
     let detailRequests = 0;
     page.on('request', (request) => {
       if (/\/transcript(?:\?|$)|\/attachments?\//.test(request.url())) {
@@ -234,6 +242,11 @@ test.describe('trajectory panel', () => {
       ).toBeLessThanOrEqual(1);
       await panel.screenshot({
         path: resolve(evidenceDir, `inspector-${width}.png`),
+      });
+      await inspector.getByRole('button', { name: 'Summary' }).click();
+      await expect(inspector).toContainText('call_0040');
+      await panel.screenshot({
+        path: resolve(evidenceDir, `inspector-summary-${width}.png`),
       });
     }
     await inspector.getByRole('button', { name: 'Close details' }).click();
@@ -318,6 +331,21 @@ test.describe('trajectory panel', () => {
           });
           await help.click();
         }
+      }
+      if (language === 'zh-CN') {
+        await panel.getByTestId('trajectory-row-tool').last().click();
+        await panel.getByRole('button', { name: '查看详情' }).click();
+        const inspector = panel.getByTestId('trajectory-inspector');
+        await expect(inspector).toBeVisible();
+        const evidenceDir = resolve(
+          process.cwd(),
+          '../../.qwen/e2e-tests/trajectory-pr2',
+        );
+        mkdirSync(evidenceDir, { recursive: true });
+        await panel.screenshot({
+          path: resolve(evidenceDir, 'inspector-zh-light-960.png'),
+        });
+        await inspector.getByRole('button', { name: '关闭详情' }).click();
       }
       const metricsBefore = await panel
         .getByTestId('trajectory-metrics')
