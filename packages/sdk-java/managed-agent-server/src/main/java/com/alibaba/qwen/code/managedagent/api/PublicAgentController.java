@@ -7,6 +7,7 @@ import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicItemList;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicList;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicSession;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicTask;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicTurn;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.SessionEventRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.UpdateSessionRequest;
 import com.alibaba.qwen.code.managedagent.service.ManagedAgentService;
@@ -201,6 +202,22 @@ public class PublicAgentController {
             @RequestParam(defaultValue = "20") int limit) {
         return service.listPublicItems(tenant.tenantId(), tenant.actorId(),
                 sessionId, after, limit);
+    }
+
+    @GetMapping("/{sessionId}/turns")
+    public PublicList<PublicTurn> turns(TenantContext tenant,
+            @PathVariable String sessionId,
+            @RequestParam(required = false) String cursor,
+            @RequestParam(defaultValue = "20") int limit) {
+        return service.listPublicTurns(tenant.tenantId(), tenant.actorId(),
+                sessionId, cursor, limit);
+    }
+
+    @GetMapping("/{sessionId}/turns/{turnId}")
+    public PublicTurn turn(TenantContext tenant,
+            @PathVariable String sessionId, @PathVariable String turnId) {
+        return service.getPublicTurn(tenant.tenantId(), tenant.actorId(),
+                sessionId, turnId);
     }
 
     @GetMapping("/{sessionId}/tasks")

@@ -144,6 +144,7 @@ const KNOWN_RECORD_SUBTYPES = new Set([
   'omni_recall',
   'session_execution_engine',
   'session_sources_snapshot',
+  'session_approval_mode',
   'branch_checkpoint',
   'goal_state',
   'goal_runtime',

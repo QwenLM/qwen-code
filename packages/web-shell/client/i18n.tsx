@@ -3209,14 +3209,15 @@ const EN: Messages = {
   'trajectory.partial':
     'Part of this transcript could not be read, so some records are missing.',
   'trajectory.totals': (v) =>
-    `${plural(v?.turns, 'turn')} · ${plural(v?.requests, 'request')} · ${plural(v?.tools, 'tool')} · ${v?.duration ?? ''}`,
+    `Loaded window · ${plural(v?.turns, 'turn')} · ${plural(v?.requests, 'request')} · ${plural(v?.tools, 'tool')}`,
   'trajectory.turn': (v) => `Turn ${v?.index ?? 0}`,
   'trajectory.turnPartial': (v) => `Turn ${v?.index ?? 0} (continued)`,
   'trajectory.turnSummary': (v) =>
-    `${plural(v?.requests, 'request')} · ${plural(v?.tools, 'tool')} · ${v?.duration ?? ''}`,
+    `${plural(v?.requests, 'request')} · ${plural(v?.tools, 'tool')} · main model total ${v?.duration ?? ''}`,
   'trajectory.request': 'Model request',
   'trajectory.requestFailed': 'Request failed',
-  'trajectory.ttft': (v) => `TTFT ${v?.duration ?? ''}`,
+  'trajectory.toolFailed': 'Tool failed',
+  'trajectory.ttft': (v) => `First token ${v?.duration ?? ''}`,
   'trajectory.subagentRollup': (v) =>
     `subagent ${plural(v?.requests, 'request')} · ${plural(v?.tools, 'tool')} · ${v?.duration ?? ''}`,
   'trajectory.badge.user': 'you',
@@ -3253,9 +3254,48 @@ const EN: Messages = {
     `Showing ${v?.from ?? ''}–${v?.to ?? ''} of ${v?.busy ?? ''}`,
   'trajectory.range.aria': (v) =>
     `, ${v?.from ?? ''} to ${v?.to ?? ''} selected`,
-  'trajectory.overview.lane.requests': 'req',
-  'trajectory.overview.lane.tools': 'tool',
-  'trajectory.overview.lane.subagents': 'sub',
+  'trajectory.metric.elapsed': 'Elapsed span',
+  'trajectory.metric.active': 'Active coverage',
+  'trajectory.metric.main': 'Main model total',
+  'trajectory.metric.help': 'Metric definitions',
+  'trajectory.metric.scope':
+    'Counts cover projected rows in the loaded window, including loaded subagent records. Selection and zoom do not change them.',
+  'trajectory.metric.elapsed.help':
+    'Elapsed span: earliest recorded start to latest end, including gaps; plotted records only.',
+  'trajectory.metric.active.help':
+    'Active coverage: time with at least one recorded request or tool running. Parallel time counts once.',
+  'trajectory.metric.main.help':
+    'Main model total: sum of main-session model request durations, excluding subagent requests and tools. Failed attempts may count.',
+  'trajectory.metric.missing.help':
+    'Unplotted requests and tools remain in the list. An em dash means unrecorded; zero is a measured zero.',
+  'trajectory.failures': (v) =>
+    `Failed requests ${v?.requests ?? 0} · failed tools ${v?.tools ?? 0}`,
+  'trajectory.unrecorded': 'unrecorded',
+  'trajectory.unplotted': (v) =>
+    `Unplotted: ${v?.starts ?? 0} without start · ${v?.timing ?? 0} without duration`,
+  'trajectory.missingStart': (v) =>
+    `${v?.count ?? 0} timed records have no start`,
+  'trajectory.missingTiming': (v) => `${v?.count ?? 0} tools have no duration`,
+  'trajectory.noStart':
+    'Recorded durations have no start time, so no bars can be plotted.',
+  'trajectory.refreshStale': 'Refresh failed; showing the last successful read',
+  'trajectory.selected.none': 'Selected record: none',
+  'trajectory.selected.turn': (v) =>
+    `Selected: turn ${v?.index ?? 0} · ${v?.requests ?? 0} main requests · ${v?.tools ?? 0} main tools · main model total ${v?.duration ?? ''}`,
+  'trajectory.selected.timed': (v) =>
+    `Selected: ${v?.name ?? ''} · ${v?.duration ?? ''}${v?.ttft ?? ''}`,
+  'trajectory.selected.untimed': (v) =>
+    `Selected: ${v?.name ?? ''} · no request or tool timing`,
+  'trajectory.mode.group': 'Time scale',
+  'trajectory.mode.active': 'Active time, idle removed',
+  'trajectory.mode.active.short': 'Active time',
+  'trajectory.mode.clock.short': 'Real time',
+  'trajectory.legend.ttft': 'Main: first token wait',
+  'trajectory.legend.after': 'After first token',
+  'trajectory.legend.error': 'Failed',
+  'trajectory.overview.lane.requests': 'Model requests',
+  'trajectory.overview.lane.tools': 'Tool calls',
+  'trajectory.overview.lane.subagents': 'Subagent requests',
   'status.contextUsed': (v) => `${v?.pct ?? '0.0'}% context used`,
   'status.disconnected': 'Disconnected',
   'status.modeHint': '(shift + tab or click to switch)',
@@ -7141,14 +7181,15 @@ const ZH: Messages = {
   'trajectory.loadFailed': (v) => `读取会话记录失败：${v?.message ?? ''}`,
   'trajectory.partial': '这份会话记录有一部分读不出来，缺少了一些记录。',
   'trajectory.totals': (v) =>
-    `${v?.turns ?? 0} 轮 · ${v?.requests ?? 0} 次请求 · ${v?.tools ?? 0} 次工具 · ${v?.duration ?? ''}`,
+    `已加载窗口 · ${v?.turns ?? 0} 轮 · ${v?.requests ?? 0} 请求 · ${v?.tools ?? 0} 工具`,
   'trajectory.turn': (v) => `第 ${v?.index ?? 0} 轮`,
   'trajectory.turnPartial': (v) => `第 ${v?.index ?? 0} 轮（接上文）`,
   'trajectory.turnSummary': (v) =>
-    `${v?.requests ?? 0} 次请求 · ${v?.tools ?? 0} 次工具 · ${v?.duration ?? ''}`,
+    `${v?.requests ?? 0} 次请求 · ${v?.tools ?? 0} 次工具 · 主模型累计 ${v?.duration ?? ''}`,
   'trajectory.request': '模型请求',
   'trajectory.requestFailed': '请求失败',
-  'trajectory.ttft': (v) => `首字 ${v?.duration ?? ''}`,
+  'trajectory.toolFailed': '工具失败',
+  'trajectory.ttft': (v) => `首 token ${v?.duration ?? ''}`,
   'trajectory.subagentRollup': (v) =>
     `子代理 ${v?.requests ?? 0} 次请求 · ${v?.tools ?? 0} 次工具 · ${v?.duration ?? ''}`,
   'trajectory.badge.user': '用户',
@@ -7184,9 +7225,46 @@ const ZH: Messages = {
   'trajectory.zoom.status': (v) =>
     `显示 ${v?.from ?? ''}–${v?.to ?? ''}，共 ${v?.busy ?? ''}`,
   'trajectory.range.aria': (v) => `，已选 ${v?.from ?? ''} 到 ${v?.to ?? ''}`,
-  'trajectory.overview.lane.requests': '请求',
-  'trajectory.overview.lane.tools': '工具',
-  'trajectory.overview.lane.subagents': '子代理',
+  'trajectory.metric.elapsed': '执行跨度',
+  'trajectory.metric.active': '活跃覆盖',
+  'trajectory.metric.main': '主模型请求累计',
+  'trajectory.metric.help': '指标说明',
+  'trajectory.metric.scope':
+    '计数针对已加载窗口内投影后的记录，包含已加载的子代理记录；时间框选和缩放不改变总计。',
+  'trajectory.metric.elapsed.help':
+    '执行跨度：已记录开始到结束的跨度，含间隔；仅覆盖可绘制记录。',
+  'trajectory.metric.active.help':
+    '活跃覆盖：至少一个已记录请求或工具处于执行中的时间，并行部分只计一次。',
+  'trajectory.metric.main.help':
+    '主模型请求累计：主会话模型请求耗时之和，不含子代理请求和工具；可能包含失败尝试。',
+  'trajectory.metric.missing.help':
+    '未绘制的请求和工具仍保留在列表。破折号表示未记录，零表示真实零值。',
+  'trajectory.failures': (v) =>
+    `失败请求 ${v?.requests ?? 0} · 失败工具 ${v?.tools ?? 0}`,
+  'trajectory.unrecorded': '未记录',
+  'trajectory.unplotted': (v) =>
+    `未绘制：有耗时无起点 ${v?.starts ?? 0} 条 · 无耗时 ${v?.timing ?? 0} 条`,
+  'trajectory.missingStart': (v) => `${v?.count ?? 0} 条有耗时记录缺少起点`,
+  'trajectory.missingTiming': (v) => `${v?.count ?? 0} 条工具记录无耗时`,
+  'trajectory.noStart': '已记录耗时，但均无起点，无法绘制条带。',
+  'trajectory.refreshStale': '刷新失败，当前为上次成功读取的数据',
+  'trajectory.selected.none': '所选记录：无',
+  'trajectory.selected.turn': (v) =>
+    `所选：第 ${v?.index ?? 0} 轮 · 主请求 ${v?.requests ?? 0} · 主工具 ${v?.tools ?? 0} · 主模型累计 ${v?.duration ?? ''}`,
+  'trajectory.selected.timed': (v) =>
+    `所选：${v?.name ?? ''} · ${v?.duration ?? ''}${v?.ttft ?? ''}`,
+  'trajectory.selected.untimed': (v) =>
+    `所选：${v?.name ?? ''} · 无请求或工具计时`,
+  'trajectory.mode.group': '时间模式',
+  'trajectory.mode.active': '活跃时间，去除间隔',
+  'trajectory.mode.active.short': '活跃时间',
+  'trajectory.mode.clock.short': '真实时间',
+  'trajectory.legend.ttft': '主模型：首 token 等待',
+  'trajectory.legend.after': '首 token 后耗时',
+  'trajectory.legend.error': '失败',
+  'trajectory.overview.lane.requests': '模型请求',
+  'trajectory.overview.lane.tools': '工具调用',
+  'trajectory.overview.lane.subagents': '子代理请求',
   'status.contextUsed': (v) => `上下文已用 ${v?.pct ?? '0.0'}%`,
   'status.disconnected': '断开连接',
   'status.modeHint': '(shift + tab 或点击切换)',
