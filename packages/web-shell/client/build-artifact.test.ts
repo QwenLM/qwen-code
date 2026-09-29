@@ -396,15 +396,15 @@ describe('build artifact — transcript entry (#11031)', () => {
     // docblock in client/transcript.ts and #11100).
     //
     // What the entry does deliver is a bounded payload, so bound it. The JS
-    // remainder measured 1,140,948 bytes at 1d94060f5 (a reviewer's local
-    // build of this branch), against 7,021,715 for dist/index.js in the same
-    // build. The ceiling is that measurement plus headroom; re-measure and
-    // lower it if the entry gets leaner.
+    // remainder measured 1,298,657 bytes on main at fa4a4c92 and 1,300,341
+    // here after adding author attribution for multi-agent transcripts. The
+    // ceiling leaves a small margin around that intentional transcript UI;
+    // re-measure and lower it if the entry gets leaner.
     const js = readTranscriptBundle().replace(
       /^const __qwenWebShellCss=[^\n]*\n/,
       '',
     );
-    expect(js.length).toBeLessThan(1_300_000);
+    expect(js.length).toBeLessThan(1_305_000);
   });
 
   it('carries no Live Voice strings and looks none up', () => {

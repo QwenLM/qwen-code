@@ -1231,7 +1231,10 @@ import {
   SESSION_SOURCE_META_KEY,
 } from '@qwen-code/acp-bridge';
 import { DAEMON_OWNED_STANDALONE_CREATION_KEY } from '@qwen-code/acp-bridge/sessionSource';
-import { AGENT_HOST_SESSION_SOURCE_TYPE } from '../runtime/agent-session-source.js';
+import {
+  AGENT_HOST_SESSION_SOURCE_TYPE,
+  AGENT_SESSION_SOURCE_TYPE,
+} from '../runtime/agent-session-source.js';
 import type {
   Agent,
   LoadSessionResponse,
@@ -8889,30 +8892,32 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
-  it('rejects forged agent host creation from an untrusted parent', async () => {
-    await setupSessionMocks('11111111-1111-4111-8111-111111111111');
-    const { agent, agentPromise } = await bootInitializedAcpAgent(
-      makeSessionSettings(),
-    );
+  it.each([
+    [AGENT_HOST_SESSION_SOURCE_TYPE, 'daemon-owned host creation'],
+    [AGENT_SESSION_SOURCE_TYPE, 'daemon-owned workspace agent creation'],
+  ] as const)(
+    'rejects forged %s creation from an untrusted parent',
+    async (sourceType, reason) => {
+      await setupSessionMocks('11111111-1111-4111-8111-111111111111');
+      const { agent, agentPromise } = await bootInitializedAcpAgent(
+        makeSessionSettings(),
+      );
 
-    await expect(
-      agent.newSession({
-        cwd: '/tmp',
-        mcpServers: [],
-        _meta: {
-          [SESSION_SOURCE_META_KEY]: {
-            sourceType: AGENT_HOST_SESSION_SOURCE_TYPE,
+      await expect(
+        agent.newSession({
+          cwd: '/tmp',
+          mcpServers: [],
+          _meta: {
+            [SESSION_SOURCE_META_KEY]: { sourceType },
           },
-        },
-      }),
-    ).rejects.toThrow(
-      '`agent-host` is reserved for daemon-owned host creation',
-    );
-    expect(loadCliConfig).not.toHaveBeenCalled();
+        }),
+      ).rejects.toThrow(`\`${sourceType}\` is reserved for ${reason}`);
+      expect(loadCliConfig).not.toHaveBeenCalled();
 
-    mockConnectionState.resolve();
-    await agentPromise;
-  });
+      mockConnectionState.resolve();
+      await agentPromise;
+    },
+  );
 
   it('accepts standalone creation and source persistence from the trusted parent', async () => {
     const sessionId = '11111111-1111-4111-8111-111111111111';
@@ -28193,6 +28198,8 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     ['resume', 'standalone'],
     ['load', AGENT_HOST_SESSION_SOURCE_TYPE],
     ['resume', AGENT_HOST_SESSION_SOURCE_TYPE],
+    ['load', AGENT_SESSION_SOURCE_TYPE],
+    ['resume', AGENT_SESSION_SOURCE_TYPE],
   ] as const)(
     '%s rejects a %s restore without a trusted daemon parent',
     async (action, sourceType) => {
@@ -28221,7 +28228,9 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         ).rejects.toThrow(
           sourceType === 'standalone'
             ? '`standalone` is reserved for daemon-owned session restore'
-            : '`agent-host` is reserved for daemon-owned host restore',
+            : sourceType === AGENT_SESSION_SOURCE_TYPE
+              ? '`agent` is reserved for daemon-owned workspace agent restore'
+              : '`agent-host` is reserved for daemon-owned host restore',
         );
       } finally {
         mockConnectionState.resolve();
