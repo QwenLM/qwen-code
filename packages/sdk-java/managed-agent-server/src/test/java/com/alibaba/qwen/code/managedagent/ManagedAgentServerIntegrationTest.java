@@ -1512,11 +1512,18 @@ class ManagedAgentServerIntegrationTest {
                                  "sessionId":"%s","turnId":"%s"}
                                 """.formatted(sessionId, turnId)))
                 .andExpect(status().isAccepted());
+        // Nothing may cancel the Turn while its submit is unresolved.
+        await().during(Duration.ofMillis(200)).atMost(Duration.ofSeconds(2))
+                .untilAsserted(() -> assertThat(harness.cancelCount())
+                        .isEqualTo(cancellations));
         harness.releaseUncertainRetries();
 
+        // Once the Turn is admitted, the dispatch that resolved the submit
+        // and the queued cancellation can each deliver the cancel; the
+        // Hosted Harness treats a repeat as a no-op.
         await().atMost(Duration.ofSeconds(3)).untilAsserted(() ->
                 assertThat(harness.cancelCount())
-                        .isEqualTo(cancellations + 1));
+                        .isGreaterThan(cancellations));
         await().atMost(Duration.ofSeconds(3)).untilAsserted(() ->
                 mvc.perform(post(
                                 "/api/agent/web-shell/v1/transcript/query")
