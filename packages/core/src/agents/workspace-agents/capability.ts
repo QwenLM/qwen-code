@@ -44,7 +44,7 @@ export const AGENT_TOOL_CLASSIFICATION = {
   [ToolNames.SEARCH_MEMORY]: 'deny',
   [ToolNames.AGENT]: 'deny',
   [ToolNames.ADVISOR]: 'deny',
-  [ToolNames.SKILL]: 'allow',
+  [ToolNames.SKILL]: 'deny',
   [ToolNames.EXIT_PLAN_MODE]: 'deny',
   [ToolNames.ENTER_PLAN_MODE]: 'deny',
   [ToolNames.WEB_FETCH]: 'deny',
