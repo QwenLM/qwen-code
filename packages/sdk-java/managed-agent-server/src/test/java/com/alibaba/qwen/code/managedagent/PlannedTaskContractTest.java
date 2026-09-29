@@ -161,6 +161,18 @@ class PlannedTaskContractTest {
     }
 
     @Test
+    void plannedTaskRoutesDeclareTheTenantFilterForbidden() {
+        // The API contract test probes the 403 only on mapped routes.
+        for (String operationId : List.of("listSessionTaskEvents",
+                "queryWebShellTaskEvents", "cancelSessionTask",
+                "cancelWebShellTask")) {
+            assertThat(CONTRACT.responsePointer(
+                    CONTRACT.operation(operationId), 403))
+                    .as("%s declares 403", operationId).isNotNull();
+        }
+    }
+
+    @Test
     void webShellTaskRequestsRequireTheirKeys() {
         ObjectNode cancel = JSON.createObjectNode().put("sessionId", SESSION)
                 .put("taskId", "task-1").put("idempotencyKey", "key-1");

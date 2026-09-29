@@ -43,6 +43,7 @@ describe('SubagentManager.buildSubagentContextOverride bound-tool isolation', ()
         buildSubagentContextOverride: (
           b: Config,
           c: SubagentConfig,
+          skillsAvailable: boolean,
         ) => Promise<{
           context: Config;
           cleanup?: () => Promise<void>;
@@ -56,7 +57,9 @@ describe('SubagentManager.buildSubagentContextOverride bound-tool isolation', ()
       level: 'session',
       ...config,
     };
-    const result = await fn(base, fullConfig);
+    // These cases assert bound-tool isolation, not skill policy: `true` keeps
+    // the agent unrestricted so it inherits the session's SkillManager.
+    const result = await fn(base, fullConfig, true);
     return result.context;
   }
 

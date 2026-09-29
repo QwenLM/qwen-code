@@ -79,6 +79,7 @@ import { formatMemoryUsage } from '../utils/formatters.js';
 import type { AnsiOutput } from '../utils/terminalSerializer.js';
 import { isSubpaths, makeRelative, shortenPath } from '../utils/paths.js';
 import {
+  buildOutsideWorkspaceWarning,
   buildShellExecWarnings,
   detectSelfKillCommand,
   getCommandRoot,
@@ -2194,6 +2195,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
 
   /**
    * AST-based permission check for the shell command.
+   * - An explicit `directory` outside the workspace → 'ask'
    * - Substitution-bearing commands (any form, including inside an
    *   env-prefix wrapper that `stripShellWrapper` would discard) → 'ask'
    * - Read-only commands (via AST analysis) → 'allow'
@@ -2201,6 +2203,8 @@ export class ShellToolInvocation extends BaseToolInvocation<
    */
   override async getDefaultPermission(): Promise<PermissionDecision> {
     if (this.config.getShellExecutionSandbox?.()) return 'ask';
+    // Like read_file outside the workspace: ask rather than reject at build
+    // time, so an approval (or YOLO) can let it run.
     if (this.isDirectoryOutsideWorkspace()) return 'ask';
     // Gate on the RAW command before `stripShellWrapper` runs.
     // `stripShellWrapper` drops leading env-assignment tokens AND
@@ -2357,8 +2361,8 @@ export class ShellToolInvocation extends BaseToolInvocation<
     const warnings = [
       ...(buildShellExecWarnings(command, this.params.command) ?? []),
       ...(sedEditPreviewWarning ? [sedEditPreviewWarning] : []),
-      ...(this.isDirectoryOutsideWorkspace()
-        ? [`Runs outside the workspace in ${this.params.directory}`]
+      ...(this.params.directory && this.isDirectoryOutsideWorkspace()
+        ? [buildOutsideWorkspaceWarning(this.params.directory)]
         : []),
     ];
 
@@ -5833,6 +5837,8 @@ export class ShellTool extends BaseDeclarativeTool<
         return `Explicitly running shell commands from within the user skills directory is not allowed. Please use absolute paths for command parameter instead.`;
       }
 
+      // The sandbox refuses any other cwd at run time, so reject now rather
+      // than ask for approval of a command that cannot start.
       const sandbox = this.config.getShellExecutionSandbox?.();
       if (sandbox) {
         try {

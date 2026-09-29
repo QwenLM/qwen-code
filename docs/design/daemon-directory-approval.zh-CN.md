@@ -4,7 +4,7 @@
 
 ## 问题
 
-普通 daemon 工具调用已经经过 core 权限流程，但内建 Git guard 随后仍无条件拒绝外部目录。用户批准的调用和 Full Access 都会失败。Shell 和 Monitor 还会在权限评估前拒绝外部 `directory` 参数。
+普通 daemon 工具调用已经经过 core 权限流程，但内建 Git guard 随后仍无条件拒绝外部目录。用户批准的调用和 Full Access 都会失败。原始报告还遇到了 Shell 和 Monitor 提前拒绝外部 `directory` 参数的问题；这一部分现已由 [#12927](https://github.com/QwenLM/qwen-code/pull/12927) 解决并合入 main。本次补齐 daemon 侧的处理。
 
 ## 决策
 

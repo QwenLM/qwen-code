@@ -37,6 +37,7 @@ import type { PermissionDecision } from '../permissions/types.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { getErrorMessage } from '../utils/errors.js';
 import {
+  buildOutsideWorkspaceWarning,
   buildShellExecWarnings,
   getCommandRoot,
   getShellConfiguration,
@@ -183,6 +184,8 @@ class MonitorToolInvocation extends BaseToolInvocation<
 
   override async getDefaultPermission(): Promise<PermissionDecision> {
     if (this.config.getShellExecutionSandbox?.()) return 'ask';
+    // Like read_file outside the workspace: ask rather than reject at build
+    // time, so an approval (or YOLO) can let it run.
     if (this.isDirectoryOutsideWorkspace()) return 'ask';
     const normalized = normalizeMonitorShellCommand(this.params.command);
     const command = normalized.safetyCommand;
@@ -290,8 +293,8 @@ class MonitorToolInvocation extends BaseToolInvocation<
         normalized.safetyCommand,
         this.params.command,
       ) ?? []),
-      ...(this.isDirectoryOutsideWorkspace()
-        ? [`Runs outside the workspace in ${this.params.directory}`]
+      ...(this.params.directory && this.isDirectoryOutsideWorkspace()
+        ? [buildOutsideWorkspaceWarning(this.params.directory)]
         : []),
     ];
 
@@ -866,6 +869,8 @@ export class MonitorTool extends BaseDeclarativeTool<
       if (isSubpaths(userSkillsDirs, resolvedDirectoryPath)) {
         return 'Explicitly running monitor commands from within the user skills directory is not allowed. Please use absolute paths for command parameter instead.';
       }
+      // The sandbox refuses any other cwd at run time, so reject now rather
+      // than ask for approval of a command that cannot start.
       const sandbox = this.config.getShellExecutionSandbox?.();
       if (sandbox) {
         try {

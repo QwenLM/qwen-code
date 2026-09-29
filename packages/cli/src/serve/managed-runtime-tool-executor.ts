@@ -86,6 +86,10 @@ export interface ManagedToolSet {
   readonly sessionId: string;
   readonly directory?: string;
   readonly tools: ReadonlyMap<string, AnyDeclarativeTool>;
+  /**
+   * Whether a shell `directory` lies inside the tools' workspace. Calls run
+   * without approval, so the executor enforces this boundary itself.
+   */
   readonly admitsDirectory: (directory: string) => boolean;
   readonly isActive?: () => boolean;
 }
@@ -534,7 +538,6 @@ export class ManagedToolExecutor {
           params['file_path'].trim(),
         );
       }
-      // Managed calls execute without the interactive permission flow.
       if (
         entry.toolName === ShellTool.Name &&
         typeof params['directory'] === 'string' &&
