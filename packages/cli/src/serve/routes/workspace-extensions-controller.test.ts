@@ -716,6 +716,51 @@ describe('createExtensionsController', () => {
     expect(refresh).toHaveBeenCalledTimes(2);
   });
 
+  it('does not let an untrusted workspace pick the status locale', async () => {
+    const workspaceDir = await mkdtemp(join(tmpdir(), 'qwen-ext-locale-'));
+    const emptyHome = await mkdtemp(join(tmpdir(), 'qwen-ext-home-'));
+    vi.stubEnv('QWEN_HOME', emptyHome);
+    await mkdir(join(workspaceDir, '.qwen'), { recursive: true });
+    await writeFile(
+      join(workspaceDir, '.qwen', 'settings.json'),
+      JSON.stringify({ general: { language: 'zh-CN' } }),
+    );
+    vi.spyOn(ExtensionManager.prototype, 'refreshCache').mockResolvedValue(
+      undefined,
+    );
+    vi.spyOn(ExtensionManager.prototype, 'getLoadedExtensions').mockReturnValue(
+      [],
+    );
+    try {
+      const languageSetting = vi.mocked(resolveLanguageSetting);
+      const untrusted = createExtensionsController({
+        boundWorkspace: workspaceDir,
+        bridge: {} as AcpSessionBridge,
+        workspace: {} as DaemonWorkspaceService,
+        isWorkspaceTrusted: () => false,
+      });
+      await untrusted.buildLocalExtensionsStatus();
+      // The untrusted branch re-loads with `skipWorkspaceSettings`, so the
+      // workspace's own `general.language` never reaches the locale resolve.
+      expect(languageSetting).toHaveBeenCalledWith(undefined);
+      expect(languageSetting).not.toHaveBeenCalledWith('zh-CN');
+
+      languageSetting.mockClear();
+      const trusted = createExtensionsController({
+        boundWorkspace: workspaceDir,
+        bridge: {} as AcpSessionBridge,
+        workspace: {} as DaemonWorkspaceService,
+        isWorkspaceTrusted: () => true,
+      });
+      await trusted.buildLocalExtensionsStatus();
+      expect(languageSetting).toHaveBeenCalledWith('zh-CN');
+    } finally {
+      vi.unstubAllEnvs();
+      await rm(workspaceDir, { recursive: true, force: true });
+      await rm(emptyHome, { recursive: true, force: true });
+    }
+  });
+
   it.each(['old-first', 'new-first', 'old-fails'] as const)(
     'does not let an invalidated status load overwrite or clear its replacement (%s)',
     async (order) => {
