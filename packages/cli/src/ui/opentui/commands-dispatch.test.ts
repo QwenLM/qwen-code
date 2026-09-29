@@ -1645,4 +1645,26 @@ describe('isIdleRef parity (command actions see pre-dispatch idle state)', () =>
       cause: 'pause',
     });
   });
+
+  it('defers the goal mutation card when a turn starts streaming during the action', async () => {
+    const snapshot = { v: 2, goal: { objective: 'x' }, activity: 'idle' };
+    const linkedHost = createProcessingLinkedHost(true);
+    const pauseCommand = stub({
+      name: 'goal',
+      action: () => {
+        linkedHost.setStreaming(true);
+        return {
+          type: 'goal_control',
+          operation: { kind: 'pause' },
+          response: { snapshot },
+          cause: 'pause',
+        } as never;
+      },
+    });
+
+    const { host } = await dispatch('/goal pause', [pauseCommand], linkedHost);
+
+    expect(linkedHost.isStreaming()).toBe(true);
+    expect(host.items.some((item) => item.type === 'goal_state')).toBe(false);
+  });
 });
