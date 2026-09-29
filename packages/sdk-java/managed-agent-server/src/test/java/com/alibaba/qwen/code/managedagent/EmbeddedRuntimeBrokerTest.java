@@ -29,6 +29,31 @@ class EmbeddedRuntimeBrokerTest {
     void usesFetchCompatibleDefaultBrokerPort() {
         assertThat(new ManagedAgentProperties().getRuntimeBroker().getPort())
                 .isEqualTo(4182);
+        assertThat(new ManagedAgentProperties().getRuntimeBroker().isDurableLocalProcess()).isFalse();
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void recoveryDirectoryCannotBeInsideLegacyOrManagedWorkspace(boolean managed,
+            @org.junit.jupiter.api.io.TempDir Path root) throws Exception {
+        ManagedAgentProperties properties = properties();
+        var config = properties.getRuntimeBroker();
+        config.setProvisioner("local-process");
+        config.setWorkspaceId("");
+        Path workspace = java.nio.file.Files.createDirectory(root.resolve("workspace")).toRealPath();
+        config.setWorkspaceCwd(workspace.toString());
+        config.setDurableLocalProcess(true);
+        config.setNodeExecutable("node");
+        config.setWorkerEntry("worker.js");
+        config.setCliEntry("cli.js");
+        Path storage = managed ? java.nio.file.Files.createDirectory(root.resolve("storage")).toRealPath() : workspace;
+        if (managed) {
+            config.setWorkspaceMounts(java.util.List.of(new ManagedAgentProperties.RuntimeBroker.WorkspaceMount(
+                    "tenant", "storage", storage.toString())));
+        }
+        config.setStateDirectory(storage.resolve("recovery").toString());
+        assertThatThrownBy(() -> broker(mock(ManagedAgentStore.class), properties))
+                .isInstanceOf(IllegalStateException.class).hasMessageContaining("outside Workspace roots");
     }
 
     @Test

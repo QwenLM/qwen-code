@@ -33,10 +33,15 @@ same file by `npm run generate:managed-agent-api` in `packages/web-shell`.
 Sessions record the agent revision from `QWEN_MANAGED_AGENT_REVISION` (default
 `1`) when they are created. Every response carries `X-Request-Id`, which error
 envelopes repeat as `request_id` and the logs print. Events keep the schema and
-projection versions and the Item and Part identity they were accepted with,
-except that a `stream.reconciled` event announces retracted deltas. A
+projection versions they were accepted with. They keep their Item and Part
+identity too, except after Harness recovery retracts output: the retracted
+deltas lose their text and identity, later deltas may name other Parts, and a
+`stream.reconciled` event announces it. A client that sees one reloads the
+Items and resumes after their `snapshot_through_sequence`. A
 cursor below a Session's replay floor gets `409 cursor_expired` from the JSON
 event query and one `agent.session.resync_required` frame from either stream.
+`GET /v1/agents/sessions/{id}/turns` lists a Session's Turns newest first with
+an opaque cursor, and `GET /v1/agents/sessions/{id}/turns/{turnId}` reads one.
 Design: [English](../../../docs/design/2026-09-27-managed-agent-api-contract.md) |
 [简体中文](../../../docs/design/2026-09-27-managed-agent-api-contract.zh-CN.md);
 Session query: [English](../../../docs/design/2026-09-27-managed-agent-session-query.md) |
@@ -44,7 +49,9 @@ Session query: [English](../../../docs/design/2026-09-27-managed-agent-session-q
 Event replay: [English](../../../docs/design/2026-09-27-managed-agent-event-replay.md) |
 [简体中文](../../../docs/design/2026-09-27-managed-agent-event-replay.zh-CN.md);
 Durable lifecycle: [English](../../../docs/design/2026-09-28-managed-agent-durable-lifecycle.md) |
-[简体中文](../../../docs/design/2026-09-28-managed-agent-durable-lifecycle.zh-CN.md)
+[简体中文](../../../docs/design/2026-09-28-managed-agent-durable-lifecycle.zh-CN.md);
+Turn queries: [English](../../../docs/design/2026-09-28-managed-agent-turn-queries.md) |
+[简体中文](../../../docs/design/2026-09-28-managed-agent-turn-queries.zh-CN.md)
 
 ## Prerequisites
 
@@ -292,9 +299,35 @@ The reserved Hosted Harness profile cannot yet connect to the Broker at
 Broker always uses the Spring `DataSource` and Flyway-managed Runtime tables;
 it does not fall back to in-memory repositories. The credential key must decode
 to exactly 32 bytes and protects persisted Runtime seeds and static Runtime
-credentials with AES-256-GCM. The local-process adapter can recover the same
-worker after a Java restart on the same host; multi-host scheduling and the
-Kubernetes adapter's real-cluster fault matrix remain production gates. This
+credentials with AES-256-GCM. By default, local worker ownership is ephemeral
+and a restarted Broker cannot adopt it. On Linux, set
+`QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS=true` to enable persistent
+launch registration and adoption of the same live worker. The state directory
+must be persistent local storage, owned by the Broker user with mode `0700`,
+without symlinks, outside every configured Workspace root. Workers and tools
+must be trusted; same-UID hostile tools and multi-host or remote storage are
+unsupported. Keep the host machine ID, SQL credential key, placement mapping,
+state directory and worker command stable across Broker restarts. Shutdown and
+late lease discard detach from registered workers instead of killing them.
+`/etc/machine-id` must be nonempty and stable, and Linux must expose the PID
+and time namespaces (`/proc/self/ns/pid` and `/proc/self/ns/time`; the latter
+requires Linux 5.6 or newer with `CONFIG_TIME_NS`). The service
+manager must let workers survive a Broker exit: systemd's default
+`KillMode=control-group` kills them, as does restarting a container whose main
+process is the Broker. Configure the service to leave child workers running
+(for example, systemd `KillMode=process`) and use an init that reaps orphaned
+processes. The Broker recognizes `Z`/`X` workers as exited even before they are
+reaped.
+Missing or damaged records and worker death do not authorize replacement;
+worker death does not prove escaped writers stopped. No host reboot reclamation
+is enabled by this option. Old v1 handles cannot be upgraded by guessing identity.
+This option does not retire idle workers or prune their registration and lock
+files. With session isolation, each Hosted Session can retain a separate idle
+worker across Broker restarts; budget process, memory and state-directory growth
+before enabling it. Physical cleanup needs an evidence-preserving lifecycle;
+do not delete records to reclaim capacity.
+See the [adoption design](../../../docs/design/2026-09-27-local-runtime-adoption.md).
+The Kubernetes adapter's real-cluster fault matrix remains a production gate. This
 standalone reference keeps the one configured directory for legacy unbound
 Sessions. Persisted bound Sessions use the private Workspace execution path
 below.

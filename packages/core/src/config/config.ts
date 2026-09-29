@@ -245,7 +245,10 @@ import type { GoalRecoveryRecord } from '../goals/goal-persistence.js';
 import { GOAL_DEFAULT_TOKEN_BUDGET } from '../goals/goal-protocol.js';
 import { createGoalVerifier } from '../goals/goal-verifier.js';
 import type { ToolInvocationGuard } from '../core/tool-invocation-guard.js';
-import type { BwrapPolicy } from '../sandbox/bwrap-execution.js';
+import type {
+  ExecutionSandboxPolicy,
+  ResolvedExecutionSandboxPolicy,
+} from '../sandbox/sandbox-execution.js';
 import {
   admitShellSandbox,
   probeShellSandbox,
@@ -1601,9 +1604,7 @@ export interface ConfigParameters {
   settingsWatcher?: { stopWatching(): void };
 }
 
-export interface ShellExecutionSandboxPolicy extends BwrapPolicy {
-  requestedBackend?: 'auto' | 'bwrap';
-}
+export type ShellExecutionSandboxPolicy = ExecutionSandboxPolicy;
 
 export type TerminalImageRenderSupport =
   | { available: true }
@@ -2606,8 +2607,9 @@ export function deriveConfig(
 }
 
 export class Config {
-  private readonly shellExecutionSandbox:
+  private shellExecutionSandbox:
     | Readonly<ShellExecutionSandboxPolicy>
+    | Readonly<ResolvedExecutionSandboxPolicy>
     | undefined;
   private sessionId: string;
   private sessionSourceType?: string;
@@ -3854,7 +3856,10 @@ export class Config {
   ): Promise<void> {
     try {
       if (this.shellExecutionSandbox)
-        await probeShellSandbox(this.shellExecutionSandbox, options?.signal);
+        this.shellExecutionSandbox = await probeShellSandbox(
+          this.shellExecutionSandbox,
+          options?.signal,
+        );
       const activation = this.activateChatRecording();
       this.sessionWriterActivationPromise = activation;
       try {
@@ -8299,12 +8304,12 @@ export class Config {
     if (!this.getStructuredMemoryRecallEnabled()) return undefined;
     if (this.memoryRecallMode === 'structured') return undefined;
     const status = await this.scanMemoryRecallCorpusStatus();
-    const to: MemoryRecallMode = status.ready ? 'structured' : 'legacy';
-    if (to === this.memoryRecallMode) {
+    if (!status.ready) {
       this.memoryCorpusRevision = status.revision;
       return undefined;
     }
     const projectRoot = this.getProjectRoot();
+    const teamEnabled = this.getTeamMemoryEnabled() && this.isTrustedFolder();
     const configuredProjectRoot = getAutoMemoryRoot(projectRoot);
     // Index rebuilds refresh the legacy MEMORY.md artifacts; the structured
     // prompt is built from scans, not these indexes, so a tier that cannot be
@@ -8321,9 +8326,7 @@ export class Config {
             : rebuildAutoMemoryIndexAtRoot(root, 'project'),
         ),
         rebuildUserAutoMemoryIndex(),
-        ...(this.getTeamMemoryEnabled() && this.isTrustedFolder()
-          ? [rebuildTeamAutoMemoryIndex(projectRoot)]
-          : []),
+        ...(teamEnabled ? [rebuildTeamAutoMemoryIndex(projectRoot)] : []),
       ].map((pending) =>
         pending.catch((error: unknown) => {
           this.debugLogger.debug(
@@ -8332,12 +8335,16 @@ export class Config {
         }),
       ),
     );
-    const autoMemoryPrompt = await this.buildAutoMemoryPromptForMode(to);
+    const autoMemoryPrompt = await buildStructuredAutoMemoryPrompt(
+      getAutoMemoryRoot(projectRoot),
+      getUserAutoMemoryRoot(),
+      teamEnabled ? getTeamAutoMemoryRoot(projectRoot) : undefined,
+    );
     const confirmed = await this.scanMemoryRecallCorpusStatus();
     if (confirmed.revision !== status.revision) return undefined;
     return {
-      from: this.memoryRecallMode,
-      to,
+      from: 'legacy',
+      to: 'structured',
       revision: confirmed.revision,
       autoMemoryPrompt,
       previousRevision: this.memoryCorpusRevision,
@@ -8381,47 +8388,6 @@ export class Config {
       teamMemoryEnabled: this.getTeamMemoryEnabled(),
       trustedProject: this.isTrustedFolder(),
     });
-  }
-
-  private async buildAutoMemoryPromptForMode(
-    mode: MemoryRecallMode,
-  ): Promise<string> {
-    const projectRoot = this.getProjectRoot();
-    const teamEnabled = this.getTeamMemoryEnabled() && this.isTrustedFolder();
-    if (mode === 'structured') {
-      return buildStructuredAutoMemoryPrompt(
-        getAutoMemoryRoot(projectRoot),
-        getUserAutoMemoryRoot(),
-        teamEnabled ? getTeamAutoMemoryRoot(projectRoot) : undefined,
-      );
-    }
-    const [projectIndex, userIndex, teamIndex] = await Promise.all([
-      readAutoMemoryIndexWithStats(projectRoot).then(
-        (result) => result?.content ?? null,
-      ),
-      readUserAutoMemoryIndexWithStats()
-        .then((result) => result?.content ?? null)
-        .catch(() => null),
-      teamEnabled
-        ? fsPromises
-            .readFile(
-              path.join(getTeamAutoMemoryRoot(projectRoot), 'MEMORY.md'),
-              'utf-8',
-            )
-            .catch(() => null)
-        : Promise.resolve(null),
-    ]);
-    return this.memoryManager.buildAutoMemoryPrompt(
-      getAutoMemoryRoot(projectRoot),
-      projectIndex,
-      { memoryDir: getUserAutoMemoryRoot(), indexContent: userIndex },
-      teamEnabled
-        ? {
-            memoryDir: getTeamAutoMemoryRoot(projectRoot),
-            indexContent: teamIndex,
-          }
-        : undefined,
-    );
   }
 
   getOutputLanguageFilePath(): string | undefined {
