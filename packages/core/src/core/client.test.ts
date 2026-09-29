@@ -11164,6 +11164,8 @@ hello
         sessionId: 'test-session-id',
         history: recordedHistory,
         config: mockConfig,
+        // Read only while a no-op cooldown is active (#13004).
+        isBelowCompactionWarn: expect.any(Function),
       });
       expect(mockMemoryManager.scheduleMetadataMigration).toHaveBeenCalledTimes(
         2,
