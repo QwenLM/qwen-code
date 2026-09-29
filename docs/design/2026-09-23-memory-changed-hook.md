@@ -45,6 +45,8 @@ Add a post-write, non-blocking hook event, `MemoryChanged`. The change is alread
 
 Snapshot keys use the filesystem's stored spelling while preserving symlink components. A path hidden by a new symlink is unknown to the walk, not a deletion. An outside delete remains the baseline even when the opening snapshot could not read the document.
 
+If the opening directory snapshot is incomplete, explicit notifications are delivered directly. If the closing snapshot is incomplete, retained explicit notifications are delivered with their original owner and signal, excluding paths superseded by a newer outside notification. Neither case infers raw changes from a partial snapshot. Migration records each committed document and index immediately so sibling windows can update their baselines. Hook execution still honors caller cancellation; this event is not a durable delivery queue.
+
 Team-memory synchronization registers a boundary around the pull and its imported-content baseline. Snapshots wait for that boundary and retry if a sync overlaps their read. Only the Git-changed document paths move the baseline, using checkout-converted content; local raw edits that differ from that content still produce events. A newer explicit notification wins over a delayed sync baseline. Concurrent windows cannot reliably attribute unnotified raw writes in the shared user-memory tree to their originating session. This known snapshot limitation remains outside this change.
 
 ### On/off toggle
@@ -58,7 +60,7 @@ Team-memory synchronization registers a boundary around the pull and its importe
 }
 ```
 
-`enabled` is present only for this toggle. `operation` and `memory_scope` are omitted. The Memory dialog commits the workspace setting before changing its displayed state or emitting with that project root. A failed settings write shows an error and emits no toggle. `qwen/settings/setMemory` writes the user setting and emits with the request workspace when `enableManagedAutoMemory` actually changes. The toggle has no relative path, so every `MemoryChanged` hook receives it. A hook that only cares about documents ignores events where `enabled` is present. Editing the settings file on disk does not emit this event. Only the Memory dialog and `qwen/settings/setMemory` do.
+`enabled` is present only for this toggle. `operation` and `memory_scope` are omitted. The Memory dialog commits the workspace setting before changing its displayed state or emitting with that project root. A failed settings write shows an error and emits no toggle. `qwen/settings/setMemory` writes the user setting and emits with the request workspace when `enableManagedAutoMemory` actually changes. A multi-key request can partially commit: it reports the later write failure while still notifying an effective toggle that was already saved. The toggle has no relative path, so every `MemoryChanged` hook receives it. A hook that only cares about documents ignores events where `enabled` is present. Editing the settings file on disk does not emit this event. Only the Memory dialog and `qwen/settings/setMemory` do.
 
 The base hook input still carries `session_id` and `cwd`. `cwd` is the working directory, not the workspace.
 
@@ -78,7 +80,7 @@ The base hook input still carries `session_id` and `cwd`. `cwd` is the working d
 
 In: the hook event, its settings entry, the emit sites above, and the user hook doc.
 
-The project scope uses the configured project memory root. The secondary repository-local compatibility root, when different, is outside the notification scope.
+The project scope uses the configured project memory root. Local mode uses the literal `.qwen/memory` location below the canonical workspace, excluding roots relocated by symlinks in that suffix. The secondary repository-local compatibility root, when different, is outside the notification scope.
 
 Out: uploading bytes, remote storage, hydration of a fresh instance, and blocking or rewriting a memory write before it hits disk.
 
