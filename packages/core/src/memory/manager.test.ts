@@ -31,11 +31,13 @@ import { ToolNames } from '../tools/tool-names.js';
 
 const telemetryMocks = vi.hoisted(() => ({
   logMemoryExtract: vi.fn(),
+  logMemoryMigration: vi.fn(),
 }));
 
 vi.mock('../telemetry/index.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../telemetry/index.js')>()),
   logMemoryExtract: telemetryMocks.logMemoryExtract,
+  logMemoryMigration: telemetryMocks.logMemoryMigration,
 }));
 
 vi.mock('./extract.js', () => ({
@@ -827,6 +829,73 @@ describe('MemoryManager', () => {
       if (dream.status === 'scheduled') {
         await dream.promise;
       }
+    });
+
+    it('preserves committed counts when the index rebuild fails', async () => {
+      telemetryMocks.logMemoryMigration.mockClear();
+      await writeLegacy(getAutoMemoryRoot(projectRoot), 'project.md');
+      vi.spyOn(
+        metadataMigration,
+        'runMemoryMetadataMigration',
+      ).mockResolvedValue({
+        filesScanned: 1,
+        legacyFiles: 1,
+        remainingLegacyFiles: 0,
+        attempted: 1,
+        committed: 1,
+        conflicts: 0,
+        failed: 0,
+        agentDurationMs: 1,
+        inputTokens: 1,
+        outputTokens: 1,
+        totalTokens: 2,
+        indexRebuildError: 'Index rebuild failed',
+      });
+      const manager = new MemoryManager();
+      const params = {
+        projectRoot,
+        scope: 'project' as const,
+        config: makeMockConfig(),
+      };
+      const scheduled = await manager.scheduleMetadataMigration(params);
+
+      expect(scheduled.status).toBe('scheduled');
+      if (scheduled.status !== 'scheduled') return;
+      const record = await scheduled.promise;
+      expect(record).toMatchObject({
+        status: 'failed',
+        error: 'Index rebuild failed',
+        metadata: {
+          attempted: 1,
+          committed: 1,
+          remainingLegacyFiles: 0,
+          indexRebuildError: 'Index rebuild failed',
+        },
+      });
+      // The telemetry event must agree with the task record: a failed run
+      // with the committed counts intact and the reason attached.
+      expect(telemetryMocks.logMemoryMigration).toHaveBeenCalledTimes(1);
+      expect(
+        telemetryMocks.logMemoryMigration.mock.calls[0]?.[1],
+      ).toMatchObject({
+        status: 'failed',
+        failure_reason: 'Index rebuild failed',
+        committed: 1,
+        failed: 0,
+        remaining_legacy_files: 0,
+      });
+      for (let attempt = 1; attempt < 3; attempt++) {
+        const retry = await manager.scheduleMetadataMigration(params);
+        expect(retry.status).toBe('scheduled');
+        await retry.promise;
+      }
+      await expect(manager.scheduleMetadataMigration(params)).resolves.toEqual({
+        status: 'skipped',
+        skippedReason: 'stalled',
+      });
+      expect(
+        metadataMigration.runMemoryMetadataMigration,
+      ).toHaveBeenCalledTimes(3);
     });
 
     it('tells the manual dream gate that the migration has stalled', async () => {
