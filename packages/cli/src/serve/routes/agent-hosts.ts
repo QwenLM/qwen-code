@@ -55,6 +55,20 @@ function readWaitMs(value: unknown): number | undefined {
 const MAX_RESULT_SUMMARY = 262_144;
 const MAX_RESULT_ERROR = 4_096;
 
+/**
+ * A Host's reported spend: absent, or a whole non-negative number. The cap is
+ * far above any real turn and only keeps a hostile value out of the ledger.
+ */
+function readHostTokens(value: unknown): number | undefined | 'invalid' {
+  if (value === undefined) return undefined;
+  return typeof value === 'number' &&
+    Number.isSafeInteger(value) &&
+    value >= 0 &&
+    value <= 1_000_000_000
+    ? value
+    : 'invalid';
+}
+
 function readHostResult(
   input: Record<string, unknown>,
   hostId: string,
@@ -66,7 +80,9 @@ function readHostResult(
   const status = input['status'];
   const error = input['error'];
   const rawClose = input['close'];
+  const tokens = readHostTokens(input['tokens']);
   if (
+    tokens === 'invalid' ||
     typeof threadId !== 'string' ||
     typeof runId !== 'string' ||
     typeof leaseId !== 'string' ||
@@ -105,6 +121,7 @@ function readHostResult(
     status,
     ...(close ? { close } : {}),
     ...(errorText ? { error: errorText } : {}),
+    ...(tokens !== undefined ? { tokens } : {}),
   };
 }
 
@@ -203,9 +220,12 @@ export function registerAgentHostTransportRoutes(
         outputText,
         thoughtText,
         steps: rawSteps,
+        tokens: rawTokens,
       } = body(req);
       const steps = parseHostRunSteps(rawSteps);
+      const tokens = readHostTokens(rawTokens);
       if (
+        tokens === 'invalid' ||
         typeof threadId !== 'string' ||
         typeof runId !== 'string' ||
         typeof leaseId !== 'string' ||
@@ -247,6 +267,7 @@ export function registerAgentHostTransportRoutes(
         outputText,
         thoughtText,
         ...(steps ? { steps } : {}),
+        ...(tokens !== undefined ? { tokens } : {}),
       });
       res.status(result.ok ? 200 : 409).json(result);
     },

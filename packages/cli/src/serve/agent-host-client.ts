@@ -324,11 +324,17 @@ async function executeAssignment(
     outputText: '',
     thoughtText: '',
   };
+  // Set once a program that can measure its spend (Qwen Code, through the
+  // session's stats) has started; Codex and Claude report none. Without it the
+  // coordinator never charged a remote run, and a tree could spend past its
+  // budget on another machine.
+  let measureTokens: (() => Promise<number | undefined>) | undefined;
   let sending = false;
   const flush = async () => {
     if (sending) return;
     sending = true;
     try {
+      const tokens = await measureTokens?.();
       await requestJson(
         `${credential.serverUrl}/agent-hosts/${encodeURIComponent(credential.workspaceId)}/${encodeURIComponent(credential.hostId)}/progress`,
         {
@@ -344,6 +350,7 @@ async function executeAssignment(
             runId: assignment.runId,
             leaseId: assignment.lease.leaseId,
             attempt: assignment.attempt,
+            ...(tokens !== undefined ? { tokens } : {}),
           }),
         },
       );
@@ -494,6 +501,28 @@ async function executeAssignment(
       ).catch((error: unknown) => {
         if (!updates.signal.aborted) execution.abort(error);
       });
+      const sessionTotal = async (): Promise<number | undefined> => {
+        try {
+          const stats = await options.bridge.getSessionStatsStatus(sessionId);
+          return Object.values(stats.models).reduce(
+            (total, model) => total + (model.tokens?.total ?? 0),
+            0,
+          );
+        } catch {
+          return undefined;
+        }
+      };
+      // The session carries earlier turns on this thread; only what this
+      // attempt adds is its spend.
+      const baseline = await sessionTotal();
+      if (baseline !== undefined) {
+        measureTokens = async () => {
+          const total = await sessionTotal();
+          return total === undefined
+            ? undefined
+            : Math.max(0, total - baseline);
+        };
+      }
       report('waiting', 'Qwen Code 已接单，等待模型回复');
       await options.bridge.sendPrompt(
         sessionId,
@@ -537,6 +566,7 @@ async function executeAssignment(
   if (!summary) {
     throw new Error('Managed Agent finished without a final answer.');
   }
+  const tokens = await measureTokens?.();
   return {
     threadId: assignment.threadId,
     runId: assignment.runId,
@@ -545,6 +575,7 @@ async function executeAssignment(
     attempt: assignment.attempt,
     status: 'completed',
     close: { kind: 'review', summary },
+    ...(tokens !== undefined ? { tokens } : {}),
   };
 }
 

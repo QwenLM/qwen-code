@@ -209,6 +209,32 @@ export interface HostRunResult {
   status: 'completed' | 'failed' | 'cancelled';
   close?: RunCloseRequest;
   error?: string;
+  /** Tokens this attempt spent, when the Host's program can measure them. */
+  tokens?: number;
+}
+
+/** The usage round a Host's cumulative spend for an attempt is recorded under. */
+const HOST_USAGE_ROUND = 1;
+
+/**
+ * Records a Host's cumulative spend for one attempt. Reports can arrive out of
+ * order, so the ledger only moves up; without this a remote run was never
+ * charged at all, and a tree could spend past its budget on another machine.
+ */
+function withHostUsage(
+  usageByRound: ThreadRun['usageByRound'],
+  attempt: number,
+  tokens: number | undefined,
+): ThreadRun['usageByRound'] {
+  if (tokens === undefined) return usageByRound;
+  const isEntry = (usage: ThreadRun['usageByRound'][number]) =>
+    usage.attempt === attempt && usage.round === HOST_USAGE_ROUND;
+  const recorded = usageByRound.find(isEntry)?.tokens ?? 0;
+  if (tokens <= recorded) return usageByRound;
+  return [
+    ...usageByRound.filter((usage) => !isEntry(usage)),
+    { attempt, round: HOST_USAGE_ROUND, tokens },
+  ].sort((a, b) => a.attempt - b.attempt || a.round - b.round);
 }
 
 function liveLease(
@@ -286,6 +312,7 @@ export async function reportHostRunProgress(
     outputText?: string;
     thoughtText?: string;
     steps?: RunStep[];
+    tokens?: number;
   },
 ) {
   return withAgentStoreTransaction(projectRoot, async (transaction) => {
@@ -327,6 +354,11 @@ export async function reportHostRunProgress(
         ? previous.steps
         : (input.steps ?? previous?.steps);
     if (steps) run.progress.steps = steps;
+    run.usageByRound = withHostUsage(
+      run.usageByRound,
+      input.attempt,
+      input.tokens,
+    );
     await transaction.writeThread(thread);
     return { ok: true };
   });
@@ -690,6 +722,11 @@ export async function applyHostRunResult(
         ...target,
         consumedMessageIds: Array.from(
           new Set([...target.consumedMessageIds, ...target.acceptedMessageIds]),
+        ),
+        usageByRound: withHostUsage(
+          target.usageByRound,
+          input.attempt,
+          input.tokens,
         ),
       })),
     );

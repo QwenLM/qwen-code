@@ -283,6 +283,51 @@ describe('host progress steps', () => {
     const run = (await readThread(PROJECT_ROOT, threadId))?.runs[0];
     expect(run?.progress?.steps).toEqual(steps);
   });
+
+  it('charges the spend a host reports, and never lowers it', async () => {
+    // A remote run used to be charged nothing, so a tree could spend past its
+    // budget on another machine without admission or the running check seeing
+    // it.
+    const mine = await host('mine', ['qwen']);
+    await placeAgent([mine]);
+    const threadId = await seedQueued();
+    const assignment = (await pickupRunForHost(PROJECT_ROOT, mine))!;
+    const report = (sequence: number, tokens: number) =>
+      reportHostRunProgress(PROJECT_ROOT, {
+        threadId,
+        runId: 'rn_1',
+        hostId: mine,
+        leaseId: assignment.lease.leaseId,
+        attempt: assignment.attempt,
+        sequence,
+        stage: 'responding',
+        detail: '',
+        tokens,
+      });
+
+    await report(2, 1_200);
+    await report(3, 900);
+    let run = (await readThread(PROJECT_ROOT, threadId))?.runs[0];
+    expect(run?.usageByRound).toEqual([
+      { attempt: assignment.attempt, round: 1, tokens: 1_200 },
+    ]);
+
+    await applyHostRunResult(PROJECT_ROOT, {
+      threadId,
+      runId: 'rn_1',
+      hostId: mine,
+      leaseId: assignment.lease.leaseId,
+      attempt: assignment.attempt,
+      status: 'completed',
+      close: { kind: 'review', summary: 'done' },
+      tokens: 2_000,
+    });
+    run = (await readThread(PROJECT_ROOT, threadId))?.runs[0];
+    expect(run?.status).toBe('completed');
+    expect(run?.usageByRound).toEqual([
+      { attempt: assignment.attempt, round: 1, tokens: 2_000 },
+    ]);
+  });
 });
 
 describe('removeAgentHost', () => {
