@@ -3291,6 +3291,18 @@ class RuntimeBrokerServiceTest {
         }
 
         @Override
+        public ToolExecutionRecord resolveUnsettled(ToolExecutionRecord expected,
+                Map<String, Object> result, Instant time) {
+            return delegate.resolveUnsettled(expected, result, time);
+        }
+
+        @Override
+        public List<ToolExecutionRecord> findUnsettled(RuntimeSessionRecord session,
+                String afterExecutionCallId, int limit) {
+            return delegate.findUnsettled(session, afterExecutionCallId, limit);
+        }
+
+        @Override
         public boolean hasActiveByBinding(String bindingId,
                 long runtimeGeneration) {
             return delegate.hasActiveByBinding(bindingId,
@@ -3409,6 +3421,18 @@ class RuntimeBrokerServiceTest {
         @Override
         public boolean hasActiveByRuntimeSession(String runtimeSessionId) {
             return delegate.hasActiveByRuntimeSession(runtimeSessionId);
+        }
+
+        @Override
+        public ToolExecutionRecord resolveUnsettled(ToolExecutionRecord expected,
+                Map<String, Object> result, Instant time) {
+            return delegate.resolveUnsettled(expected, result, time);
+        }
+
+        @Override
+        public List<ToolExecutionRecord> findUnsettled(RuntimeSessionRecord session,
+                String afterExecutionCallId, int limit) {
+            return delegate.findUnsettled(session, afterExecutionCallId, limit);
         }
 
         @Override

@@ -4,6 +4,12 @@
 
 ## 状态
 
+**优先级更新（2026-09-28）：** 保留已合入的 B2d 基础。普通宿主 Managed 引擎的
+剩余工作（M2、M4–M6）后置到 Hosted Managed 首个可交付闭环之后，不是该闭环的
+前置条件。M1 与 M3 已实现并保留，本地引擎仍未注册。排期与按需子进程宿主决定见
+[引擎状态](./2026-09-27-ordinary-host-managed-engine.zh-CN.md#状态)及 #12737。
+本决定不推迟 Hosted 的 Runtime/Broker 工作与恢复验证。
+
 #12737 的 B2d 切片设计，属于 #12380 的 Stage B 宿主接入，基于上游 `663d98eac5`。
 已由 #12828 在 `--experimental-paired-engines` 开关之后实现，未注册 Managed 引擎。它把 #12737 中已决定的选择与范围规则
 （[Q1/Q4](https://github.com/QwenLM/qwen-code/issues/12737#issuecomment-5846602143)）

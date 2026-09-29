@@ -151,6 +151,10 @@ describe('HookEventHandler', () => {
       expect(mockHookPlanner.createExecutionPlan).toHaveBeenCalledWith(
         HookEventName.UserPromptSubmit,
         undefined,
+        expect.objectContaining({
+          runtimeId: expect.any(String),
+          sessionId: 'test-session-id',
+        }),
       );
       expect(result.success).toBe(true);
     });
@@ -270,6 +274,10 @@ describe('HookEventHandler', () => {
         {
           filePath: '/repo/.qwen/QWEN.local.md',
         },
+        expect.objectContaining({
+          runtimeId: expect.any(String),
+          sessionId: 'test-session-id',
+        }),
       );
 
       const mockCalls = (mockHookRunner.executeHooksParallel as Mock).mock
@@ -307,6 +315,10 @@ describe('HookEventHandler', () => {
       expect(mockHookPlanner.createExecutionPlan).toHaveBeenCalledWith(
         HookEventName.UserPromptExpansion,
         { commandName: 'goal' },
+        expect.objectContaining({
+          runtimeId: expect.any(String),
+          sessionId: 'test-session-id',
+        }),
       );
       expect(result.success).toBe(true);
     });
@@ -360,6 +372,10 @@ describe('HookEventHandler', () => {
       expect(mockHookPlanner.createExecutionPlan).toHaveBeenCalledWith(
         HookEventName.Stop,
         undefined,
+        expect.objectContaining({
+          runtimeId: expect.any(String),
+          sessionId: 'test-session-id',
+        }),
       );
       expect(result.success).toBe(true);
     });
@@ -627,6 +643,10 @@ describe('HookEventHandler', () => {
       expect(mockHookPlanner.createExecutionPlan).toHaveBeenCalledWith(
         HookEventName.MessageDisplay,
         undefined,
+        expect.objectContaining({
+          runtimeId: expect.any(String),
+          sessionId: 'test-session-id',
+        }),
       );
       expect(result.success).toBe(true);
     });
@@ -701,6 +721,10 @@ describe('HookEventHandler', () => {
       expect(mockHookPlanner.createExecutionPlan).toHaveBeenCalledWith(
         HookEventName.SessionStart,
         { trigger: SessionStartSource.Startup },
+        expect.objectContaining({
+          runtimeId: expect.any(String),
+          sessionId: 'test-session-id',
+        }),
       );
       expect(result.success).toBe(true);
     });
@@ -874,6 +898,10 @@ describe('HookEventHandler', () => {
       expect(mockHookPlanner.createExecutionPlan).toHaveBeenCalledWith(
         HookEventName.SessionEnd,
         { trigger: SessionEndReason.Clear },
+        expect.objectContaining({
+          runtimeId: expect.any(String),
+          sessionId: 'test-session-id',
+        }),
       );
       expect(result.success).toBe(true);
     });
@@ -957,6 +985,10 @@ describe('HookEventHandler', () => {
       expect(mockHookPlanner.createExecutionPlan).toHaveBeenCalledWith(
         HookEventName.SessionDelete,
         undefined,
+        expect.objectContaining({
+          runtimeId: expect.any(String),
+          sessionId: 'test-session-id',
+        }),
       );
       const input = (mockHookRunner.executeHooksParallel as Mock).mock
         .calls[0][2] as {
@@ -1578,6 +1610,10 @@ describe('HookEventHandler', () => {
       expect(mockHookPlanner.createExecutionPlan).toHaveBeenCalledWith(
         HookEventName.PostToolBatch,
         undefined,
+        expect.objectContaining({
+          runtimeId: expect.any(String),
+          sessionId: 'test-session-id',
+        }),
       );
       expect(result.success).toBe(true);
     });
@@ -1654,6 +1690,10 @@ describe('HookEventHandler', () => {
       expect(mockHookPlanner.createExecutionPlan).toHaveBeenCalledWith(
         HookEventName.PostToolUseFailure,
         { toolName: 'test-tool' },
+        expect.objectContaining({
+          runtimeId: expect.any(String),
+          sessionId: 'test-session-id',
+        }),
       );
       expect(result.success).toBe(true);
     });
@@ -1751,7 +1791,11 @@ describe('HookEventHandler', () => {
 
       expect(mockHookPlanner.createExecutionPlan).toHaveBeenCalledWith(
         HookEventName.PostToolUseFailure,
-        { toolName: 'special-tool' }, // Context with tool name
+        { toolName: 'special-tool' },
+        expect.objectContaining({
+          runtimeId: expect.any(String),
+          sessionId: 'test-session-id',
+        }), // Context with tool name
       );
     });
 
@@ -1999,6 +2043,10 @@ describe('HookEventHandler', () => {
       expect(mockHookPlanner.createExecutionPlan).toHaveBeenCalledWith(
         HookEventName.PreToolUse,
         { toolName: 'test-tool' },
+        expect.objectContaining({
+          runtimeId: expect.any(String),
+          sessionId: 'test-session-id',
+        }),
       );
       expect(result.success).toBe(true);
     });
@@ -2059,6 +2107,10 @@ describe('HookEventHandler', () => {
       expect(mockHookPlanner.createExecutionPlan).toHaveBeenCalledWith(
         HookEventName.PreToolUse,
         { toolName: 'Bash' },
+        expect.objectContaining({
+          runtimeId: expect.any(String),
+          sessionId: 'test-session-id',
+        }),
       );
     });
 
@@ -2347,6 +2399,10 @@ describe('HookEventHandler', () => {
       expect(mockHookPlanner.createExecutionPlan).toHaveBeenCalledWith(
         HookEventName.PostToolUse,
         { toolName: 'test-tool' },
+        expect.objectContaining({
+          runtimeId: expect.any(String),
+          sessionId: 'test-session-id',
+        }),
       );
       expect(result.success).toBe(true);
     });
@@ -2411,6 +2467,10 @@ describe('HookEventHandler', () => {
       expect(mockHookPlanner.createExecutionPlan).toHaveBeenCalledWith(
         HookEventName.PostToolUse,
         { toolName: 'Write' },
+        expect.objectContaining({
+          runtimeId: expect.any(String),
+          sessionId: 'test-session-id',
+        }),
       );
     });
 
@@ -2518,6 +2578,10 @@ describe('HookEventHandler', () => {
       expect(mockHookPlanner.createExecutionPlan).toHaveBeenCalledWith(
         HookEventName.PreCompact,
         { trigger: PreCompactTrigger.Manual },
+        expect.objectContaining({
+          runtimeId: expect.any(String),
+          sessionId: 'test-session-id',
+        }),
       );
       expect(result.success).toBe(true);
     });
@@ -2539,6 +2603,10 @@ describe('HookEventHandler', () => {
       expect(mockHookPlanner.createExecutionPlan).toHaveBeenCalledWith(
         HookEventName.PreCompact,
         { trigger: PreCompactTrigger.Auto },
+        expect.objectContaining({
+          runtimeId: expect.any(String),
+          sessionId: 'test-session-id',
+        }),
       );
       expect(result.success).toBe(true);
     });
@@ -2617,6 +2685,10 @@ describe('HookEventHandler', () => {
       expect(mockHookPlanner.createExecutionPlan).toHaveBeenCalledWith(
         HookEventName.PreCompact,
         { trigger: PreCompactTrigger.Manual },
+        expect.objectContaining({
+          runtimeId: expect.any(String),
+          sessionId: 'test-session-id',
+        }),
       );
     });
 
@@ -2742,6 +2814,10 @@ describe('HookEventHandler', () => {
       expect(mockHookPlanner.createExecutionPlan).toHaveBeenCalledWith(
         HookEventName.Notification,
         { notificationType: 'permission_prompt' },
+        expect.objectContaining({
+          runtimeId: expect.any(String),
+          sessionId: 'test-session-id',
+        }),
       );
       expect(result.success).toBe(true);
     });
@@ -2798,6 +2874,10 @@ describe('HookEventHandler', () => {
       expect(mockHookPlanner.createExecutionPlan).toHaveBeenCalledWith(
         HookEventName.Notification,
         { notificationType: 'idle_prompt' },
+        expect.objectContaining({
+          runtimeId: expect.any(String),
+          sessionId: 'test-session-id',
+        }),
       );
     });
 
@@ -2851,6 +2931,10 @@ describe('HookEventHandler', () => {
       expect(mockHookPlanner.createExecutionPlan).toHaveBeenCalledWith(
         HookEventName.Notification,
         { notificationType: 'auth_success' },
+        expect.objectContaining({
+          runtimeId: expect.any(String),
+          sessionId: 'test-session-id',
+        }),
       );
       expect(result.success).toBe(true);
     });
@@ -2874,6 +2958,10 @@ describe('HookEventHandler', () => {
       expect(mockHookPlanner.createExecutionPlan).toHaveBeenCalledWith(
         HookEventName.Notification,
         { notificationType: 'elicitation_dialog' },
+        expect.objectContaining({
+          runtimeId: expect.any(String),
+          sessionId: 'test-session-id',
+        }),
       );
       expect(result.success).toBe(true);
     });
@@ -3000,6 +3088,10 @@ describe('HookEventHandler', () => {
       expect(mockHookPlanner.createExecutionPlan).toHaveBeenCalledWith(
         HookEventName.PermissionRequest,
         { toolName: 'Bash' },
+        expect.objectContaining({
+          runtimeId: expect.any(String),
+          sessionId: 'test-session-id',
+        }),
       );
       expect(result.success).toBe(true);
     });
@@ -3094,6 +3186,10 @@ describe('HookEventHandler', () => {
       expect(mockHookPlanner.createExecutionPlan).toHaveBeenCalledWith(
         HookEventName.PermissionRequest,
         { toolName: 'ReadFile' },
+        expect.objectContaining({
+          runtimeId: expect.any(String),
+          sessionId: 'test-session-id',
+        }),
       );
     });
 
@@ -3292,6 +3388,10 @@ describe('HookEventHandler', () => {
       expect(mockHookPlanner.createExecutionPlan).toHaveBeenCalledWith(
         HookEventName.PermissionDenied,
         { toolName: 'Bash' },
+        expect.objectContaining({
+          runtimeId: expect.any(String),
+          sessionId: 'test-session-id',
+        }),
       );
       expect(result.success).toBe(true);
     });
@@ -3356,6 +3456,10 @@ describe('HookEventHandler', () => {
       expect(mockHookPlanner.createExecutionPlan).toHaveBeenCalledWith(
         HookEventName.SubagentStart,
         { agentType: 'code-reviewer' },
+        expect.objectContaining({
+          runtimeId: expect.any(String),
+          sessionId: 'test-session-id',
+        }),
       );
       expect(result.success).toBe(true);
     });
@@ -3414,6 +3518,10 @@ describe('HookEventHandler', () => {
       expect(mockHookPlanner.createExecutionPlan).toHaveBeenCalledWith(
         HookEventName.SubagentStart,
         { agentType: String(AgentType.Bash) },
+        expect.objectContaining({
+          runtimeId: expect.any(String),
+          sessionId: 'test-session-id',
+        }),
       );
     });
 
@@ -3519,6 +3627,10 @@ describe('HookEventHandler', () => {
       expect(mockHookPlanner.createExecutionPlan).toHaveBeenCalledWith(
         HookEventName.SubagentStop,
         { agentType: 'code-reviewer' },
+        expect.objectContaining({
+          runtimeId: expect.any(String),
+          sessionId: 'test-session-id',
+        }),
       );
       expect(result.success).toBe(true);
     });
@@ -3589,6 +3701,10 @@ describe('HookEventHandler', () => {
       expect(mockHookPlanner.createExecutionPlan).toHaveBeenCalledWith(
         HookEventName.SubagentStop,
         { agentType: 'custom-agent' },
+        expect.objectContaining({
+          runtimeId: expect.any(String),
+          sessionId: 'test-session-id',
+        }),
       );
     });
 
@@ -3743,6 +3859,10 @@ describe('HookEventHandler', () => {
       expect(mockHookPlanner.createExecutionPlan).toHaveBeenCalledWith(
         HookEventName.StopFailure,
         { error: 'rate_limit' },
+        expect.objectContaining({
+          runtimeId: expect.any(String),
+          sessionId: 'test-session-id',
+        }),
       );
       expect(result.success).toBe(true);
     });
@@ -3797,6 +3917,10 @@ describe('HookEventHandler', () => {
       expect(mockHookPlanner.createExecutionPlan).toHaveBeenCalledWith(
         HookEventName.StopFailure,
         { error: 'server_error' },
+        expect.objectContaining({
+          runtimeId: expect.any(String),
+          sessionId: 'test-session-id',
+        }),
       );
     });
 
@@ -3897,6 +4021,10 @@ describe('HookEventHandler', () => {
       expect(mockHookPlanner.createExecutionPlan).toHaveBeenCalledWith(
         HookEventName.PostCompact,
         { trigger: PostCompactTrigger.Manual },
+        expect.objectContaining({
+          runtimeId: expect.any(String),
+          sessionId: 'test-session-id',
+        }),
       );
       expect(result.success).toBe(true);
     });
@@ -3919,6 +4047,10 @@ describe('HookEventHandler', () => {
       expect(mockHookPlanner.createExecutionPlan).toHaveBeenCalledWith(
         HookEventName.PostCompact,
         { trigger: PostCompactTrigger.Auto },
+        expect.objectContaining({
+          runtimeId: expect.any(String),
+          sessionId: 'test-session-id',
+        }),
       );
       expect(result.success).toBe(true);
     });
@@ -3974,6 +4106,10 @@ describe('HookEventHandler', () => {
       expect(mockHookPlanner.createExecutionPlan).toHaveBeenCalledWith(
         HookEventName.PostCompact,
         { trigger: PostCompactTrigger.Auto },
+        expect.objectContaining({
+          runtimeId: expect.any(String),
+          sessionId: 'test-session-id',
+        }),
       );
     });
 
