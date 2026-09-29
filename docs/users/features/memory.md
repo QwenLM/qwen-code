@@ -115,8 +115,10 @@ Automatic extraction is instructed to leave pinned records and their valid
 index entries unchanged, while Dream is instructed to skip `pinned/` during
 consolidation. Both automatic extraction and forked Dream workers, including
 background cleanup, enforce the pinned-file boundary on their write and edit
-tools, including paths that resolve through a symlink into `pinned/`; their
-existing read-only shell policy blocks command-line deletion. You still control
+tools, including paths that resolve through a symlink into `pinned/`.
+Command-line deletion is closed off too: only the project Dream worker holds a
+shell, and its policy is read-only, while automatic extraction and the
+user-memory Dream worker hold no shell at all. You still control
 these files directly and can remove them with an explicit `/forget` request.
 
 > **Note:** The visible `/dream` slash command runs on the main Agent. It

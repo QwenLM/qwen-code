@@ -160,6 +160,62 @@ class ManagedContextRecoveryTest {
     }
 
     @Test
+    void unadmittedLegacyStartupDoesNotBlockAnotherWorkspace() {
+        RuntimeScope base = REQUEST.getScope();
+        RuntimeScope firstScope = new RuntimeScope(base.getTenantId(),
+                "legacy-workspace-a", base.getWorkspaceGeneration(),
+                base.getCanonicalCwd(), base.getCapabilityDigest(), "session");
+        RuntimeScope secondScope = new RuntimeScope(base.getTenantId(),
+                "legacy-workspace-b", base.getWorkspaceGeneration(),
+                base.getCanonicalCwd(), base.getCapabilityDigest(), "session");
+        RuntimeProvisionRequest first = new RuntimeProvisionRequest(firstScope,
+                "legacy-harness-a", "local-process");
+        RuntimeProvisionRequest second = new RuntimeProvisionRequest(secondScope,
+                "legacy-harness-b", "local-process");
+        RuntimeScope thirdScope = new RuntimeScope(base.getTenantId(),
+                "legacy-workspace-c", base.getWorkspaceGeneration(),
+                base.getCanonicalCwd(), base.getCapabilityDigest(), "session");
+        RuntimeProvisionRequest third = new RuntimeProvisionRequest(thirdScope,
+                "legacy-harness-c", "local-process");
+        DataSource source = database();
+        JdbcRuntimeBrokerSchema.initialize(source);
+        for (RuntimeBindingRepository bindings : List.of(
+                new InMemoryRuntimeBindingRepository(), repository(source))) {
+            RuntimeBindingRecord initial = bindings.findOrCreate(first);
+            RuntimeBindingRecord claimed = bindings.claimOperation(
+                    initial.getBindingId(), "owner", Duration.ofMinutes(1));
+            RuntimeBindingRecord handle = bindings.compareAndSet(claimed,
+                    claimed.withResourceHandle(HANDLE, Instant.now()));
+            RuntimeBindingRecord blocked = bindings.compareAndSet(handle,
+                    handle.withState(RuntimeBindingRecord.State.RECOVERY_BLOCKED,
+                            null, Instant.now()));
+
+            assertEquals(blocked.getBindingId(),
+                    bindings.findOrCreate(first).getBindingId());
+            RuntimeBindingRecord next = bindings.findOrCreate(second);
+            assertNotEquals(blocked.getBindingId(), next.getBindingId());
+
+            RuntimeBindingRecord nextClaim = bindings.claimOperation(
+                    next.getBindingId(), "owner", Duration.ofMinutes(1));
+            RuntimeProvisionSeed seed = nextClaim.getProvisionSeed();
+            RuntimeLease lease = new RuntimeLease(seed.getProvisionalRuntimeId(),
+                    URI.create("http://127.0.0.1:12345"), seed.getToken(),
+                    seed.getLeaseId(), seed.getEpoch());
+            RuntimeBindingRecord ready = bindings.compareAndSet(nextClaim,
+                    nextClaim.withAttestation(lease, HANDLE, Instant.now(),
+                            Instant.now()));
+            bindings.compareAndSet(ready, ready.withState(
+                    RuntimeBindingRecord.State.RECOVERY_BLOCKED, null,
+                    Instant.now()));
+            RuntimeBrokerException refusal = assertThrows(
+                    RuntimeBrokerException.class,
+                    () -> bindings.findOrCreate(third));
+            assertEquals("runtime_placement_recovery_required",
+                    refusal.getCode());
+        }
+    }
+
+    @Test
     void persistedMarkerBeforeSpawnBlocksTheFirstCallAfterRestart() throws Exception {
         DataSource source = database();
         JdbcRuntimeBrokerSchema.initialize(source);
