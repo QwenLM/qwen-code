@@ -325,9 +325,13 @@ jobs:
         run: 'node scripts/check-failsafe-reports.js hosted packages/sdk-java/managed-agent-server'
       - name: 'Check Hosted latency measurements'
         run: |-
-          test -s packages/sdk-java/managed-agent-server/target/hosted-latency-baseline.json
-          cd integration-tests
-          npx vitest run cli/hosted-latency-baseline.test.ts
+          if grep -q '@Disabled' packages/sdk-java/managed-agent-server/src/test/java/com/alibaba/qwen/code/managedagent/HostedWorkspaceToolTurnIT.java; then
+            echo 'HostedWorkspaceToolTurnIT is @Disabled on this branch, so no latency baseline is produced; skipping.'
+          else
+            test -s packages/sdk-java/managed-agent-server/target/hosted-latency-baseline.json
+            cd integration-tests
+            npx vitest run cli/hosted-latency-baseline.test.ts
+          fi
       - name: 'Run Runtime Broker fault gates'
         timeout-minutes: 10
         env:
