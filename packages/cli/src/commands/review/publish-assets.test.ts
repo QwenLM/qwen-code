@@ -351,26 +351,11 @@ describe('publish-assets', () => {
     expect(manifest.branch).toBe('pr-assets/8346-review');
   });
 
-  it('folds --reviewed-repo to its upstream before the self-target check', () => {
-    // The flag names the probe TARGET, not the answer: `repo view <fork>`
-    // resolves the fork, and `parent` folds it to the upstream
-    // that hosts the PR. Passing the fork must warn exactly as the CWD-probe
-    // branch does — otherwise the same (review-target, assets-repo) pair warns
-    // or stays silent purely on whether the caller passed the flag. Reverting
-    // the flag branch to `return args.reviewedRepo` reddens this leg while the
-    // CWD-probe test above stays green.
-    process.env['QWEN_REVIEW_ASSETS_REPO'] = 'QwenLM/qwen-code';
-    ghMock.mockImplementation((...args: string[]) => {
-      if (args[0] === 'repo' && args[1] === 'view') {
-        return JSON.stringify({
-          url: 'https://github.com/AaronZ345/qwen-code',
-          owner: { login: 'AaronZ345' },
-          name: 'qwen-code',
-          parent: { owner: { login: 'QwenLM' }, name: 'qwen-code' },
-        });
-      }
-      return args.includes('.object.sha') ? 'headsha1234567890' : '{}';
-    });
+  it('treats --reviewed-repo as the authoritative self-target identity', () => {
+    process.env['QWEN_REVIEW_ASSETS_REPO'] = 'AaronZ345/qwen-code';
+    ghMock.mockImplementation((...args: string[]) =>
+      args.includes('.object.sha') ? 'headsha1234567890' : '{}',
+    );
     ghWithInputMock.mockImplementation(() => '{}');
 
     run({
@@ -378,20 +363,40 @@ describe('publish-assets', () => {
       reviewedRepo: 'AaronZ345/qwen-code',
     });
 
-    expect(ghMock).toHaveBeenCalledWith(
-      'repo',
-      'view',
-      'AaronZ345/qwen-code',
-      '--json',
-      'owner,name,url,parent',
+    const repoViewCalls = ghMock.mock.calls.filter(
+      ([group, command]) => group === 'repo' && command === 'view',
     );
+    expect(repoViewCalls).toHaveLength(0);
     expect(process.exitCode).toBeUndefined();
-    const stderr = (stderrSpy.mock.calls.map((c) => c[0]) as string[]).join(
+    const stderr = (stderrSpy.mock.calls.map((call) => call[0]) as string[]).join(
       '\n',
     );
     expect(stderr).toContain(
       'QWEN_REVIEW_ASSETS_REPO points at the reviewed repository',
     );
+  });
+
+  it('does not fold an explicit fork target to its parent', () => {
+    process.env['QWEN_REVIEW_ASSETS_REPO'] = 'QwenLM/qwen-code';
+    ghMock.mockImplementation((...args: string[]) =>
+      args.includes('.object.sha') ? 'headsha1234567890' : '{}',
+    );
+    ghWithInputMock.mockImplementation(() => '{}');
+
+    run({
+      files: [pngFile('evidence.png')],
+      reviewedRepo: 'AaronZ345/qwen-code',
+    });
+
+    const repoViewCalls = ghMock.mock.calls.filter(
+      ([group, command]) => group === 'repo' && command === 'view',
+    );
+    expect(repoViewCalls).toHaveLength(0);
+    expect(process.exitCode).toBeUndefined();
+    const stderr = (stderrSpy.mock.calls.map((call) => call[0]) as string[]).join(
+      '\n',
+    );
+    expect(stderr).not.toContain('points at the reviewed repository');
   });
 
   it('stays silent when the assets repo is a different repository', () => {
