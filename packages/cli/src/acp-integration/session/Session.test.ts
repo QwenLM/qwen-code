@@ -18491,6 +18491,11 @@ describe('Session', () => {
                 throw new Error('policy store unavailable');
               return false;
             }),
+            // No PM rules are configured here, so the independent sibling call
+            // is governed by its own `getDefaultPermission: 'allow'`. Without
+            // this stub `evaluatePermissionRules` throws on the sibling and its
+            // functionResponse carries the TypeError instead of its output.
+            hasRelevantRules: vi.fn().mockReturnValue(false),
           });
           const bridge = {
             name: core.ToolNames.TOOL_CALL,
@@ -18531,12 +18536,10 @@ describe('Session', () => {
               getDefaultPermission: vi.fn().mockResolvedValue('allow'),
               getDescription: () => 'independent call',
               toolLocations: () => [],
-              execute: vi
-                .fn()
-                .mockResolvedValue({
-                  llmContent: 'sibling completed',
-                  returnDisplay: 'sibling completed',
-                }),
+              execute: vi.fn().mockResolvedValue({
+                llmContent: 'sibling completed',
+                returnDisplay: 'sibling completed',
+              }),
             })),
           };
           mockToolRegistry.getTool.mockImplementation((name: string) =>
