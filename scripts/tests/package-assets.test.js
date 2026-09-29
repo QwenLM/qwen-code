@@ -726,9 +726,14 @@ describe('package asset scripts', () => {
       preparePackage({ rootDir, requireNativeAudioCapture: false }),
     ).toThrow('process.exit(1)');
     expect(exit).toHaveBeenCalledWith(1);
+    // verifyBundleArtifacts builds `requiredPath` with path.join, so on Windows
+    // the reported message carries `\`. The two multi-segment entries above
+    // (`mem0/main.js`, `mem0/write-confirmation.js`) are spelled with `/`, so
+    // normalise the separator before matching; otherwise they pass on POSIX and
+    // go red in the test_windows lane (which runs test:scripts).
     expect(
       console.error.mock.calls
-        .map(([message]) => String(message))
+        .map(([message]) => String(message).split(path.sep).join('/'))
         .some(
           (message) =>
             message.includes('Required package artifact not found') &&
