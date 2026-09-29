@@ -17,9 +17,10 @@ import {
   writeFileSync,
 } from 'node:fs';
 import type { Readable } from 'node:stream';
-import { MAX_STATUS_BYTES, parseBwrapStatus } from './bwrap-status.js';
+import { parseLandlockStatus } from './landlock-status.js';
+import { MAX_STATUS_BYTES } from './sandbox-status.js';
 
-const [parentPid, statusPath, payloadEnvPath, bwrap, ...args] =
+const [parentPid, statusPath, payloadEnvPath, runner, ...args] =
   process.argv.slice(2);
 if (process.ppid !== Number(parentPid)) process.exit(1);
 const parentWatch = setInterval(() => {
@@ -62,16 +63,16 @@ if (input.isFIFO()) {
     shareInput = false;
   }
 }
-// Initialize Node's shared output descriptors before bwrap restores blocking
+// Initialize Node's shared output descriptors before the helper restores blocking
 // mode; lazy initialization after spawn would race and re-enable O_NONBLOCK.
 void process.stdout;
 void process.stderr;
-const child = spawn(bwrap, ['--json-status-fd', '3', ...args], {
+const child = spawn(runner, args, {
   stdio: [shareInput ? 'inherit' : 'pipe', 'inherit', 'inherit', 'pipe'],
   env,
 });
 if (!shareInput && child.stdin) {
-  // Host-backed descriptors can bypass mount policy through fd operations.
+  // Host-backed descriptors can bypass filesystem policy through fd operations.
   // Copy their bytes through a relay-owned pipe instead of sharing the fd.
   const sink = child.stdin;
   const source = createReadStream('', { fd: 0, autoClose: false });
@@ -83,7 +84,7 @@ if (!shareInput && child.stdin) {
 let wire = '';
 let bytes = 0;
 let failed = false;
-// Only a bwrap spawn error proves the payload never ran. A status-stream
+// Only a Landlock helper spawn error proves the payload never ran. A status-stream
 // transport error or a wire overflow can happen after the payload has
 // executed, so those must stay unattested (PR #12067 review, round 2).
 let spawnFailed = false;
@@ -102,7 +103,7 @@ child.on('error', () => {
 });
 child.on('close', (code, signal) => {
   clearInterval(parentWatch);
-  // A spawn failure of bwrap itself means the payload provably never ran —
+  // A spawn failure of Landlock helper itself means the payload provably never ran —
   // attest that explicitly so the finalizer can clean up instead of
   // retaining the dirs for inspection. Every other failure mode leaves the
   // field absent: absence of evidence is not evidence of absence.
@@ -112,7 +113,7 @@ child.on('close', (code, signal) => {
       ? spawnFailed
         ? { state: 'unconfirmed', payloadExitObserved: false }
         : { state: 'unconfirmed' }
-      : parseBwrapStatus(wire, code);
+      : parseLandlockStatus(wire, code);
   writeFileSync(fd, JSON.stringify(status));
   closeSync(fd);
   if (signal) process.kill(process.pid, signal);
