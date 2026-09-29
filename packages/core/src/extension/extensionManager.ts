@@ -117,6 +117,8 @@ import {
 import {
   ExtensionConflictError,
   ExtensionStore,
+  getManagedSecretNames,
+  isManagedAbsenceUnproven,
   type ExtensionActivation,
   type ExtensionActivationResult,
   type ExtensionIdentity,
@@ -1499,6 +1501,9 @@ export class ExtensionManager {
               id: extension.id,
               name: extension.name,
               source: extension.source,
+              ...(extension.source === 'managed'
+                ? { managedDirectory: path.basename(extension.path) }
+                : {}),
             })),
             // The store may treat a missing managed identity as a withdrawal
             // only when this process can see the root: an unconfigured or
@@ -1606,6 +1611,9 @@ export class ExtensionManager {
             id: extension.id,
             name: extension.name,
             source: extension.source,
+            ...(extension.source === 'managed'
+              ? { managedDirectory: path.basename(extension.path) }
+              : {}),
           })),
         };
       });
@@ -1990,11 +1998,15 @@ export class ExtensionManager {
       name?: string;
     }> = [];
     let managedRootUnreadable = false;
+    const unprovenManagedNames = new Set<string>();
     const manageds = await this.loadManagedExtensions(
       this.workspaceDir,
       {
         onListFailure: () => {
           managedRootUnreadable = true;
+        },
+        onEntrySkipped: (directory) => {
+          unprovenManagedNames.add(path.basename(directory).toLowerCase());
         },
       },
       (directory, error, name) => {
@@ -2017,7 +2029,8 @@ export class ExtensionManager {
     }
     if (
       managedRootUnreadable ||
-      failedManaged.some((failed) => failed.name === undefined)
+      failedManaged.some((failed) => failed.name === undefined) ||
+      unprovenManagedNames.size > 0
     ) {
       // Absence unproven: an unlistable root or a nameless failure can still
       // be the retained package, so only the store's managed marker can say
@@ -2027,7 +2040,10 @@ export class ExtensionManager {
       const retained = Object.values(snapshot.extensions).some(
         (policy) =>
           policy.managed === true &&
-          policy.name.toLowerCase() === extension.name.toLowerCase(),
+          policy.name.toLowerCase() === extension.name.toLowerCase() &&
+          (managedRootUnreadable ||
+            failedManaged.some((failed) => failed.name === undefined) ||
+            isManagedAbsenceUnproven(policy, unprovenManagedNames)),
       );
       if (retained) {
         throw new ManagedExtensionReadOnlyError(extension.name);
@@ -3822,13 +3838,11 @@ export class ExtensionManager {
           managedNames.add(path.basename(failed.directory).toLowerCase());
           if (failed.name) managedNames.add(failed.name.toLowerCase());
         }
-        for (const skipped of manifestlessManagedDirs) {
-          managedNames.add(skipped);
-        }
         if (
           managedRootUnreadable ||
           failedManaged.some((failed) => failed.name === undefined) ||
-          managedNames.has(policy.name.toLowerCase())
+          managedNames.has(policy.name.toLowerCase()) ||
+          isManagedAbsenceUnproven(policy, manifestlessManagedDirs)
         ) {
           throw new ManagedExtensionReadOnlyError(policy.name);
         }
@@ -3847,29 +3861,52 @@ export class ExtensionManager {
         // directory untouched, and a record that changed concurrently
         // (removePolicy then silently keeps it) fails the release instead of
         // being destroyed under a live policy.
-        const released = await this.extensionStore.removePolicy({
-          id: extensionId,
-          name: policy.name,
-        });
-        if (released.extensions[extensionId] !== undefined) {
+        let secretNames: string[] = [];
+        const released = await this.extensionStore.removePolicy(
+          { id: extensionId, name: policy.name },
+          {
+            beforeRemove: (current) => {
+              if (isManagedAbsenceUnproven(current, manifestlessManagedDirs)) {
+                throw new ManagedExtensionReadOnlyError(current.name);
+              }
+              if (
+                current.managedDirectory !== policy.managedDirectory ||
+                current.managed !== policy.managed
+              ) {
+                throw new ExtensionConflictError(
+                  `Extension "${policy.name}" changed while its withdrawal was being checked.`,
+                );
+              }
+            },
+            onRemoved: (removed) => {
+              secretNames = getManagedSecretNames(removed);
+            },
+          },
+        );
+        if (
+          secretNames.length === 0 ||
+          released.extensions[extensionId] !== undefined
+        ) {
           throw new ExtensionConflictError(
             `Extension "${policy.name}" changed while its release was being committed.`,
           );
         }
         const warnings: NonNullable<ExtensionStoreMutationResult['warnings']> =
           [];
-        try {
-          await clearStoredExtensionSecrets(policy.name, extensionId, [
-            this.workspaceDir,
-          ]);
-        } catch (error) {
-          debugLogger.warn(
-            `Managed extension "${policy.name}" was released, but stored-secret cleanup failed: ${getErrorMessage(error)}`,
-          );
-          warnings.push({
-            code: 'extension_secrets_cleanup_failed',
-            error: getErrorMessage(error),
-          });
+        for (const name of secretNames) {
+          try {
+            await clearStoredExtensionSecrets(name, extensionId, [
+              this.workspaceDir,
+            ]);
+          } catch (error) {
+            debugLogger.warn(
+              `Managed extension "${name}" was released, but stored-secret cleanup failed: ${getErrorMessage(error)}`,
+            );
+            warnings.push({
+              code: 'extension_secrets_cleanup_failed',
+              error: getErrorMessage(error),
+            });
+          }
         }
         try {
           const settingsDirectory = path.join(this.configDir, policy.name);
@@ -4066,14 +4103,23 @@ export class ExtensionManager {
           : { ...extension, installMetadata };
       callback(extension.name, ExtensionUpdateState.CHECKING_FOR_UPDATES);
       promises.push(
-        schedule(
-          async () =>
-            await checkForExtensionUpdate(extensionForUpdate, this, signal),
-        )
+        schedule(async () => {
+          await this.assertUserManagedExtension(extension);
+          return await checkForExtensionUpdate(
+            extensionForUpdate,
+            this,
+            signal,
+          );
+        })
           .then((state) => callback(extension.name, state))
-          .catch(() => {
+          .catch((error) => {
             signal?.throwIfAborted();
-            callback(extension.name, ExtensionUpdateState.ERROR);
+            callback(
+              extension.name,
+              error instanceof ManagedExtensionReadOnlyError
+                ? ExtensionUpdateState.NOT_UPDATABLE
+                : ExtensionUpdateState.ERROR,
+            );
           }),
       );
     }
@@ -4092,10 +4138,17 @@ export class ExtensionManager {
     enableExtensionReloading: boolean = true,
     signal?: AbortSignal,
   ): Promise<ExtensionUpdateInfo | undefined> {
-    if (extension.source === 'managed') {
-      callback(extension.name, ExtensionUpdateState.NOT_UPDATABLE);
+    try {
+      await this.assertUserManagedExtension(extension);
+    } catch (error) {
+      callback(
+        extension.name,
+        error instanceof ManagedExtensionReadOnlyError
+          ? ExtensionUpdateState.NOT_UPDATABLE
+          : ExtensionUpdateState.ERROR,
+      );
+      throw error;
     }
-    await this.assertUserManagedExtension(extension);
     if (currentState === ExtensionUpdateState.UPDATING) {
       return undefined;
     }
@@ -4173,25 +4226,44 @@ export class ExtensionManager {
         callback(extension.name, ExtensionUpdateState.NOT_UPDATABLE);
       }
     }
-    return (
-      await Promise.all(
-        extensions
-          .filter(
-            (extension) =>
-              extension.source !== 'managed' &&
-              extensionsState.get(extension.name)?.status ===
-                ExtensionUpdateState.UPDATE_AVAILABLE,
-          )
-          .map((extension) =>
-            this.updateExtension(
-              extension,
-              extensionsState.get(extension.name)!.status,
-              callback,
-              enableExtensionReloading,
-            ),
-          ),
-      )
-    ).filter((updateInfo) => !!updateInfo);
+    const results = await Promise.allSettled(
+      extensions
+        .filter(
+          (extension) =>
+            extension.source !== 'managed' &&
+            extensionsState.get(extension.name)?.status ===
+              ExtensionUpdateState.UPDATE_AVAILABLE,
+        )
+        .map((extension) => {
+          let lastState: ExtensionUpdateState | undefined;
+          return this.updateExtension(
+            extension,
+            extensionsState.get(extension.name)!.status,
+            (name, state) => {
+              lastState = state;
+              callback(name, state);
+            },
+            enableExtensionReloading,
+          ).catch((error) => {
+            if (
+              lastState === undefined ||
+              lastState === ExtensionUpdateState.UPDATING ||
+              lastState === ExtensionUpdateState.CHECKING_FOR_UPDATES
+            ) {
+              callback(
+                extension.name,
+                error instanceof ManagedExtensionReadOnlyError
+                  ? ExtensionUpdateState.NOT_UPDATABLE
+                  : ExtensionUpdateState.ERROR,
+              );
+            }
+            return undefined;
+          });
+        }),
+    );
+    return results.flatMap((result) =>
+      result.status === 'fulfilled' && result.value ? [result.value] : [],
+    );
   }
 
   async refreshTools(): Promise<void> {

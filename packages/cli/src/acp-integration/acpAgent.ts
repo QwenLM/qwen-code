@@ -14389,7 +14389,7 @@ class QwenAgent implements Agent {
             isWorkspaceTrusted(settings.merged).isTrusted ?? true,
           locale: getCurrentLanguage(),
         });
-        await extensionManager.refreshCache();
+        await extensionManager.refreshCache({ allowManagedHandBack: false });
         const extension = extensionManager
           .getLoadedExtensions()
           .find((item) => item.id === extensionId || item.name === extensionId);

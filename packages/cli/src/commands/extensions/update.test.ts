@@ -32,6 +32,7 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
     UPDATE_AVAILABLE: 'update available',
     UP_TO_DATE: 'up to date',
     ERROR: 'error',
+    NOT_UPDATABLE: 'not updatable',
   },
 }));
 
@@ -241,6 +242,48 @@ describe('handleUpdate', () => {
   });
 
   describe('update all', () => {
+    it('reports failed and skipped entries alongside successful updates', async () => {
+      mockCheckForAllExtensionUpdates.mockImplementationOnce(
+        async (callback) => {
+          callback('retained', ExtensionUpdateState.NOT_UPDATABLE);
+        },
+      );
+      mockUpdateAllUpdatableExtensions.mockImplementationOnce(
+        async (_states, callback) => {
+          callback('broken', ExtensionUpdateState.ERROR);
+          return [
+            {
+              name: 'healthy',
+              originalVersion: '1.0.0',
+              updatedVersion: '2.0.0',
+            },
+          ];
+        },
+      );
+      await handleUpdate({ all: true });
+      expect(mockWriteStderrLine).toHaveBeenCalledWith('broken: error');
+      expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+        'retained: not updatable',
+      );
+      expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+        expect.stringContaining('healthy'),
+      );
+    });
+
+    it('does not describe a failed batch as having no updates', async () => {
+      mockUpdateAllUpdatableExtensions.mockImplementationOnce(
+        async (_states, callback) => {
+          callback('broken', ExtensionUpdateState.ERROR);
+          return [];
+        },
+      );
+      await handleUpdate({ all: true });
+      expect(mockWriteStderrLine).toHaveBeenCalledWith('broken: error');
+      expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
+        'No extensions to update.',
+      );
+    });
+
     it('should show message when no extensions to update', async () => {
       mockCheckForAllExtensionUpdates.mockResolvedValueOnce(undefined);
       mockUpdateAllUpdatableExtensions.mockResolvedValueOnce([]);

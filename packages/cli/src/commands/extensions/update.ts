@@ -113,13 +113,32 @@ export async function handleUpdate(args: UpdateArgs) {
     }
   }
   if (args.all) {
+    const reportedStates = new Map<string, ExtensionUpdateState>();
+    const failures = new Set<string>();
     for (const extension of extensions) {
       if (extension.source === 'managed') {
+        reportedStates.set(extension.name, ExtensionUpdateState.NOT_UPDATABLE);
         writeStdoutLine(
           `Skipping managed extension "${extension.name}": managed by its provider.`,
         );
       }
     }
+    const reportUpdateState = (name: string, state: ExtensionUpdateState) => {
+      if (
+        (state !== ExtensionUpdateState.ERROR &&
+          state !== ExtensionUpdateState.NOT_UPDATABLE) ||
+        reportedStates.get(name) === state
+      )
+        return;
+      reportedStates.set(name, state);
+      const message = `${name}: ${t(state)}`;
+      if (state === ExtensionUpdateState.ERROR) {
+        failures.add(name);
+        writeStderrLine(message);
+      } else {
+        writeStdoutLine(message);
+      }
+    };
     try {
       const extensionState = new Map();
       await extensionManager.checkForAllExtensionUpdates(
@@ -128,17 +147,18 @@ export async function handleUpdate(args: UpdateArgs) {
             status: state,
             processed: true, // No need to process as we will force the update.
           });
+          reportUpdateState(extensionName, state);
         },
       );
       let updateInfos = await extensionManager.updateAllUpdatableExtensions(
         extensionState,
-        () => {},
+        reportUpdateState,
       );
       updateInfos = updateInfos.filter(
         (info) => info.originalVersion !== info.updatedVersion,
       );
       if (updateInfos.length === 0) {
-        writeStdoutLine(t('No extensions to update.'));
+        if (failures.size === 0) writeStdoutLine(t('No extensions to update.'));
         return;
       }
       writeStdoutLine(updateInfos.map((info) => updateOutput(info)).join('\n'));

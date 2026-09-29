@@ -15,6 +15,7 @@ import {
   ExtensionConflictError,
   ExtensionStore,
   ExtensionStoreCorruptError,
+  getManagedSecretNames,
 } from './extension-store.js';
 import {
   ExtensionSettingScope,
@@ -76,6 +77,39 @@ describe('ExtensionStore', () => {
       'utf8',
     );
   };
+
+  it('refuses a cross-name rename of a stable user id until retained managed ownership is handed back', async () => {
+    const store = makeStore();
+    const user = {
+      id: 'e1'.repeat(32),
+      name: 'original',
+      source: 'user' as const,
+    };
+    const managed = {
+      id: 'e2'.repeat(32),
+      name: 'original',
+      source: 'managed' as const,
+    };
+    await store.ensureInitialized([user]);
+    await store.ensureInitialized([managed]);
+    const retained = await store.ensureInitialized([user]);
+    expect(retained.extensions[user.id].managed).toBe(true);
+    const bytes = await fsp.readFile(path.join(storeDir, 'state.json'), 'utf8');
+    await expect(
+      store.ensureInitialized([{ ...user, name: 'renamed' }]),
+    ).rejects.toBeInstanceOf(ExtensionConflictError);
+    expect(await fsp.readFile(path.join(storeDir, 'state.json'), 'utf8')).toBe(
+      bytes,
+    );
+    expect(await store.readSnapshot()).toEqual(retained);
+    await store.ensureInitialized([user], { managedAbsenceProven: true });
+    const renamed = await store.ensureInitialized([
+      { ...user, name: 'renamed' },
+    ]);
+    expect(renamed.extensions[user.id].name).toBe('renamed');
+    expect(renamed.extensions[user.id].managed).toBeUndefined();
+    expect(await store.readSnapshot()).toEqual(renamed);
+  });
 
   it('derives a stable contained Agent Plugin data directory', () => {
     const store = makeStore();
@@ -324,6 +358,8 @@ describe('ExtensionStore', () => {
         };
         delete expectedPolicy.managed;
         delete expectedPolicy.managedName;
+        delete expectedPolicy.managedSecretNames;
+        delete expectedPolicy.managedDirectory;
         delete expectedPolicy.preservedDefaultActivation;
         delete expectedPolicy.preservedWorkspaceOverrides;
         expect(after.extensions).toEqual({ [userIdentity.id]: expectedPolicy });
@@ -3353,6 +3389,225 @@ describe('ExtensionStore', () => {
       expect(JSON.parse(await fsp.readFile(enablementPath, 'utf8'))).toEqual(
         {},
       );
+    },
+  );
+
+  it('retains all managed spellings across restarts without adding a user spelling', async () => {
+    const managedId = 'd1'.repeat(32);
+    const names = ['demo', 'Demo', 'DEMO'];
+    for (const name of names) {
+      await makeStore().ensureInitialized([
+        { id: managedId, name, source: 'managed', managedDirectory: 'bundle' },
+      ]);
+    }
+    const store = makeStore();
+    const before = await store.readSnapshot();
+    expect(before.extensions[managedId]?.managedSecretNames).toEqual(names);
+    const repeated = await store.ensureInitialized([
+      {
+        id: managedId,
+        name: 'DEMO',
+        source: 'managed',
+        managedDirectory: 'bundle',
+      },
+    ]);
+    expect(repeated).toEqual(before);
+
+    const user = { id: 'd2'.repeat(32), name: 'dEmO', source: 'user' as const };
+    const rekeyed = await store.ensureInitialized([user]);
+    expect(rekeyed.extensions[user.id]?.managedSecretNames).toEqual(names);
+    const handedBackNames: string[] = [];
+    const released = await makeStore().ensureInitialized([user], {
+      managedAbsenceProven: true,
+      onManagedHandBack: (name) => handedBackNames.push(name),
+    });
+    expect(handedBackNames).toEqual(names);
+    expect(released.extensions[user.id]?.managedSecretNames).toBeUndefined();
+    expect(released.extensions[user.id]?.managedDirectory).toBeUndefined();
+    expect(released.extensions[user.id]?.managed).toBeUndefined();
+  });
+
+  it('uses the latest observed managed directory for hand-back and read projection', async () => {
+    const store = makeStore();
+    const managed = {
+      id: 'd3'.repeat(32),
+      name: 'demo',
+      source: 'managed' as const,
+    };
+    await store.ensureInitialized([
+      { ...managed, managedDirectory: 'bundle old' },
+    ]);
+    const current = await store.ensureInitialized([
+      { ...managed, managedDirectory: 'bundle 新版本' },
+    ]);
+    expect(current.extensions[managed.id]?.managedDirectory).toBe(
+      'bundle 新版本',
+    );
+    expect(await makeStore().readSnapshot()).toEqual(current);
+    const user = { id: 'd4'.repeat(32), name: 'demo', source: 'user' as const };
+    const onManagedHandBack = vi.fn();
+    const retained = await store.ensureInitialized([user], {
+      managedAbsenceProven: true,
+      unprovenManagedNames: new Set(['bundle 新版本']),
+      onManagedHandBack,
+    });
+    expect(retained.extensions[user.id]?.managed).toBe(true);
+    expect(onManagedHandBack).not.toHaveBeenCalled();
+    expect(
+      store.projectManagedHandBackSnapshot(retained, [user], {
+        managedAbsenceProven: true,
+        unprovenManagedNames: new Set(['bundle 新版本']),
+      }),
+    ).toBe(retained);
+    const released = await store.ensureInitialized([user], {
+      managedAbsenceProven: true,
+      unprovenManagedNames: new Set(['bundle old', 'assets']),
+      onManagedHandBack,
+    });
+    expect(released.extensions[user.id]?.managed).toBeUndefined();
+    expect(onManagedHandBack).toHaveBeenCalledExactlyOnceWith('demo');
+  });
+
+  it('upgrades legacy first/current spellings before a user re-key', async () => {
+    const store = makeStore();
+    const managed = {
+      id: 'd5'.repeat(32),
+      name: 'demo',
+      source: 'managed' as const,
+    };
+    await store.ensureInitialized([managed]);
+    const legacy = await store.ensureInitialized([
+      { ...managed, name: 'DEMO' },
+    ]);
+    delete legacy.extensions[managed.id].managedSecretNames;
+    await fsp.writeFile(
+      path.join(storeDir, 'state.json'),
+      JSON.stringify(legacy),
+    );
+    const user = { id: 'd6'.repeat(32), name: 'dEmO', source: 'user' as const };
+    const upgraded = await makeStore().ensureInitialized([user]);
+    expect(upgraded.extensions[user.id]?.managedSecretNames).toEqual([
+      'demo',
+      'DEMO',
+    ]);
+    expect(await makeStore().ensureInitialized([user])).toEqual(upgraded);
+    expect(upgraded.extensions[user.id]?.managedDirectory).toBeUndefined();
+  });
+
+  it.each([
+    { field: 'managedSecretNames', value: [] },
+    { field: 'managedSecretNames', value: ['demo', 1] },
+    { field: 'managedSecretNames', value: ['../demo'] },
+    { field: 'managedSecretNames', value: ['another-extension'] },
+    { field: 'managedName', value: 'another-extension' },
+    ...['', '.', '..', 'nested/bundle', 'nested\\bundle', 'nul\0bundle'].map(
+      (value) => ({ field: 'managedDirectory', value }),
+    ),
+  ])(
+    'rejects invalid managed metadata $field=$value',
+    async ({ field, value }) => {
+      const store = makeStore();
+      const identity = {
+        id: 'd7'.repeat(32),
+        name: 'demo',
+        source: 'managed' as const,
+      };
+      const snapshot = await store.ensureInitialized([identity]);
+      Object.assign(snapshot.extensions[identity.id], { [field]: value });
+      const invalid = JSON.stringify(snapshot);
+      await fsp.writeFile(path.join(storeDir, 'state.json'), invalid);
+      await fsp.writeFile(path.join(storeDir, 'state.previous.json'), invalid);
+      await expect(makeStore().readSnapshot()).rejects.toBeInstanceOf(
+        ExtensionStoreCorruptError,
+      );
+    },
+  );
+
+  it('captures the actual removed policy after the release is committed', async () => {
+    const store = makeStore();
+    const identity = {
+      id: 'd8'.repeat(32),
+      name: 'demo',
+      source: 'managed' as const,
+    };
+    await store.ensureInitialized([identity]);
+    const oldPolicy = (await store.readSnapshot()).extensions[identity.id];
+    for (const name of ['Demo', 'DEMO', 'demo']) {
+      await makeStore().ensureInitialized([{ ...identity, name }]);
+    }
+    expect(getManagedSecretNames(oldPolicy)).toEqual(['demo']);
+    const captured: string[][] = [];
+    const released = await store.removePolicy(identity, {
+      onRemoved: (policy) => {
+        const persisted = JSON.parse(
+          fs.readFileSync(path.join(storeDir, 'state.json'), 'utf8'),
+        );
+        expect(persisted.extensions[identity.id]).toBeUndefined();
+        captured.push(getManagedSecretNames(policy));
+      },
+    });
+    expect(captured).toEqual([['demo', 'Demo', 'DEMO']]);
+    expect(released.extensions[identity.id]).toBeUndefined();
+    const onMissing = vi.fn();
+    await store.removePolicy(identity, { onRemoved: onMissing });
+    expect(onMissing).not.toHaveBeenCalled();
+  });
+
+  it.each(['install', 'update'] as const)(
+    'refuses %s when only an intermediate managed spelling holds credentials',
+    async (operation) => {
+      const store = makeStore();
+      const managedId = 'd9'.repeat(32);
+      for (const name of ['demo', 'Demo', 'DEMO']) {
+        await makeStore().ensureInitialized([
+          { id: managedId, name, source: 'managed' },
+        ]);
+      }
+      await updateSetting(
+        {
+          name: 'Demo',
+          version: '1.0.0',
+          settings: [
+            {
+              name: 'Token',
+              description: 'token',
+              envVar: 'TOKEN',
+              sensitive: true,
+            },
+          ],
+        },
+        managedId,
+        'TOKEN',
+        async () => 'test-only-middle-spelling',
+        ExtensionSettingScope.USER,
+      );
+      const user = {
+        id: 'da'.repeat(32),
+        name: 'dEmO',
+        source: 'user' as const,
+      };
+      const before = await store.ensureInitialized([user]);
+      const destination = path.join(extensionsDir, user.name);
+      if (operation === 'update') await fsp.mkdir(destination);
+      const staging = await store.createStagingDirectory();
+      await fsp.writeFile(path.join(staging, 'qwen-extension.json'), '{}');
+      await expect(
+        store.commitArtifact({
+          operation,
+          identity: user,
+          destinationDirectory: destination,
+          stagingDirectory: staging,
+          ...(operation === 'install'
+            ? {
+                initialActivation: { scope: 'user' as const },
+                allowManagedPolicyAdoption: true,
+              }
+            : {}),
+          adoptionProbeManagedId: managedId,
+        }),
+      ).rejects.toThrow(/stored credentials/);
+      expect(await store.readSnapshot()).toEqual(before);
+      expect(await hasStoredExtensionSecrets('Demo', managedId)).toBe(true);
     },
   );
 

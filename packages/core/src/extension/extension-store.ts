@@ -83,6 +83,10 @@ export interface ExtensionPolicy {
   // spelling case-sensitively. The hand-back and the secret probes must use
   // this record, or they address a service name the episode never wrote.
   managedName?: string;
+  /** Exact manifest spellings observed during this managed episode. */
+  managedSecretNames?: string[];
+  /** Last successfully discovered directory, relative to the managed root. */
+  managedDirectory?: string;
   artifactDirectory?: string;
   artifactGeneration?: number;
   declarationOnly?: true;
@@ -125,8 +129,9 @@ interface ManagedHandBackOptions {
   // own withdrawal, so the hand-back skips a policy whose name matches one
   // even when absence is otherwise proven.
   unprovenManagedNames?: ReadonlySet<string>;
-  // Fired once per policy whose managed marker the proven-withdrawal
-  // hand-back deletes. Secrets written during the managed episode live
+  // Fired for each recorded spelling of a policy whose managed marker the
+  // proven-withdrawal hand-back deletes. Secrets written during the managed
+  // episode live
   // under the managed identity and every cleanup path keys on the marker
   // being present, so the caller must finish the transition (the store
   // itself cannot: it knows neither the managed id formula nor the
@@ -143,6 +148,59 @@ export interface ExtensionIdentity {
   id: string;
   name: string;
   source?: 'managed' | 'user';
+  managedDirectory?: string;
+}
+
+export function getManagedSecretNames(policy: ExtensionPolicy): string[] {
+  return [
+    ...new Set(
+      policy.managedSecretNames ??
+        [policy.managedName, policy.name].filter(
+          (name): name is string => name !== undefined,
+        ),
+    ),
+  ];
+}
+
+export function isManagedAbsenceUnproven(
+  policy: ExtensionPolicy,
+  unprovenNames: ReadonlySet<string> | undefined,
+): boolean {
+  return [policy.name, policy.managedName, policy.managedDirectory].some(
+    (name) => name !== undefined && unprovenNames?.has(name.toLowerCase()),
+  );
+}
+
+function isManagedDirectoryName(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    value.length > 0 &&
+    value !== '.' &&
+    value !== '..' &&
+    !/[\\/\0]/.test(value)
+  );
+}
+
+function recordManagedSource(
+  policy: ExtensionPolicy,
+  identity: ExtensionIdentity,
+): boolean {
+  const names = policy.managed ? getManagedSecretNames(policy) : [];
+  if (!names.includes(identity.name)) names.push(identity.name);
+  let changed =
+    !policy.managedSecretNames ||
+    names.length !== policy.managedSecretNames.length ||
+    names.some((name, index) => name !== policy.managedSecretNames?.[index]);
+  if (changed) policy.managedSecretNames = names;
+  const directory =
+    identity.managedDirectory ??
+    (policy.managed ? policy.managedDirectory : undefined);
+  if (directory !== policy.managedDirectory) {
+    if (directory === undefined) delete policy.managedDirectory;
+    else policy.managedDirectory = directory;
+    changed = true;
+  }
+  return changed;
 }
 
 export interface ExtensionActivationResult {
@@ -344,6 +402,12 @@ function assertIdentity(identity: ExtensionIdentity): void {
   if (!/^[a-zA-Z0-9-_.]+$/.test(identity.name)) {
     throw new Error('Invalid extension name.');
   }
+  if (
+    identity.managedDirectory !== undefined &&
+    !isManagedDirectoryName(identity.managedDirectory)
+  ) {
+    throw new Error('Invalid managed extension directory.');
+  }
 }
 
 function setLegacyPathActivation(
@@ -425,7 +489,19 @@ function parseState(
       (parsed.managed === undefined || parsed.managed === true) &&
       (parsed.managedName === undefined ||
         (typeof parsed.managedName === 'string' &&
-          /^[a-zA-Z0-9-_.]+$/.test(parsed.managedName))) &&
+          /^[a-zA-Z0-9-_.]+$/.test(parsed.managedName) &&
+          parsed.managedName.toLowerCase() === parsed.name.toLowerCase())) &&
+      (parsed.managedSecretNames === undefined ||
+        (Array.isArray(parsed.managedSecretNames) &&
+          parsed.managedSecretNames.length > 0 &&
+          parsed.managedSecretNames.every(
+            (name) =>
+              typeof name === 'string' &&
+              /^[a-zA-Z0-9-_.]+$/.test(name) &&
+              name.toLowerCase() === parsed.name?.toLowerCase(),
+          ))) &&
+      (parsed.managedDirectory === undefined ||
+        isManagedDirectoryName(parsed.managedDirectory)) &&
       (parsed.artifactDirectory === undefined ||
         (typeof parsed.artifactDirectory === 'string' &&
           /^[a-zA-Z0-9-_.]+$/.test(parsed.artifactDirectory) &&
@@ -787,12 +863,15 @@ export class ExtensionStore {
     if (existing) {
       let changed = false;
       const renamedPolicyNames = new Set<string>();
-      // The hand-back below must name the secrets as they were STORED — the
-      // managed manifest's spelling — but the re-key migrations overwrite
-      // policy.name with the returning user identity's spelling. Remember
-      // each managed policy's pre-rename spelling so the callback does not
-      // clear a keychain service name that was never written.
-      const managedHandBackNames = new Map<string, string>();
+      // Upgrade the legacy first/current spellings before a user re-key or
+      // legacy import can rename the record. Older unrecorded spellings
+      // cannot be reconstructed; new episodes record every managed name.
+      for (const policy of Object.values(existing.extensions)) {
+        if (policy.managed && policy.managedSecretNames === undefined) {
+          policy.managedSecretNames = getManagedSecretNames(policy);
+          changed = true;
+        }
+      }
       const importUnmappedLegacy =
         existing.legacyProjectionHash === projectionHash(legacy);
       let legacyProjectionIsNewer = false;
@@ -810,6 +889,14 @@ export class ExtensionStore {
         assertIdentity(identity);
         const directPolicy = existing.extensions[identity.id];
         if (directPolicy) {
+          if (
+            directPolicy.managed &&
+            directPolicy.name.toLowerCase() !== identity.name.toLowerCase()
+          ) {
+            throw new ExtensionConflictError(
+              `Cannot rename retained managed extension "${directPolicy.name}" to "${identity.name}" before its managed ownership is released.`,
+            );
+          }
           if (directPolicy.name !== identity.name) {
             const nameOwner = Object.entries(existing.extensions).find(
               ([id, policy]) =>
@@ -842,9 +929,6 @@ export class ExtensionStore {
               }
               delete existing.extensions[declarationId];
               changed = true;
-            }
-            if (directPolicy.managed) {
-              managedHandBackNames.set(identity.id, directPolicy.name);
             }
             directPolicy.name = identity.name;
             changed = true;
@@ -881,9 +965,6 @@ export class ExtensionStore {
             }
           }
           delete existing.extensions[staleId];
-          if (policy.managed && policy.name !== identity.name) {
-            managedHandBackNames.set(identity.id, policy.name);
-          }
           policy.name = identity.name;
           existing.extensions[identity.id] = policy;
           changed = true;
@@ -936,9 +1017,6 @@ export class ExtensionStore {
                 previousRules.length !== rules.length ||
                 previousRules.some((rule, index) => rule !== rules[index]);
               if (!policyChanged) continue;
-              if (existingPolicy.managed) {
-                managedHandBackNames.set(identity.id, existingPolicy.name);
-              }
               existingPolicy.name = identity.name;
               if (rules.length > 0) {
                 existingPolicy.legacyPathRules = [...rules];
@@ -981,6 +1059,7 @@ export class ExtensionStore {
       for (const identity of extensions) {
         const policy = existing.extensions[identity.id];
         const managed = identity.source === 'managed';
+        if (managed) changed = recordManagedSource(policy, identity) || changed;
         if (managed === (policy.managed === true)) continue;
         if (managed) {
           policy.managed = true;
@@ -1014,16 +1093,15 @@ export class ExtensionStore {
           changed = true;
         } else if (
           managedAbsenceProven &&
-          !options.unprovenManagedNames?.has(identity.name.toLowerCase())
+          !isManagedAbsenceUnproven(policy, options.unprovenManagedNames)
         ) {
-          const handBackName =
-            policy.managedName ??
-            managedHandBackNames.get(identity.id) ??
-            policy.name;
+          const handBackNames = getManagedSecretNames(policy);
           delete policy.managed;
           delete policy.managedName;
+          delete policy.managedSecretNames;
+          delete policy.managedDirectory;
           restorePreservedActivationSurface(policy);
-          options.onManagedHandBack?.(handBackName);
+          for (const name of handBackNames) options.onManagedHandBack?.(name);
           changed = true;
         }
         // Absence unproven: the policy keeps its managed marker and stash so
@@ -1064,6 +1142,7 @@ export class ExtensionStore {
         ...(rules.length > 0 ? { legacyPathRules: [...rules] } : {}),
       };
       if (identity.source === 'managed') {
+        recordManagedSource(policy, identity);
         policy.managed = true;
         policy.managedName = identity.name;
         // A policy born managed never passes the claim-time stash, so stamp
@@ -1148,11 +1227,10 @@ export class ExtensionStore {
         // the keychain service name keeps the episode-era spelling. Probe
         // every spelling the record has carried against both ids, or the
         // adoption orphans them.
-        const retainedProbeNames = new Set(
-          [retainedPolicy.name, retainedPolicy.managedName].filter(
-            (probeName): probeName is string => probeName !== undefined,
-          ),
-        );
+        const retainedProbeNames = new Set([
+          retainedPolicy.name,
+          ...getManagedSecretNames(retainedPolicy),
+        ]);
         const retainedProbeIds = new Set([
           retainedIdentityId,
           input.adoptionProbeManagedId,
@@ -1366,11 +1444,10 @@ export class ExtensionStore {
           // cleanup path keys on the marker being present — dropping it here
           // would orphan the managed episode's credentials. Fail closed and
           // let the proven-withdrawal hand-back own the transition.
-          const probeNames = new Set(
-            [committed.name, committed.managedName].filter(
-              (probeName): probeName is string => probeName !== undefined,
-            ),
-          );
+          const probeNames = new Set([
+            committed.name,
+            ...getManagedSecretNames(committed),
+          ]);
           const probeIds = new Set([
             input.identity.id,
             input.adoptionProbeManagedId,
@@ -1395,6 +1472,8 @@ export class ExtensionStore {
         }
         delete committed.managed;
         delete committed.managedName;
+        delete committed.managedSecretNames;
+        delete committed.managedDirectory;
         delete committed.preservedLegacyPathRules;
         delete committed.preservedDefaultActivation;
         delete committed.preservedWorkspaceOverrides;
@@ -1541,7 +1620,7 @@ export class ExtensionStore {
       if (
         identity.source !== 'user' ||
         !policy?.managed ||
-        options.unprovenManagedNames?.has(identity.name.toLowerCase())
+        isManagedAbsenceUnproven(policy, options.unprovenManagedNames)
       ) {
         continue;
       }
@@ -1767,6 +1846,10 @@ export class ExtensionStore {
    */
   async removePolicy(
     identity: ExtensionIdentity,
+    options: {
+      beforeRemove?: (policy: Readonly<ExtensionPolicy>) => void;
+      onRemoved?: (policy: ExtensionPolicy) => void;
+    } = {},
   ): Promise<ExtensionStoreSnapshot> {
     assertIdentity(identity);
     return await this.withLock(async () => {
@@ -1774,9 +1857,11 @@ export class ExtensionStore {
         (await this.readSnapshotUnlocked()) ?? this.emptySnapshot();
       const policy = snapshot.extensions[identity.id];
       if (!policy || policy.name !== identity.name) return snapshot;
+      options.beforeRemove?.(policy);
       delete snapshot.extensions[identity.id];
       snapshot.generation += 1;
       await this.writeSnapshotUnlocked(snapshot);
+      options.onRemoved?.(policy);
       return snapshot;
     });
   }
