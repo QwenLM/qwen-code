@@ -1304,7 +1304,7 @@ export class ShellExecutionService {
           const stderrPreview = stderrTail?.read() ?? Buffer.alloc(0);
           const tailPreview = retainedTail();
           const tailText = rawCapture
-            ? stripAnsi(decodeBufferedOutput(tailPreview)).trim()
+            ? stripAnsi(decodePreviewTail(tailPreview)).trim()
             : '';
           const stderrText = stderrPreview.length
             ? stripAnsi(decodePreviewTail(stderrPreview)).trim()

@@ -3218,6 +3218,42 @@ describe('ShellExecutionService child_process fallback', () => {
     );
   });
 
+  it('decodes a combined preview tail that starts inside a UTF-8 character', async () => {
+    Object.assign(mockChildProcess.stdout!, {
+      pause: vi.fn(),
+      resume: vi.fn(),
+    });
+    Object.assign(mockChildProcess.stderr!, {
+      pause: vi.fn(),
+      resume: vi.fn(),
+    });
+    const capture = {
+      write: vi.fn(async () => {}),
+      finish: vi.fn(async () => {}),
+      setStarted: vi.fn(),
+      setProcessResult: vi.fn(),
+    };
+    const stdout = Buffer.from(`${'错'.repeat(30)}END`);
+    const handle = await ShellExecutionService.execute(
+      'printf output',
+      '/test/dir',
+      onOutputEventMock,
+      new AbortController().signal,
+      true,
+      { ...shellExecutionConfig, maxBufferedOutputBytes: 64 },
+      { rawCapture: capture },
+    );
+    mockChildProcess.stdout!.emit('data', stdout);
+    mockChildProcess.stdout!.emit('end');
+    mockChildProcess.stderr!.emit('end');
+    mockChildProcess.emit('exit', 0, null);
+    mockChildProcess.emit('close', 0, null);
+    const result = await handle.result;
+    const tail = result.output.split('managed capture.]\n')[1];
+    expect(tail).toMatch(/^错+END$/);
+    expect(capture.write).toHaveBeenCalledWith('stdout', stdout);
+  });
+
   it('decodes a stderr preview that starts inside a UTF-8 character', async () => {
     Object.assign(mockChildProcess.stdout!, {
       pause: vi.fn(),
