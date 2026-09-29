@@ -3759,7 +3759,8 @@ export class CoreToolScheduler {
                       formatDenialStateLog(denialState),
                   );
                 } else if (
-                  outcome.reason === 'external_write' &&
+                  (outcome.reason === 'external_write' ||
+                    outcome.reason === 'external_directory') &&
                   outcome.message
                 ) {
                   this.autoModeFallbackCallIds.add(reqInfo.callId);
@@ -3768,7 +3769,7 @@ export class CoreToolScheduler {
                     message: outcome.message,
                   };
                   debugLogger.warn(
-                    `Auto mode fallback to manual approval (external_write): Write attempted outside workspace.`,
+                    `Auto mode fallback to manual approval (${outcome.reason}): target outside workspace.`,
                   );
                 }
                 break;
@@ -7456,9 +7457,12 @@ export class CoreToolScheduler {
                 debugLogger.warn(
                   `Auto mode fallback for pending tool (${outcome.reason}): consecutiveBlock=${denialState.consecutiveBlock}, consecutiveUnavailable=${denialState.consecutiveUnavailable}`,
                 );
-              } else if (outcome.reason === 'external_write') {
+              } else if (
+                outcome.reason === 'external_write' ||
+                outcome.reason === 'external_directory'
+              ) {
                 debugLogger.warn(
-                  `Auto mode fallback to manual approval (external_write): Write attempted outside workspace.`,
+                  `Auto mode fallback to manual approval (${outcome.reason}): target outside workspace.`,
                 );
               }
 
@@ -7466,7 +7470,8 @@ export class CoreToolScheduler {
                 outcome.message &&
                 (isDenialFallbackReason(outcome.reason) ||
                   outcome.reason === 'classifier_unavailable' ||
-                  outcome.reason === 'external_write')
+                  outcome.reason === 'external_write' ||
+                  outcome.reason === 'external_directory')
               ) {
                 const autoModeFallback: AutoModeFallbackConfirmation = {
                   reason: outcome.reason,
