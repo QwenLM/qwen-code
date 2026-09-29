@@ -333,13 +333,13 @@ export function registerWorkspaceAgentRoutes(
 
   const dispatch = async (runtime: WorkspaceRuntime): Promise<void> => {
     runtime.generationGuard?.assertOpen();
-    let current = owners.get(runtime.workspaceCwd);
+    const previous = owners.get(runtime.workspaceCwd);
+    let current = previous;
     if (
       !current ||
       current.bridge !== runtime.bridge ||
       current.generationGuard !== runtime.generationGuard
     ) {
-      await current?.owner.stop();
       const owner = startAgentHostSessionOwner({
         bridge: runtime.bridge,
         workspaceCwd: runtime.workspaceCwd,
@@ -352,7 +352,13 @@ export function registerWorkspaceAgentRoutes(
         generationGuard: runtime.generationGuard,
         owner,
       };
+      // Published before the first await: draining a replaced owner suspends,
+      // and a second dispatch entering during that window must find this entry
+      // rather than build its own. An owner that never reached the map is
+      // invisible to both teardown paths, so nothing can ever stop it and its
+      // keepalive timer runs for the life of the process.
       owners.set(runtime.workspaceCwd, current);
+      await previous?.owner.stop();
     }
     await current.owner.dispatch();
   };
