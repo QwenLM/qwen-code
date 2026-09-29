@@ -95,6 +95,8 @@ Command hooks execute commands via child processes. Input JSON is passed through
 
 Migration: bash hooks used to have these variables replaced in the command text before the shell ran, and that replacement has been removed. A bash hook that leaves the variable unquoted in a project path containing spaces, or writes it inside single quotes such as `'$QWEN_PROJECT_DIR/hook.sh'`, must now double-quote it: `"$QWEN_PROJECT_DIR/hook.sh"`.
 
+Compatibility note: Qwen-format extension command hooks now expand `${extensionPath}`, `${/}` and `${pathSeparator}` at load time for both user-installed and managed extensions, in addition to `${CLAUDE_PLUGIN_ROOT}`. The root placeholders resolve to the extension directory, and the separator placeholders use the platform path separator. This expansion applies to the command text in memory. Other hook types are unaffected by this change.
+
 ### HTTP Hooks
 
 HTTP hooks send hook input as POST requests to specified URLs. They support URL whitelists, DNS-level SSRF protection, environment variable interpolation, and other security features.
