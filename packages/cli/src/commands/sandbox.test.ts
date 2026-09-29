@@ -36,8 +36,8 @@ vi.mock('@qwen-code/qwen-code-core/sandbox/runtime-shell-policy.js', () => ({
     params.shellExecutionSandbox,
   probeShellSandbox: mocks.probe,
 }));
-vi.mock('@qwen-code/qwen-code-core/sandbox/bwrap-execution.js', () => ({
-  executeBwrap: mocks.execute,
+vi.mock('@qwen-code/qwen-code-core/sandbox/execute-sandbox.js', () => ({
+  executeSandbox: mocks.execute,
 }));
 vi.mock('../utils/stdioHelpers.js', () => ({
   writeStdoutLine: mocks.stdout,
@@ -70,7 +70,11 @@ beforeEach(() => {
   mocks.settings.mockReturnValue({ merged: configured });
   mocks.minimal.mockReturnValue({ merged: configured });
   mocks.legacy.mockResolvedValue(undefined);
-  mocks.probe.mockResolvedValue(undefined);
+  mocks.probe.mockImplementation(async (policy: object) => ({
+    ...policy,
+    effectiveBackend: 'bwrap',
+    enforcement: 'full',
+  }));
   mocks.execute.mockResolvedValue({
     result: Promise.resolve({ exitCode: 42, error: null, aborted: false }),
   });
@@ -85,7 +89,7 @@ describe('qwen sandbox tool boundary', () => {
   it('reports actual scope and probes without running a user payload', async () => {
     await run();
     expect(mocks.stdout.mock.calls.flat().join('\n')).toContain(
-      'Boundary: tools; backend: auto → bwrap',
+      'Boundary: tools; backend: auto → bwrap (full)',
     );
     expect(mocks.stdout.mock.calls.flat().join('\n')).toContain(
       'traffic stay on the host',

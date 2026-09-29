@@ -61,6 +61,7 @@ Channels are configured under the `channels` key in `settings.json`. Each channe
 | `privatePolicy`     | No               | Private access: `disabled`, `allowlist`, `pairing`, or `open`; new managed channels default to `pairing`                                                                                                    |
 | `allowedUsers`      | No               | Private user IDs allowed without pairing (used by private `allowlist` and `pairing` policies)                                                                                                               |
 | `sessionScope`      | No               | How sessions are scoped: `user` (default), `chat_thread`, or `single`. Legacy `thread` remains compatible when already configured but is not offered for new Web Shell configurations                       |
+| `sessionRotation`   | No               | Start a fresh session after `maxTurns` routed messages or `maxAgeHours` elapsed, whichever comes first. Requires a positive bound and cannot be combined with `multiSession`.                               |
 | `multiSession`      | No               | Retain up to eight owner-scoped named tasks in one chat. Requires daemon-managed mode, `sessionScope: "user"`, no webhooks or group-history backfill, and no enabled Channel loops                          |
 | `cwd`               | No               | Working directory for the agent. Defaults to the current directory                                                                                                                                          |
 | `approvalMode`      | No               | Tool approval mode for channel sessions. Unattended webhook tasks require `yolo`; the setting applies to every session on the channel                                                                       |
@@ -162,6 +163,24 @@ Named results identify their originating task: direct chats use `[task]`, while 
 One task remains selected to receive the next normal message, but other named tasks may keep running concurrently. `/session new <name>` shares the configured workspace, while `/session new <name> --worktree` creates an isolated checkout for that task under the daemon workspace's `.qwen/worktrees/` directory. The daemon verifies the persisted worktree owner before reopening the task after a restart; a missing, changed, or foreign ownership record fails closed instead of silently moving the task into the shared workspace. Creating or selecting another task does not cancel or retarget earlier work, and late results retain their originating task label. A busy task cannot be closed, but its active prompt can be cancelled with `/session cancel [<name>]` through the existing Channel cancellation behavior. Independently queued turns are not cancelled, but in `collect` dispatch mode any follow-ups buffered behind the cancelled prompt are discarded by that existing behavior. Media preparation is not targeted. Bare permission commands apply only to the selected task, while an explicit request ID can answer an owned inactive task. `/clear`, `/new`, and `/reset` also work on a selected worktree task: the task gets a fresh conversation while its worktree and files are kept. A busy worktree task refuses the reset until its prompt finishes, and a task whose worktree record was damaged reports the failure without touching files. Channel memory remains scoped to the chat rather than to a named task.
 
 This mode is unavailable in standalone `qwen channel start`, with webhooks, with non-zero channel or group `groupHistoryLimit`, or with Channel loops. If an enabled loop already exists for that channel, the daemon worker refuses to start until the loop is disabled.
+
+### Session Rotation
+
+Long-lived routes can start a fresh conversation after a configured limit:
+
+```json
+{
+  "channels": {
+    "my-bot": {
+      "type": "dingtalk",
+      "sessionScope": "chat_thread",
+      "sessionRotation": { "maxTurns": 200, "maxAgeHours": 24 }
+    }
+  }
+}
+```
+
+Either positive bound may be used alone; the first one reached triggers rotation before the next routed message. `maxTurns` counts messages routed to the session, including messages handled without a model turn. The count and age start persist across restarts. A route with a running or queued message waits for a later idle message to rotate, so steady traffic may pass the configured bound. Rotation clears that route's conversation context, retires its old session, and posts a notice in the triggering chat or thread. With `sessionScope: "single"`, other chats sharing the session do not receive the notice. Omitting `sessionRotation` preserves ongoing session reuse. Named tasks (`multiSession`) cannot use this option.
 
 ### Channel Memory
 

@@ -32,8 +32,10 @@ export interface ServeCapabilityDescriptor {
 export const SERVE_CAPABILITY_REGISTRY = {
   health: { since: 'v1' },
   daemon_status: { since: 'v1' },
+  daemon_update: { since: 'v1' },
   capabilities: { since: 'v1' },
   session_create: { since: 'v1' },
+  hosted_harness_private_v1: { since: 'v1' },
   session_startup_config: { since: 'v1' },
   session_id_override: { since: 'v1' },
   session_scope_override: { since: 'v1' },
@@ -58,6 +60,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // Prompts and mid-turn messages reference session-scoped image and file
   // attachments by their stored filename.
   session_attachments: { since: 'v1' },
+  session_attachment_chunk_upload: { since: 'v1' },
   session_attachment_list: { since: 'v1' },
   session_mid_turn_message_mutation: { since: 'v1' },
   // Daemon-owned reconciliation surface for mid-turn messages:
@@ -121,6 +124,15 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // definitions. Built-in / extension agents stay read-only.
   workspace_agents: { since: 'v1' },
   workspace_agent_generate: { since: 'v1' },
+  // Persistent workspace Agents collaborating on shared task threads
+  // (`/workspaces/:workspace/agent/*`). Conditional on the
+  // `experimental.agentCollaboration` opt-in. Whether the routes exist at all
+  // is settled at daemon startup, but the tag is recomputed per response, so a
+  // workspace opting in or out afterwards is seen on the next request. A client
+  // that sees it absent must not render the collaboration surface rather than
+  // render it and let the calls 404. Distinct from `workspace_agents` above,
+  // which is unconditional subagent-definition CRUD.
+  agent_collaboration_v1: { since: 'v1' },
   workspace_env: { since: 'v1' },
   workspace_preflight: { since: 'v1' },
   session_context: { since: 'v1' },
@@ -391,6 +403,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_hooks: { since: 'v1' },
   workspace_extensions: { since: 'v1' },
   session_branch: { since: 'v1' },
+  session_branch_worktree: { since: 'v1' },
   rate_limit: { since: 'v1' },
   workspace_reload: { since: 'v1' },
   // Immediate best-effort channel delivery for prompt/scheduled finals and
@@ -560,7 +573,18 @@ export type ServeFeature = keyof typeof SERVE_CAPABILITY_REGISTRY;
  * advertised.
  */
 export interface AdvertiseFeatureToggles {
+  hostedHarness?: boolean;
   requireAuth?: boolean;
+  /**
+   * Whether the daemon is serving the workspace-agent collaboration routes
+   * (`agent_collaboration_v1`) for this response. Resolved from
+   * `experimental.agentCollaboration` at call time rather than snapshotted at
+   * boot: which routes exist at all is settled at startup, but a workspace
+   * opting in or out afterwards is seen on the next request. Left unset by the
+   * pre-runtime bootstrap envelope, which reads no workspace settings and so
+   * omits the tag even when the runtime envelope will advertise it.
+   */
+  agentCollaborationEnabled?: boolean;
   mcpPoolActive?: boolean;
   externalToolGuardActive?: boolean;
   allowOriginActive?: boolean;
@@ -655,7 +679,12 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   ServeFeature,
   (toggles: AdvertiseFeatureToggles) => boolean
 > = new Map<ServeFeature, (toggles: AdvertiseFeatureToggles) => boolean>([
+  ['hosted_harness_private_v1', (toggles) => toggles.hostedHarness === true],
   ['require_auth', (toggles) => toggles.requireAuth === true],
+  [
+    'agent_collaboration_v1',
+    (toggles) => toggles.agentCollaborationEnabled === true,
+  ],
   [
     'standalone_sessions_v1',
     (toggles) => toggles.standaloneSessionsAvailable === true,
