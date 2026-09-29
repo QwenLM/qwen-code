@@ -242,6 +242,11 @@ final class LocalRuntimeStore {
         }
     }
 
+    boolean rebooted(Registration registration) {
+        return identity.hostId().equals(registration.handle().getValue().get("hostId"))
+                && !identity.bootId().equals(registration.handle().getValue().get("bootId"));
+    }
+
     boolean sameBoot(Registration registration) {
         return identity.hostId().equals(registration.handle().getValue().get("hostId"))
                 && identity.bootId().equals(registration.handle().getValue().get("bootId"))
