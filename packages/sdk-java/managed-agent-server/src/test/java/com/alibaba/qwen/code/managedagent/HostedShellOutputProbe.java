@@ -190,7 +190,9 @@ final class HostedShellOutputProbe implements AutoCloseable {
         assertThat(manifest.path("executionCallId").asText()).isEqualTo(execution.get("execution_call_id"));
         var reference = JSON.readTree(execution.get("reference_json").toString());
         assertThat(reference.path("runtimeProtocol").asInt()).isEqualTo(3);
+        assertThat(manifest.path("callId").isTextual()).isTrue();
         assertThat(manifest.path("callId")).isEqualTo(reference.path("callId"));
+        assertThat(manifest.path("invocationDigest").isTextual()).isTrue();
         assertThat(manifest.path("invocationDigest")).isEqualTo(reference.path("inputDigest"));
         assertThat(manifest.path("bindingGeneration").asText()).isEqualTo(execution.get("runtime_generation").toString());
         assertThat(manifest.path("captureStatus").asText()).isEqualTo("complete");

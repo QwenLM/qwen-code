@@ -129,13 +129,13 @@ const proxy = createServer(async (req, res) => {
         headers.set(name, Array.isArray(value) ? value.join(',') : value);
     const operation =
       req.method === 'GET' ? 'status' : url.pathname.split(':').at(-1)!;
+    const executionId = url.pathname.match(/\/executions\/([^/:]+)/)?.[1];
     if (!store) {
       assert.equal(restoring, false, 'Cold load must not contact Broker');
       assert.equal(fields.runtimeSessionId, current.promptId);
       assert.notEqual(operation, 'acknowledge');
       assert.notEqual(operation, 'release');
       current.operations.push(operation);
-      const executionId = url.pathname.match(/\/executions\/([^/:]+)/)?.[1];
       if (executionId) assert.equal(executionId, current.executionCallId);
     }
     const target =
@@ -178,6 +178,8 @@ const proxy = createServer(async (req, res) => {
     } else {
       assert.equal(upstream.status, 200, url + ': ' + bytes);
     }
+    if (!store && executionId && upstream.status === 200)
+      assert.equal(json.executionCallId, current.executionCallId);
     if (!store && operation === 'prepare') {
       assert.equal(current.executionCallId, '');
       assert.equal(fields.reference.runtimeProtocol, 3);
@@ -326,17 +328,14 @@ try {
     });
     clientId = created.clientId;
     const prompt = [{ type: 'text', text: current.fault }];
-    await json(
-      route + '/prompt',
-      {
-        promptId: current.promptId,
-        prompt,
-        payloadDigest:
-          'sha256:' +
-          createHash('sha256').update(JSON.stringify(prompt)).digest('hex'),
-      },
-      202,
-    );
+    const input = {
+      promptId: current.promptId,
+      prompt,
+      payloadDigest:
+        'sha256:' +
+        createHash('sha256').update(JSON.stringify(prompt)).digest('hex'),
+    };
+    await json(route + '/prompt', input, 202);
     await waitUntil(() => {
       if (proxyFailure) throw proxyFailure;
       return current.injections === 1;
@@ -350,6 +349,14 @@ try {
         60_000,
       );
       assert.equal((await json(route + '/status')).recoveryBlocked, true);
+      const operations = current.operations.length;
+      const rejected = await json(
+        route + '/prompt',
+        { ...input, promptId: randomUUID() },
+        409,
+      );
+      assert.equal(rejected.error, 'hosted_turn_recovery_required');
+      assert.equal(current.operations.length, operations);
       await killHarness();
     }
     await waitUntil(
@@ -418,7 +425,7 @@ try {
   await writeFile(configPath + '.results', JSON.stringify(reports));
   console.log('HOSTED_SHELL_OUTPUT_FAULTS_OK');
 } catch (cause) {
-  console.error(current.fault, cli.output);
+  console.error('FG6F ' + current.fault, JSON.stringify(current), cli.output);
   throw cause;
 } finally {
   await cli.close();

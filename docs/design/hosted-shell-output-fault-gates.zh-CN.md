@@ -26,6 +26,8 @@ FG6f 完成。
 每个场景验证原预留与派发各一次、选中 Workspace 内一次文件副作用、Harness 目录
 的诱饵不变，以及 Workspace 所有权保留。旧 writer 租约过期后，由新 boot 的
 Harness 加载同一 Session。冷加载必须拒绝未结算输入，不调用模型或 Broker。
+当原 Harness 在故障后仍存活时，新 prompt 也必须被拒绝，返回
+`hosted_turn_recovery_required`，且不增加模型或 Broker 调用。
 仅有持久回执不能解决现存 `await_runtime` 检查点，也不能授权自动续跑。
 
 ## 夹具设计
@@ -33,6 +35,7 @@ Harness 加载同一 Session。冷加载必须拒绝未结算输入，不调用�
 独立 TypeScript 驱动使用确定性本地模型和既有 Hosted 进程 helper，代理 Harness
 的 Store 与 Broker 请求以选择精确故障，并记录原身份和事务字节。Publisher 位于
 Harness 内，仅杀代理不能验证 publisher 进程丢失，因此不作为替代。
+成功的执行响应必须指向原执行；捕获身份字段必须存在，才能与保存的引用比较。
 
 进程故障场景的命令写入仅追加证明、发布已知的 1 MiB 输出前缀，并等待 FIFO。
 注入前必须确认实际已提交的内容资源、处于执行中的 Broker 行，以及原 worker

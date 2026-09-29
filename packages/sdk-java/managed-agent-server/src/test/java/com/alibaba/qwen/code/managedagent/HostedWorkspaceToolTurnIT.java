@@ -241,7 +241,7 @@ class HostedWorkspaceToolTurnIT {
                     for (Map<String, Object> session : sessions) {
                         if (shellOutput ? session.get("fault").equals("receipt-failure")
                                 : !session.get("fault").toString().endsWith("-reply")) {
-                            String trigger = "fg6b_" + UUID.randomUUID().toString().replace("-", "");
+                            String trigger = (shellOutput ? "fg6f_" : "fg6b_") + UUID.randomUUID().toString().replace("-", "");
                             triggers.add(trigger);
                             createStoreFaultTrigger(jdbc, tenant, session, trigger);
                         }

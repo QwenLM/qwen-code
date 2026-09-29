@@ -29,7 +29,9 @@ Every case checks one original reservation and dispatch, one filesystem effect
 in the selected Workspace, an unchanged Harness-directory decoy and retained
 Workspace ownership. A new Harness boot loads the same Session after the old
 writer lease expires. Cold load must refuse the unresolved input without calling
-the model or Broker. A durable receipt by itself does not resolve the existing
+the model or Broker. When the original Harness survives the fault, a new prompt
+must also be refused with `hosted_turn_recovery_required`, without additional
+model or Broker calls. A durable receipt by itself does not resolve the existing
 `await_runtime` checkpoint or authorize automatic continuation.
 
 ## Fixture design
@@ -37,6 +39,8 @@ the model or Broker. A durable receipt by itself does not resolve the existing
 A dedicated TypeScript driver uses a deterministic local model and the existing
 Hosted process helper. It proxies the Harness's Store and Broker requests to
 select exact faults and records original identities and transaction bytes.
+Successful execution responses must name the original execution; captured
+identity fields must exist before they are compared with the saved reference.
 The publisher runs inside the Harness; killing only a proxy would not exercise
 publisher-process loss and is not used as its substitute.
 
