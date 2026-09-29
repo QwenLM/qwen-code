@@ -4,6 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  assertHookExecutionOwner,
+  captureHookExecutionOwner,
+  runWithHookExecutionOwner,
+} from '../hooks/hook-execution-context.js';
 import type { SessionSourceService } from '../services/session-sources.js';
 
 import { resolveProviderProtocol } from '../models/modelRegistry.js';
@@ -4101,276 +4106,283 @@ export class Config {
               return;
             }
 
-            // Execute the appropriate hook based on eventName
-            let result;
-            let stopHookCount: number | undefined;
-            const input = request.input || {};
-            const signal = request.signal;
-            switch (request.eventName) {
-              case 'UserPromptSubmit':
-                result = await hookSystem.fireUserPromptSubmitEvent(
-                  (input['prompt'] as string) || '',
-                  signal,
-                  typeof input['submitted_prompt'] === 'string' &&
-                    input['submitted_prompt'].trim().length > 0
-                    ? input['submitted_prompt']
-                    : undefined,
-                );
-                break;
-              case 'UserPromptExpansion':
-                result = await hookSystem.fireUserPromptExpansionEvent(
-                  (input['command_name'] as string) || '',
-                  (input['command_args'] as string) || '',
-                  (input['prompt'] as string) || '',
-                  signal,
-                );
-                break;
-              case 'Stop': {
-                // Extract context usage data from input with runtime validation
-                const contextUsageData = buildContextUsage(
-                  input['context_limit'] as number | undefined,
-                  (input['input_tokens'] as number | undefined) ?? 0,
-                );
-
-                const stopResult = await hookSystem.fireStopEvent(
-                  (input['stop_hook_active'] as boolean) || false,
-                  (input['last_assistant_message'] as string) || '',
-                  contextUsageData,
-                  signal,
-                );
-                result = stopResult.finalOutput
-                  ? createHookOutput('Stop', stopResult.finalOutput)
-                  : undefined;
-                stopHookCount = stopResult.allOutputs.length;
-                break;
-              }
-              case 'MessageDisplay': {
-                const messageDisplayResult =
-                  await hookSystem.fireMessageDisplayEvent(
-                    (input['message_id'] as string) || '',
-                    (input['displayed_text'] as string) || '',
-                    (input['is_final'] as boolean) || false,
+            assertHookExecutionOwner(
+              request.owner,
+              hookSystem.runtimeId,
+              this.getSessionId(),
+            );
+            await runWithHookExecutionOwner(request.owner, async () => {
+              // Execute the appropriate hook based on eventName
+              let result;
+              let stopHookCount: number | undefined;
+              const input = request.input || {};
+              const signal = request.signal;
+              switch (request.eventName) {
+                case 'UserPromptSubmit':
+                  result = await hookSystem.fireUserPromptSubmitEvent(
+                    (input['prompt'] as string) || '',
+                    signal,
+                    typeof input['submitted_prompt'] === 'string' &&
+                      input['submitted_prompt'].trim().length > 0
+                      ? input['submitted_prompt']
+                      : undefined,
+                  );
+                  break;
+                case 'UserPromptExpansion':
+                  result = await hookSystem.fireUserPromptExpansionEvent(
+                    (input['command_name'] as string) || '',
+                    (input['command_args'] as string) || '',
+                    (input['prompt'] as string) || '',
                     signal,
                   );
-                result = messageDisplayResult.finalOutput
-                  ? createHookOutput(
-                      'MessageDisplay',
-                      messageDisplayResult.finalOutput,
-                    )
-                  : undefined;
-                break;
-              }
-              case 'PreToolUse': {
-                result = await hookSystem.firePreToolUseEvent(
-                  (input['tool_name'] as string) || '',
-                  (input['tool_input'] as Record<string, unknown>) || {},
-                  (input['tool_use_id'] as string) || '',
-                  (input['permission_mode'] as PermissionMode | undefined) ??
-                    PermissionMode.Default,
-                  signal,
-                  (input['tool_call_id'] as string) || undefined,
-                );
-                break;
-              }
-              case 'PostToolUse':
-                result = await hookSystem.firePostToolUseEvent(
-                  (input['tool_name'] as string) || '',
-                  (input['tool_input'] as Record<string, unknown>) || {},
-                  (input['tool_response'] as Record<string, unknown>) || {},
-                  (input['tool_use_id'] as string) || '',
-                  (input['permission_mode'] as PermissionMode) || 'default',
-                  signal,
-                  (input['tool_call_id'] as string) || undefined,
-                  typeof input['duration_ms'] === 'number'
-                    ? input['duration_ms']
-                    : undefined,
-                );
-                break;
-              case 'PostToolUseFailure':
-                result = await hookSystem.firePostToolUseFailureEvent(
-                  (input['tool_use_id'] as string) || '',
-                  (input['tool_name'] as string) || '',
-                  (input['tool_input'] as Record<string, unknown>) || {},
-                  (input['error'] as string) || '',
-                  input['is_interrupt'] as boolean | undefined,
-                  (input['permission_mode'] as PermissionMode) || 'default',
-                  signal,
-                  (input['tool_call_id'] as string) || undefined,
-                  typeof input['duration_ms'] === 'number'
-                    ? input['duration_ms']
-                    : undefined,
-                );
-                break;
-              case 'PostToolBatch':
-                result = await hookSystem.firePostToolBatchEvent(
-                  (input['tool_calls'] as PostToolBatchToolCall[]) || [],
-                  (input['permission_mode'] as PermissionMode) || 'default',
-                  signal,
-                );
-                break;
-              case 'Notification':
-                result = await hookSystem.fireNotificationEvent(
-                  (input['message'] as string) || '',
-                  (input['notification_type'] as NotificationType) ||
-                    'permission_prompt',
-                  (input['title'] as string) || undefined,
-                  signal,
-                );
-                break;
-              case 'PermissionRequest':
-                result = await hookSystem.firePermissionRequestEvent(
-                  (input['tool_name'] as string) || '',
-                  (input['tool_input'] as Record<string, unknown>) || {},
-                  (input['permission_mode'] as PermissionMode) ||
-                    PermissionMode.Default,
-                  (input['permission_suggestions'] as
-                    | PermissionSuggestion[]
-                    | undefined) || undefined,
-                  signal,
-                );
-                break;
-              case 'PermissionDenied':
-                result = await hookSystem.firePermissionDeniedEvent(
-                  (input['tool_name'] as string) || '',
-                  (input['tool_input'] as Record<string, unknown>) || {},
-                  (input['tool_use_id'] as string) || '',
-                  (input['reason'] as PermissionDeniedReason) ||
-                    'classifier_blocked',
-                  signal,
-                  (input['tool_call_id'] as string) || undefined,
-                );
-                break;
-              case 'SubagentStart':
-                result = await hookSystem.fireSubagentStartEvent(
-                  (input['agent_id'] as string) || '',
-                  (input['agent_type'] as string) || '',
-                  (input['permission_mode'] as PermissionMode) ||
-                    PermissionMode.Default,
-                  signal,
-                );
-                break;
-              case 'SubagentStop':
-                result = await hookSystem.fireSubagentStopEvent(
-                  (input['agent_id'] as string) || '',
-                  (input['agent_type'] as string) || '',
-                  (input['agent_transcript_path'] as string) || '',
-                  (input['last_assistant_message'] as string) || '',
-                  (input['stop_hook_active'] as boolean) || false,
-                  (input['permission_mode'] as PermissionMode) ||
-                    PermissionMode.Default,
-                  signal,
-                );
-                break;
-              case 'SessionStart':
-                result = await hookSystem.fireSessionStartEvent(
-                  input['source'] as SessionStartSource,
-                  (input['model'] as string) || '',
-                  (input['permission_mode'] as PermissionMode) || undefined,
-                  input['agent_type'] as AgentType | undefined,
-                  signal,
-                );
-                break;
-              case 'SessionEnd':
-                result = await hookSystem.fireSessionEndEvent(
-                  input['reason'] as SessionEndReason,
-                  signal,
-                );
-                break;
-              case 'SessionDelete':
-                result = await hookSystem.fireSessionDeleteEvent(
-                  (input['deleted_session_id'] as string) || '',
-                  signal,
-                );
-                break;
-              case 'PreCompact':
-                result = await hookSystem.firePreCompactEvent(
-                  input['trigger'] as PreCompactTrigger,
-                  (input['custom_instructions'] as string) || '',
-                  signal,
-                );
-                break;
-              case 'PostCompact':
-                result = await hookSystem.firePostCompactEvent(
-                  input['trigger'] as PostCompactTrigger,
-                  (input['compact_summary'] as string) || '',
-                  signal,
-                );
-                break;
-              case 'InstructionsLoaded':
-                result = await hookSystem.fireInstructionsLoadedEvent(
-                  (input['file_path'] as string) || '',
-                  input['memory_type'] as InstructionMemoryType,
-                  input['load_reason'] as InstructionLoadReason,
-                  {
-                    triggerFilePath: input['trigger_file_path'] as
-                      | string
-                      | undefined,
-                    parentFilePath: input['parent_file_path'] as
-                      | string
-                      | undefined,
-                  },
-                  signal,
-                );
-                break;
-              // These three return the aggregated result, and the bus replies
-              // with its final output as is. For TodoCreated and TodoCompleted
-              // that is what direct callers read (todoWrite checks
-              // `finalOutput.decision`). StopFailure is fire-and-forget: the
-              // aggregator hard-codes its `finalOutput` to undefined and every
-              // direct caller detaches without reading the result, so its arm
-              // always replies with no output and awaits only so the hooks run.
-              // Stop and MessageDisplay instead wrap theirs with
-              // createHookOutput.
-              case 'StopFailure':
-                result = (
-                  await hookSystem.fireStopFailureEvent(
-                    input['error'] as StopFailureErrorType,
-                    input['error_details'] as string | undefined,
-                    input['last_assistant_message'] as string | undefined,
-                    signal,
-                  )
-                ).finalOutput;
-                break;
-              case 'TodoCreated':
-                result = (
-                  await hookSystem.fireTodoCreatedEvent(
-                    (input['todo_id'] as string) || '',
-                    (input['todo_content'] as string) || '',
-                    input['todo_status'] as TodoStatus,
-                    (input['all_todos'] as TodoItem[]) || [],
-                    input['phase'] as HookPhase,
-                    signal,
-                  )
-                ).finalOutput;
-                break;
-              case 'TodoCompleted':
-                result = (
-                  await hookSystem.fireTodoCompletedEvent(
-                    (input['todo_id'] as string) || '',
-                    (input['todo_content'] as string) || '',
-                    input['previous_status'] as 'pending' | 'in_progress',
-                    (input['all_todos'] as TodoItem[]) || [],
-                    input['phase'] as HookPhase,
-                    signal,
-                  )
-                ).finalOutput;
-                break;
-              default:
-                this.debugLogger.warn(
-                  `Unknown hook event: ${request.eventName}`,
-                );
-                result = undefined;
-            }
+                  break;
+                case 'Stop': {
+                  // Extract context usage data from input with runtime validation
+                  const contextUsageData = buildContextUsage(
+                    input['context_limit'] as number | undefined,
+                    (input['input_tokens'] as number | undefined) ?? 0,
+                  );
 
-            // Send response
-            this.messageBus?.publish({
-              type: MessageBusType.HOOK_EXECUTION_RESPONSE,
-              correlationId: request.correlationId,
-              success: true,
-              output: result,
-              // Include stop hook count for Stop events
-              stopHookCount,
-            } as HookExecutionResponse);
+                  const stopResult = await hookSystem.fireStopEvent(
+                    (input['stop_hook_active'] as boolean) || false,
+                    (input['last_assistant_message'] as string) || '',
+                    contextUsageData,
+                    signal,
+                  );
+                  result = stopResult.finalOutput
+                    ? createHookOutput('Stop', stopResult.finalOutput)
+                    : undefined;
+                  stopHookCount = stopResult.allOutputs.length;
+                  break;
+                }
+                case 'MessageDisplay': {
+                  const messageDisplayResult =
+                    await hookSystem.fireMessageDisplayEvent(
+                      (input['message_id'] as string) || '',
+                      (input['displayed_text'] as string) || '',
+                      (input['is_final'] as boolean) || false,
+                      signal,
+                    );
+                  result = messageDisplayResult.finalOutput
+                    ? createHookOutput(
+                        'MessageDisplay',
+                        messageDisplayResult.finalOutput,
+                      )
+                    : undefined;
+                  break;
+                }
+                case 'PreToolUse': {
+                  result = await hookSystem.firePreToolUseEvent(
+                    (input['tool_name'] as string) || '',
+                    (input['tool_input'] as Record<string, unknown>) || {},
+                    (input['tool_use_id'] as string) || '',
+                    (input['permission_mode'] as PermissionMode | undefined) ??
+                      PermissionMode.Default,
+                    signal,
+                    (input['tool_call_id'] as string) || undefined,
+                  );
+                  break;
+                }
+                case 'PostToolUse':
+                  result = await hookSystem.firePostToolUseEvent(
+                    (input['tool_name'] as string) || '',
+                    (input['tool_input'] as Record<string, unknown>) || {},
+                    (input['tool_response'] as Record<string, unknown>) || {},
+                    (input['tool_use_id'] as string) || '',
+                    (input['permission_mode'] as PermissionMode) || 'default',
+                    signal,
+                    (input['tool_call_id'] as string) || undefined,
+                    typeof input['duration_ms'] === 'number'
+                      ? input['duration_ms']
+                      : undefined,
+                  );
+                  break;
+                case 'PostToolUseFailure':
+                  result = await hookSystem.firePostToolUseFailureEvent(
+                    (input['tool_use_id'] as string) || '',
+                    (input['tool_name'] as string) || '',
+                    (input['tool_input'] as Record<string, unknown>) || {},
+                    (input['error'] as string) || '',
+                    input['is_interrupt'] as boolean | undefined,
+                    (input['permission_mode'] as PermissionMode) || 'default',
+                    signal,
+                    (input['tool_call_id'] as string) || undefined,
+                    typeof input['duration_ms'] === 'number'
+                      ? input['duration_ms']
+                      : undefined,
+                  );
+                  break;
+                case 'PostToolBatch':
+                  result = await hookSystem.firePostToolBatchEvent(
+                    (input['tool_calls'] as PostToolBatchToolCall[]) || [],
+                    (input['permission_mode'] as PermissionMode) || 'default',
+                    signal,
+                  );
+                  break;
+                case 'Notification':
+                  result = await hookSystem.fireNotificationEvent(
+                    (input['message'] as string) || '',
+                    (input['notification_type'] as NotificationType) ||
+                      'permission_prompt',
+                    (input['title'] as string) || undefined,
+                    signal,
+                  );
+                  break;
+                case 'PermissionRequest':
+                  result = await hookSystem.firePermissionRequestEvent(
+                    (input['tool_name'] as string) || '',
+                    (input['tool_input'] as Record<string, unknown>) || {},
+                    (input['permission_mode'] as PermissionMode) ||
+                      PermissionMode.Default,
+                    (input['permission_suggestions'] as
+                      | PermissionSuggestion[]
+                      | undefined) || undefined,
+                    signal,
+                  );
+                  break;
+                case 'PermissionDenied':
+                  result = await hookSystem.firePermissionDeniedEvent(
+                    (input['tool_name'] as string) || '',
+                    (input['tool_input'] as Record<string, unknown>) || {},
+                    (input['tool_use_id'] as string) || '',
+                    (input['reason'] as PermissionDeniedReason) ||
+                      'classifier_blocked',
+                    signal,
+                    (input['tool_call_id'] as string) || undefined,
+                  );
+                  break;
+                case 'SubagentStart':
+                  result = await hookSystem.fireSubagentStartEvent(
+                    (input['agent_id'] as string) || '',
+                    (input['agent_type'] as string) || '',
+                    (input['permission_mode'] as PermissionMode) ||
+                      PermissionMode.Default,
+                    signal,
+                  );
+                  break;
+                case 'SubagentStop':
+                  result = await hookSystem.fireSubagentStopEvent(
+                    (input['agent_id'] as string) || '',
+                    (input['agent_type'] as string) || '',
+                    (input['agent_transcript_path'] as string) || '',
+                    (input['last_assistant_message'] as string) || '',
+                    (input['stop_hook_active'] as boolean) || false,
+                    (input['permission_mode'] as PermissionMode) ||
+                      PermissionMode.Default,
+                    signal,
+                  );
+                  break;
+                case 'SessionStart':
+                  result = await hookSystem.fireSessionStartEvent(
+                    input['source'] as SessionStartSource,
+                    (input['model'] as string) || '',
+                    (input['permission_mode'] as PermissionMode) || undefined,
+                    input['agent_type'] as AgentType | undefined,
+                    signal,
+                  );
+                  break;
+                case 'SessionEnd':
+                  result = await hookSystem.fireSessionEndEvent(
+                    input['reason'] as SessionEndReason,
+                    signal,
+                  );
+                  break;
+                case 'SessionDelete':
+                  result = await hookSystem.fireSessionDeleteEvent(
+                    (input['deleted_session_id'] as string) || '',
+                    signal,
+                  );
+                  break;
+                case 'PreCompact':
+                  result = await hookSystem.firePreCompactEvent(
+                    input['trigger'] as PreCompactTrigger,
+                    (input['custom_instructions'] as string) || '',
+                    signal,
+                  );
+                  break;
+                case 'PostCompact':
+                  result = await hookSystem.firePostCompactEvent(
+                    input['trigger'] as PostCompactTrigger,
+                    (input['compact_summary'] as string) || '',
+                    signal,
+                  );
+                  break;
+                case 'InstructionsLoaded':
+                  result = await hookSystem.fireInstructionsLoadedEvent(
+                    (input['file_path'] as string) || '',
+                    input['memory_type'] as InstructionMemoryType,
+                    input['load_reason'] as InstructionLoadReason,
+                    {
+                      triggerFilePath: input['trigger_file_path'] as
+                        | string
+                        | undefined,
+                      parentFilePath: input['parent_file_path'] as
+                        | string
+                        | undefined,
+                    },
+                    signal,
+                  );
+                  break;
+                // These three return the aggregated result, and the bus replies
+                // with its final output as is. For TodoCreated and TodoCompleted
+                // that is what direct callers read (todoWrite checks
+                // `finalOutput.decision`). StopFailure is fire-and-forget: the
+                // aggregator hard-codes its `finalOutput` to undefined and every
+                // direct caller detaches without reading the result, so its arm
+                // always replies with no output and awaits only so the hooks run.
+                // Stop and MessageDisplay instead wrap theirs with
+                // createHookOutput.
+                case 'StopFailure':
+                  result = (
+                    await hookSystem.fireStopFailureEvent(
+                      input['error'] as StopFailureErrorType,
+                      input['error_details'] as string | undefined,
+                      input['last_assistant_message'] as string | undefined,
+                      signal,
+                    )
+                  ).finalOutput;
+                  break;
+                case 'TodoCreated':
+                  result = (
+                    await hookSystem.fireTodoCreatedEvent(
+                      (input['todo_id'] as string) || '',
+                      (input['todo_content'] as string) || '',
+                      input['todo_status'] as TodoStatus,
+                      (input['all_todos'] as TodoItem[]) || [],
+                      input['phase'] as HookPhase,
+                      signal,
+                    )
+                  ).finalOutput;
+                  break;
+                case 'TodoCompleted':
+                  result = (
+                    await hookSystem.fireTodoCompletedEvent(
+                      (input['todo_id'] as string) || '',
+                      (input['todo_content'] as string) || '',
+                      input['previous_status'] as 'pending' | 'in_progress',
+                      (input['all_todos'] as TodoItem[]) || [],
+                      input['phase'] as HookPhase,
+                      signal,
+                    )
+                  ).finalOutput;
+                  break;
+                default:
+                  this.debugLogger.warn(
+                    `Unknown hook event: ${request.eventName}`,
+                  );
+                  result = undefined;
+              }
+
+              // Send response
+              this.messageBus?.publish({
+                type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+                correlationId: request.correlationId,
+                success: true,
+                output: result,
+                // Include stop hook count for Stop events
+                stopHookCount,
+              } as HookExecutionResponse);
+            });
           } catch (error) {
             this.debugLogger.warn(`Hook execution failed: ${error}`);
             this.messageBus?.publish({
@@ -5696,6 +5708,7 @@ export class Config {
    * Refresh authentication and rebuild ContentGenerator.
    */
   async refreshAuth(authMethod: AuthType, isInitialAuth?: boolean) {
+    const hookOwner = captureHookExecutionOwner(this, null);
     if (!this.contentGenerator && authMethod === this.initialAuthType) {
       authMethod = this.initialResolvedAuthType ?? authMethod;
     }
@@ -5772,6 +5785,8 @@ export class Config {
         `Successfully authenticated with ${authMethod}`,
         NotificationType.AuthSuccess,
         'Authentication successful',
+        undefined,
+        hookOwner,
       ).catch(() => {
         // Silently ignore errors - fireNotificationHook has internal error handling
         // and notification hooks should not block the auth flow
@@ -6537,9 +6552,53 @@ export class Config {
     }
 
     const rawSelector = resolveModelId(this.fastModel);
-    return rawSelector?.authType
-      ? `${rawSelector.authType}:${selector.modelId}`
-      : selector.modelId;
+    if (!rawSelector?.authType) return selector.modelId;
+    const qualified = `${rawSelector.authType}:${selector.modelId}`;
+    const endpoint = this.pinnedAuxEndpoint(
+      this.fastModel,
+      selector.modelId,
+      available,
+    );
+    return endpoint ? `${qualified}\0${endpoint}` : qualified;
+  }
+
+  /**
+   * The endpoint a persisted aux selector (`authType:id\0<baseUrl>`) is pinned
+   * to, in the registry-identity form consumers of the selector compare
+   * against: the picker persists the row's effective baseUrl, while registry
+   * keys and the forked-runtime guard use the declared one. An entry that
+   * declares no endpoint needs no suffix — a bare selector resolves to it —
+   * and an endpoint matching no configured entry is dropped, which keeps the
+   * pre-existing first-match behaviour instead of unconfiguring the model.
+   *
+   * Matching is on the effective baseUrl (what the picker persists), which is
+   * not unique across same-id entries: a row declaring no baseUrl shares the
+   * auth type's default URL with a row that declares that same URL. When
+   * several rows match, prefer the one that declared the endpoint
+   * (`registryBaseUrl` set) so the pin deterministically re-attaches instead
+   * of collapsing to whichever entry the config listed first. Residual
+   * ambiguity: a pin on the no-declared-baseUrl row cannot be told apart from
+   * a pin on the declaring row and resolves to the declaring one.
+   */
+  private pinnedAuxEndpoint(
+    persisted: string | undefined,
+    modelId: string,
+    available: AvailableModel[],
+  ): string | undefined {
+    const endpoint = persisted?.trim().split('\0')[1];
+    if (!endpoint) return undefined;
+    const hits = available.filter(
+      (model) => model.id === modelId && model.baseUrl === endpoint,
+    );
+    const matched =
+      hits.find((model) => model.registryBaseUrl !== undefined) ?? hits[0];
+    if (!matched) {
+      this.debugLogger.warn(
+        `Aux endpoint pin dropped for "${modelId}": no configured entry at ${formatVisionModelSettingForLog(endpoint)}; falling back to the first same-id match.`,
+      );
+      return undefined;
+    }
+    return matched.registryBaseUrl;
   }
 
   /**
@@ -6661,9 +6720,14 @@ export class Config {
         return undefined;
       }
       const rawSelector = resolveModelId(this.compactionModel);
-      return rawSelector?.authType
-        ? `${rawSelector.authType}:${selector.modelId}`
-        : selector.modelId;
+      if (!rawSelector?.authType) return selector.modelId;
+      const qualified = `${rawSelector.authType}:${selector.modelId}`;
+      const endpoint = this.pinnedAuxEndpoint(
+        this.compactionModel,
+        selector.modelId,
+        available,
+      );
+      return endpoint ? `${qualified}\0${endpoint}` : qualified;
     }
     return this.getModel();
   }

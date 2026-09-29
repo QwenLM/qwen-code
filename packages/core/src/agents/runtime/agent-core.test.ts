@@ -5,6 +5,18 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
+import {
+  getHookExecutionOwner,
+  runWithHookExecutionOwner,
+} from '../../hooks/hook-execution-context.js';
+
+import { HookSystem } from '../../hooks/hookSystem.js';
+import {
+  HookEventName,
+  HookType,
+  PermissionMode,
+  type HookInput,
+} from '../../hooks/types.js';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -180,6 +192,173 @@ describe('AgentCore.runInAgentFrames', () => {
       subagentId,
     );
   }
+
+  it.each([
+    { caller: null, explicit: undefined, expected: null },
+    { caller: 'caller-A', explicit: undefined, expected: 'caller-A' },
+    { caller: 'caller-A', explicit: 'child-B', expected: 'child-B' },
+  ])(
+    'dispatches real tool hooks for caller $caller and explicit child $explicit',
+    async ({ caller, explicit, expected }) => {
+      const events: HookInput[] = [];
+      const config = {
+        getSessionId: () => 'session',
+        getAllowedHttpHookUrls: () => [],
+        getAllowPrivateNetworkHooks: () => false,
+        getSystemHooks: () => undefined,
+        getUserHooks: () => ({
+          [HookEventName.PreToolUse]: [
+            {
+              hooks: [
+                {
+                  type: HookType.Function,
+                  id: 'recorder',
+                  errorMessage: 'recorder failed',
+                  callback: async (input: HookInput) => {
+                    events.push(input);
+                    return undefined;
+                  },
+                },
+              ],
+            },
+          ],
+        }),
+        getProjectHooks: () => undefined,
+        getExtensions: () => [],
+        getSessionSourceType: () => undefined,
+        getSessionSourceId: () => undefined,
+        getTranscriptPath: () => '/tmp/transcript',
+        getWorkingDir: () => '/tmp',
+        getProjectRoot: () => '/tmp',
+        getApprovalMode: () => 'default',
+        getMessageBus: () => undefined,
+        getHookSystem: (): HookSystem => system,
+        isTrustedFolder: () => true,
+      } as unknown as Config;
+      const system = new HookSystem(config);
+      await system.initialize();
+      const localEvents: HookInput[] = [];
+      system.getRegistry().addAgentHooks(
+        {
+          [HookEventName.PreToolUse]: [
+            {
+              hooks: [
+                {
+                  type: HookType.Function,
+                  id: 'caller-local',
+                  errorMessage: 'local failed',
+                  callback: async (input: HookInput) => {
+                    localEvents.push(input);
+                    return undefined;
+                  },
+                },
+              ],
+            },
+          ],
+        },
+        'caller-registration',
+        {
+          owner: {
+            sessionId: 'session',
+            agentId: 'caller-A',
+          },
+        },
+      );
+      const owner = {
+        runtimeId: system.runtimeId,
+        sessionId: 'session',
+        agentId: caller,
+      };
+      const core = runWithHookExecutionOwner(
+        owner,
+        () =>
+          new AgentCore(
+            'internal-fork',
+            config,
+            { systemPrompt: '' },
+            { model: 'test' },
+            { max_turns: 1 },
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            explicit,
+          ),
+      );
+      await core.runInAgentFrames(() =>
+        system.firePreToolUseEvent(
+          'read_file',
+          {},
+          'tool',
+          PermissionMode.Default,
+        ),
+      );
+      expect(localEvents).toHaveLength(expected === 'caller-A' ? 1 : 0);
+      expect(events).toHaveLength(1);
+      expect(events[0].session_id).toBe('session');
+      if (expected === null) expect(events[0]).not.toHaveProperty('agent_id');
+      else expect(events[0].agent_id).toBe(expected);
+    },
+  );
+
+  it('pins hook ownership to the core across foreign frames and deferred approval', async () => {
+    let sessionId = 'original-session';
+    const config = {
+      getSessionId: () => sessionId,
+      getHookSystem: () => ({ runtimeId: 'own-runtime' }),
+    } as unknown as Config;
+    const foreign = {
+      runtimeId: 'foreign-runtime',
+      sessionId: 'foreign-session',
+      agentId: 'B',
+    };
+    const core = runWithHookExecutionOwner(
+      foreign,
+      () =>
+        new AgentCore(
+          'A',
+          config,
+          { systemPrompt: '' },
+          { model: 'test' },
+          { max_turns: 1 },
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          'actual-A',
+        ),
+    );
+    const expected = {
+      runtimeId: 'own-runtime',
+      sessionId: 'original-session',
+      agentId: 'actual-A',
+    };
+    sessionId = 'later-session';
+    let resume: (() => Promise<void>) | undefined;
+    await runWithAgentContext('general-parent', () =>
+      runWithHookExecutionOwner(foreign, async () => {
+        const depth = getCurrentAgentDepth();
+        await core.runInHookFrame(async () => {
+          await Promise.resolve();
+          expect(getHookExecutionOwner()).toEqual(expected);
+          expect(getCurrentAgentId()).toBe('general-parent');
+          expect(getCurrentAgentDepth()).toBe(depth);
+          resume = () =>
+            core.runInAgentFrames(async () => {
+              await Promise.resolve();
+              expect(getHookExecutionOwner()).toEqual(expected);
+            });
+        });
+        expect(getHookExecutionOwner()).toEqual(foreign);
+        await resume!();
+        expect(getHookExecutionOwner()).toEqual(foreign);
+        expect(getCurrentAgentDepth()).toBe(depth);
+      }),
+    );
+    expect(getHookExecutionOwner()).toBeUndefined();
+  });
 
   it('binds the running chat for Advisor and restores it during approval continuation', async () => {
     const core = makeCore('child');
