@@ -25,7 +25,7 @@ class WorkspaceRecoveryTest {
     }
 
     @Test
-    void operatorPreparationBlocksPlacementAndOrdinaryRecovery() {
+    void operatorPreparationBlocksPlacementAndOrdinaryRecovery() throws Exception {
         WorkspaceRecoveryContract.verifyOperatorPrepare(source, jdbc, store, authority);
     }
 }

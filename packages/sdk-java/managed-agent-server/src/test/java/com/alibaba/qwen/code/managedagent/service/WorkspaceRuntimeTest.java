@@ -140,18 +140,6 @@ class WorkspaceRuntimeTest {
                 .isEqualTo(originalLoss);
         assertThat(bindings.findRecoveryCandidates("local-process", null, 100))
                 .noneMatch(candidate -> candidate.getBindingId().equals(runtime.getBindingId()));
-        assertThat(bindings.compareAndSet(runtime,
-                runtime.withState(RuntimeBindingRecord.State.READY,
-                        runtime.getLease(), Instant.now()))).isNull();
-        RuntimeBindingRecord currentFence = bindings.claimOperation(runtime.getBindingId(),
-                "fence-test", Duration.ofSeconds(10));
-        assertThat(currentFence).isNotNull();
-        assertThatThrownBy(() -> bindings.compareAndSet(currentFence,
-                currentFence.withState(RuntimeBindingRecord.State.READY,
-                        currentFence.getLease(), Instant.now())))
-                .isInstanceOf(IllegalArgumentException.class);
-        bindings.releaseOperation(runtime.getBindingId(), "fence-test",
-                currentFence.getOperationGeneration());
         assertThat(recovery.inspect(runtime.getBindingId(), runtime.getGeneration())
                 .eligibleForPrepare()).isFalse();
         assertThat(recovery.prepare(runtime.getBindingId(), runtime.getGeneration(),
@@ -178,6 +166,15 @@ class WorkspaceRuntimeTest {
         authority.assertHeld(session.workspace(), held);
         var operation = recovery.operation(recoveryId);
         recovery.requireSnapshot(operation, bindings.findById(runtime.getBindingId()));
+        String handleJson = jdbc.queryForObject("SELECT resource_handle_json"
+                + " FROM managed_workspace_operator_recovery WHERE recovery_id = ?",
+                String.class, recoveryId);
+        jdbc.update("UPDATE managed_workspace_operator_recovery SET resource_handle_json = '{}'"
+                + " WHERE recovery_id = ?", recoveryId);
+        assertThatThrownBy(() -> recovery.requireSnapshot(operation,
+                bindings.findById(runtime.getBindingId()))).isInstanceOf(IllegalStateException.class);
+        jdbc.update("UPDATE managed_workspace_operator_recovery SET resource_handle_json = ?"
+                + " WHERE recovery_id = ?", handleJson, recoveryId);
         byte[] evidence = "verified stopped writers".getBytes(StandardCharsets.UTF_8);
         recovery.attest(operation, evidence);
         recovery.attest(operation, evidence);

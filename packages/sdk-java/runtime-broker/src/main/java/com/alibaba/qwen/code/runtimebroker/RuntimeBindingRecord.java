@@ -336,7 +336,8 @@ public final class RuntimeBindingRecord {
         return unreclaimed
                 && request.getScope().getTenantId().equals(candidate.getScope().getTenantId())
                 && (!request.isManagedContext()
-                        || (state == State.OPERATOR_RECOVERY || state == State.LOST)
+                        || (state == State.OPERATOR_RECOVERY || state == State.LOST
+                                || state == State.RECOVERY_BLOCKED || state == State.FAILED)
                                 && (request.getStorageId().equals(candidate.getStorageId())
                                         || request.getScope().getCanonicalCwd().equals(
                                                 candidate.getScope().getCanonicalCwd()))

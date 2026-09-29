@@ -576,7 +576,7 @@ public final class JdbcRuntimeBindingRepository
         }
     }
 
-    private static void lockPlacementDomain(Connection connection, String tenantId)
+    public static void lockPlacementDomain(Connection connection, String tenantId)
             throws SQLException {
         String key = JdbcRepositorySupport.valueKey(tenantId);
         try (PreparedStatement insert = connection.prepareStatement(

@@ -21,20 +21,21 @@ class WorkspaceRecoveryCommandTest {
     void acceptsOnlyTheExactPrivateOperatorStatement() throws Exception {
         String recoveryId = UUID.randomUUID().toString();
         Path evidence = directory.resolve("evidence.json");
+        Instant verifiedAt = Instant.now().minusSeconds(60);
         String valid = """
-                {"version":1,"recoveryId":"%s","verifiedAt":"2026-09-29T03:00:00Z",\
+                {"version":1,"recoveryId":"%s","verifiedAt":"%s",\
                 "method":"host inspection","actions":"Stopped all writers and disabled restarts",\
                 "restartPrevention":true}
-                """.formatted(recoveryId);
+                """.formatted(recoveryId, verifiedAt);
         Files.writeString(evidence, valid);
         Files.setPosixFilePermissions(evidence,
                 PosixFilePermissions.fromString("rw-------"));
         ObjectMapper mapper = new ObjectMapper();
-        Instant preparedAt = Instant.parse("2026-09-29T02:00:00Z");
+        Instant preparedAt = verifiedAt.minusSeconds(60);
         assertThat(WorkspaceRecoveryCommand.readEvidence(directory, evidence,
                 recoveryId, preparedAt, mapper)).isEqualTo(valid.getBytes(StandardCharsets.UTF_8));
         assertThatThrownBy(() -> WorkspaceRecoveryCommand.readEvidence(directory, evidence,
-                recoveryId, Instant.parse("2026-09-29T04:00:00Z"), mapper))
+                recoveryId, verifiedAt.plusSeconds(60), mapper))
                 .isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> WorkspaceRecoveryCommand.readEvidence(directory, evidence,
                 UUID.randomUUID().toString(), preparedAt, mapper)).isInstanceOf(IllegalArgumentException.class);
@@ -42,6 +43,22 @@ class WorkspaceRecoveryCommandTest {
         Files.writeString(evidence, valid.replace("\"version\":1", "\"version\":\"1\""));
         assertThatThrownBy(() -> WorkspaceRecoveryCommand.readEvidence(directory, evidence,
                 recoveryId, preparedAt, mapper)).isInstanceOf(IllegalArgumentException.class);
+        Files.writeString(evidence, valid.replace("\"version\":1", "\"version\":4294967297"));
+        assertThatThrownBy(() -> WorkspaceRecoveryCommand.readEvidence(directory, evidence,
+                recoveryId, preparedAt, mapper)).isInstanceOf(IllegalArgumentException.class);
+        Files.writeString(evidence, valid.replace("\"restartPrevention\":true", "\"restartPrevention\":false"));
+        assertThatThrownBy(() -> WorkspaceRecoveryCommand.readEvidence(directory, evidence,
+                recoveryId, preparedAt, mapper)).isInstanceOf(IllegalArgumentException.class);
+        Files.writeString(evidence, valid.replace(verifiedAt.toString(),
+                Instant.now().plusSeconds(360).toString()));
+        assertThatThrownBy(() -> WorkspaceRecoveryCommand.readEvidence(directory, evidence,
+                recoveryId, preparedAt, mapper)).isInstanceOf(IllegalArgumentException.class);
+        Files.writeString(evidence, valid.replace("Stopped all writers and disabled restarts", "x".repeat(8192)));
+        assertThatThrownBy(() -> WorkspaceRecoveryCommand.readEvidence(directory, evidence,
+                recoveryId, preparedAt, mapper)).hasMessageContaining("8 KiB");
+        Files.write(evidence, valid.getBytes(StandardCharsets.UTF_16));
+        assertThatThrownBy(() -> WorkspaceRecoveryCommand.readEvidence(directory, evidence,
+                recoveryId, preparedAt, mapper)).hasMessageContaining("UTF-8");
         Files.writeString(evidence, valid.replace("\"method\":\"host inspection\"", "\"method\":123"));
         assertThatThrownBy(() -> WorkspaceRecoveryCommand.readEvidence(directory, evidence,
                 recoveryId, preparedAt, mapper)).isInstanceOf(IllegalArgumentException.class);
@@ -56,5 +73,15 @@ class WorkspaceRecoveryCommandTest {
         Files.createSymbolicLink(link, evidence);
         assertThatThrownBy(() -> WorkspaceRecoveryCommand.readEvidence(directory, link,
                 recoveryId, preparedAt, mapper)).isInstanceOf(IllegalArgumentException.class);
+        Path outside = Files.createTempFile("operator-evidence", ".json");
+        try {
+            Files.writeString(outside, valid);
+            Files.setPosixFilePermissions(outside,
+                    PosixFilePermissions.fromString("rw-------"));
+            assertThatThrownBy(() -> WorkspaceRecoveryCommand.readEvidence(directory, outside,
+                    recoveryId, preparedAt, mapper)).isInstanceOf(IllegalArgumentException.class);
+        } finally {
+            Files.deleteIfExists(outside);
+        }
     }
 }

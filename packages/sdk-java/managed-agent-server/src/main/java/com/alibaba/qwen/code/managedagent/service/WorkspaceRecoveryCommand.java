@@ -15,12 +15,14 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerService;
 import com.alibaba.qwen.code.runtimebroker.RuntimeObservation;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Arrays;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -178,15 +180,25 @@ public final class WorkspaceRecoveryCommand {
         Path file = source.toAbsolutePath().normalize();
         if (!stateDirectory.equals(file.getParent()) || Files.isSymbolicLink(file)
                 || !Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)
-                || Files.size(file) > 8192
                 || !PosixFilePermissions.toString(Files.getPosixFilePermissions(file))
                         .equals("rw-------")) {
             throw new IllegalArgumentException("Evidence must be a private file in the Runtime state directory.");
         }
-        byte[] evidence = Files.readAllBytes(file);
+        byte[] evidence;
+        try (var input = Files.newInputStream(file, LinkOption.NOFOLLOW_LINKS)) {
+            evidence = input.readNBytes(8193);
+        }
+        if (evidence.length > 8192) {
+            throw new IllegalArgumentException("Operator evidence exceeds 8 KiB.");
+        }
+        if (!Arrays.equals(evidence,
+                new String(evidence, StandardCharsets.UTF_8).getBytes(StandardCharsets.UTF_8))) {
+            throw new IllegalArgumentException("Operator evidence must be UTF-8.");
+        }
         JsonNode value = mapper.readTree(evidence);
         if (value == null || !value.isObject() || value.size() != 6
                 || !value.path("version").isIntegralNumber()
+                || !value.path("version").canConvertToInt()
                 || value.path("version").asInt() != 1
                 || !recoveryId.equals(value.path("recoveryId").asText())
                 || !value.path("restartPrevention").isBoolean()

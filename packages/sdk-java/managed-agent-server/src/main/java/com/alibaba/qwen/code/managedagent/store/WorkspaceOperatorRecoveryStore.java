@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.store;
 
+import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -13,6 +14,7 @@ import java.time.ZoneOffset;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.UUID;
+import org.springframework.jdbc.core.ConnectionCallback;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -72,6 +74,11 @@ public final class WorkspaceOperatorRecoveryStore {
         }
         RuntimeBindingRecord saved = requireBinding(bindingId, generation);
         return transaction.execute(status -> {
+            jdbc.execute((ConnectionCallback<Void>) connection -> {
+                JdbcRuntimeBindingRepository.lockPlacementDomain(connection,
+                        saved.getRequest().getScope().getTenantId());
+                return null;
+            });
             List<Boolean> valid = jdbc.query("SELECT binding_state, record_version,"
                     + " resource_handle_version, provision_request_id, runtime_lease_id,"
                     + " runtime_epoch, storage_id, tenant_id, stop_evidence_json"
