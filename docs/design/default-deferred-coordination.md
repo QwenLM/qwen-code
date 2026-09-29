@@ -19,8 +19,9 @@ Common file tools remain unchanged. `tools.eager` retains its existing meaning;
 listing a natively deferred tool there does not force it resident. `tools.visible`
 can force a declaration up front. Existing preload behavior and eager fallback
 when either bridge half is unavailable still apply. Code Mode keeps its existing
-discovery path. This does not shrink system prompts, memory, history, or the
-schemas that subagents receive.
+discovery path. Existing declared-tool system-prompt gating still applies; no
+new prompt-trimming policy is added. Memory, history, and the schemas that
+subagents receive are unchanged.
 
 ## Risks and acceptance
 
