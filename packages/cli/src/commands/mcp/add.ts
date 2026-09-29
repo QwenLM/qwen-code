@@ -13,9 +13,11 @@ import type {
   MCPOAuthConfig,
 } from '@qwen-code/qwen-code-core';
 
-function splitCommaList(values: string[] | undefined): string[] | undefined {
+// `--no-include-tools` makes yargs put a boolean `false` in the array.
+function splitCommaList(values: unknown[] | undefined): string[] | undefined {
   return values
-    ?.flatMap((value) => value.split(','))
+    ?.filter((value): value is string => typeof value === 'string')
+    .flatMap((value) => value.split(','))
     .map((value) => value.trim())
     .filter(Boolean);
 }
@@ -330,10 +332,10 @@ export const addCommand: CommandModule = {
         trust: argv['trust'] as boolean | undefined,
         description: argv['description'] as string | undefined,
         includeTools: splitCommaList(
-          argv['includeTools'] as string[] | undefined,
+          argv['includeTools'] as unknown[] | undefined,
         ),
         excludeTools: splitCommaList(
-          argv['excludeTools'] as string[] | undefined,
+          argv['excludeTools'] as unknown[] | undefined,
         ),
         oauthClientId: argv['oauthClientId'] as string | undefined,
         oauthClientSecret: argv['oauthClientSecret'] as string | undefined,

@@ -259,6 +259,35 @@ describe('mcp add command', () => {
     });
   });
 
+  it('should treat --no-exclude-tools as an empty list instead of crashing', async () => {
+    await parser.parseAsync('add my-server /path/to/server --no-exclude-tools');
+
+    expect(mockSetValue).toHaveBeenCalledWith(SettingScope.User, 'mcpServers', {
+      'my-server': expect.objectContaining({ excludeTools: [] }),
+    });
+  });
+
+  it('should drop empty segments from comma-separated tool lists', async () => {
+    await parser.parseAsync(
+      'add my-server /path/to/server --include-tools "a,,b" --exclude-tools write_file,',
+    );
+
+    expect(mockSetValue).toHaveBeenCalledWith(SettingScope.User, 'mcpServers', {
+      'my-server': expect.objectContaining({
+        includeTools: ['a', 'b'],
+        excludeTools: ['write_file'],
+      }),
+    });
+  });
+
+  it('should keep a present-but-empty tool list as an empty array', async () => {
+    await parser.parseAsync('add my-server /path/to/server --include-tools ""');
+
+    expect(mockSetValue).toHaveBeenCalledWith(SettingScope.User, 'mcpServers', {
+      'my-server': expect.objectContaining({ includeTools: [] }),
+    });
+  });
+
   describe('when handling scope and directory', () => {
     const serverName = 'test-server';
     const command = 'echo';
