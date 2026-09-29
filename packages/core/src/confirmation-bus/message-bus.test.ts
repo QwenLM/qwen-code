@@ -69,6 +69,7 @@ describe('MessageBus', () => {
 
       const request: HookExecutionRequest = {
         type: MessageBusType.HOOK_EXECUTION_REQUEST,
+        owner: { runtimeId: 'runtime', sessionId: 'session', agentId: null },
         eventName: 'UserPromptSubmit',
         input: { prompt: 'test' },
         correlationId: 'hook-123',
@@ -196,6 +197,7 @@ describe('MessageBus', () => {
       >(
         {
           type: MessageBusType.HOOK_EXECUTION_REQUEST,
+          owner: { runtimeId: 'runtime', sessionId: 'session', agentId: null },
           eventName: 'TestEvent',
           input: {},
         },
@@ -232,6 +234,7 @@ describe('MessageBus', () => {
       >(
         {
           type: MessageBusType.HOOK_EXECUTION_REQUEST,
+          owner: { runtimeId: 'runtime', sessionId: 'session', agentId: null },
           eventName: 'TestEvent',
           input: {},
         },
@@ -246,6 +249,11 @@ describe('MessageBus', () => {
         bus.request<HookExecutionRequest, HookExecutionResponse>(
           {
             type: MessageBusType.HOOK_EXECUTION_REQUEST,
+            owner: {
+              runtimeId: 'runtime',
+              sessionId: 'session',
+              agentId: null,
+            },
             eventName: 'TestEvent',
             input: {},
           },
@@ -263,6 +271,11 @@ describe('MessageBus', () => {
         bus.request<HookExecutionRequest, HookExecutionResponse>(
           {
             type: MessageBusType.HOOK_EXECUTION_REQUEST,
+            owner: {
+              runtimeId: 'runtime',
+              sessionId: 'session',
+              agentId: null,
+            },
             eventName: 'TestEvent',
             input: {},
           },
@@ -279,6 +292,7 @@ describe('MessageBus', () => {
       const promise = bus.request<HookExecutionRequest, HookExecutionResponse>(
         {
           type: MessageBusType.HOOK_EXECUTION_REQUEST,
+          owner: { runtimeId: 'runtime', sessionId: 'session', agentId: null },
           eventName: 'TestEvent',
           input: {},
         },
