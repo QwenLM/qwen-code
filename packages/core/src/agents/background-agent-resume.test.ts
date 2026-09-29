@@ -1422,7 +1422,7 @@ describe('BackgroundAgentResumeService', () => {
         getTerminateMode: () => AgentTerminateMode.GOAL,
         getFinalText: () => 'done',
       };
-      const { service, subagentManager } = createService({
+      const { service, subagentManager, stubToolRegistry } = createService({
         toolMode,
         skillManager: {
           listSkills: vi.fn().mockResolvedValue([
@@ -1436,6 +1436,7 @@ describe('BackgroundAgentResumeService', () => {
           isSkillActive: vi.fn().mockReturnValue(true),
         },
       });
+      stubToolRegistry.getAllToolNames.mockReturnValue([ToolNames.SKILL]);
       subagentManager.loadSubagent.mockResolvedValue({
         name: 'researcher',
         color: 'cyan',
