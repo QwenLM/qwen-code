@@ -9,6 +9,7 @@ import type { Part } from '@google/genai';
 import type { Application, Request, Response } from 'express';
 import { parseBridgeManagedSessionStore } from '@qwen-code/acp-bridge/bridgeTypes';
 import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
+import { MANAGED_MCP_MAX_CONNECTIONS } from '@qwen-code/qwen-code-core/managed-runtime/managed-mcp-protocol.js';
 import {
   ManagedSessionAlreadyExistsError,
   ManagedSessionNotFoundError,
@@ -43,6 +44,7 @@ import {
   HostedMcpSession,
   HostedMcpRecoveryRequiredError,
   HostedMcpConflictError,
+  HostedMcpConnectionQuotaError,
   parseHostedMcpServers,
   type HostedMcpServerPin,
 } from './hosted-mcp-session.js';
@@ -267,6 +269,12 @@ export function registerHostedHarnessSessionRoutes(
         mcpServers = parseHostedMcpServers(body?.['mcpServers']);
       else if (body?.['mcpServers'] !== undefined)
         throw new Error('MCP requires its explicit profile.');
+      if (
+        create &&
+        mcpServers &&
+        mcpServers.length > MANAGED_MCP_MAX_CONNECTIONS
+      )
+        throw new Error('MCP server definitions exceed Runtime capacity.');
     } catch {
       error(res, 400, 'invalid_hosted_mcp_servers');
       return;
@@ -656,7 +664,14 @@ export function registerHostedHarnessSessionRoutes(
             );
           }
         }
-        if (!res.headersSent) error(res, 503, 'hosted_prompt_admission_failed');
+        if (!res.headersSent)
+          error(
+            res,
+            cause instanceof HostedMcpConnectionQuotaError ? 409 : 503,
+            cause instanceof HostedMcpConnectionQuotaError
+              ? cause.message
+              : 'hosted_prompt_admission_failed',
+          );
       } finally {
         if (timer) clearTimeout(timer);
         try {
@@ -706,8 +721,14 @@ export function registerHostedHarnessSessionRoutes(
       .configure(operationId as string, pin, Number(expectedRevision))
       .then(
         () => res.status(202).json({ operationId, state: 'settled' }),
-        () => {
-          error(res, 409, 'hosted_mcp_configuration_failed');
+        (cause: unknown) => {
+          error(
+            res,
+            409,
+            cause instanceof HostedMcpConnectionQuotaError
+              ? cause.message
+              : 'hosted_mcp_configuration_failed',
+          );
         },
       )
       .finally(() => {
@@ -771,8 +792,13 @@ export function registerHostedHarnessSessionRoutes(
         (cause: unknown) => {
           error(
             res,
-            cause instanceof HostedMcpConflictError ? 409 : 503,
-            'hosted_mcp_operation_failed',
+            cause instanceof HostedMcpConflictError ||
+              cause instanceof HostedMcpConnectionQuotaError
+              ? 409
+              : 503,
+            cause instanceof HostedMcpConnectionQuotaError
+              ? cause.message
+              : 'hosted_mcp_operation_failed',
           );
         },
       )

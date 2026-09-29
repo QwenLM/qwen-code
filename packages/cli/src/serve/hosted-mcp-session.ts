@@ -39,6 +39,7 @@ export interface HostedMcpServerPin {
 export function parseHostedMcpServers(
   value: unknown,
 ): readonly HostedMcpServerPin[] {
+  // Saved Sessions retain the original pin format so they can load and detach.
   if (!Array.isArray(value) || value.length < 1 || value.length > 32) {
     throw new Error('MCP profile requires 1–32 server definitions.');
   }
@@ -79,6 +80,12 @@ export class HostedMcpRecoveryRequiredError extends Error {
 }
 
 export class HostedMcpConflictError extends Error {}
+
+export class HostedMcpConnectionQuotaError extends Error {
+  constructor() {
+    super('managed_mcp_connection_quota');
+  }
+}
 
 type ResourceRequest = Exclude<
   ManagedMcpInvoke['request'],
@@ -327,6 +334,8 @@ export class HostedMcpSession {
             reason: null,
           },
         });
+      if (operation.error?.code === 'managed_mcp_connection_quota')
+        throw new HostedMcpConnectionQuotaError();
       throw new Error('Runtime MCP configuration failed.');
     }
     const catalog = operation.catalog;

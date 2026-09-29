@@ -15,6 +15,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LocalJsonlManagedSessionJournalStore } from '@qwen-code/qwen-code-core/managed-runtime/local-jsonl-managed-session-journal-store.js';
 import { LocalManagedSessionAuthority } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
 import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
+import { openManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import type {
   ManagedMcpControl,
   ManagedMcpOperationView,
@@ -392,6 +393,185 @@ describe('Hosted Harness no-tool session', () => {
         supertest(server).get(`/session/${SESSION_ID}/status`),
       );
       expect(status.body.recoveryBlocked).toBe(false);
+      expect(
+        (await headers(supertest(server).delete(`/session/${SESSION_ID}`)))
+          .status,
+      ).toBe(204);
+    },
+  );
+
+  it.each([
+    [16, 200],
+    [17, 400],
+    [32, 400],
+  ])(
+    'checks the MCP pin limit at creation (%i pins)',
+    async (count, status) => {
+      const server = app(true);
+      const created = await headers(supertest(server).post('/session')).send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+        toolProfile: 'hosted-workspace-mcp/1',
+        mcpServers: Array.from({ length: count }, (_, index) => ({
+          serverId: `server-${index}`,
+          serverRevision: 1,
+          definitionDigest: 'a'.repeat(64),
+        })),
+      });
+      if (created.status === 200)
+        await headers(supertest(server).delete(`/session/${SESSION_ID}`));
+      expect(created.status).toBe(status);
+      if (status === 400)
+        expect(created.body.code).toBe('invalid_hosted_mcp_servers');
+      expect(state.model).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([17, 32])(
+    'loads and detaches an existing %i-pin MCP Session',
+    async (count) => {
+      const mcpServers = Array.from({ length: count }, (_, index) => ({
+        serverId: `server-${index}`,
+        serverRevision: 1,
+        definitionDigest: 'a'.repeat(64),
+      }));
+      const sessionKey = {
+        tenantId: 'tenant',
+        workspaceId: 'workspace',
+        sessionId: SESSION_ID,
+      };
+      const resources = LocalManagedSessionResourceStore.create({
+        runtimeBaseDir: state.root,
+        sessionKey,
+      });
+      const transcriptPath = path.join(state.root, `${SESSION_ID}.jsonl`);
+      const previous = await openManagedSession({
+        runtimeBaseDir: state.root,
+        cwd: state.root,
+        transcriptPath,
+        sessionId: SESSION_ID,
+        sessionKey,
+        version: 'hosted-harness/1',
+        workerId: BOOT_ID,
+        activationLeaseDurationMs: 60_000,
+        journalStore: new LocalJsonlManagedSessionJournalStore({
+          runtimeBaseDir: state.root,
+          sessionId: SESSION_ID,
+          transcriptPath,
+        }),
+        resourceStore: resources,
+        create: {
+          definitionRef: await resources.publish(
+            'managed-definition',
+            Buffer.from(
+              JSON.stringify({
+                engine: 'managed',
+                sessionId: SESSION_ID,
+                toolProfile: 'hosted-workspace-mcp/1',
+                mcpServers,
+              }),
+            ),
+          ),
+          rootSnapshotRef: await resources.publish(
+            'managed-root',
+            Buffer.from('{}'),
+          ),
+          createdBy: 'hosted-harness',
+        },
+      });
+      await previous.close();
+      const server = app(true);
+      const loaded = await headers(
+        supertest(server).post(`/session/${SESSION_ID}/load`),
+      ).send({
+        toolProfile: 'hosted-workspace-mcp/1',
+        mcpServers,
+        managedSessionStore: store(),
+      });
+      expect(loaded.status).toBe(200);
+      expect(
+        (
+          await headers(
+            supertest(server).post(`/session/${SESSION_ID}/detach`),
+          ).set('X-Qwen-Client-Id', loaded.body.clientId as string)
+        ).status,
+      ).toBe(204);
+      expect(state.model).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['prompt', 'configuration', 'resource'])(
+    'reports exhausted Runtime capacity from the MCP %s entry point',
+    async (entryPoint) => {
+      const { server, authorize } = await mcpApp();
+      const resource = () =>
+        authorize(
+          supertest(server).post(`/session/${SESSION_ID}/mcp/operations`),
+        ).send({
+          operationId: randomUUID(),
+          serverId: 'demo',
+          request: { kind: 'resource_read', uri: 'memory://note' },
+        });
+      if (entryPoint === 'configuration')
+        expect((await resource()).status).toBe(202);
+      const control = vi.mocked(HostedWorkspaceBroker.prototype.control);
+      const physical = control.getMockImplementation()!;
+      control.mockImplementationOnce(async (operation) => {
+        expect(operation.kind).toBe('mcp-configure');
+        return {
+          operationId: operation.operationId,
+          state: 'settled',
+          error: { code: 'managed_mcp_connection_quota' },
+        };
+      });
+      const admit = vi.spyOn(
+        LocalManagedSessionAuthority.prototype,
+        'submitInput',
+      );
+      const prompt = [{ type: 'text', text: 'hello' }];
+      const sendPrompt = () =>
+        authorize(supertest(server).post(`/session/${SESSION_ID}/prompt`)).send(
+          {
+            prompt,
+            promptId: PROMPT_ID,
+            payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+          },
+        );
+      const rejected =
+        entryPoint === 'prompt'
+          ? await sendPrompt()
+          : entryPoint === 'resource'
+            ? await resource()
+            : await authorize(
+                supertest(server).post(
+                  `/session/${SESSION_ID}/mcp/configurations`,
+                ),
+              ).send({
+                operationId: randomUUID(),
+                expectedRevision: 1,
+                server: {
+                  serverId: 'demo',
+                  serverRevision: 2,
+                  definitionDigest: 'a'.repeat(64),
+                },
+              });
+      expect(rejected.status).toBe(409);
+      expect(rejected.body.code).toBe('managed_mcp_connection_quota');
+      expect(admit).not.toHaveBeenCalled();
+      expect(state.model).not.toHaveBeenCalled();
+      control.mockImplementation(physical);
+      if (entryPoint === 'prompt') {
+        expect((await sendPrompt()).status).toBe(202);
+        await vi.waitFor(async () => {
+          const status = await authorize(
+            supertest(server).get(`/session/${SESSION_ID}/status`),
+          );
+          expect(status.body.hasActivePrompt).toBe(false);
+          expect(status.body.recoveryBlocked).toBe(false);
+        });
+        expect(state.model).toHaveBeenCalledOnce();
+      }
       expect(
         (await headers(supertest(server).delete(`/session/${SESSION_ID}`)))
           .status,

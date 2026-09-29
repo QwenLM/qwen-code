@@ -10,6 +10,7 @@ import type { ManagedSessionKey } from './managed-session-records.js';
 export const MANAGED_MCP_PROTOCOL = 'managed-mcp/1';
 export const MANAGED_MCP_TOOL = 'managed_mcp_call';
 export const MANAGED_MCP_ROUTE = '/internal/managed-runtime/v3/mcp';
+export const MANAGED_MCP_MAX_CONNECTIONS = 16;
 
 export type ManagedMcpDiscoveryState =
   | 'complete'

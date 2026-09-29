@@ -24,12 +24,13 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import { ManagedOperationGrantGate } from '@qwen-code/qwen-code-core/managed-runtime/managed-operation-grant-gate.js';
 import { parseOperationGrant } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-record.js';
-import type {
-  ManagedMcpCatalog,
-  ManagedMcpConfigure,
-  ManagedMcpControl,
-  ManagedMcpInvoke,
-  ManagedMcpOperationView,
+import {
+  MANAGED_MCP_MAX_CONNECTIONS,
+  type ManagedMcpCatalog,
+  type ManagedMcpConfigure,
+  type ManagedMcpControl,
+  type ManagedMcpInvoke,
+  type ManagedMcpOperationView,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-mcp-protocol.js';
 import type { ManagedSessionKey } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 
@@ -90,7 +91,6 @@ export class ManagedMcpError extends Error {
   }
 }
 
-const MAX_CONNECTIONS = 16;
 const MAX_INFLIGHT = 32;
 const MAX_MANIFEST_BYTES = 1024 * 1024;
 const MAX_RESULT_BYTES = 60 * 1024;
@@ -590,7 +590,7 @@ export class ManagedMcpRuntime {
         throw new ManagedMcpError('managed_mcp_revision_conflict');
       if (
         [...this.connections.values()].filter((entry) => !entry.closed)
-          .length >= MAX_CONNECTIONS
+          .length >= MANAGED_MCP_MAX_CONNECTIONS
       )
         throw new ManagedMcpError('managed_mcp_connection_quota');
       const transport =
