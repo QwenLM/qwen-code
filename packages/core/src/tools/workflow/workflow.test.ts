@@ -905,8 +905,11 @@ await agent('scan package.json')
     // `agent({tools})`, whose entry states what the allowlist refuses and what
     // it cannot promise, which put the fallback at 26,900. Raised again from
     // 27,500, which the resume refusals had reached exactly, when the reference
-    // gained how a run interrupted by its process exiting is listed.
-    expect(tool.description.length).toBeLessThanOrEqual(28_000);
+    // gained how a run interrupted by its process exiting is listed. Raised
+    // again from 28,000, which the fallback had nearly reached, when the
+    // `schema` entry gained what is refused before dispatch and what a
+    // failed structured result reports.
+    expect(tool.description.length).toBeLessThanOrEqual(28_500);
   });
 
   it('rejects build() when script is missing', () => {

@@ -31,6 +31,7 @@ class DurableLocalRuntimeFaultGateTest {
             String execution = created.getString("executionCallId");
             // Keep the result from settling in the first Broker before the crash.
             response.awaitHeld(FaultGateRig.WAIT);
+            assertNull(rig.execution(execution).getResult());
             var original = rig.activeBinding();
             var worker = first.workers().getFirst();
             rig.killBroker(first);
@@ -39,11 +40,12 @@ class DurableLocalRuntimeFaultGateTest {
             var second = rig.broker("second", secondProxy, FaultGateRig.Provisioner.DURABLE_LOCAL_PROCESS);
             rig.awaitDispatchLapse(execution);
             second.acquire(HARNESS, SESSION).requireOk();
+            assertEquals(ToolExecutionRecord.State.SETTLED, rig.execution(execution).getState());
             var retry = second.create(HARNESS, SESSION, "original", reference).object();
             assertEquals(execution, retry.getString("executionCallId"));
-            assertEquals("UNKNOWN", retry.getString("state"));
-            FaultGateRig.await(() -> second.reconcile(HARNESS, SESSION, execution).object().getString("outcome"),
-                    "RESOLVED"::equals, "original journal settlement");
+            assertEquals("SETTLED", retry.getString("state"));
+            assertEquals("ALREADY_SETTLED",
+                    second.reconcile(HARNESS, SESSION, execution).object().getString("outcome"));
             var restored = rig.activeBinding();
             assertEquals(original.getBindingId(), restored.getBindingId());
             assertEquals(original.getGeneration(), restored.getGeneration());

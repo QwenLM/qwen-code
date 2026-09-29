@@ -4,6 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  captureHookExecutionOwner,
+  runWithHookExecutionOwner,
+  type HookExecutionOwner,
+} from '@qwen-code/qwen-code-core/hooks/hook-execution-context.js';
+
 import { shellResultText } from '@qwen-code/qwen-code-core/shellResult';
 import { evaluateMediaPolicyToolCall } from '@qwen-code/qwen-code-core/omni/policy/model-access.js';
 
@@ -1797,22 +1803,25 @@ export async function fireSessionPermissionDeniedForAutoMode(
   toolParams: Record<string, unknown>,
   callId: string,
   signal?: AbortSignal,
+  owner = captureHookExecutionOwner(config),
 ): Promise<void> {
   if (
     !config.getDisableAllHooks?.() &&
     shouldFirePermissionDeniedForAutoMode(decision, outcome)
   ) {
     try {
-      await config
-        .getHookSystem?.()
-        ?.firePermissionDeniedEvent(
-          toolName,
-          toolParams,
-          callId,
-          getAutoModePermissionDeniedReason(decision),
-          signal,
-          callId,
-        );
+      await runWithHookExecutionOwner(owner, () =>
+        config
+          .getHookSystem?.()
+          ?.firePermissionDeniedEvent(
+            toolName,
+            toolParams,
+            callId,
+            getAutoModePermissionDeniedReason(decision),
+            signal,
+            callId,
+          ),
+      );
     } catch (hookError) {
       debugLogger.warn(
         `PermissionDenied hook failed for tool ${callId}: ${hookError instanceof Error ? hookError.message : String(hookError)}`,
@@ -6180,6 +6189,7 @@ export class Session implements SessionContext {
                       ...(resourceLinks.length > 0 ? { resourceLinks } : {}),
                     }
                   : undefined,
+                promptId,
                 daemonPromptId,
               );
             }
@@ -6271,6 +6281,7 @@ export class Session implements SessionContext {
                         ...(inputAnnotations ? { inputAnnotations } : {}),
                       }
                     : undefined,
+                  promptId,
                   daemonPromptId,
                 );
               }
@@ -6352,6 +6363,7 @@ export class Session implements SessionContext {
               >(
                 {
                   type: MessageBusType.HOOK_EXECUTION_REQUEST,
+                  owner: captureHookExecutionOwner(this.config),
                   eventName: 'UserPromptSubmit',
                   input: {
                     prompt: promptText,
@@ -7299,6 +7311,7 @@ export class Session implements SessionContext {
           >(
             {
               type: MessageBusType.HOOK_EXECUTION_REQUEST,
+              owner: captureHookExecutionOwner(this.config),
               eventName: 'Stop',
               input: {
                 stop_hook_active: stopHookForcedTurn,
@@ -8592,8 +8605,12 @@ export class Session implements SessionContext {
     }
     // The dispatcher mirrors warnings to console.warn itself; this sink
     // only adds them to the debug-log file.
-    return new MessageDisplayDispatcher(messageBus, signal, (message) =>
-      debugLogger.warn(message),
+    return new MessageDisplayDispatcher(
+      messageBus,
+      signal,
+      (message) => debugLogger.warn(message),
+      undefined,
+      captureHookExecutionOwner(this.config),
     );
   }
 
@@ -13189,6 +13206,7 @@ export class Session implements SessionContext {
       onResult: (result: McpAppToolResult) => void;
     },
   ): Promise<RunToolResult> {
+    const hookOwner = captureHookExecutionOwner(this.config);
     const callId = fc.id ?? generatedCallId ?? `${fc.name}-${Date.now()}`;
     const modelFacingToolName = fc.name ?? 'unknown_tool';
     let args = (fc.args ?? {}) as Record<string, unknown>;
@@ -14033,6 +14051,7 @@ export class Session implements SessionContext {
               toolParams,
               callId,
               abortSignal,
+              hookOwner,
             );
             const permissionDeniedHookCancellation =
               cancelBeforeExecutionIfAborted(toolName);
@@ -14276,6 +14295,7 @@ export class Session implements SessionContext {
                 String(approvalMode),
                 undefined,
                 activeToolAbortSignal,
+                hookOwner,
               );
               const permissionHookCancellation =
                 cancelBeforeExecutionIfAborted(toolName);
@@ -14425,6 +14445,7 @@ export class Session implements SessionContext {
                   `Qwen Code needs your permission to use ${toolName}`,
                   NotificationType.PermissionPrompt,
                   'Permission needed',
+                  hookOwner,
                 );
               }
 
@@ -14779,6 +14800,7 @@ export class Session implements SessionContext {
               permissionMode,
               activeToolAbortSignal,
               callId,
+              hookOwner,
             );
             const preHookCancellation =
               cancelBeforeExecutionIfAborted(toolName);
@@ -15334,6 +15356,7 @@ export class Session implements SessionContext {
               activeToolAbortSignal,
               callId,
               elapsedExecutionMs(),
+              hookOwner,
             );
 
             if (activeToolAbortSignal.aborted) {
@@ -15403,6 +15426,7 @@ export class Session implements SessionContext {
                 activeToolAbortSignal,
                 callId,
                 elapsedExecutionMs(),
+                hookOwner,
               );
               if (failureHookResult.additionalContext) {
                 debugLogger.debug(
@@ -15660,6 +15684,7 @@ export class Session implements SessionContext {
                 activeToolAbortSignal,
                 callId,
                 elapsedExecutionMs(),
+                hookOwner,
               );
               if (failureHookResult.additionalContext) {
                 debugLogger.debug(
@@ -16544,8 +16569,16 @@ export class Session implements SessionContext {
     message: string,
     notificationType: NotificationType,
     title?: string,
+    owner?: HookExecutionOwner,
   ): void {
-    void fireNotificationHook(messageBus, message, notificationType, title)
+    void fireNotificationHook(
+      messageBus,
+      message,
+      notificationType,
+      title,
+      undefined,
+      owner,
+    )
       .then((hookResult) => {
         if (!hookResult.terminalSequence) return;
         return this.client.extNotification(
