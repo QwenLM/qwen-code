@@ -54,9 +54,11 @@ before any invocation is journaled: core applies content modification only to
 `edit` and `run_shell_command`. The shared provider corpus still lists that
 shape as valid, because it pins the wire shape both sides accept, not what one
 profile serves. A `run_shell_command` whose `directory` lies outside the
-Session's workspace is refused the same way: core's shell tool would ask before
-running there, and a preapproved Session never asks. `mediaContext` is admitted
-for `read_file` only; it binds the
+Session's workspace is refused the same way, since core's shell tool would ask
+and a preapproved Session never asks. The worker checks again just before the
+call runs, resolving the path afresh the way the kernel follows it, and settles
+the call as an error if a link has since moved it out. `mediaContext` is
+admitted for `read_file` only; it binds the
 tool's model-facing description to the Harness's modalities, while the read
 itself decides media delivery from this worker's own content-generator
 modalities, which it does not have, so a media file is still answered with the
@@ -174,7 +176,10 @@ That state blocks release and can retain Workspace storage ownership. Error
 codes alone do not prove that execution never started. The Broker's Runtime-loss
 recovery may fence an uncertain execution as ABANDONED: it remains permanently
 unknown, can be read through its persisted owner, and cannot be replayed.
-Existing immediate Tool v2 behavior stays available independently.
+Broker HTTP start, read and cancel ask the original worker about a provider
+execution left UNKNOWN, as they do for a tool v3 one, so its retained result
+settles the execution without a second dispatch. Existing immediate Tool v2
+behavior stays available independently.
 
 The raw reserve/start path from #12831 remains available on the same Broker
 routes. It reserves a four-field reference and supplies the exact `payloadJson`

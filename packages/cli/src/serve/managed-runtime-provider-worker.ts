@@ -5,6 +5,8 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
 import type { Application, Request, Response } from 'express';
 import {
   Config,
@@ -28,7 +30,10 @@ import {
 import { ReadFileTool } from '@qwen-code/qwen-code-core/tools/read-file.js';
 import { WriteFileTool } from '@qwen-code/qwen-code-core/tools/write-file.js';
 import { EditTool } from '@qwen-code/qwen-code-core/tools/edit.js';
-import { ShellTool } from '@qwen-code/qwen-code-core/tools/shell.js';
+import {
+  ShellTool,
+  type ShellToolParams,
+} from '@qwen-code/qwen-code-core/tools/shell.js';
 import type { AnyDeclarativeTool } from '@qwen-code/qwen-code-core/tools/tools.js';
 import {
   registerSessionProjectDir,
@@ -37,6 +42,7 @@ import {
   unregisterSessionProjectDir,
 } from '@qwen-code/qwen-code-core/utils/sessionIdContext.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
+import { isPathWithinRoot } from '@qwen-code/qwen-code-core/utils/workspaceContext.js';
 import {
   authorizeManagedRuntime,
   handleManagedRuntimeJsonError,
@@ -157,6 +163,65 @@ function history(value: ProviderRuntime): ManagedToolFileHistory {
   return (
     value.history ?? conflict('Managed Runtime file history is not bound.')
   );
+}
+
+/**
+ * Whether a shell `directory` lies inside the workspace. The path is resolved
+ * afresh on every call, the way the kernel follows it (a link before a
+ * following `..`), never from the workspace context's cache.
+ */
+function workspaceAdmits(config: Config, directory: string): boolean {
+  if (!path.isAbsolute(directory)) return false;
+  try {
+    const real = fs.realpathSync.native(directory);
+    return config
+      .getWorkspaceContext()
+      .getDirectories()
+      .some((root) => isPathWithinRoot(real, fs.realpathSync.native(root)));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Core's shell tool asks before running in a directory outside the workspace,
+ * and a preapproved Session never asks. Like the tool executor, this one
+ * refuses such a directory when the call is prepared, and again just before
+ * it runs, so a link retargeted in between cannot move the call out.
+ */
+class WorkspaceShellTool extends ShellTool {
+  constructor(
+    config: Config,
+    private readonly workspace: Config,
+  ) {
+    super(config);
+  }
+
+  protected override validateToolParamValues(
+    params: ShellToolParams,
+  ): string | null {
+    return super.validateToolParamValues(params) ?? this.outside(params);
+  }
+
+  protected override createInvocation(params: ShellToolParams) {
+    const invocation = super.createInvocation(params);
+    const execute = invocation.execute.bind(invocation);
+    invocation.execute = (...args: Parameters<typeof execute>) => {
+      const refusal = this.outside(params);
+      if (refusal) throw new Error(refusal);
+      return execute(...args);
+    };
+    return invocation;
+  }
+
+  private outside(params: ShellToolParams): string | null {
+    const directory = params.directory;
+    return typeof directory === 'string' &&
+      directory !== '' &&
+      !workspaceAdmits(this.workspace, directory)
+      ? `Directory '${directory}' is not within any of the registered workspace directories.`
+      : null;
+  }
 }
 
 class ManagedRuntimeProviderWorker {
@@ -335,7 +400,7 @@ class ManagedRuntimeProviderWorker {
       const toolConfig = deriveConfig(config, {
         getFileHistoryService: () => history(value).service,
       });
-      const shell = new ShellTool(toolConfig);
+      const shell = new WorkspaceShellTool(toolConfig, config);
       const tools = [
         new ReadFileTool(toolConfig),
         new WriteFileTool(toolConfig),
@@ -426,26 +491,13 @@ class ManagedRuntimeProviderWorker {
       case 'prepare': {
         if (operation.toolName === ShellTool.Name) {
           const normalized = structuredClone(operation.input);
-          if (value.shell.validateToolParams(normalized) === null) {
-            if (normalized['is_background'] === true)
-              conflict(
-                'Managed Runtime does not admit background shell execution.',
-              );
-            // Core's shell tool asks before running in a directory outside
-            // the workspace, and a preapproved Session never asks, so keep
-            // every call inside the Session's workspace, as the executor does.
-            const directory = normalized['directory'];
-            if (
-              typeof directory === 'string' &&
-              directory !== '' &&
-              !value.config
-                .getWorkspaceContext()
-                .isPathWithinWorkspace(directory)
-            )
-              throw new ManagedToolPreparationError(
-                `Directory '${directory}' is not within any of the registered workspace directories.`,
-              );
-          }
+          if (
+            value.shell.validateToolParams(normalized) === null &&
+            normalized['is_background'] === true
+          )
+            conflict(
+              'Managed Runtime does not admit background shell execution.',
+            );
         }
         // Core applies content modification only to notebook_edit, which
         // this profile does not expose; refuse it before anything is

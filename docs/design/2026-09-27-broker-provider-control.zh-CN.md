@@ -42,8 +42,9 @@ operation 是封闭的判别联合。公开 Broker 控制为 `manifest`、`begin
 core 只对 `notebook_edit` 应用内容修改，而本 profile 只暴露 `read_file`、`write_file`、
 `edit` 和 `run_shell_command`。共享的 provider 语料仍把这种形状列为合法，因为语料固定的
 是两端都接受的线上形状，而不是某个 profile 实际提供的能力。`directory` 位于 Session
-工作区之外的 `run_shell_command` 同样以此拒绝：core 的 shell 工具会先询问再在那里执行，
-而预先批准的 Session 从不询问。`mediaContext` 只对
+工作区之外的 `run_shell_command` 同样以此拒绝，因为 core 的 shell 工具只会询问，而预先
+批准的 Session 从不询问。调用执行前 worker 会再检查一次，按内核跟随链接的方式重新解析
+路径；若链接已把它移出工作区，该调用以错误结算。`mediaContext` 只对
 `read_file` 生效：它把该工具面向模型的描述绑定到 Harness 的模态上，而读取本身按本
 worker 自己的 content-generator 模态决定是否交付媒体；本 worker 没有这些模态，所以
 媒体文件仍以“不支持的类型”占位文本作答。经 worker 交付媒体留作后续工作。派发前拒绝外来 Session
@@ -117,7 +118,9 @@ provider 的 reserve/start 路径需要 Broker 持久预留。预留创建 PREPA
 变成重放许可。这包括继承的派发期间 HTTP 拒绝保守处理：没有权威执行证据时，即使
 worker 的原因描述为拒绝，仍保持 UNKNOWN。该状态阻止释放，并可能继续持有 Workspace
 存储。仅凭错误码不能证明执行从未开始。Broker 的 Runtime 丢失恢复可将不确定执行封存为
-ABANDONED：结果永久未知，可通过持久归属读取，但不能重放。现有即时 Tool v2 行为独立保留。
+ABANDONED：结果永久未知，可通过持久归属读取，但不能重放。Broker HTTP 的 start、读取与
+取消会像对 tool v3 一样，就停留在 UNKNOWN 的 provider 执行询问原 worker，由其保留的结果
+结算执行，不会再次派发。现有即时 Tool v2 行为独立保留。
 
 #12831 的原始 reserve/start 路径继续使用同一组 Broker 路由：预留四字段 reference，
 仅在 start 时提供精确的 `payloadJson`。provider 预留使用七字段 reference 并拒绝

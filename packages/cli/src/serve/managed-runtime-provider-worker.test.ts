@@ -573,25 +573,60 @@ describe('Managed Runtime provider worker', () => {
 
   it('keeps shell calls inside the Session workspace', async () => {
     await begin();
+    // The kernel follows a link before the `..` after it.
+    fs.mkdirSync(path.join(storage, 'inner'));
+    fs.symlinkSync(path.join(storage, 'inner'), path.join(workspace, 'link'));
     // Core's shell tool would ask here, and a preapproved Session never asks.
-    const outside = await post({
-      kind: 'prepare',
-      identity,
-      toolName: 'run_shell_command',
-      input: { command: 'pwd', directory: storage },
-    });
-    expect(outside.status).toBe(400);
-    expect(await outside.json()).toEqual({
-      code: 'managed_runtime_tool_invalid',
-      error: `Directory '${storage}' is not within any of the registered workspace directories.`,
-    });
+    for (const directory of [
+      storage,
+      `${path.join(workspace, 'link')}${path.sep}..`,
+    ]) {
+      const outside = await post({
+        kind: 'prepare',
+        identity,
+        toolName: 'run_shell_command',
+        input: { command: 'pwd', directory },
+      });
+      expect(outside.status).toBe(400);
+      expect(await outside.json()).toEqual({
+        code: 'managed_runtime_tool_invalid',
+        error: `Directory '${directory}' is not within any of the registered workspace directories.`,
+      });
+    }
+    // Nothing was journaled: the same call prepares once corrected.
+    expect(
+      await prepare('run_shell_command', {
+        command: 'pwd',
+        directory: workspace,
+      }),
+    ).toMatchObject({ callId: 'call-1' });
+    // An empty directory is the Session's own, as core reads it.
     expect(
       await prepare(
         'run_shell_command',
-        { command: 'pwd', directory: workspace },
+        { command: 'pwd', directory: '' },
         'call-2',
       ),
     ).toMatchObject({ callId: 'call-2' });
+  });
+
+  it('refuses a shell call whose directory leaves the workspace before it runs', async () => {
+    await begin();
+    const sub = path.join(workspace, 'sub');
+    fs.mkdirSync(sub);
+    const ref = reference(
+      await prepare('run_shell_command', { command: 'pwd', directory: sub }),
+    );
+    await control({ kind: 'preflight', reference: ref });
+    // Retargeted between the checks: the call must not run outside.
+    fs.rmdirSync(sub);
+    fs.symlinkSync(storage, sub);
+    expect(await control({ kind: 'execute', reference: ref })).toMatchObject({
+      executionStatus: 'error',
+      error: {
+        message: `Directory '${sub}' is not within any of the registered workspace directories.`,
+      },
+    });
   });
 
   it('rechecks directories for new work while status, cancellation and release remain available', async () => {
