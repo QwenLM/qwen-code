@@ -971,22 +971,29 @@ export class MemoryManager {
         );
         return record;
       }
-      if (result.committed > 0 || result.remainingLegacyFiles === 0) {
-        this.migrationStallCountByDomain.delete(domain);
-      } else {
+      const indexRebuildFailed = result.indexRebuildError !== undefined;
+      if (
+        indexRebuildFailed ||
+        (result.committed === 0 && result.remainingLegacyFiles > 0)
+      ) {
         this.migrationStallCountByDomain.set(
           domain,
           (this.migrationStallCountByDomain.get(domain) ?? 0) + 1,
         );
+      } else {
+        this.migrationStallCountByDomain.delete(domain);
       }
       const stalled =
         (this.migrationStallCountByDomain.get(domain) ?? 0) >=
         MIGRATION_STALL_LIMIT;
+      const failed = stalled || indexRebuildFailed;
       this.update(record, {
-        status: stalled ? 'failed' : 'completed',
-        ...(stalled
+        status: failed ? 'failed' : 'completed',
+        ...(failed
           ? {
-              error: `Migration stalled: ${result.remainingLegacyFiles} legacy file(s) could not be migrated in ${MIGRATION_STALL_LIMIT} consecutive runs; giving up for this session.`,
+              error:
+                result.indexRebuildError ??
+                `Migration stalled: ${result.remainingLegacyFiles} legacy file(s) could not be migrated in ${MIGRATION_STALL_LIMIT} consecutive runs; giving up for this session.`,
             }
           : {}),
         progressText: `Migrated ${result.committed} memory file(s).`,
@@ -996,7 +1003,9 @@ export class MemoryManager {
         params.config,
         new MemoryMigrationEvent({
           scope: params.scope,
-          status: stalled ? 'failed' : 'completed',
+          status: failed ? 'failed' : 'completed',
+          failure_reason:
+            result.indexRebuildError ?? (stalled ? 'stalled' : undefined),
           files_scanned: result.filesScanned,
           legacy_files: result.legacyFiles,
           remaining_legacy_files: result.remainingLegacyFiles,
