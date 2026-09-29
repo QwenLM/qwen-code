@@ -1927,9 +1927,19 @@ export function convertOpenAIChunkToLlm(
     }
 
     // If tool call JSON was truncated, override to "length" so downstream
-    // (turn.ts) correctly sets wasOutputTruncated=true.
+    // (turn.ts) correctly sets wasOutputTruncated=true. Brace depth alone
+    // does not prove truncation: providers can emit malformed (e.g. fused)
+    // tool-call arguments that end incomplete without any token-limit cut,
+    // and the override then misdiagnoses the schema-validation failure as
+    // max_tokens truncation (QwenLM/qwen-code#12970). Only apply it when
+    // the reported usage cannot disprove truncation.
     const effectiveFinishReason =
-      toolCallsTruncated && choice.finish_reason !== 'length'
+      toolCallsTruncated &&
+      choice.finish_reason !== 'length' &&
+      usageConsistentWithTruncation(
+        chunk.usage,
+        requestContext.maxOutputTokens,
+      )
         ? 'length'
         : choice.finish_reason;
 
@@ -2018,6 +2028,43 @@ export function convertOpenAIChunkToLlm(
   }
 
   return response;
+}
+
+/**
+ * Fraction of the output budget a response must have consumed before
+ * incomplete tool-call JSON may be attributed to max_tokens truncation.
+ * Deliberately conservative: genuine truncation lands at ~100% of the budget,
+ * so 50% keeps the heuristic for plausible cuts while clearing it for
+ * responses that ended far below the ceiling.
+ */
+const TRUNCATION_COMPLETION_TOKEN_RATIO_THRESHOLD = 0.5;
+
+/**
+ * The truncated-tool-call finish_reason override exists for providers that
+ * report "stop"/"tool_calls" for output actually cut by the token limit
+ * (QwenLM/qwen-code#4964). A genuine cut means the model generated (very
+ * nearly) the full output budget, so usage reporting completion tokens well
+ * below the ceiling disproves truncation — the incomplete tool-call JSON then
+ * comes from malformed generation instead (QwenLM/qwen-code#12970). When
+ * usage or the ceiling is unavailable the check is inconclusive and the
+ * legacy inference stands.
+ */
+function usageConsistentWithTruncation(
+  usage: OpenAI.Chat.ChatCompletionChunk['usage'],
+  maxOutputTokens: number | undefined,
+): boolean {
+  const completionTokens = usage?.completion_tokens;
+  if (
+    completionTokens === undefined ||
+    maxOutputTokens === undefined ||
+    maxOutputTokens <= 0
+  ) {
+    return true;
+  }
+  return (
+    completionTokens >=
+    maxOutputTokens * TRUNCATION_COMPLETION_TOKEN_RATIO_THRESHOLD
+  );
 }
 
 function mapOpenAIFinishReasonToLlm(openaiReason: string | null): FinishReason {

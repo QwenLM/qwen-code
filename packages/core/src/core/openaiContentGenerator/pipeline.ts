@@ -380,6 +380,29 @@ function hasProviderOutputBudgetKey(samplingParams: {
 }
 
 /**
+ * Effective output-token ceiling carried by a wire request, whichever key the
+ * budget travels under (`max_tokens` or a provider-specific stand-in).
+ * Undefined when the request caps output by neither (e.g. a samplingParams
+ * opt-out), in which case the converter's truncation corroboration check is
+ * inconclusive and keeps its legacy inference.
+ */
+function getWireOutputBudget(
+  request: OpenAI.Chat.ChatCompletionCreateParams,
+): number | undefined {
+  if (typeof request.max_tokens === 'number' && request.max_tokens > 0) {
+    return request.max_tokens;
+  }
+  const wire = request as unknown as Record<string, unknown>;
+  for (const key of PROVIDER_OUTPUT_BUDGET_KEYS) {
+    const value = wire[key];
+    if (typeof value === 'number' && value > 0) {
+      return value;
+    }
+  }
+  return undefined;
+}
+
+/**
  * Clamp any provider-specific output-budget key (e.g. `max_completion_tokens`)
  * to the window's remaining room, mutating and returning the passed object.
  * An output budget is subject to `prompt + output ≤ window` regardless of the
@@ -1601,6 +1624,10 @@ export class ContentGenerationPipeline {
         attemptContext,
         isStreaming,
       );
+      // The converter corroborates suspected tool-call truncation against the
+      // output budget actually sent on the wire before it may override
+      // finish_reason to "length" (QwenLM/qwen-code#12970).
+      attemptContext.maxOutputTokens = getWireOutputBudget(openaiRequest);
 
       // Position is load-bearing: capture must run after buildRequest (post
       // provider enhancement, post disable-reasoning) and before the SDK call

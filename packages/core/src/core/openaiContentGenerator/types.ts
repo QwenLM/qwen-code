@@ -43,6 +43,14 @@ export interface RequestContext {
   model: string;
   modalities: InputModalities;
   startTime: number;
+  /**
+   * Effective output-token ceiling sent on the wire (`max_tokens` or a
+   * provider-specific budget key), set by the pipeline once the request is
+   * built. The converter cross-checks it against reported usage before
+   * treating incomplete tool-call JSON as max_tokens truncation
+   * (QwenLM/qwen-code#12970).
+   */
+  maxOutputTokens?: number;
   toolCallParser?: StreamingToolCallParser;
   responseParsingOptions?: OpenAIResponseParsingOptions;
   taggedThinkingParser?: TaggedThinkingParser;

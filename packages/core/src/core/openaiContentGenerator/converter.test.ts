@@ -7806,9 +7806,16 @@ describe('Truncated tool call detection in streaming', () => {
       arguments: string;
     }>,
     finishReason: string,
+    options?: {
+      usage?: OpenAI.Chat.ChatCompletionChunk['usage'];
+      maxOutputTokens?: number;
+    },
   ) {
     // One stream-local context covers every chunk of this simulated stream.
     const ctx = createStreamingRequestContext();
+    if (options?.maxOutputTokens !== undefined) {
+      ctx.maxOutputTokens = options.maxOutputTokens;
+    }
 
     // Feed argument chunks (no finish_reason yet)
     for (const tc of toolCallChunks) {
@@ -7858,6 +7865,7 @@ describe('Truncated tool call detection in streaming', () => {
             logprobs: null,
           },
         ],
+        usage: options?.usage,
       } as unknown as OpenAI.Chat.ChatCompletionChunk,
       ctx,
     );
@@ -8385,6 +8393,134 @@ describe('Truncated tool call detection in streaming', () => {
         ],
       } as unknown as OpenAI.Chat.ChatCompletionChunk,
       ctx,
+    );
+
+    expect(result.candidates?.[0]?.finishReason).toBe(FinishReason.MAX_TOKENS);
+  });
+
+  it('should not override finishReason when usage disproves truncation (fused tool-call arguments)', () => {
+    // Issue #12970: the provider fused two intended read_file calls into one
+    // argument bag and the streamed JSON is missing the final closing brace,
+    // so the parser flags the call incomplete. Usage (185 completion tokens
+    // against an 8192 output budget) proves the response was NOT cut by
+    // max_tokens, so the brace-depth heuristic must not rewrite the
+    // provider's finish_reason to "length" — downstream that misdiagnosis
+    // appends the truncation guidance to the schema-validation error and
+    // sends the model into futile identical retries.
+    const result = feedToolCallChunks(
+      converter,
+      [
+        {
+          index: 0,
+          id: 'call_1',
+          name: 'read_file',
+          arguments:
+            '{"file_path": "/tmp/ad01.yml", "limit": {"file_path": "/tmp/node01.yml", "limit": null}',
+          // Fused second call's argument bag; missing the final closing brace.
+        },
+      ],
+      'stop',
+      {
+        usage: {
+          prompt_tokens: 252811,
+          completion_tokens: 185,
+          total_tokens: 252996,
+        },
+        maxOutputTokens: 8192,
+      },
+    );
+
+    // The repaired call is still emitted so downstream schema validation can
+    // report the real parameter error...
+    const parts = result.candidates?.[0]?.content?.parts ?? [];
+    const fnCall = parts.find((p: Part) => p.functionCall);
+    expect(fnCall?.functionCall?.name).toBe('read_file');
+    expect(fnCall?.functionCall?.args).toEqual({
+      file_path: '/tmp/ad01.yml',
+      limit: { file_path: '/tmp/node01.yml', limit: null },
+    });
+    // ...but without the truncation misdiagnosis: turn.ts only flags
+    // wasOutputTruncated on MAX_TOKENS, so STOP here is what keeps the
+    // scheduler from appending the max_tokens note to the validation error.
+    expect(result.candidates?.[0]?.finishReason).toBe(FinishReason.STOP);
+  });
+
+  it('should still override finishReason to MAX_TOKENS when usage corroborates truncation', () => {
+    // Genuine truncation (#4964 must not regress): completion_tokens reached
+    // the output budget, so the incomplete JSON really was cut by the limit
+    // even though the provider reported "stop".
+    const result = feedToolCallChunks(
+      converter,
+      [
+        {
+          index: 0,
+          id: 'call_1',
+          name: 'write_file',
+          arguments: '{"file_path": "/tmp/test.cpp"',
+        },
+      ],
+      'stop',
+      {
+        usage: {
+          prompt_tokens: 100,
+          completion_tokens: 8192,
+          total_tokens: 8292,
+        },
+        maxOutputTokens: 8192,
+      },
+    );
+
+    expect(result.candidates?.[0]?.finishReason).toBe(FinishReason.MAX_TOKENS);
+  });
+
+  it('should keep the legacy override when the output ceiling is unknown', () => {
+    // Without a known output budget the usage check is inconclusive; keep
+    // inferring truncation from brace depth as before.
+    const result = feedToolCallChunks(
+      converter,
+      [
+        {
+          index: 0,
+          id: 'call_1',
+          name: 'write_file',
+          arguments: '{"file_path": "/tmp/test.cpp"',
+        },
+      ],
+      'stop',
+      {
+        usage: {
+          prompt_tokens: 100,
+          completion_tokens: 185,
+          total_tokens: 285,
+        },
+      },
+    );
+
+    expect(result.candidates?.[0]?.finishReason).toBe(FinishReason.MAX_TOKENS);
+  });
+
+  it('should trust a provider-reported "length" even when usage is below the ceiling', () => {
+    // The usage guard only restrains the client-side inference; an explicit
+    // finish_reason from the provider is taken at face value.
+    const result = feedToolCallChunks(
+      converter,
+      [
+        {
+          index: 0,
+          id: 'call_1',
+          name: 'write_file',
+          arguments: '{"file_path": "/tmp/test.cpp"',
+        },
+      ],
+      'length',
+      {
+        usage: {
+          prompt_tokens: 100,
+          completion_tokens: 185,
+          total_tokens: 285,
+        },
+        maxOutputTokens: 8192,
+      },
     );
 
     expect(result.candidates?.[0]?.finishReason).toBe(FinishReason.MAX_TOKENS);
