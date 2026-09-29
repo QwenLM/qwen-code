@@ -55,6 +55,7 @@ import {
 } from '../messages/ToolGroup';
 import { Markdown } from '../messages/Markdown';
 import { DiffView } from '../messages/tools/DiffView';
+import toolChromeStyles from '../messages/tools/ToolChrome.module.css';
 import { parseShellLiveOutput } from '../messages/tools/shellLiveOutput';
 import type { TurnOutputOpenRequest } from './TurnOutputs';
 import { Button } from '../ui/button';
@@ -863,7 +864,7 @@ const TurnCallRowItem = memo(function TurnCallRowItem({
                 <>
                   <DiffView diff={diff.slice(0, MAX_DETAIL_LENGTH)} />
                   {diffRebuilt && (
-                    <p className="text-xs text-muted-foreground">
+                    <p className={toolChromeStyles.expandedCardDetail}>
                       {t('toolGroup.diffRebuiltFromArgs')}
                     </p>
                   )}

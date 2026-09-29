@@ -3082,26 +3082,33 @@ describe('rebuilt edit diff annotation', () => {
     const container = expandCompletedEdit({
       rawOutput: { fileDiff: 'diff --git a/app.ts b/app.ts\n' },
     });
+    expect(container.textContent).toContain('diff --git a/app.ts b/app.ts');
     expect(container.textContent).not.toContain(
       'Diff rebuilt from the tool call arguments',
     );
   });
 
-  it('does not annotate a tool-provided diff content block', () => {
+  it('annotates a tool-provided diff content block', () => {
     const container = expandCompletedEdit({
       content: [
         { type: 'diff', oldText: 'const a = 1;\n', newText: 'const a = 2;\n' },
       ],
     });
-    expect(container.textContent).not.toContain(
+    expect(container.textContent).toContain('const a = 2;');
+    expect(container.textContent).toContain(
       'Diff rebuilt from the tool call arguments',
     );
   });
 
-  it('does not annotate a patch argument', () => {
+  it('keeps a real patch argument unannotated', () => {
     const container = expandCompletedEdit({
-      args: { ...editArgs, patch: '--- a/app.ts\n+++ b/app.ts\n' },
+      args: {
+        ...editArgs,
+        patch:
+          '--- a/app.ts\n+++ b/app.ts\n@@ -1,1 +1,1 @@\n-const a = 1;\n+const a = 2;\n',
+      },
     });
+    expect(container.textContent).toContain('const a = 2;');
     expect(container.textContent).not.toContain(
       'Diff rebuilt from the tool call arguments',
     );
@@ -3122,6 +3129,20 @@ describe('rebuilt edit diff annotation', () => {
 
   it('does not annotate an in-flight edit preview', () => {
     const container = expandCompletedEdit({ status: 'in_progress' });
+    expect(container.textContent).toContain('const a = 2;');
+    expect(container.textContent).not.toContain(
+      'Diff rebuilt from the tool call arguments',
+    );
+  });
+
+  it('does not annotate a whole-file write delivered as a content block', () => {
+    const container = expandCompletedEdit({
+      args: {},
+      content: [
+        { type: 'diff', path: '/repo/app.ts', newText: 'const a = 2;\n' },
+      ],
+    });
+    expect(container.textContent).toContain('const a = 2;');
     expect(container.textContent).not.toContain(
       'Diff rebuilt from the tool call arguments',
     );

@@ -252,23 +252,32 @@ function isTruncatedSessionDiff(raw: Record<string, unknown>): boolean {
 }
 
 /**
- * True when the diff a completed edit surface shows was rebuilt from the
- * call's own old/new text arguments because no recorded fileDiff survived
- * session-history truncation, and the call is edit-shaped (an old-text
- * argument exists — whole-file writes rebuild the entire file, where the
- * note's clauses do not apply). Such a rebuild's gutter counts from 0
- * within the rebuilt text and a replace_all edit renders as a single
- * occurrence, so the card must say the diff was reconstructed rather than
- * recorded. Approval-time and in-flight previews legitimately come from
- * the arguments, so only completed calls are annotated.
+ * The completed-call gate and edit-shape clause the reconstruction note
+ * adds on top of resolveDiff's source verdict. Both headerless
+ * buildUnifiedDiff sources get the note — the argument rebuild and the
+ * tool-provided content block render the same 0-based, snippet-scoped
+ * gutter — while recorded diffs and `patch` arguments keep their real
+ * hunk headers. The edit-shape clause requires an old text (the content
+ * block's, or the arguments' for a rebuild), so whole-file writes — whose
+ * rebuild spans the entire file and has no replace_all — stay
+ * unannotated. Approval-time and in-flight previews legitimately come
+ * from the arguments, so only completed calls are annotated.
  */
-export function isDiffRebuiltFromArgs(tool: ACPToolCall): boolean {
+function isAnnotatedDiffSource(tool: ACPToolCall, source: DiffSource): boolean {
   if (tool.status !== 'completed' || tool.wasCancelled) return false;
-  const oldText = tool.args?.oldText ?? tool.args?.old_string;
-  return (
-    resolveDiff(tool).source === 'rebuilt-from-args' &&
-    typeof oldText === 'string'
-  );
+  if (source === 'content-block') {
+    const diffBlock = tool.content?.find((b) => b.type === 'diff');
+    return typeof diffBlock?.oldText === 'string';
+  }
+  if (source === 'rebuilt-from-args') {
+    const oldText = tool.args?.oldText ?? tool.args?.old_string;
+    return typeof oldText === 'string';
+  }
+  return false;
+}
+
+export function isDiffRebuiltFromArgs(tool: ACPToolCall): boolean {
+  return isAnnotatedDiffSource(tool, resolveDiff(tool).source);
 }
 
 // A description longer than this is likely ellipsised on a normal-width row, so
@@ -344,7 +353,16 @@ export function fencedCodeBlock(language: string, code: string): string {
 
 function ExpandedEditContent({ tool }: { tool: ACPToolCall }) {
   const { t } = useI18n();
-  const diff = useMemo(() => extractDiff(tool), [tool]);
+  // One resolveDiff walk per tool change: the rendered diff and the note
+  // verdict come from the same pass, so a streaming re-render never
+  // re-runs the source ladder (its LCS is the expensive half).
+  const { diff, rebuilt } = useMemo(() => {
+    const resolved = resolveDiff(tool);
+    return {
+      diff: resolved.diff,
+      rebuilt: isAnnotatedDiffSource(tool, resolved.source),
+    };
+  }, [tool]);
   const text = useMemo(
     () => (tool.content ? extractText(tool) || '' : ''),
     [tool],
@@ -355,7 +373,7 @@ function ExpandedEditContent({ tool }: { tool: ACPToolCall }) {
       {diff ? (
         <>
           <DiffView diff={diff} />
-          {isDiffRebuiltFromArgs(tool) && (
+          {rebuilt && (
             <p className={styles.expandedCardDetail}>
               {t('toolGroup.diffRebuiltFromArgs')}
             </p>
