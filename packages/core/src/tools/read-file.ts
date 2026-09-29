@@ -224,6 +224,7 @@ class ReadFileToolInvocation extends BaseToolInvocation<
         requireProcessGroupExit: shellExecutionConfig?.requireProcessGroupExit,
       },
     );
+    signal.throwIfAborted();
 
     if (result.pdfVisionBridgeCandidate) {
       result = await this.transcribePdfCandidate(result, signal);

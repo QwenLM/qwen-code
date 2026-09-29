@@ -86,6 +86,11 @@ export interface ManagedToolSet {
   readonly sessionId: string;
   readonly directory?: string;
   readonly tools: ReadonlyMap<string, AnyDeclarativeTool>;
+  /**
+   * Whether a shell `directory` lies inside the tools' workspace. Calls run
+   * without approval, so the executor enforces this boundary itself.
+   */
+  readonly admitsDirectory: (directory: string) => boolean;
   readonly isActive?: () => boolean;
 }
 
@@ -259,7 +264,7 @@ export class ManagedToolExecutor {
       controller: new AbortController(),
     };
     this.entries.set(reference.callId, entry);
-    entry.promise = this.run(entry, tool, tools.sessionId, tools.directory);
+    entry.promise = this.run(entry, tool, tools, tools.directory);
     await entry.promise;
     return entry.result!;
   }
@@ -358,7 +363,7 @@ export class ManagedToolExecutor {
       controller: new AbortController(),
     };
     this.entries.set(reference.callId, entry);
-    entry.promise = this.run(entry, tool, tools.sessionId);
+    entry.promise = this.run(entry, tool, tools);
     await entry.promise;
     return v3View(entry);
   }
@@ -513,9 +518,10 @@ export class ManagedToolExecutor {
   private async run(
     entry: JournalEntry,
     tool: AnyDeclarativeTool,
-    sessionId: string,
+    tools: ManagedToolSet,
     directory?: string,
   ): Promise<void> {
+    const { sessionId } = tools;
     entry.state = 'executing';
     entry.lastSequence += 1;
     let payload: ManagedToolResultPayload;
@@ -530,6 +536,16 @@ export class ManagedToolExecutor {
         params['file_path'] = path.resolve(
           directory,
           params['file_path'].trim(),
+        );
+      }
+      if (
+        entry.toolName === ShellTool.Name &&
+        typeof params['directory'] === 'string' &&
+        params['directory'] !== '' &&
+        !tools.admitsDirectory(params['directory'])
+      ) {
+        throw new Error(
+          `Directory '${params['directory']}' is not within any of the registered workspace directories.`,
         );
       }
       const result: ToolResult = await sessionIdContext.run(sessionId, () => {
@@ -664,6 +680,8 @@ export function createManagedToolSet(
   return {
     sessionId,
     directory,
+    admitsDirectory: (candidate) =>
+      config.getWorkspaceContext().isPathWithinWorkspace(candidate),
     tools: new Map(
       [
         new ReadFileTool(config),

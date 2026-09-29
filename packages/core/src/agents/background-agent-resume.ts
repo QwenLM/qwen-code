@@ -82,9 +82,10 @@ import { BUBBLE_APPROVAL_MODE } from '../subagents/types.js';
 import { resolveAgentExecutionBackend } from '../subagents/execution-backend.js';
 import {
   buildInheritedForkExecutionToolNames,
-  EXCLUDED_TOOLS_FOR_SUBAGENTS,
   extractParentToolNames,
 } from './runtime/agent-core.js';
+import { toolConfigAllowsSkill } from './runtime/subagent-plan-tool-policy.js';
+import { ToolMode } from '../tools/code-mode.js';
 import { ToolNames } from '../tools/tool-names.js';
 import type {
   AgentExternalInput,
@@ -125,17 +126,56 @@ const CONTAINER_EXECUTION_BLOCKED_REASON =
 
 /**
  * Returns true when the subagent's effective tool surface will include the
- * Skill tool. Mirrors `AgentCore.willHaveSkillTool()` for the resume path
- * where no AgentCore instance exists yet.
+ * Skill tool — the same answer `SubagentManager.createAgentHeadless()` reaches
+ * for the agent, so a resumed agent is shown the skill listing exactly when
+ * its Config holds a SkillManager (#12424).
+ *
+ * An empty list is normalized the way the launch path normalizes it: `tools: []`
+ * is the definition layer's "inherit everything" marker, while the `ToolConfig`
+ * layer reads it as deny-all. A non-array value, which only unvalidated SDK
+ * `initialize.agents` JSON can produce, follows launch too: a nullish or empty
+ * one leaves `toolConfig` unset for `createAgentHeadless` to default to
+ * `['*']`, while a non-empty string is walked per character, so `"*"` stays
+ * the wildcard and `"read_file"` becomes nine entries naming no tool. The same
+ * ingress can produce a non-array `disallowedTools`, which launch resolves one
+ * character at a time into entries that name no tool, so it denies nothing
+ * there and is dropped here. Names are otherwise matched as written — the
+ * launch path also resolves display names through `convertToRuntimeConfig` and
+ * this helper does not, so a definition that uses one can still drift.
+ * Pre-existing, and outside #12424's measured scope.
  */
 function subagentWillHaveSkillTool(
   subagentConfig: SubagentConfig | undefined,
+  codeModeOnly = false,
 ): boolean {
-  const tools = subagentConfig?.tools;
-  if (!tools || tools.length === 0 || tools.includes('*')) {
-    return !EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.SKILL);
-  }
-  return tools.includes(ToolNames.SKILL);
+  // Launch reads `config.tools?.length ? resolveToolNames(config.tools) : ['*']`,
+  // and `resolveToolNames`' `for...of` walks a bare string per character,
+  // preserving each one. Nullish and `''` are falsy in that test, so both take
+  // the wildcard path; the cast admits the scalar only unvalidated SDK
+  // `initialize.agents` JSON produces.
+  const tools = subagentConfig?.tools as string[] | string | null | undefined;
+  const allowList = Array.isArray(tools)
+    ? tools
+    : tools != null && tools.length > 0
+      ? [...tools]
+      : undefined;
+  const disallowedTools = subagentConfig?.disallowedTools;
+  return toolConfigAllowsSkill(
+    {
+      tools: allowList?.length ? allowList : ['*'],
+      // Launch reads `config.disallowedTools?.length`, which a non-empty string
+      // satisfies, and hands it to `resolveToolNames`, whose `for...of` walks
+      // the string per character and preserves every character as-is: the
+      // launched agent's blocklist is `['s','k','i','l','l']` for `"skill"`,
+      // which denies nothing. Dropping the scalar here mirrors that, and keeps
+      // `matchesAgentToolBlocklist` off a value whose `.length` passes its
+      // guard but which has no `.some`.
+      disallowedTools: Array.isArray(disallowedTools)
+        ? disallowedTools
+        : undefined,
+    },
+    codeModeOnly,
+  );
 }
 
 interface TranscriptRecovery {
@@ -1003,6 +1043,7 @@ export class BackgroundAgentResumeService {
                 includeDeferredToolsReminder: false,
                 includeAvailableSkillsReminder: subagentWillHaveSkillTool(
                   target.subagentConfig,
+                  activeAgentConfig.getToolMode?.() === ToolMode.CodeModeOnly,
                 ),
               })
             )[0],

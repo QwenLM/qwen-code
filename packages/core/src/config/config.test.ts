@@ -4,6 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  captureHookExecutionOwner,
+  getHookExecutionOwner,
+} from '../hooks/hook-execution-context.js';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Mock } from 'vitest';
 import {
@@ -91,6 +95,7 @@ import {
   createDebugLogger,
   resetDebugLoggingState,
   setDebugLogSession,
+  type DebugLogger,
 } from '../utils/debugLogger.js';
 import { logGoalState, logRipgrepFallback } from '../telemetry/loggers.js';
 import { RipgrepFallbackEvent } from '../telemetry/types.js';
@@ -341,6 +346,7 @@ vi.mock('../memory/team-memory-git-status.js', () => ({
 
 vi.mock('../hooks/index.js', () => {
   const HookSystemMock = vi.fn();
+  HookSystemMock.prototype.runtimeId = 'test-hook-runtime';
   HookSystemMock.prototype.initialize = vi.fn().mockResolvedValue(undefined);
   HookSystemMock.prototype.hasHooksForEvent = vi.fn().mockReturnValue(false);
   HookSystemMock.prototype.getAllHooks = vi.fn().mockReturnValue([]);
@@ -6069,7 +6075,7 @@ describe('Server Config (config.ts)', () => {
         );
         await expect(
           config.initialize({ sessionExecutionEngine: 'managed' }),
-        ).rejects.toThrow(/requires recording and a writer lease/);
+        ).rejects.toThrow(/requires chat recording and a writer lease/);
         expect(initialize).not.toHaveBeenCalled();
         expect(config.getSessionExecutionEngine()).toBeUndefined();
       },
@@ -9126,6 +9132,9 @@ describe('Server Config (config.ts)', () => {
       });
       // Set messageBus using the setter
       config.setMessageBus(mockMessageBus as unknown as MessageBus);
+      vi.spyOn(config, 'getHookSystem').mockReturnValue({
+        runtimeId: 'auth-runtime',
+      } as unknown as NonNullable<ReturnType<Config['getHookSystem']>>);
 
       const authType = AuthType.USE_GEMINI;
       const mockContentConfig = {
@@ -9147,6 +9156,12 @@ describe('Server Config (config.ts)', () => {
         `Successfully authenticated with ${authType}`,
         'auth_success',
         'Authentication successful',
+        undefined,
+        {
+          runtimeId: 'auth-runtime',
+          sessionId: config.getSessionId(),
+          agentId: null,
+        },
       );
     });
 
@@ -9397,6 +9412,148 @@ describe('Server Config (config.ts)', () => {
       expect(config.getFastModel()).toBe('openai:shared-model');
     });
 
+    it.each(['fastModel', 'compactionModel'] as const)(
+      'drops a stale auxiliary endpoint instead of unconfiguring %s',
+      (key) => {
+        const config = new Config({
+          ...baseParams,
+          authType: AuthType.USE_OPENAI,
+          model: 'main',
+          [key]: 'openai:shared\0https://removed.example/v1',
+          modelProvidersConfig: {
+            openai: [{ id: 'shared', baseUrl: 'https://moved.example/v1' }],
+          },
+        });
+        // The pin no longer names a configured endpoint, so the selector falls
+        // back to the bare form and the registry's first same-id match — the
+        // pre-#12760 behaviour — instead of reporting the model as unset.
+        const read = () =>
+          key === 'fastModel'
+            ? config.getFastModel()
+            : config.getCompactionModel();
+        expect(read()).toBe('openai:shared');
+      },
+    );
+
+    it.each(['fastModel', 'compactionModel'] as const)(
+      'warns when a stale auxiliary endpoint pin is dropped (%s)',
+      (key) => {
+        const config = new Config({
+          ...baseParams,
+          authType: AuthType.USE_OPENAI,
+          model: 'main',
+          [key]: 'openai:shared\0https://removed.example/v1',
+          modelProvidersConfig: {
+            openai: [{ id: 'shared', baseUrl: 'https://moved.example/v1' }],
+          },
+        });
+        const warn = vi.spyOn(
+          (config as unknown as { debugLogger: DebugLogger }).debugLogger,
+          'warn',
+        );
+        const read = () =>
+          key === 'fastModel'
+            ? config.getFastModel()
+            : config.getCompactionModel();
+        expect(read()).toBe('openai:shared');
+        expect(warn).toHaveBeenCalledWith(
+          expect.stringContaining('Aux endpoint pin dropped for "shared"'),
+        );
+        // The escaped form must reach the log, never a raw NUL byte.
+        expect(warn).not.toHaveBeenCalledWith(expect.stringContaining('\0'));
+      },
+    );
+
+    it('keeps the pin when a same-id sibling declares the colliding default URL (#12760)', () => {
+      // The first row declares no baseUrl, so its effective URL is the
+      // provider default — the same URL the second row declares. Matching the
+      // pin on effective baseUrl with first-hit semantics would return the
+      // first row's undefined registryBaseUrl and silently drop the pin,
+      // rebinding every fast-model call to the personal key.
+      const config = new Config({
+        ...baseParams,
+        authType: AuthType.USE_OPENAI,
+        model: 'main',
+        fastModel: 'openai:gpt-4o\0https://api.openai.com/v1',
+        modelProvidersConfig: {
+          openai: [
+            { id: 'gpt-4o', envKey: 'OPENAI_API_KEY_PERSONAL' },
+            {
+              id: 'gpt-4o',
+              baseUrl: 'https://api.openai.com/v1',
+              envKey: 'OPENAI_API_KEY_WORK',
+            },
+          ],
+        },
+      });
+
+      expect(config.getFastModel()).toBe(
+        'openai:gpt-4o\0https://api.openai.com/v1',
+      );
+    });
+
+    it.each(['fastModel', 'compactionModel'] as const)(
+      'keeps %s bare when the pinned entry declares no endpoint of its own',
+      (key) => {
+        const config = new Config({
+          ...baseParams,
+          authType: AuthType.USE_OPENAI,
+          model: 'main',
+          // What the picker persists for a row whose provider entry has no
+          // `baseUrl`: the registry's effective (default) URL.
+          [key]: 'openai:shared\0https://api.openai.com/v1',
+          modelProvidersConfig: { openai: [{ id: 'shared' }] },
+        });
+        // Such an entry is registered under the plain id, which a bare
+        // selector already resolves to; re-attaching the effective URL would
+        // hand consumers a registry key that does not exist.
+        const read = () =>
+          key === 'fastModel'
+            ? config.getFastModel()
+            : config.getCompactionModel();
+        expect(read()).toBe('openai:shared');
+      },
+    );
+
+    it('keeps the endpoint disambiguator on a persisted fast model selector (#12760)', () => {
+      // Two providers expose the same model id over the openai protocol; the
+      // picker pins the second one as `authType:id\0baseUrl`. Dropping the
+      // suffix would rebind the fast model to the first registered endpoint
+      // (registry first-match fallback) — e.g. an exhausted token plan.
+      const config = new Config({
+        ...baseParams,
+        authType: AuthType.USE_OPENAI,
+        model: 'qwen3.7-max',
+        fastModel: 'openai:shared-fast\0https://free-quota.example.com/v1',
+        modelProvidersConfig: {
+          [AuthType.USE_OPENAI]: [
+            {
+              id: 'qwen3.7-max',
+              name: 'qwen3.7-max',
+              baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+              envKey: 'DASHSCOPE_API_KEY',
+            },
+            {
+              id: 'shared-fast',
+              name: 'shared-fast (token plan)',
+              baseUrl: 'https://exhausted-plan.example.com/v1',
+              envKey: 'TOKEN_PLAN_API_KEY',
+            },
+            {
+              id: 'shared-fast',
+              name: 'shared-fast (free quota)',
+              baseUrl: 'https://free-quota.example.com/v1',
+              envKey: 'FREE_QUOTA_API_KEY',
+            },
+          ],
+        },
+      });
+
+      expect(config.getFastModel()).toBe(
+        'openai:shared-fast\0https://free-quota.example.com/v1',
+      );
+    });
+
     it('preserves authType-qualified fast model selectors across auth types', () => {
       const config = new Config({
         ...baseParams,
@@ -9586,6 +9743,48 @@ describe('Server Config (config.ts)', () => {
     });
 
     describe('getCompactionModel', () => {
+      it('keeps the endpoint disambiguator on a persisted compaction model selector (#12760)', async () => {
+        // Twin of the getFastModel case: the picker pins the second of two
+        // same-id endpoints and runSideQuery's resolveForModel consumes the
+        // suffix. Dropping it would rebind compaction to the first registered
+        // endpoint (registry first-match fallback).
+        const config = new Config({
+          ...baseParams,
+          authType: AuthType.USE_OPENAI,
+          model: 'qwen3.7-max',
+          compactionModel:
+            'openai:shared-compact\0https://free-quota.example.com/v1',
+          modelProvidersConfig: {
+            [AuthType.USE_OPENAI]: [
+              {
+                id: 'qwen3.7-max',
+                name: 'qwen3.7-max',
+                baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+                envKey: 'DASHSCOPE_API_KEY',
+              },
+              {
+                id: 'shared-compact',
+                name: 'shared-compact (token plan)',
+                baseUrl: 'https://exhausted-plan.example.com/v1',
+                envKey: 'TOKEN_PLAN_API_KEY',
+              },
+              {
+                id: 'shared-compact',
+                name: 'shared-compact (free quota)',
+                baseUrl: 'https://free-quota.example.com/v1',
+                envKey: 'FREE_QUOTA_API_KEY',
+              },
+            ],
+          },
+        });
+
+        await config.refreshAuth(AuthType.USE_OPENAI);
+
+        expect(config.getCompactionModel()).toBe(
+          'openai:shared-compact\0https://free-quota.example.com/v1',
+        );
+      });
+
       it('returns the compaction model when set', async () => {
         const config = new Config({
           ...baseParams,
@@ -11872,6 +12071,7 @@ describe('Server Config (config.ts)', () => {
     const fireInstructionsLoadedEvent = vi.fn().mockResolvedValue(undefined);
     const signal = new AbortController().signal;
     config['hookSystem'] = {
+      runtimeId: 'test-hook-runtime',
       fireInstructionsLoadedEvent,
     } as unknown as HookSystem;
 
@@ -16169,13 +16369,17 @@ describe('Model Switching and Config Updates', () => {
 
       const fireUserPromptSubmitEvent = vi.fn().mockResolvedValue(undefined);
       // @ts-expect-error - accessing private for testing
-      config['hookSystem'] = { fireUserPromptSubmitEvent };
+      config['hookSystem'] = {
+        runtimeId: 'test-hook-runtime',
+        fireUserPromptSubmitEvent,
+      };
 
       const response = await config
         .getMessageBus()!
         .request<HookExecutionRequest, HookExecutionResponse>(
           {
             type: MessageBusType.HOOK_EXECUTION_REQUEST,
+            owner: captureHookExecutionOwner(config),
             eventName: 'UserPromptSubmit',
             input: {
               prompt: 'model prompt',
@@ -16191,6 +16395,80 @@ describe('Model Switching and Config Updates', () => {
         expected,
       );
       expect(response.success).toBe(true);
+    });
+  });
+
+  describe('hook execution bridge ownership', () => {
+    it.each(['missing', 'runtime', 'session', 'agent'] as const)(
+      'rejects %s ownership before dispatch',
+      async (invalid) => {
+        const config = new Config({ ...baseParams });
+        await config.initialize();
+        const fire = vi.fn();
+        // @ts-expect-error - a focused dispatcher test double
+        config['hookSystem'] = {
+          runtimeId: 'runtime-A',
+          firePreToolUseEvent: fire,
+        };
+        const owner = captureHookExecutionOwner(config)!;
+        const invalidOwner =
+          invalid === 'missing'
+            ? undefined
+            : {
+                ...owner,
+                ...(invalid === 'runtime' ? { runtimeId: 'runtime-B' } : {}),
+                ...(invalid === 'session' ? { sessionId: 'old-session' } : {}),
+                ...(invalid === 'agent' ? { agentId: '' } : {}),
+              };
+        const response = await config
+          .getMessageBus()!
+          .request<HookExecutionRequest, HookExecutionResponse>(
+            {
+              type: MessageBusType.HOOK_EXECUTION_REQUEST,
+              owner: invalidOwner,
+              eventName: 'PreToolUse',
+              input: { tool_name: 'read_file' },
+            },
+            MessageBusType.HOOK_EXECUTION_RESPONSE,
+          );
+        expect(response.success).toBe(false);
+        expect(response.error?.message).toContain('owner');
+        expect(fire).not.toHaveBeenCalled();
+      },
+    );
+
+    it('dispatches with the captured owner rather than untrusted input metadata', async () => {
+      const config = new Config({ ...baseParams });
+      await config.initialize();
+      const observed: unknown[] = [];
+      const fire = vi.fn(async () => {
+        observed.push(getHookExecutionOwner());
+        return undefined;
+      });
+      // @ts-expect-error - a focused dispatcher test double
+      config['hookSystem'] = {
+        runtimeId: 'runtime-A',
+        firePreToolUseEvent: fire,
+      };
+      const owner = captureHookExecutionOwner(config, 'A');
+      const response = await config
+        .getMessageBus()!
+        .request<HookExecutionRequest, HookExecutionResponse>(
+          {
+            type: MessageBusType.HOOK_EXECUTION_REQUEST,
+            owner,
+            eventName: 'PreToolUse',
+            input: {
+              tool_name: 'read_file',
+              agent_id: 'B',
+              session_id: 'other-session',
+            },
+          },
+          MessageBusType.HOOK_EXECUTION_RESPONSE,
+        );
+      expect(response.success).toBe(true);
+      expect(observed).toEqual([owner]);
+      expect(getHookExecutionOwner()).toBeUndefined();
     });
   });
 
@@ -16210,6 +16488,7 @@ describe('Model Switching and Config Updates', () => {
           {},
           {
             get: (_target, prop) => {
+              if (prop === 'runtimeId') return 'test-hook-runtime';
               if (typeof prop !== 'string' || prop === 'then') {
                 return undefined;
               }
@@ -16235,6 +16514,7 @@ describe('Model Switching and Config Updates', () => {
           .request<HookExecutionRequest, HookExecutionResponse>(
             {
               type: MessageBusType.HOOK_EXECUTION_REQUEST,
+              owner: captureHookExecutionOwner(config),
               eventName,
               input: {},
             },
@@ -16261,12 +16541,13 @@ describe('Model Switching and Config Updates', () => {
       const config = new Config({ ...baseParams });
       await config.initialize();
       // @ts-expect-error - accessing private for testing
-      config['hookSystem'] = { [method]: fire };
+      config['hookSystem'] = { runtimeId: 'test-hook-runtime', [method]: fire };
       return config
         .getMessageBus()!
         .request<HookExecutionRequest, HookExecutionResponse>(
           {
             type: MessageBusType.HOOK_EXECUTION_REQUEST,
+            owner: captureHookExecutionOwner(config),
             eventName,
             input,
             signal,
@@ -16496,7 +16777,7 @@ describe('Model Switching and Config Updates', () => {
         allOutputs: [blockingOutput, secondOutput],
       });
       // @ts-expect-error - accessing private for testing
-      config['hookSystem'] = { fireStopEvent };
+      config['hookSystem'] = { runtimeId: 'test-hook-runtime', fireStopEvent };
 
       const controller = new AbortController();
       const response = await config
@@ -16504,6 +16785,7 @@ describe('Model Switching and Config Updates', () => {
         .request<HookExecutionRequest, HookExecutionResponse>(
           {
             type: MessageBusType.HOOK_EXECUTION_REQUEST,
+            owner: captureHookExecutionOwner(config),
             eventName: 'Stop',
             input: {
               stop_hook_active: true,
@@ -16551,13 +16833,14 @@ describe('Model Switching and Config Updates', () => {
         allOutputs: [],
       });
       // @ts-expect-error - accessing private for testing
-      config['hookSystem'] = { fireStopEvent };
+      config['hookSystem'] = { runtimeId: 'test-hook-runtime', fireStopEvent };
 
       const response = await config
         .getMessageBus()!
         .request<HookExecutionRequest, HookExecutionResponse>(
           {
             type: MessageBusType.HOOK_EXECUTION_REQUEST,
+            owner: captureHookExecutionOwner(config),
             eventName: 'Stop',
             input: { stop_hook_active: false },
           },
@@ -16589,7 +16872,10 @@ describe('Model Switching and Config Updates', () => {
         .fn()
         .mockResolvedValue({ finalOutput: undefined, allOutputs: [] });
       // @ts-expect-error - accessing private for testing
-      config['hookSystem'] = { fireMessageDisplayEvent };
+      config['hookSystem'] = {
+        runtimeId: 'test-hook-runtime',
+        fireMessageDisplayEvent,
+      };
 
       const messageBus = config.getMessageBus();
       expect(messageBus).toBeDefined();
@@ -16600,6 +16886,7 @@ describe('Model Switching and Config Updates', () => {
       >(
         {
           type: MessageBusType.HOOK_EXECUTION_REQUEST,
+          owner: captureHookExecutionOwner(config),
           eventName: 'MessageDisplay',
           input: {
             message_id: 'msg-123',
@@ -16627,7 +16914,10 @@ describe('Model Switching and Config Updates', () => {
         .fn()
         .mockResolvedValue({ finalOutput: undefined, allOutputs: [] });
       // @ts-expect-error - accessing private for testing
-      config['hookSystem'] = { fireMessageDisplayEvent };
+      config['hookSystem'] = {
+        runtimeId: 'test-hook-runtime',
+        fireMessageDisplayEvent,
+      };
 
       const messageBus = config.getMessageBus();
       const response = await messageBus!.request<
@@ -16636,6 +16926,7 @@ describe('Model Switching and Config Updates', () => {
       >(
         {
           type: MessageBusType.HOOK_EXECUTION_REQUEST,
+          owner: captureHookExecutionOwner(config),
           eventName: 'MessageDisplay',
           input: {},
         },

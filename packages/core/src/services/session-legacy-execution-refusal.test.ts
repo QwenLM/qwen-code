@@ -156,6 +156,26 @@ describe('Legacy refusal of Managed-owned transcripts', () => {
     expect(await readFile(transcriptPath, 'utf8')).toBe(before);
   });
 
+  it('refuses to rename an archived transcript whose only Managed evidence is its owner record', async () => {
+    const archivedPath = path.join(
+      path.dirname(
+        config.getSessionService().getSessionTranscriptPath(SESSION_ID),
+      ),
+      'archive',
+      `${SESSION_ID}.jsonl`,
+    );
+    await mkdir(path.dirname(archivedPath), { recursive: true });
+    await writeFile(archivedPath, `${owner('managed')}\n`);
+    const before = await readFile(archivedPath, 'utf8');
+
+    await expect(
+      config
+        .getSessionService()
+        .renameSession(SESSION_ID, 'renamed on Legacy', 'manual', 'archived'),
+    ).rejects.toThrow(SessionExecutionEngineError);
+    expect(await readFile(archivedPath, 'utf8')).toBe(before);
+  });
+
   it('keeps a Managed create that stopped before its header completable', async () => {
     // What a Managed create leaves when it stops between its owner record and
     // its header.
@@ -358,6 +378,14 @@ describe('Managed owner evidence', () => {
     [
       'followed by another record on its line',
       (ownerLine) => `${ownerLine}${userMessage('hello')}\n`,
+    ],
+    [
+      'preceded by another record on its line',
+      (ownerLine) => `${userMessage('hello')}${ownerLine}\n`,
+    ],
+    [
+      'on a later head line',
+      (ownerLine) => `${userMessage('hello')}\n${ownerLine}\n`,
     ],
     [
       'after a byte-order mark',

@@ -4,6 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  captureHookExecutionOwner,
+  runWithHookExecutionOwner,
+  type HookExecutionOwner,
+} from '../hooks/hook-execution-context.js';
+
 import { randomUUID } from 'node:crypto';
 import { canUseRipgrep } from '../utils/ripgrepUtils.js';
 import { deriveConfig, type Config } from '../config/config.js';
@@ -128,6 +134,7 @@ interface CallSlot {
 }
 
 interface Entry {
+  readonly hookOwner: HookExecutionOwner | undefined;
   readonly reference: ManagedToolInvocationReference;
   readonly inputDigest: string;
   readonly tool: AnyDeclarativeTool;
@@ -235,14 +242,20 @@ export class ManagedToolRuntime {
   }
 
   private scoped<T>(identity: ManagedToolCallIdentity, action: () => T): T {
-    return promptIdContext.run(identity.promptId, () =>
-      runWithInvocationContext(
-        {
-          version: 1,
-          sessionId: identity.sessionId,
-          promptId: identity.promptId,
-        },
-        action,
+    const owner =
+      'invocationId' in identity && typeof identity.invocationId === 'string'
+        ? this.entries.get(identity.invocationId)?.hookOwner
+        : captureHookExecutionOwner(this.config);
+    return runWithHookExecutionOwner(owner, () =>
+      promptIdContext.run(identity.promptId, () =>
+        runWithInvocationContext(
+          {
+            version: 1,
+            sessionId: identity.sessionId,
+            promptId: identity.promptId,
+          },
+          action,
+        ),
       ),
     );
   }
@@ -386,6 +399,9 @@ export class ManagedToolRuntime {
     source?: Entry,
     mediaContext?: ManagedToolMediaContext,
   ): Promise<Entry> {
+    const hookOwner = source
+      ? source.hookOwner
+      : captureHookExecutionOwner(this.config);
     let tool = this.tools().find((candidate) => candidate.name === toolName);
     if (!tool) throw new Error('Managed Runtime tool is unavailable.');
     if (mediaContext !== undefined) {
@@ -438,6 +454,7 @@ export class ManagedToolRuntime {
     };
     const toolUseId = generateToolUseId();
     const entry: Entry = {
+      hookOwner,
       reference,
       inputDigest,
       tool,
@@ -577,6 +594,7 @@ export class ManagedToolRuntime {
         this.config.getApprovalMode(),
         entry.controller.signal,
         entry.reference.callId,
+        entry.hookOwner,
       );
       this.assertExecutable(entry);
       entry.preflightResult = structuredClone(result);
@@ -703,6 +721,8 @@ export class ManagedToolRuntime {
           this.config.getApprovalMode(),
           undefined,
           entry.reference.callId,
+          undefined,
+          entry.hookOwner,
         );
       } else if (result.executionStatus === 'success' && result.result) {
         result.postHook = await firePostToolUseHook(
@@ -717,6 +737,8 @@ export class ManagedToolRuntime {
           this.config.getApprovalMode(),
           undefined,
           entry.reference.callId,
+          undefined,
+          entry.hookOwner,
         );
       }
     } catch (error) {

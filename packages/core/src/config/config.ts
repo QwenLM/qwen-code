@@ -4,6 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  assertHookExecutionOwner,
+  captureHookExecutionOwner,
+  runWithHookExecutionOwner,
+} from '../hooks/hook-execution-context.js';
 import type { SessionSourceService } from '../services/session-sources.js';
 
 import { resolveProviderProtocol } from '../models/modelRegistry.js';
@@ -305,6 +310,7 @@ import {
   type ChatRecord,
   type ChatRecordingFailureEvent,
   type ChatRecordingFailureListener,
+  type ManagedSessionRecordWriter,
 } from '../services/chatRecordingService.js';
 import { CHARS_PER_TOKEN } from '../services/tokenEstimation.js';
 import {
@@ -330,11 +336,20 @@ import type {
   SessionRuntimeResumeState,
 } from '../services/session-transcript-reader.js';
 import {
+  EMPTY_COMMIT_PREFIX_HASH,
+  LocalManagedSessionAuthority,
+  ManagedSessionUncommittedTailError,
+} from '../managed-runtime/managed-session-authority.js';
+import { LocalJsonlManagedSessionJournalStore } from '../managed-runtime/local-jsonl-managed-session-journal-store.js';
+import { readManagedSessionRecords } from '../managed-runtime/managed-session-message-projection.js';
+import { readManagedExecutionEvidenceSync } from '../utils/sessionStorageUtils.js';
+import {
   SessionTranscriptChangedError,
   SessionWriterError,
   SessionWriterLease,
   SessionWriterLostError,
   SessionWriterUnavailableError,
+  type SessionWriterCommitProof,
 } from '../services/session-writer-lease.js';
 import {
   openManagedSession,
@@ -455,10 +470,54 @@ const ACTIVE_TODO_REMINDER_REFRESH_TURNS = 3;
 // reveal never rewrites the declaration list.
 const DEFAULT_TOOL_SEARCH_THRESHOLD = 0;
 
-// Horizon an installed Managed activation records. Real liveness is the writer
-// lock's pid check, so this only bounds how long a reader treats a lock-less
-// activation as possibly still live.
+// Horizon a Managed session activation records; it is renewed at a third of
+// it while the session is open. Liveness of a local session is its writer
+// lock, so the horizon only bounds how long a reader treats an activation
+// without a live lock as possibly current.
 const MANAGED_ACTIVATION_LEASE_MS = 5 * 60 * 1000;
+
+/** The recorder's view of a Managed Session log. */
+function managedRecordWriter(
+  managed: ManagedSession,
+  log: { readonly transcriptPath: string; readonly runtimeBaseDir: string },
+): ManagedSessionRecordWriter {
+  return {
+    canCarry: (record) => managed.sink.canCarry(record),
+    write: (record) => managed.sink.write(record),
+    // Every record the reader replays, not only messages: turn results, goal
+    // state and the other records the chain passes through are parents too.
+    project: () =>
+      readManagedSessionRecords({
+        transcriptPath: log.transcriptPath,
+        runtimeBaseDir: log.runtimeBaseDir,
+        sessionKey: managed.authority.sessionHeader.sessionKey,
+      }),
+    stopAdvancing: () => stopAdvancing(managed),
+    commitProof: () => managedCommitProof(managed),
+    logSize: () => {
+      try {
+        return fs.statSync(log.transcriptPath).size;
+      } catch {
+        return undefined;
+      }
+    },
+  };
+}
+
+async function stopAdvancing(managed: ManagedSession): Promise<void> {
+  // Stops renewing the activation. The lease was adopted, so the session's
+  // own close, or the activation that failed, seals it afterwards.
+  await managed.close();
+  await managed.releaseActivation();
+}
+
+function managedCommitProof(managed: ManagedSession): SessionWriterCommitProof {
+  const proof = managed.authority.commitProof;
+  return {
+    last_commit_sequence: proof.lastCommitSequence,
+    committed_prefix_hash: proof.committedPrefixHash,
+  };
+}
 
 import {
   ModelsConfig,
@@ -2818,6 +2877,8 @@ export class Config {
   private provisionalWorkspaceActivation?: Promise<void>;
   private sessionProjectDirRegistered = false;
   private pendingSessionWriterLease?: SessionWriterLease;
+  /** The Managed Session log a Managed session records through. */
+  private managedSession?: ManagedSession;
   private pendingSessionWriterRelease:
     | { lease: SessionWriterLease; promise: Promise<void> }
     | undefined;
@@ -3140,8 +3201,6 @@ export class Config {
   private preserveRestorableAskUserQuestion = false;
   private readonly sessionWriterLeaseEnabled: boolean = false;
   private readonly managedSessionLogEnabled: boolean = false;
-  /** Held for its activation, which the close path has to release. */
-  private managedSession?: ManagedSession;
   private managedHarness?: ManagedHarnessHandle;
   private readonly cronEnabled: boolean = true;
   /** Recurring cron max age in days, resolved once at construction
@@ -3383,7 +3442,7 @@ export class Config {
     ) {
       throw new SessionExecutionEngineError(
         params.sessionId ?? '',
-        'managed execution requires recording and a writer lease',
+        'managed execution requires chat recording and a writer lease',
       );
     }
     this.runtimeEnvironment =
@@ -4295,276 +4354,283 @@ export class Config {
               return;
             }
 
-            // Execute the appropriate hook based on eventName
-            let result;
-            let stopHookCount: number | undefined;
-            const input = request.input || {};
-            const signal = request.signal;
-            switch (request.eventName) {
-              case 'UserPromptSubmit':
-                result = await hookSystem.fireUserPromptSubmitEvent(
-                  (input['prompt'] as string) || '',
-                  signal,
-                  typeof input['submitted_prompt'] === 'string' &&
-                    input['submitted_prompt'].trim().length > 0
-                    ? input['submitted_prompt']
-                    : undefined,
-                );
-                break;
-              case 'UserPromptExpansion':
-                result = await hookSystem.fireUserPromptExpansionEvent(
-                  (input['command_name'] as string) || '',
-                  (input['command_args'] as string) || '',
-                  (input['prompt'] as string) || '',
-                  signal,
-                );
-                break;
-              case 'Stop': {
-                // Extract context usage data from input with runtime validation
-                const contextUsageData = buildContextUsage(
-                  input['context_limit'] as number | undefined,
-                  (input['input_tokens'] as number | undefined) ?? 0,
-                );
-
-                const stopResult = await hookSystem.fireStopEvent(
-                  (input['stop_hook_active'] as boolean) || false,
-                  (input['last_assistant_message'] as string) || '',
-                  contextUsageData,
-                  signal,
-                );
-                result = stopResult.finalOutput
-                  ? createHookOutput('Stop', stopResult.finalOutput)
-                  : undefined;
-                stopHookCount = stopResult.allOutputs.length;
-                break;
-              }
-              case 'MessageDisplay': {
-                const messageDisplayResult =
-                  await hookSystem.fireMessageDisplayEvent(
-                    (input['message_id'] as string) || '',
-                    (input['displayed_text'] as string) || '',
-                    (input['is_final'] as boolean) || false,
+            assertHookExecutionOwner(
+              request.owner,
+              hookSystem.runtimeId,
+              this.getSessionId(),
+            );
+            await runWithHookExecutionOwner(request.owner, async () => {
+              // Execute the appropriate hook based on eventName
+              let result;
+              let stopHookCount: number | undefined;
+              const input = request.input || {};
+              const signal = request.signal;
+              switch (request.eventName) {
+                case 'UserPromptSubmit':
+                  result = await hookSystem.fireUserPromptSubmitEvent(
+                    (input['prompt'] as string) || '',
+                    signal,
+                    typeof input['submitted_prompt'] === 'string' &&
+                      input['submitted_prompt'].trim().length > 0
+                      ? input['submitted_prompt']
+                      : undefined,
+                  );
+                  break;
+                case 'UserPromptExpansion':
+                  result = await hookSystem.fireUserPromptExpansionEvent(
+                    (input['command_name'] as string) || '',
+                    (input['command_args'] as string) || '',
+                    (input['prompt'] as string) || '',
                     signal,
                   );
-                result = messageDisplayResult.finalOutput
-                  ? createHookOutput(
-                      'MessageDisplay',
-                      messageDisplayResult.finalOutput,
-                    )
-                  : undefined;
-                break;
-              }
-              case 'PreToolUse': {
-                result = await hookSystem.firePreToolUseEvent(
-                  (input['tool_name'] as string) || '',
-                  (input['tool_input'] as Record<string, unknown>) || {},
-                  (input['tool_use_id'] as string) || '',
-                  (input['permission_mode'] as PermissionMode | undefined) ??
-                    PermissionMode.Default,
-                  signal,
-                  (input['tool_call_id'] as string) || undefined,
-                );
-                break;
-              }
-              case 'PostToolUse':
-                result = await hookSystem.firePostToolUseEvent(
-                  (input['tool_name'] as string) || '',
-                  (input['tool_input'] as Record<string, unknown>) || {},
-                  (input['tool_response'] as Record<string, unknown>) || {},
-                  (input['tool_use_id'] as string) || '',
-                  (input['permission_mode'] as PermissionMode) || 'default',
-                  signal,
-                  (input['tool_call_id'] as string) || undefined,
-                  typeof input['duration_ms'] === 'number'
-                    ? input['duration_ms']
-                    : undefined,
-                );
-                break;
-              case 'PostToolUseFailure':
-                result = await hookSystem.firePostToolUseFailureEvent(
-                  (input['tool_use_id'] as string) || '',
-                  (input['tool_name'] as string) || '',
-                  (input['tool_input'] as Record<string, unknown>) || {},
-                  (input['error'] as string) || '',
-                  input['is_interrupt'] as boolean | undefined,
-                  (input['permission_mode'] as PermissionMode) || 'default',
-                  signal,
-                  (input['tool_call_id'] as string) || undefined,
-                  typeof input['duration_ms'] === 'number'
-                    ? input['duration_ms']
-                    : undefined,
-                );
-                break;
-              case 'PostToolBatch':
-                result = await hookSystem.firePostToolBatchEvent(
-                  (input['tool_calls'] as PostToolBatchToolCall[]) || [],
-                  (input['permission_mode'] as PermissionMode) || 'default',
-                  signal,
-                );
-                break;
-              case 'Notification':
-                result = await hookSystem.fireNotificationEvent(
-                  (input['message'] as string) || '',
-                  (input['notification_type'] as NotificationType) ||
-                    'permission_prompt',
-                  (input['title'] as string) || undefined,
-                  signal,
-                );
-                break;
-              case 'PermissionRequest':
-                result = await hookSystem.firePermissionRequestEvent(
-                  (input['tool_name'] as string) || '',
-                  (input['tool_input'] as Record<string, unknown>) || {},
-                  (input['permission_mode'] as PermissionMode) ||
-                    PermissionMode.Default,
-                  (input['permission_suggestions'] as
-                    | PermissionSuggestion[]
-                    | undefined) || undefined,
-                  signal,
-                );
-                break;
-              case 'PermissionDenied':
-                result = await hookSystem.firePermissionDeniedEvent(
-                  (input['tool_name'] as string) || '',
-                  (input['tool_input'] as Record<string, unknown>) || {},
-                  (input['tool_use_id'] as string) || '',
-                  (input['reason'] as PermissionDeniedReason) ||
-                    'classifier_blocked',
-                  signal,
-                  (input['tool_call_id'] as string) || undefined,
-                );
-                break;
-              case 'SubagentStart':
-                result = await hookSystem.fireSubagentStartEvent(
-                  (input['agent_id'] as string) || '',
-                  (input['agent_type'] as string) || '',
-                  (input['permission_mode'] as PermissionMode) ||
-                    PermissionMode.Default,
-                  signal,
-                );
-                break;
-              case 'SubagentStop':
-                result = await hookSystem.fireSubagentStopEvent(
-                  (input['agent_id'] as string) || '',
-                  (input['agent_type'] as string) || '',
-                  (input['agent_transcript_path'] as string) || '',
-                  (input['last_assistant_message'] as string) || '',
-                  (input['stop_hook_active'] as boolean) || false,
-                  (input['permission_mode'] as PermissionMode) ||
-                    PermissionMode.Default,
-                  signal,
-                );
-                break;
-              case 'SessionStart':
-                result = await hookSystem.fireSessionStartEvent(
-                  input['source'] as SessionStartSource,
-                  (input['model'] as string) || '',
-                  (input['permission_mode'] as PermissionMode) || undefined,
-                  input['agent_type'] as AgentType | undefined,
-                  signal,
-                );
-                break;
-              case 'SessionEnd':
-                result = await hookSystem.fireSessionEndEvent(
-                  input['reason'] as SessionEndReason,
-                  signal,
-                );
-                break;
-              case 'SessionDelete':
-                result = await hookSystem.fireSessionDeleteEvent(
-                  (input['deleted_session_id'] as string) || '',
-                  signal,
-                );
-                break;
-              case 'PreCompact':
-                result = await hookSystem.firePreCompactEvent(
-                  input['trigger'] as PreCompactTrigger,
-                  (input['custom_instructions'] as string) || '',
-                  signal,
-                );
-                break;
-              case 'PostCompact':
-                result = await hookSystem.firePostCompactEvent(
-                  input['trigger'] as PostCompactTrigger,
-                  (input['compact_summary'] as string) || '',
-                  signal,
-                );
-                break;
-              case 'InstructionsLoaded':
-                result = await hookSystem.fireInstructionsLoadedEvent(
-                  (input['file_path'] as string) || '',
-                  input['memory_type'] as InstructionMemoryType,
-                  input['load_reason'] as InstructionLoadReason,
-                  {
-                    triggerFilePath: input['trigger_file_path'] as
-                      | string
-                      | undefined,
-                    parentFilePath: input['parent_file_path'] as
-                      | string
-                      | undefined,
-                  },
-                  signal,
-                );
-                break;
-              // These three return the aggregated result, and the bus replies
-              // with its final output as is. For TodoCreated and TodoCompleted
-              // that is what direct callers read (todoWrite checks
-              // `finalOutput.decision`). StopFailure is fire-and-forget: the
-              // aggregator hard-codes its `finalOutput` to undefined and every
-              // direct caller detaches without reading the result, so its arm
-              // always replies with no output and awaits only so the hooks run.
-              // Stop and MessageDisplay instead wrap theirs with
-              // createHookOutput.
-              case 'StopFailure':
-                result = (
-                  await hookSystem.fireStopFailureEvent(
-                    input['error'] as StopFailureErrorType,
-                    input['error_details'] as string | undefined,
-                    input['last_assistant_message'] as string | undefined,
-                    signal,
-                  )
-                ).finalOutput;
-                break;
-              case 'TodoCreated':
-                result = (
-                  await hookSystem.fireTodoCreatedEvent(
-                    (input['todo_id'] as string) || '',
-                    (input['todo_content'] as string) || '',
-                    input['todo_status'] as TodoStatus,
-                    (input['all_todos'] as TodoItem[]) || [],
-                    input['phase'] as HookPhase,
-                    signal,
-                  )
-                ).finalOutput;
-                break;
-              case 'TodoCompleted':
-                result = (
-                  await hookSystem.fireTodoCompletedEvent(
-                    (input['todo_id'] as string) || '',
-                    (input['todo_content'] as string) || '',
-                    input['previous_status'] as 'pending' | 'in_progress',
-                    (input['all_todos'] as TodoItem[]) || [],
-                    input['phase'] as HookPhase,
-                    signal,
-                  )
-                ).finalOutput;
-                break;
-              default:
-                this.debugLogger.warn(
-                  `Unknown hook event: ${request.eventName}`,
-                );
-                result = undefined;
-            }
+                  break;
+                case 'Stop': {
+                  // Extract context usage data from input with runtime validation
+                  const contextUsageData = buildContextUsage(
+                    input['context_limit'] as number | undefined,
+                    (input['input_tokens'] as number | undefined) ?? 0,
+                  );
 
-            // Send response
-            this.messageBus?.publish({
-              type: MessageBusType.HOOK_EXECUTION_RESPONSE,
-              correlationId: request.correlationId,
-              success: true,
-              output: result,
-              // Include stop hook count for Stop events
-              stopHookCount,
-            } as HookExecutionResponse);
+                  const stopResult = await hookSystem.fireStopEvent(
+                    (input['stop_hook_active'] as boolean) || false,
+                    (input['last_assistant_message'] as string) || '',
+                    contextUsageData,
+                    signal,
+                  );
+                  result = stopResult.finalOutput
+                    ? createHookOutput('Stop', stopResult.finalOutput)
+                    : undefined;
+                  stopHookCount = stopResult.allOutputs.length;
+                  break;
+                }
+                case 'MessageDisplay': {
+                  const messageDisplayResult =
+                    await hookSystem.fireMessageDisplayEvent(
+                      (input['message_id'] as string) || '',
+                      (input['displayed_text'] as string) || '',
+                      (input['is_final'] as boolean) || false,
+                      signal,
+                    );
+                  result = messageDisplayResult.finalOutput
+                    ? createHookOutput(
+                        'MessageDisplay',
+                        messageDisplayResult.finalOutput,
+                      )
+                    : undefined;
+                  break;
+                }
+                case 'PreToolUse': {
+                  result = await hookSystem.firePreToolUseEvent(
+                    (input['tool_name'] as string) || '',
+                    (input['tool_input'] as Record<string, unknown>) || {},
+                    (input['tool_use_id'] as string) || '',
+                    (input['permission_mode'] as PermissionMode | undefined) ??
+                      PermissionMode.Default,
+                    signal,
+                    (input['tool_call_id'] as string) || undefined,
+                  );
+                  break;
+                }
+                case 'PostToolUse':
+                  result = await hookSystem.firePostToolUseEvent(
+                    (input['tool_name'] as string) || '',
+                    (input['tool_input'] as Record<string, unknown>) || {},
+                    (input['tool_response'] as Record<string, unknown>) || {},
+                    (input['tool_use_id'] as string) || '',
+                    (input['permission_mode'] as PermissionMode) || 'default',
+                    signal,
+                    (input['tool_call_id'] as string) || undefined,
+                    typeof input['duration_ms'] === 'number'
+                      ? input['duration_ms']
+                      : undefined,
+                  );
+                  break;
+                case 'PostToolUseFailure':
+                  result = await hookSystem.firePostToolUseFailureEvent(
+                    (input['tool_use_id'] as string) || '',
+                    (input['tool_name'] as string) || '',
+                    (input['tool_input'] as Record<string, unknown>) || {},
+                    (input['error'] as string) || '',
+                    input['is_interrupt'] as boolean | undefined,
+                    (input['permission_mode'] as PermissionMode) || 'default',
+                    signal,
+                    (input['tool_call_id'] as string) || undefined,
+                    typeof input['duration_ms'] === 'number'
+                      ? input['duration_ms']
+                      : undefined,
+                  );
+                  break;
+                case 'PostToolBatch':
+                  result = await hookSystem.firePostToolBatchEvent(
+                    (input['tool_calls'] as PostToolBatchToolCall[]) || [],
+                    (input['permission_mode'] as PermissionMode) || 'default',
+                    signal,
+                  );
+                  break;
+                case 'Notification':
+                  result = await hookSystem.fireNotificationEvent(
+                    (input['message'] as string) || '',
+                    (input['notification_type'] as NotificationType) ||
+                      'permission_prompt',
+                    (input['title'] as string) || undefined,
+                    signal,
+                  );
+                  break;
+                case 'PermissionRequest':
+                  result = await hookSystem.firePermissionRequestEvent(
+                    (input['tool_name'] as string) || '',
+                    (input['tool_input'] as Record<string, unknown>) || {},
+                    (input['permission_mode'] as PermissionMode) ||
+                      PermissionMode.Default,
+                    (input['permission_suggestions'] as
+                      | PermissionSuggestion[]
+                      | undefined) || undefined,
+                    signal,
+                  );
+                  break;
+                case 'PermissionDenied':
+                  result = await hookSystem.firePermissionDeniedEvent(
+                    (input['tool_name'] as string) || '',
+                    (input['tool_input'] as Record<string, unknown>) || {},
+                    (input['tool_use_id'] as string) || '',
+                    (input['reason'] as PermissionDeniedReason) ||
+                      'classifier_blocked',
+                    signal,
+                    (input['tool_call_id'] as string) || undefined,
+                  );
+                  break;
+                case 'SubagentStart':
+                  result = await hookSystem.fireSubagentStartEvent(
+                    (input['agent_id'] as string) || '',
+                    (input['agent_type'] as string) || '',
+                    (input['permission_mode'] as PermissionMode) ||
+                      PermissionMode.Default,
+                    signal,
+                  );
+                  break;
+                case 'SubagentStop':
+                  result = await hookSystem.fireSubagentStopEvent(
+                    (input['agent_id'] as string) || '',
+                    (input['agent_type'] as string) || '',
+                    (input['agent_transcript_path'] as string) || '',
+                    (input['last_assistant_message'] as string) || '',
+                    (input['stop_hook_active'] as boolean) || false,
+                    (input['permission_mode'] as PermissionMode) ||
+                      PermissionMode.Default,
+                    signal,
+                  );
+                  break;
+                case 'SessionStart':
+                  result = await hookSystem.fireSessionStartEvent(
+                    input['source'] as SessionStartSource,
+                    (input['model'] as string) || '',
+                    (input['permission_mode'] as PermissionMode) || undefined,
+                    input['agent_type'] as AgentType | undefined,
+                    signal,
+                  );
+                  break;
+                case 'SessionEnd':
+                  result = await hookSystem.fireSessionEndEvent(
+                    input['reason'] as SessionEndReason,
+                    signal,
+                  );
+                  break;
+                case 'SessionDelete':
+                  result = await hookSystem.fireSessionDeleteEvent(
+                    (input['deleted_session_id'] as string) || '',
+                    signal,
+                  );
+                  break;
+                case 'PreCompact':
+                  result = await hookSystem.firePreCompactEvent(
+                    input['trigger'] as PreCompactTrigger,
+                    (input['custom_instructions'] as string) || '',
+                    signal,
+                  );
+                  break;
+                case 'PostCompact':
+                  result = await hookSystem.firePostCompactEvent(
+                    input['trigger'] as PostCompactTrigger,
+                    (input['compact_summary'] as string) || '',
+                    signal,
+                  );
+                  break;
+                case 'InstructionsLoaded':
+                  result = await hookSystem.fireInstructionsLoadedEvent(
+                    (input['file_path'] as string) || '',
+                    input['memory_type'] as InstructionMemoryType,
+                    input['load_reason'] as InstructionLoadReason,
+                    {
+                      triggerFilePath: input['trigger_file_path'] as
+                        | string
+                        | undefined,
+                      parentFilePath: input['parent_file_path'] as
+                        | string
+                        | undefined,
+                    },
+                    signal,
+                  );
+                  break;
+                // These three return the aggregated result, and the bus replies
+                // with its final output as is. For TodoCreated and TodoCompleted
+                // that is what direct callers read (todoWrite checks
+                // `finalOutput.decision`). StopFailure is fire-and-forget: the
+                // aggregator hard-codes its `finalOutput` to undefined and every
+                // direct caller detaches without reading the result, so its arm
+                // always replies with no output and awaits only so the hooks run.
+                // Stop and MessageDisplay instead wrap theirs with
+                // createHookOutput.
+                case 'StopFailure':
+                  result = (
+                    await hookSystem.fireStopFailureEvent(
+                      input['error'] as StopFailureErrorType,
+                      input['error_details'] as string | undefined,
+                      input['last_assistant_message'] as string | undefined,
+                      signal,
+                    )
+                  ).finalOutput;
+                  break;
+                case 'TodoCreated':
+                  result = (
+                    await hookSystem.fireTodoCreatedEvent(
+                      (input['todo_id'] as string) || '',
+                      (input['todo_content'] as string) || '',
+                      input['todo_status'] as TodoStatus,
+                      (input['all_todos'] as TodoItem[]) || [],
+                      input['phase'] as HookPhase,
+                      signal,
+                    )
+                  ).finalOutput;
+                  break;
+                case 'TodoCompleted':
+                  result = (
+                    await hookSystem.fireTodoCompletedEvent(
+                      (input['todo_id'] as string) || '',
+                      (input['todo_content'] as string) || '',
+                      input['previous_status'] as 'pending' | 'in_progress',
+                      (input['all_todos'] as TodoItem[]) || [],
+                      input['phase'] as HookPhase,
+                      signal,
+                    )
+                  ).finalOutput;
+                  break;
+                default:
+                  this.debugLogger.warn(
+                    `Unknown hook event: ${request.eventName}`,
+                  );
+                  result = undefined;
+              }
+
+              // Send response
+              this.messageBus?.publish({
+                type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+                correlationId: request.correlationId,
+                success: true,
+                output: result,
+                // Include stop hook count for Stop events
+                stopHookCount,
+              } as HookExecutionResponse);
+            });
           } catch (error) {
             this.debugLogger.warn(`Hook execution failed: ${error}`);
             this.messageBus?.publish({
@@ -4886,7 +4952,9 @@ export class Config {
    * Opens the authoritative Managed session log on the writer that is about to
    * become the recorder's. The local backend adopts the recorder's process
    * lease; a Hosted backend acquires its own durable writer while the recorder
-   * retains only the local process guard.
+   * retains only the local process guard. Without a header, the log is
+   * created: the authority writes the owner record and then the header, which
+   * also completes a create that stopped after its owner record.
    */
   private async openManagedSessionLog(
     lease: SessionWriterLease,
@@ -4902,38 +4970,126 @@ export class Config {
         runtimeBaseDir: this.sessionRuntimeBaseDir,
         sessionKey,
       });
-    return openManagedSession({
-      runtimeBaseDir: this.sessionRuntimeBaseDir,
-      sessionId: this.sessionId,
-      transcriptPath,
-      sessionKey,
-      // Matches what the recorder stamps on every record it projects.
-      cwd: projectRoot,
-      version: this.getCliVersion() || 'unknown',
-      // The embedded harness runs in the process that owns the writer, so the
-      // session it holds identifies the worker advancing the log.
-      workerId: this.sessionId,
-      // The activation really lives as long as this process holds the writer
-      // lock, whose liveness is a pid check, so this horizon is only what a
-      // reader compares against once the lock is gone. Nothing renews it yet, so
-      // a long session's activation can read as expired while its writer is
-      // still live.
-      activationLeaseDurationMs: MANAGED_ACTIVATION_LEASE_MS,
-      ...(remote === undefined
-        ? { lease }
-        : {
-            journalStore: remote.journalStore,
-            resourceStore: resources,
-          }),
-      ...(remote?.mode === 'create' ? { requireNew: true } : {}),
-      // Only avoids republishing resources a reopened session already has; the
-      // authority reads the log itself and ignores these once a header exists.
-      ...(remote?.mode === 'load' ||
+    // Only avoids republishing resources a reopened session already has; the
+    // authority reads the log itself and ignores these once a header exists.
+    const create =
+      remote?.mode === 'load' ||
       (remote === undefined && isManagedSessionTranscriptSync(transcriptPath))
-        ? {}
-        : {
-            create: await this.publishManagedSessionRoot(sessionKey, resources),
-          }),
+        ? undefined
+        : await this.publishManagedSessionRoot(sessionKey, resources);
+    const open = () =>
+      openManagedSession({
+        runtimeBaseDir: this.sessionRuntimeBaseDir,
+        sessionId: this.sessionId,
+        transcriptPath,
+        sessionKey,
+        // Matches what the recorder stamps on every record it projects.
+        cwd: projectRoot,
+        version: this.getCliVersion() || 'unknown',
+        // The embedded harness runs in the process that owns the writer, so the
+        // session it holds identifies the worker advancing the log.
+        workerId: this.sessionId,
+        // The activation really lives as long as this process holds the writer
+        // lock, whose liveness is a pid check, so this horizon is only what a
+        // reader compares against once the lock is gone. Nothing renews it yet, so
+        // a long session's activation can read as expired while its writer is
+        // still live.
+        activationLeaseDurationMs: MANAGED_ACTIVATION_LEASE_MS,
+        ...(remote === undefined
+          ? { lease }
+          : {
+              journalStore: remote.journalStore,
+              resourceStore: resources,
+            }),
+        ...(remote?.mode === 'create' ? { requireNew: true } : {}),
+        ...(create === undefined ? {} : { create }),
+      });
+    try {
+      return await open();
+    } catch (error) {
+      if (!(error instanceof ManagedSessionUncommittedTailError)) throw error;
+      // A crash left records after the last commit marker. They were never
+      // committed; this writer holds the lease, so it moves them to the
+      // diagnostic file beside the log and opens the log at its last commit.
+      await LocalManagedSessionAuthority.recoverUncommittedTail({
+        lease,
+        sessionKey,
+      });
+      return await open();
+    }
+  }
+
+  /**
+   * Whether the transcript holds records and its head shows no Managed
+   * evidence, which makes it a Legacy session's. A missing or empty
+   * transcript is a new session, and an unreadable head tells nothing.
+   */
+  private isLegacyTranscript(): boolean {
+    const transcriptPath = this.getTranscriptPath();
+    try {
+      if (fs.statSync(transcriptPath).size === 0) return false;
+    } catch {
+      return false;
+    }
+    return readManagedExecutionEvidenceSync(transcriptPath) === false;
+  }
+
+  /**
+   * Ends the writer of a Managed session whose activation failed.
+   *
+   * - A log that was opened is sealed at the authority's position.
+   * - A lease that replaced a sealed lock gets that seal back.
+   * - A transcript that is missing or empty, or whose head shows no Managed
+   *   evidence, has its lock released: it holds nothing to guard.
+   * - Any other log is sealed at the committed position read from it. One
+   *   whose head or log cannot be read keeps its lock held until the process
+   *   exits, since nothing tells what it holds or where to seal it. The lease
+   *   may have reclaimed a crashed Managed writer's lock, which releasing
+   *   would drop.
+   */
+  private async finishManagedWriter(
+    lease: SessionWriterLease,
+    opened: ManagedSession | undefined,
+  ): Promise<void> {
+    if (opened) {
+      try {
+        await stopAdvancing(opened);
+      } catch {
+        // The seal is the at-rest barrier; an activation that reads as
+        // abandoned is the lesser loss.
+      }
+      await lease.sealForHandoff(managedCommitProof(opened));
+      return;
+    }
+    const takenOver = lease.takeoverCommitProof;
+    if (takenOver !== undefined) {
+      // The open checks the log against this seal before it writes anything.
+      // Sealing at the position read from the log instead would accept a log
+      // that changed behind the seal on the next attempt.
+      await lease.sealForHandoff(takenOver);
+      return;
+    }
+    const transcriptPath = this.getTranscriptPath();
+    const evidence = readManagedExecutionEvidenceSync(transcriptPath);
+    if (evidence === false) {
+      await lease.release();
+      return;
+    }
+    if (evidence === undefined) return;
+    let scan: Awaited<
+      ReturnType<typeof LocalJsonlManagedSessionJournalStore.read>
+    >;
+    try {
+      scan = await LocalJsonlManagedSessionJournalStore.read(
+        transcriptPath,
+        localManagedSessionKey(this.storage.getProjectRoot(), this.sessionId),
+      );
+    } catch {
+      return;
+    }
+    await lease.sealForHandoff({
+      last_commit_sequence: scan.committed,
+      committed_prefix_hash: scan.lastMarkerDigest ?? EMPTY_COMMIT_PREFIX_HASH,
     });
   }
 
@@ -4983,30 +5139,41 @@ export class Config {
   private async activateChatRecording(
     executionEngine?: SessionExecutionEngine,
   ): Promise<void> {
-    const expectedEngine = this.managedToolSessionFactory
-      ? 'managed'
-      : 'legacy';
-    if (executionEngine && executionEngine !== expectedEngine) {
+    const requested = executionEngine ?? this.selectedSessionExecutionEngine;
+    const managed = requested === 'managed';
+    // The log follows the engine unless the host pinned it off: a Managed
+    // host with its tool factory can leave a Legacy transcript when the log
+    // is disabled; a host without the factory takes the log from the engine
+    // alone.
+    const managedLog =
+      managed &&
+      (this.managedToolSessionFactory === undefined ||
+        this.managedSessionLogEnabled);
+    if (
+      executionEngine !== undefined &&
+      this.managedToolSessionFactory !== undefined &&
+      executionEngine !== 'managed'
+    ) {
       throw new SessionExecutionEngineError(
         this.sessionId,
         'host engine mismatch',
       );
     }
     if (
-      executionEngine === 'managed' &&
+      managed &&
       (!this.chatRecordingEnabled || !this.sessionWriterLeaseEnabled)
     ) {
       throw new SessionExecutionEngineError(
         this.sessionId,
-        'managed execution requires recording and a writer lease',
+        'managed execution requires chat recording and a writer lease',
       );
     }
     if (!this.chatRecordingEnabled || !this.sessionWriterLeaseEnabled) {
-      if (executionEngine) {
+      if (requested) {
         await this.chatRecordingService?.recordSessionExecutionEngine(
-          executionEngine,
+          requested,
         );
-        this.sessionExecutionEngine = executionEngine;
+        this.sessionExecutionEngine = requested;
       }
       return;
     }
@@ -5015,6 +5182,15 @@ export class Config {
       // Managed log is written as soon as it opens, so opening one here would
       // persist an empty session that no client created and list it.
       return;
+    }
+    if (managedLog && this.isLegacyTranscript()) {
+      // Refused before the lease is taken: a certified takeover would retire
+      // a Legacy session's seal, and the owner check after it could refuse
+      // the restore only once that seal was gone.
+      throw new SessionExecutionEngineError(
+        this.sessionId,
+        'belongs to legacy, cannot execute with managed',
+      );
     }
     if (this.sessionWriterShutdownRequested) {
       throw new SessionWriterShutdownError();
@@ -5030,16 +5206,16 @@ export class Config {
         processKind: 'acp',
         qwenVersion: this.cliVersion ?? null,
         reclaimPolicy: this.sessionWriterReclaimPolicy,
-        // A Managed session closes by sealing, and only a certified takeover
-        // may reacquire a sealed lock -- without this, reopening one raises a
-        // writer conflict. A live lock still conflicts either way.
-        takeoverPolicy: this.managedSessionLogEnabled
+        // A Managed writer pins its log format into the lock: a binary that
+        // does not know the Managed schema and takes the writer lease refuses
+        // the lock instead of writing into the log, and a sealed Managed lock
+        // is reopened only by a certified takeover that checks the log
+        // against the seal. Writers that take no lease, such as the TUI and
+        // the headless CLI, are refused by the log's own header instead.
+        takeoverPolicy: managedLog
           ? 'certified'
           : this.sessionWriterTakeoverPolicy,
-        // A Managed writer pins its log format into the lock record (schema
-        // 3): baseline binaries refuse the unknown schema instead of writing
-        // into a Managed log, and sealing pins the authority's commit proof.
-        ...(this.managedSessionLogEnabled
+        ...(managed
           ? {
               lockSchema: {
                 schemaVersion: 3 as const,
@@ -5075,11 +5251,13 @@ export class Config {
           'after_writer_lease',
         );
         projection = await this.sessionRestoreProjectionSource();
-        assertSessionExecutionEngine(
-          projection?.executionEngine,
-          this.sessionId,
-          expectedEngine,
-        );
+        if (requested !== undefined) {
+          assertSessionExecutionEngine(
+            projection?.executionEngine,
+            this.sessionId,
+            requested,
+          );
+        }
         this.setSessionRestoreProjection(projection);
       } else if (
         this.sessionData ||
@@ -5090,17 +5268,19 @@ export class Config {
           this.sessionId,
         );
         if (!authoritative) throw new SessionWriterUnavailableError();
-        assertSessionExecutionEngine(
-          authoritative.executionEngine,
-          this.sessionId,
-          expectedEngine,
-        );
+        if (requested !== undefined) {
+          assertSessionExecutionEngine(
+            authoritative.executionEngine,
+            this.sessionId,
+            requested,
+          );
+        }
         if (this.pendingSessionRestoreProjection) {
           projection = this.pendingSessionRestoreProjection;
           if (
             !isDeepStrictEqual(
               projection.executionEngine?.snapshot,
-              authoritative.executionEngine.snapshot,
+              authoritative.executionEngine?.snapshot,
             )
           ) {
             throw new SessionTranscriptChangedError();
@@ -5117,49 +5297,30 @@ export class Config {
         throw new SessionWriterShutdownError();
       }
       this.sessionData = authoritative;
-      // Opened before the recorder accepts writes: `activate()` starts
-      // accepting them synchronously, and a record that took the legacy append
-      // path would land raw in an authoritative log.
-      const managedSession = this.managedSessionLogEnabled
-        ? await this.openManagedSessionLog(lease)
-        : undefined;
-      try {
-        recorder.activate(
-          lease,
-          authoritative,
-          persistedTitleInfo,
-          projection?.runtime.recording,
-        );
-      } catch (activationError) {
-        if (managedSession) {
-          const cleanupErrors: unknown[] = [];
-          try {
-            await managedSession.releaseActivation();
-          } catch (cleanupError) {
-            cleanupErrors.push(cleanupError);
-          }
-          try {
-            await managedSession.close();
-          } catch (cleanupError) {
-            cleanupErrors.push(cleanupError);
-          }
-          if (cleanupErrors.length > 0) {
-            throw new AggregateError(
-              [activationError, ...cleanupErrors],
-              'Managed session cleanup failed during recorder activation',
-            );
-          }
+      if (managedLog) {
+        // Opened, and the recorder bound to it, before the recorder accepts a
+        // record: a record appended directly would be a raw line in the log.
+        this.managedSession = await this.openManagedSessionLog(lease);
+        if (this.sessionWriterShutdownRequested) {
+          throw new SessionWriterShutdownError();
         }
-        throw activationError;
+        recorder.bindManagedSink(
+          managedRecordWriter(this.managedSession, {
+            transcriptPath: this.getTranscriptPath(),
+            runtimeBaseDir: this.sessionRuntimeBaseDir,
+          }),
+        );
       }
-      this.pendingSessionWriterLease = undefined;
-      lease = undefined;
-      if (managedSession) {
-        // The authority already wrote the engine record and the header, and the
-        // sink refuses records it cannot map, so no engine record is written
-        // here.
-        recorder.bindManagedSink(managedSession.sink);
-        this.managedSession = managedSession;
+      recorder.activate(
+        lease,
+        authoritative,
+        persistedTitleInfo,
+        projection?.runtime.recording,
+      );
+      if (managedLog) {
+        // The authority already wrote the engine record and the header, and
+        // the sink refuses records it cannot map, so no engine record is
+        // written here.
         this.managedHarness = undefined;
         this.sessionExecutionEngine = 'managed';
       } else if (executionEngine) {
@@ -5176,13 +5337,12 @@ export class Config {
       // held back can finally run — against `authoritative`, which is
       // fresher than what the constructor had. Not awaited: activation
       // latency is unchanged, and `getGoalRuntimeReady()` is what waits.
+      this.pendingSessionWriterLease = undefined;
+      lease = undefined;
       this.startPendingGoalRestore();
     } catch (error) {
       let failure: unknown = error;
-      if (
-        this.managedSession === undefined &&
-        this.managedSessionStore?.close !== undefined
-      ) {
+      if (this.managedSessionStore?.close !== undefined) {
         try {
           await this.managedSessionStore.close();
         } catch (cleanupError) {
@@ -5194,8 +5354,25 @@ export class Config {
       }
       const ownedLease = lease ?? this.pendingSessionWriterLease;
       let releaseFailureAlreadyReported = false;
+      const abandonedManagedSession = this.managedSession;
+      this.managedSession = undefined;
+      if (managedLog && ownedLease) {
+        // Registered as this lease's release, so the cleanup below and any
+        // close waits for it instead of releasing the lease itself.
+        const finishing = this.finishManagedWriter(
+          ownedLease,
+          abandonedManagedSession,
+        );
+        void finishing.catch(() => undefined);
+        this.pendingSessionWriterRelease = {
+          lease: ownedLease,
+          promise: finishing,
+        };
+      }
       if (
         !(failure instanceof SessionWriterError) &&
+        // A Managed log's own errors say what is wrong with the log; they are
+        // not the writer contention this reports.
         !(failure instanceof ManagedSessionRecordError) &&
         failure &&
         typeof failure === 'object' &&
@@ -5870,6 +6047,7 @@ export class Config {
    * Refresh authentication and rebuild ContentGenerator.
    */
   async refreshAuth(authMethod: AuthType, isInitialAuth?: boolean) {
+    const hookOwner = captureHookExecutionOwner(this, null);
     await this.proxyDispatcherReady;
     if (!this.contentGenerator && authMethod === this.initialAuthType) {
       authMethod = this.initialResolvedAuthType ?? authMethod;
@@ -5947,6 +6125,8 @@ export class Config {
         `Successfully authenticated with ${authMethod}`,
         NotificationType.AuthSuccess,
         'Authentication successful',
+        undefined,
+        hookOwner,
       ).catch(() => {
         // Silently ignore errors - fireNotificationHook has internal error handling
         // and notification hooks should not block the auth flow
@@ -7452,9 +7632,53 @@ export class Config {
     }
 
     const rawSelector = resolveModelId(this.fastModel);
-    return rawSelector?.authType
-      ? `${rawSelector.authType}:${selector.modelId}`
-      : selector.modelId;
+    if (!rawSelector?.authType) return selector.modelId;
+    const qualified = `${rawSelector.authType}:${selector.modelId}`;
+    const endpoint = this.pinnedAuxEndpoint(
+      this.fastModel,
+      selector.modelId,
+      available,
+    );
+    return endpoint ? `${qualified}\0${endpoint}` : qualified;
+  }
+
+  /**
+   * The endpoint a persisted aux selector (`authType:id\0<baseUrl>`) is pinned
+   * to, in the registry-identity form consumers of the selector compare
+   * against: the picker persists the row's effective baseUrl, while registry
+   * keys and the forked-runtime guard use the declared one. An entry that
+   * declares no endpoint needs no suffix — a bare selector resolves to it —
+   * and an endpoint matching no configured entry is dropped, which keeps the
+   * pre-existing first-match behaviour instead of unconfiguring the model.
+   *
+   * Matching is on the effective baseUrl (what the picker persists), which is
+   * not unique across same-id entries: a row declaring no baseUrl shares the
+   * auth type's default URL with a row that declares that same URL. When
+   * several rows match, prefer the one that declared the endpoint
+   * (`registryBaseUrl` set) so the pin deterministically re-attaches instead
+   * of collapsing to whichever entry the config listed first. Residual
+   * ambiguity: a pin on the no-declared-baseUrl row cannot be told apart from
+   * a pin on the declaring row and resolves to the declaring one.
+   */
+  private pinnedAuxEndpoint(
+    persisted: string | undefined,
+    modelId: string,
+    available: AvailableModel[],
+  ): string | undefined {
+    const endpoint = persisted?.trim().split('\0')[1];
+    if (!endpoint) return undefined;
+    const hits = available.filter(
+      (model) => model.id === modelId && model.baseUrl === endpoint,
+    );
+    const matched =
+      hits.find((model) => model.registryBaseUrl !== undefined) ?? hits[0];
+    if (!matched) {
+      this.debugLogger.warn(
+        `Aux endpoint pin dropped for "${modelId}": no configured entry at ${formatVisionModelSettingForLog(endpoint)}; falling back to the first same-id match.`,
+      );
+      return undefined;
+    }
+    return matched.registryBaseUrl;
   }
 
   /**
@@ -7576,9 +7800,14 @@ export class Config {
         return undefined;
       }
       const rawSelector = resolveModelId(this.compactionModel);
-      return rawSelector?.authType
-        ? `${rawSelector.authType}:${selector.modelId}`
-        : selector.modelId;
+      if (!rawSelector?.authType) return selector.modelId;
+      const qualified = `${rawSelector.authType}:${selector.modelId}`;
+      const endpoint = this.pinnedAuxEndpoint(
+        this.compactionModel,
+        selector.modelId,
+        available,
+      );
+      return endpoint ? `${qualified}\0${endpoint}` : qualified;
     }
     return this.getModel();
   }
@@ -12624,7 +12853,8 @@ export class Config {
         await this.chatRecordingService?.flush();
         managedLogDiscarded =
           await this.discardEmptyManagedSessionLog(managedSession);
-        if (!managedLogDiscarded) await managedSession.releaseActivation();
+        // The recorder's close stops advancing: it anchors the due metadata,
+        // then closes the session and releases the activation before sealing.
       } catch (error) {
         // Collected rather than thrown: the seal below is the at-rest barrier,
         // and losing it is worse than an activation left looking abandoned.
@@ -12634,21 +12864,10 @@ export class Config {
     try {
       await this.chatRecordingService?.close({
         handoff: this.sessionWriterHandoffRequested,
-        // The recorder seals the adopted lease, so the authority's commit
-        // proof has to reach that seal through it. Computed after the release
-        // boundary above, so the sealed proof covers the final record.
-        ...(managedSession === undefined
-          ? {}
-          : managedLogDiscarded
-            ? { discardManagedLog: true }
-            : {
-                managedCommitProof: {
-                  last_commit_sequence:
-                    managedSession.authority.commitProof.lastCommitSequence,
-                  committed_prefix_hash:
-                    managedSession.authority.commitProof.committedPrefixHash,
-                },
-              }),
+        // A discarded log has nothing left for a seal to protect; the lock is
+        // released. Otherwise the recorder seals with the sink's commit proof,
+        // which reads the authority after the final record lands.
+        ...(managedLogDiscarded ? { discardManagedLog: true } : {}),
       });
     } catch (error) {
       failures.push(error);
@@ -12704,6 +12923,15 @@ export class Config {
     if (!lease) return undefined;
     const existing = this.pendingSessionWriterRelease;
     if (existing?.lease === lease) return existing.promise;
+    // A Managed writer is ended by its failed activation, which alone knows
+    // whether the log was written; releasing it early could delete the lock of
+    // a log that already holds its header. The selection is known from
+    // construction, before activation sets the live engine.
+    if (
+      (this.sessionExecutionEngine ?? this.selectedSessionExecutionEngine) ===
+      'managed'
+    )
+      return undefined;
     const promise = lease.release();
     this.pendingSessionWriterRelease = { lease, promise };
     void promise.catch(() => undefined);
@@ -13418,10 +13646,17 @@ export class Config {
       const { SendMessageTool } = await import('../tools/send-message.js');
       return new SendMessageTool(this);
     });
-    await registerLazy(ToolNames.SKILL, async () => {
-      const { SkillTool } = await import('../tools/skill.js');
-      return new SkillTool(this);
-    });
+    // A subagent whose tool policy withholds skills gets a Config with no
+    // SkillManager (#12424, SubagentManager.buildSubagentContextOverride).
+    // SkillTool cannot be constructed without one, and a factory that throws
+    // stays pending, so every warmAll() of that agent's registry would retry
+    // and log it. The agent cannot declare the tool anyway.
+    if (!options?.forSubAgent || this.getSkillManager()) {
+      await registerLazy(ToolNames.SKILL, async () => {
+        const { SkillTool } = await import('../tools/skill.js');
+        return new SkillTool(this);
+      });
+    }
     // list_directory is opt-in (disabled by default): glob covers directory
     // listing in most cases, so the tool only registers when explicitly
     // enabled via `tools.listDirectory.enabled` or the coreTools allowlist.

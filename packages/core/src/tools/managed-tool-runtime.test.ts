@@ -7,6 +7,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
+import {
+  getHookExecutionOwner,
+  runWithHookExecutionOwner,
+} from '../hooks/hook-execution-context.js';
 import { getInvocationContext } from '../utils/invocation-context.js';
 import { promptIdContext } from '../utils/promptIdContext.js';
 import {
@@ -417,6 +421,107 @@ describe('ManagedToolRuntime', () => {
     const retry = runtime.prepare(identity, tool.name, input);
     await expect(bad).rejects.toThrow();
     expect((await retry).params).toEqual(input);
+  });
+
+  it('runs only global and preparation-owner hooks through the real hook pipeline', async () => {
+    const { HookSystem } = await import('../hooks/hookSystem.js');
+    const { HookType, PermissionMode } = await import('../hooks/types.js');
+    const actual = await vi.importActual<
+      typeof import('../core/toolHookTriggers.js')
+    >('../core/toolHookTriggers.js');
+    hooks.pre.mockImplementation(actual.firePreToolUseHook);
+    const seen: string[] = [];
+    const definition = (
+      label: string,
+    ): Array<import('../hooks/types.js').HookDefinition> => [
+      {
+        hooks: [
+          {
+            type: HookType.Function,
+            name: label,
+            errorMessage: 'failed',
+            callback: async () => {
+              seen.push(label);
+              return true;
+            },
+          },
+        ],
+      },
+    ];
+    Object.assign(config, {
+      getAllowedHttpHookUrls: () => [],
+      getAllowPrivateNetworkHooks: () => false,
+      getSystemHooks: () => ({}),
+      getUserHooks: () => ({ PreToolUse: definition('G') }),
+      getProjectHooks: () => ({}),
+      getExtensions: () => [],
+      isTrustedFolder: () => true,
+      getTranscriptPath: () => '/tmp/transcript',
+      getWorkingDir: () => '/tmp',
+      getSessionSourceType: () => undefined,
+      getSessionSourceId: () => undefined,
+    });
+    const system = new HookSystem(config);
+    config.getHookSystem = () => system;
+    await system.initialize();
+    const owner = { runtimeId: system.runtimeId, sessionId, agentId: 'A' };
+    for (const agentId of ['A', 'B'])
+      system
+        .getRegistry()
+        .addAgentHooks({ PreToolUse: definition(agentId) }, agentId, {
+          owner: { ...owner, agentId },
+        });
+    const request = vi.fn(
+      async (
+        message: import('../confirmation-bus/types.js').HookExecutionRequest,
+      ) => {
+        await runWithHookExecutionOwner(message.owner, () =>
+          system.firePreToolUseEvent(
+            String(message.input['tool_name']),
+            message.input['tool_input'] as Record<string, unknown>,
+            String(message.input['tool_use_id']),
+            PermissionMode.Default,
+          ),
+        );
+        return { success: true, output: {} };
+      },
+    );
+    config.getMessageBus = () =>
+      ({ request, publish: vi.fn() }) as unknown as ReturnType<
+        Config['getMessageBus']
+      >;
+    const ref = await runWithHookExecutionOwner(owner, () => prepare());
+    await runWithHookExecutionOwner({ ...owner, agentId: 'B' }, () =>
+      runtime.preflight(ref),
+    );
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(seen.sort()).toEqual(['A', 'G']);
+  });
+
+  it('retains its preparation owner across approval and execution by another agent', async () => {
+    const owner = { runtimeId: 'runtime', sessionId, agentId: 'A' };
+    config.getHookSystem = () =>
+      ({ runtimeId: 'runtime' }) as unknown as ReturnType<
+        Config['getHookSystem']
+      >;
+    tool.setup = (invocation) => {
+      invocation.onConfirm.mockImplementation(async () => {
+        expect(getHookExecutionOwner()).toEqual(owner);
+      });
+      invocation.execute.mockImplementation(async () => {
+        expect(getHookExecutionOwner()).toEqual(owner);
+        return rawResult;
+      });
+    };
+    const ref = await runWithHookExecutionOwner(owner, () => prepare());
+    await runWithHookExecutionOwner({ ...owner, agentId: 'B' }, async () => {
+      await runtime.confirmation(ref);
+      await runtime.confirm(ref, ToolConfirmationOutcome.ProceedOnce);
+      await runtime.preflight(ref);
+      await runtime.execute(ref);
+    });
+    expect(hooks.pre.mock.calls[0][7]).toEqual(owner);
+    expect(hooks.post.mock.calls[0][9]).toEqual(owner);
   });
 
   it('build, confirmation, preflight and execution carry the original invocation context', async () => {

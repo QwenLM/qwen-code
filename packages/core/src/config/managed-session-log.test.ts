@@ -1,2721 +1,1215 @@
 /**
  * @license
- * Copyright 2025 Qwen Team
+ * Copyright 2026 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, rm, stat } from 'node:fs/promises';
-import * as os from 'node:os';
-import * as path from 'node:path';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { randomUUID } from 'node:crypto';
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  stat,
+  writeFile,
+} from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Config, type ConfigParameters } from './config.js';
-import { LlmChat, ORPHAN_TOOL_USE_REPAIR_REASON } from '../core/llm-chat.js';
-import type { ContentGenerator } from '../core/contentGenerator.js';
-import type { Content, GenerateContentResponse } from '@google/genai';
-import { CompressionStatus } from '../core/turn.js';
 import { Storage } from './storage.js';
-import type { ChatRecord } from '../services/chatRecordingService.js';
-import { getSessionWriterLockPath } from '../services/session-writer-lease.js';
 import {
-  clearSessionTranscriptIndexCacheEntriesForTest,
-  encodeSessionTranscriptCursor,
-  SessionTranscriptReader,
-  SessionTranscriptSnapshotUnavailableError,
-} from '../services/session-transcript-reader.js';
-import { readManagedSessionRecords } from '../managed-runtime/managed-session-message-projection.js';
-import type { ManagedSession } from '../managed-runtime/managed-session-assembly.js';
+  ManagedSessionRecordRefusedError,
+  type ChatRecord,
+} from '../services/chatRecordingService.js';
+import { SessionExecutionEngineError } from '../services/session-execution-engine.js';
+import { SessionService } from '../services/sessionService.js';
 import {
-  createAwaitRuntimeHarnessCheckpoint,
-  encodeHarnessCheckpointV1,
-  HARNESS_DURABLE_WAIT_BOUNDARY,
-  parseHarnessCheckpointV1,
-} from '../managed-runtime/managed-harness-checkpoint.js';
-import { LocalJsonlManagedSessionJournalStore } from '../managed-runtime/local-jsonl-managed-session-journal-store.js';
-import { LocalManagedSessionResourceStore } from '../managed-runtime/managed-session-resources.js';
+  getSessionWriterLockPath,
+  SessionWriterLease,
+  SessionWriterUnavailableError,
+} from '../services/session-writer-lease.js';
 import {
   MANAGED_SESSION_COMMIT_SUBTYPE,
   MANAGED_SESSION_EVENT_SUBTYPE,
   MANAGED_SESSION_HEADER_SUBTYPE,
 } from '../managed-runtime/managed-session-records.js';
-import {
-  managedRuntimeDispatchGate,
-  resetManagedRuntimeDispatchGatesForTest,
-} from '../managed-runtime/managed-runtime-dispatch-gate.js';
-import type { ManagedToolSessionFactory } from '../tools/managed-tool-session.js';
+import { LocalJsonlManagedSessionJournalStore } from '../managed-runtime/local-jsonl-managed-session-journal-store.js';
+import type { ManagedSession } from '../managed-runtime/managed-session-assembly.js';
+import { ManagedSessionConflictError } from '../managed-runtime/managed-session-authority.js';
+import { LocalManagedSessionResourceStore } from '../managed-runtime/managed-session-resources.js';
+import { ManagedSessionRecordSink } from '../managed-runtime/managed-session-record-sink.js';
+import { readManagedSessionRecords } from '../managed-runtime/managed-session-message-projection.js';
 import {
   isManagedSessionTranscriptSync,
   localManagedSessionKey,
   managedSessionResourceRoot,
 } from '../utils/sessionStorageUtils.js';
 
-const sessionId = '550e8400-e29b-41d4-a716-4466554400aa';
-const temporaryDirectories = new Set<string>();
+const SESSION_ID = '3f2504e0-4f89-41d3-9a0c-0305e82c3301';
 
-afterEach(async () => {
-  for (const directory of temporaryDirectories) {
-    await rm(directory, { recursive: true, force: true });
-  }
-  temporaryDirectories.clear();
-  resetManagedRuntimeDispatchGatesForTest();
-  vi.restoreAllMocks();
+let root: string;
+let projectDir: string;
+let runtimeDir: string;
+
+beforeEach(async () => {
+  root = await mkdtemp(path.join(os.tmpdir(), 'qwen-managed-log-'));
+  projectDir = path.join(root, 'project');
+  runtimeDir = path.join(root, 'runtime');
+  await mkdir(projectDir, { recursive: true });
+  // An exported QWEN_RUNTIME_DIR outranks the static override.
+  vi.stubEnv('QWEN_RUNTIME_DIR', runtimeDir);
+  Storage.setRuntimeBaseDir(runtimeDir);
 });
 
-interface Fixture {
-  config: Config;
-  runtimeBaseDir: string;
-  transcriptPath: string;
+afterEach(async () => {
+  vi.restoreAllMocks();
+  vi.unstubAllEnvs();
+  Storage.setRuntimeBaseDir(null);
+  await rm(root, { recursive: true, force: true });
+});
+
+/** What a crash leaves: the writer's lock, naming a process that is gone. */
+async function crashWriterLock(): Promise<Record<string, unknown>> {
+  const crashed = await lockRecord();
+  await writeFile(
+    getSessionWriterLockPath(runtimeDir, SESSION_ID),
+    JSON.stringify({ ...crashed, pid: 999_999 }),
+  );
+  return crashed;
 }
 
-type Activate = (options: {
-  managedSessionLog: boolean;
-  managedToolSessionFactory?: ManagedToolSessionFactory;
-}) => Promise<Fixture>;
+function sessionService(): SessionService {
+  return new SessionService(projectDir, { runtimeBaseDir: runtimeDir });
+}
 
-async function withWorkspace(run: (activate: Activate) => Promise<void>) {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'qwen-managed-log-'));
-  temporaryDirectories.add(root);
-  const workspace = path.join(root, 'workspace');
-  const runtimeBaseDir = path.join(root, 'runtime');
-  await mkdir(workspace, { recursive: true });
-  await Storage.runWithResolvedRuntimeBaseDir(runtimeBaseDir, async () => {
-    await run(async (options) => {
-      const params: ConfigParameters = {
-        sessionId,
-        cwd: workspace,
-        targetDir: workspace,
-        debugMode: false,
-        model: 'qwen3-coder-plus',
-        chatRecording: true,
-        experimentalZedIntegration: true,
-        sessionWriterLeaseEnabled: true,
-        managedToolSessionFactory:
-          options.managedToolSessionFactory ??
-          (() => {
-            throw new Error('must not create tools');
-          }),
-        ...(options.managedSessionLog
-          ? { managedSessionLogEnabled: true }
-          : {}),
-      };
-      const config = new Config(params);
-      const transcriptPath = config.getTranscriptPath();
-      await mkdir(path.dirname(transcriptPath), { recursive: true });
-      vi.spyOn(
-        config as unknown as { initializeInternal(): Promise<void> },
-        'initializeInternal',
-      ).mockResolvedValue(undefined);
-      await config.initialize({ sessionExecutionEngine: 'managed' });
-      return { config, runtimeBaseDir, transcriptPath };
-    });
+/** A Config the way a Managed host would build one for this session. */
+function managedConfig(params: Partial<ConfigParameters> = {}): Config {
+  return new Config({
+    sessionId: SESSION_ID,
+    cwd: projectDir,
+    targetDir: projectDir,
+    debugMode: false,
+    model: 'test-model',
+    chatRecording: true,
+    usageStatisticsEnabled: false,
+    overrideExtensions: [],
+    experimentalZedIntegration: true,
+    sessionWriterLeaseEnabled: true,
+    sessionExecutionEngine: 'managed',
+    ...params,
   });
 }
 
-async function transcriptRecords(
-  transcriptPath: string,
-): Promise<Array<Record<string, unknown>>> {
-  const raw = await readFile(transcriptPath, 'utf8');
+/** A Config that restores this session through its projection, as the daemon does. */
+function restoringConfig(): Config {
+  return managedConfig({
+    sessionRestoreProjectionSource: () =>
+      sessionService().readRestoreProjection(SESSION_ID, {
+        replay: { kind: 'none' },
+      }),
+  });
+}
+
+// Stops initialization where hooks, MCP and tools would start.
+async function start(config: Config): Promise<Config> {
+  vi.spyOn(
+    config as unknown as { initializeInternal(): Promise<void> },
+    'initializeInternal',
+  ).mockResolvedValue(undefined);
+  await config.initialize();
+  return config;
+}
+
+async function transcriptRecords(): Promise<Array<Record<string, unknown>>> {
+  const raw = await readFile(
+    sessionService().getSessionTranscriptPath(SESSION_ID),
+    'utf8',
+  );
   return raw
     .split('\n')
     .filter((line) => line.length > 0)
     .map((line) => JSON.parse(line) as Record<string, unknown>);
 }
 
-function checkpointPayloads(
-  records: Array<Record<string, unknown>>,
-): Array<Record<string, unknown>> {
-  return records
-    .filter((entry) => {
-      const body = entry['managedSession'] as
-        | Record<string, unknown>
-        | undefined;
-      return body?.['kind'] === 'checkpoint.committed';
-    })
-    .map(
-      (entry) =>
-        (entry['managedSession'] as Record<string, unknown>)[
-          'payload'
-        ] as Record<string, unknown>,
-    );
-}
-
-function deferred() {
-  let resolve!: () => void;
-  const promise = new Promise<void>((fulfill) => {
-    resolve = fulfill;
-  });
-  return { promise, resolve };
-}
-
-async function readCheckpoint(
-  fixture: Fixture,
-  payload: Record<string, unknown>,
-) {
-  const stateRef = payload['stateRef'] as {
-    kind: string;
-    resourceId: string;
-  };
-  const bytes = await readFile(
-    path.join(
-      managedSessionResourceRoot(fixture.runtimeBaseDir, sessionId),
-      stateRef.kind,
-      stateRef.resourceId,
-    ),
+async function writeOwnerOnlyTranscript(): Promise<void> {
+  const transcriptPath = sessionService().getSessionTranscriptPath(SESSION_ID);
+  await mkdir(path.dirname(transcriptPath), { recursive: true });
+  // What a create leaves when it stops between its two appends.
+  await writeFile(
+    transcriptPath,
+    `${JSON.stringify({
+      uuid: randomUUID(),
+      parentUuid: null,
+      sessionId: SESSION_ID,
+      timestamp: new Date().toISOString(),
+      type: 'system',
+      subtype: 'session_execution_engine',
+      cwd: projectDir,
+      version: 'test',
+      systemPayload: { version: 1, engine: 'managed' },
+    })}\n`,
   );
-  return parseHarnessCheckpointV1(bytes);
 }
 
-async function readCheckpointPhase(
-  fixture: Fixture,
-  payload: Record<string, unknown>,
-): Promise<string> {
-  return (await readCheckpoint(fixture, payload)).continuation.phase;
+async function lockRecord(): Promise<Record<string, unknown>> {
+  return JSON.parse(
+    await readFile(getSessionWriterLockPath(runtimeDir, SESSION_ID), 'utf8'),
+  ) as Record<string, unknown>;
 }
 
-function stubStoppedModelStream(
-  config: Config,
-  beforeGenerate: () => Promise<void>,
-) {
-  const generateContentStream = vi.fn(async () => {
-    await beforeGenerate();
-    return (async function* () {
-      yield {
-        candidates: [
-          {
-            content: { role: 'model', parts: [{ text: 'ok' }] },
-            finishReason: 'STOP',
-          },
-        ],
-      } as unknown as GenerateContentResponse;
-    })();
+function recordUser(config: Config, text: string): void {
+  config.getChatRecordingService()!.recordUserMessage([{ text }]);
+}
+
+async function activeChatTexts(config: Config): Promise<string[]> {
+  const chain = await config
+    .getChatRecordingService()!
+    .readActiveTranscriptChain();
+  return chain
+    .filter((record) => record.type === 'user')
+    .map((record) => {
+      const parts = (record.message?.parts ?? []) as Array<{ text?: string }>;
+      return parts.map((part) => part.text ?? '').join('');
+    });
+}
+
+describe('Managed Session log recording', () => {
+  it('records a new session as a Managed Session log', async () => {
+    const config = await start(managedConfig());
+    recordUser(config, 'first prompt');
+    await config.getChatRecordingService()!.flush();
+
+    const records = await transcriptRecords();
+    // The authority writes the owner record before the header, so Legacy
+    // entries refuse the session even if the header never lands.
+    expect(records[0]).toMatchObject({
+      type: 'system',
+      subtype: 'session_execution_engine',
+      systemPayload: { version: 1, engine: 'managed' },
+    });
+    expect(records[1]?.['subtype']).toBe(MANAGED_SESSION_HEADER_SUBTYPE);
+    // Every other line belongs to a committed Managed transaction; the user
+    // record never lands raw.
+    for (const record of records.slice(2)) {
+      expect([
+        MANAGED_SESSION_EVENT_SUBTYPE,
+        MANAGED_SESSION_COMMIT_SUBTYPE,
+      ]).toContain(record['subtype']);
+    }
+    const scan = await LocalJsonlManagedSessionJournalStore.read(
+      sessionService().getSessionTranscriptPath(SESSION_ID),
+      localManagedSessionKey(projectDir, SESSION_ID),
+    );
+    expect(scan.uncommitted).toBe(0);
+    // The session is the activation's worker, with a five-minute horizon.
+    expect(scan.activation?.workerId).toBe(SESSION_ID);
+    expect(
+      scan.events.find((event) => event.kind === 'activation.changed')?.payload[
+        'leaseDurationMs'
+      ],
+    ).toBe(5 * 60 * 1000);
+    // The definition carries configuration identity only.
+    const definition = JSON.parse(
+      (
+        await LocalManagedSessionResourceStore.create({
+          runtimeBaseDir: runtimeDir,
+          sessionKey: localManagedSessionKey(projectDir, SESSION_ID),
+        }).read(scan.header!.definitionRef)
+      ).toString('utf8'),
+    ) as Record<string, unknown>;
+    expect(definition).toEqual({
+      version: 1,
+      engine: 'managed',
+      model: 'test-model',
+      approvalMode: config.getApprovalMode(),
+    });
+    expect(records.some((record) => record['type'] === 'user')).toBe(false);
+    expect(
+      records.filter(
+        (record) => record['subtype'] === 'session_execution_engine',
+      ),
+    ).toHaveLength(1);
+
+    const transcriptPath =
+      sessionService().getSessionTranscriptPath(SESSION_ID);
+    expect(isManagedSessionTranscriptSync(transcriptPath)).toBe(true);
+    expect(() =>
+      sessionService().assertLegacySessionExecution(SESSION_ID),
+    ).toThrow(SessionExecutionEngineError);
+    expect(await activeChatTexts(config)).toEqual(['first prompt']);
+
+    // The writer pins the Managed schema while the session is open.
+    expect(await lockRecord()).toMatchObject({
+      state: 'active',
+      schema_version: 3,
+    });
+    await config.closeSessionWriter();
   });
-  vi.spyOn(config, 'getContentGenerator').mockReturnValue({
-    generateContent: vi.fn(),
-    generateContentStream,
-    embedContent: vi.fn(),
-  } as unknown as ContentGenerator);
-  vi.spyOn(config, 'getContentGeneratorConfig').mockReturnValue({
-    model: 'qwen3-coder-plus',
-    authType: 'openai',
-  } as ReturnType<Config['getContentGeneratorConfig']>);
-  return generateContentStream;
-}
 
-describe('managed session log activation', () => {
-  it('routes the authoritative journal through an injected hosted store', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'qwen-hosted-store-'));
-    temporaryDirectories.add(root);
-    const workspace = path.join(root, 'workspace');
-    const runtimeBaseDir = path.join(root, 'runtime');
-    const remoteBaseDir = path.join(root, 'remote-store');
-    await mkdir(workspace, { recursive: true });
+  it('seals the writer on close and restores the same history', async () => {
+    const first = await start(managedConfig());
+    recordUser(first, 'first prompt');
+    await first.closeSessionWriter();
 
-    await Storage.runWithResolvedRuntimeBaseDir(runtimeBaseDir, async () => {
-      const sessionKey = {
-        tenantId: 'tenant-a',
-        workspaceId: 'workspace-a',
-        sessionId,
-      };
-      const remoteTranscriptPath = path.join(remoteBaseDir, 'authority.jsonl');
-      const config = new Config({
-        sessionId,
-        cwd: workspace,
-        targetDir: workspace,
-        debugMode: false,
-        model: 'qwen3-coder-plus',
-        chatRecording: true,
-        experimentalZedIntegration: true,
-        sessionWriterLeaseEnabled: true,
-        managedSessionLogEnabled: true,
-        managedToolSessionFactory: () => {
-          throw new Error('must not create tools');
-        },
-        managedSessionStore: {
-          mode: 'create',
-          sessionKey,
-          journalStore: new LocalJsonlManagedSessionJournalStore({
-            runtimeBaseDir: remoteBaseDir,
-            sessionId,
-            transcriptPath: remoteTranscriptPath,
-          }),
-          resourceStore: LocalManagedSessionResourceStore.create({
-            runtimeBaseDir: remoteBaseDir,
-            sessionKey,
-          }),
-        },
+    // Releasing would delete the lock and leave the log open to any writer.
+    const sealed = await lockRecord();
+    expect(sealed).toMatchObject({ state: 'sealed', schema_version: 3 });
+    // The log records that the session stopped advancing before the seal.
+    const scan = await LocalJsonlManagedSessionJournalStore.read(
+      sessionService().getSessionTranscriptPath(SESSION_ID),
+      localManagedSessionKey(projectDir, SESSION_ID),
+    );
+    expect(scan.activation?.phase).toBe('released');
+    expect(scan.uncommitted).toBe(0);
+    const bytesAtClose = (
+      await stat(sessionService().getSessionTranscriptPath(SESSION_ID))
+    ).size;
+
+    const second = await start(restoringConfig());
+    expect(await activeChatTexts(second)).toEqual(['first prompt']);
+    recordUser(second, 'second prompt');
+    await second.getChatRecordingService()!.flush();
+    expect(await activeChatTexts(second)).toEqual([
+      'first prompt',
+      'second prompt',
+    ]);
+    await second.closeSessionWriter();
+    expect(
+      (await stat(sessionService().getSessionTranscriptPath(SESSION_ID))).size,
+    ).toBeGreaterThan(bytesAtClose);
+
+    const third = await start(restoringConfig());
+    expect(await activeChatTexts(third)).toEqual([
+      'first prompt',
+      'second prompt',
+    ]);
+    await third.closeSessionWriter();
+    expect(await lockRecord()).toMatchObject({ state: 'sealed' });
+  });
+
+  it('completes a create that stopped after its owner record', async () => {
+    await writeOwnerOnlyTranscript();
+    expect(() =>
+      sessionService().assertLegacySessionExecution(SESSION_ID),
+    ).toThrow(SessionExecutionEngineError);
+
+    const config = await start(restoringConfig());
+    recordUser(config, 'after the interrupted create');
+    await config.getChatRecordingService()!.flush();
+    const subtypes = (await transcriptRecords()).map(
+      (record) => record['subtype'],
+    );
+    expect(subtypes.slice(0, 2)).toEqual([
+      'session_execution_engine',
+      MANAGED_SESSION_HEADER_SUBTYPE,
+    ]);
+    expect(await activeChatTexts(config)).toEqual([
+      'after the interrupted create',
+    ]);
+    await config.closeSessionWriter();
+  });
+
+  it('repairs a transaction a crash left without its commit marker', async () => {
+    const first = await start(managedConfig());
+    recordUser(first, 'committed prompt');
+    await first.getChatRecordingService()!.flush();
+    const transcriptPath =
+      sessionService().getSessionTranscriptPath(SESSION_ID);
+    const committedBytes = await readFile(transcriptPath);
+
+    // The process dies after writing a transaction's events and before its
+    // commit marker; its lock is reclaimed afterwards.
+    const appendJsonLine = SessionWriterLease.prototype.appendJsonLine;
+    const append = vi
+      .spyOn(SessionWriterLease.prototype, 'appendJsonLine')
+      .mockImplementation(async function (
+        this: SessionWriterLease,
+        value: unknown,
+      ) {
+        if (
+          (value as { subtype?: unknown }).subtype ===
+          MANAGED_SESSION_COMMIT_SUBTYPE
+        ) {
+          throw new Error('process died');
+        }
+        return appendJsonLine.call(this, value);
       });
-      const localTranscriptPath = config.getTranscriptPath();
-      await mkdir(path.dirname(localTranscriptPath), { recursive: true });
-      vi.spyOn(
-        config as unknown as { initializeInternal(): Promise<void> },
-        'initializeInternal',
-      ).mockResolvedValue(undefined);
+    recordUser(first, 'lost prompt');
+    await first
+      .getChatRecordingService()!
+      .flush()
+      .catch(() => undefined);
+    append.mockRestore();
+    await crashWriterLock();
+    expect((await readFile(transcriptPath)).length).toBeGreaterThan(
+      committedBytes.length,
+    );
 
-      await config.initialize({ sessionExecutionEngine: 'managed' });
+    const second = await start(restoringConfig());
+    expect(await activeChatTexts(second)).toEqual(['committed prompt']);
+    // The committed prefix stays; the tail moved to the diagnostic file.
+    expect(
+      (await readFile(transcriptPath)).subarray(0, committedBytes.length),
+    ).toEqual(committedBytes);
+    await expect(
+      readFile(`${transcriptPath}.uncommitted-tail`, 'utf8'),
+    ).resolves.toContain(MANAGED_SESSION_EVENT_SUBTYPE);
+    recordUser(second, 'after the repair');
+    await second.getChatRecordingService()!.flush();
+    expect(await activeChatTexts(second)).toEqual([
+      'committed prompt',
+      'after the repair',
+    ]);
+    await second.closeSessionWriter();
+    expect(await lockRecord()).toMatchObject({ state: 'sealed' });
+  });
+
+  it('keeps its title where the session list and a restore read it', async () => {
+    const config = await start(managedConfig());
+    const recorder = config.getChatRecordingService()!;
+    const titleRecords = async () =>
+      (
+        await readFile(
+          sessionService().getSessionTranscriptPath(SESSION_ID),
+          'utf8',
+        )
+      ).split('"domain":"session_metadata"').length - 1;
+    await expect(
+      recorder.recordCustomTitle('Early title', 'auto'),
+    ).resolves.toBe(true);
+    // The session list scans 64 KiB at each end of the log. The rename lands
+    // past the head window, and the records after it would push it past the tail
+    // window too if the recorder did not re-anchor it.
+    for (let index = 0; index < 45; index++) {
+      recordUser(config, `before the rename ${index}`);
+    }
+    await recorder.flush();
+    const transcriptPath =
+      sessionService().getSessionTranscriptPath(SESSION_ID);
+    const renamedAt = (await stat(transcriptPath)).size;
+    await expect(
+      recorder.recordCustomTitle('Renamed title', 'manual'),
+    ).resolves.toBe(true);
+    for (let index = 0; index < 45; index++) {
+      recordUser(config, `after the rename ${index}`);
+    }
+    await recorder.flush();
+    expect(sessionService().getSessionTitleInfo(SESSION_ID)).toMatchObject({
+      title: 'Renamed title',
+      source: 'manual',
+    });
+    // Re-anchors come no more often than every 32 KiB of growth.
+    const offsets: number[] = [];
+    let offset = 0;
+    for (const line of (await readFile(transcriptPath, 'utf8')).split('\n')) {
+      if (line.includes('"domain":"session_metadata"')) offsets.push(offset);
+      offset += Buffer.byteLength(line, 'utf8') + 1;
+    }
+    expect(offsets.length).toBeGreaterThan(4);
+    for (let index = 1; index < offsets.length; index++) {
+      if (offsets[index] === renamedAt) continue;
+      expect(offsets[index]! - offsets[index - 1]!).toBeGreaterThanOrEqual(
+        32 * 1024,
+      );
+    }
+    await config.closeSessionWriter();
+
+    const restored = await start(restoringConfig());
+    expect(restored.getChatRecordingService()!.getCurrentCustomTitle()).toBe(
+      'Renamed title',
+    );
+    // A restored rename commits one record, not the rename and a re-anchor.
+    const before = await titleRecords();
+    await expect(
+      restored
+        .getChatRecordingService()!
+        .recordCustomTitle('Final title', 'manual'),
+    ).resolves.toBe(true);
+    await restored.getChatRecordingService()!.flush();
+    expect(await titleRecords()).toBe(before + 1);
+    expect(sessionService().getSessionTitleInfo(SESSION_ID)).toMatchObject({
+      title: 'Final title',
+    });
+    await restored.closeSessionWriter();
+  });
+
+  it('re-anchors its title on finalize after renewals alone moved the log on', async () => {
+    const config = await start(managedConfig());
+    const recorder = config.getChatRecordingService()!;
+    for (let index = 0; index < 40; index++) {
+      recordUser(config, `prompt ${index}`);
+    }
+    await recorder.flush();
+    await expect(
+      recorder.recordCustomTitle('Idle title', 'manual'),
+    ).resolves.toBe(true);
+    const transcriptPath =
+      sessionService().getSessionTranscriptPath(SESSION_ID);
+    const titledAt = (await stat(transcriptPath)).size;
+    // While the session is idle, the renewal timer is the only writer.
+    const { authority } = (
+      config as unknown as { managedSession: ManagedSession }
+    ).managedSession;
+    while ((await stat(transcriptPath)).size - titledAt < 70 * 1024) {
+      await authority.renewActivation({ leaseDurationMs: 5 * 60 * 1000 });
+    }
+    expect(sessionService().getSessionTitleInfo(SESSION_ID)?.title).not.toBe(
+      'Idle title',
+    );
+
+    recorder.finalize();
+    await recorder.flush();
+    expect(sessionService().getSessionTitleInfo(SESSION_ID)).toMatchObject({
+      title: 'Idle title',
+    });
+    // The title it wrote is not on the chain the next record continues.
+    recordUser(config, 'after finalize');
+    const texts = await activeChatTexts(config);
+    expect(texts[0]).toBe('prompt 0');
+    expect(texts.at(-1)).toBe('after finalize');
+    await config.closeSessionWriter();
+  });
+
+  it.each([
+    'a handoff close',
+    'a close after a failed write',
+    'a crash',
+  ] as const)(
+    'keeps a rename that renewals moved out of the list windows through %s',
+    async (ending) => {
+      const building = managedConfig();
+      // The takeover policy the ACP host sets; without it a handoff close is
+      // an ordinary one.
+      if (ending === 'a handoff close') {
+        building.setSessionWriterTakeoverPolicy('certified');
+      }
+      const config = await start(building);
       const recorder = config.getChatRecordingService()!;
-      recorder.recordUserMessage('persist remotely');
+      await recorder.recordCustomTitle('Early title', 'auto');
+      for (let index = 0; index < 40; index++) {
+        recordUser(config, `prompt ${index}`);
+      }
       await recorder.flush();
-
-      await expect(stat(localTranscriptPath)).rejects.toMatchObject({
-        code: 'ENOENT',
+      await expect(
+        recorder.recordCustomTitle('Renamed title', 'manual'),
+      ).resolves.toBe(true);
+      const transcriptPath =
+        sessionService().getSessionTranscriptPath(SESSION_ID);
+      const renamedAt = (await stat(transcriptPath)).size;
+      const { authority } = (
+        config as unknown as { managedSession: ManagedSession }
+      ).managedSession;
+      while ((await stat(transcriptPath)).size - renamedAt < 70 * 1024) {
+        await authority.renewActivation({ leaseDurationMs: 5 * 60 * 1000 });
+      }
+      // The session list now finds only the early title, in the head window.
+      expect(sessionService().getSessionTitleInfo(SESSION_ID)).toMatchObject({
+        title: 'Early title',
       });
-      expect(isManagedSessionTranscriptSync(remoteTranscriptPath)).toBe(true);
-      expect(
-        (await transcriptRecords(remoteTranscriptPath)).map(
-          (record) => record['subtype'],
-        ),
-      ).toEqual(
-        expect.arrayContaining([
-          MANAGED_SESSION_HEADER_SUBTYPE,
-          MANAGED_SESSION_EVENT_SUBTYPE,
-          MANAGED_SESSION_COMMIT_SUBTYPE,
-        ]),
-      );
 
-      await config.closeSessionWriter();
-      const remoteLock = JSON.parse(
-        await readFile(
-          getSessionWriterLockPath(remoteBaseDir, sessionId),
-          'utf8',
-        ),
-      ) as Record<string, unknown>;
-      expect(remoteLock['state']).toBe('sealed');
+      if (ending === 'a handoff close') {
+        // The daemon's Managed shutdown closes the writer without finalize().
+        await config.closeSessionWriter({ handoff: true });
+        expect(sessionService().getSessionTitleInfo(SESSION_ID)).toMatchObject({
+          title: 'Renamed title',
+        });
+      } else if (ending === 'a close after a failed write') {
+        const write = ManagedSessionRecordSink.prototype.write;
+        const failing = vi
+          .spyOn(ManagedSessionRecordSink.prototype, 'write')
+          .mockImplementation(async function (
+            this: ManagedSessionRecordSink,
+            record: ChatRecord,
+          ) {
+            if (record.type === 'user') throw new Error('disk full');
+            return write.call(this, record);
+          });
+        recordUser(config, 'not recorded');
+        await expect(recorder.flush()).rejects.toThrow('disk full');
+        failing.mockRestore();
+        await config.closeSessionWriter().catch(() => undefined);
+        expect(sessionService().getSessionTitleInfo(SESSION_ID)).toMatchObject({
+          title: 'Renamed title',
+        });
+      } else {
+        // The process dies; its lock is reclaimed afterwards.
+        await crashWriterLock();
+      }
+
+      const restored = await start(restoringConfig());
+      expect(restored.getChatRecordingService()!.getCurrentCustomTitle()).toBe(
+        'Renamed title',
+      );
+      recordUser(restored, 'after the restore');
+      await restored.getChatRecordingService()!.flush();
+      await restored.closeSessionWriter();
+      expect(sessionService().getSessionTitleInfo(SESSION_ID)).toMatchObject({
+        title: 'Renamed title',
+      });
+    },
+  );
+
+  it('adds no title on finalize right behind an anchor', async () => {
+    const config = await start(managedConfig());
+    const recorder = config.getChatRecordingService()!;
+    await recorder.recordCustomTitle('Managed title', 'manual');
+    const transcriptPath =
+      sessionService().getSessionTranscriptPath(SESSION_ID);
+    const titleRecords = async () =>
+      (await readFile(transcriptPath, 'utf8')).split(
+        '"domain":"session_metadata"',
+      ).length - 1;
+    // Records until an anchor lands behind the last of them.
+    let anchored = false;
+    for (let index = 0; index < 40 && !anchored; index++) {
+      const before = await titleRecords();
+      recordUser(config, `prompt ${index}`);
+      await recorder.flush();
+      anchored = (await titleRecords()) > before;
+    }
+    expect(anchored).toBe(true);
+    const count = await titleRecords();
+
+    recorder.finalize();
+    await recorder.flush();
+    expect(await titleRecords()).toBe(count);
+    await config.closeSessionWriter();
+  });
+
+  it('restores its session source', async () => {
+    const first = await start(managedConfig());
+    await expect(
+      first.getChatRecordingService()!.recordSessionSource('creator', 'one'),
+    ).resolves.toBe(true);
+    recordUser(first, 'first prompt');
+    await first.closeSessionWriter();
+
+    const projection = await sessionService().readRestoreProjection(
+      SESSION_ID,
+      { replay: { kind: 'none' } },
+    );
+    expect(projection?.runtime.recording).toMatchObject({
+      sourceType: 'creator',
+      sourceId: 'one',
+    });
+    const restored = await start(restoringConfig());
+    const recorder = restored.getChatRecordingService()!;
+    // As on a Legacy restore: the source is already recorded, and another is
+    // refused.
+    await expect(recorder.recordSessionSource('creator', 'one')).resolves.toBe(
+      true,
+    );
+    await expect(recorder.recordSessionSource('intruder', 'two')).resolves.toBe(
+      false,
+    );
+    await recorder.flush();
+    const raw = await readFile(
+      sessionService().getSessionTranscriptPath(SESSION_ID),
+      'utf8',
+    );
+    expect(raw.split('"domain":"session_source"')).toHaveLength(2);
+    await restored.closeSessionWriter();
+  });
+
+  // An unreadable file is made with chmod, which neither Windows nor root
+  // honours.
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'keeps a reclaimed lock when it cannot read the log',
+    async () => {
+      const first = await start(managedConfig());
+      recordUser(first, 'first prompt');
+      await first.getChatRecordingService()!.flush();
+      const transcriptPath =
+        sessionService().getSessionTranscriptPath(SESSION_ID);
+      const crashed = await crashWriterLock();
+      try {
+        // The lock is reclaimed first; then the log becomes unreadable and the
+        // restore fails.
+        const config = managedConfig({
+          sessionRestoreProjectionSource: async () => {
+            await chmod(transcriptPath, 0o000);
+            throw new Error('projection unavailable');
+          },
+        });
+        vi.spyOn(
+          config as unknown as { initializeInternal(): Promise<void> },
+          'initializeInternal',
+        ).mockResolvedValue(undefined);
+        await expect(config.initialize()).rejects.toThrow(
+          'projection unavailable',
+        );
+        await config.closeSessionWriter().catch(() => undefined);
+        // Nothing tells whether the log holds Managed records, so the Managed
+        // lock it took over stays in place rather than being dropped.
+        const kept = await lockRecord();
+        expect(kept).toMatchObject({ state: 'active', schema_version: 3 });
+        expect(kept['owner_id']).not.toBe(crashed['owner_id']);
+      } finally {
+        await chmod(transcriptPath, 0o644);
+      }
+    },
+  );
+
+  it('writes a due anchor right behind the record that made it due', async () => {
+    const config = await start(managedConfig());
+    const recorder = config.getChatRecordingService()!;
+    await recorder.recordSessionSource('test-source');
+    // Queued at once, so the source falls due while most of them still wait.
+    for (let index = 0; index < 30; index++) {
+      recordUser(config, `burst ${index}`);
+    }
+    await recorder.flush();
+
+    const records = await readManagedSessionRecords({
+      transcriptPath: sessionService().getSessionTranscriptPath(SESSION_ID),
+      runtimeBaseDir: runtimeDir,
+      sessionKey: localManagedSessionKey(projectDir, SESSION_ID),
+    });
+    const sources = records.flatMap((record, index) =>
+      record.subtype === 'session_source' ? [index] : [],
+    );
+    expect(sources).toHaveLength(2);
+    const anchorAt = sources[1]!;
+    // Among the queued records, with the record before it in the log as its
+    // parent rather than the last record queued.
+    expect(anchorAt).toBeLessThan(records.length - 1);
+    expect(records[anchorAt]!.parentUuid).toBe(records[anchorAt - 1]!.uuid);
+    await config.closeSessionWriter();
+  });
+
+  it('does not anchor the title that a rename in flight replaces', async () => {
+    const config = await start(managedConfig());
+    const recorder = config.getChatRecordingService()!;
+    await recorder.recordCustomTitle('Old title', 'manual');
+    const transcriptPath =
+      sessionService().getSessionTranscriptPath(SESSION_ID);
+    const { authority } = (
+      config as unknown as { managedSession: ManagedSession }
+    ).managedSession;
+    // The log moves past the re-anchor threshold while the rename is written,
+    // so the anchor falls due as the rename lands.
+    const write = ManagedSessionRecordSink.prototype.write;
+    vi.spyOn(ManagedSessionRecordSink.prototype, 'write').mockImplementation(
+      async function (this: ManagedSessionRecordSink, record: ChatRecord) {
+        const payload = record.systemPayload as
+          | { customTitle?: unknown }
+          | undefined;
+        if (payload?.customTitle === 'New title') {
+          const from = (await stat(transcriptPath)).size;
+          while ((await stat(transcriptPath)).size - from < 34 * 1024) {
+            await authority.renewActivation({
+              leaseDurationMs: 5 * 60 * 1000,
+            });
+          }
+        }
+        return write.call(this, record);
+      },
+    );
+
+    await expect(
+      recorder.recordCustomTitle('New title', 'manual'),
+    ).resolves.toBe(true);
+    await recorder.flush();
+    expect(sessionService().getSessionTitleInfo(SESSION_ID)).toMatchObject({
+      title: 'New title',
+    });
+    vi.restoreAllMocks();
+    await config.closeSessionWriter();
+  });
+
+  it('keeps a record committed when the anchor behind it fails', async () => {
+    const first = await start(managedConfig());
+    await first
+      .getChatRecordingService()!
+      .recordCustomTitle('Managed title', 'manual');
+    recordUser(first, 'first prompt');
+    await first.closeSessionWriter();
+
+    // A restored session anchors its title behind the first record it writes.
+    const restored = await start(restoringConfig());
+    const write = ManagedSessionRecordSink.prototype.write;
+    vi.spyOn(ManagedSessionRecordSink.prototype, 'write').mockImplementation(
+      async function (this: ManagedSessionRecordSink, record: ChatRecord) {
+        if (record.subtype === 'custom_title') throw new Error('disk full');
+        return write.call(this, record);
+      },
+    );
+    const recorder = restored.getChatRecordingService()!;
+    await expect(recorder.recordSessionSource('test-source')).resolves.toBe(
+      true,
+    );
+    // Only the writes after it fail.
+    await expect(recorder.flush()).rejects.toThrow('disk full');
+    vi.restoreAllMocks();
+    await restored.closeSessionWriter().catch(() => undefined);
+    expect(await lockRecord()).toMatchObject({ state: 'sealed' });
+    const projection = await sessionService().readRestoreProjection(
+      SESSION_ID,
+      { replay: { kind: 'none' } },
+    );
+    expect(projection?.runtime.recording).toMatchObject({
+      sourceType: 'test-source',
     });
   });
 
-  it('seals an injected hosted store when recorder activation fails', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'qwen-hosted-store-'));
-    temporaryDirectories.add(root);
-    const workspace = path.join(root, 'workspace');
-    const runtimeBaseDir = path.join(root, 'runtime');
-    const remoteBaseDir = path.join(root, 'remote-store');
-    await mkdir(workspace, { recursive: true });
+  it('keeps the chain through records that are not messages', async () => {
+    // The same records on a Legacy session, whose chain includes the title.
+    const describeChain = async (config: Config) =>
+      (await config.getChatRecordingService()!.readActiveTranscriptChain()).map(
+        (record) =>
+          record.type === 'user'
+            ? `user:${(
+                (record.message?.parts ?? []) as Array<{ text?: string }>
+              )
+                .map((part) => part.text)
+                .join('')}`
+            : (record.subtype ?? record.type),
+      );
+    const recordSequence = async (config: Config, sessionId: string) => {
+      const recorder = config.getChatRecordingService()!;
+      recordUser(config, 'A');
+      await recorder.recordCustomTitle('Title', 'manual');
+      recorder.recordTurnResult({
+        promptId: `${sessionId}########1`,
+        state: 'completed',
+        endedAt: Date.now(),
+      });
+      await recorder.recordSessionSource('test-source');
+      recordUser(config, 'B');
+      // What a session switch or an artifact migration writes before the
+      // session goes on.
+      recorder.finalize();
+      recordUser(config, 'C');
+      await recorder.flush();
+    };
 
-    await Storage.runWithResolvedRuntimeBaseDir(runtimeBaseDir, async () => {
-      const sessionKey = {
-        tenantId: 'tenant-a',
-        workspaceId: 'workspace-a',
-        sessionId,
-      };
-      const closeStore = vi.fn<() => Promise<void>>().mockResolvedValue();
-      const config = new Config({
-        sessionId,
-        cwd: workspace,
-        targetDir: workspace,
-        debugMode: false,
-        model: 'qwen3-coder-plus',
-        chatRecording: true,
-        experimentalZedIntegration: true,
-        sessionWriterLeaseEnabled: true,
-        managedSessionLogEnabled: true,
-        managedToolSessionFactory: () => {
-          throw new Error('must not create tools');
-        },
-        managedSessionStore: {
-          mode: 'create',
-          sessionKey,
-          journalStore: new LocalJsonlManagedSessionJournalStore({
-            runtimeBaseDir: remoteBaseDir,
-            sessionId,
-            transcriptPath: path.join(remoteBaseDir, 'authority.jsonl'),
-          }),
-          resourceStore: LocalManagedSessionResourceStore.create({
-            runtimeBaseDir: remoteBaseDir,
-            sessionKey,
-          }),
-          close: closeStore,
-        },
-      });
-      await mkdir(path.dirname(config.getTranscriptPath()), {
-        recursive: true,
-      });
+    const legacyId = randomUUID();
+    const legacy = await start(
+      managedConfig({ sessionId: legacyId, sessionExecutionEngine: 'legacy' }),
+    );
+    await recordSequence(legacy, legacyId);
+    const legacyChain = await describeChain(legacy);
+    await legacy.closeSessionWriter();
+
+    const managed = await start(managedConfig());
+    await recordSequence(managed, SESSION_ID);
+    // The owner record precedes a Managed header and a Managed title is
+    // metadata, so neither is in the chain; everything else is the chain
+    // Legacy keeps.
+    const expected = legacyChain.filter(
+      (entry) =>
+        entry !== 'custom_title' && entry !== 'session_execution_engine',
+    );
+    expect(expected).toEqual([
+      'user:A',
+      'turn_result',
+      'session_source',
+      'user:B',
+      'user:C',
+    ]);
+    expect(await describeChain(managed)).toEqual(expected);
+    await managed.closeSessionWriter();
+
+    const restored = await start(restoringConfig());
+    expect(await describeChain(restored)).toEqual(expected);
+    await restored.closeSessionWriter();
+  });
+
+  it('refuses a record its log cannot carry and keeps recording', async () => {
+    const config = await start(managedConfig());
+    const recorder = config.getChatRecordingService()!;
+
+    await expect(
+      recorder.recordUserTextElements({ content: 'hello', textElements: [] }),
+    ).rejects.toThrow(ManagedSessionRecordRefusedError);
+    // A carried kind in a shape its mapping cannot take is refused the same
+    // way, before it reaches the log.
+    await expect(recorder.recordCustomTitle('', 'manual')).resolves.toBe(false);
+    // Written without waiting: dropped instead of failing later writes.
+    recorder.recordNotification([{ text: 'background done' }], 'done');
+
+    recordUser(config, 'still recorded');
+    await recorder.flush();
+    expect(await activeChatTexts(config)).toEqual(['still recorded']);
+    const raw = await readFile(
+      sessionService().getSessionTranscriptPath(SESSION_ID),
+      'utf8',
+    );
+    expect(raw).not.toContain('background done');
+    expect(raw).not.toContain('user_text_elements');
+    await config.closeSessionWriter();
+    expect(await lockRecord()).toMatchObject({ state: 'sealed' });
+  });
+
+  it.each<[string, Partial<ConfigParameters>]>([
+    ['without chat recording', { chatRecording: false }],
+    ['without the writer lease', { sessionWriterLeaseEnabled: false }],
+  ])('refuses a Managed session %s', async (_name, params) => {
+    const config = managedConfig(params);
+    vi.spyOn(
+      config as unknown as { initializeInternal(): Promise<void> },
+      'initializeInternal',
+    ).mockResolvedValue(undefined);
+
+    await expect(config.initialize()).rejects.toThrow(
+      'managed execution requires chat recording and a writer lease',
+    );
+    await expect(
+      stat(sessionService().getSessionTranscriptPath(SESSION_ID)),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+  it.each<[string, () => Config]>([
+    [
+      'a restore',
+      () => {
+        // Closed while the restore reads its projection.
+        const source = sessionService();
+        const closing = managedConfig({
+          sessionRestoreProjectionSource: async () => {
+            void closing.closeSessionWriter().catch(() => undefined);
+            return source.readRestoreProjection(SESSION_ID, {
+              replay: { kind: 'none' },
+            });
+          },
+        });
+        return closing;
+      },
+    ],
+    [
+      'a new session',
+      () => {
+        // Closed while the create publishes the resources its header needs.
+        const closing = managedConfig();
+        const publish = LocalManagedSessionResourceStore.prototype.publish;
+        vi.spyOn(
+          LocalManagedSessionResourceStore.prototype,
+          'publish',
+        ).mockImplementation(async function (
+          this: LocalManagedSessionResourceStore,
+          kind: string,
+          bytes: Buffer,
+        ) {
+          void closing.closeSessionWriter().catch(() => undefined);
+          return publish.call(this, kind, bytes);
+        });
+        return closing;
+      },
+    ],
+  ])('seals the log when a close interrupts %s', async (name, build) => {
+    if (name === 'a restore') {
+      const first = await start(managedConfig());
+      recordUser(first, 'first prompt');
+      await first.closeSessionWriter();
+    }
+    const config = build();
+    vi.spyOn(
+      config as unknown as { initializeInternal(): Promise<void> },
+      'initializeInternal',
+    ).mockResolvedValue(undefined);
+    await expect(config.initialize()).rejects.toThrow();
+    await config.closeSessionWriter().catch(() => undefined);
+    vi.restoreAllMocks();
+
+    expect(await lockRecord()).toMatchObject({
+      state: 'sealed',
+      schema_version: 3,
+    });
+    const restored = await start(restoringConfig());
+    recordUser(restored, 'after the close');
+    await restored.getChatRecordingService()!.flush();
+    expect(await activeChatTexts(restored)).toEqual(
+      name === 'a restore'
+        ? ['first prompt', 'after the close']
+        : ['after the close'],
+    );
+    await restored.closeSessionWriter();
+  });
+
+  it('keeps the lock of a Managed log it cannot read', async () => {
+    const first = await start(managedConfig());
+    recordUser(first, 'first prompt');
+    await first.closeSessionWriter();
+    const transcriptPath =
+      sessionService().getSessionTranscriptPath(SESSION_ID);
+    // A line the Managed format does not allow after its header, and no lock.
+    await writeFile(
+      transcriptPath,
+      `${await readFile(transcriptPath, 'utf8')}${JSON.stringify({
+        uuid: randomUUID(),
+        parentUuid: null,
+        sessionId: SESSION_ID,
+        timestamp: new Date().toISOString(),
+        type: 'user',
+        cwd: projectDir,
+        version: 'test',
+        message: { role: 'user', parts: [{ text: 'raw' }] },
+      })}\n`,
+    );
+    await rm(getSessionWriterLockPath(runtimeDir, SESSION_ID));
+
+    const config = managedConfig();
+    vi.spyOn(
+      config as unknown as { initializeInternal(): Promise<void> },
+      'initializeInternal',
+    ).mockResolvedValue(undefined);
+    await expect(config.initialize()).rejects.toThrow('unknown subtype');
+    await config.closeSessionWriter().catch(() => undefined);
+    // No position to seal it at, so it stays held rather than released.
+    expect(await lockRecord()).toMatchObject({
+      state: 'active',
+      schema_version: 3,
+    });
+  });
+
+  it('refuses to open a Legacy-owned transcript as a Managed log', async () => {
+    const legacy = await start(
+      managedConfig({ sessionExecutionEngine: 'legacy' }),
+    );
+    recordUser(legacy, 'legacy prompt');
+    await legacy.closeSessionWriter();
+    const before = await readFile(
+      sessionService().getSessionTranscriptPath(SESSION_ID),
+    );
+
+    const config = restoringConfig();
+    vi.spyOn(
+      config as unknown as { initializeInternal(): Promise<void> },
+      'initializeInternal',
+    ).mockResolvedValue(undefined);
+    await expect(config.initialize()).rejects.toThrow(
+      SessionExecutionEngineError,
+    );
+    expect(
+      await readFile(sessionService().getSessionTranscriptPath(SESSION_ID)),
+    ).toEqual(before);
+    // Nothing Managed was written, so the lock is released for Legacy.
+    await expect(
+      stat(getSessionWriterLockPath(runtimeDir, SESSION_ID)),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('refuses a restore whose projection names another owner', async () => {
+    const first = await start(managedConfig());
+    recordUser(first, 'first prompt');
+    await first.closeSessionWriter();
+    const transcriptPath =
+      sessionService().getSessionTranscriptPath(SESSION_ID);
+    const before = await readFile(transcriptPath);
+
+    // The projection is checked before the log is opened, which writes to it.
+    const source = sessionService();
+    const config = managedConfig({
+      sessionRestoreProjectionSource: async () => {
+        const projection = (await source.readRestoreProjection(SESSION_ID, {
+          replay: { kind: 'none' },
+        }))!;
+        return {
+          ...projection,
+          executionEngine: {
+            ...projection.executionEngine,
+            engine: 'legacy',
+          } as typeof projection.executionEngine,
+        };
+      },
+    });
+    vi.spyOn(
+      config as unknown as { initializeInternal(): Promise<void> },
+      'initializeInternal',
+    ).mockResolvedValue(undefined);
+    await expect(config.initialize()).rejects.toThrow(
+      SessionExecutionEngineError,
+    );
+    await config.closeSessionWriter().catch(() => undefined);
+    expect(await readFile(transcriptPath)).toEqual(before);
+    expect(await lockRecord()).toMatchObject({ state: 'sealed' });
+  });
+
+  it("leaves a Legacy session's handoff seal in place", async () => {
+    const legacy = managedConfig({ sessionExecutionEngine: 'legacy' });
+    legacy.setSessionWriterTakeoverPolicy('certified');
+    await start(legacy);
+    recordUser(legacy, 'legacy prompt');
+    await legacy.closeSessionWriter({ handoff: true });
+    const sealed = await lockRecord();
+    expect(sealed).toMatchObject({ state: 'sealed', schema_version: 2 });
+    const before = await readFile(
+      sessionService().getSessionTranscriptPath(SESSION_ID),
+    );
+
+    // Refused before the lease is taken, so the seal a Legacy successor
+    // checks the transcript against is never retired.
+    const config = restoringConfig();
+    vi.spyOn(
+      config as unknown as { initializeInternal(): Promise<void> },
+      'initializeInternal',
+    ).mockResolvedValue(undefined);
+    await expect(config.initialize()).rejects.toThrow(
+      SessionExecutionEngineError,
+    );
+    await config.closeSessionWriter().catch(() => undefined);
+    expect(await lockRecord()).toEqual(sealed);
+    expect(
+      await readFile(sessionService().getSessionTranscriptPath(SESSION_ID)),
+    ).toEqual(before);
+  });
+
+  it('releases the lock of a new session that fails before writing anything', async () => {
+    vi.spyOn(
+      LocalManagedSessionResourceStore.prototype,
+      'publish',
+    ).mockRejectedValue(new Error('resource store unavailable'));
+    const config = managedConfig();
+    vi.spyOn(
+      config as unknown as { initializeInternal(): Promise<void> },
+      'initializeInternal',
+    ).mockResolvedValue(undefined);
+    await expect(config.initialize()).rejects.toThrow(
+      'resource store unavailable',
+    );
+    await config.closeSessionWriter().catch(() => undefined);
+    // Nothing was written, so there is nothing for a lock to guard.
+    await expect(
+      stat(sessionService().getSessionTranscriptPath(SESSION_ID)),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(
+      stat(getSessionWriterLockPath(runtimeDir, SESSION_ID)),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('seals a handoff close whose last flush failed', async () => {
+    const building = managedConfig();
+    building.setSessionWriterTakeoverPolicy('certified');
+    const config = await start(building);
+    recordUser(config, 'committed prompt');
+    await config.getChatRecordingService()!.flush();
+    const write = ManagedSessionRecordSink.prototype.write;
+    vi.spyOn(ManagedSessionRecordSink.prototype, 'write').mockImplementation(
+      async function (this: ManagedSessionRecordSink, record: ChatRecord) {
+        if (record.type === 'user') throw new Error('disk full');
+        return write.call(this, record);
+      },
+    );
+    recordUser(config, 'not recorded');
+
+    // A Legacy handoff keeps its lock active here; a Managed log is sealed at
+    // its committed position, which the failed record is not part of.
+    await config.closeSessionWriter({ handoff: true }).catch(() => undefined);
+    vi.restoreAllMocks();
+    expect(await lockRecord()).toMatchObject({
+      state: 'sealed',
+      schema_version: 3,
+    });
+    const restored = await start(restoringConfig());
+    expect(await activeChatTexts(restored)).toEqual(['committed prompt']);
+    await restored.closeSessionWriter();
+  });
+
+  it('restores a session whose title body is missing', async () => {
+    const first = await start(managedConfig());
+    await first
+      .getChatRecordingService()!
+      .recordCustomTitle('Managed title', 'manual');
+    recordUser(first, 'first prompt');
+    await first.closeSessionWriter();
+    await rm(
+      path.join(
+        managedSessionResourceRoot(runtimeDir, SESSION_ID),
+        'managed-session_metadata',
+      ),
+      { recursive: true },
+    );
+
+    // A damaged title costs the title, not the session.
+    await expect(
+      sessionService().readLiveRestoreProjection(SESSION_ID, {
+        replay: { kind: 'none' },
+      }),
+    ).resolves.toBeDefined();
+    const restored = await start(restoringConfig());
+    expect(
+      restored.getChatRecordingService()!.getCurrentCustomTitle(),
+    ).toBeUndefined();
+    expect(await activeChatTexts(restored)).toEqual(['first prompt']);
+    await restored.closeSessionWriter();
+  });
+
+  it('gives back the seal it took over when the log does not match it', async () => {
+    const first = await start(managedConfig());
+    recordUser(first, 'first prompt');
+    await first.closeSessionWriter();
+    // A seal that names an earlier commit than the log holds, as when the log
+    // changed after the session was sealed.
+    const sealed = await lockRecord();
+    const mismatched = {
+      ...sealed,
+      last_commit_sequence: (sealed['last_commit_sequence'] as number) - 1,
+    };
+    await writeFile(
+      getSessionWriterLockPath(runtimeDir, SESSION_ID),
+      JSON.stringify(mismatched),
+    );
+
+    // Refused every time, with the log's own error rather than as writer
+    // contention.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const config = restoringConfig();
       vi.spyOn(
         config as unknown as { initializeInternal(): Promise<void> },
         'initializeInternal',
       ).mockResolvedValue(undefined);
-      vi.spyOn(
-        config.getChatRecordingService()!,
-        'activate',
-      ).mockImplementation(() => {
-        throw new Error('recorder activation failed');
+      await expect(config.initialize()).rejects.toThrow(
+        ManagedSessionConflictError,
+      );
+      await config.closeSessionWriter().catch(() => undefined);
+      expect(await lockRecord()).toMatchObject({
+        state: 'sealed',
+        last_commit_sequence: mismatched.last_commit_sequence,
+        committed_prefix_hash: sealed['committed_prefix_hash'],
       });
-
-      await expect(
-        config.initialize({ sessionExecutionEngine: 'managed' }),
-      ).rejects.toThrow('recorder activation failed');
-      expect(closeStore).toHaveBeenCalledOnce();
-
-      const remoteLock = JSON.parse(
-        await readFile(
-          getSessionWriterLockPath(remoteBaseDir, sessionId),
-          'utf8',
-        ),
-      ) as Record<string, unknown>;
-      expect(remoteLock['state']).toBe('sealed');
-    });
+    }
   });
 
-  it('records a managed session through the authority and seals on close', async () => {
-    await withWorkspace(async (activate) => {
-      const fixture = await activate({ managedSessionLog: true });
-      const recorder = fixture.config.getChatRecordingService()!;
-      recorder.recordUserMessage('summarise the docs');
-      await recorder.flush();
-
-      const records = await transcriptRecords(fixture.transcriptPath);
-      const subtypes = records.map((entry) => entry['subtype']);
-
-      // The authority writes the engine record first so maintenance guards see
-      // a managed session, then the header that makes the log authoritative.
-      expect(subtypes[0]).toBe('session_execution_engine');
-      expect(
-        (records[0]['systemPayload'] as Record<string, unknown>)['engine'],
-      ).toBe('managed');
-      expect(subtypes[1]).toBe(MANAGED_SESSION_HEADER_SUBTYPE);
-      expect(isManagedSessionTranscriptSync(fixture.transcriptPath)).toBe(true);
-      expect(fixture.config.getSessionExecutionEngine()).toBe('managed');
-
-      // The user message reached the log as a Managed event, not as a raw
-      // legacy line: it is inside a committed transaction.
-      expect(subtypes).toContain(MANAGED_SESSION_EVENT_SUBTYPE);
-      expect(subtypes).toContain(MANAGED_SESSION_COMMIT_SUBTYPE);
-      expect(subtypes).not.toContain(undefined);
-
-      await fixture.config.closeSessionWriter();
-
-      // Releasing would delete the lock and leave the Managed log unguarded.
-      const lock = JSON.parse(
-        await readFile(
-          getSessionWriterLockPath(fixture.runtimeBaseDir, sessionId),
-          'utf8',
-        ),
-      ) as Record<string, unknown>;
-      expect(lock['state']).toBe('sealed');
-    });
-  });
-
-  it('submits a before_model checkpoint before a model request, not on open', async () => {
-    await withWorkspace(async (activate) => {
-      const fixture = await activate({ managedSessionLog: true });
-      const recorder = fixture.config.getChatRecordingService()!;
-      recorder.recordUserMessage('summarise the docs');
-      await recorder.flush();
-
-      const before = await transcriptRecords(fixture.transcriptPath);
-      expect(
-        before.some((entry) => {
-          const body = entry['managedSession'] as
-            | Record<string, unknown>
-            | undefined;
-          return body?.['kind'] === 'checkpoint.committed';
+  it.each([
+    ['a Legacy recorder that already accepts records', 'legacy'],
+    ['a Managed recorder that already accepts records', 'managed'],
+  ] as const)('refuses to bind a log to %s', async (_name, engine) => {
+    const config = await start(
+      managedConfig({ sessionExecutionEngine: engine }),
+    );
+    expect(() =>
+      config.getChatRecordingService()!.bindManagedSink({
+        canCarry: () => true,
+        write: async () => undefined,
+        project: async () => [],
+        stopAdvancing: async () => undefined,
+        commitProof: () => ({
+          last_commit_sequence: 0,
+          committed_prefix_hash: '0'.repeat(64),
         }),
-      ).toBe(false);
-
-      await fixture.config.ensureManagedHarnessRunnable();
-
-      const after = await transcriptRecords(fixture.transcriptPath);
-      const checkpoints = after.filter((entry) => {
-        const body = entry['managedSession'] as
-          | Record<string, unknown>
-          | undefined;
-        return body?.['kind'] === 'checkpoint.committed';
-      });
-      expect(checkpoints).toHaveLength(1);
-      expect(
-        (checkpoints[0]['managedSession'] as Record<string, unknown>)[
-          'payload'
-        ] as Record<string, unknown>,
-      ).toMatchObject({ boundary: null });
-
-      await fixture.config.closeSessionWriter();
-    });
+        logSize: () => undefined,
+      }),
+    ).toThrow(SessionWriterUnavailableError);
+    await config.closeSessionWriter();
   });
 
-  it('sends the Agent model stream only after a before_model checkpoint', async () => {
-    await withWorkspace(async (activate) => {
-      const fixture = await activate({ managedSessionLog: true });
-      const recorder = fixture.config.getChatRecordingService()!;
-      recorder.recordUserMessage('summarise the docs');
-      await recorder.flush();
-      expect(
-        checkpointPayloads(await transcriptRecords(fixture.transcriptPath)),
-      ).toHaveLength(0);
-
-      const generateContentStream = stubStoppedModelStream(
-        fixture.config,
-        async () => {
-          const during = checkpointPayloads(
-            await transcriptRecords(fixture.transcriptPath),
-          );
-          expect(during).toHaveLength(1);
-          expect(during[0]).toMatchObject({ boundary: null });
-        },
-      );
-
-      const chat = new LlmChat(fixture.config, {});
-      const stream = await chat.sendMessageStream(
-        'qwen3-coder-plus',
-        { message: 'summarise the docs' },
-        'prompt-h08',
-      );
-      for await (const _ of stream) {
-        /* consume the Agent stream */
-      }
-
-      expect(generateContentStream).toHaveBeenCalledOnce();
-
-      recorder.recordTurnResult({
-        promptId: 'prompt-h08',
-        state: 'completed',
-        endedAt: Date.now(),
-        stopReason: 'end_turn',
-      });
-      await recorder.flush();
-
-      const after = await transcriptRecords(fixture.transcriptPath);
-      const events = after
-        .filter((entry) => entry['subtype'] === MANAGED_SESSION_EVENT_SUBTYPE)
-        .map((entry) => entry['managedSession'] as Record<string, unknown>);
-      const checkpoints = checkpointPayloads(after);
-      const settled = events.filter(
-        (event) => event['kind'] === 'turn.settled',
-      );
-      expect(checkpoints).toHaveLength(2);
-      expect(settled).toHaveLength(1);
-      expect(checkpoints[0]['boundary']).toBeNull();
-      expect(checkpoints[1]['boundary']).toBe('turn_complete');
-
-      await fixture.config.closeSessionWriter();
-    });
-  });
-
-  it('sends the Agent model stream after a cold reopen only once a before_model checkpoint exists', async () => {
-    await withWorkspace(async (activate) => {
-      const first = await activate({ managedSessionLog: true });
-      first.config
-        .getChatRecordingService()!
-        .recordUserMessage('summarise the docs');
-      await first.config.closeSessionWriter();
-      expect(
-        checkpointPayloads(await transcriptRecords(first.transcriptPath)),
-      ).toHaveLength(0);
-
-      const fixture = await activate({ managedSessionLog: true });
-      expect(
-        checkpointPayloads(await transcriptRecords(fixture.transcriptPath)),
-      ).toHaveLength(0);
-
-      const generateContentStream = stubStoppedModelStream(
-        fixture.config,
-        async () => {
-          const during = checkpointPayloads(
-            await transcriptRecords(fixture.transcriptPath),
-          );
-          expect(during).toHaveLength(1);
-          expect(during[0]).toMatchObject({ boundary: null });
-        },
-      );
-
-      const chat = new LlmChat(fixture.config, {});
-      const stream = await chat.sendMessageStream(
-        'qwen3-coder-plus',
-        { message: 'summarise the docs' },
-        'prompt-h08-cold',
-      );
-      for await (const _ of stream) {
-        /* consume the Agent stream */
-      }
-
-      expect(generateContentStream).toHaveBeenCalledOnce();
-      await fixture.config.closeSessionWriter();
-    });
-  });
-
-  it('commits a turn-complete checkpoint with the settled turn, not on open', async () => {
-    await withWorkspace(async (activate) => {
-      const fixture = await activate({ managedSessionLog: true });
-      const recorder = fixture.config.getChatRecordingService()!;
-      recorder.recordUserMessage('summarise the docs');
-      await recorder.flush();
-      await fixture.config.ensureManagedHarnessRunnable();
-
-      recorder.recordTurnResult({
-        promptId: 'turn-1',
-        state: 'completed',
-        endedAt: Date.now(),
-        stopReason: 'end_turn',
-      });
-      await recorder.flush();
-
-      const after = await transcriptRecords(fixture.transcriptPath);
-      const events = after
-        .filter((entry) => entry['subtype'] === MANAGED_SESSION_EVENT_SUBTYPE)
-        .map((entry) => entry['managedSession'] as Record<string, unknown>);
-      const checkpoints = events.filter(
-        (event) => event['kind'] === 'checkpoint.committed',
-      );
-      const settled = events.filter(
-        (event) => event['kind'] === 'turn.settled',
-      );
-      expect(checkpoints).toHaveLength(2);
-      expect(settled).toHaveLength(1);
-      expect(
-        (checkpoints[0]['payload'] as Record<string, unknown>)['boundary'],
-      ).toBeNull();
-      expect(
-        (checkpoints[1]['payload'] as Record<string, unknown>)['boundary'],
-      ).toBe('turn_complete');
-      expect(
-        (checkpoints[1]['payload'] as Record<string, unknown>)[
-          'previousCheckpointId'
-        ],
-      ).toBe(
-        (checkpoints[0]['payload'] as Record<string, unknown>)['checkpointId'],
-      );
-
-      const markers = after
-        .filter((entry) => entry['subtype'] === MANAGED_SESSION_COMMIT_SUBTYPE)
-        .map((entry) => entry['managedSession'] as Record<string, unknown>);
-      const settleMarker = markers.find(
-        (marker) => marker['operation'] === 'settleTurn',
-      );
-      expect(settleMarker?.['eventCount']).toBe(2);
-      expect(settleMarker?.['lastSequence']).toBe(
-        (settleMarker?.['firstSequence'] as number) + 1,
-      );
-
-      await fixture.config.closeSessionWriter();
-    });
-  });
-
-  it('replaces the Harness activation after a turn-complete checkpoint', async () => {
-    await withWorkspace(async (activate) => {
-      const fixture = await activate({ managedSessionLog: true });
-      const rebuilt: unknown[][] = [];
-      const llmClient = fixture.config.getLlmClient();
-      const startNewSession = vi.spyOn(fixture.config, 'startNewSession');
-      const closeSessionWriter = vi.spyOn(fixture.config, 'closeSessionWriter');
-      vi.spyOn(llmClient, 'isInitialized').mockReturnValue(true);
-      vi.spyOn(llmClient, 'rebuildChatFromDurableHistory').mockImplementation(
-        async (history) => {
-          rebuilt.push(history);
-        },
-      );
-      const recorder = fixture.config.getChatRecordingService()!;
-      recorder.recordUserMessage('first turn');
-      await recorder.flush();
-      await fixture.config.ensureManagedHarnessRunnable();
-      expect(rebuilt).toHaveLength(0);
-      recorder.recordTurnResult({
-        promptId: 'turn-1',
-        state: 'completed',
-        endedAt: Date.now(),
-        stopReason: 'end_turn',
-      });
-      await recorder.flush();
-
-      await fixture.config.ensureManagedHarnessRunnable();
-      expect(rebuilt).toHaveLength(1);
-      expect(rebuilt[0]).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({
-            role: 'user',
-            parts: expect.arrayContaining([
-              expect.objectContaining({ text: 'first turn' }),
-            ]),
-          }),
-        ]),
-      );
-      await fixture.config.ensureManagedHarnessRunnable();
-      expect(rebuilt).toHaveLength(1);
-      recorder.recordUserMessage('second turn');
-      await recorder.flush();
-
-      const after = await transcriptRecords(fixture.transcriptPath);
-      const events = after
-        .filter((entry) => entry['subtype'] === MANAGED_SESSION_EVENT_SUBTYPE)
-        .map((entry) => entry['managedSession'] as Record<string, unknown>);
-      const checkpoints = events.filter(
-        (event) => event['kind'] === 'checkpoint.committed',
-      );
-      expect(checkpoints).toHaveLength(2);
-      expect(
-        (checkpoints[1]['payload'] as Record<string, unknown>)['boundary'],
-      ).toBe('turn_complete');
-
-      const activations = events.filter(
-        (event) => event['kind'] === 'activation.changed',
-      );
-      expect(
-        activations.map(
-          (event) =>
-            (event['payload'] as Record<string, unknown>)['phase'] as string,
-        ),
-      ).toEqual(['active', 'released', 'active']);
-      const firstActive = activations[0]['payload'] as Record<string, unknown>;
-      const secondActive = activations[2]['payload'] as Record<string, unknown>;
-      expect(secondActive['activationId']).not.toBe(
-        firstActive['activationId'],
-      );
-      expect(secondActive['epoch']).toBe(2);
-
-      const messages = events.filter(
-        (event) => event['kind'] === 'message.committed',
-      );
-      expect(
-        (messages[messages.length - 1]?.['subject'] as Record<string, unknown>)[
-          'activationId'
-        ],
-      ).toBe(secondActive['activationId']);
-
-      expect(fixture.config.getLlmClient()).toBe(llmClient);
-      expect(startNewSession).not.toHaveBeenCalled();
-      expect(closeSessionWriter).not.toHaveBeenCalled();
-
-      await fixture.config.closeSessionWriter();
-    });
-  });
-
-  it('waits for queued records before replacing the Harness activation', async () => {
-    await withWorkspace(async (activate) => {
-      const fixture = await activate({ managedSessionLog: true });
-      const recorder = fixture.config.getChatRecordingService()!;
-      recorder.recordUserMessage('first turn');
-      await recorder.flush();
-      await fixture.config.ensureManagedHarnessRunnable();
-      recorder.recordTurnResult({
-        promptId: 'turn-1',
-        state: 'completed',
-        endedAt: Date.now(),
-        stopReason: 'end_turn',
-      });
-      await recorder.flush();
-
-      const managedSession = (
-        fixture.config as unknown as { managedSession?: ManagedSession }
-      ).managedSession;
-      if (!managedSession) throw new Error('Managed session was not opened.');
-
-      const recordPublishStarted = deferred();
-      const releaseRecordPublish = deferred();
-      const replacementStarted = deferred();
-      const originalPublish = managedSession.resources.publish.bind(
-        managedSession.resources,
-      );
-      vi.spyOn(managedSession.resources, 'publish').mockImplementation(
-        async (kind, body) => {
-          const ref = await originalPublish(kind, body);
-          if (kind === 'managed-message') {
-            const record = JSON.parse(body.toString('utf8')) as ChatRecord;
-            const text = record.message?.parts
-              ?.map((part) => part.text ?? '')
-              .join('');
-            if (text === 'second turn') {
-              recordPublishStarted.resolve();
-              await releaseRecordPublish.promise;
-            }
-          }
-          return ref;
-        },
-      );
-      const originalReplace =
-        managedSession.replaceActivation.bind(managedSession);
-      const replaceActivation = vi
-        .spyOn(managedSession, 'replaceActivation')
-        .mockImplementation(async () => {
-          replacementStarted.resolve();
-          return originalReplace();
-        });
-
-      recorder.recordUserMessage('second turn');
-      await recordPublishStarted.promise;
-      const ensureRunnable = fixture.config.ensureManagedHarnessRunnable();
-      const replacedWhileRecordWasPending = await Promise.race([
-        replacementStarted.promise.then(() => true),
-        new Promise<false>((resolve) => setTimeout(() => resolve(false), 25)),
-      ]);
-      releaseRecordPublish.resolve();
-      const [ensureResult, flushResult] = await Promise.allSettled([
-        ensureRunnable,
-        recorder.flush(),
-      ]);
-
-      expect(replacedWhileRecordWasPending).toBe(false);
-      expect(ensureResult.status).toBe('fulfilled');
-      expect(flushResult.status).toBe('fulfilled');
-      expect(replaceActivation).toHaveBeenCalledOnce();
-      await expect(recorder.assertCanStartTurn()).resolves.toBeUndefined();
-
-      await fixture.config.closeSessionWriter();
-    });
-  });
-
-  it('persists a durable approval wait without replacing the Harness handle', async () => {
-    await withWorkspace(async (activate) => {
-      const fixture = await activate({ managedSessionLog: true });
-      const recorder = fixture.config.getChatRecordingService()!;
-      recorder.recordUserMessage('needs permission');
-      await recorder.flush();
-      await fixture.config.ensureManagedHarnessRunnable();
-
-      await fixture.config.commitManagedDurableWait({
-        requestId: 'fc-wait-1',
-        kind: 'execute',
-        source: 'tool_call',
-        options: [{ optionId: 'allow', name: 'Allow', kind: 'allow_once' }],
-        invocation: { toolCallId: 'fc-wait-1', kind: 'execute' },
-      });
-
-      const waiting = checkpointPayloads(
-        await transcriptRecords(fixture.transcriptPath),
-      );
-      expect(waiting).toHaveLength(2);
-      expect(waiting[1]).toMatchObject({ boundary: 'durable_wait' });
-      expect(await readCheckpointPhase(fixture, waiting[1])).toBe(
-        'await_action',
-      );
-
-      await expect(
-        fixture.config.ensureManagedHarnessRunnable(),
-      ).rejects.toMatchObject({ reason: 'invalid_state' });
-      await expect(
-        fixture.config.resolveManagedDurableWait({
-          requestId: 'fc-wait-1',
-          outcome: 'decided',
-          body: { optionId: 'allow' },
-        }),
-      ).resolves.toBeUndefined();
-      await fixture.config.ensureManagedHarnessRunnable();
-
-      const after = await transcriptRecords(fixture.transcriptPath);
-      const payloads = checkpointPayloads(after);
-      expect(payloads).toHaveLength(3);
-      expect(payloads[2]['boundary']).toBeNull();
-      expect(await readCheckpointPhase(fixture, payloads[2])).toBe(
-        'model_output_committed',
-      );
-
-      const events = after
-        .filter((entry) => entry['subtype'] === MANAGED_SESSION_EVENT_SUBTYPE)
-        .map((entry) => entry['managedSession'] as Record<string, unknown>);
-      const actions = events.filter(
-        (event) => event['kind'] === 'action.changed',
-      );
-      expect(
-        actions.map(
-          (event) =>
-            (event['payload'] as Record<string, unknown>)['state'] as string,
-        ),
-      ).toEqual(['requested', 'decided']);
-      const lastCheckpoint = events
-        .filter((event) => event['kind'] === 'checkpoint.committed')
-        .at(-1);
-      expect(actions[1]['sequence'] as number).toBeLessThan(
-        lastCheckpoint?.['sequence'] as number,
-      );
-      expect(
-        (actions[1]['payload'] as Record<string, unknown>)['decisionRef'],
-      ).not.toBeNull();
-      expect(
-        events
-          .filter((event) => event['kind'] === 'activation.changed')
-          .map(
-            (event) =>
-              (event['payload'] as Record<string, unknown>)['phase'] as string,
-          ),
-      ).toEqual(['active']);
-
-      await fixture.config.closeSessionWriter();
-    });
-  });
-
-  it('rebuilds a still-requested approval wait after the original waiter is gone', async () => {
-    await withWorkspace(async (activate) => {
-      const options = [
-        { optionId: 'allow', name: 'Allow', kind: 'allow_once' },
-      ];
-      const invocation = { toolCallId: 'fc-wait-1', kind: 'execute' };
-      const first = await activate({ managedSessionLog: true });
-      first.config
-        .getChatRecordingService()!
-        .recordUserMessage('needs permission');
-      await first.config.getChatRecordingService()!.flush();
-      await first.config.ensureManagedHarnessRunnable();
-      await first.config.commitManagedDurableWait({
-        requestId: 'fc-wait-1',
-        kind: 'execute',
-        source: 'tool_call',
-        options,
-        invocation,
-      });
-      await expect(
-        first.config.readPendingManagedApprovalWait(),
-      ).resolves.toMatchObject({
-        requestId: 'fc-wait-1',
-        kind: 'execute',
-        source: 'tool_call',
-        options,
-        invocation,
-      });
-      await first.config.closeSessionWriter();
-
-      const second = await activate({ managedSessionLog: true });
-      await expect(
-        second.config.readPendingManagedApprovalWait(),
-      ).resolves.toMatchObject({
-        requestId: 'fc-wait-1',
-        kind: 'execute',
-        source: 'tool_call',
-        options,
-        invocation,
-      });
-      await second.config.resolveManagedDurableWait({
-        requestId: 'fc-wait-1',
-        outcome: 'decided',
-        body: { optionId: 'allow' },
-      });
-      await expect(
-        second.config.readPendingManagedApprovalWait(),
-      ).resolves.toBeNull();
-      await second.config.ensureManagedHarnessRunnable();
-      await second.config.closeSessionWriter();
-    });
-  });
-
-  it('resolves a detached approval wait on a successor handle', async () => {
-    await withWorkspace(async (activate) => {
-      const fixture = await activate({ managedSessionLog: true });
-      const recorder = fixture.config.getChatRecordingService()!;
-      recorder.recordUserMessage('needs permission');
-      await recorder.flush();
-      await fixture.config.ensureManagedHarnessRunnable();
-      await fixture.config.commitManagedDurableWait({
-        requestId: 'fc-wait-1',
-        kind: 'execute',
-        source: 'tool_call',
-        options: [{ optionId: 'allow', name: 'Allow', kind: 'allow_once' }],
-        invocation: { toolCallId: 'fc-wait-1', kind: 'execute' },
-      });
-      await fixture.config.detachManagedHarnessWait();
-      await expect(
-        fixture.config.ensureManagedHarnessRunnable(),
-      ).rejects.toMatchObject({ reason: 'invalid_state' });
-      await expect(
-        fixture.config.readPendingManagedApprovalWait(),
-      ).resolves.toMatchObject({ requestId: 'fc-wait-1' });
-      await fixture.config.resolveManagedDurableWait({
-        requestId: 'fc-wait-1',
-        outcome: 'decided',
-        body: { optionId: 'allow' },
-      });
-      await expect(
-        fixture.config.readPendingManagedApprovalWait(),
-      ).resolves.toBeNull();
-      await fixture.config.ensureManagedHarnessRunnable();
-      await fixture.config.closeSessionWriter();
-    });
-  });
-
-  it('persists admitted Runtime work without replacing the Harness handle', async () => {
-    await withWorkspace(async (activate) => {
-      const fixture = await activate({ managedSessionLog: true });
-      const recorder = fixture.config.getChatRecordingService()!;
-      recorder.recordUserMessage('run a remote tool');
-      await recorder.flush();
-      await fixture.config.ensureManagedHarnessRunnable();
-
-      await fixture.config.commitManagedAwaitRuntime({
-        functionCallId: 'fc-rt-1',
-        toolName: 'remote_tool',
-        executionCallId: 'ex-rt-1',
-        invocationBindingId: 'bind-rt-1',
-        modelMessageId: 'msg-rt-1',
-      });
-
-      const waiting = checkpointPayloads(
-        await transcriptRecords(fixture.transcriptPath),
-      );
-      expect(waiting).toHaveLength(2);
-      expect(waiting[1]).toMatchObject({ boundary: 'durable_wait' });
-      expect(await readCheckpointPhase(fixture, waiting[1])).toBe(
-        'await_runtime',
-      );
-      await expect(
-        fixture.config.ensureManagedHarnessRunnable(),
-      ).rejects.toMatchObject({ reason: 'invalid_state' });
-      expect(
-        fixture.config.shouldRetainManagedRuntimeInvocation('ex-rt-1'),
-      ).toBe(false);
-
-      const sessionKey = localManagedSessionKey(
-        fixture.config.getProjectRoot(),
-        sessionId,
-      );
-      managedRuntimeDispatchGate(sessionKey).handoff('ex-rt-1');
-      expect(
-        fixture.config.shouldRetainManagedRuntimeInvocation('ex-rt-1'),
-      ).toBe(true);
-
-      await expect(
-        fixture.config.resolveManagedAwaitRuntime({
-          functionCallId: 'fc-rt-1',
-          executionCallId: 'ex-rt-1',
-          outcome: 'completed',
-          body: { output: 'ok' },
-        }),
-      ).resolves.toBeUndefined();
-      await fixture.config.ensureManagedHarnessRunnable();
-
-      const after = await transcriptRecords(fixture.transcriptPath);
-      const payloads = checkpointPayloads(after);
-      expect(payloads).toHaveLength(3);
-      expect(payloads[2]['boundary']).toBeNull();
-      expect(await readCheckpointPhase(fixture, payloads[2])).toBe(
-        'results_ready',
-      );
-      expect(
-        fixture.config.shouldRetainManagedRuntimeInvocation('ex-rt-1'),
-      ).toBe(false);
-
-      const events = after
-        .filter((entry) => entry['subtype'] === MANAGED_SESSION_EVENT_SUBTYPE)
-        .map((entry) => entry['managedSession'] as Record<string, unknown>);
-      expect(
-        events
-          .filter((event) => event['kind'] === 'activation.changed')
-          .map(
-            (event) =>
-              (event['payload'] as Record<string, unknown>)['phase'] as string,
-          ),
-      ).toEqual(['active']);
-
-      await fixture.config.closeSessionWriter();
-    });
-  });
-
-  it('inspects admitted Runtime work and blocks an unknown outcome after a cold reopen', async () => {
-    await withWorkspace(async (activate) => {
-      const first = await activate({ managedSessionLog: true });
-      const recorder = first.config.getChatRecordingService()!;
-      recorder.recordUserMessage('run a remote tool');
-      await recorder.flush();
-      await first.config.ensureManagedHarnessRunnable();
-      await first.config.commitManagedAwaitRuntime({
-        functionCallId: 'fc-recover-1',
-        toolName: 'remote_tool',
-        executionCallId: 'ex-recover-1',
-        invocationBindingId: 'runtime-session-1',
-        modelMessageId: 'msg-recover-1',
-      });
-      await first.config.closeSessionWriter();
-
-      const inspectExecution = vi.fn().mockResolvedValue({
-        outcome: 'known' as const,
-        status: {
-          state: 'executing' as const,
-          cancelRequested: false,
-          lastSeq: 2,
-          firstAvailableSeq: 1,
-          progressGap: false,
-          progress: [],
-        },
-      });
-      const reconcileExecution = vi
-        .fn()
-        .mockRejectedValue(new Error('passive recovery must not reconcile'));
-      const second = await activate({
-        managedSessionLog: true,
-        managedToolSessionFactory: () => ({
-          sessionId: 'recovery-inspector',
-          shellConfiguration: {
-            shell: 'bash',
-            executable: 'bash',
-            argsPrefix: ['-c'],
-          },
-          platform: 'darwin',
-          getClient: async () => {
-            throw new Error('recovery inspection must not acquire a Runtime');
-          },
-          inspectExecution,
-          reconcileExecution,
-          close: async () => {},
-        }),
-      });
-
-      await expect(
-        second.config.readPendingManagedRuntimeWait(),
-      ).resolves.toMatchObject({
-        phase: 'await_runtime',
-        activationId: expect.any(String),
-        checkpointId: expect.any(String),
-        executions: [
-          {
-            functionCallId: 'fc-recover-1',
-            toolName: 'remote_tool',
-            executionCallId: 'ex-recover-1',
-            runtimeSessionId: 'runtime-session-1',
-            progressCursor: null,
-          },
-        ],
-      });
-      await expect(
-        second.config.inspectPendingManagedRuntimeWait({ passive: true }),
-      ).resolves.toMatchObject({
-        phase: 'await_runtime',
-        executions: [
-          {
-            functionCallId: 'fc-recover-1',
-            executionCallId: 'ex-recover-1',
-            runtimeSessionId: 'runtime-session-1',
-            outcome: 'known',
-            status: { state: 'executing', lastSeq: 2 },
-          },
-        ],
-      });
-      expect(reconcileExecution).not.toHaveBeenCalled();
-      expect(inspectExecution).toHaveBeenCalledExactlyOnceWith({
-        runtimeSessionId: 'runtime-session-1',
-        executionCallId: 'ex-recover-1',
-      });
-      const managedSession = (
-        second.config as unknown as { managedSession?: ManagedSession }
-      ).managedSession!;
-      const blockRecovery = vi
-        .spyOn(managedSession.authority, 'blockRecovery')
-        .mockResolvedValue();
-      reconcileExecution.mockResolvedValueOnce({
-        outcome: 'unknown' as const,
-      });
-      await expect(
-        second.config.inspectPendingManagedRuntimeWait(),
-      ).resolves.toMatchObject({
-        phase: 'await_runtime',
-        executions: [{ outcome: 'unknown' }],
-      });
-      expect(blockRecovery).toHaveBeenCalledExactlyOnceWith({
-        status: 'BLOCKED_EXECUTION',
-        detailCode: 'runtime_execution_outcome_unknown',
-      });
-      await second.config.closeSessionWriter();
-    });
-  });
-
-  it('cancels and waits for the original Runtime execution after a cold reopen', async () => {
-    await withWorkspace(async (activate) => {
-      const first = await activate({ managedSessionLog: true });
-      const recorder = first.config.getChatRecordingService()!;
-      const daemonPromptId = '550e8400-e29b-41d4-a716-446655440099';
-      recorder.recordUserMessage(
-        'cancel a remote tool',
-        undefined,
-        undefined,
-        daemonPromptId,
-      );
-      await recorder.flush();
-      await first.config.ensureManagedHarnessRunnable();
-      await first.config.commitManagedAwaitRuntime({
-        functionCallId: 'fc-cancel-1',
-        toolName: 'remote_tool',
-        executionCallId: 'ex-cancel-1',
-        invocationBindingId: 'runtime-cancel-1',
-        modelMessageId: 'msg-cancel-1',
-      });
-      await first.config.closeSessionWriter();
-
-      const cancelExecution = vi.fn().mockResolvedValue({
-        outcome: 'known' as const,
-        status: {
-          state: 'settled' as const,
-          cancelRequested: true,
-          lastSeq: 1,
-          firstAvailableSeq: 1,
-          progressGap: false,
-          progress: [],
-          result: { executionStatus: 'cancelled' as const },
-        },
-      });
-      const second = await activate({
-        managedSessionLog: true,
-        managedToolSessionFactory: () => ({
-          sessionId: 'recovery-canceller',
-          shellConfiguration: {
-            shell: 'bash',
-            executable: 'bash',
-            argsPrefix: ['-c'],
-          },
-          platform: 'darwin',
-          getClient: async () => {
-            throw new Error('recovery cancellation must not acquire a Runtime');
-          },
-          cancelExecution,
-          close: async () => {},
-        }),
-      });
-      const pending = await second.config.readPendingManagedRuntimeWait();
-      if (pending === null) {
-        throw new Error('expected a pending Runtime checkpoint');
-      }
-
-      await expect(
-        second.config.cancelPendingManagedRuntimeWait(
-          '550e8400-e29b-41d4-a716-446655440098',
-          pending.checkpointId,
-          pending.activationId,
-        ),
-      ).resolves.toBeNull();
-      expect(cancelExecution).not.toHaveBeenCalled();
-      await expect(
-        second.config.cancelPendingManagedRuntimeWait(
-          daemonPromptId,
-          pending.checkpointId,
-          pending.activationId,
-        ),
-      ).resolves.toMatchObject({ phase: 'results_ready' });
-      expect(cancelExecution).toHaveBeenCalledExactlyOnceWith({
-        runtimeSessionId: 'runtime-cancel-1',
-        executionCallId: 'ex-cancel-1',
-      });
-      await expect(second.config.readManagedRuntimeOutcomes()).resolves.toEqual(
-        expect.objectContaining({
-          outcomes: [
-            expect.objectContaining({
-              functionCallId: 'fc-cancel-1',
-              executionCallId: 'ex-cancel-1',
-            }),
-          ],
-        }),
-      );
-      await second.config.closeSessionWriter();
-    });
-  });
-
-  it('blocks recovered cancellation of multiple Runtime executions when any outcome is unknown', async () => {
-    await withWorkspace(async (activate) => {
-      const first = await activate({ managedSessionLog: true });
-      const recorder = first.config.getChatRecordingService()!;
-      const daemonPromptId = '550e8400-e29b-41d4-a716-446655440099';
-      recorder.recordUserMessage(
-        'cancel two remote tools',
-        undefined,
-        undefined,
-        daemonPromptId,
-      );
-      await recorder.flush();
-      await first.config.ensureManagedHarnessRunnable();
-      await first.config.commitManagedAwaitRuntime({
-        functionCallId: 'fc-cancel-multi-1',
-        toolName: 'remote_tool',
-        executionCallId: 'ex-cancel-multi-1',
-        invocationBindingId: 'runtime-cancel-multi-1',
-        modelMessageId: 'msg-cancel-multi-1',
-      });
-      const managedSession = (
-        first.config as unknown as { managedSession?: ManagedSession }
-      ).managedSession!;
-      const wait = parseHarnessCheckpointV1(
-        (await managedSession.authority.readCheckpointState())!,
-      );
-      const secondItem = {
-        ...wait.tools!.items[0],
-        functionCallId: 'fc-cancel-multi-2',
-        executionCallId: 'ex-cancel-multi-2',
-        modelMessageId: 'msg-cancel-multi-2',
-        ordinal: 1,
-        inputDigest: createHash('sha256')
-          .update('ex-cancel-multi-2')
-          .digest('hex'),
-      };
-      const secondBinding = {
-        ...wait.runtime!.bindings[0],
-        executionCallId: 'ex-cancel-multi-2',
-        invocationBindingId: 'runtime-cancel-multi-2',
-      };
-      const state = encodeHarnessCheckpointV1(
-        createAwaitRuntimeHarnessCheckpoint({
-          previous: wait,
-          checkpointId: `ckpt-${managedSession.authority.committedSequence + 1}`,
-          coveredSequence: managedSession.authority.committedSequence,
-          previousCheckpointId: wait.identity.checkpointId,
-          attempt: wait.attempt!,
-          tools: {
-            batchId: wait.tools!.batchId,
-            items: [...wait.tools!.items, secondItem],
-          },
-          runtime: {
-            bindings: [...wait.runtime!.bindings, secondBinding],
-          },
-        }),
-      );
-      await managedSession.authority.commitCheckpoint(
-        {
-          operation: 'commitCheckpoint',
-          commandId: 'multi-runtime-cancel-wait',
-          sessionKey: managedSession.authority.sessionHeader.sessionKey,
-          contentDigest: createHash('sha256').update(state).digest('hex'),
-        },
-        { state, boundary: HARNESS_DURABLE_WAIT_BOUNDARY },
-        { class: 'harness', activation: managedSession.activation },
-      );
-      await first.config.closeSessionWriter();
-
-      const cancelExecution = vi.fn(
-        async ({ executionCallId }: { executionCallId: string }) =>
-          executionCallId === 'ex-cancel-multi-1'
-            ? {
-                outcome: 'known' as const,
-                status: {
-                  state: 'settled' as const,
-                  cancelRequested: true,
-                  lastSeq: 1,
-                  firstAvailableSeq: 1,
-                  progressGap: false,
-                  progress: [],
-                  result: { executionStatus: 'cancelled' as const },
-                },
-              }
-            : { outcome: 'unknown' as const },
-      );
-      const second = await activate({
-        managedSessionLog: true,
-        managedToolSessionFactory: () => ({
-          sessionId: 'multi-recovery-canceller',
-          shellConfiguration: {
-            shell: 'bash',
-            executable: 'bash',
-            argsPrefix: ['-c'],
-          },
-          platform: 'darwin',
-          getClient: async () => {
-            throw new Error('recovery cancellation must not acquire a Runtime');
-          },
-          cancelExecution,
-          close: async () => {},
-        }),
-      });
-      const pending = await second.config.readPendingManagedRuntimeWait();
-      if (pending === null) {
-        throw new Error('expected a pending Runtime checkpoint');
-      }
-      const recoveredSession = (
-        second.config as unknown as { managedSession?: ManagedSession }
-      ).managedSession!;
-      const blockRecovery = vi
-        .spyOn(recoveredSession.authority, 'blockRecovery')
-        .mockResolvedValue();
-
-      await expect(
-        second.config.cancelPendingManagedRuntimeWait(
-          daemonPromptId,
-          pending.checkpointId,
-          pending.activationId,
-        ),
-      ).resolves.toMatchObject({
-        phase: 'await_runtime',
-        executions: [
-          {
-            executionCallId: 'ex-cancel-multi-1',
-            outcome: 'known',
-            status: {
-              state: 'settled',
-              result: { executionStatus: 'cancelled' },
-            },
-          },
-          { executionCallId: 'ex-cancel-multi-2', outcome: 'unknown' },
-        ],
-      });
-      expect(cancelExecution).toHaveBeenNthCalledWith(1, {
-        runtimeSessionId: 'runtime-cancel-multi-1',
-        executionCallId: 'ex-cancel-multi-1',
-      });
-      expect(cancelExecution).toHaveBeenNthCalledWith(2, {
-        runtimeSessionId: 'runtime-cancel-multi-2',
-        executionCallId: 'ex-cancel-multi-2',
-      });
-      expect(blockRecovery).toHaveBeenCalledExactlyOnceWith({
-        status: 'BLOCKED_EXECUTION',
-        detailCode: 'runtime_execution_outcome_unknown',
-      });
-      await expect(
-        recoveredSession.authority.harnessRunAuthorization(),
-      ).resolves.toMatchObject({
-        checkpoint: {
-          continuation: { phase: 'await_runtime' },
-          tools: {
-            items: [
-              { executionCallId: 'ex-cancel-multi-1', state: 'in_progress' },
-              { executionCallId: 'ex-cancel-multi-2', state: 'in_progress' },
-            ],
-          },
-        },
-      });
-      await expect(second.config.readManagedRuntimeOutcomes()).resolves.toEqual(
-        {
-          outcomes: [],
-          preserveCallIds: [],
-        },
-      );
-      await second.config.closeSessionWriter();
-    });
-  });
-
-  it('settles the original Runtime execution and restores its receipt after a cold reopen', async () => {
-    await withWorkspace(async (activate) => {
-      const first = await activate({ managedSessionLog: true });
-      const recorder = first.config.getChatRecordingService()!;
-      recorder.recordUserMessage('run a remote tool');
-      await recorder.flush();
-      await first.config.ensureManagedHarnessRunnable();
-      await first.config.commitManagedAwaitRuntime({
-        functionCallId: 'fc-recover-settled',
-        toolName: 'remote_tool',
-        executionCallId: 'ex-recover-settled',
-        invocationBindingId: 'runtime-session-settled',
-        modelMessageId: 'msg-recover-settled',
-      });
-      await first.config.closeSessionWriter();
-
-      const result = {
-        executionStatus: 'success' as const,
-        result: {
-          llmContent: 'recovered output',
-          returnDisplay: 'recovered output',
-        },
-      };
-      const reconcileExecution = vi.fn().mockResolvedValue({
-        outcome: 'known' as const,
-        status: {
-          state: 'settled' as const,
-          cancelRequested: false,
-          lastSeq: 3,
-          firstAvailableSeq: 1,
-          progressGap: false,
-          progress: [],
-          result,
-        },
-      });
-      const second = await activate({
-        managedSessionLog: true,
-        managedToolSessionFactory: () => ({
-          sessionId: 'recovery-reconciler',
-          shellConfiguration: {
-            shell: 'bash',
-            executable: 'bash',
-            argsPrefix: ['-c'],
-          },
-          platform: 'darwin',
-          getClient: async () => {
-            throw new Error('recovery must not acquire a new Runtime');
-          },
-          reconcileExecution,
-          close: async () => {},
-        }),
-      });
-
-      await expect(
-        second.config.inspectPendingManagedRuntimeWait(),
-      ).resolves.toMatchObject({
-        phase: 'results_ready',
-        executions: [
-          {
-            executionCallId: 'ex-recover-settled',
-            outcome: 'known',
-            status: { state: 'settled' },
-          },
-        ],
-      });
-      expect(reconcileExecution).toHaveBeenCalledExactlyOnceWith({
-        runtimeSessionId: 'runtime-session-settled',
-        executionCallId: 'ex-recover-settled',
-      });
-      const managedSession = (
-        second.config as unknown as { managedSession?: ManagedSession }
-      ).managedSession!;
-      await expect(
-        managedSession.authority.harnessRunAuthorization(),
-      ).resolves.toMatchObject({
-        status: 'runnable',
-        checkpoint: { continuation: { phase: 'results_ready' } },
-      });
-      await expect(second.config.readManagedRuntimeOutcomes()).resolves.toEqual(
-        {
-          outcomes: [
-            {
-              functionCallId: 'fc-recover-settled',
-              executionCallId: 'ex-recover-settled',
-              part: {
-                functionResponse: {
-                  id: 'fc-recover-settled',
-                  name: 'remote_tool',
-                  response: { output: 'recovered output' },
-                },
-              },
-            },
-          ],
-          preserveCallIds: ['fc-recover-settled'],
-        },
-      );
-      await second.config.closeSessionWriter();
-
-      const third = await activate({ managedSessionLog: true });
-      await expect(
-        third.config.inspectPendingManagedRuntimeWait(),
-      ).resolves.toMatchObject({
-        phase: 'results_ready',
-        checkpointId: expect.any(String),
-        executions: [
-          {
-            functionCallId: 'fc-recover-settled',
-            executionCallId: 'ex-recover-settled',
-            runtimeSessionId: 'runtime-session-settled',
-            outcome: 'known',
-            status: { state: 'settled' },
-          },
-        ],
-      });
-      expect(reconcileExecution).toHaveBeenCalledOnce();
-      await third.config.closeSessionWriter();
-    });
-  });
-
-  it('recovers multiple Runtime executions in reverse settle order after a cold reopen', async () => {
-    await withWorkspace(async (activate) => {
-      const first = await activate({ managedSessionLog: true });
-      const recorder = first.config.getChatRecordingService()!;
-      recorder.recordUserMessage('run two remote tools');
-      await recorder.flush();
-      await first.config.ensureManagedHarnessRunnable();
-      await first.config.commitManagedAwaitRuntime({
-        functionCallId: 'fc-multi-1',
-        toolName: 'remote_tool',
-        executionCallId: 'ex-multi-1',
-        invocationBindingId: 'runtime-multi-1',
-        modelMessageId: 'msg-multi-1',
-      });
-      const managedSession = (
-        first.config as unknown as { managedSession?: ManagedSession }
-      ).managedSession!;
-      const wait = parseHarnessCheckpointV1(
-        (await managedSession.authority.readCheckpointState())!,
-      );
-      const secondItem = {
-        ...wait.tools!.items[0],
-        functionCallId: 'fc-multi-2',
-        executionCallId: 'ex-multi-2',
-        modelMessageId: 'msg-multi-2',
-        ordinal: 1,
-        inputDigest: createHash('sha256').update('ex-multi-2').digest('hex'),
-      };
-      const secondBinding = {
-        ...wait.runtime!.bindings[0],
-        executionCallId: 'ex-multi-2',
-        invocationBindingId: 'runtime-multi-2',
-      };
-      const state = encodeHarnessCheckpointV1(
-        createAwaitRuntimeHarnessCheckpoint({
-          previous: wait,
-          checkpointId: `ckpt-${managedSession.authority.committedSequence + 1}`,
-          coveredSequence: managedSession.authority.committedSequence,
-          previousCheckpointId: wait.identity.checkpointId,
-          attempt: wait.attempt!,
-          tools: {
-            batchId: wait.tools!.batchId,
-            items: [...wait.tools!.items, secondItem],
-          },
-          runtime: {
-            bindings: [...wait.runtime!.bindings, secondBinding],
-          },
-        }),
-      );
-      await managedSession.authority.commitCheckpoint(
-        {
-          operation: 'commitCheckpoint',
-          commandId: 'multi-runtime-wait',
-          sessionKey: managedSession.authority.sessionHeader.sessionKey,
-          contentDigest: createHash('sha256').update(state).digest('hex'),
-        },
-        { state, boundary: HARNESS_DURABLE_WAIT_BOUNDARY },
-        { class: 'harness', activation: managedSession.activation },
-      );
-      await first.config.closeSessionWriter();
-
-      const settledResult = (output: string) => ({
-        outcome: 'known' as const,
-        status: {
-          state: 'settled' as const,
-          cancelRequested: false,
-          lastSeq: 1,
-          firstAvailableSeq: 1,
-          progressGap: false,
-          progress: [],
-          result: {
-            executionStatus: 'success' as const,
-            result: { llmContent: output, returnDisplay: output },
-          },
-        },
-      });
-      let firstSettled = false;
-      const reconcileExecution = vi.fn(
-        async ({ executionCallId }: { executionCallId: string }) =>
-          executionCallId === 'ex-multi-2' || firstSettled
-            ? settledResult(`${executionCallId} output`)
-            : {
-                outcome: 'known' as const,
-                status: {
-                  state: 'executing' as const,
-                  cancelRequested: false,
-                  lastSeq: 1,
-                  firstAvailableSeq: 1,
-                  progressGap: false,
-                  progress: [],
-                },
-              },
-      );
-      const second = await activate({
-        managedSessionLog: true,
-        managedToolSessionFactory: () => ({
-          sessionId: 'multi-recovery',
-          shellConfiguration: {
-            shell: 'bash',
-            executable: 'bash',
-            argsPrefix: ['-c'],
-          },
-          platform: 'darwin',
-          getClient: async () => {
-            throw new Error('recovery must not acquire a new Runtime');
-          },
-          reconcileExecution,
-          close: async () => {},
-        }),
-      });
-
-      await expect(
-        second.config.inspectPendingManagedRuntimeWait(),
-      ).resolves.toMatchObject({
-        phase: 'await_runtime',
-        executions: [{ executionCallId: 'ex-multi-1' }],
-      });
-      const partialSession = (
-        second.config as unknown as { managedSession?: ManagedSession }
-      ).managedSession!;
-      await expect(
-        partialSession.authority.harnessRunAuthorization(),
-      ).resolves.toMatchObject({
-        checkpoint: {
-          continuation: { phase: 'await_runtime' },
-          tools: {
-            items: [
-              { executionCallId: 'ex-multi-1', state: 'in_progress' },
-              { executionCallId: 'ex-multi-2', state: 'settled' },
-            ],
-          },
-        },
-      });
-
-      firstSettled = true;
-      await expect(
-        second.config.inspectPendingManagedRuntimeWait(),
-      ).resolves.toMatchObject({
-        phase: 'results_ready',
-        executions: [
-          { executionCallId: 'ex-multi-1' },
-          { executionCallId: 'ex-multi-2' },
-        ],
-      });
-      await expect(second.config.readManagedRuntimeOutcomes()).resolves.toEqual(
-        {
-          outcomes: [
-            expect.objectContaining({
-              functionCallId: 'fc-multi-1',
-              executionCallId: 'ex-multi-1',
-            }),
-            expect.objectContaining({
-              functionCallId: 'fc-multi-2',
-              executionCallId: 'ex-multi-2',
-            }),
-          ],
-          preserveCallIds: ['fc-multi-1', 'fc-multi-2'],
-        },
-      );
-      await second.config.closeSessionWriter();
-    });
-  });
-
-  it('reopens a consumed Runtime continuation and closes it after the model request', async () => {
-    await withWorkspace(async (activate) => {
-      const first = await activate({ managedSessionLog: true });
-      const recorder = first.config.getChatRecordingService()!;
-      recorder.recordUserMessage('run a remote tool');
-      await recorder.flush();
-      await first.config.ensureManagedHarnessRunnable();
-      await first.config.commitManagedAwaitRuntime({
-        functionCallId: 'fc-admitted',
-        toolName: 'remote_tool',
-        executionCallId: 'ex-admitted',
-        invocationBindingId: 'runtime-session-admitted',
-        modelMessageId: 'msg-admitted',
-      });
-      await first.config.resolveManagedAwaitRuntime({
-        functionCallId: 'fc-admitted',
-        executionCallId: 'ex-admitted',
-        outcome: 'completed',
-        body: { output: 'original runtime receipt' },
-        functionResponse: {
-          id: 'fc-admitted',
-          name: 'remote_tool',
-          response: { output: 'original runtime receipt' },
-        },
-      });
-      await first.config.consumeManagedRuntimeResults();
-      await first.config.closeSessionWriter();
-
-      const second = await activate({ managedSessionLog: true });
-      await expect(
-        second.config.inspectPendingManagedRuntimeWait(),
-      ).resolves.toMatchObject({
-        phase: 'results_ready',
-        continuationAdmitted: true,
-        executions: [{ executionCallId: 'ex-admitted', outcome: 'known' }],
-      });
-      await expect(second.config.readManagedRuntimeOutcomes()).resolves.toEqual(
-        {
-          outcomes: [
-            {
-              functionCallId: 'fc-admitted',
-              executionCallId: 'ex-admitted',
-              part: {
-                functionResponse: {
-                  id: 'fc-admitted',
-                  name: 'remote_tool',
-                  response: { output: 'original runtime receipt' },
-                },
-              },
-            },
-          ],
-          preserveCallIds: ['fc-admitted'],
-        },
-      );
-      await second.config.settleConsumedManagedRuntimeContinuation();
-      await second.config.closeSessionWriter();
-
-      const third = await activate({ managedSessionLog: true });
-      await expect(
-        third.config.inspectPendingManagedRuntimeWait(),
-      ).resolves.toBeNull();
-      await expect(third.config.readManagedRuntimeOutcomes()).resolves.toEqual({
-        outcomes: [],
-        preserveCallIds: [],
-      });
-      await third.config.closeSessionWriter();
-    });
-  });
-
-  it('rebuilds a consumed Runtime receipt from the Broker when the outcome body is unreadable', async () => {
-    await withWorkspace(async (activate) => {
-      const first = await activate({ managedSessionLog: true });
-      const recorder = first.config.getChatRecordingService()!;
-      recorder.recordUserMessage('run a remote tool');
-      await recorder.flush();
-      await first.config.ensureManagedHarnessRunnable();
-      await first.config.commitManagedAwaitRuntime({
-        functionCallId: 'fc-broker-receipt',
-        toolName: 'remote_tool',
-        executionCallId: 'ex-broker-receipt',
-        invocationBindingId: 'runtime-session-broker',
-        modelMessageId: 'msg-broker-receipt',
-      });
-      await first.config.resolveManagedAwaitRuntime({
-        functionCallId: 'fc-broker-receipt',
-        executionCallId: 'ex-broker-receipt',
-        outcome: 'completed',
-        body: { output: 'broker receipt' },
-        functionResponse: {
-          id: 'fc-broker-receipt',
-          name: 'remote_tool',
-          response: { output: 'broker receipt' },
-        },
-      });
-      await first.config.consumeManagedRuntimeResults();
-      await first.config.closeSessionWriter();
-
-      const reconcileExecution = vi.fn().mockResolvedValue({
-        outcome: 'known' as const,
-        status: {
-          state: 'settled' as const,
-          cancelRequested: false,
-          lastSeq: 1,
-          firstAvailableSeq: 1,
-          progressGap: false,
-          progress: [],
-          result: {
-            executionStatus: 'success' as const,
-            result: {
-              llmContent: 'broker receipt',
-              returnDisplay: 'broker receipt',
-            },
-          },
-        },
-      });
-      const second = await activate({
-        managedSessionLog: true,
-        managedToolSessionFactory: () => ({
-          sessionId: 'broker-receipt',
-          shellConfiguration: {
-            shell: 'bash',
-            executable: 'bash',
-            argsPrefix: ['-c'],
-          },
-          platform: 'darwin',
-          getClient: async () => {
-            throw new Error('receipt rebuild must not acquire a Runtime');
-          },
-          reconcileExecution,
-          close: async () => {},
-        }),
-      });
-      const managedSession = (
-        second.config as unknown as { managedSession?: ManagedSession }
-      ).managedSession!;
-      const readResource = managedSession.resources.read.bind(
-        managedSession.resources,
-      );
-      vi.spyOn(managedSession.resources, 'read').mockImplementation(
-        async (ref) => {
-          if (ref.kind === 'managed-tool-outcome') {
-            throw new Error('outcome body unavailable');
-          }
-          return readResource(ref);
-        },
-      );
-
-      await expect(second.config.readManagedRuntimeOutcomes()).resolves.toEqual(
-        {
-          outcomes: [
-            {
-              functionCallId: 'fc-broker-receipt',
-              executionCallId: 'ex-broker-receipt',
-              part: {
-                functionResponse: {
-                  id: 'fc-broker-receipt',
-                  name: 'remote_tool',
-                  response: { output: 'broker receipt' },
-                },
-              },
-            },
-          ],
-          preserveCallIds: ['fc-broker-receipt'],
-        },
-      );
-      expect(reconcileExecution).toHaveBeenCalledExactlyOnceWith({
-        runtimeSessionId: 'runtime-session-broker',
-        executionCallId: 'ex-broker-receipt',
-      });
-      await second.config.closeSessionWriter();
-    });
-  });
-
-  it('sends the original Runtime receipt on the next model request instead of a synthesized failure', async () => {
-    await withWorkspace(async (activate) => {
-      const fixture = await activate({ managedSessionLog: true });
-      const recorder = fixture.config.getChatRecordingService()!;
-      recorder.recordUserMessage('run a remote tool');
-      await recorder.flush();
-      await fixture.config.ensureManagedHarnessRunnable();
-      await fixture.config.commitManagedAwaitRuntime({
-        functionCallId: 'fc-rt-1',
-        toolName: 'remote_tool',
-        executionCallId: 'ex-rt-1',
-        invocationBindingId: 'bind-rt-1',
-        modelMessageId: 'msg-rt-1',
-      });
-      await fixture.config.resolveManagedAwaitRuntime({
-        functionCallId: 'fc-rt-1',
-        executionCallId: 'ex-rt-1',
-        outcome: 'completed',
-        body: { output: 'ok' },
-        functionResponse: {
-          id: 'fc-rt-1',
-          name: 'remote_tool',
-          response: { output: 'original runtime receipt' },
-        },
-      });
-
-      let captured: Content[] | undefined;
-      const generateContentStream = vi.fn(
-        async (request: { contents: Content[] }) => {
-          captured = request.contents;
-          return (async function* () {
-            yield {
-              candidates: [
-                {
-                  content: {
-                    role: 'model',
-                    parts: [{ text: 'used original' }],
-                  },
-                  finishReason: 'STOP',
-                },
-              ],
-            } as unknown as GenerateContentResponse;
-          })();
-        },
-      );
-      vi.spyOn(fixture.config, 'getContentGenerator').mockReturnValue({
-        generateContent: vi.fn(),
-        generateContentStream,
-        embedContent: vi.fn(),
-      } as unknown as ContentGenerator);
-      vi.spyOn(fixture.config, 'getContentGeneratorConfig').mockReturnValue({
-        model: 'qwen3-coder-plus',
-        authType: 'openai',
-      } as ReturnType<Config['getContentGeneratorConfig']>);
-
-      const chat = new LlmChat(fixture.config, {}, [
-        {
-          role: 'user',
-          parts: [{ text: 'run a remote tool' }],
-        },
-        {
-          role: 'model',
-          parts: [
-            {
-              functionCall: {
-                id: 'fc-rt-1',
-                name: 'remote_tool',
-                args: {},
-              },
-            },
-          ],
-        },
-      ]);
-      const stream = await chat.sendMessageStream(
-        'qwen3-coder-plus',
-        { message: 'continue' },
-        'prompt-h04',
-      );
-      for await (const _ of stream) {
-        /* consume the Agent stream */
-      }
-
-      expect(generateContentStream).toHaveBeenCalledOnce();
-      const serialized = JSON.stringify(captured);
-      expect(serialized).toContain('original runtime receipt');
-      expect(serialized).not.toContain(ORPHAN_TOOL_USE_REPAIR_REASON);
-      expect(
-        captured
-          ?.flatMap((content) => content.parts ?? [])
-          .find((part) => part.functionResponse?.id === 'fc-rt-1')
-          ?.functionResponse?.response,
-      ).toEqual({ output: 'original runtime receipt' });
-
-      const payloads = checkpointPayloads(
-        await transcriptRecords(fixture.transcriptPath),
-      );
-      const latest = await readCheckpoint(
-        fixture,
-        payloads[payloads.length - 1]!,
-      );
-      expect(latest.continuation.phase).toBe('results_ready');
-      expect(latest.tools?.items[0]?.consumed).toBe(true);
-      expect(() =>
-        managedRuntimeDispatchGate(
-          localManagedSessionKey(fixture.config.getProjectRoot(), sessionId),
-        ).claim('ex-rt-1'),
-      ).toThrow(/already dispatched/);
-
-      await fixture.config.closeSessionWriter();
-    });
-  });
-
-  it('marks an already-present Runtime receipt consumed without replacing it', async () => {
-    await withWorkspace(async (activate) => {
-      const fixture = await activate({ managedSessionLog: true });
-      const recorder = fixture.config.getChatRecordingService()!;
-      recorder.recordUserMessage('run a remote tool');
-      await recorder.flush();
-      await fixture.config.ensureManagedHarnessRunnable();
-      await fixture.config.commitManagedAwaitRuntime({
-        functionCallId: 'fc-rt-1',
-        toolName: 'remote_tool',
-        executionCallId: 'ex-rt-1',
-        invocationBindingId: 'bind-rt-1',
-        modelMessageId: 'msg-rt-1',
-      });
-      await fixture.config.resolveManagedAwaitRuntime({
-        functionCallId: 'fc-rt-1',
-        executionCallId: 'ex-rt-1',
-        outcome: 'completed',
-        functionResponse: {
-          id: 'fc-rt-1',
-          name: 'remote_tool',
-          response: { output: 'original runtime receipt' },
-        },
-      });
-
-      let captured: Content[] | undefined;
-      const generateContentStream = vi.fn(
-        async (request: { contents: Content[] }) => {
-          captured = request.contents;
-          return (async function* () {
-            yield {
-              candidates: [
-                {
-                  content: {
-                    role: 'model',
-                    parts: [{ text: 'used original' }],
-                  },
-                  finishReason: 'STOP',
-                },
-              ],
-            } as unknown as GenerateContentResponse;
-          })();
-        },
-      );
-      vi.spyOn(fixture.config, 'getContentGenerator').mockReturnValue({
-        generateContent: vi.fn(),
-        generateContentStream,
-        embedContent: vi.fn(),
-      } as unknown as ContentGenerator);
-      vi.spyOn(fixture.config, 'getContentGeneratorConfig').mockReturnValue({
-        model: 'qwen3-coder-plus',
-        authType: 'openai',
-      } as ReturnType<Config['getContentGeneratorConfig']>);
-
-      const chat = new LlmChat(fixture.config, {}, [
-        {
-          role: 'user',
-          parts: [{ text: 'run a remote tool' }],
-        },
-        {
-          role: 'model',
-          parts: [
-            {
-              functionCall: {
-                id: 'fc-rt-1',
-                name: 'remote_tool',
-                args: {},
-              },
-            },
-          ],
-        },
-        {
-          role: 'user',
-          parts: [
-            {
-              functionResponse: {
-                id: 'fc-rt-1',
-                name: 'remote_tool',
-                response: { output: 'original runtime receipt' },
-              },
-            },
-          ],
-        },
-      ]);
-      const stream = await chat.sendMessageStream(
-        'qwen3-coder-plus',
-        { message: 'continue' },
-        'prompt-h04-live',
-      );
-      for await (const _ of stream) {
-        /* consume the Agent stream */
-      }
-
-      expect(generateContentStream).toHaveBeenCalledOnce();
-      expect(JSON.stringify(captured)).not.toContain(
-        ORPHAN_TOOL_USE_REPAIR_REASON,
-      );
-      expect(
-        captured
-          ?.flatMap((content) => content.parts ?? [])
-          .filter((part) => part.functionResponse?.id === 'fc-rt-1'),
-      ).toHaveLength(1);
-
-      const payloads = checkpointPayloads(
-        await transcriptRecords(fixture.transcriptPath),
-      );
-      expect(
-        (await readCheckpoint(fixture, payloads[payloads.length - 1]!)).tools
-          ?.items[0]?.consumed,
-      ).toBe(true);
-
-      await fixture.config.closeSessionWriter();
-    });
-  });
-
-  it('attributes records to the activation it installed and releases it', async () => {
-    await withWorkspace(async (activate) => {
-      const fixture = await activate({ managedSessionLog: true });
-      fixture.config.getChatRecordingService()!.recordUserMessage('first turn');
-      await fixture.config.closeSessionWriter();
-
-      const events = (await transcriptRecords(fixture.transcriptPath))
-        .filter((entry) => entry['subtype'] === MANAGED_SESSION_EVENT_SUBTYPE)
-        .map((entry) => entry['managedSession'] as Record<string, unknown>);
-      const activations = events.filter(
-        (event) => event['kind'] === 'activation.changed',
-      );
-
-      // Installed on open, released on close: a reader can tell a holder that
-      // finished from one that vanished.
-      expect(
-        activations.map(
-          (event) =>
-            (event['payload'] as Record<string, unknown>)['phase'] as string,
-        ),
-      ).toEqual(['active', 'released']);
-      const installed = activations[0]['payload'] as Record<string, unknown>;
-      const released = activations[1]['payload'] as Record<string, unknown>;
-      expect(installed['workerId']).toBe(sessionId);
-      expect(installed['installRef']).not.toBeNull();
-      expect(released['boundaryRef']).not.toBeNull();
-
-      // The message names that activation, so the fence accepted it as harness
-      // output rather than as an untethered entry.
-      const message = events.find(
-        (event) => event['kind'] === 'message.committed',
-      );
-      expect(
-        (message?.['subject'] as Record<string, unknown>)['activationId'],
-      ).toBe(installed['activationId']);
-    });
-  });
-
-  it('reopens a sealed managed session and continues the same log', async () => {
-    await withWorkspace(async (activate) => {
-      const first = await activate({ managedSessionLog: true });
-      first.config.getChatRecordingService()!.recordUserMessage('first turn');
-      await first.config.closeSessionWriter();
-      const afterFirst = await transcriptRecords(first.transcriptPath);
-
-      // A reader sees the conversation, not the wrapper records carrying it.
-      const loaded = await first.config
-        .getSessionService()
-        .loadSession(sessionId);
-      expect(loaded?.conversation.messages.map((entry) => entry.type)).toEqual([
-        'user',
-      ]);
-      expect(loaded?.lastCompletedUuid).toBe(
-        loaded?.conversation.messages[0].uuid,
-      );
-
-      // Taking over the seal, not colliding with it.
-      const second = await activate({ managedSessionLog: true });
-      second.config.getChatRecordingService()!.recordUserMessage('second turn');
-      await second.config.closeSessionWriter();
-
-      const reloaded = await second.config
-        .getSessionService()
-        .loadSession(sessionId);
-      expect(
-        reloaded?.conversation.messages.map((entry) => entry.type),
-      ).toEqual(['user', 'user']);
-
-      const records = await transcriptRecords(second.transcriptPath);
-      const subtypes = records.map((entry) => entry['subtype']);
-      expect(
-        subtypes.filter((value) => value === MANAGED_SESSION_HEADER_SUBTYPE),
-      ).toHaveLength(1);
-      expect(
-        subtypes.filter((value) => value === 'session_execution_engine'),
-      ).toHaveLength(1);
-
-      // The first session's records are still there, with the second appended.
-      expect(records.slice(0, afterFirst.length)).toEqual(afterFirst);
-      expect(
-        subtypes.filter((value) => value === MANAGED_SESSION_EVENT_SUBTYPE)
-          .length,
-      ).toBeGreaterThan(
-        afterFirst.filter(
-          (entry) => entry['subtype'] === MANAGED_SESSION_EVENT_SUBTYPE,
-        ).length,
-      );
-
-      const lock = JSON.parse(
-        await readFile(
-          getSessionWriterLockPath(second.runtimeBaseDir, sessionId),
-          'utf8',
-        ),
-      ) as Record<string, unknown>;
-      expect(lock['state']).toBe('sealed');
-    });
-  });
-
-  it('restores the goal a managed session recorded', async () => {
-    await withWorkspace(async (activate) => {
-      const fixture = await activate({ managedSessionLog: true });
-      const recorder = fixture.config.getChatRecordingService()!;
-      const permit = {
-        goalId: 'goal-1',
-        revision: 1,
-        turnId: 'turn-1',
-      } as never;
-      recorder.recordUserMessage('set the goal');
-      recorder.recordAssistantTurn({
-        model: 'qwen3-coder-plus',
-        message: 'evidence for the goal',
-        goalContext: permit,
-      });
-      await recorder.flush();
-      const written = (await fixture.config
-        .getSessionService()
-        .loadSession(sessionId))!.conversation.messages;
-      const [cursorRecord] = written;
-      const goal = {
-        goalId: 'goal-1',
-        revision: 1,
-        objective: 'verify the result',
-        status: 'active',
-        evidenceCursor: { recordId: cursorRecord.uuid },
-        turnCount: 1,
-        activeTimeMs: 0,
-        tokensUsed: 0,
-        createdAt: 1,
-        updatedAt: 2,
-      };
-      await recorder.recordGoalState('550e8400-e29b-41d4-a716-4466554400b1', {
-        v: 2,
-        cause: 'turn_finished',
-        snapshot: { v: 2, activity: 'idle', goal },
-      } as never);
-      await fixture.config.closeSessionWriter();
-
-      const projection = await fixture.config
-        .getSessionService()
-        .readRestoreProjection(sessionId, {
-          replay: { kind: 'all', hideInheritedHistory: false },
-        });
-
-      // Reported as a recovery candidate, so a resumed session still has its
-      // goal rather than silently losing it.
-      expect(
-        projection?.runtime.goalRecords.map((entry) => entry.subtype),
-      ).toEqual(['goal_state']);
-    });
-  });
-
-  it('restores a compacted managed session from its summary', async () => {
-    await withWorkspace(async (activate) => {
-      const fixture = await activate({ managedSessionLog: true });
-      const recorder = fixture.config.getChatRecordingService()!;
-      recorder.recordUserMessage('first turn');
-      recorder.recordChatCompression({
-        info: {
-          originalTokenCount: 100,
-          newTokenCount: 10,
-          compressionStatus: CompressionStatus.COMPRESSED,
-        },
-        compressedHistory: [{ role: 'user', parts: [{ text: 'summary' }] }],
-      });
-      // A shape the sink cannot map fails the flush, so reaching the assertions
-      // is itself evidence the compaction was carried.
-      await recorder.flush();
-      await fixture.config.closeSessionWriter();
-
-      const projection = await fixture.config
-        .getSessionService()
-        .readRestoreProjection(sessionId, {
-          replay: { kind: 'all', hideInheritedHistory: false },
-        });
-
-      // Rebuilt from the compaction snapshot, not from the turn it replaced.
-      expect(projection?.runtime.apiHistory).toEqual([
-        { role: 'user', parts: [{ text: 'summary' }] },
-      ]);
-    });
-  });
-
-  it('restores a managed session from its projected records', async () => {
-    await withWorkspace(async (activate) => {
-      const fixture = await activate({ managedSessionLog: true });
-      const recorder = fixture.config.getChatRecordingService()!;
-      recorder.recordUserMessage('first turn');
-      recorder.recordUserMessage('second turn');
-      await fixture.config.closeSessionWriter();
-
-      const service = fixture.config.getSessionService();
-      const projection = await service.readRestoreProjection(sessionId, {
-        replay: { kind: 'all', hideInheritedHistory: false },
-      });
-
-      // The replay page is the conversation, not the wrapper records.
-      expect(projection?.replay?.records.map((entry) => entry.type)).toEqual([
-        'user',
-        'user',
-      ]);
-      expect(projection?.replay?.hasMore).toBe(false);
-      expect(projection?.runtime.apiHistory.length).toBeGreaterThan(0);
-      expect(projection?.runtime.recording.executionEngine).toBe('managed');
-
-      // A record written next chains from the last thing a reader saw.
-      const records = projection!.replay!.records;
-      expect(projection?.runtime.recording.lastCompletedUuid).toBe(
-        records[records.length - 1].uuid,
-      );
-
-      const recent = await service.readRestoreProjection(sessionId, {
-        replay: { kind: 'recent', limit: 1, hideInheritedHistory: false },
-      });
-      expect(recent?.replay?.records).toHaveLength(1);
-      expect(recent?.replay?.hasMore).toBe(true);
-      expect(recent?.replay?.anchorRecordId).toBe(
-        recent?.replay?.records[0].uuid,
-      );
-    });
-  });
-
-  it('refuses to restore a managed session from another project', async () => {
-    await withWorkspace(async (activate) => {
-      const fixture = await activate({ managedSessionLog: true });
-      fixture.config.getChatRecordingService()!.recordUserMessage('first turn');
-      await fixture.config.closeSessionWriter();
-
-      const service = fixture.config.getSessionService();
-      vi.spyOn(
-        service as unknown as {
-          sessionBelongsToCurrentProject(): Promise<boolean>;
-        },
-        'sessionBelongsToCurrentProject',
-      ).mockResolvedValue(false);
-
-      await expect(
-        service.readRestoreProjection(sessionId, {
-          replay: { kind: 'all', hideInheritedHistory: false },
-        }),
-      ).rejects.toThrow();
-    });
-  });
-
-  it('discards a managed session nothing was said in when it is closed explicitly', async () => {
-    await withWorkspace(async (activate) => {
-      const first = await activate({ managedSessionLog: true });
-      await first.config.closeSessionWriter({ discardEmptyManagedLog: true });
-
-      // Like a legacy session that never wrote a record: nothing is left to
-      // list, and the id can be used again.
-      await expect(stat(first.transcriptPath)).rejects.toMatchObject({
-        code: 'ENOENT',
-      });
-      await expect(
-        stat(getSessionWriterLockPath(first.runtimeBaseDir, sessionId)),
-      ).rejects.toMatchObject({ code: 'ENOENT' });
-      await expect(
-        stat(managedSessionResourceRoot(first.runtimeBaseDir, sessionId)),
-      ).rejects.toMatchObject({ code: 'ENOENT' });
-      await expect(
-        first.config.getSessionService().loadSession(sessionId),
-      ).resolves.toBeUndefined();
-    });
-  });
-
-  it('loads a managed session that nothing has been said in yet', async () => {
-    await withWorkspace(async (activate) => {
-      const first = await activate({ managedSessionLog: true });
-      await first.config.closeSessionWriter();
-
-      // The header is proof the session exists, so an empty history must not
-      // read as a missing session -- that would make the session unopenable.
-      const loaded = await first.config
-        .getSessionService()
-        .loadSession(sessionId);
-      expect(loaded?.conversation.messages).toEqual([]);
-      expect(loaded?.lastCompletedUuid).toBeNull();
-
-      // A client opening the same session pages it before anything is said.
-      const page = await new SessionTranscriptReader(
-        first.config.getTargetDir(),
-      ).readPage(sessionId, { limit: 10 });
-      expect(page.records).toEqual([]);
-      expect(page.hasMore).toBe(false);
-      const backwardPage = await new SessionTranscriptReader(
-        first.config.getTargetDir(),
-      ).readPage(sessionId, { direction: 'backward', limit: 10 });
-      expect(backwardPage.records).toEqual([]);
-      expect(backwardPage.hasMore).toBe(false);
-
-      const second = await activate({ managedSessionLog: true });
-      second.config.getChatRecordingService()!.recordUserMessage('first turn');
-      await second.config.closeSessionWriter();
-      const reloaded = await second.config
-        .getSessionService()
-        .loadSession(sessionId);
-      expect(reloaded?.conversation.messages).toHaveLength(1);
-    });
-  });
-
-  it('carries the file history a managed session recorded', async () => {
-    await withWorkspace(async (activate) => {
-      const fixture = await activate({ managedSessionLog: true });
-      const recorder = fixture.config.getChatRecordingService()!;
-      await recorder.recordFileHistorySnapshotBatchStrict([
-        {
-          promptId: 'prompt-1',
-          trackedFileBackups: {},
-          timestamp: new Date('2026-09-11T00:00:00.000Z'),
-        },
-      ]);
-      await recorder.recordFileHistorySnapshotBatchStrict([
-        {
-          promptId: 'prompt-2',
-          trackedFileBackups: {},
-          timestamp: new Date('2026-09-11T00:00:01.000Z'),
-        },
-      ]);
-      await fixture.config.closeSessionWriter();
-
-      // Each batch is its own committed fact, so both prompts survive a cold
-      // reopen; one folded latest-wins body would have dropped the first.
-      const projection = await fixture.config
-        .getSessionService()
-        .readRestoreProjection(sessionId, { replay: { kind: 'none' } });
-      expect(
-        projection?.runtime.fileHistorySnapshots?.map(
-          (snapshot) => snapshot.promptId,
-        ),
-      ).toEqual(['prompt-1', 'prompt-2']);
-
-      // They live in the authoritative log, not as a legacy record beside it.
-      const records = await transcriptRecords(fixture.transcriptPath);
-      expect(
-        records.filter(
-          (record) => record['subtype'] === 'file_history_snapshot',
-        ),
-      ).toEqual([]);
-      const committedDomains = records
-        .filter((record) => record['subtype'] === MANAGED_SESSION_EVENT_SUBTYPE)
-        .map((record) => record['managedSession'] as Record<string, unknown>)
-        .filter((event) => event['kind'] === 'domain.committed')
-        .map(
-          (event) =>
-            (event['payload'] as { domain?: unknown } | undefined)?.domain,
-        );
-      expect(
-        committedDomains.filter((domain) => domain === 'file_history'),
-      ).toHaveLength(2);
-    });
-  });
-
-  it('carries the branch checkpoint a completed turn recorded', async () => {
-    await withWorkspace(async (activate) => {
-      const fixture = await activate({ managedSessionLog: true });
-      const recorder = fixture.config.getChatRecordingService()!;
-      const cursor = recorder.getBranchCheckpointCursor();
-      recorder.recordUserMessage('branch me');
-      recorder.recordAssistantTurn({
-        model: 'qwen3-coder-plus',
-        message: [{ text: 'sure' }],
-      });
-      const point = await recorder.recordBranchCheckpointTransaction({
-        cursor,
-        stopReason: 'end_turn',
-      });
-      expect(point?.checkpointUuid).toBeDefined();
-
-      // Every ordinary end_turn prompt records one of these, and a refused
-      // record degrades the recorder for the rest of the session — so the
-      // message after it is the real evidence that nothing was refused.
-      recorder.recordUserMessage('after the checkpoint');
-      await recorder.flush();
-      await fixture.config.closeSessionWriter();
-
-      const records = await transcriptRecords(fixture.transcriptPath);
-      expect(
-        records.filter((record) => record['subtype'] === 'branch_checkpoint'),
-      ).toEqual([]);
-      const events = records
-        .filter((record) => record['subtype'] === MANAGED_SESSION_EVENT_SUBTYPE)
-        .map((record) => record['managedSession'] as Record<string, unknown>);
-      expect(
-        events.filter((event) => event['kind'] === 'checkpoint.committed'),
-      ).toEqual([]);
-      const branchMessages = events.filter(
-        (event) =>
-          event['kind'] === 'message.committed' &&
-          (event['payload'] as { messageId?: unknown }).messageId ===
-            point!.checkpointUuid,
-      );
-      expect(branchMessages).toHaveLength(1);
-      expect(branchMessages[0]['payload']).toMatchObject({ role: 'system' });
-
-      // The branch readers parse the original payload, so the record has to
-      // come back as it was written.
-      const projected = await readManagedSessionRecords({
-        transcriptPath: fixture.transcriptPath,
-        runtimeBaseDir: fixture.runtimeBaseDir,
-        sessionKey: localManagedSessionKey(
-          fixture.config.getProjectRoot(),
-          sessionId,
-        ),
-      });
-      const restored = projected.find(
-        (record) => record.subtype === 'branch_checkpoint',
-      );
-      expect(restored?.uuid).toBe(point!.checkpointUuid);
-      expect(restored?.systemPayload).toEqual({
-        v: 1,
-        startExclusiveRecordUuid: cursor.recordId,
-        assistantRecordUuid: point!.assistantRecordUuid,
-      });
-    });
-  });
-
-  it('carries the source a daemon session was created from', async () => {
-    await withWorkspace(async (activate) => {
-      const fixture = await activate({ managedSessionLog: true });
-      const recorder = fixture.config.getChatRecordingService()!;
-      expect(await recorder.recordSessionSource('standalone', 'task-42')).toBe(
-        true,
-      );
-
-      // The bridge writes this on create and again on restore, so a refusal
-      // here would degrade the recorder before the first prompt.
-      recorder.recordUserMessage('after the source');
-      await recorder.flush();
-      await fixture.config.closeSessionWriter();
-
-      const records = await transcriptRecords(fixture.transcriptPath);
-      expect(
-        records.filter((record) => record['subtype'] === 'session_source'),
-      ).toEqual([]);
-      const committedDomains = records
-        .filter((record) => record['subtype'] === MANAGED_SESSION_EVENT_SUBTYPE)
-        .map((record) => record['managedSession'] as Record<string, unknown>)
-        .filter((event) => event['kind'] === 'domain.committed')
-        .map(
-          (event) =>
-            (event['payload'] as { domain?: unknown } | undefined)?.domain,
-        );
-      expect(
-        committedDomains.filter((domain) => domain === 'session_source'),
-      ).toHaveLength(1);
-
-      const projected = await readManagedSessionRecords({
-        transcriptPath: fixture.transcriptPath,
-        runtimeBaseDir: fixture.runtimeBaseDir,
-        sessionKey: localManagedSessionKey(
-          fixture.config.getProjectRoot(),
-          sessionId,
-        ),
-      });
-      const restored = projected.find(
-        (record) => record.subtype === 'session_source',
-      );
-      expect(restored?.systemPayload).toEqual({
-        sourceType: 'standalone',
-        sourceId: 'task-42',
-      });
-
-      // The listing reads physical records and then the transcript tail, so
-      // without a Managed probe a Managed session would be listed with no
-      // creator attribution at all.
-      const listed = await fixture.config.getSessionService().listSessions();
-      const item = listed.items.find((entry) => entry.sessionId === sessionId);
-      expect(item?.sourceType).toBe('standalone');
-      expect(item?.sourceId).toBe('task-42');
-    });
-  });
-
-  it('navigates the turns of a managed session', async () => {
-    await withWorkspace(async (activate) => {
-      const fixture = await activate({ managedSessionLog: true });
-      const recorder = fixture.config.getChatRecordingService()!;
-      recorder.recordUserMessage('first turn');
-      recorder.recordUserMessage('second turn');
-      await fixture.config.closeSessionWriter();
-
-      // The physical log holds only wrapper records, which carry no navigation
-      // kind, so turn navigation has to read the projection — otherwise a
-      // Managed session silently reports no turns at all.
-      const page = await new SessionTranscriptReader(
-        fixture.config.getTargetDir(),
-      ).readTurnIndexPage(sessionId);
-      expect(page.totalTurns).toBe(2);
-      expect(page.turns.map((turn) => turn.label)).toEqual([
-        'first turn',
-        'second turn',
-      ]);
-      expect(page.turns.map((turn) => turn.ordinal)).toEqual([0, 1]);
-
-      // Paging is derived from the projection too, so start and the snapshot
-      // round trip have to hold there and not just on the legacy index.
-      const reader = new SessionTranscriptReader(fixture.config.getTargetDir());
-      const newest = await reader.readTurnIndexPage(sessionId, { limit: 1 });
-      expect(newest.start).toBe(1);
-      expect(newest.turns.map((turn) => turn.label)).toEqual(['second turn']);
-      const oldest = await reader.readTurnIndexPage(sessionId, {
-        snapshot: newest.snapshot,
-        start: 0,
-        limit: 1,
-      });
-      expect(oldest.turns.map((turn) => turn.label)).toEqual(['first turn']);
-    });
-  });
-
-  it('pages a managed session from its projection', async () => {
-    await withWorkspace(async (activate) => {
-      const fixture = await activate({ managedSessionLog: true });
-      const recorder = fixture.config.getChatRecordingService()!;
-      const cursor = recorder.getBranchCheckpointCursor();
-      recorder.recordUserMessage('first turn');
-      recorder.recordAssistantTurn({
-        model: 'qwen3-coder-plus',
-        message: [{ text: 'first reply' }],
-      });
-      const point = await recorder.recordBranchCheckpointTransaction({
-        cursor,
-        stopReason: 'end_turn',
-      });
-      recorder.recordUserMessage('second turn');
-      await fixture.config.closeSessionWriter();
-
-      // Without projection-backed paging this handed the client the authority's
-      // wrapper records as if they were the conversation.
-      const workspaceCwd = fixture.config.getTargetDir();
-      const reader = new SessionTranscriptReader(workspaceCwd);
-      const first = await reader.readPage(sessionId, { limit: 2 });
-      expect(first.records.map((item) => item.type)).toEqual([
-        'user',
-        'assistant',
-      ]);
-      expect(first.hasMore).toBe(true);
-      expect(first.branchPointsByAssistantUuid).toEqual({
-        [first.records[1].uuid]: point!.checkpointUuid,
-      });
-
-      const second = await reader.readPage(sessionId, {
-        cursor: encodeSessionTranscriptCursor(
-          first.nextCursorState!,
-          workspaceCwd,
-        ),
-        limit: 2,
-      });
-      expect(second.records.map((item) => [item.type, item.subtype])).toEqual([
-        ['system', 'branch_checkpoint'],
-        ['user', undefined],
-      ]);
-      expect(second.records[1].message?.parts?.[0]?.text).toBe('second turn');
-      expect(second.hasMore).toBe(false);
-
-      // The turn index issues the snapshot a client anchors with, so both
-      // readers have to accept the same identity.
-      const turns = await reader.readTurnIndexPage(sessionId);
-      const anchored = await reader.readPage(sessionId, {
-        snapshot: turns.snapshot,
-        atRecordId: turns.turns[1].turnId,
-        limit: 1,
-      });
-      expect(anchored.targetRecordId).toBe(turns.turns[1].turnId);
-      expect(
-        anchored.records.map((item) => item.message?.parts?.[0]?.text),
-      ).toEqual(['second turn']);
-      expect(anchored.hasOlder).toBe(true);
-
-      // The projected segment length is what the byte budget measures, so a
-      // tiny budget still has to return the one record a page cannot split.
-      const budgeted = await reader.readPage(sessionId, {
-        limit: 10,
-        maxBytes: 1,
-      });
-      expect(budgeted.records).toHaveLength(1);
-      expect(budgeted.hasMore).toBe(true);
-
-      // Turn status resolution pages backward and chains the cursor, so the
-      // chain has to cover the whole projection in order.
-      const backward: ChatRecord[][] = [];
-      let backwardCursor: string | undefined;
-      for (let request = 0; request < 10; request++) {
-        const page = await reader.readPage(sessionId, {
-          ...(backwardCursor === undefined
-            ? { direction: 'backward' as const }
-            : { cursor: backwardCursor }),
-          limit: 2,
-        });
-        backward.unshift(page.records);
-        if (!page.hasMore || page.nextCursorState === undefined) break;
-        backwardCursor = encodeSessionTranscriptCursor(
-          page.nextCursorState,
-          workspaceCwd,
-        );
-      }
-      const projected = await reader.readPage(sessionId, { limit: 10 });
-      expect(backward.flat().map((item) => item.uuid)).toEqual(
-        projected.records.map((item) => item.uuid),
-      );
-
-      const before = await reader.readPage(sessionId, {
-        beforeRecordId: projected.records[3].uuid,
-        limit: 10,
-      });
-      expect(before.records.map((item) => item.uuid)).toEqual(
-        projected.records.slice(0, 3).map((item) => item.uuid),
-      );
-
-      // A frozen snapshot has to keep answering from the bytes it covers, so a
-      // record appended afterwards must not appear on an anchored page.
-      const reopened = await activate({ managedSessionLog: true });
-      reopened.config
-        .getChatRecordingService()!
-        .recordUserMessage('third turn');
-      await reopened.config.closeSessionWriter();
-      // Drop the cached index so the projection is rebuilt: a cache hit would
-      // hide whether the byte bound is what keeps the new record out.
-      clearSessionTranscriptIndexCacheEntriesForTest();
-      const afterAppend = await new SessionTranscriptReader(
-        workspaceCwd,
-      ).readPage(sessionId, {
-        snapshot: turns.snapshot,
-        atRecordId: turns.turns[1].turnId,
-        limit: 10,
-      });
-      const afterAppendTexts = afterAppend.records.map(
-        (item) => item.message?.parts?.[0]?.text,
-      );
-      expect(afterAppendTexts).toContain('second turn');
-      expect(afterAppendTexts).not.toContain('third turn');
-    });
-  });
-
-  it('maps a broken managed projection to an unavailable snapshot', async () => {
-    await withWorkspace(async (activate) => {
-      const fixture = await activate({ managedSessionLog: true });
-      fixture.config.getChatRecordingService()!.recordUserMessage('first turn');
-      await fixture.config.closeSessionWriter();
-
-      await rm(managedSessionResourceRoot(fixture.runtimeBaseDir, sessionId), {
-        recursive: true,
-        force: true,
-      });
-      clearSessionTranscriptIndexCacheEntriesForTest();
-
-      await expect(
-        new SessionTranscriptReader(fixture.config.getTargetDir()).readPage(
-          sessionId,
-          { limit: 10 },
-        ),
-      ).rejects.toBeInstanceOf(SessionTranscriptSnapshotUnavailableError);
-    });
-  });
-
-  it('leaves a managed host on the legacy transcript when the log is off', async () => {
-    await withWorkspace(async (activate) => {
-      const fixture = await activate({ managedSessionLog: false });
-      const recorder = fixture.config.getChatRecordingService()!;
-      recorder.recordUserMessage('summarise the docs');
-      await recorder.flush();
-
-      const records = await transcriptRecords(fixture.transcriptPath);
-      expect(records.map((entry) => entry['subtype'])).toEqual([
-        'session_execution_engine',
-        undefined,
-      ]);
-      expect(records[1]['type']).toBe('user');
-      expect(isManagedSessionTranscriptSync(fixture.transcriptPath)).toBe(
-        false,
-      );
-
-      await fixture.config.closeSessionWriter();
-
-      // A legacy close still releases, which removes the lock outright.
-      await expect(
-        stat(getSessionWriterLockPath(fixture.runtimeBaseDir, sessionId)),
-      ).rejects.toMatchObject({ code: 'ENOENT' });
-    });
+  it('refuses to bind a second log before activation', () => {
+    const recorder = managedConfig().getChatRecordingService()!;
+    const writer = {
+      canCarry: () => true,
+      write: async () => undefined,
+      project: async () => [],
+      stopAdvancing: async () => undefined,
+      commitProof: () => ({
+        last_commit_sequence: 0,
+        committed_prefix_hash: '0'.repeat(64),
+      }),
+      logSize: () => undefined,
+    };
+    recorder.bindManagedSink(writer);
+    expect(() => recorder.bindManagedSink(writer)).toThrow(
+      SessionWriterUnavailableError,
+    );
   });
 });
