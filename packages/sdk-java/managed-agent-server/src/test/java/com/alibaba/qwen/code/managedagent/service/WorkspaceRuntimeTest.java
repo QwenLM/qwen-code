@@ -16,12 +16,14 @@ import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
+import java.time.Duration;
 import com.alibaba.qwen.code.runtimebroker.HttpRuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
-import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionSeed;
 import com.alibaba.qwen.code.runtimebroker.RuntimeResourceHandle;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
@@ -45,6 +47,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.junit.jupiter.api.io.TempDir;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -208,6 +211,38 @@ class WorkspaceRuntimeTest {
     }
 
     @Test
+    void postClaimAuthorityRefusalIsNotReportedAsAnUnclaimedWorkspace() throws Exception {
+        SessionRecord session = createSession("storage", ".");
+        var fixture = transport(session);
+        when(fixture.http().installContext(any(), any(), any(), any()))
+                .thenReturn(CompletableFuture.completedFuture(Map.of()));
+        when(fixture.http().activateWorkspace(any(), any(), any(), eq(true))).thenAnswer(ignored -> {
+            jdbc.update("UPDATE managed_workspace_access SET can_read = FALSE WHERE tenant_id = ?", session.tenantId());
+            return CompletableFuture.completedFuture(null);
+        });
+        assertThatThrownBy(() -> fixture.transport().acquire(fixture.lease(), fixture.record().getSession())
+                .toCompletableFuture().join())
+                .cause().isInstanceOfSatisfying(RuntimeBrokerException.class, error -> {
+                    assertThat(error.getCode()).isEqualTo("runtime_session_acquire_failed");
+                    assertThat(error.getStatusCode()).isEqualTo(503);
+                });
+        authority.assertHeld(session.workspace(), fixture.record());
+        assertBusy(() -> authority.claim(session.workspace(), holder(session, "rival")));
+    }
+
+    @Test
+    void synchronousPostClaimFailureRemainsUncertain() throws Exception {
+        SessionRecord session = createSession("storage", ".");
+        var fixture = transport(session);
+        when(fixture.http().installContext(any(), any(), any(), any()))
+                .thenThrow(WorkspaceExecutionStore.unavailable());
+        assertThatThrownBy(() -> fixture.transport().acquire(fixture.lease(), fixture.record().getSession()))
+                .isInstanceOfSatisfying(RuntimeBrokerException.class, error ->
+                        assertThat(error.getCode()).isEqualTo("runtime_session_acquire_failed"));
+        authority.assertHeld(session.workspace(), fixture.record());
+    }
+
+    @Test
     void refusesMissingOrLinkedSessionDirectoryBeforeClaimingStorage() throws Exception {
         for (String cwd : List.of("missing", "link")) {
             SessionRecord session = createSession("storage", cwd);
@@ -219,6 +254,48 @@ class WorkspaceRuntimeTest {
             verify(fixture.http(), never()).installContext(any(), any(), any(), any());
             authority.claim(session.workspace(), holder(session, "rival"));
         }
+    }
+
+    @Test
+    void routesCapturedShellAndOriginalCleanupThroughV3AfterRevocation() throws Exception {
+        SessionRecord session = createSession("storage", ".");
+        var fixture = transport(session);
+        var runtimeSession = fixture.record().getSession();
+        authority.claim(session.workspace(), fixture.record());
+        Map<String, Object> publisher = Map.of("url", "http://127.0.0.1:1234/internal/hosted-shell-publisher/v1",
+                "token", "a".repeat(43));
+        when(fixture.http().installPublisherV3(any(), any(), any())).thenReturn(CompletableFuture.completedFuture(null));
+        fixture.transport().installPublisher(fixture.lease(), runtimeSession, publisher).toCompletableFuture().join();
+        Map<String, Object> reference = Map.of("sessionId", runtimeSession.getRuntimeSessionId(), "promptId", "turn",
+                "callId", "worker-call", "argsDigest", "sha256:" + "a".repeat(64), "runtimeProtocol", 3,
+                "inputDigest", "b".repeat(64), "executionCallId", "execution", "toolName", "run_shell_command",
+                "input", Map.of("command", "pwd"));
+        Map<String, Object> result = Map.of("executionStatus", "success", "responseParts", List.of());
+        Map<String, Object> response = Map.of("protocolVersion", 3, "toolResult", "managed-tool-result/1",
+                "state", "settled", "lastSequence", 2, "result", result);
+        when(fixture.http().executeV3(any(), any(), any(), any())).thenReturn(CompletableFuture.completedFuture(response));
+        assertThat(fixture.transport().execute(fixture.lease(), runtimeSession, reference).toCompletableFuture().join())
+                .isEqualTo(result);
+        @SuppressWarnings({"rawtypes", "unchecked"})
+        ArgumentCaptor<Map<String, Object>> wire = ArgumentCaptor.forClass((Class) Map.class);
+        @SuppressWarnings({"rawtypes", "unchecked"})
+        ArgumentCaptor<Map<String, Object>> capture = ArgumentCaptor.forClass((Class) Map.class);
+        verify(fixture.http()).executeV3(eq(fixture.lease()), eq(runtimeSession), wire.capture(), capture.capture());
+        assertThat(wire.getValue()).containsEntry("argsDigest", "b".repeat(64))
+                .doesNotContainKeys("runtimeProtocol", "inputDigest", "executionCallId");
+        assertThat(capture.getValue()).containsEntry("sessionId", session.sessionId())
+                .containsEntry("tenantId", session.tenantId()).containsEntry("bindingGeneration", "1")
+                .containsEntry("executionCallId", "execution");
+        verify(fixture.http(), never()).execute(any(), any(), any());
+        jdbc.update("UPDATE managed_workspace_access SET can_read = FALSE WHERE tenant_id = ?", session.tenantId());
+        assertUnavailable(() -> fixture.transport().installPublisher(fixture.lease(), runtimeSession, publisher));
+        when(fixture.http().statusV3(any(), any(), any(), eq(0L))).thenReturn(CompletableFuture.completedFuture(response));
+        when(fixture.http().cancelV3(any(), any(), any())).thenReturn(CompletableFuture.completedFuture(response));
+        when(fixture.http().acknowledgeV3(any(), any(), any(), any())).thenReturn(CompletableFuture.completedFuture(response));
+        Map<String, Object> status = Map.of("state", "settled", "result", result);
+        assertThat(fixture.transport().status(fixture.lease(), runtimeSession, reference, 0).toCompletableFuture().join()).isEqualTo(status);
+        assertThat(fixture.transport().cancel(fixture.lease(), runtimeSession, reference).toCompletableFuture().join()).isEqualTo(status);
+        assertThat(fixture.transport().acknowledge(fixture.lease(), runtimeSession, reference, Map.of()).toCompletableFuture().join()).isEqualTo(status);
     }
 
     @Test
@@ -242,27 +319,59 @@ class WorkspaceRuntimeTest {
         authority.claim(session.workspace(), holder(session, "next"));
     }
 
+    @Test
+    void lateDeactivationCannotClearAHolderAfterTheLossFence() throws Exception {
+        SessionRecord session = createSession("storage", ".");
+        var fixture = transport(session);
+        var rival = holder(session, "rival");
+        authority.claim(session.workspace(), fixture.record());
+        var deactivation = new CompletableFuture<Void>();
+        when(fixture.http().activateWorkspace(any(), any(), any(), eq(false))).thenReturn(deactivation);
+        var releasing = fixture.transport().release(fixture.lease(), fixture.record().getSession()).toCompletableFuture();
+        RuntimeBindingRecord lost = fixture.bindings().compareAndSet(fixture.runtime(),
+                fixture.runtime().withState(RuntimeBindingRecord.State.LOST, fixture.lease(), Instant.now()));
+        assertThat(lost).isNotNull();
+        deactivation.complete(null);
+        assertThatThrownBy(releasing::join).hasRootCauseInstanceOf(RuntimeBrokerException.class);
+        authority.assertHeld(session.workspace(), fixture.record());
+        assertBusy(() -> authority.claim(session.workspace(), rival));
+    }
+
     private TransportFixture transport(SessionRecord session) throws Exception {
         var resolver = resolver(session, temp.toRealPath());
         var resolved = resolver.resolve(session.sessionId());
         var runtimeSession = new RuntimeSession(session.sessionId(), UUID.randomUUID().toString(), "bootstrap", resolved.scope());
-        var record = new RuntimeSessionRecord(runtimeSession, "binding", 1, RuntimeSessionRecord.State.ACQUIRING, 0, Instant.now());
         var request = new RuntimeProvisionRequest(resolved.scope(), session.sessionId(), "local-process", "storage");
-        var seed = RuntimeProvisionSeed.create("binding", 1);
-        var lease = new RuntimeLease(seed.getProvisionalRuntimeId(), URI.create("http://127.0.0.1:9"), seed.getToken(), seed.getLeaseId(), seed.getEpoch());
-        Instant now = Instant.now();
-        var runtime = new RuntimeBindingRecord("binding", request, seed, 1, RuntimeBindingRecord.State.READY, lease,
-                new RuntimeResourceHandle("local-process", 1, Map.of("provider", "local-process")), 1, false, null, null, 0, 0, now, now, now);
+        var bindings = bindings();
+        var runtime = readyBinding(bindings, request);
+        var lease = runtime.getLease();
+        var record = new RuntimeSessionRecord(runtimeSession, runtime.getBindingId(), runtime.getGeneration(),
+                RuntimeSessionRecord.State.ACQUIRING, 0, Instant.now());
         var runtimeSessions = mock(RuntimeSessionRepository.class);
-        var bindings = mock(RuntimeBindingRepository.class);
         when(runtimeSessions.findById(resolved.scope(), runtimeSession.getRuntimeSessionId())).thenReturn(record);
-        when(bindings.findById("binding")).thenReturn(runtime);
         var http = mock(HttpRuntimeTransport.class);
-        return new TransportFixture(new WorkspaceRuntimeTransport(http, resolver, authority, bindings, runtimeSessions), http, record, lease);
+        return new TransportFixture(new WorkspaceRuntimeTransport(http, resolver, authority, bindings, runtimeSessions),
+                http, record, lease, runtime, bindings);
     }
 
     private record TransportFixture(WorkspaceRuntimeTransport transport, HttpRuntimeTransport http,
-            RuntimeSessionRecord record, RuntimeLease lease) {
+            RuntimeSessionRecord record, RuntimeLease lease, RuntimeBindingRecord runtime,
+            RuntimeBindingRepository bindings) {
+    }
+
+    private JdbcRuntimeBindingRepository bindings() {
+        return new JdbcRuntimeBindingRepository(dataSource, new AesGcmSecretProtector("test-key", new byte[32]));
+    }
+
+    private static RuntimeBindingRecord readyBinding(RuntimeBindingRepository bindings, RuntimeProvisionRequest request) {
+        var created = bindings.findOrCreate(request);
+        var claimed = bindings.claimOperation(created.getBindingId(), "test", Duration.ofMinutes(5));
+        var seed = claimed.getProvisionSeed();
+        var lease = new RuntimeLease(seed.getProvisionalRuntimeId(), URI.create("http://127.0.0.1:9"),
+                seed.getToken(), seed.getLeaseId(), seed.getEpoch());
+        return bindings.compareAndSet(claimed, claimed.withAttestation(lease,
+                new RuntimeResourceHandle("local-process", 1, Map.of("provider", "local-process")),
+                Instant.now(), Instant.now()));
     }
 
     private boolean contend(WorkspaceExecutionStore store, ContextBinding binding,
@@ -286,7 +395,7 @@ class WorkspaceRuntimeTest {
         jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, can_read, can_create)"
                 + " VALUES (?, 'workspace', ?, TRUE, TRUE)", tenant, "actor".getBytes(StandardCharsets.UTF_8));
         var created = sessions.insertWorkspaceSessionCommand(tenant, "actor", "create", "sha256:" + "a".repeat(64),
-                "qwen-code", null, List.of(), null, new WorkspaceSelection("workspace", cwd));
+                "qwen-code", null, null, List.of(), null, new WorkspaceSelection("workspace", cwd));
         return sessions.findSessionById(created.sessionId()).orElseThrow();
     }
 
@@ -305,8 +414,10 @@ class WorkspaceRuntimeTest {
         var binding = session.workspace();
         var scope = new RuntimeScope(session.tenantId(), binding.getWorkspaceId(), "1", temp.toString(),
                 WorkspaceExecutionProfile.CAPABILITY_DIGEST, "session");
+        var runtime = readyBinding(bindings(), new RuntimeProvisionRequest(scope, id, "local-process",
+                binding.getStorageId()));
         return new RuntimeSessionRecord(new RuntimeSession(session.sessionId(), id, "bootstrap", scope),
-                "binding-" + id, 1, RuntimeSessionRecord.State.ACQUIRING, 0, Instant.now());
+                runtime.getBindingId(), runtime.getGeneration(), RuntimeSessionRecord.State.ACQUIRING, 0, Instant.now());
     }
 
     private static String digest(String text) throws Exception {

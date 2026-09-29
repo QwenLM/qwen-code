@@ -275,6 +275,7 @@ const GATE_EXEMPT_TOOLS = new Set<string>([
   ToolNames.READ_FILE,
   ToolNames.READ_MCP_RESOURCE,
   ToolNames.ENTER_PLAN_MODE,
+  ToolNames.SEARCH_MEMORY,
 ]);
 
 // The tri-state persistedOutputFiles mapping every truncation pass reports
@@ -5647,7 +5648,8 @@ export class CoreToolScheduler {
                 setPromoteAbortControllerCallback,
                 canPromoteForegroundShell,
               );
-            return scheduledCall.request.name === ToolNames.EXEC
+            return scheduledCall.request.name === ToolNames.EXEC ||
+              scheduledCall.request.name === ToolNames.TOOL_SEARCH
               ? runWithToolCallRuntime(
                   {
                     parentCallId: callId,
@@ -5688,7 +5690,8 @@ export class CoreToolScheduler {
                 liveOutputCallback,
                 shellExecutionConfig,
               );
-            return scheduledCall.request.name === ToolNames.EXEC
+            return scheduledCall.request.name === ToolNames.EXEC ||
+              scheduledCall.request.name === ToolNames.TOOL_SEARCH
               ? runWithToolCallRuntime(
                   {
                     parentCallId: callId,

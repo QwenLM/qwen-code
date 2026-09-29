@@ -150,11 +150,6 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
         return CompletableFuture.completedFuture(null);
     }
 
-    @Override
-    public void resume(String sessionId) {
-        retired.remove(sessionId);
-    }
-
     public URI getBaseUri() {
         return server.getBaseUri();
     }
@@ -177,12 +172,17 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
                 throw new IllegalStateException("Merged local Runtime"
                         + " provisioner does not accept extra environment");
             }
-            return new LocalProcessRuntimeProvisioner(List.of(
+            List<String> command = List.of(
                     Path.of(broker.getNodeExecutable()).toAbsolutePath()
                             .toString(),
                     Path.of(broker.getWorkerEntry()).toAbsolutePath()
-                            .toString(), "managed-runtime-worker"),
-                    Path.of(broker.getStateDirectory()), transport);
+                            .toString(), "managed-runtime-worker");
+            Path stateDirectory = Path.of(broker.getStateDirectory()).toAbsolutePath().normalize();
+            if (broker.isDurableLocalProcess()) {
+                requireRecoveryDirectoryOutsideWorkspaces(broker, stateDirectory);
+                return LocalProcessRuntimeProvisioner.durable(command, stateDirectory, transport);
+            }
+            return new LocalProcessRuntimeProvisioner(command, stateDirectory, transport);
         }
         if ("static".equals(broker.getProvisioner())) {
             if (!"workspace".equals(broker.getIsolationClass())) {
@@ -203,6 +203,24 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
         }
         throw new IllegalStateException("Runtime Broker provisioner must be"
                 + " local-process or static");
+    }
+
+    private static void requireRecoveryDirectoryOutsideWorkspaces(ManagedAgentProperties.RuntimeBroker broker,
+            Path directory) {
+        try {
+            Path candidate = java.nio.file.Files.exists(directory) ? directory.toRealPath()
+                    : directory.getParent().toRealPath().resolve(directory.getFileName());
+            if (candidate.startsWith(Path.of(broker.getWorkspaceCwd()).toRealPath())) {
+                throw new IllegalStateException("Runtime recovery directory must be outside Workspace roots");
+            }
+            for (var mount : broker.getWorkspaceMounts()) {
+                if (candidate.startsWith(Path.of(mount.root()).toRealPath())) {
+                    throw new IllegalStateException("Runtime recovery directory must be outside Workspace roots");
+                }
+            }
+        } catch (IOException error) {
+            throw new IllegalStateException("Runtime recovery directory could not be verified", error);
+        }
     }
 
     private static String resolveWorkspaceCwd(

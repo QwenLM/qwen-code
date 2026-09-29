@@ -91,6 +91,7 @@ import {
   computeUniqueBranchTitle,
   normalizeDerivedBranchTitle,
   BranchPointInvalidError,
+  SessionForkSourceUnavailableError,
   parseGoalSnapshotV2,
   parseGoalStateCause,
   ToolNames,
@@ -298,6 +299,7 @@ import {
 } from './extension-skills.js';
 import { Session, registerCreateSubSessionTool } from './session/Session.js';
 import { restoreSessionModelThenAuthenticate } from './session-model-persistence.js';
+import { applyRestoredSessionApprovalMode } from './session-approval-mode-persistence.js';
 import { HistoryReplayer } from './session/history-replayer.js';
 import { renderPreparedGoalUpdate } from './session/recovered-goal-update.js';
 import { ActiveWorkReporter } from './active-work-reporter.js';
@@ -361,7 +363,7 @@ import { registerCleanup, runExitCleanup } from '../utils/cleanup.js';
 import { QWEN_CODE_SERVE_ENV } from '../config/acp-channel-fallback.js';
 import { isSshWorkspaceExtMethodAllowed } from './ssh-workspace-guards.js';
 import { PeerMessaging } from '../peerMessaging/peer-messaging.js';
-import { isCrossSessionMessagingEnabled } from '../peerMessaging/enabled.js';
+import { isCrossSessionMessagingActive } from '../peerMessaging/enabled.js';
 import { startNonInteractiveOpenAILogHousekeeping } from '../services/housekeeping/scheduler.js';
 import { appEvents, AppEvent } from '../utils/events.js';
 import {
@@ -723,6 +725,7 @@ type AcpSessionProfileStage =
   | 'live_restore'
   | 'existence_check'
   | 'config_setup'
+  | 'restore_approval_mode'
   | 'restore_session_model'
   | 'auth'
   | 'file_system_setup'
@@ -3894,8 +3897,8 @@ class QwenAgent implements Agent {
    * converged on, seeded with the session's boot-derived mode at
    * publication. `workspaceReload` compares the reloaded disk value against
    * this — not against each session's live mode — because approval mode has
-   * runtime-only writers (`ExitPlanModeTool` approved plan exits, ACP
-   * `session/set_mode`, the `sessionApprovalMode` ext) that never persist,
+   * writers (`ExitPlanModeTool` approved plan exits, ACP `session/set_mode`,
+   * the `sessionApprovalMode` ext) that do not update workspace settings,
    * so a live session legitimately diverges from the file mid-workflow and
    * an unchanged file must not clobber those transitions. The record lives
    * on the daemon so it survives a `this.settings` cache swap, and per
@@ -4290,6 +4293,7 @@ class QwenAgent implements Agent {
           {
             ...this.argv,
             sessionId: 'workspace-mcp-discovery',
+            experimentalLsp: false,
             resume: undefined,
             continue: false,
             chatRecording: false,
@@ -5007,7 +5011,7 @@ class QwenAgent implements Agent {
   /**
    * Give a newly published session a registry record of its own.
    *
-   * Only when that session's own settings turn messaging on. A record
+   * Only when that session itself takes part in messaging. A record
    * with no inbox behind it would put a name in every peer's listing
    * that can be addressed and never answered, which is worse than not
    * appearing at all — the interactive UI registers unconditionally
@@ -5019,11 +5023,15 @@ class QwenAgent implements Agent {
     config: Config,
     settings: LoadedSettings,
   ): void {
-    // Each session's own settings decide: one process can host sessions
-    // from more than one workspace, and a record exists to be addressed,
-    // so it is written only when that session's settings turn messaging
-    // on. The process's startup settings answer for nobody else.
-    if (!isCrossSessionMessagingEnabled(settings.merged)) return;
+    // Each session decides for itself: one process can host sessions from
+    // more than one workspace, and a record exists to be addressed, so it
+    // is written only when that session takes part. Read off this session's
+    // own `config`, never a process-startup one. The suppressions count
+    // here exactly as they do in the interactive UI: without them a hosted
+    // safe-mode or bare session binds an inbox and publishes its `ipcPath`,
+    // advertising itself as reachable from the mode that exists to close
+    // that surface — and, having an `ipcPath`, is also allowed to send.
+    if (!isCrossSessionMessagingActive(settings.merged, config)) return;
     // Bound by the first session that needs it rather than at startup: an
     // ACP process with no session has nothing to advertise and nobody to
     // receive for, and this is also the first moment the agent exists.
@@ -5989,6 +5997,10 @@ class QwenAgent implements Agent {
         config.suppressRestorableAskUserQuestionPreservation();
       }
       const projection = config.consumeSessionRestoreProjection?.();
+      const fileDerivedApprovalMode = config.getApprovalMode();
+      profiler.timeSync('restore_approval_mode', () =>
+        applyRestoredSessionApprovalMode(config, projection),
+      );
       const suppressRecoveredGoalPresentation =
         projection?.runtime.goalRecoverySourceUuid !== undefined &&
         projection.runtime.goalRecoverySourceUuid !==
@@ -6036,6 +6048,7 @@ class QwenAgent implements Agent {
           this.createAndStoreSession(config, settings, undefined, {
             deferWorkspaceActivation: provisionalStandalone,
             configProviderRevision,
+            fileDerivedApprovalMode,
             ...(provisionalStandalone
               ? {
                   beforeDeferredWorkspaceActivation: () =>
@@ -6404,6 +6417,10 @@ class QwenAgent implements Agent {
         config.suppressRestorableAskUserQuestionPreservation();
       }
       const projection = config.consumeSessionRestoreProjection?.();
+      const fileDerivedApprovalMode = config.getApprovalMode();
+      profiler.timeSync('restore_approval_mode', () =>
+        applyRestoredSessionApprovalMode(config, projection),
+      );
       let response: ResumeSessionResponse | undefined;
       try {
         if (!provisionalStandalone) {
@@ -6422,6 +6439,7 @@ class QwenAgent implements Agent {
           this.createAndStoreSession(config, settings, undefined, {
             deferWorkspaceActivation: provisionalStandalone,
             configProviderRevision,
+            fileDerivedApprovalMode,
             ...(provisionalStandalone
               ? {
                   beforeDeferredWorkspaceActivation: () =>
@@ -6515,7 +6533,11 @@ class QwenAgent implements Agent {
       const sessionPath = config
         .getSessionService()
         .getWorktreeSessionPath(config.getSessionId());
-      const restored = await restoreWorktreeContext(sessionPath);
+      const restored = await restoreWorktreeContext(
+        sessionPath,
+        (error) => debugLogger.warn(`ACP worktree restore warning: ${error}`),
+        config.getSessionId(),
+      );
       if (restored.contextMessage) {
         session.pendingWorktreeNotice = restored.contextMessage;
       }
@@ -9477,6 +9499,9 @@ class QwenAgent implements Agent {
     const requestedCwd =
       typeof params['cwd'] === 'string' ? params['cwd'] : undefined;
     const cwd = requestedCwd || process.cwd();
+    const UUID_V4_RE =
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
     switch (method) {
       case SERVE_STATUS_EXT_METHODS.channelPing: {
         const nonce = params['nonce'];
@@ -13980,13 +14005,30 @@ class QwenAgent implements Agent {
         }
         const name = params['name'];
         const atRecordId = params['atRecordId'];
+        const targetSessionId = params['targetSessionId'];
         if (atRecordId !== undefined && typeof atRecordId !== 'string') {
           throw RequestError.invalidParams(undefined, 'Invalid atRecordId');
+        }
+        if (
+          targetSessionId !== undefined &&
+          (typeof targetSessionId !== 'string' ||
+            !UUID_V4_RE.test(targetSessionId))
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid targetSessionId',
+          );
         }
         if (isSideTask && atRecordId !== undefined) {
           throw RequestError.invalidParams(
             undefined,
             'atRecordId is not supported for side tasks',
+          );
+        }
+        if (isSideTask && targetSessionId !== undefined) {
+          throw RequestError.invalidParams(
+            undefined,
+            'targetSessionId is not supported for side tasks',
           );
         }
 
@@ -14048,7 +14090,7 @@ class QwenAgent implements Agent {
                     baseName,
                     sessionService,
                   );
-                  const newSessionId = randomUUID();
+                  const newSessionId = targetSessionId ?? randomUUID();
                   const fork = () =>
                     sessionService.forkSession(sessionId, newSessionId, {
                       title,
@@ -14070,6 +14112,12 @@ class QwenAgent implements Agent {
               throw new RequestError(-32009, error.message, {
                 errorKind: 'branch_point_invalid',
                 recordId: error.recordId,
+              });
+            }
+            if (error instanceof SessionForkSourceUnavailableError) {
+              throw new RequestError(-32004, error.message, {
+                errorKind: 'session_not_found',
+                sessionId: error.sessionId,
               });
             }
             throw error;
@@ -15741,6 +15789,7 @@ class QwenAgent implements Agent {
       enableLiveScreenContext?: boolean;
       deferWorkspaceActivation?: boolean;
       configProviderRevision?: number;
+      fileDerivedApprovalMode?: ApprovalMode;
       beforeDeferredWorkspaceActivation?: () => Promise<void>;
       prepareBeforeSessionCreate?: () => Promise<void>;
       beforeSessionPublish?: () => void;
@@ -15947,12 +15996,11 @@ class QwenAgent implements Agent {
       }
       this.sessions.set(sessionId, session);
       this.registerHostedSession(sessionId, config, settings);
-      // The session boots converged on the mode its settings derived; later
-      // reloads track convergence from here. Restricted sessions derive
-      // DEFAULT, mirroring the fold the reload loop applies to them.
+      // Track the file-derived mode, not a mode restored from the transcript.
+      // An unchanged settings reload must not overwrite session-local state.
       this.sessionApprovalModeConverged.set(
         sessionId,
-        config.getApprovalMode(),
+        options.fileDerivedApprovalMode ?? config.getApprovalMode(),
       );
       published = true;
       // The Session set itself is part of the snapshot: publish so the daemon

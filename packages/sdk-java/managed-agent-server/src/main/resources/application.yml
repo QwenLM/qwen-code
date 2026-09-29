@@ -16,6 +16,11 @@ server:
   address: '${QWEN_MANAGED_AGENT_SERVER_ADDRESS:127.0.0.1}'
   shutdown: 'graceful'
 
+logging:
+  pattern:
+    # Brackets only when a request id is set, not on every other log line.
+    correlation: '%replace([%X{requestId}] ){''^\[\] $'', ''''}'
+
 management:
   endpoints:
     web:
@@ -24,6 +29,7 @@ management:
 
 qwen:
   managed-agent:
+    agent-revision: '${QWEN_MANAGED_AGENT_REVISION:1}'
     session-store:
       enabled: '${QWEN_MANAGED_AGENT_SESSION_STORE_ENABLED:false}'
       base-url: '${QWEN_MANAGED_AGENT_SESSION_STORE_BASE_URL:}'
@@ -64,6 +70,7 @@ qwen:
       workspace-cwd: '${QWEN_MANAGED_AGENT_WORKSPACE_CWD:}'
       isolation-class: '${QWEN_MANAGED_AGENT_RUNTIME_ISOLATION:session}'
       state-directory: '${QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY:}'
+      durable-local-process: '${QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS:false}'
       credential-key-id: '${QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY_ID:}'
       credential-key: '${QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY:}'
       node-executable: '${QWEN_MANAGED_AGENT_NODE_EXECUTABLE:}'

@@ -678,6 +678,11 @@ interface ChannelInfo {
   /** Revisions of workspace changes this channel did not acknowledge. */
   workspaceChangesMissing?: Set<number>;
   /**
+   * Revision of a missing change that tightened permissions. A session whose
+   * restore or creation lands on this channel afterwards is fenced too.
+   */
+  workspaceChangeFence?: number;
+  /**
    * The user-language change last sent to this channel, settled either way,
    * so a session request on a new Managed channel waits for it rather than
    * sending it again.
@@ -688,7 +693,8 @@ interface ChannelInfo {
 /**
  * A paired channel's quarantine, from the moment it first stops taking fresh
  * sessions until its process tree is confirmed gone. While it lasts the
- * channel admits no new prompt, background turn or side request, and its
+ * channel admits no new prompt, message from another session or side request,
+ * and a background notification turn only until its termination starts; its
  * engine admits no fresh session — even after termination starts, because a
  * child that has not exited may still hold work nobody can cancel.
  */
@@ -3749,15 +3755,18 @@ export function createSessionControlPlane(
     for (const entry of unsettled) {
       void bridgeApi.cancelSession(entry.sessionId).catch(() => undefined);
     }
-    void harness
-      .killChannelWithLog(ci.harness, 'quarantine drain deadline')
-      .then(() => armQuarantineExitCheck(ci, episode));
+    // Terminating the channel starts its exit check (see
+    // `onChannelTerminationStart`).
+    void harness.killChannelWithLog(ci.harness, 'quarantine drain deadline');
   }
 
   /**
-   * A child still not confirmed gone one budget after termination (never less
-   * than the registry's own termination window) is reported as needing an
-   * operator; its engine stays closed meanwhile.
+   * A child still not confirmed gone one budget after its termination began
+   * (never less than the registry's own termination window) is reported as
+   * needing an operator; its engine stays closed meanwhile. Armed when a kill
+   * or reap starts terminating the channel (the deadline, a drained channel's
+   * reap, a failed close's recovery), when its transport fails, or when its
+   * root exits before the registry releases the tree.
    */
   function armQuarantineExitCheck(
     ci: ChannelInfo,
@@ -3781,6 +3790,24 @@ export function createSessionControlPlane(
       );
     }, exitCheckMs);
     episode.exitTimer.unref();
+  }
+
+  /**
+   * Whether a quarantined channel may run a background notification turn. A
+   * report of background work is admitted whether that work began before the
+   * quarantine or was started by a turn admitted during it: the work already
+   * exists, and refusing its report never retires the channel sooner, because
+   * the child keeps the report queued and keeps reporting it as held work. The
+   * drain deadline, not a refusal, bounds how long admitted turns keep the
+   * channel busy. A message from another session is new input and is refused,
+   * and so is every turn once the channel's termination has begun. A session
+   * fenced by a tightening change is refused before this is asked.
+   */
+  function quarantineAdmitsBackgroundTurn(
+    ci: ChannelInfo,
+    turn: BackgroundNotificationTurn,
+  ): boolean {
+    return turn.kind !== 'peer' && !ci.harness.isDying;
   }
 
   /**
@@ -4100,7 +4127,8 @@ export function createSessionControlPlane(
    * sessions take no new work, settled ones are closed, and it retires by the
    * drain deadline unless a late acknowledgement ends the quarantine first. A
    * change that tightens permissions also cancels running turns now, refuses
-   * permission requests, and cancels Goal turns the child reports later.
+   * permission requests and background turns, and cancels Goal turns the child
+   * reports later, including on sessions that register on the channel later.
    */
   function refuseUnacknowledgedChannel(
     ci: ChannelInfo,
@@ -4113,6 +4141,7 @@ export function createSessionControlPlane(
         (tightening ? '; cancelling its running turns' : ''),
     );
     if (tightening) {
+      ci.workspaceChangeFence = revision;
       for (const sessionId of Array.from(ci.sessionIds)) {
         const entry = byId.get(sessionId);
         if (!entry || entry.channel !== ci.channel) continue;
@@ -4130,11 +4159,12 @@ export function createSessionControlPlane(
   }
 
   /**
-   * A late, exact acknowledgement of every change a channel missed ends its
+   * A late, exact acknowledgement of every change a channel missed lifts its
+   * permission fence, because the engine now holds those changes, and ends its
    * quarantine before the drain deadline, as #12737 Q3 allows. It never ends
    * an episode that began for another cause or that another cause has joined,
    * nor one whose channel is already terminating (the deadline starts that);
-   * sessions already closed stay closed.
+   * the fence lifts even then. Sessions already closed stay closed.
    */
   function acknowledgeMissingWorkspaceChange(
     ci: ChannelInfo,
@@ -4143,6 +4173,12 @@ export function createSessionControlPlane(
     const missing = ci.workspaceChangesMissing;
     if (!missing?.delete(revision) || missing.size > 0) return;
     ci.workspaceChangesMissing = undefined;
+    const fenced = ci.workspaceChangeFence !== undefined;
+    ci.workspaceChangeFence = undefined;
+    for (const sessionId of ci.sessionIds) {
+      const entry = byId.get(sessionId);
+      if (entry?.channel === ci.channel) delete entry.workspaceChangeFence;
+    }
     const episode = ci.quarantine;
     // With this cause gone, any other one, or the one the episode began with,
     // is what the channel reports now.
@@ -4151,14 +4187,16 @@ export function createSessionControlPlane(
       ci.harness.isDying ||
       channelUnavailableReason(ci) !== 'workspace_change_unacknowledged'
     ) {
+      if (episode && fenced) {
+        writeStderrLine(
+          `qwen serve: ACP channel ${ci.id} acknowledged the workspace changes it missed; ` +
+            `its permission fence is lifted, and its quarantine continues`,
+        );
+      }
       return;
     }
     clearTimeout(episode.drainTimer);
     ci.quarantine = undefined;
-    for (const sessionId of ci.sessionIds) {
-      const entry = byId.get(sessionId);
-      if (entry?.channel === ci.channel) delete entry.workspaceChangeFence;
-    }
     writeStderrLine(
       `qwen serve: ACP channel ${ci.id} acknowledged the workspace changes it missed; ` +
         `its quarantine ended after ${Date.now() - episode.startedAt}ms`,
@@ -4813,8 +4851,11 @@ export function createSessionControlPlane(
           entry.backgroundTurn ||
           entry.goalTurnActive ||
           entry.pendingPromptList.some((p) => !p.terminalPublished) ||
-          // A quarantined channel admits no new background turn.
-          infoRef.current?.quarantine
+          // An unacknowledged change that tightened permissions admits no
+          // model turn at all until it is acknowledged (#12737 Q2).
+          entry.workspaceChangeFence !== undefined ||
+          (infoRef.current?.quarantine !== undefined &&
+            !quarantineAdmitsBackgroundTurn(infoRef.current, turn))
         )
           return false;
         entry.backgroundTurn = turn;
@@ -5035,6 +5076,7 @@ export function createSessionControlPlane(
 
   function handleChannelTransportUnavailable(info: ChannelInfo): void {
     clearInFlightExtensionRefreshes(info.connection);
+    if (info.quarantine) armQuarantineExitCheck(info, info.quarantine);
   }
 
   const harness = createHarness({
@@ -5053,6 +5095,10 @@ export function createSessionControlPlane(
     constructHarnessChannel: constructChannelInfo,
     handleChannelTransportUnavailable: (channel) =>
       handleChannelTransportUnavailable(getChannelInfo(channel)),
+    onChannelTerminationStart: (channel) => {
+      const info = getChannelInfo(channel);
+      if (info.quarantine) armQuarantineExitCheck(info, info.quarantine);
+    },
     beforeChannelExit: (channel) => beforeChannelExit(getChannelInfo(channel)),
     handleChannelExit: (channel, exitInfo) =>
       handleChannelExit(getChannelInfo(channel), exitInfo),
@@ -7081,6 +7127,33 @@ export function createSessionControlPlane(
     });
   };
 
+  const syncRestoreStateApprovalMode = (
+    entry: SessionEntry,
+    mode: string,
+    planExecutionMode: string | undefined,
+  ): void => {
+    const state = entry.restoreState;
+    if (!state) return;
+    if (state.modes) {
+      state.modes = { ...state.modes, currentModeId: mode };
+      const metadata: Record<string, unknown> = { ...state.modes._meta };
+      delete metadata['planExecutionMode'];
+      if (planExecutionMode) {
+        metadata['planExecutionMode'] = planExecutionMode;
+      }
+      if (Object.keys(metadata).length > 0) {
+        state.modes._meta = metadata;
+      } else {
+        delete state.modes._meta;
+      }
+    }
+    if (Array.isArray(state.configOptions)) {
+      state.configOptions = state.configOptions.map((option) =>
+        option.id === 'mode' ? { ...option, currentValue: mode } : option,
+      );
+    }
+  };
+
   const publishApprovalModeChanged = (
     entry: SessionEntry,
     payload: {
@@ -7094,6 +7167,7 @@ export function createSessionControlPlane(
     entry.currentApprovalMode = payload.next;
     entry.planExecutionMode =
       payload.next === 'plan' ? payload.planExecutionMode : undefined;
+    syncRestoreStateApprovalMode(entry, payload.next, entry.planExecutionMode);
     entry.approvalModePublishGeneration++;
     // See `publishModelSwitched`: `publish()` never throws, so no wrapper.
     entry.events.publish({
@@ -7319,6 +7393,11 @@ export function createSessionControlPlane(
       retryAllowed: false,
       promptSettledAt: null,
       promptSettledCloseTimer: undefined,
+      // A restore or creation already in flight when the channel missed a
+      // tightening change lands under the same fence as the sessions it found.
+      ...(ci.workspaceChangeFence !== undefined
+        ? { workspaceChangeFence: ci.workspaceChangeFence }
+        : {}),
     };
     if (isReservedStandaloneSessionSourceType(options.sourceType)) {
       entry.prepareArtifactWorkspace = () =>
@@ -11976,7 +12055,8 @@ export function createSessionControlPlane(
         );
       }
       const isSideTask = source.sourceType === 'side_task';
-      const restoreBranch = isSideTask || req.atRecordId === undefined;
+      const restoreBranch =
+        !req.persistOnly && (isSideTask || req.atRecordId === undefined);
 
       if (context?.clientId !== undefined) {
         resolveTrustedClientId(entry, context.clientId);
@@ -12013,7 +12093,7 @@ export function createSessionControlPlane(
 
         assertFreshSessionsAvailable(sourceCi.harness.executionEngine);
         let admission: ReturnType<typeof reserveFreshSession> | undefined;
-        if (restoreBranch) {
+        if (restoreBranch || req.persistOnly) {
           if (
             byId.size +
               inFlightSpawns.size +
@@ -12023,6 +12103,8 @@ export function createSessionControlPlane(
           ) {
             throw new SessionLimitExceededError(maxSessions);
           }
+        }
+        if (restoreBranch) {
           admission = reserveFreshSession({
             operation: 'branch',
             workspaceCwd: boundWorkspace,
@@ -12054,6 +12136,9 @@ export function createSessionControlPlane(
               name: req.name,
               ...(req.atRecordId !== undefined
                 ? { atRecordId: req.atRecordId }
+                : {}),
+              ...(req.targetSessionId !== undefined
+                ? { targetSessionId: req.targetSessionId }
                 : {}),
             },
           );
@@ -12097,6 +12182,14 @@ export function createSessionControlPlane(
           if (!result || typeof result.newSessionId !== 'string') {
             throw new Error(
               `branchSession: agent returned invalid response: ${JSON.stringify(result)}`,
+            );
+          }
+          if (
+            req.targetSessionId !== undefined &&
+            result.newSessionId !== req.targetSessionId
+          ) {
+            throw new Error(
+              'branchSession: agent returned a different target session id',
             );
           }
           // The fork is durably committed at this point, including the
@@ -13106,6 +13199,16 @@ export function createSessionControlPlane(
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
       return toSessionSummary(entry);
+    },
+
+    getSessionExecutionSnapshot(sessionId) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      return {
+        workspaceCwd: entry.workspaceCwd,
+        effectiveCwd: entry.effectiveCwd,
+        ...(entry.worktree ? { worktree: { ...entry.worktree } } : {}),
+      };
     },
 
     recordHeartbeat(sessionId, context) {

@@ -122,6 +122,39 @@ const EN: Messages = {
     'The request outcome is unconfirmed. Retry to check or complete the same submission.',
   'managed.newRequired': 'Start a new task to send another message.',
   'managed.truncated': '[Details truncated]',
+  'managed.phase.created': 'Created',
+  'managed.workspaceCreateTitle': 'Create a Workspace session',
+  'managed.workspaceLabel': 'Workspace',
+  'managed.workspaceChoose': 'Choose a Workspace',
+  'managed.workspaceDirectory': 'Relative directory',
+  'managed.workspaceCreate': 'Create session',
+  'managed.workspaceBound': 'Bound Workspace',
+  'managed.workspaceExecutionUnavailable':
+    'Workspace is bound. Message execution is not available in this service yet.',
+  'managed.workspaceSharedFiles':
+    'Sessions in the same Workspace share files. Directory availability is checked before execution.',
+  'managed.workspaceEmpty': 'No readable Workspaces are available.',
+  'managed.workspaceUnsupported':
+    'This service does not support Workspace binding.',
+  'managed.workspacePermission':
+    'You do not have permission to discover Workspaces.',
+  'managed.workspaceLoadFailed': 'Could not load Workspaces.',
+  'managed.workspaceStorageUnavailable':
+    'Browser session storage is unavailable. Creation cannot start safely.',
+  'managed.workspaceUncertain':
+    'Creation is unconfirmed. Retry the saved request or read the saved session.',
+  'managed.workspaceRetryRead': 'Retry reading session',
+  'managed.workspaceSessionId': 'Session ID',
+  'managed.workspaceProtocolError': (v) =>
+    `Session ${v?.sessionId ?? ''} was created, but its Workspace binding could not be confirmed.`,
+  'managed.workspaceAbandon': 'Abandon local confirmation',
+  'managed.workspaceAbandonWarning':
+    'The original empty session may still exist. Abandoning this record does not delete it.',
+  'managed.workspaceSwitchTitle': 'Switch Workspace?',
+  'managed.workspaceSwitchDescription':
+    'Switching resets the relative directory to the Workspace root.',
+  'managed.workspaceKeep': 'Keep selection',
+  'managed.workspaceSwitch': 'Switch',
   'managed.phase.admitted': 'Accepted',
   'managed.phase.runtime_starting': 'Preparing environment',
   'managed.phase.agent_running': 'Thinking / responding',
@@ -2113,6 +2146,18 @@ const EN: Messages = {
     'This response is no longer on the active history path. Branching from this point is not supported by the current session.',
   'branch.success': (v) =>
     `Copied session. New session name: "${v?.name ?? ''}". Switched to the new session.`,
+  'branch.dialog.title': 'Branch session',
+  'branch.dialog.current.title': 'Current workspace',
+  'branch.dialog.current.description':
+    'Copy the conversation and continue using the current checkout.',
+  'branch.dialog.worktree.title': 'New worktree',
+  'branch.dialog.worktree.description':
+    'Create an isolated checkout from the current Git HEAD. Files are not restored to the state of this response.',
+  'branch.dialog.cancel': 'Cancel',
+  'branch.dialog.confirm': 'Branch',
+  'branch.dialog.creating': 'Creating…',
+  'branch.worktreeActivationFailed':
+    'The branched session was created, but its worktree could not be opened automatically. Reopen it from the session list.',
   'fork.empty': 'Please provide a directive. Usage: /fork <directive>',
   'fork.failed': (v) => `Failed to launch fork: ${v?.reason ?? ''}`,
   'fork.notStarted': 'Background agent was not launched.',
@@ -2941,6 +2986,7 @@ const EN: Messages = {
   'parallelAgents.failed': (v) => `${v?.count ?? 0} failed`,
   'skills.actions': 'Skill actions',
   'skills.disable': 'Disable',
+  'skills.disableInWorkspace': 'Disable in this workspace',
   'skills.disabled': 'Skill disabled.',
   'skills.enable': 'Enable',
   'skills.enabled': 'Skill enabled.',
@@ -3156,14 +3202,15 @@ const EN: Messages = {
   'trajectory.partial':
     'Part of this transcript could not be read, so some records are missing.',
   'trajectory.totals': (v) =>
-    `${plural(v?.turns, 'turn')} · ${plural(v?.requests, 'request')} · ${plural(v?.tools, 'tool')} · ${v?.duration ?? ''}`,
+    `Loaded window · ${plural(v?.turns, 'turn')} · ${plural(v?.requests, 'request')} · ${plural(v?.tools, 'tool')}`,
   'trajectory.turn': (v) => `Turn ${v?.index ?? 0}`,
   'trajectory.turnPartial': (v) => `Turn ${v?.index ?? 0} (continued)`,
   'trajectory.turnSummary': (v) =>
-    `${plural(v?.requests, 'request')} · ${plural(v?.tools, 'tool')} · ${v?.duration ?? ''}`,
+    `${plural(v?.requests, 'request')} · ${plural(v?.tools, 'tool')} · main model total ${v?.duration ?? ''}`,
   'trajectory.request': 'Model request',
   'trajectory.requestFailed': 'Request failed',
-  'trajectory.ttft': (v) => `TTFT ${v?.duration ?? ''}`,
+  'trajectory.toolFailed': 'Tool failed',
+  'trajectory.ttft': (v) => `First token ${v?.duration ?? ''}`,
   'trajectory.subagentRollup': (v) =>
     `subagent ${plural(v?.requests, 'request')} · ${plural(v?.tools, 'tool')} · ${v?.duration ?? ''}`,
   'trajectory.badge.user': 'you',
@@ -3200,9 +3247,48 @@ const EN: Messages = {
     `Showing ${v?.from ?? ''}–${v?.to ?? ''} of ${v?.busy ?? ''}`,
   'trajectory.range.aria': (v) =>
     `, ${v?.from ?? ''} to ${v?.to ?? ''} selected`,
-  'trajectory.overview.lane.requests': 'req',
-  'trajectory.overview.lane.tools': 'tool',
-  'trajectory.overview.lane.subagents': 'sub',
+  'trajectory.metric.elapsed': 'Elapsed span',
+  'trajectory.metric.active': 'Active coverage',
+  'trajectory.metric.main': 'Main model total',
+  'trajectory.metric.help': 'Metric definitions',
+  'trajectory.metric.scope':
+    'Counts cover projected rows in the loaded window, including loaded subagent records. Selection and zoom do not change them.',
+  'trajectory.metric.elapsed.help':
+    'Elapsed span: earliest recorded start to latest end, including gaps; plotted records only.',
+  'trajectory.metric.active.help':
+    'Active coverage: time with at least one recorded request or tool running. Parallel time counts once.',
+  'trajectory.metric.main.help':
+    'Main model total: sum of main-session model request durations, excluding subagent requests and tools. Failed attempts may count.',
+  'trajectory.metric.missing.help':
+    'Unplotted requests and tools remain in the list. An em dash means unrecorded; zero is a measured zero.',
+  'trajectory.failures': (v) =>
+    `Failed requests ${v?.requests ?? 0} · failed tools ${v?.tools ?? 0}`,
+  'trajectory.unrecorded': 'unrecorded',
+  'trajectory.unplotted': (v) =>
+    `Unplotted: ${v?.starts ?? 0} without start · ${v?.timing ?? 0} without duration`,
+  'trajectory.missingStart': (v) =>
+    `${v?.count ?? 0} timed records have no start`,
+  'trajectory.missingTiming': (v) => `${v?.count ?? 0} tools have no duration`,
+  'trajectory.noStart':
+    'Recorded durations have no start time, so no bars can be plotted.',
+  'trajectory.refreshStale': 'Refresh failed; showing the last successful read',
+  'trajectory.selected.none': 'Selected record: none',
+  'trajectory.selected.turn': (v) =>
+    `Selected: turn ${v?.index ?? 0} · ${v?.requests ?? 0} main requests · ${v?.tools ?? 0} main tools · main model total ${v?.duration ?? ''}`,
+  'trajectory.selected.timed': (v) =>
+    `Selected: ${v?.name ?? ''} · ${v?.duration ?? ''}${v?.ttft ?? ''}`,
+  'trajectory.selected.untimed': (v) =>
+    `Selected: ${v?.name ?? ''} · no request or tool timing`,
+  'trajectory.mode.group': 'Time scale',
+  'trajectory.mode.active': 'Active time, idle removed',
+  'trajectory.mode.active.short': 'Active time',
+  'trajectory.mode.clock.short': 'Real time',
+  'trajectory.legend.ttft': 'Main: first token wait',
+  'trajectory.legend.after': 'After first token',
+  'trajectory.legend.error': 'Failed',
+  'trajectory.overview.lane.requests': 'Model requests',
+  'trajectory.overview.lane.tools': 'Tool calls',
+  'trajectory.overview.lane.subagents': 'Subagent requests',
   'status.contextUsed': (v) => `${v?.pct ?? '0.0'}% context used`,
   'status.disconnected': 'Disconnected',
   'status.modeHint': '(shift + tab or click to switch)',
@@ -4149,6 +4235,36 @@ const ZH: Messages = {
   'managed.uncertain': '请求结果尚未确认。重试会确认或完成同一次提交。',
   'managed.newRequired': '请新建任务后发送消息。',
   'managed.truncated': '[详情已截断]',
+  'managed.phase.created': '已创建',
+  'managed.workspaceCreateTitle': '创建工作区会话',
+  'managed.workspaceLabel': '工作区',
+  'managed.workspaceChoose': '选择工作区',
+  'managed.workspaceDirectory': '相对目录',
+  'managed.workspaceCreate': '创建会话',
+  'managed.workspaceBound': '已绑定工作区',
+  'managed.workspaceExecutionUnavailable':
+    '工作区已绑定；当前服务暂未开放消息执行。',
+  'managed.workspaceSharedFiles':
+    '同一工作区的会话共享文件；目录可用性将在执行前验证。',
+  'managed.workspaceEmpty': '没有可读取的工作区。',
+  'managed.workspaceUnsupported': '当前服务不支持工作区绑定。',
+  'managed.workspacePermission': '没有发现工作区的权限。',
+  'managed.workspaceLoadFailed': '加载工作区失败。',
+  'managed.workspaceStorageUnavailable':
+    '浏览器会话存储不可用，无法安全地开始创建。',
+  'managed.workspaceUncertain':
+    '创建结果尚未确认。可重试已保存的请求，或读取已返回的会话。',
+  'managed.workspaceRetryRead': '重试读取会话',
+  'managed.workspaceSessionId': '会话 ID',
+  'managed.workspaceProtocolError': (v) =>
+    `会话 ${v?.sessionId ?? ''} 已创建，但无法确认其工作区绑定。`,
+  'managed.workspaceAbandon': '放弃本地确认记录',
+  'managed.workspaceAbandonWarning':
+    '原空会话可能已经存在；放弃记录不会删除服务端会话。',
+  'managed.workspaceSwitchTitle': '切换工作区？',
+  'managed.workspaceSwitchDescription': '切换后相对目录将重置为工作区根目录。',
+  'managed.workspaceKeep': '保留原选择',
+  'managed.workspaceSwitch': '切换',
   'managed.phase.admitted': '已接收',
   'managed.phase.runtime_starting': '环境准备中',
   'managed.phase.agent_running': '思考／生成中',
@@ -4417,6 +4533,8 @@ const ZH: Messages = {
   'toolName.update_goal': '更新目标',
   'toolName.propose_goal': '提议目标',
   'toolName.save_memory': '保存记忆',
+  'toolName.manage_memory': '管理记忆',
+  'toolName.search_memory': '搜索记忆',
   'toolName.agent': '智能体',
   'toolName.advisor': '审查模型',
   'toolName.skill': '查看技能',
@@ -6075,6 +6193,17 @@ const ZH: Messages = {
     '这条回复已不在当前活跃历史路径中，当前会话不支持从此处分支。',
   'branch.success': (v) =>
     `已复制会话，新会话名称为： "${v?.name ?? ''}"，当前已切换到新的会话。`,
+  'branch.dialog.title': '分支会话',
+  'branch.dialog.current.title': '当前工作区',
+  'branch.dialog.current.description': '复制对话，并继续使用当前检出目录。',
+  'branch.dialog.worktree.title': '新 Worktree',
+  'branch.dialog.worktree.description':
+    '从当前 Git HEAD 创建隔离检出目录；不会把文件恢复到这条回复时的状态。',
+  'branch.dialog.cancel': '取消',
+  'branch.dialog.confirm': '创建分支',
+  'branch.dialog.creating': '正在创建…',
+  'branch.worktreeActivationFailed':
+    '分支会话已创建，但无法自动打开它的 Worktree。请从会话列表重新打开。',
   'fork.empty': '请提供任务指令。用法：/fork <指令>',
   'fork.failed': (v) => `启动后台智能体失败：${v?.reason ?? ''}`,
   'fork.notStarted': '后台智能体未启动。',
@@ -6842,6 +6971,7 @@ const ZH: Messages = {
   'parallelAgents.failed': (v) => `失败 ${v?.count ?? 0} 个`,
   'skills.actions': 'Skill 操作',
   'skills.disable': '禁用',
+  'skills.disableInWorkspace': '在此工作区禁用',
   'skills.disabled': 'Skill 已禁用。',
   'skills.enable': '启用',
   'skills.enabled': 'Skill 已启用。',
@@ -7037,14 +7167,15 @@ const ZH: Messages = {
   'trajectory.loadFailed': (v) => `读取会话记录失败：${v?.message ?? ''}`,
   'trajectory.partial': '这份会话记录有一部分读不出来，缺少了一些记录。',
   'trajectory.totals': (v) =>
-    `${v?.turns ?? 0} 轮 · ${v?.requests ?? 0} 次请求 · ${v?.tools ?? 0} 次工具 · ${v?.duration ?? ''}`,
+    `已加载窗口 · ${v?.turns ?? 0} 轮 · ${v?.requests ?? 0} 请求 · ${v?.tools ?? 0} 工具`,
   'trajectory.turn': (v) => `第 ${v?.index ?? 0} 轮`,
   'trajectory.turnPartial': (v) => `第 ${v?.index ?? 0} 轮（接上文）`,
   'trajectory.turnSummary': (v) =>
-    `${v?.requests ?? 0} 次请求 · ${v?.tools ?? 0} 次工具 · ${v?.duration ?? ''}`,
+    `${v?.requests ?? 0} 次请求 · ${v?.tools ?? 0} 次工具 · 主模型累计 ${v?.duration ?? ''}`,
   'trajectory.request': '模型请求',
   'trajectory.requestFailed': '请求失败',
-  'trajectory.ttft': (v) => `首字 ${v?.duration ?? ''}`,
+  'trajectory.toolFailed': '工具失败',
+  'trajectory.ttft': (v) => `首 token ${v?.duration ?? ''}`,
   'trajectory.subagentRollup': (v) =>
     `子代理 ${v?.requests ?? 0} 次请求 · ${v?.tools ?? 0} 次工具 · ${v?.duration ?? ''}`,
   'trajectory.badge.user': '用户',
@@ -7080,9 +7211,46 @@ const ZH: Messages = {
   'trajectory.zoom.status': (v) =>
     `显示 ${v?.from ?? ''}–${v?.to ?? ''}，共 ${v?.busy ?? ''}`,
   'trajectory.range.aria': (v) => `，已选 ${v?.from ?? ''} 到 ${v?.to ?? ''}`,
-  'trajectory.overview.lane.requests': '请求',
-  'trajectory.overview.lane.tools': '工具',
-  'trajectory.overview.lane.subagents': '子代理',
+  'trajectory.metric.elapsed': '执行跨度',
+  'trajectory.metric.active': '活跃覆盖',
+  'trajectory.metric.main': '主模型请求累计',
+  'trajectory.metric.help': '指标说明',
+  'trajectory.metric.scope':
+    '计数针对已加载窗口内投影后的记录，包含已加载的子代理记录；时间框选和缩放不改变总计。',
+  'trajectory.metric.elapsed.help':
+    '执行跨度：已记录开始到结束的跨度，含间隔；仅覆盖可绘制记录。',
+  'trajectory.metric.active.help':
+    '活跃覆盖：至少一个已记录请求或工具处于执行中的时间，并行部分只计一次。',
+  'trajectory.metric.main.help':
+    '主模型请求累计：主会话模型请求耗时之和，不含子代理请求和工具；可能包含失败尝试。',
+  'trajectory.metric.missing.help':
+    '未绘制的请求和工具仍保留在列表。破折号表示未记录，零表示真实零值。',
+  'trajectory.failures': (v) =>
+    `失败请求 ${v?.requests ?? 0} · 失败工具 ${v?.tools ?? 0}`,
+  'trajectory.unrecorded': '未记录',
+  'trajectory.unplotted': (v) =>
+    `未绘制：有耗时无起点 ${v?.starts ?? 0} 条 · 无耗时 ${v?.timing ?? 0} 条`,
+  'trajectory.missingStart': (v) => `${v?.count ?? 0} 条有耗时记录缺少起点`,
+  'trajectory.missingTiming': (v) => `${v?.count ?? 0} 条工具记录无耗时`,
+  'trajectory.noStart': '已记录耗时，但均无起点，无法绘制条带。',
+  'trajectory.refreshStale': '刷新失败，当前为上次成功读取的数据',
+  'trajectory.selected.none': '所选记录：无',
+  'trajectory.selected.turn': (v) =>
+    `所选：第 ${v?.index ?? 0} 轮 · 主请求 ${v?.requests ?? 0} · 主工具 ${v?.tools ?? 0} · 主模型累计 ${v?.duration ?? ''}`,
+  'trajectory.selected.timed': (v) =>
+    `所选：${v?.name ?? ''} · ${v?.duration ?? ''}${v?.ttft ?? ''}`,
+  'trajectory.selected.untimed': (v) =>
+    `所选：${v?.name ?? ''} · 无请求或工具计时`,
+  'trajectory.mode.group': '时间模式',
+  'trajectory.mode.active': '活跃时间，去除间隔',
+  'trajectory.mode.active.short': '活跃时间',
+  'trajectory.mode.clock.short': '真实时间',
+  'trajectory.legend.ttft': '主模型：首 token 等待',
+  'trajectory.legend.after': '首 token 后耗时',
+  'trajectory.legend.error': '失败',
+  'trajectory.overview.lane.requests': '模型请求',
+  'trajectory.overview.lane.tools': '工具调用',
+  'trajectory.overview.lane.subagents': '子代理请求',
   'status.contextUsed': (v) => `上下文已用 ${v?.pct ?? '0.0'}%`,
   'status.disconnected': '断开连接',
   'status.modeHint': '(shift + tab 或点击切换)',

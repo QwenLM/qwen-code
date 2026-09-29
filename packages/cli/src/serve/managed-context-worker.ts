@@ -28,8 +28,11 @@ import {
 import {
   createManagedToolSet,
   ManagedToolExecutor,
+  type ManagedShellCapturePublisher,
 } from './managed-runtime-tool-executor.js';
+import type { ManagedShellPublisherRegistry } from './managed-shell-publisher.js';
 import { registerManagedRuntimeToolRoutes } from './managed-runtime-tool-routes.js';
+import { registerManagedRuntimeToolV3Routes } from './managed-runtime-tool-v3-routes.js';
 import {
   WorkspaceActivations,
   WORKSPACE_ACTIVATION_ROUTE,
@@ -124,6 +127,8 @@ function isHostAbsolute(mountRoot: string): boolean {
 export function registerManagedContextRoutes(
   app: Application,
   bootDocument: ManagedContextBoot,
+  capturePublisher?: ManagedShellCapturePublisher,
+  remotePublishers?: ManagedShellPublisherRegistry,
 ): ManagedToolExecutor {
   const boot = parseManagedContextBoot(bootDocument);
   const installations = new ManagedContextInstallations(boot);
@@ -189,9 +194,20 @@ export function registerManagedContextRoutes(
       ),
       isActive,
     };
-  });
+  }, capturePublisher ?? remotePublishers);
   activations.register(app, boot, installations, executor);
   registerManagedRuntimeToolRoutes(app, boot, executor);
+  if (capturePublisher || remotePublishers) {
+    registerManagedRuntimeToolV3Routes(app, boot, executor);
+  }
+  remotePublishers?.register(
+    app,
+    boot,
+    (sessionId) =>
+      requiresActivation &&
+      activations.isActive(sessionId) &&
+      installations.installed(sessionId) !== undefined,
+  );
   return executor;
 }
 

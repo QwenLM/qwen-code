@@ -357,7 +357,10 @@ Important Rules:
   return assembleSystemPrompt({
     base: finalPrompt,
     contextFiles: runtimeContext.getUserMemory(),
-    autoMemory: runtimeContext.getAutoMemoryPrompt(),
+    autoMemory:
+      runtimeContext.getMemoryRecallMode() === 'structured'
+        ? ''
+        : runtimeContext.getAutoMemoryPrompt(),
   });
 }
 
@@ -604,17 +607,19 @@ export class AgentCore {
       (t): t is string => typeof t === 'string',
     );
     const hasWildcard = asStrings.includes('*');
-    if (hasWildcard || asStrings.length === 0) {
+    if (hasWildcard) {
       return !EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.SKILL);
     }
+    // An explicit empty list has no tools at all — and no skill tool.
     return asStrings.includes(ToolNames.SKILL);
   }
 
   /**
    * Prepares the list of tools available to this agent.
    *
-   * If no explicit toolConfig or it contains "*" or is empty,
-   * inherits all tools (excluding AgentTool to prevent recursion).
+   * With no toolConfig, or one containing "*", inherits all tools
+   * (excluding AgentTool to prevent recursion). An explicit empty tools
+   * array denies all tools.
    */
   async prepareTools(): Promise<FunctionDeclaration[]> {
     const toolRegistry = this.runtimeContext.getToolRegistry();
@@ -666,10 +671,10 @@ export class AgentCore {
         this.toolConfig?.tools.filter(
           (tool): tool is FunctionDeclaration => typeof tool !== 'string',
         ) ?? [];
-      const inheritsRegistry =
-        !this.toolConfig ||
-        stringTools.includes('*') ||
-        (stringTools.length === 0 && inlineTools.length === 0);
+      // An explicit empty tools array denies all tools (the documented
+      // subagent contract); only an absent toolConfig or a wildcard
+      // inherits the registry.
+      const inheritsRegistry = !this.toolConfig || stringTools.includes('*');
       const configuredNames = inheritsRegistry
         ? undefined
         : new Set(stringTools);
@@ -684,10 +689,20 @@ export class AgentCore {
               (inheritsCodeModeBindings &&
                 getToolExposure(name) === 'code-mode-callable')) &&
             !isExcluded(name) &&
-            !isHiddenByEagerAllowList(name) &&
             !isDisallowed(name) &&
             this.isToolExecutionAllowed(name),
         );
+      if (
+        allowedNames.some(
+          (name) => getToolExposure(name) === 'code-mode-callable',
+        ) &&
+        toolRegistry.getTool(ToolNames.TOOL_SEARCH) &&
+        !allowedNames.includes(ToolNames.TOOL_SEARCH) &&
+        !isExcluded(ToolNames.TOOL_SEARCH) &&
+        this.isToolExecutionAllowed(ToolNames.TOOL_SEARCH)
+      ) {
+        allowedNames.push(ToolNames.TOOL_SEARCH);
+      }
       this.codeModeAllowedToolNames = Object.freeze(
         allowedNames.filter(
           (name) => getToolExposure(name) === 'code-mode-callable',
@@ -719,10 +734,11 @@ export class AgentCore {
         (t): t is FunctionDeclaration => typeof t !== 'string',
       );
 
-      if (
-        hasWildcard ||
-        (asStrings.length === 0 && onlyInlineDecls.length === 0)
-      ) {
+      // An explicit empty tools array denies all tools (the documented
+      // subagent contract): it falls through to the explicit-list branch,
+      // which resolves zero names. Only a wildcard or an absent toolConfig
+      // inherits the registry.
+      if (hasWildcard) {
         // Subagents inherit ordinary deferred tools (MCP, low-frequency
         // built-ins). Tools demoted by the `settings.tools.eager` allowlist
         // remain hidden and are reached through the stable ToolSearch +
@@ -1039,7 +1055,9 @@ export class AgentCore {
           ],
           config: {
             abortSignal: roundAbortController.signal,
-            tools: [{ functionDeclarations: toolsList }],
+            tools: toolsList.length
+              ? [{ functionDeclarations: toolsList }]
+              : [],
             ...(stickyMaxOutputTokens !== undefined
               ? { maxOutputTokens: stickyMaxOutputTokens }
               : {}),
@@ -1726,13 +1744,9 @@ export class AgentCore {
       return false;
     }
     if (this.executionAllowedTools === undefined) {
-      // Code mode declares exec unconditionally (getCodeModeFunctionDeclarations
-      // keeps exposure 'exec' regardless of the allowed set), so a finite
-      // configured list that omits it must not refuse the only tool the model
-      // was shown — the same carve-out the executionAllowedTools branch
-      // applies below.
+      // Code Mode gateways operate on the agent's scoped nested-tool allowlist.
       if (
-        toolName === ToolNames.EXEC &&
+        (toolName === ToolNames.EXEC || toolName === ToolNames.TOOL_SEARCH) &&
         this.runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly
       ) {
         return true;
@@ -1744,7 +1758,7 @@ export class AgentCore {
       );
     }
     if (
-      toolName === ToolNames.EXEC &&
+      (toolName === ToolNames.EXEC || toolName === ToolNames.TOOL_SEARCH) &&
       this.runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly
     ) {
       return true;
@@ -2383,7 +2397,8 @@ export class AgentCore {
         prompt_id: promptId,
         response_id: responseId,
         wasOutputTruncated,
-        ...(toolName === ToolNames.EXEC &&
+        ...((toolName === ToolNames.EXEC ||
+          toolName === ToolNames.TOOL_SEARCH) &&
         this.runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly
           ? {
               codeModeAllowedToolNames: this.codeModeAllowedToolNames ?? [],

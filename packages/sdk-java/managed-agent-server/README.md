@@ -28,10 +28,27 @@ below are not evidence for this split.
 single source for the public and WebShell routes. `ManagedAgentApiContractTest`
 compares the mapped routes, the `ApiModels` records and real responses with it;
 `src/test/resources/openapi/contract-known-gaps.txt` lists the differences that
-Stage D still has to close. The WebShell client types are generated from the
+a later slice still has to close; none remain after D4. The WebShell client types are generated from the
 same file by `npm run generate:managed-agent-api` in `packages/web-shell`.
+Sessions record the agent revision from `QWEN_MANAGED_AGENT_REVISION` (default
+`1`) when they are created. Every response carries `X-Request-Id`, which error
+envelopes repeat as `request_id` and the logs print. Events keep the schema and
+projection versions and the Item and Part identity they were accepted with,
+except that a `stream.reconciled` event announces retracted deltas. A
+cursor below a Session's replay floor gets `409 cursor_expired` from the JSON
+event query and one `agent.session.resync_required` frame from either stream.
+`GET /v1/agents/sessions/{id}/turns` lists a Session's Turns newest first with
+an opaque cursor, and `GET /v1/agents/sessions/{id}/turns/{turnId}` reads one.
 Design: [English](../../../docs/design/2026-09-27-managed-agent-api-contract.md) |
-[简体中文](../../../docs/design/2026-09-27-managed-agent-api-contract.zh-CN.md)
+[简体中文](../../../docs/design/2026-09-27-managed-agent-api-contract.zh-CN.md);
+Session query: [English](../../../docs/design/2026-09-27-managed-agent-session-query.md) |
+[简体中文](../../../docs/design/2026-09-27-managed-agent-session-query.zh-CN.md);
+Event replay: [English](../../../docs/design/2026-09-27-managed-agent-event-replay.md) |
+[简体中文](../../../docs/design/2026-09-27-managed-agent-event-replay.zh-CN.md);
+Durable lifecycle: [English](../../../docs/design/2026-09-28-managed-agent-durable-lifecycle.md) |
+[简体中文](../../../docs/design/2026-09-28-managed-agent-durable-lifecycle.zh-CN.md);
+Turn queries: [English](../../../docs/design/2026-09-28-managed-agent-turn-queries.md) |
+[简体中文](../../../docs/design/2026-09-28-managed-agent-turn-queries.zh-CN.md)
 
 ## Prerequisites
 
@@ -71,7 +88,7 @@ curl -sS http://127.0.0.1:8080/v1/agents/sessions \
   -H 'Content-Type: application/json' \
   -H 'X-Qwen-Tenant-Id: demo' \
   -H 'Idempotency-Key: create-1' \
-  -d '{"agent_id":"qwen-code","input":[{"type":"text","text":"hello"}]}'
+  -d '{"agent_id":"qwen-code","input":[{"type":"input_text","text":"hello"}]}'
 ```
 
 The returned `id` is an RFC UUID and is the canonical identity used by
@@ -80,10 +97,13 @@ not maintain a separate public-to-Harness Session mapping.
 
 ## Public Session lifecycle
 
-Flyway V5 adds durable lifecycle commands and soft-deletion timestamps. The
-public control plane owns lifecycle state and tenant/idempotency checks, while
-the Hosted Harness remains the private title authority and the Runtime Broker
-owns execution bindings.
+Close, archive and delete are durable operations (Flyway V17). Each answers
+`202` with a command operation that
+`GET /v1/agents/sessions/{id}/operations/{operationId}` reads back, also after a
+delete; the WebShell adapter offers the same routes. The public control plane
+owns lifecycle state and tenant/idempotency checks, while the Hosted Harness
+remains the private title authority and the Runtime Broker owns execution
+bindings.
 
 ```bash
 curl -sS -X PATCH \
@@ -92,6 +112,15 @@ curl -sS -X PATCH \
   -H 'X-Qwen-Tenant-Id: demo' \
   -H 'Idempotency-Key: rename-1' \
   -d '{"title":"investigate checkout failure"}'
+
+curl -sS -X POST \
+  http://127.0.0.1:8080/v1/agents/sessions/$SESSION_ID/close \
+  -H 'X-Qwen-Tenant-Id: demo' \
+  -H 'Idempotency-Key: close-1'
+
+curl -sS \
+  http://127.0.0.1:8080/v1/agents/sessions/$SESSION_ID/operations/$OPERATION_ID \
+  -H 'X-Qwen-Tenant-Id: demo'
 
 curl -sS -X POST \
   http://127.0.0.1:8080/v1/agents/sessions/$SESSION_ID/archive \
@@ -109,15 +138,19 @@ curl -sS -X DELETE \
   -H 'Idempotency-Key: delete-1'
 ```
 
-Archive and delete reject an active Turn. Rename waits for the Harness to
-durably commit `session_metadata`; archive closes the Harness attachment and
-requests Runtime drain (currently only an in-process retirement flag); delete closes it only when the Session was active
-and always drains the binding; unarchive clears the Runtime retirement fence
-and loads the Harness lazily on the next Turn. A failed external action leaves
-a `PENDING` command that the same idempotency key can safely resume. The
-command retains the pre-mutation state, so deleting an archived Session does
-not require the already-closed Harness. A different lifecycle command is
-blocked until it completes.
+Close and delete reject an active Turn and seal input as soon as they are
+admitted. A background worker then closes the Hosted Harness Session, waits
+until no Harness holds its journal writer under an unexpired lease (the
+holding Harness seals it when closing), drains the Runtime binding (currently
+only an in-process retirement flag) and completes the operation; a failed
+attempt is retried with the dispatch backoff until it succeeds, so a `202`
+never means that tools stopped. After the Hosted Harness restarts, its calls fail with a
+generation error until Java restarts too, as Turns do, and the operation waits. A Harness whose journal writes stopped after a failed commit answers every close with `503` until it restarts. A delete of a closed or archived Session
+needs no Harness. Archive accepts only a closed Session and completes at once;
+unarchive restores it to closed. Rename waits for the Harness to durably commit
+`session_metadata`, and a failed rename leaves a `PENDING` command that the
+same idempotency key can safely resume. One lifecycle change runs at a time. A
+retry with the same key from the same actor returns the original operation.
 
 Harness attachment uses strict create/load semantics: create returns `409` for
 an existing private Session authority, while load returns `404` for a missing
@@ -127,9 +160,10 @@ An in-memory Hosted attachment is bound to one normalized Store endpoint,
 tenant, workspace, and Harness writer generation; an attach or cold-load race
 with a different identity fails closed.
 
-Delete currently writes a public tombstone and hides the Session from get/list
-responses. It does not physically erase the private journal or resources;
-retention, writer sealing, and garbage collection remain future work.
+Delete writes a public tombstone: get and list stop returning the Session,
+while its operations stay readable. It does not physically erase the private
+journal, events or resources, and it does not mark the journal deleted;
+retention and garbage collection remain future work.
 
 The Phase 1 schema has not been released. A development database created by an
 older revision with `harness_session_id` must be recreated before running this
@@ -262,12 +296,46 @@ The reserved Hosted Harness profile cannot yet connect to the Broker at
 Broker always uses the Spring `DataSource` and Flyway-managed Runtime tables;
 it does not fall back to in-memory repositories. The credential key must decode
 to exactly 32 bytes and protects persisted Runtime seeds and static Runtime
-credentials with AES-256-GCM. The local-process adapter can recover the same
-worker after a Java restart on the same host; multi-host scheduling and the
-Kubernetes adapter's real-cluster fault matrix remain production gates. This
+credentials with AES-256-GCM. By default, local worker ownership is ephemeral
+and a restarted Broker cannot adopt it. On Linux, set
+`QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS=true` to enable persistent
+launch registration and adoption of the same live worker. The state directory
+must be persistent local storage, owned by the Broker user with mode `0700`,
+without symlinks, outside every configured Workspace root. Workers and tools
+must be trusted; same-UID hostile tools and multi-host or remote storage are
+unsupported. Keep the host machine ID, SQL credential key, placement mapping,
+state directory and worker command stable across Broker restarts. Shutdown and
+late lease discard detach from registered workers instead of killing them.
+`/etc/machine-id` must be nonempty and stable, and Linux must expose the PID
+and time namespaces (`/proc/self/ns/pid` and `/proc/self/ns/time`; the latter
+requires Linux 5.6 or newer with `CONFIG_TIME_NS`). The service
+manager must let workers survive a Broker exit: systemd's default
+`KillMode=control-group` kills them, as does restarting a container whose main
+process is the Broker. Configure the service to leave child workers running
+(for example, systemd `KillMode=process`) and use an init that reaps orphaned
+processes. The Broker recognizes `Z`/`X` workers as exited even before they are
+reaped.
+Missing or damaged records and worker death do not authorize replacement;
+worker death does not prove escaped writers stopped. No host reboot reclamation
+is enabled by this option. Old v1 handles cannot be upgraded by guessing identity.
+This option does not retire idle workers or prune their registration and lock
+files. With session isolation, each Hosted Session can retain a separate idle
+worker across Broker restarts; budget process, memory and state-directory growth
+before enabling it. Physical cleanup needs an evidence-preserving lifecycle;
+do not delete records to reclaim capacity.
+See the [adoption design](../../../docs/design/2026-09-27-local-runtime-adoption.md).
+The Kubernetes adapter's real-cluster fault matrix remains a production gate. This
 standalone reference keeps the one configured directory for legacy unbound
 Sessions. Persisted bound Sessions use the private Workspace execution path
 below.
+
+Flyway V12 aligns the Runtime tables with the Broker's own `schema.sql`, which
+its JDBC repositories are written against. `RuntimeBrokerFlywaySchemaTest`
+fails when the two definitions differ, so a change to either one needs a
+matching change to the other. V12 replaces two primary keys. MySQL rejects this
+when `sql_require_primary_key` is set: V12 fails before it changes anything, and
+Flyway records the failure. Unset the variable, run Flyway `repair`, and start
+the server again.
 
 ### Private Workspace tool execution (W0c-3)
 

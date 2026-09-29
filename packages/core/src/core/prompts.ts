@@ -438,6 +438,7 @@ function getToolGuidanceSection(
     return `
 ## Using Your Tools
 - **Calling Convention:** Ordinary tools exist only inside '${ToolNames.EXEC}', as \`tools.<name>(args)\`. Every other tool declared to you — ${directControls} — is called directly and is not reachable through \`tools\`.
+- **Tool Discovery:** If a needed tool's signature is absent from '${ToolNames.EXEC}', use the top-level '${ToolNames.TOOL_SEARCH}' when available. Read its returned schema and JavaScript name before calling that tool in a later '${ToolNames.EXEC}' program.
 - **Prefer Dedicated Tools:** Do NOT use \`tools.${ToolNames.SHELL}\` to run commands when a relevant dedicated tool is provided. Dedicated tools make actions easier to review:
   - To read files use \`tools.${ToolNames.READ_FILE}\` instead of cat, head, tail, or sed
   - To edit files use \`tools.${ToolNames.EDIT}\` instead of sed or awk
@@ -1585,8 +1586,8 @@ Find something genuinely interesting or amusing from the session summaries.`,
    - Example: "To connect to GitHub, run \`qwen mcp add --header "Authorization: Bearer your_github_mcp_pat" --transport http github https://api.githubcopilot.com/mcp/\` and set the AUTHORIZATION header with your PAT. Then you can ask Qwen to query issues, PRs, or repos."
 
 2. **Custom Skills**: Reusable prompts you define as markdown files that run with a single /command.
-   - How to use: Create \`.qwen/skills/commit/SKILL.md\` with instructions. Then type \`/commit\` to run it.
-   - Good for: repetitive workflows - /commit, /review, /test, /deploy, /pr, or complex multi-step workflows
+   - How to use: Create \`.qwen/skills/wrapup/SKILL.md\` with instructions. Then type \`/wrapup\` to run it.
+   - Good for: repetitive workflows - /wrapup, /review, /test, /deploy, /pr, or complex multi-step workflows
    - SKILL.md format:
     \`\`\`
     ---

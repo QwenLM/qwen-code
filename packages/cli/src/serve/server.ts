@@ -87,6 +87,7 @@ import {
   canonicalizeWorkspace,
   createAcpSessionBridge,
   createSpawnChannelFactory,
+  defaultSpawnChannelFactory,
   MAX_SESSION_RESTORE_TIMEOUT_MS,
   resolveSessionRestoreTimeoutMs,
   SessionNotFoundError,
@@ -152,6 +153,10 @@ import {
   requestedSessionIdPersistenceExists,
 } from './session-id-admission.js';
 import { sessionAttachmentsRoots } from './session-attachments-root.js';
+import {
+  createPairedExecutionEngines,
+  type ManagedExecutionEngine,
+} from './session-execution-engine-selector.js';
 import {
   registerScheduledTasksRoutes,
   registerWorkspaceQualifiedScheduledTasksRoutes,
@@ -628,6 +633,12 @@ export interface ServeAppDeps {
     policy: ChildHeapPolicy;
     ownsBridge?: (bridge: AcpSessionBridge) => boolean;
   };
+  /**
+   * Managed engine for the default Bridge when `experimentalPairedEngines`
+   * pairs it. Without one, paired sessions run on Legacy and Managed owners
+   * are refused on restore.
+   */
+  managedExecutionEngine?: ManagedExecutionEngine;
   /**
    * Sink fed one (durationMs, statusCode) per matched daemon HTTP request, so
    * the metrics ring can bucket request rate and latency for the charts.
@@ -1261,6 +1272,36 @@ export function createServeApp(
     boundWorkspace,
     Storage.getRuntimeBaseDir(),
   );
+  const defaultBridgeChannels = () => {
+    const channelFactory =
+      acpChildArgs || deps.managedChildProcesses
+        ? createSpawnChannelFactory({
+            processRegistry: deps.managedChildProcesses?.registry,
+            childHeapPolicy: deps.managedChildProcesses?.policy,
+            ...(deps.managedChildProcesses
+              ? {
+                  reclaimIdleChild: async (signal?: AbortSignal) => {
+                    await reclaimIdleAcp?.(
+                      hashDaemonWorkspace(boundWorkspace),
+                      signal,
+                    );
+                  },
+                }
+              : {}),
+            extraArgs: acpChildArgs,
+          })
+        : undefined;
+    if (!opts.experimentalPairedEngines) {
+      return channelFactory ? { channelFactory } : {};
+    }
+    return {
+      executionEngines: createPairedExecutionEngines({
+        legacy: channelFactory ?? defaultSpawnChannelFactory,
+        runtimeBaseDir: Storage.getRuntimeBaseDir(),
+        managed: deps.managedExecutionEngine,
+      }),
+    };
+  };
   const bridge =
     injectedWorkspaceRegistry?.primary.bridge ??
     deps.bridge ??
@@ -1289,25 +1330,7 @@ export function createServeApp(
       ...(opts.restoreAskUserQuestion === true
         ? { restoreAskUserQuestion: true }
         : {}),
-      ...(acpChildArgs || deps.managedChildProcesses
-        ? {
-            channelFactory: createSpawnChannelFactory({
-              processRegistry: deps.managedChildProcesses?.registry,
-              childHeapPolicy: deps.managedChildProcesses?.policy,
-              ...(deps.managedChildProcesses
-                ? {
-                    reclaimIdleChild: async (signal?: AbortSignal) => {
-                      await reclaimIdleAcp?.(
-                        hashDaemonWorkspace(boundWorkspace),
-                        signal,
-                      );
-                    },
-                  }
-                : {}),
-              extraArgs: acpChildArgs,
-            }),
-          }
-        : {}),
+      ...defaultBridgeChannels(),
       boundWorkspace,
       sessionShellCommandEnabled,
       // Wire the production status provider so direct embeds / tests
@@ -2209,7 +2232,12 @@ export function createServeApp(
         )
       : [];
   if (webShellDir) {
-    mountWebShellAssets(app, webShellDir, webShellFrameAncestors);
+    mountWebShellAssets(
+      app,
+      webShellDir,
+      webShellFrameAncestors,
+      opts.clientMcpOverWs === true,
+    );
     (app.locals as { stopMcpAppSandbox?: () => void }).stopMcpAppSandbox =
       mountMcpAppSandbox(app, (origin, req) => {
         if (originAllowlist.allows(origin)) return true;
@@ -2305,10 +2333,73 @@ export function createServeApp(
       app,
       hostedHarness,
       primaryBoundWorkspace,
+      opts.managedRuntimeBrokerUrl && opts.managedRuntimeBrokerToken
+        ? {
+            baseUrl: opts.managedRuntimeBrokerUrl,
+            token: opts.managedRuntimeBrokerToken,
+          }
+        : undefined,
     );
     app.use((req, res, next) => {
       if (req.path === '/capabilities' || req.path === '/health') next();
       else res.sendStatus(404);
+    });
+  }
+
+  if (opts.clientMcpOverWs === true) {
+    app.post('/desktop-relay/credential', (req, res) => {
+      if (listenerIdentityOf(req).kind !== 'primary') {
+        res.status(403).json({ error: 'primary_listener_required' });
+        return;
+      }
+      const body = req.body as unknown;
+      if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+        res.status(400).json({ error: 'invalid_request' });
+        return;
+      }
+      const { sessionId, workspace } = body as Record<string, unknown>;
+      if (
+        typeof sessionId !== 'string' ||
+        sessionId.length === 0 ||
+        sessionId.length > 4_096
+      ) {
+        res.status(400).json({ error: 'invalid_session_id' });
+        return;
+      }
+
+      let acpPath = '/acp';
+      if (workspace !== undefined) {
+        if (
+          workspace === null ||
+          typeof workspace !== 'object' ||
+          Array.isArray(workspace)
+        ) {
+          res.status(400).json({ error: 'invalid_workspace' });
+          return;
+        }
+        const selector = workspace as Record<string, unknown>;
+        if (
+          (selector['kind'] !== 'id' && selector['kind'] !== 'cwd') ||
+          typeof selector['value'] !== 'string' ||
+          selector['value'].length === 0 ||
+          selector['value'].length > 4_096
+        ) {
+          res.status(400).json({ error: 'invalid_workspace' });
+          return;
+        }
+        acpPath = `/workspaces/${encodeURIComponent(selector['value'])}/acp`;
+      }
+
+      const credential = credentials.createDesktopRelayCredential({
+        acpPath,
+        sessionId,
+      });
+      res.setHeader('Cache-Control', 'no-store');
+      if (!credential) {
+        res.status(429).json({ error: 'credential_limit' });
+        return;
+      }
+      res.json({ credential });
     });
   }
 
@@ -3816,7 +3907,12 @@ export function createServeApp(
   // is what keeps an attacker-controlled `Accept: text/html` from coaxing the
   // 200 shell out of an authed route.
   if (webShellDir) {
-    mountWebShellSpaFallback(app, webShellDir, webShellFrameAncestors);
+    mountWebShellSpaFallback(
+      app,
+      webShellDir,
+      webShellFrameAncestors,
+      opts.clientMcpOverWs === true,
+    );
   }
 
   installFinalErrorHandler(app);

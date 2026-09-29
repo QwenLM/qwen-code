@@ -48,11 +48,35 @@ public interface RuntimeTransport {
     CompletionStage<Void> acquire(RuntimeLease lease,
             RuntimeSession session);
 
+    default CompletionStage<Void> installPublisher(RuntimeLease lease,
+            RuntimeSession session, Map<String, Object> publisher) {
+        return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
+                "managed_tool_publisher_unavailable",
+                "Runtime transport does not support output publication.", false));
+    }
+
+    default CompletionStage<Map<String, Object>> acknowledge(RuntimeLease lease,
+            RuntimeSession session, Map<String, Object> reference,
+            Map<String, Object> receipt) {
+        return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
+                "managed_tool_result_acknowledge_unsupported",
+                "Runtime transport does not support result acknowledgement.", false));
+    }
+
     CompletionStage<Object> control(RuntimeLease lease,
             RuntimeSession session, Map<String, Object> operation);
 
     CompletionStage<Map<String, Object>> execute(RuntimeLease lease,
             RuntimeSession session, Map<String, Object> reference);
+
+    default CompletionStage<Map<String, Object>> execute(RuntimeLease lease,
+            RuntimeSession session, Map<String, Object> reference,
+            Map<String, Object> payload) {
+        Map<String, Object> request = new java.util.LinkedHashMap<>(reference);
+        request.remove("dispatchMode");
+        request.putAll(payload);
+        return execute(lease, session, Map.copyOf(request));
+    }
 
     CompletionStage<Map<String, Object>> cancel(RuntimeLease lease,
             RuntimeSession session, Map<String, Object> reference);

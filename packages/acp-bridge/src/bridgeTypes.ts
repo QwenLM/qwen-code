@@ -825,6 +825,16 @@ export interface BridgeBranchSessionRequest {
   sourceId?: string;
   replayInheritedHistory?: boolean;
   atRecordId?: string;
+  /** Daemon-internal target id used to prepare durable worktree metadata. */
+  targetSessionId?: string;
+  /** Persist the fork without restoring it inside the bridge. */
+  persistOnly?: boolean;
+}
+
+export interface BridgeSessionExecutionSnapshot {
+  workspaceCwd: string;
+  effectiveCwd: string;
+  worktree?: { slug: string; path: string; branch: string };
 }
 
 export interface BridgePersistedBranchedSession {
@@ -1853,7 +1863,7 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     req: BridgeRestoreSessionRequest,
   ): Promise<BridgeRestoredSession>;
 
-  /** Restore latest-state forks; leave historical checkpoint forks persisted. */
+  /** Restore forks unless persistOnly is set. */
   branchSession(
     sessionId: string,
     req: BridgeBranchSessionRequest,
@@ -2241,6 +2251,11 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
    */
   getSessionSummary(sessionId: string): BridgeSessionSummary;
 
+  /** Daemon-internal execution location; never populated from client input. */
+  getSessionExecutionSnapshot(
+    sessionId: string,
+  ): BridgeSessionExecutionSnapshot;
+
   /**
    * Record a client heartbeat for the session. Throws
    * `SessionNotFoundError` for unknown ids and `InvalidClientIdError`
@@ -2602,8 +2617,9 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
 
   /**
    * Change the approval mode of a live session and broadcast an
-   * `approval_mode_changed` event. `opts.persist === true` also writes
-   * `tools.approvalMode` to workspace settings.
+   * `approval_mode_changed` event. The mode is session-local and may be
+   * restored from that session's transcript; `opts.persist === true` also
+   * writes `tools.approvalMode` to workspace settings.
    */
   setSessionApprovalMode(
     sessionId: string,

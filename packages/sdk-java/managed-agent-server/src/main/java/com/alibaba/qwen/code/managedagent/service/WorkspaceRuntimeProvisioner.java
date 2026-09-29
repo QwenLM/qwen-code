@@ -60,8 +60,18 @@ final class WorkspaceRuntimeProvisioner implements RuntimeProvisioner {
     }
 
     @Override
+    public boolean supportsStartupRecovery(RuntimeResourceHandle handle) {
+        return delegate.supportsStartupRecovery(handle);
+    }
+
+    @Override
     public CompletionStage<Void> confirm(RuntimeProvisionRequest request, RuntimeLease lease) {
         return delegate.confirm(request, lease);
+    }
+
+    @Override
+    public boolean canRetryFailedConfirm(RuntimeLease lease) {
+        return delegate.canRetryFailedConfirm(lease);
     }
 
     @Override
