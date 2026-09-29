@@ -2373,14 +2373,9 @@ function displayItemSourceBlockIds(
 export interface MessageListHandle {
   /**
    * Scroll the transcript so the given message is visible and briefly
-   * highlight it. Calls onSettled after deferred measurement and scrolling
-   * finish. Returns false when the message is not in the list.
+   * highlight it. Returns false when the message is not in the list.
    */
-  scrollToMessage: (
-    messageId: string,
-    callId?: string,
-    onSettled?: () => void,
-  ) => boolean;
+  scrollToMessage: (messageId: string, callId?: string) => boolean;
   /** 定位持久化历史搜索结果；调用方可取消仍在加载的选择。 */
   scrollToSearchHit?: (
     hit: import('../daemon/session/turn-navigation-store').ConversationSearchHit,
@@ -4937,7 +4932,7 @@ export const MessageList = memo(
 
     // Scroll a visible row to center and flash the target message inside it.
     const performScrollToRow = useCallback(
-      (rowIndex: number, target: LocateFlashTarget, onSettled?: () => void) => {
+      (rowIndex: number, target: LocateFlashTarget) => {
         // Explicit navigation away from the tail — pause follow so the
         // auto-scroll driver doesn't yank the viewport straight back down,
         // and engage the same cooldown scrollToBottom uses so the scroll
@@ -4977,7 +4972,6 @@ export const MessageList = memo(
             scrollCooldown.current = false;
             scheduleSessionTimelineRangeUpdate();
             scheduleScrollOverflowReport();
-            onSettled?.();
           }
         }, 150);
         setFlashTarget(null);
@@ -4996,11 +4990,7 @@ export const MessageList = memo(
       visibleItems: readonly DisplayItem[];
       displayItems: readonly DisplayItem[];
       headerOffset: number;
-      performScrollToRow: (
-        rowIndex: number,
-        target: LocateFlashTarget,
-        onSettled?: () => void,
-      ) => void;
+      performScrollToRow: (rowIndex: number, target: LocateFlashTarget) => void;
     }>({
       visibleItems: [],
       displayItems: [],
@@ -5016,13 +5006,10 @@ export const MessageList = memo(
 
     // A scroll target that currently sits inside a collapsed turn: expand the
     // turn, then finish the scroll once its rows materialize in `visibleItems`.
-    const pendingScrollRef = useRef<{
-      target: LocateFlashTarget;
-      onSettled?: () => void;
-    } | null>(null);
+    const pendingScrollRef = useRef<LocateFlashTarget | null>(null);
 
     const scrollToMessage = useCallback(
-      (messageId: string, callId?: string, onSettled?: () => void): boolean => {
+      (messageId: string, callId?: string): boolean => {
         const { visibleItems, displayItems, headerOffset, performScrollToRow } =
           scrollToMessageState.current;
         const visibleIndex = findDisplayItemIndex(
@@ -5032,14 +5019,10 @@ export const MessageList = memo(
         );
         if (visibleIndex >= 0) {
           pendingScrollRef.current = null;
-          performScrollToRow(
-            visibleIndex + headerOffset,
-            {
-              messageId,
-              callId,
-            },
-            onSettled,
-          );
+          performScrollToRow(visibleIndex + headerOffset, {
+            messageId,
+            callId,
+          });
           return true;
         }
         // Not on screen — it may be folded inside a collapsed turn. Locate it
@@ -5048,10 +5031,7 @@ export const MessageList = memo(
         if (fullIndex < 0) return false;
         const turnId = findTurnIdForIndex(displayItems, fullIndex);
         if (!turnId) return false;
-        pendingScrollRef.current = {
-          target: { messageId, callId },
-          onSettled,
-        };
+        pendingScrollRef.current = { messageId, callId };
         setCollapseOverrides((prev) => {
           if (prev.get(turnId) === true) return prev;
           const next = new Map(prev);
@@ -5075,12 +5055,12 @@ export const MessageList = memo(
       if (!pending) return;
       const idx = findDisplayItemIndex(
         visibleItems,
-        pending.target.messageId,
-        pending.target.callId,
+        pending.messageId,
+        pending.callId,
       );
       if (idx < 0) return;
       pendingScrollRef.current = null;
-      performScrollToRow(idx + headerOffset, pending.target, pending.onSettled);
+      performScrollToRow(idx + headerOffset, pending);
     }, [visibleItems, headerOffset, performScrollToRow]);
 
     const loadOlderHistory = useCallback(
