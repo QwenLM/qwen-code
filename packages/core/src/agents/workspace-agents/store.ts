@@ -1001,8 +1001,13 @@ async function listThreadsUnlocked(
       unreadable.push(id);
     }
   }
-  threads.sort((a, b) => b.createdAt - a.createdAt || a.id.localeCompare(b.id));
+  threads.sort(compareThreads);
   return { threads, unreadable };
+}
+
+/** Newest first, then by id, so listings are stable. */
+function compareThreads(a: Thread, b: Thread): number {
+  return b.createdAt - a.createdAt || a.id.localeCompare(b.id);
 }
 
 function trimThread(thread: Thread): Thread {
@@ -1101,14 +1106,50 @@ function makeTransaction(
   initialWorkspace: AgentWorkspaceState,
 ): AgentStoreTransaction {
   let workspace = initialWorkspace;
+  // Nothing else writes the store while this transaction holds the lock, so
+  // the thread directory is read and parsed once and then kept current by the
+  // transaction's own writes. Admission, closing and disabling each list the
+  // threads several times; re-reading every file each time held the lock long
+  // enough for another process's `lockfile.lock` retries to run out.
+  // Callers get copies: one may edit a thread in place and then not write it.
+  let listing:
+    | { threads: Map<string, Thread>; unreadable: string[] }
+    | undefined;
   return {
     projectRoot,
     workspaceId: workspace.workspaceId,
     readAgents: () => readAgentsUnlocked(projectRoot),
     writeAgents: (agents) => writeAgentsUnlocked(projectRoot, agents),
-    readThread: (threadId) => readThreadUnlocked(projectRoot, threadId),
-    listThreads: () => listThreadsUnlocked(projectRoot),
-    writeThread: (thread) => writeThreadUnlocked(projectRoot, thread),
+    readThread: async (threadId) => {
+      const cached = listing?.threads.get(threadId);
+      return cached
+        ? structuredClone(cached)
+        : readThreadUnlocked(projectRoot, threadId);
+    },
+    listThreads: async () => {
+      if (!listing) {
+        const read = await listThreadsUnlocked(projectRoot);
+        listing = {
+          threads: new Map(read.threads.map((thread) => [thread.id, thread])),
+          unreadable: read.unreadable,
+        };
+      }
+      const threads = [...listing.threads.values()].map((thread) =>
+        structuredClone(thread),
+      );
+      threads.sort(compareThreads);
+      return { threads, unreadable: [...listing.unreadable] };
+    },
+    writeThread: async (thread) => {
+      const written = await writeThreadUnlocked(projectRoot, thread);
+      if (listing) {
+        listing.threads.set(written.id, written);
+        listing.unreadable = listing.unreadable.filter(
+          (id) => id !== written.id,
+        );
+      }
+      return structuredClone(written);
+    },
     allocateRunSequence: async () => {
       const sequence = workspace.nextRunSequence;
       workspace = { ...workspace, nextRunSequence: sequence + 1 };
