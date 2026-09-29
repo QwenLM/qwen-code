@@ -61,6 +61,9 @@ import {
   reconcileThreadOutbox,
   retireWorkspaceAgent,
   setWorkspaceAgentEnabled,
+  updateWorkspaceAgent,
+  issueAgentHostEnrollment,
+  enrollAgentHost,
   isAgentAddressable,
   updateWorkspaceAgents,
   withAgentStoreTransaction,
@@ -717,6 +720,87 @@ describe('retiring an agent', () => {
     ).resolves.toBe('updated');
     const [alice] = await readWorkspaceAgents(PROJECT_ROOT);
     expect(isAgentAddressable(alice)).toBe(true);
+  });
+
+  it('leaves every roster field unchanged when a combined placement update is refused', async () => {
+    await seed([ALICE]);
+    await writeThread(
+      PROJECT_ROOT,
+      thread({ runs: [run(1, 0, { status: 'running' })] }),
+    );
+    await expect(
+      updateWorkspaceAgent(PROJECT_ROOT, ALICE.id, {
+        applyConfig: (agent) => ({ ...agent, description: 'changed' }),
+        execution: { mode: 'local' },
+        enabled: false,
+      }),
+    ).resolves.toBe('has_live_work');
+    expect(await readWorkspaceAgents(PROJECT_ROOT)).toEqual([ALICE]);
+  });
+
+  it('does not apply config when disabling is refused by unreadable threads', async () => {
+    await seed([ALICE]);
+    await writeRaw(getThreadPath(PROJECT_ROOT, 'th_broken'), {
+      schemaVersion: AGENTS_SCHEMA_VERSION,
+    });
+    await expect(
+      updateWorkspaceAgent(PROJECT_ROOT, ALICE.id, {
+        applyConfig: (agent) => ({ ...agent, description: 'changed' }),
+        enabled: false,
+      }),
+    ).rejects.toThrow('thread records are unreadable');
+    expect(await readWorkspaceAgents(PROJECT_ROOT)).toEqual([ALICE]);
+  });
+
+  it('checks concurrent persona and placement patches against the locked roster', async () => {
+    await seed([ALICE]);
+    const enrollment = await issueAgentHostEnrollment(PROJECT_ROOT);
+    const { host } = await enrollAgentHost(PROJECT_ROOT, {
+      token: enrollment.token,
+      name: 'worker',
+      workspaceCwd: '/worker',
+      providers: ['Qwen Code ACP'],
+    });
+    const results = await Promise.all([
+      updateWorkspaceAgent(PROJECT_ROOT, ALICE.id, {
+        execution: {
+          mode: 'managed-host',
+          hostIds: [host.id],
+          provider: 'qwen',
+        },
+      }),
+      updateWorkspaceAgent(PROJECT_ROOT, ALICE.id, {
+        applyConfig: (agent) => ({ ...agent, model: 'custom-model' }),
+      }),
+    ]);
+    expect(results.sort()).toEqual([
+      'managed_host_persona_unsupported',
+      'updated',
+    ]);
+    const [agent] = await readWorkspaceAgents(PROJECT_ROOT);
+    expect(
+      agent.execution?.mode === 'managed-host' && Boolean(agent.model),
+    ).toBe(false);
+  });
+
+  it('combines a config change with disable and settles queued work', async () => {
+    await seed([ALICE]);
+    await writeThread(
+      PROJECT_ROOT,
+      thread({ runs: [run(1, 0, { status: 'queued', endedAt: undefined })] }),
+    );
+    await expect(
+      updateWorkspaceAgent(PROJECT_ROOT, ALICE.id, {
+        applyConfig: (agent) => ({ ...agent, description: 'paused' }),
+        enabled: false,
+      }),
+    ).resolves.toBe('updated');
+    expect(await readWorkspaceAgents(PROJECT_ROOT)).toEqual([
+      { ...ALICE, description: 'paused', enabled: false },
+    ]);
+    expect((await readThread(PROJECT_ROOT, 'th_root'))?.runs[0]?.status).toBe(
+      'cancelled',
+    );
   });
 
   it('cancels queued runs on disable so they cannot wedge their thread', async () => {

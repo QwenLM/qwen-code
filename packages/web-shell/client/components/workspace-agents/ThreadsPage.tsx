@@ -313,7 +313,10 @@ export function ThreadsPage({
   const groups = useMemo(() => groupThreads(threads), [threads]);
   const runtimeEntries = runtimes ?? [];
   const [creating, setCreating] = useState<'thread'>();
-  const [configuring, setConfiguring] = useState<string>();
+  const [configuring, setConfiguring] = useState<{
+    id: string;
+    hostIds: string[];
+  }>();
   const [openAgentId, setOpenAgentId] = useState<string>();
   const { t } = useI18n();
   const [addingRuntime, setAddingRuntime] = useState(false);
@@ -760,7 +763,15 @@ export function ThreadsPage({
                         <DropdownMenuContent align="end" className="min-w-40">
                           {onUpdateAgent ? (
                             <DropdownMenuItem
-                              onSelect={() => setConfiguring(agent.id)}
+                              onSelect={() =>
+                                setConfiguring({
+                                  id: agent.id,
+                                  hostIds:
+                                    agent.execution?.mode === 'managed-host'
+                                      ? [...agent.execution.hostIds]
+                                      : [],
+                                })
+                              }
                             >
                               {t('collab.agent.configure')}
                             </DropdownMenuItem>
@@ -807,7 +818,7 @@ export function ThreadsPage({
                     </div>
                   )}
                 </div>
-                {configuring === agent.id && onUpdateAgent ? (
+                {configuring?.id === agent.id && onUpdateAgent ? (
                   <form
                     className={styles.agentConfig}
                     onSubmit={submitConfig(agent.id)}
@@ -836,6 +847,7 @@ export function ThreadsPage({
                       <input
                         className={styles.field}
                         name="agentType"
+                        disabled={configuring.hostIds.length > 0}
                         defaultValue={agent.agentType ?? ''}
                         placeholder={t('collab.config.workspaceDefault')}
                       />
@@ -845,6 +857,7 @@ export function ThreadsPage({
                       <input
                         className={styles.field}
                         name="model"
+                        disabled={configuring.hostIds.length > 0}
                         defaultValue={agent.model ?? ''}
                         placeholder={t('collab.config.workspaceDefault')}
                       />
@@ -873,17 +886,34 @@ export function ThreadsPage({
                                 name="executionHostId"
                                 type="checkbox"
                                 value={entry.id}
-                                defaultChecked={
-                                  agent.execution?.mode === 'managed-host' &&
-                                  agent.execution.hostIds.includes(entry.id)
+                                checked={configuring.hostIds.includes(entry.id)}
+                                disabled={
+                                  !configuring.hostIds.includes(entry.id) &&
+                                  !entry.programs?.includes(
+                                    agent.execution?.mode === 'managed-host'
+                                      ? (agent.execution.provider ?? 'qwen')
+                                      : 'qwen',
+                                  )
                                 }
+                                onChange={(event) => {
+                                  const hostIds = event.target.checked
+                                    ? [...configuring.hostIds, entry.id]
+                                    : configuring.hostIds.filter(
+                                        (id) => id !== entry.id,
+                                      );
+                                  setConfiguring({ id: agent.id, hostIds });
+                                }}
                               />{' '}
                               {hostLabel(entry)} · {entry.provider} ·{' '}
                               {statusLabel(entry.status)}
                             </label>
                           ))}
                         <span className={styles.configNote}>
-                          {t('collab.config.runtimesHint')}
+                          {t(
+                            configuring.hostIds.length > 0
+                              ? 'collab.agent.hostPersona'
+                              : 'collab.config.runtimesHint',
+                          )}
                         </span>
                       </fieldset>
                     ) : null}

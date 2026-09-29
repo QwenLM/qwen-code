@@ -156,7 +156,11 @@ async function writeCredential(
 }
 
 async function requestJson<T>(url: string, init: RequestInit): Promise<T> {
-  const response = await fetch(url, init);
+  const response = await fetch(url, {
+    signal: AbortSignal.timeout(10_000),
+    redirect: 'error',
+    ...init,
+  });
   const result = (await response.json().catch(() => ({}))) as {
     error?: string;
   } & T;
@@ -184,12 +188,11 @@ function isPermanentRejection(error: unknown): boolean {
 }
 
 async function pickup(
-  serverUrl: string,
   credential: AgentHostCredential,
   waitMs = 25_000,
 ): Promise<HostRunAssignment | undefined> {
   const response = await fetch(
-    `${serverUrl}/agent-hosts/${encodeURIComponent(credential.workspaceId)}/${encodeURIComponent(credential.hostId)}/pickup`,
+    `${credential.serverUrl}/agent-hosts/${encodeURIComponent(credential.workspaceId)}/${encodeURIComponent(credential.hostId)}/pickup`,
     {
       method: 'POST',
       headers: {
@@ -197,6 +200,8 @@ async function pickup(
         'content-type': 'application/json',
       },
       body: JSON.stringify({ waitMs }),
+      signal: AbortSignal.timeout(waitMs + 10_000),
+      redirect: 'error',
     },
   );
   if (response.status === 204) return undefined;
@@ -582,15 +587,16 @@ async function executeAssignment(
 }
 
 async function returnResult(
-  serverUrl: string,
   credential: AgentHostCredential,
   initial: HostRunResult,
+  generationGuard?: WorkspaceGenerationGuard,
 ): Promise<void> {
   let result = initial;
   for (;;) {
+    generationGuard?.assertOpen();
     try {
       await requestJson(
-        `${serverUrl}/agent-hosts/${encodeURIComponent(credential.workspaceId)}/${encodeURIComponent(credential.hostId)}/result`,
+        `${credential.serverUrl}/agent-hosts/${encodeURIComponent(credential.workspaceId)}/${encodeURIComponent(credential.hostId)}/result`,
         {
           method: 'POST',
           headers: {
@@ -679,7 +685,8 @@ export async function startAgentHostConnection(
   try {
     await start;
   } catch (error) {
-    activeConnections.delete(key);
+    if (activeConnections.get(key)?.start === start)
+      activeConnections.delete(key);
     throw error;
   }
 }
@@ -704,6 +711,7 @@ async function connectAgentHost(
     options.workspaceCwd,
   );
   let credential = await readCredential(filePath);
+  options.generationGuard?.assertOpen();
   if (!credential) {
     if (!options.enrollmentToken) {
       throw new Error(
@@ -724,6 +732,7 @@ async function connectAgentHost(
         providers,
       }),
     });
+    options.generationGuard?.assertOpen();
     credential = {
       schemaVersion: 1,
       serverUrl,
@@ -786,7 +795,7 @@ async function connectAgentHost(
       for (;;) {
         options.generationGuard?.assertOpen();
         try {
-          const assignment = await pickup(serverUrl, activeCredential);
+          const assignment = await pickup(activeCredential);
           options.generationGuard?.assertOpen();
           if (!assignment) continue;
           writeStderrLine(
@@ -813,7 +822,7 @@ async function connectAgentHost(
               error: error instanceof Error ? error.message : String(error),
             };
           }
-          await returnResult(serverUrl, activeCredential, result);
+          await returnResult(activeCredential, result, options.generationGuard);
         } catch (error) {
           if (options.generationGuard?.closed) return;
           writeStderrLine(

@@ -141,6 +141,8 @@ export const COLLAB_MESSAGES_EN: Record<string, CollabMessage> = {
   'collab.agent.runsOn': 'Runs on',
   'collab.agent.thisComputer': 'This computer',
   'collab.agent.cwdUnknown': 'Folder not reported yet',
+  'collab.agent.hostPersona':
+    'Remote agents use the runtime’s model and your instructions here. Local role and model overrides are unavailable.',
   'collab.agent.runsOnHint':
     'A joined runtime works in its own folder, shown under its name. Files here are not copied to it.',
   'collab.agent.programLocal': 'Runs only on a joined runtime',
@@ -506,6 +508,8 @@ export const COLLAB_MESSAGES_ZH: Record<string, CollabMessage> = {
   'collab.agent.runsOn': '运行在',
   'collab.agent.thisComputer': '这台电脑',
   'collab.agent.cwdUnknown': '尚未上报目录',
+  'collab.agent.hostPersona':
+    '远程 Agent 使用执行环境的模型和此处填写的指令，不支持本地角色与模型覆盖。',
   'collab.agent.runsOnHint':
     '加入的 Runtime 在它自己的目录里工作（显示在名字下方），这里的文件不会复制过去。',
   'collab.agent.programLocal': '只能在加入的 Runtime 上运行',

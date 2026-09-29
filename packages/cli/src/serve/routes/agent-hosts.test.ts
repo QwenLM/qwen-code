@@ -13,8 +13,9 @@ import type {
 } from '../workspace-registry.js';
 import { registerAgentHostTransportRoutes } from './agent-hosts.js';
 
-const { pickup } = vi.hoisted(() => ({
+const { pickup, heartbeat } = vi.hoisted(() => ({
   pickup: vi.fn<() => Promise<unknown>>(),
+  heartbeat: vi.fn<() => Promise<unknown>>(),
 }));
 
 vi.mock(
@@ -33,11 +34,13 @@ vi.mock(
       typeof import('@qwen-code/qwen-code-core/agents/workspace-agents/store.js')
     >()),
     authenticateAgentHost: async () => true,
+    heartbeatAgentHost: heartbeat,
   }),
 );
 
 beforeEach(() => {
   pickup.mockReset();
+  heartbeat.mockReset();
 });
 
 function setup(initiallyEnabled = true) {
@@ -50,7 +53,7 @@ function setup(initiallyEnabled = true) {
   let active = true;
   let enabled = initiallyEnabled;
   const registry = {
-    listAll: () => (active ? [runtime] : []),
+    list: () => (active ? [runtime] : []),
   } as unknown as WorkspaceRegistry;
   const app = express();
   registerAgentHostTransportRoutes(app, registry, undefined, () => enabled);
@@ -121,3 +124,62 @@ it.each([false, true])(
     );
   },
 );
+
+it('refuses untrusted workspaces before reading settings on every transport route', async () => {
+  const app = express();
+  const settings = vi.fn(() => true);
+  const registry = {
+    list: () => [
+      { workspaceId: 'workspace', workspaceCwd: '/untrusted', trusted: false },
+    ],
+  } as unknown as WorkspaceRegistry;
+  registerAgentHostTransportRoutes(app, registry, undefined, settings);
+  for (const operation of [
+    'enroll',
+    'host/heartbeat',
+    'host/pickup',
+    'host/progress',
+    'host/result',
+  ]) {
+    const response = await request(app)
+      .post(
+        operation === 'enroll'
+          ? '/agent-hosts/enroll'
+          : `/agent-hosts/workspace/${operation}`,
+      )
+      .set('Authorization', `AgentHost ${'a'.repeat(32)}`)
+      .send({
+        workspaceId: 'workspace',
+        token: 'token',
+        name: 'remote',
+        workspaceCwd: '/remote',
+        providers: ['qwen'],
+      });
+    expect(response.status).toBe(403);
+  }
+  expect(settings).not.toHaveBeenCalled();
+  expect(heartbeat).not.toHaveBeenCalled();
+});
+
+it('does not disclose paths when the host registry fails before authentication', async () => {
+  const app = express();
+  const registry = {
+    list: () => [
+      {
+        workspaceId: 'workspace',
+        workspaceCwd: '/private/project',
+        trusted: true,
+      },
+    ],
+  } as unknown as WorkspaceRegistry;
+  registerAgentHostTransportRoutes(app, registry, undefined, () => true);
+  heartbeat.mockRejectedValue(
+    new Error('Malformed Agent Host registry in /private/project'),
+  );
+  const response = await request(app)
+    .post('/agent-hosts/workspace/host/heartbeat')
+    .set('Authorization', `AgentHost ${'a'.repeat(32)}`)
+    .send({ workspaceCwd: '/remote', providers: ['qwen'] });
+  expect(response.status).toBe(400);
+  expect(response.body).toEqual({ error: 'Agent Host heartbeat refused.' });
+});

@@ -708,6 +708,7 @@ export function AgentCreatePage({
                 </FieldLabel>
                 <Select
                   value={role || NO_ROLE}
+                  disabled={executionHostIds.size > 0}
                   onValueChange={(value) =>
                     setRole(value === NO_ROLE ? '' : value)
                   }
@@ -766,6 +767,7 @@ export function AgentCreatePage({
               </FieldLabel>
               <Input
                 id="agent-model"
+                disabled={workspaceAgentMode && executionHostIds.size > 0}
                 value={model}
                 onChange={(event) => setModel(event.target.value)}
                 placeholder="inherit / fast / provider:model"
@@ -822,6 +824,8 @@ export function AgentCreatePage({
                           onChange={() => {
                             setExecutionHostIds(new Set([host.id]));
                             setExecutionProvider('qwen');
+                            setRole('');
+                            setModel('');
                           }}
                         />
                         <span>
@@ -839,7 +843,11 @@ export function AgentCreatePage({
                     ))}
                   </div>
                   <FieldDescription>
-                    {t('collab.agent.runsOnHint')}
+                    {t(
+                      executionHostIds.size > 0
+                        ? 'collab.agent.hostPersona'
+                        : 'collab.agent.runsOnHint',
+                    )}
                   </FieldDescription>
                 </Field>
                 {(() => {

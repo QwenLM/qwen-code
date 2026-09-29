@@ -42,6 +42,21 @@ export function registerAgentHostConnectionRoutes(
   runtimeFor: (req: Request, res: Response) => WorkspaceRuntime | undefined,
   mutate: () => RequestHandler,
 ): void {
+  const isCurrent = (
+    req: Request,
+    res: Response,
+    runtime: WorkspaceRuntime,
+  ) => {
+    const current = runtimeFor(req, res);
+    if (!current) return false;
+    if (current !== runtime || runtime.generationGuard?.closed) {
+      res
+        .status(409)
+        .json({ error: 'Workspace runtime changed; retry the request.' });
+      return false;
+    }
+    return true;
+  };
   app.get(`${prefix}/hosts/service`, async (req, res) => {
     const runtime = runtimeFor(req, res);
     if (!runtime) return;
@@ -69,6 +84,7 @@ export function registerAgentHostConnectionRoutes(
       }
       if (!(await providers()).includes(input.provider))
         throw new Error('此服务环境未安装所选执行程序。');
+      if (!isCurrent(req, res, runtime)) return;
       await startAgentHostConnection({
         bridge: runtime.bridge,
         workspaceCwd: runtime.workspaceCwd,
@@ -81,6 +97,7 @@ export function registerAgentHostConnectionRoutes(
           ? { generationGuard: runtime.generationGuard }
           : {}),
       });
+      if (!isCurrent(req, res, runtime)) return;
       res.json({
         connected: true,
         workspaceCwd: runtime.workspaceCwd,
@@ -142,7 +159,9 @@ export function registerAgentHostConnectionRoutes(
         !service.providers?.includes(input.provider)
       )
         throw new Error('远程服务不支持所选执行程序或接入协议。');
+      if (!isCurrent(req, res, runtime)) return;
       const enrollment = await issueAgentHostEnrollment(runtime.workspaceCwd);
+      if (!isCurrent(req, res, runtime)) return;
       const result = await request('/connect', {
         serverUrl: callback,
         workspaceId: runtime.workspaceId,
@@ -150,6 +169,7 @@ export function registerAgentHostConnectionRoutes(
         provider: input.provider,
         allowHttp: input.allowHttp === true,
       });
+      if (!isCurrent(req, res, runtime)) return;
       if (!result.connected) throw new Error('远程服务未确认接入。');
       res.json(result);
     } catch (error) {

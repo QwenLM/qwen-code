@@ -1602,7 +1602,8 @@ type WorkspaceAgentRosterChange =
   | 'has_live_work'
   | 'retired'
   | 'host_not_found'
-  | 'program_unavailable';
+  | 'program_unavailable'
+  | 'managed_host_persona_unsupported';
 
 async function agentHasLiveWork(
   transaction: AgentStoreTransaction,
@@ -1626,30 +1627,64 @@ async function agentHasLiveWork(
   );
 }
 
-export async function setWorkspaceAgentEnabled(
+export async function updateWorkspaceAgent(
   projectRoot: string,
   agentId: string,
-  enabled: boolean,
+  patch: {
+    enabled?: boolean;
+    execution?: WorkspaceAgent['execution'];
+    applyConfig?: (agent: WorkspaceAgent) => WorkspaceAgent;
+  },
 ): Promise<WorkspaceAgentRosterChange> {
   return withAgentStoreTransaction(projectRoot, async (transaction) => {
     const agents = await transaction.readAgents();
     const agent = agents.find((candidate) => candidate.id === agentId);
     if (!agent) return 'not_found';
-    // A retired identity is a record, not a switch. Enabling one would report
-    // success and change nothing a caller can observe — `isAgentAddressable`
-    // still refuses it — which is worse than saying no.
     if (agent.retiredAt !== undefined) return 'retired';
-    if (enabled && agent.enabled !== false) return 'updated';
-    const pending = enabled ? undefined : await transaction.listThreads();
+    let next = patch.applyConfig ? patch.applyConfig(agent) : agent;
+    if ('execution' in patch) next = { ...next, execution: patch.execution };
+    if (
+      patch.enabled !== undefined &&
+      (agent.enabled !== false) !== patch.enabled
+    ) {
+      next = { ...next, enabled: patch.enabled };
+    }
+    if (
+      (patch.applyConfig || 'execution' in patch) &&
+      next.execution?.mode === 'managed-host' &&
+      (next.agentType || next.model)
+    ) {
+      return 'managed_host_persona_unsupported';
+    }
+    if ('execution' in patch) {
+      if (await agentHasLiveWork(transaction, agentId)) return 'has_live_work';
+      const execution = next.execution;
+      if (execution?.mode === 'managed-host') {
+        const hosts = (await readAgentHostsUnlocked(projectRoot)).hosts;
+        const placed = hosts.filter((host) =>
+          execution.hostIds.includes(host.id),
+        );
+        if (placed.length !== execution.hostIds.length) return 'host_not_found';
+        const { provider } = execution;
+        if (
+          provider &&
+          !placed.some((host) => hostOffersProgram(host, provider))
+        ) {
+          return 'program_unavailable';
+        }
+      }
+    }
+    const pending =
+      patch.enabled === false ? await transaction.listThreads() : undefined;
     if (pending && pending.unreadable.length > 0) {
       throw new Error(
         `Cannot change the agent roster while thread records are unreadable: ${pending.unreadable.join(', ')}.`,
       );
     }
-    if ((agent.enabled !== false) !== enabled) {
+    if (next !== agent) {
       await transaction.writeAgents(
         agents.map((candidate) =>
-          candidate.id === agentId ? { ...candidate, enabled } : candidate,
+          candidate.id === agentId ? next : candidate,
         ),
       );
     }
@@ -1680,38 +1715,20 @@ export async function setWorkspaceAgentEnabled(
   });
 }
 
+export async function setWorkspaceAgentEnabled(
+  projectRoot: string,
+  agentId: string,
+  enabled: boolean,
+): Promise<WorkspaceAgentRosterChange> {
+  return updateWorkspaceAgent(projectRoot, agentId, { enabled });
+}
+
 export async function setWorkspaceAgentExecution(
   projectRoot: string,
   agentId: string,
   execution: WorkspaceAgent['execution'],
 ): Promise<WorkspaceAgentRosterChange> {
-  return withAgentStoreTransaction(projectRoot, async (transaction) => {
-    const agents = await transaction.readAgents();
-    const agent = agents.find((candidate) => candidate.id === agentId);
-    if (!agent) return 'not_found';
-    if (agent.retiredAt !== undefined) return 'retired';
-    if (await agentHasLiveWork(transaction, agentId)) return 'has_live_work';
-    if (execution?.mode === 'managed-host') {
-      const hosts = (await readAgentHostsUnlocked(projectRoot)).hosts;
-      const placed = hosts.filter((host) =>
-        execution.hostIds.includes(host.id),
-      );
-      if (placed.length !== execution.hostIds.length) return 'host_not_found';
-      const { provider } = execution;
-      if (
-        provider &&
-        !placed.some((host) => hostOffersProgram(host, provider))
-      ) {
-        return 'program_unavailable';
-      }
-    }
-    await transaction.writeAgents(
-      agents.map((candidate) =>
-        candidate.id === agentId ? { ...candidate, execution } : candidate,
-      ),
-    );
-    return 'updated';
-  });
+  return updateWorkspaceAgent(projectRoot, agentId, { execution });
 }
 
 /**

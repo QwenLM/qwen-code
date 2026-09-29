@@ -29,9 +29,7 @@ function body(req: Request): Record<string, unknown> {
 }
 
 function runtimeFor(registry: WorkspaceRegistry, workspaceId: string) {
-  return registry
-    .listAll()
-    .find((runtime) => runtime.workspaceId === workspaceId);
+  return registry.list().find((runtime) => runtime.workspaceId === workspaceId);
 }
 
 function hostSecret(req: Request): string | undefined {
@@ -148,8 +146,8 @@ export function registerAgentHostTransportRoutes(
       res.status(404).json({ error: 'Workspace not found.' });
       return;
     }
-    if (!requireEnabled(runtime.workspaceCwd, res)) return;
     if (!requireTrustedWorkspaceRuntime(runtime, res)) return;
+    if (!requireEnabled(runtime.workspaceCwd, res)) return;
     const secret = hostSecret(req);
     if (
       !secret ||
@@ -200,8 +198,8 @@ export function registerAgentHostTransportRoutes(
         res.status(404).json({ error: 'Workspace not found.' });
         return;
       }
-      if (!requireEnabled(runtime.workspaceCwd, res)) return;
       if (!requireTrustedWorkspaceRuntime(runtime, res)) return;
+      if (!requireEnabled(runtime.workspaceCwd, res)) return;
       if (
         !secret ||
         !(await authenticateAgentHost(runtime.workspaceCwd, hostId, secret))
@@ -296,8 +294,8 @@ export function registerAgentHostTransportRoutes(
       res.status(404).json({ error: 'Workspace not found.' });
       return;
     }
-    if (!requireEnabled(runtime.workspaceCwd, res)) return;
     if (!requireTrustedWorkspaceRuntime(runtime, res)) return;
+    if (!requireEnabled(runtime.workspaceCwd, res)) return;
     try {
       const enrolled = await enrollAgentHost(runtime.workspaceCwd, {
         token,
@@ -338,8 +336,8 @@ export function registerAgentHostTransportRoutes(
         res.status(404).json({ error: 'Workspace not found.' });
         return;
       }
-      if (!requireEnabled(runtime.workspaceCwd, res)) return;
       if (!requireTrustedWorkspaceRuntime(runtime, res)) return;
+      if (!requireEnabled(runtime.workspaceCwd, res)) return;
       try {
         const host = await heartbeatAgentHost(
           runtime.workspaceCwd,
@@ -387,10 +385,8 @@ export function registerAgentHostTransportRoutes(
           return;
         }
         res.json({ host });
-      } catch (error) {
-        res.status(400).json({
-          error: error instanceof Error ? error.message : String(error),
-        });
+      } catch {
+        res.status(400).json({ error: 'Agent Host heartbeat refused.' });
       }
     },
   );
@@ -416,8 +412,8 @@ export function registerAgentHostTransportRoutes(
         res.status(404).json({ error: 'Workspace not found.' });
         return;
       }
-      if (!requireEnabled(runtime.workspaceCwd, res)) return;
       if (!requireTrustedWorkspaceRuntime(runtime, res)) return;
+      if (!requireEnabled(runtime.workspaceCwd, res)) return;
       if (
         !(await authenticateAgentHost(runtime.workspaceCwd, hostId, secret))
       ) {
@@ -479,8 +475,8 @@ export function registerAgentHostTransportRoutes(
         res.status(404).json({ error: 'Workspace not found.' });
         return;
       }
-      if (!requireEnabled(runtime.workspaceCwd, res)) return;
       if (!requireTrustedWorkspaceRuntime(runtime, res)) return;
+      if (!requireEnabled(runtime.workspaceCwd, res)) return;
       if (
         !(await authenticateAgentHost(runtime.workspaceCwd, hostId, secret))
       ) {

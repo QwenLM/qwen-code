@@ -56,8 +56,7 @@ import {
   isAgentAddressable,
   isAgentLocal,
   maxConcurrentRunsFor,
-  setWorkspaceAgentEnabled,
-  setWorkspaceAgentExecution,
+  updateWorkspaceAgent,
   threadTokens,
   updateWorkspaceAgents,
   withAgentStoreTransaction,
@@ -771,8 +770,19 @@ export function registerWorkspaceAgentRoutes(
             (candidate) => candidate.sourceId === agent.id,
           );
           const execution = agent.execution ?? { mode: 'local' as const };
+          const availableHost =
+            execution.mode === 'managed-host'
+              ? hostRuntimes.find(
+                  (host) =>
+                    execution.hostIds.includes(host.id) &&
+                    host.status === 'online' &&
+                    (!execution.provider ||
+                      host.programs.includes(execution.provider)),
+                )
+              : undefined;
           const selectedHostId =
             activeRun?.lease?.hostId ??
+            availableHost?.id ??
             (execution.mode === 'managed-host'
               ? execution.hostIds[0]
               : undefined);
@@ -780,11 +790,7 @@ export function registerWorkspaceAgentRoutes(
             (host) => host.id === selectedHostId,
           );
           const runtimeAvailable =
-            execution.mode === 'local' ||
-            hostRuntimes.some(
-              (host) =>
-                execution.hostIds.includes(host.id) && host.status === 'online',
-            );
+            execution.mode === 'local' || availableHost !== undefined;
           const blocked = threads.some(
             (thread) =>
               resolve(thread, threads).status === 'blocked' &&
@@ -1706,11 +1712,6 @@ export function registerWorkspaceAgentRoutes(
         res.status(400).json({ error: 'nothing_to_update' });
         return;
       }
-      // Narrowed on `apply` for the same reason as the create handler above:
-      // the `error` guard reads well but never discriminated the union. Gating
-      // on `touched` instead is not an option here — `nextConfig` has to stay
-      // the patched agent even when this request touched no config field, or
-      // the managed-host check below would miss an existing persona override.
       const applyConfig = config.apply;
       if (!applyConfig) {
         res.status(500).json({ error: 'config_patch_unavailable' });
@@ -1718,84 +1719,30 @@ export function registerWorkspaceAgentRoutes(
       }
       try {
         const agentId = String(req.params['id']);
-        const current = (await readWorkspaceAgents(runtime.workspaceCwd)).find(
-          (agent) => agent.id === agentId,
+        const result = await updateWorkspaceAgent(
+          runtime.workspaceCwd,
+          agentId,
+          {
+            ...(config.touched ? { applyConfig } : {}),
+            ...(execution !== undefined ? { execution } : {}),
+            ...(enabled !== undefined ? { enabled } : {}),
+          },
         );
-        const nextConfig = current ? applyConfig(current) : undefined;
-        const nextExecution = execution ?? current?.execution;
-        if (
-          nextExecution?.mode === 'managed-host' &&
-          (nextConfig?.agentType || nextConfig?.model)
-        ) {
-          res.status(400).json({ error: 'managed_host_persona_unsupported' });
-          return;
-        }
-        let missing = false;
-        let retired = false;
-        if (execution !== undefined) {
-          const result = await setWorkspaceAgentExecution(
-            runtime.workspaceCwd,
-            agentId,
-            execution,
-          );
-          if (result !== 'updated') {
-            const [status, error] =
-              result === 'not_found'
-                ? ([404, 'agent_not_found'] as const)
-                : result === 'retired'
-                  ? ([409, 'agent_retired'] as const)
-                  : result === 'host_not_found'
-                    ? ([400, 'agent_host_not_found'] as const)
-                    : result === 'program_unavailable'
-                      ? ([400, 'program_unavailable'] as const)
+        if (result !== 'updated') {
+          const [status, error] =
+            result === 'not_found'
+              ? ([404, 'agent_not_found'] as const)
+              : result === 'retired'
+                ? ([409, 'agent_retired'] as const)
+                : result === 'host_not_found'
+                  ? ([400, 'agent_host_not_found'] as const)
+                  : result === 'program_unavailable'
+                    ? ([400, 'program_unavailable'] as const)
+                    : result === 'managed_host_persona_unsupported'
+                      ? ([400, 'managed_host_persona_unsupported'] as const)
                       : ([409, 'agent_has_live_work'] as const);
-            res.status(status).json({ error });
-            return;
-          }
-        }
-        if (config.touched) {
-          await updateWorkspaceAgents(runtime.workspaceCwd, (agents) => {
-            const existing = agents.find((agent) => agent.id === agentId);
-            if (!existing) {
-              missing = true;
-              return agents;
-            }
-            // A retired identity is a record, not a thing to keep tuning.
-            if (existing.retiredAt !== undefined) {
-              retired = true;
-              return agents;
-            }
-            return agents.map((agent) =>
-              agent.id === agentId ? config.apply(agent) : agent,
-            );
-          });
-          if (missing) {
-            res.status(404).json({ error: 'agent_not_found' });
-            return;
-          }
-          if (retired) {
-            res.status(409).json({ error: 'agent_retired' });
-            return;
-          }
-        }
-        if (enabled !== undefined) {
-          const result = await setWorkspaceAgentEnabled(
-            runtime.workspaceCwd,
-            agentId,
-            enabled,
-          );
-          if (result === 'not_found') {
-            res.status(404).json({ error: 'agent_not_found' });
-            return;
-          }
-          if (result === 'has_live_work') {
-            res.status(409).json({ error: 'agent_has_live_work' });
-            return;
-          }
-          if (result === 'retired') {
-            res.status(409).json({ error: 'agent_retired' });
-            return;
-          }
+          res.status(status).json({ error });
+          return;
         }
         const [agents, { threads }] = await Promise.all([
           readWorkspaceAgents(runtime.workspaceCwd),

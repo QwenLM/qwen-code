@@ -189,10 +189,8 @@ export type LeaseResult<T> =
   | { ok: false; reason: LeaseRefusal };
 
 export interface HostRunAssignment {
-  workspaceId: string;
   agent: WorkspaceAgent;
   threadId: string;
-  rootThreadId: string;
   runId: string;
   attempt: number;
   prompt: string;
@@ -414,10 +412,8 @@ function assignmentFor(
     roster,
   });
   return {
-    workspaceId: transaction.workspaceId,
     agent,
     threadId: thread.id,
-    rootThreadId: thread.rootThreadId,
     runId: run.id,
     attempt: run.attempts,
     prompt: prompt.text,
