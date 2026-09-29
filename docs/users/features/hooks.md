@@ -38,6 +38,17 @@ Reloading requires this explicit menu-open action: saving a file, pulling change
 
 This reload covers hook definitions, not hook controls or HTTP security settings. Changes to `disableAllHooks`, `stopHookBlockingCap`, `security.allowedHttpHookUrls` and `security.allowPrivateNetworkHooks` still require a restart. Hooks registered at runtime by skills or the SDK are not affected. Project hooks load only in a trusted folder. When hooks are turned off by `disableAllHooks`, `--safe-mode` or `--bare`, none load and the browser says so at the top.
 
+### Agent frontmatter scope
+
+Hooks declared in an agent's frontmatter apply only to that invocation, including
+its `SubagentStart` and `SubagentStop` events. They do not inherit into nested
+agents or run for parents and siblings. Global settings hooks and session-wide
+skill/function hooks retain their existing scope. Project-agent hooks recheck
+the trust of the workspace that supplied the agent before every event.
+
+Use `SubagentStop` for agent completion; `Stop` is not automatically remapped.
+Move an agent hook to settings if it should observe the whole session.
+
 ## Hook Types
 
 Qwen Code supports four hook executor types:
@@ -1473,6 +1484,9 @@ It fires when the session starts, when context files are reloaded during the ses
 ## Hook Configuration
 
 Hooks are configured in Qwen Code settings, typically in `.qwen/settings.json` or user configuration files. Hooks in the system settings files (System and SystemDefaults) load with the source System and, like user hooks, regardless of folder trust. Within one event, sequential hooks from settings and extensions run in this order: Project, User, System, Extension.
+
+> [!NOTE]
+> A hook must include a name field to be enabled or disabled individually at runtime. Hooks without a name will always execute when their event and matcher conditions are met.
 
 ```json
 {

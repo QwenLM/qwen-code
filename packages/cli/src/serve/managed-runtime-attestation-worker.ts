@@ -8,13 +8,35 @@ import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import type { Readable } from 'node:stream';
 import express from 'express';
+import { MANAGED_TOOL_RESULT_ROUTES } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
 import {
+  OWNED_MANAGED_RUNTIME_ROUTES,
   ownedManagedRuntimeRouteGate,
   registerManagedRuntimeAttestationRoute,
   type ManagedRuntimeAttestationIdentity,
 } from './managed-runtime-attestation-contract.js';
-import { ManagedToolExecutor } from './managed-runtime-tool-executor.js';
+import {
+  createManagedContextReady,
+  parseManagedContextBoot,
+  type ManagedContextBoot,
+  type ManagedContextReady,
+} from './managed-context-envelope.js';
+import {
+  MANAGED_CONTEXT_WORKER_ROUTES,
+  ManagedContextMount,
+  registerManagedContextRoutes,
+} from './managed-context-worker.js';
+import {
+  ManagedToolExecutor,
+  type ManagedShellCapturePublisher,
+} from './managed-runtime-tool-executor.js';
+import {
+  ManagedShellPublisherRegistry,
+  MANAGED_SHELL_PUBLISHER_ROUTE,
+} from './managed-shell-publisher.js';
 import { registerManagedRuntimeToolRoutes } from './managed-runtime-tool-routes.js';
+import { MANAGED_RUNTIME_PROVIDER_ROUTE } from './managed-runtime-provider-protocol.js';
+import { registerManagedRuntimeProviderRoute } from './managed-runtime-provider-worker.js';
 
 const MANAGED_RUNTIME_WORKER_BOOT_LIMIT_BYTES = 32 * 1024;
 const MANAGED_RUNTIME_WORKER_BOOT_TIMEOUT_MS = 30_000;
@@ -53,7 +75,7 @@ export interface ManagedRuntimeWorkerReady {
 }
 
 export interface ManagedRuntimeAttestationWorkerHandle {
-  readonly ready: ManagedRuntimeWorkerReady;
+  readonly ready: ManagedRuntimeWorkerReady | ManagedContextReady;
   close(): Promise<void>;
 }
 
@@ -72,7 +94,7 @@ function isExactBoot(value: unknown): value is ManagedRuntimeWorkerBoot {
 
 async function collectManagedRuntimeWorkerBoot(
   input: Readable,
-): Promise<ManagedRuntimeWorkerBoot> {
+): Promise<ManagedRuntimeWorkerBoot | ManagedContextBoot> {
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of input) {
@@ -83,21 +105,29 @@ async function collectManagedRuntimeWorkerBoot(
     }
     chunks.push(bytes);
   }
+  const document = Buffer.concat(chunks);
   let parsed: unknown;
   try {
-    parsed = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    parsed = JSON.parse(document.toString('utf8'));
   } catch {
     throw new Error(INVALID_BOOT_MESSAGE);
   }
-  if (!isExactBoot(parsed)) {
+  if (isExactBoot(parsed)) {
+    return parsed;
+  }
+  try {
+    // Boot v2 is UTF-8: bytes that are not are refused, never replaced.
+    new TextDecoder('utf-8', { fatal: true }).decode(document);
+    return parseManagedContextBoot(parsed);
+  } catch {
     throw new Error(INVALID_BOOT_MESSAGE);
   }
-  return parsed;
 }
 
+/** Reads boot v1, or boot v2 of `managed-context/1`, from standard input. */
 export async function readManagedRuntimeWorkerBoot(
   input: Readable,
-): Promise<ManagedRuntimeWorkerBoot> {
+): Promise<ManagedRuntimeWorkerBoot | ManagedContextBoot> {
   let timeout: NodeJS.Timeout | undefined;
   const timedOut = new Promise<never>((_, reject) => {
     timeout = setTimeout(() => {
@@ -117,17 +147,49 @@ export async function readManagedRuntimeWorkerBoot(
 }
 
 export async function startManagedRuntimeAttestationWorker(
-  boot: ManagedRuntimeWorkerBoot,
+  boot: ManagedRuntimeWorkerBoot | ManagedContextBoot,
+  capturePublisher?: ManagedShellCapturePublisher,
+  remotePublishers?: ManagedShellPublisherRegistry,
 ): Promise<ManagedRuntimeAttestationWorkerHandle> {
   const app = express();
   app.disable('x-powered-by');
-  registerManagedRuntimeAttestationRoute(app, boot);
-  const executor = ManagedToolExecutor.forWorkspace(
-    boot.workspaceCwd,
-    boot.runtimeInstanceId,
+  let executor: ManagedToolExecutor;
+  if (boot.version === 2) {
+    executor = registerManagedContextRoutes(
+      app,
+      boot,
+      capturePublisher,
+      remotePublishers,
+    );
+  } else {
+    registerManagedRuntimeAttestationRoute(app, boot);
+    executor = ManagedToolExecutor.forWorkspace(
+      boot.workspaceCwd,
+      boot.runtimeInstanceId,
+    );
+    registerManagedRuntimeToolRoutes(app, boot, executor);
+    const mount = new ManagedContextMount(boot.workspaceCwd);
+    registerManagedRuntimeProviderRoute(app, boot, executor, async () => {
+      const directory = await mount.resolve('');
+      return directory === undefined
+        ? undefined
+        : { directory, workspaceRoot: directory, preapproved: false };
+    });
+  }
+  const server = createServer(
+    ownedManagedRuntimeRouteGate(
+      app,
+      boot.version === 2
+        ? capturePublisher || remotePublishers
+          ? [
+              ...MANAGED_CONTEXT_WORKER_ROUTES,
+              ...MANAGED_TOOL_RESULT_ROUTES,
+              ...(remotePublishers ? [MANAGED_SHELL_PUBLISHER_ROUTE] : []),
+            ]
+          : MANAGED_CONTEXT_WORKER_ROUTES
+        : [...OWNED_MANAGED_RUNTIME_ROUTES, MANAGED_RUNTIME_PROVIDER_ROUTE],
+    ),
   );
-  registerManagedRuntimeToolRoutes(app, boot, executor);
-  const server = createServer(ownedManagedRuntimeRouteGate(app));
   server.maxHeadersCount = 32;
   server.headersTimeout = 5_000;
   server.requestTimeout = 5_000;
@@ -152,15 +214,18 @@ export async function startManagedRuntimeAttestationWorker(
     await new Promise<void>((resolve) => server.close(() => resolve()));
     throw new Error('Managed Runtime worker listener is unavailable.');
   }
-  const ready = Object.freeze({
-    type: 'ready',
-    version: 1,
-    runtimeInstanceId: boot.runtimeInstanceId,
-    runtimeIncarnation: boot.runtimeIncarnation,
-    leaseId: boot.leaseId,
-    epoch: boot.epoch,
-    url: `http://127.0.0.1:${address.port}`,
-  } satisfies ManagedRuntimeWorkerReady);
+  const ready =
+    boot.version === 2
+      ? createManagedContextReady(boot, address.port)
+      : Object.freeze({
+          type: 'ready',
+          version: 1,
+          runtimeInstanceId: boot.runtimeInstanceId,
+          runtimeIncarnation: boot.runtimeIncarnation,
+          leaseId: boot.leaseId,
+          epoch: boot.epoch,
+          url: `http://127.0.0.1:${address.port}`,
+        } satisfies ManagedRuntimeWorkerReady);
   let closing: Promise<void> | undefined;
 
   return {
@@ -180,7 +245,11 @@ export async function startManagedRuntimeAttestationWorker(
 
 export async function runManagedRuntimeAttestationWorker(): Promise<void> {
   const boot = await readManagedRuntimeWorkerBoot(process.stdin);
-  const worker = await startManagedRuntimeAttestationWorker(boot);
+  const worker = await startManagedRuntimeAttestationWorker(
+    boot,
+    undefined,
+    boot.version === 2 ? new ManagedShellPublisherRegistry() : undefined,
+  );
 
   await new Promise<void>((resolve, reject) => {
     let closing = false;

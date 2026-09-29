@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.runtimebroker;
 
 import java.time.Instant;
 import java.util.Map;
+import java.util.LinkedHashMap;
 import java.util.Objects;
 import java.util.Set;
 
@@ -10,13 +11,35 @@ public final class ToolExecutionRecord {
     private static final Set<String> EXECUTION_STATUSES = Set.of(
             "not_started", "success", "error", "cancelled");
 
+    /**
+     * Whether the original Runtime can still answer for this execution after
+     * its dispatch answer was lost: tool v3 and provider references can be
+     * observed and cancelled there, a tool v2 reference cannot.
+     */
+    boolean observableAfterLoss() {
+        return Integer.valueOf(3).equals(reference.get("runtimeProtocol"))
+                || ProviderRuntimeProtocol.isReference(reference);
+    }
+
+    Map<String, Object> cancellationBeforeDispatch() {
+        if (!Integer.valueOf(3).equals(reference.get("runtimeProtocol"))) {
+            return Map.of("executionStatus", "cancelled");
+        }
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("executionStatus", "not_started");
+        result.put("responseParts", java.util.List.of());
+        result.put("capture", null);
+        return result;
+    }
+
     public enum State {
         PREPARED,
         DISPATCHING,
         EXECUTING,
         CANCEL_REQUESTED,
         SETTLED,
-        UNKNOWN
+        UNKNOWN,
+        ABANDONED
     }
 
     private final String executionCallId;
@@ -39,6 +62,8 @@ public final class ToolExecutionRecord {
     private final long dispatchGeneration;
     private final long version;
     private final Instant settledAt;
+    private final Instant abandonedAt;
+    private final String lossEvidenceId;
 
     ToolExecutionRecord(String executionCallId, String idempotencyKey,
             String bindingId, long runtimeGeneration,
@@ -49,6 +74,21 @@ public final class ToolExecutionRecord {
             long lastSequence, boolean cancelRequested,
             String dispatchOwner, Instant dispatchLeaseUntil,
             long dispatchGeneration, long version, Instant settledAt) {
+        this(executionCallId, idempotencyKey, bindingId, runtimeGeneration,
+                harnessSessionId, runtimeSessionId, turnId, toolCallId,
+                requestDigest, reference, state, executionStatus, result,
+                lastSequence, cancelRequested, dispatchOwner, dispatchLeaseUntil,
+                dispatchGeneration, version, settledAt, null, null);
+    }
+
+    ToolExecutionRecord(String executionCallId, String idempotencyKey,
+            String bindingId, long runtimeGeneration,
+            String harnessSessionId, String runtimeSessionId, String turnId,
+            String toolCallId, String requestDigest, Map<String, Object> reference,
+            State state, String executionStatus, Map<String, Object> result,
+            long lastSequence, boolean cancelRequested, String dispatchOwner,
+            Instant dispatchLeaseUntil, long dispatchGeneration, long version,
+            Instant settledAt, Instant abandonedAt, String lossEvidenceId) {
         this.executionCallId = BrokerValues.requireId(executionCallId,
                 "executionCallId");
         this.idempotencyKey = BrokerValues.requireId(idempotencyKey,
@@ -130,6 +170,16 @@ public final class ToolExecutionRecord {
         this.dispatchGeneration = dispatchGeneration;
         this.version = version;
         this.settledAt = settledAt;
+        if (state == State.ABANDONED) {
+            BrokerValues.requireId(lossEvidenceId, "lossEvidenceId");
+            if (abandonedAt == null) {
+                throw new IllegalArgumentException("Abandonment time is required");
+            }
+        } else if (abandonedAt != null || lossEvidenceId != null) {
+            throw new IllegalArgumentException("Only abandonment carries loss evidence");
+        }
+        this.abandonedAt = abandonedAt;
+        this.lossEvidenceId = lossEvidenceId;
     }
 
     public static ToolExecutionRecord prepared(String executionCallId,
@@ -224,6 +274,49 @@ public final class ToolExecutionRecord {
         return settledAt;
     }
 
+    public Instant getAbandonedAt() {
+        return abandonedAt;
+    }
+
+    public String getLossEvidenceId() {
+        return lossEvidenceId;
+    }
+
+    public String getAbandonmentReason() {
+        return state == State.ABANDONED ? "runtime_lost" : null;
+    }
+
+    public boolean isTerminal() {
+        return isSettled() || state == State.ABANDONED;
+    }
+
+    boolean needsReconciliation() {
+        return state == State.EXECUTING || state == State.CANCEL_REQUESTED
+                || state == State.UNKNOWN;
+    }
+
+    boolean belongsTo(RuntimeSessionRecord session) {
+        return bindingId.equals(session.getBindingId())
+                && runtimeGeneration == session.getRuntimeGeneration()
+                && harnessSessionId.equals(session.getSession().getHarnessSessionId())
+                && runtimeSessionId.equals(session.getRuntimeSessionId());
+    }
+
+    ToolExecutionRecord abandon(RuntimeBindingRecord binding, Instant time) {
+        if (isTerminal() || binding.getState() != RuntimeBindingRecord.State.LOST
+                || !bindingId.equals(binding.getBindingId())
+                || runtimeGeneration != binding.getGeneration()
+                || binding.getLossEvidence() == null) {
+            throw new IllegalArgumentException("Execution cannot be abandoned");
+        }
+        return new ToolExecutionRecord(executionCallId, idempotencyKey,
+                bindingId, runtimeGeneration, harnessSessionId, runtimeSessionId,
+                turnId, toolCallId, requestDigest, reference, State.ABANDONED,
+                null, null, lastSequence, cancelRequested, dispatchOwner,
+                dispatchLeaseUntil, dispatchGeneration, version, null,
+                time, binding.getLossEvidence().evidenceId());
+    }
+
     public boolean isSettled() {
         return state == State.SETTLED;
     }
@@ -266,6 +359,14 @@ public final class ToolExecutionRecord {
             Map<String, Object> resolutionResult, Instant resolutionTime) {
         if (state != State.UNKNOWN) {
             throw new IllegalStateException("execution is not unknown");
+        }
+        return resolveUnsettled(resolutionResult, resolutionTime);
+    }
+
+    ToolExecutionRecord resolveUnsettled(
+            Map<String, Object> resolutionResult, Instant resolutionTime) {
+        if (!needsReconciliation()) {
+            throw new IllegalStateException("execution does not require reconciliation");
         }
         if (resolutionTime == null) {
             throw new IllegalArgumentException("resolutionTime is required");
@@ -343,6 +444,6 @@ public final class ToolExecutionRecord {
                 runtimeSessionId, turnId, toolCallId, requestDigest,
                 reference, nextState, nextStatus, nextResult, sequence,
                 requested, owner, leaseUntil, nextDispatchGeneration,
-                nextVersion, completionTime);
+                nextVersion, completionTime, abandonedAt, lossEvidenceId);
     }
 }

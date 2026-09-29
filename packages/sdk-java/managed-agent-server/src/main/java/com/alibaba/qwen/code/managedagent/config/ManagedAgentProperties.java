@@ -1,7 +1,9 @@
 package com.alibaba.qwen.code.managedagent.config;
 
+import jakarta.annotation.PostConstruct;
 import java.time.Duration;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
@@ -12,6 +14,7 @@ public class ManagedAgentProperties {
     private final Dispatch dispatch = new Dispatch();
     private final Events events = new Events();
     private final RuntimeBroker runtimeBroker = new RuntimeBroker();
+    private String agentRevision = "1";
 
     public Harness getHarness() {
         return harness;
@@ -33,8 +36,32 @@ public class ManagedAgentProperties {
         return runtimeBroker;
     }
 
+    public String getAgentRevision() {
+        return agentRevision;
+    }
+
+    public void setAgentRevision(String agentRevision) {
+        this.agentRevision = agentRevision;
+    }
+
+    @PostConstruct
+    void validateWorkspaceFiles() {
+        if (harness.isWorkspaceFilesEnabled()
+                && (!harness.isEnabled() || !sessionStore.isEnabled()
+                        || !runtimeBroker.isEnabled()
+                        || !"local-process".equals(runtimeBroker.getProvisioner())
+                        || !"session".equals(runtimeBroker.getIsolationClass())
+                        || runtimeBroker.getWorkspaceMounts().isEmpty()
+                        || !"yolo".equalsIgnoreCase(harness.getApprovalMode()))) {
+            throw new IllegalStateException("Hosted Workspace files require"
+                    + " a preapproved Harness, Session Store and Session-isolated"
+                    + " local-process Broker with Workspace mounts");
+        }
+    }
+
     public static class Harness {
         private boolean enabled;
+        private boolean workspaceFilesEnabled;
         private String baseUrl = "http://127.0.0.1:4170";
         private String token = "";
         private String capabilityDigest = "";
@@ -49,6 +76,14 @@ public class ManagedAgentProperties {
 
         public void setEnabled(boolean enabled) {
             this.enabled = enabled;
+        }
+
+        public boolean isWorkspaceFilesEnabled() {
+            return workspaceFilesEnabled;
+        }
+
+        public void setWorkspaceFilesEnabled(boolean workspaceFilesEnabled) {
+            this.workspaceFilesEnabled = workspaceFilesEnabled;
         }
 
         public String getBaseUrl() {
@@ -270,8 +305,11 @@ public class ManagedAgentProperties {
         private String workspaceId = "";
         private String workspaceGeneration = "1";
         private String workspaceCwd = "";
+        private List<WorkspaceMount> workspaceMounts = List.of();
         private String isolationClass = "session";
         private String stateDirectory = "";
+        private boolean durableLocalProcess;
+        private boolean trustedLocalRebootRecovery;
         private String credentialKeyId = "";
         private String credentialKey = "";
         private String nodeExecutable = "";
@@ -364,8 +402,35 @@ public class ManagedAgentProperties {
             return isolationClass;
         }
 
+        public List<WorkspaceMount> getWorkspaceMounts() {
+            return workspaceMounts;
+        }
+
+        public void setWorkspaceMounts(List<WorkspaceMount> workspaceMounts) {
+            this.workspaceMounts = workspaceMounts;
+        }
+
+        public record WorkspaceMount(String tenantId, String storageId, String root) {
+        }
+
         public void setIsolationClass(String isolationClass) {
             this.isolationClass = isolationClass;
+        }
+
+        public boolean isDurableLocalProcess() {
+            return durableLocalProcess;
+        }
+
+        public void setDurableLocalProcess(boolean durableLocalProcess) {
+            this.durableLocalProcess = durableLocalProcess;
+        }
+
+        public boolean isTrustedLocalRebootRecovery() {
+            return trustedLocalRebootRecovery;
+        }
+
+        public void setTrustedLocalRebootRecovery(boolean trustedLocalRebootRecovery) {
+            this.trustedLocalRebootRecovery = trustedLocalRebootRecovery;
         }
 
         public String getStateDirectory() {

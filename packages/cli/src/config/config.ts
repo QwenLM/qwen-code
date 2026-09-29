@@ -6,10 +6,10 @@
 
 import { readSshWorkspace } from '../serve/ssh-workspace-store.js';
 import { SshExecutionEnvironment } from '@qwen-code/qwen-code-core/services/ssh-execution-environment.js';
+import type { SessionExecutionEngine } from '@qwen-code/qwen-code-core/services/session-execution-engine.js';
 import {
   type ModelProposedGoalsMode,
   ApprovalMode,
-  APPROVAL_MODES,
   type AuthType,
   Config,
   DEFAULT_QWEN_EMBEDDING_MODEL,
@@ -57,6 +57,10 @@ import {
   type OutputStyleDefinition,
   validateModelProvidersConfig,
 } from '@qwen-code/qwen-code-core';
+import {
+  AGENT_HOST_SESSION_SOURCE_TYPE,
+  AGENT_SESSION_SOURCE_TYPE,
+} from '../runtime/agent-session-source.js';
 import { extensionsCommand } from '../commands/extensions.js';
 import {
   agentExecutionBackend,
@@ -104,6 +108,7 @@ import { channelCommand } from '../commands/channel.js';
 import { authCommand } from '../commands/auth.js';
 import { serveCommand } from '../commands/serve.js';
 import { sessionsCommand } from '../commands/sessions.js';
+import { batchCommand } from '../commands/batch.js';
 import { boardCommand } from '../commands/board.js';
 import { updateCommand } from '../commands/update.js';
 import { sandboxCommand } from '../commands/sandbox.js';
@@ -126,6 +131,9 @@ import {
 import { detectSystemLanguage } from '../i18n/index.js';
 import { normalizeSkillNames, resolveSkillSettings } from './skill-settings.js';
 import { checkAdvisorModelAvailability } from './advisor-model.js';
+import { parseApprovalModeValue } from './approval-mode-value.js';
+
+export { parseApprovalModeValue };
 
 const debugLogger = createDebugLogger('CONFIG');
 
@@ -146,34 +154,6 @@ const SKILL_LEVELS: readonly SkillLevel[] = [
 
 function isSkillLevel(value: unknown): value is SkillLevel {
   return SKILL_LEVELS.includes(value as SkillLevel);
-}
-
-function formatApprovalModeError(value: string): Error {
-  return new Error(
-    `Invalid approval mode: ${value}. Valid values are: ${APPROVAL_MODES.join(
-      ', ',
-    )}`,
-  );
-}
-
-/**
- * Normalizes an approval-mode spelling exactly the way boot accepts it:
- * trimmed, lowercased, with the legacy `auto_edit`/`autoedit` aliases mapped
- * to AUTO_EDIT. Throws for values boot would reject. Shared with the ACP
- * daemon's reload convergence so a settings file reload agrees with boot for
- * every accepted spelling.
- */
-export function parseApprovalModeValue(value: string): ApprovalMode {
-  const normalized = value.trim().toLowerCase();
-  const canonical =
-    normalized === 'auto_edit' || normalized === 'autoedit'
-      ? ApprovalMode.AUTO_EDIT
-      : normalized;
-  const approvalMode = APPROVAL_MODES.find((mode) => mode === canonical);
-  if (approvalMode === undefined) {
-    throw formatApprovalModeError(value);
-  }
-  return approvalMode;
 }
 
 export interface CliArgs {
@@ -901,6 +881,7 @@ export async function parseArguments(): Promise<CliArgs> {
     .command(serveCommand)
     // Register sessions subcommands
     .command(sessionsCommand)
+    .command(batchCommand)
     // Register update command
     .command(updateCommand)
     // Register `qwen sandbox` (inspect / prove the resolved sandbox backend)
@@ -944,16 +925,20 @@ export async function parseArguments(): Promise<CliArgs> {
       result._[0] === 'review' ||
       result._[0] === 'sessions' ||
       result._[0] === 'board' ||
+      result._[0] === 'batch' ||
       result._[0] === 'update' ||
       result._[0] === 'sandbox')
   ) {
     // Note: `serve` is intentionally NOT in this list. Its handler blocks
     // forever (after the listener is up); SIGINT/SIGTERM in runQwenServe
     // drives shutdown. Hitting `process.exit(0)` here would kill the daemon.
-    // MCP/Extensions/Auth/Hooks/Channel/Review commands handle their own
-    // execution and exit. Returning here would let the main interactive
-    // flow run, which would prompt for stdin input despite the user
-    // having already invoked a subcommand.
+    // MCP/Extensions/Auth/Hooks/Channel/Review/Batch commands handle their own
+    // execution and exit. Returning here would let the main interactive flow
+    // run, which would prompt for stdin input despite the user having already
+    // invoked a subcommand. `batch` must be here for a second reason: the main
+    // flow below relaunches the process for a larger heap, and a second parse
+    // would run the subcommand handler again — submitting (and billing) a
+    // duplicate batch job whose id the user never sees.
     process.exit(process.exitCode ?? 0);
   }
 
@@ -1711,6 +1696,8 @@ export async function loadCliConfig(
         sessionId: string,
       ) => Promise<SessionRestoreProjection | undefined>;
     };
+    /** Engine a paired host selected; the Config persists or verifies it. */
+    executionEngine?: SessionExecutionEngine;
   },
   enabledSkillNamesProvider?: () => ReadonlySet<string>,
 ): Promise<Config> {
@@ -2260,7 +2247,12 @@ export async function loadCliConfig(
   if (argv.continue || argv.resume) {
     const sessionService = new SessionService(cwd);
     if (argv.continue) {
-      sessionData = await sessionService.loadLastSession();
+      sessionData = await sessionService.loadLastSession({
+        excludeSourceTypes: [
+          AGENT_HOST_SESSION_SOURCE_TYPE,
+          AGENT_SESSION_SOURCE_TYPE,
+        ],
+      });
       if (sessionData) {
         sessionId = sessionData.conversation.sessionId;
       } else if (argv.forkSession) {
@@ -2435,6 +2427,7 @@ export async function loadCliConfig(
     sessionData,
     sessionRestoreProjection,
     sessionRestoreProjectionSource: boundSessionRestoreProjectionSource,
+    sessionExecutionEngine: hostPolicy?.executionEngine,
     embeddingModel: DEFAULT_QWEN_EMBEDDING_MODEL,
     sandbox: sandboxConfig,
     targetDir: cwd,
@@ -2611,6 +2604,8 @@ export async function loadCliConfig(
     lsToolEnabled: settings.tools?.listDirectory?.enabled === true,
     todoWriteEnabled: settings.tools?.todoWrite?.enabled === true,
     agentTeamEnabled: settings.experimental?.agentTeam ?? false,
+    agentCollaborationEnabled:
+      settings.experimental?.agentCollaboration ?? false,
     artifactEnabled: settings.experimental?.artifact ?? true,
     artifactAutoOpen: settings.artifact?.autoOpen ?? true,
     artifactPublisher: settings.artifact?.publisher ?? 'local',
@@ -2735,6 +2730,10 @@ export async function loadCliConfig(
       bareMode || safeMode
         ? false
         : (settings.memory?.enableTeamMemorySync ?? false),
+    enableStructuredMemoryRecall:
+      bareMode || safeMode
+        ? false
+        : (settings.memory?.enableStructuredRecall ?? false),
     enableAutoSkill:
       bareMode || safeMode
         ? false
@@ -2747,6 +2746,7 @@ export async function loadCliConfig(
     memoryAgentMaxTurns: settings.memory?.agentMaxTurns,
     fastModel: settings.fastModel || undefined,
     advisorModel,
+    advisorMaxUses: settings.advisorMaxUses,
     // Bare and safe mode must switch the tool off explicitly: `undefined`
     // means "derive it" now that WebSearch is opt-out.
     webSearch:
@@ -2839,6 +2839,7 @@ export async function loadCliConfig(
     configParams.enableManagedAutoDream = false;
     configParams.enableTeamMemory = false;
     configParams.enableTeamMemorySync = false;
+    configParams.enableStructuredMemoryRecall = false;
     configParams.enableAutoSkill = false;
     configParams.fileCheckpointingEnabled = false;
     configParams.artifactEnabled = false;

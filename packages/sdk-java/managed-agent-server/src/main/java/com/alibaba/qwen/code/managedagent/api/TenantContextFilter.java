@@ -1,12 +1,13 @@
 package com.alibaba.qwen.code.managedagent.api;
 
+import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceActor;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import java.io.IOException;
-import java.util.Map;
+import java.security.Principal;
 import java.util.regex.Pattern;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
@@ -40,22 +41,48 @@ public class TenantContextFilter extends OncePerRequestFilter {
             HttpServletResponse response, FilterChain chain)
             throws ServletException, IOException {
         if (request.getRequestURI()
-                .startsWith(MANAGED_SESSION_STORE_PREFIX)) {
+                .startsWith(MANAGED_SESSION_STORE_PREFIX)
+                || request.getRequestURI().startsWith("/v1/agents/workspaces")
+                || request.getRequestURI().startsWith(
+                        "/api/agent/web-shell/v1/workspaces/")) {
             response.setHeader(HttpHeaders.CACHE_CONTROL, "no-store");
         }
         String tenantId = request.getHeader(HEADER);
         if (tenantId == null || !TENANT_PATTERN.matcher(tenantId).matches()) {
             response.setStatus(HttpServletResponse.SC_BAD_REQUEST);
             response.setContentType(MediaType.APPLICATION_JSON_VALUE);
-            objectMapper.writeValue(response.getOutputStream(), Map.of(
-                    "error", Map.of(
-                            "code", "invalid_tenant",
-                            "message", HEADER
-                                    + " is required and must contain 1-128"
-                                    + " safe characters.")));
+            objectMapper.writeValue(response.getOutputStream(),
+                    ApiExceptionHandler.envelope(request, "invalid_tenant",
+                            HEADER + " is required and must contain 1-128"
+                                    + " safe characters."));
             return;
         }
-        request.setAttribute(ATTRIBUTE, new TenantContext(tenantId));
+        Principal principal = request.getUserPrincipal();
+        String actorId = null;
+        if (principal instanceof AuthenticatedTenantActor actor) {
+            String claimedActorId = actor.actorId();
+            if (!tenantId.equals(actor.tenantId())
+                    || !validActorId(tenantId, claimedActorId)) {
+                response.setStatus(HttpServletResponse.SC_FORBIDDEN);
+                response.setContentType(MediaType.APPLICATION_JSON_VALUE);
+                objectMapper.writeValue(response.getOutputStream(),
+                        ApiExceptionHandler.envelope(request,
+                                "actor_scope_mismatch",
+                                "Authenticated actor scope is invalid."));
+                return;
+            }
+            actorId = claimedActorId;
+        }
+        request.setAttribute(ATTRIBUTE, new TenantContext(tenantId, actorId));
         chain.doFilter(request, response);
+    }
+
+    private static boolean validActorId(String tenantId, String actorId) {
+        try {
+            new WorkspaceActor(tenantId, actorId);
+            return true;
+        } catch (IllegalArgumentException error) {
+            return false;
+        }
     }
 }

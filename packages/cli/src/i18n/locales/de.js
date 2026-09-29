@@ -169,6 +169,8 @@ export default {
     'Das Zurückspulen wirkt sich nicht auf Dateien aus, die manuell oder per Shell-Befehl geändert wurden.',
   'Cannot rewind to a turn that was compressed. Try a more recent turn.':
     'Zu einem komprimierten Turn kann nicht zurückgespult werden. Bitte einen aktuelleren Turn versuchen.',
+  'Cannot rewind the conversation to this turn: it no longer matches the model history (for example, after a retry). Try a more recent turn.':
+    'Die Unterhaltung kann nicht zu diesem Turn zurückgespult werden: Er passt nicht mehr zum Modellverlauf (z. B. nach einem erneuten Versuch). Bitte einen aktuelleren Turn versuchen.',
   'File restore is unavailable for this turn (no captured file changes, or this turn predates the current session).':
     'Datei-Wiederherstellung ist für diesen Turn nicht verfügbar (keine erfassten Dateiänderungen, oder dieser Turn liegt vor der aktuellen Sitzung).',
   '(+{{insertions}} -{{deletions}} in {{count}} file)':
@@ -1851,13 +1853,17 @@ export default {
     'Kontext überschreitet Limit! Verwenden Sie /compress oder /clear zum Reduzieren.',
   'No API response yet. Send a message to see actual usage.':
     'Noch keine API-Antwort. Senden Sie eine Nachricht, um die tatsächliche Nutzung anzuzeigen.',
+  'Estimated usage, including the conversation':
+    'Geschätzte Nutzung inkl. Unterhaltung',
+  'No provider usage yet. These are local estimates, including the conversation.':
+    'Noch keine Nutzungsdaten vom Anbieter. Dies sind lokale Schätzungen einschließlich der Unterhaltung.',
   'Estimated pre-conversation overhead':
     'Geschätzte Vorabkosten vor der Unterhaltung',
   'Context window': 'Kontextfenster',
   tokens: 'Tokens',
   Used: 'Verwendet',
   Free: 'Frei',
-  'Autocompact buffer': 'Autokomprimierungs-Puffer',
+  'Autocompact buffer': 'Komprimierungspuffer',
   'Usage by category': 'Verwendung nach Kategorie',
   'System prompt': 'System-Prompt',
   'Built-in tools': 'Integrierte Tools',
@@ -1867,7 +1873,7 @@ export default {
   Messages: 'Nachrichten',
   'Startup context': 'Startkontext',
   Unattributed: 'Nicht zugeordnet',
-  'Cached prefix': 'Zwischengespeichertes Präfix',
+  'Cached prefix': 'Cache-Präfix',
   'Run /context detail for per-item breakdown.':
     'Führen Sie /context detail für eine Aufschlüsselung nach Elementen aus.',
   active: 'aktiv',
