@@ -604,6 +604,7 @@ async function returnResult(
             'content-type': 'application/json',
           },
           body: JSON.stringify(result),
+          signal: AbortSignal.timeout(DEFAULT_RUN_LEASE_MS),
         },
       );
       return;
