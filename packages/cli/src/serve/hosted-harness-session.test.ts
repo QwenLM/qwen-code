@@ -16,6 +16,7 @@ import { LocalJsonlManagedSessionJournalStore } from '@qwen-code/qwen-code-core/
 import { LocalManagedSessionAuthority } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
 import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
 import { ManagedSessionRecordSink } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-record-sink.js';
+import { resetManagedRuntimeDispatchGatesForTest } from '@qwen-code/qwen-code-core/managed-runtime/managed-runtime-dispatch-gate.js';
 import {
   createHostedHarnessContract,
   installHostedHarnessContractMiddleware,
@@ -27,7 +28,10 @@ import {
 } from './hosted-workspace-broker.js';
 import { HostedShellPublisher } from './hosted-shell-publisher.js';
 import type { ShellPublisherDescriptor } from './managed-shell-publisher.js';
-import type { HostedWorkspaceToolTurn } from './hosted-workspace-tool-turn.js';
+import {
+  HostedToolRecoveryRequiredError,
+  HostedWorkspaceToolTurn,
+} from './hosted-workspace-tool-turn.js';
 import * as stdio from '../utils/stdioHelpers.js';
 
 const state = vi.hoisted(() => ({
@@ -120,6 +124,7 @@ function store() {
 
 describe('Hosted Harness no-tool session', () => {
   beforeEach(async () => {
+    resetManagedRuntimeDispatchGatesForTest();
     state.root = await mkdtemp(path.join(tmpdir(), 'hosted-harness-test-'));
     state.model.mockReset();
     state.publicationRequest.mockReset();
@@ -869,6 +874,124 @@ describe('Hosted Harness no-tool session', () => {
     );
   });
 
+  it('recovers a proven unstarted Shell after its history reply is lost', async () => {
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'prepareV3').mockResolvedValue({
+      executionCallId: 'shell-execution',
+      runtimeBindingId: 'binding-1',
+      bindingGeneration: '1',
+    });
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'executeV3').mockResolvedValue({
+      executionStatus: 'not_started',
+      responseParts: [],
+      capture: null,
+    });
+    const acknowledge = vi.spyOn(
+      HostedWorkspaceBroker.prototype,
+      'acknowledgeV3',
+    );
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'release').mockResolvedValue();
+    state.publicationRequest.mockImplementation(
+      async (_resourceStore, route: string, body: { operation: string }) => {
+        if (route !== '/grants')
+          throw new Error('Unexpected publication route');
+        return {
+          state:
+            body.operation === 'close_not_started' ? 'NOT_STARTED' : 'OPEN',
+        };
+      },
+    );
+    const originalWrite = ManagedSessionRecordSink.prototype.write;
+    let failed = false;
+    vi.spyOn(ManagedSessionRecordSink.prototype, 'write').mockImplementation(
+      async function (this: ManagedSessionRecordSink, record) {
+        if (!failed && record.type === 'tool_result') {
+          failed = true;
+          await originalWrite.call(this, record);
+          throw new Error('lost history reply');
+        }
+        return originalWrite.call(this, record);
+      },
+    );
+    state.model.mockImplementationOnce(async ({ toolTurn, signal }) => {
+      const call = {
+        name: 'run_shell_command',
+        callId: 'model-shell-call',
+        args: { command: 'printf hi' },
+        isClientInitiated: false,
+        prompt_id: PROMPT_ID,
+      };
+      await toolTurn!.execute(
+        [call],
+        [
+          {
+            functionCall: { id: call.callId, name: call.name, args: call.args },
+          },
+        ],
+        'test-model',
+        signal,
+      );
+      throw new Error('Expected a lost history reply');
+    });
+    state.model.mockImplementationOnce(
+      async ({ toolTurn, resumeFromToolResults }) => {
+        expect(resumeFromToolResults).toHaveLength(1);
+        await toolTurn!.consumeResults();
+        return { text: 'resumed after unstarted Shell', model: 'test-model' };
+      },
+    );
+    const first = app(true);
+    const created = await headers(supertest(first).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+      toolProfile: 'hosted-workspace-shell/1',
+      captureBytes: 1024 * 1024,
+    });
+    expect(created.status).toBe(200);
+    const prompt = [{ type: 'text', text: 'run Shell' }];
+    await headers(supertest(first).post('/session/' + SESSION_ID + '/prompt'))
+      .set('X-Qwen-Client-Id', created.body.clientId as string)
+      .send({
+        prompt,
+        promptId: PROMPT_ID,
+        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+      })
+      .expect(202);
+    await vi.waitFor(async () => {
+      const status = await headers(
+        supertest(first).get('/session/' + SESSION_ID + '/status'),
+      ).set('X-Qwen-Client-Id', created.body.clientId as string);
+      expect(status.body.recoveryBlocked).toBe(true);
+    });
+    expect(failed).toBe(true);
+    await headers(supertest(first).delete('/session/' + SESSION_ID)).expect(
+      204,
+    );
+    const second = app(true);
+    const loaded = await headers(
+      supertest(second).post('/session/' + SESSION_ID + '/load'),
+    ).send({
+      managedSessionStore: store(),
+      toolProfile: 'hosted-workspace-shell/1',
+      captureBytes: 1024 * 1024,
+    });
+    expect(loaded.status).toBe(200);
+    await vi.waitFor(async () => {
+      const status = await headers(
+        supertest(second).get('/session/' + SESSION_ID + '/status'),
+      ).set('X-Qwen-Client-Id', loaded.body.clientId as string);
+      expect(status.body.hasActivePrompt).toBe(false);
+      expect(status.body.recoveryBlocked).toBe(false);
+    });
+    expect(state.model).toHaveBeenCalledTimes(2);
+    expect(acknowledge).not.toHaveBeenCalled();
+    await headers(supertest(second).delete('/session/' + SESSION_ID)).expect(
+      204,
+    );
+  });
+
   it('ends an event stream when its attachment closes', async () => {
     const server = app();
     const created = await headers(supertest(server).post('/session')).send({
@@ -1145,6 +1268,49 @@ describe('Hosted Harness no-tool session', () => {
       await headers(supertest(server).delete(`/session/${SESSION_ID}`));
     },
   );
+
+  it('preserves a recovery failure when Shell cleanup also fails', async () => {
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+    vi.spyOn(HostedWorkspaceToolTurn.prototype, 'close').mockRejectedValue(
+      new Error('cleanup failed'),
+    );
+    state.model.mockRejectedValueOnce(
+      new HostedToolRecoveryRequiredError(new Error('original result unknown')),
+    );
+    const server = app(true);
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+      toolProfile: 'hosted-workspace-shell/1',
+    });
+    expect(created.status).toBe(200);
+    const clientId = created.body.clientId as string;
+    const prompt = [{ type: 'text', text: 'run Shell' }];
+    await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+      .set('X-Qwen-Client-Id', clientId)
+      .send({
+        prompt,
+        promptId: PROMPT_ID,
+        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+      })
+      .expect(202);
+    await vi.waitFor(async () => {
+      const status = await headers(
+        supertest(server).get(`/session/${SESSION_ID}/status`),
+      ).set('X-Qwen-Client-Id', clientId);
+      expect(status.body.hasActivePrompt).toBe(false);
+      expect(status.body.recoveryBlocked).toBe(true);
+    });
+    const transcript = await headers(
+      supertest(server).get(`/session/${SESSION_ID}/transcript`),
+    ).set('X-Qwen-Client-Id', clientId);
+    expect(
+      transcript.body.events.filter(
+        (event: { type: string }) => event.type === 'turn_error',
+      ),
+    ).toEqual([]);
+  });
 
   it('blocks new prompts when terminal settlement keeps failing', async () => {
     const server = app();

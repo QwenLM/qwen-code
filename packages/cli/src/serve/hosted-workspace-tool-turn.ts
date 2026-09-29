@@ -878,34 +878,127 @@ export class HostedWorkspaceToolTurn {
       )) as Record<string, unknown>;
       if (closed['state'] !== 'NOT_STARTED')
         throw new Error('Original Shell was not proven unstarted.');
-      const converted = convertToFunctionErrorResponse(
-        call.name,
-        call.callId,
-        [],
-        'Runtime Shell did not start.',
-      );
-      const response = converted[0]?.functionResponse;
-      if (!response || converted.length !== 1)
-        throw new Error('Unstarted Shell result cannot be recorded.');
-      response.response = {
-        ...response.response,
-        executionStatus: 'not_started',
-      };
-      if (!this.messageFitsInline('tool_result', converted, model))
-        throw new Error('Unstarted Shell result cannot be recorded.');
-      const outcome = Buffer.from(
-        JSON.stringify({ executionCallId, ...converted[0] }),
-      );
-      if (
-        outcome.length >
-        HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes
-      )
-        throw new Error('Unstarted Shell outcome exceeds its limit.');
-      const ref = await this.session.resources.publish(
-        'managed-tool-outcome',
-        outcome,
-      );
-      await this.commit('tool_result', converted, model);
+      const authority = this.session.authority;
+      let receipt = authority
+        .eventsInSequenceRange(1, authority.committedSequence)
+        .find(
+          (event) =>
+            event.kind === 'tool.receipt' &&
+            event.payload['executionCallId'] === executionCallId,
+        );
+      let ref: ManagedSessionDurableRef;
+      let converted: Part[];
+      let messageId: string;
+      let timestamp: string;
+      if (receipt) {
+        ref = assertManagedSessionDurableRef(
+          receipt.payload['toolOutcomeRef'],
+          'original tool outcome',
+        );
+        const saved = JSON.parse(
+          (await this.session.resources.read(ref)).toString('utf8'),
+        ) as Record<string, unknown>;
+        const history = saved['history'] as Record<string, unknown> | undefined;
+        if (
+          saved['schemaVersion'] !== 1 ||
+          saved['decision'] !== 'blocked' ||
+          !isDeepStrictEqual(saved['envelope'], brokerResult) ||
+          saved['manifestRef'] !== null ||
+          receipt.payload['resultRef'] !== null ||
+          receipt.payload['historyRevision'] !== receipt.sequence ||
+          typeof history?.['messageId'] !== 'string' ||
+          typeof history['timestamp'] !== 'string' ||
+          typeof history['model'] !== 'string' ||
+          !Array.isArray(history['parts'])
+        )
+          throw new Error('Original unstarted Shell receipt conflicts.');
+        converted = history['parts'] as Part[];
+        messageId = history['messageId'];
+        timestamp = history['timestamp'];
+        model = history['model'];
+      } else {
+        converted = convertToFunctionErrorResponse(
+          call.name,
+          call.callId,
+          [],
+          'Runtime Shell did not start.',
+        );
+        const response = converted[0]?.functionResponse;
+        if (!response || converted.length !== 1)
+          throw new Error('Unstarted Shell result cannot be recorded.');
+        response.response = {
+          ...response.response,
+          executionStatus: 'not_started',
+        };
+        if (!this.messageFitsInline('tool_result', converted, model))
+          throw new Error('Unstarted Shell result cannot be recorded.');
+        const originalIntent = authority
+          .eventsInSequenceRange(1, authority.committedSequence)
+          .find(
+            (event) =>
+              event.kind === 'tool.intent' &&
+              event.payload['executionCallId'] === executionCallId,
+          );
+        if (!originalIntent)
+          throw new Error('Original Shell intent is missing.');
+        messageId = shellHistoryId(executionCallId);
+        timestamp = new Date(originalIntent.occurredAt).toISOString();
+        const outcome = Buffer.from(
+          JSON.stringify({
+            schemaVersion: 1,
+            decision: 'blocked',
+            envelope: brokerResult,
+            manifestRef: null,
+            history: { messageId, timestamp, model, parts: converted },
+          }),
+        );
+        if (
+          outcome.length >
+          HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes
+        )
+          throw new Error('Unstarted Shell outcome exceeds its limit.');
+        ref = await this.session.resources.publish(
+          'managed-tool-outcome',
+          outcome,
+        );
+        await authority.appendExecutionEvent(
+          {
+            operation: 'recordToolResult',
+            commandId: executionCallId,
+            sessionKey: authority.sessionHeader.sessionKey,
+            contentDigest: ref.digest,
+          },
+          (sequence) => ({
+            v: 1,
+            sequence,
+            eventId: `tool-receipt:${executionCallId}`,
+            sessionKey: authority.sessionHeader.sessionKey,
+            kind: 'tool.receipt',
+            occurredAt: Date.now(),
+            payload: {
+              executionCallId,
+              toolOutcomeRef: ref,
+              resultRef: null,
+              resources: [],
+              historyRevision: sequence,
+            },
+          }),
+          { class: 'trusted_entry' },
+        );
+        receipt = authority
+          .eventsInSequenceRange(1, authority.committedSequence)
+          .find(
+            (event) =>
+              event.kind === 'tool.receipt' &&
+              event.payload['executionCallId'] === executionCallId,
+          );
+      }
+      if (!receipt)
+        throw new Error('Original unstarted Shell receipt disappeared.');
+      await this.commit('tool_result', converted, model, {
+        uuid: messageId,
+        timestamp,
+      });
       await this.harness.resolveAwaitRuntime(executionCallId, ref);
       return converted;
     }

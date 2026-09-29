@@ -475,21 +475,28 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     if (!"deferred_v3".equals(execution.getReference().get("dispatchMode"))) {
                         return acknowledgeLocalExecution(harnessSessionId, runtimeSessionId, id, receipt);
                     }
-                    if (!execution.isSettled()
-                            || !"deferred_v3".equals(execution.getReference().get("dispatchMode"))
-                            || !execution.getBindingId().equals(context.binding().getBindingId())
-                            || execution.getRuntimeGeneration() != context.binding().getGeneration()
-                            || publicationVerifier == null) {
-                        throw conflict("runtime_execution_conflict", "Original Tool v3 execution is unavailable");
+                    synchronized (context) {
+                        requireReadySessionRecord(context);
+                        execution = requireExecution(context, id);
+                        if (!execution.isSettled()
+                                || !execution.getBindingId().equals(context.binding().getBindingId())
+                                || execution.getRuntimeGeneration() != context.binding().getGeneration()
+                                || publicationVerifier == null) {
+                            throw conflict("runtime_execution_conflict", "Original Tool v3 execution is unavailable");
+                        }
+                        context.beginControl();
                     }
-                    Map<String, Object> saved = publicationVerifier.receipt(execution);
-                    if (saved == null || !sameReceipt(saved, receipt)) {
-                        throw conflict("runtime_execution_conflict", "Session receipt conflicts with publication");
-                    }
-                    requireUsableLease(context);
-                    return mapFailure(safeStage(() -> transport.acknowledgeV3(
-                            context.lease(), context.session(), execution.getReference(), saved)),
-                            "runtime_execution_ack_failed", "Tool v3 acknowledgement failed");
+                    ToolExecutionRecord original = execution;
+                    return mapFailure(safeStage(() -> {
+                        Map<String, Object> saved = publicationVerifier.receipt(original);
+                        if (saved == null || !sameReceipt(saved, receipt)) {
+                            throw conflict("runtime_execution_conflict", "Session receipt conflicts with publication");
+                        }
+                        requireUsableLease(context);
+                        return transport.acknowledgeV3(context.lease(), context.session(),
+                                original.getReference(), saved);
+                    }), "runtime_execution_ack_failed", "Tool v3 acknowledgement failed")
+                            .whenComplete((ignored, error) -> context.endControl());
                 });
     }
 
@@ -546,11 +553,14 @@ public final class RuntimeBrokerService implements AutoCloseable {
             return requireReadySession(harnessSessionId, runtimeSessionId)
                     .thenCompose(context -> {
                         ToolExecutionRecord requested;
+                        boolean publicationV3;
                         synchronized (context) {
                             requireReadySessionRecord(context);
                             ToolExecutionRecord current = requireExecution(
                                     context, executionId);
                             requested = requestCancel(current);
+                            publicationV3 = "deferred_v3".equals(
+                                    requested.getReference().get("dispatchMode"));
                             // An UNKNOWN record may still have an invocation
                             // running in this process; it gets the physical
                             // cancel below but is never settled from here.
@@ -559,6 +569,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
                                             == ToolExecutionRecord.State.UNKNOWN
                                             && !invocations.contains(
                                                     executionId)
+                                            && !publicationV3
                                             && !Integer.valueOf(3).equals(
                                                     requested.getReference().get("runtimeProtocol")))) {
                                 return CompletableFuture.completedFuture(
@@ -606,7 +617,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
                         }
                         requireUsableLease(context);
                         return mapFailure(safeStage(() ->
-                                "deferred_v3".equals(requested.getReference().get("dispatchMode"))
+                                publicationV3
                                         ? transport.cancelV3(context.lease(), context.session(),
                                                 requested.getReference()).thenApply(
                                                         RuntimeBrokerService::projectV3Status)

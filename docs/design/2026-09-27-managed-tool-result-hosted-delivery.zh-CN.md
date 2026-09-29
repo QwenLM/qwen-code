@@ -169,9 +169,9 @@ Session owner 首先查询已有原始 `tool.receipt`。若不存在，则加载
 
 Hosted Shell 在接纳原 outcome 的同时冻结有界模型历史投影，包括稳定的 message ID、时间、模型与 function response。按完整 ChatRecord 序列化后的 UTF-8 字节数核对 64 KiB 上限，逐步缩短预览，必要时退化为固定短摘要。回执 committed 后，追加前先查原历史 message，再推进 checkpoint。恢复时重用投影，不重建原执行、manifest 或旧 writer 的不确定事务。本地 O1c 接纳行为保持不变。
 
-私有 Hosted Shell load 仅在一个已接纳 turn 尚未结算、最新 checkpoint 中该批工具全部结算且处于 results_ready，并且当前 turn 以原始冻结的工具结果消息结束、其后没有 assistant 消息时，才可继续模型推理。若最终 assistant 消息已持久保存而只缺 turn 结算，则只补结算，不再调用模型。检查任一边界前先根据回执补齐缺失历史；后续重开也重试原 ACK，包括 turn 已结算的情况。其他未完成状态继续阻断恢复。
+私有 Hosted Shell load 仅在一个已接纳 turn 尚未结算、最新 checkpoint 中该批工具全部结算且处于 results_ready，并且当前 turn 以原始冻结的工具结果消息结束、其后没有 assistant 消息时，才可继续模型推理。若最终 assistant 消息已持久保存而只缺 turn 结算，则只补结算，不再调用模型。检查任一边界前先根据回执补齐缺失历史；只有该 turn 尚未结算且原 Runtime 仍可用时，才重试原 ACK。turn 结算后的重开不向可能已释放的 Runtime 发送 ACK，已提交的 Session 回执仍是权威记录。其他未完成状态继续阻断恢复。
 
-未启动调用的 capture 为空，走现有无 capture 结果路径，并由 owner 幂等关闭其 publication 预留为 `NOT_STARTED`。要求原执行的权威证据，fence grant，核算已接收操作，再释放未用额度和活跃 capture 槽位。存在矛盾的 start/publication 证据时拒绝关闭。prepared cancellation 和明确的调度前拒绝可以提供证据；超时、lease 到期或查不到 status 均不能提供。该路径不能发送 Tool v3 capture ACK。
+未启动调用的 capture 为空，由 owner 幂等关闭其 publication 预留为 `NOT_STARTED`。该路径还写入持久 `tool.receipt`，保存 blocked capture 决定与稳定的工具错误历史，然后解析已证实未启动的工具结果；恢复使用该回执补齐响应丢失的历史写入。要求原执行的权威证据，fence grant，核算已接收操作，再释放未用额度和活跃 capture 槽位。存在矛盾的 start/publication 证据时拒绝关闭。prepared cancellation 和明确的调度前拒绝可以提供证据；超时、lease 到期或查不到 status 均不能提供。该路径不能发送 Tool v3 capture ACK。
 
 批次中后续预留失败时，先停止 grant 续约，取消所有已 prepare 的 Broker 调用，再请求 owner 关闭每个已确认但未使用的预留。关闭仍须通过服务端权威未启动证明；状态未知的执行保留容量，并使该轮保持恢复阻断。
 
@@ -203,7 +203,7 @@ W0e 将 Broker 执行标记为 `ABANDONED` 后，其 ledger 保持终态，不�
 | 有 manifest，没有 durable finished envelope | 保持 unknown/blocked；object 扫描或 manifest 状态不能补足缺失的物理结果                                  |
 | finish 已提交，响应或 worker 丢失           | 读取原 finished envelope/ref，按原 intent 重新核对；不创建新执行                                         |
 | receipt commit 响应丢失                     | 重开 authority 并读取原 journal；已经提交则复用原 outcome/ref/sequence                                   |
-| receipt 已提交，checkpoint 前失败           | 使用 committed receipt 推进；blocked 永不推进                                                            |
+| receipt 已提交，checkpoint 前失败           | 使用 committed receipt 推进；partial/unavailable capture 仍阻断，已证实未启动的调用按保存的工具错误结算  |
 | checkpoint 已提交，ACK 前失败               | 向原 generation 重发相同 ACK；该 generation 已不存在则保留 Session 结果                                  |
 | PUT 期间 writer/activation fence 改变       | 停止新 publication；迟到 candidate 继续 hold，catalog 安装失败；owner 改变不能证明 Shell 已停止          |
 | object 损坏/缺失，或 Java/OSS 不可用        | 读取/接纳失败；保留已知物理结果、归属与容量不确定性；不降级执行                                          |
@@ -246,7 +246,7 @@ W0e 将 Broker 执行标记为 `ABANDONED` 后，其 ledger 保持终态，不�
 | 字节与内存 | 增量 100 MiB 与 1 GiB、二进制/NUL/非法/跨 chunk UTF-8、双流和尾部范围；独立流式 hash oracle；固定并发和慢存储下客户端/服务端队列及 RSS 有界                                                                                            |
 | 进程语义   | EOF 与 exit、继承 pipe、取消、Node 退出时恢复写入、未 EOF 的 finish、finish 后释放 buffer；quota/I/O 失败保留物理结果                                                                                                                  |
 | 配额与上传 | 预留失败零副作用；启动前拒绝/取消恢复未用额度并拒绝旧 grant；finish 后仍保留 admission 配额；产生一次副作用标记后执行中耗尽额度；同 ordinal 冲突、PUT/readback/catalog 响应丢失、损坏、bucket 模式改变、并发容量竞争、fence 后迟到写入 |
-| 接纳与恢复 | 合法 complete 提交；partial/unavailable/无 manifest/未 seal/错身份/错摘要阻断；blocked 不推进；重读摘要校验、receipt 响应/checkpoint/ACK 丢失、改变 ACK 拒绝；精确复用 refs/sequence                                                   |
+| 接纳与恢复 | 合法 complete 提交；partial/unavailable/无 manifest/未 seal/错身份/错摘要阻断；已证实未启动的调用按回执结算；重读摘要校验、receipt 响应/checkpoint/ACK 丢失、改变 ACK 拒绝；精确复用 refs/sequence                                     |
 | 宿主替换   | 原 Runtime 磁盘不可访问，合法 writer 交接后在另一宿主重开，读取准确 100 MiB 尾部；异常丢失保持 unknown，不假定孤立进程可接管                                                                                                           |
 | 兼容性     | TS/Java 真实 v3 互通，原 v2/禁用门禁/W0c activation，HTTP inline 事务，本地 O1b/O1c，Hosted no-tool/file-only profile                                                                                                                  |
 

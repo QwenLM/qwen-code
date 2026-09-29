@@ -6,11 +6,13 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import com.alibaba.qwen.code.managedagent.store.ToolPublicationContract;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.networknt.schema.JsonSchemaFactory;
 import com.networknt.schema.SpecVersion.VersionFlag;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 class ToolPublicationContractTest {
@@ -87,5 +89,21 @@ class ToolPublicationContractTest {
                 .isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> ToolPublicationContract.parseBytes("binding",
                 new byte[65537])).isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void acceptsEcmascriptCanonicalShellInputWithControlCharacters() throws Exception {
+        JsonNode suite = JSON.readTree(contracts().resolve(
+                "managed-tool-publication-v1.fixtures.json").toFile());
+        ObjectNode binding = (ObjectNode) suite.required("cases").get(0)
+                .required("value").deepCopy();
+        String command = "echo " + (char) 27 + "[31m" + (char) 11 + "😀";
+        String payload = JSON.writeValueAsString(Map.of("toolName", "run_shell_command",
+                "input", Map.of("command", command)));
+        binding.put("requestDigest", "sha256:" + ToolPublicationContract.sha256(
+                payload.getBytes(StandardCharsets.UTF_8)));
+        ((ObjectNode) binding.get("reference")).put("argsDigest",
+                "sha256:2977495d23c926da571956f2cde4af68ca4c679f245ec2d76e2ebf1abf23091f");
+        ToolPublicationContract.requirePayload(binding, payload);
     }
 }

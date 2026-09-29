@@ -15,7 +15,10 @@ import {
   type ManagedSession,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
-import type { ManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
+import {
+  assertManagedSessionDurableRef,
+  type ManagedSessionDurableRef,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
 import type { HttpToolPublicationOwner } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import { HostedShellPublisher } from './hosted-shell-publisher.js';
@@ -483,6 +486,77 @@ it.each([
   'uses only the original Shell publication after Broker %s',
   shellReceiptScenario,
 );
+
+it('records a durable receipt for a proven unstarted Shell', async () => {
+  const call = {
+    ...calls[0],
+    name: 'run_shell_command',
+    callId: 'shell-call',
+    args: { command: 'printf hi' },
+  };
+  const shellParts: Part[] = [
+    {
+      functionCall: { id: call.callId, name: call.name, args: call.args },
+    },
+  ];
+  const envelope = {
+    executionStatus: 'not_started' as const,
+    responseParts: [],
+    capture: null,
+  };
+  broker.prepareV3.mockResolvedValue({
+    executionCallId: 'shell-execution',
+    runtimeBindingId: 'binding-1',
+    bindingGeneration: '1',
+  });
+  broker.executeV3.mockResolvedValue(envelope);
+  const owner = {
+    owner: async () => ({ writerId: 'worker', writerGeneration: 1 }),
+    request: vi.fn(async (route: string, body: { operation: string }) => {
+      expect(route).toBe('/grants');
+      return {
+        state: body.operation === 'close_not_started' ? 'NOT_STARTED' : 'OPEN',
+      };
+    }),
+  } as unknown as HttpToolPublicationOwner;
+  turn = new HostedWorkspaceToolTurn(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    harness,
+    'prompt',
+    commit,
+    messageFitsInline,
+    { owner, captureBytes: 1024 * 1024 },
+  );
+  const result = await turn.execute(
+    [call],
+    shellParts,
+    'model',
+    new AbortController().signal,
+  );
+  expect(result[0]?.functionResponse?.response).toMatchObject({
+    executionStatus: 'not_started',
+  });
+  const receipts = session.authority
+    .eventsInSequenceRange(1, session.authority.committedSequence)
+    .filter((event) => event.kind === 'tool.receipt');
+  expect(receipts).toHaveLength(1);
+  expect(receipts[0]?.payload['resultRef']).toBeNull();
+  const ref = assertManagedSessionDurableRef(
+    receipts[0]?.payload['toolOutcomeRef'],
+    'unstarted Shell outcome',
+  );
+  expect(
+    JSON.parse((await session.resources.read(ref)).toString()),
+  ).toMatchObject({
+    schemaVersion: 1,
+    decision: 'blocked',
+    envelope,
+    manifestRef: null,
+    history: { model: 'model', parts: result },
+  });
+  expect(broker.acknowledgeV3).not.toHaveBeenCalled();
+});
 
 it('closes proven unstarted reservations after a later batch reservation fails', async () => {
   const shellCalls = [0, 1].map((index) => ({

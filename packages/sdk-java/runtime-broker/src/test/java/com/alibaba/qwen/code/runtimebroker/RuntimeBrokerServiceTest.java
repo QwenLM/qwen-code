@@ -403,6 +403,87 @@ class RuntimeBrokerServiceTest {
     }
 
     @Test
+    void inFlightDeferredV3AcknowledgementBlocksRelease() {
+        Map<String, Object> manifest = Map.of("resourceId", "manifest", "kind",
+                "managed-tool-result-manifest", "schemaVersion", 1,
+                "byteLength", 1, "digest", "a".repeat(64));
+        Map<String, Object> receipt = Map.of("executionCallId", "durable-v3",
+                "manifest", manifest, "deliveryStatus", "committed",
+                "historyRevision", 1);
+        RuntimePublicationVerifier verifier = new RuntimePublicationVerifier() {
+            @Override
+            public RuntimePublicationGrant verify(ToolExecutionRecord execution,
+                    String publicationId, String token) {
+                throw new AssertionError("No dispatch expected");
+            }
+
+            @Override
+            public Map<String, Object> receipt(ToolExecutionRecord execution) {
+                return receipt;
+            }
+        };
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE, verifier)) {
+            RuntimeSessionRecord session = join(fixture.service.acquire(
+                    "harness", "runtime", "bootstrap"));
+            ToolExecutionRecord prepared = fixture.executionRepository.findOrCreate(
+                    ToolExecutionRecord.prepared("durable-v3", "v3-key",
+                            session.getBindingId(), session.getRuntimeGeneration(),
+                            "harness", "runtime", "prompt", "call", "digest",
+                            Map.of("sessionId", "runtime", "promptId", "prompt",
+                                    "callId", "call", "argsDigest", "canonical",
+                                    "payloadDigest", "digest", "dispatchMode", "deferred_v3",
+                                    "publicationId", "pub-1")));
+            ToolExecutionRecord claimed = fixture.executionRepository.claimDispatch(
+                    "durable-v3", "other-broker", Duration.ofMinutes(1));
+            fixture.executionRepository.compareAndSet(claimed,
+                    claimed.withResult(Map.of("executionStatus", "success"), 1, START),
+                    "other-broker", claimed.getDispatchGeneration());
+            Map<String, Object> conflicting = new HashMap<>(receipt);
+            conflicting.put("deliveryStatus", "blocked");
+            assertEquals("runtime_execution_conflict", failure(
+                    fixture.service.acknowledgeExecution("harness", "runtime",
+                            prepared.getExecutionCallId(), conflicting)).getCode());
+            CompletableFuture<Map<String, Object>> acknowledgement = new CompletableFuture<>();
+            fixture.transport.acknowledgeV3Result = acknowledgement;
+
+            CompletionStage<Map<String, Object>> pending = fixture.service.acknowledgeExecution(
+                    "harness", "runtime", prepared.getExecutionCallId(), receipt);
+            assertEquals("runtime_session_busy", failure(
+                    fixture.service.release("harness", "runtime")).getCode());
+            acknowledgement.complete(Map.of("state", "settled"));
+            assertEquals("settled", join(pending).get("state"));
+            assertTrue(join(fixture.service.release("harness", "runtime")));
+        }
+    }
+
+    @Test
+    void cancelUnknownDeferredV3CallsTheOriginalRuntime() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            RuntimeSessionRecord session = join(fixture.service.acquire(
+                    "harness", "runtime", "bootstrap"));
+            ToolExecutionRecord prepared = fixture.executionRepository.findOrCreate(
+                    ToolExecutionRecord.prepared("durable-v3", "v3-key",
+                            session.getBindingId(), session.getRuntimeGeneration(),
+                            "harness", "runtime", "prompt", "call", "digest",
+                            Map.of("sessionId", "runtime", "promptId", "prompt",
+                                    "callId", "call", "argsDigest", "canonical",
+                                    "payloadDigest", "digest", "dispatchMode", "deferred_v3",
+                                    "publicationId", "pub-1")));
+            ToolExecutionRecord claimed = fixture.executionRepository.claimDispatch(
+                    "durable-v3", "other-broker", Duration.ofMinutes(1));
+            ToolExecutionRecord executing = fixture.executionRepository.compareAndSet(claimed,
+                    claimed.withState(ToolExecutionRecord.State.EXECUTING, false),
+                    "other-broker", claimed.getDispatchGeneration());
+            fixture.executionRepository.compareAndSet(executing, executing.withUnknown(),
+                    "other-broker", executing.getDispatchGeneration());
+
+            join(fixture.service.cancelExecution("harness", "runtime",
+                    prepared.getExecutionCallId()));
+            assertEquals(1, fixture.transport.cancelV3Calls.get());
+        }
+    }
+
+    @Test
     void controlUsesTheExistingPrivateOperationAllowlist() {
         try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
             join(fixture.service.acquire("harness", "runtime",
@@ -3069,6 +3150,7 @@ class RuntimeBrokerServiceTest {
         final AtomicInteger acquireCalls = new AtomicInteger();
         final AtomicInteger executeCalls = new AtomicInteger();
         final AtomicInteger cancelCalls = new AtomicInteger();
+        final AtomicInteger cancelV3Calls = new AtomicInteger();
         final AtomicInteger releaseCalls = new AtomicInteger();
         final AtomicInteger statusCalls = new AtomicInteger();
         volatile long lastAfterSequence = -1;
@@ -3096,6 +3178,8 @@ class RuntimeBrokerServiceTest {
         volatile CompletableFuture<Map<String, Object>> cancelResult =
                 CompletableFuture.completedFuture(
                         Map.of("state", "cancel_requested"));
+        volatile CompletableFuture<Map<String, Object>> acknowledgeV3Result =
+                CompletableFuture.completedFuture(Map.of("state", "settled"));
         volatile CompletableFuture<Boolean> releaseResult =
                 CompletableFuture.completedFuture(true);
 
@@ -3157,6 +3241,20 @@ class RuntimeBrokerServiceTest {
                         .findByExecutionCallId(observedExecutionId);
             }
             return cancelResult;
+        }
+
+        @Override
+        public CompletionStage<Map<String, Object>> cancelV3(RuntimeLease lease,
+                RuntimeSession session, Map<String, Object> reference) {
+            cancelV3Calls.incrementAndGet();
+            return cancelResult;
+        }
+
+        @Override
+        public CompletionStage<Map<String, Object>> acknowledgeV3(RuntimeLease lease,
+                RuntimeSession session, Map<String, Object> reference,
+                Map<String, Object> receipt) {
+            return acknowledgeV3Result;
         }
 
         @Override

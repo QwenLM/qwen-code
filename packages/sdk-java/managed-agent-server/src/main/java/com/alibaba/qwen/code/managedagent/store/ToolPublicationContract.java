@@ -166,13 +166,13 @@ public final class ToolPublicationContract {
                 "Shell description is invalid");
         require(("sha256:" + sha256(bytes)).equals(text(binding, "requestDigest")),
                 "Original payload digest conflicts");
-        require(("sha256:" + sha256(canonical(input).toString().getBytes(StandardCharsets.UTF_8)))
+        require(("sha256:" + sha256(canonicalText(canonical(input)).getBytes(StandardCharsets.UTF_8)))
                 .equals(text(binding.path("reference"), "argsDigest")),
                 "Canonical Shell input digest conflicts");
     }
 
     public static String bindingDigest(JsonNode binding) {
-        return sha256(canonical(parse("binding", binding)).toString()
+        return sha256(canonicalText(canonical(parse("binding", binding)))
                 .getBytes(StandardCharsets.UTF_8));
     }
 
@@ -241,6 +241,57 @@ public final class ToolPublicationContract {
         names.sort(String::compareTo);
         names.forEach(name -> result.set(name, canonical(node.get(name))));
         return result;
+    }
+
+    private static String canonicalText(JsonNode node) {
+        if (node.isTextual()) {
+            String value = node.textValue();
+            StringBuilder result = new StringBuilder("\"");
+            for (int i = 0; i < value.length(); i++) {
+                char c = value.charAt(i);
+                if (c == '"' || c == '\\') {
+                    result.append('\\').append(c);
+                } else if (c == '\b') {
+                    result.append("\\b");
+                } else if (c == '\t') {
+                    result.append("\\t");
+                } else if (c == '\n') {
+                    result.append("\\n");
+                } else if (c == '\f') {
+                    result.append("\\f");
+                } else if (c == '\r') {
+                    result.append("\\r");
+                } else if (c < 0x20 || Character.isSurrogate(c)
+                        && !(Character.isHighSurrogate(c) && i + 1 < value.length()
+                                && Character.isLowSurrogate(value.charAt(i + 1)))
+                        && !(Character.isLowSurrogate(c) && i > 0
+                                && Character.isHighSurrogate(value.charAt(i - 1)))) {
+                    result.append("\\u");
+                    for (int shift = 12; shift >= 0; shift -= 4) {
+                        result.append(Character.forDigit((c >> shift) & 15, 16));
+                    }
+                } else {
+                    result.append(c);
+                }
+            }
+            return result.append('"').toString();
+        }
+        if (node.isObject()) {
+            List<String> fields = new ArrayList<>();
+            node.fieldNames().forEachRemaining(fields::add);
+            List<String> parts = new ArrayList<>();
+            for (String field : fields) {
+                parts.add(canonicalText(JSON.getNodeFactory().textNode(field)) + ":"
+                        + canonicalText(node.get(field)));
+            }
+            return "{" + String.join(",", parts) + "}";
+        }
+        if (node.isArray()) {
+            List<String> parts = new ArrayList<>();
+            node.forEach(item -> parts.add(canonicalText(item)));
+            return "[" + String.join(",", parts) + "]";
+        }
+        return node.toString();
     }
 
     private static void ref(JsonNode r, String kind) {

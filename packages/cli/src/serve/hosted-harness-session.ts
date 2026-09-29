@@ -229,7 +229,8 @@ async function recoverShellReceipts(
     }
     const authorization = await authority.harnessRunAuthorization();
     if (
-      decision === 'committed' &&
+      (decision === 'committed' ||
+        envelope.executionStatus === 'not_started') &&
       authorization.status === 'runnable' &&
       authorization.checkpoint.continuation.phase === 'await_runtime' &&
       receiptPromptId === promptId &&
@@ -238,7 +239,11 @@ async function recoverShellReceipts(
       )
     )
       await harness.resolveAwaitRuntime(executionCallId, ref);
-    if (receiptPromptId !== promptId) continue;
+    if (
+      receiptPromptId !== promptId ||
+      envelope.executionStatus === 'not_started'
+    )
+      continue;
     try {
       const broker = new HostedWorkspaceBroker(
         options,
@@ -484,7 +489,14 @@ async function executeHostedTurn(
     onTurnResult?.(turnResult);
     await session.managed.sink.write(turnResult);
   });
-  await running.finally(() => toolTurn?.close());
+  await running.finally(() =>
+    toolTurn?.close().catch((cause: unknown) => {
+      session.blocked = true;
+      writeStderrLineSafe(
+        'qwen serve: Hosted Shell publisher cleanup failed: ' + String(cause),
+      );
+    }),
+  );
   if (!turnResult) throw new Error('Hosted turn did not settle.');
   return turnResult;
 }
