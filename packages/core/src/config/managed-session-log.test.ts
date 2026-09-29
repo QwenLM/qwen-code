@@ -1021,6 +1021,42 @@ describe('Managed Session log recording', () => {
     ).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
+  it('refuses a restore whose projection names another owner', async () => {
+    const first = await start(managedConfig());
+    recordUser(first, 'first prompt');
+    await first.closeSessionWriter();
+    const transcriptPath =
+      sessionService().getSessionTranscriptPath(SESSION_ID);
+    const before = await readFile(transcriptPath);
+
+    // The projection is checked before the log is opened, which writes to it.
+    const source = sessionService();
+    const config = managedConfig({
+      sessionRestoreProjectionSource: async () => {
+        const projection = (await source.readRestoreProjection(SESSION_ID, {
+          replay: { kind: 'none' },
+        }))!;
+        return {
+          ...projection,
+          executionEngine: {
+            ...projection.executionEngine,
+            engine: 'legacy',
+          } as typeof projection.executionEngine,
+        };
+      },
+    });
+    vi.spyOn(
+      config as unknown as { initializeInternal(): Promise<void> },
+      'initializeInternal',
+    ).mockResolvedValue(undefined);
+    await expect(config.initialize()).rejects.toThrow(
+      SessionExecutionEngineError,
+    );
+    await config.closeSessionWriter().catch(() => undefined);
+    expect(await readFile(transcriptPath)).toEqual(before);
+    expect(await lockRecord()).toMatchObject({ state: 'sealed' });
+  });
+
   it("leaves a Legacy session's handoff seal in place", async () => {
     const legacy = managedConfig({ sessionExecutionEngine: 'legacy' });
     legacy.setSessionWriterTakeoverPolicy('certified');
