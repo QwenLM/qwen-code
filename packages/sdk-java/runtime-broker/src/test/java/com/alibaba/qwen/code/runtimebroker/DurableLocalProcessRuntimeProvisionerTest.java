@@ -388,6 +388,46 @@ class DurableLocalProcessRuntimeProvisionerTest {
         assertTrue(LocalRuntimeStore.linuxProcessAbsent(stat, "ticks:987654321"));
     }
 
+    @Test
+    void anInvalidReadyRecordReapsTheWorkerAndRetiresTheBinding() throws Exception {
+        var request = request(false);
+        var store = store();
+        try (var provisioner = provisioner(store, "--ready-version=1.9")) {
+            var handle = await(provisioner.ensureResource(request, SEED, null));
+            var failure = assertThrows(java.util.concurrent.ExecutionException.class,
+                    () -> await(provisioner.provision(request, SEED)));
+            var error = (RuntimeBrokerException) failure.getCause();
+            assertEquals(503, error.getStatusCode());
+            assertEquals("runtime_provision_failed", error.getCode());
+            assertEquals("Managed Runtime ready record is invalid.",
+                    error.getMessage());
+            var record = registration(store, request, handle);
+            assertEquals(LocalRuntimeStore.State.RETIRED, record.state());
+            ProcessHandle worker = ProcessHandle.of(record.pid()).orElse(null);
+            assertTrue(worker == null || !worker.onExit()
+                    .get(10, TimeUnit.SECONDS).isAlive());
+            // A retry reads the tombstone instead of adopting again.
+            assertBlocked(provisioner.provision(request, SEED));
+        }
+    }
+
+    @Test
+    void aManagedContextReadyRejectionIsAProvisionFailureNotAStoreConflict() throws Exception {
+        var request = request(true);
+        var store = store();
+        try (var provisioner = provisioner(store, "--ready-version=2.0000000000000001D")) {
+            var handle = await(provisioner.ensureResource(request, SEED, null));
+            var failure = assertThrows(java.util.concurrent.ExecutionException.class,
+                    () -> await(provisioner.provision(request, SEED)));
+            var error = (RuntimeBrokerException) failure.getCause();
+            assertEquals(503, error.getStatusCode());
+            assertEquals("runtime_provision_failed", error.getCode());
+            assertFalse(error.isRetryable());
+            assertEquals(LocalRuntimeStore.State.RETIRED,
+                    registration(store, request, handle).state());
+        }
+    }
+
     private RuntimeProvisionRequest request(boolean managed) {
         return new RuntimeProvisionRequest(new RuntimeScope("tenant", "workspace", "1",
                 directory.toAbsolutePath().toString(), "sha256:" + "a".repeat(64), "workspace"),
@@ -398,10 +438,13 @@ class DurableLocalProcessRuntimeProvisionerTest {
         return new LocalRuntimeStore(directory.toRealPath(), HOST);
     }
 
-    private LocalProcessRuntimeProvisioner provisioner(LocalRuntimeStore store) {
-        return new LocalProcessRuntimeProvisioner(List.of("node", Path.of(
-                "src/test/resources/fake-attestation-worker.mjs").toAbsolutePath().toString()),
-                directory, TRANSPORT, ignored -> "storage:a", store);
+    private LocalProcessRuntimeProvisioner provisioner(LocalRuntimeStore store,
+            String... workerArgs) {
+        List<String> command = new ArrayList<>(List.of("node", Path.of(
+                "src/test/resources/fake-attestation-worker.mjs").toAbsolutePath().toString()));
+        command.addAll(List.of(workerArgs));
+        return new LocalProcessRuntimeProvisioner(command, directory,
+                TRANSPORT, ignored -> "storage:a", store);
     }
 
     private RuntimeLease launch(LocalProcessRuntimeProvisioner provisioner, LocalRuntimeStore store,

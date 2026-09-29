@@ -528,12 +528,10 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
             throw protocol("Managed Runtime " + operation + " response is invalid.");
         }
         if (fields.containsKey("lastSequence")) {
-            Object cursor = fields.get("lastSequence");
-            if (!"status".equals(operation)
-                    || !(cursor instanceof Number number)
-                    || new BigDecimal(number.toString()).signum() < 0
-                    || new BigDecimal(number.toString()).stripTrailingZeros()
-                            .scale() > 0) {
+            BigDecimal sequence = BrokerValues.exactInteger(
+                    fields.get("lastSequence"));
+            if (!"status".equals(operation) || sequence == null
+                    || sequence.signum() < 0) {
                 throw protocol("Managed Runtime " + operation
                         + " sequence is invalid.");
             }
@@ -542,18 +540,17 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
     }
 
     private static boolean validV3ManifestRef(Object value) {
-        if (!(value instanceof Map<?, ?> ref)
-                || !ref.keySet().equals(V3_MANIFEST_REF_FIELDS)
+        if (!(value instanceof Map<?, ?> ref)) {
+            return false;
+        }
+        Long byteLength = BrokerValues.exactLong(ref.get("byteLength"));
+        if (!ref.keySet().equals(V3_MANIFEST_REF_FIELDS)
                 || !(ref.get("resourceId") instanceof String resourceId)
                 || resourceId.isEmpty()
                 || !"managed-tool-result-manifest".equals(ref.get("kind"))
                 || !Integer.valueOf(1).equals(ref.get("schemaVersion"))
-                || !(ref.get("byteLength") instanceof Number length)
-                || new BigDecimal(length.toString()).signum() <= 0
-                || new BigDecimal(length.toString()).compareTo(
-                        BigDecimal.valueOf(64 * 1024)) > 0
-                || new BigDecimal(length.toString()).stripTrailingZeros()
-                        .scale() > 0
+                || byteLength == null || byteLength <= 0
+                || byteLength > 64 * 1024
                 || !(ref.get("digest") instanceof String digest)
                 || !digest.matches("[0-9a-f]{64}")) {
             return false;
@@ -701,14 +698,10 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
                     + " response is invalid.");
         }
         if (fields.containsKey("lastSequence")) {
-            if (!"status".equals(operation)
-                    || !(fields.get("lastSequence") instanceof Number number)) {
-                throw protocol("Managed Runtime " + operation
-                        + " response is invalid.");
-            }
-            BigDecimal sequence = new BigDecimal(number.toString());
-            if (sequence.signum() < 0
-                    || sequence.stripTrailingZeros().scale() > 0) {
+            BigDecimal sequence = BrokerValues.exactInteger(
+                    fields.get("lastSequence"));
+            if (!"status".equals(operation) || sequence == null
+                    || sequence.signum() < 0) {
                 throw protocol("Managed Runtime " + operation
                         + " response is invalid.");
             }

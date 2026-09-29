@@ -40,6 +40,34 @@ class BrokerValuesTest {
         assertNull(BrokerValues.exactLong(null));
     }
 
+    @Test
+    void exactIntegerReadsTheSameRuleWithoutTheLongBound() {
+        for (String literal : List.of("4", "4.0", "4E0", "4L")) {
+            assertEquals(0, new BigDecimal(4).compareTo(
+                    BrokerValues.exactInteger(parse(literal))), literal);
+        }
+        // A cursor of any magnitude stays exact: it is never narrowed.
+        for (String literal : List.of("9223372036854775808",
+                "18446744073709551616")) {
+            assertEquals(0, new BigDecimal(literal).compareTo(
+                    BrokerValues.exactInteger(parse(literal))), literal);
+        }
+        assertEquals(0, new BigDecimal("0.00").compareTo(
+                BrokerValues.exactInteger(parse("0.00"))));
+        assertEquals(0, new BigDecimal("1E+1000000000").compareTo(
+                BrokerValues.exactInteger(new BigDecimal("1E+1000000000"))));
+        // A fraction, or a type that may round or wrap, even when it holds 4.
+        for (String literal : List.of("4.5", "4.0000000000000001",
+                "40000000000000001E-16", "4.0000000000000001D", "4F",
+                "65540S", "260B")) {
+            assertNull(BrokerValues.exactInteger(parse(literal)), literal);
+        }
+        assertNull(BrokerValues.exactInteger(new BigDecimal("1E-1000000000")));
+        assertNull(BrokerValues.exactInteger(new AtomicLong(4)));
+        assertNull(BrokerValues.exactInteger("4"));
+        assertNull(BrokerValues.exactInteger(null));
+    }
+
     private static Object parse(String literal) {
         return JsonCodec.parseObject(("{\"value\":" + literal + "}")
                 .getBytes(StandardCharsets.UTF_8), "test").get("value");

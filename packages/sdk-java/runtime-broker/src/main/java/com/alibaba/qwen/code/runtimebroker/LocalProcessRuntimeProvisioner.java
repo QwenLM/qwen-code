@@ -306,7 +306,15 @@ public final class LocalProcessRuntimeProvisioner
                     "Managed Runtime ready record");
         URI endpoint;
         if (request.isManagedContext()) {
-            endpoint = ManagedContextProtocol.ready(ready, document);
+            try {
+                endpoint = ManagedContextProtocol.ready(ready, document);
+            } catch (IllegalArgumentException exception) {
+                // A rejected record is a provision failure in both store
+                // modes; the durable store would retype it as a 409.
+                throw new RuntimeBrokerException(503, "runtime_provision_failed",
+                        "Managed context startup failed; recovery is blocked.",
+                        false, exception);
+            }
         } else {
             if (!"ready".equals(ready.get("type"))
                     || !Long.valueOf(1L).equals(
@@ -399,7 +407,20 @@ public final class LocalProcessRuntimeProvisioner
             if (ready == null) {
                 return null;
             }
-            lease = readyLease(request, seed, document, ready);
+            try {
+                lease = readyLease(request, seed, document, ready);
+            } catch (RuntimeException rejection) {
+                // A definitive rejection recurs on every retry and
+                // reconcile, so retire the binding and reap the worker
+                // instead of wedging both.
+                ProcessHandle worker = registration.process();
+                if (worker != null) {
+                    worker.destroyForcibly();
+                }
+                resource.save(registration.withState(
+                        LocalRuntimeStore.State.RETIRED));
+                throw rejection;
+            }
         } else {
             lease = new RuntimeLease(seed.getProvisionalRuntimeId(), registration.endpoint(),
                     seed.getToken(), seed.getLeaseId(), seed.getEpoch());
