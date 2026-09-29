@@ -7,6 +7,7 @@ export const SESSION_SOURCE_META_KEY = 'qwen.session.source';
 export const SESSION_SOURCE_TYPE_PATTERN = /^[a-z][a-z0-9_-]{0,63}$/;
 export const MAX_SESSION_SOURCE_ID_LENGTH = 256;
 export const STANDALONE_SESSION_SOURCE_TYPE = 'standalone';
+export const MANAGED_GATEWAY_SESSION_SOURCE_TYPE = 'managed-gateway';
 export const DAEMON_OWNED_STANDALONE_CREATION_KEY =
   'daemonOwnedStandaloneCreation';
 
@@ -14,6 +15,12 @@ export function isReservedStandaloneSessionSourceType(
   sourceType: unknown,
 ): sourceType is typeof STANDALONE_SESSION_SOURCE_TYPE {
   return sourceType === STANDALONE_SESSION_SOURCE_TYPE;
+}
+
+export function isManagedGatewaySessionSourceType(
+  sourceType: unknown,
+): sourceType is typeof MANAGED_GATEWAY_SESSION_SOURCE_TYPE {
+  return sourceType === MANAGED_GATEWAY_SESSION_SOURCE_TYPE;
 }
 
 /**

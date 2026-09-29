@@ -37,6 +37,7 @@ import {
 } from '../services/microcompaction/microcompact.js';
 import { buildLegacyRelevantAutoMemoryPrompt } from '../memory/recall.js';
 import { slimCompactionInput } from '../services/compactionInputSlimming.js';
+import { captureAutoMemoryExtractionHistory } from '../memory/extractionAgentPlanner.js';
 import {
   GOAL_PAUSE_REASON_SESSION_TOKEN_LIMIT,
   GOAL_PAUSE_REASON_STOP_HOOK_CAP,
@@ -1695,6 +1696,41 @@ export class LlmClient {
     return deduped;
   }
 
+  /**
+   * Replaces the in-memory LlmChat after a turn-complete Harness safety
+   * point. History comes from the durable Session log, not from the drained
+   * object. Does not fire SessionStart, repair orphans, clear the file-read
+   * cache, or release the writer.
+   */
+  async rebuildChatFromDurableHistory(history: Content[]): Promise<void> {
+    if (!this.chat) {
+      return;
+    }
+    const previous = this.chat;
+    const chat = new LlmChat(
+      this.config,
+      {
+        systemInstruction: this.getMainSessionSystemInstruction(),
+      },
+      history,
+      this.config.getChatRecordingService(),
+      uiTelemetryService,
+    );
+    chat.enableManualPlanExitNotices();
+    chat.seedResumeTokenCounts(
+      previous.getLastPromptTokenCount(),
+      previous.getLastOutputTokenCount(),
+    );
+    if (this.lastSessionStartContext && this.lastSessionStartSource) {
+      chat.applySessionStartContext(
+        this.lastSessionStartContext,
+        this.lastSessionStartSource,
+      );
+    }
+    this.chat = chat;
+    await this.setTools({ skipHistoryReveal: true });
+  }
+
   private prepareMemoryDelivery(
     result: RelevantAutoMemoryPromptResult,
   ): MemoryDeliveryResult {
@@ -3121,6 +3157,13 @@ export class LlmClient {
         projectRoot,
         sessionId,
         history,
+        extractionHistory: captureAutoMemoryExtractionHistory(
+          {
+            getHistoryTailShallow: (count, curated) =>
+              this.getHistoryTailShallow(count, curated),
+          },
+          this.config.getEffectiveInputModalities(),
+        ),
         config: this.config,
       })
       .then((result) => result.touchedTopics.length)
@@ -3477,6 +3520,7 @@ export class LlmClient {
     ) {
       await this.config.assertCanStartTurn();
     }
+    await this.config.ensureManagedHarnessRunnable?.();
     if (
       messageType === SendMessageType.UserQuery &&
       !options?.isConcurrentSideQuery
@@ -4229,20 +4273,7 @@ export class LlmClient {
 
         if (messageType === SendMessageType.UserQuery) {
           try {
-            await this.config.getFileHistoryService().makeSnapshot(prompt_id);
-            try {
-              const latestSnapshot = this.config
-                .getFileHistoryService()
-                .getSnapshots()
-                .at(-1);
-              if (latestSnapshot) {
-                this.config
-                  .getChatRecordingService()
-                  ?.recordFileHistorySnapshot(latestSnapshot);
-              }
-            } catch (e) {
-              debugLogger.error(`FileHistory: recordSnapshot failed: ${e}`);
-            }
+            await this.config.makeFileHistorySnapshot(prompt_id);
           } catch (e) {
             debugLogger.error(`FileHistory: makeSnapshot failed: ${e}`);
           }

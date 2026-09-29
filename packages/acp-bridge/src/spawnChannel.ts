@@ -43,12 +43,7 @@ import { estimateJsonStringBytes } from './json-string-bytes.js';
 import { detectAvailableMemoryMb } from './daemon-memory-budget.js';
 
 let cachedMemoryArgs: string[] | undefined;
-export const DAEMON_ACP_NDJSON_LIMITS: Readonly<NdJsonStreamLimits> =
-  Object.freeze({
-    maxFrameBytes: 64 * 1024 * 1024,
-    maxQueuedMessages: 256,
-    maxQueuedBytes: 64 * 1024 * 1024,
-  });
+export { DAEMON_ACP_NDJSON_LIMITS } from './ndJsonStream.js';
 
 const daemonClientParamValidators = new Map<
   string,
@@ -803,3 +798,8 @@ export function scrubChildEnv(
   }
   return childEnv;
 }
+
+export {
+  channelFactoryForwardsChildEnv,
+  markChannelFactoryForwardsChildEnv,
+} from './child-env-forwarding.js';

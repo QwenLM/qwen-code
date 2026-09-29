@@ -1034,4 +1034,33 @@ describe('NotebookEditTool', () => {
     const updated = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
     expect(updated.cells[0].source).toEqual(['x = 100']);
   });
+
+  it('honors cancellation during the final freshness check before writing', async () => {
+    const filePath = writeNotebook('cancel-final-check.ipynb', {
+      nbformat: 4,
+      nbformat_minor: 5,
+      cells: [{ cell_type: 'code', id: 'a', source: ['x = 1'], metadata: {} }],
+      metadata: {},
+    });
+    seedNotebookRead(filePath);
+    const before = fs.readFileSync(filePath, 'utf8');
+    const controller = new AbortController();
+    const check = fileReadCache.check.bind(fileReadCache);
+    mockFileHistoryService.trackEdit.mockImplementation(async () => {
+      vi.spyOn(fileReadCache, 'check').mockImplementationOnce((stats) => {
+        const result = check(stats);
+        controller.abort(new Error('cancel at final check'));
+        return result;
+      });
+    });
+    await expect(
+      buildInvocation({
+        notebook_path: filePath,
+        cell_id: 'a',
+        new_source: 'x = 2',
+      }).execute(controller.signal),
+    ).rejects.toThrow('cancel at final check');
+    expect(mockFileHistoryService.trackEdit).toHaveBeenCalledOnce();
+    expect(fs.readFileSync(filePath, 'utf8')).toBe(before);
+  });
 });

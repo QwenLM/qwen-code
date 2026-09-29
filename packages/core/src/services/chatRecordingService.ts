@@ -10,6 +10,12 @@ import type { ContentBlock } from '@agentclientprotocol/sdk';
 
 import { type Config } from '../config/config.js';
 import {
+  SessionExecutionEngineError,
+  type SessionExecutionEngine,
+  type SessionExecutionEnginePayload,
+  type SessionExecutionEngineState,
+} from './session-execution-engine.js';
+import {
   backgroundTurnContext,
   type BackgroundNotificationTurn,
 } from '../utils/background-turn-context.js';
@@ -18,11 +24,6 @@ import { ApprovalMode } from '../config/approval-mode.js';
 import path from 'node:path';
 import fs from 'node:fs';
 import { isManagedExecutionTranscriptSync } from '../utils/sessionStorageUtils.js';
-import {
-  SessionExecutionEngineError,
-  type SessionExecutionEngine,
-  type SessionExecutionEnginePayload,
-} from './session-execution-engine.js';
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type {
@@ -1031,6 +1032,7 @@ export interface BranchCheckpointCursor {
 }
 
 export interface ChatRecordingRestoreState {
+  executionEngine?: SessionExecutionEngine;
   lastCompletedUuid: string;
   turnParentUuids: Array<string | null>;
   customTitle?: string;
@@ -1196,6 +1198,11 @@ export class ChatRecordingService {
   private bytesSinceTitleAnchor = 0;
   private hasNonTitleContentSinceTitleAnchor = false;
   private bytesSinceSourceAnchor = 0;
+  private currentExecutionEngine?: SessionExecutionEngine;
+  private executionEngineWrite?: {
+    engine: SessionExecutionEngine;
+    completion: Promise<void>;
+  };
 
   constructor(
     config: Config,
@@ -1223,6 +1230,7 @@ export class ChatRecordingService {
             ? {
                 conversation: resumed.conversation ?? { messages: [] },
                 lastCompletedUuid: resumed.lastCompletedUuid,
+                executionEngine: resumed.executionEngine,
               }
             : undefined,
           resumed ? this.readPersistedTitleInfo() : undefined,
@@ -1314,6 +1322,7 @@ export class ChatRecordingService {
     sessionData?: {
       conversation: { messages: ChatRecord[] };
       lastCompletedUuid: string | null;
+      executionEngine?: SessionExecutionEngineState;
     },
     persistedTitleInfo?: { title?: string; source?: TitleSource },
   ): void {
@@ -1325,6 +1334,11 @@ export class ChatRecordingService {
     this.currentSourceType = undefined;
     this.currentSourceId = undefined;
     this.currentSessionModel = undefined;
+    this.currentExecutionEngine =
+      sessionData?.executionEngine?.status === 'verified' &&
+      sessionData.executionEngine.recorded
+        ? sessionData.executionEngine.engine
+        : undefined;
     this.currentSessionApprovalMode = undefined;
     this.activeBranchRecords = [];
     this.activeBranchBaseUuid = null;
@@ -1390,6 +1404,7 @@ export class ChatRecordingService {
   }
 
   private restoreProjectedState(state: ChatRecordingRestoreState): void {
+    this.currentExecutionEngine = state.executionEngine;
     this.lastRecordUuid = state.lastCompletedUuid;
     this.lastPersistedRecordUuid = state.lastCompletedUuid;
     this.activeBranchBaseUuid = state.lastCompletedUuid;
@@ -1418,6 +1433,7 @@ export class ChatRecordingService {
     sessionData?: {
       conversation: { messages: ChatRecord[] };
       lastCompletedUuid: string | null;
+      executionEngine?: SessionExecutionEngineState;
     },
     persistedTitleInfo?: { title?: string; source?: TitleSource },
     restoreState?: ChatRecordingRestoreState,
@@ -1439,12 +1455,46 @@ export class ChatRecordingService {
     this.acceptingWrites = true;
   }
 
+  async recordSessionExecutionEngine(
+    engine: SessionExecutionEngine,
+  ): Promise<void> {
+    const owner =
+      this.currentExecutionEngine ?? this.executionEngineWrite?.engine;
+    if (owner !== undefined && owner !== engine) {
+      throw new SessionExecutionEngineError(
+        this.getSessionId(),
+        `cannot change ${owner} to ${engine}`,
+      );
+    }
+    if (this.executionEngineWrite) return this.executionEngineWrite.completion;
+    if (this.currentExecutionEngine === engine) return;
+    if (!this.managedSink && !fs.existsSync(this.transcriptFilePath())) {
+      // A fresh Session writes its engine record just ahead of its first
+      // record (see createBaseRecord). Writing it now would persist a Session
+      // that never records anything: listed after it closes or dies, and
+      // holding its id.
+      this.currentExecutionEngine = engine;
+      this.pendingExecutionEngine = engine;
+      return;
+    }
+    const completion = this.appendRecordStrict({
+      ...this.createBaseRecord('system'),
+      subtype: 'session_execution_engine',
+      systemPayload: { version: 1, engine },
+    }).then(() => {
+      this.currentExecutionEngine = engine;
+    });
+    this.executionEngineWrite = { engine, completion };
+    await completion;
+  }
+
   /**
    * Creates base fields for a ChatRecord.
    */
   private createBaseRecord(
     type: ChatRecord['type'],
   ): Omit<ChatRecord, 'message' | 'tokens' | 'model' | 'toolCallsMetadata'> {
+    this.writePendingExecutionEngine();
     const cwd = this.config.getProjectRoot();
     const background = backgroundTurnContext.getStore();
     const backgroundTurn =
@@ -1472,6 +1522,22 @@ export class ChatRecordingService {
       version: this.config.getCliVersion() || 'unknown',
       gitBranch: this.getCachedGitBranch(cwd),
     };
+  }
+
+  /**
+   * Appends the deferred engine record first, so it stays the root of the
+   * chain the new record extends, exactly where an eager write would have put
+   * it.
+   */
+  private writePendingExecutionEngine(): void {
+    const engine = this.pendingExecutionEngine;
+    if (engine === undefined) return;
+    this.pendingExecutionEngine = undefined;
+    this.appendRecord({
+      ...this.createBaseRecord('system'),
+      subtype: 'session_execution_engine',
+      systemPayload: { version: 1, engine },
+    });
   }
 
   private getCachedGitBranch(cwd: string): string | undefined {
@@ -1553,9 +1619,15 @@ export class ChatRecordingService {
    * instead of straight into the transcript.
    */
   private managedSink?: ManagedSessionRecordWriter;
+  private managedLogDiscarded = false;
 
   /** The Managed log's size when the recorder last measured its growth. */
   private managedLogSizeSeen = 0;
+  /**
+   * The engine a fresh legacy Session records together with its first record,
+   * so a Session that never records anything leaves no transcript behind.
+   */
+  private pendingExecutionEngine?: SessionExecutionEngine;
 
   /**
    * Routes every record of a Managed session through its authority. Bound
@@ -2022,9 +2094,19 @@ export class ChatRecordingService {
     }
   }
 
-  close(options?: { handoff?: boolean }): Promise<void> {
+  close(options?: {
+    handoff?: boolean;
+    /**
+     * The caller already removed a Managed log that held no Session content,
+     * so there is nothing left for a seal to protect and the lock is released.
+     */
+    discardManagedLog?: boolean;
+  }): Promise<void> {
     if (options?.handoff) {
       this.handoffRequested = true;
+    }
+    if (options?.discardManagedLog) {
+      this.managedLogDiscarded = true;
     }
     if (this.closePromise) return this.closePromise;
     if (this.state === 'closed') return Promise.resolve();
@@ -2054,6 +2136,10 @@ export class ChatRecordingService {
     }
   }
 
+  private transcriptFilePath(): string {
+    return path.join(this.ensureChatsDir(), `${this.getSessionId()}.jsonl`);
+  }
+
   private async closeOnce(): Promise<void> {
     let flushFailure: unknown;
     try {
@@ -2075,7 +2161,12 @@ export class ChatRecordingService {
     const lease = this.binding?.lease;
     let stopFailure: unknown;
     try {
-      if (managedSink) {
+      if (this.managedLogDiscarded) {
+        // The caller already removed a Managed log that held no Session
+        // content, so there is nothing left for a seal to protect and the
+        // lock is released.
+        await lease?.release();
+      } else if (managedSink) {
         // A Managed log is only ever sealed: releasing would delete the lock
         // and leave the log open to any writer. The seal pins the authority's
         // committed position, which stays exact even after a failed write,
@@ -3156,21 +3247,6 @@ export class ChatRecordingService {
     }
   }
 
-  /**
-   * Persist the execution engine that owns this session. A failed write
-   * rejects, so creation fails instead of continuing without a durable owner.
-   * A session without chat recording has no recorder, so nothing is written.
-   */
-  async recordExecutionEngine(engine: SessionExecutionEngine): Promise<void> {
-    const systemPayload: SessionExecutionEnginePayload = { version: 1, engine };
-    await this.appendRecordStrict({
-      ...this.createBaseRecord('system'),
-      type: 'system',
-      subtype: 'session_execution_engine',
-      systemPayload,
-    });
-  }
-
   /** Persist immutable creator attribution near the start of the transcript. */
   async recordSessionSource(
     sourceType: string,
@@ -3443,6 +3519,18 @@ export class ChatRecordingService {
     } catch (error) {
       debugLogger.error('Error saving file history snapshot batch:', error);
     }
+  }
+
+  async recordFileHistorySnapshotBatchStrict(
+    snapshots: FileHistorySnapshot[],
+  ): Promise<void> {
+    const record: ChatRecord = {
+      ...this.createBaseRecord('system'),
+      type: 'system',
+      subtype: 'file_history_snapshot',
+      systemPayload: { snapshots: snapshots.map(serializeSnapshot) },
+    };
+    await this.appendRecordStrict(record);
   }
 
   async recordUserTextElements(

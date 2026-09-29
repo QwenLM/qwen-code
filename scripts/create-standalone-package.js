@@ -97,6 +97,7 @@ const DIST_ALLOWED_ENTRIES = new Set([
   'sandboxBwrapRelay.js',
   'sandboxLandlockRelay.js',
   'sandboxFileWorker.js',
+  'managed-runtime-worker.js',
   'chunks',
   'vendor',
   'bundled',

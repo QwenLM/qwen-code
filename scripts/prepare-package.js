@@ -351,6 +351,7 @@ function writeDistPackageJson(rootDir, distDir) {
       'sandboxBwrapRelay.js',
       'sandboxLandlockRelay.js',
       'sandboxFileWorker.js',
+      'managed-runtime-worker.js',
       'chunks',
       'vendor',
       '*.sb',

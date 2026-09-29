@@ -12,6 +12,7 @@ import { LSTool } from './ls.js';
 import type { LSToolParams } from './ls.js';
 import type { Config } from '../config/config.js';
 import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
+import { getMemoryBaseDir } from '../memory/paths.js';
 import { ToolErrorType } from './tool-error.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
 import { shortenPath } from '../utils/paths.js';
@@ -39,6 +40,7 @@ describe('LSTool', () => {
       getTargetDir: () => tempRootDir,
       getWorkspaceContext: () => mockWorkspaceContext,
       getFileService: () => new FileDiscoveryService(tempRootDir),
+      getMemoryBaseDir,
       getFileFilteringOptions: () => ({
         respectGitIgnore: true,
         respectQwenIgnore: true,

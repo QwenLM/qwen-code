@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
   type MCPServerConfig,
@@ -20,8 +19,8 @@ export interface LoadProjectMcpServersResult {
   /**
    * Servers declared in `.mcp.json`, each tagged `scope: 'project'`. These are
    * UNTRUSTED until the user approves them — loading is side-effect-free and
-   * MUST NOT trigger any connection (see issue #4615). Empty when no readable
-   * `.mcp.json` exists.
+   * MUST NOT trigger any connection (see issue #4615). Empty when the file is
+   * absent or could not be read; errors distinguish those cases.
    */
   servers: Record<string, MCPServerConfig>;
   /** Absolute path of the `.mcp.json` that was read, if any. */
@@ -42,23 +41,18 @@ export interface LoadProjectMcpServersResult {
  */
 export function loadProjectMcpServers(
   projectRoot: string,
-  options: { strict?: boolean } = {},
+  _options: { strict?: boolean } = {},
 ): LoadProjectMcpServersResult {
   const filePath = path.join(projectRoot, PROJECT_MCP_FILENAME);
 
   let raw: string | undefined;
   try {
-    raw = options.strict
-      ? readConfigFile(filePath)
-      : fs.readFileSync(filePath, 'utf-8');
-  } catch (e) {
-    // Without strict, a missing or unreadable file is the common case — not
-    // an error.
-    if (!options.strict) return { servers: {}, path: undefined, errors: [] };
+    raw = readConfigFile(filePath);
+  } catch (error) {
     return {
       servers: {},
       path: filePath,
-      errors: [`Failed to read ${filePath}: ${(e as Error).message}`],
+      errors: [`Failed to read ${filePath}: ${(error as Error).message}`],
     };
   }
   if (raw === undefined) return { servers: {}, path: undefined, errors: [] };
@@ -66,11 +60,11 @@ export function loadProjectMcpServers(
   let parsed: unknown;
   try {
     parsed = JSON.parse(stripJsonComments(raw));
-  } catch (e) {
+  } catch {
     return {
       servers: {},
       path: filePath,
-      errors: [`Failed to parse ${filePath}: ${(e as Error).message}`],
+      errors: [`Failed to parse ${filePath}: invalid JSON.`],
     };
   }
 

@@ -12,6 +12,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
+import { getMemoryBaseDir } from '../memory/paths.js';
 import type { Config } from '../config/config.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
 import { tildeifyPath } from '../utils/paths.js';
@@ -29,6 +30,7 @@ describe('GlobTool', () => {
   // Mock config for testing
   const mockConfig = {
     getFileService: () => new FileDiscoveryService(tempRootDir),
+    getMemoryBaseDir,
     getFileFilteringRespectGitIgnore: () => true,
     getFileFilteringOptions: () => ({
       respectGitIgnore: true,

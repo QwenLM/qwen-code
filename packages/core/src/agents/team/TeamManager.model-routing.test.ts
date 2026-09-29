@@ -23,7 +23,7 @@ import { InProcessBackend } from '../backends/InProcessBackend.js';
 import type { Backend } from '../backends/types.js';
 import { AgentStatus } from '../runtime/agent-types.js';
 import { SubagentManager } from '../../subagents/subagent-manager.js';
-import type { Config } from '../../config/config.js';
+import { Config } from '../../config/config.js';
 import type { TeamFile } from './types.js';
 import { formatAgentId } from './teamHelpers.js';
 
@@ -94,7 +94,10 @@ const LEADER_AUTH_TYPE = 'openai';
 function createLeaderConfig(projectRoot: string): Config {
   const leaderGenerator = { generateContentStream: vi.fn() };
   return {
+    createManagedChildExecutionScope:
+      Config.prototype.createManagedChildExecutionScope,
     getModel: vi.fn().mockReturnValue(LEADER_MODEL),
+    getRuntimeEnvironment: () => process.env,
     getFastModel: vi.fn().mockReturnValue(undefined),
     getAllConfiguredModels: vi.fn().mockReturnValue([]),
     getToolRegistry: vi.fn().mockReturnValue(createMockToolRegistry()),

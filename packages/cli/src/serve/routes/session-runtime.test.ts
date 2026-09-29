@@ -22,14 +22,17 @@ import { requireSessionRuntime } from './session-runtime.js';
 
 function runtime(
   workspaceCwd: string,
-  opts: { primary?: boolean; trusted?: boolean } = {},
+  opts: { primary?: boolean; trusted?: boolean; sourceType?: string } = {},
 ): WorkspaceRuntime {
   return {
     workspaceCwd,
     workspaceId: workspaceCwd.split('/').at(-1) ?? workspaceCwd,
     primary: opts.primary === true,
     trusted: opts.trusted !== false,
-  } as WorkspaceRuntime;
+    bridge: {
+      getSessionSummary: vi.fn(() => ({ sourceType: opts.sourceType })),
+    },
+  } as unknown as WorkspaceRuntime;
 }
 
 function response(): Response {
@@ -70,6 +73,34 @@ function registry(opts: {
 describe('requireSessionRuntime telemetry attribution', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  it('hides a Managed Gateway session from the ordinary session routes', () => {
+    const primary = runtime('/workspace/primary', {
+      primary: true,
+      sourceType: 'managed-gateway',
+    });
+    const setup = registry({
+      primary,
+      runtimes: [primary],
+      resolution: { kind: 'not_found' },
+    });
+    const res = response();
+
+    expect(
+      requireSessionRuntime({
+        sessionId: 'managed-1',
+        route: 'POST /session/:id/prompt',
+        res,
+        workspaceRegistry: setup.registry,
+      }),
+    ).toBeUndefined();
+    expect(res.status).toHaveBeenCalledWith(404);
+    expect(res.json).toHaveBeenCalledWith({
+      error: 'No session with id "managed-1"',
+      code: 'session_not_found',
+      sessionId: 'managed-1',
+    });
   });
 
   it('publishes the primary runtime without scanning in single-workspace mode', () => {

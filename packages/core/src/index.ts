@@ -102,6 +102,7 @@ export * from './core/output-style-files.js';
 export * from './core/session-recovery.js';
 export { buildSessionHistoryFromConversation } from './services/session-api-history.js';
 export * from './core/ask-user-question-restore.js';
+export * from './core/managed-approval-restore.js';
 export * from './core/tokenLimits.js';
 export * from './core/tool-call-preparation.js';
 export * from './core/toolCallIdUtils.js';
@@ -118,6 +119,13 @@ export * from './tools/tool-names.js';
 export * from './tools/tool-error.js';
 export * from './tools/tool-registry.js';
 export * from './tools/tools.js';
+export * from './tools/managed-tool-protocol.js';
+export * from './tools/managed-tool-runtime.js';
+export * from './tools/managed-tool-file-history.js';
+export * from './tools/managed-tool-file-history-protocol.js';
+export * from './tools/runtime-backed-tool.js';
+export * from './tools/managed-tool-session.js';
+export * from './tools/builtin-tool-definitions.js';
 
 // Individual tools — MCP/SDK infrastructure only (tool classes are lazy-loaded)
 export * from './tools/mcp-client.js';
@@ -146,20 +154,34 @@ export type { ConnectionId, PoolEvent } from './tools/mcp-pool-events.js';
 export { WorkspaceMcpBudget } from './tools/mcp-workspace-budget.js';
 export * from './tools/mcp-tool.js';
 export * from './tools/read-file.js';
+export * from './services/session-execution-engine.js';
 export * from './tools/ripGrep.js';
 export * from './tools/sdk-control-client-transport.js';
 export * from './tools/client-mcp-registrar.js';
 export * from './tools/modifiable-tool.js';
-export type {
-  ManagedToolExecutionResult,
-  ManagedToolInvocationStatus,
-  ManagedToolV2Client,
-} from './tools/managed-tool-runtime.js';
-export {
-  managedToolDigest,
-  type ManagedToolInvocationReference,
-} from './tools/managed-tool-protocol.js';
+export * from './managed-runtime/embedded-harness-scheduler.js';
+export * from './managed-runtime/managed-activation-store.js';
+export * from './managed-runtime/managed-prompt-admission.js';
+export * from './managed-runtime/managed-session-inbox.js';
+export * from './managed-runtime/managed-session-assembly.js';
+export * from './managed-runtime/managed-harness-checkpoint.js';
+export * from './managed-runtime/managed-harness-factory.js';
+export * from './managed-runtime/managed-runtime-dispatch-gate.js';
+export * from './managed-runtime/managed-session-authority.js';
+export * from './managed-runtime/managed-session-message-projection.js';
+export * from './managed-runtime/managed-session-record-sink.js';
 export * from './managed-runtime/managed-session-records.js';
+export * from './managed-runtime/managed-session-resources.js';
+export * from './managed-runtime/http-managed-session-store.js';
+export type {
+  ManagedSessionCommitProof,
+  ManagedSessionCommittedTransaction,
+  ManagedSessionJournalHandle,
+  ManagedSessionJournalReader,
+  ManagedSessionJournalScan,
+  ManagedSessionJournalStore,
+  ManagedSessionResourceStore,
+} from './managed-runtime/managed-session-storage.js';
 
 // Selective re-exports of types/utilities from tool files (avoids loading full tool modules)
 export {
@@ -428,6 +450,7 @@ export {
 } from './services/session-turn-state.js';
 export * from './services/session-writer-lease.js';
 export {
+  buildManagedSessionRestoreProjection,
   decodeSessionTranscriptCursor,
   decodeSessionTranscriptSnapshot,
   encodeSessionTranscriptCursor,
@@ -450,6 +473,7 @@ export {
   SessionTranscriptTooLargeError,
 } from './services/session-transcript-reader.js';
 export type {
+  ManagedSessionRestoreProjectionInput,
   SelectiveSessionRestoreOptions,
   SessionLiveRestoreProjection,
   SessionRestoreProjection,
@@ -561,6 +585,7 @@ export * from './utils/toolResultDisplayCompaction.js';
 // Production code: config.getMemoryManager().method(...)
 // Tests: new MemoryManager()
 export * from './memory/manager.js';
+export { captureAutoMemoryExtractionHistory } from './memory/extractionAgentPlanner.js';
 
 // Foundational utilities (paths, storage scaffold, type definitions, constants)
 // that are legitimately needed by UI code (MemoryDialog, commands, etc.)

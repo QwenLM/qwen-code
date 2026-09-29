@@ -215,6 +215,8 @@ describe('AgentTool', () => {
       stop: vi.fn().mockResolvedValue(undefined),
     };
     config = {
+      createManagedChildExecutionScope:
+        Config.prototype.createManagedChildExecutionScope,
       getProjectRoot: vi.fn().mockReturnValue('/test/project'),
       getTargetDir: vi.fn().mockReturnValue('/test/project'),
       getCwd: vi.fn().mockReturnValue('/test/project'),
@@ -2922,6 +2924,61 @@ describe('AgentTool', () => {
         subagent: mockAgent,
         dispose: vi.fn().mockResolvedValue(undefined),
       });
+    });
+
+    it('returns a nonmanaged foreground result and restores AUTO permissions before disposal settles', async () => {
+      const permissionManager = {
+        stripDangerousRulesForAutoMode: vi.fn(),
+        restoreDangerousRules: vi.fn(),
+      };
+      Object.assign(config, {
+        getPermissionManager: () => permissionManager,
+      });
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue({
+        ...mockSubagents[0],
+        approvalMode: ApprovalMode.AUTO,
+      });
+      let finishDisposal!: () => void;
+      const disposal = new Promise<void>((resolve) => {
+        finishDisposal = resolve;
+      });
+      const dispose = vi.fn(() => disposal);
+      vi.mocked(mockSubagentManager.createAgentHeadless).mockResolvedValue({
+        subagent: mockAgent,
+        dispose,
+      });
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Search files',
+        prompt: 'Find all TypeScript files',
+        subagent_type: 'file-search',
+        run_in_background: false,
+      });
+      let result:
+        | Awaited<ReturnType<AgentToolInvocation['execute']>>
+        | undefined;
+      const pending = invocation.execute().then((value) => {
+        result = value;
+      });
+      try {
+        await vi.waitFor(() => {
+          expect(dispose).toHaveBeenCalledOnce();
+          expect(result).toBeDefined();
+          expect(
+            permissionManager.restoreDangerousRules,
+          ).toHaveBeenCalledOnce();
+        });
+        expect(
+          permissionManager.stripDangerousRulesForAutoMode,
+        ).toHaveBeenCalledOnce();
+        expect(partToString(result!.llmContent)).toBe(
+          'Task completed successfully',
+        );
+      } finally {
+        finishDisposal();
+        await pending;
+      }
     });
 
     it('should execute subagent successfully', async () => {
@@ -7063,6 +7120,7 @@ describe('AgentTool', () => {
       appendActivity: ReturnType<typeof vi.fn>;
       registerResidentAgent: ReturnType<typeof vi.fn>;
       unregisterResidentAgent: ReturnType<typeof vi.fn>;
+      disposeResidentAgent: ReturnType<typeof vi.fn>;
       restartCompletedAgent: ReturnType<typeof vi.fn>;
     };
 
@@ -7121,6 +7179,13 @@ describe('AgentTool', () => {
         appendActivity: vi.fn(),
         registerResidentAgent: vi.fn(),
         unregisterResidentAgent: vi.fn().mockReturnValue(true),
+        disposeResidentAgent: vi.fn(
+          (id: string, resident: { dispose(): void | Promise<void> }) => {
+            mockRegistry.unregisterResidentAgent(id, resident);
+            void resident.dispose();
+            return true;
+          },
+        ),
         restartCompletedAgent: vi.fn().mockReturnValue(restartedEntry),
       };
 

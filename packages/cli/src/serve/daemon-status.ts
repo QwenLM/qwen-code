@@ -55,10 +55,7 @@ import type {
   WorkspaceRequestContext,
 } from './workspace-service/index.js';
 import type { TotalSessionAdmissionSnapshot } from './total-session-admission.js';
-import type {
-  WorkspaceRegistry,
-  WorkspaceRuntime,
-} from './workspace-registry.js';
+import type { WorkspaceRegistry } from './workspace-registry.js';
 import { isInternalWorkspaceRuntime } from './workspace-runtime-visibility.js';
 
 // Re-export so downstream consumers (server.ts, routes, the SDK type mirror)
@@ -676,21 +673,18 @@ export async function buildDaemonStatusResponse(
   const memoryBudget = input.opts.daemonMemoryBudget;
   let runtimeMemory: DaemonStatusRuntimeMemory | undefined;
   if (memoryBudget) {
-    // Count the live (non-dying) channels of managed runtimes, not what is
+    // Count managed runtimes whose channel is live (non-dying), not what is
     // merely active-state. `list()` (active-state only) drops workspaces
     // mid-replacement or blocked, which would under-report children in exactly
     // the window an admission policy must not treat as free capacity.
     // `listManaged()` is the managed set; `listEntries()` is the registration
     // count. A workspace whose kill has started but whose child has not exited
     // is excluded (dying channel); registered-but-dormant workspaces have no
-    // live child, so the registered count remains unsafe to divide by. A
-    // paired runtime holds up to one live child per engine.
+    // live child, so the registered count remains unsafe to divide by.
     const managedRuntimes = input.workspaceRegistry?.listManaged();
-    const liveChildren = (runtime: WorkspaceRuntime): number =>
-      runtime.bridge.liveChannelCount ??
-      (runtime.bridge.isChannelLive() ? 1 : 0);
     const activeAcpChildCount = managedRuntimes
-      ? managedRuntimes.reduce((sum, runtime) => sum + liveChildren(runtime), 0)
+      ? managedRuntimes.filter((runtime) => runtime.bridge.isChannelLive())
+          .length
       : workspaceSnapshots.filter((item) => item.snapshot.channelLive).length;
     const registeredWorkspaceCount = input.workspaceRegistry
       ? (
@@ -726,14 +720,11 @@ export async function buildDaemonStatusResponse(
       // leaning on it would make `sampled <= activeAcpChildren` — the one
       // thing this block promises — hold by coincidence instead of by
       // construction.
-      const children = liveChildren(runtime);
-      if (children === 0) continue;
+      if (!runtime.bridge.isChannelLive()) continue;
       const snapshot = runtime.bridge.getChildResourceSnapshot?.();
       if (!snapshot) continue;
       childRssBytesTotal += snapshot.rssBytes;
-      // Capped by the same count `activeAcpChildCount` added for this runtime.
-      const sampled = Math.min(children, snapshot.children ?? 1);
-      childRssSampled += sampled;
+      childRssSampled += 1;
       // Absent on bridges predating the field; such a child still counts
       // toward the sum, it just cannot say how old its reading is.
       if (snapshot.ageMs !== undefined) {
@@ -747,7 +738,7 @@ export async function buildDaemonStatusResponse(
       // honest denominator for the maxima.
       const heap = snapshot.heap;
       if (!heap) continue;
-      heapReported += Math.min(sampled, snapshot.heapReported ?? 1);
+      heapReported += 1;
       peakOldGenerationBytes = Math.max(
         peakOldGenerationBytes,
         heap.peakOldGenerationBytes,

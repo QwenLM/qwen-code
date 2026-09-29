@@ -150,6 +150,28 @@ describe('resolveEnvVarsInObject', () => {
     process.env = originalEnv;
   });
 
+  it('uses an explicit environment without ambient fallback, including nested values', () => {
+    process.env['MANAGED_TEST_KEY'] = 'ambient';
+    const input = { nested: ['$MANAGED_TEST_KEY', '${MANAGED_TEST_KEY}'] };
+    expect(
+      resolveEnvVarsInObject(input, undefined, { environment: {} }),
+    ).toEqual(input);
+    expect(
+      resolveEnvVarsInObject(input, undefined, {
+        environment: { MANAGED_TEST_KEY: 'workspace' },
+      }),
+    ).toEqual({
+      nested: ['workspace', 'workspace'],
+    });
+    expect(
+      resolveEnvVarsInString(
+        '$MANAGED_TEST_KEY',
+        { MANAGED_TEST_KEY: 'override' },
+        { environment: {} },
+      ),
+    ).toBe('override');
+  });
+
   it('passes the process.env fallback option to nested values', () => {
     process.env['FROM_PROCESS'] = 'process-value';
 

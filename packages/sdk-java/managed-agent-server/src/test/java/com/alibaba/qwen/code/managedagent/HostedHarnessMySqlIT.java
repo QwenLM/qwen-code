@@ -47,6 +47,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 import java.util.regex.Pattern;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
@@ -55,6 +56,9 @@ import org.springframework.boot.web.servlet.context.ServletWebServerApplicationC
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 
+@Disabled("This branch wires hosted-harness to require a Runtime Broker"
+        + " (packages/cli/src/serve/hosted-harness-profile.ts), so main's"
+        + " no-Broker no-tool profile this IT exercises is not wired here.")
 class HostedHarnessMySqlIT {
     private static final String MODEL = "hosted-mysql-fixture";
     private static final String TOKEN = "hosted-mysql-private-token";

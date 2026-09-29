@@ -40,6 +40,14 @@ import {
   resolveAgentExecutionBackend,
 } from './execution-backend.js';
 import { AgentHeadless } from '../agents/runtime/agent-headless.js';
+import {
+  bindManagedChildExecution,
+  createManagedChildCleanup,
+} from '../agents/managed-child-execution.js';
+import {
+  createManagedChildExecutionScope,
+  type ManagedChildExecutionScope,
+} from '../tools/managed-tool-session.js';
 import type { SubagentExecutor } from '../agents/runtime/subagent-executor.js';
 import type {
   AgentEventEmitter,
@@ -937,6 +945,7 @@ export class SubagentManager {
       taskName?: string;
       /** Stable id used to keep one invocation grouped across resume. */
       subagentId?: string;
+      managedScope?: ManagedChildExecutionScope;
     },
   ): Promise<{ subagent: SubagentExecutor; dispose: () => Promise<void> }> {
     const hookSessionId = runtimeContext.getSessionId();
@@ -952,6 +961,10 @@ export class SubagentManager {
         config.name,
       );
     }
+    const originalRuntimeContext = runtimeContext;
+    const managedScope =
+      options?.managedScope ?? createManagedChildExecutionScope(runtimeContext);
+    if (!options?.managedScope) runtimeContext = managedScope.config;
     // Track per-spawn cleanup callbacks declared outside the inner
     // `try/catch` so the catch can fire them on a constructor failure
     // before the caller ever receives the return value. The successful
@@ -961,8 +974,10 @@ export class SubagentManager {
     // `runCleanup` doesn't need its own null-out guards — a duplicate
     // invocation is at worst wasted work, never a re-fire of side effects.
     let unregisterAgentHooks: (() => void) | undefined;
+    let disposeLaunchRegistry: (() => Promise<void>) | undefined;
     let disposeSubagentRegistry: (() => Promise<void>) | undefined;
-    const runCleanup = async (): Promise<void> => {
+    const runCleanup = createManagedChildCleanup(managedScope, async () => {
+      if (disposeLaunchRegistry) await disposeLaunchRegistry();
       if (unregisterAgentHooks) {
         try {
           unregisterAgentHooks();
@@ -979,9 +994,10 @@ export class SubagentManager {
           debugLogger.warn(
             `Subagent "${config.name}": failed to stop per-agent ToolRegistry: ${error instanceof Error ? error.message : String(error)}`,
           );
+          if (managedScope.signal) throw error;
         }
       }
-    };
+    });
 
     try {
       if (
@@ -1127,9 +1143,15 @@ export class SubagentManager {
           },
         };
       }
-      const runtimeConfig = await this.convertToRuntimeConfig(
-        config,
-        runtimeContext,
+      if (!options?.managedScope && managedScope.signal) {
+        await managedScope.run(() =>
+          rebuildToolRegistryOnOverride(runtimeContext, originalRuntimeContext),
+        );
+        const registry = runtimeContext.getToolRegistry();
+        disposeLaunchRegistry = () => registry.stop();
+      }
+      const runtimeConfig = await managedScope.run(() =>
+        this.convertToRuntimeConfig(config, runtimeContext),
       );
       const promptConfig: PromptConfig = {
         ...runtimeConfig.promptConfig,
@@ -1167,42 +1189,47 @@ export class SubagentManager {
       // ContentGenerator + view so the subagent talks to the right API with
       // its own settings without affecting the parent process. The view is
       // applied via AsyncLocalStorage when the agent runs.
-      const runtimeView = await this.buildRuntimeContentGeneratorView(
-        config,
-        runtimeContext,
-        modelConfig.model,
-        options?.runtimeAuthOverrides,
-        modelConfig.reasoningEffort,
+      const runtimeView = await managedScope.run(() =>
+        this.buildRuntimeContentGeneratorView(
+          config,
+          runtimeContext,
+          modelConfig.model,
+          options?.runtimeAuthOverrides,
+          modelConfig.reasoningEffort,
+        ),
       );
 
       const skillsAvailable = toolConfigAllowsSkill(
         toolConfig,
         runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly,
       );
-      const { context: subagentContext, cleanup } =
-        await this.buildSubagentContextOverride(
+      const { context: subagentContext, cleanup } = await managedScope.run(() =>
+        this.buildSubagentContextOverride(
           runtimeContext,
           config,
           skillsAvailable,
-        );
+        ),
+      );
       disposeSubagentRegistry = cleanup;
 
       try {
         const subagentId =
           options?.subagentId ??
           `${config.name}-${randomUUID().replace(/-/g, '').slice(0, 8)}`;
-        const subagent = await AgentHeadless.create(
-          config.name,
-          subagentContext,
-          promptConfig,
-          modelConfig,
-          runConfig,
-          toolConfig,
-          options?.eventEmitter,
-          options?.hooks,
-          runtimeView,
-          options?.taskName,
-          subagentId,
+        const subagent = await managedScope.run(() =>
+          AgentHeadless.create(
+            config.name,
+            subagentContext,
+            promptConfig,
+            modelConfig,
+            runConfig,
+            toolConfig,
+            options?.eventEmitter,
+            options?.hooks,
+            runtimeView,
+            options?.taskName,
+            subagentId,
+          ),
         );
         const hookRegistry = runtimeContext.getHookSystem()?.getRegistry();
         if (config.hooks && Object.keys(config.hooks).length > 0) {
@@ -1232,6 +1259,7 @@ export class SubagentManager {
             );
           }
         }
+        bindManagedChildExecution(subagent, managedScope);
         return { subagent, dispose: runCleanup };
       } catch (innerError) {
         // The caller never received the return value — `dispose` cannot
@@ -1242,6 +1270,7 @@ export class SubagentManager {
         throw innerError;
       }
     } catch (error) {
+      await runCleanup();
       // Already-classified errors carry an accurate message; re-wrapping them
       // under "Failed to create AgentHeadless" would misreport the executor
       // path, which never constructs an AgentHeadless at all.

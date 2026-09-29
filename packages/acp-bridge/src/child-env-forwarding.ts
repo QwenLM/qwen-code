@@ -13,11 +13,13 @@ import type { ChannelFactory } from './channel.js';
  * The Conversations runtime's mandatory writer lease depends on a private
  * provenance marker reaching the ACP child, and only the factory decides
  * whether the bridge's overrides are forwarded. Membership is therefore
- * granted solely by `createSpawnChannelFactory` (the production path that
- * performs the merge through `scrubChildEnv`) or, for tests, by the
- * deliberate `internal/testUtils` seam. This is a contract against
- * accidental same-process miswiring, not a security boundary: embedding
- * code can already construct arbitrary runtime objects.
+ * granted solely by `createSpawnChannelFactory` (the production spawn path
+ * that merges through `scrubChildEnv`), `createManagedAgentChannelFactory`
+ * (the in-process host that merges the same overrides through
+ * `scrubChildEnv`), or, for tests, by the deliberate `internal/testUtils`
+ * seam. This is a contract against accidental same-process miswiring, not
+ * a security boundary: embedding code can already construct arbitrary
+ * runtime objects.
  */
 const forwardingFactories = new WeakSet<ChannelFactory>();
 

@@ -100,6 +100,7 @@ function createGenerator(): OpenAIContentGenerator {
     authType: AuthType.USE_OPENAI,
   };
   const cliConfig = {
+    getRuntimeEnvironment: () => process.env,
     getCliVersion: () => '0.0.0-test',
     getProxy: () => undefined,
     getSessionId: () => 'test-session',

@@ -70,6 +70,10 @@ describe('auto-memory extraction', () => {
   let tempDir: string;
   let projectRoot: string;
   let mockConfig: Config;
+  const extractionHistory: Content[] = [
+    { role: 'user', parts: [{ text: 'A captured recent preference.' }] },
+    { role: 'model', parts: [{ text: 'Noted.' }] },
+  ];
 
   beforeEach(async () => {
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'auto-memory-extract-'));
@@ -111,12 +115,14 @@ describe('auto-memory extraction', () => {
       projectRoot,
       sessionId: 'session-1',
       config: mockConfig,
+      extractionHistory,
       history: [...history],
     });
     const second = await runAutoMemoryExtract({
       projectRoot,
       sessionId: 'session-1',
       config: mockConfig,
+      extractionHistory,
       history: [...history],
     });
 
@@ -133,7 +139,7 @@ describe('auto-memory extraction', () => {
   });
 
   it('skips a session mismatch without advancing the cursor', async () => {
-    vi.mocked(getCacheSafeParamsSessionId)
+    vi.mocked(mockConfig.getSessionId)
       .mockReturnValueOnce('session-1')
       .mockReturnValueOnce('session-2');
     const cursorBefore = await fs.readFile(
@@ -145,6 +151,7 @@ describe('auto-memory extraction', () => {
       projectRoot,
       sessionId: 'session-1',
       config: mockConfig,
+      extractionHistory,
       history: [{ role: 'user', parts: [{ text: 'Remember this.' }] }],
     });
 
@@ -157,13 +164,14 @@ describe('auto-memory extraction', () => {
   });
 
   it('skips an existing session mismatch before scaffold IO', async () => {
-    vi.mocked(getCacheSafeParamsSessionId).mockReturnValue('session-2');
+    vi.mocked(mockConfig.getSessionId).mockReturnValue('session-2');
     const uncreatedProjectRoot = path.join(tempDir, 'not-created');
 
     const result = await runAutoMemoryExtract({
       projectRoot: uncreatedProjectRoot,
       sessionId: 'session-1',
       config: mockConfig,
+      extractionHistory,
       history: [{ role: 'user', parts: [{ text: 'Remember this.' }] }],
     });
 
@@ -174,21 +182,85 @@ describe('auto-memory extraction', () => {
     expect(runAutoMemoryExtractionByAgent).not.toHaveBeenCalled();
   });
 
-  it('preserves the empty-cache failure path', async () => {
-    vi.mocked(getCacheSafeParamsSessionId).mockReturnValue(undefined);
-    vi.mocked(runAutoMemoryExtractionByAgent).mockRejectedValueOnce(
-      new Error('no cache-safe params'),
-    );
-
-    await expect(
-      runAutoMemoryExtract({
+  it.each([undefined, 'other-session'])(
+    'uses the captured snapshot regardless of the global cache owner %s',
+    async (cachedOwner) => {
+      vi.mocked(getCacheSafeParamsSessionId).mockReturnValue(cachedOwner);
+      vi.mocked(runAutoMemoryExtractionByAgent).mockResolvedValueOnce({
+        touchedTopics: [],
+        touchedProjectScope: false,
+        touchedUserScope: false,
+        hasToolActivity: true,
+      });
+      const history: Content[] = Array.from({ length: 52 }, (_, index) => ({
+        role: index % 2 === 0 ? 'user' : 'model',
+        parts: [{ text: `history-${index}` }],
+      }));
+      const result = await runAutoMemoryExtract({
         projectRoot,
         sessionId: 'session-1',
         config: mockConfig,
-        history: [{ role: 'user', parts: [{ text: 'Remember this.' }] }],
-      }),
-    ).rejects.toThrow('no cache-safe params');
-    expect(runAutoMemoryExtractionByAgent).toHaveBeenCalledOnce();
+        history,
+        extractionHistory,
+      });
+      expect(result.cursor.processedOffset).toBe(52);
+      expect(runAutoMemoryExtractionByAgent).toHaveBeenCalledWith(
+        mockConfig,
+        projectRoot,
+        extractionHistory,
+      );
+      expect(getCacheSafeParamsSessionId).not.toHaveBeenCalled();
+    },
+  );
+
+  it('keeps interleaved sessions attached to their supplied extraction snapshots', async () => {
+    const firstGate =
+      deferred<Awaited<ReturnType<typeof runAutoMemoryExtractionByAgent>>>();
+    const completed = {
+      touchedTopics: [],
+      touchedProjectScope: false,
+      touchedUserScope: false,
+      hasToolActivity: false,
+    };
+    vi.mocked(runAutoMemoryExtractionByAgent)
+      .mockReturnValueOnce(firstGate.promise)
+      .mockResolvedValue(completed);
+    const secondConfig = { getSessionId: () => 'session-2' } as Config;
+    const secondHistory: Content[] = [
+      { role: 'user', parts: [{ text: 'Second session preference' }] },
+      { role: 'model', parts: [{ text: 'Second response' }] },
+    ];
+    const first = runAutoMemoryExtract({
+      projectRoot,
+      sessionId: 'session-1',
+      config: mockConfig,
+      history: extractionHistory,
+      extractionHistory,
+    });
+    await waitForMockCall(vi.mocked(runAutoMemoryExtractionByAgent));
+    vi.mocked(getCacheSafeParamsSessionId).mockReturnValue('session-2');
+    await runAutoMemoryExtract({
+      projectRoot: path.join(tempDir, 'second-project'),
+      sessionId: 'session-2',
+      config: secondConfig,
+      history: secondHistory,
+      extractionHistory: secondHistory,
+    });
+    firstGate.resolve(completed);
+    await first;
+    expect(runAutoMemoryExtractionByAgent).toHaveBeenNthCalledWith(
+      1,
+      mockConfig,
+      projectRoot,
+      extractionHistory,
+    );
+    expect(runAutoMemoryExtractionByAgent).toHaveBeenNthCalledWith(
+      2,
+      secondConfig,
+      path.join(tempDir, 'second-project'),
+      secondHistory,
+    );
+    expect(getCacheSafeParamsSessionId).not.toHaveBeenCalled();
   });
 
   it('throws when config is missing because heuristic fallback was removed', async () => {
@@ -196,6 +268,7 @@ describe('auto-memory extraction', () => {
       runAutoMemoryExtract({
         projectRoot,
         sessionId: 'session-1',
+        extractionHistory,
         history: [
           { role: 'user', parts: [{ text: 'I prefer terse responses.' }] },
         ],
@@ -237,6 +310,7 @@ describe('auto-memory extraction', () => {
           projectRoot,
           sessionId: 'session-1',
           config: mockConfig,
+          extractionHistory,
           history: [...newHistory],
         }),
       ).rejects.toThrow('EACCES: project memory index write failed');
@@ -265,6 +339,7 @@ describe('auto-memory extraction', () => {
           projectRoot,
           sessionId: 'session-1',
           config: mockConfig,
+          extractionHistory,
           history: [...newHistory],
         }),
       ).resolves.toBeDefined();
@@ -290,6 +365,7 @@ describe('auto-memory extraction', () => {
         projectRoot,
         sessionId: 'session-1',
         config: mockConfig,
+        extractionHistory,
         history: [...newHistory],
       });
 
@@ -311,6 +387,7 @@ describe('auto-memory extraction', () => {
         projectRoot,
         sessionId: 'session-1',
         config: mockConfig,
+        extractionHistory,
         history: [...newHistory],
       });
 
@@ -335,6 +412,7 @@ describe('auto-memory extraction', () => {
         projectRoot,
         sessionId: 'session-1',
         config: mockConfig,
+        extractionHistory,
         history: [...newHistory],
       });
       await waitForMockCall(vi.mocked(rebuildManagedAutoMemoryIndex));
@@ -366,6 +444,7 @@ describe('auto-memory extraction', () => {
         projectRoot,
         sessionId: 'session-1',
         config: mockConfig,
+        extractionHistory,
         history: [...newHistory],
       });
       await waitForMockCall(vi.mocked(rebuildUserAutoMemoryIndex));
@@ -414,6 +493,7 @@ describe('auto-memory extraction', () => {
         projectRoot,
         sessionId: 'session-1',
         config: mockConfig,
+        extractionHistory,
         history: [...history],
       });
       expect(first.cursor.processedOffset).toBe(20);
@@ -432,6 +512,7 @@ describe('auto-memory extraction', () => {
         projectRoot,
         sessionId: 'session-1',
         config: mockConfig,
+        extractionHistory,
         history: [...history],
       });
 
@@ -466,6 +547,7 @@ describe('auto-memory extraction', () => {
         projectRoot,
         sessionId: 'session-1',
         config: mockConfig,
+        extractionHistory,
         history: [...history],
       });
 
@@ -477,6 +559,7 @@ describe('auto-memory extraction', () => {
         projectRoot,
         sessionId: 'session-1',
         config: mockConfig,
+        extractionHistory,
         history: [...history],
       });
 
@@ -509,6 +592,7 @@ describe('auto-memory extraction', () => {
         projectRoot,
         sessionId: 'session-1',
         config: mockConfig,
+        extractionHistory,
         history: [{ role: 'user', parts: [{ text: hugeText }] }],
       });
 
@@ -540,6 +624,7 @@ describe('auto-memory extraction', () => {
         projectRoot,
         sessionId: 'session-1',
         config: mockConfig,
+        extractionHistory,
         history: [...history],
       });
 
@@ -547,10 +632,12 @@ describe('auto-memory extraction', () => {
         .calls.length;
 
       // Session 2: cursor ignored, full history treated as unprocessed
+      vi.mocked(mockConfig.getSessionId).mockReturnValue('session-2');
       await runAutoMemoryExtract({
         projectRoot,
         sessionId: 'session-2',
         config: mockConfig,
+        extractionHistory,
         history: [...history],
       });
 
@@ -590,6 +677,7 @@ describe('auto-memory extraction', () => {
         projectRoot,
         sessionId: 'session-1',
         config: mockConfig,
+        extractionHistory,
         history: [...history],
       });
 
@@ -608,6 +696,7 @@ describe('auto-memory extraction', () => {
         projectRoot,
         sessionId: 'session-1',
         config: mockConfig,
+        extractionHistory,
         history: [...history],
       });
 
@@ -629,6 +718,7 @@ describe('auto-memory extraction', () => {
         projectRoot,
         sessionId: 'session-1',
         config: mockConfig,
+        extractionHistory,
         history: [...history],
       });
 
@@ -642,6 +732,7 @@ describe('auto-memory extraction', () => {
         projectRoot,
         sessionId: 'session-1',
         config: mockConfig,
+        extractionHistory,
         history: [...history],
       });
 
@@ -677,6 +768,7 @@ describe('auto-memory extraction', () => {
         projectRoot,
         sessionId: 'session-1',
         config: mockConfig,
+        extractionHistory,
         history: [...fullHistory],
       });
 
@@ -695,6 +787,7 @@ describe('auto-memory extraction', () => {
         projectRoot,
         sessionId: 'session-1',
         config: mockConfig,
+        extractionHistory,
         history: [...compressedHistory], // 6 messages, cursor says 20
       });
 
@@ -725,6 +818,7 @@ describe('auto-memory extraction', () => {
         projectRoot,
         sessionId: 'session-1',
         config: mockConfig,
+        extractionHistory,
         history: [...history],
       });
 
@@ -745,6 +839,7 @@ describe('auto-memory extraction', () => {
         projectRoot,
         sessionId: 'session-1',
         config: mockConfig,
+        extractionHistory,
         history: [...history],
       });
 

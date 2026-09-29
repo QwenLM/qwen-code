@@ -5,6 +5,7 @@
  */
 
 import type { Response } from 'express';
+import { SessionNotFoundError } from '../acp-session-bridge.js';
 import type { DaemonLogger } from '../daemon-logger.js';
 import type {
   WorkspaceRegistry,
@@ -31,6 +32,30 @@ export function requirePrimarySessionRuntime(
   return undefined;
 }
 
+export function rejectManagedGatewayRuntimeSession(
+  runtime: WorkspaceRuntime,
+  sessionId: string,
+  res: Response,
+): boolean {
+  try {
+    if (
+      runtime.bridge.getSessionSummary(sessionId).sourceType !==
+      'managed-gateway'
+    ) {
+      return false;
+    }
+  } catch (error) {
+    if (error instanceof SessionNotFoundError) return false;
+    throw error;
+  }
+  res.status(404).json({
+    error: `No session with id "${sessionId}"`,
+    code: 'session_not_found',
+    sessionId,
+  });
+  return true;
+}
+
 export function requireSessionRuntime(opts: {
   sessionId: string;
   route: string;
@@ -48,7 +73,14 @@ export function requireSessionRuntime(opts: {
     details = {},
   } = opts;
   if (workspaceRegistry.listAllEntries().length === 1) {
-    return requirePrimarySessionRuntime(workspaceRegistry, res);
+    const runtime = requirePrimarySessionRuntime(workspaceRegistry, res);
+    if (
+      !runtime ||
+      rejectManagedGatewayRuntimeSession(runtime, sessionId, res)
+    ) {
+      return undefined;
+    }
+    return runtime;
   }
 
   const resolution = workspaceRegistry.resolveLiveSessionOwner(sessionId);
@@ -79,6 +111,9 @@ export function requireSessionRuntime(opts: {
         workspaceCwd: runtime.workspaceCwd,
         workspaceId: runtime.workspaceId,
       });
+      return undefined;
+    }
+    if (rejectManagedGatewayRuntimeSession(runtime, sessionId, res)) {
       return undefined;
     }
     return runtime;

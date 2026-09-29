@@ -29,6 +29,7 @@ import {
   stripUtf8Bom,
 } from './execution-sandbox-settings.js';
 import { isWorkspaceTrusted } from './trustedFolders.js';
+import { readConfigFile } from './read-config-file.js';
 import { hasOwnModelProviders } from './modelProvidersScope.js';
 import {
   type Settings,
@@ -37,7 +38,10 @@ import {
   type SettingDefinition,
   getSettingsSchema,
 } from './settingsSchema.js';
-import { resolveEnvVarsInObject } from '@qwen-code/qwen-code-core/envVarResolver';
+import {
+  resolveEnvVarsInObject,
+  type ResolveEnvVarsOptions,
+} from '@qwen-code/qwen-code-core/envVarResolver';
 import {
   setNestedPropertySafe,
   WORKSPACE_NON_OVERRIDING_SETTINGS,
@@ -69,7 +73,6 @@ import {
   getSystemSettingsPath,
   spawnedEnvironmentView,
 } from './storage-paths-lite.js';
-import { readConfigFile } from './read-config-file.js';
 
 export {
   DEFAULT_EXCLUDED_ENV_VARS,
@@ -698,6 +701,7 @@ export class LoadedSettings {
     corruptedPath: string | undefined = undefined,
     wasRecovered: boolean = false,
     workspaceSettingsActive: boolean = true,
+    runtimeEnvironment?: Readonly<NodeJS.ProcessEnv>,
   ) {
     this.system = system;
     this.systemDefaults = systemDefaults;
@@ -709,6 +713,10 @@ export class LoadedSettings {
     this.corruptedPath = corruptedPath;
     this.wasRecovered = wasRecovered;
     this.workspaceSettingsActive = workspaceSettingsActive;
+    this.runtimeEnvironment =
+      runtimeEnvironment === undefined
+        ? undefined
+        : Object.freeze({ ...runtimeEnvironment });
     this._merged = this.computeMergedSettings();
   }
 
@@ -725,6 +733,7 @@ export class LoadedSettings {
   corruptionDialogDismissed: boolean = false;
 
   private _merged: Settings;
+  private readonly runtimeEnvironment?: Readonly<NodeJS.ProcessEnv>;
 
   get merged(): Settings {
     return this._merged;
@@ -857,7 +866,12 @@ export class LoadedSettings {
         }
         const resolved = resolveEnvVarsInObject(
           parsed as Settings,
-          getHomeEnvFallbackVars((message) => debugLogger.warn(message)),
+          this.runtimeEnvironment === undefined
+            ? getHomeEnvFallbackVars((message) => debugLogger.warn(message))
+            : undefined,
+          this.runtimeEnvironment === undefined
+            ? {}
+            : { environment: this.runtimeEnvironment },
         );
         file.settings = resolved;
         file.originalSettings = structuredClone(parsed) as Settings;
@@ -1032,6 +1046,7 @@ export const CORRUPTED_SUFFIX = '.corrupted';
  * System Defaults → User (~/.qwen/settings.json) → Workspace → System.
  */
 export interface LoadSettingsOptions {
+  runtimeEnvironment?: Readonly<NodeJS.ProcessEnv>;
   consumeCorruptionEnvVars?: boolean;
   skipLoadEnvironment?: boolean;
   skipWorkspaceSettings?: boolean;
@@ -1052,7 +1067,7 @@ export function loadSettings(
     typeof consumeCorruptionEnvVars === 'object'
       ? consumeCorruptionEnvVars
       : { consumeCorruptionEnvVars };
-  return readSettingsLayers(workspaceDir, opts);
+  return loadSettingsInternal(workspaceDir, opts, false);
 }
 
 /**
@@ -1061,31 +1076,31 @@ export function loadSettings(
  * normalization, backup, corruption recovery or environment change. A layer
  * that cannot be read whole, is not a JSON object or carries a version this
  * build cannot migrate throws, where `loadSettings` repairs, skips or accepts
- * some of these. `environment` locates the user and system files and is the
- * only source for `${VAR}` placeholders; without one, nothing is read. It is
- * read as a spawned session host receives it, and one that the host would not
- * receive as it is throws.
+ * some of these. `runtimeEnvironment` locates the user and system files and
+ * is the only source for `${VAR}` placeholders; without one, nothing is read.
+ * It is read as a spawned session host receives it, and one that the host
+ * would not receive as it is throws.
  */
 export function readSettingsSnapshot(
   workspaceDir: string,
   options: {
-    environment: Readonly<NodeJS.ProcessEnv>;
+    runtimeEnvironment: Readonly<NodeJS.ProcessEnv>;
     workspaceTrusted: boolean;
   },
 ): LoadedSettings {
-  const { environment } = options;
-  if (typeof environment !== 'object' || environment === null) {
+  const { runtimeEnvironment } = options;
+  if (typeof runtimeEnvironment !== 'object' || runtimeEnvironment === null) {
     throw new TypeError('A settings snapshot needs an environment.');
   }
-  return readSettingsLayers(
+  return loadSettingsInternal(
     workspaceDir,
     {
-      consumeCorruptionEnvVars: false,
-      skipLoadEnvironment: true,
+      ...options,
       skipWorkspaceSettings: !options.workspaceTrusted,
-      workspaceTrusted: options.workspaceTrusted,
+      skipLoadEnvironment: true,
+      consumeCorruptionEnvVars: false,
     },
-    { environment },
+    true,
   );
 }
 
@@ -1098,40 +1113,41 @@ export function resolveHomeDirectory(home: string = homedir()): string {
   return fs.realpathSync(path.resolve(home));
 }
 
-function readSettingsLayers(
+function loadSettingsInternal(
   workspaceDir: string,
   opts: LoadSettingsOptions,
-  snapshotOf?: { readonly environment: Readonly<NodeJS.ProcessEnv> },
+  snapshotOnly: boolean,
 ): LoadedSettings {
-  // A snapshot reads through the given environment and writes nothing. Every
-  // step below that writes a file or `process.env` must be skipped when
-  // `snapshot` is set; the snapshot tests compare the whole tree to hold it.
-  const snapshot = snapshotOf !== undefined;
-  const snapshotEnvironment = snapshotOf?.environment;
   // Apply any QWEN_HOME / QWEN_RUNTIME_DIR set in user-level `.env` files
   // BEFORE any code reads a path derived from them. After this call, the
   // lazy `getUserSettingsPath()` / `Storage.getGlobalQwenDir()` getters
   // return the post-bootstrap value.
-  if (!snapshot) preResolveHomeEnvOverrides();
+  if (opts.runtimeEnvironment === undefined) preResolveHomeEnvOverrides();
   // A malformed operator file cannot silently reset a confinement policy.
   // Validate literals before environment substitution and corruption recovery.
-  const operatorSandbox = snapshot
-    ? undefined
-    : readOperatorSandboxSettings().tools?.executionSandbox;
-  const userSettingsPath = snapshot
-    ? path.join(getGlobalQwenDirLite(snapshotEnvironment), 'settings.json')
+  const operatorSandbox =
+    opts.runtimeEnvironment === undefined
+      ? readOperatorSandboxSettings().tools?.executionSandbox
+      : undefined;
+  const pathEnvironment: Readonly<NodeJS.ProcessEnv> | undefined =
+    snapshotOnly && opts.runtimeEnvironment !== undefined
+      ? { ...process.env, ...opts.runtimeEnvironment }
+      : undefined;
+  const userSettingsPath = pathEnvironment
+    ? path.join(getGlobalQwenDirLite(pathEnvironment), 'settings.json')
     : getUserSettingsPath();
-  const qwenHomeRedirectWarning = snapshot
-    ? null
-    : detectQwenHomeRedirectWithoutMigration(userSettingsPath);
+  const qwenHomeRedirectWarning =
+    opts.runtimeEnvironment === undefined
+      ? detectQwenHomeRedirectWithoutMigration(userSettingsPath)
+      : undefined;
 
   let systemSettings: Settings = {};
   let systemDefaultSettings: Settings = {};
   let userSettings: Settings = {};
   let workspaceSettings: Settings = {};
   const settingsErrors: SettingsError[] = [];
-  const systemSettingsPath = getSystemSettingsPath(snapshotEnvironment);
-  const systemDefaultsPath = getSystemDefaultsPath(snapshotEnvironment);
+  const systemSettingsPath = getSystemSettingsPath(pathEnvironment);
+  const systemDefaultsPath = getSystemDefaultsPath(pathEnvironment);
   const migratedInMemoryScopes = new Set<SettingScope>();
 
   // Resolve paths to their canonical representation to handle symlinks
@@ -1163,7 +1179,7 @@ function readSettingsLayers(
     wasRecovered?: boolean;
   } => {
     try {
-      const content = snapshot
+      const content = snapshotOnly
         ? readConfigFile(filePath)
         : fs.existsSync(filePath)
           ? fs.readFileSync(filePath, 'utf-8')
@@ -1179,8 +1195,10 @@ function readSettingsLayers(
         try {
           rawSettings = JSON.parse(stripJsonComments(stripUtf8Bom(content)));
         } catch (parseError: unknown) {
+          if (snapshotOnly) {
+            throw new Error('Settings file contains invalid JSON.');
+          }
           if (
-            snapshot ||
             scope !== SettingScope.Workspace ||
             operatorSandbox ||
             opts.preserveInvalidWorkspaceSettings
@@ -1244,6 +1262,7 @@ function readSettingsLayers(
         // don't re-trigger this path.
         const envCorruptedPath = process.env[ENV_CORRUPTED_PATH];
         if (
+          opts.runtimeEnvironment === undefined &&
           (opts.consumeCorruptionEnvVars ?? true) &&
           envCorruptedPath &&
           envCorruptedPath === corruptedPath &&
@@ -1280,18 +1299,21 @@ function readSettingsLayers(
         const hasLegacyNumericVersion =
           typeof versionValue === 'number' && versionValue < SETTINGS_VERSION;
         if (
-          snapshot &&
+          snapshotOnly &&
           hasVersionKey &&
-          !(Number.isInteger(versionValue) && (versionValue as number) >= 1)
+          (typeof versionValue !== 'number' ||
+            !Number.isInteger(versionValue) ||
+            versionValue < 1)
         ) {
-          throw new Error(
-            `Settings file has an unsupported ${SETTINGS_VERSION_KEY}.`,
-          );
+          throw new Error('Settings file has an unsupported version.');
         }
         let migrationWarnings: string[] | undefined;
 
         const persistSettingsObject = (warningPrefix: string) => {
-          if (snapshot) return;
+          if (snapshotOnly) {
+            migratedInMemoryScopes.add(scope);
+            return;
+          }
           if (operatorSandbox && scope === SettingScope.Workspace) return;
           try {
             // Use sync mode to remove deprecated keys (zombie key prevention)
@@ -1351,12 +1373,10 @@ function readSettingsLayers(
           persistSettingsObject('Error normalizing settings version on disk');
         }
         if (
-          snapshot &&
+          snapshotOnly &&
           settingsObject[SETTINGS_VERSION_KEY] !== SETTINGS_VERSION
         ) {
-          throw new Error(
-            `Settings file has an unsupported ${SETTINGS_VERSION_KEY}.`,
-          );
+          throw new Error('Settings file has an unsupported version.');
         }
 
         // Attach corruption state propagated from the parent via env vars.
@@ -1416,32 +1436,42 @@ function readSettingsLayers(
   // effective precedence is: process.env > home .env > unresolved placeholder.
   // The resolver checks customEnv before process.env, but since customEnv
   // never contains a process.env key, process.env always wins.
-  // A snapshot environment is the environment of the session hosts it
-  // describes and carries the user-level `.env` values its runtime applied, so
-  // it is the only source, read as a host spawned with it sees it.
-  const homeEnvFallback = snapshotOf
-    ? spawnedEnvironmentView(snapshotOf.environment)
-    : getHomeEnvFallbackVars((message) => debugLogger.warn(message));
-  const resolveOptions = { processEnvFallback: !snapshot };
+  // A snapshot resolves only through the injected environment, read as a
+  // host spawned with it sees it (case-insensitive on Windows); a live load
+  // with an injected environment resolves through it as the base.
+  const homeEnvFallback =
+    opts.runtimeEnvironment === undefined
+      ? getHomeEnvFallbackVars((message) => debugLogger.warn(message))
+      : undefined;
+  const customEnv =
+    snapshotOnly && opts.runtimeEnvironment !== undefined
+      ? spawnedEnvironmentView(opts.runtimeEnvironment)
+      : homeEnvFallback;
+  const resolveEnv: ResolveEnvVarsOptions =
+    opts.runtimeEnvironment === undefined
+      ? {}
+      : snapshotOnly
+        ? { processEnvFallback: false }
+        : { environment: opts.runtimeEnvironment };
   systemSettings = resolveEnvVarsInObject(
     systemResult.settings,
-    homeEnvFallback,
-    resolveOptions,
+    customEnv,
+    resolveEnv,
   );
   systemDefaultSettings = resolveEnvVarsInObject(
     systemDefaultsResult.settings,
-    homeEnvFallback,
-    resolveOptions,
+    customEnv,
+    resolveEnv,
   );
   userSettings = resolveEnvVarsInObject(
     userResult.settings,
-    homeEnvFallback,
-    resolveOptions,
+    customEnv,
+    resolveEnv,
   );
   workspaceSettings = resolveEnvVarsInObject(
     workspaceResult.settings,
-    homeEnvFallback,
-    resolveOptions,
+    customEnv,
+    resolveEnv,
   );
 
   // Support legacy theme names
@@ -1489,7 +1519,7 @@ function readSettingsLayers(
 
   // loadEnvironment depends on settings so we have to create a temp version of
   // the settings to avoid a cycle
-  if (!opts.skipLoadEnvironment) {
+  if (!opts.skipLoadEnvironment && opts.runtimeEnvironment === undefined) {
     loadEnvironment(tempMergedSettings, workspaceDir);
   }
 
@@ -1544,6 +1574,7 @@ function readSettingsLayers(
     userResult.corruptedPath,
     userResult.wasRecovered ?? false,
     workspaceSettingsActive,
+    opts.runtimeEnvironment,
   );
 }
 

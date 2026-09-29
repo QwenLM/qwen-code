@@ -39,26 +39,47 @@ export function createLlmContentGenerator(
       'x-gemini-api-privileged-user-id': `${installationId}`,
     };
   }
-  const httpOptions = config.baseUrl
-    ? {
-        headers,
-        baseUrl: config.baseUrl,
-      }
-    : { headers };
+  const environment = gcConfig.getRuntimeEnvironment();
+  const vertexai =
+    config.vertexai ?? config.authType === AuthType.USE_VERTEX_AI;
+  const usesAdc = vertexai && !config.apiKey;
+  const project = usesAdc
+    ? (environment['GOOGLE_CLOUD_PROJECT']?.trim() ?? '')
+    : '';
+  const location = usesAdc
+    ? environment['GOOGLE_CLOUD_LOCATION']?.trim() || 'global'
+    : '';
+  const defaultBaseUrl = !vertexai
+    ? 'https://generativelanguage.googleapis.com/'
+    : !usesAdc || location === 'global'
+      ? 'https://aiplatform.googleapis.com/'
+      : location === 'us' || location === 'eu'
+        ? `https://aiplatform.${location}.rep.googleapis.com/`
+        : `https://${location}-aiplatform.googleapis.com/`;
+  const baseUrl =
+    config.baseUrl ||
+    environment[
+      vertexai ? 'GOOGLE_VERTEX_BASE_URL' : 'GOOGLE_GEMINI_BASE_URL'
+    ]?.trim() ||
+    defaultBaseUrl;
 
   const llmContentGenerator = new LlmContentGenerator(
     {
-      apiKey: config.apiKey === '' ? undefined : config.apiKey,
-      // Derive Vertex mode from the auth type rather than leaving it to the
-      // GOOGLE_GENAI_USE_VERTEXAI side effect: only the CLI pre-flight check
-      // writes that variable, and the session boot paths that skip it would
-      // otherwise build a client pointed at the Gemini API endpoint. Left
-      // undefined for the other auth types so the SDK keeps its own env
-      // fallback for them.
-      vertexai:
-        config.vertexai ??
-        (config.authType === AuthType.USE_VERTEX_AI ? true : undefined),
-      httpOptions,
+      // An explicit ADC project takes precedence over the SDK's ambient key.
+      // Other modes use a resolved key and empty project/location values.
+      apiKey: usesAdc ? undefined : config.apiKey || '',
+      project,
+      location,
+      vertexai,
+      ...(usesAdc
+        ? {
+            googleAuthOptions: {
+              projectId: project,
+              keyFilename: environment['GOOGLE_APPLICATION_CREDENTIALS'],
+            },
+          }
+        : {}),
+      httpOptions: { headers, baseUrl },
     },
     config,
     gcConfig,

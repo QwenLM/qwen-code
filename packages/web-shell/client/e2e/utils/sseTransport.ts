@@ -125,11 +125,13 @@ export async function installSseTransport<TEvent>(
       const url = new URL(request.url, window.location.href);
       const match =
         url.origin === baseOrigin &&
-        /^\/session\/[^/]+\/events\/?$/.test(url.pathname);
+        /^\/(?:session|managed\/sessions)\/([^/]+)\/events\/?$/.exec(
+          url.pathname,
+        );
 
       if (!match) return originalFetch(input, init);
 
-      const sessionId = decodeURIComponent(url.pathname.split('/')[2] ?? '');
+      const sessionId = decodeURIComponent(match[1]);
       let streamController: ReadableStreamDefaultController<Uint8Array> | null =
         null;
       let connectionRecord: SseConnectionRecord | null = null;

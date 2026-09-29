@@ -129,7 +129,7 @@ export async function evaluateManagedCompatibility(
   let settings: LoadedSettings;
   try {
     settings = readSettingsSnapshot(runtime.workspaceCwd, {
-      environment,
+      runtimeEnvironment: environment,
       workspaceTrusted: true,
     });
   } catch {

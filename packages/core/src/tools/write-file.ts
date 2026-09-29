@@ -28,10 +28,10 @@ import type { PermissionDecision } from '../permissions/types.js';
 import {
   BaseDeclarativeTool,
   BaseToolInvocation,
-  Kind,
   ToolConfirmationOutcome,
 } from './tools.js';
 import { ToolErrorType } from './tool-error.js';
+import { createManagedToolEditParams } from './managed-tool-edit-params.js';
 import {
   FileEncoding,
   needsUtf8Bom,
@@ -42,7 +42,11 @@ import { makeRelative, shortenPath, unescapePath } from '../utils/paths.js';
 import { getErrorMessage, isNodeError } from '../utils/errors.js';
 import { createPatchSmart, getDiffStat } from './diffOptions.js';
 import { checkPriorRead, StructuredToolError } from './priorReadEnforcement.js';
-import { ToolNames, ToolDisplayNames } from './tool-names.js';
+import { ToolNames } from './tool-names.js';
+import {
+  getWriteFileToolDefinition,
+  projectWriteFileToolClassifierInput,
+} from './builtin-tool-definitions.js';
 import type {
   ModifiableDeclarativeTool,
   ModifyContext,
@@ -825,35 +829,15 @@ export class WriteFileTool
   static readonly Name: string = ToolNames.WRITE_FILE;
 
   constructor(private readonly config: Config) {
+    const definition = getWriteFileToolDefinition();
     super(
-      WriteFileTool.Name,
-      ToolDisplayNames.WRITE_FILE,
-      `Writes content to a specified file in the local filesystem. A request to create or generate a file does not establish that the target path is new. Unless the target's absence or current text contents have already been established in this session, you MUST use the ${ToolNames.READ_FILE} tool first; if the file does not exist, then create it. With prior-read enforcement enabled, blind overwrites are rejected. The file_path argument MUST be an absolute path. Always construct it by combining the project root with the file's relative path (e.g. project root '/path/to/project/' + relative 'foo/bar.txt' = '/path/to/project/foo/bar.txt'). If the user provides a relative path, resolve it against the project root first.
-
-${WRITE_FILE_ARTIFACT_DESCRIPTION}
-
-The user has the ability to modify \`content\`. If modified, this will be stated in the response.`,
-      Kind.Edit,
-      {
-        properties: {
-          file_path: {
-            description:
-              "The absolute path to the file to write to (e.g., '/home/user/project/file.txt'). Relative paths are not supported.",
-            type: 'string',
-          },
-          content: {
-            description: 'The content to write to the file.',
-            type: 'string',
-          },
-          record_as_artifact: {
-            description:
-              'Set false for intermediate files that should not appear as session artifacts, such as HTML used only to print a PDF. Defaults to true for artifact-like extensions.',
-            type: 'boolean',
-          },
-        },
-        required: ['file_path', 'content'],
-        type: 'object',
-      },
+      definition.name,
+      definition.displayName,
+      definition.description,
+      definition.kind,
+      definition.schema.parametersJsonSchema,
+      definition.isOutputMarkdown,
+      definition.canUpdateOutput,
     );
   }
 
@@ -907,17 +891,7 @@ The user has the ability to modify \`content\`. If modified, this will be stated
   override toAutoClassifierInput(
     params: WriteFileToolParams,
   ): Record<string, unknown> {
-    const content = params.content ?? '';
-    // 300-char window for the same reason as EditTool's projection —
-    // out-of-workspace writes need enough headroom for the classifier
-    // to spot a malicious registry / shell / env line hidden behind
-    // a benign prefix.
-    return {
-      file_path: params.file_path,
-      byte_count: Buffer.byteLength(content, 'utf8'),
-      content_preview: content.slice(0, 300),
-      content_truncated: content.length > 300,
-    };
+    return projectWriteFileToolClassifierInput(params);
   }
 
   getModifyContext(
@@ -946,15 +920,13 @@ The user has the ability to modify \`content\`. If modified, this will be stated
         _oldContent: string,
         modifiedProposedContent: string,
         originalParams: WriteFileToolParams,
-      ) => {
-        const content = originalParams.content;
-        return {
-          ...originalParams,
-          ai_proposed_content: content,
-          content: modifiedProposedContent,
-          modified_by_user: true,
-        };
-      },
+      ) =>
+        createManagedToolEditParams(
+          WriteFileTool.Name,
+          originalParams,
+          _oldContent,
+          modifiedProposedContent,
+        ),
     };
   }
 }

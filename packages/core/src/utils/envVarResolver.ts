@@ -12,6 +12,13 @@ export interface ResolveEnvVarsOptions {
    * `process.env`. Defaults to true.
    */
   readonly processEnvFallback?: boolean;
+  /**
+   * The base environment to resolve from instead of `process.env` — a
+   * session host spawned with a managed runtime's environment resolves its
+   * settings against that environment. When set, `process.env` is not
+   * consulted unless `processEnvFallback` is explicitly true.
+   */
+  readonly environment?: Readonly<NodeJS.ProcessEnv>;
 }
 
 /**
@@ -30,7 +37,8 @@ export interface ResolveEnvVarsOptions {
  *
  * @param value - The string that may contain environment variable placeholders
  * @param customEnv - Variables consulted before `process.env`
- * @param options - Whether `process.env` is consulted at all
+ * @param options - Whether `process.env` is consulted at all, and the base
+ * environment a managed host resolves through instead of it
  * @returns The string with environment variables resolved
  *
  * @example
@@ -56,6 +64,15 @@ export function resolveEnvVarsInString(
     }
     if (customEnv && typeof customEnv[varName] === 'string') {
       return customEnv[varName];
+    }
+    const environment = options.environment;
+    if (environment !== undefined) {
+      if (typeof environment[varName] === 'string') {
+        return environment[varName]!;
+      }
+      if (options.processEnvFallback !== true) {
+        return match;
+      }
     }
     if (
       options.processEnvFallback !== false &&

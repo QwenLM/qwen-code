@@ -82,6 +82,7 @@ describe('DashScopeOpenAICompatibleProvider', () => {
 
     // Mock Config
     mockCliConfig = {
+      getRuntimeEnvironment: () => process.env,
       getCliVersion: vi.fn().mockReturnValue('1.0.0'),
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
       getContentGeneratorConfig: vi.fn().mockReturnValue({
@@ -640,6 +641,19 @@ describe('DashScopeOpenAICompatibleProvider', () => {
   });
 
   describe('buildClient', () => {
+    it('passes the workspace account options to the SDK', () => {
+      mockCliConfig.getRuntimeEnvironment = () => ({
+        OPENAI_ORG_ID: 'workspace-org',
+      });
+      provider.buildClient();
+      expect(OpenAI).toHaveBeenCalledWith(
+        expect.objectContaining({
+          organization: 'workspace-org',
+          project: null,
+        }),
+      );
+    });
+
     it('should create OpenAI client with DashScope configuration', () => {
       const client = provider.buildClient();
 

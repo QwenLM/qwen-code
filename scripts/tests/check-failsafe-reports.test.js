@@ -116,6 +116,38 @@ describe('check-failsafe-reports', () => {
     );
   });
 
+  it('accepts a class annotated @Disabled at its source', () => {
+    const dir = module(
+      'declared',
+      ['com.example.HostedOrdersIT', 'com.example.HostedFlowIT'],
+      {
+        'com.example.HostedOrdersIT': [1, 0],
+        'com.example.HostedFlowIT': [0, 3],
+      },
+    );
+    writeFileSync(
+      join(dir, 'src', 'test', 'java', 'com', 'example', 'HostedFlowIT.java'),
+      '@Disabled("not wired on this branch")\nclass HostedFlowIT {}\n',
+    );
+    const result = check('hosted', dir);
+    expect(result.output).toContain(
+      'com.example.HostedFlowIT is disabled at its source',
+    );
+    expect(result.status).toBe(0);
+    // A class with no report and no @Disabled still fails.
+    const silent = module(
+      'silent',
+      ['com.example.OrdersIT', 'com.example.LedgerIT'],
+      {
+        'com.example.OrdersIT': [1, 0],
+        'com.example.LedgerIT': [0, 1],
+      },
+    );
+    const skipped = check('non-hosted', silent);
+    expect(skipped.output).toContain('com.example.LedgerIT ran no test');
+    expect(skipped.status).toBe(1);
+  });
+
   it('rejects a run under -Dit.test even when every class ran a test', () => {
     const dir = module(
       'filtered',

@@ -28,6 +28,7 @@ export function assembleMcpServers(
   mergedSettingsServers: Record<string, MCPServerConfig> | undefined,
   cwd: string,
   cliMcpServers?: Record<string, MCPServerConfig> | null,
+  options: { rejectProjectConfigErrors?: boolean } = {},
 ): Record<string, MCPServerConfig> {
   const belowProject: Record<string, MCPServerConfig> = {};
   const aboveProject: Record<string, MCPServerConfig> = {};
@@ -42,6 +43,9 @@ export function assembleMcpServers(
   }
 
   const projectResult = loadProjectMcpServers(cwd);
+  if (options.rejectProjectConfigErrors && projectResult.errors.length > 0) {
+    throw new Error(projectResult.errors.join('\n'));
+  }
   for (const error of projectResult.errors) {
     writeStderrLine(`Warning: ${error}`);
   }

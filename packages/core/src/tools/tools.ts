@@ -13,6 +13,32 @@ import { type AgentStatsSummary } from '../agents/runtime/agent-statistics.js';
 import type { AnsiOutput } from '../utils/terminalSerializer.js';
 import type { PermissionDecision } from '../permissions/types.js';
 import type { VisionBridgeNoticeDisplay } from '../services/visionBridge/vision-bridge-service.js';
+import type { PreToolUseHookResult } from '../core/toolHookTriggers.js';
+import type {
+  ManagedToolExecutionReservation,
+  ManagedToolExecutionResult,
+} from './managed-tool-runtime.js';
+
+import type { ManagedToolContentModification } from './managed-tool-protocol.js';
+
+export interface ManagedToolInvocationLifecycle {
+  prepare(
+    signal: AbortSignal,
+    context: { callId: string; promptId: string },
+    modification?: ManagedToolContentModification,
+  ): Promise<void>;
+  contentModification?(newContent: string): ManagedToolContentModification;
+  preflight(): Promise<PreToolUseHookResult>;
+  confirmPreflight(
+    outcome: ToolConfirmationOutcome,
+    payload?: ToolConfirmationPayload,
+  ): Promise<void>;
+  authorize(): void;
+  prepareExecution(): Promise<ManagedToolExecutionReservation>;
+  cancelAndDrain(): Promise<void>;
+  readonly result: ManagedToolExecutionResult | undefined;
+  readonly toolUseId: string;
+}
 
 /**
  * Represents a validated and ready-to-execute tool call.
@@ -26,6 +52,8 @@ export interface ToolInvocation<
    * The validated parameters for this specific invocation.
    */
   params: TParams;
+
+  readonly managed?: ManagedToolInvocationLifecycle;
 
   /** Historical names accepted only when evaluating persisted permissions. */
   readonly permissionAliases?: readonly string[];
@@ -575,6 +603,9 @@ export interface ToolArtifact {
 }
 
 export interface ToolResult {
+  /** Physical outcome when error presence alone cannot describe execution (e.g. Shell cancellation). */
+  executionStatus?: 'not_started' | 'success' | 'error' | 'cancelled';
+
   /**
    * Content meant to be included in LLM history.
    * This should represent the factual outcome of the tool execution.

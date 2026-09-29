@@ -4487,6 +4487,38 @@ describe('Settings Loading and Merging', () => {
   });
 
   describe('reloadScopeFromDisk', () => {
+    it('keeps explicit environment interpolation on reload and leaves missing keys unresolved', () => {
+      vi.stubEnv('MANAGED_THEME', 'ambient');
+      let current = JSON.stringify({ ui: { theme: '${MANAGED_THEME}' } });
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+      );
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) =>
+          p === USER_SETTINGS_PATH ? current : '{}',
+      );
+      const environment = { MANAGED_THEME: 'workspace' };
+      try {
+        const settings = loadSettings(MOCK_WORKSPACE_DIR, {
+          runtimeEnvironment: environment,
+        });
+        const missing = loadSettings(MOCK_WORKSPACE_DIR, {
+          runtimeEnvironment: {},
+        });
+        expect(settings.merged.ui?.theme).toBe('workspace');
+        expect(missing.merged.ui?.theme).toBe('${MANAGED_THEME}');
+        environment.MANAGED_THEME = 'mutated';
+        current = JSON.stringify({ ui: { theme: '$MANAGED_THEME' } });
+        expect(settings.reloadScopeFromDisk(SettingScope.User)).toBe(true);
+        expect(missing.reloadScopeFromDisk(SettingScope.User)).toBe(true);
+        expect(settings.merged.ui?.theme).toBe('workspace');
+        expect(missing.merged.ui?.theme).toBe('$MANAGED_THEME');
+        expect(process.env['MANAGED_THEME']).toBe('ambient');
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
     it('reloads a scope from disk and resolves home env vars', () => {
       const homeQwenEnvPath = path.join(
         path.dirname(USER_SETTINGS_PATH),

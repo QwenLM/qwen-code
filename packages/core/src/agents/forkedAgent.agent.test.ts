@@ -15,6 +15,7 @@ import {
 import { AgentTerminateMode } from './runtime/agent-types.js';
 import type { ModelConfig, PromptConfig } from './runtime/agent-types.js';
 import { runForkedAgent } from './forkedAgent.js';
+import { createManagedAgentTestConfig } from './managed-child-execution-test-utils.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { EditTool } from '../tools/edit.js';
 import {
@@ -124,32 +125,48 @@ describe('runForkedAgent (AgentHeadless path) bound-tool isolation', () => {
     return { captured, restore: () => spy.mockRestore() };
   }
 
-  it('rejects a tool-capable fork when the operator requires container execution', async () => {
-    const parent = new ConfigImpl({
-      ...baseParams,
-      agentExecutionBackend: 'container',
-    });
+  it('holds a managed fork until its child Runtime release completes', async () => {
+    const { config: parent, sessions } = createManagedAgentTestConfig();
     const parentRegistry = await parent.createToolRegistry(undefined, {
       skipDiscovery: true,
     });
-    const registrySpy = vi
-      .spyOn(parent, 'getToolRegistry')
-      .mockReturnValue(parentRegistry);
-    const executeSpy = vi.spyOn(AgentHeadless.prototype, 'execute');
-
+    vi.spyOn(parent, 'getToolRegistry').mockReturnValue(parentRegistry);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const { captured, restore } = captureAgentHeadlessConfig();
+    vi.spyOn(parent, 'createManagedChildExecutionScope').mockImplementation(
+      function (this: Config) {
+        const scope =
+          ConfigImpl.prototype.createManagedChildExecutionScope.call(this);
+        vi.mocked(sessions[1]!.close).mockReturnValue(gate);
+        return scope;
+      },
+    );
+    let finished = false;
+    const pending = runForkedAgent({
+      name: 'managed-fork',
+      systemPrompt: 'test',
+      taskPrompt: 'test',
+      config: parent,
+    }).then((result) => {
+      finished = true;
+      return result;
+    });
     try {
-      await expect(
-        runForkedAgent({
-          name: 'test-fork',
-          systemPrompt: 'You are a test fork.',
-          taskPrompt: 'do the task',
-          config: parent,
-        }),
-      ).rejects.toThrow('has no execution environment');
-      expect(executeSpy).not.toHaveBeenCalled();
+      await vi.waitFor(() => expect(sessions[1]?.close).toHaveBeenCalledOnce());
+      expect(finished).toBe(false);
+      expect(captured.config?.getApprovalMode()).toBe(ApprovalMode.YOLO);
+      expect(sessions).toHaveLength(2);
+      release();
+      await pending;
+      await parent.closeManagedToolSession();
+      expect(sessions[1]!.close).toHaveBeenCalledOnce();
     } finally {
-      executeSpy.mockRestore();
-      registrySpy.mockRestore();
+      release();
+      await pending;
+      restore();
       await parentRegistry.stop();
     }
   });

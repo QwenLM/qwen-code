@@ -29,7 +29,7 @@ const STRING_EXEC_OPTIONS: ExecFileOptionsWithStringEncoding = {
   windowsHide: true,
 };
 
-/** A proven exit with a nonzero code or signal, not a failure to prove cleanup. */
+/** A verified termination whose exit status was unsuccessful. */
 export class ProcessExitError extends Error {}
 
 export interface ProcessAttachmentOptions {

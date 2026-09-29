@@ -188,6 +188,7 @@ describe('LlmChat', async () => {
     // Default mock implementation for tests that don't care about retry logic
     mockRetryWithBackoff.mockImplementation(async (apiCall) => apiCall());
     mockConfig = {
+      getRuntimeEnvironment: () => process.env,
       getSessionId: () => 'test-session-id',
       getTelemetryLogPromptsEnabled: () => true,
       getUsageStatisticsEnabled: () => true,
@@ -227,6 +228,8 @@ describe('LlmChat', async () => {
       restorePendingManualPlanExitNotice: vi.fn(),
       getFileReadCache: vi.fn().mockReturnValue({ clear: vi.fn() }),
       getRestoreAskUserQuestion: vi.fn().mockReturnValue(false),
+      ensureManagedHarnessRunnable: vi.fn().mockResolvedValue(undefined),
+      getLlmClient: vi.fn(),
     } as unknown as Config;
 
     // Disable 429 simulation for tests
@@ -551,34 +554,88 @@ describe('LlmChat', async () => {
       expect(mockSleepInhibitorRelease).toHaveBeenCalledTimes(1);
     });
 
-    it('marks the pushed user entry with the send promptId', async () => {
-      // Rewind reads this mark through getHistoryShallow.
-      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
-        async () => streamResponse(stopResponse([{ text: 'ok' }])),
+    it('does not start the model when the Managed Harness is blocked', async () => {
+      vi.mocked(mockConfig.ensureManagedHarnessRunnable!).mockRejectedValue(
+        new Error('Harness recovery is blocked (opaque_state).'),
       );
 
-      const send = async (options?: { promptId?: string }) => {
-        const stream = await chat.sendMessageStream(
+      await expect(
+        chat.sendMessageStream(
           'test-model',
-          { message: 'hello' },
-          'prompt-id-mark',
-          undefined,
-          options,
-        );
-        for await (const _ of stream) {
-          /* consume stream */
-        }
-        return chat
-          .getHistoryShallow()
-          .filter((entry) => entry.role === 'user')
-          .at(-1)!;
-      };
+          { message: 'test message' },
+          'prompt-id-harness-blocked',
+        ),
+      ).rejects.toThrow(/opaque_state/);
+      expect(mockContentGenerator.generateContentStream).not.toHaveBeenCalled();
+    });
 
-      expect(
-        getApiHistoryPromptId(await send({ promptId: 'session########7' })),
-      ).toBe('session########7');
-      // No identity supplied (retry, continuation, tool result): unmarked.
-      expect(getApiHistoryPromptId(await send())).toBeUndefined();
+    it('establishes the Harness checkpoint before generating content', async () => {
+      const order: string[] = [];
+      vi.mocked(mockConfig.ensureManagedHarnessRunnable!).mockImplementation(
+        async () => {
+          order.push('harness');
+        },
+      );
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => {
+          order.push('model');
+          return (async function* () {
+            yield {
+              candidates: [
+                {
+                  content: { role: 'model', parts: [{ text: 'ok' }] },
+                  finishReason: 'STOP',
+                },
+              ],
+            } as unknown as GenerateContentResponse;
+          })();
+        },
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'test message' },
+        'prompt-id-harness-first',
+      );
+      for await (const _ of stream) {
+        /* consume stream */
+      }
+
+      expect(order[0]).toBe('harness');
+      expect(order).toContain('model');
+    });
+
+    it('continues on the successor chat after a Harness host rebuild', async () => {
+      const successor = new LlmChat(
+        mockConfig,
+        config,
+        [],
+        undefined,
+        uiTelemetryService,
+      );
+      const successorStream = vi
+        .spyOn(successor, 'sendMessageStream')
+        .mockResolvedValue(
+          (async function* () {
+            /* drained successor */
+          })(),
+        );
+      vi.mocked(mockConfig.getLlmClient).mockReturnValue({
+        isInitialized: () => true,
+        getChat: () => successor,
+      } as ReturnType<Config['getLlmClient']>);
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'next turn' },
+        'prompt-id-harness-successor',
+      );
+      for await (const _ of stream) {
+        /* consume stream */
+      }
+
+      expect(successorStream).toHaveBeenCalledOnce();
+      expect(mockContentGenerator.generateContentStream).not.toHaveBeenCalled();
     });
 
     describe('manual plan-exit notices', () => {
@@ -21550,6 +21607,7 @@ describe('LlmChat', async () => {
       try {
         const chat = new LlmChat(
           {
+            getRuntimeEnvironment: () => process.env,
             getPlanFilePath: () => planFile,
             getToolRegistry: () => undefined,
           } as unknown as Config,
@@ -21583,6 +21641,7 @@ describe('LlmChat', async () => {
     it('setHistory leaves history alone when no plan file exists', () => {
       const chat = new LlmChat(
         {
+          getRuntimeEnvironment: () => process.env,
           getPlanFilePath: () => '/plans/never-written.md',
           getToolRegistry: () => undefined,
         } as unknown as Config,

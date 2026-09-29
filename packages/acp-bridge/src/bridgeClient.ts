@@ -747,11 +747,6 @@ export interface BridgeClientSessionEntry {
   modelRoundtripInFlight?: boolean;
   /** A2: mirrors `modelRoundtripInFlight` for approval-mode roundtrips. */
   approvalModeRoundtripInFlight?: boolean;
-  /**
-   * Set while the session's channel is quarantined for a missing workspace
-   * change that tightened permissions: permission requests are refused.
-   */
-  workspaceChangeFence?: number;
 }
 
 export interface BridgeClientDeferredArtifactBatch {
@@ -976,17 +971,13 @@ export class BridgeClient implements Client {
       turn: BackgroundNotificationTurn,
       afterPromptId?: string,
     ) => Promise<boolean>,
-    /** Invoked after the child reports that it started a Goal turn. */
-    private readonly onGoalTurnStart?: (sessionId: string) => void,
   ) {}
 
   async requestPermission(
     params: RequestPermissionRequest,
   ): Promise<RequestPermissionResponse> {
     const entry = this.resolveEntry(params.sessionId);
-    if (!entry || entry.workspaceChangeFence !== undefined) {
-      return { outcome: { outcome: 'cancelled' } };
-    }
+    if (!entry) return { outcome: { outcome: 'cancelled' } };
 
     const explicitBackgroundTurn = parseBackgroundNotificationTurn(
       params._meta?.['backgroundTurn'],
@@ -1580,10 +1571,6 @@ export class BridgeClient implements Client {
     }
     const entry = this.resolveEntry(sessionId);
     if (!entry) return { messages: [], items: [], hasQueuedPrompt: false };
-    // A turn cancelled by a permission fence takes no new input.
-    if (entry.workspaceChangeFence !== undefined) {
-      return { messages: [], items: [], hasQueuedPrompt: false };
-    }
     const requestedPromptId = params['promptId'];
     if (
       requestedPromptId !== undefined &&
@@ -2489,7 +2476,6 @@ export class BridgeClient implements Client {
       const entry = this.resolveEntry(sessionId);
       if (!entry || !this.ownsSession(sessionId)) return;
       entry.goalTurnActive = true;
-      this.onGoalTurnStart?.(sessionId);
       return;
     }
     if (method === '_qwencode/end_turn') {

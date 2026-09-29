@@ -5,7 +5,6 @@
  */
 
 import * as path from 'node:path';
-import { getMemoryBaseDir } from '../memory/paths.js';
 import type { Config } from '../config/config.js';
 import { normalizeQwenCustomIgnoreFileNames } from '../utils/qwenIgnoreParser.js';
 import type { SerializedFileHistorySnapshot } from '../services/fileHistoryService.js';
@@ -43,7 +42,7 @@ export function captureManagedToolExecutionContext(
   const filtering = config.getFileFilteringOptions();
   return {
     workspaceDirectories: [...config.getWorkspaceContext().getDirectories()],
-    memoryBaseDir: getMemoryBaseDir(),
+    memoryBaseDir: config.getMemoryBaseDir(),
     lsToolEnabled: config.isLsToolEnabled(),
     grepOptions: {
       useRipgrep: config.getUseRipgrep(),

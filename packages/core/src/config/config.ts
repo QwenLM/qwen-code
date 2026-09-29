@@ -25,6 +25,7 @@ import * as fs from 'node:fs';
 import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
 import process from 'node:process';
+import { isDeepStrictEqual } from 'node:util';
 
 // Types
 import type {
@@ -88,6 +89,11 @@ import {
 
 // Services
 import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
+import {
+  assertSessionExecutionEngine,
+  SessionExecutionEngineError,
+  type SessionExecutionEngine,
+} from '../services/session-execution-engine.js';
 import { FileHistoryService } from '../services/fileHistoryService.js';
 import {
   type FileSystemService,
@@ -252,9 +258,16 @@ import type {
 } from '../sandbox/sandbox-execution.js';
 import {
   admitShellSandbox,
-  probeShellSandbox,
   assertShellSandboxCwd,
+  probeShellSandbox,
 } from '../sandbox/runtime-shell-policy.js';
+import {
+  createManagedBuiltinTool,
+  type ManagedChildExecutionScope,
+  type ManagedToolExecutionInspection,
+  type ManagedToolSession,
+  type ManagedToolSessionFactory,
+} from '../tools/managed-tool-session.js';
 
 // Utils
 import { shouldAttemptBrowserLaunch } from '../utils/browser.js';
@@ -266,6 +279,7 @@ import { FatalConfigError, getErrorMessage } from '../utils/errors.js';
 import { normalizeProxyUrl } from '../utils/proxyUtils.js';
 import {
   loadUndici,
+  isTlsVerificationDisabled,
   setResolvedProxyUrlForRuntimeFetch,
   redactProxyError,
 } from '../utils/runtimeFetchOptions.js';
@@ -294,6 +308,7 @@ import {
 import { Storage } from './storage.js';
 import {
   ChatRecordingService,
+  type ChatRecord,
   type ChatRecordingFailureEvent,
   type ChatRecordingFailureListener,
   type ManagedSessionRecordWriter,
@@ -316,37 +331,19 @@ import {
   SessionService,
   type ResumedSessionData,
 } from '../services/sessionService.js';
+import { buildApiHistoryFromConversation } from '../services/session-api-history.js';
 import type {
   SessionRestoreProjection,
   SessionRuntimeResumeState,
 } from '../services/session-transcript-reader.js';
-import {
-  assertSessionExecutionEngine,
-  SessionExecutionEngineError,
-  type SessionExecutionEngine,
-} from '../services/session-execution-engine.js';
-import {
-  openManagedSession,
-  type ManagedSession,
-} from '../managed-runtime/managed-session-assembly.js';
 import {
   EMPTY_COMMIT_PREFIX_HASH,
   LocalManagedSessionAuthority,
   ManagedSessionUncommittedTailError,
 } from '../managed-runtime/managed-session-authority.js';
 import { LocalJsonlManagedSessionJournalStore } from '../managed-runtime/local-jsonl-managed-session-journal-store.js';
-import { LocalManagedSessionResourceStore } from '../managed-runtime/managed-session-resources.js';
 import { readManagedSessionRecords } from '../managed-runtime/managed-session-message-projection.js';
-import {
-  MANAGED_SESSION_FORMAT_VERSION,
-  ManagedSessionRecordError,
-  type ManagedSessionDurableRef,
-} from '../managed-runtime/managed-session-records.js';
-import {
-  isManagedSessionTranscriptSync,
-  localManagedSessionKey,
-  readManagedExecutionEvidenceSync,
-} from '../utils/sessionStorageUtils.js';
+import { readManagedExecutionEvidenceSync } from '../utils/sessionStorageUtils.js';
 import {
   SessionTranscriptChangedError,
   SessionWriterError,
@@ -355,6 +352,49 @@ import {
   SessionWriterUnavailableError,
   type SessionWriterCommitProof,
 } from '../services/session-writer-lease.js';
+import {
+  openManagedSession,
+  type ManagedSession,
+} from '../managed-runtime/managed-session-assembly.js';
+import {
+  HARNESS_DURABLE_WAIT_BOUNDARY,
+  HARNESS_TURN_COMPLETE_BOUNDARY,
+} from '../managed-runtime/managed-harness-checkpoint.js';
+import {
+  createManagedHarnessHandle,
+  parseManagedRuntimeOutcomePart,
+  type ManagedAwaitRuntimeRequest,
+  type ManagedDurableWaitDecision,
+  type ManagedDurableWaitRequest,
+  type ManagedHarnessHandle,
+  type ManagedRuntimeOutcome,
+  type ManagedRuntimeOutcomeRead,
+} from '../managed-runtime/managed-harness-factory.js';
+import { managedRuntimeDispatchGate } from '../managed-runtime/managed-runtime-dispatch-gate.js';
+import { LocalManagedSessionResourceStore } from '../managed-runtime/managed-session-resources.js';
+import type {
+  ManagedSessionDurableRef,
+  ManagedSessionKey,
+} from '../managed-runtime/managed-session-records.js';
+import {
+  MANAGED_SESSION_FORMAT_VERSION,
+  MANAGED_SESSION_LIMITS,
+  ManagedSessionRecordError,
+} from '../managed-runtime/managed-session-records.js';
+import {
+  isManagedSessionTranscriptSync,
+  localManagedSessionKey,
+  managedSessionResourceRoot,
+} from '../utils/sessionStorageUtils.js';
+import type {
+  ManagedSessionJournalStore,
+  ManagedSessionResourceStore,
+} from '../managed-runtime/managed-session-storage.js';
+import {
+  convertToFunctionErrorResponse,
+  convertToFunctionResponse,
+} from '../core/coreToolScheduler.js';
+import type { ManagedToolExecutionResult } from '../tools/managed-tool-runtime.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { loadServerHierarchicalMemory } from '../memory/memoryDiscovery.js';
 import {
@@ -367,6 +407,7 @@ import {
   type DebugLogger,
 } from '../utils/debugLogger.js';
 import {
+  getMemoryBaseDir,
   getAutoMemoryRoot,
   getAutoMemoryIndexPath,
   getTeamAutoMemoryRoot,
@@ -399,6 +440,7 @@ import { isSafeModeEnv } from '../utils/safe-mode.js';
 
 const gitCoAuthorLogger = createDebugLogger('GIT_CO_AUTHOR');
 const memoryPressureConfigLogger = createDebugLogger('MEMORY_PRESSURE');
+const managedSessionLogger = createDebugLogger('MANAGED_SESSION');
 
 const MEMORY_CONTEXT_WARNING_RATIO = 0.15;
 
@@ -1077,6 +1119,10 @@ export interface ConfigParameters {
   agentExecutionBackend?: 'container';
   executionEnvironmentFactory?: ExecutionEnvironmentFactory;
   executionEnvironment?: ExecutionEnvironment;
+  /** Explicit host environment. Omission preserves the standalone CLI environment. */
+  runtimeEnvironment?: Readonly<NodeJS.ProcessEnv>;
+  /** The single process host may configure transport shared by OAuth and Google. */
+  processNetworkOwner?: true;
   sessionId?: string;
   sessionData?: ResumedSessionData;
   sessionRestoreProjection?: SessionRestoreProjection;
@@ -1208,6 +1254,15 @@ export interface ConfigParameters {
   toolInvocationGuard?: ToolInvocationGuard;
   /** Internal trusted-host integration; never loaded from workspace settings. */
   shellExecutionSandbox?: Readonly<ShellExecutionSandboxPolicy>;
+  managedToolSessionFactory?: ManagedToolSessionFactory;
+  /** Trusted host-selected storage for one Hosted Managed Session. */
+  managedSessionStore?: {
+    readonly mode: 'create' | 'load';
+    readonly sessionKey: ManagedSessionKey;
+    readonly journalStore: ManagedSessionJournalStore;
+    readonly resourceStore: ManagedSessionResourceStore;
+    readonly close?: () => Promise<void>;
+  };
   toolDiscoveryCommand?: string;
   toolCallCommand?: string;
   mcpServerCommand?: string;
@@ -1319,6 +1374,12 @@ export interface ConfigParameters {
    */
   restoreAskUserQuestion?: boolean;
   sessionWriterLeaseEnabled?: boolean;
+  /**
+   * Opt-in for the authoritative Managed session log. Only a managed host can
+   * enable it, and enabling it changes the on-disk shape of new sessions, so it
+   * stays off until a host asks for it explicitly.
+   */
+  managedSessionLogEnabled?: boolean;
   cronEnabled?: boolean;
   /**
    * Days a recurring cron job lives before auto-expiring. `0` disables
@@ -2172,6 +2233,8 @@ function readMemoryPressureRatioEnv(envName: string, fallback: number): number {
  * Options for Config.initialize()
  */
 export interface ConfigInitializeOptions {
+  /** Actual executable ACP session; omitted for bootstrap and readonly replay. */
+  sessionExecutionEngine?: SessionExecutionEngine;
   /** Cancels request-scoped initialization without becoming a session signal. */
   signal?: AbortSignal;
   /**
@@ -2396,8 +2459,16 @@ export type DerivedConfigOverrides = Partial<
     | 'getPlanFilePath'
     | 'getWorkspaceContext'
     | 'getFileService'
-    | 'getEffectiveInputModalities'
     | 'getFileReadCache'
+    | 'getEffectiveInputModalities'
+    | 'getFileFilteringOptions'
+    | 'getMemoryBaseDir'
+    | 'isLsToolEnabled'
+    | 'getUseRipgrep'
+    | 'getUseBuiltinRipgrep'
+    | 'getTruncateToolOutputThreshold'
+    | 'isTruncateToolOutputThresholdExplicit'
+    | 'getTruncateToolOutputLines'
     | 'getFileHistoryService'
     | 'getToolRegistry'
     | 'getPermissionManager'
@@ -2688,6 +2759,106 @@ export function deriveConfig(
   return derived;
 }
 
+export interface ManagedPendingRuntimeExecution {
+  readonly functionCallId: string;
+  readonly toolName: string;
+  readonly executionCallId: string;
+  readonly runtimeSessionId: string;
+  readonly progressCursor: string | null;
+}
+
+export interface ManagedPendingRuntimeWait {
+  readonly phase: 'await_runtime';
+  readonly checkpointId: string;
+  readonly activationId: string;
+  readonly executions: readonly ManagedPendingRuntimeExecution[];
+}
+
+export type ManagedInspectedRuntimeExecution = ManagedPendingRuntimeExecution &
+  ManagedToolExecutionInspection;
+
+export interface ManagedRuntimeWaitInspection {
+  readonly phase: 'await_runtime' | 'results_ready';
+  readonly checkpointId: string;
+  readonly activationId: string;
+  readonly executions: readonly ManagedInspectedRuntimeExecution[];
+  /**
+   * True when every settled receipt was already attached to a model
+   * continuation that has not committed `turn_settled`.
+   */
+  readonly continuationAdmitted?: boolean;
+}
+
+function recoverableSettledRuntimeItems<
+  T extends { readonly state: string; readonly consumed?: boolean },
+>(items: readonly T[]): { items: T[]; continuationAdmitted: boolean } | null {
+  const settled = items.filter((item) => item.state === 'settled');
+  if (settled.length === 0) return null;
+  const pending = settled.filter((item) => item.consumed !== true);
+  if (pending.length > 0) {
+    return { items: pending, continuationAdmitted: false };
+  }
+  if (settled.length !== items.length) return null;
+  return { items: settled, continuationAdmitted: true };
+}
+
+function recoveredRuntimeOutcome(
+  execution: ManagedPendingRuntimeExecution,
+  result: ManagedToolExecutionResult,
+): {
+  outcome: 'completed' | 'failed' | 'cancelled';
+  functionResponse: ManagedRuntimeOutcome['part']['functionResponse'];
+} {
+  const failed = result.executionStatus !== 'success';
+  const fallback =
+    result.error?.message ??
+    (result.executionStatus === 'cancelled'
+      ? 'Managed tool execution was cancelled.'
+      : result.executionStatus === 'not_started'
+        ? 'Managed tool execution did not start.'
+        : 'Managed tool execution failed.');
+  if (!failed && result.result === undefined) {
+    throw new ManagedSessionRecordError(
+      `settled Runtime execution ${execution.executionCallId} has no result.`,
+    );
+  }
+  const parts = failed
+    ? convertToFunctionErrorResponse(
+        execution.toolName,
+        execution.functionCallId,
+        result.result?.llmContent ?? fallback,
+        fallback,
+      )
+    : convertToFunctionResponse(
+        execution.toolName,
+        execution.functionCallId,
+        result.result!.llmContent,
+      );
+  const functionResponse = parts.find(
+    (part) => part.functionResponse !== undefined,
+  )?.functionResponse;
+  if (functionResponse === undefined) {
+    throw new ManagedSessionRecordError(
+      `settled Runtime execution ${execution.executionCallId} has no model response.`,
+    );
+  }
+  return {
+    outcome:
+      result.executionStatus === 'success'
+        ? 'completed'
+        : result.executionStatus === 'error'
+          ? 'failed'
+          : 'cancelled',
+    functionResponse: {
+      id: execution.functionCallId,
+      name: execution.toolName,
+      ...(functionResponse.response === undefined
+        ? {}
+        : { response: functionResponse.response }),
+    },
+  };
+}
+
 export class Config {
   private shellExecutionSandbox:
     | Readonly<ShellExecutionSandboxPolicy>
@@ -2697,12 +2868,14 @@ export class Config {
   private sessionSourceType?: string;
   private sessionSourceId?: string;
   private sessionData?: ResumedSessionData;
+  private sessionExecutionEngine?: SessionExecutionEngine;
   private pendingSessionRestoreProjection?: SessionRestoreProjection;
   private sessionRestoreRuntime?: SessionRuntimeResumeState;
   private readonly sessionRestoreProjectionSource?: () => Promise<
     SessionRestoreProjection | undefined
   >;
-  private readonly sessionExecutionEngine?: SessionExecutionEngine;
+  /** Engine a paired host selected for this session, if any. */
+  private readonly selectedSessionExecutionEngine?: SessionExecutionEngine;
   private restoredFileHistory = false;
   private goalRestoreActivation?: () => Promise<void>;
   private rejectGoalRestoreActivation?: (reason?: unknown) => void;
@@ -2721,6 +2894,7 @@ export class Config {
   private sessionWriterTakeoverPolicy: 'never' | 'certified' = 'never';
   private sessionWriterShutdownRequested = false;
   private sessionWriterHandoffRequested = false;
+  private sessionWriterDiscardEmptyManagedLog = false;
   private sessionWriterActivationPromise: Promise<void> | undefined;
   private sessionWriterClosePromise: Promise<void> | undefined;
   /**
@@ -2771,6 +2945,14 @@ export class Config {
   private skillManager: SkillManager | null = null;
   private permissionManager: PermissionManager | null = null;
   private readonly toolInvocationGuard: ToolInvocationGuard | undefined;
+  private readonly managedToolSessionFactory?: ManagedToolSessionFactory;
+  private readonly managedSessionStore?: ConfigParameters['managedSessionStore'];
+  private managedToolSession?: ManagedToolSession;
+  private managedToolSessionClosing = false;
+  private managedToolSessionClosePromise?: Promise<void>;
+  private managedToolSessionOwner?: Config;
+  private managedChildScopes = new Set<ManagedChildExecutionScope>();
+  private sharedFileHistoryService?: FileHistoryService;
   private modelInvocableCommandsProvider:
     | (() => ReadonlyArray<{ name: string; description: string }>)
     | null = null;
@@ -3028,6 +3210,8 @@ export class Config {
    */
   private preserveRestorableAskUserQuestion = false;
   private readonly sessionWriterLeaseEnabled: boolean = false;
+  private readonly managedSessionLogEnabled: boolean = false;
+  private managedHarness?: ManagedHarnessHandle;
   private readonly cronEnabled: boolean = true;
   /** Recurring cron max age in days, resolved once at construction
    * (the setting declares `requiresRestart`); `Infinity` = no expiry. */
@@ -3222,6 +3406,7 @@ export class Config {
   // other instance updates it. Per-session publishing is not gated on it.
   private readonly ownsModelEnvSlot: boolean = false;
   private readonly settingsWatcher?: { stopWatching(): void };
+  private readonly runtimeEnvironment?: Readonly<NodeJS.ProcessEnv>;
 
   constructor(params: ConfigParameters) {
     this.executionEnvironment = params.executionEnvironment;
@@ -3239,6 +3424,42 @@ export class Config {
             AbortSignal.any([signal, this.executionShutdown.signal]),
           )
       : undefined;
+    const restoredEngine = params.managedToolSessionFactory
+      ? 'managed'
+      : 'legacy';
+    for (const restored of [
+      params.sessionData,
+      params.sessionRestoreProjection,
+    ]) {
+      if (!restored) continue;
+      const restoredSessionId =
+        'conversation' in restored
+          ? restored.conversation.sessionId
+          : restored.sessionId;
+      assertSessionExecutionEngine(
+        restored.executionEngine,
+        params.sessionId ?? restoredSessionId,
+        restoredEngine,
+      );
+    }
+    if (
+      restoredEngine === 'managed' &&
+      (params.sessionData ||
+        params.sessionRestoreProjection ||
+        params.sessionRestoreProjectionSource) &&
+      (params.chatRecording === false ||
+        params.experimentalZedIntegration !== true ||
+        params.sessionWriterLeaseEnabled !== true)
+    ) {
+      throw new SessionExecutionEngineError(
+        params.sessionId ?? '',
+        'managed execution requires chat recording and a writer lease',
+      );
+    }
+    this.runtimeEnvironment =
+      params.runtimeEnvironment === undefined
+        ? undefined
+        : Object.freeze({ ...params.runtimeEnvironment });
     this.sessionRuntimeBaseDir = Storage.getRuntimeBaseDir();
     this.shellExecutionSandbox = admitShellSandbox(
       params,
@@ -3253,13 +3474,17 @@ export class Config {
     // rather than checking env existence — otherwise a nested qwen-code
     // launched from within a session would inherit the parent's ID and
     // never claim its own.
-    if (!sessionEnvClaimed && process.env) {
+    if (
+      this.runtimeEnvironment === undefined &&
+      !sessionEnvClaimed &&
+      process.env
+    ) {
       process.env['QWEN_CODE_SESSION_ID'] = this.sessionId;
       sessionEnvClaimed = true;
     }
     this.sessionData = params.sessionData;
     this.sessionRestoreProjectionSource = params.sessionRestoreProjectionSource;
-    this.sessionExecutionEngine = params.sessionExecutionEngine;
+    this.selectedSessionExecutionEngine = params.sessionExecutionEngine;
     this.setSessionRestoreProjection(params.sessionRestoreProjection);
     // Daemon Configs use sessionIdContext and must not replace the
     // single-session CLI fallback with whichever session was created last.
@@ -3328,6 +3553,17 @@ export class Config {
     this.permissionsDeny = params.permissions?.deny || [];
     this.permissionsAutoMode = params.permissions?.autoMode ?? {};
     this.toolInvocationGuard = params.toolInvocationGuard;
+    this.managedToolSessionFactory = params.managedToolSessionFactory;
+    this.managedSessionStore = params.managedSessionStore;
+    if (
+      this.managedSessionStore !== undefined &&
+      this.managedSessionStore.sessionKey.sessionId !== this.sessionId
+    ) {
+      throw new ManagedSessionRecordError(
+        'the Hosted Managed Session store belongs to a different session.',
+      );
+    }
+    if (params.managedToolSessionFactory) this.managedToolSessionOwner = this;
     this.toolDiscoveryCommand = params.toolDiscoveryCommand;
     this.toolCallCommand = params.toolCallCommand;
     this.mcpServerCommand = params.mcpServerCommand;
@@ -3463,6 +3699,10 @@ export class Config {
     this.sessionWriterLeaseEnabled =
       this.experimentalZedIntegration === true &&
       params.sessionWriterLeaseEnabled === true;
+    this.managedSessionLogEnabled =
+      this.sessionWriterLeaseEnabled &&
+      params.managedToolSessionFactory !== undefined &&
+      params.managedSessionLogEnabled === true;
     this.cronEnabled = params.cronEnabled ?? true;
     this.cronRecurringMaxAgeDays = resolveCronRecurringMaxAgeDays(
       params.cronRecurringMaxAgeDays,
@@ -3623,7 +3863,11 @@ export class Config {
     // booted first, and every later session would hand its subprocesses another
     // session's directory. The env var is still set for the single-session CLI,
     // where it is the only consumer and there is nothing to collide with.
-    if (!projectDirEnvClaimed && process.env) {
+    if (
+      this.runtimeEnvironment === undefined &&
+      !projectDirEnvClaimed &&
+      process.env
+    ) {
       process.env['QWEN_CODE_PROJECT_DIR'] = this.storage.getProjectDir();
       projectDirEnvClaimed = true;
     }
@@ -3657,7 +3901,11 @@ export class Config {
     // - generationConfig.authType may have a default value from resolvers
     this.initialAuthType = params.authType ?? params.generationConfig?.authType;
     this.modelsConfig = new ModelsConfig({
-      initialAuthType: this.initialAuthType,
+      getEnvironment:
+        this.runtimeEnvironment === undefined
+          ? undefined
+          : () => this.getRuntimeEnvironment(),
+      initialAuthType: params.authType ?? params.generationConfig?.authType,
       modelProvidersConfig: this.modelProvidersConfig,
       providerProtocolConfig: this.providerProtocolConfig,
       generationConfig: {
@@ -3679,7 +3927,11 @@ export class Config {
     // never clobbers the live session's global value. Done here rather than
     // alongside the session ID because the value comes from the ModelsConfig
     // just constructed.
-    if (!modelEnvClaimed && process.env) {
+    if (
+      this.runtimeEnvironment === undefined &&
+      !modelEnvClaimed &&
+      process.env
+    ) {
       modelEnvClaimed = true;
       this.ownsModelEnvSlot = true;
     }
@@ -3700,7 +3952,10 @@ export class Config {
     }
 
     const proxyUrl = this.getProxy();
-    if (proxyUrl) {
+    if (
+      proxyUrl &&
+      (this.runtimeEnvironment === undefined || params.processNetworkOwner)
+    ) {
       // Use EnvHttpProxyAgent (not a bare ProxyAgent) so `NO_PROXY` is
       // honored. A bare ProxyAgent tunnels EVERY request — including local
       // MCP servers reached over `http://localhost:...` — through the proxy,
@@ -3717,10 +3972,24 @@ export class Config {
       // the dispatcher is installed before any network activity.
       this.proxyDispatcherReady = loadUndici()
         .then(({ EnvHttpProxyAgent, setGlobalDispatcher }) => {
+          const rejectUnauthorized = !isTlsVerificationDisabled(
+            this.getRuntimeEnvironment(),
+          );
           setGlobalDispatcher(
             new EnvHttpProxyAgent({
               httpProxy: proxyUrl,
               httpsProxy: proxyUrl,
+              ...(this.runtimeEnvironment === undefined
+                ? {}
+                : {
+                    noProxy:
+                      this.runtimeEnvironment['no_proxy'] ??
+                      this.runtimeEnvironment['NO_PROXY'] ??
+                      '',
+                    connect: { rejectUnauthorized },
+                    requestTls: { rejectUnauthorized },
+                    proxyTls: { rejectUnauthorized },
+                  }),
             }),
           );
           // Paths that pin their own dispatcher off the global one (the MCP
@@ -3747,9 +4016,8 @@ export class Config {
       ? this.createChatRecordingService()
       : undefined;
     if (
-      !this.sessionRestoreProjectionSource ||
-      this.sessionRestoreRuntime ||
-      !this.sessionWriterLeaseEnabled
+      !this.sessionWriterLeaseEnabled ||
+      (!this.sessionRestoreProjectionSource && !this.sessionRestoreRuntime)
     ) {
       this.initializeGoalRuntime(
         this.sessionRestoreRuntime?.goalRecords ??
@@ -3948,7 +4216,9 @@ export class Config {
           this.shellExecutionSandbox,
           options?.signal,
         );
-      const activation = this.activateChatRecording();
+      const activation = this.activateChatRecording(
+        options?.sessionExecutionEngine ?? this.selectedSessionExecutionEngine,
+      );
       this.sessionWriterActivationPromise = activation;
       try {
         await activation;
@@ -3958,7 +4228,6 @@ export class Config {
         }
       }
       options?.signal?.throwIfAborted();
-      await this.bindSessionExecutionEngine();
       registerSessionProjectDir(this.sessionId, this.storage.getProjectDir());
       this.sessionProjectDirRegistered = true;
       await this.initializeInternal(options);
@@ -3993,27 +4262,6 @@ export class Config {
       }
       throw error;
     }
-  }
-
-  /**
-   * Runs after the writer can take records and before any initialization side
-   * effect. A restore is checked against the owner read from its own snapshot;
-   * without chat recording there is no durable session to own.
-   */
-  private async bindSessionExecutionEngine(): Promise<void> {
-    const engine = this.sessionExecutionEngine;
-    if (engine === undefined) return;
-    if (this.sessionRestoreProjectionSource || this.sessionData) {
-      assertSessionExecutionEngine(
-        this.pendingSessionRestoreProjection?.executionEngine,
-        this.sessionId,
-        engine,
-      );
-      return;
-    }
-    // A Managed Session log records its owner itself, before its header.
-    if (this.managedSession) return;
-    await this.chatRecordingService?.recordExecutionEngine(engine);
   }
 
   private async initializeInternal(
@@ -4713,41 +4961,59 @@ export class Config {
   }
 
   /**
-   * Opens this session's Managed Session log on the writer the recorder is
-   * about to use. The authority adopts that lease, so the session keeps one
-   * writer. Without a header, the log is created: the authority writes the
-   * owner record and then the header, which also completes a create that
-   * stopped after its owner record.
+   * Opens the authoritative Managed session log on the writer that is about to
+   * become the recorder's. The local backend adopts the recorder's process
+   * lease; a Hosted backend acquires its own durable writer while the recorder
+   * retains only the local process guard. Without a header, the log is
+   * created: the authority writes the owner record and then the header, which
+   * also completes a create that stopped after its owner record.
    */
   private async openManagedSessionLog(
     lease: SessionWriterLease,
   ): Promise<ManagedSession> {
     const transcriptPath = this.getTranscriptPath();
-    // Keyed the way the reader keys the log it projects.
-    const sessionKey = localManagedSessionKey(
-      this.storage.getProjectRoot(),
-      this.sessionId,
-    );
-    const resources = LocalManagedSessionResourceStore.create({
-      runtimeBaseDir: this.sessionRuntimeBaseDir,
-      sessionKey,
-    });
-    const create = isManagedSessionTranscriptSync(transcriptPath)
-      ? undefined
-      : await this.publishManagedSessionRoot(resources);
+    const projectRoot = this.getProjectRoot();
+    const remote = this.managedSessionStore;
+    const sessionKey: ManagedSessionKey =
+      remote?.sessionKey ?? localManagedSessionKey(projectRoot, this.sessionId);
+    const resources =
+      remote?.resourceStore ??
+      LocalManagedSessionResourceStore.create({
+        runtimeBaseDir: this.sessionRuntimeBaseDir,
+        sessionKey,
+      });
+    // Only avoids republishing resources a reopened session already has; the
+    // authority reads the log itself and ignores these once a header exists.
+    const create =
+      remote?.mode === 'load' ||
+      (remote === undefined && isManagedSessionTranscriptSync(transcriptPath))
+        ? undefined
+        : await this.publishManagedSessionRoot(sessionKey, resources);
     const open = () =>
       openManagedSession({
         runtimeBaseDir: this.sessionRuntimeBaseDir,
         sessionId: this.sessionId,
         transcriptPath,
         sessionKey,
-        // The recorder stamps the same directory on every record it writes.
-        cwd: this.getProjectRoot(),
+        // Matches what the recorder stamps on every record it projects.
+        cwd: projectRoot,
         version: this.getCliVersion() || 'unknown',
+        // The embedded harness runs in the process that owns the writer, so the
+        // session it holds identifies the worker advancing the log.
         workerId: this.sessionId,
+        // The activation really lives as long as this process holds the writer
+        // lock, whose liveness is a pid check, so this horizon is only what a
+        // reader compares against once the lock is gone. Nothing renews it yet, so
+        // a long session's activation can read as expired while its writer is
+        // still live.
         activationLeaseDurationMs: MANAGED_ACTIVATION_LEASE_MS,
-        lease,
-        resourceStore: resources,
+        ...(remote === undefined
+          ? { lease }
+          : {
+              journalStore: remote.journalStore,
+              resourceStore: resources,
+            }),
+        ...(remote?.mode === 'create' ? { requireNew: true } : {}),
         ...(create === undefined ? {} : { create }),
       });
     try {
@@ -4840,11 +5106,18 @@ export class Config {
   }
 
   /**
-   * Publishes the two resources a new Managed Session header references. They
-   * carry configuration identity only, never credentials.
+   * Publishes the two resources a new Managed session header must reference.
+   * Carries configuration identity only -- never credentials, which stay out of
+   * the log and out of anything it references.
    */
   private async publishManagedSessionRoot(
-    resources: LocalManagedSessionResourceStore,
+    sessionKey: ManagedSessionKey,
+    resources: ManagedSessionResourceStore = LocalManagedSessionResourceStore.create(
+      {
+        runtimeBaseDir: this.sessionRuntimeBaseDir,
+        sessionKey,
+      },
+    ),
   ): Promise<{
     definitionRef: ManagedSessionDurableRef;
     rootSnapshotRef: ManagedSessionDurableRef;
@@ -4875,23 +5148,54 @@ export class Config {
     };
   }
 
-  private async activateChatRecording(): Promise<void> {
-    const managed = this.sessionExecutionEngine === 'managed';
+  private async activateChatRecording(
+    executionEngine?: SessionExecutionEngine,
+  ): Promise<void> {
+    const requested = executionEngine ?? this.selectedSessionExecutionEngine;
+    const managed = requested === 'managed';
+    // The log follows the engine unless the host pinned it off: a Managed
+    // host with its tool factory can leave a Legacy transcript when the log
+    // is disabled; a host without the factory takes the log from the engine
+    // alone.
+    const managedLog =
+      managed &&
+      (this.managedToolSessionFactory === undefined ||
+        this.managedSessionLogEnabled);
+    if (
+      executionEngine !== undefined &&
+      this.managedToolSessionFactory !== undefined &&
+      executionEngine !== 'managed'
+    ) {
+      throw new SessionExecutionEngineError(
+        this.sessionId,
+        'host engine mismatch',
+      );
+    }
     if (
       managed &&
       (!this.chatRecordingEnabled || !this.sessionWriterLeaseEnabled)
     ) {
-      // A Managed session is its Managed Session log, which the recorder
-      // writes under the session writer lease.
       throw new SessionExecutionEngineError(
         this.sessionId,
         'managed execution requires chat recording and a writer lease',
       );
     }
     if (!this.chatRecordingEnabled || !this.sessionWriterLeaseEnabled) {
+      if (requested) {
+        await this.chatRecordingService?.recordSessionExecutionEngine(
+          requested,
+        );
+        this.sessionExecutionEngine = requested;
+      }
       return;
     }
-    if (managed && this.isLegacyTranscript()) {
+    if (executionEngine === undefined && this.managedSessionLogEnabled) {
+      // Bootstrap and read-only replay configs are not executable sessions. A
+      // Managed log is written as soon as it opens, so opening one here would
+      // persist an empty session that no client created and list it.
+      return;
+    }
+    if (managedLog && this.isLegacyTranscript()) {
       // Refused before the lease is taken: a certified takeover would retire
       // a Legacy session's seal, and the owner check after it could refuse
       // the restore only once that seal was gone.
@@ -4920,7 +5224,7 @@ export class Config {
         // is reopened only by a certified takeover that checks the log
         // against the seal. Writers that take no lease, such as the TUI and
         // the headless CLI, are refused by the log's own header instead.
-        takeoverPolicy: managed
+        takeoverPolicy: managedLog
           ? 'certified'
           : this.sessionWriterTakeoverPolicy,
         ...(managed
@@ -4959,30 +5263,41 @@ export class Config {
           'after_writer_lease',
         );
         projection = await this.sessionRestoreProjectionSource();
-        if (managed) {
-          // Checked before the log is opened, which writes to it.
+        if (requested !== undefined) {
           assertSessionExecutionEngine(
             projection?.executionEngine,
             this.sessionId,
-            'managed',
+            requested,
           );
         }
         this.setSessionRestoreProjection(projection);
       } else if (
-        managed &&
-        (this.sessionData || lease.transcriptExistedAtAcquire)
+        this.sessionData ||
+        this.pendingSessionRestoreProjection ||
+        lease.transcriptExistedAtAcquire
       ) {
-        // A Managed log restores from its projection; the Legacy loader would
-        // read its wrapper records as a conversation.
-        throw new SessionExecutionEngineError(
-          this.sessionId,
-          'managed restore requires a restore projection',
-        );
-      } else if (this.sessionData || lease.transcriptExistedAtAcquire) {
         authoritative = await this.getSessionService().loadSession(
           this.sessionId,
         );
         if (!authoritative) throw new SessionWriterUnavailableError();
+        if (requested !== undefined) {
+          assertSessionExecutionEngine(
+            authoritative.executionEngine,
+            this.sessionId,
+            requested,
+          );
+        }
+        if (this.pendingSessionRestoreProjection) {
+          projection = this.pendingSessionRestoreProjection;
+          if (
+            !isDeepStrictEqual(
+              projection.executionEngine?.snapshot,
+              authoritative.executionEngine?.snapshot,
+            )
+          ) {
+            throw new SessionTranscriptChangedError();
+          }
+        }
       } else if (location !== undefined) {
         throw new SessionTranscriptChangedError();
       }
@@ -4994,7 +5309,7 @@ export class Config {
         throw new SessionWriterShutdownError();
       }
       this.sessionData = authoritative;
-      if (managed) {
+      if (managedLog) {
         // Opened, and the recorder bound to it, before the recorder accepts a
         // record: a record appended directly would be a raw line in the log.
         this.managedSession = await this.openManagedSessionLog(lease);
@@ -5014,26 +5329,46 @@ export class Config {
         persistedTitleInfo,
         projection?.runtime.recording,
       );
-      if (this.sessionRestoreProjectionSource) {
+      if (managedLog) {
+        // The authority already wrote the engine record and the header, and
+        // the sink refuses records it cannot map, so no engine record is
+        // written here.
+        this.managedHarness = undefined;
+        this.sessionExecutionEngine = 'managed';
+      } else if (executionEngine) {
+        await recorder.recordSessionExecutionEngine(executionEngine);
+        this.sessionExecutionEngine = executionEngine;
+      }
+      if (projection || this.sessionRestoreProjectionSource) {
         this.initializeGoalRuntime(
           projection?.runtime.goalRecords,
           projection?.runtime,
         );
       }
-      this.pendingSessionWriterLease = undefined;
-      lease = undefined;
       // The recorder can take writes now, so the restore the constructor
       // held back can finally run — against `authoritative`, which is
       // fresher than what the constructor had. Not awaited: activation
       // latency is unchanged, and `getGoalRuntimeReady()` is what waits.
+      this.pendingSessionWriterLease = undefined;
+      lease = undefined;
       this.startPendingGoalRestore();
     } catch (error) {
       let failure: unknown = error;
+      if (this.managedSessionStore?.close !== undefined) {
+        try {
+          await this.managedSessionStore.close();
+        } catch (cleanupError) {
+          failure = new AggregateError(
+            [failure, cleanupError],
+            'Managed Session store cleanup failed during activation',
+          );
+        }
+      }
       const ownedLease = lease ?? this.pendingSessionWriterLease;
       let releaseFailureAlreadyReported = false;
       const abandonedManagedSession = this.managedSession;
       this.managedSession = undefined;
-      if (managed && ownedLease) {
+      if (managedLog && ownedLease) {
         // Registered as this lease's release, so the cleanup below and any
         // close waits for it instead of releasing the lease itself.
         const finishing = this.finishManagedWriter(
@@ -5561,6 +5896,10 @@ export class Config {
     return this.modelsConfig;
   }
 
+  getRuntimeEnvironment(): Readonly<NodeJS.ProcessEnv> {
+    return this.runtimeEnvironment ?? process.env;
+  }
+
   /**
    * Updates the credentials in the generation config.
    * Exclusive for `OpenAIKeyPrompt` to update credentials via `/auth`
@@ -5721,6 +6060,7 @@ export class Config {
    */
   async refreshAuth(authMethod: AuthType, isInitialAuth?: boolean) {
     const hookOwner = captureHookExecutionOwner(this, null);
+    await this.proxyDispatcherReady;
     if (!this.contentGenerator && authMethod === this.initialAuthType) {
       authMethod = this.initialResolvedAuthType ?? authMethod;
     }
@@ -5841,6 +6181,7 @@ export class Config {
   }
 
   hydrateSessionRestoreFileHistory(): void {
+    if (this.sharedFileHistoryService) return;
     if (this.restoredFileHistory) return;
     const snapshots = this.sessionRestoreRuntime?.fileHistorySnapshots;
     if (!snapshots?.length) return;
@@ -5989,13 +6330,751 @@ export class Config {
     return this.debugLogger;
   }
 
+  assertCanRestoreSession(sessionId: string, data: ResumedSessionData): void {
+    assertSessionExecutionEngine(
+      data.executionEngine,
+      sessionId,
+      this.managedToolSessionFactory ? 'managed' : 'legacy',
+    );
+  }
+
+  getSessionExecutionEngine(): SessionExecutionEngine | undefined {
+    return this.sessionExecutionEngine;
+  }
+
+  private dropDetachedManagedHarness(): void {
+    if (this.managedHarness?.isDetached() === true) {
+      this.managedHarness = undefined;
+    }
+  }
+
+  private liveManagedHarness(): ManagedHarnessHandle | undefined {
+    const session = this.managedSession;
+    if (session === undefined) return undefined;
+    this.dropDetachedManagedHarness();
+    this.managedHarness ??= createManagedHarnessHandle(session);
+    return this.managedHarness;
+  }
+
   /**
-   * Starts a new session and resets session-scoped services.
+   * A Managed session may not start a model request until a runnable Harness
+   * checkpoint exists. Legal initial starts submit `before_model` first;
+   * opaque or missing continuation is blocked. After a turn-complete safety
+   * point the drained handle is replaced so the next turn uses a new
+   * activation and a new LlmChat rebuilt from the durable log; the existing
+   * checkpoint is not rewritten. A `durable_wait` is not a finished turn, so
+   * this method leaves the handle in place.
    */
+  async ensureManagedHarnessRunnable(): Promise<void> {
+    const session = this.managedSession;
+    if (session === undefined) return;
+    const recorder = this.chatRecordingService;
+    if (recorder === undefined) throw new SessionWriterUnavailableError();
+    await recorder.runWithWriteBarrier(async () => {
+      this.dropDetachedManagedHarness();
+      const handle = this.managedHarness;
+      let replacedHost = false;
+      if (handle !== undefined) {
+        const latest = session.authority.latestCheckpoint;
+        const authorization = await session.authority.harnessRunAuthorization();
+        if (
+          latest?.boundary === HARNESS_TURN_COMPLETE_BOUNDARY &&
+          authorization.status === 'runnable' &&
+          handle.activation.activationId ===
+            authorization.checkpoint.identity.activationId
+        ) {
+          await handle.detach();
+          await session.replaceActivation();
+          this.managedHarness = undefined;
+          replacedHost = true;
+        }
+      }
+      const live = this.liveManagedHarness();
+      if (live === undefined) return;
+      await live.ensureRunnable();
+      if (replacedHost && this.llmClient.isInitialized()) {
+        const records = await session.sink.project();
+        await this.llmClient.rebuildChatFromDurableHistory(
+          buildApiHistoryFromConversation({ messages: records }),
+        );
+      }
+    });
+  }
+
+  /**
+   * Persists safety point B before a permission RPC. Legacy sessions no-op.
+   * Does not replace the handle: a wait is not a finished-turn safety point.
+   */
+  async commitManagedDurableWait(
+    request: ManagedDurableWaitRequest,
+  ): Promise<void> {
+    const session = this.managedSession;
+    if (session === undefined) return;
+    const handle = this.liveManagedHarness();
+    if (handle === undefined) return;
+    const optionsBytes = Buffer.from(
+      JSON.stringify(request.options ?? null),
+      'utf8',
+    );
+    const optionsRef = await session.resources.publish(
+      'managed-approval',
+      optionsBytes,
+    );
+    const invocationRef =
+      request.source === 'tool_call'
+        ? await session.resources.publish(
+            'managed-invocation',
+            Buffer.from(JSON.stringify(request.invocation ?? null), 'utf8'),
+          )
+        : null;
+    const routeRef = await session.resources.publish(
+      'managed-route',
+      Buffer.from(JSON.stringify({ model: this.getModel() }), 'utf8'),
+    );
+    await handle.commitDurableWait({
+      requestId: request.requestId,
+      kind: request.kind,
+      source: request.source,
+      optionsRef,
+      inputRevision: createHash('sha256').update(optionsBytes).digest('hex'),
+      invocationRef,
+      attemptId: `att-${request.requestId}`,
+      routeRef,
+    });
+  }
+
+  /**
+   * Transfers an in-flight approval/Runtime wait off this handle. The
+   * durable ticket stays requested; a successor handle on the same
+   * activation continues. Not a finished-turn A/D swap.
+   */
+  async detachManagedHarnessWait(): Promise<void> {
+    const session = this.managedSession;
+    const handle = this.managedHarness;
+    if (session === undefined || handle === undefined) return;
+    if (handle.isDetached()) {
+      this.managedHarness = undefined;
+      return;
+    }
+    if (
+      session.authority.latestCheckpoint?.boundary !==
+      HARNESS_DURABLE_WAIT_BOUNDARY
+    ) {
+      return;
+    }
+    await handle.detach();
+    this.managedHarness = undefined;
+  }
+
+  /**
+   * Persists the permission decision, then restores a model-start phase.
+   * Legacy sessions no-op. The original tool is not authorized until the
+   * decision is in the log.
+   */
+  async resolveManagedDurableWait(
+    decision: ManagedDurableWaitDecision,
+  ): Promise<void> {
+    const session = this.managedSession;
+    if (session === undefined) return;
+    const handle = this.liveManagedHarness();
+    if (handle === undefined) return;
+    const decisionRef =
+      decision.outcome === 'decided'
+        ? await session.resources.publish(
+            'managed-decision',
+            Buffer.from(JSON.stringify(decision.body ?? null), 'utf8'),
+          )
+        : null;
+    await session.authority.resolveAction(
+      {
+        operation: 'resolveAction',
+        commandId: `resolveAction:${decision.requestId}`,
+        sessionKey: session.authority.sessionHeader.sessionKey,
+        contentDigest:
+          decisionRef?.digest ??
+          createHash('sha256').update(decision.outcome).digest('hex'),
+      },
+      {
+        requestId: decision.requestId,
+        state: decision.outcome,
+        decisionRef,
+      },
+    );
+    await handle.resolveDurableWait();
+  }
+
+  async commitManagedAwaitRuntime(
+    request: ManagedAwaitRuntimeRequest,
+  ): Promise<void> {
+    await this.commitManagedAwaitRuntimeBatch([request]);
+  }
+
+  async commitManagedAwaitRuntimeBatch(
+    requests: readonly ManagedAwaitRuntimeRequest[],
+  ): Promise<void> {
+    const session = this.managedSession;
+    if (session === undefined || requests.length === 0) return;
+    const handle = this.liveManagedHarness();
+    if (handle === undefined) return;
+    const routeRef = await session.resources.publish(
+      'managed-route',
+      Buffer.from(JSON.stringify({ model: this.getModel() }), 'utf8'),
+    );
+    await handle.commitAwaitRuntimeBatch(
+      requests.map((request, index) => ({
+        functionCallId: request.functionCallId,
+        toolName: request.toolName,
+        executionCallId: request.executionCallId,
+        invocationBindingId:
+          request.invocationBindingId ?? request.executionCallId,
+        capabilityVersion: 'runtime-v1',
+        policyVersion: 'policy-v1',
+        mediaVersion: null,
+        modelMessageId: request.modelMessageId ?? request.functionCallId,
+        partIndex: 0,
+        ordinal: request.ordinal ?? index,
+        inputDigest: createHash('sha256')
+          .update(request.functionCallId)
+          .update('\0')
+          .update(request.executionCallId)
+          .digest('hex'),
+        progressCursor: null,
+        attemptId: `att-${request.functionCallId}`,
+        routeRef,
+      })),
+    );
+  }
+
+  async resolveManagedAwaitRuntime(request: {
+    functionCallId: string;
+    executionCallId: string;
+    outcome: 'completed' | 'failed' | 'cancelled';
+    body?: unknown;
+    functionResponse?: ManagedRuntimeOutcome['part']['functionResponse'];
+  }): Promise<void> {
+    const session = this.managedSession;
+    if (session === undefined) return;
+    const handle = this.liveManagedHarness();
+    if (handle === undefined) return;
+    const resultRef = await session.resources.publish(
+      'managed-tool-outcome',
+      Buffer.from(
+        JSON.stringify({
+          functionCallId: request.functionCallId,
+          executionCallId: request.executionCallId,
+          outcome: request.outcome,
+          body: request.body ?? null,
+          ...(request.functionResponse === undefined
+            ? {}
+            : { functionResponse: request.functionResponse }),
+        }),
+        'utf8',
+      ),
+    );
+    await handle.resolveAwaitRuntime(request.executionCallId, resultRef);
+  }
+
+  /**
+   * Reads the durable identities for Runtime work admitted before a Harness
+   * disconnect. It never starts or replays an execution.
+   */
+  async readPendingManagedRuntimeWait(): Promise<ManagedPendingRuntimeWait | null> {
+    const session = this.managedSession;
+    if (
+      session === undefined ||
+      session.authority.latestCheckpoint?.boundary !==
+        HARNESS_DURABLE_WAIT_BOUNDARY
+    ) {
+      return null;
+    }
+    const authorization = await session.authority.harnessRunAuthorization();
+    if (
+      authorization.status !== 'runnable' ||
+      authorization.checkpoint.continuation.phase !== 'await_runtime'
+    ) {
+      return null;
+    }
+    const checkpoint = authorization.checkpoint;
+    const bindings = new Map(
+      (checkpoint.runtime?.bindings ?? [])
+        .filter((binding) => binding.state === 'dispatch')
+        .map((binding) => [binding.executionCallId, binding]),
+    );
+    const executions = (checkpoint.tools?.items ?? [])
+      .filter((item) => item.state === 'in_progress')
+      .map((item): ManagedPendingRuntimeExecution => {
+        const binding = bindings.get(item.executionCallId);
+        if (binding === undefined) {
+          throw new ManagedSessionRecordError(
+            `in-progress Runtime execution ${item.executionCallId} has no dispatch binding.`,
+          );
+        }
+        return {
+          functionCallId: item.functionCallId,
+          toolName: item.toolName,
+          executionCallId: item.executionCallId,
+          runtimeSessionId: binding.invocationBindingId,
+          progressCursor: binding.progressCursor,
+        };
+      });
+    if (executions.length === 0) {
+      throw new ManagedSessionRecordError(
+        'await_runtime checkpoint has no in-progress Runtime execution.',
+      );
+    }
+    return {
+      phase: 'await_runtime',
+      checkpointId: checkpoint.identity.checkpointId,
+      activationId: checkpoint.identity.activationId,
+      executions,
+    };
+  }
+
+  private async readResultsReadyManagedRuntimeWait(): Promise<ManagedRuntimeWaitInspection | null> {
+    const session = this.managedSession;
+    if (session === undefined) return null;
+    const authorization = await session.authority.harnessRunAuthorization();
+    if (authorization.status !== 'runnable') return null;
+    const checkpoint = authorization.checkpoint;
+    const tools = checkpoint.tools;
+    if (checkpoint.continuation.phase !== 'results_ready' || tools === null) {
+      return null;
+    }
+    const recoverable = recoverableSettledRuntimeItems(tools.items);
+    if (recoverable === null) return null;
+    const items = recoverable.items;
+    const outcomes = await this.readManagedRuntimeOutcomes();
+    const outcomeCallIds = new Set(
+      outcomes.outcomes.map((outcome) => outcome.functionCallId),
+    );
+    const bindings = new Map(
+      (checkpoint.runtime?.bindings ?? [])
+        .filter((binding) => binding.state === 'settled')
+        .map((binding) => [binding.executionCallId, binding]),
+    );
+    const executions = items.map((item): ManagedInspectedRuntimeExecution => {
+      const binding = bindings.get(item.executionCallId);
+      if (binding === undefined) {
+        throw new ManagedSessionRecordError(
+          `settled Runtime execution ${item.executionCallId} has no settled binding.`,
+        );
+      }
+      if (!outcomeCallIds.has(item.functionCallId)) {
+        throw new ManagedSessionRecordError(
+          `settled Runtime execution ${item.executionCallId} has no readable model receipt.`,
+        );
+      }
+      return {
+        functionCallId: item.functionCallId,
+        toolName: item.toolName,
+        executionCallId: item.executionCallId,
+        runtimeSessionId: binding.invocationBindingId,
+        progressCursor: binding.progressCursor,
+        outcome: 'known',
+        status: {
+          state: 'settled',
+          cancelRequested: false,
+          lastSeq: 0,
+          firstAvailableSeq: 1,
+          progressGap: false,
+          progress: [],
+        },
+      };
+    });
+    return {
+      phase: 'results_ready',
+      checkpointId: checkpoint.identity.checkpointId,
+      activationId: checkpoint.identity.activationId,
+      continuationAdmitted: recoverable.continuationAdmitted,
+      executions,
+    };
+  }
+
+  /**
+   * Reconciles pending Runtime work by its durable Broker identity when the
+   * provider supports it, otherwise inspects without dispatch. An unknown
+   * result is returned to the coordinator and must never trigger tool replay.
+   */
+  async inspectPendingManagedRuntimeWait(options?: {
+    passive?: boolean;
+  }): Promise<ManagedRuntimeWaitInspection | null> {
+    const pending = await this.readPendingManagedRuntimeWait();
+    if (pending === null) return this.readResultsReadyManagedRuntimeWait();
+    const managedToolSession = this.getManagedToolSession();
+    const inspectExecution = options?.passive
+      ? managedToolSession?.inspectExecution
+      : (managedToolSession?.reconcileExecution ??
+        managedToolSession?.inspectExecution);
+    if (inspectExecution === undefined) {
+      throw new Error(
+        'Managed tool Runtime recovery inspection is unavailable.',
+      );
+    }
+    const executions = await Promise.all(
+      pending.executions.map(async (execution) => ({
+        ...execution,
+        ...(await inspectExecution({
+          runtimeSessionId: execution.runtimeSessionId,
+          executionCallId: execution.executionCallId,
+        })),
+      })),
+    );
+    if (options?.passive) return { ...pending, executions };
+    if (executions.some((execution) => execution.outcome === 'unknown')) {
+      await this.managedSession!.authority.blockRecovery({
+        status: 'BLOCKED_EXECUTION',
+        detailCode: 'runtime_execution_outcome_unknown',
+      });
+      return { ...pending, executions };
+    }
+    const knownExecutions = executions.filter(
+      (
+        execution,
+      ): execution is ManagedPendingRuntimeExecution &
+        Extract<ManagedToolExecutionInspection, { outcome: 'known' }> =>
+        execution.outcome === 'known',
+    );
+    const settled = knownExecutions.filter(
+      (execution) => execution.status.state === 'settled',
+    );
+    for (const execution of settled) {
+      if (execution.status.result === undefined) {
+        throw new ManagedSessionRecordError(
+          `settled Runtime execution ${execution.executionCallId} has no receipt.`,
+        );
+      }
+    }
+    for (const execution of settled) {
+      const result = execution.status.result!;
+      const recovered = recoveredRuntimeOutcome(execution, result);
+      await this.resolveManagedAwaitRuntime({
+        functionCallId: execution.functionCallId,
+        executionCallId: execution.executionCallId,
+        outcome: recovered.outcome,
+        body: result,
+        functionResponse: recovered.functionResponse,
+      });
+    }
+    if (settled.length === executions.length) {
+      const ready = await this.readResultsReadyManagedRuntimeWait();
+      if (ready === null) {
+        throw new ManagedSessionRecordError(
+          'settled Runtime executions did not produce a results_ready checkpoint.',
+        );
+      }
+      return ready;
+    }
+    const remaining = await this.readPendingManagedRuntimeWait();
+    if (remaining === null) {
+      throw new ManagedSessionRecordError(
+        'unsettled Runtime executions lost their await_runtime checkpoint.',
+      );
+    }
+    return {
+      ...remaining,
+      executions: knownExecutions.filter(
+        (execution) => execution.status.state !== 'settled',
+      ),
+    };
+  }
+
+  async cancelPendingManagedRuntimeWait(
+    promptId: string,
+    checkpointId: string,
+    activationId: string,
+  ): Promise<ManagedRuntimeWaitInspection | null> {
+    const session = this.managedSession;
+    if (session === undefined) return null;
+    const authorization = await session.authority.harnessRunAuthorization();
+    if (authorization.status !== 'runnable') return null;
+    const checkpoint = authorization.checkpoint;
+    if (
+      checkpoint.identity.checkpointId !== checkpointId ||
+      checkpoint.identity.activationId !== activationId
+    ) {
+      return null;
+    }
+    let durablePromptId: string | undefined;
+    let afterSequence = 0;
+    for (;;) {
+      const events = session.authority.readEvents({
+        afterSequence,
+        limit: MANAGED_SESSION_LIMITS.maxReadEvents,
+      });
+      if (events.length === 0) break;
+      for (const event of events) {
+        afterSequence = event.sequence;
+        if (
+          event.kind !== 'message.committed' ||
+          event.subject?.type !== 'activation' ||
+          event.subject.activationId !== activationId
+        ) {
+          continue;
+        }
+        const body = await session.resources.read(
+          event.payload['contentRef'] as unknown as ManagedSessionDurableRef,
+        );
+        const record = JSON.parse(body.toString('utf8')) as ChatRecord;
+        if (typeof record.daemonPromptId === 'string') {
+          durablePromptId = record.daemonPromptId;
+        }
+      }
+    }
+    if (durablePromptId !== promptId) return null;
+    const pending = await this.readPendingManagedRuntimeWait();
+    if (pending === null) return this.readResultsReadyManagedRuntimeWait();
+    const cancelExecution = this.getManagedToolSession()?.cancelExecution;
+    if (cancelExecution === undefined) {
+      throw new Error(
+        'Managed tool Runtime recovery cancellation is unavailable.',
+      );
+    }
+    const executions = await Promise.all(
+      pending.executions.map(async (execution) => ({
+        ...execution,
+        ...(await cancelExecution({
+          runtimeSessionId: execution.runtimeSessionId,
+          executionCallId: execution.executionCallId,
+        })),
+      })),
+    );
+    if (executions.some((execution) => execution.outcome === 'unknown')) {
+      await this.managedSession!.authority.blockRecovery({
+        status: 'BLOCKED_EXECUTION',
+        detailCode: 'runtime_execution_outcome_unknown',
+      });
+      return { ...pending, executions };
+    }
+    for (const execution of executions) {
+      if (
+        execution.outcome !== 'known' ||
+        execution.status.state !== 'settled' ||
+        execution.status.result === undefined
+      ) {
+        throw new ManagedSessionRecordError(
+          `cancelled Runtime execution ${execution.executionCallId} did not settle with a receipt.`,
+        );
+      }
+      const recovered = recoveredRuntimeOutcome(
+        execution,
+        execution.status.result,
+      );
+      await this.resolveManagedAwaitRuntime({
+        functionCallId: execution.functionCallId,
+        executionCallId: execution.executionCallId,
+        outcome: recovered.outcome,
+        body: execution.status.result,
+        functionResponse: recovered.functionResponse,
+      });
+    }
+    const ready = await this.readResultsReadyManagedRuntimeWait();
+    if (ready === null) {
+      throw new ManagedSessionRecordError(
+        'cancelled Runtime executions did not produce a results_ready checkpoint.',
+      );
+    }
+    return ready;
+  }
+
+  shouldRetainManagedRuntimeInvocation(executionCallId: string): boolean {
+    const session = this.managedSession;
+    if (
+      session === undefined ||
+      session.authority.latestCheckpoint?.boundary !==
+        HARNESS_DURABLE_WAIT_BOUNDARY
+    ) {
+      return false;
+    }
+    return managedRuntimeDispatchGate(
+      session.authority.sessionHeader.sessionKey,
+    ).isHandedOff(executionCallId);
+  }
+
+  /**
+   * Reads settled Runtime receipts for the next model request. An unreadable
+   * outcome body is rebuilt from the Broker's settled result. A missing
+   * Broker result is not synthesized.
+   */
+  async readManagedRuntimeOutcomes(): Promise<ManagedRuntimeOutcomeRead> {
+    const empty: ManagedRuntimeOutcomeRead = {
+      outcomes: [],
+      preserveCallIds: [],
+    };
+    const session = this.managedSession;
+    if (session === undefined) return empty;
+    const authorization = await session.authority.harnessRunAuthorization();
+    if (
+      authorization.status !== 'runnable' ||
+      authorization.checkpoint.continuation.phase !== 'results_ready' ||
+      authorization.checkpoint.tools === null
+    ) {
+      return empty;
+    }
+    const recoverable = recoverableSettledRuntimeItems(
+      authorization.checkpoint.tools.items,
+    );
+    if (recoverable === null) return empty;
+    const bindings = new Map(
+      (authorization.checkpoint.runtime?.bindings ?? []).map((binding) => [
+        binding.executionCallId,
+        binding,
+      ]),
+    );
+    const preserveCallIds: string[] = [];
+    const outcomes: ManagedRuntimeOutcome[] = [];
+    for (const item of recoverable.items) {
+      preserveCallIds.push(item.functionCallId);
+      let part: ManagedRuntimeOutcome['part'] | null = null;
+      if (item.outcomeRef !== null) {
+        try {
+          part = parseManagedRuntimeOutcomePart(
+            item.functionCallId,
+            JSON.parse(
+              (await session.resources.read(item.outcomeRef)).toString('utf8'),
+            ) as unknown,
+          );
+        } catch {
+          part = null;
+        }
+      }
+      part ??= await this.readSettledRuntimeReceipt(
+        item,
+        bindings.get(item.executionCallId),
+      );
+      if (part === null) continue;
+      outcomes.push({
+        functionCallId: item.functionCallId,
+        executionCallId: item.executionCallId,
+        part,
+      });
+    }
+    return { outcomes, preserveCallIds };
+  }
+
+  private async readSettledRuntimeReceipt(
+    item: {
+      readonly functionCallId: string;
+      readonly toolName: string;
+      readonly executionCallId: string;
+    },
+    binding:
+      | {
+          readonly invocationBindingId: string;
+          readonly progressCursor: string | null;
+        }
+      | undefined,
+  ): Promise<ManagedRuntimeOutcome['part'] | null> {
+    if (binding === undefined) return null;
+    const managedToolSession = this.getManagedToolSession();
+    const reconcile =
+      managedToolSession?.reconcileExecution ??
+      managedToolSession?.inspectExecution;
+    if (reconcile === undefined) return null;
+    const inspected = await reconcile({
+      runtimeSessionId: binding.invocationBindingId,
+      executionCallId: item.executionCallId,
+    });
+    if (
+      inspected.outcome !== 'known' ||
+      inspected.status.state !== 'settled' ||
+      inspected.status.result === undefined
+    ) {
+      return null;
+    }
+    const recovered = recoveredRuntimeOutcome(
+      {
+        functionCallId: item.functionCallId,
+        toolName: item.toolName,
+        executionCallId: item.executionCallId,
+        runtimeSessionId: binding.invocationBindingId,
+        progressCursor: binding.progressCursor,
+      },
+      inspected.status.result,
+    );
+    return { functionResponse: recovered.functionResponse };
+  }
+
+  /**
+   * Marks unconsumed Runtime receipts consumed after they are present on
+   * the outgoing model request. Legacy sessions no-op.
+   */
+  async consumeManagedRuntimeResults(): Promise<void> {
+    const session = this.managedSession;
+    if (session === undefined) return;
+    const handle = this.liveManagedHarness();
+    if (handle === undefined) return;
+    await handle.consumeRuntimeResults();
+  }
+
+  /**
+   * Closes a consumed Runtime continuation after its model request finishes.
+   * Until then a successor can still read the original receipts.
+   */
+  async settleConsumedManagedRuntimeContinuation(): Promise<void> {
+    const session = this.managedSession;
+    if (session === undefined) return;
+    const handle = this.liveManagedHarness();
+    if (handle === undefined) return;
+    await handle.settleConsumedRuntimeContinuation();
+  }
+
+  /**
+   * Reconstructs a still-requested approval wait from the log. Used to hang a
+   * new connection waiter; the old Promise is not restored. Null when there
+   * is no await_action ticket, or it is already final.
+   */
+  async readPendingManagedApprovalWait(): Promise<ManagedDurableWaitRequest | null> {
+    const session = this.managedSession;
+    if (session === undefined) return null;
+    if (
+      session.authority.latestCheckpoint?.boundary !==
+      HARNESS_DURABLE_WAIT_BOUNDARY
+    ) {
+      return null;
+    }
+    const authorization = await session.authority.harnessRunAuthorization();
+    if (
+      authorization.status !== 'runnable' ||
+      authorization.checkpoint.continuation.phase !== 'await_action'
+    ) {
+      return null;
+    }
+    const approval = authorization.checkpoint.approval;
+    if (approval === null) return null;
+    const action = session.authority.action(approval.requestId);
+    if (action === undefined || action.state !== 'requested') return null;
+    let options: unknown = [];
+    let invocation: unknown;
+    try {
+      options = JSON.parse(
+        (await session.resources.read(approval.optionsRef)).toString('utf8'),
+      ) as unknown;
+      invocation =
+        approval.invocationRef === null
+          ? undefined
+          : (JSON.parse(
+              (await session.resources.read(approval.invocationRef)).toString(
+                'utf8',
+              ),
+            ) as unknown);
+    } catch {
+      // Still identify the waited call so replay can skip finalize.
+    }
+    return {
+      requestId: approval.requestId,
+      kind: approval.kind,
+      source: approval.source,
+      options,
+      invocation,
+    };
+  }
+
+  /** Starts a new session and resets session-scoped services. */
   startNewSession(
     sessionId?: string,
     sessionData?: ResumedSessionData,
   ): string {
+    if (sessionData) this.assertCanRestoreSession(sessionId ?? '', sessionData);
     if (isDerivedConfig(this)) {
       throw new Error('Derived Configs cannot start new sessions');
     }
@@ -6042,6 +7121,7 @@ export class Config {
     unregisterSessionModel(previousSessionId);
     this.publishModelEnv();
     this.sessionData = sessionData;
+    this.sessionExecutionEngine = undefined;
     if (isSessionTransition) {
       const skillTool = this.toolRegistry?.getTool?.(ToolNames.SKILL);
       if (skillTool && 'clearLoadedSkills' in skillTool) {
@@ -7060,6 +8140,13 @@ export class Config {
    * @returns The bridge model selection, or `undefined`.
    */
   getDefaultVisionBridgeModel(): VisionBridgeModelSelection | undefined {
+    // Tool-only sessions return workspace data; the Gateway owns inference.
+    if (
+      this.sessionSourceType === 'managed-gateway' &&
+      this.sessionSourceId === this.getSessionId()
+    ) {
+      return undefined;
+    }
     const explicit = this.resolveVisionModelSelection();
     if (explicit) return explicit;
     const contentGeneratorConfig = this.getContentGeneratorConfig();
@@ -7642,6 +8729,149 @@ export class Config {
     return this.toolRegistry;
   }
 
+  closeManagedToolSession(): Promise<void> {
+    if (
+      !this.managedToolSessionFactory ||
+      this.managedToolSessionOwner !== this
+    )
+      return Promise.resolve();
+    this.managedToolSessionClosing = true;
+    this.managedToolSessionClosePromise ??= (async () => {
+      const children = await Promise.allSettled(
+        [...this.managedChildScopes].map((scope) => scope.close()),
+      );
+      const failures = children.filter(
+        (result) => result.status === 'rejected',
+      );
+      if (failures.length)
+        throw new AggregateError(
+          failures.map((result) => result.reason),
+          'Managed child Agent cleanup failed.',
+        );
+      try {
+        await this.initializationPromise;
+      } catch {
+        // Partial initialization may have acquired a Runtime Session.
+      }
+      await this.managedToolSession?.flushFileHistory?.();
+      await this.managedToolSession?.close();
+    })();
+    const current = this.managedToolSessionClosePromise;
+    void current.catch(() => {
+      if (this.managedToolSessionClosePromise === current)
+        this.managedToolSessionClosePromise = undefined;
+    });
+    return current;
+  }
+
+  private getManagedToolSession(): ManagedToolSession | undefined {
+    const owner = this.managedToolSessionOwner;
+    if (!owner?.managedToolSessionFactory) return undefined;
+    return (owner.managedToolSession ??=
+      owner.managedToolSessionFactory(owner));
+  }
+
+  createManagedChildExecutionScope(): ManagedChildExecutionScope {
+    const parent = this.managedToolSessionOwner;
+    if (!parent || !this.managedToolSessionFactory) {
+      return {
+        config: this,
+        run: (operation) => operation(),
+        onClose: () => {},
+        close: async () => {},
+      };
+    }
+    if (parent.managedToolSessionClosing || parent.shutdownRequested)
+      throw new Error('Managed parent Agent is closing.');
+    const session = parent.getManagedToolSession();
+    if (!session?.createChild)
+      throw new Error('Managed child Agent execution is unavailable.');
+    const config = deriveConfig(this);
+    config.managedToolSessionOwner = config;
+    config.managedToolSessionClosing = false;
+    config.managedToolSessionClosePromise = undefined;
+    config.managedChildScopes = new Set();
+    config.managedToolSession = session.createChild(config);
+    const controller = new AbortController();
+    const running = new Set<Promise<unknown>>();
+    const callbacks = new Set<() => void | Promise<void>>();
+    let closing = false;
+    let cleanup: Promise<void> | undefined;
+    const scope: ManagedChildExecutionScope = {
+      config,
+      signal: controller.signal,
+      onClose: (callback) => {
+        if (closing) throw new Error('Managed child Agent is closing.');
+        callbacks.add(callback);
+      },
+      run: <T>(operation: () => Promise<T>): Promise<T> => {
+        if (closing || parent.managedToolSessionClosing)
+          return Promise.reject(new Error('Managed child Agent is closing.'));
+        let pending: Promise<T>;
+        try {
+          pending = operation();
+        } catch (error) {
+          return Promise.reject(error);
+        }
+        running.add(pending);
+        void pending.then(
+          () => running.delete(pending),
+          () => running.delete(pending),
+        );
+        return pending;
+      },
+      close: () => {
+        closing = true;
+        config.managedToolSessionClosing = true;
+        controller.abort(
+          new DOMException('Managed child Agent is closing.', 'AbortError'),
+        );
+        cleanup ??= (async () => {
+          // Seal descendants before waiting for a parent Agent that may be
+          // awaiting one of them; their raw execute promises exclude close.
+          const descendants = Promise.allSettled(
+            [...config.managedChildScopes].map((child) => child.close()),
+          );
+          await Promise.allSettled([...running]);
+          const failures = (await descendants).filter(
+            (result) => result.status === 'rejected',
+          );
+          if (failures.length)
+            throw new AggregateError(
+              failures.map((result) => result.reason),
+              'Managed child Agent cleanup failed.',
+            );
+          await config.closeManagedToolSession();
+          for (const callback of callbacks) {
+            await callback();
+            callbacks.delete(callback);
+          }
+          parent.managedChildScopes.delete(scope);
+        })();
+        const current = cleanup;
+        void current.catch(() => {
+          if (cleanup === current) cleanup = undefined;
+        });
+        return current;
+      },
+    };
+    parent.managedChildScopes.add(scope);
+    return scope;
+  }
+
+  async makeFileHistorySnapshot(promptId: string): Promise<void> {
+    const managed = this.getManagedToolSession();
+    if (managed?.beginFileHistoryTurn) {
+      await managed.beginFileHistoryTurn(promptId);
+      return;
+    }
+    const service = this.getFileHistoryService();
+    await service.makeSnapshot(promptId);
+    const latest = service.getSnapshots().at(-1);
+    if (latest)
+      this.getChatRecordingService()?.recordFileHistorySnapshot(latest);
+  }
+
   /**
    * Shuts down the Config and releases all resources.
    * This method is idempotent and safe to call multiple times.
@@ -7658,6 +8888,8 @@ export class Config {
     this.shutdownRequested = true;
     void this.shutdownExecutionEnvironments().catch(() => undefined);
     this.settingsWatcher?.stopWatching();
+    const managed = this.managedToolSessionFactory !== undefined;
+    let resourcesReleased = false;
     const closeWriter = () =>
       this.closeSessionWriter().catch((error) => {
         this.debugLogger.error(
@@ -7666,6 +8898,7 @@ export class Config {
         );
       });
     const earlyWriterClose =
+      !managed &&
       !options?.skipSessionWriter &&
       this.initializationPromise !== undefined &&
       !this.initializationSucceeded
@@ -7673,6 +8906,7 @@ export class Config {
         : undefined;
 
     try {
+      if (managed) await this.closeManagedToolSession();
       if (!options?.skipSessionWriter && !earlyWriterClose) {
         try {
           this.chatRecordingService?.finalize();
@@ -7683,12 +8917,15 @@ export class Config {
       }
 
       try {
-        await this.shutdownResources(options?.strictResourceCleanup === true);
+        await this.shutdownResources(
+          managed || options?.strictResourceCleanup === true,
+        );
+        resourcesReleased = true;
       } catch (error) {
-        if (options?.strictResourceCleanup) throw error;
+        if (managed || options?.strictResourceCleanup) throw error;
       }
     } finally {
-      if (!options?.skipSessionWriter) {
+      if (!options?.skipSessionWriter && (!managed || resourcesReleased)) {
         await (earlyWriterClose ?? closeWriter());
       }
       this.chatRecordingFailureListeners.clear();
@@ -7754,6 +8991,7 @@ export class Config {
     let resourceError: unknown;
     try {
       this.memoryManager.cancelMigrations();
+      await this.closeManagedToolSession();
       this.clearSessionRestoreProjection();
       // Drop this session's project-dir registry entry. It is registered during
       // initialization, so it is released here whenever that step completed —
@@ -10418,6 +11656,10 @@ export class Config {
     return this.fileFiltering.respectQwenIgnore;
   }
 
+  getMemoryBaseDir(): string {
+    return getMemoryBaseDir();
+  }
+
   getFileFilteringOptions(): FileFilteringOptions {
     return {
       respectGitIgnore: this.fileFiltering.respectGitIgnore,
@@ -10442,7 +11684,11 @@ export class Config {
   }
 
   getFileCheckpointingEnabled(): boolean {
-    return !this.shellExecutionSandbox && this.fileCheckpointingEnabled;
+    if (this.shellExecutionSandbox) return false;
+    return (
+      this.sharedFileHistoryService?.isEnabled() ??
+      this.fileCheckpointingEnabled
+    );
   }
 
   enableFileCheckpointing(): void {
@@ -10455,6 +11701,7 @@ export class Config {
   }
 
   getFileHistoryService(): FileHistoryService {
+    if (this.sharedFileHistoryService) return this.sharedFileHistoryService;
     if (!this.fileHistoryService) {
       const service = new FileHistoryService(
         this.sessionId,
@@ -10477,6 +11724,15 @@ export class Config {
       }
     }
     return this.fileHistoryService;
+  }
+
+  bindSharedFileHistoryService(service: FileHistoryService): void {
+    if (
+      this.sharedFileHistoryService &&
+      this.sharedFileHistoryService !== service
+    )
+      throw new Error('Managed file history owner is already bound.');
+    this.sharedFileHistoryService = service;
   }
 
   getProxy(): string | undefined {
@@ -11564,12 +12820,24 @@ export class Config {
     this.sessionWriterTakeoverPolicy = policy;
   }
 
-  closeSessionWriter(options?: { handoff?: boolean }): Promise<void> {
+  closeSessionWriter(options?: {
+    handoff?: boolean;
+    /**
+     * Set by an explicit close of the Session: a Managed log that recorded no
+     * Session content is removed instead of sealed, as a legacy Session that
+     * never wrote a record leaves nothing behind. Every other close keeps it,
+     * so the Session can still be opened.
+     */
+    discardEmptyManagedLog?: boolean;
+  }): Promise<void> {
     if (isDerivedConfig(this)) {
       throw new SessionWriterUnavailableError();
     }
     if (options?.handoff && this.sessionWriterTakeoverPolicy === 'certified') {
       this.sessionWriterHandoffRequested = true;
+    }
+    if (options?.discardEmptyManagedLog) {
+      this.sessionWriterDiscardEmptyManagedLog = true;
     }
     this.sessionWriterShutdownRequested = true;
     this.chatRecordingService?.beginClose({
@@ -11587,6 +12855,53 @@ export class Config {
     return pending;
   }
 
+  /**
+   * On an explicit close, removes a local Managed log that holds no Session
+   * content, the way a legacy Session that never wrote a record leaves no
+   * transcript behind: keeping it would list an empty closed Session and
+   * reserve its id. The writer lock is still held, so no other writer can
+   * reach the log while it is removed; the recorder releases the lock
+   * afterwards instead of sealing it. Returns false, leaving the log to be
+   * sealed, when the close was not explicit, or there is content, a handoff, a
+   * Hosted journal, or the transcript could not be removed.
+   */
+  private async discardEmptyManagedSessionLog(
+    managedSession: ManagedSession,
+  ): Promise<boolean> {
+    if (
+      !this.sessionWriterDiscardEmptyManagedLog ||
+      this.managedSessionStore !== undefined ||
+      this.sessionWriterHandoffRequested ||
+      managedSession.authority.hasSessionContent
+    ) {
+      return false;
+    }
+    try {
+      await fsPromises.unlink(this.getTranscriptPath());
+    } catch (error) {
+      managedSessionLogger.warn(
+        `Keeping empty Managed session log ${this.sessionId}: ${String(error)}`,
+      );
+      return false;
+    }
+    // The transcript is gone, so the Session is discarded even if its
+    // resources linger; they are unreachable without the header.
+    await fsPromises
+      .rm(
+        managedSessionResourceRoot(this.sessionRuntimeBaseDir, this.sessionId),
+        {
+          recursive: true,
+          force: true,
+        },
+      )
+      .catch((error: unknown) => {
+        managedSessionLogger.warn(
+          `Empty Managed session resources for ${this.sessionId} were not removed: ${String(error)}`,
+        );
+      });
+    return true;
+  }
+
   private async closeSessionWriterOnce(): Promise<void> {
     const failures: unknown[] = [];
     const activation = this.sessionWriterActivationPromise;
@@ -11597,12 +12912,46 @@ export class Config {
         failures.push(error);
       }
     }
+    const managedSession = this.managedSession;
+    let managedLogDiscarded = false;
+    if (managedSession) {
+      this.managedSession = undefined;
+      this.managedHarness = undefined;
+      try {
+        // `beginClose()` has already stopped the recorder accepting writes, so
+        // this is the one point where no further record can arrive to name a
+        // released activation -- which the fence would refuse.
+        await this.chatRecordingService?.flush();
+        managedLogDiscarded =
+          await this.discardEmptyManagedSessionLog(managedSession);
+        // The recorder's close stops advancing: it anchors the due metadata,
+        // then closes the session and releases the activation before sealing.
+      } catch (error) {
+        // Collected rather than thrown: the seal below is the at-rest barrier,
+        // and losing it is worse than an activation left looking abandoned.
+        failures.push(error);
+      }
+    }
     try {
       await this.chatRecordingService?.close({
         handoff: this.sessionWriterHandoffRequested,
+        // A discarded log has nothing left for a seal to protect; the lock is
+        // released. Otherwise the recorder seals with the sink's commit proof,
+        // which reads the authority after the final record lands.
+        ...(managedLogDiscarded ? { discardManagedLog: true } : {}),
       });
     } catch (error) {
       failures.push(error);
+    }
+    if (managedSession) {
+      try {
+        // For an adopted local journal this is intentionally a no-op because
+        // the recorder just sealed its lease. A Hosted journal owns a separate
+        // durable writer and must end it here as well.
+        await managedSession.close();
+      } catch (error) {
+        failures.push(error);
+      }
     }
     const pendingLease = activation
       ? undefined
@@ -11647,8 +12996,13 @@ export class Config {
     if (existing?.lease === lease) return existing.promise;
     // A Managed writer is ended by its failed activation, which alone knows
     // whether the log was written; releasing it early could delete the lock of
-    // a log that already holds its header.
-    if (this.sessionExecutionEngine === 'managed') return undefined;
+    // a log that already holds its header. The selection is known from
+    // construction, before activation sets the live engine.
+    if (
+      (this.sessionExecutionEngine ?? this.selectedSessionExecutionEngine) ===
+      'managed'
+    )
+      return undefined;
     const promise = lease.release();
     this.pendingSessionWriterRelease = { lease, promise };
     void promise.catch(() => undefined);
@@ -11974,6 +13328,23 @@ export class Config {
         error,
       );
       return;
+    }
+    if (status !== 'disabled' && this.managedToolSessionFactory) {
+      const session = this.getManagedToolSession()!;
+      const managedTool = createManagedBuiltinTool(
+        toolName,
+        this,
+        session,
+        () => {
+          if (this.shutdownRequested || this.managedToolSessionClosing) {
+            return Promise.reject(
+              new Error('Managed tool Session is closing.'),
+            );
+          }
+          return session.getClient();
+        },
+      );
+      if (managedTool) factory = async () => managedTool;
     }
     if (status === 'deferred') {
       registry.registerPermissionDeferredFactory(toolName, factory);
@@ -12400,12 +13771,23 @@ export class Config {
     });
 
     // --- Grep / RipGrep (conditional) ---
-    if (this.getUseRipgrep()) {
+    if (this.managedToolSessionFactory) {
+      await registerLazy(ToolNames.GREP, async () => {
+        throw new Error('Managed Grep requires a Runtime proxy.');
+      });
+    } else if (this.getUseRipgrep()) {
       let useRipgrep = false;
       let errorString: undefined | string = undefined;
       recordStartupEvent('config_initialize_ripgrep_probe_start');
       try {
-        useRipgrep = await canUseRipgrep(this.getUseBuiltinRipgrep());
+        useRipgrep =
+          this.sessionSourceType === 'managed-gateway' &&
+          this.sessionSourceId === this.getSessionId()
+            ? await canUseRipgrep(this.getUseBuiltinRipgrep(), {
+                requireProcessGroupExit: true,
+                cwd: this.getTargetDir(),
+              })
+            : await canUseRipgrep(this.getUseBuiltinRipgrep());
       } catch (error: unknown) {
         errorString = getErrorMessage(error);
       }

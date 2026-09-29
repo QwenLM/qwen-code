@@ -15,6 +15,7 @@ describe('MiniMaxOpenAICompatibleProvider', () => {
   const mockCliConfig = {
     getCliVersion: vi.fn().mockReturnValue('1.0.0'),
     getProxy: vi.fn().mockReturnValue(undefined),
+    getRuntimeEnvironment: () => process.env,
   } as unknown as Config;
 
   function createConfig(baseUrl?: string): ContentGeneratorConfig {

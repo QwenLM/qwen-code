@@ -94,6 +94,52 @@ describe('buildRuntimeFetchOptions (node runtime)', () => {
   afterEach(() => {
     vi.restoreAllMocks();
   });
+  it('binds NO_PROXY and TLS to each supplied snapshot', () => {
+    vi.stubEnv('NO_PROXY', 'ambient.example');
+    vi.stubEnv('QWEN_TLS_INSECURE', '1');
+    vi.stubEnv('NODE_TLS_REJECT_UNAUTHORIZED', '0');
+    try {
+      const a = buildRuntimeFetchOptions('openai', 'http://proxy.local', {
+        NO_PROXY: 'a.example',
+      });
+      const b = buildRuntimeFetchOptions('openai', 'http://proxy.local', {});
+      const c = buildRuntimeFetchOptions('openai', 'http://proxy.local', {
+        NO_PROXY: 'a.example',
+        QWEN_TLS_INSECURE: '1',
+      });
+      const dispatcher = (value: typeof a) =>
+        value?.fetchOptions?.dispatcher as unknown as {
+          options: UndiciOptions;
+        };
+      expect(dispatcher(a).options['noProxy']).toBe('a.example');
+      expect(dispatcher(b).options['noProxy']).toBe('');
+      expect(dispatcher(a).options['connect']).toEqual({
+        rejectUnauthorized: true,
+      });
+      expect(dispatcher(c).options['connect']).toEqual({
+        rejectUnauthorized: false,
+      });
+      expect(dispatcher(a)).not.toBe(dispatcher(b));
+      expect(dispatcher(a)).not.toBe(dispatcher(c));
+      expect(
+        dispatcher(
+          buildRuntimeFetchOptions('openai', 'http://proxy.local', {
+            NO_PROXY: 'a.example',
+          }),
+        ),
+      ).toBe(dispatcher(a));
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('does not fall back to the global dispatcher after a snapshot proxy fails', () => {
+    expect(() =>
+      buildRuntimeFetchOptions('openai', 'http://invalid-proxy', {}),
+    ).toThrow('Failed to create the configured model proxy dispatcher.');
+    expect(mockConsoleError).not.toHaveBeenCalled();
+  });
+
   it('returns Agent with disabled timeouts for OpenAI when no proxy is set', () => {
     const result = buildRuntimeFetchOptions('openai');
     expect(result).toBeDefined();

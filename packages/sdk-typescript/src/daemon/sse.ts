@@ -67,10 +67,20 @@ export class SseFramingError extends Error {
  */
 const MAX_BUF_CHARS = 16 * 1024 * 1024;
 
+export function parseSseStream(
+  body: ReadableStream<Uint8Array>,
+  signal?: AbortSignal,
+): AsyncGenerator<DaemonEvent>;
+export function parseSseStream<T>(
+  body: ReadableStream<Uint8Array>,
+  signal: AbortSignal | undefined,
+  parse: (value: unknown) => T | undefined,
+): AsyncGenerator<T>;
 export async function* parseSseStream(
   body: ReadableStream<Uint8Array>,
   signal?: AbortSignal,
-): AsyncGenerator<DaemonEvent> {
+  parse?: (value: unknown) => unknown,
+): AsyncGenerator<unknown> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buf = '';
@@ -137,14 +147,14 @@ export async function* parseSseStream(
           // single-frame fallback) which silently dropped events.
           const consumed = consumeFrames(buf);
           for (const raw of consumed.frames) {
-            const frame = parseFrame(raw);
+            const frame = parseFrame(raw, parse);
             if (frame) yield frame;
           }
           // Anything left over after the last separator is a
           // legitimate trailing fragment (no `\n\n` ever arrived);
           // try to parse it once as a final attempt.
           if (consumed.tail.length > 0) {
-            const frame = parseFrame(consumed.tail);
+            const frame = parseFrame(consumed.tail, parse);
             if (frame) yield frame;
           }
         }
@@ -161,7 +171,7 @@ export async function* parseSseStream(
       const consumed = consumeFrames(buf);
       if (consumed.frames.length > 0) {
         for (const raw of consumed.frames) {
-          const frame = parseFrame(raw);
+          const frame = parseFrame(raw, parse);
           if (frame) yield frame;
         }
       }
@@ -230,7 +240,7 @@ export function consumeFrames(buf: string): {
   return { frames, tail: buf.slice(cursor) };
 }
 
-function parseFrame(raw: string): DaemonEvent | undefined {
+function parseFrame(raw: string, parse?: (value: unknown) => unknown): unknown {
   if (!raw) return undefined;
   // Per the EventSource spec, comment lines (`:` prefix) and `retry:`
   // are line-level fields, not frame-level. A frame may legitimately
@@ -252,7 +262,8 @@ function parseFrame(raw: string): DaemonEvent | undefined {
   if (dataLines.length === 0) return undefined;
   const dataText = dataLines.join('\n');
   try {
-    const parsed = JSON.parse(dataText);
+    const parsed: unknown = JSON.parse(dataText);
+    if (parse) return parse(parsed);
     // `JSON.parse('null')` / `JSON.parse('42')` / `JSON.parse('[1,2]')`
     // etc. parse cleanly but aren't `DaemonEvent`-shaped. Casting
     // them through would hand consumers a value that violates the

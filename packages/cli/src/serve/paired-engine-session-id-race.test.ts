@@ -181,12 +181,12 @@ describe('paired Bridge requested-ID rejection through the session route', () =>
 
     const routed = post({ sessionId: SESSION_ID }).then((res) => res);
     await scanStarted.promise;
+    // An ordinary direct creation: this branch keeps Tool Runtime gateway
+    // sessions out of ordinary prompts, and the check below prompts it.
     const direct = await bridge.spawnOrAttach({
       workspaceCwd,
       sessionScope: 'thread',
       sessionId: SESSION_ID,
-      sourceType: 'managed-gateway',
-      sourceId: SESSION_ID,
     });
     scanResult.resolve(undefined);
     const res = await routed;

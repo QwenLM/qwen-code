@@ -17,6 +17,7 @@ import { tildeifyPath } from '../utils/paths.js';
 import { ToolErrorType } from './tool-error.js';
 import * as glob from 'glob';
 import { FileReadCache } from '../services/fileReadCache.js';
+import { getMemoryBaseDir } from '../memory/paths.js';
 
 vi.mock('glob', { spy: true });
 
@@ -91,6 +92,7 @@ describe('GrepTool', () => {
   const abortSignal = new AbortController().signal;
 
   const mockConfig = {
+    getMemoryBaseDir,
     getTargetDir: () => tempRootDir,
     getWorkspaceContext: () => createMockWorkspaceContext(tempRootDir),
     getFileExclusions: () => ({
@@ -756,6 +758,7 @@ describe('GrepTool', () => {
 
       // Create a mock config with multiple directories
       const multiDirConfig = {
+        getMemoryBaseDir,
         getTargetDir: () => tempRootDir,
         getWorkspaceContext: () =>
           createMockWorkspaceContext(tempRootDir, [secondDir]),
@@ -797,6 +800,7 @@ describe('GrepTool', () => {
       );
 
       const multiDirConfig = {
+        getMemoryBaseDir,
         getTargetDir: () => tempRootDir,
         getWorkspaceContext: () =>
           createMockWorkspaceContext(tempRootDir, [secondDir]),
@@ -835,6 +839,7 @@ describe('GrepTool', () => {
       const subDir = path.join(tempRootDir, 'sub');
 
       const multiDirConfig = {
+        getMemoryBaseDir,
         getTargetDir: () => tempRootDir,
         getWorkspaceContext: () =>
           createMockWorkspaceContext(tempRootDir, [subDir]),

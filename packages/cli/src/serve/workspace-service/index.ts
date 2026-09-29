@@ -43,7 +43,6 @@ import {
   McpServerNotFoundError,
   McpServerRestartFailedError,
   SessionNotFoundError,
-  WorkspaceChangePartiallyAppliedError,
 } from '@qwen-code/acp-bridge/bridgeErrors';
 
 import { MCP_RESTART_SERVER_DEADLINE_MS } from '@qwen-code/acp-bridge/mcpTimeouts';
@@ -719,19 +718,6 @@ export function createDaemonWorkspaceService(
         });
         return result as ReturnType<typeof buildPermissionSettings>;
       } catch (err) {
-        if (
-          err instanceof WorkspaceChangePartiallyAppliedError &&
-          err.result !== undefined
-        ) {
-          // Saved but not applied everywhere: observers still need the change.
-          assertActiveGeneration();
-          publishWorkspaceEvent({
-            type: 'settings_changed',
-            data: { key, value: request.rules, scope: request.scope },
-            originatorClientId: ctx.originatorClientId,
-          });
-          throw err;
-        }
         if (!(err instanceof SessionNotFoundError)) {
           throw err;
         }
@@ -1420,6 +1406,7 @@ export function createDaemonWorkspaceService(
 
     async reload(ctx: WorkspaceRequestContext) {
       assertActiveGeneration();
+      await deps.beforeReload?.();
       let runtimeEnvironmentApplied: boolean | undefined;
       if (deps.reloadDaemonEnv) {
         try {
@@ -1446,34 +1433,23 @@ export function createDaemonWorkspaceService(
       let sessionsRefreshed: string[] | undefined;
       let sessionsSkipped: string[] | undefined;
       let childError: string | undefined;
-      type ChildReloadResult = {
-        env: { updatedKeys: string[]; removedKeys: string[] };
-        changedKeys: string[];
-        sessionsRefreshed: string[];
-        sessionsSkipped: string[];
-      };
-      const applyChildResult = (childResult: ChildReloadResult) => {
+      try {
+        const childResult = await invokeWorkspaceCommand<{
+          env: { updatedKeys: string[]; removedKeys: string[] };
+          changedKeys: string[];
+          sessionsRefreshed: string[];
+          sessionsSkipped: string[];
+        }>(
+          SERVE_CONTROL_EXT_METHODS.workspaceReload,
+          { cwd: boundWorkspace },
+          { timeoutMs: 30_000 },
+        );
         childReloaded = true;
         env = childResult.env;
         changedKeys = childResult.changedKeys;
         sessionsRefreshed = childResult.sessionsRefreshed;
         sessionsSkipped = childResult.sessionsSkipped;
-      };
-      try {
-        applyChildResult(
-          await invokeWorkspaceCommand<ChildReloadResult>(
-            SERVE_CONTROL_EXT_METHODS.workspaceReload,
-            { cwd: boundWorkspace },
-            { timeoutMs: 30_000 },
-          ),
-        );
       } catch (err) {
-        if (
-          err instanceof WorkspaceChangePartiallyAppliedError &&
-          err.result !== undefined
-        ) {
-          applyChildResult(err.result as ChildReloadResult);
-        }
         if (err instanceof SessionNotFoundError) {
           childError = 'ACP child not running';
         } else {

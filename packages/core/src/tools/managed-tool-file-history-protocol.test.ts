@@ -75,6 +75,7 @@ describe('managed file history protocol', () => {
         getWorkspaceContext: () => ({
           getDirectories: () => context.workspaceDirectories,
         }),
+        getMemoryBaseDir: () => context.memoryBaseDir,
         isLsToolEnabled: () => context.lsToolEnabled,
         getFileFilteringOptions: () => context.fileFilteringOptions,
         getUseRipgrep: () => false,

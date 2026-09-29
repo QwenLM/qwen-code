@@ -11,6 +11,7 @@ import {
 } from '../hooks/hook-execution-context.js';
 
 import { randomUUID } from 'node:crypto';
+import { canUseRipgrep } from '../utils/ripgrepUtils.js';
 import { deriveConfig, type Config } from '../config/config.js';
 import {
   firePreToolUseHook,
@@ -675,18 +676,22 @@ export class ManagedToolRuntime {
       const raw = await entry.invocation.execute(
         signal,
         (output) => this.progress(entry, output),
-        this.config.getShellExecutionConfig(),
+        {
+          ...this.config.getShellExecutionConfig(),
+          requireProcessGroupExit: true,
+        },
       );
       result = {
         executionStatus:
-          isShellResultDisplay(raw.returnDisplay) &&
+          raw.executionStatus ??
+          (isShellResultDisplay(raw.returnDisplay) &&
           raw.returnDisplay.outcome === 'cancelled'
             ? 'cancelled'
             : raw.error
               ? signal.aborted
                 ? 'cancelled'
                 : 'error'
-              : 'success',
+              : 'success'),
       };
       try {
         result.result = structuredClone({
@@ -913,16 +918,22 @@ export async function createBuiltinManagedToolRuntime(
     { WriteFileTool },
     { EditTool },
     { NotebookEditTool },
+    { ShellTool },
     { GlobTool },
     { LSTool },
+    { GrepTool },
+    { RipGrepTool },
     { ZoomImageTool },
   ] = await Promise.all([
     import('./read-file.js'),
     import('./write-file.js'),
     import('./edit.js'),
     import('./notebook-edit.js'),
+    import('./shell.js'),
     import('./glob.js'),
     import('./ls.js'),
+    import('./grep.js'),
+    import('./ripGrep.js'),
     import('./zoom-image.js'),
   ]);
   const registry = config.getToolRegistry();
@@ -957,6 +968,7 @@ export async function createBuiltinManagedToolRuntime(
     WriteFileTool,
     EditTool,
     NotebookEditTool,
+    ShellTool,
     GlobTool,
     LSTool,
     ZoomImageTool,
@@ -964,6 +976,29 @@ export async function createBuiltinManagedToolRuntime(
     (Constructor) => Constructor !== LSTool || toolConfig.isLsToolEnabled(),
   );
   const revision = randomUUID();
+  const admittedGrep = registry.getTool(GrepTool.Name);
+  let grep: AnyDeclarativeTool | undefined;
+  if (
+    admittedGrep?.constructor === GrepTool ||
+    admittedGrep?.constructor === RipGrepTool
+  ) {
+    let useRipgrep = false;
+    if (toolConfig.getUseRipgrep()) {
+      try {
+        useRipgrep = await canUseRipgrep(toolConfig.getUseBuiltinRipgrep(), {
+          requireProcessGroupExit: true,
+          cwd: toolConfig.getTargetDir(),
+        });
+      } catch (error) {
+        if (
+          (error as NodeJS.ErrnoException).code ===
+          'ERR_OWNED_COMMAND_UNSUPPORTED'
+        )
+          throw error;
+      }
+    }
+    grep = useRipgrep ? new RipGrepTool(toolConfig) : new GrepTool(toolConfig);
+  }
   const boundTools =
     toolConfig === config
       ? undefined
@@ -985,6 +1020,10 @@ export async function createBuiltinManagedToolRuntime(
           const tool = config.getToolRegistry().getTool(Constructor.Name);
           return tool?.constructor === Constructor ? [tool] : [];
         })),
+      ...(grep &&
+      config.getToolRegistry().getTool(GrepTool.Name) === admittedGrep
+        ? [grep]
+        : []),
     ],
     () => revision,
     fileHistory,

@@ -735,3 +735,23 @@ describe('createWorkspaceRegistry', () => {
     expect(sessionOwnerIndex.getWorkspaceCwds('fallback')).toEqual([]);
   });
 });
+
+describe('workspace generation signal', () => {
+  it('notifies once with the same rejection used by admission', () => {
+    const guard = createWorkspaceGenerationGuard();
+    const reasons: unknown[] = [];
+    guard.signal.addEventListener('abort', () =>
+      reasons.push(guard.signal.reason),
+    );
+    expect(guard.signal.aborted).toBe(false);
+    guard.assertOpen();
+    guard.close();
+    guard.close();
+    expect(guard.closed).toBe(true);
+    expect(reasons).toEqual([guard.signal.reason]);
+    expect(guard.signal.reason).toMatchObject({
+      code: 'workspace_generation_closed',
+    });
+    expect(() => guard.assertOpen()).toThrow(guard.signal.reason);
+  });
+});

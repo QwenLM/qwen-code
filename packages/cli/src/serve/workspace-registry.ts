@@ -71,21 +71,23 @@ export class WorkspaceGenerationClosedError extends Error {
 
 export interface WorkspaceGenerationGuard {
   readonly closed: boolean;
+  readonly signal: AbortSignal;
   assertOpen(): void;
   close(): void;
 }
 
 export function createWorkspaceGenerationGuard(): WorkspaceGenerationGuard {
-  let closed = false;
+  const controller = new AbortController();
   return {
+    signal: controller.signal,
     get closed() {
-      return closed;
+      return controller.signal.aborted;
     },
     assertOpen() {
-      if (closed) throw new WorkspaceGenerationClosedError();
+      if (controller.signal.aborted) throw controller.signal.reason;
     },
     close() {
-      closed = true;
+      controller.abort(new WorkspaceGenerationClosedError());
     },
   };
 }

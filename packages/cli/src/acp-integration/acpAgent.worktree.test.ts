@@ -84,7 +84,10 @@ vi.mock('./acp-output.js', () => ({
   }),
 }));
 
-vi.mock('@qwen-code/acp-bridge/ndJsonStream', () => ({
+vi.mock('@qwen-code/acp-bridge/ndJsonStream', async (importOriginal) => ({
+  ...(await importOriginal<
+    typeof import('@qwen-code/acp-bridge/ndJsonStream')
+  >()),
   ndJsonStream: vi.fn().mockReturnValue({}),
 }));
 
@@ -121,6 +124,12 @@ vi.mock('../peerMessaging/peer-messaging.js', () => ({
   PeerMessaging: { start: vi.fn() },
 }));
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
+  createBuiltinManagedToolRuntime: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).createBuiltinManagedToolRuntime,
+  SESSION_EXECUTION_ENGINE_META_KEY: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).SESSION_EXECUTION_ENGINE_META_KEY,
   registerSession: vi.fn(),
   createDebugLogger: () => ({
     debug: vi.fn(),
@@ -243,6 +252,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
     acquire: vi.fn(),
     release: vi.fn(),
     shutdown: vi.fn().mockResolvedValue(undefined),
+    drainAll: vi.fn().mockResolvedValue({ drained: 0, forced: 0, errors: [] }),
     on: vi.fn(),
     off: vi.fn(),
   })),
@@ -408,6 +418,7 @@ describe('QwenAgent loadSession — Phase C worktree context restore', () => {
       getContentGeneratorConfig: vi.fn().mockReturnValue({}),
       getApprovalMode: vi.fn().mockReturnValue('default'),
       getSessionId: vi.fn().mockReturnValue(SESSION_ID),
+      getSessionExecutionEngine: vi.fn().mockReturnValue('legacy'),
       getTargetDir: vi.fn().mockReturnValue('/fake/project'),
       getAuthType: vi.fn().mockReturnValue('api-key'),
       getAllConfiguredModels: vi.fn().mockReturnValue([]),
@@ -465,6 +476,7 @@ describe('QwenAgent loadSession — Phase C worktree context restore', () => {
 
     mockConfig = {
       initialize: vi.fn().mockResolvedValue(undefined),
+      shutdown: vi.fn().mockResolvedValue(undefined),
       waitForMcpReady: vi.fn().mockResolvedValue(undefined),
       getHookSystem: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(false),

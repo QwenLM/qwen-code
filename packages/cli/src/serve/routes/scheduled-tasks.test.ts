@@ -294,6 +294,7 @@ function closeGenerationDuringCronCommit(): WorkspaceRuntime['generationGuard'] 
   let open = true;
   let checks = 0;
   return {
+    signal: new AbortController().signal,
     get closed() {
       return !open;
     },
@@ -341,6 +342,7 @@ describe('scheduled-tasks routes', () => {
     await teardown(h);
     let generationOpen = true;
     h = await makeHarness(true, {
+      signal: new AbortController().signal,
       get closed() {
         return !generationOpen;
       },
@@ -382,6 +384,7 @@ describe('scheduled-tasks routes', () => {
     await teardown(h);
     let checks = 0;
     h = await makeHarness(true, {
+      signal: new AbortController().signal,
       closed: false,
       assertOpen() {
         checks += 1;
@@ -408,6 +411,7 @@ describe('scheduled-tasks routes', () => {
     let checks = 0;
     let generationOpen = true;
     h = await makeHarness(true, {
+      signal: new AbortController().signal,
       get closed() {
         return !generationOpen;
       },
@@ -1519,6 +1523,7 @@ describe('scheduled-tasks routes', () => {
     await teardown(h);
     let generationOpen = true;
     h = await makeHarness(true, {
+      signal: new AbortController().signal,
       get closed() {
         return !generationOpen;
       },
@@ -1978,6 +1983,7 @@ describe('scheduled-tasks routes', () => {
     await teardown(h);
     let checks = 0;
     h = await makeHarness(true, {
+      signal: new AbortController().signal,
       closed: false,
       assertOpen() {
         checks += 1;
@@ -2078,6 +2084,7 @@ describe('scheduled-tasks routes', () => {
     await teardown(h);
     let checks = 0;
     h = await makeHarness(true, {
+      signal: new AbortController().signal,
       closed: false,
       assertOpen() {
         checks += 1;
@@ -2225,6 +2232,7 @@ describe('scheduled-tasks routes', () => {
     await teardown(h);
     let checks = 0;
     h = await makeHarness(true, {
+      signal: new AbortController().signal,
       closed: false,
       assertOpen() {
         checks += 1;
@@ -2287,6 +2295,7 @@ describe('scheduled-tasks routes', () => {
     await teardown(h);
     let checks = 0;
     h = await makeHarness(true, {
+      signal: new AbortController().signal,
       closed: false,
       assertOpen() {
         checks += 1;
@@ -2406,6 +2415,7 @@ describe('scheduled-tasks routes', () => {
     await teardown(h);
     let checks = 0;
     h = await makeHarness(true, {
+      signal: new AbortController().signal,
       closed: false,
       assertOpen() {
         checks += 1;

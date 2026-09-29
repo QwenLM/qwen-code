@@ -133,9 +133,9 @@ describe('Legacy refusal of Managed-owned transcripts', () => {
     ).rejects.toMatchObject({ code: 'ENOENT' });
 
     const recorder = new ChatRecordingService(config, undefined, false);
-    await expect(recorder.recordExecutionEngine('legacy')).rejects.toThrow(
-      'belongs to managed, cannot record with legacy',
-    );
+    await expect(
+      recorder.recordSessionExecutionEngine('legacy'),
+    ).rejects.toThrow('belongs to managed, cannot record with legacy');
 
     await expect(
       service.renameSession(SESSION_ID, 'renamed on Legacy'),

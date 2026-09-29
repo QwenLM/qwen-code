@@ -6,7 +6,10 @@
 
 import type { Config } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { runForkedAgent, getCacheSafeParams } from '../agents/forkedAgent.js';
+import { runForkedAgent } from '../agents/forkedAgent.js';
+import type { InputModalities } from '../core/contentGenerator.js';
+import type { LlmChat } from '../core/llm-chat.js';
+import { slimCompactionInput } from '../services/compactionInputSlimming.js';
 import { buildFunctionResponseParts } from '../tools/agent/fork-subagent.js';
 import type { Content } from '@google/genai';
 import {
@@ -36,6 +39,18 @@ import {
 } from '../core/environmentContext.js';
 
 const MAX_TOPIC_SUMMARY_CHARS = 280;
+
+export function captureAutoMemoryExtractionHistory(
+  chat: Pick<LlmChat, 'getHistoryTailShallow'>,
+  supportedModalities?: InputModalities,
+): Content[] {
+  return structuredClone(
+    slimCompactionInput(
+      chat.getHistoryTailShallow(40, true),
+      supportedModalities,
+    ).slimmedHistory,
+  );
+}
 
 const debugLogger = createDebugLogger('AUTO_MEMORY_EXTRACTION_AGENT');
 
@@ -298,15 +313,9 @@ function touchedTopicsFromFilePaths(
 export async function runAutoMemoryExtractionByAgent(
   config: Config,
   projectRoot: string,
+  extractionHistory: Content[],
 ): Promise<AutoMemoryExtractionExecutionResult> {
-  const cacheSafe = getCacheSafeParams(config.getSessionId());
-  if (!cacheSafe) {
-    throw new Error(
-      'runAutoMemoryExtractionByAgent: no cache-safe params available; ' +
-        'extraction must run after a completed main turn.',
-    );
-  }
-  const extraHistory = buildAgentHistory(cacheSafe.history);
+  const extraHistory = buildAgentHistory(extractionHistory);
 
   const { topicSummaries, keywordVocabularySnapshot } =
     await buildExistingMemoryContext(projectRoot);

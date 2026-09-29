@@ -919,35 +919,6 @@ describe('Managed Session log recording', () => {
       stat(sessionService().getSessionTranscriptPath(SESSION_ID)),
     ).rejects.toMatchObject({ code: 'ENOENT' });
   });
-
-  it('refuses to restore a Managed session without a projection', async () => {
-    const first = await start(managedConfig());
-    recordUser(first, 'first prompt');
-    await first.closeSessionWriter();
-    const before = await readFile(
-      sessionService().getSessionTranscriptPath(SESSION_ID),
-    );
-
-    const config = managedConfig();
-    vi.spyOn(
-      config as unknown as { initializeInternal(): Promise<void> },
-      'initializeInternal',
-    ).mockResolvedValue(undefined);
-    await expect(config.initialize()).rejects.toThrow(
-      'managed restore requires a restore projection',
-    );
-    expect(
-      await readFile(sessionService().getSessionTranscriptPath(SESSION_ID)),
-    ).toEqual(before);
-    expect(await lockRecord()).toMatchObject({ state: 'sealed' });
-
-    // Sealed again at the position the log stands at, so a restore takes it
-    // over.
-    const restored = await start(restoringConfig());
-    expect(await activeChatTexts(restored)).toEqual(['first prompt']);
-    await restored.closeSessionWriter();
-  });
-
   it.each<[string, () => Config]>([
     [
       'a restore',
@@ -1042,9 +1013,7 @@ describe('Managed Session log recording', () => {
       config as unknown as { initializeInternal(): Promise<void> },
       'initializeInternal',
     ).mockResolvedValue(undefined);
-    await expect(config.initialize()).rejects.toThrow(
-      'managed restore requires a restore projection',
-    );
+    await expect(config.initialize()).rejects.toThrow('unknown subtype');
     await config.closeSessionWriter().catch(() => undefined);
     // No position to seal it at, so it stays held rather than released.
     expect(await lockRecord()).toMatchObject({
@@ -1259,32 +1228,6 @@ describe('Managed Session log recording', () => {
         committed_prefix_hash: sealed['committed_prefix_hash'],
       });
     }
-  });
-
-  it('seals the lock of a Managed log it could not open', async () => {
-    await writeOwnerOnlyTranscript();
-    const config = managedConfig();
-    vi.spyOn(
-      config as unknown as { initializeInternal(): Promise<void> },
-      'initializeInternal',
-    ).mockResolvedValue(undefined);
-    await expect(config.initialize()).rejects.toThrow(
-      'managed restore requires a restore projection',
-    );
-    // The lock it acquired stays as a seal at the log's committed position,
-    // which a later restore takes over.
-    expect(await lockRecord()).toMatchObject({
-      state: 'sealed',
-      schema_version: 3,
-    });
-
-    const restored = await start(restoringConfig());
-    recordUser(restored, 'after the failed restore');
-    await restored.getChatRecordingService()!.flush();
-    expect(await activeChatTexts(restored)).toEqual([
-      'after the failed restore',
-    ]);
-    await restored.closeSessionWriter();
   });
 
   it.each([

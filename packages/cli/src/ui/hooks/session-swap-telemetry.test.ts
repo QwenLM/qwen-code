@@ -209,6 +209,9 @@ function makeFakeEnv() {
     getSessionId: () => currentSessionId,
     getResumedSessionData: () => sessionData,
     getTargetDir: () => '/tmp/project',
+    // The resume hook checks the stored execution engine before swapping;
+    // these sessions are all legacy, so the check always passes.
+    assertCanRestoreSession: vi.fn(),
     startNewSession: (sessionId?: string, data?: ResumedSessionData) => {
       currentSessionId = sessionId ?? currentSessionId;
       sessionData = data;

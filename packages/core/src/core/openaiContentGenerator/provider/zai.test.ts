@@ -27,6 +27,7 @@ function makeProvider(
     ...overrides,
   } as ContentGeneratorConfig;
   const cliConfig = {
+    getRuntimeEnvironment: () => process.env,
     getCliVersion: vi.fn().mockReturnValue('1.0.0'),
   } as unknown as Config;
   return new ZaiOpenAICompatibleProvider(contentGeneratorConfig, cliConfig);
@@ -127,6 +128,7 @@ describe('ZaiOpenAICompatibleProvider', () => {
   // reasoning_effort reshape with no test failure.
   describe('determineProvider routing', () => {
     const cliConfig = {
+      getRuntimeEnvironment: () => process.env,
       getCliVersion: vi.fn().mockReturnValue('1.0.0'),
       getProxy: vi.fn().mockReturnValue(undefined),
     } as unknown as Config;

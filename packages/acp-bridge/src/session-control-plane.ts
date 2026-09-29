@@ -31,6 +31,7 @@ import type {
   ApprovalMode,
   RebuiltSessionArtifactSnapshot,
   TurnResultRecordPayload,
+  SessionExecutionEngine,
 } from '@qwen-code/qwen-code-core';
 import {
   DAEMON_TRACEPARENT_META_KEY,
@@ -52,6 +53,10 @@ import {
   toSessionPrInfo,
   normalizeTurnResultError,
   normalizeSnapshotPayload,
+  parseManagedToolFileHistoryBinding,
+  parseManagedToolFileHistoryPromptId,
+  parseManagedToolFileHistoryState,
+  ManagedToolProtocolError,
   type InvocationContextV1,
   type ShellOutputEvent,
 } from '@qwen-code/qwen-code-core';
@@ -107,6 +112,7 @@ import {
   InvalidSessionScopeError,
   SessionLimitExceededError,
   PromptQueueFullError,
+  PromptIdConflictError,
   WorkspaceMismatchError,
   InvalidClientIdError,
   SessionShellClientRequiredError,
@@ -131,7 +137,6 @@ import {
   StandaloneSessionSpawnError,
   RequestedSessionIdRejectedError,
   ManagedSessionBranchUnsupportedError,
-  WorkspaceChangePartiallyAppliedError,
 } from './bridgeErrors.js';
 import type { BridgeChannelUnavailableReason } from './bridgeErrors.js';
 import {
@@ -144,6 +149,7 @@ import {
 } from './workspacePaths.js';
 import {
   DAEMON_OWNED_STANDALONE_CREATION_KEY,
+  isManagedGatewaySessionSourceType,
   isReservedStandaloneSessionSourceType,
   isScheduledTaskRunSource,
   parseSessionSource,
@@ -180,6 +186,7 @@ import {
   LOAD_REPLAY_PAGE_SIZE_META_KEY,
   LOAD_REPLAY_VERSION,
   MID_TURN_RECONCILIATION_RING_SIZE,
+  MANAGED_SESSION_STORE_META_KEY,
   PROMPT_CANCEL_METHOD,
   REQUESTED_SESSION_ID_META_KEY,
   SESSION_INITIALIZATION_DEADLINE_META_KEY,
@@ -189,6 +196,7 @@ import {
   activeWorkCloseRetryDelayMs,
   isValidTrustedModelPrompt,
   sessionCloseDrainBudgetMs,
+  parseBridgeManagedSessionStore,
 } from './bridgeTypes.js';
 import type {
   ChannelWorkExclusions,
@@ -237,9 +245,12 @@ import type {
   BridgeWorkspaceGenerationStreamEvent,
   BridgePromptContentBlock,
   BridgePromptRequest,
+  BridgeManagedRuntimeToolExecuteResult,
+  BridgeManagedRuntimeToolManifest,
   ChildHeapReport,
   RuntimeMcpServerAddResult,
   RuntimeMcpServerRemoveResult,
+  BridgeManagedSessionStore,
 } from './bridgeTypes.js';
 import {
   isSessionAttachmentReference,
@@ -255,7 +266,6 @@ import type {
   BridgeOptions,
   BridgeSessionLifecycleEvent,
   BridgeTelemetry,
-  BridgeTelemetryAttributes,
   LiveScreenContextCaptureHandler,
   LiveSpeakToUserHandler,
   LiveTaskToolRequestHandler,
@@ -653,10 +663,9 @@ interface ChannelInfo {
    */
   unsettledAbandonedRestores: Set<string>;
   /**
-   * Abandoned restore ids that outlived their settlement grace. Fresh session
-   * work is refused while this is non-empty so the channel can drain and be
-   * recycled; existing sessions keep working on a single-factory Bridge, while
-   * a paired Bridge drains and retires the channel.
+   * Abandoned restore ids that outlived their settlement grace. Existing
+   * sessions keep working; fresh session work is refused while this is
+   * non-empty so the channel can drain and be recycled.
    */
   overdueAbandonedRestores: Set<string>;
   /** Grace timers armed at restore abandonment, keyed by session id. */
@@ -669,48 +678,13 @@ interface ChannelInfo {
   newSessionSettlementTimers: Map<symbol, NodeJS.Timeout>;
   /** A late-created session could not be closed deterministically. */
   newSessionCleanupFailed: boolean;
-  /**
-   * No fresh session work may enter. Existing sessions stay usable on a
-   * single-factory Bridge; a paired Bridge drains and retires the channel.
-   */
+  /** Existing sessions stay usable, but no fresh session work may enter. */
   isQuarantined: boolean;
-  /** Paired Bridges only: the quarantine episode this channel is in. */
-  quarantine?: ChannelQuarantine;
-  /** Revisions of workspace changes this channel did not acknowledge. */
-  workspaceChangesMissing?: Set<number>;
-  /**
-   * Revision of a missing change that tightened permissions. A session whose
-   * restore or creation lands on this channel afterwards is fenced too.
-   */
-  workspaceChangeFence?: number;
-  /**
-   * The user-language change last sent to this channel, settled either way,
-   * so a session request on a new Managed channel waits for it rather than
-   * sending it again.
-   */
-  userLanguageDelivery?: Promise<void>;
-}
-
-/**
- * A paired channel's quarantine, from the moment it first stops taking fresh
- * sessions until its process tree is confirmed gone. While it lasts the
- * channel admits no new prompt, message from another session or side request,
- * and a background notification turn only until its termination starts; its
- * engine admits no fresh session — even after termination starts, because a
- * child that has not exited may still hold work nobody can cancel.
- */
-interface ChannelQuarantine {
-  readonly startedAt: number;
-  /** The first cause, kept for refusals once the flags no longer say. */
-  readonly reason: BridgeChannelUnavailableReason;
-  /** Armed once at the start; activity never re-arms it. */
-  drainTimer?: NodeJS.Timeout;
-  exitTimer?: NodeJS.Timeout;
-  /** Not confirmed gone one budget after termination; operators must act. */
-  exitUnverified: boolean;
 }
 
 interface SessionEntry {
+  readonly executionEngine?: SessionExecutionEngine;
+  readonly managedSessionStore?: BridgeManagedSessionStore;
   mcpAppCalls?: Map<string, { clientId: string; cancel: () => void }>;
   sessionId: string;
   workspaceCwd: string;
@@ -774,12 +748,6 @@ interface SessionEntry {
   deferredRestoreAskUserQuestionPrompts?: Map<string, string>;
   pendingAgentNotificationCount: number;
   /**
-   * Requests other than turns that the child is still answering for this
-   * Session: content generation, side questions, recaps, fork launches,
-   * workflow actions and goal control. A quarantine drain waits for them.
-   */
-  sideRequestCount: number;
-  /**
    * Optional prompt terminal ledger sink (injected via BridgeOptions).
    * Best-effort synchronous appends; absence keeps pre-existing behavior.
    */
@@ -831,6 +799,33 @@ interface SessionEntry {
    * tail of `sendPrompt`.
    */
   pendingPromptList: PendingPromptEntry[];
+  continuationAdmissions: Map<
+    string,
+    {
+      recoveryKey: string | null;
+      result: {
+        accepted: true;
+        interruption: 'interrupted_prompt' | 'interrupted_turn';
+        promptId: string;
+        lastEventId: number;
+        eventEpoch: string;
+      };
+    }
+  >;
+  /**
+   * Admitted `promptId` → original `sendPrompt` result. A retry with the
+   * same fingerprint returns this promise and must not abort the original
+   * turn; a different payload is `PromptIdConflictError`.
+   */
+  promptAdmissions: Map<
+    string,
+    {
+      fingerprint: string;
+      result: Promise<PromptResponse>;
+      lastEventId: number;
+      eventEpoch: string;
+    }
+  >;
   /** Recent formal terminals bridge-published before transcript visibility. */
   terminalTurnStatuses: Map<string, BridgeTurnStatus>;
   /**
@@ -959,11 +954,6 @@ interface SessionEntry {
   hasRunningBackgroundTasks?: boolean;
   backgroundAdmissionEpoch?: number;
   backgroundStartsSuspended?: boolean;
-  /**
-   * Revision of a missing change that tightened permissions: the session's
-   * turns are cancelled and its permission requests refused.
-   */
-  workspaceChangeFence?: number;
   activePromptTerminal?: {
     promptId: string;
     promise: Promise<void>;
@@ -1078,6 +1068,28 @@ interface SessionEntry {
    * is pending. Cancelled by `clearPromptSettledClose` when a subscriber
    * reconnects or the session is explicitly closed / killed. */
   promptSettledCloseTimer: ReturnType<typeof setTimeout> | undefined;
+}
+
+function assertManagedSessionStoreBinding(
+  sessionId: string,
+  current: BridgeManagedSessionStore | undefined,
+  requested: BridgeManagedSessionStore | undefined,
+): void {
+  if (
+    (current === undefined && requested === undefined) ||
+    (current !== undefined &&
+      requested !== undefined &&
+      current.baseUrl === requested.baseUrl &&
+      current.tenantId === requested.tenantId &&
+      current.workspaceId === requested.workspaceId &&
+      current.writerId === requested.writerId)
+  ) {
+    return;
+  }
+  throw RequestError.invalidParams(
+    { errorKind: 'managed_session_store_conflict' },
+    `Session "${sessionId}" is already bound to another Managed Session store`,
+  );
 }
 
 function isServeDebugLoggingEnabled(): boolean {
@@ -2291,12 +2303,6 @@ function extractMediaBlocks(
 }
 
 const DEFAULT_INIT_TIMEOUT_MS = 10_000;
-const DEFAULT_QUARANTINE_DRAIN_TIMEOUT_MS = 300_000;
-// A quarantined child is reported as not confirmed gone only after the process
-// registry had time to finish its own termination: its 10s exit deadline plus
-// its state polling. A short initialize budget must not turn a slow but normal
-// release into a call for an operator.
-const QUARANTINE_EXIT_CHECK_FLOOR_MS = 15_000;
 const PERSIST_TIMEOUT_MS = 5_000;
 // Bounded retries for the sub-session `parentSessionId` transcript write on the
 // spawn critical path — a transport/timeout hiccup gets a couple more tries
@@ -2323,6 +2329,7 @@ const DAEMON_CONTINUE_META_KEY = 'qwen.daemon.continueLastTurn';
  */
 const SESSION_RECAP_TIMEOUT_MS = 60_000;
 const SESSION_GENERATION_TIMEOUT_MS = 65_000;
+const MANAGED_RUNTIME_TOOL_TIMEOUT_MS = 10 * 60_000;
 const GENERATION_STREAM_QUEUE_CAPACITY = 128;
 const SESSION_BTW_TIMEOUT_MS = 60_000;
 const SESSION_TRANSCRIPT_TIMEOUT_MS = 60_000;
@@ -2389,52 +2396,6 @@ const DEFAULT_SESSION_IDLE_TIMEOUT_MS = 30 * 60_000;
  * `qwen serve --session-prompt-settled-close-grace-ms` flag. */
 const DEFAULT_SESSION_PROMPT_SETTLED_CLOSE_GRACE_MS = 0;
 
-/** Goal and workflow actions that start work rather than stop or record it. */
-const GOAL_ACTIONS_STARTING_WORK: ReadonlySet<string> = new Set([
-  'create',
-  'replace',
-  'edit',
-  'resume',
-]);
-const WORKFLOW_ACTIONS_STARTING_WORK: ReadonlySet<string> = new Set([
-  'resume',
-  'retry',
-  'rerun',
-  'run-saved',
-  'run-script',
-]);
-
-/** The fresh resource readings of a Bridge's live children, combined. */
-interface ChildResourceTotals {
-  rssBytes: number;
-  cpuPercent: number;
-  ageMs: number;
-  heap?: ChildHeapReport;
-  children: number;
-  heapReported: number;
-}
-
-/**
- * Two children's heap marks as one: each high-water mark keeps its maximum,
- * the way the daemon combines workspaces, and an unknown space seen by either
- * child stays named.
- */
-function maxChildHeap(a: ChildHeapReport, b: ChildHeapReport): ChildHeapReport {
-  return {
-    peakOldGenerationBytes: Math.max(
-      a.peakOldGenerationBytes,
-      b.peakOldGenerationBytes,
-    ),
-    peakLiveSetBytes: Math.max(a.peakLiveSetBytes, b.peakLiveSetBytes),
-    peakTotalHeapBytes: Math.max(a.peakTotalHeapBytes, b.peakTotalHeapBytes),
-    majorGcCount: Math.max(a.majorGcCount, b.majorGcCount),
-    majorGcMs: Math.max(a.majorGcMs, b.majorGcMs),
-    unclassifiedSpaceNames: [
-      ...new Set([...a.unclassifiedSpaceNames, ...b.unclassifiedSpaceNames]),
-    ],
-  };
-}
-
 export function createSessionControlPlane(
   opts: BridgeOptions,
   createHarness: typeof createChannelHarness,
@@ -2488,29 +2449,6 @@ export function createSessionControlPlane(
   } else {
     maxSessions = opts.maxSessions;
   }
-  /**
-   * Why a channel refuses fresh sessions, if it does. A paired quarantine
-   * outlives its flags — an overdue settlement can still clear, and the flags
-   * go with the channel once it exits — so it falls back to the reason the
-   * episode began with.
-   */
-  const channelUnavailableReason = (
-    ci: ChannelInfo,
-  ): BridgeChannelUnavailableReason | undefined => {
-    if (ci.quarantine?.exitUnverified) return 'channel_exit_unverified';
-    if (ci.isQuarantined) return 'restore_cleanup_failed';
-    if (ci.overdueAbandonedRestores.size > 0) {
-      return 'restore_settlement_overdue';
-    }
-    if (ci.newSessionCleanupFailed) return 'new_session_cleanup_failed';
-    if (ci.overdueAbandonedNewSessions.size > 0) {
-      return 'new_session_settlement_overdue';
-    }
-    if (ci.workspaceChangesMissing?.size) {
-      return 'workspace_change_unacknowledged';
-    }
-    return ci.quarantine?.reason;
-  };
   // Two independent conditions close a channel to NEW session work while
   // leaving its existing sessions usable: cleanup after a timed-out restore
   // failed (we no longer know the child's state), or an abandoned restore
@@ -2518,31 +2456,30 @@ export function createSessionControlPlane(
   // cannot cancel or account for). Both want existing work to drain so the
   // channel can be recycled, so they share one 503 shape and differ by
   // `reason`. Scanned rather than tracked in a single variable, so a second
-  // condemned channel can never silently displace the first. On a paired
-  // Bridge the same conditions start a quarantine with a drain deadline; see
-  // `syncChannelQuarantine`.
+  // condemned channel can never silently displace the first.
   const freshSessionBlocker = (
     engine: BridgeExecutionEngine | undefined,
   ):
     | { channel: ChannelInfo; reason: BridgeChannelUnavailableReason }
     | undefined => {
-    for (const ci of [...channelInfos(), ...releasingQuarantines]) {
+    for (const ci of channelInfos()) {
       if (executionEngines && ci.harness.executionEngine !== engine) continue;
-      // A paired quarantine outlives the channel's termination: until its
-      // process tree is confirmed gone, the child may still hold work for its
-      // sessions, so no fresh session of the same engine may start beside it.
-      if (ci.harness.isDying && !ci.quarantine) continue;
-      const reason = channelUnavailableReason(ci);
-      if (reason !== undefined) return { channel: ci, reason };
+      if (ci.harness.isDying) continue;
+      if (ci.isQuarantined) {
+        return { channel: ci, reason: 'restore_cleanup_failed' };
+      }
+      if (ci.overdueAbandonedRestores.size > 0) {
+        return { channel: ci, reason: 'restore_settlement_overdue' };
+      }
+      if (ci.newSessionCleanupFailed) {
+        return { channel: ci, reason: 'new_session_cleanup_failed' };
+      }
+      if (ci.overdueAbandonedNewSessions.size > 0) {
+        return { channel: ci, reason: 'new_session_settlement_overdue' };
+      }
     }
     return undefined;
   };
-  const quarantineRetryAfterSeconds = (
-    reason: BridgeChannelUnavailableReason,
-  ): number =>
-    reason.startsWith('new_session_')
-      ? abandonedNewSessionRetryAfterSeconds
-      : abandonedRestoreRetryAfterSeconds;
   const assertFreshSessionsAvailable = (
     engine: BridgeExecutionEngine | undefined,
   ): void => {
@@ -2551,23 +2488,9 @@ export function createSessionControlPlane(
     if (blocker) {
       throw new BridgeChannelQuarantinedError(
         blocker.reason,
-        quarantineRetryAfterSeconds(blocker.reason),
-      );
-    }
-  };
-  /**
-   * Q3 of #12737: a quarantined paired channel admits no new prompt. Turns
-   * already running may settle; anything new waits until the session is
-   * restored on a fresh channel of its engine.
-   */
-  const assertChannelAdmitsPrompts = (entry: SessionEntry): void => {
-    const owner = channelInfoForEntry(entry);
-    const reason = owner?.quarantine && channelUnavailableReason(owner);
-    if (reason) {
-      throw new BridgeChannelQuarantinedError(
-        reason,
-        quarantineRetryAfterSeconds(reason),
-        'prompts',
+        blocker.reason.startsWith('new_session_')
+          ? abandonedNewSessionRetryAfterSeconds
+          : abandonedRestoreRetryAfterSeconds,
       );
     }
   };
@@ -2750,17 +2673,6 @@ export function createSessionControlPlane(
   const newSessionSettlementGraceMs = initTimeoutMs;
   const abandonedNewSessionRetryAfterSeconds =
     restoreRetryAfterSeconds(initTimeoutMs);
-  const quarantineDrainTimeoutMs =
-    opts.quarantineDrainTimeoutMs ?? DEFAULT_QUARANTINE_DRAIN_TIMEOUT_MS;
-  if (
-    !Number.isInteger(quarantineDrainTimeoutMs) ||
-    quarantineDrainTimeoutMs <= 0 ||
-    quarantineDrainTimeoutMs > 2_147_483_647
-  ) {
-    throw new TypeError(
-      `Invalid quarantineDrainTimeoutMs: ${quarantineDrainTimeoutMs}. Must be a positive integer within the supported timer range.`,
-    );
-  }
   let localRuntimeEpoch = 0;
   const runtimeEpochSource = opts.runtimeEpochSource ?? {
     current: () => localRuntimeEpoch,
@@ -3495,8 +3407,6 @@ export function createSessionControlPlane(
         entry.activeWorkCloseRetryAt = null;
       }
     }
-    // Background tasks and held work finish only in these reports.
-    drainQuarantinedChannel(info);
   }
 
   /**
@@ -3606,9 +3516,7 @@ export function createSessionControlPlane(
       ci.unsettledAbandonedRestores.size > 0 ||
       ci.unsettledAbandonedNewSessions.size > 0 ||
       ci.isQuarantined ||
-      ci.newSessionCleanupFailed ||
-      // A paired quarantine retires the channel even after its cause clears.
-      ci.quarantine !== undefined
+      ci.newSessionCleanupFailed
     );
   }
 
@@ -3617,264 +3525,8 @@ export function createSessionControlPlane(
       ci.isQuarantined ||
       ci.overdueAbandonedRestores.size > 0 ||
       ci.newSessionCleanupFailed ||
-      ci.overdueAbandonedNewSessions.size > 0 ||
-      // A paired quarantine stays condemned after an overdue cause clears.
-      ci.quarantine !== undefined
+      ci.overdueAbandonedNewSessions.size > 0
     );
-  }
-
-  // Paired quarantines whose root process exited while the registry has not
-  // released its process tree yet. They keep their engine closed.
-  const releasingQuarantines = new Set<ChannelInfo>();
-
-  /**
-   * Start a paired channel's quarantine when it first stops taking fresh
-   * sessions; every site that sets a cause calls this afterwards.
-   *
-   * Every current cause means the child holds work the daemon can no longer
-   * account for, so the quarantine never ends before the channel does: its
-   * settled sessions are closed now and again as each one settles, it retires
-   * as soon as it drains, and the drain deadline bounds the wait.
-   */
-  function syncChannelQuarantine(ci: ChannelInfo): void {
-    if (!executionEngines || !harness.has(ci.harness)) return;
-    if (!ci.quarantine) {
-      const reason = channelUnavailableReason(ci);
-      if (reason === undefined || ci.harness.isDying) return;
-      startChannelQuarantine(ci, reason);
-    }
-    drainQuarantinedChannel(ci);
-  }
-
-  function quarantineTelemetry(
-    ci: ChannelInfo,
-    episode: ChannelQuarantine,
-  ): BridgeTelemetryAttributes {
-    return {
-      'qwen-code.daemon.acp_channel.id': ci.id,
-      'qwen-code.daemon.acp_channel.execution_engine':
-        ci.harness.executionEngine ?? 'legacy',
-      'qwen-code.daemon.acp_channel.quarantine_reason': episode.reason,
-      'qwen-code.daemon.acp_channel.quarantine_age_ms':
-        Date.now() - episode.startedAt,
-      'qwen-code.daemon.acp_channel.session_count': ci.sessionIds.size,
-    };
-  }
-
-  function startChannelQuarantine(
-    ci: ChannelInfo,
-    reason: BridgeChannelUnavailableReason,
-  ): void {
-    const episode: ChannelQuarantine = {
-      startedAt: Date.now(),
-      reason,
-      exitUnverified: false,
-    };
-    episode.drainTimer = setTimeout(
-      () => onChannelQuarantineDeadline(ci, episode),
-      quarantineDrainTimeoutMs,
-    );
-    episode.drainTimer.unref();
-    ci.quarantine = episode;
-    writeStderrLine(
-      `qwen serve: quarantining ${ci.harness.executionEngine ?? 'legacy'} ACP channel ${ci.id} (${reason}); ` +
-        `refusing new sessions and turns, terminating it in ${quarantineDrainTimeoutMs}ms unless it drains first`,
-    );
-    telemetry.event('channel.quarantine.started', {
-      ...quarantineTelemetry(ci, episode),
-      'qwen-code.daemon.acp_channel.quarantine_drain_timeout_ms':
-        quarantineDrainTimeoutMs,
-    });
-  }
-
-  /**
-   * The root process exiting ends the channel, but the quarantine ends only
-   * once the registry has released the process tree: until then descendants
-   * may still hold the sessions' work, so the engine stays closed.
-   */
-  function finishQuarantineAtExit(ci: ChannelInfo): void {
-    const episode = ci.quarantine;
-    if (!episode) return;
-    const released = ci.channel.registryReleased;
-    if (!released) {
-      endChannelQuarantine(ci);
-      return;
-    }
-    if (episode.drainTimer) {
-      clearTimeout(episode.drainTimer);
-      episode.drainTimer = undefined;
-    }
-    releasingQuarantines.add(ci);
-    armQuarantineExitCheck(ci, episode);
-    void released.then(() => endChannelQuarantine(ci));
-  }
-
-  function endChannelQuarantine(ci: ChannelInfo): void {
-    const episode = ci.quarantine;
-    if (!episode) return;
-    ci.quarantine = undefined;
-    releasingQuarantines.delete(ci);
-    if (episode.drainTimer) clearTimeout(episode.drainTimer);
-    if (episode.exitTimer) clearTimeout(episode.exitTimer);
-    if (shuttingDown && !episode.exitUnverified) return;
-    writeStderrLine(
-      `qwen serve: quarantine of ACP channel ${ci.id} ended after ${Date.now() - episode.startedAt}ms; its process is gone`,
-    );
-    telemetry.event('channel.quarantine.ended', {
-      ...quarantineTelemetry(ci, episode),
-      'qwen-code.daemon.acp_channel.quarantine_exit_unverified':
-        episode.exitUnverified,
-    });
-  }
-
-  /**
-   * The deadline starts cleanup; it proves nothing about the process. Running
-   * turns are asked to cancel and the channel is terminated with the ordinary
-   * escalation, but sessions, ids and admission stay allocated until the exit
-   * handler runs.
-   */
-  function onChannelQuarantineDeadline(
-    ci: ChannelInfo,
-    episode: ChannelQuarantine,
-  ): void {
-    if (ci.quarantine !== episode || shuttingDown) return;
-    episode.drainTimer = undefined;
-    const unsettled = Array.from(ci.sessionIds).flatMap((sessionId) => {
-      const entry = byId.get(sessionId);
-      return entry?.channel === ci.channel && !entryIsSettled(entry)
-        ? [entry]
-        : [];
-    });
-    writeStderrLine(
-      `qwen serve: quarantined ACP channel ${ci.id} reached its ${quarantineDrainTimeoutMs}ms drain deadline; ` +
-        `cancelling ${unsettled.length} unsettled session(s) and terminating it`,
-    );
-    telemetry.event('channel.quarantine.deadline', {
-      ...quarantineTelemetry(ci, episode),
-      'qwen-code.daemon.acp_channel.unsettled_session_count': unsettled.length,
-    });
-    for (const entry of unsettled) {
-      void bridgeApi.cancelSession(entry.sessionId).catch(() => undefined);
-    }
-    // Terminating the channel starts its exit check (see
-    // `onChannelTerminationStart`).
-    void harness.killChannelWithLog(ci.harness, 'quarantine drain deadline');
-  }
-
-  /**
-   * A child still not confirmed gone one budget after its termination began
-   * (never less than the registry's own termination window) is reported as
-   * needing an operator; its engine stays closed meanwhile. Armed when a kill
-   * or reap starts terminating the channel (the deadline, a drained channel's
-   * reap, a failed close's recovery), when its transport fails, or when its
-   * root exits before the registry releases the tree.
-   */
-  function armQuarantineExitCheck(
-    ci: ChannelInfo,
-    episode: ChannelQuarantine,
-  ): void {
-    if (ci.quarantine !== episode || episode.exitTimer) return;
-    if (episode.exitUnverified) return;
-    const exitCheckMs = Math.max(initTimeoutMs, QUARANTINE_EXIT_CHECK_FLOOR_MS);
-    episode.exitTimer = setTimeout(() => {
-      episode.exitTimer = undefined;
-      if (ci.quarantine !== episode) return;
-      episode.exitUnverified = true;
-      const engine = ci.harness.executionEngine ?? 'legacy';
-      writeStderrLine(
-        `qwen serve: quarantined ${engine} ACP channel ${ci.id} is not confirmed gone ${exitCheckMs}ms after termination; ` +
-          `operator action required — new ${engine} sessions stay refused until it is`,
-      );
-      telemetry.event(
-        'channel.quarantine.exit_unverified',
-        quarantineTelemetry(ci, episode),
-      );
-    }, exitCheckMs);
-    episode.exitTimer.unref();
-  }
-
-  /**
-   * Whether a quarantined channel may run a background notification turn. A
-   * report of background work is admitted whether that work began before the
-   * quarantine or was started by a turn admitted during it: the work already
-   * exists, and refusing its report never retires the channel sooner, because
-   * the child keeps the report queued and keeps reporting it as held work. The
-   * drain deadline, not a refusal, bounds how long admitted turns keep the
-   * channel busy. A message from another session is new input and is refused,
-   * and so is every turn once the channel's termination has begun. A session
-   * fenced by a tightening change is refused before this is asked.
-   */
-  function quarantineAdmitsBackgroundTurn(
-    ci: ChannelInfo,
-    turn: BackgroundNotificationTurn,
-  ): boolean {
-    return turn.kind !== 'peer' && !ci.harness.isDying;
-  }
-
-  /**
-   * Whether a Session on a quarantined channel has nothing left that its
-   * channel's termination would interrupt: no queued or running prompt, no
-   * automatic turn, no notification or side request in flight, no background
-   * task and no work the child reports holding.
-   */
-  function entryIsSettled(entry: SessionEntry): boolean {
-    return (
-      !entryHasLocalWork(entry) &&
-      !entry.promptActive &&
-      !entry.goalTurnActive &&
-      entry.sideRequestCount === 0 &&
-      entry.hasRunningBackgroundTasks !== true &&
-      !childReportsHeldWork(entry)
-    );
-  }
-
-  /**
-   * Close the settled Sessions of a quarantined channel. Each close is
-   * authorized locally and bounded, as on any condemned channel; closing the
-   * last one lets the ordinary reap retire the channel before its deadline.
-   */
-  function drainQuarantinedChannel(ci: ChannelInfo): void {
-    if (!ci.quarantine || ci.harness.isDying) return;
-    for (const sessionId of Array.from(ci.sessionIds)) {
-      const entry = byId.get(sessionId);
-      if (
-        !entry ||
-        entry.channel !== ci.channel ||
-        isClosingOrAuthorizingClose(entry) ||
-        resetPendingSessions.has(sessionId) ||
-        ci.pendingRestoreIds.has(sessionId) ||
-        !entryIsSettled(entry)
-      ) {
-        continue;
-      }
-      void closeIfChildUnheld(entry, {
-        trigger: 'channel_quarantine',
-        closeReason: 'channel_quarantined',
-      });
-    }
-    void harness.reapPendingEmptyChannel(ci.harness);
-  }
-
-  function drainQuarantinedChannelFor(entry: SessionEntry): void {
-    const owner = channelInfoForEntry(entry);
-    if (owner) drainQuarantinedChannel(owner);
-  }
-
-  /**
-   * Admit a request for a Session that is not a turn but still starts work in
-   * the child, the way a prompt is admitted, and count it until it answers so
-   * a quarantine drain does not close the Session under it.
-   */
-  function beginSideRequest(entry: SessionEntry): () => void {
-    assertChannelAdmitsPrompts(entry);
-    entry.sideRequestCount += 1;
-    let ended = false;
-    return () => {
-      if (ended) return;
-      ended = true;
-      entry.sideRequestCount = Math.max(0, entry.sideRequestCount - 1);
-      drainQuarantinedChannelFor(entry);
-    };
   }
 
   /**
@@ -3911,9 +3563,7 @@ export function createSessionControlPlane(
    * Existing sessions keep running, and once they drain the channel is reaped,
    * which closes the transport and finally releases the hung request. We
    * deliberately do NOT force-kill a channel that still has live siblings —
-   * that is the failure this whole change exists to remove. A paired Bridge
-   * bounds the wait instead: its quarantine drain deadline terminates the
-   * channel (see `syncChannelQuarantine`).
+   * that is the failure this whole change exists to remove.
    */
   function armRestoreSettlementGrace(
     ci: ChannelInfo,
@@ -3938,7 +3588,6 @@ export function createSessionControlPlane(
         'qwen-code.daemon.acp_channel.id': ci.id,
         'session.id': sessionId,
       });
-      syncChannelQuarantine(ci);
       void harness.reapPendingEmptyChannel(ci.harness, {
         ignoreRestoreId: sessionId,
       });
@@ -3969,7 +3618,6 @@ export function createSessionControlPlane(
         'qwen-code.daemon.acp_channel.id': ci.id,
         ...(requestedSessionId ? { 'session.id': requestedSessionId } : {}),
       });
-      syncChannelQuarantine(ci);
       void harness.reapPendingEmptyChannel(ci.harness);
     }, newSessionSettlementGraceMs);
     timer.unref();
@@ -3993,219 +3641,6 @@ export function createSessionControlPlane(
     fn: () => Promise<T>,
   ): Promise<T> {
     return harness.withWorkspaceControl(ci.harness, fn, false);
-  }
-
-  interface WorkspaceChange {
-    kind:
-      | 'permissions'
-      | 'settings'
-      | 'sessionWorkflow'
-      | 'modelProviders'
-      | 'skills';
-    tightening: boolean;
-    /** Only the workspace-control engine persists it. */
-    persistedByControl: boolean;
-    payload: Record<string, unknown>;
-  }
-
-  // Workspace commands that change what live sessions may do. A paired Bridge
-  // also sends each of them to every live channel of another engine.
-  function sessionAffectingChange(
-    method: string,
-    params: Record<string, unknown> | undefined,
-  ): WorkspaceChange | undefined {
-    switch (method) {
-      case 'qwen/permissions/setRules':
-        return {
-          kind: 'permissions',
-          tightening: true,
-          persistedByControl: true,
-          payload: {},
-        };
-      case SERVE_CONTROL_EXT_METHODS.workspaceReload:
-        return {
-          kind: 'settings',
-          tightening: true,
-          persistedByControl: false,
-          payload: {},
-        };
-      case SERVE_CONTROL_EXT_METHODS.workspaceSessionWorkflow:
-        return {
-          kind: 'sessionWorkflow',
-          tightening: params?.['enabled'] === true,
-          persistedByControl: false,
-          payload: { enabled: params?.['enabled'] },
-        };
-      case SERVE_CONTROL_EXT_METHODS.workspaceModelProvidersReload:
-        return {
-          kind: 'modelProviders',
-          tightening: false,
-          persistedByControl: false,
-          payload: {},
-        };
-      case SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh:
-        return {
-          kind: 'skills',
-          tightening: false,
-          persistedByControl: false,
-          payload: { reason: params?.['reason'] ?? 'all' },
-        };
-      default:
-        return undefined;
-    }
-  }
-
-  let workspaceChangeRevision = 0;
-
-  /** Sends a change to every live channel of another engine; returns the ones that did not acknowledge it. */
-  async function propagateWorkspaceChange(
-    change: WorkspaceChange,
-    timeoutMs: number,
-  ): Promise<{ revision: number; unacknowledged: string[] }> {
-    // Legacy is workspace control. A Legacy channel that replaced a timed-out
-    // one while the command ran has read the current settings itself.
-    const targets = liveChannelInfos().filter(
-      (ci) => ci.harness.executionEngine !== 'legacy',
-    );
-    if (targets.length === 0) {
-      return { revision: workspaceChangeRevision, unacknowledged: [] };
-    }
-    const revision = ++workspaceChangeRevision;
-    const params = {
-      v: 1,
-      revision,
-      kind: change.kind,
-      tightening: change.tightening,
-      cwd: boundWorkspace,
-      ...change.payload,
-    };
-    const acknowledges = (response: unknown): boolean =>
-      isRecord(response) &&
-      response['v'] === 1 &&
-      response['revision'] === revision &&
-      response['acknowledged'] === true;
-    const unacknowledged: string[] = [];
-    await Promise.all(
-      targets.map(async (ci) => {
-        // Sent outside workspace control, like a Managed resource read: a slow
-        // answer quarantines the channel rather than retiring it, so a late
-        // acknowledgement can still end that quarantine.
-        const request = ci.connection.extMethod(
-          SERVE_CONTROL_EXT_METHODS.workspaceChange,
-          params,
-        );
-        try {
-          const response = await withTimeout(
-            Promise.race([request, getChannelClosedReject(ci)]),
-            timeoutMs,
-            SERVE_CONTROL_EXT_METHODS.workspaceChange,
-          );
-          if (acknowledges(response)) return;
-        } catch (error) {
-          // An exited channel's sessions are gone, and a fresh session starts
-          // a new channel that reads current settings.
-          if (error instanceof BridgeChannelClosedError) return;
-          if (error instanceof BridgeTimeoutError) {
-            void request.then(
-              (response) => {
-                if (acknowledges(response)) {
-                  acknowledgeMissingWorkspaceChange(ci, revision);
-                }
-              },
-              () => undefined,
-            );
-          }
-        }
-        unacknowledged.push(ci.id);
-        refuseUnacknowledgedChannel(ci, revision, change.tightening);
-      }),
-    );
-    return { revision, unacknowledged };
-  }
-
-  /**
-   * Quarantines the channel (#12737 Q2/Q3): it takes no fresh sessions, its
-   * sessions take no new work, settled ones are closed, and it retires by the
-   * drain deadline unless a late acknowledgement ends the quarantine first. A
-   * change that tightens permissions also cancels running turns now, refuses
-   * permission requests and background turns, and cancels Goal turns the child
-   * reports later, including on sessions that register on the channel later.
-   */
-  function refuseUnacknowledgedChannel(
-    ci: ChannelInfo,
-    revision: number,
-    tightening: boolean,
-  ): void {
-    (ci.workspaceChangesMissing ??= new Set()).add(revision);
-    writeStderrLine(
-      `qwen serve: ACP channel ${ci.id} did not acknowledge workspace change ${revision}` +
-        (tightening ? '; cancelling its running turns' : ''),
-    );
-    if (tightening) {
-      ci.workspaceChangeFence = revision;
-      for (const sessionId of Array.from(ci.sessionIds)) {
-        const entry = byId.get(sessionId);
-        if (!entry || entry.channel !== ci.channel) continue;
-        entry.workspaceChangeFence = revision;
-        if (
-          entry.promptActive ||
-          entry.backgroundTurn ||
-          entry.goalTurnActive
-        ) {
-          void bridgeApi.cancelSession(sessionId).catch(() => undefined);
-        }
-      }
-    }
-    syncChannelQuarantine(ci);
-  }
-
-  /**
-   * A late, exact acknowledgement of every change a channel missed lifts its
-   * permission fence, because the engine now holds those changes, and ends its
-   * quarantine before the drain deadline, as #12737 Q3 allows. It never ends
-   * an episode that began for another cause or that another cause has joined,
-   * nor one whose channel is already terminating (the deadline starts that);
-   * the fence lifts even then. Sessions already closed stay closed.
-   */
-  function acknowledgeMissingWorkspaceChange(
-    ci: ChannelInfo,
-    revision: number,
-  ): void {
-    const missing = ci.workspaceChangesMissing;
-    if (!missing?.delete(revision) || missing.size > 0) return;
-    ci.workspaceChangesMissing = undefined;
-    const fenced = ci.workspaceChangeFence !== undefined;
-    ci.workspaceChangeFence = undefined;
-    for (const sessionId of ci.sessionIds) {
-      const entry = byId.get(sessionId);
-      if (entry?.channel === ci.channel) delete entry.workspaceChangeFence;
-    }
-    const episode = ci.quarantine;
-    // With this cause gone, any other one, or the one the episode began with,
-    // is what the channel reports now.
-    if (
-      !episode ||
-      ci.harness.isDying ||
-      channelUnavailableReason(ci) !== 'workspace_change_unacknowledged'
-    ) {
-      if (episode && fenced) {
-        writeStderrLine(
-          `qwen serve: ACP channel ${ci.id} acknowledged the workspace changes it missed; ` +
-            `its permission fence is lifted, and its quarantine continues`,
-        );
-      }
-      return;
-    }
-    clearTimeout(episode.drainTimer);
-    ci.quarantine = undefined;
-    writeStderrLine(
-      `qwen serve: ACP channel ${ci.id} acknowledged the workspace changes it missed; ` +
-        `its quarantine ended after ${Date.now() - episode.startedAt}ms`,
-    );
-    telemetry.event(
-      'channel.quarantine.cleared',
-      quarantineTelemetry(ci, episode),
-    );
   }
 
   function startSessionReaper(): void {
@@ -4514,6 +3949,7 @@ export function createSessionControlPlane(
     historyPageSize?: number;
     liveReplayMode: 'full' | 'summary';
     hideInheritedHistory: boolean;
+    managedSessionStore?: BridgeManagedSessionStore;
     publicPromise: Promise<BridgeRestoredSession>;
     settlementPromise: Promise<void>;
     lifecycle: { phase: 'active' | 'abandoned'; channel?: ChannelInfo };
@@ -4534,6 +3970,38 @@ export function createSessionControlPlane(
   // context; running either twice for the same id at the same time can
   // duplicate history frames or race two entries into `byId`.
   const inFlightRestores = new Map<string, InFlightRestore>();
+  const quotaExemptReservations = new Set<symbol>();
+  const beginQuotaExemptReservation = (): (() => void) => {
+    const token = Symbol();
+    quotaExemptReservations.add(token);
+    return () => {
+      quotaExemptReservations.delete(token);
+    };
+  };
+  const userFacingLiveCount = (): number => {
+    let count = 0;
+    for (const entry of byId.values()) {
+      if (!isManagedGatewaySessionSourceType(entry.sourceType)) count++;
+    }
+    return count;
+  };
+  const userFacingQuotaOccupied = (): number =>
+    Math.max(
+      0,
+      userFacingLiveCount() +
+        inFlightSpawns.size +
+        inFlightRestores.size +
+        abandonedNewSessionSettlements.size -
+        quotaExemptReservations.size,
+    );
+  // Tool Runtime `managed-gateway` sessions are internal workers and do not
+  // occupy the user-facing maxSessions budget.
+  const assertSessionQuotaAvailable = (sourceType?: string): void => {
+    if (isManagedGatewaySessionSourceType(sourceType)) return;
+    if (userFacingQuotaOccupied() >= maxSessions) {
+      throw new SessionLimitExceededError(maxSessions);
+    }
+  };
 
   // Sessions whose worktree ownership is being transferred to a replacement
   // session (worktree reset). While an id is present, every writer that could
@@ -4686,6 +4154,21 @@ export function createSessionControlPlane(
     return clientId;
   };
 
+  const assertSessionAcceptsModelWork = (entry: SessionEntry): void => {
+    if (entry.sourceType === 'managed-gateway') {
+      throw new SessionNotFoundError(entry.sessionId);
+    }
+  };
+
+  const assertManagedRuntimeToolSession = (entry: SessionEntry): void => {
+    if (
+      entry.sourceType !== 'managed-gateway' ||
+      entry.sourceId !== entry.sessionId
+    ) {
+      throw new SessionNotFoundError(entry.sessionId);
+    }
+  };
+
   function constructChannelInfo(
     channel: AcpChannel,
     acpChannelId: string,
@@ -4820,10 +4303,8 @@ export function createSessionControlPlane(
       // A Goal turn drains the mid-turn queue but owns no prompt slot, so
       // nothing else would settle what its last drain missed.
       (sessionId) => {
-        const entry = byId.get(sessionId);
-        if (entry?.channel !== channel) return;
-        settleMidTurnQueueAfterAutomaticTurn(sessionId);
-        drainQuarantinedChannelFor(entry);
+        if (byId.get(sessionId)?.channel === channel)
+          settleMidTurnQueueAfterAutomaticTurn(sessionId);
       },
       opts.onCreateCurrentSessionScheduledTask,
       async (sessionId, turn, afterPromptId) => {
@@ -4852,12 +4333,7 @@ export function createSessionControlPlane(
           entry.backgroundAdmissionEpoch !== epoch ||
           entry.backgroundTurn ||
           entry.goalTurnActive ||
-          entry.pendingPromptList.some((p) => !p.terminalPublished) ||
-          // An unacknowledged change that tightened permissions admits no
-          // model turn at all until it is acknowledged (#12737 Q2).
-          entry.workspaceChangeFence !== undefined ||
-          (infoRef.current?.quarantine !== undefined &&
-            !quarantineAdmitsBackgroundTurn(infoRef.current, turn))
+          entry.pendingPromptList.some((p) => !p.terminalPublished)
         )
           return false;
         entry.backgroundTurn = turn;
@@ -4869,17 +4345,6 @@ export function createSessionControlPlane(
         entry.sessionLastSeenAt = Date.now();
         touchActivity(entry);
         return true;
-      },
-      // The child starts Goal turns without asking; a fenced Session's are
-      // cancelled as soon as they are reported.
-      (sessionId) => {
-        const entry = byId.get(sessionId);
-        if (
-          entry?.channel !== channel ||
-          entry.workspaceChangeFence === undefined
-        )
-          return;
-        void bridgeApi.cancelSession(sessionId).catch(() => undefined);
       },
     );
     const connection = harness.createConnection(client, channel);
@@ -4958,7 +4423,6 @@ export function createSessionControlPlane(
       clearTimeout(timer);
     }
     info.newSessionSettlementTimers.clear();
-    finishQuarantineAtExit(info);
   }
 
   function handleChannelExit(
@@ -5020,7 +4484,7 @@ export function createSessionControlPlane(
     const stoppedByRuntimeStop = runtimeStop?.channels.includes(info) === true;
     for (const sid of sessions) {
       const sessEntry = byId.get(sid);
-      if (!sessEntry) continue;
+      if (!sessEntry || sessEntry.channel !== info.channel) continue;
       cancelPendingForSession(sid);
       // DAEMON-002/005: every still-pending prompt owes its formal
       // terminal before the bus closes below.
@@ -5078,7 +4542,6 @@ export function createSessionControlPlane(
 
   function handleChannelTransportUnavailable(info: ChannelInfo): void {
     clearInFlightExtensionRefreshes(info.connection);
-    if (info.quarantine) armQuarantineExitCheck(info, info.quarantine);
   }
 
   const harness = createHarness({
@@ -5097,10 +4560,6 @@ export function createSessionControlPlane(
     constructHarnessChannel: constructChannelInfo,
     handleChannelTransportUnavailable: (channel) =>
       handleChannelTransportUnavailable(getChannelInfo(channel)),
-    onChannelTerminationStart: (channel) => {
-      const info = getChannelInfo(channel);
-      if (info.quarantine) armQuarantineExitCheck(info, info.quarantine);
-    },
     beforeChannelExit: (channel) => beforeChannelExit(getChannelInfo(channel)),
     handleChannelExit: (channel, exitInfo) =>
       handleChannelExit(getChannelInfo(channel), exitInfo),
@@ -5266,7 +4725,6 @@ export function createSessionControlPlane(
           'qwen-code.daemon.acp_channel.id': ci.id,
           'session.id': lateSessionId,
         });
-        syncChannelQuarantine(ci);
         if (harness.hasNoChannelWork(ci.harness)) {
           void harness.killChannelWithLog(
             ci.harness,
@@ -5361,7 +4819,6 @@ export function createSessionControlPlane(
       }
       ci.newSessionCleanupFailed = true;
       ci.harness.emptyReapPending = true;
-      syncChannelQuarantine(ci);
       await harness.reapPendingEmptyChannel(ci.harness);
       await ci.channel.exited;
     } finally {
@@ -5390,6 +4847,7 @@ export function createSessionControlPlane(
     worktree?: { slug: string; path: string; branch: string },
     branch?: { name: string; baseBranch: string },
     requestedSessionId?: string,
+    managedSessionStore?: BridgeManagedSessionStore,
     daemonOwnedStandaloneCreation = false,
     onNewSessionDispatch?: () => void,
     onNewSessionAbandoned?: (settlement: Promise<void>) => void,
@@ -5438,9 +4896,6 @@ export function createSessionControlPlane(
       if (ci.harness.isDying) {
         throw new BridgeChannelClosedError('before newSession');
       }
-      // Selection checked the engine before the channel wait; a quarantine
-      // that began during it must still keep this session out.
-      if (engine !== undefined) assertFreshSessionsAvailable(engine);
       ci.sessionSpawnsInFlight++;
     } finally {
       unboundSessionSpawns--;
@@ -5474,7 +4929,6 @@ export function createSessionControlPlane(
             'qwen-code.daemon.acp_channel.id': ci.id,
           },
           async () => {
-            await deliverRememberedUserLanguage(ci);
             // This legacy-named helper sanitizes and injects trace metadata
             // for any ACP request, not only prompts.
             const request = telemetry.injectPromptContext({
@@ -5489,6 +4943,11 @@ export function createSessionControlPlane(
                 ...(requestedSessionId
                   ? {
                       [REQUESTED_SESSION_ID_META_KEY]: requestedSessionId,
+                    }
+                  : {}),
+                ...(managedSessionStore
+                  ? {
+                      [MANAGED_SESSION_STORE_META_KEY]: managedSessionStore,
                     }
                   : {}),
                 ...(engine !== undefined
@@ -5674,7 +5133,14 @@ export function createSessionControlPlane(
         newSessionResp.sessionId,
         boundWorkspace,
         undefined,
-        { parentSessionId, sourceType, sourceId, worktree, branch },
+        {
+          parentSessionId,
+          sourceType,
+          sourceId,
+          worktree,
+          branch,
+          ...(managedSessionStore ? { managedSessionStore } : {}),
+        },
       );
       initializedSessionId = entry.sessionId;
       sessionRegistered = true;
@@ -5885,9 +5351,6 @@ export function createSessionControlPlane(
         }
       }
       ci.sessionSpawnsInFlight = Math.max(0, ci.sessionSpawnsInFlight - 1);
-      // A creation admitted before a quarantine began lands a settled session
-      // on the quarantined channel.
-      if (sessionRegistered) drainQuarantinedChannel(ci);
       if (!sessionRegistered) {
         if (!emptyFailureTeardownStarted) {
           await harness.reapPendingEmptyChannel(ci.harness);
@@ -6690,48 +6153,30 @@ export function createSessionControlPlane(
     };
   };
 
-  // Daemon Status child-resource: poll each live child's `workspaceResource`
-  // extMethod and cache rss/cpu on its channel. The daemon's metrics sampler
+  // Daemon Status child-resource: poll the live child's `workspaceResource`
+  // extMethod and cache rss/cpu on the channel. The daemon's metrics sampler
   // fires this fire-and-forget, then reads the cache synchronously — keeping the
   // async round-trip off the sampler's hot path.
   const STALE_CHILD_RESOURCE_MS = 30_000;
-  // In-flight guard, per child: a status request waits up to `initTimeoutMs`
-  // (10s), longer than the 5s sample cadence — so without this a degraded child
-  // (the exact case the chart should surface) would accumulate concurrent polls
-  // and pile more load onto an already-struggling pipe. At most one outstanding
-  // poll per child, so one wedged engine does not stop the other's readings.
-  const childResourceRefreshing = new WeakSet<HarnessChannel>();
-  const refreshChannelResource = async (info: ChannelInfo): Promise<void> => {
-    if (childResourceRefreshing.has(info.harness)) return;
-    childResourceRefreshing.add(info.harness);
+  // In-flight guard: `requestWorkspaceStatus` waits up to `initTimeoutMs` (10s),
+  // longer than the 5s sample cadence — so without this a degraded child (the
+  // exact case the chart should surface) would accumulate concurrent polls and
+  // pile more load onto an already-struggling pipe. At most one outstanding poll.
+  let childResourceRefreshing = false;
+  const refreshChildResource = async (): Promise<void> => {
+    if (childResourceRefreshing) return;
+    const info = liveChannelInfo();
+    if (!info) return;
+    childResourceRefreshing = true;
     try {
-      const request = () =>
-        withTimeout(
-          Promise.race([
-            info.connection.extMethod(
-              SERVE_STATUS_EXT_METHODS.workspaceResource,
-              { cwd: boundWorkspace },
-            ),
-            getChannelClosedReject(info),
-          ]),
-          initTimeoutMs,
-          SERVE_STATUS_EXT_METHODS.workspaceResource,
-        );
-      // The workspace-control channel keeps reading as workspace control, as
-      // it always has. A Managed child is only observed: sampling must neither
-      // re-arm its idle timer nor retire it on a slow answer, or an open
-      // dashboard would decide how long it lives.
-      const res: {
+      const res = await requestWorkspaceStatus<{
         rssBytes?: unknown;
         cpuPercent?: unknown;
         heap?: unknown;
-      } =
-        info.harness.executionEngine === 'managed'
-          ? await request()
-          : await withWorkspaceStatusRead(info, request);
-      // A channel that started dying during the await is no longer read; only
-      // stamp a child that is still live.
-      if (!liveChannelInfos().includes(info)) return;
+      }>(SERVE_STATUS_EXT_METHODS.workspaceResource, () => ({}));
+      // A channel swap during the await would otherwise stamp a dead channel;
+      // only write if this is still the live one.
+      if (liveChannelInfo() !== info) return;
       // `typeof NaN === 'number'` is true, so also require finiteness at this
       // trust boundary — a misbehaving child returning NaN would otherwise be
       // cached and read as NaN before the sampler's finiteGauge() catches it.
@@ -6763,101 +6208,43 @@ export function createSessionControlPlane(
       // Log at debug so an operator watching child rss/cpu flatline to 0 can
       // tell "the poll is failing" apart from "the child is genuinely idle".
       teeServeDebugLine(
-        `child-resource refresh failed for channel ${info.id}: ${
+        `child-resource refresh failed: ${
           err instanceof Error ? err.message : String(err)
         }`,
       );
     } finally {
-      childResourceRefreshing.delete(info.harness);
+      childResourceRefreshing = false;
     }
   };
-  const refreshChildResource = async (): Promise<void> => {
-    await Promise.all(liveChannelInfos().map(refreshChannelResource));
-  };
-  const getChildResourceSnapshot = (): ChildResourceTotals | undefined => {
-    // One reading per engine of a paired Bridge, combined the way the daemon
-    // combines workspaces: rss and cpu add up (cpu is already a share of the
-    // whole machine), the age is the oldest, heap marks keep their maxima.
-    const totals: ChildResourceTotals = {
-      rssBytes: 0,
-      cpuPercent: 0,
-      ageMs: 0,
-      children: 0,
-      heapReported: 0,
-    };
-    const now = Date.now();
-    for (const info of liveChannelInfos()) {
-      if (info.harness.childResourceAt === undefined) continue;
-      // Staleness: a child that goes unresponsive without a channel swap would
-      // otherwise show its last-good rss/cpu forever (a zombie looking
-      // healthy). Drop the reading once it ages past the window so it reads 0.
-      const ageMs = now - info.harness.childResourceAt;
-      if (ageMs > STALE_CHILD_RESOURCE_MS) continue;
-      totals.rssBytes += info.harness.childRssBytes ?? 0;
-      totals.cpuPercent = Math.min(
-        100,
-        totals.cpuPercent + (info.harness.childCpuPercent ?? 0),
-      );
-      // Bounded by the guard above, so a caller summing several children's
-      // readings can say how far apart they were taken. Without it a sum of
-      // readings up to `STALE_CHILD_RESOURCE_MS` apart looks instantaneous.
-      totals.ageMs = Math.max(totals.ageMs, ageMs);
-      totals.children += 1;
+  const getChildResourceSnapshot = ():
+    | {
+        rssBytes: number;
+        cpuPercent: number;
+        ageMs: number;
+        heap?: ChildHeapReport;
+      }
+    | undefined => {
+    const info = liveChannelInfo();
+    if (!info || info.harness.childResourceAt === undefined) return undefined;
+    // Staleness: a child that goes unresponsive without a channel swap would
+    // otherwise show its last-good rss/cpu forever (a zombie looking healthy).
+    // Drop the reading once it ages past the window so the chart reads 0.
+    const ageMs = Date.now() - info.harness.childResourceAt;
+    if (ageMs > STALE_CHILD_RESOURCE_MS) {
+      return undefined;
+    }
+    return {
+      rssBytes: info.harness.childRssBytes ?? 0,
+      cpuPercent: info.harness.childCpuPercent ?? 0,
       // Deliberately not defaulted. Unlike rss/cpu, where 0 is a plausible
       // reading, a zeroed heap report would assert the child needed no old
       // generation — the one conclusion that must never be manufactured.
-      const heap = info.harness.childHeap;
-      if (heap) {
-        totals.heapReported += 1;
-        totals.heap = totals.heap ? maxChildHeap(totals.heap, heap) : heap;
-      }
-    }
-    return totals.children > 0 ? totals : undefined;
-  };
-
-  // The last sessionless language change on a paired Bridge. A Legacy child
-  // re-reads the persisted settings when it starts; a Managed channel that
-  // starts later is sent this before its first session request instead.
-  let rememberedUserLanguage:
-    | { language: string; syncOutputLanguage: boolean }
-    | undefined;
-  const sendUserLanguage = (
-    info: ChannelInfo,
-    params: { language: string; syncOutputLanguage: boolean },
-  ): Promise<{ language: string; sessions: number; failed: number }> => {
-    const response = withTimeout(
-      Promise.race([
-        info.connection.extMethod(SERVE_CONTROL_EXT_METHODS.userLanguage, {
-          language: params.language,
-          syncOutputLanguage: params.syncOutputLanguage,
-        }),
-        getChannelClosedReject(info),
-      ]),
-      initTimeoutMs,
-      SERVE_CONTROL_EXT_METHODS.userLanguage,
-    ) as Promise<{ language: string; sessions: number; failed: number }>;
-    info.userLanguageDelivery = response.then(
-      () => undefined,
-      () => undefined,
-    );
-    return response;
-  };
-  /** Best-effort: a failure is logged and never blocks the session. */
-  const deliverRememberedUserLanguage = async (
-    info: ChannelInfo,
-  ): Promise<void> => {
-    const params = rememberedUserLanguage;
-    if (info.harness.executionEngine !== 'managed' || params === undefined) {
-      return;
-    }
-    if (info.userLanguageDelivery === undefined) {
-      void sendUserLanguage(info, params).catch((err: unknown) => {
-        writeStderrLine(
-          `qwen serve: could not send the user language to Managed ACP channel ${info.id}: ${extractErrorMessage(err)}`,
-        );
-      });
-    }
-    await info.userLanguageDelivery;
+      heap: info.harness.childHeap,
+      // Bounded by the guard above, so a caller summing several children's
+      // readings can say how far apart they were taken. Without it a sum of
+      // readings up to `STALE_CHILD_RESOURCE_MS` apart looks instantaneous.
+      ageMs,
+    };
   };
 
   const requestSessionStatus = async <T>(
@@ -7320,6 +6707,7 @@ export function createSessionControlPlane(
       sourceId?: string;
       worktree?: { slug: string; path: string; branch: string };
       branch?: { name: string; baseBranch: string };
+      managedSessionStore?: BridgeManagedSessionStore;
     } = {},
   ): SessionEntry => {
     const childSnapshot = ci.harness.activeWork?.snapshot;
@@ -7336,7 +6724,13 @@ export function createSessionControlPlane(
       ...(options.sourceId !== undefined ? { sourceId: options.sourceId } : {}),
       ...(options.worktree ? { worktree: options.worktree } : {}),
       ...(options.branch ? { branch: options.branch } : {}),
+      ...(options.managedSessionStore
+        ? { managedSessionStore: options.managedSessionStore }
+        : {}),
       channel: ci.channel,
+      ...(ci.harness.executionEngine
+        ? { executionEngine: ci.harness.executionEngine }
+        : {}),
       connection: ci.connection,
       events,
       artifacts: new SessionArtifactStore({
@@ -7363,9 +6757,10 @@ export function createSessionControlPlane(
       pendingPromptCount: 0,
       cancelGeneration: 0,
       pendingAgentNotificationCount: 0,
-      sideRequestCount: 0,
       ...(opts.promptLedger ? { promptLedger: opts.promptLedger } : {}),
       pendingPromptList: [],
+      promptAdmissions: new Map(),
+      continuationAdmissions: new Map(),
       terminalTurnStatuses: new Map(),
       enrichedTerminalPromptIds: new Set(),
       rewindGeneration: 0,
@@ -7395,11 +6790,6 @@ export function createSessionControlPlane(
       retryAllowed: false,
       promptSettledAt: null,
       promptSettledCloseTimer: undefined,
-      // A restore or creation already in flight when the channel missed a
-      // tightening change lands under the same fence as the sessions it found.
-      ...(ci.workspaceChangeFence !== undefined
-        ? { workspaceChangeFence: ci.workspaceChangeFence }
-        : {}),
     };
     if (isReservedStandaloneSessionSourceType(options.sourceType)) {
       entry.prepareArtifactWorkspace = () =>
@@ -8213,6 +7603,10 @@ export function createSessionControlPlane(
     req: BridgeRestoreSessionRequest,
     options: {
       skipFreshSessionAdmission?: boolean;
+      /** Moves an admission the caller already holds into this restore. */
+      takeFreshSessionAdmission?: () =>
+        | BridgeFreshSessionReservation
+        | undefined;
       suppressRestorePrompt?: boolean;
       deferRestorePrompt?: boolean;
       daemonOwnedStandaloneRestore?: boolean;
@@ -8245,6 +7639,10 @@ export function createSessionControlPlane(
     req: BridgeRestoreSessionRequest,
     options: {
       skipFreshSessionAdmission?: boolean;
+      /** Moves an admission the caller already holds into this restore. */
+      takeFreshSessionAdmission?: () =>
+        | BridgeFreshSessionReservation
+        | undefined;
       suppressRestorePrompt?: boolean;
       deferRestorePrompt?: boolean;
       daemonOwnedStandaloneRestore?: boolean;
@@ -8276,7 +7674,29 @@ export function createSessionControlPlane(
         '`standalone` is reserved for daemon-owned session restore',
       );
     }
+    if (req.managedSessionStore !== undefined && action !== 'load') {
+      throw RequestError.invalidParams(
+        { errorKind: 'managed_session_store_load_only' },
+        'managedSessionStore is supported only for session/load',
+      );
+    }
     const workspaceKey = resolveWorkspaceKey(req.workspaceCwd);
+    const source = parseSessionSource(req.sourceType, req.sourceId);
+    if ('error' in source) {
+      throw new InvalidSessionMetadataError('sourceType', source.error);
+    }
+    req = Object.freeze({
+      ...req,
+      workspaceCwd: workspaceKey,
+      ...source,
+      ...(req.managedSessionStore
+        ? {
+            managedSessionStore: parseBridgeManagedSessionStore(
+              req.managedSessionStore,
+            ),
+          }
+        : {}),
+    });
     if (
       req.approvalMode !== undefined &&
       !KNOWN_APPROVAL_MODES.has(req.approvalMode)
@@ -8322,6 +7742,11 @@ export function createSessionControlPlane(
         channelInfoForEntry(existing)?.harness.executionEngine,
       );
       assertAttachableSessionEntry(req.sessionId, existing);
+      assertManagedSessionStoreBinding(
+        req.sessionId,
+        existing.managedSessionStore,
+        req.managedSessionStore,
+      );
       const replayFields =
         historyPageSize !== undefined
           ? await refreshedReplayFieldsFor(
@@ -8424,6 +7849,11 @@ export function createSessionControlPlane(
 
     const inFlight = inFlightRestores.get(req.sessionId);
     if (inFlight) {
+      assertManagedSessionStoreBinding(
+        req.sessionId,
+        inFlight.managedSessionStore,
+        req.managedSessionStore,
+      );
       // Cold restores only coalesce when their effective request shapes
       // match. Sharing across actions, replay transports, response pages, or
       // inherited-history policies can return replay selected for another
@@ -8591,15 +8021,7 @@ export function createSessionControlPlane(
     }
 
     assertFreshSessionAdmissionOpen();
-    if (
-      byId.size +
-        inFlightSpawns.size +
-        inFlightRestores.size +
-        abandonedNewSessionSettlements.size >=
-      maxSessions
-    ) {
-      throw new SessionLimitExceededError(maxSessions);
-    }
+    assertSessionQuotaAvailable(source.sourceType);
 
     const restoreEvents = createSessionEventBus(req.sessionId);
     let registeredEntry: SessionEntry | undefined;
@@ -8608,13 +8030,15 @@ export function createSessionControlPlane(
     // doc comment). Mutated synchronously by the coalesce branch above
     // and read once by the IIFE when seeding `entry.attachCount`.
     const coalesceState = { count: 0 };
-    const admission =
-      options.skipFreshSessionAdmission === true
+    const admission = options.takeFreshSessionAdmission
+      ? options.takeFreshSessionAdmission()
+      : options.skipFreshSessionAdmission === true
         ? undefined
         : reserveFreshSession({
             operation: action,
             workspaceCwd: workspaceKey,
             sessionId: req.sessionId,
+            ...(source.sourceType ? { sourceType: source.sourceType } : {}),
           });
     let admissionReleased = false;
     const releaseAdmissionOnce = () => {
@@ -8751,7 +8175,6 @@ export function createSessionControlPlane(
             'qwen-code.daemon.acp_channel.id': channel.id,
             'session.id': req.sessionId,
           });
-          syncChannelQuarantine(channel);
           if (
             harness.hasNoChannelWork(channel.harness, {
               ignoreRestoreId: req.sessionId,
@@ -8797,7 +8220,6 @@ export function createSessionControlPlane(
       if (restoreChannel.harness.isDying) {
         throw new BridgeChannelClosedError(`before session/${action}`);
       }
-      if (engine !== undefined) assertFreshSessionsAvailable(engine);
       ci = restoreChannel;
       restoreChannel.pendingRestoreIds.add(req.sessionId);
       // Mark this id as in-flight restore BEFORE the ACP
@@ -8836,8 +8258,6 @@ export function createSessionControlPlane(
       let replayHasMore: true | undefined;
       let replayAnchorRecordId: string | undefined;
       let restoreAskUserQuestionHint = false;
-      // Before the restore deadline starts; this never throws.
-      await deliverRememberedUserLanguage(restoreChannel);
       try {
         const rawRestore = telemetry.withSpan(
           'session.restore',
@@ -8890,6 +8310,12 @@ export function createSessionControlPlane(
                     : {}),
                   ...(hideInheritedHistory
                     ? { [LOAD_REPLAY_HIDE_INHERITED_META_KEY]: true }
+                    : {}),
+                  ...(req.managedSessionStore
+                    ? {
+                        [MANAGED_SESSION_STORE_META_KEY]:
+                          req.managedSessionStore,
+                      }
                     : {}),
                   ...(req.suppressWorktreeContextRestore
                     ? {
@@ -9075,6 +8501,11 @@ export function createSessionControlPlane(
       if (racedEntry) {
         restoreEvents.close();
         assertAttachableSessionEntry(req.sessionId, racedEntry);
+        assertManagedSessionStoreBinding(
+          req.sessionId,
+          racedEntry.managedSessionStore,
+          req.managedSessionStore,
+        );
         // Self + any coalescers we accumulated while the restore was
         // in flight. Coalescers must not bump attachCount themselves
         // (they read it off the registered entry on the next tick).
@@ -9200,6 +8631,9 @@ export function createSessionControlPlane(
             : {}),
           ...(req.sourceType ? { sourceType: req.sourceType } : {}),
           ...(req.sourceId !== undefined ? { sourceId: req.sourceId } : {}),
+          ...(req.managedSessionStore
+            ? { managedSessionStore: req.managedSessionStore }
+            : {}),
         },
       );
       releaseAdmissionOnce();
@@ -9369,9 +8803,6 @@ export function createSessionControlPlane(
       if (restoreLifecycle.phase === 'abandoned') return;
       releaseAdmissionOnce();
       ci?.pendingRestoreIds.delete(req.sessionId);
-      // A restore admitted before a quarantine began lands a settled session
-      // on the quarantined channel.
-      if (ci) drainQuarantinedChannel(ci);
       // Pair with `markRestoreInFlight`. Once the IIFE settles, either
       // `createSessionEntry` ran (`drainEarlyEvents` already cleared
       // the tombstone) or the restore failed (handled below).
@@ -9449,18 +8880,27 @@ export function createSessionControlPlane(
       },
     );
 
+    const releaseQuotaExempt = isManagedGatewaySessionSourceType(
+      source.sourceType,
+    )
+      ? beginQuotaExemptReservation()
+      : undefined;
     inFlightRestores.set(req.sessionId, {
       action,
       historyReplay,
       ...(historyPageSize !== undefined ? { historyPageSize } : {}),
       liveReplayMode,
       hideInheritedHistory,
+      ...(req.managedSessionStore
+        ? { managedSessionStore: req.managedSessionStore }
+        : {}),
       publicPromise: promise,
       settlementPromise,
       lifecycle: restoreLifecycle,
       coalesceState,
     });
     void settlementPromise.finally(() => {
+      releaseQuotaExempt?.();
       const current = inFlightRestores.get(req.sessionId);
       if (current?.settlementPromise === settlementPromise) {
         inFlightRestores.delete(req.sessionId);
@@ -9706,11 +9146,7 @@ export function createSessionControlPlane(
     if (
       shuttingDown ||
       runtimeStop ||
-      [...harness.values()].some((c) => c.isDying) ||
-      // A quarantined channel is already on its way out, and one whose
-      // process tree the registry has not released yet is not gone.
-      [...channelInfos()].some((c) => c.quarantine !== undefined) ||
-      releasingQuarantines.size > 0
+      [...harness.values()].some((c) => c.isDying)
     )
       blockedReasons.push('stopping');
     if (channels.length === 0) blockedReasons.push('not_live');
@@ -9950,7 +9386,7 @@ export function createSessionControlPlane(
     originatorClientId?: string,
     content?: readonly BridgePromptContentBlock[],
     eventDetailMode?: LiveReplayMode,
-  ): boolean => {
+  ) => {
     // Drop references that are already gone BEFORE admission: the admission
     // check throws on the first dead reference, and the fallback would then
     // replace the ENTIRE prompt with the marker, discarding the siblings the
@@ -10013,7 +9449,7 @@ export function createSessionControlPlane(
         writeStderrLine(
           `[mid-turn] session=${JSON.stringify(entry.sessionId)} failed to run promoted message ${JSON.stringify(messageId)}: ${JSON.stringify(fallbackError instanceof Error ? fallbackError.message : String(fallbackError))}`,
         );
-        return false;
+        return;
       }
     }
     // SessionAttachmentReferenceError can no longer reject this result
@@ -10024,7 +9460,6 @@ export function createSessionControlPlane(
         `[mid-turn] session=${JSON.stringify(entry.sessionId)} failed to run promoted message ${JSON.stringify(messageId)}: ${JSON.stringify(error instanceof Error ? error.message : String(error))}`,
       );
     });
-    return true;
   };
 
   /**
@@ -10047,7 +9482,7 @@ export function createSessionControlPlane(
         }
         continue;
       }
-      const promoted = promoteMidTurnMessage(
+      promoteMidTurnMessage(
         entry,
         message.messageId,
         message.text,
@@ -10055,26 +9490,6 @@ export function createSessionControlPlane(
         message.content,
         message.eventDetailMode,
       );
-      // Refused (for example on a quarantined channel): the message left the
-      // queue without a turn, so take it out of the queue views that showed
-      // it. It is not remembered as settled, so a retry is refused again
-      // rather than acknowledged.
-      if (!promoted && message.originatorClientId) {
-        try {
-          entry.events.publish({
-            type: 'pending_prompt_completed',
-            promptId: message.messageId,
-            data: {
-              sessionId: entry.sessionId,
-              promptId: message.messageId,
-              state: 'removed',
-            },
-            originatorClientId: message.originatorClientId,
-          });
-        } catch {
-          /* bus may be closed during session teardown */
-        }
-      }
     }
   };
 
@@ -10192,6 +9607,10 @@ export function createSessionControlPlane(
       return byId.size;
     },
 
+    get userFacingSessionCount() {
+      return userFacingLiveCount();
+    },
+
     get pendingPromptTotal() {
       // Queue-depth gauge for the Daemon Status "Queued" chart: count only
       // prompts still waiting in the per-session FIFO (`state === 'queued'`),
@@ -10286,10 +9705,6 @@ export function createSessionControlPlane(
 
     isChannelLive() {
       return liveChannelInfos().length > 0;
-    },
-
-    get liveChannelCount() {
-      return liveChannelInfos().length;
     },
 
     getWorkspaceRuntimeLifecycleSnapshot() {
@@ -10489,6 +9904,28 @@ export function createSessionControlPlane(
       };
       const daemonOwnedStandaloneCreation =
         trustedStandaloneSpawn !== undefined;
+      req = {
+        ...req,
+        ...(req.worktree
+          ? { worktree: Object.freeze({ ...req.worktree }) }
+          : {}),
+        ...(req.branch ? { branch: Object.freeze({ ...req.branch }) } : {}),
+        ...(req.managedSessionStore
+          ? {
+              managedSessionStore: parseBridgeManagedSessionStore(
+                req.managedSessionStore,
+              ),
+            }
+          : {}),
+      };
+      if (
+        req.managedSessionStore !== undefined &&
+        req.sessionId === undefined
+      ) {
+        throw new Error(
+          'managedSessionStore requires a caller-supplied sessionId',
+        );
+      }
 
       // Resolve the effective scope for THIS call. A per-request
       // `req.sessionScope` overrides the daemon-wide default; omitting
@@ -10511,6 +9948,12 @@ export function createSessionControlPlane(
       if ('error' in source) {
         throw new InvalidSessionMetadataError('sourceType', source.error);
       }
+      req = Object.freeze({
+        ...req,
+        workspaceCwd: workspaceKey,
+        sessionScope: effectiveScope,
+        ...source,
+      });
       if (
         isReservedStandaloneSessionSourceType(source.sourceType) &&
         !daemonOwnedStandaloneCreation
@@ -10755,20 +10198,14 @@ export function createSessionControlPlane(
           );
         }
       }
-      // Cap check: count both registered sessions and in-flight spawns
-      // (a fresh-spawn race that's about to register hasn't hit
+      // Cap check: count both registered user-facing sessions and in-flight
+      // spawns (a fresh-spawn race that's about to register hasn't hit
       // `byId` yet but should still count toward the limit). Attaches
       // returned above bypass this — only NEW children are gated.
+      // Tool Runtime `managed-gateway` sessions are internal workers and
+      // do not occupy the user-facing maxSessions budget.
       assertFreshSessionAdmissionOpen();
-      if (
-        byId.size +
-          inFlightSpawns.size +
-          inFlightRestores.size +
-          abandonedNewSessionSettlements.size >=
-        maxSessions
-      ) {
-        throw new SessionLimitExceededError(maxSessions);
-      }
+      assertSessionQuotaAvailable(source.sourceType);
 
       const requestedSessionRegistrationOwner =
         req.sessionId !== undefined ? Symbol(req.sessionId) : undefined;
@@ -10810,6 +10247,7 @@ export function createSessionControlPlane(
           operation: 'spawn',
           workspaceCwd: workspaceKey,
           ...(req.sessionId !== undefined ? { sessionId: req.sessionId } : {}),
+          ...(source.sourceType ? { sourceType: source.sourceType } : {}),
         });
       } catch (error) {
         releaseRequestedSessionRegistration();
@@ -10834,6 +10272,7 @@ export function createSessionControlPlane(
         req.worktree,
         req.branch,
         req.sessionId,
+        req.managedSessionStore,
         daemonOwnedStandaloneCreation,
         trustedStandaloneSpawn
           ? () => {
@@ -10878,6 +10317,11 @@ export function createSessionControlPlane(
         effectiveScope === 'single'
           ? workspaceKey
           : `${workspaceKey}#${randomUUID()}`;
+      const releaseQuotaExempt = isManagedGatewaySessionSourceType(
+        source.sourceType,
+      )
+        ? beginQuotaExemptReservation()
+        : undefined;
       inFlightSpawns.set(tracker, promise);
       try {
         return await promise;
@@ -10893,9 +10337,11 @@ export function createSessionControlPlane(
               releaseRequestedSessionRegistration();
             },
           );
+          void abandonedSettlement.finally(() => releaseQuotaExempt?.());
         } else {
           releaseAdmissionOnce();
           releaseRequestedSessionRegistration();
+          releaseQuotaExempt?.();
         }
         // Always clear the in-flight slot whether the spawn resolved
         // or rejected — leaving a rejected promise behind would
@@ -10927,6 +10373,25 @@ export function createSessionControlPlane(
       const queuedAt = Date.now();
       const entry = byId.get(sessionId);
       if (!entry) return Promise.reject(new SessionNotFoundError(sessionId));
+      if (entry.sourceType === 'managed-gateway') {
+        throw new SessionNotFoundError(sessionId);
+      }
+      if (!Array.isArray(req.prompt)) {
+        return Promise.reject(
+          RequestError.invalidParams(undefined, 'Prompt must be an array'),
+        );
+      }
+      const promptId = context?.promptId ?? randomUUID();
+      const fingerprint = JSON.stringify(req.prompt);
+      const existingAdmission = entry.promptAdmissions.get(promptId);
+      if (existingAdmission) {
+        if (existingAdmission.fingerprint !== fingerprint) {
+          throw new PromptIdConflictError(sessionId, promptId);
+        }
+        return existingAdmission.result;
+      }
+      const admissionLastEventId = entry.events.lastEventId;
+      const admissionEventEpoch = entry.events.epoch;
       if (isClosingOrAuthorizingClose(entry)) {
         return Promise.reject(
           new SessionNotFoundError(
@@ -10944,17 +10409,11 @@ export function createSessionControlPlane(
       if (resetPendingSessions.has(sessionId)) {
         throw new SessionResetPendingError(sessionId);
       }
-      assertChannelAdmitsPrompts(entry);
       if (
         isReservedStandaloneSessionSourceType(entry.sourceType) &&
         entry.managedConversationBinding?.released !== true
       ) {
         return Promise.reject(standaloneWorkingDirectoryMissingError());
-      }
-      if (!Array.isArray(req.prompt)) {
-        return Promise.reject(
-          RequestError.invalidParams(undefined, 'Prompt must be an array'),
-        );
       }
       const promotedMidTurn = context?.promotedMidTurn;
       const isPromotedMidTurn = promotedMidTurn !== undefined;
@@ -11001,7 +10460,6 @@ export function createSessionControlPlane(
       // genuinely queued (another prompt is already running/queued) —
       // the first prompt on an idle session starts immediately and
       // doesn't need a queue event.
-      const promptId = context?.promptId ?? randomUUID();
       const invocationContext: InvocationContextV1 = Object.freeze({
         version: 1,
         sessionId,
@@ -11202,8 +10660,6 @@ export function createSessionControlPlane(
           ) {
             throw standaloneWorkingDirectoryMissingError();
           }
-          // A prompt queued before the quarantine began is still a new turn.
-          assertChannelAdmitsPrompts(entry);
           pendingEntry.startedAt = Date.now();
           // If this prompt was queued behind another, promote it to
           // 'running' and publish a started event now that it has reached the
@@ -11397,9 +10853,6 @@ export function createSessionControlPlane(
                   }
                   return copy;
                 })();
-                // Resolving attachments can yield; a quarantine that began
-                // meanwhile still refuses the prompt before it is sent.
-                assertChannelAdmitsPrompts(entry);
                 entry.events.setEventDetailMode(eventDetailMode);
                 entry.backgroundStartsSuspended = false;
                 let resolveTerminal!: () => void;
@@ -11721,9 +11174,14 @@ export function createSessionControlPlane(
           // sessionPromptSettledCloseGraceMs (default 0 = immediate) so
           // poll-based clients can reconnect without a session rebuild.
           schedulePromptSettledClose(entry);
-          drainQuarantinedChannelFor(entry);
         })
         .catch(() => {});
+      entry.promptAdmissions.set(promptId, {
+        fingerprint,
+        result,
+        lastEventId: admissionLastEventId,
+        eventEpoch: admissionEventEpoch,
+      });
       return result;
     },
 
@@ -11896,6 +11354,17 @@ export function createSessionControlPlane(
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
       return entry.events.epoch;
+    },
+
+    getPromptAdmissionWatermark(sessionId, promptId) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const admission = entry.promptAdmissions.get(promptId);
+      if (!admission) return undefined;
+      return {
+        lastEventId: admission.lastEventId,
+        eventEpoch: admission.eventEpoch,
+      };
     },
 
     getSessionCurrentCwd(sessionId) {
@@ -12104,21 +11573,14 @@ export function createSessionControlPlane(
         assertFreshSessionsAvailable(sourceCi.harness.executionEngine);
         let admission: ReturnType<typeof reserveFreshSession> | undefined;
         if (restoreBranch || req.persistOnly) {
-          if (
-            byId.size +
-              inFlightSpawns.size +
-              inFlightRestores.size +
-              abandonedNewSessionSettlements.size >=
-            maxSessions
-          ) {
-            throw new SessionLimitExceededError(maxSessions);
-          }
+          assertSessionQuotaAvailable(source.sourceType);
         }
         if (restoreBranch) {
           admission = reserveFreshSession({
             operation: 'branch',
             workspaceCwd: boundWorkspace,
             sourceSessionId: sessionId,
+            ...(source.sourceType ? { sourceType: source.sourceType } : {}),
           });
         }
         let admissionReleased = false;
@@ -12289,7 +11751,13 @@ export function createSessionControlPlane(
                 ...source,
               },
               {
-                skipFreshSessionAdmission: true,
+                // The restore owns the branch admission from here on, so a
+                // timed-out restore keeps it until its cleanup settles.
+                takeFreshSessionAdmission: () => {
+                  const transferred = admission;
+                  admission = undefined;
+                  return transferred;
+                },
                 expectedExecutionEngine: sourceCi.harness.executionEngine,
                 // A fork inherits the parent's dangling ask_user_question
                 // tail, but forks cannot run that tool — never fire a
@@ -12299,6 +11767,11 @@ export function createSessionControlPlane(
             );
             releaseAdmissionOnce();
           } catch (restoreErr) {
+            // A timed-out restore is still running; its own abandoned-restore
+            // cleanup closes the late session, so closing here would race it.
+            if (restoreErr instanceof SessionRestoreTimeoutError) {
+              throw restoreErr;
+            }
             writeStderrLine(
               `qwen serve: branchSession load failed for ${result.newSessionId}; closing partial live state while preserving the committed session...`,
             );
@@ -12704,8 +12177,6 @@ export function createSessionControlPlane(
 
     clearSessionResetPending(sessionId) {
       resetPendingSessions.delete(sessionId);
-      const entry = byId.get(sessionId);
-      if (entry) drainQuarantinedChannelFor(entry);
     },
 
     async severSessionClients(sessionId) {
@@ -12994,6 +12465,48 @@ export function createSessionControlPlane(
             /* bus already closed */
           }
         }
+      }
+      return {
+        displayName: entry.displayName,
+        ...(entry.prs && entry.prs.length > 0 ? { prs: entry.prs } : {}),
+      };
+    },
+
+    async commitSessionTitle(sessionId, title, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      if (
+        typeof title !== 'string' ||
+        title.trim() === '' ||
+        title.length > MAX_DISPLAY_NAME_LENGTH ||
+        hasControlCharacter(title)
+      ) {
+        throw new InvalidSessionMetadataError(
+          'displayName',
+          `must be a non-empty string of at most ${MAX_DISPLAY_NAME_LENGTH} characters without control characters`,
+        );
+      }
+      if (context?.clientId !== undefined) {
+        resolveTrustedClientId(entry, context.clientId);
+      }
+      const result = (await withTimeout(
+        Promise.race([
+          entry.connection.extMethod(SERVE_CONTROL_EXT_METHODS.sessionTitle, {
+            sessionId,
+            displayName: title,
+            titleSource: 'manual',
+          }),
+          getTransportClosedReject(entry),
+        ]),
+        initTimeoutMs,
+        'commitSessionTitle',
+      )) as { persisted?: unknown };
+      if (result?.persisted !== true) {
+        throw new Error(`Session '${sessionId}' title was not persisted`);
+      }
+      if (entry.displayName !== title) {
+        entry.displayName = title;
+        markSessionCatalogChanged();
       }
       return {
         displayName: entry.displayName,
@@ -13386,50 +12899,10 @@ export function createSessionControlPlane(
         return await withEnsuredWorkspaceControl(invoke);
       }
       const info = liveChannelInfo();
-      // A stopping runtime refuses workspace control as before, so nothing is
-      // propagated and no engine is treated as unacknowledged.
-      const change =
-        executionEngines && !runtimeStop
-          ? sessionAffectingChange(method, params)
-          : undefined;
-      if (!change || (!info && change.persistedByControl)) {
-        if (!info) {
-          throw new SessionNotFoundError(`workspace-command:${method}`);
-        }
-        return await harness.withWorkspaceControl(info.harness, () =>
-          invoke(info),
-        );
-      }
-      // Other engines still need a change already on disk when workspace
-      // control failed or is not live.
-      let result: T | undefined;
-      let controlError: unknown;
-      if (info) {
-        try {
-          result = await harness.withWorkspaceControl(info.harness, () =>
-            invoke(info),
-          );
-        } catch (error) {
-          controlError = error;
-        }
-      } else {
-        controlError = new SessionNotFoundError(`workspace-command:${method}`);
-      }
-      const { revision, unacknowledged } = await propagateWorkspaceChange(
-        change,
-        invokeOpts?.timeoutMs ?? initTimeoutMs,
+      if (!info) throw new SessionNotFoundError(`workspace-command:${method}`);
+      return await harness.withWorkspaceControl(info.harness, () =>
+        invoke(info),
       );
-      if (unacknowledged.length > 0) {
-        throw new WorkspaceChangePartiallyAppliedError(
-          revision,
-          change.kind,
-          unacknowledged,
-          result,
-          controlError,
-        );
-      }
-      if (controlError !== undefined) throw controlError;
-      return result as T;
     },
 
     async isWorkspaceMemoryRememberAvailable(): Promise<boolean> {
@@ -13732,6 +13205,7 @@ export function createSessionControlPlane(
     ) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
+      assertSessionAcceptsModelWork(entry);
       resolveTrustedClientId(entry, context?.clientId);
 
       // A workflow action runs a saved workflow, a script the caller supplied,
@@ -13739,33 +13213,27 @@ export function createSessionControlPlane(
       // cwd — the checkout the transfer is moving — and sets none of the busy
       // flags the barrier or the route's quiescence re-check reads.
       assertSessionResetNotPending(sessionId);
-      const endSideRequest = WORKFLOW_ACTIONS_STARTING_WORK.has(action)
-        ? beginSideRequest(entry)
-        : undefined;
-      try {
-        return await requestSessionStatus<{
-          changed: boolean;
-          status?: ServeSessionWorkflowTaskStatus['status'];
-          taskId?: string;
-        }>(sessionId, SERVE_CONTROL_EXT_METHODS.sessionWorkflowTaskAction, {
-          taskId,
-          action,
-          // Forwarded only when present, so a control action's request body
-          // stays byte-identical to what it was before start input existed.
-          ...(input?.args !== undefined ? { args: input.args } : {}),
-          ...(input?.sourceRef !== undefined
-            ? { sourceRef: input.sourceRef }
-            : {}),
-          ...(input?.script !== undefined ? { script: input.script } : {}),
-        });
-      } finally {
-        endSideRequest?.();
-      }
+      return requestSessionStatus<{
+        changed: boolean;
+        status?: ServeSessionWorkflowTaskStatus['status'];
+        taskId?: string;
+      }>(sessionId, SERVE_CONTROL_EXT_METHODS.sessionWorkflowTaskAction, {
+        taskId,
+        action,
+        // Forwarded only when present, so a control action's request body
+        // stays byte-identical to what it was before start input existed.
+        ...(input?.args !== undefined ? { args: input.args } : {}),
+        ...(input?.sourceRef !== undefined
+          ? { sourceRef: input.sourceRef }
+          : {}),
+        ...(input?.script !== undefined ? { script: input.script } : {}),
+      });
     },
 
     async controlSessionGoal(sessionId, request, context) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
+      assertSessionAcceptsModelWork(entry);
       const info = channelInfoForEntry(entry);
       if (!info || info.harness.isDying)
         throw new SessionNotFoundError(sessionId);
@@ -13775,18 +13243,11 @@ export function createSessionControlPlane(
       // so it starts work in this session's cwd without ever passing the
       // fenced `sendPrompt` admission.
       assertSessionResetNotPending(sessionId);
-      const endSideRequest = GOAL_ACTIONS_STARTING_WORK.has(request.action)
-        ? beginSideRequest(entry)
-        : undefined;
-      try {
-        return await requestSessionStatus(
-          sessionId,
-          SERVE_CONTROL_EXT_METHODS.sessionGoalControl,
-          { request },
-        );
-      } finally {
-        endSideRequest?.();
-      }
+      return requestSessionStatus(
+        sessionId,
+        SERVE_CONTROL_EXT_METHODS.sessionGoalControl,
+        { request },
+      );
     },
 
     async clearSessionGoal(sessionId) {
@@ -13810,9 +13271,22 @@ export function createSessionControlPlane(
       // is then silently dropped at admission.
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
+      assertSessionAcceptsModelWork(entry);
       resolveTrustedClientId(entry, context?.clientId);
-      // Refused before the child classifies the last turn.
-      assertChannelAdmitsPrompts(entry);
+      const promptId = context?.promptId;
+      const managedRuntimeContinuation = context?.managedRuntimeContinuation;
+      const recoveryKey = managedRuntimeContinuation
+        ? `${managedRuntimeContinuation.checkpointId}\u0000${managedRuntimeContinuation.activationId}`
+        : null;
+      if (promptId !== undefined) {
+        const existing = entry.continuationAdmissions.get(promptId);
+        if (existing !== undefined) {
+          if (existing.recoveryKey !== recoveryKey) {
+            throw new PromptIdConflictError(sessionId, promptId);
+          }
+          return existing.result;
+        }
+      }
       const cancelGeneration = entry.cancelGeneration;
 
       // Accept/reject pre-check: the agent classifies the last turn (and rejects
@@ -13820,7 +13294,13 @@ export function createSessionControlPlane(
       const decision = await requestSessionStatus<{
         accepted: boolean;
         interruption: 'none' | 'interrupted_prompt' | 'interrupted_turn';
-      }>(sessionId, SERVE_CONTROL_EXT_METHODS.sessionContinue);
+      }>(
+        sessionId,
+        managedRuntimeContinuation
+          ? SERVE_CONTROL_EXT_METHODS.sessionManagedRuntimeContinue
+          : SERVE_CONTROL_EXT_METHODS.sessionContinue,
+        managedRuntimeContinuation ?? {},
+      );
 
       if (!decision.accepted) {
         return decision;
@@ -13852,8 +13332,6 @@ export function createSessionControlPlane(
       // envelope (DAEMON-001): without it a client that seeds its SSE resume
       // position from this response cannot detect a daemon restart.
       const eventEpoch = liveEntry.events.epoch;
-      const promptId = context?.promptId;
-
       // Admit synchronously: `sendPrompt` throws synchronously for queue-full /
       // pre-aborted, so an admission failure propagates out of here and the
       // caller gets an error instead of a misleading accepted:true whose
@@ -13883,12 +13361,27 @@ export function createSessionControlPlane(
         );
       });
 
-      return {
+      const result = {
         ...decision,
         ...(promptId !== undefined ? { promptId } : {}),
         lastEventId,
         eventEpoch,
       };
+      if (promptId !== undefined) {
+        entry.continuationAdmissions.set(promptId, {
+          recoveryKey,
+          result: {
+            accepted: true,
+            interruption: decision.interruption as
+              | 'interrupted_prompt'
+              | 'interrupted_turn',
+            promptId,
+            lastEventId,
+            eventEpoch,
+          },
+        });
+      }
+      return result;
     },
 
     async getSessionStatsStatus(sessionId) {
@@ -14262,51 +13755,23 @@ export function createSessionControlPlane(
     },
 
     async setUserLanguage(params) {
-      if (executionEngines) {
-        rememberedUserLanguage = {
-          language: params.language,
-          syncOutputLanguage: params.syncOutputLanguage,
-        };
-      }
-      // Sessionless: runs on every channel that is already live — one per
-      // engine on a paired Bridge. A runtime without one has no sessions to
-      // refresh and re-reads the persisted files when its channel next
-      // spawns, so the daemon route treats the SessionNotFoundError as
-      // "skipped", not failed.
-      const channels = liveChannelInfos();
-      const [first] = channels;
-      if (!first) throw new SessionNotFoundError('user-language');
-      if (channels.length === 1) return await sendUserLanguage(first, params);
-      const results = await Promise.allSettled(
-        channels.map((info) => sendUserLanguage(info, params)),
-      );
-      const applied: Array<{
-        language: string;
-        sessions: number;
-        failed: number;
-      }> = [];
-      let rejection: unknown;
-      results.forEach((settled, index) => {
-        if (settled.status === 'fulfilled') {
-          applied.push(settled.value);
-          return;
-        }
-        rejection ??= settled.reason;
-        writeStderrLine(
-          `qwen serve: user language change failed on ACP channel ${channels[index]?.id}: ${extractErrorMessage(settled.reason)}`,
-        );
-      });
-      // A channel that could not apply the change counts as one failure; the
-      // call itself fails only when no channel applied it.
-      const [answer] = applied;
-      if (!answer) throw rejection;
-      return {
-        language: answer.language,
-        sessions: applied.reduce((sum, value) => sum + value.sessions, 0),
-        failed:
-          applied.reduce((sum, value) => sum + value.failed, 0) +
-          (results.length - applied.length),
-      };
+      // Sessionless: runs on whatever channel is already live. A runtime
+      // without one has no sessions to refresh and re-reads the persisted
+      // files when its channel next spawns, so the daemon route treats the
+      // SessionNotFoundError as "skipped", not failed.
+      const info = liveChannelInfo();
+      if (!info) throw new SessionNotFoundError('user-language');
+      return (await withTimeout(
+        Promise.race([
+          info.connection.extMethod(SERVE_CONTROL_EXT_METHODS.userLanguage, {
+            language: params.language,
+            syncOutputLanguage: params.syncOutputLanguage,
+          }),
+          getChannelClosedReject(info),
+        ]),
+        initTimeoutMs,
+        SERVE_CONTROL_EXT_METHODS.userLanguage,
+      )) as { language: string; sessions: number; failed: number };
     },
 
     async setSessionLiveConversationActive(sessionId, active) {
@@ -14375,6 +13840,7 @@ export function createSessionControlPlane(
       // recap is informational-only today — no SSE broadcast.
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
+      assertSessionAcceptsModelWork(entry);
       const info = channelInfoForEntry(entry);
       if (!info || info.harness.isDying)
         throw new SessionNotFoundError(sessionId);
@@ -14382,22 +13848,16 @@ export function createSessionControlPlane(
         `qwen serve: bridge generateSessionRecap dispatching ext-method for session=${sessionId}`,
         'info',
       );
-      const endSideRequest = beginSideRequest(entry);
-      let response: { sessionId: string; recap: string | null };
-      try {
-        response = (await Promise.race([
-          withTimeout(
-            entry.connection.extMethod(SERVE_CONTROL_EXT_METHODS.sessionRecap, {
-              sessionId,
-            }),
-            SESSION_RECAP_TIMEOUT_MS,
-            SERVE_CONTROL_EXT_METHODS.sessionRecap,
-          ),
-          getTransportClosedReject(entry),
-        ])) as { sessionId: string; recap: string | null };
-      } finally {
-        endSideRequest();
-      }
+      const response = (await Promise.race([
+        withTimeout(
+          entry.connection.extMethod(SERVE_CONTROL_EXT_METHODS.sessionRecap, {
+            sessionId,
+          }),
+          SESSION_RECAP_TIMEOUT_MS,
+          SERVE_CONTROL_EXT_METHODS.sessionRecap,
+        ),
+        getTransportClosedReject(entry),
+      ])) as { sessionId: string; recap: string | null };
       opts.onDiagnosticLine?.(
         `qwen serve: bridge generateSessionRecap completed for session=${sessionId} recap=${response.recap ? `len=${response.recap.length}` : 'null'}`,
         'info',
@@ -14411,11 +13871,11 @@ export function createSessionControlPlane(
     generateSessionContent(sessionId, prompt, signal, context) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
+      assertSessionAcceptsModelWork(entry);
       const info = channelInfoForEntry(entry);
       if (!info || info.harness.isDying)
         throw new SessionNotFoundError(sessionId);
       resolveTrustedClientId(entry, context?.clientId);
-      const endSideRequest = beginSideRequest(entry);
 
       const requestId = randomUUID();
       const queue = new GenerationStreamQueue<BridgeGenerationStreamEvent>(
@@ -14445,7 +13905,6 @@ export function createSessionControlPlane(
 
       if (signal.aborted) {
         cancel();
-        endSideRequest();
         return queue;
       }
 
@@ -14493,10 +13952,199 @@ export function createSessionControlPlane(
           request.settled = true;
           signal.removeEventListener('abort', cancel);
           generationRequests.delete(requestId);
-          endSideRequest();
         });
 
       return queue;
+    },
+
+    getManagedToolV2Client(sessionId, context) {
+      const owner = byId.get(sessionId);
+      if (!owner) throw new SessionNotFoundError(sessionId);
+      const assertOwner = () => {
+        if (byId.get(sessionId) !== owner) {
+          throw new SessionNotFoundError(sessionId);
+        }
+        assertManagedRuntimeToolSession(owner);
+        if (!context?.clientId) throw new InvalidClientIdError(sessionId, '');
+        resolveTrustedClientId(owner, context.clientId);
+      };
+      assertOwner();
+      const call = <T>(
+        method: string,
+        params: Record<string, unknown> = {},
+      ): Promise<T> => {
+        assertOwner();
+        return requestSessionStatus<T>(
+          sessionId,
+          method,
+          params,
+          MANAGED_RUNTIME_TOOL_TIMEOUT_MS,
+        );
+      };
+      return {
+        fileHistory: {
+          bind: async (binding) => {
+            const parsed = parseManagedToolFileHistoryBinding(binding);
+            const state = parseManagedToolFileHistoryState(
+              await call(
+                SERVE_CONTROL_EXT_METHODS.sessionManagedToolV2BindHistory,
+                { binding: parsed },
+              ),
+            );
+            if (state.ownerSessionId !== parsed.ownerSessionId) {
+              throw new ManagedToolProtocolError(
+                'Managed file history owner changed.',
+              );
+            }
+            return state;
+          },
+          checkpoint: async (promptId) =>
+            parseManagedToolFileHistoryState(
+              await call(
+                SERVE_CONTROL_EXT_METHODS.sessionManagedToolV2Checkpoint,
+                {
+                  promptId: parseManagedToolFileHistoryPromptId(promptId),
+                },
+              ),
+            ),
+          snapshot: async () =>
+            parseManagedToolFileHistoryState(
+              await call(SERVE_CONTROL_EXT_METHODS.sessionManagedToolV2History),
+            ),
+        },
+        manifest: () =>
+          call(SERVE_CONTROL_EXT_METHODS.sessionManagedToolV2Manifest),
+        beginTurn: async (identity) => {
+          await call(SERVE_CONTROL_EXT_METHODS.sessionManagedToolV2BeginTurn, {
+            identity,
+          });
+        },
+        prepare: (identity, toolName, input, modification, mediaContext) =>
+          call(SERVE_CONTROL_EXT_METHODS.sessionManagedToolV2Prepare, {
+            identity,
+            toolName,
+            input,
+            ...(modification === undefined ? {} : { modification }),
+            ...(mediaContext === undefined ? {} : { mediaContext }),
+          }),
+        confirmation: (reference) =>
+          call(SERVE_CONTROL_EXT_METHODS.sessionManagedToolV2Confirmation, {
+            reference,
+          }),
+        confirm: async (reference, outcome, payload, phase) => {
+          await call(SERVE_CONTROL_EXT_METHODS.sessionManagedToolV2Confirm, {
+            reference,
+            outcome,
+            ...(payload === undefined ? {} : { payload }),
+            ...(phase === undefined ? {} : { phase }),
+          });
+        },
+        preflight: (reference) =>
+          call(SERVE_CONTROL_EXT_METHODS.sessionManagedToolV2Preflight, {
+            reference,
+          }),
+        execute: (reference) =>
+          call(SERVE_CONTROL_EXT_METHODS.sessionManagedToolV2Execute, {
+            reference,
+          }),
+        status: (reference, afterSeq) =>
+          call(SERVE_CONTROL_EXT_METHODS.sessionManagedToolV2Status, {
+            reference,
+            ...(afterSeq === undefined ? {} : { afterSeq }),
+          }),
+        cancel: (reference) =>
+          call(SERVE_CONTROL_EXT_METHODS.sessionManagedToolV2Cancel, {
+            reference,
+          }),
+      };
+    },
+
+    async getManagedRuntimeToolManifest(sessionId, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      assertManagedRuntimeToolSession(entry);
+      resolveTrustedClientId(entry, context?.clientId);
+      return requestSessionStatus<BridgeManagedRuntimeToolManifest>(
+        sessionId,
+        SERVE_CONTROL_EXT_METHODS.sessionManagedRuntimeToolManifest,
+      );
+    },
+
+    async executeManagedRuntimeTool(sessionId, request, signal, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      assertManagedRuntimeToolSession(entry);
+      resolveTrustedClientId(entry, context?.clientId);
+      if (signal.aborted) {
+        throw signal.reason instanceof Error
+          ? signal.reason
+          : new DOMException(
+              'Managed Runtime Tool execution was aborted.',
+              'AbortError',
+            );
+      }
+      const pending =
+        requestSessionStatus<BridgeManagedRuntimeToolExecuteResult>(
+          sessionId,
+          SERVE_CONTROL_EXT_METHODS.sessionManagedRuntimeToolExecute,
+          request as unknown as Record<string, unknown>,
+          MANAGED_RUNTIME_TOOL_TIMEOUT_MS,
+        );
+      return new Promise<BridgeManagedRuntimeToolExecuteResult>(
+        (resolve, reject) => {
+          let settled = false;
+          const cancel = () =>
+            requestSessionStatus<{ cancelled: boolean }>(
+              sessionId,
+              SERVE_CONTROL_EXT_METHODS.sessionManagedRuntimeToolCancel,
+              { executionId: request.executionId },
+            ).catch(() => undefined);
+          const finish = (
+            result?: BridgeManagedRuntimeToolExecuteResult,
+            error?: unknown,
+          ) => {
+            if (settled) return;
+            settled = true;
+            signal.removeEventListener('abort', onAbort);
+            if (error !== undefined) reject(error);
+            else resolve(result!);
+          };
+          const onAbort = () => {
+            void cancel();
+            finish(
+              undefined,
+              signal.reason instanceof Error
+                ? signal.reason
+                : new DOMException(
+                    'Managed Runtime Tool execution was aborted.',
+                    'AbortError',
+                  ),
+            );
+          };
+          signal.addEventListener('abort', onAbort, { once: true });
+          void pending.then(
+            (result) => finish(result),
+            (error: unknown) => {
+              if (settled) return;
+              void cancel();
+              finish(undefined, error);
+            },
+          );
+          if (signal.aborted) onAbort();
+        },
+      );
+    },
+
+    async cancelManagedRuntimeTool(sessionId, executionId, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      assertManagedRuntimeToolSession(entry);
+      resolveTrustedClientId(entry, context?.clientId);
+      return requestSessionStatus<{ cancelled: boolean }>(
+        sessionId,
+        SERVE_CONTROL_EXT_METHODS.sessionManagedRuntimeToolCancel,
+        { executionId },
+      );
     },
 
     getPendingPrompts(sessionId, context) {
@@ -14756,6 +14404,7 @@ export function createSessionControlPlane(
     ) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
+      assertSessionAcceptsModelWork(entry);
       // Authorize the caller against THIS session before doing anything —
       // mirrors `/prompt` and `/btw`. Throws `InvalidClientIdError` when the
       // client-declared id isn't bound to the session, so a token-holding
@@ -14850,9 +14499,6 @@ export function createSessionControlPlane(
         );
         return { accepted: false };
       }
-      // New user input, whether a running turn drains it or it becomes the
-      // next prompt: a quarantined channel takes neither.
-      assertChannelAdmitsPrompts(entry);
       // Validate only genuinely new admissions, AFTER the retry-ack rings:
       // a same-id retry whose media was already removed (delete racing an
       // in-flight POST, or a refresh re-enqueueing from the snapshot) must
@@ -14902,7 +14548,7 @@ export function createSessionControlPlane(
           );
           return { accepted: false, reason: 'session_idle' };
         }
-        const promoted = promoteMidTurnMessage(
+        promoteMidTurnMessage(
           entry,
           messageId,
           trimmed,
@@ -14910,7 +14556,7 @@ export function createSessionControlPlane(
           mediaBlocks.length > 0 ? mediaBlocks : undefined,
           eventDetailMode,
         );
-        return promoted ? { accepted: true, messageId } : { accepted: false };
+        return { accepted: true, messageId };
       }
       // Bound the drain queue. Rejected requests remain unowned.
       if (entry.midTurnMessageQueue.length >= MAX_MID_TURN_QUEUE_DEPTH) {
@@ -15013,6 +14659,7 @@ export function createSessionControlPlane(
     async enqueueBackgroundNotification(sessionId, notification) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
+      assertSessionAcceptsModelWork(entry);
       const info = channelInfoForEntry(entry);
       if (!info || info.harness.isDying)
         throw new SessionNotFoundError(sessionId);
@@ -15036,7 +14683,6 @@ export function createSessionControlPlane(
           entry.pendingAgentNotificationCount - 1,
         );
         void maybeCloseIdleSession(entry, 'agent_notification_settled');
-        drainQuarantinedChannelFor(entry);
       }
     },
 
@@ -15070,11 +14716,11 @@ export function createSessionControlPlane(
     async generateSessionBtw(sessionId, question, signal, _context) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
+      assertSessionAcceptsModelWork(entry);
       const info = channelInfoForEntry(entry);
       if (!info || info.harness.isDying)
         throw new SessionNotFoundError(sessionId);
       if (signal?.aborted) return { sessionId, answer: null };
-      const endSideRequest = beginSideRequest(entry);
       const races: Array<Promise<unknown>> = [
         withTimeout(
           entry.connection.extMethod(SERVE_CONTROL_EXT_METHODS.sessionBtw, {
@@ -15105,7 +14751,6 @@ export function createSessionControlPlane(
         };
       } finally {
         cleanupAbort?.();
-        endSideRequest();
       }
       return {
         sessionId: entry.sessionId,
@@ -15116,6 +14761,7 @@ export function createSessionControlPlane(
     async launchSessionForkAgent(sessionId, directive, context) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
+      assertSessionAcceptsModelWork(entry);
       const info = channelInfoForEntry(entry);
       if (!info || info.harness.isDying)
         throw new SessionNotFoundError(sessionId);
@@ -15138,7 +14784,7 @@ export function createSessionControlPlane(
           'Cannot fork while a response or tool call is in progress',
         );
       }
-      const launchForkAgent = async () => {
+      return entry.promptQueue.then(async () => {
         if (
           entry.pendingPromptCount > 0 ||
           entry.promptActive ||
@@ -15197,16 +14843,6 @@ export function createSessionControlPlane(
           'info',
         );
         return result;
-      };
-      const endSideRequest = beginSideRequest(entry);
-      return entry.promptQueue.then(async () => {
-        try {
-          // A quarantine that began while this waited still refuses it.
-          assertChannelAdmitsPrompts(entry);
-          return await launchForkAgent();
-        } finally {
-          endSideRequest();
-        }
       });
     },
 
@@ -15237,7 +14873,6 @@ export function createSessionControlPlane(
       // session is the checkout itself — the strongest writer vector on the
       // superseded session, not a workspace-cwd one.
       assertSessionResetNotPending(sessionId);
-      assertChannelAdmitsPrompts(entry);
 
       if (signal?.aborted) {
         return { exitCode: null, output: '', aborted: true };
@@ -16322,6 +15957,13 @@ export function createSessionControlPlane(
         const teardownFailures = teardownResults.flatMap((result) =>
           result.status === 'rejected' ? [result.reason] : [],
         );
+        // A startup whose teardown was never confirmed may still hold a live
+        // resource, so shutdown must not report success over it.
+        for (const failure of harness.teardownFailures) {
+          if (!teardownFailures.includes(failure)) {
+            teardownFailures.push(failure);
+          }
+        }
         if (teardownFailures.length === 1) throw teardownFailures[0];
         if (teardownFailures.length > 1) {
           throw new AggregateError(

@@ -94,4 +94,46 @@ describe('assembleMcpServers (precedence + scope tagging)', () => {
     const result = assembleMcpServers({ usr: { command: 'user-cmd' } }, dir);
     expect(Object.keys(result)).toEqual(['usr']);
   });
+
+  it.each(['missing', 'valid'])(
+    'preserves merge precedence with strict loading and %s project input',
+    (kind) => {
+      if (kind === 'valid') {
+        writeMcpJson({
+          project: { command: 'project' },
+          shared: { command: 'project' },
+        });
+      }
+      const settings = {
+        user: { command: 'user' },
+        shared: { command: 'system', scope: 'system' as const },
+      };
+      const cli = { shared: { command: 'cli' } };
+      expect(
+        assembleMcpServers(settings, dir, cli, {
+          rejectProjectConfigErrors: true,
+        }),
+      ).toEqual(assembleMcpServers(settings, dir, cli));
+    },
+  );
+
+  it.each(['invalid JSON', 'invalid entry', 'directory'])(
+    'rejects %s before exposing a partial configuration in strict mode',
+    (kind) => {
+      const file = path.join(dir, '.mcp.json');
+      if (kind === 'directory') fs.mkdirSync(file);
+      else if (kind === 'invalid JSON') fs.writeFileSync(file, '{ invalid');
+      else writeMcpJson({ good: { command: 'good' }, bad: null });
+      expect(() =>
+        assembleMcpServers(
+          { settings: { command: 'settings' } },
+          dir,
+          undefined,
+          {
+            rejectProjectConfigErrors: true,
+          },
+        ),
+      ).toThrow();
+    },
+  );
 });

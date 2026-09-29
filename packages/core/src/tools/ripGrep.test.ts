@@ -313,6 +313,8 @@ describe('RipGrepTool', () => {
       const result = await invocation.execute(abortSignal);
 
       expect(result.returnDisplay).toBe('Found 1 match (incomplete)');
+      expect(result.executionStatus).toBe('error');
+      expect(result.error?.message).toBe(error.message);
       expect(result.llmContent).toContain(
         '[Search did not complete: the results above may not include all matches.]',
       );
@@ -790,6 +792,11 @@ describe('RipGrepTool', () => {
         llmContent:
           'Error during grep search operation: ripgrep binary not found.',
         returnDisplay: 'Error: ripgrep binary not found.',
+        executionStatus: 'error',
+        error: {
+          message: 'ripgrep binary not found.',
+          type: 'grep_execution_error',
+        },
       });
     });
 

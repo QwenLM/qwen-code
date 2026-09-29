@@ -38,6 +38,12 @@ type JsonlReadOptions = {
 
 type JsonlReadLinesOptions = {
   signal?: AbortSignal;
+  /**
+   * Reads no further than this many bytes from the start of the file. Line
+   * reading otherwise buffers a whole line, however long, before the line
+   * budget can stop it. A line the bound cuts short parses as incomplete.
+   */
+  maxBytes?: number;
 };
 
 interface ParsedJsonlLine<T> {
@@ -205,9 +211,11 @@ async function readLinesWithIntegrityInternal<T = unknown>(
   let rl: readline.Interface | undefined;
   try {
     options.signal?.throwIfAborted();
+    const range =
+      options.maxBytes === undefined ? {} : { end: options.maxBytes - 1 };
     fileStream = options.signal
-      ? fs.createReadStream(filePath, { signal: options.signal })
-      : fs.createReadStream(filePath);
+      ? fs.createReadStream(filePath, { ...range, signal: options.signal })
+      : fs.createReadStream(filePath, range);
     rl = readline.createInterface({
       input: fileStream,
       crlfDelay: Infinity,

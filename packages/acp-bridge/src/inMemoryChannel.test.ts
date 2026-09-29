@@ -6,6 +6,10 @@
 
 import { describe, it, expect } from 'vitest';
 import type { AnyMessage } from '@agentclientprotocol/sdk';
+import {
+  AgentSideConnection,
+  ClientSideConnection,
+} from '@agentclientprotocol/sdk';
 // Import via the barrel rather than the source file so the public API
 // surface (serve/index.ts) is exercised by CI — a typo or missing
 // re-export would otherwise go undetected.
@@ -45,6 +49,51 @@ async function recvOne(
 }
 
 describe('createInMemoryChannel', () => {
+  it.each([0, 1, 2, 3])(
+    'closes both SDK connections when abort races a write after %i microtasks',
+    async (microtasks) => {
+      const channel = createInMemoryChannel();
+      let finishInitialize!: () => void;
+      const initializeGate = new Promise<void>((resolve) => {
+        finishInitialize = resolve;
+      });
+      const agent = new AgentSideConnection(
+        () => ({
+          initialize: async () => {
+            await initializeGate;
+            return { protocolVersion: 1 };
+          },
+          authenticate: async () => ({}),
+          cancel: async () => {},
+          newSession: async () => ({ sessionId: 'unused' }),
+          prompt: async () => ({ stopReason: 'end_turn' as const }),
+        }),
+        channel.agentStream,
+      );
+      const client = new ClientSideConnection(
+        () => ({
+          sessionUpdate: async () => {},
+          requestPermission: async () => ({
+            outcome: { outcome: 'cancelled' as const },
+          }),
+        }),
+        channel.clientStream,
+      );
+      // The SDK does not settle outstanding RPCs on closure; owners guard them.
+      void client.initialize({ protocolVersion: 1 }).catch(() => {});
+      for (let index = 0; index < microtasks; index++) await Promise.resolve();
+      channel.abort();
+      try {
+        await Promise.all([client.closed, agent.closed]);
+        expect(client.signal.aborted).toBe(true);
+        expect(agent.signal.aborted).toBe(true);
+      } finally {
+        channel.abort();
+        finishInitialize();
+      }
+    },
+  );
+
   it('round-trips a frame from client to agent', async () => {
     const { clientStream, agentStream } = createInMemoryChannel();
     const sent: AnyMessage = {

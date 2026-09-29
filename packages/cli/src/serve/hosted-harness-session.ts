@@ -513,8 +513,10 @@ export function registerHostedHarnessSessionRoutes(
               .map((event) => event.payload['turnId']),
           );
           const history = session.toolProfile
-            ? projected.filter((entry) =>
-                settledPrompts.has(entry.daemonPromptId),
+            ? projected.filter(
+                (entry) =>
+                  entry.daemonPromptId !== undefined &&
+                  settledPrompts.has(entry.daemonPromptId),
               )
             : projected;
           let parentUuid = projected.at(-1)?.uuid ?? null;

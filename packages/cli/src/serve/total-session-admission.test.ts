@@ -47,6 +47,25 @@ describe('createTotalSessionAdmissionController', () => {
     ).toThrow(TotalSessionLimitExceededError);
   });
 
+  it('does not count managed-gateway Tool Runtime sessions toward the total cap', () => {
+    const admission = createTotalSessionAdmissionController({
+      maxTotalSessions: 1,
+      getBridges: () => [{ sessionCount: 2, userFacingSessionCount: 1 }],
+    });
+
+    const reservation = admission.admit({
+      operation: 'spawn',
+      workspaceCwd: '/work/a',
+      sourceType: 'managed-gateway',
+    });
+    if (!reservation) throw new Error('expected reservation');
+    expect(admission.snapshot()).toEqual({ liveCount: 1, inFlight: 0 });
+    expect(() =>
+      admission.admit({ operation: 'spawn', workspaceCwd: '/work/b' }),
+    ).toThrow(TotalSessionLimitExceededError);
+    reservation.release();
+  });
+
   it('treats undefined, zero, and Infinity as unlimited', () => {
     for (const maxTotalSessions of [undefined, 0, Infinity]) {
       const admission = createTotalSessionAdmissionController({

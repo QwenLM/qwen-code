@@ -130,6 +130,33 @@ describe('ToolCallEmitter', () => {
       );
     });
 
+    it('uses scheduler-prepared metadata without rebuilding an invocation', async () => {
+      const tool = createMockTool({
+        build: vi.fn(() => {
+          throw new Error('unprepared invocation');
+        }),
+      });
+      vi.mocked(mockToolRegistry.getTool).mockReturnValue(tool);
+      await emitter.emitStart({
+        toolName: 'remote_tool',
+        callId: 'remote-call',
+        args: { path: 'remote.txt' },
+        metadata: {
+          title: 'Remote normalized description',
+          locations: [{ path: '/remote/remote.txt', line: null }],
+          kind: 'read',
+        },
+      });
+      expect(tool.build).not.toHaveBeenCalled();
+      expect(sendUpdateSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: 'Remote normalized description',
+          locations: [{ path: '/remote/remote.txt', line: null }],
+          kind: 'read',
+        }),
+      );
+    });
+
     it('should emit tool_call update with basic params when tool not in registry', async () => {
       const result = await emitter.emitStart({
         toolName: 'unknown_tool',

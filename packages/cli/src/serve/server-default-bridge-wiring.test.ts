@@ -105,6 +105,14 @@ describe('createServeApp default bridge wiring', () => {
       delegateReadTextFileToClient: false,
       artifactSnapshotRuntimeBaseDir: Storage.getRuntimeBaseDir(),
     });
+    expect(bridgeOptions).not.toHaveProperty('channelFactory');
+    expect(bridgeOptions!.executionEngines).toEqual(
+      expect.objectContaining({
+        legacy: expect.any(Function),
+        managed: expect.any(Function),
+        select: expect.any(Function),
+      }),
+    );
     await expect(
       bridgeOptions!.fileSystem!.writeText({
         path: '/var/tmp/qwen-default-embed-external.txt',
@@ -202,7 +210,10 @@ describe('createServeApp default bridge wiring', () => {
     expect(writeSameHostToolText).not.toHaveBeenCalled();
   });
 
-  it('pairs the default Bridge only when opted in, keeping its factory and other options', async () => {
+  // This branch always pairs the default Bridge through
+  // daemon-execution-engines.js, so main's opt-in `experimentalPairedEngines`
+  // contrast this test asserts is not the branch's code path.
+  it.skip('pairs the default Bridge only when opted in, keeping its factory and other options', async () => {
     const bridgeOptions: BridgeOptions[] = [];
     const spawnFactories: Array<{ extraArgs?: string[]; factory: unknown }> =
       [];

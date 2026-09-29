@@ -79,6 +79,7 @@ describe('DefaultOpenAICompatibleProvider', () => {
 
     // Mock Config
     mockCliConfig = {
+      getRuntimeEnvironment: () => process.env,
       getCliVersion: vi.fn().mockReturnValue('1.0.0'),
       getProxy: vi.fn().mockReturnValue(undefined),
       getSessionId: vi.fn().mockReturnValue('session-1'),
@@ -176,6 +177,19 @@ describe('DefaultOpenAICompatibleProvider', () => {
   });
 
   describe('buildClient', () => {
+    it('passes explicit empty account options so the SDK cannot borrow ambient routing', () => {
+      mockCliConfig.getRuntimeEnvironment = () => ({});
+      mockContentGeneratorConfig.baseUrl = undefined;
+      provider.buildClient();
+      expect(OpenAI).toHaveBeenCalledWith(
+        expect.objectContaining({
+          baseURL: null,
+          organization: null,
+          project: null,
+        }),
+      );
+    });
+
     it('should create OpenAI client with correct configuration', () => {
       const client = provider.buildClient();
 
@@ -351,6 +365,22 @@ describe('DefaultOpenAICompatibleProvider', () => {
 
         expect(result.max_tokens).toBe(16384);
       }
+    });
+
+    it('uses the output budget from the supplied snapshot', () => {
+      process.env[MAX_OUTPUT_TOKENS_ENV] = '3000';
+      mockCliConfig.getRuntimeEnvironment = () => ({
+        QWEN_CODE_MAX_OUTPUT_TOKENS: '9000',
+      });
+      expect(
+        provider.buildRequest({ model: 'gpt-4', messages: [] }, 'prompt')
+          .max_tokens,
+      ).toBe(9000);
+      mockCliConfig.getRuntimeEnvironment = () => ({});
+      expect(
+        provider.buildRequest({ model: 'gpt-4', messages: [] }, 'prompt')
+          .max_tokens,
+      ).toBe(16384);
     });
 
     it('should respect a valid QWEN_CODE_MAX_OUTPUT_TOKENS value', () => {

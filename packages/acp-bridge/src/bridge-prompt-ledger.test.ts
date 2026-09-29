@@ -41,6 +41,12 @@ describe('bridge prompt terminal ledger writes', () => {
     });
     try {
       const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const lastEventIdBeforeAdmission = bridge.getSessionLastEventId(
+        session.sessionId,
+      );
+      const eventEpochBeforeAdmission = bridge.getSessionEventEpoch(
+        session.sessionId,
+      );
       const running = bridge.sendPrompt(
         session.sessionId,
         {
@@ -50,6 +56,14 @@ describe('bridge prompt terminal ledger writes', () => {
         undefined,
         { promptId: 'p-ledger-1' },
       );
+      const watermark = bridge.getPromptAdmissionWatermark?.(
+        session.sessionId,
+        'p-ledger-1',
+      );
+      expect(watermark).toEqual({
+        lastEventId: lastEventIdBeforeAdmission,
+        eventEpoch: eventEpochBeforeAdmission,
+      });
       const inFlight = ledger.records.filter(
         (record) => !('terminal' in record),
       );

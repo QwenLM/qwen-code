@@ -390,10 +390,16 @@ export function findEnvFiles(
 ): string[] {
   const homeDir = os.homedir();
   let realStartDir = path.resolve(startDir);
+  let realHomeDir = path.resolve(homeDir);
   try {
     realStartDir = fs.realpathSync(realStartDir);
   } catch {
     // Match loadSettings(): use the resolved path when realpath is unavailable.
+  }
+  try {
+    realHomeDir = fs.realpathSync(realHomeDir);
+  } catch {
+    // Keep the resolved home path when the directory is unavailable.
   }
   const globalQwenDir = Storage.getGlobalQwenDir();
   const legacyQwenDir = path.normalize(path.join(homeDir, QWEN_DIR));
@@ -461,7 +467,7 @@ export function findEnvFiles(
   let currentDir = realStartDir;
   let visitedHomeDir = false;
   while (true) {
-    if (currentDir === homeDir) {
+    if (currentDir === realHomeDir) {
       visitedHomeDir = true;
       pushHomeCandidates();
       return found;
@@ -643,6 +649,32 @@ function reportRejectedSettingsEnv(
       `qwen: ${source} cannot set QWEN_AGENT_EXECUTION_BACKEND; ignored. Export it in the launch environment instead.`,
     );
   }
+}
+
+export function buildHostBootstrapEnvironment(
+  baseEnv: Readonly<NodeJS.ProcessEnv>,
+): Readonly<NodeJS.ProcessEnv> {
+  const userLevelPaths = getUserLevelEnvPaths();
+  const parsed = parseEnvFiles(
+    findEnvFiles({}, os.homedir(), userLevelPaths, false),
+    userLevelPaths,
+  );
+  if (parsed.readFailed) {
+    throw new Error('Could not read the daemon host environment.');
+  }
+  const effectiveEnv = { ...baseEnv };
+  for (const file of parsed.files) {
+    for (const [key, value] of Object.entries(file.parsedEnv)) {
+      if (
+        file.isHomeScopedEnvFile &&
+        isReloadExcludedKey(key) &&
+        canApplyParsedEnvKey(file, key, DEFAULT_EXCLUDED_ENV_VARS)
+      ) {
+        setRuntimeEnvIfUnset(effectiveEnv, key, value);
+      }
+    }
+  }
+  return Object.freeze(effectiveEnv);
 }
 
 export function buildRuntimeEnvironment(

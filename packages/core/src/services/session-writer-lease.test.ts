@@ -2991,6 +2991,7 @@ describe('SessionWriterLease', () => {
       });
       expect(replacement.ownerId).not.toBe(first.ownerId);
       expect(replacement.takeoverCommitProof).toEqual(commitProof);
+      expect(replacement.writesManagedLockRecords).toBe(true);
       const lockPath = getSessionWriterLockPath(
         fixture.runtimeBaseDir,
         fixture.options.sessionId,
@@ -3067,10 +3068,10 @@ describe('SessionWriterLease', () => {
         ...fixture.options,
         lockSchema: managedSchema,
       });
+      expect(managed.writesManagedLockRecords).toBe(true);
       await managed.release();
     });
   });
-
   it('waits for an accepted append before sealing the transcript', async () => {
     const fixture = await createFixture('sealed-append-race-session');
     const lease = await SessionWriterLease.acquire(fixture.options);

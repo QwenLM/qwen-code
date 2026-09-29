@@ -30,6 +30,7 @@ function createMockConfig(
   resolvedModel?: ResolvedModelConfig,
 ) {
   return {
+    getRuntimeEnvironment: () => process.env,
     getContentGeneratorConfig: () => parentConfig,
     getModelsConfig: () => ({
       getResolvedModel: vi.fn().mockReturnValue(resolvedModel),
@@ -81,6 +82,7 @@ describe('buildAgentContentGeneratorConfig', () => {
           customHeaders: { Authorization: 'parent-secret' },
         }),
         getModelsConfig: () => models,
+        getRuntimeEnvironment: () => process.env,
       } as unknown as Config;
     }
 
@@ -328,6 +330,7 @@ describe('buildAgentContentGeneratorConfig', () => {
     it('should use explicit baseUrl when looking up a registry model', () => {
       const getResolvedModel = vi.fn().mockReturnValue(resolvedModel);
       const config = {
+        getRuntimeEnvironment: () => process.env,
         getContentGeneratorConfig: () => parentConfig,
         getModelsConfig: () => ({ getResolvedModel }),
       } as unknown as Config;
@@ -602,6 +605,7 @@ describe('buildAgentContentGeneratorConfig', () => {
       return {
         getContentGeneratorConfig: () => parent,
         getModelsConfig: () => ({ getResolvedModel }),
+        getRuntimeEnvironment: () => process.env,
       } as unknown as Config;
     }
 

@@ -74,10 +74,15 @@ describe('auto-memory extraction with agent planner', () => {
       };
     });
 
+    const extractionHistory = [
+      { role: 'user', parts: [{ text: 'I prefer terse responses.' }] },
+      { role: 'model', parts: [{ text: 'Noted.' }] },
+    ];
     const result = await runAutoMemoryExtract({
       projectRoot,
       sessionId: 'session-1',
       config: mockConfig,
+      extractionHistory,
       history: [
         {
           role: 'user',
@@ -90,6 +95,7 @@ describe('auto-memory extraction with agent planner', () => {
     expect(runAutoMemoryExtractionByAgent).toHaveBeenCalledWith(
       mockConfig,
       projectRoot,
+      extractionHistory,
     );
 
     const docs = await scanAutoMemoryTopicDocuments(projectRoot);
