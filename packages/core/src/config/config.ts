@@ -6552,9 +6552,53 @@ export class Config {
     }
 
     const rawSelector = resolveModelId(this.fastModel);
-    return rawSelector?.authType
-      ? `${rawSelector.authType}:${selector.modelId}`
-      : selector.modelId;
+    if (!rawSelector?.authType) return selector.modelId;
+    const qualified = `${rawSelector.authType}:${selector.modelId}`;
+    const endpoint = this.pinnedAuxEndpoint(
+      this.fastModel,
+      selector.modelId,
+      available,
+    );
+    return endpoint ? `${qualified}\0${endpoint}` : qualified;
+  }
+
+  /**
+   * The endpoint a persisted aux selector (`authType:id\0<baseUrl>`) is pinned
+   * to, in the registry-identity form consumers of the selector compare
+   * against: the picker persists the row's effective baseUrl, while registry
+   * keys and the forked-runtime guard use the declared one. An entry that
+   * declares no endpoint needs no suffix — a bare selector resolves to it —
+   * and an endpoint matching no configured entry is dropped, which keeps the
+   * pre-existing first-match behaviour instead of unconfiguring the model.
+   *
+   * Matching is on the effective baseUrl (what the picker persists), which is
+   * not unique across same-id entries: a row declaring no baseUrl shares the
+   * auth type's default URL with a row that declares that same URL. When
+   * several rows match, prefer the one that declared the endpoint
+   * (`registryBaseUrl` set) so the pin deterministically re-attaches instead
+   * of collapsing to whichever entry the config listed first. Residual
+   * ambiguity: a pin on the no-declared-baseUrl row cannot be told apart from
+   * a pin on the declaring row and resolves to the declaring one.
+   */
+  private pinnedAuxEndpoint(
+    persisted: string | undefined,
+    modelId: string,
+    available: AvailableModel[],
+  ): string | undefined {
+    const endpoint = persisted?.trim().split('\0')[1];
+    if (!endpoint) return undefined;
+    const hits = available.filter(
+      (model) => model.id === modelId && model.baseUrl === endpoint,
+    );
+    const matched =
+      hits.find((model) => model.registryBaseUrl !== undefined) ?? hits[0];
+    if (!matched) {
+      this.debugLogger.warn(
+        `Aux endpoint pin dropped for "${modelId}": no configured entry at ${formatVisionModelSettingForLog(endpoint)}; falling back to the first same-id match.`,
+      );
+      return undefined;
+    }
+    return matched.registryBaseUrl;
   }
 
   /**
@@ -6676,9 +6720,14 @@ export class Config {
         return undefined;
       }
       const rawSelector = resolveModelId(this.compactionModel);
-      return rawSelector?.authType
-        ? `${rawSelector.authType}:${selector.modelId}`
-        : selector.modelId;
+      if (!rawSelector?.authType) return selector.modelId;
+      const qualified = `${rawSelector.authType}:${selector.modelId}`;
+      const endpoint = this.pinnedAuxEndpoint(
+        this.compactionModel,
+        selector.modelId,
+        available,
+      );
+      return endpoint ? `${qualified}\0${endpoint}` : qualified;
     }
     return this.getModel();
   }

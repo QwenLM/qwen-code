@@ -6190,6 +6190,7 @@ export class Session implements SessionContext {
                       ...(resourceLinks.length > 0 ? { resourceLinks } : {}),
                     }
                   : undefined,
+                promptId,
                 daemonPromptId,
               );
             }
@@ -6281,6 +6282,7 @@ export class Session implements SessionContext {
                         ...(inputAnnotations ? { inputAnnotations } : {}),
                       }
                     : undefined,
+                  promptId,
                   daemonPromptId,
                 );
               }
