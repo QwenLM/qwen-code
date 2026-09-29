@@ -1051,6 +1051,12 @@ export interface LoadSettingsOptions {
   skipLoadEnvironment?: boolean;
   skipWorkspaceSettings?: boolean;
   workspaceTrusted?: boolean;
+  /**
+   * Throw on invalid workspace-scope JSON instead of recovering it. Recovery
+   * rewrites the file to `{}`, which a caller polling a setting would read as
+   * the user having turned it off — and the rewrite makes that permanent.
+   */
+  preserveInvalidWorkspaceSettings?: boolean;
 }
 
 export function loadSettings(
@@ -1192,7 +1198,11 @@ function loadSettingsInternal(
           if (snapshotOnly) {
             throw new Error('Settings file contains invalid JSON.');
           }
-          if (scope !== SettingScope.Workspace || operatorSandbox)
+          if (
+            scope !== SettingScope.Workspace ||
+            operatorSandbox ||
+            opts.preserveInvalidWorkspaceSettings
+          )
             throw parseError;
           // ===== JSON parse failed — enter corruption recovery =====
           // Strategy: save corrupted file as .corrupted → reset to empty →

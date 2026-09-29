@@ -39,6 +39,7 @@ import {
   ACTIVE_WORK_MAX_SNAPSHOT_SESSIONS,
   ACTIVE_WORK_NOTIFICATION_METHOD,
   DAEMON_PERMISSION_CANCEL_REASON_META_KEY,
+  DAEMON_AGENT_RUN_META_KEY,
   MID_TURN_RECONCILIATION_RING_SIZE,
   MID_TURN_QUEUE_DRAIN_METHOD,
   TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
@@ -1610,6 +1611,7 @@ export class BridgeClient implements Client {
       messageId: string;
       displayText: string;
       content: ContentBlock[];
+      _meta?: Record<string, unknown>;
       attachmentReferences?: SessionAttachmentReference[];
     }> = [];
     try {
@@ -1660,6 +1662,9 @@ export class BridgeClient implements Client {
           messageId: item.messageId,
           displayText: item.text,
           content,
+          ...(item.agentRun
+            ? { _meta: { [DAEMON_AGENT_RUN_META_KEY]: item.agentRun } }
+            : {}),
           ...(attachmentReferences.length > 0 ? { attachmentReferences } : {}),
         });
       }
@@ -1737,6 +1742,7 @@ export class BridgeClient implements Client {
     const toolCallId = params['toolCallId'];
     const toolName = params['toolName'];
     const args = params['arguments'];
+    const permissionChecked = params['permissionChecked'];
     if (
       typeof sessionId !== 'string' ||
       sessionId.length === 0 ||
@@ -1746,7 +1752,9 @@ export class BridgeClient implements Client {
       toolCallId.length === 0 ||
       typeof toolName !== 'string' ||
       toolName.length === 0 ||
-      !isRecord(args)
+      !isRecord(args) ||
+      (permissionChecked !== undefined &&
+        typeof permissionChecked !== 'boolean')
     ) {
       throw RequestError.invalidParams(
         undefined,
@@ -1778,6 +1786,7 @@ export class BridgeClient implements Client {
       toolCallId,
       toolName,
       arguments: args,
+      ...(permissionChecked === true ? { permissionChecked: true } : {}),
       effectiveCwd: entry.effectiveCwd,
       // Forwarded verbatim and explicitly untrusted: the host policy decides
       // whether it can establish this scope from state it owns.

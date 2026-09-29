@@ -145,6 +145,8 @@ export interface ExternalToolGuardPrepareRequest {
   readonly toolCallId: string;
   readonly toolName: string;
   readonly arguments: Readonly<Record<string, unknown>>;
+  /** Child-runtime provenance, not a model argument or an OS credential. */
+  readonly permissionChecked?: boolean;
   /** Daemon-owned current session working directory. */
   readonly effectiveCwd?: string;
   /**

@@ -4175,18 +4175,16 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                 isFork ? 'fork' : 'background',
               ),
               turnAbortController.signal,
-              (recordOutcome) =>
-                runWithAgentContext(
-                  hookOpts.agentId,
-                  () =>
-                    bgBody(
-                      turnContextState,
-                      turnAbortController,
-                      recordOutcome,
-                      fireStartHook,
-                    ),
-                  launchDepth,
-                ),
+              (recordOutcome) => {
+                const body = () =>
+                  bgBody(
+                    turnContextState,
+                    turnAbortController,
+                    recordOutcome,
+                    fireStartHook,
+                  );
+                return runWithAgentContext(hookOpts.agentId, body, launchDepth);
+              },
             );
           return isFork ? runInForkContext(framedBgBody) : framedBgBody();
         };
@@ -4198,21 +4196,26 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         };
 
         const residentController: ResidentBackgroundAgent = {
-          continue: (message) => {
+          continue: (input) => {
             if (
               !canStayResident ||
               disposeRequested ||
               runtimeDisposed ||
               launchScope.signal?.aborted
             ) {
-              return false;
+              return 'fallback';
             }
             if (needsAutoPermissionLease()) {
               registry.disposeResidentAgent(
                 hookOpts.agentId,
                 residentController,
               );
-              return false;
+              return 'fallback';
+            }
+
+            const currentEntry = registry.get(hookOpts.agentId);
+            if (!registry.canStartBackgroundAgent(currentEntry?.model)) {
+              return 'capacity_wait';
             }
 
             const nextAbortController = createChildAbortController(
@@ -4228,7 +4231,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               debugLogger.warn(
                 `[Agent] Could not continue resident background agent ${hookOpts.agentId}: ${error instanceof Error ? error.message : String(error)}`,
               );
-              return false;
+              return registry.canStartBackgroundAgent(currentEntry?.model)
+                ? 'fallback'
+                : 'capacity_wait';
             }
             if (
               !restarted ||
@@ -4237,7 +4242,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               registry.get(hookOpts.agentId) !== restarted ||
               restarted.status !== 'running'
             ) {
-              return false;
+              return 'fallback';
             }
 
             liveToolCallCount = 0;
@@ -4258,7 +4263,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             });
 
             const nextContextState = new ContextState();
-            nextContextState.set('task_prompt', message);
+            if (typeof input === 'string') {
+              nextContextState.set('task_prompt', input);
+            } else {
+              nextContextState.set('external_inputs_override', [input]);
+            }
             nextContextState.set('hook_context', '');
             const previousTurn = currentTurnPromise ?? Promise.resolve();
             currentTurnPromise = previousTurn
@@ -4272,7 +4281,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                 );
               });
             currentTurnPromise.catch(reportUnexpectedBackgroundError);
-            return true;
+            return 'continued';
           },
           dispose: requestRuntimeDisposal,
         };

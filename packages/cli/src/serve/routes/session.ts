@@ -180,6 +180,10 @@ import {
 } from '../prompt-terminal-ledger.js';
 import { createSessionOrganizationService } from '../session-organization-helpers.js';
 import {
+  AGENT_HOST_SESSION_SOURCE_TYPE,
+  AGENT_SESSION_SOURCE_TYPE,
+} from '../../runtime/agent-session-source.js';
+import {
   omitSkillDetailsForSdkSurface,
   omitSkillDetailsFromReplayArrays,
 } from '../skill-details-redaction.js';
@@ -995,6 +999,20 @@ function parseRequestedSessionSource(
     res.status(400).json({
       error:
         'The requested session source is reserved for daemon-owned Managed Gateway Runtimes.',
+      code: 'reserved_session_source',
+    });
+    return null;
+  }
+  // Agent sessions are created by the dispatcher in-process, never through
+  // this route. Accepting the source here would let a client relabel a
+  // session it restores so the dispatcher sends a real run into it.
+  if (
+    body['sourceType'] === AGENT_HOST_SESSION_SOURCE_TYPE ||
+    body['sourceType'] === AGENT_SESSION_SOURCE_TYPE
+  ) {
+    res.status(400).json({
+      error:
+        'The requested session source is reserved for daemon-owned agent sessions.',
       code: 'reserved_session_source',
     });
     return null;
@@ -1904,6 +1922,10 @@ export function registerSessionRoutes(
         archiveState: 'active',
         size: 1,
         signal,
+        excludeSourceTypes: [
+          AGENT_HOST_SESSION_SOURCE_TYPE,
+          AGENT_SESSION_SOURCE_TYPE,
+        ],
       });
       signal.throwIfAborted();
       return page.items.length > 0;
@@ -3550,7 +3572,16 @@ export function registerSessionRoutes(
         // by a "new chat" does not block a fresh branch session.
         const sharedCheckoutSession = runtime.bridge
           .listWorkspaceSessions(workspaceCwd)
-          .find((session) => !session.worktree && session.clientCount > 0);
+          .find(
+            (session) =>
+              session.sourceType !== AGENT_HOST_SESSION_SOURCE_TYPE &&
+              // Mesh agent bodies hold no user edits and are driven by the
+              // daemon, not by a person at a checkout — they must not block
+              // branch creation in the workspace they happen to share.
+              session.sourceType !== AGENT_SESSION_SOURCE_TYPE &&
+              !session.worktree &&
+              session.clientCount > 0,
+          );
         if (sharedCheckoutSession) {
           res.status(409).json({
             error:
@@ -4547,9 +4578,15 @@ export function registerSessionRoutes(
               sourceId: _reservedSourceId,
               ...metadataWithoutSource
             } = metadata;
+            // Agent-source sessions strip their source on restore as well:
+            // the restore is a person reading history, and the admission gate
+            // in acpAgent refuses `sourceType: 'agent'` materialisation with
+            // no live run behind it — keeping the source would make a finished
+            // agent's transcript unopenable while it stays listed.
             const restoreMetadata =
-              !isInternalWorkspaceRuntime(runtime) &&
-              isReservedStandaloneSessionSource(metadata)
+              (!isInternalWorkspaceRuntime(runtime) &&
+                isReservedStandaloneSessionSource(metadata)) ||
+              metadata.sourceType === AGENT_SESSION_SOURCE_TYPE
                 ? metadataWithoutSource
                 : metadata;
             const hasPersistedSource =
@@ -10863,7 +10900,11 @@ export function registerSessionRoutes(
       }
       const sessions = bridge
         .listWorkspaceSessions(runtime.workspaceCwd)
-        .filter((session) => session.sourceType !== 'managed-gateway')
+        .filter(
+          (session) =>
+            session.sourceType !== 'managed-gateway' &&
+            session.sourceType !== AGENT_HOST_SESSION_SOURCE_TYPE,
+        )
         .map((session) => ({
           sessionId: session.sessionId,
           clientCount: session.clientCount,

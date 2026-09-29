@@ -31292,10 +31292,14 @@ describe('Session', () => {
           },
         );
 
-        it('ignores the flag outside a Goal turn', async () => {
-          // Nothing but the Goal tool sets it today, and an ordinary turn
-          // has no verification boundary to reach, so an ordinary turn must
-          // keep the tool loop it has always had.
+        it('honours the flag outside a Goal turn too', async () => {
+          // It was Goal-only when only `update_goal` set it. The workspace-Agent
+          // closing tools set it as well now, and a hand-off makes later work in
+          // the same physical turn stale for the same reason a Goal checkpoint
+          // does — so `#endTurnAfterToolRun` no longer asks whether a Goal turn
+          // is in flight. A flagged tool ends the turn wherever it runs; a tool
+          // that does not set it keeps the ordinary loop, which the cases above
+          // cover.
           mockGoalRuntime.getSnapshot.mockReturnValue({
             v: 2,
             activity: 'idle',
@@ -31314,7 +31318,7 @@ describe('Session', () => {
             prompt: [{ type: 'text', text: 'go' }],
           });
 
-          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
         });
       });
 
@@ -37041,6 +37045,7 @@ describe('Session', () => {
             toolName: 'read_file',
             args: { path: '/normalized/final.txt' },
             signal: expect.any(AbortSignal),
+            permissionChecked: true,
             // The daemon policy falls back to the session and needs to know
             // where the tool will run.
             sessionId: 'test-session-id',
@@ -37109,6 +37114,7 @@ describe('Session', () => {
             toolName: 'read_file',
             args: { path: '/normalized/final.txt' },
             signal: expect.any(AbortSignal),
+            permissionChecked: true,
             // The daemon policy falls back to the session and needs to know
             // where the tool will run.
             sessionId: 'test-session-id',

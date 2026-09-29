@@ -68,6 +68,11 @@ import {
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import { CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY } from '../channel-worker-prompt-authorization.js';
 import { parseSessionSource } from '@qwen-code/acp-bridge';
+import {
+  AGENT_HOST_SESSION_SOURCE_TYPE,
+  AGENT_SESSION_SOURCE_TYPE,
+} from '../../runtime/agent-session-source.js';
+
 import { readServeWorkflowActionInput } from '@qwen-code/acp-bridge/status';
 import { restoreRetryAfterSeconds } from '@qwen-code/acp-bridge/sessionRestoreTimeout';
 import {
@@ -203,6 +208,14 @@ import {
   type JsonRpcRequest,
   type JsonRpcResponse,
 } from './json-rpc.js';
+
+/** Sources only the daemon's own dispatcher may create a session under. */
+function isAgentSessionSourceType(sourceType: unknown): boolean {
+  return (
+    sourceType === AGENT_HOST_SESSION_SOURCE_TYPE ||
+    sourceType === AGENT_SESSION_SOURCE_TYPE
+  );
+}
 
 function errMsg(err: unknown): string {
   if (err instanceof Error) return err.message;
@@ -1972,6 +1985,19 @@ export class AcpDispatcher {
             return;
           }
           const sessionRuntime = this.getSessionRuntimeContext();
+          // Same reservation as the REST route: only the daemon's dispatcher
+          // creates agent-host and agent sessions.
+          if (isAgentSessionSourceType(params['sourceType'])) {
+            conn.sendConn(
+              error(
+                id,
+                RPC.INVALID_PARAMS,
+                'The requested session source is reserved for daemon-owned agent sessions.',
+                { errorKind: 'reserved_session_source' },
+              ),
+            );
+            return;
+          }
           if (
             isReservedStandaloneSessionSource({
               sourceType:
@@ -2305,9 +2331,13 @@ export class AcpDispatcher {
                   sourceId: _reservedSourceId,
                   ...metadataWithoutSource
                 } = metadata;
+                // Agent-source sessions strip their source as the REST restore
+                // does: a restore is a person reading history, and keeping the
+                // source would let the load stand in for a dispatched run.
                 const restoreMetadata =
-                  this.liveSessionIsolation === undefined &&
-                  isReservedStandaloneSessionSource(metadata)
+                  (this.liveSessionIsolation === undefined &&
+                    isReservedStandaloneSessionSource(metadata)) ||
+                  metadata.sourceType === AGENT_SESSION_SOURCE_TYPE
                     ? metadataWithoutSource
                     : metadata;
                 // The private directory belongs to the live entry, which the

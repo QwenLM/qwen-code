@@ -347,8 +347,11 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     {
       reason:
         'Embedded server construction keeps a process-environment compatibility fallback, and the paired ' +
-        'execution-engine selector reads the same fallback when no primary effective environment was resolved.',
-      accesses: { whole: 2 },
+        'execution-engine selector reads the same fallback when no primary effective environment was resolved. ' +
+        'The collaboration opt-in is read once at daemon startup and is process-scoped ' +
+        'by design: it governs work no session owns (a recovery sweep and the ' +
+        'dispatch timer), so it cannot be a per-session setting.',
+      accesses: { whole: 2, 'key:QWEN_CODE_ENABLE_AGENT_COLLABORATION': 1 },
     },
   ],
   [

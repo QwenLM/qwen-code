@@ -13369,6 +13369,7 @@ describe('CoreToolScheduler Plan shell routing', () => {
       toolName: ToolNames.SHELL,
       args: { command: 'git status', directory: '/workspace' },
       signal: expect.any(AbortSignal),
+      permissionChecked: true,
       sessionId: 'plan-shell-session',
       cwd: '/workspace',
     });
@@ -13407,6 +13408,7 @@ describe('CoreToolScheduler Plan shell routing', () => {
       toolName: ToolNames.SHELL,
       args: { command: 'git status', directory: '/workspace' },
       signal: expect.any(AbortSignal),
+      permissionChecked: true,
       sessionId: 'plan-shell-session',
       cwd: '/workspace',
     });
@@ -13419,6 +13421,67 @@ describe('CoreToolScheduler Plan shell routing', () => {
     }
     expect(allowedCall.response.executionStatus).toBe('success');
   });
+
+  it.each([true, false])(
+    'does not mark fixed_policy calls as permission-checked when the host allows=%s',
+    async (allowed) => {
+      const getDefaultPermission = vi.fn().mockResolvedValue('ask');
+      const getConfirmationDetails = vi.fn();
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: 'ok',
+        returnDisplay: 'ok',
+      });
+      const toolInvocationGuard = vi
+        .fn<ToolInvocationGuard>()
+        .mockResolvedValue(
+          allowed
+            ? { allowed: true }
+            : { allowed: false, reason: 'host denied' },
+        );
+      const { scheduler, onAllToolCallsComplete } = buildPlanShellScheduler({
+        tools: [
+          new MockMediaPolicyTool({
+            name: 'omni_test_policy',
+            getDefaultPermission,
+            getConfirmationDetails,
+            execute,
+          }),
+        ],
+        toolInvocationGuard,
+      });
+
+      await scheduler.schedule(
+        [
+          {
+            callId: 'guard-fixed-policy',
+            name: 'omni_test_policy',
+            args: {},
+            isClientInitiated: false,
+            prompt_id: 'prompt-fixed-policy',
+            executionOrigin: {
+              kind: 'fixed_policy',
+              policyId: 'test-policy',
+              stage: 'preprocessing',
+            },
+          },
+        ],
+        new AbortController().signal,
+      );
+      await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+
+      expect(getDefaultPermission).not.toHaveBeenCalled();
+      expect(getConfirmationDetails).not.toHaveBeenCalled();
+      expect(toolInvocationGuard).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          toolName: 'omni_test_policy',
+          permissionChecked: false,
+        }),
+      );
+      expect(execute).toHaveBeenCalledTimes(allowed ? 1 : 0);
+      const completed = onAllToolCallsComplete.mock.calls[0][0] as ToolCall[];
+      expect(completed[0].status).toBe(allowed ? 'success' : 'error');
+    },
+  );
 
   it('cancels without execution when aborted while awaiting the host guard', async () => {
     const execute = vi.fn();

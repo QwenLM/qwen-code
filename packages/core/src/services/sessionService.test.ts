@@ -8175,6 +8175,74 @@ describe('SessionService', () => {
         systemPayload: { text: 'x'.repeat(350) },
       }));
 
+    it('excludes a source before applying the page size', async () => {
+      const visibleId = '00000000-0000-4000-8000-000000000001';
+      const hiddenId = '00000000-0000-4000-8000-000000000002';
+      const hiddenAgentId = '00000000-0000-4000-8000-000000000003';
+      const visibleFile = writeSession(visibleId, [
+        userLine(visibleId, 'visible'),
+      ]);
+      const hiddenFile = writeSession(hiddenId, [
+        userLine(hiddenId, 'hidden'),
+        {
+          ...sessionSourceLine(hiddenId),
+          systemPayload: { sourceType: 'agent-host' },
+        },
+      ]);
+      // A second excluded source (a mesh agent's body session) must be dropped
+      // by the same list option, not just the one name it was built for.
+      const hiddenAgentFile = writeSession(hiddenAgentId, [
+        userLine(hiddenAgentId, 'hidden agent'),
+        {
+          ...sessionSourceLine(hiddenAgentId),
+          systemPayload: { sourceType: 'agent' },
+        },
+      ]);
+      fs.utimesSync(visibleFile, new Date(1), new Date(1));
+      fs.utimesSync(hiddenFile, new Date(2), new Date(2));
+      fs.utimesSync(hiddenAgentFile, new Date(3), new Date(3));
+
+      await expect(
+        service.listSessions({
+          size: 1,
+          excludeSourceTypes: ['agent-host', 'agent'],
+        }),
+      ).resolves.toMatchObject({
+        items: [{ sessionId: visibleId }],
+        hasMore: false,
+        nextCursor: undefined,
+      });
+    });
+
+    it('excludes the source from active and archived counts', async () => {
+      const visibleId = '00000000-0000-4000-8000-000000000001';
+      const hiddenId = '00000000-0000-4000-8000-000000000002';
+      writeSession(visibleId, [userLine(visibleId, 'visible')]);
+      const archiveDir = realPath.join(getChatsDir(), 'archive');
+      fs.mkdirSync(archiveDir, { recursive: true });
+      fs.writeFileSync(
+        realPath.join(archiveDir, `${hiddenId}.jsonl`),
+        `${[
+          userLine(hiddenId, 'hidden'),
+          {
+            ...sessionSourceLine(hiddenId),
+            systemPayload: { sourceType: 'agent-host' },
+          },
+        ]
+          .map((line) => JSON.stringify(line))
+          .join('\n')}\n`,
+      );
+
+      await expect(
+        service.getSessionInfoCounts({ excludeSourceTypes: ['agent-host'] }),
+      ).resolves.toEqual({
+        active: 1,
+        archived: 0,
+        total: 1,
+        truncated: false,
+      });
+    });
+
     // Short complete fixtures answer from parsed records before the scan runs.
     // The long and truncated fixtures below drive the real tail-window scan
     // and pin the production marker (`"subtype":"goal_state"`) and field name.

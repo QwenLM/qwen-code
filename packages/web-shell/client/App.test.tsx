@@ -1559,6 +1559,7 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
     WebShellSidebar: (props: {
       collapsed?: boolean;
       onOpenSettings?: () => void;
+      onOpenAgents?: (view?: 'agents' | 'tasks') => void;
       onOpenPlugins?: () => void;
       onOpenChannels?: () => void;
       onOpenDaemonStatus?: () => void;
@@ -1600,6 +1601,7 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
           ),
           'data-show-live': String(props.showLive),
           'data-project-features-enabled': String(props.projectFeaturesEnabled),
+          'data-has-open-agents': String(Boolean(props.onOpenAgents)),
           'data-has-git-diff': String(Boolean(props.onOpenGitDiff)),
           'data-has-commit': String(Boolean(props.onOpenCommit)),
           'data-can-open-sessions-overview': String(
@@ -2537,6 +2539,23 @@ vi.doMock('./components/terminal/TerminalPanel', async () => {
       }),
   };
 });
+vi.doMock(
+  './components/workspace-agents/ThreadsRoute',
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import('./components/workspace-agents/ThreadsRoute')
+      >();
+    const React = await import('react');
+    return {
+      ...actual,
+      ThreadsRoute: () =>
+        React.createElement('div', {
+          'data-testid': 'workspace-agent-thread-route',
+        }),
+    };
+  },
+);
 mockComponent('./components/QueuedPromptDisplay', 'QueuedPromptDisplay');
 
 const {
@@ -43870,6 +43889,47 @@ it('runtime-stop does not leak shell drain lock', async () => {
   expect(mockSessionActions.sendShellCommand).toHaveBeenCalledWith(
     'second-after-resume',
   );
+});
+
+it('does not restore a workspace-agent thread when collaboration is disabled', async () => {
+  sessionStorage.setItem(
+    'qwen:team-conversation',
+    JSON.stringify({
+      id: 'thread-1',
+      cwd: '/tmp/project',
+      server: mockWorkspace.baseUrl,
+    }),
+  );
+
+  const { container, rerender } = renderApp();
+  await flush();
+
+  expect(
+    container.querySelector('[data-testid="workspace-agent-thread-route"]'),
+  ).toBeNull();
+  expect(
+    container
+      .querySelector('[data-testid="sidebar"]')
+      ?.getAttribute('data-has-open-agents'),
+  ).toBe('false');
+
+  mockWorkspace.capabilities = {
+    ...mockWorkspace.capabilities,
+    features: ['agent_collaboration_v1'],
+  };
+  rerender();
+  await act(async () => {
+    await vi.dynamicImportSettled();
+  });
+
+  expect(
+    container.querySelector('[data-testid="workspace-agent-thread-route"]'),
+  ).not.toBeNull();
+  expect(
+    container
+      .querySelector('[data-testid="sidebar"]')
+      ?.getAttribute('data-has-open-agents'),
+  ).toBe('true');
 });
 
 function mockRuntimeStopChoice() {
