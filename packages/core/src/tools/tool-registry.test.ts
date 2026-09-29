@@ -1203,26 +1203,41 @@ describe('ToolRegistry', () => {
       expect(toolRegistry.isDeferredToolRevealed(toolName)).toBe(false);
     });
 
-    it('drops the reviewed declaration with the tool, so a replacement must be reviewed again (#12569)', () => {
+    it('keeps the reviewed declaration after removal so a changed replacement is refused (#11321)', () => {
+      const declaration = {
+        type: 'object',
+        properties: { text: { type: 'string' } },
+      };
       const tool = new DiscoveredMCPTool(
         {} as CallableTool,
         'slack',
         'send_message',
         'send a message',
-        { type: 'object', properties: { text: { type: 'string' } } },
+        declaration,
       );
       toolRegistry.registerTool(tool);
       toolRegistry.recordReviewedDeclaration(tool);
-      expect(toolRegistry.getReviewedDeclaration(tool.name)).toBe(
-        deferredDeclarationFingerprint(tool),
-      );
+      const recorded = toolRegistry.getReviewedDeclaration(tool.name);
+      expect(recorded).toBe(deferredDeclarationFingerprint(tool));
 
       toolRegistry.removeMcpToolsByServer('slack');
 
-      // tool_call refuses a hidden tool with no review, so pruning is the
-      // strict direction: a same-named replacement, changed or not, has to go
-      // through tool_search before it runs.
-      expect(toolRegistry.getReviewedDeclaration(tool.name)).toBeUndefined();
+      // Deliberately NOT pruned. A disconnect does not take the reviewed
+      // schema out of history, and the entry can only match the same server,
+      // schema name and parameter schema — so it either still describes the
+      // live tool or forces a re-review. History replacement is what clears
+      // it (#12569).
+      expect(toolRegistry.getReviewedDeclaration(tool.name)).toBe(recorded);
+
+      // A replacement republishing a changed contract does not match it.
+      const replacement = new DiscoveredMCPTool(
+        {} as CallableTool,
+        'slack',
+        'send_message',
+        'send a message',
+        { type: 'object', properties: { channel: { type: 'string' } } },
+      );
+      expect(deferredDeclarationFingerprint(replacement)).not.toBe(recorded);
     });
 
     it('clearReviewedDeclarations forgets every review (#12569)', () => {
