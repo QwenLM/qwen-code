@@ -332,7 +332,12 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
             String runtimeSessionId, ExecutionReconciliation observation) {
         ToolExecutionRecord record = observation.getRecord();
         String state = observation.getRuntimeState();
-        if (record.getState() == ToolExecutionRecord.State.UNKNOWN
+        // A provider call the worker still holds as prepared was never
+        // started, and nothing dispatches it a second time: it stays UNKNOWN
+        // for the caller, who would otherwise wait for it for ever.
+        boolean neverStarted = "prepared".equals(state)
+                && ProviderRuntimeProtocol.isReference(record.getReference());
+        if (record.getState() == ToolExecutionRecord.State.UNKNOWN && !neverStarted
                 && ("prepared".equals(state) || "executing".equals(state)
                     || "cancel_requested".equals(state))) {
             Map<String, Object> response = envelope(harnessSessionId, runtimeSessionId,
