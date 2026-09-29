@@ -13,6 +13,13 @@ import type {
   MCPOAuthConfig,
 } from '@qwen-code/qwen-code-core';
 
+function splitCommaList(values: string[] | undefined): string[] | undefined {
+  return values
+    ?.flatMap((value) => value.split(','))
+    .map((value) => value.trim())
+    .filter(Boolean);
+}
+
 async function addMcpServer(
   name: string,
   commandOrUrl: string,
@@ -322,8 +329,12 @@ export const addCommand: CommandModule = {
         timeout: argv['timeout'] as number | undefined,
         trust: argv['trust'] as boolean | undefined,
         description: argv['description'] as string | undefined,
-        includeTools: argv['includeTools'] as string[] | undefined,
-        excludeTools: argv['excludeTools'] as string[] | undefined,
+        includeTools: splitCommaList(
+          argv['includeTools'] as string[] | undefined,
+        ),
+        excludeTools: splitCommaList(
+          argv['excludeTools'] as string[] | undefined,
+        ),
         oauthClientId: argv['oauthClientId'] as string | undefined,
         oauthClientSecret: argv['oauthClientSecret'] as string | undefined,
         oauthRedirectUri: argv['oauthRedirectUri'] as string | undefined,

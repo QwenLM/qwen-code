@@ -218,6 +218,34 @@ describe('mcp add command', () => {
     });
   });
 
+  it('should split comma-separated include and exclude tools', async () => {
+    await parser.parseAsync(
+      'add my-server /path/to/server ' +
+        '--include-tools "read_text_file, list_directory" ' +
+        '--exclude-tools write_file,edit_file',
+    );
+
+    expect(mockSetValue).toHaveBeenCalledWith(SettingScope.User, 'mcpServers', {
+      'my-server': expect.objectContaining({
+        includeTools: ['read_text_file', 'list_directory'],
+        excludeTools: ['write_file', 'edit_file'],
+      }),
+    });
+  });
+
+  it('should keep accepting repeated include-tools flags', async () => {
+    await parser.parseAsync(
+      'add my-server /path/to/server ' +
+        '--include-tools read_text_file --include-tools list_directory',
+    );
+
+    expect(mockSetValue).toHaveBeenCalledWith(SettingScope.User, 'mcpServers', {
+      'my-server': expect.objectContaining({
+        includeTools: ['read_text_file', 'list_directory'],
+      }),
+    });
+  });
+
   describe('when handling scope and directory', () => {
     const serverName = 'test-server';
     const command = 'echo';
