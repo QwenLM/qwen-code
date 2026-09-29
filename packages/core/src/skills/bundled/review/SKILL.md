@@ -1,6 +1,6 @@
 ---
 name: review
-description: Review changed code for correctness, security, code quality, and performance. Use when the user asks to review code changes, a PR, or specific files. Invoke with `/review`, `/review <pr-number>`, `/review <file-path>`, `/review <pr-number> --comment` to post inline comments on the PR, `/review --fix` to apply the findings to your working tree, or `/review <pr-number> --resume` to continue an interrupted review of that PR instead of starting over. Add `--effort low|medium|high` to trade depth for speed (defaults to high for PRs, medium for local changes). Add `--topology minimal` to run the single-pass A/B comparison arm instead of the pipeline.
+description: Review changed code, a PR, or specific files for correctness, security, code quality, and performance. Invoke with `/review [<pr-number>|<file-path>]`; `--comment` posts inline PR comments, `--fix` applies the findings, `--resume` continues an interrupted PR review, `--effort low|medium|high` trades depth for speed, and `--topology minimal` runs the single-pass A/B arm.
 argument-hint: '[pr-number|file-path] [--effort low|medium|high] [--severity-floor critical|suggestion] [--topology minimal] [--comment] [--fix] [--resume]'
 allowedTools:
   - task

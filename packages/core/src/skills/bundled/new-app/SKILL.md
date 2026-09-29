@@ -1,6 +1,6 @@
 ---
 name: new-app
-description: Workflow for creating new applications from scratch. Covers requirements gathering, tech stack selection, scaffolding, implementation, and delivery of a functional prototype.
+description: Workflow for building a new application from scratch - requirements, tech stack, scaffolding, implementation, and a working prototype.
 when_to_use: When the user asks to create a new application, project, website, game, mobile app, CLI tool, or library from scratch.
 ---
 

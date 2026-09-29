@@ -1,6 +1,6 @@
 ---
 name: stuck
-description: Diagnose frozen, stuck, or slow Qwen Code sessions on this machine. Scans for problematic processes, high CPU/memory usage, hung subprocesses, and debug logs. Use /stuck or /stuck <PID> to focus on a specific process.
+description: Diagnose frozen, stuck, or slow Qwen Code sessions on this machine - processes, CPU and memory use, hung subprocesses, and debug logs. Use `/stuck [<PID>]`.
 argument-hint: '[PID or symptom]'
 allowedTools:
   - run_shell_command
