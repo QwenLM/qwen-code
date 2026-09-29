@@ -109,6 +109,7 @@ import {
 } from '../utils/invocation-context.js';
 import { getPlanModeSystemReminder } from './prompts.js';
 import { PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE } from './plan-mode-entry-policy.js';
+import { STALE_APPROVAL_MESSAGE } from './plan-mode-shell-policy.js';
 import { SESSION_SKILL_MANAGER } from '../tools/skill-utils.js';
 import {
   promptIdContext,
@@ -12699,7 +12700,7 @@ describe('CoreToolScheduler plan mode with ask_user_question', () => {
     const functionResponse =
       completedCall.response.responseParts[0].functionResponse;
     expect(functionResponse?.response?.['error']).toBe(
-      `[Operation Cancelled] Reason: ${cancellationReason} Stop and await further instructions; do not retry or work around it.`,
+      `[Operation Cancelled] Reason: ${cancellationReason}`,
     );
   });
 });
@@ -15494,10 +15495,10 @@ describe('CoreToolScheduler telemetry spans', () => {
     [
       'host cancellation',
       ToolConfirmationOutcome.Cancel,
-      'Approval timed out.',
+      'host policy: no edits',
     ],
   ] as const)(
-    'adds the stop directive after %s at confirmation',
+    'composes %s accurately at confirmation',
     async (_label, outcome, reason) => {
       const execute = vi.fn().mockResolvedValue({
         llmContent: 'unexpected',
@@ -15524,12 +15525,48 @@ describe('CoreToolScheduler telemetry spans', () => {
       expect(completed[0].response.executionStatus).toBe('not_started');
       expect(execute).not.toHaveBeenCalled();
       const text = JSON.stringify(completed[0].response.responseParts);
-      expect(text).toContain(reason ?? 'User did not allow tool call');
-      expect(text).toContain(
-        'Stop and await further instructions; do not retry or work around it.',
-      );
+      if (reason) {
+        expect(text).toContain('host policy: no edits.');
+        expect(text).not.toContain(
+          'Stop and await further instructions; do not retry or work around it.',
+        );
+      } else {
+        expect(text).toContain('User did not allow tool call.');
+        expect(text).toContain(
+          'Stop and await further instructions; do not retry or work around it.',
+        );
+      }
     },
   );
+
+  it('does not append conflicting stop guidance to a stale approval reason', async () => {
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'unexpected',
+      returnDisplay: 'unexpected',
+    });
+    const { onToolCallsUpdate, onAllToolCallsComplete } = await scheduleWithAsk({
+      messageBus: askMessageBus(),
+      execute,
+    });
+    const waiting = (await waitForStatus(
+      onToolCallsUpdate,
+      'awaiting_approval',
+    )) as WaitingToolCall;
+    await waiting.confirmationDetails.onConfirm(
+      ToolConfirmationOutcome.Cancel,
+      { cancelMessage: STALE_APPROVAL_MESSAGE },
+    );
+    await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+    const completed = onAllToolCallsComplete.mock.calls.at(
+      -1,
+    )?.[0] as CompletedToolCall[];
+    const text = JSON.stringify(completed[0].response.responseParts);
+    expect(text).toContain(STALE_APPROVAL_MESSAGE);
+    expect(text).not.toContain(
+      'Stop and await further instructions; do not retry or work around it.',
+    );
+    expect(execute).not.toHaveBeenCalled();
+  });
 
   it('does not attribute a confirmation-time system abort to the user', async () => {
     const execute = vi.fn().mockResolvedValue({
