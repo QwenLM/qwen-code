@@ -35,6 +35,17 @@ describe('scanWorkflowScriptShape — rows', () => {
     ]);
   });
 
+  it('keeps agent rows after a CR-terminated leading comment', () => {
+    const shape = scanWorkflowScriptShape("// header\rawait agent('work')");
+
+    expect(shape.agentCalls).toBe(1);
+    expect(shape.rows[0]).toMatchObject({
+      kind: 'step',
+      count: 1,
+      prompts: ['work'],
+    });
+  });
+
   it('classifies calls inside parallel() and pipeline() as fan-outs', () => {
     const shape = scanWorkflowScriptShape(
       script(
@@ -223,6 +234,14 @@ describe('scanWorkflowScriptShape — determinism', () => {
       { call: 'new Date()', line: 8 },
       { call: 'Date()', line: 9 },
     ]);
+  });
+
+  it('reports a clock read after a CR-terminated leading comment', () => {
+    const shape = scanWorkflowScriptShape('// header\rconst now = Date.now()');
+
+    expect(
+      shape.determinismViolations.map((violation) => violation.call),
+    ).toContain('Date.now()');
   });
 
   it('ignores calls inside strings, templates and comments', () => {

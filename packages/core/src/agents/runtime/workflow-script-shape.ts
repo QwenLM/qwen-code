@@ -123,8 +123,8 @@ function maskNonCode(source: string): string {
     const ch = source[i];
     const next = source[i + 1];
     if (ch === '/' && next === '/') {
-      const newline = source.indexOf('\n', i);
-      const end = newline === -1 ? n : newline;
+      let end = i + 2;
+      while (end < n && !/[\n\r\u2028\u2029]/.test(source[end]!)) end++;
       blank(i, end);
       i = end;
       continue;
