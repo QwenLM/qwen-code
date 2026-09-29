@@ -14062,12 +14062,14 @@ export class Session implements SessionContext {
                 wasAutoModeManualFallback =
                   isDenialFallbackReason(outcome.reason) ||
                   outcome.reason === 'classifier_unavailable' ||
-                  outcome.reason === 'external_write';
+                  outcome.reason === 'external_write' ||
+                  outcome.reason === 'external_directory';
 
                 if (
                   outcome.message &&
                   (outcome.reason === 'classifier_unavailable' ||
                     outcome.reason === 'external_write' ||
+                    outcome.reason === 'external_directory' ||
                     isDenialFallbackReason(outcome.reason))
                 ) {
                   autoModeFallback = {
