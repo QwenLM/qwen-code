@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { captureHookExecutionOwner } from '../hooks/hook-execution-context.js';
+import {
+  captureHookExecutionOwner,
+  runWithHookExecutionOwner,
+} from '../hooks/hook-execution-context.js';
 
 // External dependencies
 import type {
@@ -1830,6 +1833,15 @@ export class LlmClient {
   }
 
   async resetChat(): Promise<void> {
+    const hookSystem = this.config.getHookSystem();
+    // /clear has switched Config sessions while its caller still owns the old turn.
+    const hookOwner = hookSystem
+      ? Object.freeze({
+          runtimeId: hookSystem.runtimeId,
+          sessionId: this.config.getSessionId(),
+          agentId: null,
+        })
+      : undefined;
     const memBefore = process.memoryUsage();
     const historyLength = this.chat?.getHistoryLength() ?? 0;
     if (debugLogger.isEnabled()) {
@@ -1866,7 +1878,9 @@ export class LlmClient {
     // compression should keep session-setup reveals so the declaration list
     // does not change mid-session.
     this.config.getToolRegistry().clearRevealedDeferredTools();
-    await this.startChat(undefined, SessionStartSource.Clear);
+    await runWithHookExecutionOwner(hookOwner, () =>
+      this.startChat(undefined, SessionStartSource.Clear),
+    );
     this.initializedSessionId = this.config.getSessionId();
 
     const memAfter = process.memoryUsage();
