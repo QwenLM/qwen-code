@@ -53,6 +53,7 @@ import { LoopDetectionService } from '../../services/loopDetectionService.js';
 import type { LoopType } from '../../telemetry/types.js';
 import {
   CoreToolScheduler,
+  TOOL_CANCELLED_BEFORE_EXECUTION_MESSAGE,
   type ToolCall,
   type ExecutingToolCall,
   type WaitingToolCall,
@@ -2464,7 +2465,7 @@ export class AgentCore {
 
           const executionRequest = executionRequestByCallId.get(req.callId);
           const toolName = executionRequest?.name ?? req.name;
-          const errorMessage = 'Tool call cancelled by user abort.';
+          const errorMessage = TOOL_CANCELLED_BEFORE_EXECUTION_MESSAGE;
           const responseParts: Part[] = [
             {
               functionResponse: {
