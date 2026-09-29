@@ -1610,7 +1610,14 @@ export class LlmClient {
     // deterministic result now rather than gambling on a later tool call:
     // a turn that makes none has no safe delivery point at all. The handle
     // stays pending so the model-selected result can still land later.
-    if (handle.settledAt === null) {
+    // A recall that skipped the selector (#13003) settles almost at once, but
+    // its result is the fast result, so the initial turn still delivers it as
+    // the fast phase; later consume points dedup it as already delivered.
+    const selectorSkippedFast =
+      handle.result?.selectorSkipped === true &&
+      deliveryPoint === 'initial' &&
+      !handle.fastDelivered;
+    if (handle.settledAt === null || selectorSkippedFast) {
       if (deliveryPoint !== 'initial' || handle.fastDelivered) {
         return null;
       }

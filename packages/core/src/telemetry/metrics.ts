@@ -1261,14 +1261,24 @@ export function recordMemoryDreamMetrics(
 export function recordMemoryRecallMetrics(
   config: Config,
   durationMs: number,
-  attrs: { strategy: MemoryRecallStrategy; docs_selected: number },
+  attrs: {
+    strategy: MemoryRecallStrategy;
+    docs_selected: number;
+    selector_skipped?: boolean;
+  },
 ): void {
   if (!isMetricsInitialized) return;
   const common = baseMetricDefinition.getCommonAttributes(config);
-  memoryRecallCounter?.add(1, { ...common, strategy: attrs.strategy });
+  const selectorSkipped = attrs.selector_skipped ?? false;
+  memoryRecallCounter?.add(1, {
+    ...common,
+    strategy: attrs.strategy,
+    selector_skipped: selectorSkipped,
+  });
   memoryRecallDurationHistogram?.record(durationMs, {
     ...common,
     strategy: attrs.strategy,
+    selector_skipped: selectorSkipped,
   });
 }
 

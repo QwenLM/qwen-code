@@ -1616,6 +1616,7 @@ export function logMemoryRecall(
     scan_duration_ms: event.scan_duration_ms,
     fast_duration_ms: event.fast_duration_ms,
     selector_duration_ms: event.selector_duration_ms,
+    selector_skipped: event.selector_skipped,
   };
 
   const logger = logs.getLogger(SERVICE_NAME);
@@ -1626,6 +1627,7 @@ export function logMemoryRecall(
   recordMemoryRecallMetrics(config, event.duration_ms, {
     strategy: event.strategy,
     docs_selected: event.docs_selected,
+    selector_skipped: event.selector_skipped,
   });
 }
 

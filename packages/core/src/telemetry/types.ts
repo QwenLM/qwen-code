@@ -1754,6 +1754,13 @@ export class MemoryRecallEvent implements BaseTelemetryEvent {
   scan_duration_ms: number;
   fast_duration_ms: number;
   selector_duration_ms: number;
+  /**
+   * True only when the model selector was skipped because the deterministic
+   * fast result was a unique, strong, current match (#13003). Keeps a
+   * deliberate skip apart from a selector failure, which also reports
+   * `strategy: 'heuristic'`.
+   */
+  selector_skipped: boolean;
 
   constructor(params: {
     query_length: number;
@@ -1764,6 +1771,7 @@ export class MemoryRecallEvent implements BaseTelemetryEvent {
     scan_duration_ms?: number;
     fast_duration_ms?: number;
     selector_duration_ms?: number;
+    selector_skipped?: boolean;
   }) {
     this['event.name'] = 'qwen-code.memory.recall';
     this['event.timestamp'] = new Date().toISOString();
@@ -1775,6 +1783,7 @@ export class MemoryRecallEvent implements BaseTelemetryEvent {
     this.scan_duration_ms = params.scan_duration_ms ?? 0;
     this.fast_duration_ms = params.fast_duration_ms ?? 0;
     this.selector_duration_ms = params.selector_duration_ms ?? 0;
+    this.selector_skipped = params.selector_skipped ?? false;
   }
 }
 

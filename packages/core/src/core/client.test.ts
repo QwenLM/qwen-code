@@ -7738,6 +7738,59 @@ hello
       );
     });
 
+    it('delivers a selector-skipped recall as the fast phase, not a refined one (#13003)', async () => {
+      // The recall settles at once because the selector was skipped, so the
+      // settled branch would otherwise report its only document as refined.
+      const skipped = {
+        prompt: '## Relevant memory\n\nUnique strong hit.',
+        selectedDocs: [fastDoc('/m/unique.md', '- unique')],
+        strategy: 'heuristic' as const,
+      };
+      mockMemoryManager.recall.mockImplementation((_root, _query, options) => {
+        options.onFastResult?.(skipped);
+        return Promise.resolve({ ...skipped, selectorSkipped: true as const });
+      });
+
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: 'content', value: 'Hello' };
+        })(),
+      );
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      } as unknown as LlmChat;
+
+      await fromAsync(
+        client.sendMessageStream(
+          [{ text: 'What do you know about me?' }],
+          new AbortController().signal,
+          'prompt-id-selector-skipped',
+          { type: SendMessageType.UserQuery },
+        ),
+      );
+
+      const initialRequest = mockTurnRunFn.mock.calls[0]?.[1] as unknown[];
+      expect(initialRequest).toEqual(
+        expect.arrayContaining([expect.stringContaining('Unique strong hit.')]),
+      );
+      expect(logMemoryRecallDelivery).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          phase: 'fast',
+          delivery_point: 'initial',
+          strategy: 'heuristic',
+        }),
+      );
+      expect(logMemoryRecallDelivery).not.toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          phase: 'refined',
+          delivery_point: 'initial',
+        }),
+      );
+    });
+
     it('still delivers the model-selected result at ToolResult after a fast initial delivery', async () => {
       vi.useFakeTimers();
       let settleRecall:
