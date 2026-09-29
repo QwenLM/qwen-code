@@ -68,8 +68,8 @@ if (inflightFailover || continuationFailover) {
 
 const durableFailover =
   sessionFailover || inflightFailover || continuationFailover;
-// The Stage A acceptance criterion names a 15-second Runtime delay; below it
-// real-provider TTFT does not reliably precede Runtime readiness.
+// The Stage A acceptance criterion names a 15-second Runtime delay; the
+// real-provider TTFT margin under it is unrecorded (tracked in #12941).
 const modelBeforeRuntimeAssertionDelayMs = 15_000;
 
 if (!Number.isSafeInteger(runtimeDelayMs) || runtimeDelayMs < 0) {
@@ -1603,7 +1603,12 @@ try {
       runtimeDelayMs >= modelBeforeRuntimeAssertionDelayMs &&
       firstModel.event.sequence >= runtimeReady.event.sequence
     ) {
-      throw new Error('First model event did not precede Runtime readiness');
+      throw new Error(
+        'First model event did not precede Runtime readiness ' +
+          `(firstModelEventMs=${firstModel.observedAt - requestStartedAt}, ` +
+          `runtimeReadyMs=${runtimeReady.observedAt - requestStartedAt}, ` +
+          `runtimeDelayMs=${runtimeDelayMs})`,
+      );
     }
     if (!existsSync(sideEffect)) {
       throw new Error('Tool side effect file was not created');
