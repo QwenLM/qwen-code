@@ -153,7 +153,6 @@ describe('Core System Prompt (prompts.ts)', () => {
     expect(prompt).toContain('reuse prior observations');
     expect(prompt).toContain('current or post-change state');
     expect(prompt).toContain('only a summary lacking the needed evidence');
-    expect(prompt).toContain('use `git log` / `git blame`');
     expect(prompt).toContain('not verification before claiming a change works');
     expect(prompt).not.toContain('the Git as Source of Truth directive');
   });
@@ -488,6 +487,7 @@ describe('Core System Prompt (prompts.ts)', () => {
     vi.mocked(isGitRepository).mockReturnValue(false);
     const prompt = getCoreSystemPrompt();
     expect(prompt).not.toContain('# Git Repository');
+    expect(prompt).not.toContain('git blame');
     expect(prompt).toMatchSnapshot();
   });
 
