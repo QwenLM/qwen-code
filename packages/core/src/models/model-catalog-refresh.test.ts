@@ -8,6 +8,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { defaultOutputCeiling, tokenLimit } from '../core/tokenLimits.js';
 import bundled from './generated/model-registry.json' with { type: 'json' };
 import {
   getModelCatalogCachePath,
@@ -380,7 +381,7 @@ describe('refreshModelCatalog', () => {
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
-  it('writes the trimmed catalog to the cache and serves it immediately', async () => {
+  it('writes the trimmed catalog to the cache', async () => {
     // Pin the clock just ahead of the bundled snapshot's committed stamp: the
     // fresh cache must win loadModelCatalog's `fetchedAt` compare no matter
     // what the runner's wall clock says about a file generated on another host.
@@ -399,6 +400,36 @@ describe('refreshModelCatalog', () => {
     expect(lookupModelCatalog('qwen-x')).toEqual(trimmed['qwen-x']);
   });
 
+  it('keeps the current context and output defaults until the next process', async () => {
+    vi.setSystemTime(new Date(Date.parse(bundled.fetchedAt) + 60_000));
+    const model = 'seed-oss-catalog-refresh-check';
+    expect(lookupModelCatalog(model)).toBeUndefined();
+    const contextBefore = tokenLimit(model);
+    const outputBefore = defaultOutputCeiling(model);
+    const updated = chat(model, { context: 131_072, output: 65_536 });
+    fetchMock.mockResolvedValue(
+      jsonResponse({
+        ...api,
+        volcengine: { models: { [model]: updated } },
+      }),
+    );
+
+    await refreshModelCatalog();
+
+    expect(readJson(getModelCatalogCachePath()).models).toHaveProperty(model, {
+      context: 131_072,
+      output: 65_536,
+      modalities: {},
+    });
+    expect(tokenLimit(model)).toBe(contextBefore);
+    expect(defaultOutputCeiling(model)).toBe(outputBefore);
+
+    // A new process has no memoized catalog.
+    invalidateModelCatalog();
+    expect(tokenLimit(model)).toBe(131_072);
+    expect(defaultOutputCeiling(model)).toBe(64_000);
+  });
+
   it('refetches a cache whose stamp is ahead of the local clock', async () => {
     // A stamp written by a faster clock must not serve indefinitely: the age
     // is negative, which the freshness check treats as "refetch", and the
@@ -415,14 +446,45 @@ describe('refreshModelCatalog', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it('rejects a catalog body over the byte budget', async () => {
+  it('refreshes a complete multi-megabyte upstream response', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse({
+        ...api,
+        pad: {
+          models: {
+            big: {
+              id: 'big',
+              tool_call: false,
+              note: 'x'.repeat(5 * 1024 * 1024),
+            },
+          },
+        },
+      }),
+    );
+
+    await refreshModelCatalog();
+
+    expect(readJson(getModelCatalogCachePath()).models).toEqual(trimmed);
+  });
+
+  it('keeps the cache when a catalog body exceeds the download budget', async () => {
+    const previous = {
+      source: MODELS_DEV_URL,
+      fetchedAt: LONG_AGO,
+      models: { kept: { context: 128_000 } },
+    };
+    writeJson(getModelCatalogCachePath(), previous);
     // Valid JSON that would project fine, but larger than the budget: the
     // refresh must refuse it before buffering unboundedly.
     const oversized = {
       ...api,
       pad: {
         models: {
-          big: { id: 'big', tool_call: false, note: 'x'.repeat(210 * 1024) },
+          big: {
+            id: 'big',
+            tool_call: false,
+            note: 'x'.repeat(17 * 1024 * 1024),
+          },
         },
       },
     } as ModelsDevApi;
@@ -430,7 +492,7 @@ describe('refreshModelCatalog', () => {
 
     await expect(refreshModelCatalog()).resolves.toBeUndefined();
 
-    expect(fs.existsSync(getModelCatalogCachePath())).toBe(false);
+    expect(readJson(getModelCatalogCachePath())).toEqual(previous);
   });
 
   it('rejects a present-but-non-JSON content type', async () => {

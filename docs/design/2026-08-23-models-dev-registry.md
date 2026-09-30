@@ -18,7 +18,7 @@ Reasoning-effort tiers, reasoning wire fields, pricing, provider detection, and 
 
 Explicit model configuration remains above inferred catalog defaults. For inferred context windows, client-owned corrections take precedence over the selected catalog; existing regex tables and generic defaults supply missing fields. For output limits, existing regex matches take precedence over the catalog, preserving endpoint-specific request ceilings. The catalog supplies default output limits only where the table has no match; those catalog-only values do not cap explicit request or environment budgets. Existing curated output caps and the context-window clamp still apply. Trusted catalog image, audio, and video capabilities extend the regex defaults. PDF remains explicit because it selects an endpoint- and protocol-dependent file path. Explicit configured modalities remain authoritative.
 
-The runtime cache replaces the bundled snapshot only when its ISO `fetchedAt` timestamp is newer. Incomplete responses are rejected before they can replace a complete snapshot or cache. Filesystem modification times do not determine freshness. Refreshing the cache does not rewrite an already resolved session configuration; later resolutions see refreshed data.
+The runtime cache replaces the bundled snapshot only when its ISO `fetchedAt` timestamp is newer. Incomplete responses are rejected before they can replace a complete snapshot or cache. Filesystem modification times do not determine freshness. The selected catalog stays fixed for the lifetime of a process, so context and output defaults use the same metadata. A background refresh writes the cache for the next process start.
 
 Sonnet 4.5 is corrected to 200,000 context tokens even when cached data advertises its retired 1M beta. Sonnet 4.6 and Sonnet 5 retain their catalog limits. See [Anthropic's context-window reference](https://platform.claude.com/docs/en/build-with-claude/context-windows).
 
@@ -36,7 +36,7 @@ The draft-only `model.customCatalog` option was removed: it loaded too late for 
 
 ## Storage and refresh
 
-A trimmed JSON snapshot ships with the CLI and has a 200 KiB generation budget. Refresh starts in the background after proxy initialization, uses a ten-second timeout and a 24-hour cache interval, revalidates with ETag, and atomically writes the cache under `Storage.getGlobalQwenDir()`. Concurrent refreshes share an in-flight request. Failure leaves the previous data usable and is logged only at debug level.
+A trimmed JSON snapshot ships with the CLI and has a 200 KiB generation budget. The full upstream download has a separate 16 MiB limit. Refresh starts in the background after proxy initialization, uses a ten-second timeout and a 24-hour cache interval, revalidates with ETag, and atomically writes the cache under `Storage.getGlobalQwenDir()`. Concurrent refreshes share an in-flight request. Failure leaves the previous data usable and is logged only at debug level.
 
 `QWEN_CODE_MODELS_DEV=off` restores regex-only behavior. `QWEN_CODE_MODELS_DEV_REFRESH=off` disables upstream refresh. `QWEN_CODE_MODELS_DEV_URL` selects a mirror with the same provider filtering. No request-time network lookup, cross-process lock, scheduled regeneration service, or new dependency is introduced.
 

@@ -17,7 +17,6 @@ import { getErrorMessage } from '../utils/errors.js';
 import {
   CATALOG_MODALITIES,
   getModelCatalogCachePath,
-  invalidateModelCatalog,
   isModelCatalogDisabled,
   isModelCatalogKey,
   MODEL_CATALOG_URL_ENV,
@@ -259,7 +258,8 @@ async function readCacheFile(
   }
 }
 
-const MAX_CATALOG_BYTES = 200 * 1024;
+// The full upstream feed is several MiB; 200 KiB budgets only the projection.
+const MAX_CATALOG_BYTES = 16 * 1024 * 1024;
 
 /**
  * Reads a 200 body with a hard size ceiling, so a hostile or broken endpoint
@@ -354,7 +354,6 @@ async function refreshRemote(url: string, cachePath: string): Promise<void> {
   }
   await fs.promises.mkdir(path.dirname(cachePath), { recursive: true });
   await atomicWriteJSON(cachePath, next);
-  invalidateModelCatalog();
   debugLogger.debug(
     `Model catalog refreshed from ${url}: ${Object.keys(next.models).length} models`,
   );
@@ -364,7 +363,8 @@ let inFlight: Promise<void> | undefined;
 
 /**
  * Best-effort background refresh. Call after installing the proxy dispatcher;
- * the bundled snapshot covers startup while the request is in flight.
+ * the selected catalog stays fixed for this process; the downloaded cache
+ * is available to the next process.
  */
 export function refreshModelCatalog(): Promise<void> {
   if (
