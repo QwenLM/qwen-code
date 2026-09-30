@@ -622,8 +622,9 @@ function normalizedToRawOffsets(
  *
  * For a local span, the untouched prefix and suffix are copied verbatim from
  * `rawContent`. Inserted text takes the ending of the replaced region — the
- * span's trailing break, else the break immediately after it, else the one
- * before it. A whole-file span keeps the previous writer's file-wide CRLF
+ * break the span starts on, else its trailing break, else the break immediately
+ * after it, else the most recent break before it, else the file's first break.
+ * A whole-file span keeps the previous writer's file-wide CRLF
  * conversion because there are no outside bytes to preserve. Uniformly
  * terminated files remain byte-identical to the previous path, with one
  * exception: where the matched span is not followed by a line break, a
