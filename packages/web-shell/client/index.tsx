@@ -39,6 +39,7 @@ export {
 } from './ManagedAgentWebShell';
 export {
   type ManagedAgentCommandOptions,
+  type ManagedAgentPendingAction,
   type ManagedAgentProvider,
   type ManagedAgentRequestOptions,
   type ManagedAgentRuntimeState,
