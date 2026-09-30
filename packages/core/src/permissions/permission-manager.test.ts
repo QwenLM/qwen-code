@@ -24,12 +24,14 @@ import {
   splitCompoundCommandSegments,
   projectHeredocBodiesForStateTracking,
   heredocSafetyForStateTracking,
+  rawCommandCandidatesForRules,
   buildPermissionRules,
   getRuleDisplayName,
   buildHumanReadableRuleLabel,
   TOOL_NAME_ALIASES,
 } from './rule-parser.js';
 import { PermissionManager } from './permission-manager.js';
+import { evaluatePermissionRules } from '../core/permission-helpers.js';
 import type { PermissionManagerConfig } from './permission-manager.js';
 import { extractShellOperationsAcrossCommand } from './shell-semantics.js';
 import { normalizeToolNameForProvider } from '../utils/tool-name-utils.js';
@@ -1100,6 +1102,36 @@ describe('heredoc fail-closed projections', () => {
     ).toContain('rm -rf /important');
   });
 
+  it('keeps the body visible when a group pipes the receiver onward', () => {
+    // { cat <<EOF; } | sh hands the receiver's stdout to sh as its program,
+    // so a body stripped as inert would come back as executed code. The same
+    // holds for the subshell and function spellings.
+    expect(
+      splitCompoundCommand('{\ncat <<"EOF"\nrm -rf /\nEOF\n} | sh'),
+    ).toContain('rm -rf /');
+    expect(
+      splitCompoundCommand('(\ncat <<"EOF"\nrm -rf /\nEOF\n) | sh'),
+    ).toContain('rm -rf /');
+    expect(
+      splitCompoundCommand('f() {\ncat <<EOF\nrm -rf /\nEOF\n}\nf | sh'),
+    ).toContain('rm -rf /');
+  });
+
+  it('keeps the body visible when a redirect precedes the command word', () => {
+    // `< cat sh <<EOF` opens no file named cat: the redirect operand is not
+    // argv, so the body answers to sh and is executed code, not stdin data.
+    expect(
+      splitCompoundCommand(
+        "touch cat; < cat sh <<'EOF'\ntouch /tmp/pwned\nEOF",
+      ),
+    ).toContain('touch /tmp/pwned');
+    expect(
+      heredocSafetyForStateTracking(
+        "touch cat; < cat sh <<'EOF'\ntouch /tmp/pwned\nEOF",
+      ).safe,
+    ).toBe(false);
+  });
+
   it('refuses to strip an unquoted-delimiter body with command substitution', () => {
     // $(rm -rf /) inside an unquoted heredoc executes; the line must stay
     // visible rather than being treated as inert data.
@@ -1153,6 +1185,30 @@ describe('heredoc fail-closed projections', () => {
         command: 'cat() { bash; }\ncat <<EOF\nrm -rf /tmp/pwned\nEOF',
       }),
     ).toBe('deny');
+  });
+
+  it('does not route an inert documentation body through file-op deny rules', async () => {
+    // The body is documentation fed to cat; the redirection-shaped text in it
+    // never reaches the filesystem, so the Write deny rule has nothing to
+    // deny and the allow rule on cat decides.
+    const pm2 = new PermissionManager(
+      makeConfig({
+        permissionsDeny: ['Write(.qwen/settings.json)'],
+        permissionsAllow: ['Bash(cat *)'],
+      }),
+    );
+    pm2.initialize();
+    const command =
+      "cat <<'EOF'\n# Sample bootstrap for the docs\necho {} > .qwen/settings.json\nEOF";
+    expect(await pm2.evaluate({ toolName: 'run_shell_command', command })).toBe(
+      'allow',
+    );
+    // An apostrophe pair inside the body changes nothing about the verdict.
+    const twin =
+      "cat <<'EOF'\nit's a doc line with ' quotes\necho {} > .qwen/settings.json\nEOF";
+    expect(
+      await pm2.evaluate({ toolName: 'run_shell_command', command: twin }),
+    ).toBe('allow');
   });
 
   it('keeps every line visible when receiver resolution can be redirected', () => {
@@ -1291,10 +1347,96 @@ describe('state-tracking heredoc projection', () => {
       { command: 'echo {} > settings.json', terminator: '' },
     ]);
   });
+
+  it('keeps heredoc-looking text inside a multi-line quote byte-identical', () => {
+    // The << sits inside a double-quoted string spanning lines; nothing arms
+    // a body, so the projection must return the command unchanged.
+    const command = 'echo "x <<Y\ncat <<EOF\n"; git reset --hard';
+    expect(heredocSafetyForStateTracking(command).safe).toBe(true);
+    expect(projectHeredocBodiesForStateTracking(command)).toBe(command);
+  });
+
+  it('keeps every line visible when a group pipes the receiver onward', () => {
+    // The } | sh line can hand the stripped body to a shell as its program,
+    // so the gate denies and the projection declines to strip anything.
+    const command = '{\ncat <<EOF\nx\nEOF\n} | sh';
+    expect(heredocSafetyForStateTracking(command).safe).toBe(false);
+    expect(projectHeredocBodiesForStateTracking(command)).toBe(command);
+  });
+
+  it('does not let an apostrophe inside a comment swallow heredoc lines', () => {
+    // # opens a comment, so the ' in don't is text, not a quote opener; the
+    // following lines are a real heredoc whose inert body strips as usual.
+    const command = 'echo "x" # don\'t\ncat <<EOF\nbody\nEOF';
+    expect(heredocSafetyForStateTracking(command).safe).toBe(true);
+    expect(projectHeredocBodiesForStateTracking(command)).toBe(
+      'echo "x" # don\'t\ncat <<EOF',
+    );
+  });
+
+  it('scopes resolution probes to the visible text, not the stripped body', () => {
+    // A body read as data can show a function skeleton or the word alias
+    // without denying; the same tokens in the executed text fail closed.
+    const stripped = "cat <<'EOF'\nfunction f() {}\nEOF";
+    expect(heredocSafetyForStateTracking(stripped).safe).toBe(true);
+    expect(projectHeredocBodiesForStateTracking(stripped)).toBe("cat <<'EOF'");
+    const visible = "cat <<'EOF'\nx\nEOF\nalias grep='grep --color'";
+    expect(heredocSafetyForStateTracking(visible).safe).toBe(false);
+    expect(projectHeredocBodiesForStateTracking(visible)).toBe(visible);
+  });
+
+  it('trusts only the bare-stdin idiom for interpreter receivers', () => {
+    // python - reads its program from stdin, as opaque to shell rules as any
+    // script file the guard never sees into; an argument after the dash ends
+    // the idiom, and a bare interpreter keeps its body visible.
+    const idiom = "python - <<'PY'\nimport os\nPY";
+    expect(heredocSafetyForStateTracking(idiom).safe).toBe(true);
+    expect(projectHeredocBodiesForStateTracking(idiom)).toBe("python - <<'PY'");
+    expect(
+      heredocSafetyForStateTracking("python - X=1 <<'EOF'\nx\nEOF").safe,
+    ).toBe(false);
+    expect(heredocSafetyForStateTracking("python <<'EOF'\nx\nEOF").safe).toBe(
+      false,
+    );
+  });
+
+  it('treats git commit -F - as reading its message from stdin', () => {
+    const command = "git commit -F - <<'MSG'\nsubject\nMSG";
+    expect(heredocSafetyForStateTracking(command).safe).toBe(true);
+    expect(projectHeredocBodiesForStateTracking(command)).toBe(
+      "git commit -F - <<'MSG'",
+    );
+    // git apply stays unlisted: a patch is an arbitrary file write.
+    expect(
+      heredocSafetyForStateTracking("git apply <<'PATCH'\ndiff\nPATCH").safe,
+    ).toBe(false);
+  });
+});
+
+describe('rawCommandCandidatesForRules', () => {
+  it('keeps the executed tail after a # inside an unclosed quote', () => {
+    // bash closes the string on the second line and runs what follows; a
+    // per-line comment stripper used to delete the tail from the list.
+    const candidates = rawCommandCandidatesForRules(
+      "echo 'don\n# t' ; rm -rf /",
+    );
+    expect(candidates.map((candidate) => candidate.command)).toContain(
+      'rm -rf /',
+    );
+  });
+
+  it('still strips a real comment tail', () => {
+    // The behavior the stripping exists for: a word-start # outside quotes
+    // hides the rest of the line.
+    expect(
+      rawCommandCandidatesForRules('git status # && rm -rf /').map(
+        (candidate) => candidate.command,
+      ),
+    ).toEqual(['git status']);
+  });
 });
 
 // ─── resolvePathPattern ──────────────────────────────────────────────────────
-
 describe('resolvePathPattern', () => {
   const projectRoot = '/project';
   const cwd = '/project/subdir';
@@ -4477,6 +4619,94 @@ describe('PermissionManager', () => {
             "cat <<'EOF'\nrm -rf /important is what this doc warns about\nEOF\necho done",
         }),
       ).toBe(true);
+    });
+
+    it('returns true for an anchored ask rule on a single-segment heredoc', () => {
+      // A heredoc that projects to one segment used to skip the raw-candidate
+      // pass, so the ask rule never surfaced even though evaluate() asks.
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash(cat *)'],
+          permissionsAsk: ['Bash(rm *)'],
+        }),
+      );
+      pm.initialize();
+
+      expect(
+        pm.hasMatchingAskRule({
+          toolName: 'run_shell_command',
+          command: "cat <<'EOF'\nrm -rf /important\nEOF",
+        }),
+      ).toBe(true);
+    });
+
+    it('does not throw on a backslash continuation after the command word', () => {
+      // The continuation joins one word; the anchored-rule matcher used to
+      // recurse past its fixed point and die with a RangeError here.
+      pm = new PermissionManager(
+        makeConfig({ permissionsAllow: ['Bash(npm *)'] }),
+      );
+      pm.initialize();
+
+      expect(
+        pm.hasMatchingAskRule({
+          toolName: 'run_shell_command',
+          command: 'npm run build \\\n --source-maps',
+        }),
+      ).toBe(false);
+    });
+  });
+
+  describe('heredoc rule surfaces stay consistent', () => {
+    it('treats a deny rule reached only through a heredoc body as relevant', async () => {
+      // hasRelevantRules gates whether evaluate() runs at all, so it must
+      // consult the raw candidates that still carry the body.
+      const pm2 = new PermissionManager(
+        makeConfig({ permissionsDeny: ['Bash(rm *)'] }),
+      );
+      pm2.initialize();
+      const request = {
+        toolName: 'run_shell_command',
+        command: "cat <<'EOF'\nrm -rf /important\nEOF",
+      };
+      expect(pm2.hasRelevantRules(request)).toBe(true);
+      await expect(
+        evaluatePermissionRules(pm2, 'allow', request),
+      ).resolves.toMatchObject({ finalPermission: 'deny' });
+    });
+
+    it('reports the matching deny rule for a heredoc body hit', () => {
+      const pm2 = new PermissionManager(
+        makeConfig({
+          permissionsDeny: ['Bash(rm *)'],
+          permissionsAllow: ['Bash(cat *)'],
+        }),
+      );
+      pm2.initialize();
+      const request = {
+        toolName: 'run_shell_command',
+        command: 'cat <<EOF\nrm -rf dist\nEOF',
+      };
+      expect(pm2.findMatchingDenyRule(request)).toBe('Bash(rm *)');
+    });
+
+    it('marks an explicit ask on a single-segment heredoc as forced', async () => {
+      // permission-helpers reads pmForcedAsk to hide the Always Allow
+      // buttons; an explicit ask rule must never render them.
+      const pm2 = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash(cat *)'],
+          permissionsAsk: ['Bash(rm *)'],
+        }),
+      );
+      pm2.initialize();
+      const request = {
+        toolName: 'run_shell_command',
+        command: "cat <<'EOF'\nrm -rf /important\nEOF",
+      };
+      await expect(
+        evaluatePermissionRules(pm2, 'allow', request),
+      ).resolves.toMatchObject({ finalPermission: 'ask', pmForcedAsk: true });
     });
   });
 });

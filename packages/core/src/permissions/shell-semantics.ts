@@ -2143,7 +2143,7 @@ export function extractShellOperationsAcrossCommand(
   command: string,
   cwd: string,
 ): ShellOperation[] {
-  return walkCompoundCommand(command, cwd, 0, false);
+  return walkCompoundCommand(command, cwd, 0, false, false);
 }
 
 function extractFindExecOps(args: string[], cwd: string): ShellOperation[] {
@@ -2185,6 +2185,7 @@ function walkCompoundCommand(
   cwd: string,
   depth: number,
   initialCwdUnknown: boolean,
+  inheritedHeredocUnmodelled: boolean,
 ): ShellOperation[] {
   const subCommands = splitCompoundCommandSegmentsForStateTracking(command);
 
@@ -2195,9 +2196,12 @@ function walkCompoundCommand(
   // every tracked state transition unreliable: body lines can be child-shell
   // phantoms or vanish outright, and a later absolute cd would wash a plain
   // cwdUnknown flag clean again. The daemon guard refuses such commands
-  // outright; here every extracted op stays cwd-unknown so it escalates.
+  // outright; here every extracted op stays cwd-unknown so it escalates. The
+  // inherited arm carries the state through a shell-wrapper unwrap, which a
+  // plain cwdUnknown hand-off cannot survive either.
   const heredocUnmodelled =
-    command.includes('<<') && !heredocSafetyForStateTracking(command).safe;
+    inheritedHeredocUnmodelled ||
+    (command.includes('<<') && !heredocSafetyForStateTracking(command).safe);
 
   for (const { command: sub, terminator } of subCommands) {
     // `cd x & …` runs the `cd` in a background subshell, so it does not move
@@ -2233,6 +2237,7 @@ function walkCompoundCommand(
             effectiveCwd,
             depth + 1,
             cwdUnknown,
+            heredocUnmodelled,
           ),
         );
         continue;
