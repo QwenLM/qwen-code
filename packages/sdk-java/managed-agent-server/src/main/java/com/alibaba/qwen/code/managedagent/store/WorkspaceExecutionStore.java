@@ -165,12 +165,16 @@ public class WorkspaceExecutionStore {
         if (storageGuard != null) {
             storageGuard.verify(binding);
         }
+        if (!isHeld(binding, session)) {
+            throw busy();
+        }
+    }
+
+    public boolean isHeld(ContextBinding binding, RuntimeSessionRecord session) {
         List<String> holders = jdbc.queryForList("SELECT holder_key FROM"
                 + " managed_workspace_execution_lease WHERE storage_key = ?",
                 String.class, storageKey(binding));
-        if (holders.size() != 1 || !holderKey(session).equals(holders.getFirst())) {
-            throw busy();
-        }
+        return holders.size() == 1 && holderKey(session).equals(holders.getFirst());
     }
 
     public void release(ContextBinding binding, RuntimeSessionRecord session) {

@@ -234,7 +234,10 @@ class ProcessCrashFaultGateTest {
         BrokerProcess second = rig.broker("second", secondProxy,
                 FaultGateRig.Provisioner.RECOVERABLE);
 
-        BrokerProcess.Reply acquire = second.acquire(HARNESS, SESSION);
+        BrokerProcess.Reply acquire = FaultGateRig.await(
+                () -> second.acquire(HARNESS, SESSION),
+                reply -> !"runtime_provision_fenced".equals(reply.code()),
+                "original Runtime loss after recovery fencing");
         assertFalse(acquire.ok());
         assertEquals("runtime_broker_runtime_lost", acquire.code());
         assertEquals(RuntimeBindingRecord.State.LOST,

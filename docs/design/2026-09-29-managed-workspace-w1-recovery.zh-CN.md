@@ -4,7 +4,7 @@
 
 状态：W1a 已有实现候选；W1b/W1c 仍为设计提案。`7c54aa78` 已有 Linux/MySQL 验收证据；birth-time 身份修复及 O2 整合需要重新验证。
 调研基线：`be1ebc74d7f5b0bdce2b88a6565d4940d5a6b3c0`，2026-09-29。
-实现整合基线：main `3b18cfe5e`，2026-09-30；已包含初始 Workspace 文件 Turn、可审计运维恢复及 O2 远端 Shell 结果持久交付（#12894）。
+实现整合基线：main `3a8fd1171`，2026-09-30；已包含初始 Workspace 文件 Turn、可审计运维恢复及 O2 远端 Shell 结果持久交付（#12894）、私有 Hosted MCP（#12946）和 Runtime JSON 序列化（#13108）。
 属于 [proposal #12380](https://github.com/QwenLM/qwen-code/issues/12380)。
 目标契约为 [Workspace v1.12 第 2、3.5、5 节](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-workspace-context.en.md)。
 
@@ -62,7 +62,7 @@ W1b/W1c 不代表 G1/G3 完成。调研时仍 open 的[运维恢复 #12977](http
 
 没有登记意味着 `unverified`，不能自动登记启动时碰巧找到的目录。启用 W1 的执行路径必须拒绝它。现有部署只能在维护期间登记：运维人员检查原存储、停止准入并核对全部旧写入者后，显式纳管。这建立了有记录的 W1 起点，不反向证明全部历史字节都曾被捕获。
 
-V23 保存规范 root、应用专属 host 身份、明确的数值 device/inode、独立的 `mount_birth_time`，以及随机分配的 storage registration ID。Marker v2 `.qwen-managed-storage.json` 保存同一身份，其中 `birthTime` 为保留纳秒精度的规范 `Instant` 字符串；SQL 与 marker 必须一致。Host 身份使用 HMAC-SHA256，以去除首尾空白的 `/etc/machine-id` UTF-8 字节为 key，以 `Qwen-Code/verified-workspace/v2` 为输入；marker 不暴露原始 machine ID。登记只校验已存在的 root，绝不创建替代项目目录。标记使用排他/no-follow 创建和持久发布；登记中断后保持 unverified，按原回执恢复。已有冲突标记时拒绝，不能覆盖。
+V24 保存规范 root、应用专属 host 身份、明确的数值 device/inode、独立的 `mount_birth_time`，以及随机分配的 storage registration ID。Marker v2 `.qwen-managed-storage.json` 保存同一身份，其中 `birthTime` 为保留纳秒精度的规范 `Instant` 字符串；SQL 与 marker 必须一致。Host 身份使用 HMAC-SHA256，以去除首尾空白的 `/etc/machine-id` UTF-8 字节为 key，以 `Qwen-Code/verified-workspace/v2` 为输入；marker 不暴露原始 machine ID。登记只校验已存在的 root，绝不创建替代项目目录。标记使用排他/no-follow 创建和持久发布；登记中断后保持 unverified，按原回执恢复。已有冲突标记时拒绝，不能覆盖。
 
 在同一次 no-follow 属性读取中取得 `unix:creationTime`、`lastModifiedTime`、`dev` 和 `ino`。OpenJDK 21 在 birth time 不可用时会返回 mtime 或 epoch，因此 creation time 不晚于 epoch 或等于 mtime 都拒绝。真实 birth time 恰好等于 mtime 也保守拒绝：离线完成项目布局或更新 root 的 mtime 后再重试登记。Mtime 只用于识别歧义，绝不作为身份持久化；普通 mtime 变化不能使未变的 birth time 失效。仅 device/inode 不够，因为删除目录后从备份解压可能复用 inode 号。
 
@@ -91,6 +91,8 @@ W1a 维护先关闭新工作入口，结算或取消原执行，证明全部写�
 物理 mount guard 使用默认关闭的 Broker 属性 `verified-workspace-recovery-enabled`。Hosted Workspace 冷加载校验始终启用，不受该属性控制；省略 tool profile 或 Shell `captureBytes` 时采用保存的 definition，显式提供的值必须精确匹配。保存的审批设置继续固定。私有入口 `WorkspaceStorageRegistrationMain` 支持 `register`、`inspect`、`fence` 和 `restore-original`；修改操作必须显式声明离线维护，并使用精确的 operation ID。[服务端 README](../../packages/sdk-java/managed-agent-server/README.md)给出了调用方式和升级顺序。该声明本身不能停止外部写入者。登记和执行需要受信任的 Linux 身份提供者；本地 H2 测试使用合成提供者，不能代替 Linux 验收。
 
 ### 5.4 已确认的 W1a 恢复契约（2026-09-30）
+
+W1 保留资源校验和省略 profile 时的自动采用只适用于保存的文件/Shell profile。已独立合入的 MCP profile 保留显式 profile/server-pin 加载规则及自身恢复契约。原 MCP status/cancel/release 检查保存的 lease、Runtime 状态和精确 storage holder，不要求物理 mount 可用；新的 MCP 配置、发现和调用仍要求已验证 mount。
 
 Owner 已选择内部 Java → Hosted → Runtime 恢复、进程重启，以及严格的历史完整性。公开恢复和后续 Turn 准入作为独立接线。Passive Hosted attachment 保留 Session、Registry、grants 和 profile 授权，只跳过物理 mount 校验；原执行清理继续通过保存的 Broker 身份处理。保留 O2 对原 `results_ready`、consumed-final 和 `not_started` 回执的受控恢复，不能将 unknown/abandoned 执行当作新工作。W0e/G2 继续负责精确原执行的对账。打开 Session 不清除物理 holder。
 
@@ -189,7 +191,7 @@ Java 请求路径不递归复制存储，SQL 元数据/SSE 不携带文件字节
 
 W1a 首版实现包含一个增量 migration、登记/guard 及其调用者、小型私有维护入口、定向测试和本设计。后续 PR 不应将 W1b snapshot adapter 或 W1c 迁移状态机并入其中。整合基线已包含 #12977；保留其可审计原 owner 清理，并将 storage 登记与部分 Shell 恢复分开。
 
-V23 接在 main 的 O2 migrations V20–V22 之后，在 mount 登记中增加 `mount_birth_time`。保留现有封闭 ContextBinding 和 worker 协议，整个部署升级并完成登记前不启用 W1。预合并实验的 W1 V21 数据库和 marker v1 不能直接升级至 V23/v2。不能通过 Flyway `repair`、`outOfOrder` 或手动改 history 绕过不匹配。有保留数据的部署需要备份及独立的离线迁移设计；只有可丢弃测试部署可以重建。普通本地 Managed 引擎仍按独立排期延期。
+V24 接在 main 的 O2 migrations V20–V22 和 MCP V23 之后，在 mount 登记中增加 `mount_birth_time`。保留现有封闭 ContextBinding 和 worker 协议，整个部署升级并完成登记前不启用 W1。预合并实验的 W1 V21 数据库和 marker v1 不能直接升级至 V24/v2。不能通过 Flyway `repair`、`outOfOrder` 或手动改 history 绕过不匹配。有保留数据的部署需要备份及独立的离线迁移设计；只有可丢弃测试部署可以重建。普通本地 Managed 引擎仍按独立排期延期。
 
 ## 10. 验证与验收
 
@@ -222,10 +224,10 @@ W1a 的可信 Linux/原位置、仅内部、进程重启、离线登记和严格
 
 ## 12. 实现证据
 
-已检查 Java 持久化/租约/placement 和 TypeScript 恢复/context/file history，并对两侧分别进行了独立探索。当前整合基线为 main `3b18cfe5e`，包含 #12955、#12977 和 O2 #12894。全局 CLI 基线为 `0.24.6`，没有 W1 维护入口，因此不能直接通过全局 CLI dry-run。
+已检查 Java 持久化/租约/placement 和 TypeScript 恢复/context/file history，并对两侧分别进行了独立探索。当前整合基线为 main `3a8fd1171`，包含 #12955、#12977、O2 #12894、Hosted MCP #12946 和 #13108。全局 CLI 基线为 `0.24.6`，没有 W1 维护入口，因此不能直接通过全局 CLI dry-run。
 
 此前本地验证已通过定向 Java、Hosted、projection/sink 测试，以及 build、typecheck、bundle、ESLint 和 Java Checkstyle，覆盖登记/重试/fence、缓存新工作授权、passive attachment、固定 cut 校验、重命名后的文件/Shell Session 历史及保留资源缺失。打包 macOS/H2 E2E 覆盖 stderr seal 修复、Harness 重启、下一 Turn、100 MiB Shell 输出和七个 Shell producer 退出；该环境关闭物理 guard，单独不构成 Linux 验收。
 
 [维护者针对 `7c54aa78` 的真实环境报告](https://github.com/QwenLM/qwen-code/pull/13088#issuecomment-5910509307)提供了 Linux/ext4 与 MySQL 8.4 证据，包括进程重启、专用主机重启/断电检查、两个真实 Broker JVM/worker、两种 claim/fence 顺序、派发前 fence 拒绝，以及旧 release/LOST cleanup 保持完整 storage 行不变。该精确 head 的选择集通过 209 个单元测试、15 个 Hosted 集成测试和 44 个故障门禁；只移除锁内 claim 校验的反向检查连续失败两次。这些结果证明该 head，不能代替更新候选的验证。
 
-同一报告复现了删除目录后从备份恢复并复用 inode，以及普通 Git 清理导致 marker 丢失，分别促成本轮 birth time 和 storage 布局要求。V23/marker v2 及 O2 整合后的 load 路径仍需新的定向测试、Linux/MySQL 门禁及精确 head 验证，尤其要重跑实际 inode 复用拒绝、远端输出闭包失败时零新模型/prepare/execute，以及原回执的成功恢复。公开 Workspace 恢复/后续 Turn 准入保持独立；被忽略的测试计划记录剩余门禁。
+同一报告复现了删除目录后从备份恢复并复用 inode，以及普通 Git 清理导致 marker 丢失，分别促成本轮 birth time 和 storage 布局要求。V24/marker v2 及 O2 整合后的 load 路径仍需新的定向测试、Linux/MySQL 门禁及精确 head 验证，尤其要重跑实际 inode 复用拒绝、远端输出闭包失败时零新模型/prepare/execute，以及原回执的成功恢复。公开 Workspace 恢复/后续 Turn 准入保持独立；被忽略的测试计划记录剩余门禁。

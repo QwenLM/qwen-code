@@ -433,7 +433,7 @@ for the exact boundary.
 ### Verified original-mount recovery (W1a)
 
 W1a's physical mount guard is opt-in for process restart in a trusted, single-host OpenJDK 21/Linux `local-process` deployment with a persistent, unambiguous root birth time. Taking the next tool Turn after a Broker restart requires `durable-local-process=true`. Whole-host restart succeeds only while the registered physical identity still matches. Flyway
-V23 adds a persistent storage registration, independent `mount_birth_time` and mount fence. Leave
+V24 adds a persistent storage registration, independent `mount_birth_time` and mount fence. Leave
 `QWEN_MANAGED_AGENT_RUNTIME_VERIFIED_WORKSPACE_RECOVERY_ENABLED=false` while
 upgrading every Broker and Harness instance. An unregistered mount is refused
 once the option is enabled; it is never registered from the directory found at
@@ -443,7 +443,7 @@ Marker v2 stores birth time as a canonical `Instant` string preserving nanosecon
 
 Keep the storage root outside **every Git worktree**, with Session cwd in a child project directory. `.qwen-managed-storage.json` is an administrator maintenance file: do not read/write it through model tools or subject it to Git cleanup/stash. Tools are not confined by this layout. Missing or conflicting markers close admission; completed registrations never automatically republish them, including on a same-UUID retry. Marker repair needs a separate design.
 
-Prerelease W1 V21 databases and marker v1 cannot be directly upgraded to V23/v2. Do not bypass the mismatch with Flyway `repair`, `outOfOrder` or manual history edits. Preserve backups and design an explicit offline migration for deployments with retained data; only disposable test deployments may be rebuilt.
+Prerelease W1 V21 databases and marker v1 cannot be directly upgraded to V24/v2. Do not bypass the mismatch with Flyway `repair`, `outOfOrder` or manual history edits. Preserve backups and design an explicit offline migration for deployments with retained data; only disposable test deployments may be rebuilt.
 
 Stop all processes and external jobs that can write the storage, account for
 old Runtime holders and verify the original root before registration. Apply
