@@ -52,6 +52,8 @@ function readWaitMs(value: unknown): number | undefined {
 /** A result's summary may be as long as the progress text it replaces. */
 const MAX_RESULT_SUMMARY = 262_144;
 const MAX_RESULT_ERROR = 4_096;
+/** The thought stream a progress flush carries is shorter than its output. */
+const MAX_PROGRESS_THOUGHT = 65_536;
 
 /**
  * A Host's reported spend: absent, or a whole non-negative number. The cap is
@@ -136,7 +138,9 @@ export function registerAgentHostTransportRoutes(
     return false;
   };
   // Runs before the large-body routes parse anything, so a request with a
-  // wrong secret never gets 2 MB read on its behalf.
+  // wrong secret never gets 2 MB read on its behalf. It is also the only place
+  // those routes check trust, the collaboration setting and the credential:
+  // the handlers below resolve the workspace again just to read its cwd.
   const authenticated: RequestHandler = async (req, res, next) => {
     const runtime = runtimeFor(
       workspaceRegistry,
@@ -192,19 +196,9 @@ export function registerAgentHostTransportRoutes(
     express.json({ limit: '2mb' }),
     async (req, res) => {
       const { workspaceId, hostId } = req.params;
-      const secret = hostSecret(req);
       const runtime = runtimeFor(workspaceRegistry, workspaceId);
       if (!runtime) {
         res.status(404).json({ error: 'Workspace not found.' });
-        return;
-      }
-      if (!requireTrustedWorkspaceRuntime(runtime, res)) return;
-      if (!requireEnabled(runtime.workspaceCwd, res)) return;
-      if (
-        !secret ||
-        !(await authenticateAgentHost(runtime.workspaceCwd, hostId, secret))
-      ) {
-        res.status(401).json({ error: 'Invalid Agent Host credential.' });
         return;
       }
       const {
@@ -245,9 +239,11 @@ export function registerAgentHostTransportRoutes(
         typeof detail !== 'string' ||
         detail.length > 1200 ||
         (outputText !== undefined &&
-          (typeof outputText !== 'string' || outputText.length > 262144)) ||
+          (typeof outputText !== 'string' ||
+            outputText.length > MAX_RESULT_SUMMARY)) ||
         (thoughtText !== undefined &&
-          (typeof thoughtText !== 'string' || thoughtText.length > 65536)) ||
+          (typeof thoughtText !== 'string' ||
+            thoughtText.length > MAX_PROGRESS_THOUGHT)) ||
         steps === 'invalid'
       ) {
         res.status(400).json({ error: 'Invalid progress.' });
@@ -479,22 +475,9 @@ export function registerAgentHostTransportRoutes(
     async (req: Request, res: Response) => {
       const workspaceId = req.params['workspaceId'];
       const hostId = req.params['hostId'];
-      const secret = hostSecret(req);
-      if (!workspaceId || !hostId || !secret) {
-        res.status(401).json({ error: 'Invalid Agent Host credential.' });
-        return;
-      }
       const runtime = runtimeFor(workspaceRegistry, workspaceId);
       if (!runtime) {
         res.status(404).json({ error: 'Workspace not found.' });
-        return;
-      }
-      if (!requireTrustedWorkspaceRuntime(runtime, res)) return;
-      if (!requireEnabled(runtime.workspaceCwd, res)) return;
-      if (
-        !(await authenticateAgentHost(runtime.workspaceCwd, hostId, secret))
-      ) {
-        res.status(401).json({ error: 'Invalid Agent Host credential.' });
         return;
       }
       const input = readHostResult(body(req), hostId);

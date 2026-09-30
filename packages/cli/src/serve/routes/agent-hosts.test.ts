@@ -104,6 +104,9 @@ it('does not expose host work for a collaboration-disabled workspace', async () 
   const response = await setup(false).poll();
 
   expect(response.status).toBe(404);
+  // Byte-identical to the unknown-workspace answer, so a caller cannot tell
+  // which workspaces exist.
+  expect(response.body).toEqual({ error: 'Workspace not found.' });
   expect(pickup).not.toHaveBeenCalled();
 });
 
