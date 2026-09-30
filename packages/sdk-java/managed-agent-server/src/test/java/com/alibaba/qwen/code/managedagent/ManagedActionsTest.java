@@ -3,9 +3,8 @@ package com.alibaba.qwen.code.managedagent;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.awaitility.Awaitility.await;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.RETURNS_DEFAULTS;
+import static org.mockito.Mockito.mock;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -24,12 +23,13 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import org.junit.jupiter.api.Test;
+import org.mockito.stubbing.Answer;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.test.context.bean.override.mockito.MockitoBean;
+import org.springframework.test.context.bean.override.convention.TestBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 
@@ -58,9 +58,23 @@ class ManagedActionsTest {
     @Autowired private ManagedSessionStore journals;
     @Autowired private ManagedActionStore actions;
     @Autowired private AgentStateStore sessions;
-    @MockitoBean private HarnessConnector harness;
 
-    private final Map<String, ActionJournal> pending = new ConcurrentHashMap<>();
+    @TestBean(methodName = "createHarness")
+    private HarnessConnector harness;
+
+    private static final Map<String, Answer<Void>> responses = new ConcurrentHashMap<>();
+
+    static HarnessConnector createHarness() {
+        return mock(
+                HarnessConnector.class,
+                call -> {
+                    if ("resolveAction".equals(call.getMethod().getName())) {
+                        Answer<Void> answer = responses.get(call.getArgument(2));
+                        return answer == null ? null : answer.answer(call);
+                    }
+                    return RETURNS_DEFAULTS.answer(call);
+                });
+    }
 
     @Test
     void rejectsMalformedActionJournalWithoutProjectingIt() throws Exception {
@@ -221,14 +235,13 @@ class ManagedActionsTest {
         ActionJournal journal =
                 action(tenant, session, System.currentTimeMillis(), 9007199254740991L);
         AtomicInteger delivered = new AtomicInteger();
-        doAnswer(
-                        call -> {
-                            delivered.incrementAndGet();
-                            pending.get(call.getArgument(2)).change("decided", call.getArgument(3));
-                            throw new IllegalStateException("answer lost after commit");
-                        })
-                .when(harness)
-                .resolveAction(anyString(), anyString(), anyString(), any());
+        responses.put(
+                journal.id,
+                call -> {
+                    delivered.incrementAndGet();
+                    journal.change("decided", call.getArgument(3));
+                    throw new IllegalStateException("answer lost after commit");
+                });
         mvc.perform(
                         auth(post(path(session, journal.id) + "/responses"), tenant, "other")
                                 .header("Idempotency-Key", "answer")
@@ -304,15 +317,14 @@ class ManagedActionsTest {
         ActionJournal journal =
                 action(tenant, session, System.currentTimeMillis(), 9007199254740991L);
         AtomicInteger attempts = new AtomicInteger();
-        doAnswer(
-                        call -> {
-                            if (attempts.incrementAndGet() == 1)
-                                throw new IllegalStateException("temporarily unavailable");
-                            pending.get(call.getArgument(2)).change("decided", call.getArgument(3));
-                            return null;
-                        })
-                .when(harness)
-                .resolveAction(anyString(), anyString(), anyString(), any());
+        responses.put(
+                journal.id,
+                call -> {
+                    if (attempts.incrementAndGet() == 1)
+                        throw new IllegalStateException("temporarily unavailable");
+                    journal.change("decided", call.getArgument(3));
+                    return null;
+                });
         var result =
                 mvc.perform(
                                 auth(
@@ -368,13 +380,12 @@ class ManagedActionsTest {
         long expiry = System.currentTimeMillis() + 1500;
         ActionJournal journal = action(tenant, session, System.currentTimeMillis(), expiry);
         AtomicInteger attempts = new AtomicInteger();
-        doAnswer(
-                        call -> {
-                            attempts.incrementAndGet();
-                            throw new IllegalStateException("recovery blocked");
-                        })
-                .when(harness)
-                .resolveAction(anyString(), anyString(), anyString(), any());
+        responses.put(
+                journal.id,
+                call -> {
+                    attempts.incrementAndGet();
+                    throw new IllegalStateException("recovery blocked");
+                });
         JsonNode admitted =
                 readAccepted(
                         auth(post(path(session, journal.id) + "/responses"), tenant, "owner")
@@ -417,12 +428,11 @@ class ManagedActionsTest {
         String session = session(tenant);
         ActionJournal journal =
                 action(tenant, session, System.currentTimeMillis(), 9007199254740991L);
-        doAnswer(
-                        call -> {
-                            throw new IllegalStateException("temporarily unavailable");
-                        })
-                .when(harness)
-                .resolveAction(anyString(), anyString(), anyString(), any());
+        responses.put(
+                journal.id,
+                call -> {
+                    throw new IllegalStateException("temporarily unavailable");
+                });
         JsonNode allow =
                 readAccepted(
                         auth(post(path(session, journal.id) + "/responses"), tenant, "owner")
@@ -501,7 +511,6 @@ class ManagedActionsTest {
             throws Exception {
         ActionJournal journal = new ActionJournal(journals, tenant, session, created, expiry);
         journal.change("requested", null);
-        pending.put(journal.id, journal);
         return journal;
     }
 
