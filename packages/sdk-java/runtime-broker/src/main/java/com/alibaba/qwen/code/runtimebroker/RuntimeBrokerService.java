@@ -21,6 +21,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
@@ -1732,24 +1733,42 @@ public final class RuntimeBrokerService implements AutoCloseable {
         // reconcile or attestation cannot hold the binding open forever.
         // Releasing the claim first fences any late write from this
         // operation.
-        ScheduledFuture<?> deadlineTask;
+        AtomicReference<ScheduledFuture<?>> deadlineTask =
+                new AtomicReference<>();
+        Runnable fence = () -> {
+            renewal.close();
+            releaseOperationQuietly(bindingId, operationGeneration);
+            operation.completeExceptionally(unavailable(
+                    "runtime_broker_reconcile_timeout",
+                    "Managed Runtime reconciliation timed out."));
+        };
+        // The reclaim keeps the claim alive with its own inline renewals,
+        // so when the loop hands a lost binding over, the handoff gets a
+        // fresh deadline window rather than the reconcile's remainder.
+        Runnable rearmDeadline = () -> {
+            ScheduledFuture<?> pending = deadlineTask.getAndSet(
+                    scheduler.schedule(fence, operationDeadlineNanos(),
+                            TimeUnit.NANOSECONDS));
+            if (pending != null) {
+                pending.cancel(false);
+            }
+        };
         try {
-            deadlineTask = scheduler.schedule(() -> {
-                renewal.close();
-                releaseOperationQuietly(bindingId, operationGeneration);
-                operation.completeExceptionally(unavailable(
-                        "runtime_broker_reconcile_timeout",
-                        "Managed Runtime reconciliation timed out."));
-            }, operationDeadlineNanos(), TimeUnit.NANOSECONDS);
+            deadlineTask.set(scheduler.schedule(fence,
+                    operationDeadlineNanos(), TimeUnit.NANOSECONDS));
         } catch (RuntimeException scheduleFailure) {
             renewal.stopAndGet();
             releaseOperationQuietly(bindingId, operationGeneration);
             return failed(scheduleFailure);
         }
         reconcileLoop(bindingId, operationGeneration, renewal,
-                System.nanoTime() + operationDeadlineNanos(), 0)
+                System.nanoTime() + operationDeadlineNanos(), 0,
+                rearmDeadline)
                 .whenComplete((context, error) -> {
-                    deadlineTask.cancel(false);
+                    ScheduledFuture<?> pending = deadlineTask.getAndSet(null);
+                    if (pending != null) {
+                        pending.cancel(false);
+                    }
                     renewal.stopAndGet();
                     releaseOperationQuietly(bindingId, operationGeneration);
                     if (error == null) {
@@ -1763,7 +1782,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
 
     private CompletionStage<BindingContext> reconcileLoop(String bindingId,
             long operationGeneration, BindingRenewal renewal,
-            long deadlineNanos, int attempt) {
+            long deadlineNanos, int attempt, Runnable rearmDeadline) {
         if (System.nanoTime() >= deadlineNanos) {
             return failed(unavailable("runtime_broker_reconcile_timeout",
                     "Managed Runtime reconciliation timed out."));
@@ -1832,7 +1851,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
                             try {
                                 scheduler.schedule(() -> reconcileLoop(
                                         bindingId, operationGeneration,
-                                        renewal, deadlineNanos, attempt + 1)
+                                        renewal, deadlineNanos, attempt + 1,
+                                        rearmDeadline)
                                         .whenComplete((context, error) -> {
                                             if (error == null) {
                                                 next.complete(context);
@@ -1852,6 +1872,10 @@ public final class RuntimeBrokerService implements AutoCloseable {
                             // path below renews it inline, so no renewal can
                             // invalidate the fresh CAS snapshots mid-write.
                             renewal.close();
+                            // The reclaim may span several leases of its
+                            // own; it gets a fresh deadline window instead
+                            // of whatever the reconcile retries left over.
+                            rearmDeadline.run();
                             RuntimeBindingRecord latest =
                                     bindingRepository.findById(bindingId);
                             if (latest == null || !ownsOperation(latest,
@@ -2021,17 +2045,27 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     : safeStage(() -> {
                         // The claim may already be partly spent (e.g. the
                         // reconcile loop's last renewal tick), so stretch it
-                        // before a provisioner call that may run for half a
-                        // lease; a lapsed claim fails the renew below instead.
+                        // before a provisioner call that may run for most of
+                        // a lease; a lapsed claim fails the renew below instead.
                         renewRecoveryClaim(claimed);
                         return provisioner.reconcile(recovered.getRequest(),
                                 recovered.getProvisionSeed(), recovered.getResourceHandle(), recovered.getLease());
                     })
                             .toCompletableFuture().orTimeout(cleanupStepTimeoutMillis(), TimeUnit.MILLISECONDS)
-                            .exceptionally(error -> null);
+                            .exceptionally(error -> {
+                                // A step cut short by our own bound is not
+                                // "the provisioner observed nothing": name it
+                                // so the caller retries instead of proceeding
+                                // without the observation.
+                                if (unwrap(error) instanceof TimeoutException) {
+                                    throw unavailable("runtime_broker_reconcile_timeout",
+                                            "Managed Runtime reconciliation timed out.");
+                                }
+                                return null;
+                            });
             return observation.thenCompose(observed -> {
                 // Renew, never just re-read: the provisioner call above may
-                // have run for half the lease, and the guarded writes below
+                // have run for most of the lease, and the guarded writes below
                 // need the post-renewal snapshot to CAS deterministically.
                 RuntimeBindingRecord latest = renewRecoveryClaim(claimed);
                 if (observed != null && observed.getOutcome() == RuntimeObservation.Outcome.NOT_FOUND
@@ -2050,8 +2084,15 @@ public final class RuntimeBrokerService implements AutoCloseable {
                                 terminalized.getGeneration())) {
                     return CompletableFuture.completedFuture(terminalized);
                 }
-                return safeStage(() -> provisioner.recoverResources(terminalized))
+                // Renew between the transaction above and the destructive
+                // step, and hand the provisioner the renewed record: its
+                // version is what the stores match the cleanup against.
+                RuntimeBindingRecord refreshed = renewRecoveryClaim(claimed);
+                return safeStage(() -> provisioner.recoverResources(refreshed))
                         .toCompletableFuture().orTimeout(cleanupStepTimeoutMillis(), TimeUnit.MILLISECONDS)
+                        .exceptionally(error -> {
+                            throw mapStepTimeout(error);
+                        })
                         .thenApply(ignored -> {
                             RuntimeBindingRecord finished = bindingRepository.finishLostRecovery(
                                     sessionRepository, executionRepository, renewRecoveryClaim(claimed));
@@ -2078,6 +2119,20 @@ public final class RuntimeBrokerService implements AutoCloseable {
             throw unavailable("runtime_provision_fenced", "Runtime recovery claim expired");
         }
         return renewed;
+    }
+
+    /**
+     * Names a step the cleanup bound cut short, so callers see a named,
+     * retryable reconcile timeout rather than a raw {@link TimeoutException};
+     * any other failure passes through unchanged.
+     */
+    private RuntimeException mapStepTimeout(Throwable error) {
+        if (unwrap(error) instanceof TimeoutException) {
+            return unavailable("runtime_broker_reconcile_timeout",
+                    "Managed Runtime reconciliation timed out.");
+        }
+        return error instanceof RuntimeException runtime
+                ? runtime : new CompletionException(error);
     }
 
     /** Trusted maintenance of the saved generation; never resolves current authorization or provisions a replacement. */
@@ -2118,6 +2173,9 @@ public final class RuntimeBrokerService implements AutoCloseable {
             return safeStage(() -> provisioner.reconcile(claimed.getRequest(), claimed.getProvisionSeed(),
                     claimed.getResourceHandle(), claimed.getLease()))
                     .toCompletableFuture().orTimeout(cleanupStepTimeoutMillis(), TimeUnit.MILLISECONDS)
+                    .exceptionally(error -> {
+                        throw mapStepTimeout(error);
+                    })
                     .thenCompose(observed -> {
                         RuntimeBindingRecord current = renewRecoveryClaim(claimed);
                         if (observed == null) {
@@ -2146,7 +2204,11 @@ public final class RuntimeBrokerService implements AutoCloseable {
                         return CompletableFuture.completedFuture(bindingRepository.findById(bindingId));
                     });
         });
-        return operation.toCompletableFuture().orTimeout(operationLeaseDuration.toMillis(), TimeUnit.MILLISECONDS)
+        // The inner steps are each bounded and the claim is renewed between
+        // them, so the chain can legitimately span more than one lease; the
+        // outer backstop uses the same 4x deadline as reconciliation instead
+        // of cutting a healthy chain at exactly one lease.
+        return operation.toCompletableFuture().orTimeout(operationDeadlineMillis(), TimeUnit.MILLISECONDS)
                 .whenComplete((recovered, error) -> {
                     if (claimed != null) {
                         releaseOperationQuietly(bindingId, claimed.getOperationGeneration());
@@ -2211,6 +2273,10 @@ public final class RuntimeBrokerService implements AutoCloseable {
         long leaseNanos = operationLeaseDuration.toNanos();
         return leaseNanos > Long.MAX_VALUE / 4
                 ? Long.MAX_VALUE : leaseNanos * 4;
+    }
+
+    private long operationDeadlineMillis() {
+        return Math.max(1, operationDeadlineNanos() / 1_000_000);
     }
 
     private static boolean validAttestation(RuntimeAttestation attestation,
@@ -3207,12 +3273,14 @@ public final class RuntimeBrokerService implements AutoCloseable {
     }
 
     /**
-     * The bound for a single cleanup step, kept under half the operation
-     * lease so the inline renewal that follows each step still has margin
-     * before the claim lapses.
+     * The bound for a single cleanup step. Each step starts from a claim
+     * renewed immediately before it, so the bound stays one renewal tick
+     * below the full lease, leaving margin for the inline renewal that
+     * follows the step. A provisioner's internal waits must fit inside it.
      */
     private long cleanupStepTimeoutMillis() {
-        return Math.max(1, operationLeaseDuration.toMillis() / 2);
+        return Math.max(1, operationLeaseDuration.toMillis()
+                - renewalDelayMillis(operationLeaseDuration));
     }
 
     private static <T> CompletionStage<T> safeStage(
@@ -3348,6 +3416,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
     private final class BindingRenewal implements AutoCloseable {
         private final AtomicReference<RuntimeBindingRecord> current;
         private final AtomicBoolean valid = new AtomicBoolean(true);
+        private final AtomicBoolean stopped = new AtomicBoolean();
         private ScheduledFuture<?> task;
 
         BindingRenewal(RuntimeBindingRecord claimed) {
@@ -3384,7 +3453,11 @@ public final class RuntimeBrokerService implements AutoCloseable {
         }
 
         private synchronized void renew() {
-            if (closed.get()) {
+            // stopped is per-instance: cancel(false) cannot retract a tick
+            // already waiting on this monitor, so once close() ran the tick
+            // must return here rather than renew a claim its owner has
+            // started renewing inline.
+            if (stopped.get() || closed.get()) {
                 close();
                 return;
             }
@@ -3409,6 +3482,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
 
         @Override
         public synchronized void close() {
+            stopped.set(true);
             if (task != null) {
                 task.cancel(false);
             }

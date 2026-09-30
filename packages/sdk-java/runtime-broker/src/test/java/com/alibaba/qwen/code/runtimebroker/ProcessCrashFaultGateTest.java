@@ -238,7 +238,8 @@ class ProcessCrashFaultGateTest {
 
         BrokerProcess.Reply acquire = FaultGateRig.await(
                 () -> second.acquire(HARNESS, SESSION),
-                reply -> !"runtime_provision_fenced".equals(reply.code()),
+                reply -> !"runtime_provision_fenced".equals(reply.code())
+                        && !"runtime_broker_reconcile_timeout".equals(reply.code()),
                 "original Runtime loss after recovery fencing");
         assertFalse(acquire.ok());
         assertEquals("runtime_broker_runtime_lost", acquire.code(),

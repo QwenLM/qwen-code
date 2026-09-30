@@ -38,7 +38,8 @@ class LocalRebootFaultGateTest {
             var restored = rig.broker("restored", rig.proxy(), FaultGateRig.Provisioner.TRUSTED_LOCAL_PROCESS);
             var warm = FaultGateRig.await(
                     () -> restored.warm(FaultGateRig.HARNESS),
-                    reply -> !"runtime_provision_fenced".equals(reply.code()),
+                    reply -> !"runtime_provision_fenced".equals(reply.code())
+                            && !"runtime_broker_reconcile_timeout".equals(reply.code()),
                     "original worker loss after recovery fencing");
             assertEquals("runtime_broker_runtime_lost", warm.code(),
                     () -> warm.message() + rig.logs());

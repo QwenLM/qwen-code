@@ -1370,15 +1370,6 @@ class RuntimeBrokerServiceTest {
                 throw new AssertionError(
                         "Lost writer domain must not be reprovisioned");
             }
-
-            @Override
-            public CompletionStage<RuntimeObservation> reconcile(
-                    RuntimeProvisionRequest request,
-                    RuntimeProvisionSeed seed, RuntimeResourceHandle handle,
-                    RuntimeLease lease) {
-                return CompletableFuture.completedFuture(
-                        RuntimeObservation.unknown(handle));
-            }
         };
         try (RuntimeBrokerService service = new RuntimeBrokerService(
                 ignored -> CompletableFuture.completedFuture(
@@ -1429,8 +1420,8 @@ class RuntimeBrokerServiceTest {
                 // A single step that outlasts the whole operation lease
                 // must still fence rather than march on with a dead claim.
                 clock.advance(Duration.ofSeconds(3));
-                return CompletableFuture.completedFuture(
-                        RuntimeObservation.unknown(handle));
+                return RuntimeProvisioner.super.reconcile(request, seed,
+                        handle, lease);
             }
         };
         try (RuntimeBrokerService service = new RuntimeBrokerService(
@@ -1443,6 +1434,335 @@ class RuntimeBrokerServiceTest {
                     failure(service.warm("lapsed-cleanup-harness")).getCode());
             assertEquals(RuntimeBindingRecord.State.LOST,
                     bindings.findById(lost.getBindingId()).getState());
+        }
+    }
+
+    @Test
+    void reclaimRenewsItsClaimBeforeASlowReconcile() {
+        MutableClock clock = new MutableClock(START);
+        SlowRecoveryBindingRepository bindings =
+                new SlowRecoveryBindingRepository(clock,
+                        Duration.ofMillis(1200));
+        var sessions = new InMemoryRuntimeSessionRepository();
+        var executions = new InMemoryToolExecutionRepository(clock);
+        var fixture = new RuntimeRecoveryContract.Fixture(bindings, sessions,
+                executions, "slow-reconcile");
+        RuntimeBindingRecord lost = fixture.lose(false);
+        bindings.releaseOperation(lost.getBindingId(), "recovery",
+                lost.getOperationGeneration());
+        RuntimeProvisioner provisioner = new RuntimeProvisioner() {
+            @Override
+            public String kind() {
+                return "test-supervisor";
+            }
+
+            @Override
+            public CompletionStage<RuntimeLease> provision(
+                    RuntimeProvisionRequest request) {
+                throw new AssertionError(
+                        "Lost writer domain must not be reprovisioned");
+            }
+
+            @Override
+            public CompletionStage<RuntimeObservation> reconcile(
+                    RuntimeProvisionRequest request,
+                    RuntimeProvisionSeed seed, RuntimeResourceHandle handle,
+                    RuntimeLease lease) {
+                clock.advance(Duration.ofMillis(1200));
+                return RuntimeProvisioner.super.reconcile(request, seed,
+                        handle, lease);
+            }
+        };
+        try (RuntimeBrokerService service = new RuntimeBrokerService(
+                ignored -> CompletableFuture.completedFuture(
+                        lost.getRequest().getScope()),
+                provisioner, new FakeTransport(), bindings, sessions,
+                executions, "restarted", Duration.ofSeconds(2),
+                Duration.ofSeconds(2), clock, () -> "execution")) {
+            // recoverLost burns 1.2s and the reconcile another 1.2s of the
+            // 2s claim; without the stretch renew before the provisioner
+            // call the post-step renewal at 2.4s meets a claim that lapsed
+            // at 2s and this answers runtime_provision_fenced.
+            assertEquals("runtime_broker_runtime_lost",
+                    failure(service.warm("slow-reconcile-harness")).getCode());
+            assertEquals(RuntimeBindingRecord.State.LOST,
+                    bindings.findById(lost.getBindingId()).getState());
+        }
+    }
+
+    @Test
+    void reclaimReleasesAfterAnObservationInsideTheStepBand()
+            throws Exception {
+        var bindings = new InMemoryRuntimeBindingRepository();
+        var sessions = new InMemoryRuntimeSessionRepository();
+        var executions = new InMemoryToolExecutionRepository();
+        var fixture = new RuntimeRecoveryContract.Fixture(bindings, sessions,
+                executions, "step-band");
+        RuntimeBindingRecord lost = fixture.lose(false);
+        bindings.releaseOperation(lost.getBindingId(), "recovery",
+                lost.getOperationGeneration());
+        RuntimeProvisioner provisioner = new RuntimeProvisioner() {
+            @Override
+            public String kind() {
+                return "test-supervisor";
+            }
+
+            @Override
+            public CompletionStage<RuntimeLease> provision(
+                    RuntimeProvisionRequest request) {
+                throw new AssertionError(
+                        "Lost writer domain must not be reprovisioned");
+            }
+
+            @Override
+            public CompletionStage<RuntimeObservation> reconcile(
+                    RuntimeProvisionRequest request,
+                    RuntimeProvisionSeed seed, RuntimeResourceHandle handle,
+                    RuntimeLease lease) {
+                // Real elapsed time just over half the 6s lease: the step
+                // bound must admit the band between half a lease and the
+                // renewal tick before it, or this observation is discarded
+                // and the binding stays LOST on every attempt. The future
+                // must complete asynchronously: a synchronous sleep inside
+                // the supplier only delays arming orTimeout instead of
+                // tripping it, and MutableClock cannot move the delayer.
+                return CompletableFuture.supplyAsync(
+                        () -> RuntimeObservation.notFound(
+                                lost.getLossEvidence(),
+                                RuntimeRecoveryContract.evidence(lost,
+                                        RuntimeRecoveryEvidence.Fact.WRITERS_STOPPED)),
+                        CompletableFuture.delayedExecutor(3400,
+                                TimeUnit.MILLISECONDS));
+            }
+
+            @Override
+            public boolean supportsStartupRecovery(
+                    RuntimeResourceHandle handle) {
+                return true;
+            }
+        };
+        try (RuntimeBrokerService service = new RuntimeBrokerService(
+                ignored -> CompletableFuture.completedFuture(
+                        lost.getRequest().getScope()),
+                provisioner, new FakeTransport(), bindings, sessions,
+                executions, "restarted", Duration.ofSeconds(6),
+                Duration.ofSeconds(6), Clock.systemUTC(), () -> "execution")) {
+            RuntimeBindingRecord recovered = service.recoverBinding(
+                    lost.getBindingId(), lost.getGeneration())
+                    .toCompletableFuture().get(15, TimeUnit.SECONDS);
+            assertEquals(RuntimeBindingRecord.State.RELEASED,
+                    recovered.getState());
+            assertEquals(0, sessions.countActiveByBinding(
+                    recovered.getBindingId(), recovered.getGeneration()));
+        }
+    }
+
+    @Test
+    void reclaimNamesAStepItCutShort() {
+        var bindings = new InMemoryRuntimeBindingRepository();
+        var sessions = new InMemoryRuntimeSessionRepository();
+        var executions = new InMemoryToolExecutionRepository();
+        var fixture = new RuntimeRecoveryContract.Fixture(bindings, sessions,
+                executions, "cut-step");
+        RuntimeBindingRecord lost = fixture.lose(false);
+        bindings.releaseOperation(lost.getBindingId(), "recovery",
+                lost.getOperationGeneration());
+        RuntimeProvisioner provisioner = new RuntimeProvisioner() {
+            @Override
+            public String kind() {
+                return "test-supervisor";
+            }
+
+            @Override
+            public CompletionStage<RuntimeLease> provision(
+                    RuntimeProvisionRequest request) {
+                throw new AssertionError(
+                        "Lost writer domain must not be reprovisioned");
+            }
+
+            @Override
+            public CompletionStage<RuntimeObservation> reconcile(
+                    RuntimeProvisionRequest request,
+                    RuntimeProvisionSeed seed, RuntimeResourceHandle handle,
+                    RuntimeLease lease) {
+                return new CompletableFuture<>();
+            }
+
+            @Override
+            public boolean supportsStartupRecovery(
+                    RuntimeResourceHandle handle) {
+                return true;
+            }
+        };
+        try (RuntimeBrokerService service = new RuntimeBrokerService(
+                ignored -> CompletableFuture.completedFuture(
+                        lost.getRequest().getScope()),
+                provisioner, new FakeTransport(), bindings, sessions,
+                executions, "restarted", Duration.ofSeconds(2),
+                Duration.ofSeconds(2), Clock.systemUTC(), () -> "execution")) {
+            // The reconcile never answers; when the step bound cuts it the
+            // caller must hear a named, retryable timeout rather than a raw
+            // TimeoutException or a silent "no observation".
+            assertEquals("runtime_broker_reconcile_timeout",
+                    failure(service.recoverBinding(lost.getBindingId(),
+                            lost.getGeneration())).getCode());
+            assertEquals(RuntimeBindingRecord.State.LOST,
+                    bindings.findById(lost.getBindingId()).getState());
+        }
+    }
+
+    @Test
+    void recoverBindingSettlesAStalledObservation() {
+        var bindings = new InMemoryRuntimeBindingRepository();
+        var sessions = new InMemoryRuntimeSessionRepository();
+        var executions = new InMemoryToolExecutionRepository();
+        var fixture = new RuntimeRecoveryContract.Fixture(bindings, sessions,
+                executions, "stalled-observation");
+        bindings.releaseOperation(fixture.binding.getBindingId(), "recovery",
+                fixture.binding.getOperationGeneration());
+        RuntimeProvisioner provisioner = new RuntimeProvisioner() {
+            @Override
+            public String kind() {
+                return "test-supervisor";
+            }
+
+            @Override
+            public CompletionStage<RuntimeLease> provision(
+                    RuntimeProvisionRequest request) {
+                throw new AssertionError(
+                        "A ready binding must not be reprovisioned");
+            }
+
+            @Override
+            public CompletionStage<RuntimeObservation> reconcile(
+                    RuntimeProvisionRequest request,
+                    RuntimeProvisionSeed seed, RuntimeResourceHandle handle,
+                    RuntimeLease lease) {
+                return new CompletableFuture<>();
+            }
+
+            @Override
+            public boolean supportsStartupRecovery(
+                    RuntimeResourceHandle handle) {
+                return true;
+            }
+        };
+        try (RuntimeBrokerService service = new RuntimeBrokerService(
+                ignored -> CompletableFuture.completedFuture(
+                        fixture.binding.getRequest().getScope()),
+                provisioner, new FakeTransport(), bindings, sessions,
+                executions, "restarted", Duration.ofSeconds(6),
+                Duration.ofSeconds(6), Clock.systemUTC(), () -> "execution")) {
+            // The observation hangs; the inner step bound (2/3 of the 6s
+            // lease) must settle the maintenance call with a named timeout
+            // well before the outer 4x-lease backstop would.
+            RuntimeBrokerException timeout = assertTimeoutPreemptively(
+                    Duration.ofMillis(5200),
+                    () -> failure(service.recoverBinding(
+                            fixture.binding.getBindingId(),
+                            fixture.binding.getGeneration())));
+            assertEquals("runtime_broker_reconcile_timeout",
+                    timeout.getCode());
+        }
+    }
+
+    @Test
+    void reclaimRenewsItsClaimBeforeRecoveringResources() {
+        MutableClock clock = new MutableClock(START);
+        SlowRecoveryBindingRepository bindings =
+                new SlowRecoveryBindingRepository(clock,
+                        Duration.ofMillis(1200));
+        var sessions = new InMemoryRuntimeSessionRepository();
+        var executions = new InMemoryToolExecutionRepository(clock);
+        RuntimeScope scope = new RuntimeScope("tenant-m", "workspace-m", "1",
+                "/workspace", WorkspaceExecutionProfile.CAPABILITY_DIGEST,
+                "session");
+        RuntimeProvisionRequest request = new RuntimeProvisionRequest(scope,
+                "harness-1", "test-supervisor", "storage-a");
+        RuntimeBindingRecord created = bindings.findOrCreate(request);
+        RuntimeBindingRecord claimed = bindings.claimOperation(
+                created.getBindingId(), "recovery", Duration.ofMinutes(5));
+        RuntimeProvisionSeed seed = claimed.getProvisionSeed();
+        RuntimeBindingRecord ready = bindings.compareAndSet(claimed,
+                claimed.withAttestation(
+                        new RuntimeLease(seed.getProvisionalRuntimeId(),
+                                URI.create("http://127.0.0.1:4190"),
+                                seed.getToken(), seed.getLeaseId(),
+                                seed.getEpoch()),
+                        new RuntimeResourceHandle("test-supervisor", 1,
+                                Map.of("resource", "m")),
+                        clock.instant(), clock.instant()));
+        RuntimeSessionRecord acquiring = bindings.admitSession(sessions,
+                new RuntimeSessionRecord(
+                        new RuntimeSession("harness-1", "runtime-1",
+                                "bootstrap", scope),
+                        ready.getBindingId(), ready.getGeneration(),
+                        RuntimeSessionRecord.State.ACQUIRING, 0,
+                        clock.instant()));
+        sessions.compareAndSet(acquiring, acquiring.withState(
+                RuntimeSessionRecord.State.READY, clock.instant()));
+        RuntimeBindingRecord lost = bindings.compareAndSet(ready,
+                ready.withRecoveryEvidence(
+                        RuntimeRecoveryContract.evidence(ready,
+                                RuntimeRecoveryEvidence.Fact.JOURNAL_LOST),
+                        RuntimeRecoveryContract.evidence(ready,
+                                RuntimeRecoveryEvidence.Fact.WRITERS_STOPPED),
+                        clock.instant()));
+        bindings.releaseOperation(lost.getBindingId(), "recovery",
+                lost.getOperationGeneration());
+        AtomicInteger recoverResourcesCalls = new AtomicInteger();
+        RuntimeProvisioner provisioner = new RuntimeProvisioner() {
+            @Override
+            public String kind() {
+                return "test-supervisor";
+            }
+
+            @Override
+            public CompletionStage<RuntimeLease> provision(
+                    RuntimeProvisionRequest provisionRequest) {
+                throw new AssertionError(
+                        "Lost writer domain must not be reprovisioned");
+            }
+
+            @Override
+            public CompletionStage<Void> recoverResources(
+                    RuntimeBindingRecord binding) {
+                recoverResourcesCalls.incrementAndGet();
+                // The stores match the cleanup against record_version, so
+                // the provisioner must see the version-current record, not
+                // a pre-renewal snapshot.
+                assertEquals(
+                        bindings.findById(binding.getBindingId())
+                                .getVersion(),
+                        binding.getVersion(),
+                        "recoverResources must receive the version-current record");
+                clock.advance(Duration.ofMillis(900));
+                return CompletableFuture.completedFuture(null);
+            }
+
+            @Override
+            public boolean supportsStartupRecovery(
+                    RuntimeResourceHandle handle) {
+                return true;
+            }
+        };
+        try (RuntimeBrokerService service = new RuntimeBrokerService(
+                ignored -> CompletableFuture.completedFuture(scope),
+                provisioner, new FakeTransport(), bindings, sessions,
+                executions, "restarted", Duration.ofSeconds(2),
+                Duration.ofSeconds(2), clock, () -> "execution")) {
+            // The managed-context cleanup is the only path that reaches
+            // recoverResources: recoverLost twice burns 2.4s and the
+            // resource recovery another 0.9s of the 2s claim, so without
+            // the renew handed to the provisioner the final renewal meets
+            // a lapsed claim and fences AFTER the destructive step ran.
+            RuntimeBindingRecord recovered = join(service.recoverBinding(
+                    lost.getBindingId(), lost.getGeneration()));
+            assertEquals(RuntimeBindingRecord.State.RELEASED,
+                    recovered.getState());
+            assertEquals(1, recoverResourcesCalls.get());
+            assertEquals(0, sessions.countActiveByBinding(
+                    lost.getBindingId(), lost.getGeneration()));
         }
     }
 
