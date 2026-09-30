@@ -418,6 +418,25 @@ class ThreadCreateInvocation extends BaseToolInvocation<
               `Agent "${assignee.name}" is disabled and cannot take work.`,
             );
           }
+          // Work submitted from outside the workspace was granted to one
+          // agent; handing it to another would widen that grant.
+          const parent = threads.find(
+            (thread) => thread.id === context.threadId,
+          );
+          const grantedAgentId = threads.find(
+            (thread) => thread.id === parent?.rootThreadId,
+          )?.externalIntake?.targetAgentId;
+          // Splitting work to itself widens nothing: the agent already works
+          // this tree, whether granted or brought in by a local person.
+          if (
+            grantedAgentId !== undefined &&
+            assignee.id !== grantedAgentId &&
+            assignee.id !== context.agentId
+          ) {
+            throw new Error(
+              `This thread came from outside the workspace and was shared with one agent only; it cannot be handed to "${assignee.name}".`,
+            );
+          }
           // A retried call must not duplicate a live hand-off, but a finished
           // or reassigned sub-thread of the same title is not that hand-off.
           const existing = threads.find(

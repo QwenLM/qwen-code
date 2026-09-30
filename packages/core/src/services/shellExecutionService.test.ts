@@ -2167,6 +2167,102 @@ describe('ShellExecutionService child_process fallback', () => {
   const dataChunksOf = (events: Array<{ type: string; chunk?: unknown }>) =>
     events.filter((e) => e.type === 'data').map((e) => e.chunk);
 
+  /**
+   * Executes under a raw-output capture with a 64-byte preview; `drive` emits
+   * the child's output, then both streams end and the child exits with `code`.
+   */
+  const runCaptured = async (command: string, drive: () => void, code = 0) => {
+    for (const stream of [mockChildProcess.stdout!, mockChildProcess.stderr!]) {
+      Object.assign(stream, { pause: vi.fn(), resume: vi.fn() });
+    }
+    const capture = {
+      write: vi.fn(async () => {}),
+      finish: vi.fn(async () => {}),
+      setStarted: vi.fn(),
+      setProcessResult: vi.fn(),
+    };
+    const handle = await ShellExecutionService.execute(
+      command,
+      '/test/dir',
+      onOutputEventMock,
+      new AbortController().signal,
+      true,
+      { ...shellExecutionConfig, maxBufferedOutputBytes: 64 },
+      { rawCapture: capture },
+    );
+    drive();
+    mockChildProcess.stdout!.emit('end');
+    mockChildProcess.stderr!.emit('end');
+    finish(code);
+    return { result: await handle.result, capture };
+  };
+
+  it('keeps a bounded head and tail preview while capturing every raw byte', async () => {
+    const bytes = Buffer.from(`HEAD${'x'.repeat(100)}TAIL`);
+    const { result, capture } = await runCaptured('printf output', () =>
+      emitOut(bytes),
+    );
+    expect(capture.write).toHaveBeenCalledWith('stdout', bytes);
+    expect(result.rawOutput.byteLength).toBe(32);
+    expect(result.output).toContain('HEAD');
+    expect(result.output).toContain('TAIL');
+    expect(result.output).toContain('Middle output omitted');
+    expect(result.output).not.toContain('x'.repeat(100));
+  });
+
+  it('keeps recent stderr visible after later stdout fills the preview tail', async () => {
+    const { result, capture } = await runCaptured(
+      'failing build',
+      () => {
+        emitOut('HEAD' + 'x'.repeat(80));
+        emitOut('ERR: 42\n', 'stderr');
+        emitOut('y'.repeat(100) + 'TAIL');
+      },
+      3,
+    );
+    expect(result.output).toContain('HEAD');
+    expect(result.output).toContain('TAIL');
+    expect(result.output).toContain('[Recent stderr]\nERR: 42');
+    expect(capture.write).toHaveBeenCalledWith(
+      'stderr',
+      Buffer.from('ERR: 42\n'),
+    );
+  });
+
+  it('decodes a combined preview tail that starts inside a UTF-8 character', async () => {
+    const stdout = Buffer.from(`${'错'.repeat(30)}END`);
+    const { result, capture } = await runCaptured('printf output', () =>
+      emitOut(stdout),
+    );
+    const tail = result.output.split('managed capture.]\n')[1];
+    expect(tail).toMatch(/^错+END$/);
+    expect(capture.write).toHaveBeenCalledWith('stdout', stdout);
+  });
+
+  it('decodes a stderr preview that starts inside a UTF-8 character', async () => {
+    const stderr = Buffer.from(`${'错'.repeat(30)}END\n`);
+    const { result, capture } = await runCaptured(
+      'failing build',
+      () => {
+        emitOut('HEAD' + 'x'.repeat(80));
+        emitOut(stderr, 'stderr');
+        emitOut('y'.repeat(100));
+      },
+      3,
+    );
+    expect(result.output.split('[Recent stderr]\n')[1]).toBe('错END');
+    expect(capture.write).toHaveBeenCalledWith('stderr', stderr);
+  });
+
+  it('keeps a stdout-only preview complete within its byte limit', async () => {
+    const stdout = Buffer.from('x'.repeat(60));
+    const { result, capture } = await runCaptured('printf output', () =>
+      emitOut(stdout),
+    );
+    expect(result.output).toBe(stdout.toString());
+    expect(capture.write).toHaveBeenCalledWith('stdout', stdout);
+  });
+
   describe('child environment sanitization (#6601)', () => {
     it('strips Qwen-internal daemon secrets from the child_process env while keeping user vars and third-party credentials', async () => {
       setSecretEnv();
