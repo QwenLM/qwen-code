@@ -113,10 +113,16 @@ class HostedPublicWorkspaceIT {
             await().atMost(Duration.ofSeconds(35)).failFast(() -> {
                 String status = jdbc.queryForObject("SELECT status FROM managed_agent_turn WHERE session_id = ?",
                         String.class, session);
-                assertThat(status).as("Turn: %s; events: %s; model requests: %s; Harness: %s",
-                        jdbc.queryForList("SELECT status, error_code FROM managed_agent_turn WHERE session_id = ?", session),
-                        jdbc.queryForList("SELECT event_type, data_json FROM managed_agent_event WHERE session_id = ?", session),
-                        modelRequests.size(), Files.readString(temporary.resolve("harness.log"))).isNotEqualTo("FAILED");
+                // Diagnostics are built only when the Turn has failed, not on every poll.
+                if ("FAILED".equals(status)) {
+                    throw new AssertionError(String.format("Turn failed. Turn: %s; events: %s; model requests: %s;"
+                                    + " Harness: %s",
+                            jdbc.queryForList("SELECT status, error_code FROM managed_agent_turn WHERE session_id = ?",
+                                    session),
+                            jdbc.queryForList("SELECT event_type, data_json FROM managed_agent_event"
+                                    + " WHERE session_id = ?", session),
+                            modelRequests.size(), Files.readString(temporary.resolve("harness.log"))));
+                }
             }).untilAsserted(() -> {
                 if (approvals) answerActions(session, webShell);
                 assertThat(modelFailure.get()).isNull();
@@ -172,16 +178,16 @@ class HostedPublicWorkspaceIT {
                 .path("error").path("code").asText()).isEqualTo("unsupported_feature");
         Map<String, Object> unsupportedAgent = new java.util.LinkedHashMap<>(denied);
         unsupportedAgent.put("agent_id", "another-agent");
-        request("POST", "/v1/agents/sessions", unsupportedAgent, "unsupported-agent", "actor", 409);
+        assertUnavailable(request("POST", "/v1/agents/sessions", unsupportedAgent, "unsupported-agent", "actor", 409));
         Map<String, Object> unknown = new java.util.LinkedHashMap<>(denied);
         unknown.put("workspace", Map.of("workspace_id", "unknown"));
         request("POST", "/v1/agents/sessions", unknown, "unknown", "actor", 404);
         jdbc.update("UPDATE managed_workspace_registry SET state = 'DRAINING' WHERE tenant_id = ?", tenant);
-        request("POST", "/v1/agents/sessions", denied, "draining", "actor", 409);
+        assertUnavailable(request("POST", "/v1/agents/sessions", denied, "draining", "actor", 409));
         jdbc.update("UPDATE managed_workspace_registry SET state = 'ACTIVE' WHERE tenant_id = ?", tenant);
         register("unmounted", "unmounted-storage");
         unknown.put("workspace", Map.of("workspace_id", "unmounted"));
-        request("POST", "/v1/agents/sessions", unknown, "unmounted", "actor", 409);
+        assertUnavailable(request("POST", "/v1/agents/sessions", unknown, "unmounted", "actor", 409));
         var crossTenant = http.send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + "/v1/agents/sessions"))
                 .timeout(Duration.ofSeconds(10)).header("X-Qwen-Tenant-Id", "other-tenant")
                 .header("X-G0-Fixture-Actor", "actor").build(), HttpResponse.BodyHandlers.ofString());
@@ -190,7 +196,7 @@ class HostedPublicWorkspaceIT {
         request("POST", "/v1/agents/sessions", denied, "read-only", "actor", 403);
         jdbc.update("UPDATE managed_workspace_access SET can_create = TRUE WHERE tenant_id = ?", tenant);
         jdbc.update("UPDATE managed_workspace_registry SET config_ref = 'unsupported' WHERE tenant_id = ?", tenant);
-        request("POST", "/v1/agents/sessions", denied, "unsupported", "actor", 409);
+        assertUnavailable(request("POST", "/v1/agents/sessions", denied, "unsupported", "actor", 409));
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_session WHERE tenant_id = ?",
                 Integer.class, tenant)).isEqualTo(2);
         assertThat(modelRequests).hasSize(8);
@@ -320,11 +326,16 @@ class HostedPublicWorkspaceIT {
         environment.putAll(Map.of("HOME", home.toString(), "USERPROFILE", home.toString(), "QWEN_HOME", config.toString(),
                 "QWEN_RUNTIME_DIR", temporary.resolve("runtime").toString(), "OPENAI_API_KEY", "fake-local-key",
                 "OPENAI_BASE_URL", modelUrl, "QWEN_SERVER_TOKEN", TOKEN, "QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST", DIGEST));
+        environment.put("TMPDIR", temporary.toString());
+        environment.put("TMP", temporary.toString());
+        environment.put("TEMP", temporary.toString());
         for (String name : List.of("QWEN_CODE_SYSTEM_SETTINGS_PATH", "QWEN_CODE_SYSTEM_DEFAULTS_PATH",
                 "QWEN_CODE_TRUSTED_FOLDERS_PATH")) environment.put(name, temporary.resolve(name + ".json").toString());
         harness = builder.start();
         await().atMost(Duration.ofSeconds(30)).ignoreExceptions().untilAsserted(() -> {
-            assertThat(harness.isAlive()).as(Files.readString(log)).isTrue();
+            if (!harness.isAlive()) {
+                throw new AssertionError("Hosted Harness exited: " + Files.readString(log));
+            }
             assertThat(http.send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + harnessPort + "/capabilities"))
                     .timeout(Duration.ofSeconds(2)).header("Authorization", "Bearer " + TOKEN).build(),
                     HttpResponse.BodyHandlers.discarding()).statusCode()).isEqualTo(200);
@@ -387,6 +398,11 @@ class HostedPublicWorkspaceIT {
         var response = http.send(request.build(), HttpResponse.BodyHandlers.ofString());
         assertThat(response.statusCode()).as("%s %s: %s", method, path, response.body()).isEqualTo(expected);
         return json.readTree(response.body());
+    }
+
+    // Every creation refusal here shares one declared code; the fixture, not the code, selects the branch.
+    private static void assertUnavailable(JsonNode refusal) {
+        assertThat(refusal.path("error").path("code").asText()).isEqualTo("workspace_unavailable");
     }
 
     private static int freePort() throws IOException {
