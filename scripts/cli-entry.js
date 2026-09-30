@@ -307,6 +307,18 @@ if (isInProcessFastPath()) {
 } else {
   const { spawnSync } = await import('node:child_process');
   const UPDATE_COMPLETE_EXIT_CODE = 44;
+  // A child that never started comes back from spawnSync as
+  // { status: null, signal: null, error }; say why instead of exiting silently.
+  const SPAWN_FAILURE_EXIT_CODE = 126;
+  const exitOnSpawnError = (command, error) => {
+    const detail = [error.code, error.errno, error.syscall]
+      .filter((part) => part !== undefined)
+      .join(' ');
+    process.stderr.write(
+      `Failed to start ${command}: ${error.message}${detail ? ` (${detail})` : ''}\n`,
+    );
+    process.exit(SPAWN_FAILURE_EXIT_CODE);
+  };
   // cmd.exe metacharacters. Mirrors UNSAFE_CMD_CHARS in
   // packages/cli/src/ui/standalone-update.ts — kept local because this
   // plain-ESM entry ships in the standalone package and cannot import the
@@ -411,7 +423,9 @@ if (isInProcessFastPath()) {
             stdio: 'inherit',
             env: relaunchEnv,
           });
-    if (relaunchResult.signal) {
+    if (relaunchResult.error) {
+      exitOnSpawnError(launcher, relaunchResult.error);
+    } else if (relaunchResult.signal) {
       process.kill(process.pid, relaunchResult.signal);
     } else {
       process.exit(relaunchResult.status ?? 1);
@@ -462,7 +476,9 @@ if (isInProcessFastPath()) {
         },
       },
     );
-    if (result.signal) {
+    if (result.error) {
+      exitOnSpawnError(`${process.execPath} ${cliPath}`, result.error);
+    } else if (result.signal) {
       process.kill(process.pid, result.signal);
     } else if (result.status !== UPDATE_COMPLETE_EXIT_CODE) {
       process.exit(result.status ?? 1);
