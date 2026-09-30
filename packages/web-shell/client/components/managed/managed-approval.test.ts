@@ -30,7 +30,6 @@ function toolGroup(turnId: string, callId: string): Message {
       {
         callId: `${turnId}:${callId}`,
         toolName: 'write_file',
-        title: `write ${turnId}`,
         status: 'pending',
         args: { file_path: 'notes.md', content: turnId },
       },
@@ -49,8 +48,14 @@ describe('Managed approval presentation', () => {
       sessionId: 's1',
       toolCallId: 'turn-2:call-1',
       toolName: 'write_file',
-      title: 'write turn-2',
-      content: [],
+      title: 'write_file',
+      content: [
+        {
+          type: 'text',
+          text: '{\n  "file_path": "notes.md",\n  "content": "turn-2"\n}',
+        },
+      ],
+      contentIsInput: true,
       rawInput: { file_path: 'notes.md', content: 'turn-2' },
       options: [
         { id: 'allow', label: 'Allow', kind: 'allow_once' },

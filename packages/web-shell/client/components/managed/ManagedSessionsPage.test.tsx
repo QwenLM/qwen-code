@@ -244,6 +244,52 @@ describe('ManagedSessionsPage', () => {
     ).toBeNull();
   });
 
+  it.each([
+    ['write_file', { file_path: 'notes.md', content: 'approval-write-body' }],
+    [
+      'edit',
+      {
+        file_path: 'notes.md',
+        old_string: 'approval-old-body',
+        new_string: 'approval-new-body',
+      },
+    ],
+  ])(
+    'shows available %s arguments inside the approval card',
+    async (toolName, input) => {
+      mocks.client.getSession.mockResolvedValue(
+        summary('s1', { capabilities: { canSend: false, actions: true } }),
+      );
+      mocks.client.getTranscript.mockResolvedValue({
+        events: [
+          {
+            ...event(1, ''),
+            type: 'tool_requested',
+            data: { toolCallId: 'call-1', toolName, input },
+          },
+        ],
+        lastEventId: 1,
+      });
+      provider = {
+        ...provider,
+        actions: {
+          listPending: vi
+            .fn()
+            .mockResolvedValue([{ ...pendingAction, toolName }]),
+          respond: vi.fn(),
+        },
+      };
+
+      await render('s1');
+      const card = container.querySelector('[data-testid="managed-approval"]')!;
+      const shownInput = card.querySelector('pre')?.textContent ?? '';
+      for (const value of Object.values(input)) {
+        expect(shownInput).toContain(value);
+      }
+      expect(card.textContent).not.toContain('Tool arguments are unavailable');
+    },
+  );
+
   it('offers a direct retry when pending approvals could not be loaded', async () => {
     mocks.client.getSession.mockResolvedValue(
       summary('s1', { capabilities: { canSend: false, actions: true } }),
