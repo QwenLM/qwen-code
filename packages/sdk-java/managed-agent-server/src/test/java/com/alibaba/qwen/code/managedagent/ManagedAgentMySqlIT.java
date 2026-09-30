@@ -958,6 +958,8 @@ class ManagedAgentMySqlIT {
         var authority = new com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore(jdbc,
                 new DataSourceTransactionManager(source));
         com.alibaba.qwen.code.managedagent.service.WorkspaceRecoveryContract.verify(source, jdbc, store, authority);
+        com.alibaba.qwen.code.managedagent.service.WorkspaceRecoveryContract.verifyOperatorPrepare(
+                source, jdbc, store, authority);
     }
 
     private static Process startWorkspaceProcess(String action,

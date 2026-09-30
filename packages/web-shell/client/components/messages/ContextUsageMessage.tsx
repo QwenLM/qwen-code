@@ -14,6 +14,12 @@ import styles from './ContextUsageMessage.module.css';
 
 const SENTINEL = 'web-shell:context-usage:v1:';
 
+export function createContextUsageMessageData(
+  status: DaemonSessionContextUsageStatus,
+) {
+  return { type: SENTINEL, status };
+}
+
 export function serializeContextUsageMessage(
   status: DaemonSessionContextUsageStatus,
 ): string {
@@ -22,7 +28,17 @@ export function serializeContextUsageMessage(
 
 export function parseContextUsageMessage(
   content: string,
+  data?: unknown,
 ): DaemonSessionContextUsageStatus | null {
+  const structured = data as
+    | ReturnType<typeof createContextUsageMessageData>
+    | undefined;
+  if (
+    structured?.type === SENTINEL &&
+    typeof structured.status?.usage?.totalTokens === 'number'
+  ) {
+    return structured.status;
+  }
   if (!content.startsWith(SENTINEL)) return null;
   try {
     const parsed = JSON.parse(content.slice(SENTINEL.length));
