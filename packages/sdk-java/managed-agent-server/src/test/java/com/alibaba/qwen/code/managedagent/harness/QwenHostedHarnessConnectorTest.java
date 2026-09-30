@@ -7,7 +7,6 @@ import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import com.alibaba.qwen.code.daemon.CreateHarnessSession;
@@ -77,6 +76,7 @@ class QwenHostedHarnessConnectorTest {
                     .contains("toolProfile=hosted-workspace-files/1", "workspaceId=selected-workspace", "tenantId=tenant-a")
                     .doesNotContain("workspaceId=workspace-a");
         }
+        clearInvocations(execution);
         RuntimeBrokerException refusal = WorkspaceExecutionStore.unavailable();
         doThrow(refusal).when(execution).authorize(session);
         assertThatThrownBy(() -> connector.createOrLoad("tenant-a", SESSION_ID, true))
@@ -86,9 +86,9 @@ class QwenHostedHarnessConnectorTest {
                     assertThat(error.getCode()).isEqualTo("workspace_unavailable");
                     assertThat(error.isRetryable()).isFalse();
                 });
-        verify(execution, times(2)).authorize(session);
+        verify(execution).authorize(session);
 
-        QwenHostedHarnessConnector cold = new QwenHostedHarnessConnector(properties, sessions, execution);
+        QwenHostedHarnessConnector cold = new QwenHostedHarnessConnector(properties, sessions, execution, actions);
         ReflectionTestUtils.setField(cold, "client", client);
         clearInvocations(client);
         assertThatThrownBy(() -> cold.createOrLoad("tenant-a", SESSION_ID, true))

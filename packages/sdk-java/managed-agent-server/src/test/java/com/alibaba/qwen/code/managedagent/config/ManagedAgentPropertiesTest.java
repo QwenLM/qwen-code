@@ -29,7 +29,7 @@ class ManagedAgentPropertiesTest {
                 .run(started -> assertThat(started).hasFailed()
                         .getFailure().hasRootCauseInstanceOf(IllegalStateException.class)
                         .hasRootCauseMessage("Hosted Workspace files require"
-                                + " a preapproved Harness, Session Store and Session-isolated"
+                                + " a supported Harness, Session Store and Session-isolated"
                                 + " local-process Broker with Workspace mounts"));
     }
 
