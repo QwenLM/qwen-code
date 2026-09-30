@@ -60,23 +60,62 @@ export function getModelCatalogCachePath(): string {
   return path.join(Storage.getGlobalQwenDir(), 'model-registry.json');
 }
 
-function isEntry(value: unknown): value is ModelCatalogEntry {
-  if (!value || typeof value !== 'object') {
-    return false;
+/**
+ * Modality keys the catalog understands. This is the single list: the
+ * refresh projection writes exactly these (`toModalities`), so a new
+ * `InputModalities` key fails tsc here at declaration time rather than
+ * silently discarding entries at parse time.
+ */
+export const CATALOG_MODALITIES: ReadonlyArray<keyof InputModalities> = [
+  'image',
+  'pdf',
+  'audio',
+  'video',
+];
+
+/**
+ * Keeps the fields that are valid instead of discarding the entry for one
+ * that is not: an unrecognised modality key (e.g. written by a newer build
+ * that knows more modalities) degrades that one field rather than taking the
+ * model's context window and output limit down with it. Context/output stay
+ * strict — a corrupt limit is worse than no limit.
+ */
+function sanitizeEntry(value: unknown): ModelCatalogEntry | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return undefined;
   }
   const { context, output, modalities } = value as ModelCatalogEntry;
-  return (
-    (context === undefined || (Number.isSafeInteger(context) && context > 0)) &&
-    (output === undefined || (Number.isSafeInteger(output) && output > 0)) &&
-    (modalities === undefined ||
-      (typeof modalities === 'object' &&
-        modalities !== null &&
-        !Array.isArray(modalities) &&
-        Object.entries(modalities).every(
-          ([key, value]) =>
-            ['image', 'pdf', 'audio', 'video'].includes(key) && value === true,
-        )))
-  );
+  if (
+    (context !== undefined &&
+      !(Number.isSafeInteger(context) && context > 0)) ||
+    (output !== undefined && !(Number.isSafeInteger(output) && output > 0))
+  ) {
+    return undefined;
+  }
+  const entry: ModelCatalogEntry = {
+    ...(context !== undefined ? { context } : {}),
+    ...(output !== undefined ? { output } : {}),
+  };
+  if (modalities !== undefined) {
+    if (
+      typeof modalities !== 'object' ||
+      modalities === null ||
+      Array.isArray(modalities)
+    ) {
+      return undefined;
+    }
+    const clean: InputModalities = {};
+    for (const [key, flag] of Object.entries(modalities)) {
+      if (
+        (CATALOG_MODALITIES as readonly string[]).includes(key) &&
+        flag === true
+      ) {
+        clean[key] = true;
+      }
+    }
+    entry.modalities = clean;
+  }
+  return entry;
 }
 
 export function parseModelCatalog(raw: unknown): ModelCatalog | undefined {
@@ -89,8 +128,15 @@ export function parseModelCatalog(raw: unknown): ModelCatalog | undefined {
   }
   const valid: Record<string, ModelCatalogEntry> = {};
   for (const [id, entry] of Object.entries(models)) {
-    if (isEntry(entry)) {
-      valid[id] = entry;
+    // '__proto__' would invoke the prototype setter instead of creating an
+    // own property — the refresh path can legitimately write that key
+    // (Object.fromEntries uses [[DefineOwnProperty]]), so tolerate it here.
+    if (id === '__proto__') {
+      continue;
+    }
+    const sanitized = sanitizeEntry(entry);
+    if (sanitized) {
+      valid[id] = sanitized;
     }
   }
   return {

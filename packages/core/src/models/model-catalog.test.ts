@@ -407,17 +407,54 @@ describe('model catalog', () => {
         zero: { output: 0 },
         infinite: { context: Infinity },
         fractional: { output: 1.5 },
-        invalidModality: { modalities: { image: 'false' } },
-        falseModality: { modalities: { image: false } },
+        // A wrong-typed or false flag drops only the modality field — the
+        // entry's limits survive a malformed modalities member.
+        invalidModality: { context: 5, modalities: { image: 'false' } },
+        falseModality: { context: 6, modalities: { image: false } },
+        // A modality key this build does not know (e.g. written by a newer
+        // one) degrades that field, not the whole entry.
+        futureModality: {
+          context: 100,
+          output: 10,
+          modalities: { image: true, hologram: true },
+        },
+        // An own-property `__proto__` key (the refresh path can legitimately
+        // write one via Object.fromEntries; a literal would invoke the setter
+        // here, so it comes in through spread). The parse must skip it rather
+        // than mutate the map's prototype.
+        ...Object.fromEntries([['__proto__', { context: 1 }]]),
       },
     });
     expect(parsed).toEqual({
       source: '',
       fetchedAt: FAR_FUTURE,
       etag: '"abc"',
-      models: { good: { context: 1, modalities: { image: true } } },
+      models: {
+        good: { context: 1, modalities: { image: true } },
+        invalidModality: { context: 5, modalities: {} },
+        falseModality: { context: 6, modalities: {} },
+        futureModality: {
+          context: 100,
+          output: 10,
+          modalities: { image: true },
+        },
+      },
     });
+    expect(Object.getPrototypeOf(parsed!.models)).toBe(Object.prototype);
     expect(parseModelCatalog({ models: {} })).toBeUndefined();
     expect(parseModelCatalog('nope')).toBeUndefined();
+  });
+
+  it('keeps every entry of the committed snapshot parseable', () => {
+    // The bundled file is the floor every offline user starts from, so it
+    // must satisfy the same parser the downloaded cache goes through.
+    const parsed = parseModelCatalog(bundled);
+    expect(parsed).toBeDefined();
+    expect(Object.keys(parsed!.models).sort()).toEqual(
+      Object.keys(bundled.models).sort(),
+    );
+    expect(Buffer.byteLength(JSON.stringify(bundled))).toBeLessThanOrEqual(
+      200 * 1024,
+    );
   });
 });

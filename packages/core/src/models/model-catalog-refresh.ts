@@ -15,6 +15,7 @@ import { atomicWriteJSON } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { getErrorMessage } from '../utils/errors.js';
 import {
+  CATALOG_MODALITIES,
   getModelCatalogCachePath,
   invalidateModelCatalog,
   isModelCatalogDisabled,
@@ -38,10 +39,16 @@ const FETCH_TIMEOUT_MS = 10_000;
 /**
  * models.dev providers whose token limits feed the catalog. Conflicting
  * normalized ids lose their limits so endpoint-specific values fall back to
- * existing tables. Third-party routers are left out — they republish vendor
- * models under their own aliases and limits. Modalities are not gated by
- * this list: they describe the weights, not the endpoint, so every provider
- * that serves a model contributes them (see trimModelsDevCatalog).
+ * existing tables. Pure mirrors are left out — they republish vendor models
+ * under their own aliases and limits, and a mirror's hosted-inference numbers
+ * otherwise veto the first-party vendor's (measured 2026-09-30 against the
+ * live payload: modelscope's only contributions were four dated `-2507`
+ * qwen3 snapshots recorded under the bare ids plus the `glm-4.6` veto, both
+ * the harm this list exists to avoid). `volcengine` stays because it is the
+ * first-party endpoint for the doubao/seed family — dropping it costs the
+ * catalog all 16 of those keys. Modalities are not gated by this list: they
+ * describe the weights, not the endpoint, so every provider that serves a
+ * model contributes them (see trimModelsDevCatalog).
  */
 export const MODELS_DEV_PROVIDERS: readonly string[] = [
   'anthropic',
@@ -54,7 +61,6 @@ export const MODELS_DEV_PROVIDERS: readonly string[] = [
   'xai',
   'alibaba-cn',
   'alibaba',
-  'modelscope',
   'volcengine',
 ];
 
@@ -69,13 +75,6 @@ export type ModelsDevApi = Record<
   string,
   { models?: Record<string, ModelsDevModel> } | undefined
 >;
-
-const MODALITIES: ReadonlyArray<keyof InputModalities> = [
-  'image',
-  'pdf',
-  'audio',
-  'video',
-];
 
 type Limits = Pick<ModelCatalogEntry, 'context' | 'output'>;
 
@@ -100,13 +99,20 @@ function toLimits(model: ModelsDevModel): Limits | undefined {
 }
 
 function toModalities(model: ModelsDevModel): InputModalities | undefined {
+  // An absent input list means upstream said nothing; an input list with no
+  // known key is a positive text-only declaration, which must survive as {}
+  // so a future narrowing can tell the two apart (every allowlisted model on
+  // models.dev declares the array).
+  if (model.modalities?.input === undefined) {
+    return undefined;
+  }
   const modalities: InputModalities = {};
-  for (const modality of MODALITIES) {
-    if (model.modalities?.input?.includes(modality)) {
+  for (const modality of CATALOG_MODALITIES) {
+    if (model.modalities.input.includes(modality)) {
       modalities[modality] = true;
     }
   }
-  return Object.keys(modalities).length > 0 ? modalities : undefined;
+  return modalities;
 }
 
 function sortedModels(
@@ -224,7 +230,15 @@ export function trimModelsDevCatalog(
     }
     const allModalities = modalityCandidates.get(key);
     if (allModalities) {
-      entry.modalities = Object.assign({}, ...allModalities);
+      const merged = Object.assign({}, ...allModalities);
+      // A declared-text-only record ({}) is kept only on entries that ship
+      // limits: there it is fidelity the union can later narrow against. On
+      // its own it carries no usable fact, so it must not create an entry —
+      // otherwise every conflict-dropped or limit-less model would survive
+      // as a bare `{}` marker.
+      if (Object.keys(merged).length > 0 || Object.keys(entry).length > 0) {
+        entry.modalities = merged;
+      }
     }
     if (Object.keys(entry).length > 0) {
       agreed.push([key, entry]);

@@ -1,6 +1,6 @@
 {
-  "source": "https://models.dev/api.json",
-  "fetchedAt": "2026-09-29T16:52:01.578Z",
+  "source": "/tmp/11959-models-dev.json",
+  "fetchedAt": "2026-09-30T08:20:49.890Z",
   "models": {
     "claude-fable-5": {
       "context": 1000000,
@@ -191,7 +191,8 @@
     },
     "doubao-seed-1-6": {
       "context": 256000,
-      "output": 64000
+      "output": 64000,
+      "modalities": {}
     },
     "doubao-seed-1-6-flash": {
       "context": 256000,
@@ -457,15 +458,18 @@
     },
     "glm-4.5": {
       "context": 131072,
-      "output": 98304
+      "output": 98304,
+      "modalities": {}
     },
     "glm-4.5-air": {
       "context": 131072,
-      "output": 98304
+      "output": 98304,
+      "modalities": {}
     },
     "glm-4.5-flash": {
       "context": 131072,
-      "output": 98304
+      "output": 98304,
+      "modalities": {}
     },
     "glm-4.5v": {
       "context": 64000,
@@ -474,6 +478,11 @@
         "image": true,
         "video": true
       }
+    },
+    "glm-4.6": {
+      "context": 204800,
+      "output": 131072,
+      "modalities": {}
     },
     "glm-4.6v": {
       "context": 128000,
@@ -493,19 +502,23 @@
     },
     "glm-4.7": {
       "context": 204800,
-      "output": 131072
+      "output": 131072,
+      "modalities": {}
     },
     "glm-4.7-flash": {
       "context": 200000,
-      "output": 131072
+      "output": 131072,
+      "modalities": {}
     },
     "glm-4.7-flashx": {
       "context": 200000,
-      "output": 131072
+      "output": 131072,
+      "modalities": {}
     },
     "glm-5-2": {
       "context": 1000000,
-      "output": 131072
+      "output": 131072,
+      "modalities": {}
     },
     "glm-5-3-flash": {
       "context": 1000000,
@@ -518,11 +531,13 @@
     },
     "glm-5-turbo": {
       "context": 200000,
-      "output": 131072
+      "output": 131072,
+      "modalities": {}
     },
     "glm-5.3": {
       "context": 1000000,
-      "output": 131072
+      "output": 131072,
+      "modalities": {}
     },
     "glm-5.3-flash": {
       "context": 1000000,
@@ -552,7 +567,8 @@
       }
     },
     "gpt-4": {
-      "output": 8192
+      "output": 8192,
+      "modalities": {}
     },
     "gpt-4-turbo": {
       "context": 128000,
@@ -801,6 +817,14 @@
         "pdf": true
       }
     },
+    "gpt-6.1-sol": {
+      "context": 922000,
+      "output": 128000,
+      "modalities": {
+        "image": true,
+        "pdf": true
+      }
+    },
     "gpt-daybreak-blue": {
       "context": 922000,
       "output": 128000,
@@ -887,7 +911,8 @@
     },
     "kimi-k2-thinking": {
       "context": 262144,
-      "output": 16384
+      "output": 16384,
+      "modalities": {}
     },
     "kimi-k2.5": {
       "modalities": {
@@ -927,27 +952,33 @@
     },
     "minimax-m2": {
       "context": 204800,
-      "output": 131072
+      "output": 131072,
+      "modalities": {}
     },
     "minimax-m2.1": {
       "context": 204800,
-      "output": 131072
+      "output": 131072,
+      "modalities": {}
     },
     "minimax-m2.5": {
       "context": 204800,
-      "output": 131072
+      "output": 131072,
+      "modalities": {}
     },
     "minimax-m2.5-highspeed": {
       "context": 204800,
-      "output": 131072
+      "output": 131072,
+      "modalities": {}
     },
     "minimax-m2.7": {
       "context": 204800,
-      "output": 131072
+      "output": 131072,
+      "modalities": {}
     },
     "minimax-m2.7-highspeed": {
       "context": 204800,
-      "output": 131072
+      "output": 131072,
+      "modalities": {}
     },
     "minimax-m3": {
       "context": 1000000,
@@ -959,7 +990,8 @@
     },
     "moonshot-kimi-k2-instruct": {
       "context": 131072,
-      "output": 8192
+      "output": 8192,
+      "modalities": {}
     },
     "o1": {
       "context": 200000,
@@ -986,7 +1018,8 @@
     },
     "o3-mini": {
       "context": 200000,
-      "output": 100000
+      "output": 100000,
+      "modalities": {}
     },
     "o3-pro": {
       "context": 200000,
@@ -1011,25 +1044,31 @@
     },
     "qwen-deep-research": {
       "context": 1000000,
-      "output": 32768
+      "output": 32768,
+      "modalities": {}
     },
     "qwen-doc-turbo": {
       "context": 131072,
-      "output": 8192
+      "output": 8192,
+      "modalities": {}
     },
     "qwen-flash": {
       "context": 1000000,
-      "output": 32768
+      "output": 32768,
+      "modalities": {}
     },
     "qwen-long": {
       "context": 10000000,
-      "output": 8192
+      "output": 8192,
+      "modalities": {}
     },
     "qwen-math-plus": {
-      "output": 3072
+      "output": 3072,
+      "modalities": {}
     },
     "qwen-math-turbo": {
-      "output": 3072
+      "output": 3072,
+      "modalities": {}
     },
     "qwen-omni-turbo": {
       "context": 32768,
@@ -1050,18 +1089,22 @@
     },
     "qwen-plus": {
       "context": 1000000,
-      "output": 32768
+      "output": 32768,
+      "modalities": {}
     },
     "qwen-plus-character": {
       "context": 32768,
-      "output": 4096
+      "output": 4096,
+      "modalities": {}
     },
     "qwen-plus-character-ja": {
-      "output": 512
+      "output": 512,
+      "modalities": {}
     },
     "qwen-turbo": {
       "context": 1000000,
-      "output": 16384
+      "output": 16384,
+      "modalities": {}
     },
     "qwen-vl-max": {
       "context": 131072,
@@ -1079,33 +1122,41 @@
     },
     "qwen2-5-14b-instruct": {
       "context": 131072,
-      "output": 8192
+      "output": 8192,
+      "modalities": {}
     },
     "qwen2-5-32b-instruct": {
       "context": 131072,
-      "output": 8192
+      "output": 8192,
+      "modalities": {}
     },
     "qwen2-5-72b-instruct": {
       "context": 131072,
-      "output": 8192
+      "output": 8192,
+      "modalities": {}
     },
     "qwen2-5-7b-instruct": {
       "context": 131072,
-      "output": 8192
+      "output": 8192,
+      "modalities": {}
     },
     "qwen2-5-coder-32b-instruct": {
       "context": 131072,
-      "output": 8192
+      "output": 8192,
+      "modalities": {}
     },
     "qwen2-5-coder-7b-instruct": {
       "context": 131072,
-      "output": 8192
+      "output": 8192,
+      "modalities": {}
     },
     "qwen2-5-math-72b-instruct": {
-      "output": 3072
+      "output": 3072,
+      "modalities": {}
     },
     "qwen2-5-math-7b-instruct": {
-      "output": 3072
+      "output": 3072,
+      "modalities": {}
     },
     "qwen2-5-omni-7b": {
       "context": 32768,
@@ -1132,63 +1183,58 @@
     },
     "qwen3-14b": {
       "context": 131072,
-      "output": 8192
+      "output": 8192,
+      "modalities": {}
     },
     "qwen3-235b-a22b": {
       "context": 131072,
-      "output": 16384
-    },
-    "qwen3-235b-a22b-instruct": {
-      "context": 262144,
-      "output": 131072
-    },
-    "qwen3-235b-a22b-thinking": {
-      "context": 262144,
-      "output": 131072
-    },
-    "qwen3-30b-a3b-instruct": {
-      "context": 262144,
-      "output": 16384
-    },
-    "qwen3-30b-a3b-thinking": {
-      "context": 262144,
-      "output": 32768
+      "output": 16384,
+      "modalities": {}
     },
     "qwen3-32b": {
       "context": 131072,
-      "output": 16384
+      "output": 16384,
+      "modalities": {}
     },
     "qwen3-8b": {
       "context": 131072,
-      "output": 8192
+      "output": 8192,
+      "modalities": {}
     },
     "qwen3-coder-30b-a3b-instruct": {
       "context": 262144,
-      "output": 65536
+      "output": 65536,
+      "modalities": {}
     },
     "qwen3-coder-480b-a35b-instruct": {
       "context": 262144,
-      "output": 65536
+      "output": 65536,
+      "modalities": {}
     },
     "qwen3-coder-flash": {
       "context": 1000000,
-      "output": 65536
+      "output": 65536,
+      "modalities": {}
     },
     "qwen3-coder-plus": {
       "context": 1048576,
-      "output": 65536
+      "output": 65536,
+      "modalities": {}
     },
     "qwen3-max": {
       "context": 262144,
-      "output": 65536
+      "output": 65536,
+      "modalities": {}
     },
     "qwen3-next-80b-a3b-instruct": {
       "context": 131072,
-      "output": 32768
+      "output": 32768,
+      "modalities": {}
     },
     "qwen3-next-80b-a3b-thinking": {
       "context": 131072,
-      "output": 32768
+      "output": 32768,
+      "modalities": {}
     },
     "qwen3-omni-flash": {
       "context": 65536,
@@ -1357,11 +1403,13 @@
     },
     "qwq-32b": {
       "context": 131072,
-      "output": 8192
+      "output": 8192,
+      "modalities": {}
     },
     "qwq-plus": {
       "context": 131072,
-      "output": 8192
+      "output": 8192,
+      "modalities": {}
     }
   }
 }

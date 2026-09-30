@@ -144,7 +144,9 @@ const trimmed = {
   },
   'gpt-x': { context: 272000, output: 128000, modalities: { image: true } },
   inkling: { modalities: { image: true } },
-  'tiny-context': { output: 4_096 },
+  // Text-only declaration survives as an empty modalities record on an entry
+  // that ships limits: fidelity a future narrowing can tell from "unknown".
+  'tiny-context': { output: 4_096, modalities: {} },
   'qwen-x': {
     context: 1000000,
     output: 65536,
@@ -168,7 +170,12 @@ describe('trimModelsDevCatalog', () => {
     });
   });
 
-  it('drops conflicts with dated or provider-qualified ids too', () => {
+  it('ignores pure-mirror providers so a hub cannot veto first-party numbers', () => {
+    // modelscope republishes GLM under a vendor-qualified id with different
+    // serving limits; it is not in MODELS_DEV_PROVIDERS, so the first-party
+    // z.ai entry wins outright instead of the key being dropped for
+    // disagreement. A dated alias inside one first-party provider still
+    // conflicts and drops.
     const models = trimModelsDevCatalog(
       {
         zai: { models: { 'glm-4.6': chat('glm-4.6', { output: 131072 }) } },
@@ -186,7 +193,7 @@ describe('trimModelsDevCatalog', () => {
       },
       NOW,
     ).models;
-    expect(models).not.toHaveProperty('glm-4.6');
+    expect(models['glm-4.6']).toEqual({ output: 131072, modalities: {} });
     expect(models).not.toHaveProperty('deepseek-r1');
   });
 
