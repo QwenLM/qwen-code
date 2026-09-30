@@ -1189,6 +1189,25 @@ describe('extractShellOperationsAcrossCommand', () => {
     ]);
   });
 
+  it('carries the heredoc cwd poison through a shell-wrapper unwrap', () => {
+    // The phantom `cd /tmp` runs in the child shell python spawns, never in
+    // the parent, so the write lands at /repo; passing only cwdUnknown into
+    // the wrapper recursion loses the flag and the op reads as trusted.
+    expect(
+      extractShellOperationsAcrossCommand(
+        "python <<EOF\ncd /tmp\nEOF\nbash -c 'echo x > .qwen/settings.json'",
+        '/repo',
+      ),
+    ).toEqual([
+      {
+        virtualTool: 'write_file',
+        filePath: '/tmp/.qwen/settings.json',
+        cwdUnknown: true,
+        pathMayDependOnCwd: true,
+      },
+    ]);
+  });
+
   it('marks relative writes after dynamic `cd` targets as cwd-unknown', () => {
     // Keep the guessed path, but mark it unsafe to trust as final.
     expect(
