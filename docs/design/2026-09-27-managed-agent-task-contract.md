@@ -74,7 +74,11 @@ command operation in generated types, including `task_cancel`. The follow-up
 keeps its new task-cancel-only condition `planned` as a whole, so the generator
 does not retain requirements on filtered fields. The cancel slice must remove
 that marker together with `task_id`/`taskId` and `failure_code`/`failureCode`
-when it serves the route; no shared status enum is narrowed.
+when it serves the route; no shared status enum is narrowed. It must also
+persist the new fields: `managed_agent_operation` has no `task_id` or
+`failure_code` column, so a migration adds both, and the worker writes
+`failure_code` in the same transaction as the `FAILED` transition, so the
+reason survives re-lease and restart (section 7).
 
 ### 4.2 `PublicTask`
 
@@ -117,9 +121,11 @@ The design's shape changes in five places:
   (`created_at`, `expires_at`), and the server fills them from `clock.millis()`.
 - **`created_at`.** The list is ordered by creation, and a `pending` task has
   no `started_at`, so the view needs a creation time.
-- **Bounded `artifact_refs`.** A long-running Monitor can rotate many
-  Artifacts. The view lists the newest 100, oldest first; older Artifacts stay
-  readable through the Session artifact routes.
+- **Bounded `artifact_refs`.** The view lists the newest 100, oldest first.
+  A task must not rotate past the bound until older Artifacts can be
+  enumerated and attributed to it (sections 4.7 and 7): an evicted Artifact
+  stays readable by id through the Session artifact routes but is no longer
+  discoverable from the task.
 
 Optional fields are omitted, never `null`, as in the Action family; records
 that implement the view need `@JsonInclude(NON_NULL)`, which several API
@@ -271,6 +277,11 @@ in this order (A6):
 5. Atomically recheck new-request admission conditions and create the
    operation, serializing competing requests with Session/task transitions.
    A concurrent same-key winner is handled by step 3, not as a new request.
+   Admission requires no other open (`pending` or `running`) operation on
+   the Session: cancel operations share the durable operation table with the
+   lifecycle commands, which admit one open operation per Session, so an open
+   operation of any kind answers `409 session_operation_active`, and an open
+   cancel blocks close, archive and delete the same way.
 
 A retained key therefore survives capability and state changes, but never
 bypasses current access checks. Missing/deleted resources or revoked access
@@ -289,14 +300,27 @@ Cancel operations have these outcomes (A7):
 | `recovery_blocked`    | Recovery cannot determine whether the authority accepted the command. Do not report success or automatically re-execute it without reconciliation.               |
 | `cancelled`           | Not produced for `task_cancel`: this contract has no mechanism to withdraw a cancellation command. The shared status remains available to other operation kinds. |
 
+A `task_cancel` operation's other state fields follow its outcome.
+`pending` and `running` carry `admission_stage: java_durable`, with
+`delivery_state` `pending` between attempts and `leased` during one, and
+no `receipt_id`. `completed` carries `admission_stage: harness_confirmed`,
+`delivery_state: confirmed` and the task authority's `receipt_id`.
+`failed` and `recovery_blocked` carry `admission_stage: java_durable` and
+`delivery_state: blocked` — delivery has stopped, so a definitively rejected
+or unreconciled command is never claimed and driven again — and no
+`receipt_id`; `failed` adds `failure_code`. `blocked` means delivery is
+not attempted again without reconciliation; no other operation kind produces
+it today.
+
 The task becomes `cancelled` only when cancellation physically settles it. A
 natural completion that wins the race keeps its own terminal outcome; command
 acceptance never overwrites it. An unknown physical outcome makes the task
 `recovery_blocked` independently of the operation's acceptance outcome.
 
-Different keys that each pass admission create different operations. Their
-physical stop requests may be coalesced or repeated safely, and each operation
-must receive its own recorded outcome. A later request that finds no `cancel`
+Different keys that each pass admission —
+including step 5, no other open operation on the Session — create different
+operations. Their physical stop requests may be coalesced or repeated safely,
+and each operation must receive its own recorded outcome. A later request that finds no `cancel`
 capability gets `409 task_action_unavailable`; two different keys do not
 promise two accepted operations. No route for cancelling an operation is added.
 
@@ -345,23 +369,24 @@ API contract already froze, `invalid_idempotency_key`, which the idempotent
 routes already return, the tenant filter's `invalid_tenant` and
 `actor_scope_mismatch`, and three new task codes:
 
-| Status | Code                      | When                                                                                     |
-| ------ | ------------------------- | ---------------------------------------------------------------------------------------- |
-| `400`  | `invalid_tenant`          | `X-Qwen-Tenant-Id` is missing or malformed (tenant filter).                              |
-| `400`  | `invalid_cursor`          | The task list cursor is malformed.                                                       |
-| `400`  | `invalid_event_cursor`    | `after` is malformed or belongs to another task.                                         |
-| `400`  | `invalid_limit`           | `limit` is outside 1 to 100.                                                             |
-| `400`  | `invalid_request`         | `Idempotency-Key` is missing.                                                            |
-| `400`  | `invalid_idempotency_key` | `Idempotency-Key` is malformed, as on the other idempotent routes.                       |
-| `400`  | `unsupported_feature`     | The Session does not serve tasks (`capabilities.tasks` is `false`).                      |
-| `403`  | `task_forbidden`          | The caller can read the task but may not cancel it. New.                                 |
-| `403`  | `actor_scope_mismatch`    | The authenticated actor belongs to another tenant or has an invalid ID (tenant filter).  |
-| `404`  | `session_not_found`       | The Session is absent or outside the caller's scope.                                     |
-| `404`  | `task_not_found`          | The task is absent or outside the caller's scope. New.                                   |
-| `409`  | `cursor_expired`          | `after` is strictly below the durable retention floor, even with no retained events.     |
-| `409`  | `task_action_unavailable` | A new key while `action_capabilities` lacks `cancel`, which includes settled tasks. New. |
-| `409`  | `session_not_active`      | A new cancel request targets a Session that is not active.                               |
-| `409`  | `idempotency_conflict`    | The key was used with a different request.                                               |
+| Status | Code                       | When                                                                                             |
+| ------ | -------------------------- | ------------------------------------------------------------------------------------------------ |
+| `400`  | `invalid_tenant`           | `X-Qwen-Tenant-Id` is missing or malformed (tenant filter).                                      |
+| `400`  | `invalid_cursor`           | The task list cursor is malformed.                                                               |
+| `400`  | `invalid_event_cursor`     | `after` is malformed or belongs to another task.                                                 |
+| `400`  | `invalid_limit`            | `limit` is outside 1 to 100.                                                                     |
+| `400`  | `invalid_request`          | `Idempotency-Key` is missing.                                                                    |
+| `400`  | `invalid_idempotency_key`  | `Idempotency-Key` is malformed, as on the other idempotent routes.                               |
+| `400`  | `unsupported_feature`      | The Session does not serve tasks (`capabilities.tasks` is `false`).                              |
+| `403`  | `task_forbidden`           | The caller can read the task but may not cancel it. New.                                         |
+| `403`  | `actor_scope_mismatch`     | The authenticated actor belongs to another tenant or has an invalid ID (tenant filter).          |
+| `404`  | `session_not_found`        | The Session is absent or outside the caller's scope.                                             |
+| `404`  | `task_not_found`           | The task is absent or outside the caller's scope. New.                                           |
+| `409`  | `cursor_expired`           | `after` is strictly below the durable retention floor, even with no retained events.             |
+| `409`  | `task_action_unavailable`  | A new key while `action_capabilities` lacks `cancel`, which includes settled tasks. New.         |
+| `409`  | `session_not_active`       | A new cancel request targets a Session that is not active.                                       |
+| `409`  | `session_operation_active` | A new cancel request while another operation is open on the Session, as on the lifecycle routes. |
+| `409`  | `idempotency_conflict`     | The key was used with a different request.                                                       |
 
 A caller that cannot read a task gets `404`, not `403`, as API contract
 section 10 requires. The only `403` a read route answers is the tenant
@@ -440,6 +465,9 @@ the runtime guarantees above. Before H3 or the cancel slice marks its routes
 - cursor and accepted-event identity survive restart, rebuild and archival;
 - delayed Artifact projection, archival failure and the 100-reference bound
   cannot silently lose output; recovery joins segments without duplication;
+- a Session that advertises `capabilities.tasks` without
+  `capabilities.artifacts` admits no output-producing task, including one
+  whose output goes only to Artifacts;
 - replay after capability/session/task changes, revoked access, conflicting
   digests and concurrent same/different keys follows section 4.4;
 - lost cancellation receipts are reconciled, not reported as definite failure
@@ -492,7 +520,12 @@ the runtime guarantees above. Before H3 or the cancel slice marks its routes
 - **Artifact attribution.** `PublicArtifact` has no task reference and the
   artifact list has no task filter, so an Artifact beyond the newest 100 in
   `artifact_refs` cannot be tied back to its task. The Artifact slices (O2,
-  O4) should add one of the two before a task can rotate that many.
+  O4) must land one of the two before a task can rotate that many.
+- **Cancel operation storage.** `managed_agent_operation` (V17) has no
+  `task_id` or `failure_code` column. The cancel slice migrates both in and
+  writes `failure_code` in the same transaction as the `FAILED` transition,
+  so the reason a leased worker learns survives re-lease and restart (section
+  4.1).
 - **Legacy states.** The daemon's task status includes `paused`, and
   workflow runs add `pausing`; `TaskState` has neither. Decided in #12847
   (A9): the adapter slice (H3 or H4) maps both to `waiting`, and `TaskState`

@@ -1910,7 +1910,7 @@
             "$ref": "#/components/responses/NotFound"
           },
           "409": {
-            "$ref": "#/components/responses/CursorExpired"
+            "$ref": "#/components/responses/TaskCursorExpired"
           }
         },
         "parameters": [
@@ -1938,7 +1938,7 @@
         "x-qwen-implementation-status": "planned",
         "responses": {
           "202": {
-            "description": "Java durably accepted the cancellation and owns delivery; 202 does not prove owner acceptance or physical stop. After the tenant/actor filter and request decoding, validate Idempotency-Key (missing: 400 invalid_request; malformed: 400 invalid_idempotency_key), then current access (404 for an unreadable Session/task, then 403 task_forbidden for a readable task the actor may not cancel), then idempotent replay. The domain is tenant/session/operation-kind/actor/key; the digest includes task_id and excludes trace-only request IDs. While the record is retained and access remains valid, the same key and digest returns the same operation with its latest durable state and replayed=true; another digest returns 409 idempotency_conflict. Only new requests check capabilities.tasks (400 unsupported_feature), then Session active state (409 session_not_active otherwise, including closing, closed, archived and deleting), then action_capabilities containing cancel (409 task_action_unavailable otherwise). Atomically recheck admission and create the operation, serializing with Session/task transitions; a concurrent same-key winner replays before new-request state checks. Different keys that each pass admission create different operations, although physical stop requests may be coalesced or repeated safely; each operation gets its own recorded outcome. completed means the task authority durably recorded cancellation and returned a receipt; failed proves it was not accepted and will not be delivered again, with failure_code; recovery_blocked means acceptance is unknown and requires reconciliation before any re-execution. Retryable delivery failures remain pending/running. task_cancel never has status cancelled because cancellation commands cannot be withdrawn. Only physical cancellation settlement makes the task cancelled; a natural terminal outcome is preserved and an unknown physical outcome makes the task recovery_blocked independently of operation acceptance. Capability or state changes do not invalidate replay, but missing/deleted resources or revoked access may still return 404/403.",
+            "description": "Java durably accepted the cancellation and owns delivery; 202 does not prove owner acceptance or physical stop. After the tenant/actor filter and request decoding, validate Idempotency-Key (missing: 400 invalid_request; malformed: 400 invalid_idempotency_key), then current access (404 for an unreadable Session/task, then 403 task_forbidden for a readable task the actor may not cancel), then idempotent replay. The domain is tenant/session/operation-kind/actor/key; the digest includes task_id and excludes trace-only request IDs. While the record is retained and access remains valid, the same key and digest returns the same operation with its latest durable state and replayed=true; another digest returns 409 idempotency_conflict. Only new requests check capabilities.tasks (400 unsupported_feature), then Session active state (409 session_not_active otherwise, including closing, closed, archived and deleting), then action_capabilities containing cancel (409 task_action_unavailable otherwise). Admission requires no other open operation on the Session: cancel operations share the durable operation table with the lifecycle commands, which admit one open operation per Session, so any open operation answers 409 session_operation_active and an open cancel blocks close, archive and delete the same way. Atomically recheck admission and create the operation, serializing with Session/task transitions; a concurrent same-key winner replays before new-request state checks. Different keys that each pass admission create different operations, although physical stop requests may be coalesced or repeated safely; each operation gets its own recorded outcome. completed means the task authority durably recorded cancellation and returned a receipt; failed proves it was not accepted and will not be delivered again, with failure_code; recovery_blocked means acceptance is unknown and requires reconciliation before any re-execution. Retryable delivery failures remain pending/running. task_cancel never has status cancelled because cancellation commands cannot be withdrawn. Only physical cancellation settlement makes the task cancelled; a natural terminal outcome is preserved and an unknown physical outcome makes the task recovery_blocked independently of operation acceptance. Capability or state changes do not invalidate replay, but missing/deleted resources or revoked access may still return 404/403.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2069,7 +2069,7 @@
             "$ref": "#/components/responses/NotFound"
           },
           "409": {
-            "$ref": "#/components/responses/CursorExpired"
+            "$ref": "#/components/responses/TaskCursorExpired"
           }
         },
         "requestBody": {
@@ -2091,7 +2091,7 @@
         "x-qwen-implementation-status": "planned",
         "responses": {
           "202": {
-            "description": "Same authorized task cancellation semantics as the public API: key validation, current access, idempotent replay, then new-request capability, Session and task checks. Replay returns the same operation and latest durable state. 202 is durable admission, completed is authority acceptance, and neither proves physical stop.",
+            "description": "Same authorized task cancellation semantics as the public API: key validation, current access, idempotent replay, then new-request capability, Session and task checks. Replay returns the same operation and latest durable state. 202 is durable admission, completed is authority acceptance, and neither proves physical stop. Admission requires no other open operation on the Session (409 session_operation_active), as on the lifecycle routes.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2460,6 +2460,16 @@
       },
       "CursorExpired": {
         "description": "Replay cursor is older than the retained replay floor.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorEnvelope"
+            }
+          }
+        }
+      },
+      "TaskCursorExpired": {
+        "description": "Task event cursor is strictly below the task's durable retention floor, which survives an empty retained set; equality is valid. The envelope's replay_floor_sequence and snapshot_through_sequence stay absent because task cursors are opaque.",
         "content": {
           "application/json": {
             "schema": {
@@ -5115,12 +5125,52 @@
                   "then": {
                     "required": ["failure_code"]
                   }
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "status": {
+                        "const": "completed"
+                      }
+                    },
+                    "required": ["status"]
+                  },
+                  "then": {
+                    "properties": {
+                      "admission_stage": {
+                        "const": "harness_confirmed"
+                      },
+                      "delivery_state": {
+                        "const": "confirmed"
+                      }
+                    }
+                  }
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "status": {
+                        "enum": ["failed", "recovery_blocked"]
+                      }
+                    },
+                    "required": ["status"]
+                  },
+                  "then": {
+                    "properties": {
+                      "admission_stage": {
+                        "const": "java_durable"
+                      },
+                      "delivery_state": {
+                        "const": "blocked"
+                      }
+                    }
+                  }
                 }
               ]
             }
           }
         ],
-        "description": "Receipt IDs are opaque authorized product handles, not private journal or storage refs. Input/cancel completion is command acceptance, not Turn completion or physical stop. Action completion may only record one vote. Lifecycle completion requires its cleanup facts; archive may remain java_durable because Java is its authority. Task cancel 202 is Java durable admission; completion means the authority durably recorded cancellation and returned a receipt, not that the task stopped. Task cancel failed proves non-acceptance and no further delivery, with a failure code; recovery_blocked means acceptance is unknown and needs reconciliation before re-execution. Its status is never cancelled. Physical settlement and an unknown physical outcome belong to the task, independently of operation acceptance."
+        "description": "Receipt IDs are opaque authorized product handles, not private journal or storage refs. Input/cancel completion is command acceptance, not Turn completion or physical stop. Action completion may only record one vote. Lifecycle completion requires its cleanup facts; archive may remain java_durable because Java is its authority. Task cancel 202 is Java durable admission; completion means the authority durably recorded cancellation and returned a receipt, not that the task stopped. Task cancel failed proves non-acceptance and no further delivery, with a failure code; recovery_blocked means acceptance is unknown and needs reconciliation before re-execution. Its status is never cancelled. Physical settlement and an unknown physical outcome belong to the task, independently of operation acceptance. A completed task cancel carries admission stage harness_confirmed and delivery state confirmed with the authority's receipt; failed and recovery_blocked carry java_durable and blocked, so they are never delivered again without reconciliation."
       },
       "PublicOperation": {
         "oneOf": [
@@ -5462,12 +5512,52 @@
                   "then": {
                     "required": ["failureCode"]
                   }
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "status": {
+                        "const": "completed"
+                      }
+                    },
+                    "required": ["status"]
+                  },
+                  "then": {
+                    "properties": {
+                      "admissionStage": {
+                        "const": "harness_confirmed"
+                      },
+                      "deliveryState": {
+                        "const": "confirmed"
+                      }
+                    }
+                  }
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "status": {
+                        "enum": ["failed", "recovery_blocked"]
+                      }
+                    },
+                    "required": ["status"]
+                  },
+                  "then": {
+                    "properties": {
+                      "admissionStage": {
+                        "const": "java_durable"
+                      },
+                      "deliveryState": {
+                        "const": "blocked"
+                      }
+                    }
+                  }
                 }
               ]
             }
           }
         ],
-        "description": "Receipt IDs are opaque authorized product handles, not private journal or storage refs. Input/cancel completion is command acceptance, not Turn completion or physical stop. Action completion may only record one vote. Lifecycle completion requires its cleanup facts; archive may remain java_durable because Java is its authority. Task cancel 202 is Java durable admission; completion means the authority durably recorded cancellation and returned a receipt, not that the task stopped. Task cancel failed proves non-acceptance and no further delivery, with a failure code; recovery_blocked means acceptance is unknown and needs reconciliation before re-execution. Its status is never cancelled. Physical settlement and an unknown physical outcome belong to the task, independently of operation acceptance."
+        "description": "Receipt IDs are opaque authorized product handles, not private journal or storage refs. Input/cancel completion is command acceptance, not Turn completion or physical stop. Action completion may only record one vote. Lifecycle completion requires its cleanup facts; archive may remain java_durable because Java is its authority. Task cancel 202 is Java durable admission; completion means the authority durably recorded cancellation and returned a receipt, not that the task stopped. Task cancel failed proves non-acceptance and no further delivery, with a failure code; recovery_blocked means acceptance is unknown and needs reconciliation before re-execution. Its status is never cancelled. Physical settlement and an unknown physical outcome belong to the task, independently of operation acceptance. A completed task cancel carries admission stage harness_confirmed and delivery state confirmed with the authority's receipt; failed and recovery_blocked carry java_durable and blocked, so they are never delivered again without reconciliation."
       },
       "WebShellQuestionAction": {
         "type": "object",
@@ -5998,7 +6088,7 @@
               "minLength": 1,
               "maxLength": 128
             },
-            "description": "The newest Artifacts that hold durable task output, at most 100, oldest first; older Artifacts stay readable through the Session artifact routes."
+            "description": "The newest Artifacts that hold durable task output, at most 100, oldest first. Entries must not rotate out until older Artifacts can be enumerated and attributed to the task: an evicted Artifact stays readable by id through the Session artifact routes but is no longer discoverable from the task."
           },
           "action_capabilities": {
             "type": "array",
@@ -6354,7 +6444,7 @@
               "minLength": 1,
               "maxLength": 128
             },
-            "description": "The newest Artifacts that hold durable task output, at most 100, oldest first; older Artifacts stay readable through the Session artifact routes."
+            "description": "The newest Artifacts that hold durable task output, at most 100, oldest first. Entries must not rotate out until older Artifacts can be enumerated and attributed to the task: an evicted Artifact stays readable by id through the Session artifact routes but is no longer discoverable from the task."
           },
           "actionCapabilities": {
             "type": "array",

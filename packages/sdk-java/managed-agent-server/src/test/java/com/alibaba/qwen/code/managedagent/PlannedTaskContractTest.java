@@ -166,24 +166,43 @@ class PlannedTaskContractTest {
     void taskCancelOutcomesDescribeTheCommand() {
         for (String schema : List.of("PublicCommandOperation",
                 "PublicOperation")) {
-            for (String status : List.of("pending", "running",
-                    "recovery_blocked")) {
+            for (String status : List.of("pending", "running")) {
                 check(schema, "task_cancel " + status,
                         operation("task_cancel").put("task_id", "task-1")
                                 .put("status", status), true);
             }
+            check(schema, "recovery_blocked task_cancel stops delivery",
+                    settledCancel("recovery_blocked"), true);
+            check(schema, "recovery_blocked task_cancel still pending",
+                    settledCancel("recovery_blocked")
+                            .put("delivery_state", "pending"), false);
+
             ObjectNode completed = operation("task_cancel")
                     .put("task_id", "task-1").put("status", "completed")
+                    .put("admission_stage", "harness_confirmed")
+                    .put("delivery_state", "confirmed")
                     .put("receipt_id", "receipt-1");
             check(schema, "recorded task_cancel", completed, true);
             completed.remove("receipt_id");
             check(schema, "completed task_cancel without receipt",
                     completed, false);
+            check(schema, "completed task_cancel still java_durable",
+                    operation("task_cancel").put("task_id", "task-1")
+                            .put("status", "completed")
+                            .put("delivery_state", "confirmed")
+                            .put("receipt_id", "receipt-1"), false);
+            check(schema, "completed task_cancel still unconfirmed",
+                    operation("task_cancel").put("task_id", "task-1")
+                            .put("status", "completed")
+                            .put("admission_stage", "harness_confirmed")
+                            .put("receipt_id", "receipt-1"), false);
 
-            ObjectNode failed = operation("task_cancel")
-                    .put("task_id", "task-1").put("status", "failed")
+            ObjectNode failed = settledCancel("failed")
                     .put("failure_code", "task_action_unavailable");
             check(schema, "definitively failed task_cancel", failed, true);
+            check(schema, "failed task_cancel still pending",
+                    failed.deepCopy().put("delivery_state", "pending"),
+                    false);
             failed.remove("failure_code");
             check(schema, "failed task_cancel without reason", failed, false);
             check(schema, "task_cancel cannot itself be cancelled",
@@ -192,6 +211,8 @@ class PlannedTaskContractTest {
             check(schema, "another command keeps its status shape",
                     operation("submit_input").put("status", "cancelled"),
                     true);
+            check(schema, "another command may fail without a code",
+                    operation("submit_input").put("status", "failed"), true);
         }
         assertThat(failures).isEmpty();
     }
@@ -282,6 +303,12 @@ class PlannedTaskContractTest {
                 .put("delivery_state", "pending").put("replayed", false);
     }
 
+    /** A task_cancel that will not be delivered again: delivery is blocked. */
+    private static ObjectNode settledCancel(String status) {
+        return operation("task_cancel").put("task_id", "task-1")
+                .put("status", status).put("delivery_state", "blocked");
+    }
+
     private void accept(String label, ObjectNode task) {
         check("PublicTask", label, task, true);
     }
@@ -296,7 +323,9 @@ class PlannedTaskContractTest {
      * companions (design 4.3). The pins are validator probes on the minimal
      * valid event of each type, so they hold however a prohibition is
      * spelled, and a property added without conditional updates fails here
-     * instead of silently widening every known type.
+     * instead of silently widening every known type. The WebShell mirror must
+     * carry the same property set and no other conditional's type, so the
+     * guarantee holds on both surfaces.
      */
     private void pinEventFieldTotality() {
         Map<String, Set<String>> companions = Map.of("state_changed",
@@ -342,6 +371,26 @@ class PlannedTaskContractTest {
                 probe.set(field, JSON.valueToTree(values.get(field)));
                 check("PublicTaskEvent", type + " with " + field, probe,
                         companions.get(type).contains(field));
+            }
+        }
+        JsonNode mirror =
+                CONTRACT.node("/components/schemas/WebShellTaskEvent");
+        Set<String> mirrored = new HashSet<>();
+        mirror.path("properties").properties()
+                .forEach(entry -> mirrored.add(entry.getKey()));
+        Set<String> expected = new HashSet<>();
+        node.path("properties").properties()
+                .forEach(entry -> expected.add(camelCase(entry.getKey())));
+        if (!mirrored.equals(expected)) {
+            failures.add("WebShellTaskEvent properties " + mirrored
+                    + " do not mirror PublicTaskEvent " + expected);
+        }
+        for (JsonNode conditional : mirror.path("allOf")) {
+            String type = conditional.path("if").path("properties")
+                    .path("type").path("const").asText();
+            if (!companions.containsKey(type)) {
+                failures.add("WebShellTaskEvent has an unlisted conditional "
+                        + "for " + type);
             }
         }
     }
