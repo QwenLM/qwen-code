@@ -209,8 +209,8 @@ describe('ManagedSessionsPage', () => {
 
     const card = container.querySelector('[data-testid="managed-approval"]');
     expect(card).not.toBeNull();
-    const allow = Array.from(card!.querySelectorAll('button')).find(
-      (button) => button.textContent?.includes('Yes, allow once'),
+    const allow = Array.from(card!.querySelectorAll('button')).find((button) =>
+      button.textContent?.includes('Yes, allow once'),
     );
     expect(allow).toBeDefined();
     await act(async () => {
