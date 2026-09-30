@@ -36976,6 +36976,7 @@ describe('Session', () => {
         async function runReadFile(
           messageBus: ReturnType<typeof contextBus>,
           execute: ReturnType<typeof vi.fn>,
+          truncateThreshold = 25_000,
         ) {
           mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
           mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
@@ -36984,7 +36985,7 @@ describe('Session', () => {
             .mockReturnValue(ApprovalMode.YOLO);
           mockConfig.getTruncateToolOutputThreshold = vi
             .fn()
-            .mockReturnValue(25_000);
+            .mockReturnValue(truncateThreshold);
           mockToolRegistry.getTool.mockReturnValue({
             name: 'read_file',
             kind: core.Kind.Read,
@@ -37160,6 +37161,105 @@ describe('Session', () => {
               error: new Error('Tool failed'),
             }),
           );
+        });
+
+        it('bounds the delivered context by the truncation threshold', async () => {
+          const execute = vi.fn().mockResolvedValue({
+            llmContent: 'file contents',
+            returnDisplay: 'success',
+          });
+          const { response } = await runReadFile(
+            contextBus({
+              PreToolUse: {
+                hookSpecificOutput: {
+                  hookEventName: 'PreToolUse',
+                  additionalContext: 'P'.repeat(200),
+                },
+              },
+            }),
+            execute,
+            60,
+          );
+
+          const output = response?.['output'] as string;
+          const delivered = output.slice('file contents\n\n'.length);
+          expect(output.startsWith('file contents\n\nPPP')).toBe(true);
+          expect(delivered).toHaveLength(60);
+          expect(delivered).toContain('[hook additional context truncated]');
+        });
+
+        it('drops PreToolUse context when the call is cancelled', async () => {
+          const execute = vi.fn();
+          let cancel: Promise<void> | undefined;
+          const messageBus = {
+            request: vi
+              .fn()
+              .mockImplementation(async (request: { eventName: string }) => {
+                if (request.eventName === 'PreToolUse') {
+                  cancel = session.cancelPendingPrompt();
+                  return { success: true, output: preContext() };
+                }
+                return { success: true, output: {} };
+              }),
+          };
+          mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+          mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+          mockConfig.getApprovalMode = vi
+            .fn()
+            .mockReturnValue(ApprovalMode.YOLO);
+          mockConfig.getTruncateToolOutputThreshold = vi
+            .fn()
+            .mockReturnValue(25_000);
+          mockToolRegistry.getTool.mockReturnValue({
+            name: 'read_file',
+            kind: core.Kind.Read,
+            build: vi.fn().mockReturnValue({
+              params: { path: '/tmp/test.txt' },
+              getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+              execute,
+            }),
+          });
+          mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'call-cancel',
+                      name: 'read_file',
+                      args: { path: '/tmp/test.txt' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          );
+
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'read the file' }],
+          });
+          await cancel;
+
+          expect(execute).not.toHaveBeenCalled();
+          expect(
+            mockChatRecordingService.recordToolResult,
+          ).toHaveBeenCalledWith(
+            expect.anything(),
+            expect.objectContaining({
+              callId: 'call-cancel',
+              status: 'cancelled',
+            }),
+          );
+          expect(
+            JSON.stringify(
+              mockChatRecordingService.recordToolResult.mock.calls,
+            ),
+          ).not.toContain('P02A_PRE');
+          expect(
+            JSON.stringify(vi.mocked(mockChat.sendMessageStream).mock.calls),
+          ).not.toContain('P02A_PRE');
         });
 
         it('leaves results unchanged when hooks return no context', async () => {
@@ -39448,6 +39548,105 @@ describe('Session', () => {
       expect(result.parts).toHaveLength(1);
       expect(result.parts[0].functionResponse?.response).toEqual({
         output: 'done\n\nNESTED_CTX_exec-ctx:code:1',
+      });
+    });
+
+    it('delivers nested PostToolUseFailure context with the exec result, not the script error', async () => {
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+      mockConfig.getMessageBus = vi.fn().mockReturnValue({
+        request: vi
+          .fn()
+          .mockImplementation(
+            async (request: {
+              eventName: string;
+              input?: { tool_name?: string; tool_call_id?: string };
+            }) => ({
+              success: true,
+              output:
+                request.eventName === 'PostToolUseFailure' &&
+                request.input?.tool_name === 'read_file'
+                  ? {
+                      hookSpecificOutput: {
+                        hookEventName: 'PostToolUseFailure',
+                        additionalContext: `NESTED_FAIL_${request.input.tool_call_id}`,
+                      },
+                    }
+                  : {},
+            }),
+          ),
+      });
+      mockConfig.getTruncateToolOutputThreshold = vi
+        .fn()
+        .mockReturnValue(25_000);
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      mockConfig.getToolMode = vi
+        .fn()
+        .mockReturnValue(core.ToolMode.CodeModeOnly);
+      const nestedTool = {
+        name: 'read_file',
+        kind: core.Kind.Read,
+        displayName: 'Read file',
+        description: 'Read file',
+        build: vi.fn().mockReturnValue({
+          params: { path: '/tmp/missing.txt' },
+          execute: vi.fn().mockResolvedValue({
+            llmContent: 'missing',
+            returnDisplay: 'missing',
+            error: {
+              message: 'missing',
+              type: core.ToolErrorType.EXECUTION_FAILED,
+            },
+          }),
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          getDescription: vi.fn().mockReturnValue('Read file'),
+          toolLocations: vi.fn().mockReturnValue([]),
+        }),
+        canUpdateOutput: false,
+        isOutputMarkdown: true,
+      };
+      let scriptError: string | undefined;
+      const outerTool = {
+        name: core.ToolNames.EXEC,
+        kind: core.Kind.Other,
+        displayName: 'Exec',
+        description: 'Exec',
+        build: vi.fn().mockReturnValue({
+          params: { source: 'probe' },
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          getDescription: vi.fn().mockReturnValue('Exec'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          execute: vi.fn().mockImplementation(async (signal: AbortSignal) => {
+            try {
+              await core
+                .getToolCallRuntime()!
+                .dispatch('read_file', { path: '/tmp/missing.txt' }, signal);
+            } catch (error) {
+              // The script swallows the error without printing it.
+              scriptError = (error as Error).message;
+            }
+            return { llmContent: 'done', returnDisplay: 'done' };
+          }),
+        }),
+        canUpdateOutput: false,
+        isOutputMarkdown: true,
+      };
+      mockToolRegistry.getTool.mockImplementation((name: string) =>
+        name === core.ToolNames.EXEC ? outerTool : nestedTool,
+      );
+
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(new AbortController().signal, 'prompt-nested-fail', [
+        {
+          id: 'exec-fail',
+          name: core.ToolNames.EXEC,
+          args: { source: 'probe' },
+        },
+      ]);
+
+      expect(scriptError).toBe('missing');
+      expect(result.parts[0].functionResponse?.response).toEqual({
+        output: 'done\n\nNESTED_FAIL_exec-fail:code:1',
       });
     });
 

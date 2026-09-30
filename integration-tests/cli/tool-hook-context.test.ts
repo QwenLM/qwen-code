@@ -33,16 +33,23 @@ import {
 
 const HOOK_SCRIPT = 'context-hook.mjs';
 const HITS_LOG = 'hook-hits.jsonl';
+// The PreToolUse decision is read from a file in the (volume-mounted) test
+// directory rather than the environment, which a container sandbox does not
+// forward.
+const DECISION_FILE = 'pre-decision.txt';
 
-// Emits `P02A_<event>_<tool_call_id>` so each marker names the call that
-// produced it; the decision for PreToolUse comes from P02A_PRE_DECISION.
+// Emits `P02A_<event>_<tool_call_id>#` so each marker names the call that
+// produced it; the trailing `#` keeps a parent id from matching its nested
+// `<id>:code:N` calls.
 const hookSource = `
-import { appendFileSync, readFileSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync } from 'node:fs';
 const input = JSON.parse(readFileSync(0, 'utf8'));
 const event = input.hook_event_name;
 appendFileSync(${JSON.stringify(HITS_LOG)}, JSON.stringify({ event, call: input.tool_call_id }) + '\\n');
-const out = { hookEventName: event, additionalContext: 'P02A_' + event + '_' + input.tool_call_id };
-const decision = process.env.P02A_PRE_DECISION;
+const out = { hookEventName: event, additionalContext: 'P02A_' + event + '_' + input.tool_call_id + '#' };
+const decision = existsSync(${JSON.stringify(DECISION_FILE)})
+  ? readFileSync(${JSON.stringify(DECISION_FILE)}, 'utf8').trim()
+  : '';
 if (event === 'PreToolUse' && decision) {
   out.permissionDecision = decision;
   out.permissionDecisionReason = 'p02a policy';
@@ -114,7 +121,6 @@ describe('tool hook additionalContext delivery', () => {
     vi.stubEnv('OPENAI_MODEL', 'fake-model');
     vi.stubEnv('QWEN_HOME', join(rig.testDir!, '.qwen-home'));
     vi.stubEnv('QWEN_RUNTIME_DIR', join(rig.testDir!, '.qwen-home'));
-    vi.stubEnv('P02A_PRE_DECISION', '');
     restoreNoProxy = applyContainerSandboxNoProxy();
     return server;
   }
@@ -152,6 +158,14 @@ describe('tool hook additionalContext delivery', () => {
     return text.split(needle).length - 1;
   }
 
+  function marker(event: string, callId: string): string {
+    return `P02A_${event}_${callId}#`;
+  }
+
+  function setPreDecision(decision: 'deny' | 'ask'): void {
+    writeFileSync(join(rig.testDir!, DECISION_FILE), decision);
+  }
+
   it('headless: delivers PreToolUse context with a successful result', async () => {
     const server = await setup(
       'hook context headless allow',
@@ -164,7 +178,7 @@ describe('tool hook additionalContext delivery', () => {
     expect(hookHits()).toEqual([{ event: 'PreToolUse', call: 'call_allow' }]);
     const result = toolResultFor(server, 'call_allow');
     expect(result).toContain('hello from note');
-    expect(count(result, 'P02A_PreToolUse_call_allow')).toBe(1);
+    expect(count(result, marker('PreToolUse', 'call_allow'))).toBe(1);
   });
 
   it('headless: delivers PreToolUse context with a denied result', async () => {
@@ -174,13 +188,13 @@ describe('tool hook additionalContext delivery', () => {
       'note.txt',
       'call_deny',
     );
-    vi.stubEnv('P02A_PRE_DECISION', 'deny');
+    setPreDecision('deny');
     await rig.run('read the note', ...fakeModelLaunchArgs(server));
 
     const result = toolResultFor(server, 'call_deny');
     expect(result).toContain('p02a policy');
     expect(result).not.toContain('hello from note');
-    expect(count(result, 'P02A_PreToolUse_call_deny')).toBe(1);
+    expect(count(result, marker('PreToolUse', 'call_deny'))).toBe(1);
   });
 
   it('headless: delivers nested exec PreToolUse context with the exec result', async () => {
@@ -191,7 +205,7 @@ describe('tool hook additionalContext delivery', () => {
       'call_exec',
       (filePath) => ({
         // Consumes the nested result without printing it.
-        source: `const r = await tools.read_file({ file_path: ${JSON.stringify(filePath)} }); text(String(r).includes('P02A_') ? 'changed' : 'raw')`,
+        source: `const r = await tools.read_file({ file_path: ${JSON.stringify(filePath)} }); text(JSON.stringify(r).includes('P02A_') ? 'changed' : 'raw')`,
       }),
       { tools: { codeModeOnly: true } },
     );
@@ -206,7 +220,36 @@ describe('tool hook additionalContext delivery', () => {
     const result = toolResultFor(server, 'call_exec');
     expect(result).toContain('raw');
     expect(result).not.toContain('changed');
-    expect(count(result, 'P02A_PreToolUse_call_exec:code:1')).toBe(1);
+    // The exec call's own context and its nested call's, once each.
+    expect(count(result, marker('PreToolUse', 'call_exec'))).toBe(1);
+    expect(count(result, marker('PreToolUse', 'call_exec:code:1'))).toBe(1);
+  });
+
+  it('headless: delivers nested exec PostToolUseFailure context with the exec result', async () => {
+    const server = await setup(
+      'hook context headless nested exec failure',
+      'exec',
+      'missing.txt',
+      'call_exec_fail',
+      (filePath) => ({
+        // Swallows the nested error without printing it.
+        source: `let seen = ''; try { await tools.read_file({ file_path: ${JSON.stringify(filePath)} }); } catch (error) { seen = String(error && error.message); } text(seen.includes('P02A_') ? 'changed' : seen ? 'raw' : 'no error')`,
+      }),
+      { tools: { codeModeOnly: true } },
+    );
+    await rig.run('run the script', ...fakeModelLaunchArgs(server));
+
+    expect(hookHits()).toEqual(
+      expect.arrayContaining([
+        { event: 'PostToolUseFailure', call: 'call_exec_fail:code:1' },
+      ]),
+    );
+    const result = toolResultFor(server, 'call_exec_fail');
+    expect(result).toContain('raw');
+    expect(result).not.toContain('changed');
+    expect(
+      count(result, marker('PostToolUseFailure', 'call_exec_fail:code:1')),
+    ).toBe(1);
   });
 
   it('interactive: delivers the first PreToolUse ask context once after approval', async () => {
@@ -216,7 +259,7 @@ describe('tool hook additionalContext delivery', () => {
       'note.txt',
       'call_ask',
     );
-    vi.stubEnv('P02A_PRE_DECISION', 'ask');
+    setPreDecision('ask');
     const { ptyProcess } = rig.runInteractive(...fakeModelLaunchArgs(server));
     let output = '';
     ptyProcess.onData((data) => {
@@ -246,7 +289,7 @@ describe('tool hook additionalContext delivery', () => {
     expect(hookHits()).toEqual([{ event: 'PreToolUse', call: 'call_ask' }]);
     const result = toolResultFor(server, 'call_ask');
     expect(result).toContain('hello from note');
-    expect(count(result, 'P02A_PreToolUse_call_ask')).toBe(1);
+    expect(count(result, marker('PreToolUse', 'call_ask'))).toBe(1);
   });
 
   it('ACP: delivers PreToolUse and PostToolUseFailure context on a returned error', async () => {
@@ -266,8 +309,29 @@ describe('tool hook additionalContext delivery', () => {
       ],
       { cwd: rig.testDir!, env: process.env, stdio: ['pipe', 'pipe', 'pipe'] },
     );
-    const pending = new Map<number, (value: unknown) => void>();
+    const pending = new Map<
+      number,
+      { resolve: (value: unknown) => void; reject: (error: Error) => void }
+    >();
     let nextId = 0;
+    let disposed = false;
+    const stderr: string[] = [];
+    child.stderr!.on('data', (chunk) => stderr.push(chunk.toString()));
+    // A dead agent would otherwise surface as a bare timeout (#12871).
+    // `disposed` keeps teardown from rejecting promises nobody awaits.
+    child.once('close', (code, signal) => {
+      if (disposed) return;
+      const tail = stderr.join('').trimEnd().slice(-500);
+      for (const [id, { reject }] of pending) {
+        reject(
+          new Error(
+            `ACP request ${id} failed: agent exited (code=${code} signal=${signal})` +
+              (tail ? `\nlast agent stderr:\n${tail}` : ''),
+          ),
+        );
+      }
+      pending.clear();
+    });
     createInterface({ input: child.stdout! }).on('line', (line) => {
       let message: { id?: number; method?: string; result?: unknown };
       try {
@@ -277,7 +341,8 @@ describe('tool hook additionalContext delivery', () => {
       }
       if (message.id === undefined) return;
       if (message.method === undefined) {
-        pending.get(message.id)?.(message.result);
+        pending.get(message.id)?.resolve(message.result);
+        pending.delete(message.id);
       } else {
         // Answer any client request (e.g. permission) so the turn proceeds.
         child.stdin!.write(
@@ -293,9 +358,12 @@ describe('tool hook additionalContext delivery', () => {
       }
     });
     const request = <T>(method: string, params: unknown) =>
-      new Promise<T>((resolve) => {
+      new Promise<T>((resolve, reject) => {
         const id = ++nextId;
-        pending.set(id, (value) => resolve(value as T));
+        pending.set(id, {
+          resolve: (value) => resolve(value as T),
+          reject,
+        });
         child.stdin!.write(
           JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n',
         );
@@ -317,6 +385,7 @@ describe('tool hook additionalContext delivery', () => {
         prompt: [{ type: 'text', text: 'read the missing note' }],
       });
     } finally {
+      disposed = true;
       child.kill();
     }
 
@@ -325,7 +394,7 @@ describe('tool hook additionalContext delivery', () => {
       { event: 'PostToolUseFailure', call: 'call_fail' },
     ]);
     const result = toolResultFor(server, 'call_fail');
-    expect(count(result, 'P02A_PreToolUse_call_fail')).toBe(1);
-    expect(count(result, 'P02A_PostToolUseFailure_call_fail')).toBe(1);
+    expect(count(result, marker('PreToolUse', 'call_fail'))).toBe(1);
+    expect(count(result, marker('PostToolUseFailure', 'call_fail'))).toBe(1);
   });
 });

@@ -13252,12 +13252,16 @@ export class Session implements SessionContext {
     // exec instead, and an MCP App call has no model consumer at all.
     let preToolUseContext: string | undefined;
     let failureContext: string | undefined;
-    const nestedHookContexts: string[] = [];
+    // One slot per nested call, reserved in dispatch order: nested calls run
+    // concurrently, and truncation must not depend on completion order.
+    const nestedHookContexts: Array<string | undefined> = [];
     const hookContextFor = (
       status: 'success' | 'error' | 'cancelled',
     ): string | undefined =>
       status === 'cancelled' ||
-      (!preToolUseContext && !failureContext && nestedHookContexts.length === 0)
+      (!preToolUseContext &&
+        !failureContext &&
+        !nestedHookContexts.some(Boolean))
         ? undefined
         : boundToolHookContext(
             [preToolUseContext, failureContext, ...nestedHookContexts],
@@ -15129,6 +15133,8 @@ export class Session implements SessionContext {
                   onResult?: (response: ToolCallResponseInfo) => void,
                 ): Promise<CodeModeToolResult> => {
                   const nestedCallId = `${callId}:code:${++this.codeModeNestedSequence}`;
+                  const hookContextSlot =
+                    nestedHookContexts.push(undefined) - 1;
                   const signal = AbortSignal.any([
                     activeToolAbortSignal,
                     nestedSignal,
@@ -15161,9 +15167,7 @@ export class Session implements SessionContext {
                     if (nested.stopAfterPermissionCancel) {
                       stopNestedAfterPermissionCancel();
                     }
-                    if (nested.hookContext) {
-                      nestedHookContexts.push(nested.hookContext);
-                    }
+                    nestedHookContexts[hookContextSlot] = nested.hookContext;
                     const nestedParts = finalizeCodeModeToolResult
                       ? await finalizeCodeModeToolResult(nestedCallId, nested)
                       : nested.parts;

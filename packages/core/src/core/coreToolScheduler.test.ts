@@ -15551,6 +15551,10 @@ describe('CoreToolScheduler telemetry spans', () => {
     const fr = parts.find((p) => p.functionResponse)?.functionResponse;
     expect(fr?.id).toBe('span-call');
     expect(fr?.response?.['output']).toBe('tool body\n\nP02A_ALLOW &lt;x&gt;');
+    // Telemetry length follows the delivered text.
+    expect(
+      (completedCalls[0] as SuccessfulToolCall).response.contentLength,
+    ).toBe('tool body\n\nP02A_ALLOW &lt;x&gt;'.length);
     // UI projection is untouched.
     expect(
       (completedCalls[0] as SuccessfulToolCall).response.resultDisplay,
