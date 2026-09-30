@@ -34,7 +34,7 @@ is valid. The accepted root is pinned to its canonical path at startup so later
 relinking cannot move the boundary consumers validated. A root that later becomes unavailable or is redirected remains configured for ownership and state-separation checks. Both managed discovery and read-permission exemptions require the pinned directory to pass verification again; failed verification is not proof of withdrawal. Source revalidation invalidates the managed cache when the root loses verification, including a relink to packages with unchanged manifest metadata.
 ExtensionManager receives `managedExtensionsDir` separately from the writable
 ExtensionStore. A container sandbox (docker/podman) mounts the resolved root
-read-only at its translated container path and forwards the flag unchanged —
+read-only at its translated container path, launch spelling, and every alias exposed by a generated read-write ancestor mount, including `/home/node/.qwen`. Settings and runtime state remain writable outside those protected subdirectories. A writable mount sourced from the managed root or one of its descendants, or an incompatible mount at a required read-only destination, fails sandbox startup; the guard never silently preserves a conflicting writable mount. Advanced operator overrides through `SANDBOX_FLAGS` remain outside this generated-mount guard. The sandbox forwards the flag unchanged —
 raw argv carries user content in value positions, so the flag is never
 rewritten; the child's startup validation applies the same container
 translation to the flag value. The bwrap and seatbelt backends already expose

@@ -118,6 +118,9 @@ describe('start_sandbox', () => {
     vi.spyOn(fs, 'realpathSync').mockImplementation((filePath) =>
       String(filePath),
     );
+    Object.assign(fs.realpathSync, {
+      native: vi.fn((filePath: fs.PathLike) => String(filePath)),
+    });
     execSyncMock.mockReturnValue(Buffer.from(''));
 
     const managedRoot = path.resolve('/opt/qwen-managed');
@@ -178,6 +181,9 @@ describe('start_sandbox', () => {
     vi.spyOn(fs, 'realpathSync').mockImplementation((filePath) =>
       String(filePath),
     );
+    Object.assign(fs.realpathSync, {
+      native: vi.fn((filePath: fs.PathLike) => String(filePath)),
+    });
     execSyncMock.mockReturnValue(Buffer.from(''));
 
     const managedRoot = path.resolve('/opt/qwen-managed');
@@ -296,9 +302,22 @@ describe('start_sandbox', () => {
         // resolves through the read-write tmpdir mount inside the container.
         expect(volumes).toContain(`${canonical}:${canonical}:ro`);
         expect(volumes).toContain(`${canonical}:${launchSpelling}:ro`);
+        const tmpdirSpelling = path.join(
+          os.tmpdir(),
+          path.relative(fs.realpathSync.native(os.tmpdir()), canonical),
+        );
+        const expectedDestinations = new Set([
+          canonical,
+          launchSpelling,
+          tmpdirSpelling,
+        ]);
         expect(
-          volumes.filter((spec) => spec.startsWith(`${canonical}:`)),
-        ).toHaveLength(2);
+          volumes.filter((spec) => spec.startsWith(`${canonical}:`)).sort(),
+        ).toEqual(
+          [...expectedDestinations]
+            .map((destination) => `${canonical}:${destination}:ro`)
+            .sort(),
+        );
         expect(
           volumes.some((spec) => spec.endsWith(`:${os.tmpdir()}:ro`)),
         ).toBe(false);
@@ -378,12 +397,15 @@ describe('start_sandbox', () => {
     },
   );
 
-  it('does not mount the managed extensions root twice when it is the workspace', async () => {
+  it('rejects a managed extensions root that is also the writable workspace', async () => {
     vi.stubEnv('SANDBOX_SET_UID_GID', 'false');
     vi.spyOn(fs, 'existsSync').mockReturnValue(true);
     vi.spyOn(fs, 'realpathSync').mockImplementation((filePath) =>
       String(filePath),
     );
+    Object.assign(fs.realpathSync, {
+      native: vi.fn((filePath: fs.PathLike) => String(filePath)),
+    });
     execSyncMock.mockReturnValue(Buffer.from(''));
 
     const managedRoot = path.resolve(process.cwd());
@@ -394,16 +416,13 @@ describe('start_sandbox', () => {
     const imageCheck = Object.assign(new EventEmitter(), {
       stdout: new EventEmitter(),
     });
-    const child = new EventEmitter();
-    spawnMock
-      .mockImplementationOnce(() => {
-        queueMicrotask(() => {
-          imageCheck.stdout.emit('data', Buffer.from('image-id'));
-          imageCheck.emit('close', 0);
-        });
-        return imageCheck;
-      })
-      .mockReturnValueOnce(child);
+    spawnMock.mockImplementationOnce(() => {
+      queueMicrotask(() => {
+        imageCheck.stdout.emit('data', Buffer.from('image-id'));
+        imageCheck.emit('close', 0);
+      });
+      return imageCheck;
+    });
 
     const result = start_sandbox(
       { command: 'docker', image: 'example.com/qwen-code:latest' },
@@ -417,23 +436,10 @@ describe('start_sandbox', () => {
       ],
     );
 
-    await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledTimes(2));
-    const args = spawnMock.mock.calls[1]?.[1] as string[];
-    // The workspace mount already places the root at its container path, so
-    // the read-only mount must be skipped: the daemon rejects two --volume
-    // flags with one destination. Compare on the host side of the spec,
-    // which is never translated.
-    const volumes = args.filter((_, index) => args[index - 1] === '--volume');
-    expect(
-      volumes.filter((spec) => spec.startsWith(`${managedRoot}:`)),
-    ).toHaveLength(1);
-    // The forwarded flag still rewrites to the container path, which the
-    // workspace mount covers.
-    const entrypointCommand = args[args.length - 1];
-    expect(entrypointCommand).toContain('--managed-extensions');
-
-    child.emit('close', 0);
-    await expect(result).resolves.toBe(0);
+    await expect(result).rejects.toThrow(
+      `Cannot protect managed extensions '${managedRoot}'`,
+    );
+    expect(spawnMock).toHaveBeenCalledTimes(1);
   });
 
   it('lets the runtime choose a hostname for image-ID containers', async () => {

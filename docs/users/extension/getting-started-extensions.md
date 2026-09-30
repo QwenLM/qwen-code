@@ -356,6 +356,8 @@ Qwen’s writable extension and extension-store directories, including symlink
 and filesystem case aliases. Without this option, only the existing user extension source is discovered.
 Continue supplying the option to management commands. Unchanged skill bodies remain deduplicated during refresh.
 
+Docker/Podman sandboxes mount the managed root read-only, including aliases exposed by their settings, runtime, and other generated mounts. Settings and runtime state outside the managed root remain writable. Keep the writable workspace and explicit writable mount sources outside the managed root; overlapping sources or conflicting mount destinations cause sandbox startup to fail. A managed subdirectory of a writable parent, such as `<QWEN_HOME>/prepared`, is supported through a read-only submount. Advanced `SANDBOX_FLAGS` overrides are operator-controlled and are not covered by this mount guard.
+
 For managed extensions, User-scope CLI enable/disable changes the default across
 all workspaces, including those outside your home directory. These explicit
 actions and management API default-activation changes (including batches) clear
