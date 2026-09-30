@@ -843,6 +843,32 @@ describe('managed harness factory', () => {
     await session.close();
   });
 
+  it('binds a Hosted Runtime wait to its original turn', async () => {
+    const session = await open(await createWorkspace());
+    const handle = createManagedHarnessHandle(session);
+    await handle.ensureRunnable();
+    const commit = await runtimeCommit(session);
+    await handle.commitAwaitRuntimeBatch([commit], {
+      turnId: 'turn-1',
+      promptId: 'prompt-1',
+    });
+    const wait = parseHarnessCheckpointV1(
+      (await session.authority.readCheckpointState())!,
+    );
+    expect(wait.identity).toMatchObject({
+      turnId: 'turn-1',
+      promptId: 'prompt-1',
+      activationId: session.activation.activationId,
+    });
+    await expect(
+      handle.commitAwaitRuntimeBatch([commit], {
+        turnId: 'turn-2',
+        promptId: 'prompt-2',
+      }),
+    ).rejects.toThrow(/cannot change the current unfinished turn/);
+    await session.close();
+  });
+
   it('marks settled Runtime receipts consumed without a second dispatch', async () => {
     const workspace = await createWorkspace();
     const session = await open(workspace);
