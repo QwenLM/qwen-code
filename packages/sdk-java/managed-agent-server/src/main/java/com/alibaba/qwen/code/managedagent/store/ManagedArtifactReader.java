@@ -50,11 +50,20 @@ public class ManagedArtifactReader {
     }
 
     public InputStream open(Artifact artifact, Runnable guard) {
-        guard.run();
-        return verified(artifact).open(() -> {
-            guard.run();
-            check(artifact);
-        });
+        var lease = lease(artifact);
+        try {
+            Runnable protectedGuard = () -> { lease.check(); guard.run(); check(artifact); };
+            var input = verified(artifact, protectedGuard).open(protectedGuard);
+            return new java.io.FilterInputStream(input) {
+                @Override
+                public void close() throws java.io.IOException {
+                    try { super.close(); } finally { lease.close(); }
+                }
+            };
+        } catch (RuntimeException error) {
+            lease.close();
+            throw error;
+        }
     }
 
     public byte[] readRange(Artifact artifact, long offset, int length) {
@@ -66,8 +75,10 @@ public class ManagedArtifactReader {
                         && offset <= artifact.descriptor().path("byte_length").asLong()
                         && length <= artifact.descriptor().path("byte_length").asLong() - offset,
                 "Artifact range is invalid");
-        guard.run();
-        return readRange(artifact, verified(artifact), offset, length, guard);
+        try (var lease = lease(artifact)) {
+            Runnable protectedGuard = () -> { lease.check(); guard.run(); check(artifact); };
+            return readRange(artifact, verified(artifact, protectedGuard), offset, length, protectedGuard);
+        }
     }
 
     byte[] readRange(Artifact artifact, ToolPublicationDataStore.VerifiedStream stream,
@@ -79,7 +90,15 @@ public class ManagedArtifactReader {
         });
     }
 
+    public ToolPublicationRetentionStore.ReadLease lease(Artifact artifact) {
+        return data().readLease(artifact.source().sessionKey());
+    }
+
     ToolPublicationDataStore.VerifiedStream verified(Artifact artifact) {
+        return verified(artifact, () -> {});
+    }
+
+    ToolPublicationDataStore.VerifiedStream verified(Artifact artifact, Runnable guard) {
         var source = artifact.source();
         var binding = artifact.binding();
         var identity = JSON.createObjectNode();
@@ -93,7 +112,7 @@ public class ManagedArtifactReader {
                 "Artifact source conflicts");
         var stream = data().openReferencedStream(source.sessionKey(), artifact.publicationId(),
                 source.outcomeRef(), artifact.manifestRef(), identity, artifact.streamId(),
-                source.journalRevision(), source.receiptSequence());
+                source.journalRevision(), source.receiptSequence(), guard);
         ToolPublicationContract.require(stream.size() == artifact.descriptor().path("byte_length").asLong(-1),
                 "Artifact length conflicts");
         return stream;
