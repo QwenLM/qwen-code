@@ -11,8 +11,12 @@ import { DefaultOpenAICompatibleProvider } from './default.js';
 /** Default port of a local Ollama server. */
 const OLLAMA_DEFAULT_PORT = '11434';
 
-/** Loopback hostnames that identify a local Ollama server on the default port. */
-const OLLAMA_LOCAL_HOSTS = ['localhost', '127.0.0.1', '::1'] as const;
+/**
+ * Loopback hostnames that identify a local Ollama server on the default port.
+ * The IPv6 literal keeps the square brackets because WHATWG `URL.hostname`
+ * returns `[::1]`, not `::1`, for IPv6 addresses.
+ */
+const OLLAMA_LOCAL_HOSTS = ['localhost', '127.0.0.1', '[::1]'] as const;
 
 /** Matches "ollama" as a whole hostname label (ollama, my-ollama.local, ...). */
 const OLLAMA_LABEL = /(?:^|[.\-_])ollama(?:$|[.\-_])/;
