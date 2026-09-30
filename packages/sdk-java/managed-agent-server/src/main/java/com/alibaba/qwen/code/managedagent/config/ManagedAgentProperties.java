@@ -11,6 +11,7 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 public class ManagedAgentProperties {
     private final Harness harness = new Harness();
     private final SessionStore sessionStore = new SessionStore();
+    private final ToolPublication toolPublication = new ToolPublication();
     private final Dispatch dispatch = new Dispatch();
     private final Events events = new Events();
     private final RuntimeBroker runtimeBroker = new RuntimeBroker();
@@ -22,6 +23,10 @@ public class ManagedAgentProperties {
 
     public SessionStore getSessionStore() {
         return sessionStore;
+    }
+
+    public ToolPublication getToolPublication() {
+        return toolPublication;
     }
 
     public Dispatch getDispatch() {
@@ -180,6 +185,46 @@ public class ManagedAgentProperties {
         public void setWriterLeaseDuration(Duration writerLeaseDuration) {
             this.writerLeaseDuration = writerLeaseDuration;
         }
+    }
+
+    public static class ToolPublication {
+        private boolean enabled;
+        private String ossEndpoint = "";
+        private String ossRegion = "";
+        private String ossBucket = "";
+        private String serviceBaseUrl = "";
+        private Long executionBytes;
+        private Long sessionBytes;
+        private Long tenantBytes;
+        private Long activeCaptures;
+        private Integer entryConcurrency;
+        private Duration operationTimeout;
+        private Duration claimTimeout;
+
+        public boolean isEnabled() { return enabled; }
+        public void setEnabled(boolean enabled) { this.enabled = enabled; }
+        public String getOssEndpoint() { return ossEndpoint; }
+        public void setOssEndpoint(String value) { ossEndpoint = value; }
+        public String getOssRegion() { return ossRegion; }
+        public void setOssRegion(String value) { ossRegion = value; }
+        public String getOssBucket() { return ossBucket; }
+        public void setOssBucket(String value) { ossBucket = value; }
+        public String getServiceBaseUrl() { return serviceBaseUrl; }
+        public void setServiceBaseUrl(String value) { serviceBaseUrl = value; }
+        public Long getExecutionBytes() { return executionBytes; }
+        public void setExecutionBytes(Long value) { executionBytes = value; }
+        public Long getSessionBytes() { return sessionBytes; }
+        public void setSessionBytes(Long value) { sessionBytes = value; }
+        public Long getTenantBytes() { return tenantBytes; }
+        public void setTenantBytes(Long value) { tenantBytes = value; }
+        public Long getActiveCaptures() { return activeCaptures; }
+        public void setActiveCaptures(Long value) { activeCaptures = value; }
+        public Integer getEntryConcurrency() { return entryConcurrency; }
+        public void setEntryConcurrency(Integer value) { entryConcurrency = value; }
+        public Duration getOperationTimeout() { return operationTimeout; }
+        public void setOperationTimeout(Duration value) { operationTimeout = value; }
+        public Duration getClaimTimeout() { return claimTimeout; }
+        public void setClaimTimeout(Duration value) { claimTimeout = value; }
     }
 
     public static class Dispatch {
