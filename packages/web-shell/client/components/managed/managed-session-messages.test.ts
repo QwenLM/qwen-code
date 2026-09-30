@@ -54,6 +54,23 @@ describe('Managed transcript projection', () => {
     expect(new Set(messages.map((message) => message.id)).size).toBe(4);
   });
 
+  it('keeps approval updates out of the Turn being streamed', () => {
+    const messages = managedEventsToMessages(
+      [
+        event(1, 'accepted', { prompt: [{ type: 'text', text: 'Edit it' }] }),
+        event(2, 'assistant_delta', { text: 'Asking ' }),
+        event(3, 'action_updated', { actionId: 'a1', state: 'requested' }, ''),
+        event(4, 'assistant_delta', { text: 'first' }),
+      ],
+      '[truncated]',
+    );
+    expect(messages).toMatchObject([
+      { role: 'user', content: 'Edit it' },
+      { role: 'assistant', content: 'Asking first', isStreaming: true },
+    ]);
+    expect(messages).toHaveLength(2);
+  });
+
   it('shows requested tools as pending until tool_started and renders bounded results', () => {
     const request = event(1, 'tool_requested', {
       toolCallId: 'call',

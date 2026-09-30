@@ -37,6 +37,9 @@ export function managedEventsToMessages(
     textMessage = undefined;
   };
   for (const event of events) {
+    // Approval updates carry no Turn and render outside the transcript, so
+    // they must not settle or split the Turn being streamed.
+    if (event.type === 'action_updated') continue;
     if (event.turnId !== currentTurnId) {
       settle();
       currentTurnId = event.turnId;

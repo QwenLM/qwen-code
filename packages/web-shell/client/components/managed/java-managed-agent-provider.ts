@@ -1,6 +1,7 @@
 import {
   isJavaAgentResyncRequired,
   JavaManagedAgentClient,
+  type JavaAgentAction,
   type JavaAgentSession,
   type JavaManagedAgentClientOptions,
 } from './java-managed-agent-client';
@@ -11,6 +12,7 @@ import {
 } from './java-managed-agent-event-projector';
 import { managedRequestId } from './managed-session-storage';
 import type {
+  ManagedAgentPendingAction,
   ManagedAgentProvider,
   ManagedAgentRuntimeState,
   ManagedAgentSessionPhase,
@@ -38,6 +40,34 @@ export function createJavaManagedAgentProvider(
     storageKey: storageKey(options),
     canCancel: true,
     acceptsWorkspaceCwd: false,
+    actions: {
+      async listPending(sessionId, request) {
+        // The service allows at most one requested approval per Turn, so the
+        // first page holds every pending one in practice.
+        const page = await client.queryActions(
+          { sessionId, limit: 20 },
+          request.signal,
+        );
+        return page.data.flatMap(toPendingAction);
+      },
+      async respond(action, optionId, command) {
+        await client.respondAction(
+          {
+            requestId: managedRequestId(),
+            idempotencyKey: command.idempotencyKey,
+            sessionId: action.sessionId,
+            actionId: action.actionId,
+            response: {
+              kind: 'permission',
+              inputRevision: action.inputRevision,
+              policyRevision: action.policyRevision,
+              optionId,
+            },
+          },
+          command.signal,
+        );
+      },
+    },
     ...(options.enableWorkspaceBinding
       ? {
           workspaceBinding: {
@@ -222,9 +252,27 @@ function toSessionSummary(
         active &&
         turnStatus !== 'cancelling' &&
         !session.workspace,
+      ...(session.capabilities?.actions === true ? { actions: true } : {}),
     },
     ...(errorCode ? { failure: { code: errorCode, message: errorCode } } : {}),
   };
+}
+
+function toPendingAction(action: JavaAgentAction): ManagedAgentPendingAction[] {
+  if (action.kind !== 'permission' || action.state !== 'requested') return [];
+  return [
+    {
+      actionId: action.actionId,
+      sessionId: action.sessionId,
+      ...(action.turnId ? { turnId: action.turnId } : {}),
+      functionCallId: action.functionCallId,
+      toolName: action.toolName,
+      inputRevision: action.inputRevision,
+      policyRevision: action.policyRevision,
+      expiresAt: action.expiresAt,
+      options: action.options.map(({ id, label }) => ({ id, label })),
+    },
+  ];
 }
 
 function toRuntimeState(value: string | undefined): ManagedAgentRuntimeState {

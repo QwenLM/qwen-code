@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useI18n } from '../../i18n';
 import { MessageList } from '../MessageList';
+import { ToolApproval } from '../messages/ToolApproval';
 import { Button } from '../ui/button';
 import { Badge } from '../ui/badge';
 import { Textarea } from '../ui/textarea';
@@ -10,6 +11,8 @@ import {
   managedRequestId,
 } from './managed-session-storage';
 import { useManagedSession } from './use-managed-session';
+import { useManagedActions } from './use-managed-actions';
+import { toManagedPermissionRequest } from './managed-approval';
 import { ManagedSessionProgress } from './ManagedSessionProgress';
 import { WorkspaceBindingCreator } from './WorkspaceBindingCreator';
 import type {
@@ -143,6 +146,20 @@ function ManagedSessionsContent({
   const messages = useMemo(
     () => managedEventsToMessages(detail.events, t('managed.truncated')),
     [detail.events, t],
+  );
+  const approvals = useManagedActions(
+    provider,
+    enabled ? sessionId : undefined,
+    clientId,
+    detail.summary?.capabilities.actions === true,
+    detail.events,
+  );
+  const pendingApproval = useMemo(
+    () =>
+      approvals.action
+        ? toManagedPermissionRequest(approvals.action, messages)
+        : null,
+    [approvals.action, messages],
   );
 
   useEffect(() => {
@@ -458,7 +475,7 @@ function ManagedSessionsContent({
             <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
               <MessageList
                 messages={messages}
-                pendingApproval={null}
+                pendingApproval={pendingApproval}
                 sessionKey={`managed:${provider.storageKey}:${sessionId ?? 'new'}`}
                 loadingTranscript={detail.loading}
                 isResponding={Boolean(active)}
@@ -480,6 +497,23 @@ function ManagedSessionsContent({
           {pending && !busy && (
             <p role="status" className="text-sm text-muted-foreground">
               {t('managed.uncertain')}
+            </p>
+          )}
+          {pendingApproval && (
+            <div className="shrink-0" data-testid="managed-approval">
+              <ToolApproval
+                request={pendingApproval}
+                variant="floating"
+                keyboardActive={false}
+                onConfirm={(actionId, optionId) =>
+                  approvals.respond(actionId, optionId)
+                }
+              />
+            </div>
+          )}
+          {approvals.error !== undefined && (
+            <p role="alert" className="text-sm text-destructive">
+              {t('managed.approval.failed')}
             </p>
           )}
           <ManagedSessionProgress

@@ -445,4 +445,120 @@ describe('createJavaManagedAgentProvider', () => {
     expect(transcript.olderCursor).toBeUndefined();
     expect(transcript.lastEventId).toBe(4);
   });
+
+  it('lists pending permission Actions and answers with their revisions', async () => {
+    const permission = {
+      actionId: 'tool_approval_1',
+      sessionId: 'session-1',
+      kind: 'permission',
+      source: { type: 'tool_call' },
+      state: 'requested',
+      inputRevision: 1,
+      policyRevision: 'hosted-tool-approval/1',
+      createdAt: 1,
+      expiresAt: 600_001,
+      options: [
+        { id: 'allow', label: 'Allow' },
+        { id: 'deny', label: 'Deny' },
+      ],
+      turnId: 'turn-1',
+      functionCallId: 'call-1',
+      toolName: 'write_file',
+    };
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          data: [
+            permission,
+            { ...permission, actionId: 'tool_approval_2', state: 'decided' },
+            {
+              ...permission,
+              actionId: 'question_1',
+              kind: 'question',
+              questions: [],
+            },
+          ],
+          hasMore: false,
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({ operationId: 'op-1', status: 'running' }),
+      );
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      fetch: fetchImpl,
+    });
+
+    const pending = await provider.actions!.listPending('session-1', {
+      clientId: 'client-1',
+    });
+    expect(pending).toEqual([
+      {
+        actionId: 'tool_approval_1',
+        sessionId: 'session-1',
+        turnId: 'turn-1',
+        functionCallId: 'call-1',
+        toolName: 'write_file',
+        inputRevision: 1,
+        policyRevision: 'hosted-tool-approval/1',
+        expiresAt: 600_001,
+        options: [
+          { id: 'allow', label: 'Allow' },
+          { id: 'deny', label: 'Deny' },
+        ],
+      },
+    ]);
+    expect(String(fetchImpl.mock.calls[0][0])).toBe(
+      'https://product.example/api/agent/web-shell/v1/actions/query',
+    );
+
+    await provider.actions!.respond(pending[0], 'deny', {
+      clientId: 'client-1',
+      idempotencyKey: 'tool_approval_1:deny',
+    });
+    expect(String(fetchImpl.mock.calls[1][0])).toBe(
+      'https://product.example/api/agent/web-shell/v1/actions/respond',
+    );
+    expect(JSON.parse(String(fetchImpl.mock.calls[1][1]?.body))).toEqual({
+      requestId: expect.any(String),
+      idempotencyKey: 'tool_approval_1:deny',
+      sessionId: 'session-1',
+      actionId: 'tool_approval_1',
+      response: {
+        kind: 'permission',
+        inputRevision: 1,
+        policyRevision: 'hosted-tool-approval/1',
+        optionId: 'deny',
+      },
+    });
+  });
+
+  it('reports the actions capability only when the Session has it', async () => {
+    const session = {
+      sessionId: 'session-1',
+      status: 'ACTIVE',
+      createdAt: 1,
+      updatedAt: 1,
+      lastSequence: 0,
+    };
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      fetch: vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(
+          jsonResponse({
+            ...session,
+            capabilities: { actions: true, tasks: false },
+          }),
+        )
+        .mockResolvedValueOnce(jsonResponse(session)),
+    });
+    expect(
+      (await provider.getSession('session-1', { clientId: 'c' })).capabilities,
+    ).toEqual({ canSend: true, canCancel: false, actions: true });
+    expect(
+      (await provider.getSession('session-1', { clientId: 'c' })).capabilities,
+    ).toEqual({ canSend: true, canCancel: false });
+  });
 });

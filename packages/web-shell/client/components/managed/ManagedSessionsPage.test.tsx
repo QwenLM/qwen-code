@@ -28,6 +28,8 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useWorkspace: mocks.useWorkspace,
+  // The shared approval card asks whether a tool is an agent launch.
+  isAgentTool: () => false,
 }));
 vi.mock('../MessageList', () => ({
   MessageList: ({
@@ -173,6 +175,72 @@ describe('ManagedSessionsPage', () => {
       await flush();
     });
   }
+
+  it('shows a pending Hosted approval and answers it with the chosen option', async () => {
+    mocks.client.getSession.mockImplementation(async (id: string) =>
+      summary(id, {
+        phase: 'agent_running',
+        capabilities: { canSend: false, canCancel: true, actions: true },
+      }),
+    );
+    const action = {
+      actionId: 'tool_approval_1',
+      sessionId: 's1',
+      turnId: 'p1',
+      functionCallId: 'call-1',
+      toolName: 'write_file',
+      inputRevision: 1,
+      policyRevision: 'hosted-tool-approval/1',
+      expiresAt: Date.now() + 600_000,
+      options: [
+        { id: 'allow', label: 'Allow' },
+        { id: 'deny', label: 'Deny' },
+      ],
+    };
+    const listPending = vi
+      .fn()
+      .mockResolvedValueOnce([action])
+      .mockResolvedValue([]);
+    const respond = vi.fn().mockResolvedValue(undefined);
+    provider = { ...provider, actions: { listPending, respond } };
+
+    await render('s1');
+    await act(async () => flush());
+
+    const card = container.querySelector('[data-testid="managed-approval"]');
+    expect(card).not.toBeNull();
+    const allow = Array.from(card!.querySelectorAll('button')).find(
+      (button) => button.textContent?.includes('Yes, allow once'),
+    );
+    expect(allow).toBeDefined();
+    await act(async () => {
+      allow!.click();
+      await flush();
+    });
+
+    expect(respond).toHaveBeenCalledWith(action, 'allow', {
+      clientId: expect.any(String),
+      idempotencyKey: 'tool_approval_1:allow',
+    });
+    expect(
+      container.querySelector('[data-testid="managed-approval"]'),
+    ).toBeNull();
+  });
+
+  it('does not read approvals for a Session without the actions capability', async () => {
+    const listPending = vi.fn().mockResolvedValue([]);
+    provider = {
+      ...provider,
+      actions: { listPending, respond: vi.fn() },
+    };
+
+    await render('s1');
+
+    expect(listPending).not.toHaveBeenCalled();
+    expect(
+      container.querySelector('[data-testid="managed-approval"]'),
+    ).toBeNull();
+  });
 
   it('uses an explicit Java provider without daemon Managed capabilities', async () => {
     mocks.features = [];
