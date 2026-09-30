@@ -43,14 +43,24 @@ function renderError(error: Error): string {
       );
       // Native cause/errors are data properties. Do not execute user getters.
       const errors = Object.getOwnPropertyDescriptor(value, 'errors')?.value;
-      if (Array.isArray(errors) && errors.length > 0) {
+      let length = 0;
+      try {
+        length = Array.isArray(errors) ? Number(errors.length) : 0;
+      } catch {
+        append(' [errors: [unrenderable object]]');
+      }
+      if (length > 0) {
         append(' [errors: ');
-        const count = Math.min(errors.length, 8);
+        const count = Math.min(length, 8);
         for (let i = 0; i < count; i++) {
           if (i > 0) append('; ');
-          visit(errors[i], depth + 1);
+          try {
+            visit(errors[i], depth + 1);
+          } catch {
+            append('[unrenderable object]');
+          }
         }
-        if (errors.length > count) append('; … (truncated)');
+        if (length > count) append('; … (truncated)');
         append(']');
       }
       const cause = Object.getOwnPropertyDescriptor(value, 'cause')?.value;

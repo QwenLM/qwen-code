@@ -176,6 +176,75 @@ describe('workflow result formatting', () => {
     },
   );
 
+  it('isolates throwing aggregate member reads and retains later reasons', () => {
+    const aggregate = new AggregateError(
+      [new Error('before'), new Error('unreadable'), new Error('after')],
+      'batch failed',
+      { cause: new Error('root cause') },
+    );
+    Object.defineProperty(aggregate.errors, '1', {
+      get() {
+        throw new Error('cannot read member');
+      },
+    });
+    const expected =
+      'AggregateError: batch failed [errors: Error: before; [unrenderable object]; Error: after] [cause: Error: root cause]';
+    for (const pretty of [false, true]) {
+      expect(stringifyWorkflowResult(aggregate, pretty)).toBe(expected);
+      expect(
+        JSON.parse(
+          stringifyWorkflowResult(
+            { marker: 'DONE', failed: ['fr'], error: aggregate },
+            pretty,
+          ),
+        ),
+      ).toEqual({ marker: 'DONE', failed: ['fr'], error: expected });
+    }
+  });
+
+  it.each(['throwing length', 'throwing length coercion', 'revoked array'])(
+    'retains the cause and surrounding result with a %s errors container',
+    (failure) => {
+      const aggregate = new AggregateError([], 'batch failed', {
+        cause: new Error('root cause'),
+      });
+      if (failure !== 'revoked array') {
+        aggregate.errors = new Proxy([new Error('unreadable')], {
+          get(target, key, receiver) {
+            if (key === 'length') {
+              if (failure === 'throwing length') {
+                throw new Error('cannot read length');
+              }
+              return {
+                [Symbol.toPrimitive]() {
+                  throw new Error('cannot convert length');
+                },
+              };
+            }
+            return Reflect.get(target, key, receiver);
+          },
+        });
+      } else {
+        const { proxy, revoke } = Proxy.revocable([], {});
+        aggregate.errors = proxy;
+        revoke();
+      }
+      const expected =
+        'AggregateError: batch failed [errors: [unrenderable object]] [cause: Error: root cause]';
+      for (const pretty of [false, true]) {
+        expect(stringifyWorkflowResult(aggregate, pretty)).toBe(expected);
+        expect(
+          JSON.parse(
+            stringifyWorkflowResult(
+              { marker: 'DONE', failed: ['fr'], error: aggregate },
+              pretty,
+            ),
+          ),
+        ).toEqual({ marker: 'DONE', failed: ['fr'], error: expected });
+      }
+    },
+  );
+
   it('caps rendered errors without splitting Unicode and skips cause getters', () => {
     const error = new Error('🙂'.repeat(5_000));
     const text = stringifyWorkflowResult(error);
