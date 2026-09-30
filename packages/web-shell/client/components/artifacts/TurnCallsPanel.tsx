@@ -686,40 +686,39 @@ const TurnCallRowItem = memo(function TurnCallRowItem({
     2000,
   );
   const isShell = isShellToolName(tool.toolName);
-  const { diff, diffRebuilt, shell, argumentsText, resultText } =
-    useMemo(() => {
-      if (!expanded)
-        return {
-          diff: '',
-          diffRebuilt: false,
-          argumentsText: '',
-          resultText: '',
-        };
-      // One ladder walk for both the rendered diff and the note verdict.
-      const resolved = editTool ? resolveDiffAnnotation(tool) : null;
-      const diff = resolved?.diff ?? '';
-      const diffRebuilt = resolved?.rebuilt ?? false;
-      const shell = isShell ? shellDetails(tool) : undefined;
+  const { diff, noteKey, shell, argumentsText, resultText } = useMemo(() => {
+    if (!expanded)
       return {
-        diff,
-        diffRebuilt,
-        shell,
-        argumentsText: shell ? shell.command : stringifyValue(block.rawInput),
-        resultText: diff
-          ? ''
-          : shell
-            ? shell.output
-            : stringifyValue(block.rawOutput ?? block.content),
+        diff: '',
+        noteKey: null,
+        argumentsText: '',
+        resultText: '',
       };
-    }, [
-      expanded,
-      editTool,
-      isShell,
-      tool,
-      block.rawInput,
-      block.rawOutput,
-      block.content,
-    ]);
+    // One ladder walk for both the rendered diff and the note copy.
+    const resolved = editTool ? resolveDiffAnnotation(tool) : null;
+    const diff = resolved?.diff ?? '';
+    const noteKey = resolved?.noteKey ?? null;
+    const shell = isShell ? shellDetails(tool) : undefined;
+    return {
+      diff,
+      noteKey,
+      shell,
+      argumentsText: shell ? shell.command : stringifyValue(block.rawInput),
+      resultText: diff
+        ? ''
+        : shell
+          ? shell.output
+          : stringifyValue(block.rawOutput ?? block.content),
+    };
+  }, [
+    expanded,
+    editTool,
+    isShell,
+    tool,
+    block.rawInput,
+    block.rawOutput,
+    block.content,
+  ]);
   const hasDetails = Boolean(
     isShell ||
       block.rawInput != null ||
@@ -870,9 +869,9 @@ const TurnCallRowItem = memo(function TurnCallRowItem({
               {diff ? (
                 <>
                   <DiffView diff={diff.slice(0, MAX_DETAIL_LENGTH)} />
-                  {diffRebuilt && (
+                  {noteKey && (
                     <p className={toolChromeStyles.expandedCardDetail}>
-                      {t('toolGroup.diffRebuiltFromArgs')}
+                      {t(noteKey)}
                     </p>
                   )}
                   {diff.length > MAX_DETAIL_LENGTH && (

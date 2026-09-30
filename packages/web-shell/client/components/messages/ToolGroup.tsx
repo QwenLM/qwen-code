@@ -234,10 +234,6 @@ export function resolveDiff(tool: ACPToolCall): {
   return { diff: '', source: 'none' };
 }
 
-export function extractDiff(tool: ACPToolCall): string {
-  return resolveDiff(tool).diff;
-}
-
 export function getRawFileDiff(tool: ACPToolCall): string {
   if (tool.rawOutput && typeof tool.rawOutput === 'object') {
     const raw = tool.rawOutput as Record<string, unknown>;
@@ -254,46 +250,53 @@ function isTruncatedSessionDiff(raw: Record<string, unknown>): boolean {
 }
 
 /**
- * The gate and edit-shape clause the reconstruction note adds on top of
- * resolveDiff's source verdict, keyed on what the note actually describes:
+ * The copy key the reconstruction note renders for a source, or null when
+ * that render needs no note. Keyed on what the note actually describes:
  * the rendered diff carries no `@@` header, so its gutter counts from 0
- * within the diff text rather than the file. Both buildUnifiedDiff sources
- * — the content block and the argument rebuild — render that way;
- * recorded diffs and `patch` arguments keep their real hunk headers. The
- * edit-shape clause requires a non-empty old text (the content block's,
- * or the arguments' for a rebuild): an empty old text is this repo's
- * convention for a file creation, whose rebuild spans the entire file and
- * has no replace_all, so it stays unannotated. Argument rebuilds are the
- * one source that doubles as an approval-time preview, so those are gated
- * to completed calls; a content block is server-provided and is annotated
- * whenever it renders.
+ * within the shown text rather than the file. The two headerless
+ * buildUnifiedDiff sources get different copy because they differ in what
+ * is true of them: an argument rebuild renders the edit snippet, so its
+ * replace_all clause applies, while a content block is built from the
+ * tool result's recorded file bodies and claims nothing about the
+ * arguments. The edit-shape clause requires a non-empty old text (the
+ * content block's, or the arguments' for a rebuild): an empty old text is
+ * this repo's convention for a file creation, whose rebuild spans the
+ * entire file and has no replace_all, so it stays unannotated. Argument
+ * rebuilds are the one source that doubles as an approval-time preview,
+ * so those are gated to completed calls; a content block is
+ * server-provided and is annotated whenever it renders.
  */
-function isAnnotatedDiffSource(tool: ACPToolCall, source: DiffSource): boolean {
+function annotationNoteKey(
+  tool: ACPToolCall,
+  source: DiffSource,
+): string | null {
   if (source === 'content-block') {
     const diffBlock = tool.content?.find((b) => b.type === 'diff');
-    return Boolean(diffBlock?.oldText);
+    return diffBlock?.oldText ? 'toolGroup.diffRenderedHeaderless' : null;
   }
   if (source === 'rebuilt-from-args') {
-    if (tool.status !== 'completed' || tool.wasCancelled) return false;
+    if (tool.status !== 'completed' || tool.wasCancelled) return null;
     const oldText = tool.args?.oldText ?? tool.args?.old_string;
-    return typeof oldText === 'string' && oldText !== '';
+    return typeof oldText === 'string' && oldText !== ''
+      ? 'toolGroup.diffRebuiltFromArgs'
+      : null;
   }
-  return false;
+  return null;
 }
 
 /**
- * Resolve the diff and its annotation verdict in a single ladder walk, so
+ * Resolve the diff and its annotation copy key in a single ladder walk, so
  * a surface that renders both never re-runs the source resolution (the
  * rebuild's LCS is the expensive half).
  */
 export function resolveDiffAnnotation(tool: ACPToolCall): {
   diff: string;
-  rebuilt: boolean;
+  noteKey: string | null;
 } {
   const resolved = resolveDiff(tool);
   return {
     diff: resolved.diff,
-    rebuilt: isAnnotatedDiffSource(tool, resolved.source),
+    noteKey: annotationNoteKey(tool, resolved.source),
   };
 }
 
@@ -371,9 +374,9 @@ export function fencedCodeBlock(language: string, code: string): string {
 function ExpandedEditContent({ tool }: { tool: ACPToolCall }) {
   const { t } = useI18n();
   // One resolveDiff walk per tool change: the rendered diff and the note
-  // verdict come from the same pass, so a streaming re-render never
-  // re-runs the source ladder (its LCS is the expensive half).
-  const { diff, rebuilt } = useMemo(() => resolveDiffAnnotation(tool), [tool]);
+  // copy come from the same pass, so a streaming re-render never re-runs
+  // the source ladder (its LCS is the expensive half).
+  const { diff, noteKey } = useMemo(() => resolveDiffAnnotation(tool), [tool]);
   const text = useMemo(
     () => (tool.content ? extractText(tool) || '' : ''),
     [tool],
@@ -384,11 +387,7 @@ function ExpandedEditContent({ tool }: { tool: ACPToolCall }) {
       {diff ? (
         <>
           <DiffView diff={diff} />
-          {rebuilt && (
-            <p className={styles.expandedCardDetail}>
-              {t('toolGroup.diffRebuiltFromArgs')}
-            </p>
-          )}
+          {noteKey && <p className={styles.expandedCardDetail}>{t(noteKey)}</p>}
         </>
       ) : (
         <pre className={styles.expandedOutput}>{text}</pre>

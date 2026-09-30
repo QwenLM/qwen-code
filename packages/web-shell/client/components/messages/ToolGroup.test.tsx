@@ -35,7 +35,6 @@ vi.mock('../../WebShellContexts', async () => {
 });
 
 const {
-  extractDiff,
   fencedCodeBlock,
   formatSingleToolSummary,
   formatToolGroupSummary,
@@ -44,10 +43,15 @@ const {
   getToolHeaderKind,
   isWebFetchToolName,
   languageForPath,
+  resolveDiffAnnotation,
   shouldAutoExpand,
   ToolGroup,
   ToolLine,
 } = await import('./ToolGroup');
+
+// The extraction ladder is exercised through the production API; these
+// cases assert the diff string each rung resolves to.
+const extractDiff = (tool: ACPToolCall) => resolveDiffAnnotation(tool).diff;
 
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -3095,9 +3099,8 @@ describe('rebuilt edit diff annotation', () => {
       ],
     });
     expect(container.textContent).toContain('const a = 2;');
-    expect(container.textContent).toContain(
-      'Diff rebuilt from the tool call arguments',
-    );
+    expect(container.textContent).toContain('Rendered without hunk headers');
+    expect(container.textContent).not.toContain('tool call arguments');
   });
 
   it('keeps a real patch argument unannotated', () => {
@@ -3122,9 +3125,8 @@ describe('rebuilt edit diff annotation', () => {
       ],
     });
     expect(container.textContent).toContain('const a = 2;');
-    expect(container.textContent).toContain(
-      'Diff rebuilt from the tool call arguments',
-    );
+    expect(container.textContent).toContain('Rendered without hunk headers');
+    expect(container.textContent).not.toContain('tool call arguments');
   });
 
   it('does not annotate an in-flight edit preview', () => {
