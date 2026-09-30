@@ -8,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.alibaba.fastjson2.JSON;
 import com.alibaba.fastjson2.JSONObject;
 import java.io.IOException;
 import java.nio.file.Files;
@@ -87,6 +88,10 @@ class ContextInstallationFaultGateTest {
         assertEquals(1, proxy.count("context"));
         assertEquals(1, proxy.count("activation"));
         assertEquals(1, proxy.count("execute"));
+        int beforeRelease = proxy.exchanges().size();
+        assertEquals(Boolean.TRUE, broker.release(HARNESS, SESSION).requireOk().value());
+        assertEquals(List.of("control", "activation"), proxy.exchanges().stream()
+                .skip(beforeRelease).map(FaultProxy.Exchange::operation).toList());
     }
 
     @ParameterizedTest
@@ -244,7 +249,7 @@ class ContextInstallationFaultGateTest {
     }
 
     @Test
-    void aReplacementWorkerRunsNothingUntilItsOwnContextIsInstalled()
+    void aLostManagedWorkerKeepsItsContextAndWriterDomainPinned()
             throws Exception {
         FaultProxy proxy = rig.proxy();
         BrokerProcess broker = rig.broker("broker", proxy,
@@ -255,25 +260,20 @@ class ContextInstallationFaultGateTest {
 
         rig.killWorker(broker);
 
-        // The dead generation is retired; the next one starts a new worker
-        // whose memory holds no installation.
-        FaultGateRig.await(() -> broker.warm(HARNESS), BrokerProcess.Reply::ok,
-                "a new generation");
-        RuntimeBindingRecord replacement = rig.activeBinding();
-        assertTrue(replacement.getGeneration() > dead.getGeneration());
-        broker.acquire(HARNESS, NEXT_SESSION).requireOk();
-        assertEquals(2, proxy.count("context"));
-
-        // The old Session's tool reaches the new worker, which has no
-        // context for it and refuses it instead of running it elsewhere.
-        assertRefused(replacement.getLease(), SESSION);
-
-        String execution = create(broker, NEXT_SESSION);
-        rig.awaitExecution(execution, ToolExecutionRecord::isSettled,
-                "settled execution");
-        assertEquals("success", rig.execution(execution)
-                .getExecutionStatus());
-        assertEquals(List.of(rig.directory.toString()), rig.runs());
+        assertFalse(broker.warm(HARNESS).ok());
+        assertEquals("runtime_broker_runtime_lost", FaultGateRig.await(
+                () -> broker.warm(HARNESS),
+                reply -> !"runtime_provision_fenced".equals(reply.code()),
+                "managed worker loss after recovery fencing").code());
+        assertEquals(dead.getBindingId(), rig.activeBinding().getBindingId());
+        assertEquals(RuntimeBindingRecord.State.LOST, rig.activeBinding().getState());
+        assertNull(rig.activeBinding().getStopEvidence());
+        assertFalse(broker.acquire(HARNESS, NEXT_SESSION).ok());
+        assertFalse(broker.release(HARNESS, SESSION).ok());
+        assertEquals(1, proxy.count("context"));
+        assertEquals(0, proxy.count("execute"));
+        assertTrue(broker.workers().isEmpty());
+        assertTrue(rig.runs().isEmpty());
     }
 
     @ParameterizedTest
@@ -380,11 +380,12 @@ class ContextInstallationFaultGateTest {
 
     /** A tool of the Session, sent straight to the worker, is refused. */
     private void assertRefused(RuntimeLease lease, String session) {
+        FaultGateRig.ToolCall call = FaultGateRig.shell(session, "stray", rig.recordRun());
         ExecutionException refused = assertThrows(ExecutionException.class,
                 () -> new HttpRuntimeTransport().execute(lease,
                         new RuntimeSession(HARNESS, session, "bootstrap",
                                 rig.scope),
-                        FaultGateRig.shell(session, "stray", rig.recordRun()))
+                        call.reference(), JSON.parseObject(call.payloadJson()))
                         .toCompletableFuture().get(30, TimeUnit.SECONDS));
         RuntimeBrokerException refusal =
                 (RuntimeBrokerException) refused.getCause();

@@ -54,7 +54,7 @@ import type {
   WebShellComposerToolbarRenderInfo,
 } from './customization';
 import { serializeContextUsageMessage } from './components/messages/ContextUsageMessage';
-import { serializeStatsMessage } from './components/messages/StatsMessage';
+import { createStatsMessageData } from './components/messages/StatsMessage';
 import { serializeStatusMessage } from './components/messages/StatusMessage';
 import { loadSplitSessions, saveSplitSessions } from './utils/splitUrl';
 import { StandaloneContext } from './config/standalone';
@@ -1475,12 +1475,16 @@ vi.mock('./components/dialogs/ModelDialog', async () => {
       mode?: string;
       models?: Array<{ id: string }>;
       onSelect?: (id: string) => void;
+      currentModelId?: string;
     }) =>
       React.createElement(
         'button',
         {
           'data-testid': 'model-select',
           type: 'button',
+          ...(props.currentModelId !== undefined
+            ? { 'data-current-model-id': props.currentModelId }
+            : {}),
           onClick: () => {
             const id =
               props.mode === 'voice' ? props.models?.[0]?.id : 'fast-model-x';
@@ -1554,6 +1558,7 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
     WebShellSidebar: (props: {
       collapsed?: boolean;
       onOpenSettings?: () => void;
+      onOpenAgents?: (view?: 'agents' | 'tasks') => void;
       onOpenPlugins?: () => void;
       onOpenChannels?: () => void;
       onOpenDaemonStatus?: () => void;
@@ -1595,6 +1600,7 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
           ),
           'data-show-live': String(props.showLive),
           'data-project-features-enabled': String(props.projectFeaturesEnabled),
+          'data-has-open-agents': String(Boolean(props.onOpenAgents)),
           'data-has-git-diff': String(Boolean(props.onOpenGitDiff)),
           'data-has-commit': String(Boolean(props.onOpenCommit)),
           'data-can-open-sessions-overview': String(
@@ -2525,6 +2531,23 @@ vi.doMock('./components/terminal/TerminalPanel', async () => {
       }),
   };
 });
+vi.doMock(
+  './components/workspace-agents/ThreadsRoute',
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import('./components/workspace-agents/ThreadsRoute')
+      >();
+    const React = await import('react');
+    return {
+      ...actual,
+      ThreadsRoute: () =>
+        React.createElement('div', {
+          'data-testid': 'workspace-agent-thread-route',
+        }),
+    };
+  },
+);
 mockComponent('./components/QueuedPromptDisplay', 'QueuedPromptDisplay');
 
 const {
@@ -14435,52 +14458,60 @@ describe('App shell command queueing', () => {
 });
 
 describe('App read-only local commands mid-turn', () => {
-  it('runs /stats immediately while streaming and skips the echo', async () => {
-    const statsFixture: DaemonSessionStatsStatus = {
-      v: 1,
-      sessionId: 'session-1',
-      workspaceCwd: '/tmp/project',
-      sessionStartTimeMs: 1000,
-      durationMs: 42000,
-      promptCount: 2,
-      models: {},
-      tools: {
-        totalCalls: 1,
-        totalSuccess: 1,
-        totalFail: 0,
-        totalDurationMs: 120,
-        byName: {},
-      },
-      files: { totalLinesAdded: 3, totalLinesRemoved: 1 },
-      sources: [],
-    };
-    mockSessionActions.getStats.mockResolvedValue(statsFixture);
-    const { rerender } = renderApp({});
-    await flush();
+  it.each([
+    ['/stats', 'overview'],
+    ['/stats model', 'model'],
+    ['/stats tools', 'tools'],
+  ] as const)(
+    'runs %s immediately while streaming and skips the echo',
+    async (command, view) => {
+      const statsFixture: DaemonSessionStatsStatus = {
+        v: 1,
+        sessionId: 'session-1',
+        workspaceCwd: '/tmp/project',
+        sessionStartTimeMs: 1000,
+        durationMs: 42000,
+        promptCount: 2,
+        models: {},
+        tools: {
+          totalCalls: 1,
+          totalSuccess: 1,
+          totalFail: 0,
+          totalDurationMs: 120,
+          byName: {},
+        },
+        files: { totalLinesAdded: 3, totalLinesRemoved: 1 },
+        sources: [],
+      };
+      mockSessionActions.getStats.mockResolvedValue(statsFixture);
+      const { rerender } = renderApp({});
+      await flush();
 
-    act(() => {
-      testState.streamingState = 'responding';
-      rerender({});
-    });
-
-    let accepted: boolean | void;
-    await act(async () => {
-      accepted = testState.latestChatEditorProps?.onSubmit('/stats');
-      await vi.waitFor(() => {
-        expect(mockSessionActions.getStats).toHaveBeenCalled();
+      act(() => {
+        testState.streamingState = 'responding';
+        rerender({});
       });
-    });
 
-    expect(accepted).toBe(true);
-    expect(mockStore.appendLocalUserMessage).not.toHaveBeenCalled();
-    expect(mockStore.dispatch).toHaveBeenCalledWith([
-      expect.objectContaining({
-        type: 'status',
-        clearActiveText: false,
-        text: serializeStatsMessage(statsFixture, 'overview'),
-      }),
-    ]);
-  });
+      let accepted: boolean | void;
+      await act(async () => {
+        accepted = testState.latestChatEditorProps?.onSubmit(command);
+        await vi.waitFor(() => {
+          expect(mockSessionActions.getStats).toHaveBeenCalled();
+        });
+      });
+
+      expect(accepted).toBe(true);
+      expect(mockStore.appendLocalUserMessage).not.toHaveBeenCalled();
+      expect(mockStore.dispatch).toHaveBeenCalledWith([
+        expect.objectContaining({
+          type: 'status',
+          clearActiveText: false,
+          text: 'Session Stats',
+          data: createStatsMessageData(statsFixture, view),
+        }),
+      ]);
+    },
+  );
 
   it('echoes /stats when idle', async () => {
     renderApp({});
@@ -14726,6 +14757,181 @@ describe('App read-only local commands mid-turn', () => {
 });
 
 describe('App session callbacks', () => {
+  it('submits the selected isolation when the daemon preflight allows a worktree', async () => {
+    Object.assign(mockWorkspace.capabilities, {
+      features: ['session_branch_worktree'],
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+      ],
+    });
+    const workspaceGit = vi.fn().mockResolvedValue({
+      v: 2,
+      workspaceCwd: '/tmp/project',
+      branch: 'main',
+      worktreeSupported: true,
+    });
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit,
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    const { container, rerender } = renderApp();
+    await flush();
+    await flush();
+
+    await act(async () => {
+      await testState.latestMessageListProps?.onBranchSession?.('checkpoint-1');
+    });
+
+    expect(
+      container
+        .querySelector('[role="radio"][value="current"]')
+        ?.getAttribute('data-state'),
+    ).toBe('checked');
+    await act(async () => {
+      Array.from(container.querySelectorAll('button'))
+        .find((button) => button.textContent === 'Branch')
+        ?.click();
+      await vi.waitFor(() => {
+        expect(mockSessionActions.branchSession).toHaveBeenCalledWith({
+          atRecordId: 'checkpoint-1',
+        });
+      });
+    });
+
+    mockSessionActions.branchSession.mockClear();
+    await act(async () => {
+      await testState.latestMessageListProps?.onBranchSession?.('checkpoint-1');
+    });
+    const worktree = container.querySelector<HTMLButtonElement>(
+      '[role="radio"][value="worktree"]',
+    );
+    expect(worktree).not.toBeNull();
+    act(() => worktree?.click());
+    await act(async () => {
+      Array.from(container.querySelectorAll('button'))
+        .find((button) => button.textContent === 'Branch')
+        ?.click();
+      await vi.waitFor(() => {
+        expect(mockSessionActions.branchSession).toHaveBeenCalledWith({
+          atRecordId: 'checkpoint-1',
+          worktree: {},
+        });
+      });
+    });
+
+    mockSessionActions.branchSession.mockClear();
+    await act(async () => {
+      await testState.latestMessageListProps?.onBranchSession?.('checkpoint-3');
+    });
+    expect(container.querySelector('[role="radio"]')).not.toBeNull();
+    mockConnection.sessionId = 'session-2';
+    rerender();
+    expect(container.querySelector('[role="radio"]')).toBeNull();
+    expect(mockSessionActions.branchSession).not.toHaveBeenCalled();
+    mockConnection.sessionId = 'session-1';
+    rerender();
+    await flush();
+
+    workspaceGit.mockResolvedValueOnce({
+      v: 2,
+      workspaceCwd: '/tmp/project',
+      branch: 'main',
+      worktreeSupported: false,
+    });
+    await act(async () => {
+      await testState.latestMessageListProps?.onBranchSession?.('checkpoint-2');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.branchSession).toHaveBeenCalledWith({
+          atRecordId: 'checkpoint-2',
+        });
+      });
+    });
+    expect(container.querySelector('[role="radio"]')).toBeNull();
+  });
+
+  it('does not let an older branch request close a newer session dialog', async () => {
+    Object.assign(mockWorkspace.capabilities, {
+      features: ['session_branch_worktree'],
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+      ],
+    });
+    const workspaceGit = vi.fn().mockResolvedValue({
+      v: 2,
+      workspaceCwd: '/tmp/project',
+      branch: 'main',
+      worktreeSupported: true,
+    });
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit,
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    const branch = deferred<{
+      sessionId: string;
+      displayName: string;
+      switchStarted: boolean;
+    }>();
+    mockSessionActions.branchSession
+      .mockReturnValueOnce(branch.promise)
+      .mockResolvedValue({
+        sessionId: 'branch-b',
+        displayName: 'Branch B',
+        switchStarted: false,
+      });
+    const { container, rerender } = renderApp();
+    await flush();
+    await flush();
+
+    await act(async () => {
+      await testState.latestMessageListProps?.onBranchSession?.('checkpoint-a');
+    });
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('[role="radio"][value="worktree"]')
+        ?.click();
+    });
+    act(() => {
+      Array.from(container.querySelectorAll('button'))
+        .find((button) => button.textContent === 'Branch')
+        ?.click();
+    });
+
+    act(() => {
+      mockConnection.sessionId = 'session-2';
+      rerender();
+    });
+    await flush();
+    await act(async () => {
+      await testState.latestMessageListProps?.onBranchSession?.('checkpoint-b');
+    });
+    expect(workspaceGit).toHaveBeenCalledWith({
+      cwd: undefined,
+      sessionId: 'session-2',
+    });
+    expect(container.querySelector('[role="radio"]')).not.toBeNull();
+
+    await act(async () => {
+      branch.resolve({
+        sessionId: 'branch-a',
+        displayName: 'Branch A',
+        switchStarted: false,
+      });
+      await branch.promise;
+    });
+
+    expect(container.querySelector('[role="radio"]')).not.toBeNull();
+  });
+
   it('forwards an Assistant checkpoint and returns the pending branch request', async () => {
     const branch = deferred<{
       sessionId: string;
@@ -14745,10 +14951,9 @@ describe('App session callbacks', () => {
         testState.latestMessageListProps?.onBranchSession?.('checkpoint-1');
     });
 
-    expect(mockSessionActions.branchSession).toHaveBeenCalledWith(
-      undefined,
-      'checkpoint-1',
-    );
+    expect(mockSessionActions.branchSession).toHaveBeenCalledWith({
+      atRecordId: 'checkpoint-1',
+    });
     expect(request!).toBeInstanceOf(Promise);
     expect(duplicate).toBe(request);
     expect(mockSessionActions.branchSession).toHaveBeenCalledTimes(1);
@@ -14829,6 +15034,51 @@ describe('App session callbacks', () => {
     ]);
   });
 
+  it('refreshes the source catalog after a late worktree activation failure', async () => {
+    const { DaemonHttpError } = await import('@qwen-code/sdk/daemon');
+    let rejectBranch!: (error: unknown) => void;
+    mockSessionActions.branchSession.mockReturnValue(
+      new Promise((_resolve, reject) => {
+        rejectBranch = reject;
+      }),
+    );
+    const onToast = vi.fn();
+    const { rerender } = renderApp({ onToast });
+    await flush();
+
+    let request: void | Promise<void>;
+    act(() => {
+      request =
+        testState.latestMessageListProps?.onBranchSession?.('checkpoint-1');
+    });
+    act(() => {
+      mockConnection.sessionId = 'session-2';
+      mockConnection.workspaceCwd = '/tmp/other-project';
+      rerender({ onToast });
+    });
+    await act(async () => {
+      rejectBranch(
+        new DaemonHttpError(
+          500,
+          {
+            code: 'branch_worktree_activation_failed',
+            sessionId: 'branch-1',
+          },
+          'Activation failed',
+        ),
+      );
+      await request;
+    });
+
+    expect(sessionCatalogController.invalidateWorkspace).toHaveBeenCalledWith(
+      '/tmp/project',
+    );
+    expect(onToast).toHaveBeenCalledWith(
+      'error',
+      'The branched session was created, but its worktree could not be opened automatically. Reopen it from the session list.',
+    );
+  });
+
   it('reloads the transcript when a historical checkpoint becomes stale', async () => {
     const { DaemonHttpError } = await import('@qwen-code/sdk/daemon');
     mockConnection.capabilities.features = ['session_transcript_pagination'];
@@ -14849,10 +15099,9 @@ describe('App session callbacks', () => {
       );
     });
 
-    expect(mockSessionActions.branchSession).toHaveBeenCalledWith(
-      undefined,
-      'stale-checkpoint',
-    );
+    expect(mockSessionActions.branchSession).toHaveBeenCalledWith({
+      atRecordId: 'stale-checkpoint',
+    });
     expect(mockSessionActions.reloadSession).toHaveBeenCalledWith(
       expect.any(AbortSignal),
     );
@@ -14880,10 +15129,9 @@ describe('App session callbacks', () => {
       request =
         testState.latestMessageListProps?.onBranchSession?.('stale-checkpoint');
     });
-    expect(mockSessionActions.branchSession).toHaveBeenCalledWith(
-      undefined,
-      'stale-checkpoint',
-    );
+    expect(mockSessionActions.branchSession).toHaveBeenCalledWith({
+      atRecordId: 'stale-checkpoint',
+    });
 
     // The user switches to another session before the branch call returns.
     act(() => {
@@ -20259,8 +20507,14 @@ describe('App session callbacks', () => {
     // background recomputation lands (no SSE exists before the first
     // prompt). Both share one daemon-side `git status` computation.
     await vi.waitFor(() => {
-      expect(workspaceGit).toHaveBeenCalledWith({ cwd: undefined });
-      expect(workspaceGit).toHaveBeenCalledWith({ wait: true });
+      expect(workspaceGit).toHaveBeenCalledWith({
+        cwd: undefined,
+        sessionId: undefined,
+      });
+      expect(workspaceGit).toHaveBeenCalledWith({
+        wait: true,
+        sessionId: undefined,
+      });
     });
   });
 
@@ -20336,7 +20590,10 @@ describe('App session callbacks', () => {
     // The worktree session status lands and the git effect re-runs with the
     // worktree path.
     await vi.waitFor(() => {
-      expect(workspaceGit).toHaveBeenCalledWith({ cwd: worktreePath });
+      expect(workspaceGit).toHaveBeenCalledWith({
+        cwd: worktreePath,
+        sessionId: 'session-1',
+      });
     });
 
     // After the worktree cwd call, no wait:true call should follow — worktree
@@ -21901,6 +22158,58 @@ describe('App session callbacks', () => {
       ]);
     },
   );
+
+  it('releases the Skill fallback after a pure declaration-only mutation', async () => {
+    mockWorkspaceActions.loadSkillsStatus.mockResolvedValue({
+      skills: [
+        {
+          name: 'locked',
+          status: 'disabled',
+          disabledReason: 'hard',
+          lockedScope: 'user',
+        },
+        { name: 'other', description: 'Other skill', status: 'ok' },
+      ],
+    });
+    mockConnection.commands = [skillCommandFixture('other', 'Other skill')];
+    mockConnection.skills = ['other'];
+    const { rerender } = renderApp();
+    await flush();
+    await openComposerSkills();
+
+    emitPartialSkillMutation('enable-pure-declaration', [
+      { name: 'locked', enabled: true },
+    ]);
+    rerender();
+    await vi.waitFor(() => {
+      expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledTimes(1);
+    });
+    await flush();
+    expect(testState.latestChatEditorProps?.skills).toEqual([
+      { name: 'other', description: 'Other skill' },
+    ]);
+
+    mockConnection.commands = [
+      skillCommandFixture('other', 'Other skill'),
+      skillCommandFixture('late', 'Late session skill'),
+    ];
+    mockConnection.skills = ['other', 'late'];
+    rerender();
+    await flush();
+    expect(testState.latestChatEditorProps?.skills).toEqual([
+      { name: 'late', description: 'Late session skill' },
+      { name: 'other', description: 'Other skill' },
+    ]);
+
+    emitSkillMutation(
+      'applied-after-pure',
+      [{ name: 'other', enabled: true }],
+      'applied',
+    );
+    rerender();
+    await flush();
+    expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledTimes(1);
+  });
 
   it('removes declaration-only enables from a mixed pending mutation', async () => {
     const lockedStatus = {
@@ -37427,6 +37736,39 @@ describe('App session callbacks', () => {
     expect(settingsReload).toHaveBeenCalled();
   });
 
+  it('decodes a pinned fastModel setting before opening the fast-model picker (#12760)', async () => {
+    // The CLI picker persists `authType:id\0<baseUrl>`; handing the raw value
+    // to the dialog makes currentIdx -1 (no registry id can contain NUL), so
+    // the picker highlights an unrelated row and Enter erases the pin.
+    const pinned = 'openai:shared-fast\0https://free-quota.example.com/v1';
+    testState.settings = [
+      {
+        key: 'fastModel',
+        values: { effective: pinned, workspace: pinned },
+      } as DaemonSettingDescriptor,
+    ];
+    const { container } = renderApp();
+    await flush();
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-fast-model"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+
+    const select = container.querySelector<HTMLButtonElement>(
+      '[data-testid="model-select"]',
+    );
+    expect(select?.getAttribute('data-current-model-id')).toBe(
+      'shared-fast(openai)',
+    );
+  });
+
   it.each([
     ['fast-model selection', ['open-fast-model', 'model-select']],
     ['settings language change', ['change-language-workspace']],
@@ -43469,6 +43811,47 @@ it('runtime-stop does not leak shell drain lock', async () => {
   expect(mockSessionActions.sendShellCommand).toHaveBeenCalledWith(
     'second-after-resume',
   );
+});
+
+it('does not restore a workspace-agent thread when collaboration is disabled', async () => {
+  sessionStorage.setItem(
+    'qwen:team-conversation',
+    JSON.stringify({
+      id: 'thread-1',
+      cwd: '/tmp/project',
+      server: mockWorkspace.baseUrl,
+    }),
+  );
+
+  const { container, rerender } = renderApp();
+  await flush();
+
+  expect(
+    container.querySelector('[data-testid="workspace-agent-thread-route"]'),
+  ).toBeNull();
+  expect(
+    container
+      .querySelector('[data-testid="sidebar"]')
+      ?.getAttribute('data-has-open-agents'),
+  ).toBe('false');
+
+  mockWorkspace.capabilities = {
+    ...mockWorkspace.capabilities,
+    features: ['agent_collaboration_v1'],
+  };
+  rerender();
+  await act(async () => {
+    await vi.dynamicImportSettled();
+  });
+
+  expect(
+    container.querySelector('[data-testid="workspace-agent-thread-route"]'),
+  ).not.toBeNull();
+  expect(
+    container
+      .querySelector('[data-testid="sidebar"]')
+      ?.getAttribute('data-has-open-agents'),
+  ).toBe('true');
 });
 
 function mockRuntimeStopChoice() {

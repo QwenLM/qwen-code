@@ -1925,7 +1925,7 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
       expect(tools[0].alwaysLoad).toBe(true);
     });
 
-    it('skips MCP App tools whose visibility does not include model', async () => {
+    it('preserves App-only tools for the separate App registry', async () => {
       const mockedClient = {
         listTools: vi.fn().mockResolvedValue({
           tools: [
@@ -1970,7 +1970,34 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
 
       expect(tools.map((tool) => tool.serverToolName)).toEqual([
         'show_dashboard',
+        'internal_refresh',
       ]);
+      expect(tools[0].isAppVisible).toBe(false);
+      expect(tools[1].isModelVisible).toBe(false);
+      expect(tools[1].appVisibility).toEqual(['app']);
+    });
+
+    it.each(
+      [[], ['unknown'], null, 'app', [42]].map((visibility) => ({
+        visibility,
+      })),
+    )('rejects unsupported visibility $visibility', async ({ visibility }) => {
+      const client = {
+        listTools: vi.fn().mockResolvedValue({
+          tools: [{ name: 'private', _meta: { ui: { visibility } } }],
+        }),
+      } as unknown as ClientLib.Client;
+      vi.mocked(GenAiLib.mcpToTool).mockReturnValue({
+        tool: async () => ({ functionDeclarations: [{ name: 'private' }] }),
+      } as unknown as GenAiLib.CallableTool);
+      expect(
+        await discoverTools(
+          'apps',
+          { command: 'test' },
+          client,
+          cfgWithResources(),
+        ),
+      ).toEqual([]);
     });
 
     it('attaches listing-level app resource UI onto discovered tools', async () => {
@@ -2024,7 +2051,11 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
 
       const client = new McpClient(
         'apps',
-        { command: 'test-command' },
+        {
+          command: 'test-command',
+          appResourceMaxBytes: 2_097_152,
+          appResourceTimeoutMs: 30_000,
+        },
         { registerTool: vi.fn() } as unknown as ToolRegistry,
         { registerPrompt: vi.fn() } as unknown as PromptRegistry,
         {} as WorkspaceContext,
@@ -2035,6 +2066,10 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
         applyConfigFilters: false,
       });
 
+      expect(snapshot.tools[0]?.appResourceLimits).toEqual({
+        appResourceMaxBytes: 2_097_152,
+        appResourceTimeoutMs: 30_000,
+      });
       expect(snapshot.tools[0]?.appResourceUri).toBe('ui://demo/dash');
       expect(snapshot.tools[0]?.appResourceUi).toEqual({
         csp: { connectDomains: ['https://api.example.com'] },
@@ -2469,7 +2504,12 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
 
       const snapshot = await client.discoverAndReturn(cfgWithResources());
 
-      expect(snapshot).toEqual({ tools: [], prompts: [], resources: [] });
+      expect(snapshot.tools).toHaveLength(1);
+      expect(snapshot.tools[0].serverToolName).toBe('internal_refresh');
+      expect(snapshot.tools[0].isModelVisible).toBe(false);
+      expect(snapshot.tools[0].isAppVisible).toBe(true);
+      expect(snapshot.prompts).toEqual([]);
+      expect(snapshot.resources).toEqual([]);
       expect(client.getStatus()).toBe(MCPServerStatus.CONNECTED);
     });
 
@@ -2494,7 +2534,12 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
       );
 
       expect(getMCPServerStatus(serverName)).toBe(MCPServerStatus.CONNECTED);
-      expect(toolRegistry.registerTool).not.toHaveBeenCalled();
+      expect(toolRegistry.registerTool).toHaveBeenCalledWith(
+        expect.objectContaining({
+          serverToolName: 'internal_refresh',
+          appVisibility: ['app'],
+        }),
+      );
     });
 
     it('discoverAndReturn throws when called before connect()', async () => {

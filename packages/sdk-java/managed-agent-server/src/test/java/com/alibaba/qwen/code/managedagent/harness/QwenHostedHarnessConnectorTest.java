@@ -1,12 +1,13 @@
 package com.alibaba.qwen.code.managedagent.harness;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
-
 import com.alibaba.qwen.code.daemon.CreateHarnessSession;
 import com.alibaba.qwen.code.daemon.DaemonHttpException;
 import com.alibaba.qwen.code.daemon.HarnessSessionRef;
@@ -14,7 +15,13 @@ import com.alibaba.qwen.code.daemon.HostedHarnessCapabilities;
 import com.alibaba.qwen.code.daemon.HostedHarnessClient;
 import com.alibaba.qwen.code.daemon.LoadHarnessSession;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
+import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
+import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
+import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import java.time.Duration;
+import org.mockito.ArgumentCaptor;
 import org.junit.jupiter.api.Test;
 import org.springframework.test.util.ReflectionTestUtils;
 
@@ -23,6 +30,56 @@ class QwenHostedHarnessConnectorTest {
             "33333333-3333-4333-8333-333333333333";
     private static final String BOOT_ID =
             "11111111-1111-4111-8111-111111111111";
+
+    @Test
+    void boundCreateConflictLoadsOriginalWorkspaceAndProfileAndRechecksCachedGrant() {
+        HostedHarnessClient client = mock(HostedHarnessClient.class);
+        HostedHarnessCapabilities capabilities = mock(HostedHarnessCapabilities.class);
+        HarnessSessionRef attached = mock(HarnessSessionRef.class);
+        when(client.capabilities()).thenReturn(capabilities);
+        when(capabilities.getBootId()).thenReturn(BOOT_ID);
+        when(attached.getHarnessBootId()).thenReturn(BOOT_ID);
+        DaemonHttpException conflict = mock(DaemonHttpException.class);
+        when(conflict.getStatusCode()).thenReturn(409);
+        when(client.createSession(any())).thenThrow(conflict);
+        when(client.loadSession(any())).thenReturn(attached);
+        AgentStateStore sessions = mock(AgentStateStore.class);
+        SessionRecord session = new SessionRecord("tenant-a", SESSION_ID, "qwen-code", null,
+                null, "ACTIVE", null, null, 0, 0, 0, 1, 1, null, 1,
+                new ContextBinding("tenant-a", "selected-workspace", 1, "storage", "child",
+                        WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1));
+        when(sessions.requireSession("tenant-a", SESSION_ID)).thenReturn(session);
+        WorkspaceExecutionStore execution = mock(WorkspaceExecutionStore.class);
+        ManagedAgentProperties properties = properties();
+        properties.getHarness().setWorkspaceFilesEnabled(true);
+        var actions = mock(com.alibaba.qwen.code.managedagent.store.ManagedActionStore.class);
+        when(actions.approvalMode("tenant-a", SESSION_ID)).thenReturn("default");
+        when(attached.getApprovalMode()).thenReturn(null, "yolo", "default");
+        QwenHostedHarnessConnector connector = new QwenHostedHarnessConnector(properties, sessions, execution, actions);
+        ReflectionTestUtils.setField(connector, "client", client);
+
+        assertThatThrownBy(() -> connector.createOrLoad("tenant-a", SESSION_ID, true))
+                .hasMessageContaining("did not confirm");
+        assertThatThrownBy(() -> connector.createOrLoad("tenant-a", SESSION_ID, true))
+                .hasMessageContaining("did not confirm");
+        connector.createOrLoad("tenant-a", SESSION_ID, false);
+
+        ArgumentCaptor<CreateHarnessSession> create = ArgumentCaptor.forClass(CreateHarnessSession.class);
+        ArgumentCaptor<LoadHarnessSession> load = ArgumentCaptor.forClass(LoadHarnessSession.class);
+        verify(client).createSession(create.capture());
+        verify(client, org.mockito.Mockito.times(3)).loadSession(load.capture());
+        for (Object request : new Object[] {create.getValue(), load.getValue()}) {
+            assertThat(ReflectionTestUtils.<Object>invokeMethod(request, "toJson").toString())
+                    .contains("toolProfile=hosted-workspace-files/1", "workspaceId=selected-workspace", "tenantId=tenant-a")
+                    .doesNotContain("workspaceId=workspace-a");
+        }
+        doThrow(new IllegalStateException("grant revoked")).when(execution).authorize(session);
+        assertThatThrownBy(() -> connector.createOrLoad("tenant-a", SESSION_ID, true))
+                .hasMessage("grant revoked");
+        properties.getHarness().setWorkspaceFilesEnabled(false);
+        assertThatThrownBy(() -> connector.createOrLoad("tenant-a", SESSION_ID, true))
+                .hasMessage("Hosted Workspace files are disabled");
+    }
 
     @Test
     void loadsAnExistingSessionWithoutCreatingIt() {
@@ -72,6 +129,14 @@ class QwenHostedHarnessConnectorTest {
 
     private static QwenHostedHarnessConnector connector(
             HostedHarnessClient client) {
+        QwenHostedHarnessConnector connector =
+                new QwenHostedHarnessConnector(properties(), sessions(),
+                        mock(WorkspaceExecutionStore.class));
+        ReflectionTestUtils.setField(connector, "client", client);
+        return connector;
+    }
+
+    private static ManagedAgentProperties properties() {
         ManagedAgentProperties properties = new ManagedAgentProperties();
         properties.getHarness().setToken("token");
         properties.getHarness().setCapabilityDigest("sha256:"
@@ -82,9 +147,14 @@ class QwenHostedHarnessConnectorTest {
         properties.getSessionStore().setWorkspaceId("workspace-a");
         properties.getSessionStore().setWriterLeaseDuration(
                 Duration.ofSeconds(60));
-        QwenHostedHarnessConnector connector =
-                new QwenHostedHarnessConnector(properties);
-        ReflectionTestUtils.setField(connector, "client", client);
-        return connector;
+        return properties;
+    }
+
+    private static AgentStateStore sessions() {
+        AgentStateStore sessions = mock(AgentStateStore.class);
+        when(sessions.requireSession("tenant-a", SESSION_ID)).thenReturn(
+                new SessionRecord("tenant-a", SESSION_ID, "qwen-code", null,
+                        "ACTIVE", null, null, 0, 0, 1, 1, null, 1));
+        return sessions;
     }
 }
