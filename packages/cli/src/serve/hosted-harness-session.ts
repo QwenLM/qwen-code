@@ -66,6 +66,8 @@ interface HostedSession {
   shell?: HostedShellTurnOptions;
   mcp?: HostedMcpSession;
   mcpBusy?: boolean;
+  mcpClosing?: boolean;
+  mcpRecovering?: boolean;
 }
 
 function object(value: unknown): Record<string, unknown> | null {
@@ -425,7 +427,8 @@ export function registerHostedHarnessSessionRoutes(
   app.post('/session/:id/prompt', (req, res) => {
     const session = identity(req, sessions);
     if (!session) return error(res, 404, 'hosted_session_not_found');
-    if (session.mcpBusy) return error(res, 409, 'hosted_mcp_operation_active');
+    if (session.mcpBusy || session.mcpRecovering)
+      return error(res, 409, 'hosted_mcp_operation_active');
     const body = object(req.body);
     const promptId = body?.['promptId'];
     const prompt = body?.['prompt'];
@@ -698,7 +701,7 @@ export function registerHostedHarnessSessionRoutes(
     const session = identity(req, sessions);
     if (!session) return error(res, 404, 'hosted_session_not_found');
     if (!session.mcp) return error(res, 409, 'hosted_mcp_unavailable');
-    if (session.mcpBusy || session.blocked)
+    if (session.mcpBusy || session.mcpRecovering || session.blocked)
       return error(res, 409, 'hosted_mcp_operation_active');
     const body = object(req.body);
     const operationId = body?.['operationId'];
@@ -744,7 +747,7 @@ export function registerHostedHarnessSessionRoutes(
     const session = identity(req, sessions);
     if (!session) return error(res, 404, 'hosted_session_not_found');
     if (!session.mcp) return error(res, 409, 'hosted_mcp_unavailable');
-    if (session.active || session.mcpBusy)
+    if (session.active || session.mcpBusy || session.mcpRecovering)
       return error(res, 409, 'hosted_turn_active');
     const body = object(req.body);
     const operationId = body?.['operationId'];
@@ -815,8 +818,9 @@ export function registerHostedHarnessSessionRoutes(
     const session = identity(req, sessions);
     if (!session) return error(res, 404, 'hosted_session_not_found');
     if (!session.mcp) return error(res, 409, 'hosted_mcp_unavailable');
-    if (session.mcpBusy) return error(res, 409, 'hosted_mcp_operation_active');
-    session.mcpBusy = true;
+    if (session.mcpClosing || session.mcpRecovering)
+      return error(res, 409, 'hosted_mcp_operation_active');
+    session.mcpRecovering = true;
     void session.mcp
       .cancel(req.params['operationId'])
       .then(
@@ -824,7 +828,7 @@ export function registerHostedHarnessSessionRoutes(
         () => error(res, 503, 'hosted_mcp_cancel_failed'),
       )
       .finally(() => {
-        session.mcpBusy = false;
+        session.mcpRecovering = false;
       });
   });
 
@@ -832,8 +836,9 @@ export function registerHostedHarnessSessionRoutes(
     const session = identity(req, sessions);
     if (!session) return error(res, 404, 'hosted_session_not_found');
     if (!session.mcp) return error(res, 409, 'hosted_mcp_unavailable');
-    if (session.mcpBusy) return error(res, 409, 'hosted_mcp_operation_active');
-    session.mcpBusy = true;
+    if (session.mcpClosing || session.mcpRecovering)
+      return error(res, 409, 'hosted_mcp_operation_active');
+    session.mcpRecovering = true;
     void session.mcp
       .status(req.params['operationId'])
       .then(
@@ -841,7 +846,7 @@ export function registerHostedHarnessSessionRoutes(
         () => error(res, 503, 'hosted_mcp_status_failed'),
       )
       .finally(() => {
-        session.mcpBusy = false;
+        session.mcpRecovering = false;
       });
   });
 
@@ -998,9 +1003,10 @@ export function registerHostedHarnessSessionRoutes(
   ): Promise<void> => {
     const session = identity(req, sessions, allowMissingClientId);
     if (!session) return error(res, 404, 'hosted_session_not_found');
-    if (session.active || session.mcpBusy)
+    if (session.active || session.mcpBusy || session.mcpRecovering)
       return error(res, 409, 'hosted_turn_active');
     session.mcpBusy = true;
+    session.mcpClosing = true;
     try {
       await session.mcp?.close();
       await session.managed.close();
@@ -1010,6 +1016,7 @@ export function registerHostedHarnessSessionRoutes(
     } catch {
       error(res, 503, 'managed_session_close_failed');
     } finally {
+      session.mcpClosing = false;
       session.mcpBusy = false;
     }
   };

@@ -276,6 +276,110 @@ describe('Hosted Harness no-tool session', () => {
     },
   );
 
+  it.each(['status', 'cancel'] as const)(
+    'serves MCP %s during dispatch and keeps admissions fenced until both finish',
+    async (kind) => {
+      const { server, authorize, requests, replies } = await mcpApp();
+      const operationId = randomUUID();
+      replies.set(operationId, { operationId, state: 'outcome_unknown' });
+      const control = vi.mocked(HostedWorkspaceBroker.prototype.control);
+      const original = control.getMockImplementation()!;
+      let finishInvoke!: () => void;
+      let finishRecovery!: () => void;
+      const invoking = new Promise<void>((resolve) => {
+        finishInvoke = resolve;
+      });
+      const recovering = new Promise<void>((resolve) => {
+        finishRecovery = resolve;
+      });
+      let invokeStarted = false;
+      let recoveryStarted = false;
+      control.mockImplementation(async function (
+        this: HostedWorkspaceBroker,
+        operation,
+      ) {
+        if (operation.kind === 'mcp-invoke') {
+          invokeStarted = true;
+          await invoking;
+        }
+        if (
+          operation.kind === (kind === 'status' ? 'mcp-status' : 'mcp-cancel')
+        ) {
+          recoveryStarted = true;
+          await recovering;
+        }
+        return original.call(this, operation);
+      });
+      const invoke = authorize(
+        supertest(server).post(`/session/${SESSION_ID}/mcp/operations`),
+      )
+        .send({
+          operationId,
+          serverId: 'demo',
+          request: { kind: 'resource_read', uri: 'memory://note' },
+        })
+        .then((response) => response);
+      let recovery: Promise<supertest.Response> | undefined;
+      try {
+        await vi.waitFor(() => expect(invokeStarted).toBe(true));
+        const url = `/session/${SESSION_ID}/mcp/operations/${operationId}`;
+        recovery = authorize(
+          kind === 'status'
+            ? supertest(server).get(url)
+            : supertest(server).post(`${url}/cancel`),
+        ).then((response) => response);
+        await vi.waitFor(() => expect(recoveryStarted).toBe(true));
+        finishInvoke();
+        expect((await invoke).status).toBe(202);
+        expect(
+          (
+            await authorize(
+              supertest(server).post(`/session/${SESSION_ID}/detach`),
+            )
+          ).status,
+        ).toBe(409);
+        const prompt = [{ type: 'text', text: 'still recovering' }];
+        expect(
+          (
+            await authorize(
+              supertest(server).post(`/session/${SESSION_ID}/prompt`),
+            ).send({
+              prompt,
+              promptId: PROMPT_ID,
+              payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+            })
+          ).status,
+        ).toBe(409);
+        finishRecovery();
+        expect((await recovery).status).toBe(kind === 'status' ? 200 : 202);
+        expect(
+          requests.filter((request) => request.kind === 'mcp-invoke'),
+        ).toHaveLength(1);
+        const settled: ManagedMcpOperationView = {
+          operationId,
+          state: 'settled',
+          response: { contents: [] },
+        };
+        replies.set(operationId, settled);
+        expect((await authorize(supertest(server).get(url))).body).toEqual(
+          settled,
+        );
+        expect(
+          (
+            await authorize(
+              supertest(server).post(`/session/${SESSION_ID}/detach`),
+            )
+          ).status,
+        ).toBe(204);
+      } finally {
+        finishInvoke();
+        finishRecovery();
+        await invoke;
+        await recovery;
+      }
+    },
+  );
+
   it('refuses every MCP operation and prompt admission while close is pending', async () => {
     const { server, authorize } = await mcpApp();
     const resource = () =>

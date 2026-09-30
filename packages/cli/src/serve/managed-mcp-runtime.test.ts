@@ -58,6 +58,7 @@ createInterface({input:process.stdin}).on('line', line => {
  else if (request.method==='prompts/get') send(request.id,{messages:[{role:'user',content:{type:'text',text:'first'}},{role:'assistant',content:{type:'text',text:'second'}}]});
  else if (request.method==='tools/call') {
    if(request.params.name==='drop') process.exit(0);
+   if(request.params.arguments.invalid) {send(request.id,{content:'invalid'});return;}
    if(request.params.arguments.stray) send(999999,{});
    if(request.params.arguments.strayAfter) setTimeout(()=>send(999999,{}),100);
    if(request.params.arguments.duplicateId) send(request.params.arguments.duplicateId,{content:[{type:'text',text:'duplicate'}]});
@@ -669,6 +670,119 @@ describe('Managed MCP Runtime', () => {
     expect(
       await readFile(path.join(directory, 'calls-1'), 'utf8'),
     ).not.toContain('tools/call');
+  });
+
+  it('does not charge retained unknown replies against healthy invocation capacity', async () => {
+    const instance = runtime([
+      stdioDefinition(),
+      { ...stdioDefinition(2), serverId: 'healthy' },
+    ]);
+    const invalid = (await settled(instance, configure())).catalog!;
+    const healthy = (
+      await settled(instance, { ...configure(2), serverId: 'healthy' })
+    ).catalog!;
+    for (let index = 0; index < 32; index++) {
+      const response = await instance.invokeTool(
+        runtimeSessionId,
+        invoke(invalid, `invalid-${index}`, {
+          kind: 'tool_call',
+          name: 'echo',
+          arguments: { invalid: true },
+        }),
+      );
+      expect(response).toMatchObject({
+        state: 'outcome_unknown',
+        error: { code: 'managed_mcp_response_invalid' },
+      });
+    }
+    for (const catalog of [healthy, invalid]) {
+      const response = await instance.invokeTool(
+        runtimeSessionId,
+        invoke(catalog, `healthy-${catalog.serverId}`, {
+          kind: 'tool_call',
+          name: 'echo',
+          arguments: { duplicateId: 'invalid-0' },
+        }),
+      );
+      expect(response.state).toBe('settled');
+      expect(response.error).toBeUndefined();
+      expect(response.response).toHaveProperty('content');
+    }
+    expect(
+      await instance.control(runtimeSessionId, {
+        kind: 'mcp-status',
+        sessionKey,
+        operationId: 'late-status',
+        targetOperationId: 'invalid-0',
+      }),
+    ).toMatchObject({
+      state: 'settled',
+      response: { content: [{ text: 'duplicate' }] },
+    });
+    expect(
+      (await readFile(path.join(directory, 'calls-1'), 'utf8')).match(
+        /tools\/call/g,
+      ),
+    ).toHaveLength(33);
+    expect(
+      (await readFile(path.join(directory, 'calls-2'), 'utf8')).match(
+        /tools\/call/g,
+      ),
+    ).toHaveLength(1);
+    expect(instance.hasHolds(runtimeSessionId)).toBe(true);
+  });
+
+  it('keeps unanswered timed-out calls in the quota until their late replies arrive', async () => {
+    const instance = runtime([{ ...stdioDefinition(), timeoutMs: 20 }]);
+    const catalog = (await settled(instance, configure())).catalog!;
+    const releaseFile = path.join(directory, 'release-quota');
+    const inputs = Array.from({ length: 32 }, (_, index) =>
+      invoke(catalog, `timeout-${index}`, {
+        kind: 'tool_call',
+        name: 'echo',
+        arguments: { releaseFile },
+      }),
+    );
+    for (const input of inputs) {
+      expect(await instance.invokeTool(runtimeSessionId, input)).toMatchObject({
+        state: 'outcome_unknown',
+        error: { code: 'managed_mcp_timeout' },
+      });
+    }
+    const next = (id: string) =>
+      instance.invokeTool(
+        runtimeSessionId,
+        invoke(catalog, id, {
+          kind: 'tool_call',
+          name: 'echo',
+          arguments: {},
+        }),
+      );
+    expect((await next('over-quota')).error?.code).toBe(
+      'managed_mcp_inflight_quota',
+    );
+    await writeFile(releaseFile, 'release');
+    await vi.waitFor(() => {
+      for (const input of inputs)
+        expect(instance.toolStatus(runtimeSessionId, input).state).toBe(
+          'settled',
+        );
+    });
+    await next('after-replies');
+    await vi.waitFor(async () => {
+      const response = await instance.control(runtimeSessionId, {
+        kind: 'mcp-status',
+        sessionKey,
+        operationId: 'quota-status',
+        targetOperationId: 'after-replies',
+      });
+      expect(response.response).toHaveProperty('content');
+    });
+    expect(
+      (await readFile(path.join(directory, 'calls-1'), 'utf8')).match(
+        /tools\/call/g,
+      ),
+    ).toHaveLength(33);
   });
 
   it('preserves settlement evidence after cancellation and a configured timeout', async () => {

@@ -328,18 +328,44 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
 
     private CompletionStage<ExecutionReconciliation> observe(String harnessSessionId,
             String runtimeSessionId, ToolExecutionRecord record, boolean reconcile) {
-        return record.getState() == ToolExecutionRecord.State.UNKNOWN
-                && (reconcile || record.observableAfterLoss())
-                ? service.reconcileExecution(harnessSessionId, runtimeSessionId, record.getExecutionCallId())
-                : CompletableFuture.completedFuture(new ExecutionReconciliation(record,
-                        ExecutionReconciliation.Outcome.IN_FLIGHT, null));
+        // A lost dispatch is asked of the original Runtime when it can answer;
+        // a tool v2 reference keeps its UNKNOWN unless reconciliation is requested.
+        if (record.getState() != ToolExecutionRecord.State.UNKNOWN
+                || (!reconcile && !record.observableAfterLoss())) {
+            return CompletableFuture.completedFuture(new ExecutionReconciliation(record,
+                    ExecutionReconciliation.Outcome.IN_FLIGHT, null));
+        }
+        CompletionStage<ExecutionReconciliation> observation = service.reconcileExecution(
+                harnessSessionId, runtimeSessionId, record.getExecutionCallId());
+        if (reconcile) {
+            return observation;
+        }
+        // The automatic ask is best-effort: when the original Runtime cannot be asked
+        // or cannot answer, whatever the reason, the record's own UNKNOWN
+        // stands rather than the error of the attempt.
+        return observation.handle((reconciled, error) -> {
+            if (error == null) {
+                return reconciled;
+            }
+            Throwable cause = unwrap(error);
+            if (cause instanceof Error) {
+                throw new CompletionException(cause);
+            }
+            return new ExecutionReconciliation(record,
+                    ExecutionReconciliation.Outcome.IN_FLIGHT, null);
+        });
     }
 
     private static Map<String, Object> observedExecutionEnvelope(String harnessSessionId,
             String runtimeSessionId, ExecutionReconciliation observation) {
         ToolExecutionRecord record = observation.getRecord();
         String state = observation.getRuntimeState();
-        if (record.getState() == ToolExecutionRecord.State.UNKNOWN
+        // A provider call the worker still holds as prepared was never
+        // started, and nothing dispatches it a second time: it stays UNKNOWN
+        // for the caller, who would otherwise wait for it for ever.
+        boolean neverStarted = "prepared".equals(state)
+                && ProviderRuntimeProtocol.isReference(record.getReference());
+        if (record.getState() == ToolExecutionRecord.State.UNKNOWN && !neverStarted
                 && ("prepared".equals(state) || "executing".equals(state)
                     || "cancel_requested".equals(state))) {
             Map<String, Object> response = envelope(harnessSessionId, runtimeSessionId,

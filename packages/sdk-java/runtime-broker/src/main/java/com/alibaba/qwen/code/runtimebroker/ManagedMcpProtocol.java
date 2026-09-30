@@ -24,6 +24,9 @@ public final class ManagedMcpProtocol {
     }
 
     public static void validateSession(RuntimeSession session, Map<String, Object> operation) {
+        if (!BrokerValues.isWellFormedJson(operation)) {
+            throw invalid("MCP operation is invalid.");
+        }
         RuntimeScope scope = session.getScope();
         Map<String, Object> expected = Map.of("tenantId", scope.getTenantId(),
                 "workspaceId", scope.getWorkspaceId(), "sessionId", session.getHarnessSessionId());

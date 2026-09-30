@@ -80,6 +80,7 @@ interface Operation {
   readonly control: ManagedMcpControl;
   view: ManagedMcpOperationView;
   connection?: Connection;
+  awaitingReply?: boolean;
   done: Promise<void>;
   resolve: () => void;
   timer?: ReturnType<typeof setTimeout>;
@@ -909,12 +910,19 @@ export class ManagedMcpRuntime {
         throw new ManagedMcpError('managed_mcp_capability_unavailable');
       if (
         [...this.connections.values()].reduce(
-          (count, entry) => count + (entry.closed ? 0 : entry.pending.size),
+          (count, entry) =>
+            count +
+            (entry.closed
+              ? 0
+              : [...entry.pending.values()].filter(
+                  (pending) => pending.awaitingReply,
+                ).length),
           0,
         ) >= MAX_INFLIGHT
       )
         throw new ManagedMcpError('managed_mcp_inflight_quota');
       operation.connection = connection;
+      operation.awaitingReply = true;
       connection.pending.set(control.operationId, operation);
       operation.timer = setTimeout(
         () => this.unknown(operation, 'managed_mcp_timeout'),
@@ -949,6 +957,7 @@ export class ManagedMcpRuntime {
     operation: Operation,
     message: { result?: unknown; error?: unknown },
   ): void {
+    operation.awaitingReply = false;
     const control = operation.control as ManagedMcpInvoke;
     if (message.error !== undefined) {
       this.settled(operation, { error: { code: 'managed_mcp_remote_error' } });

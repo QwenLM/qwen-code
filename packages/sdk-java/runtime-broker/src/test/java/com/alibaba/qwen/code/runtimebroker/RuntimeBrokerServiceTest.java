@@ -1006,6 +1006,33 @@ class RuntimeBrokerServiceTest {
     }
 
     @Test
+    void refusesIllFormedMcpStringsBeforeForwarding() {
+        try (Fixture fixture = new Fixture(SESSION_SCOPE)) {
+            join(fixture.service.acquire("harness", "runtime", "bootstrap"));
+            for (String surrogate : List.of("\uD800", "\uDC00")) {
+                for (Map<String, Object> request : List.of(
+                        Map.<String, Object>of("kind", "resource_read", "uri", "a" + surrogate + "b"),
+                        Map.<String, Object>of("kind", "prompt_get", "name", "prompt",
+                                "arguments", Map.of("a" + surrogate + "b", "value")))) {
+                    Map<String, Object> operation = Map.of("kind", "mcp-invoke", "operationId", "operation",
+                            "sessionKey", Map.of("tenantId", "tenant", "workspaceId", "workspace", "sessionId", "harness"),
+                            "request", request);
+                    RuntimeBrokerException error = failure(fixture.service.control("harness", "runtime", operation));
+                    assertEquals(400, error.getStatusCode());
+                    assertEquals("runtime_control_operation_invalid", error.getCode());
+                    assertFalse(error.isRetryable());
+                    assertNull(fixture.transport.lastControl);
+                }
+            }
+            Map<String, Object> valid = Map.of("kind", "mcp-invoke", "operationId", "operation",
+                    "sessionKey", Map.of("tenantId", "tenant", "workspaceId", "workspace", "sessionId", "harness"),
+                    "request", Map.of("kind", "resource_read", "uri", "a\uD83D\uDE00b"));
+            assertEquals("ok", join(fixture.service.control("harness", "runtime", valid)));
+            assertEquals(valid, fixture.transport.lastControl);
+        }
+    }
+
+    @Test
     void observesTheOriginalOwnerAfterNewAdmissionIsRevoked() {
         try (Fixture fixture = new Fixture(SESSION_SCOPE)) {
             RuntimeSessionRecord original = join(fixture.service.acquire("harness", "runtime", "bootstrap"));
