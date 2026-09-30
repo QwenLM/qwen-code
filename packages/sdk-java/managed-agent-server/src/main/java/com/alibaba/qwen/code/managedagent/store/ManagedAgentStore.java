@@ -312,6 +312,12 @@ public class ManagedAgentStore implements AgentStateStore {
             String turnId) {
     }
 
+    // A bound Session's creator may rename it under the Workspace-files
+    // opt-in (the service checks the creator); unarchive stays gated.
+    private boolean boundRenameAllowed(SessionMutationKind kind) {
+        return kind == SessionMutationKind.RENAME && workspaceFilesEnabled;
+    }
+
     private static ApiException workspaceExecutionUnavailable() {
         return new ApiException(HttpStatus.CONFLICT,
                 "workspace_unavailable",
@@ -476,7 +482,7 @@ public class ManagedAgentStore implements AgentStateStore {
             String operation, String idempotencyKey, String requestDigest,
             String sessionId, SessionMutationKind kind) {
         SessionRecord session = requireSessionForUpdate(tenantId, sessionId);
-        if (session.workspace() != null) {
+        if (session.workspace() != null && !boundRenameAllowed(kind)) {
             throw workspaceExecutionUnavailable();
         }
         Optional<CommandRecord> existing = findCommand(tenantId, operation,
@@ -509,7 +515,7 @@ public class ManagedAgentStore implements AgentStateStore {
             String operation, String idempotencyKey, String sessionId,
             SessionMutationKind kind, String title, String harnessBootId) {
         SessionRecord session = requireSessionForUpdate(tenantId, sessionId);
-        if (session.workspace() != null) {
+        if (session.workspace() != null && !boundRenameAllowed(kind)) {
             throw workspaceExecutionUnavailable();
         }
         CommandRecord command = findCommand(tenantId, operation,

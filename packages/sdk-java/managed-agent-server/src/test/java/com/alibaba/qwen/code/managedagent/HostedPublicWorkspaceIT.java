@@ -204,6 +204,13 @@ class HostedPublicWorkspaceIT {
             heldReply = new CountDownLatch(1);
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_execution WHERE harness_session_id = ?",
                     Long.class, session)).isEqualTo(executions * 2);
+
+            // Only the creator may rename the bound Session.
+            Map<String, Object> rename = Map.of("title", "Renamed " + workspace);
+            assertThat(request("PATCH", "/v1/agents/sessions/" + session, rename, "reader-rename-" + workspace,
+                    "reader", 409).path("error").path("code").asText()).isEqualTo("workspace_unavailable");
+            assertThat(request("PATCH", "/v1/agents/sessions/" + session, rename, "rename-" + workspace,
+                    "actor", 200).path("title").asText()).isEqualTo("Renamed " + workspace);
         }
         assertThat(modelRequests).hasSize(18);
         assertThat(modelFailure.get()).isNull();

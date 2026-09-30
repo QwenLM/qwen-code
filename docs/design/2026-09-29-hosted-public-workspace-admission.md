@@ -23,7 +23,9 @@ and lets the creator cancel a running Turn, which the Hosted Harness aborts and
 settles through the original Runtime identities. Execution authorizes every
 Turn against the creator's Workspace grants, so any other actor, and every
 deployment without the opt-in, keeps the existing `workspace_unavailable`
-refusal. Rename, lifecycle and cwd operations remain gated.
+refusal. The creator may also rename the Session. Close, archive, delete,
+unarchive and cwd operations remain gated: the Runtime Broker's drain only
+stops warming a closed Session and has no Harness-level teardown yet.
 
 ## Decisions
 

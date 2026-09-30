@@ -234,7 +234,7 @@ public class ManagedAgentService {
             String tenantId, String actorId, String idempotencyKey, String sessionId,
             String title) {
         validateIdempotencyKey(idempotencyKey);
-        requireLegacyWorkspace(tenantId, actorId, sessionId);
+        requireSubmitter(tenantId, actorId, sessionId);
         String effectiveTitle = validRenameTitle(title);
         String requestDigest = digests.digest(Map.of(
                 "sessionId", sessionId, "title", effectiveTitle));
@@ -639,8 +639,8 @@ public class ManagedAgentService {
 
     // Later Turns of a Workspace-bound Session run under the creator's
     // Workspace grants (WorkspaceExecutionStore.authorize), so only the
-    // creator may submit or cancel them, and only with Workspace files
-    // enabled. Everyone else keeps the existing refusal.
+    // creator may submit or cancel them or rename the Session, and only with
+    // Workspace files enabled. Everyone else keeps the existing refusal.
     private void requireSubmitter(String tenantId, String actorId,
             String sessionId) {
         if (!maySubmitWorkspaceTurn(store.requireSession(tenantId, sessionId),
