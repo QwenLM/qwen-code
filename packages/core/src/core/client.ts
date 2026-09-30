@@ -142,6 +142,7 @@ import {
   saveCacheSafeParams,
   clearCacheSafeParams,
 } from '../agents/forkedAgent.js';
+import { CACHE_SAFE_HISTORY_TAIL_ENTRIES } from '../agents/cache-safe-history.js';
 
 // Utilities
 import {
@@ -1435,7 +1436,10 @@ export class LlmClient {
   captureCacheSafeParams(): void {
     try {
       const chat = this.getChat();
-      const historyForCache = this.getHistoryTailShallow(40, true);
+      const historyForCache = this.getHistoryTailShallow(
+        CACHE_SAFE_HISTORY_TAIL_ENTRIES,
+        true,
+      );
       const cachedHistory = slimCompactionInput(
         historyForCache,
         this.config.getEffectiveInputModalities(),
@@ -1489,7 +1493,6 @@ export class LlmClient {
     this.pendingMemoryPrefetch?.fastDeliveredRefs.clear();
   }
 
-  /** @internal */
   /**
    * Whether the last prompt sits below the compaction warn threshold (#13004).
    * This is a cooldown heuristic, not a guarantee against compaction on the
@@ -1508,6 +1511,7 @@ export class LlmClient {
     return promptTokens < warn;
   }
 
+  /** @internal */
   resetManagedAutoMemoryAfterCompression(): void {
     this.resetManagedAutoMemoryDeliveryState();
     this.config.getMemoryManager().resetExhaustedBodyRefsForCurrentTurn();

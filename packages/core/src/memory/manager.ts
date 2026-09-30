@@ -65,6 +65,7 @@ import {
 } from './paths.js';
 import { ensureAutoMemoryScaffold } from './store.js';
 import { runAutoMemoryExtract } from './extract.js';
+import { CACHE_SAFE_HISTORY_TAIL_ENTRIES } from '../agents/cache-safe-history.js';
 import {
   runManagedAutoMemoryDream,
   type AutoMemoryDreamResult,
@@ -179,14 +180,25 @@ export interface ScheduleExtractParams {
 
 /**
  * Internal experiment for #13004: after an extraction that ran, completed and
- * wrote nothing, skip this many following user turns. The extractor reads the
- * whole conversation, so the skipped turns are still in front of the next
- * run. Default 0 keeps today's once-per-turn cadence; not a user setting until
- * a paired run shows memory quality is unchanged.
+ * wrote nothing, skip this many following user turns. The extractor sees only
+ * the last {@link CACHE_SAFE_HISTORY_TAIL_ENTRIES} history entries, so a turn
+ * is skipped only while the entries accumulated since that extraction stay
+ * within {@link MAX_COOLDOWN_PENDING_HISTORY_ENTRIES}, leaving the rest of the
+ * window for the turn that ends the cooldown. Default 0 keeps today's
+ * once-per-turn cadence; not a user setting until a paired run shows memory
+ * quality is unchanged.
  */
 export const EXTRACT_NOOP_COOLDOWN_TURNS_ENV =
   'QWEN_CODE_MEMORY_EXTRACT_NOOP_COOLDOWN_TURNS';
 export const MAX_EXTRACT_NOOP_COOLDOWN_TURNS = 5;
+/**
+ * Half the extractor's history window. A turn of up to this many entries can
+ * still end the cooldown without pushing a skipped turn out of the window; a
+ * single larger turn already loses its own start today, cooldown or not.
+ */
+export const MAX_COOLDOWN_PENDING_HISTORY_ENTRIES = Math.floor(
+  CACHE_SAFE_HISTORY_TAIL_ENTRIES / 2,
+);
 
 /**
  * Reads {@link EXTRACT_NOOP_COOLDOWN_TURNS_ENV}: a non-negative integer,
@@ -695,7 +707,7 @@ export class MemoryManager {
   // Process-local on purpose: a restart resets it to "run", the safe side.
   private readonly extractCooldownRemaining = new Map<
     string,
-    { sessionId: string; remaining: number }
+    { sessionId: string; remaining: number; armedAtHistoryLength: number }
   >();
 
   // ── Skill-review in-flight dedup ─────────────────────────────────────────────
@@ -1176,9 +1188,13 @@ export class MemoryManager {
 
     const cooldown = this.extractCooldownRemaining.get(params.projectRoot);
     if (cooldown) {
+      const pendingEntries =
+        params.history.length - cooldown.armedAtHistoryLength;
       if (
         cooldown.sessionId === params.sessionId &&
         cooldown.remaining > 0 &&
+        pendingEntries >= 0 &&
+        pendingEntries <= MAX_COOLDOWN_PENDING_HISTORY_ENTRIES &&
         params.isBelowCompactionWarn?.() === true
       ) {
         cooldown.remaining--;
@@ -1188,7 +1204,8 @@ export class MemoryManager {
         ) as never;
       }
       // A different session cannot inherit a no-op from the previous history.
-      // Near compaction, or with an unknown position, also run normally.
+      // Near compaction, with an unknown position, after a history shrink, or
+      // once the skipped turns fill half the extractor's window, run normally.
       this.extractCooldownRemaining.delete(params.projectRoot);
     }
 
@@ -1354,6 +1371,7 @@ export class MemoryManager {
       this.extractCooldownRemaining.set(params.projectRoot, {
         sessionId: params.sessionId,
         remaining: turns,
+        armedAtHistoryLength: params.history.length,
       });
     } else {
       this.extractCooldownRemaining.delete(params.projectRoot);

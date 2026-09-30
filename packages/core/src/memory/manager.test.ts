@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   EXTRACT_NOOP_COOLDOWN_TURNS_ENV,
   globalMemoryManager,
+  MAX_COOLDOWN_PENDING_HISTORY_ENTRIES,
   MemoryManager,
   resolveExtractNoopCooldownTurns,
   type MemoryTaskRecord,
@@ -1514,6 +1515,7 @@ describe('MemoryManager', () => {
           isBelowCompactionWarn?: () => boolean;
           config?: Config;
           sessionId?: string;
+          history?: Content[];
         } = {
           isBelowCompactionWarn: () => true,
         },
@@ -1528,6 +1530,56 @@ describe('MemoryManager', () => {
       afterEach(() => {
         delete process.env[EXTRACT_NOOP_COOLDOWN_TURNS_ENV];
       });
+
+      // The extractor sees only the last CACHE_SAFE_HISTORY_TAIL_ENTRIES, so
+      // skipped turns must leave room in that window for the run that ends
+      // the cooldown.
+      const grownBy = (entries: number): Content[] => [
+        ...history,
+        ...Array.from(
+          { length: entries },
+          (): Content => ({ role: 'model', parts: [{ text: 'step' }] }),
+        ),
+      ];
+
+      it('still skips while the turns since the no-op fit half the extractor window', async () => {
+        process.env[EXTRACT_NOOP_COOLDOWN_TURNS_ENV] = '2';
+        vi.mocked(runAutoMemoryExtract).mockResolvedValue(completedNoop());
+        const mgr = new MemoryManager();
+
+        await turn(mgr);
+        const next = await turn(mgr, {
+          isBelowCompactionWarn: () => true,
+          history: grownBy(MAX_COOLDOWN_PENDING_HISTORY_ENTRIES),
+        });
+
+        expect(next.skippedReason).toBe('cooldown');
+        expect(runAutoMemoryExtract).toHaveBeenCalledTimes(1);
+      });
+
+      it.each([
+        [
+          'grow past half the extractor window',
+          () => grownBy(MAX_COOLDOWN_PENDING_HISTORY_ENTRIES + 1),
+        ],
+        ['shrink, as after a compaction', (): Content[] => []],
+      ] as const)(
+        'runs once the turns since the no-op %s',
+        async (_label, nextHistory) => {
+          process.env[EXTRACT_NOOP_COOLDOWN_TURNS_ENV] = '2';
+          vi.mocked(runAutoMemoryExtract).mockResolvedValue(completedNoop());
+          const mgr = new MemoryManager();
+
+          await turn(mgr);
+          const next = await turn(mgr, {
+            isBelowCompactionWarn: () => true,
+            history: nextHistory(),
+          });
+
+          expect(next.skippedReason).toBeUndefined();
+          expect(runAutoMemoryExtract).toHaveBeenCalledTimes(2);
+        },
+      );
 
       it('keeps the once-per-turn cadence when the knob is unset', async () => {
         vi.mocked(runAutoMemoryExtract).mockResolvedValue(completedNoop());
