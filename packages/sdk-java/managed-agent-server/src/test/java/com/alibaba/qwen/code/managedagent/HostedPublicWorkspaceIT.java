@@ -210,7 +210,7 @@ class HostedPublicWorkspaceIT {
             assertThat(request("PATCH", "/v1/agents/sessions/" + session, rename, "reader-rename-" + workspace,
                     "reader", 409).path("error").path("code").asText()).isEqualTo("workspace_unavailable");
             assertThat(request("PATCH", "/v1/agents/sessions/" + session, rename, "rename-" + workspace,
-                    "actor", 200).path("title").asText()).isEqualTo("Renamed " + workspace);
+                    "actor", 200).path("metadata").path("title").asText()).isEqualTo("Renamed " + workspace);
         }
         assertThat(modelRequests).hasSize(18);
         assertThat(modelFailure.get()).isNull();
