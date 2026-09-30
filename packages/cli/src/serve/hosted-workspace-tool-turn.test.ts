@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -54,6 +54,7 @@ const broker = vi.hoisted(() => ({
 vi.mock('./hosted-workspace-broker.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./hosted-workspace-broker.js')>()),
   HostedWorkspaceBroker: class {
+    readonly runtimeSessionId = 'prompt';
     warm = broker.warm;
     acquire = broker.acquire;
     prepare = broker.prepare;
@@ -1131,6 +1132,109 @@ it.each(['x'.repeat(70 * 1024), '中'.repeat(23 * 1024), '"'.repeat(17 * 1024)])
   },
 );
 
+it.each(['refresh', 'warmup'] as const)(
+  'aborts MCP %s without waiting for the original work to finish',
+  async (phase) => {
+    const pending = new Promise<void>(() => undefined);
+    const refresh = vi.fn(() =>
+      phase === 'refresh' ? pending : Promise.resolve(),
+    );
+    const mcp = {
+      broker: { ...broker, runtimeSessionId: 'mcp:session' },
+      ensureReady: () => (phase === 'warmup' ? pending : Promise.resolve()),
+      refresh,
+      tools: () => [],
+    };
+    const mcpTurn = new HostedWorkspaceToolTurn(
+      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+      session,
+      harness,
+      'prompt',
+      async () => randomUUID(),
+      () => true,
+      undefined,
+      undefined,
+      undefined,
+      mcp as unknown as import('./hosted-mcp-session.js').HostedMcpSession,
+    );
+    const abort = new AbortController();
+    const reason = new Error('cancelled test turn');
+    const work =
+      phase === 'refresh'
+        ? mcpTurn.declarations(abort.signal)
+        : mcpTurn.execute([], [], 'model', abort.signal);
+    const observed = work.catch((cause: unknown) => cause);
+    abort.abort(reason);
+    await expect(observed).resolves.toBe(reason);
+    expect(broker.prepare).not.toHaveBeenCalled();
+    await expect(mcpTurn.execute([], [], 'model', abort.signal)).rejects.toBe(
+      reason,
+    );
+  },
+);
+
+it('executes against the declarations actually advertised before a catalog replacement', async () => {
+  let name = 'mcp_old';
+  const input = { toolName: 'managed_mcp_call', input: { pinned: 'original' } };
+  const mcp = {
+    broker: { ...broker, runtimeSessionId: 'mcp:session' },
+    ensureReady: async () => undefined,
+    refresh: async () => undefined,
+    tools: () => [{ name, parametersJsonSchema: { type: 'object' } }],
+    toolInput: vi.fn(() => input),
+  };
+  const mcpTurn = new HostedWorkspaceToolTurn(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    harness,
+    'prompt',
+    async () => randomUUID(),
+    () => true,
+    undefined,
+    undefined,
+    undefined,
+    mcp as unknown as import('./hosted-mcp-session.js').HostedMcpSession,
+  );
+  expect(
+    (await mcpTurn.declarations(new AbortController().signal)).at(-1)?.name,
+  ).toBe('mcp_old');
+  name = 'mcp_new';
+  const call = { ...calls[0], name: 'mcp_old', args: { text: 'hello' } };
+  await mcpTurn.execute(
+    [call],
+    [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
+    'model',
+    new AbortController().signal,
+  );
+  expect(broker.execute).toHaveBeenCalledWith(
+    expect.any(String),
+    JSON.stringify(input),
+    expect.any(AbortSignal),
+    630_000,
+    true,
+  );
+  expect(broker.prepare).toHaveBeenCalledWith(
+    expect.any(String),
+    expect.stringMatching(/^sha256:/u),
+    undefined,
+    'prompt',
+  );
+  expect(mcp.toolInput).toHaveBeenCalledWith(
+    call.name,
+    call.args,
+    broker.prepare.mock.calls[0][0],
+  );
+  const intent = session.authority
+    .eventsInSequenceRange(1, session.authority.committedSequence)
+    .find((event) => event.kind === 'tool.intent');
+  const saved = await session.resources.read(
+    intent!.payload['toolDefinitionRef'] as unknown as ManagedSessionDurableRef,
+  );
+  expect(JSON.parse(saved.toString()).name).toBe('mcp_old');
+  expect(
+    (await mcpTurn.declarations(new AbortController().signal)).at(-1)?.name,
+  ).toBe('mcp_new');
+});
 it('returns durable errors for a refused Shell batch and permits a corrected call', async () => {
   turn = createTurn(true);
   const shell = {
@@ -1684,6 +1788,88 @@ it('commits only refusals when every asked call is denied', async () => {
   await turn.finish();
   expect(broker.release).toHaveBeenCalledOnce();
 });
+
+it.each(['allow', 'deny'])(
+  'honors %s approval for an MCP call while retaining its shared owner',
+  async (optionId) => {
+    const input = {
+      toolName: 'managed_mcp_call',
+      input: { pinned: 'original' },
+    };
+    let expiresAt = 1;
+    const mcp = {
+      broker,
+      ensureReady: async () => undefined,
+      refresh: async () => undefined,
+      tools: () => [
+        { name: 'mcp_echo', parametersJsonSchema: { type: 'object' } },
+      ],
+      toolInput: () => ({
+        ...input,
+        input: { ...input.input, grant: { expiresAt } },
+      }),
+    };
+    turn = new HostedWorkspaceToolTurn(
+      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+      session,
+      harness,
+      'prompt',
+      commit,
+      messageFitsInline,
+      undefined,
+      undefined,
+      { settings: { mode: 'default', timeoutMs: 60_000 }, waiters },
+      mcp as unknown as import('./hosted-mcp-session.js').HostedMcpSession,
+    );
+    const call = { ...calls[0], name: 'mcp_echo', args: { text: 'hello' } };
+    const running = turn.execute(
+      [call],
+      [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
+      'model',
+      new AbortController().signal,
+    );
+    const requestId = await requested();
+    expect(broker.prepare).not.toHaveBeenCalled();
+    expect(broker.execute).not.toHaveBeenCalled();
+    const approvedRef = (await checkpoint()).approval!.invocationRef!;
+    const approved = (await session.resources.read(approvedRef)).toString();
+    expiresAt = 2;
+    await resolveHostedAction(session, waiters, requestId, answer(optionId));
+    const result = await running;
+    expect(broker.prepare).toHaveBeenCalledTimes(optionId === 'allow' ? 1 : 0);
+    expect(broker.execute).toHaveBeenCalledTimes(optionId === 'allow' ? 1 : 0);
+    if (optionId === 'allow') {
+      const payload = broker.execute.mock.calls[0][1];
+      expect(JSON.parse(payload)).toEqual({
+        ...input,
+        input: { ...input.input, grant: { expiresAt: 2 } },
+      });
+      expect(broker.prepare.mock.calls[0][1]).toBe(
+        `sha256:${createHash('sha256').update(payload).digest('hex')}`,
+      );
+      const intent = session.authority
+        .eventsInSequenceRange(1, session.authority.committedSequence)
+        .find((event) => event.kind === 'tool.intent')!;
+      const routed = JSON.parse(
+        (
+          await session.resources.read(
+            intent.payload['argsRef'] as unknown as ManagedSessionDurableRef,
+          )
+        ).toString(),
+      );
+      expect(routed.payloadJson).toBe(payload);
+      expect((await session.resources.read(approvedRef)).toString()).toBe(
+        approved,
+      );
+    } else
+      expect(result[0].functionResponse?.response?.['error']).toContain(
+        'denied',
+      );
+    await turn.consumeResults();
+    await turn.finish();
+    expect(broker.release).not.toHaveBeenCalled();
+  },
+);
 
 it('asks one call at a time in the model order', async () => {
   const batch = [
