@@ -827,6 +827,10 @@ describe('modelCommand', () => {
             model: 'gpt-4',
             authType: AuthType.USE_OPENAI,
           }),
+          // A pre-discontinuation `modelProviders` entry still lists its
+          // qwen-oauth models, so the registry lookup below would otherwise
+          // accept the selector and the switch would fail with a misleading
+          // "credentials expired" error.
           getAvailableModelsForAuthType: vi
             .fn()
             .mockReturnValue([{ id: 'qwen-max', label: 'Qwen Max' }]),
@@ -836,9 +840,16 @@ describe('modelCommand', () => {
       },
     });
 
-    await expect(
-      modelCommand.action!(mockContext, `qwen-max(${AuthType.QWEN_OAUTH})`),
-    ).rejects.toThrow('Qwen OAuth free tier was discontinued');
+    const result = await modelCommand.action!(
+      mockContext,
+      `qwen-max(${AuthType.QWEN_OAUTH})`,
+    );
+
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content: expect.stringContaining('Qwen OAuth free tier was discontinued'),
+    });
     expect(switchModel).not.toHaveBeenCalled();
     expect(setValue).not.toHaveBeenCalled();
   });
