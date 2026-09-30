@@ -110,6 +110,8 @@ Attestation v3 保留 v2 的 gate，只改变身份字段。
 | `binding`         | 封闭为七个 `ContextBinding` 字段的对象，每个字段适用 W0a 的规则，取 W0a 的线上字符串形式 |
 | `contextDigest`   | 匹配 `sha256:[0-9a-f]{64}` 的字符串                                                      |
 
+Broker 只获取 [Broker Provider 控制](2026-09-27-broker-provider-control.zh-CN.md)所允许的更窄的 Runtime Session ID。
+
 worker 按以下顺序检查请求，遇到第一个失败就停止：
 
 1. 不符合形状的请求返回 400 `managed_runtime_attestation_invalid`。
