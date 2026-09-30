@@ -270,6 +270,7 @@ export function getCustomSystemPrompt(
  */
 export interface PromptToolSurface {
   declaredTools?: ReadonlySet<string>;
+  agentReachable?: boolean;
   executionSandboxFilesystem?: 'read-only' | 'workspace-write';
   executionSandboxBackend?: 'bwrap' | 'landlock';
 }
@@ -311,7 +312,8 @@ const TOOL_GUIDANCE_LINE_GATES: ReadonlyArray<{
 const PREFER_DEDICATED_TOOLS_PREFIX = '- **Prefer Dedicated Tools:**';
 
 /**
- * Drops the tool-guidance lines whose tools this session did not declare.
+ * Drops tool-guidance lines whose tools the session cannot call. Agent policy
+ * also survives when Agent is reachable through the deferred-tool bridge.
  *
  * Implemented as a line filter rather than a rebuilt template on purpose: with
  * no snapshot the section returns unchanged, so the default prompt cannot drift
@@ -328,7 +330,14 @@ function gateToolGuidance(
     const gate = TOOL_GUIDANCE_LINE_GATES.find((entry) =>
       line.startsWith(entry.prefix),
     );
-    return !gate || gate.tools.every((tool) => declared.has(tool));
+    return (
+      !gate ||
+      gate.tools.every(
+        (tool) =>
+          declared.has(tool) ||
+          (tool === ToolNames.AGENT && surface?.agentReachable === true),
+      )
+    );
   });
   // The "prefer dedicated tools" bullet only introduces its sub-bullets, so it
   // goes when every tool it was going to recommend is gone.

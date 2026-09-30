@@ -652,6 +652,7 @@ describe('Gemini Client (client.ts)', () => {
       isTodoWriteEnabled: vi.fn().mockReturnValue(false),
       getStaticSystemPrefix: vi.fn().mockReturnValue(undefined),
       setStaticSystemPrefix: vi.fn(),
+      setPromptAgentReachable: vi.fn(),
       getFullContext: vi.fn().mockReturnValue(false),
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
       takeActiveTodoReminder: vi.fn().mockReturnValue(undefined),
@@ -1816,6 +1817,7 @@ describe('Gemini Client (client.ts)', () => {
     // can stub the deferred-summary + bridge availability per case.
     function getRegistryMock() {
       return vi.mocked(mockConfig.getToolRegistry)() as unknown as {
+        getFunctionDeclarations: ReturnType<typeof vi.fn>;
         getDeferredToolSummary: ReturnType<typeof vi.fn>;
         getTool: ReturnType<typeof vi.fn>;
         isDeferredToolRevealed: ReturnType<typeof vi.fn>;
@@ -1824,6 +1826,28 @@ describe('Gemini Client (client.ts)', () => {
         preloadDeferredToolsWithinBudget: ReturnType<typeof vi.fn>;
       };
     }
+
+    it('records bridge-reachable Agent for prompt guidance', async () => {
+      const reg = getRegistryMock();
+      reg.getFunctionDeclarations.mockReturnValue([
+        { name: ToolNames.TOOL_SEARCH },
+        { name: ToolNames.TOOL_CALL },
+      ]);
+      reg.getDeferredToolSummary.mockReturnValue([
+        { name: ToolNames.AGENT, description: 'delegate work' },
+      ]);
+      reg.getTool.mockImplementation((name: string) =>
+        name === ToolNames.TOOL_SEARCH || name === ToolNames.TOOL_CALL
+          ? ({} as never)
+          : null,
+      );
+      const setReachable = vi.mocked(mockConfig.setPromptAgentReachable);
+      setReachable.mockClear();
+
+      await client.startChat();
+
+      expect(setReachable).toHaveBeenLastCalledWith(true);
+    });
 
     it('re-reveals deferred tools that appear in resumed history', async () => {
       // Resume contract: a transcript referencing `cron_create` (a

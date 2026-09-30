@@ -1736,7 +1736,7 @@ describe('resident tool gating (#12032)', () => {
     expect(codeModePrompt(new Set([ToolNames.EXEC]))).toBe(codeModePrompt());
   });
 
-  it('takes the declared set from the Config snapshot', () => {
+  it('keeps Agent guidance when Agent is bridge-reachable', () => {
     const base = {
       getSystemPrompt: () => undefined,
       getModel: () => 'gpt-4',
@@ -1748,15 +1748,18 @@ describe('resident tool gating (#12032)', () => {
       isTodoWriteEnabled: () => false,
     };
 
-    // The snapshot is the single source `/context` and the request share, so
-    // the prompt must actually read it rather than recompute from a registry.
+    // `/context` and the request share these session snapshots, so the prompt
+    // must read them rather than recompute from a live registry.
     const gated = getMainSessionBaseSystemPrompt({
       ...base,
-      getPromptToolSnapshot: () => FILE_WORK_TOOLS,
+      getPromptToolSnapshot: () =>
+        new Set([...FILE_WORK_TOOLS, ToolNames.TOOL_CALL]),
+      getPromptAgentReachable: () => true,
     });
     const ungated = getMainSessionBaseSystemPrompt(base);
 
-    expect(gated).not.toContain('- **Subagent Delegation:**');
+    expect(gated).toContain('- **Subagent Delegation:**');
+    expect(gated).toContain('- **Codebase Search:**');
     expect(ungated).toContain('- **Subagent Delegation:**');
     expect(gated.length).toBeLessThan(ungated.length);
   });

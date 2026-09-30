@@ -395,7 +395,10 @@ type MainSessionPromptConfig = Pick<
   Partial<
     Pick<
       Config,
-      'isTrustedFolder' | 'getPromptToolSnapshot' | 'getShellExecutionSandbox'
+      | 'isTrustedFolder'
+      | 'getPromptToolSnapshot'
+      | 'getPromptAgentReachable'
+      | 'getShellExecutionSandbox'
     >
   >;
 
@@ -419,6 +422,7 @@ export function getMainSessionBaseSystemPrompt(
         config.getCodeModeOnly(),
         {
           declaredTools: config.getPromptToolSnapshot?.(),
+          agentReachable: config.getPromptAgentReachable?.(),
           executionSandboxFilesystem:
             config.getShellExecutionSandbox?.()?.filesystem,
           executionSandboxBackend:
@@ -2695,13 +2699,18 @@ export class LlmClient {
       // Optional call: partial Config stubs (tests, derived agent shims) do not
       // carry the setter, and a missing snapshot simply leaves the prompt
       // ungated rather than failing session startup.
-      this.config.setPromptToolSnapshot?.(
-        new Set(
-          toolRegistry
-            .getFunctionDeclarations()
-            .map((declaration) => declaration.name)
-            .filter((name): name is string => Boolean(name)),
-        ),
+      const declaredTools = new Set(
+        toolRegistry
+          .getFunctionDeclarations()
+          .map((declaration) => declaration.name)
+          .filter((name): name is string => Boolean(name)),
+      );
+      this.config.setPromptToolSnapshot?.(declaredTools);
+      this.config.setPromptAgentReachable?.(
+        declaredTools.has(ToolNames.AGENT) ||
+          (declaredTools.has(ToolNames.TOOL_SEARCH) &&
+            declaredTools.has(ToolNames.TOOL_CALL) &&
+            deferredSummary.some(({ name }) => name === ToolNames.AGENT)),
       );
       const deferredTools = profiler.timeSync('deferred_reminder_setup', () => {
         const resolved = this.resolveDeferredToolsForReminder(deferredSummary);
