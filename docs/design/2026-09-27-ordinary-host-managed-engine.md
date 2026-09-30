@@ -473,9 +473,11 @@ M4 records a Managed session as a Managed Session log through the #12693
 authority, with its local JSONL journal and resource stores. It changes core
 `Config`, `ChatRecordingService`, the record sink and the reader's Managed
 restore projection, and adds no production caller: a Managed host starts using
-it in M6. It does not need the M2 host.
-The engine a host selects already reaches `Config` as
-`sessionExecutionEngine`, and the tests drive `Config` as a host will.
+it in M6. The slice plan's "M4 and M5 need M2" is about the host that drives a
+Managed session. The recording itself lands in core without that host: the
+engine a host selects already reaches `Config` as `sessionExecutionEngine`, and
+the tests drive `Config` as a host will. The slice plan stays as the scheduling
+update (#12920) left it.
 
 #### Trigger
 
