@@ -763,9 +763,14 @@ describe('remote Shell result publication', () => {
     expect(observations).toBe(1);
   });
 
-  it.each(['EXPIRED', 'RETRYABLE'])(
-    'does not override a deterministic refusal with %s status',
-    async (state) => {
+  it.each(
+    ['EXPIRED', 'RETRYABLE'].flatMap((state) => [
+      { state, status: 400, code: 'invalid_request' },
+      { state, status: 409, code: 'managed_tool_result_conflict' },
+    ]),
+  )(
+    'does not override HTTP $status $code with $state status',
+    async ({ state, status, code }) => {
       let posts = 0;
       let observations = 0;
       vi.stubGlobal(
@@ -777,24 +782,27 @@ describe('remote Shell result publication', () => {
             return new Response(JSON.stringify({ state }));
           }
           posts++;
-          return new Response(
-            JSON.stringify({ error: { code: 'invalid_request' } }),
-            { status: 400 },
-          );
+          return new Response(JSON.stringify({ error: { code } }), { status });
         }),
       );
       const publisher = new RemoteShellResultPublisher();
       publisher.install(installation, boot);
       const { sink } = await publisher.prepare(request);
       const store = Reflect.get(sink, 'store') as ToolResultSegmentStore;
-      await expect(
-        store.publish({
-          captureId: 'capture-a',
-          streamId: 'stdout',
-          ordinal: 0,
-          bytes: Buffer.from('original'),
-        }),
-      ).rejects.toThrow('HTTP 400');
+      const publication = store.publish({
+        captureId: 'capture-a',
+        streamId: 'stdout',
+        ordinal: 0,
+        bytes: Buffer.from('original'),
+      });
+      if (status === 400) {
+        await expect(publication).rejects.toThrow('HTTP 400');
+      } else {
+        await expect(publication).resolves.toMatchObject({
+          status: 'refused',
+          code,
+        });
+      }
       expect(posts).toBe(1);
       expect(observations).toBe(1);
     },

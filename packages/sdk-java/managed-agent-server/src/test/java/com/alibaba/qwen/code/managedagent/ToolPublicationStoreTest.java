@@ -245,10 +245,11 @@ class ToolPublicationStoreTest {
             @Override
             public void requireUnversioned() { }
         };
+        var recoveryBudget = new ToolPublicationDataStore.VerificationBudget(256, Duration.ofMinutes(25));
         var first = new ToolPublicationDataStore(jdbc, manager, store, sessions, bucket,
-                Duration.ofMinutes(2), Duration.ofSeconds(30), VERIFICATION_BUDGET);
+                Duration.ofMinutes(2), Duration.ofSeconds(30), recoveryBudget);
         var replacement = new ToolPublicationDataStore(jdbc, manager, store, sessions, bucket,
-                Duration.ofMinutes(2), Duration.ofSeconds(30), VERIFICATION_BUDGET);
+                Duration.ofMinutes(2), Duration.ofSeconds(30), recoveryBudget);
         JsonNode key = binding.get("sessionKey");
         ObjectNode capture = JSON.createObjectNode().put("captureStatus", "unavailable")
                 .put("captureReason", "storage_failed").put("previewTruncated", false)
@@ -280,10 +281,17 @@ class ToolPublicationStoreTest {
                     }
                 }).isInstanceOfSatisfying(ApiException.class, error ->
                         assertThat(error.getCode()).isEqualTo("managed_tool_publication_operation_expired"));
+                var recoveryStarted = jdbc.queryForObject("SELECT CURRENT_TIMESTAMP(6)", java.sql.Timestamp.class);
                 assertThat(replacement.recoverOperation(key, "pub-1", PUBLICATION_TOKEN, "original")
                         .path("state").asText()).isEqualTo("RETRYABLE");
+                var recoveryFinished = jdbc.queryForObject("SELECT CURRENT_TIMESTAMP(6)", java.sql.Timestamp.class);
                 var recoveryDeadline = jdbc.queryForObject("SELECT recovery_deadline FROM qwen_tool_publication_operation"
                         + " WHERE operation_id = 'original'", java.sql.Timestamp.class);
+                long recoveryWindowMillis = Duration.ofMinutes(2)
+                        .plusSeconds(terminal ? (bytes.length + 255L) / 256 : 0).toMillis();
+                assertThat(recoveryDeadline.getTime()).isBetween(
+                        recoveryStarted.getTime() / 1000 * 1000 + recoveryWindowMillis,
+                        recoveryFinished.getTime() + recoveryWindowMillis);
                 replacement.recoverOperation(key, "pub-1", PUBLICATION_TOKEN, "original");
                 assertThat(jdbc.queryForObject("SELECT recovery_deadline FROM qwen_tool_publication_operation"
                         + " WHERE operation_id = 'original'", java.sql.Timestamp.class)).isEqualTo(recoveryDeadline);
