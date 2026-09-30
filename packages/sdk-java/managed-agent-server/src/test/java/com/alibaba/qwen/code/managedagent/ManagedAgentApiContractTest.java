@@ -1351,15 +1351,19 @@ class ManagedAgentApiContractTest {
                 .getResponse();
         String content = response.getContentAsString(StandardCharsets.UTF_8);
         int status = response.getStatus();
-        if (expectedStatus == 403) {
-            assertThat(json(content).path("error").path("code").asText())
-                    .as("%s actor-scope error code", operationId)
-                    .isEqualTo("actor_scope_mismatch");
-        }
         if (status != expectedStatus) {
             drift.put("response %s: expected %d, got %d%s".formatted(
-                    operationId, expectedStatus, status, errorCode(content)),
+                    operationId, expectedStatus, status,
+                    content.isEmpty() ? "" : errorCode(content)),
                     content);
+        }
+        if (status == 403 && expectedStatus == 403) {
+            String code = content.isEmpty() ? ""
+                    : json(content).path("error").path("code").asText();
+            if (!"actor_scope_mismatch".equals(code)) {
+                drift.put("code %s: expected actor_scope_mismatch, got %s"
+                        .formatted(operationId, code), content);
+            }
         }
         String label = "response " + operationId + " " + status;
         checkRequestId(drift, label, body, content, response);
@@ -1369,8 +1373,12 @@ class ManagedAgentApiContractTest {
         }
         String schema = declared + "/content/application~1json/schema";
         if (!CONTRACT.node(schema).isMissingNode()) {
-            collect(drift, label, CONTRACT.validate(schema,
-                    objectMapper.readTree(content)));
+            if (content.isEmpty()) {
+                drift.put(label + ": empty response body", "");
+            } else {
+                collect(drift, label, CONTRACT.validate(schema,
+                        objectMapper.readTree(content)));
+            }
         }
         CONTRACT.node(declared).path("headers").fieldNames()
                 .forEachRemaining(header -> {
