@@ -96,22 +96,55 @@ class QwenHostedHarnessConnectorTest {
                 });
         verify(execution).authorize(session);
 
-        QwenHostedHarnessConnector cold = new QwenHostedHarnessConnector(properties, sessions, execution, actions);
+        properties.getHarness().setWorkspaceFilesEnabled(false);
+        assertThatThrownBy(() -> connector.createOrLoad("tenant-a", SESSION_ID, true))
+                .hasMessage("Hosted Workspace files are disabled");
+    }
+
+    @Test
+    void coldRefusalStopsBeforeAnyHarnessCreateOrLoad() {
+        HostedHarnessClient client = mock(HostedHarnessClient.class);
+        SessionRecord session = new SessionRecord("tenant-a", SESSION_ID, "qwen-code", null,
+                null, "ACTIVE", null, null, 0, 0, 0, 1, 1, null, 1,
+                new ContextBinding("tenant-a", "selected-workspace", 1, "storage", "child",
+                        WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1));
+        AgentStateStore sessions = mock(AgentStateStore.class);
+        when(sessions.requireSession("tenant-a", SESSION_ID)).thenReturn(session);
+        WorkspaceExecutionStore execution = mock(WorkspaceExecutionStore.class);
+        ManagedAgentProperties properties = properties();
+        properties.getHarness().setWorkspaceFilesEnabled(true);
+        QwenHostedHarnessConnector cold = new QwenHostedHarnessConnector(properties, sessions, execution,
+                mock(ManagedActionStore.class));
         ReflectionTestUtils.setField(cold, "client", client);
-        clearInvocations(client);
+        RuntimeBrokerException refusal = WorkspaceExecutionStore.unavailable();
+        doThrow(refusal).when(execution).authorize(session);
+
         assertThatThrownBy(() -> cold.createOrLoad("tenant-a", SESSION_ID, true))
                 .isSameAs(refusal);
         verify(client, never()).createSession(any());
         verify(client, never()).loadSession(any());
+    }
 
+    @Test
+    void transientAuthorizationFailurePropagatesUnchanged() {
+        SessionRecord session = new SessionRecord("tenant-a", SESSION_ID, "qwen-code", null,
+                null, "ACTIVE", null, null, 0, 0, 0, 1, 1, null, 1,
+                new ContextBinding("tenant-a", "selected-workspace", 1, "storage", "child",
+                        WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1));
+        AgentStateStore sessions = mock(AgentStateStore.class);
+        when(sessions.requireSession("tenant-a", SESSION_ID)).thenReturn(session);
+        WorkspaceExecutionStore execution = mock(WorkspaceExecutionStore.class);
+        ManagedAgentProperties properties = properties();
+        properties.getHarness().setWorkspaceFilesEnabled(true);
+        QwenHostedHarnessConnector connector = new QwenHostedHarnessConnector(properties, sessions, execution,
+                mock(ManagedActionStore.class));
+        ReflectionTestUtils.setField(connector, "client", mock(HostedHarnessClient.class));
         DataAccessResourceFailureException transientFailure =
                 new DataAccessResourceFailureException("db unavailable");
         doThrow(transientFailure).when(execution).authorize(session);
+
         assertThatThrownBy(() -> connector.createOrLoad("tenant-a", SESSION_ID, true))
                 .isSameAs(transientFailure);
-        properties.getHarness().setWorkspaceFilesEnabled(false);
-        assertThatThrownBy(() -> connector.createOrLoad("tenant-a", SESSION_ID, true))
-                .hasMessage("Hosted Workspace files are disabled");
     }
 
     @Test
