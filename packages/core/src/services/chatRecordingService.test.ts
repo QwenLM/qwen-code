@@ -30,7 +30,7 @@ import {
 import { MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS } from '../utils/toolResultDisplayCompaction.js';
 import * as jsonl from '../utils/jsonl-utils.js';
 import { computeInitialTurnFromHistory } from './session-turn-state.js';
-import type { Part } from '@google/genai';
+import type { Content, Part } from '@google/genai';
 import type { FileDiff, McpAppResultDisplay } from '../tools/tools.js';
 import {
   deserializeSnapshots,
@@ -52,6 +52,8 @@ import {
   type ShellResultDisplay,
 } from '../utils/shell-result.js';
 import type { ToolResultBoundaryObservation } from '../tools/tool-result-boundary-diagnostics.js';
+import { CompressionStatus } from '../core/turn.js';
+import { markApiHistoryPrompt } from './session-api-history.js';
 
 function branchTestRecord(
   uuid: string,
@@ -289,7 +291,12 @@ describe('ChatRecordingService', () => {
   describe('recordUserMessage', () => {
     it('should record a user message immediately', async () => {
       const userParts: Part[] = [{ text: 'Hello, world!' }];
-      chatRecordingService.recordUserMessage(userParts);
+      chatRecordingService.recordUserMessage(
+        userParts,
+        undefined,
+        undefined,
+        'prompt-1',
+      );
       await chatRecordingService.flush();
 
       expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
@@ -305,12 +312,80 @@ describe('ChatRecordingService', () => {
       expect(record.version).toBe('1.0.0');
       expect(record.gitBranch).toBe('main');
       expect(record.provenance).toBe('real_user');
+      expect(record.promptId).toBe('prompt-1');
       expect(record.daemonPromptId).toBeUndefined();
+    });
+
+    it('preserves prompt identities in compression checkpoints', async () => {
+      const content: Content = {
+        role: 'user',
+        parts: [{ text: 'prompt' }],
+      };
+      markApiHistoryPrompt(content, 'prompt-1');
+
+      chatRecordingService.recordChatCompression({
+        info: {
+          originalTokenCount: 10,
+          newTokenCount: 5,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        },
+        compressedHistory: [content],
+      });
+      await chatRecordingService.flush();
+
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      expect(record.systemPayload).toMatchObject({ promptIds: ['prompt-1'] });
+    });
+
+    it('freezes the compression snapshot array against later live-history mutation', async () => {
+      // Deferred serialization must keep entries aligned with promptIds.
+      const first: Content = { role: 'user', parts: [{ text: 'A' }] };
+      const second: Content = { role: 'user', parts: [{ text: 'B' }] };
+      markApiHistoryPrompt(first, 'prompt-1');
+      markApiHistoryPrompt(second, 'prompt-2');
+      const liveHistory: Content[] = [first, second];
+
+      chatRecordingService.recordChatCompression({
+        info: {
+          originalTokenCount: 10,
+          newTokenCount: 5,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        },
+        compressedHistory: liveHistory,
+      });
+
+      // Mutations the same turn performs before the queued write drains.
+      liveHistory.splice(1, 0, {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: { name: 'tool', response: {} },
+          } as Part,
+        ],
+      });
+      liveHistory.push({ role: 'user', parts: [{ text: 'C' }] });
+
+      await chatRecordingService.flush();
+
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      const payload = record.systemPayload as {
+        compressedHistory: Content[];
+        promptIds: Array<string | null>;
+      };
+      expect(payload.compressedHistory).toHaveLength(2);
+      expect(payload.compressedHistory).toHaveLength(payload.promptIds.length);
+      expect(payload.promptIds).toEqual(['prompt-1', 'prompt-2']);
+      expect(
+        payload.compressedHistory.map((c) =>
+          c.parts?.map((p) => ('text' in p ? p.text : undefined)),
+        ),
+      ).toEqual([['A'], ['B']]);
     });
 
     it('persists the daemon prompt identity before any turn result', async () => {
       chatRecordingService.recordUserMessage(
         [{ text: 'same prompt' }],
+        undefined,
         undefined,
         undefined,
         'daemon-prompt-1',
@@ -331,6 +406,7 @@ describe('ChatRecordingService', () => {
         const daemonPromptId = `test-session-id########${turn}`;
         chatRecordingService.recordUserMessage(
           [{ text: 'same prompt' }],
+          undefined,
           undefined,
           undefined,
           daemonPromptId,
@@ -507,6 +583,7 @@ describe('ChatRecordingService', () => {
         '',
         undefined,
         { displayText: '', hookContext: '', resourceLinks },
+        undefined,
         'resource-prompt',
       );
       await chatRecordingService.flush();

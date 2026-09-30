@@ -195,7 +195,7 @@ function toolCall(
 
 function timingFrame(
   timing: Record<string, unknown>,
-  recordId: string,
+  recordId?: string,
 ): DaemonEvent {
   return {
     v: 1,
@@ -217,6 +217,131 @@ const metricsOf = (container: HTMLElement) =>
   ).map((node) => node.textContent ?? '');
 
 describe('TrajectoryPanel', () => {
+  it('opens record details and invalidates them when a refreshed window reuses the key', async () => {
+    let textValue = 'first payload';
+    let failRefresh = false;
+    const loadPage = vi.fn(async () =>
+      failRefresh
+        ? page([], { replayError: 'temporary failure' })
+        : page([userText(textValue, 'same-record')]),
+    );
+    const container = await render(loadPage);
+    act(() =>
+      container
+        .querySelector<HTMLElement>('[data-testid="trajectory-row-user"]')!
+        .click(),
+    );
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="trajectory-selected"] + button',
+        )!
+        .click(),
+    );
+    expect(
+      container.querySelector('[data-testid="trajectory-inspector"]'),
+    ).not.toBeNull();
+    await act(async () => {
+      [
+        ...container.querySelectorAll<HTMLButtonElement>(
+          '[data-testid="trajectory-inspector"] button',
+        ),
+      ]
+        .find((button) => button.textContent === 'Body')!
+        .click();
+    });
+    expect(
+      text(container.querySelector('[data-testid="trajectory-inspector"] pre')),
+    ).toContain('first payload');
+
+    failRefresh = true;
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Refresh"]')!
+        .click(),
+    );
+    expect(
+      text(container.querySelector('[data-testid="trajectory-inspector"] pre')),
+    ).toContain('first payload');
+
+    failRefresh = false;
+    textValue = 'second payload';
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Refresh"]')!
+        .click(),
+    );
+    expect(
+      text(container.querySelector('[data-testid="trajectory-inspector"]')),
+    ).toContain('The record window changed');
+    expect(
+      text(container.querySelector('[data-testid="trajectory-inspector"]')),
+    ).not.toContain('second payload');
+
+    act(() =>
+      container
+        .querySelector<HTMLElement>('[data-testid="trajectory-row-user"]')!
+        .click(),
+    );
+    await act(async () => {
+      [
+        ...container.querySelectorAll<HTMLButtonElement>(
+          '[data-testid="trajectory-inspector"] button',
+        ),
+      ]
+        .find((button) => button.textContent === 'Body')!
+        .click();
+    });
+    expect(
+      text(container.querySelector('[data-testid="trajectory-inspector"] pre')),
+    ).toContain('second payload');
+  });
+
+  it('keeps the grid focused while an open inspector follows row selection', async () => {
+    const container = await render(async () => page(REAL_EVENTS));
+    act(() =>
+      container
+        .querySelector<HTMLElement>('[data-testid="trajectory-row-request"]')!
+        .click(),
+    );
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="trajectory-selected"] + button',
+        )!
+        .click(),
+    );
+    const grid = container.querySelector<HTMLElement>(
+      '[data-testid="trajectory-rows"]',
+    )!;
+    act(() => grid.focus());
+    act(() =>
+      grid.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }),
+      ),
+    );
+    expect(document.activeElement).toBe(grid);
+    expect(
+      text(container.querySelector('[data-testid="trajectory-inspector"]')),
+    ).not.toContain('Select a record');
+    act(() =>
+      container
+        .querySelector<HTMLElement>('[data-testid="trajectory-turn"]')!
+        .click(),
+    );
+    expect(
+      text(container.querySelector('[data-testid="trajectory-inspector"]')),
+    ).toContain('Turn selected. Select a record');
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="trajectory-inspector"] button[aria-label="Close details"]',
+        )!
+        .click();
+    });
+    expect(document.activeElement).toBe(grid);
+  });
+
   it('folds a real page into turns, requests and tools', async () => {
     const container = await render(async () => page(REAL_EVENTS));
 
@@ -650,7 +775,7 @@ describe('TrajectoryPanel', () => {
           text(
             container.querySelector('[data-testid="trajectory-range-status"]'),
           ),
-        ).toBe('Showing 2 of 5 rows in the selected time');
+        ).toBe('Visible records 2 / window records 5 (including context)');
         expect(
           text(container.querySelector('[data-testid="trajectory-totals"]')),
         ).toContain('Loaded window · 2 turns · 2 requests · 1 tool');
@@ -784,7 +909,7 @@ describe('TrajectoryPanel', () => {
           text(
             container.querySelector('[data-testid="trajectory-range-status"]'),
           ),
-        ).toBe('Showing 0 of 5 rows in the selected time');
+        ).toBe('Visible records 0 / window records 5 (including context)');
         // Said once: the header's count is the live region, the message is not.
         expect(empty.getAttribute('role')).toBeNull();
         expect(empty.closest('[role="status"]')).toBeNull();
@@ -939,7 +1064,9 @@ describe('TrajectoryPanel', () => {
       container.querySelector('button[data-testid="trajectory-turn"]'),
     ).toBeNull();
     expect(
-      container.querySelectorAll('[role="grid"] button, [role="grid"] a'),
+      container.querySelectorAll(
+        '[role="grid"] button:not([tabindex="-1"]), [role="grid"] a',
+      ),
     ).toHaveLength(0);
     expect(grid.getAttribute('tabindex')).toBe('0');
 
@@ -1226,5 +1353,239 @@ describe('TrajectoryPanel', () => {
     expect(indexes).toEqual(
       indexes.map((_value, offset) => indexes[0]! + offset),
     );
+  });
+});
+
+describe('collapsible trajectory', () => {
+  const events = () => [
+    userText('Inspect a file', 'fold-user'),
+    timingFrame(
+      {
+        kind: 'request',
+        durationMs: 1000,
+        startedAt: 1760000000000,
+        model: 'fold-model',
+        status: 'ok',
+      },
+      'fold-request',
+    ),
+    toolCall('fold-call', 'read_file', 'Keep this detail', 'fold-tool'),
+  ];
+  const requestRow = (container: HTMLElement) =>
+    container.querySelector<HTMLElement>(
+      '[data-testid="trajectory-row-request"]',
+    )!;
+  const fold = (container: HTMLElement) =>
+    requestRow(container).querySelector<HTMLButtonElement>('button')!;
+  const grid = (container: HTMLElement) =>
+    container.querySelector<HTMLElement>('[role="grid"]')!;
+
+  it('folds without replacing the selected record or inspector, then reveals it', async () => {
+    const container = await render(async () => page(events()));
+    const totals = text(
+      container.querySelector('[data-testid="trajectory-totals"]'),
+    );
+    await act(async () =>
+      container
+        .querySelector<HTMLElement>('[data-testid="trajectory-row-tool"]')!
+        .click(),
+    );
+    await act(async () =>
+      Array.from(container.querySelectorAll('button'))
+        .find((button) => button.textContent?.includes('View details'))!
+        .click(),
+    );
+    const inspector = () =>
+      container.querySelector('[data-testid="trajectory-inspector"]')!;
+    expect(text(inspector())).toContain('Keep this detail');
+    await act(async () => fold(container).click());
+    expect(fold(container).getAttribute('aria-expanded')).toBe('false');
+    expect(
+      container.querySelector('[data-testid="trajectory-row-tool"]'),
+    ).toBeNull();
+    expect(
+      text(container.querySelector('[data-testid="trajectory-selected"]')),
+    ).toContain('Keep this detail');
+    expect(text(inspector())).toContain(
+      'The group containing this record is collapsed.',
+    );
+    expect(text(inspector())).not.toContain('not in the selected time');
+    expect(grid(container).getAttribute('aria-activedescendant')).toBe(
+      requestRow(container).closest('[role="row"]')!.id,
+    );
+    expect(
+      text(container.querySelector('[data-testid="trajectory-totals"]')),
+    ).toBe(totals);
+    await act(async () =>
+      Array.from(inspector().querySelectorAll('button'))
+        .find((button) => button.textContent === 'Expand and locate')!
+        .click(),
+    );
+    expect(
+      container.querySelector(
+        '[data-testid="trajectory-row-tool"][data-selected="true"]',
+      ),
+    ).not.toBeNull();
+    expect(text(inspector())).not.toContain('is collapsed');
+  });
+
+  it('uses the visible ancestor for Enter and visible rows for navigation', async () => {
+    const container = await render(async () => page(events()));
+    await act(async () =>
+      container
+        .querySelector<HTMLElement>('[data-testid="trajectory-row-tool"]')!
+        .click(),
+    );
+    await act(async () => fold(container).click());
+    await act(async () =>
+      grid(container).dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+      ),
+    );
+    expect(
+      text(container.querySelector('[data-testid="trajectory-inspector"]')),
+    ).toContain('fold-model');
+    expect(
+      text(container.querySelector('[data-testid="trajectory-selected"]')),
+    ).toContain('fold-model');
+    await act(async () =>
+      grid(container).dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }),
+      ),
+    );
+    expect(fold(container).getAttribute('aria-expanded')).toBe('true');
+    await act(async () =>
+      grid(container).dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }),
+      ),
+    );
+    expect(
+      container.querySelector(
+        '[data-testid="trajectory-row-tool"][data-selected="true"]',
+      ),
+    ).not.toBeNull();
+  });
+
+  it('retains stable request folds across failed and successful refreshes', async () => {
+    let fail = false;
+    const container = await render(async () =>
+      fail ? page([], { replayError: 'offline' }) : page(events()),
+    );
+    await act(async () => fold(container).click());
+    const refresh = () =>
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Refresh"]')!
+        .click();
+    fail = true;
+    await act(async () => refresh());
+    expect(fold(container).getAttribute('aria-expanded')).toBe('false');
+    fail = false;
+    await act(async () => refresh());
+    expect(fold(container).getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('retains stable turn folds when older turns enter the refreshed window', async () => {
+    let older = false;
+    const container = await render(async () =>
+      page([
+        ...(older ? [userText('Older prompt', 'older-user')] : []),
+        ...events(),
+      ]),
+    );
+    const turnButton = () =>
+      Array.from(
+        container.querySelectorAll<HTMLElement>(
+          '[data-testid="trajectory-turn"]',
+        ),
+      )
+        .find((row) => row.textContent?.includes('Inspect a file'))!
+        .querySelector<HTMLButtonElement>('button')!;
+    await act(async () => turnButton().click());
+    expect(turnButton().getAttribute('aria-expanded')).toBe('false');
+    older = true;
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Refresh"]')!
+        .click(),
+    );
+    expect(turnButton().getAttribute('aria-expanded')).toBe('false');
+    expect(container.textContent).toContain('Older prompt');
+    expect(
+      container.querySelector('[data-testid="trajectory-row-tool"]'),
+    ).toBeNull();
+  });
+
+  it.each(['request', 'turn'])(
+    'resets a reused positional %s fold after refresh',
+    async (group) => {
+      let newer = false;
+      const container = await render(async () =>
+        page([
+          timingFrame({
+            kind: 'request',
+            durationMs: 1000,
+            model: newer ? 'New model' : 'Old model',
+          }),
+          toolCall(
+            newer ? 'new-call' : 'old-call',
+            'read_file',
+            newer ? 'New tool' : 'Old tool',
+            newer ? 'new-tool' : 'old-tool',
+          ),
+        ]),
+      );
+      const button =
+        group === 'request'
+          ? fold(container)
+          : container.querySelector<HTMLButtonElement>(
+              '[data-testid="trajectory-turn"] button',
+            )!;
+      await act(async () => button.click());
+      expect(
+        container.querySelector('[data-testid="trajectory-row-tool"]'),
+      ).toBeNull();
+      newer = true;
+      await act(async () =>
+        container
+          .querySelector<HTMLButtonElement>('button[aria-label="Refresh"]')!
+          .click(),
+      );
+      expect(container.textContent).toContain('New model');
+      expect(container.textContent).toContain('New tool');
+      expect(fold(container).getAttribute('aria-expanded')).toBe('true');
+    },
+  );
+
+  it('drops removed groups and does not restore their folds when they return', async () => {
+    let present = true;
+    const container = await render(async () =>
+      page(present ? events() : [userText('Inspect a file', 'fold-user')]),
+    );
+    await act(async () => fold(container).click());
+    const refresh = () =>
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Refresh"]')!
+        .click();
+    present = false;
+    await act(async () => refresh());
+    expect(
+      container.querySelector('[data-testid="trajectory-row-request"]'),
+    ).toBeNull();
+    present = true;
+    await act(async () => refresh());
+    expect(fold(container).getAttribute('aria-expanded')).toBe('true');
+  });
+
+  it('resets stable folds when the session loader changes', async () => {
+    const container = await render(async () => page(events()));
+    await act(async () => fold(container).click());
+    await act(async () =>
+      mounted.at(-1)!.root.render(
+        <I18nProvider language="en">
+          <TrajectoryPanel loadPage={async () => page(events())} />
+        </I18nProvider>,
+      ),
+    );
+    expect(fold(container).getAttribute('aria-expanded')).toBe('true');
   });
 });

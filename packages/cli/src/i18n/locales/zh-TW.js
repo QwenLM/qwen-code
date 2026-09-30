@@ -225,6 +225,12 @@ export default {
   'toolDisplayName.Workflow': '工作流程',
   'toolDisplayName.ReadMcpResource': '讀取 MCP 資源',
   'toolDisplayName.ImageGen': '圖像生成',
+  'toolDisplayName.ThreadPost': '發文到討論串',
+  'toolDisplayName.ThreadWait': '等待協作方',
+  'toolDisplayName.ThreadBlock': '提出阻塞問題',
+  'toolDisplayName.ThreadReview': '提交待審閱',
+  'toolDisplayName.ThreadCreate': '建立子討論串',
+  'toolDisplayName.ThreadRead': '讀取討論串',
   'toolDisplayName.DownsampleImage': '降採樣圖像',
   'toolDisplayName.DownscaleVideo': '降採樣影片',
   'toolDisplayName.DownsampleAudio': '降採樣音訊',
@@ -408,6 +414,8 @@ export default {
     '回退不會影響手動編輯或透過 shell 命令修改的檔案。',
   'Cannot rewind to a turn that was compressed. Try a more recent turn.':
     '無法回退到已被壓縮的輪次，請嘗試更近一些的輪次。',
+  'Cannot rewind the conversation to this turn: it no longer matches the model history (for example, after a retry). Try a more recent turn.':
+    '無法將對話回退到該輪次：它已無法與模型歷史對應（例如經過重試）。請嘗試更近一些的輪次。',
   'File restore is unavailable for this turn (no captured file changes, or this turn predates the current session).':
     '該輪次無法還原檔案（沒有擷取到檔案變更，或該輪次屬於本次會話之前）。',
   '(+{{insertions}} -{{deletions}} in {{count}} file)':

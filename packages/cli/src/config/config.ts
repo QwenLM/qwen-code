@@ -36,12 +36,13 @@ import {
   createDebugLogger,
   NativeLspService,
   isBareMode,
+  isGatedMcpScope,
   isTruthy,
   parsePositiveIntegerEnv,
   isSafeModeEnv,
   isToolEnabled,
   isTlsVerificationDisabled,
-  parseBooleanEnvFlag,
+  resolveUsageStatisticsEnabled,
   SchemaValidator,
   type ConfigParameters,
   type MCPServerConfig,
@@ -57,6 +58,10 @@ import {
   type OutputStyleDefinition,
   validateModelProvidersConfig,
 } from '@qwen-code/qwen-code-core';
+import {
+  AGENT_HOST_SESSION_SOURCE_TYPE,
+  AGENT_SESSION_SOURCE_TYPE,
+} from '../runtime/agent-session-source.js';
 import { extensionsCommand } from '../commands/extensions.js';
 import {
   agentExecutionBackend,
@@ -69,6 +74,7 @@ import type { LoadedSettings, Settings } from './settings.js';
 import { loadSettings, SettingScope } from './settings.js';
 import { getSettingsSchema } from './settingsSchema.js';
 import { resolveHookSettingsForConfig } from './hook-settings.js';
+import { createBundledMem0Server } from './mem0-settings.js';
 import {
   resolveCliGenerationConfig,
   getAuthTypeFromEnv,
@@ -2243,7 +2249,12 @@ export async function loadCliConfig(
   if (argv.continue || argv.resume) {
     const sessionService = new SessionService(cwd);
     if (argv.continue) {
-      sessionData = await sessionService.loadLastSession();
+      sessionData = await sessionService.loadLastSession({
+        excludeSourceTypes: [
+          AGENT_HOST_SESSION_SOURCE_TYPE,
+          AGENT_SESSION_SOURCE_TYPE,
+        ],
+      });
       if (sessionData) {
         sessionId = sessionData.conversation.sessionId;
       } else if (argv.forkSession) {
@@ -2374,18 +2385,56 @@ export async function loadCliConfig(
   // and compute which gated (project/workspace) servers are still pending
   // approval (#4615), so the discovery layer can skip them with no connection
   // side effect. Loading `.mcp.json` is a pure read.
-  // Top tier = session-injected (ACP/IDE) servers plus `--mcp-config`; CLI wins
-  // over the session source on a name clash. Both sit above settings/`.mcp.json`
+  // Top tier = bundled Mem0, session-injected (ACP/IDE), and `--mcp-config`.
+  // CLI wins over the session source. All sit above settings/`.mcp.json`
   // and are never gated (#4615).
   const cliMcpServers = parseMcpConfig(argv.mcpConfig);
+  const mem0Server =
+    bareMode ||
+    safeMode ||
+    sshWorkspace ||
+    provisionalWorkspace ||
+    !trustedFolder ||
+    settings.memory?.mem0 == null
+      ? undefined
+      : createBundledMem0Server(
+          settings.memory.mem0,
+          cwd,
+          interactive && !isAcpMode && !settings.disableAllHooks,
+        );
   const topTierMcpServers =
-    sessionMcpServers || cliMcpServers
-      ? { ...sessionMcpServers, ...(cliMcpServers ?? {}) }
+    sessionMcpServers || cliMcpServers || mem0Server
+      ? {
+          ...(mem0Server ? { 'external-context': mem0Server } : {}),
+          ...sessionMcpServers,
+          ...(cliMcpServers ?? {}),
+        }
       : undefined;
+  // Only operator-owned configuration conflicts with `memory.mem0`. An entry a
+  // checked-in `.qwen/settings.json` ('workspace') or `.mcp.json` ('project')
+  // contributes is not the operator's, and aborting over it would wedge every
+  // operator who configured `memory.mem0` inside a folder they do not own and
+  // cannot fix — before `assembleMcpServers` ever applied the approval gate that
+  // would have held such a server pending anyway. Gated-scope entries are
+  // overridden by the built-in binding instead (topTierMcpServers spreads last
+  // below), exactly as a `.mcp.json` entry of the same name always has been.
+  const settingsExternalContext = settings.mcpServers?.['external-context'];
+  if (
+    mem0Server &&
+    ((settingsExternalContext !== undefined &&
+      !isGatedMcpScope(settingsExternalContext.scope)) ||
+      sessionMcpServers?.['external-context'] ||
+      cliMcpServers?.['external-context'])
+  ) {
+    throw new Error(
+      'Configure memory.mem0 or an external-context MCP server, not both.',
+    );
+  }
   // Bare/safe mode still drop settings.mcpServers/`.mcp.json` entirely (local,
   // ambient, file-sourced state they're meant to distrust) — but top-tier
-  // servers are an explicit, per-invocation argument from the caller (ACP
-  // `session/new`, `--mcp-config`), not ambient local state, so they survive.
+  // session/CLI servers are explicit, per-invocation arguments from the caller
+  // (ACP `session/new`, `--mcp-config`), not ambient local state, so they survive.
+  // Bundled Mem0 is excluded from these modes by its gate above.
   const mcpServers =
     bareMode || safeMode
       ? { ...topTierMcpServers }
@@ -2550,10 +2599,9 @@ export async function loadCliConfig(
     // "prompt"` still initializes eagerly because it auto-submits after render.
     deferTelemetryInitialization: isAcpMode || (interactive && !question),
     outboundCorrelation: settings.outboundCorrelation,
-    usageStatisticsEnabled:
-      parseBooleanEnvFlag(process.env['QWEN_USAGE_STATISTICS_ENABLED']) ??
-      settings.privacy?.usageStatisticsEnabled ??
-      true,
+    usageStatisticsEnabled: resolveUsageStatisticsEnabled(
+      settings.privacy?.usageStatisticsEnabled,
+    ),
     clearContextOnIdle: settings.context?.clearContextOnIdle,
     fileFiltering: settings.context?.fileFiltering,
     plansDirectory: settings.plansDirectory,
@@ -2595,6 +2643,8 @@ export async function loadCliConfig(
     lsToolEnabled: settings.tools?.listDirectory?.enabled === true,
     todoWriteEnabled: settings.tools?.todoWrite?.enabled === true,
     agentTeamEnabled: settings.experimental?.agentTeam ?? false,
+    agentCollaborationEnabled:
+      settings.experimental?.agentCollaboration ?? false,
     artifactEnabled: settings.experimental?.artifact ?? true,
     artifactAutoOpen: settings.artifact?.autoOpen ?? true,
     artifactPublisher: settings.artifact?.publisher ?? 'local',
@@ -2755,6 +2805,7 @@ export async function loadCliConfig(
       settings.hooks,
       hooksConfig,
       bareMode || safeMode,
+      mem0Server,
     ),
     disableAllHooks:
       bareMode || safeMode ? true : (settings.disableAllHooks ?? false),

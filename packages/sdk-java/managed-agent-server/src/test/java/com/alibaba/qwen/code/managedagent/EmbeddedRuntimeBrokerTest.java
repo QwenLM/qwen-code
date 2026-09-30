@@ -30,6 +30,21 @@ class EmbeddedRuntimeBrokerTest {
         assertThat(new ManagedAgentProperties().getRuntimeBroker().getPort())
                 .isEqualTo(4182);
         assertThat(new ManagedAgentProperties().getRuntimeBroker().isDurableLocalProcess()).isFalse();
+        assertThat(new ManagedAgentProperties().getRuntimeBroker().isTrustedLocalRebootRecovery()).isFalse();
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void rebootRecoveryRequiresDurableLocalProvisioning(boolean local) throws Exception {
+        var properties = properties();
+        properties.getRuntimeBroker().setTrustedLocalRebootRecovery(true);
+        properties.getRuntimeBroker().setDurableLocalProcess(!local);
+        if (local) {
+            properties.getRuntimeBroker().setProvisioner("local-process");
+            properties.getRuntimeBroker().setWorkspaceId("");
+        }
+        assertThatThrownBy(() -> broker(mock(ManagedAgentStore.class), properties))
+                .isInstanceOf(IllegalStateException.class).hasMessageContaining("requires durable local-process");
     }
 
     @org.junit.jupiter.params.ParameterizedTest

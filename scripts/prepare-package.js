@@ -69,6 +69,8 @@ function verifyBundleArtifacts(rootDir, distDir) {
   const requiredPaths = [
     path.join(distDir, 'cli.js'),
     path.join(distDir, 'execution-worker.js'),
+    path.join(distDir, 'mem0', 'main.js'),
+    path.join(distDir, 'mem0', 'write-confirmation.js'),
     path.join(distDir, 'sandboxBwrapRelay.js'),
     path.join(distDir, 'sandboxLandlockRelay.js'),
     path.join(distDir, 'sandboxFileWorker.js'),
@@ -351,6 +353,7 @@ function writeDistPackageJson(rootDir, distDir) {
       'sandboxBwrapRelay.js',
       'sandboxLandlockRelay.js',
       'sandboxFileWorker.js',
+      'mem0',
       'chunks',
       'vendor',
       '*.sb',
