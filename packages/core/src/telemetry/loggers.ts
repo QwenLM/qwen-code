@@ -1598,6 +1598,22 @@ export function logMemoryDream(config: Config, event: MemoryDreamEvent): void {
   });
 }
 
+/**
+ * Mirrors `isSkipSelectorOnUniqueStrongHitEnabled` /
+ * `RECALL_SKIP_SELECTOR_ON_UNIQUE_STRONG_HIT_ENV` in ../memory/recall.ts.
+ * Duplicated here because telemetry must not import the memory feature
+ * module (recall.ts already imports this file — importing back would create
+ * a module cycle).
+ */
+function isRecallSkipSelectorExperimentEnabled(): boolean {
+  const raw = process.env[
+    'QWEN_CODE_MEMORY_RECALL_SKIP_SELECTOR_ON_UNIQUE_STRONG_HIT'
+  ]
+    ?.trim()
+    .toLowerCase();
+  return raw === '1' || raw === 'true';
+}
+
 export function logMemoryRecall(
   config: Config,
   event: MemoryRecallEvent,
@@ -1627,7 +1643,14 @@ export function logMemoryRecall(
   recordMemoryRecallMetrics(config, event.duration_ms, {
     strategy: event.strategy,
     docs_selected: event.docs_selected,
-    selector_skipped: event.selector_skipped,
+    // The selector_skipped metric dimension belongs to the #13003
+    // skip-selector experiment: attach it only while the experiment is
+    // enabled so deployments without the flag keep the pre-existing
+    // attribute space on these series. The log attribute above stays
+    // unconditional on purpose.
+    ...(isRecallSkipSelectorExperimentEnabled()
+      ? { selector_skipped: event.selector_skipped }
+      : {}),
   });
 }
 
