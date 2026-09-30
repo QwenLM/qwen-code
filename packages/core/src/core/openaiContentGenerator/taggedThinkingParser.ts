@@ -61,9 +61,25 @@ function findMatchingTag(
   return tags.find((tag) => lower.startsWith(tag, offset));
 }
 
+export interface TaggedThinkingParserOptions {
+  /**
+   * Drop closing tags encountered while in text mode instead of releasing
+   * them as visible text. The parser is a binary toggle while the demotion
+   * detector counts nesting depth, so depth-nested input (e.g.
+   * `<think></think><think>outer <think>x</think></think>`) returns the
+   * parser to text mode one tag early and the leftover closing tags are
+   * protocol remnants, not user-facing content. Only the content-only
+   * demotion path opts in; providers that expect literal tags keep the
+   * default so literal text is still preserved.
+   */
+  stripStrayClosingTags?: boolean;
+}
+
 export class TaggedThinkingParser {
   private mode: ParserMode = 'text';
   private buffer = '';
+
+  constructor(private readonly options: TaggedThinkingParserOptions = {}) {}
 
   hasUnclosedThought(): boolean {
     return this.mode === 'thought';
@@ -95,7 +111,30 @@ export class TaggedThinkingParser {
         continue;
       }
 
-      if (!final && isPrefixOfAnyTag(lower, index, activeTags)) {
+      // A closing tag while already in text mode can only be a stray
+      // remnant of depth-nested input: strip it instead of leaking it into
+      // the visible channel. The surrounding segment keeps accumulating,
+      // so `ok</think>more` collapses to a single `okmore` part.
+      if (this.options.stripStrayClosingTags && this.mode === 'text') {
+        const strayClosingTag = findMatchingTag(lower, index, CLOSE_TAGS);
+        if (strayClosingTag) {
+          debugLogger.debug(
+            `taggedThinking: stripped stray closing tag "${strayClosingTag}" at offset ${index}`,
+          );
+          index += strayClosingTag.length;
+          continue;
+        }
+      }
+
+      if (
+        !final &&
+        (isPrefixOfAnyTag(lower, index, activeTags) ||
+          // Hold partial closing-tag prefixes mid-stream (strip mode only)
+          // so a stray tag split across chunks is still recognized.
+          (this.options.stripStrayClosingTags &&
+            this.mode === 'text' &&
+            isPrefixOfAnyTag(lower, index, CLOSE_TAGS)))
+      ) {
         break;
       }
 
