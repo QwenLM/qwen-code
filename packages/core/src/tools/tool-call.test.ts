@@ -960,6 +960,135 @@ describe('ToolCallTool', () => {
       }
     });
 
+    // A deferred and hidden MCP target publishes its server's inputSchema
+    // unmodified, and per-branch `additionalProperties: false` is the standard
+    // generated tagged-union idiom: the branches are told apart BY the keyword.
+    const makeTaggedUnionLike = () =>
+      new MockTool({
+        name: 'mcp__srv__union',
+        shouldDefer: true,
+        params: {
+          type: 'object',
+          oneOf: [
+            {
+              properties: { a: { type: 'string' } },
+              required: ['a'],
+              additionalProperties: false,
+            },
+            {
+              properties: { a: { type: 'string' }, b: { type: 'string' } },
+              required: ['a'],
+              additionalProperties: false,
+            },
+          ],
+        },
+      });
+
+    it('resolves a tagged union whose branches are told apart by additionalProperties', async () => {
+      // R8-1: a rewrite keyed on the property name alone also flipped the
+      // keyword INSIDE each oneOf branch, so {a, b} matched both branches and
+      // oneOf (exactly one) failed. The pre-check then refused a call the
+      // target's own schema and build() both accept, and — because targetName
+      // is populated — booked a parameter-error strike toward RETRY LOOP
+      // DETECTED for a tool that works. Mutation check: descending into
+      // composition keywords turns this red with "must match exactly one
+      // schema in oneOf".
+      const target = makeTaggedUnionLike();
+      const result = await resolveDeferredToolCall(
+        makeRegistry([target], new Set([target.name])),
+        { name: target.name, arguments: { a: 'x', b: 'y' } },
+      );
+
+      expect(result).not.toHaveProperty('error');
+      expect(result).toMatchObject({ arguments: { a: 'x', b: 'y' } });
+      // Relaxing happens on a clone: the target's published schema is intact.
+      expect(JSON.stringify(target.schema.parametersJsonSchema)).toContain(
+        '"additionalProperties":false',
+      );
+      if ('tool' in result) {
+        expect(() => result.tool.build(result.arguments)).not.toThrow();
+      }
+    });
+
+    it('still refuses a tagged-union call that matches no branch', async () => {
+      // Preserving the branches is not the same as disabling the pre-check:
+      // `{b}` satisfies neither branch's `required: ['a']`, so it must still be
+      // refused and attributed to the target.
+      const target = makeTaggedUnionLike();
+      const result = await resolveDeferredToolCall(
+        makeRegistry([target], new Set([target.name])),
+        { name: target.name, arguments: { b: 'y' } },
+      );
+
+      expect(result).toMatchObject({
+        errorType: ToolErrorType.INVALID_TOOL_PARAMS,
+        targetName: 'mcp__srv__union',
+      });
+      expect(result).not.toHaveProperty('tool');
+      if ('error' in result) {
+        expect(
+          result.error.message.startsWith(DEFERRED_TOOL_CALL_REFUSAL_PREFIX),
+        ).toBe(true);
+        expect(result.error.message).toContain('"mcp__srv__union"');
+      }
+    });
+
+    it('leaves annotation data that looks like the keyword alone', async () => {
+      // Same inversion one class over: `const` holds data the schema compares
+      // against, so rewriting the keyword inside it makes the pre-check demand
+      // a value the authored schema rejects.
+      const target = new MockTool({
+        name: 'annotated_target',
+        shouldDefer: true,
+        params: {
+          type: 'object',
+          properties: {
+            config: { const: { additionalProperties: false } },
+          },
+          required: ['config'],
+        },
+      });
+      const result = await resolveDeferredToolCall(
+        makeRegistry([target], new Set([target.name])),
+        {
+          name: target.name,
+          arguments: { config: { additionalProperties: false } },
+        },
+      );
+
+      expect(result).not.toHaveProperty('error');
+    });
+
+    it('reads a property named additionalProperties as a name, not the keyword', async () => {
+      // Keys of a name-to-schema map are data. The authored schema forbids this
+      // property outright, so the pre-check must keep refusing it rather than
+      // relax the prohibition away.
+      const target = new MockTool({
+        name: 'named_property_target',
+        shouldDefer: true,
+        params: {
+          type: 'object',
+          properties: {
+            prompt: { type: 'string' },
+            additionalProperties: false,
+          },
+          required: ['prompt'],
+        },
+      });
+      const result = await resolveDeferredToolCall(
+        makeRegistry([target], new Set([target.name])),
+        {
+          name: target.name,
+          arguments: { prompt: 'investigate', additionalProperties: true },
+        },
+      );
+
+      expect(result).toMatchObject({
+        errorType: ToolErrorType.INVALID_TOOL_PARAMS,
+        targetName: 'named_property_target',
+      });
+    });
+
     it('still attributes wrong field types when surplus keys are present', async () => {
       const target = makeWebFetchLike();
       const result = await resolveDeferredToolCall(

@@ -87,6 +87,97 @@ function bridgeRefusal(message: string): Error {
   return new Error(`${DEFERRED_TOOL_CALL_REFUSAL_PREFIX}${message}`);
 }
 
+/**
+ * Schema keywords whose subtree the relaxation below must leave byte-identical.
+ * Composition branches (`oneOf`/`anyOf`/`allOf`/`if`/`then`/`else`/`not`) use a
+ * per-branch `additionalProperties: false` to tell the branches apart, so
+ * relaxing it there inverts the schema's meaning instead of widening acceptance.
+ * Annotation keywords hold data the schema compares against, not a subschema.
+ */
+const VERBATIM_SCHEMA_KEYS: ReadonlySet<string> = new Set([
+  'allOf',
+  'anyOf',
+  'oneOf',
+  'not',
+  'if',
+  'then',
+  'else',
+  'const',
+  'default',
+  'enum',
+  'example',
+  'examples',
+]);
+
+/**
+ * Schema keywords whose value maps an arbitrary NAME to a subschema. The names
+ * are data, so a property literally named `additionalProperties` keeps its own
+ * schema rather than being read as the keyword: these are walked by value only.
+ */
+const NAME_TO_SCHEMA_KEYS: ReadonlySet<string> = new Set([
+  '$defs',
+  'definitions',
+  'dependentSchemas',
+  'patternProperties',
+  'properties',
+]);
+
+/** Relaxes `additionalProperties: false` in an already-cloned schema tree. */
+function relaxAdditionalPropertiesInPlace(node: unknown): void {
+  if (Array.isArray(node)) {
+    for (const item of node) {
+      relaxAdditionalPropertiesInPlace(item);
+    }
+    return;
+  }
+  if (!node || typeof node !== 'object') {
+    return;
+  }
+  const schema = node as Record<string, unknown>;
+  for (const [key, value] of Object.entries(schema)) {
+    if (VERBATIM_SCHEMA_KEYS.has(key)) {
+      continue;
+    }
+    if (NAME_TO_SCHEMA_KEYS.has(key)) {
+      if (value && typeof value === 'object' && !Array.isArray(value)) {
+        const byName = value as Record<string, unknown>;
+        for (const subschema of Object.values(byName)) {
+          relaxAdditionalPropertiesInPlace(subschema);
+        }
+      }
+      continue;
+    }
+    if (key === 'additionalProperties' && value === false) {
+      schema[key] = true;
+      continue;
+    }
+    relaxAdditionalPropertiesInPlace(value);
+  }
+}
+
+/**
+ * Deep-clones a target schema with `additionalProperties: false` relaxed at
+ * every position where relaxing only widens acceptance. Some targets
+ * deliberately tolerate surplus keys (for example, Agent's `name` outside team
+ * mode, or todo_write's item-level extra fields), so that decision is left to
+ * their own build(): a nested `additionalProperties: false` (todo_write's items
+ * schema) must not refuse bridged calls the target's own validator accepts.
+ *
+ * The walk is structural rather than keyed on the property name alone, because
+ * a name-keyed rewrite also reaches the positions listed in
+ * `VERBATIM_SCHEMA_KEYS` and `NAME_TO_SCHEMA_KEYS`, where it makes the
+ * pre-check STRICTER than the schema the target publishes: an input matching
+ * exactly one `oneOf` branch then matches two and `oneOf` fails, and a `const`
+ * branch compares against rewritten data.
+ */
+function relaxAdditionalProperties(schema: unknown): Record<string, unknown> {
+  // The JSON round-trip deep-clones, so the walk can relax in place and never
+  // touches the target's own schema object (which it may mutate and reuse).
+  const clone = JSON.parse(JSON.stringify(schema)) as Record<string, unknown>;
+  relaxAdditionalPropertiesInPlace(clone);
+  return clone;
+}
+
 export async function resolveDeferredToolCall(
   registry: ToolRegistry,
   envelope: Record<string, unknown>,
@@ -310,17 +401,14 @@ export async function resolveDeferredToolCall(
   if (!options?.wasOutputTruncated && !preCheckSuppressed) {
     try {
       const argsClone = structuredClone(invocation.params.arguments);
-      // Some targets deliberately tolerate surplus keys (for example, Agent's
-      // name outside team mode, or todo_write's item-level extra fields).
-      // Leave that decision to their own build(): relax the keyword at every
-      // level, since a nested `additionalProperties: false` (todo_write's
-      // items schema) refuses bridged calls the target's own validator
-      // accepts. The JSON round-trip also deep-clones the schema.
-      const schemaClone = JSON.parse(
-        JSON.stringify(target.schema.parametersJsonSchema, (key, value) =>
-          key === 'additionalProperties' && value === false ? true : value,
-        ),
-      ) as Record<string, unknown>;
+      // Surplus-key tolerance is the target's own call, so relax the keyword
+      // wherever relaxing only widens acceptance — but never inside a
+      // composition branch or annotation data, where the rewrite inverts the
+      // schema's meaning and the pre-check ends up stricter than the schema the
+      // target publishes. See relaxAdditionalProperties.
+      const schemaClone = relaxAdditionalProperties(
+        target.schema.parametersJsonSchema,
+      );
       const required = new Set(
         Array.isArray(schemaClone['required']) ? schemaClone['required'] : [],
       );
