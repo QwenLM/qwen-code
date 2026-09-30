@@ -2,8 +2,8 @@
 
 [English](2026-09-27-managed-workspace-recovery.md) | [简体中文](2026-09-27-managed-workspace-recovery.zh-CN.md)
 
-Status: W0e-1/2 implementation and proposed W0e-3 follow-up design, 2026-09-27.
-Physical reclamation remains follow-up work. Baseline: `e0b8bea9e0ba369a0661bc51cbbb9a27555aff48`.
+Status: W0e-1/2/3 source implementation, 2026-09-28.
+Dedicated Linux physical reboot acceptance remains pending. Baseline: `e0b8bea9e0ba369a0661bc51cbbb9a27555aff48`.
 
 Related: [roadmap #12380](https://github.com/QwenLM/qwen-code/issues/12380),
 [lost executions #12670](https://github.com/QwenLM/qwen-code/issues/12670),
@@ -377,6 +377,16 @@ adds an opt-in Linux identity store, a boot barrier with durable PID/start-tick
 registration, permanent launch locks, and adoption after Broker restart. The
 default ephemeral mode retains the W0e-1 behavior. Neither mode proves stopped
 writers after worker-only death; W0e-3 physical reclamation remains separate.
+
+## 6c. W0e-3 implementation
+
+The [trusted local reboot implementation](2026-09-28-local-reboot-recovery.md)
+adds separately enabled same-host boot evidence, original-holder cleanup,
+late-acquisition fencing and an independent bounded maintenance scan. Cleanup
+uses saved physical ownership even after grants, product Session or Registry
+change. Loss receipts remain terminal uncertainty. Tests with real workers and
+SQL plus synthetic boot identity exercise the chain; a dedicated Linux reboot
+is still required before physical acceptance can be claimed.
 
 ## 7. Delivery order and boundaries
 

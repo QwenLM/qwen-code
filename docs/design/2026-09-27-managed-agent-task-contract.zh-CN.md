@@ -38,7 +38,7 @@ Issue：[#12827](https://github.com/QwenLM/qwen-code/issues/12827)，属于 [#12
 
 ## 4. 决定
 
-2026-09-29 的后续修订在契约 v1.22.0 中确定 [#12847](https://github.com/QwenLM/qwen-code/issues/12847) 的 A1–A8。事件和取消仍为 `planned`，不增加运行时行为。A9 与 A10 的任务路由部分已由 #12966 合入。下文原 H0a 的范围与验证仍作为历史记录保留。
+2026-09-29 的后续修订在契约 v1.23.0 中确定 [#12847](https://github.com/QwenLM/qwen-code/issues/12847) 的 A1–A8。事件和取消仍为 `planned`，不增加运行时行为。A9 与 A10 的任务路由部分已由 #12966 合入。下文原 H0a 的范围与验证仍作为历史记录保留。
 
 ### 4.1 新增内容均为 `planned`
 

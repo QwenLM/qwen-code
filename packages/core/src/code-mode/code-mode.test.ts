@@ -272,6 +272,8 @@ describe('CodeModeOnly exposure', () => {
     );
     expect(buildExecDescription(first)).toContain('ImageContent');
     expect(buildExecDescription(first)).toContain('generatedImage');
+    expect(buildExecDescription(first)).toContain('text(result.value.output)');
+    expect(buildExecDescription(first)).not.toContain('text(result.value)');
     expect(buildExecDescription(first)).toContain(
       'setTimeout(callback: () => void, delayMs?: number)',
     );
@@ -442,6 +444,48 @@ describe('code mode protocol', () => {
 });
 
 describe('isolated code mode host', () => {
+  it('keeps a pending sibling result when allSettled handles a rejection', async () => {
+    let releaseSibling!: () => void;
+    const siblingGate = new Promise<void>((resolve) => {
+      releaseSibling = resolve;
+    });
+    const siblingStarted = vi.fn();
+    const siblingAborted = vi.fn();
+    const execution = executeCodeMode(
+      `const results = await Promise.allSettled([
+        tools.fail({}),
+        tools.read({}),
+      ]);
+      for (const result of results) {
+        text(result.status === 'fulfilled' ? result.value.output : String(result.reason));
+      }
+      return results.map(result => result.status);`,
+      plan('fail', 'read'),
+      runtime(async (name, _args, signal) => {
+        if (name === 'fail') throw new Error('read failed');
+        signal.addEventListener('abort', siblingAborted, { once: true });
+        siblingStarted();
+        await siblingGate;
+        signal.removeEventListener('abort', siblingAborted);
+        return { callId: 'read', name, status: 'success', output: 'retained' };
+      }),
+      new AbortController().signal,
+    );
+    try {
+      await vi.waitFor(() => expect(siblingStarted).toHaveBeenCalledOnce(), {
+        timeout: 10_000,
+      });
+      expect(siblingAborted).not.toHaveBeenCalled();
+    } finally {
+      releaseSibling();
+    }
+    const result = await execution;
+    expect(result.value).toEqual(['rejected', 'fulfilled']);
+    expect(result.output).toContain('read failed');
+    expect(result.output).toContain('retained');
+    expect(siblingAborted).not.toHaveBeenCalled();
+  });
+
   it('runs async tool calls, Promise.all, helpers, and return values', async () => {
     const dispatch = vi.fn(async (name, args) => ({
       callId: String(args['value']),

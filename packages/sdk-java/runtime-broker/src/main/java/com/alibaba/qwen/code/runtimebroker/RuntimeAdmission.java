@@ -20,7 +20,7 @@ final class RuntimeAdmission {
                 || !binding.getRequest().getScope().equals(session.getSession().getScope())
                 || binding.getState() != RuntimeBindingRecord.State.READY
                         && binding.getState() != RuntimeBindingRecord.State.DRAINING
-                        && !binding.hasStoppedWriters()) {
+                        && (binding.getRequest().isManagedContext() || !binding.hasStoppedWriters())) {
             throw new RuntimeBrokerException(503, "runtime_reconciliation_required",
                     "Runtime release requires recovery of the original generation", true);
         }

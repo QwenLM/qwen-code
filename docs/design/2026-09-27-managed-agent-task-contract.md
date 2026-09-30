@@ -49,7 +49,7 @@ has nothing to plan against except those daemon routes.
 
 ## 4. Decisions
 
-The 2026-09-29 follow-up settles A1–A8 of [#12847](https://github.com/QwenLM/qwen-code/issues/12847) in contract v1.22.0. Events and cancel remain `planned`; no runtime behavior is added. A9 and the task-route part of A10 landed in #12966. The original H0a scope and validation below remain historical.
+The 2026-09-29 follow-up settles A1–A8 of [#12847](https://github.com/QwenLM/qwen-code/issues/12847) in contract v1.23.0. Events and cancel remain `planned`; no runtime behavior is added. A9 and the task-route part of A10 landed in #12966. The original H0a scope and validation below remain historical.
 
 ### 4.1 Everything added is `planned`
 
