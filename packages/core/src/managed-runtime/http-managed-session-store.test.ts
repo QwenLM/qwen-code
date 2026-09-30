@@ -16,8 +16,11 @@ import {
 } from './managed-session-message-projection.js';
 import type { ManagedSessionStoreHttpError } from './http-managed-session-store.js';
 import { createHttpManagedSessionStores } from './http-managed-session-store.js';
-import type { ManagedSessionKey } from './managed-session-records.js';
 import type { McpConfiguration } from './managed-mcp-record.js';
+import type {
+  ManagedSessionDurableRef,
+  ManagedSessionKey,
+} from './managed-session-records.js';
 import {
   createInitialHarnessCheckpoint,
   encodeHarnessCheckpointV1,
@@ -171,6 +174,103 @@ describe('HTTP Managed Session store', () => {
       expect(server.commits).toHaveLength(0);
     } finally {
       await stores.close();
+    }
+  });
+
+  it('retries a busy receipt commit with the original transaction', async () => {
+    const server = new FakeManagedSessionStore();
+    const runtimeBaseDir = await mkdtemp(
+      path.join(tmpdir(), 'managed-http-store-'),
+    );
+    temporaryDirectories.push(runtimeBaseDir);
+    const requests: Array<Record<string, unknown>> = [];
+    let outcomeRef: ManagedSessionDurableRef;
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://session-store.test',
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn: async (input, init) => {
+        if (!new URL(requestUrl(input)).pathname.endsWith('/receipts/commit'))
+          return server.fetch(input, init);
+        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        requests.push(body);
+        if (requests.length === 1)
+          return jsonResponse(
+            { error: { code: 'managed_tool_publication_busy' } },
+            429,
+          );
+        const committed = await server.fetch(
+          `http://session-store.test/internal/managed-session-store/v1/sessions/${SESSION_KEY.sessionId}/transactions:commit`,
+          init,
+        );
+        return jsonResponse({
+          ...(await committed.json()),
+          historyRevision: body['lastSequence'],
+          toolOutcomeRef: outcomeRef,
+        });
+      },
+    });
+    const definitionRef = await stores.resourceStore.publish(
+      'managed-session-definition',
+      Buffer.from('{}'),
+    );
+    const rootSnapshotRef = await stores.resourceStore.publish(
+      'managed-session-root-snapshot',
+      Buffer.from('{}'),
+    );
+    const session = await openManagedSession({
+      runtimeBaseDir,
+      sessionId: SESSION_KEY.sessionId,
+      transcriptPath: path.join(runtimeBaseDir, 'session.jsonl'),
+      sessionKey: SESSION_KEY,
+      cwd: '/workspace',
+      version: 'test',
+      workerId: 'harness-a',
+      activationLeaseDurationMs: 60_000,
+      journalStore: stores.journalStore,
+      resourceStore: stores.resourceStore,
+      create: { definitionRef, rootSnapshotRef, createdBy: 'test' },
+    });
+    try {
+      outcomeRef = await session.resources.publish(
+        'managed-tool-outcome',
+        Buffer.from('{}'),
+      );
+      stores.publication.rememberAdmission('publication-a', outcomeRef);
+      await session.authority.appendExecutionEvent(
+        {
+          operation: 'recordToolResult',
+          commandId: 'receipt-a',
+          sessionKey: SESSION_KEY,
+          contentDigest: 'a'.repeat(64),
+        },
+        (sequence) => ({
+          v: 1,
+          sequence,
+          eventId: 'receipt:a',
+          sessionKey: SESSION_KEY,
+          kind: 'tool.receipt',
+          occurredAt: 1,
+          payload: {
+            executionCallId: 'execution-a',
+            toolOutcomeRef: outcomeRef,
+            resultRef: null,
+            resources: [],
+            historyRevision: sequence,
+          },
+        }),
+        { class: 'trusted_entry' },
+      );
+      expect(requests).toHaveLength(2);
+      expect(requests[1]).toEqual(requests[0]);
+      expect(
+        server.commits.filter(
+          (commit) => commit['operation'] === 'recordToolResult',
+        ),
+      ).toHaveLength(1);
+    } finally {
+      await session.close();
     }
   });
 

@@ -18,8 +18,8 @@ import type {
   LocalShellCaptureRequest,
   LocalShellReceipt,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-shell-result-session.js';
-import type { ToolResultExpectedIdentity } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result-store.js';
 import type { LocalShellResultCapture } from '@qwen-code/qwen-code-core/managed-runtime/local-shell-result-capture.js';
+import type { ToolResultExpectedIdentity } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result-store.js';
 import { MANAGED_TOOL_RESULT_PROTOCOL } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
 import type { ManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import {
@@ -131,6 +131,7 @@ interface JournalEntry {
   v3Result?: ToolResultEnvelope;
   readonly v3Capture?: LocalShellCaptureRequest['capture'];
   readonly captureSink?: ManagedShellCaptureSink;
+  readonly capturePublisher?: ManagedShellCapturePublisher;
   acknowledgement?: ToolResultAcknowledgement;
   readonly controller: AbortController;
   promise?: Promise<void>;
@@ -158,11 +159,16 @@ export interface ManagedShellCapturePublisher {
   prepare(request: LocalShellCaptureRequest): Promise<{
     identity: ToolResultExpectedIdentity;
     sink: ManagedShellCaptureSink;
+    publisher?: ManagedShellCapturePublisher;
   }>;
-  accept(
+  accept?(
     identity: ToolResultExpectedIdentity,
     envelope: ToolResultEnvelope,
   ): Promise<LocalShellReceipt>;
+  finish?(
+    identity: ToolResultExpectedIdentity,
+    result: ToolResultEnvelope,
+  ): Promise<void>;
 }
 
 /**
@@ -440,7 +446,7 @@ export class ManagedToolExecutor {
           'Managed Runtime invocation identity conflicts.',
         );
       }
-      await existing.promise;
+      if (!existing.capturePublisher?.finish) await existing.promise;
       return v3View(existing);
     }
     if (!this.capturePublisher || toolName !== ShellTool.Name) {
@@ -492,13 +498,14 @@ export class ManagedToolExecutor {
       inputJson,
       v3Capture: capture,
       captureSink: prepared.sink,
+      capturePublisher: prepared.publisher ?? this.capturePublisher,
       state: 'prepared',
       lastSequence: 0,
       controller: new AbortController(),
     };
     this.entries.set(reference.callId, entry);
     entry.promise = this.run(entry, tool, tools);
-    await entry.promise;
+    if (!entry.capturePublisher?.finish) await entry.promise;
     return v3View(entry);
   }
 
@@ -754,23 +761,30 @@ export class ManagedToolExecutor {
           };
         }
         if (entry.v3Result.capture) {
-          const receipt = await this.capturePublisher!.accept(
-            entry.captureSink!.identity,
-            entry.v3Result,
-          );
-          entry.v3Result = {
-            ...entry.v3Result,
-            capture: {
-              ...entry.v3Result.capture,
+          if (entry.capturePublisher!.finish) {
+            await entry.capturePublisher!.finish(
+              entry.captureSink!.identity,
+              entry.v3Result,
+            );
+          } else if (entry.capturePublisher!.accept) {
+            const receipt = await entry.capturePublisher!.accept(
+              entry.captureSink!.identity,
+              entry.v3Result,
+            );
+            entry.v3Result = {
+              ...entry.v3Result,
+              capture: {
+                ...entry.v3Result.capture,
+                deliveryStatus: receipt.deliveryStatus,
+              },
+            };
+            entry.acknowledgement = {
+              executionCallId: receipt.executionCallId,
+              manifest: receipt.manifest,
               deliveryStatus: receipt.deliveryStatus,
-            },
-          };
-          entry.acknowledgement = {
-            executionCallId: receipt.executionCallId,
-            manifest: receipt.manifest,
-            deliveryStatus: receipt.deliveryStatus,
-            historyRevision: receipt.historyRevision,
-          };
+              historyRevision: receipt.historyRevision,
+            };
+          }
         }
       } catch {
         entry.state = 'unknown';

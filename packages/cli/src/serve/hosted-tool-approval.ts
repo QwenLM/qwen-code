@@ -197,6 +197,7 @@ export async function endHostedAction(
   session: ManagedSession,
   requestId: string,
   state: 'expired' | 'cancelled',
+  admit?: () => boolean,
 ): Promise<void> {
   const authority = session.authority;
   try {
@@ -208,6 +209,7 @@ export async function endHostedAction(
         contentDigest: createHash('sha256').update(state).digest('hex'),
       },
       { requestId, state, decisionRef: null },
+      admit,
     );
   } catch (cause) {
     if (
@@ -320,7 +322,7 @@ export async function resolveHostedAction(
   ) {
     if (!writable()) return RECOVERY_REQUIRED;
     try {
-      await endHostedAction(session, requestId, 'expired');
+      await endHostedAction(session, requestId, 'expired', writable);
     } catch (cause) {
       return failed(cause);
     }

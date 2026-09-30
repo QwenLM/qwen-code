@@ -107,6 +107,6 @@ H1 明确保留每个 tenant/storage lease 同时仅一个 attached MCP owner �
 
 Session 存储全局识别这两个记录 domain；实际执行仍由显式私有 profile 和限定范围的 Runtime 定义控制。共享 Broker acquire 有意对原 owner 幂等，并返回 workspace generation 与 Runtime binding/generation；普通文件/Shell prepare 保留实际 prompt 和 call 身份。
 
-尚未发布的 MCP migration 使用 V23，避免与 #12894 的 V20/V21/V22 publication migration 重号。部署应按递增顺序执行，后合并分支必须再次对照 main 检查。如果 MCP V23 已先执行，后到达且尚未应用的 publication migration 必须重新编号到已部署版本之后，不能靠启用 out-of-order migration 绕过检查。#12868 的通用 control 与 MCP 撤权后的原 owner 恢复并存。正常 release 必须等待 provider 清理和 MCP hold 结束，再停用 Workspace 并释放存储租约；没有持有租约的 RELEASING Session 保留无需联系 worker 的清理路径。provider 不能接管已有 MCP 工具日志的 Session，MCP 工具派发在 context 查询后再次检查协议归属。
+MCP migration 使用 V23，位于 #12894 已合入的 V20/V21/V22 publication migration 之后。部署应按递增顺序执行。如果 MCP V23 已先执行，后到达且尚未应用的 publication migration 必须重新编号到已部署版本之后，不能靠启用 out-of-order migration 绕过检查。#12868 的通用 control 与 MCP 撤权后的原 owner 恢复并存。正常 release 必须等待 provider 清理和 MCP hold 结束，再停用 Workspace 并释放存储租约；没有持有租约的 RELEASING Session 保留无需联系 worker 的清理路径。provider 不能接管已有 MCP 工具日志的 Session，MCP 工具派发在 context 查询后再次检查协议归属。
 
 公开配置管理和生产 AgentBundle 能力发布另行部署。没有查询或幂等支持的远端系统不能自动恢复未知副作用。Runtime 的代内回执不能跨物理 Runtime 丢失持久保留；此时已提交的 Session intent 保持阻塞结果。配额按 Runtime 实例计算，不跨独立 Runtime 进程汇总。私有配置沿用现有 inline Session Store：每类发现列表限制为 16 KiB 和 64 页，保留部分条目时标记 partial，无法保留有效条目时标记 failed；原始操作响应限制为 60 KiB，超限以 output-limit 错误结算。本阶段不启用 SDK 反向客户端、生产 profile 公告、跨进程总预算或对象存储结果。

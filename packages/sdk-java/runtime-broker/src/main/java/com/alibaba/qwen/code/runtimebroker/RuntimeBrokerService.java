@@ -8,8 +8,8 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
-import java.util.Map;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -55,6 +55,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
     private final RuntimeBindingRepository bindingRepository;
     private final RuntimeSessionRepository sessionRepository;
     private final ToolExecutionRepository executionRepository;
+    private final RuntimePublicationVerifier publicationVerifier;
     private final String brokerOwnerId;
     private final Duration operationLeaseDuration;
     private final Duration dispatchLeaseDuration;
@@ -86,7 +87,22 @@ public final class RuntimeBrokerService implements AutoCloseable {
             Duration dispatchLeaseDuration) {
         this(sessionResolver, provisioner, transport, bindingRepository,
                 sessionRepository, executionRepository, brokerOwnerId,
-                operationLeaseDuration, dispatchLeaseDuration,
+                operationLeaseDuration, dispatchLeaseDuration, null,
+                Clock.systemUTC(), () -> UUID.randomUUID().toString(),
+                newScheduler());
+    }
+
+    public RuntimeBrokerService(HarnessSessionResolver sessionResolver,
+            RuntimeProvisioner provisioner, RuntimeTransport transport,
+            RuntimeBindingRepository bindingRepository,
+            RuntimeSessionRepository sessionRepository,
+            ToolExecutionRepository executionRepository,
+            String brokerOwnerId, Duration operationLeaseDuration,
+            Duration dispatchLeaseDuration,
+            RuntimePublicationVerifier publicationVerifier) {
+        this(sessionResolver, provisioner, transport, bindingRepository,
+                sessionRepository, executionRepository, brokerOwnerId,
+                operationLeaseDuration, dispatchLeaseDuration, publicationVerifier,
                 Clock.systemUTC(), () -> UUID.randomUUID().toString(),
                 newScheduler());
     }
@@ -101,7 +117,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
             Supplier<String> executionIdSupplier) {
         this(sessionResolver, provisioner, transport, bindingRepository,
                 sessionRepository, executionRepository, brokerOwnerId,
-                operationLeaseDuration, dispatchLeaseDuration, clock,
+                operationLeaseDuration, dispatchLeaseDuration, null, clock,
                 executionIdSupplier, newScheduler());
     }
 
@@ -111,7 +127,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
             RuntimeSessionRepository sessionRepository,
             ToolExecutionRepository executionRepository,
             String brokerOwnerId, Duration operationLeaseDuration,
-            Duration dispatchLeaseDuration, Clock clock,
+            Duration dispatchLeaseDuration,
+            RuntimePublicationVerifier publicationVerifier, Clock clock,
             Supplier<String> executionIdSupplier,
             ScheduledExecutorService scheduler) {
         if (sessionResolver == null || provisioner == null
@@ -134,6 +151,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
         this.bindingRepository = bindingRepository;
         this.sessionRepository = sessionRepository;
         this.executionRepository = executionRepository;
+        this.publicationVerifier = publicationVerifier;
         this.clock = clock;
         this.executionIdSupplier = executionIdSupplier;
         this.scheduler = scheduler;
@@ -219,9 +237,12 @@ public final class RuntimeBrokerService implements AutoCloseable {
         String key = BrokerValues.requireId(idempotencyKey,
                 "idempotencyKey");
         if (reference == null || reference.containsKey("dispatchMode")
-                || reference.containsKey("runtimeProtocol") || reference.containsKey("inputDigest")
+                || reference.containsKey("payloadDigest")
+                || reference.containsKey("publicationId")
+                || reference.containsKey("runtimeProtocol")
+                || reference.containsKey("inputDigest")
                 || reference.containsKey("executionCallId")) {
-            throw invalid("runtime_reference_invalid", "Deferred execution fields are reserved");
+            throw invalid("runtime_reference_invalid", "Execution reference contains reserved fields");
         }
         Map<String, Object> immutable;
         try {
@@ -240,6 +261,23 @@ public final class RuntimeBrokerService implements AutoCloseable {
     public CompletionStage<ToolExecutionRecord> prepareExecution(
             String harnessSessionId, String runtimeSessionId,
             String idempotencyKey, Map<String, Object> reference) {
+        return prepareExecution(harnessSessionId, runtimeSessionId,
+                idempotencyKey, reference, null);
+    }
+
+    /** A v3 reservation keeps the raw payload digest distinct from canonical input. */
+    public CompletionStage<ToolExecutionRecord> prepareExecution(
+            String harnessSessionId, String runtimeSessionId,
+            String idempotencyKey, Map<String, Object> reference,
+            String payloadDigest) {
+        return prepareExecution(harnessSessionId, runtimeSessionId,
+                idempotencyKey, reference, payloadDigest, null);
+    }
+
+    public CompletionStage<ToolExecutionRecord> prepareExecution(
+            String harnessSessionId, String runtimeSessionId,
+            String idempotencyKey, Map<String, Object> reference,
+            String payloadDigest, String publicationId) {
         requireOpen();
         String key = BrokerValues.requireId(idempotencyKey, "idempotencyKey");
         Map<String, Object> immutable = immutableMap(reference, "reference");
@@ -247,6 +285,9 @@ public final class RuntimeBrokerService implements AutoCloseable {
             ProviderRuntimeProtocol.reference(immutable, runtimeSessionId);
         } else {
             boolean v3 = Integer.valueOf(3).equals(immutable.get("runtimeProtocol"));
+            if (v3 && payloadDigest != null) {
+                throw invalid("runtime_reference_invalid", "Tool v3 publication modes conflict");
+            }
             Set<String> fields = v3
                     ? Set.of("sessionId", "promptId", "callId", "argsDigest", "runtimeProtocol", "inputDigest")
                     : Set.of("sessionId", "promptId", "callId", "argsDigest");
@@ -258,7 +299,18 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 throw invalid("runtime_reference_invalid", "Deferred execution reference is invalid");
             }
             Map<String, Object> deferred = new LinkedHashMap<>(immutable);
-            deferred.put("dispatchMode", "deferred");
+            if (payloadDigest == null) {
+                deferred.put("dispatchMode", "deferred");
+            } else {
+                if (!payloadDigest.matches("sha256:[0-9a-f]{64}")
+                        || publicationId == null
+                        || !publicationId.matches("[a-z0-9_-]{1,128}")) {
+                    throw invalid("runtime_reference_invalid", "Payload digest or publication ID is invalid");
+                }
+                deferred.put("dispatchMode", "deferred_v3");
+                deferred.put("payloadDigest", payloadDigest);
+                deferred.put("publicationId", publicationId);
+            }
             try {
                 immutable = Map.copyOf(deferred);
             } catch (NullPointerException nullValue) {
@@ -274,17 +326,36 @@ public final class RuntimeBrokerService implements AutoCloseable {
     public CompletionStage<ToolExecutionRecord> startExecution(
             String harnessSessionId, String runtimeSessionId,
             String executionCallId, String payloadJson) {
+        return startExecution(harnessSessionId, runtimeSessionId,
+                executionCallId, payloadJson, null, null);
+    }
+
+    public CompletionStage<ToolExecutionRecord> startExecution(
+            String harnessSessionId, String runtimeSessionId,
+            String executionCallId, String payloadJson,
+            String publicationId, String publicationToken) {
         requireOpen();
         String executionId = BrokerValues.requireId(executionCallId, "executionCallId");
         CompletionStage<ToolExecutionRecord> started = requireReadySession(
                 harnessSessionId, runtimeSessionId)
-                .thenApply(context -> {
+                .thenCompose(context -> {
                     synchronized (context) {
                         requireReadySessionRecord(context);
-                        ToolExecutionRecord record = requireExecution(context,
-                                executionId);
-                        if (!"deferred".equals(record.getReference().get("dispatchMode"))) {
+                        ToolExecutionRecord record = requireExecution(context, executionId);
+                        boolean v3 = "deferred_v3".equals(record.getReference().get("dispatchMode"));
+                        if (!"deferred".equals(record.getReference().get("dispatchMode")) && !v3) {
                             throw conflict("runtime_execution_conflict", "Execution was not reserved for deferred dispatch");
+                        }
+                        if (v3 && (publicationVerifier == null || publicationId == null
+                                || publicationToken == null)) {
+                            throw unavailable("runtime_execution_publication_required",
+                                    "Tool v3 requires an installed publication before dispatch", null);
+                        }
+                        if (v3 && !publicationId.equals(record.getReference().get("publicationId"))) {
+                            throw conflict("runtime_execution_conflict", "Original publication ID changed");
+                        }
+                        if (!v3 && (publicationId != null || publicationToken != null)) {
+                            throw invalid("runtime_reference_invalid", "Tool v2 has no publication grant");
                         }
                         // The UTF-8 encoder would turn an unpaired surrogate into '?'.
                         if (payloadJson == null || !BrokerValues.isWellFormedJson(payloadJson)) {
@@ -314,11 +385,31 @@ public final class RuntimeBrokerService implements AutoCloseable {
                                     && !"run_shell_command".equals(toolName)) {
                             throw invalid("runtime_payload_invalid", "Tool payload is invalid");
                         }
+                        if (v3) {
+                            if (!"run_shell_command".equals(payload.get("toolName"))
+                                    || Boolean.TRUE.equals(((Map<?, ?>) payload.get("input")).get("is_background"))) {
+                                throw invalid("runtime_payload_invalid", "Tool v3 requires foreground Shell");
+                            }
+                            RuntimePublicationGrant grant = publicationVerifier.verify(record,
+                                    publicationId, publicationToken);
+                            if (!shouldDriveDispatch(record)) {
+                                return CompletableFuture.completedFuture(record);
+                            }
+                            requireUsableLease(context);
+                            return mapFailure(safeStage(() -> transport.installPublication(
+                                    context.lease(), context.session(), grant)),
+                                    "runtime_publication_install_failed", "Publication installation failed")
+                                    .thenApply(ignored -> {
+                                        beginDispatch(context, record, payload, grant);
+                                        ToolExecutionRecord latest = executionRepository.findByExecutionCallId(executionId);
+                                        return latest == null ? record : latest;
+                                    });
+                        }
                         if (shouldDriveDispatch(record)) {
                             beginDispatch(context, record, payload);
                         }
                         ToolExecutionRecord latest = executionRepository.findByExecutionCallId(executionId);
-                        return latest == null ? record : latest;
+                        return CompletableFuture.completedFuture(latest == null ? record : latest);
                     }
                 });
         return unknownWhenAdmissionClosed(started, harnessSessionId,
@@ -376,10 +467,20 @@ public final class RuntimeBrokerService implements AutoCloseable {
         String executionId = BrokerValues.requireId(executionCallId,
                 "executionCallId");
         return safeStage(() -> {
-            ToolExecutionRecord stored = requireOwnedExecution(harnessSessionId,
+            ToolExecutionRecord saved = requireOwnedExecution(harnessSessionId,
                     runtimeSessionId, executionId);
-            if (stored.isTerminal()) {
-                return CompletableFuture.completedFuture(stored);
+            if (saved.isTerminal()) {
+                return CompletableFuture.completedFuture(saved);
+            }
+            if ("deferred_v3".equals(saved.getReference().get("dispatchMode"))) {
+                if (saved.getState() == ToolExecutionRecord.State.UNKNOWN
+                        && publicationVerifier != null) {
+                    Map<String, Object> durable = publicationVerifier.finished(saved);
+                    if (durable != null) {
+                        return CompletableFuture.completedFuture(absorbRuntimeStatus(saved,
+                                Map.of("state", "settled", "result", durable), false).getRecord());
+                    }
+                }
             }
             return unknownWhenAdmissionClosed(
                     requireReadySession(harnessSessionId, runtimeSessionId)
@@ -407,7 +508,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
         });
     }
 
-    public CompletionStage<Map<String, Object>> acknowledgeExecution(String harnessSessionId,
+    private CompletionStage<Map<String, Object>> acknowledgeLocalExecution(String harnessSessionId,
             String runtimeSessionId, String executionCallId, Map<String, Object> receipt) {
         requireOpen();
         Map<String, Object> savedReceipt = immutableMap(receipt, "receipt");
@@ -433,6 +534,80 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 return status;
             }).whenComplete((ignored, error) -> context.endControl());
         });
+    }
+
+    public CompletionStage<Map<String, Object>> acknowledgeExecution(
+            String harnessSessionId, String runtimeSessionId,
+            String executionCallId, Map<String, Object> receipt) {
+        requireOpen();
+        String id = BrokerValues.requireId(executionCallId, "executionCallId");
+        return requireReadySession(harnessSessionId, runtimeSessionId)
+                .thenCompose(context -> {
+                    ToolExecutionRecord execution = requireExecution(context, id);
+                    if (!"deferred_v3".equals(execution.getReference().get("dispatchMode"))) {
+                        return acknowledgeLocalExecution(harnessSessionId, runtimeSessionId, id, receipt);
+                    }
+                    synchronized (context) {
+                        requireReadySessionRecord(context);
+                        execution = requireExecution(context, id);
+                        if (!execution.isSettled()
+                                || !execution.getBindingId().equals(context.binding().getBindingId())
+                                || execution.getRuntimeGeneration() != context.binding().getGeneration()
+                                || publicationVerifier == null) {
+                            throw conflict("runtime_execution_conflict", "Original Tool v3 execution is unavailable");
+                        }
+                        context.beginControl();
+                    }
+                    ToolExecutionRecord original = execution;
+                    return mapFailure(safeStage(() -> {
+                        Map<String, Object> saved = publicationVerifier.receipt(original);
+                        if (saved == null || !sameReceipt(saved, receipt)) {
+                            throw conflict("runtime_execution_conflict", "Session receipt conflicts with publication");
+                        }
+                        requireUsableLease(context);
+                        return transport.acknowledgeV3(context.lease(), context.session(),
+                                original.getReference(), saved);
+                    }), "runtime_execution_ack_failed", "Tool v3 acknowledgement failed")
+                            .whenComplete((ignored, error) -> context.endControl());
+                });
+    }
+
+    private static boolean sameReceipt(Map<String, Object> expected,
+            Map<String, Object> actual) {
+        if (actual == null || !actual.keySet().equals(Set.of("executionCallId", "manifest",
+                "deliveryStatus", "historyRevision"))
+                || !java.util.Objects.equals(expected.get("executionCallId"), actual.get("executionCallId"))
+                || !java.util.Objects.equals(expected.get("deliveryStatus"), actual.get("deliveryStatus"))) {
+            return false;
+        }
+        Object leftRevision = expected.get("historyRevision");
+        Object rightRevision = actual.get("historyRevision");
+        if (leftRevision == null ? rightRevision != null
+                : !(rightRevision instanceof Number number)
+                        || ((Number) leftRevision).longValue() != number.longValue()) {
+            return false;
+        }
+        Object left = expected.get("manifest");
+        Object right = actual.get("manifest");
+        if (left == null || right == null) {
+            return left == right;
+        }
+        if (!(left instanceof Map<?, ?> saved) || !(right instanceof Map<?, ?> received)
+                || !saved.keySet().equals(received.keySet())) {
+            return false;
+        }
+        for (String field : List.of("resourceId", "kind", "digest")) {
+            if (!java.util.Objects.equals(saved.get(field), received.get(field))) {
+                return false;
+            }
+        }
+        for (String field : List.of("schemaVersion", "byteLength")) {
+            if (!(saved.get(field) instanceof Number a) || !(received.get(field) instanceof Number b)
+                    || a.longValue() != b.longValue()) {
+                return false;
+            }
+        }
+        return true;
     }
 
     public CompletionStage<ToolExecutionRecord> cancelExecution(
@@ -476,6 +651,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     requireReadySession(harnessSessionId, runtimeSessionId)
                     .thenCompose(context -> {
                         ToolExecutionRecord requested;
+                        boolean publicationV3;
                         synchronized (context) {
                             requireReadySessionRecord(context);
                             ToolExecutionRecord current = requireExecution(
@@ -485,6 +661,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
                                 context.beginControl();
                                 return cancelPreparedProvider(context, requested);
                             }
+                            publicationV3 = "deferred_v3".equals(
+                                    requested.getReference().get("dispatchMode"));
                             // An UNKNOWN record may still have an invocation
                             // running in this process, or be one its original
                             // Runtime can still answer for; it gets the
@@ -495,6 +673,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
                                             == ToolExecutionRecord.State.UNKNOWN
                                             && !invocations.contains(
                                                     executionId)
+                                            && !publicationV3
                                             && !requested.observableAfterLoss())) {
                                 return CompletableFuture.completedFuture(
                                         requested);
@@ -540,9 +719,13 @@ public final class RuntimeBrokerService implements AutoCloseable {
                             return CompletableFuture.completedFuture(requested);
                         }
                         requireUsableLease(context);
-                        return mapFailure(safeStage(() -> transport.cancel(
-                                context.lease(), context.session(),
-                                requested.getReference())),
+                        return mapFailure(safeStage(() ->
+                                publicationV3
+                                        ? transport.cancelV3(context.lease(), context.session(),
+                                                requested.getReference()).thenApply(
+                                                        RuntimeBrokerService::projectV3Status)
+                                        : transport.cancel(context.lease(), context.session(),
+                                                requested.getReference())),
                                 "runtime_execution_cancel_failed",
                                 "Runtime execution cancellation failed")
                                 .thenApply(status -> {
@@ -656,6 +839,14 @@ public final class RuntimeBrokerService implements AutoCloseable {
             return CompletableFuture.completedFuture(notUnknown(unknown,
                     null));
         }
+        if ("deferred_v3".equals(unknown.getReference().get("dispatchMode"))
+                && publicationVerifier != null) {
+            Map<String, Object> durable = publicationVerifier.finished(unknown);
+            if (durable != null) {
+                return CompletableFuture.completedFuture(absorbRuntimeStatus(unknown,
+                        Map.of("state", "settled", "result", durable), false));
+            }
+        }
         CompletableFuture<SessionContext> local = sessions.get(
                 runtimeSessionId);
         // Process-local Sessions are keyed by Runtime Session id alone, so a
@@ -732,9 +923,14 @@ public final class RuntimeBrokerService implements AutoCloseable {
         CompletableFuture<Map<String, Object>> lookup =
                 new CompletableFuture<>();
         try {
-            safeStage(() -> transport.status(context.lease(),
-                    context.session(), unknown.getReference(),
-                    unknown.getLastSequence()))
+            CompletionStage<Map<String, Object>> query = safeStage(() ->
+                    "deferred_v3".equals(unknown.getReference().get("dispatchMode"))
+                            ? transport.statusV3(context.lease(), context.session(),
+                                    unknown.getReference(), unknown.getLastSequence())
+                                    .thenApply(RuntimeBrokerService::projectV3Status)
+                            : transport.status(context.lease(), context.session(),
+                                    unknown.getReference(), unknown.getLastSequence()));
+            query
                     .whenComplete((status, error) -> {
                         if (error == null) {
                             lookup.complete(status);
@@ -778,6 +974,17 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     }
                 });
         return created;
+    }
+
+    private static Map<String, Object> projectV3Status(Map<String, Object> response) {
+        Object state = response.get("state");
+        if (!(state instanceof String name) || !RUNTIME_STATUS_STATES.contains(name)
+                || "settled".equals(name) != (response.get("result") instanceof Map)) {
+            throw conflict("runtime_execution_conflict", "Tool v3 returned an invalid status");
+        }
+        return "settled".equals(name)
+                ? Map.of("state", name, "result", response.get("result"))
+                : Map.of("state", name);
     }
 
     private CompletionStage<SessionContext> scanExecutions(SessionContext context,
@@ -922,7 +1129,9 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     context.session().getRuntimeSessionId(),
                     referenceString(safeReference, "promptId"),
                     referenceString(safeReference, "callId"),
-                    referenceString(safeReference, "argsDigest"),
+                    referenceString(safeReference,
+                            "deferred_v3".equals(safeReference.get("dispatchMode"))
+                                    ? "payloadDigest" : "argsDigest"),
                     safeReference);
             // The JSON writer and the JDBC codec write an unpaired surrogate
             // as '?', so the Worker would run another tool name or input.
@@ -2107,7 +2316,14 @@ public final class RuntimeBrokerService implements AutoCloseable {
 
     private void beginDispatch(SessionContext context,
             ToolExecutionRecord prepared, Map<String, Object> payload) {
-        if (payload == null && "deferred".equals(prepared.getReference().get("dispatchMode"))
+        beginDispatch(context, prepared, payload, null);
+    }
+
+    private void beginDispatch(SessionContext context,
+            ToolExecutionRecord prepared, Map<String, Object> payload,
+            RuntimePublicationGrant grant) {
+        if (payload == null && ("deferred".equals(prepared.getReference().get("dispatchMode"))
+                || "deferred_v3".equals(prepared.getReference().get("dispatchMode")))
                 && !prepared.isCancelRequested()) {
             throw conflict("runtime_execution_conflict", "Deferred execution requires its original payload");
         }
@@ -2119,7 +2335,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
         }
         CompletionStage<Void> operation;
         try {
-            operation = dispatch(context, prepared, payload);
+            operation = dispatch(context, prepared, payload, grant);
         } catch (RuntimeException | Error exception) {
             dispatches.remove(prepared.getExecutionCallId(), created);
             created.completeExceptionally(exception);
@@ -2137,7 +2353,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
     }
 
     private CompletionStage<Void> dispatch(SessionContext context,
-            ToolExecutionRecord prepared, Map<String, Object> payload) {
+            ToolExecutionRecord prepared, Map<String, Object> payload,
+            RuntimePublicationGrant grant) {
         ToolExecutionRecord claimed = executionRepository.claimDispatch(
                 prepared.getExecutionCallId(), brokerOwnerId,
                 dispatchLeaseDuration);
@@ -2170,9 +2387,31 @@ public final class RuntimeBrokerService implements AutoCloseable {
             throw exception;
         }
         invocations.add(executing.getExecutionCallId());
-        return safeStage(() -> payload == null
-                ? transport.execute(context.lease(), context.session(), executing.getReference())
-                : transport.execute(context.lease(), context.session(), dispatchReference(executing), payload))
+        CompletionStage<Map<String, Object>> invocation = grant == null
+                ? safeStage(() -> payload == null
+                        ? transport.execute(context.lease(), context.session(), executing.getReference())
+                        : transport.execute(context.lease(), context.session(), dispatchReference(executing), payload))
+                : safeStage(() -> transport.executeV3(context.lease(), context.session(),
+                        executing.getReference(), payload, capture(grant)))
+                        .handle((answer, error) -> {
+                            if (nonRetryableToolV3(error)) {
+                                throw new CompletionException(unwrap(error));
+                            }
+                            if (error == null && answer != null
+                                    && "settled".equals(answer.get("state"))
+                                    && answer.get("result") instanceof Map<?, ?> result
+                                    && "not_started".equals(result.get("executionStatus"))) {
+                                @SuppressWarnings("unchecked")
+                                Map<String, Object> notStarted = (Map<String, Object>) result;
+                                return notStarted;
+                            }
+                            return null;
+                        })
+                        .thenCompose(notStarted -> notStarted != null
+                                ? CompletableFuture.completedFuture(notStarted)
+                                : awaitV3Result(context, executing,
+                                        clock.instant().plus(Duration.ofMinutes(30))));
+        return invocation
                 .<Void>handle((result, error) -> {
                     // Stop counting as running before the outcome is
                     // written, so a cancel that reads that outcome does not
@@ -2192,6 +2431,80 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     }
                     return null;
                 }).whenComplete((ignored, error) -> renewal.close());
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> capture(RuntimePublicationGrant grant) {
+        Map<String, Object> binding = grant.binding();
+        Map<String, Object> key = (Map<String, Object>) binding.get("sessionKey");
+        return Map.of("tenantId", key.get("tenantId"), "sessionId", key.get("sessionId"),
+                "turnId", binding.get("turnId"), "executionCallId", binding.get("executionCallId"),
+                "bindingGeneration", binding.get("bindingGeneration"),
+                "capturePolicy", "complete_required");
+    }
+
+    private CompletionStage<Map<String, Object>> awaitV3Result(SessionContext context,
+            ToolExecutionRecord original, Instant deadline) {
+        CompletableFuture<Map<String, Object>> result = new CompletableFuture<>();
+        pollV3Result(context, original, deadline, result);
+        return result;
+    }
+
+    private void pollV3Result(SessionContext context, ToolExecutionRecord original,
+            Instant deadline, CompletableFuture<Map<String, Object>> answer) {
+        if (answer.isDone()) {
+            return;
+        }
+        try {
+            Map<String, Object> finished = publicationVerifier.finished(original);
+            if (finished != null) {
+                answer.complete(finished);
+                return;
+            }
+            ToolExecutionRecord current = executionRepository.findByExecutionCallId(
+                    original.getExecutionCallId());
+            if (current == null || !ownsDispatch(current, original)
+                    || !current.getBindingId().equals(context.binding().getBindingId())
+                    || current.getRuntimeGeneration() != context.binding().getGeneration()
+                    || !provisioner.isUsable(context.lease()) || !clock.instant().isBefore(deadline)) {
+                throw evidenceUnavailable();
+            }
+            safeStage(() -> transport.statusV3(context.lease(), context.session(),
+                    original.getReference(), 0)).whenComplete((status, error) -> {
+                        if (answer.isDone()) {
+                            return;
+                        }
+                        if (nonRetryableToolV3(error)) {
+                            answer.completeExceptionally(unwrap(error));
+                            return;
+                        }
+                        if (error == null && status != null && "settled".equals(status.get("state"))
+                                && status.get("result") instanceof Map<?, ?> result
+                                && "not_started".equals(result.get("executionStatus"))) {
+                            @SuppressWarnings("unchecked")
+                            Map<String, Object> saved = (Map<String, Object>) result;
+                            answer.complete(saved);
+                            return;
+                        }
+                        if (error == null && status != null && "unknown".equals(status.get("state"))) {
+                            answer.completeExceptionally(evidenceUnavailable());
+                            return;
+                        }
+                        try {
+                            scheduler.schedule(() -> pollV3Result(context, original, deadline, answer),
+                                    100, TimeUnit.MILLISECONDS);
+                        } catch (RuntimeException failure) {
+                            answer.completeExceptionally(failure);
+                        }
+                    });
+        } catch (RuntimeException failure) {
+            answer.completeExceptionally(failure);
+        }
+    }
+
+    private static boolean nonRetryableToolV3(Throwable error) {
+        return error != null && unwrap(error) instanceof RuntimeBrokerException failure
+                && !failure.isRetryable();
     }
 
     private static Map<String, Object> dispatchReference(ToolExecutionRecord record) {

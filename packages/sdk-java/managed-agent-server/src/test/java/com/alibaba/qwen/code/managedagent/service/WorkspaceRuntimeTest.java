@@ -547,6 +547,37 @@ class WorkspaceRuntimeTest {
     }
 
     @Test
+    void v3OriginalControlSurvivesWorkspaceAuthorizationLossWithoutNewDispatch() throws Exception {
+        SessionRecord session = createSession("storage", ".");
+        var fixture = transport(session);
+        var runtimeSession = fixture.record().getSession();
+        authority.claim(session.workspace(), fixture.record());
+        jdbc.update("UPDATE managed_workspace_access SET can_read = FALSE WHERE tenant_id = ?", session.tenantId());
+        Map<String, Object> original = Map.of("callId", "original");
+        when(fixture.http().statusV3(any(), any(), any(), eq(0L)))
+                .thenReturn(CompletableFuture.completedFuture(Map.of("state", "executing")));
+        when(fixture.http().cancelV3(any(), any(), any()))
+                .thenReturn(CompletableFuture.completedFuture(Map.of("state", "cancel_requested")));
+        when(fixture.http().acknowledgeV3(any(), any(), any(), any()))
+                .thenReturn(CompletableFuture.completedFuture(Map.of("state", "settled")));
+        assertThat(fixture.transport().statusV3(fixture.lease(), runtimeSession, original, 0)
+                .toCompletableFuture().join()).containsEntry("state", "executing");
+        assertThat(fixture.transport().cancelV3(fixture.lease(), runtimeSession, original)
+                .toCompletableFuture().join()).containsEntry("state", "cancel_requested");
+        assertThat(fixture.transport().acknowledgeV3(fixture.lease(), runtimeSession, original, Map.of())
+                .toCompletableFuture().join()).containsEntry("state", "settled");
+        Map<String, Object> refusal = fixture.transport().executeV3(fixture.lease(), runtimeSession,
+                original, Map.of(), Map.of()).toCompletableFuture().join();
+        assertThat(refusal).containsEntry("state", "settled");
+        Map<?, ?> result = (Map<?, ?>) refusal.get("result");
+        assertThat(result.get("executionStatus")).isEqualTo("not_started");
+        assertThat(result.get("capture")).isNull();
+        assertThat(result.get("error")).isEqualTo(Map.of("type", "workspace_unavailable",
+                "message", "Workspace execution was refused before dispatch."));
+        verify(fixture.http(), never()).executeV3(any(), any(), any(), any(), any());
+    }
+
+    @Test
     void controlsRecheckWorkspaceAuthorityAndReleaseWaitsForProviderCleanup() throws Exception {
         SessionRecord session = createSession("storage", ".");
         var fixture = transport(session);
