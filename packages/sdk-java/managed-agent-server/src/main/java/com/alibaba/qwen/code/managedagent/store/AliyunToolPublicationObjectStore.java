@@ -64,6 +64,12 @@ public final class AliyunToolPublicationObjectStore implements ToolPublicationOb
     }
 
     @Override
+    public void deleteIfPresent(String key) {
+        requireUnversioned();
+        client.deleteObject(bucket, key);
+    }
+
+    @Override
     public InputStream open(String key) {
         return open(key, () -> {});
     }

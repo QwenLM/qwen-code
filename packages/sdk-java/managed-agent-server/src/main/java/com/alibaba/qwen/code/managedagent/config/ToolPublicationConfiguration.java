@@ -9,6 +9,7 @@ import com.alibaba.qwen.code.managedagent.store.ToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.store.ToolPublicationStore;
 import com.alibaba.qwen.code.managedagent.store.ToolPublicationRetentionStore;
 import com.alibaba.qwen.code.managedagent.store.ToolPublicationRetentionObserver;
+import com.alibaba.qwen.code.managedagent.store.ToolPublicationCollector;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
 import com.aliyun.oss.ClientBuilderConfiguration;
@@ -114,6 +115,12 @@ public class ToolPublicationConfiguration {
     public ToolPublicationRetentionObserver toolPublicationRetentionObserver(ToolPublicationRetentionStore retention,
             ManagedAgentProperties properties) {
         return new ToolPublicationRetentionObserver(retention, properties);
+    }
+
+    @Bean
+    public ToolPublicationCollector toolPublicationCollector(JdbcTemplate jdbc, PlatformTransactionManager manager,
+            ToolPublicationRetentionStore retention, ToolPublicationObjectStore objects, ManagedAgentProperties properties) {
+        return new ToolPublicationCollector(jdbc, manager, retention, objects, properties);
     }
 
     private static String required(String value, String label) {
