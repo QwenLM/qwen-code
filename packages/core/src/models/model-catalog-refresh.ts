@@ -190,8 +190,12 @@ export function trimModelsDevCatalog(
       }
       // DeepSeek models are text-only unless the id names a `vision` variant
       // (#10270); some upstream bare-model records overstate image support.
+      // Key on the family root, not the hyphenated prefix: normalize() folds
+      // bare-model records onto it (`deepseek-v3` -> `deepseek`), and the
+      // root passes isModelCatalogKey, so a `deepseek-`-only guard would let
+      // exactly the records it exists for through.
       const modalities =
-        key.startsWith('deepseek-') && !key.includes('vision')
+        /^deepseek(?:-|$)/.test(key) && !key.includes('vision')
           ? undefined
           : toModalities(model);
       if (modalities && trustedForModalities) {
@@ -304,6 +308,23 @@ async function readBoundedCatalogJson(
   return JSON.parse(Buffer.concat(chunks).toString('utf8')) as ModelsDevApi;
 }
 
+/**
+ * A payload missing any allowlisted provider is truncated or partial-mirror
+ * data, not a catalog: it must never replace a complete snapshot or cache.
+ * This is a coverage check, not an allowlist of who may appear — providers
+ * outside MODELS_DEV_PROVIDERS (e.g. thinkingmachines) still contribute
+ * modalities. Shared by the runtime refresh and the snapshot generator so
+ * both paths reject the same payloads.
+ */
+export function assertCatalogPayloadComplete(api: ModelsDevApi): void {
+  const missingProvider = MODELS_DEV_PROVIDERS.find(
+    (provider) => Object.keys(api[provider]?.models ?? {}).length === 0,
+  );
+  if (missingProvider) {
+    throw new Error(`catalog is missing provider ${missingProvider}`);
+  }
+}
+
 async function refreshRemote(url: string, cachePath: string): Promise<void> {
   const cached = await readCacheFile(cachePath);
   // Old projections and unusable entries must be fetched again, not re-stamped
@@ -337,12 +358,7 @@ async function refreshRemote(url: string, cachePath: string): Promise<void> {
     next = { ...reusable, fetchedAt };
   } else if (response.ok) {
     const api = await readBoundedCatalogJson(response);
-    const missingProvider = MODELS_DEV_PROVIDERS.find(
-      (provider) => Object.keys(api[provider]?.models ?? {}).length === 0,
-    );
-    if (missingProvider) {
-      throw new Error(`catalog is missing provider ${missingProvider}`);
-    }
+    assertCatalogPayloadComplete(api);
     next = trimModelsDevCatalog(api, fetchedAt, url);
     // A 200 that projects to nothing is not a catalog (a renamed upstream
     // field or a gateway error body); keep the previous data instead of

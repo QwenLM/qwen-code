@@ -209,6 +209,11 @@ describe('trimModelsDevCatalog', () => {
             bare: chat('deepseek-v4-flash', {}, ['text', 'image']),
             next: chat('deepseek-v4.1-flash', {}, ['text', 'image']),
             vision: chat('deepseek-v4-flash-vision-exp', {}, ['text', 'image']),
+            // normalize('deepseek-v3') === 'deepseek': the bare-model record
+            // the #10270 narrowing exists for collapses onto the family root,
+            // which passes isModelCatalogKey — the guard must key on the
+            // family, not the hyphenated prefix.
+            root: chat('deepseek-v3', {}, ['text', 'image']),
           },
         },
       },
@@ -217,6 +222,7 @@ describe('trimModelsDevCatalog', () => {
 
     expect(models['deepseek-v4-flash']).toBeUndefined();
     expect(models['deepseek-v4.1-flash']).toBeUndefined();
+    expect(models['deepseek']?.modalities?.image).toBeUndefined();
     expect(models['deepseek-v4-flash-vision-exp']).toEqual({
       modalities: { image: true },
     });
@@ -496,6 +502,29 @@ describe('refreshModelCatalog', () => {
       },
     } as ModelsDevApi;
     fetchMock.mockResolvedValue(jsonResponse(oversized));
+
+    await expect(refreshModelCatalog()).resolves.toBeUndefined();
+
+    expect(readJson(getModelCatalogCachePath())).toEqual(previous);
+  });
+
+  it('rejects a payload missing an allowlisted provider and keeps the cache', async () => {
+    const previous = {
+      source: MODELS_DEV_URL,
+      fetchedAt: LONG_AGO,
+      projection: MODEL_CATALOG_PROJECTION_VERSION,
+      models: { 'kept-model': { context: 128_000 } },
+    };
+    writeJson(getModelCatalogCachePath(), previous);
+    // A truncated download or a partial mirror: valid JSON that projects
+    // fine, but every allowlisted provider except one is absent. The refresh
+    // must treat it as fatal rather than shadow the bundled snapshot with a
+    // partial catalog for a day.
+    fetchMock.mockResolvedValue(
+      jsonResponse({
+        anthropic: api['anthropic'],
+      }),
+    );
 
     await expect(refreshModelCatalog()).resolves.toBeUndefined();
 

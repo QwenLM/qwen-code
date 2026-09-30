@@ -20,6 +20,7 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
+  assertCatalogPayloadComplete,
   MODELS_DEV_URL,
   trimModelsDevCatalog,
   type ModelsDevApi,
@@ -48,6 +49,9 @@ const api: ModelsDevApi = /^https?:\/\//.test(input)
   ? await fetchApi(input)
   : JSON.parse(fs.readFileSync(input, 'utf8'));
 
+// Same coverage guard the runtime refresh applies: a truncated download or
+// a mirror that omits one provider must not replace the committed snapshot.
+assertCatalogPayloadComplete(api);
 const catalog = trimModelsDevCatalog(api, new Date().toISOString(), source);
 // A 200 that projects to nothing is not a catalog (a renamed upstream field
 // or a gateway error body); never overwrite the committed snapshot with it.
