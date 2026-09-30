@@ -896,6 +896,64 @@ describe('ToolCallTool', () => {
       expect(result).toMatchObject({ arguments: { count: '3' } });
     });
 
+    it('leaves optional null placeholders for the target to normalize', async () => {
+      class NullTolerantTool extends MockTool {
+        override validateToolParams(params: {
+          [key: string]: unknown;
+        }): string | null {
+          return params['working_dir'] === null
+            ? null
+            : super.validateToolParams(params);
+        }
+      }
+      const target = new NullTolerantTool({
+        name: 'agent_like',
+        shouldDefer: true,
+        params: {
+          type: 'object',
+          properties: {
+            prompt: { type: 'string' },
+            working_dir: { type: 'string' },
+          },
+          required: ['prompt'],
+        },
+      });
+      const argumentsWithPlaceholder = {
+        prompt: 'investigate',
+        working_dir: null,
+      };
+
+      const result = await resolveDeferredToolCall(
+        makeRegistry([target], new Set([target.name])),
+        { name: target.name, arguments: argumentsWithPlaceholder },
+      );
+
+      expect(result).not.toHaveProperty('error');
+      expect(result).toMatchObject({ arguments: argumentsWithPlaceholder });
+    });
+
+    it('does not reserve a target schema id in the shared validator', async () => {
+      const target = new MockTool({
+        name: 'identified_target',
+        shouldDefer: true,
+        params: {
+          $id: 'https://example.com/deferred-tool-precheck',
+          type: 'object',
+          properties: { prompt: { type: 'string' } },
+          required: ['prompt'],
+          additionalProperties: false,
+        },
+      });
+
+      const result = await resolveDeferredToolCall(
+        makeRegistry([target], new Set([target.name])),
+        { name: target.name, arguments: { prompt: 'investigate' } },
+      );
+
+      expect(result).not.toHaveProperty('error');
+      expect(target.validateToolParams({})).toContain("'prompt'");
+    });
+
     it('re-reads a target schema the target mutates in place after the first call', async () => {
       // AgentTool's refresh mutates its own parameterSchema object in place
       // (it adds and removes `model`/`name`), and Ajv caches a compiled

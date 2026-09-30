@@ -282,9 +282,9 @@ export async function resolveDeferredToolCall(
   // build time; and Ajv caches a compiled schema by object identity, so a
   // target that mutates its own schema object in place (AgentTool's refresh
   // adds and removes `model`/`name`) would otherwise stay pinned to whatever
-  // shape it had on the first bridged call. A per-call copy resolves through
-  // the JSON-text tier, which still shares one compiled validator per
-  // distinct schema text.
+  // shape it had on the first bridged call. Compile the per-call copy in an
+  // isolated validator so it sees the current shape without reserving the
+  // target's `$id` in the process-shared registry.
   //
   // Only the schema layer runs here — never the target's full
   // validateToolParams: its value-level rules (fs stats, content scans, the
@@ -318,7 +318,18 @@ export async function resolveDeferredToolCall(
       if (schemaClone['additionalProperties'] === false) {
         schemaClone['additionalProperties'] = true;
       }
-      paramsError = SchemaValidator.validate(schemaClone, argsClone);
+      const required = new Set(
+        Array.isArray(schemaClone['required']) ? schemaClone['required'] : [],
+      );
+      for (const [name, value] of Object.entries(argsClone)) {
+        if (value === null && !required.has(name)) {
+          delete argsClone[name];
+        }
+      }
+      const compiled = SchemaValidator.compileIsolated(schemaClone);
+      if ('validate' in compiled) {
+        paramsError = compiled.validate(argsClone);
+      }
     } catch {
       // A target whose validation throws under this pre-check must not become
       // a new bridge failure mode: the scheduler's build() reports the same
