@@ -164,11 +164,14 @@ class HostedWorkspaceToolTurnIT {
         Path root = cli.getParent().getParent();
         Path worker = cli;
         int runtimeProvisioningDelayMs = 15_000;
-        if (latency) {
-            worker = temporary.resolve("delayed-worker.mjs");
+        if (latency || cancellations || sseGaps) {
+            worker = temporary.resolve("fixture-worker.mjs");
             ObjectMapper mapper = new ObjectMapper();
-            Files.writeString(worker, "await new Promise(resolve => setTimeout(resolve, "
-                    + runtimeProvisioningDelayMs + "));\nprocess.argv[1] = "
+            String setup = latency ? "await new Promise(resolve => setTimeout(resolve, "
+                    + runtimeProvisioningDelayMs + "));\n" : "await import("
+                    + mapper.writeValueAsString(root.resolve("integration-tests/helpers/hosted-file-read-gate.mjs")
+                            .toUri().toString()) + ");\n";
+            Files.writeString(worker, setup + "process.argv[1] = "
                     + mapper.writeValueAsString(cli.toString()) + ";\nawait import("
                     + mapper.writeValueAsString(cli.toUri().toString()) + ");\n");
         }

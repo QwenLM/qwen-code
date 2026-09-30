@@ -742,7 +742,13 @@ export function registerHostedHarnessSessionRoutes(
       const fileHistory = await readHostedFileHistory(managed);
       if (fileHistory?.pendingTurn || fileHistory?.pendingUndo) {
         await managed.close();
-        error(res, 409, 'hosted_file_history_recovery_required');
+        error(
+          res,
+          409,
+          fileHistory.pendingUndo
+            ? 'hosted_file_history_recovery_required'
+            : 'hosted_turn_recovery_required',
+        );
         return;
       }
       const restore = await managed.authority.restoreBundle();

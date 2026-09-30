@@ -3068,6 +3068,42 @@ describe('Hosted Harness tool approvals', () => {
     expect(log).toHaveBeenCalledWith(expect.stringContaining('journal down'));
   });
 
+  it('retains the turn recovery error on cold load of a pending file edit', async () => {
+    vi.spyOn(stdio, 'writeStderrLineSafe').mockImplementation(() => {});
+    const { server, clientId, answer, status } = await waitingSession();
+    vi.mocked(HostedWorkspaceBroker.prototype.execute).mockRejectedValueOnce(
+      new Error('lost execution reply'),
+    );
+    expect((await answer('allow')).status).toBe(200);
+    await waitFor(async () =>
+      expect(await status()).toMatchObject({
+        hasActivePrompt: false,
+        recoveryBlocked: true,
+      }),
+    );
+    const history = await headers(
+      supertest(server).get(`/session/${SESSION_ID}/files/history`),
+    ).set('X-Qwen-Client-Id', clientId);
+    expect(history.body.history.pendingTurn).toBe(PROMPT_ID);
+    await headers(supertest(server).post(`/session/${SESSION_ID}/detach`))
+      .set('X-Qwen-Client-Id', clientId)
+      .send({})
+      .expect(204);
+    vi.mocked(HostedWorkspaceBroker.prototype.acquire).mockClear();
+    vi.mocked(HostedWorkspaceBroker.prototype.execute).mockClear();
+    vi.mocked(HostedWorkspaceBroker.prototype.fileHistory).mockClear();
+    state.model.mockClear();
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({ managedSessionStore: store(), toolProfile: files });
+    expect(loaded.status).toBe(409);
+    expect(loaded.body.code).toBe('hosted_turn_recovery_required');
+    expect(HostedWorkspaceBroker.prototype.acquire).not.toHaveBeenCalled();
+    expect(HostedWorkspaceBroker.prototype.execute).not.toHaveBeenCalled();
+    expect(HostedWorkspaceBroker.prototype.fileHistory).not.toHaveBeenCalled();
+    expect(state.model).not.toHaveBeenCalled();
+  });
+
   it('cancels a waiting approval through the cancel route and releases the Workspace', async () => {
     const { server, clientId, answer, status } = await waitingSession();
     await headers(supertest(server).post(`/session/${SESSION_ID}/cancel`))
