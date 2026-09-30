@@ -42,7 +42,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description Without a cursor, a Session that has a Snapshot returns all of its Items, the events up to the Snapshot other than input, text-delta and tool-call updates, and every event after it. Otherwise, and for an olderCursor, limit bounds the page of events. */
+        /** @description Without a cursor, a Session that has a Snapshot returns all of its Items, the events up to the Snapshot other than turn.accepted, item.output_text.delta, item.reasoning.delta and item.tool_call.updated, which the Items already hold, and every event after it. Otherwise, and for an olderCursor, limit bounds the page of events. */
         post: operations["webShellTranscript"];
         delete?: never;
         options?: never;
@@ -76,7 +76,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description W0 maps workspaceId/cwdRelative to the public selection without using environmentId or absolute cwd. Freeze selection with the original idempotency key; admission does not prove physical directory readiness. */
+        /** @description Maps workspaceId/cwdRelative to public Workspace selection without using environmentId or absolute cwd. Shares G0's opt-in initial file-tool Turn admission and fixed server-owned profile with public Session creation. Later Workspace submit, cancel and lifecycle operations remain gated. Freeze selection with the original idempotency key; admission does not prove physical directory readiness. */
         post: operations["webShellCreateSession"];
         delete?: never;
         options?: never;
@@ -484,7 +484,7 @@ export interface components {
                  * @default false
                  */
                 workspaceContext: boolean;
-                /** @description Supports authorized Workspace discovery, empty Session creation, and saved binding read-back; does not enable execution. */
+                /** @description Supports authorized Workspace discovery, Session creation, and saved binding read-back. This capability does not advertise execution readiness. Deployments may separately opt in to an initial Workspace Read/Write/Edit Turn at creation; later submit, cancel and lifecycle operations remain gated. */
                 workspaceBinding: boolean;
             };
             /** @description Same authorized explicit default as default_workspace, including when outside this page; null if absent or not creatable. A non-null default is active and has canCreateSession=true. */
@@ -598,7 +598,7 @@ export interface components {
         };
     };
     responses: {
-        /** @description Resource is readable but actor lacks this operation or original Action responder permission. */
+        /** @description The authenticated actor belongs to another tenant than X-Qwen-Tenant-Id or has an invalid ID (actor_scope_mismatch, which the tenant filter answers on every /v1/agents/ and WebShell route), or the resource is readable but the actor lacks this operation or the original Action responder permission. */
         Forbidden: {
             headers: {
                 [name: string]: unknown;
@@ -1042,6 +1042,7 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
+            403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
         };
     };
@@ -1068,6 +1069,7 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
+            403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
         };
     };

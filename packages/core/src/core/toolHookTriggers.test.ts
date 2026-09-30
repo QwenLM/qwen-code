@@ -42,6 +42,75 @@ const createMockMessageBus = () =>
   }) as unknown as MessageBus;
 
 describe('toolHookTriggers', () => {
+  it('transports the owner on all six helpers without adding it to stdin', async () => {
+    const bus = createMockMessageBus();
+    const owner = { runtimeId: 'runtime', sessionId: 'session', agentId: 'A' };
+    vi.mocked(bus.request).mockResolvedValue({
+      type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+      correlationId: 'hook-response',
+      success: true,
+      output: {},
+    });
+    await firePreToolUseHook(
+      bus,
+      'read',
+      {},
+      'tool',
+      'default',
+      undefined,
+      'call',
+      owner,
+    );
+    await firePostToolUseHook(
+      bus,
+      'read',
+      {},
+      {},
+      'tool',
+      'default',
+      undefined,
+      'call',
+      undefined,
+      owner,
+    );
+    await firePostToolUseFailureHook(
+      bus,
+      'tool',
+      'read',
+      {},
+      'error',
+      false,
+      'default',
+      undefined,
+      'call',
+      undefined,
+      owner,
+    );
+    await firePostToolBatchHook(bus, [], 'default', undefined, owner);
+    await fireNotificationHook(
+      bus,
+      'message',
+      NotificationType.PermissionPrompt,
+      undefined,
+      undefined,
+      owner,
+    );
+    await firePermissionRequestHook(
+      bus,
+      'read',
+      {},
+      'default',
+      undefined,
+      undefined,
+      owner,
+    );
+    expect(bus.request).toHaveBeenCalledTimes(6);
+    for (const [request] of vi.mocked(bus.request).mock.calls) {
+      expect(request).toHaveProperty('owner', owner);
+      expect(request).not.toHaveProperty('input.owner');
+    }
+  });
+
   describe('generateToolUseId', () => {
     it('should generate unique IDs with the correct prefix', () => {
       const id1 = generateToolUseId();

@@ -99,6 +99,7 @@ import {
   recordAcpConfigStartupEvent,
 } from './utils/acp-startup-profiler.js';
 import {
+  exitWhenSupervisorExits,
   relaunchAppInChildProcess,
   relaunchOnExitCode,
 } from './utils/relaunch.js';
@@ -429,6 +430,7 @@ export async function main() {
   // that never completes — reach no other scrub, so it happens here for
   // all of them. A session that does bind one re-exports its own pair.
   clearInheritedPeerMessagingEnv();
+  exitWhenSupervisorExits();
   const acpStartupProfilerEnabled = isAcpStartupProfilerEnabled();
   // Bridge core-package startup events (Config.initialize, MCP discovery,
   // LlmClient.setTools) into the cli's startup profiler. Gated on

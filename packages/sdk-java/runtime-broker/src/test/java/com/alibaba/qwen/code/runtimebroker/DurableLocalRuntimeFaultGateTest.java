@@ -23,24 +23,29 @@ class DurableLocalRuntimeFaultGateTest {
     void brokerCrashAdoptsOriginalWorkerWithoutReplaying(FaultGateRig.Placement placement) throws Exception {
         try (var rig = FaultGateRig.open(placement)) {
             var firstProxy = rig.proxy();
+            var response = firstProxy.schedule("execute", FaultProxy.Action.HOLD_RESPONSE);
             var first = rig.broker("first", firstProxy, FaultGateRig.Provisioner.DURABLE_LOCAL_PROCESS);
             first.acquire(HARNESS, SESSION).requireOk();
-            var reference = FaultGateRig.shell("call", "echo start >> marker; sleep 3; echo end >> marker");
+            var reference = FaultGateRig.shell("call", "echo start >> marker; echo end >> marker");
             var created = first.create(HARNESS, SESSION, "original", reference).object();
             String execution = created.getString("executionCallId");
-            rig.awaitMarker(marker(rig), List.of("start"));
+            // Keep the result from settling in the first Broker before the crash.
+            response.awaitHeld(FaultGateRig.WAIT);
+            assertNull(rig.execution(execution).getResult());
             var original = rig.activeBinding();
             var worker = first.workers().getFirst();
             rig.killBroker(first);
+            response.release(FaultProxy.Action.RESET);
             var secondProxy = rig.proxy();
             var second = rig.broker("second", secondProxy, FaultGateRig.Provisioner.DURABLE_LOCAL_PROCESS);
             rig.awaitDispatchLapse(execution);
             second.acquire(HARNESS, SESSION).requireOk();
+            assertEquals(ToolExecutionRecord.State.SETTLED, rig.execution(execution).getState());
             var retry = second.create(HARNESS, SESSION, "original", reference).object();
             assertEquals(execution, retry.getString("executionCallId"));
-            FaultGateRig.await(() -> second.reconcile(HARNESS, SESSION, execution).object().getString("outcome"),
-                    outcome -> "RESOLVED".equals(outcome) || "ALREADY_SETTLED".equals(outcome),
-                    "original journal settlement");
+            assertEquals("SETTLED", retry.getString("state"));
+            assertEquals("ALREADY_SETTLED",
+                    second.reconcile(HARNESS, SESSION, execution).object().getString("outcome"));
             var restored = rig.activeBinding();
             assertEquals(original.getBindingId(), restored.getBindingId());
             assertEquals(original.getGeneration(), restored.getGeneration());
