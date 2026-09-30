@@ -417,6 +417,25 @@ describe('createDaemonToolGuard', () => {
     },
   );
 
+  // The AGENTS.md PR-body idiom: a heredoc nested inside a quoted
+  // substitution. The substitution loop already evaluates the interior as
+  // its own command (cat reads the body as data), so the relocation scan
+  // must not pattern-match the token's raw text for git markers.
+  it.runIf(bashSemanticsLane)(
+    'allows a heredoc body inside a quoted command substitution',
+    async () => {
+      const guard = createDaemonToolGuard();
+
+      await expect(
+        guard(
+          request(
+            `gh pr create --title "T" --body "$(cat <<'HEREDOC'\n## How to verify\ncd /tmp/scratch\ngit reset --hard\nHEREDOC\n)"`,
+          ),
+        ),
+      ).resolves.toEqual({ allowed: true });
+    },
+  );
+
   it('fails closed on an unterminated command substitution', async () => {
     const guard = createDaemonToolGuard();
 
