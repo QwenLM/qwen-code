@@ -66,7 +66,7 @@ describe('acceptSpeculation', () => {
   it('injects history only after the files are on disk', async () => {
     const cwd = await makeCwd();
     const overlay = new OverlayFs(cwd);
-    dirs.push(overlay.overlayDir);
+    dirs.push(overlay.getOverlayDir());
 
     const realFile = join(cwd, 'src', 'app.ts');
     await mkdir(join(cwd, 'src'), { recursive: true });
@@ -95,7 +95,7 @@ describe('acceptSpeculation', () => {
   it('accepts a redirected path nothing was written to, and still injects history', async () => {
     const cwd = await makeCwd();
     const overlay = new OverlayFs(cwd);
-    dirs.push(overlay.overlayDir);
+    dirs.push(overlay.getOverlayDir());
 
     // Registered but never written: the speculative edit failed on this path.
     const neverWritten = join(cwd, 'brand-new.ts');
@@ -125,8 +125,8 @@ describe('acceptSpeculation', () => {
   it('cleans up the overlay even when applyToReal throws', async () => {
     const cwd = await makeCwd();
     const overlay = new OverlayFs(cwd);
-    dirs.push(overlay.overlayDir);
-    const overlayDir = overlay.overlayDir;
+    dirs.push(overlay.getOverlayDir());
+    const overlayDir = overlay.getOverlayDir();
 
     // A genuine blocked copy: the overlay file exists, the real-side mkdir fails.
     await writeFile(join(cwd, 'blocker'), 'not a directory');
