@@ -1879,6 +1879,19 @@ describe('cleanOrphanedFunctionCalls', () => {
     expect(items).toEqual([]);
   });
 
+  it('drops the whole reasoning run heading a fully orphaned group', () => {
+    // Two adjacent signed episodes head one call group; the scan at the
+    // first episode breaks on the second reasoning item, so only dropping
+    // the run as a whole keeps a bare reasoning item off the wire.
+    const items = cleanOrphanedFunctionCalls([
+      { type: 'reasoning', id: 'rs_1', encrypted_content: 'enc', summary: [] },
+      { type: 'reasoning', id: 'rs_2', encrypted_content: 'enc', summary: [] },
+      { type: 'function_call', call_id: 'a', name: 'f', arguments: '{}' },
+      { type: 'function_call', call_id: 'b', name: 'g', arguments: '{}' },
+    ]);
+    expect(items).toEqual([]);
+  });
+
   it('keeps reasoning paired with a call whose output survived', () => {
     const items = cleanOrphanedFunctionCalls([
       { type: 'reasoning', id: 'rs_1', encrypted_content: 'enc', summary: [] },

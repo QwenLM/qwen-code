@@ -845,6 +845,22 @@ export function cleanOrphanedFunctionCalls(
         unitCallIds.length > 0 &&
         !unitCallIds.some((callId) => outputCallIds.has(callId))
       ) {
+        // The group is gone, so its whole head goes: the maximal run of
+        // consecutive reasoning items immediately preceding the call run.
+        // Each was pushed with an empty run of its own, because the scan
+        // breaks on the next reasoning item.
+        while (kept.length > 0) {
+          const tail = kept[kept.length - 1];
+          if (
+            typeof tail !== 'object' ||
+            tail === null ||
+            !('type' in tail) ||
+            tail.type !== 'reasoning'
+          ) {
+            break;
+          }
+          kept.pop();
+        }
         continue;
       }
       kept.push(item);
