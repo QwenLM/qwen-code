@@ -6,6 +6,7 @@
 
 import { getErrorMessage } from '../utils/errors.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { getJsonRpcErrorCode } from './jsonrpc-error-code.js';
 
 const debugLogger = createDebugLogger('MCP_RETRY');
 
@@ -61,7 +62,7 @@ const TRANSIENT_HTTP_STATUS_PATTERNS: RegExp[] = [
 export function isTransientNetworkError(error: unknown): boolean {
   if (error == null) return false;
 
-  const code = (error as { code?: unknown } | null)?.code;
+  const code = getJsonRpcErrorCode(error);
   if (code === -32601 || code === -32600 || code === -32602) return false;
 
   const message = getErrorMessage(error);

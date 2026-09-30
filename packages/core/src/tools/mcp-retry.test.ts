@@ -98,6 +98,31 @@ describe('isTransientNetworkError', () => {
     expect(isTransientNetworkError({ code: -32601 })).toBe(false);
   });
 
+  // R4-3 (#12496): the sentinel extraction is shared with the onerror
+  // guards — a legacy-era wrapped body carrying -32601 (no structured
+  // code) must read as non-transient too, or the verdict would silently
+  // depend on which shape the transport happened to deliver.
+  it('returns false for -32601 wrapped in a legacy-era body without a structured code', () => {
+    expect(
+      isTransientNetworkError(
+        Object.assign(new Error('Error POSTing to endpoint'), {
+          data: {
+            status: 400,
+            statusText: 'Bad Request',
+            text: '{"jsonrpc":"2.0","error":{"code":-32601,"message":"Method not found"},"id":1}',
+          },
+        }),
+      ),
+    ).toBe(false);
+    expect(
+      isTransientNetworkError(
+        new Error(
+          'Error POSTing to endpoint: {"jsonrpc":"2.0","error":{"code":-32601,"message":"Unknown method"},"id":1}',
+        ),
+      ),
+    ).toBe(false);
+  });
+
   it('returns false for JSON-RPC Invalid Request (-32600)', () => {
     expect(isTransientNetworkError({ code: -32600 })).toBe(false);
   });

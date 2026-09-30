@@ -76,6 +76,7 @@ import {
   runWithTimeout,
 } from './mcp-discovery-timeout.js';
 import { retryWithBackoff } from './mcp-retry.js';
+import { getJsonRpcErrorCode } from './jsonrpc-error-code.js';
 import { normalizePathEnvForWindows } from '../utils/windowsPath.js';
 import { sanitizeChildEnv } from '../utils/sanitize-child-env.js';
 import type {
@@ -576,7 +577,19 @@ export class McpClient {
         // Legacy Streamable HTTP can wrap a JSON-RPC -32601 response in a
         // transport error. Discovery treats that response as an absent
         // optional method, so it must not poison the healthy connection.
-        if (this.isDisconnecting || isBenignMcpMethodNotFound(error)) {
+        // The gate is deliberately `isBenignMcpMethodNotFound`, not a bare
+        // numeric -32601 check: onerror has no request context, so only a
+        // transport-owned HTTP status plus a valid JSON-RPC body may keep a
+        // session alive. Anything peer-controlled — a 401 or 403 body, a
+        // numeric `code` on a plain Error, a statusless SSE wrapper — must
+        // still retire the connection.
+        if (isBenignMcpMethodNotFound(error)) {
+          debugLogger.debug(
+            `MCP method-not-found (${this.serverName}): ${getErrorMessage(error)}`,
+          );
+          return;
+        }
+        if (this.isDisconnecting) {
           return;
         }
         // capture the upstream error
@@ -1488,6 +1501,9 @@ export async function connectAndDiscover(
       // optional method's JSON-RPC -32601 as an error callback, even though
       // discovery correctly treats it as "method not found".
       if (isBenignMcpMethodNotFound(error)) {
+        debugLogger.debug(
+          `MCP method-not-found (${mcpServerName}): ${getErrorMessage(error)}`,
+        );
         return;
       }
       debugLogger.error(`MCP ERROR (${mcpServerName}):`, error.toString());
@@ -1753,12 +1769,13 @@ async function discoverToolsWithMetadata(
 /**
  * True when an MCP request failed because the method is not implemented.
  * JSON-RPC guarantees the numeric code (`-32601`), so that is the primary,
- * precise check. The message fallback (for transports that drop the code)
- * keeps the original case-sensitive exact substring `'Method not found'` —
- * deliberately NOT a broad `/method not found/i`, which would also swallow
- * unrelated errors like "Error in method not found handler: ...". Transport
- * wrappers use the stricter JSON-RPC body/status predicate below; a wrapper
- * that fails that gate is not treated as a method-not-found message.
+ * precise check (via the shared `getJsonRpcErrorCode` extraction). The
+ * message fallback (for transports that drop the code) keeps the original
+ * case-sensitive exact substring `'Method not found'` — deliberately NOT a
+ * broad `/method not found/i`, which would also swallow unrelated errors
+ * like "Error in method not found handler: ...". Transport wrappers use the
+ * stricter JSON-RPC body/status predicate below; a wrapper that fails that
+ * gate is not treated as a method-not-found message.
  */
 function isMethodNotFound(error: unknown): boolean {
   // Use the same JSON-RPC body predicate as the status callback. This keeps
@@ -1767,11 +1784,11 @@ function isMethodNotFound(error: unknown): boolean {
   if (isBenignMcpMethodNotFound(error)) return true;
   // A recognized transport error that fails the body/status gate must not
   // fall through to the message substring, which could hide a 401 or 503.
+  // This ordering is load-bearing: it must precede both fallbacks below.
   if (isLegacyMcpTransportError(error)) return false;
-  const code = (error as { code?: unknown } | null)?.code;
   // Direct protocol errors reach discovery as request rejections rather than
   // transport callbacks, so retain the numeric JSON-RPC fallback for them.
-  if (code === -32601) return true;
+  if (getJsonRpcErrorCode(error) === -32601) return true;
   return error instanceof Error && error.message.includes('Method not found');
 }
 
