@@ -80,7 +80,8 @@ describe('managed operation grant gate', () => {
         }
         if (
           each.id === 'invalid-next' ||
-          each.id === 'next-past-double-range'
+          each.id === 'next-past-double-range' ||
+          each.id === 'replacement-with-a-non-text-digest'
         ) {
           // A malformed grant is refused as malformed, not as a conflict,
           // which is a subclass of the record error.
